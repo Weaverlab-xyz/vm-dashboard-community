@@ -1,0 +1,515 @@
+{% extends "base.html" %}
+{% block title %}Users – Infrastructure Management{% endblock %}
+
+{% block content %}
+<div x-data="usersPage()" x-init="init()">
+
+  <!-- Header -->
+  <div class="flex items-center justify-between mb-6">
+    <div>
+      <h1 class="text-2xl font-bold text-gray-900">User Management</h1>
+      <p class="text-sm text-gray-500 mt-1">Manage dashboard and API users</p>
+    </div>
+    <button @click="openCreate()"
+            class="bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-4 py-2 rounded-lg transition">
+      + New User
+    </button>
+  </div>
+
+  <!-- User table -->
+  <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+    <table class="w-full text-sm">
+      <thead class="bg-gray-50 text-gray-500 uppercase text-xs">
+        <tr>
+          <th class="px-4 py-3 text-left">Username</th>
+          <th class="px-4 py-3 text-left">Full Name</th>
+          <th class="px-4 py-3 text-left">Email</th>
+          <th class="px-4 py-3 text-left">Workgroups</th>
+          <th class="px-4 py-3 text-left">Auth</th>
+          <th class="px-4 py-3 text-left">MFA</th>
+          <th class="px-4 py-3 text-left">Role</th>
+          <th class="px-4 py-3 text-left">Status</th>
+          <th class="px-4 py-3 text-left">Actions</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-gray-100">
+        <template x-if="users.length === 0">
+          <tr><td colspan="9" class="px-4 py-8 text-center text-gray-400">No users found</td></tr>
+        </template>
+        <template x-for="u in users" :key="u.id">
+          <tr class="hover:bg-gray-50">
+            <td class="px-4 py-3 font-medium text-gray-900" x-text="u.username"></td>
+            <td class="px-4 py-3 text-gray-600" x-text="u.full_name || '—'"></td>
+            <td class="px-4 py-3 text-gray-600" x-text="u.email || '—'"></td>
+            <td class="px-4 py-3">
+              <div class="flex flex-wrap gap-1">
+                <template x-for="wg in u.workgroups" :key="wg">
+                  <span class="bg-blue-100 text-blue-700 text-xs px-2 py-0.5 rounded-full" x-text="wg"></span>
+                </template>
+                <span x-show="u.workgroups.length === 0" class="text-gray-400 text-xs">None</span>
+              </div>
+            </td>
+            <td class="px-4 py-3">
+              <span x-text="u.auth_provider === 'azure_ad' ? 'Azure AD' : 'Local'"
+                    :class="u.auth_provider === 'azure_ad' ? 'bg-purple-100 text-purple-700' : 'bg-gray-100 text-gray-600'"
+                    class="text-xs px-2 py-0.5 rounded-full"></span>
+            </td>
+            <td class="px-4 py-3">
+              <span :class="u.mfa_required ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'"
+                    class="text-xs px-2 py-0.5 rounded-full"
+                    x-text="u.mfa_required ? 'On' : 'Off'"></span>
+            </td>
+            <td class="px-4 py-3">
+              <span :class="u.is_admin ? 'bg-yellow-100 text-yellow-700' : 'bg-gray-100 text-gray-500'"
+                    class="text-xs px-2 py-0.5 rounded-full"
+                    x-text="u.is_admin ? 'Admin' : 'User'"></span>
+            </td>
+            <td class="px-4 py-3">
+              <span :class="u.is_active ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-600'"
+                    class="text-xs px-2 py-0.5 rounded-full"
+                    x-text="u.is_active ? 'Active' : 'Inactive'"></span>
+            </td>
+            <td class="px-4 py-3">
+              <div class="flex items-center gap-2">
+                <button @click="openEdit(u)"
+                        class="text-blue-600 hover:text-blue-800 text-xs font-medium">Edit</button>
+                <button @click="openTokens(u)"
+                        class="text-gray-500 hover:text-gray-700 text-xs font-medium">Tokens</button>
+                <button x-show="u.is_active && u.id !== currentUserId"
+                        @click="deactivate(u)"
+                        class="text-red-500 hover:text-red-700 text-xs font-medium">Deactivate</button>
+                <button x-show="u.id !== currentUserId"
+                        @click="deleteUser(u)"
+                        class="text-red-700 hover:text-red-900 text-xs font-medium">Delete</button>
+              </div>
+            </td>
+          </tr>
+        </template>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- ── Create / Edit User Modal ─────────────────────────────────────────── -->
+  <div x-show="showUserModal" x-cloak
+       class="fixed inset-0 bg-black/50 flex items-center justify-center z-40 p-4"
+       @keydown.escape.window="showUserModal = false">
+    <div class="bg-white rounded-xl shadow-xl w-full max-w-lg" @click.stop>
+      <div class="flex items-center justify-between px-6 py-4 border-b">
+        <h2 class="font-semibold text-gray-900" x-text="editingUser ? 'Edit User' : 'New User'"></h2>
+        <button @click="showUserModal = false" class="text-gray-400 hover:text-gray-600">✕</button>
+      </div>
+      <form @submit.prevent="saveUser()" class="px-6 py-4 space-y-4">
+        <!-- Username (create only) -->
+        <div x-show="!editingUser">
+          <label class="block text-sm font-medium text-gray-700 mb-1">Username <span class="text-red-500">*</span></label>
+          <input x-model="form.username" type="text" :required="!editingUser"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+        </div>
+        <!-- Full Name -->
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Full Name</label>
+          <input x-model="form.full_name" type="text"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+        </div>
+        <!-- Email -->
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Email</label>
+          <input x-model="form.email" type="email"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+        </div>
+        <!-- Password -->
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">
+            Password <span x-show="!editingUser" class="text-red-500">*</span>
+            <span x-show="editingUser" class="text-gray-400 font-normal">(leave blank to keep current)</span>
+          </label>
+          <input x-model="form.password" type="password" :required="!editingUser"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+        </div>
+        <!-- Workgroups -->
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-2">Workgroups</label>
+          <div class="flex flex-wrap gap-2">
+            <template x-for="wg in availableWorkgroups" :key="wg">
+              <label class="flex items-center gap-1.5 text-sm cursor-pointer">
+                <input type="checkbox"
+                       :checked="form.workgroups && form.workgroups.includes(wg)"
+                       @change="toggleWorkgroup(wg, $event.target.checked)"
+                       class="rounded border-gray-300 text-blue-600">
+                <span x-text="wg"></span>
+              </label>
+            </template>
+          </div>
+        </div>
+        <!-- Flags -->
+        <div class="flex gap-6">
+          <label class="flex items-center gap-2 text-sm cursor-pointer">
+            <input type="checkbox" x-model="form.is_admin" class="rounded border-gray-300 text-yellow-500">
+            <span>Admin</span>
+          </label>
+          <label x-show="editingUser" class="flex items-center gap-2 text-sm cursor-pointer">
+            <input type="checkbox" x-model="form.is_active" class="rounded border-gray-300 text-green-500">
+            <span>Active</span>
+          </label>
+        </div>
+
+        <!-- Permission Matrix -->
+        <div x-show="editingUser && !form.is_admin">
+          <div class="flex items-center justify-between mb-2">
+            <label class="block text-sm font-medium text-gray-700">Permissions</label>
+            <label class="flex items-center gap-1.5 text-xs text-gray-500 cursor-pointer">
+              <input type="checkbox" x-model="form.permissionsUnrestricted"
+                     @change="toggleUnrestricted()"
+                     class="rounded border-gray-300 text-blue-600">
+              Full access (unrestricted)
+            </label>
+          </div>
+          <div x-show="!form.permissionsUnrestricted" class="border border-gray-200 rounded-lg overflow-hidden text-xs">
+            <table class="w-full">
+              <thead class="bg-gray-50 text-gray-500">
+                <tr>
+                  <th class="px-3 py-2 text-left font-medium">Section</th>
+                  <th class="px-3 py-2 text-center font-medium">Read</th>
+                  <th class="px-3 py-2 text-center font-medium">Write</th>
+                  <th class="px-3 py-2 text-center font-medium">Delete</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-gray-100">
+                <template x-for="scope in permissionScopes" :key="scope">
+                  <tr class="hover:bg-gray-50">
+                    <td class="px-3 py-2 font-medium text-gray-700 capitalize" x-text="scope.replace('_', ' ')"></td>
+                    <template x-for="level in ['read','write','delete']" :key="level">
+                      <td class="px-3 py-2 text-center">
+                        <input type="checkbox"
+                               :checked="hasPerm(scope, level)"
+                               @change="togglePerm(scope, level, $event.target.checked)"
+                               class="rounded border-gray-300 text-blue-600">
+                      </td>
+                    </template>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+          <p x-show="form.permissionsUnrestricted" class="text-xs text-gray-400 mt-1">User has unrestricted access to all sections (same as NULL permissions).</p>
+        </div>
+        <!-- Actions -->
+        <div class="flex justify-end gap-3 pt-2">
+          <button type="button" @click="showUserModal = false"
+                  class="px-4 py-2 text-sm text-gray-600 hover:text-gray-800">Cancel</button>
+          <button type="submit"
+                  class="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium">
+            <span x-text="editingUser ? 'Save Changes' : 'Create User'"></span>
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- ── Tokens Modal ──────────────────────────────────────────────────────── -->
+  <div x-show="showTokensModal" x-cloak
+       class="fixed inset-0 bg-black/50 flex items-center justify-center z-40 p-4"
+       @keydown.escape.window="showTokensModal = false">
+    <div class="bg-white rounded-xl shadow-xl w-full max-w-2xl" @click.stop>
+      <div class="flex items-center justify-between px-6 py-4 border-b">
+        <h2 class="font-semibold text-gray-900">
+          API Tokens — <span x-text="tokenUser?.username"></span>
+        </h2>
+        <button @click="showTokensModal = false" class="text-gray-400 hover:text-gray-600">✕</button>
+      </div>
+
+      <!-- One-time token reveal -->
+      <div x-show="newTokenValue" class="mx-6 mt-4 p-4 bg-green-50 border border-green-200 rounded-lg">
+        <p class="text-sm font-medium text-green-800 mb-2">Token created — copy it now. It won't be shown again.</p>
+        <div class="flex items-center gap-2">
+          <code class="flex-1 text-xs bg-white border border-green-300 rounded px-3 py-2 font-mono break-all select-all"
+                x-text="newTokenValue"></code>
+          <button @click="copyToken()"
+                  class="shrink-0 text-xs bg-green-600 hover:bg-green-700 text-white px-3 py-2 rounded font-medium">
+            Copy
+          </button>
+        </div>
+      </div>
+
+      <!-- Create token form -->
+      <div class="px-6 pt-4 pb-2">
+        <form @submit.prevent="createToken()" class="flex items-end gap-3">
+          <div class="flex-1">
+            <label class="block text-xs font-medium text-gray-600 mb-1">Token name</label>
+            <input x-model="newTokenName" type="text" placeholder="e.g. github-actions-prod" required
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+          </div>
+          <div class="w-32">
+            <label class="block text-xs font-medium text-gray-600 mb-1">Expires (days)</label>
+            <input x-model="newTokenExpiry" type="number" min="1" placeholder="Never"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+          </div>
+          <button type="submit"
+                  class="shrink-0 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-4 py-2 rounded-lg">
+            Create
+          </button>
+        </form>
+      </div>
+
+      <!-- Token list -->
+      <div class="px-6 py-4">
+        <template x-if="userTokens.length === 0">
+          <p class="text-gray-400 text-sm text-center py-4">No tokens yet</p>
+        </template>
+        <table x-show="userTokens.length > 0" class="w-full text-sm">
+          <thead class="text-gray-500 text-xs uppercase">
+            <tr>
+              <th class="pb-2 text-left">Name</th>
+              <th class="pb-2 text-left">Created</th>
+              <th class="pb-2 text-left">Expires</th>
+              <th class="pb-2 text-left">Last Used</th>
+              <th class="pb-2 text-left">Status</th>
+              <th class="pb-2"></th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-gray-100">
+            <template x-for="t in userTokens" :key="t.id">
+              <tr>
+                <td class="py-2 font-medium" x-text="t.name"></td>
+                <td class="py-2 text-gray-500" x-text="fmtDate(t.created_at)"></td>
+                <td class="py-2 text-gray-500" x-text="t.expires_at ? fmtDate(t.expires_at) : 'Never'"></td>
+                <td class="py-2 text-gray-500" x-text="t.last_used_at ? fmtDate(t.last_used_at) : '—'"></td>
+                <td class="py-2">
+                  <span :class="t.is_active ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'"
+                        class="text-xs px-2 py-0.5 rounded-full"
+                        x-text="t.is_active ? 'Active' : 'Revoked'"></span>
+                </td>
+                <td class="py-2 text-right">
+                  <button x-show="t.is_active"
+                          @click="revokeToken(t)"
+                          class="text-red-500 hover:text-red-700 text-xs font-medium">Revoke</button>
+                </td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="px-6 pb-4 flex justify-end border-t pt-4">
+        <button @click="showTokensModal = false"
+                class="px-4 py-2 text-sm text-gray-600 hover:text-gray-800">Close</button>
+      </div>
+    </div>
+  </div>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const PERMISSION_SCOPES = ['vms', 'aws', 'azure', 'images', 'containers', 'config_mgmt', 'jobs'];
+const PERMISSION_LEVELS = ['read', 'write', 'delete'];
+
+function usersPage() {
+  return {
+    users: [],
+    currentUserId: null,
+    availableWorkgroups: {{ workgroups | tojson }},
+    permissionScopes: PERMISSION_SCOPES,
+
+    // user modal
+    showUserModal: false,
+    editingUser: null,
+    form: {},
+
+    // tokens modal
+    showTokensModal: false,
+    tokenUser: null,
+    userTokens: [],
+    newTokenName: '',
+    newTokenExpiry: '',
+    newTokenValue: '',
+
+    async init() {
+      requireAuth();
+      const me = await API.get('/api/auth/me');
+      if (!me || !me.is_admin) {
+        window.location.href = '/';
+        return;
+      }
+      this.currentUserId = me.id;
+      await this.loadUsers();
+    },
+
+    async loadUsers() {
+      const data = await API.get('/api/users');
+      this.users = data || [];
+    },
+
+    openCreate() {
+      this.editingUser = null;
+      this.form = { username: '', full_name: '', email: '', password: '', workgroups: [], is_admin: false };
+      this.showUserModal = true;
+    },
+
+    openEdit(u) {
+      this.editingUser = u;
+      // permissions: null/undefined = unrestricted; {} = unrestricted; dict = restricted
+      const hasPerms = u.permissions && Object.keys(u.permissions).length > 0;
+      this.form = {
+        full_name: u.full_name || '',
+        email: u.email || '',
+        password: '',
+        workgroups: [...u.workgroups],
+        is_admin: u.is_admin,
+        is_active: u.is_active,
+        permissions: hasPerms ? JSON.parse(JSON.stringify(u.permissions)) : {},
+        permissionsUnrestricted: !hasPerms,
+      };
+      this.showUserModal = true;
+    },
+
+    toggleWorkgroup(wg, checked) {
+      if (!this.form.workgroups) this.form.workgroups = [];
+      if (checked) {
+        if (!this.form.workgroups.includes(wg)) this.form.workgroups.push(wg);
+      } else {
+        this.form.workgroups = this.form.workgroups.filter(w => w !== wg);
+      }
+    },
+
+    hasPerm(scope, level) {
+      if (!this.form.permissions) return false;
+      return (this.form.permissions[scope] || []).includes(level);
+    },
+
+    togglePerm(scope, level, checked) {
+      if (!this.form.permissions) this.form.permissions = {};
+      if (!this.form.permissions[scope]) this.form.permissions[scope] = [];
+      if (checked) {
+        if (!this.form.permissions[scope].includes(level))
+          this.form.permissions[scope].push(level);
+      } else {
+        this.form.permissions[scope] = this.form.permissions[scope].filter(l => l !== level);
+      }
+    },
+
+    toggleUnrestricted() {
+      if (this.form.permissionsUnrestricted) {
+        this.form.permissions = {};
+      }
+    },
+
+    async saveUser() {
+      try {
+        if (this.editingUser) {
+          const body = {
+            full_name: this.form.full_name || null,
+            email: this.form.email || null,
+            workgroups: this.form.workgroups,
+            is_admin: this.form.is_admin,
+            is_active: this.form.is_active,
+          };
+          if (this.form.password) body.password = this.form.password;
+          // Send permissions: null = no change to perms (only for create);
+          // for edit: send null if unrestricted, or the dict if restricted
+          if (!this.form.is_admin) {
+            body.permissions = this.form.permissionsUnrestricted ? {} : (this.form.permissions || {});
+          }
+          await API.request('PATCH', `/api/users/${this.editingUser.id}`, body);
+          toast('User updated', 'success');
+        } else {
+          await API.post('/api/users', {
+            username: this.form.username,
+            password: this.form.password,
+            full_name: this.form.full_name || null,
+            email: this.form.email || null,
+            workgroups: this.form.workgroups,
+            is_admin: this.form.is_admin,
+          });
+          toast('User created', 'success');
+        }
+        this.showUserModal = false;
+        await this.loadUsers();
+      } catch (e) {
+        toast('Error: ' + e.message, 'error');
+      }
+    },
+
+    async deactivate(u) {
+      if (!confirm(`Deactivate user "${u.username}"? They will be logged out immediately.`)) return;
+      try {
+        await API.del(`/api/users/${u.id}`);
+        toast('User deactivated', 'success');
+        await this.loadUsers();
+      } catch (e) {
+        toast('Error: ' + e.message, 'error');
+      }
+    },
+
+    async deleteUser(u) {
+      const confirmed = confirm(
+        `Permanently delete user "${u.username}"?\n\nThis will remove the account, all API tokens, and all FIDO2 keys. This cannot be undone.`
+      );
+      if (!confirmed) return;
+      // Second confirmation for destructive action
+      const reconfirmed = confirm(`Are you sure? Type-check: this will permanently delete "${u.username}".`);
+      if (!reconfirmed) return;
+      try {
+        await API.del(`/api/users/${u.id}/permanent`);
+        toast(`User "${u.username}" permanently deleted`, 'success');
+        await this.loadUsers();
+      } catch (e) {
+        toast('Error: ' + e.message, 'error');
+      }
+    },
+
+    async openTokens(u) {
+      this.tokenUser = u;
+      this.userTokens = [];
+      this.newTokenName = '';
+      this.newTokenExpiry = '';
+      this.newTokenValue = '';
+      this.showTokensModal = true;
+      try {
+        this.userTokens = await API.get(`/api/users/${u.id}/tokens`) || [];
+      } catch (e) {
+        toast('Could not load tokens: ' + e.message, 'error');
+      }
+    },
+
+    async createToken() {
+      try {
+        const body = { name: this.newTokenName };
+        if (this.newTokenExpiry) body.expires_days = parseInt(this.newTokenExpiry);
+        const result = await API.post(`/api/users/${this.tokenUser.id}/tokens`, body);
+        this.newTokenValue = result.token;
+        this.newTokenName = '';
+        this.newTokenExpiry = '';
+        this.userTokens = await API.get(`/api/users/${this.tokenUser.id}/tokens`) || [];
+      } catch (e) {
+        toast('Error creating token: ' + e.message, 'error');
+      }
+    },
+
+    copyToken() {
+      navigator.clipboard.writeText(this.newTokenValue)
+        .then(() => toast('Token copied to clipboard', 'success'))
+        .catch(() => toast('Copy failed — select and copy manually', 'error'));
+    },
+
+    async revokeToken(t) {
+      if (!confirm(`Revoke token "${t.name}"?`)) return;
+      try {
+        await API.del(`/api/users/${this.tokenUser.id}/tokens/${t.id}`);
+        if (this.newTokenValue) this.newTokenValue = '';
+        toast('Token revoked', 'success');
+        this.userTokens = await API.get(`/api/users/${this.tokenUser.id}/tokens`) || [];
+      } catch (e) {
+        toast('Error: ' + e.message, 'error');
+      }
+    },
+
+    fmtDate(iso) {
+      if (!iso) return '—';
+      return new Date(iso).toLocaleDateString();
+    },
+  };
+}
+</script>
+{% endblock %}

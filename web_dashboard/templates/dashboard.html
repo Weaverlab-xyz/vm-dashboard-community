@@ -1,0 +1,419 @@
+{% extends "base.html" %}
+{% block title %}Dashboard – Infrastructure Management{% endblock %}
+
+{% block content %}
+<div x-data="dashboard()" x-init="init()">
+
+  <!-- Header -->
+  <div class="mb-6">
+    <h1 class="text-2xl font-bold text-gray-900">Dashboard</h1>
+    <p class="text-sm text-gray-500 mt-1">Infrastructure overview</p>
+  </div>
+
+  <!-- Stats cards -->
+  <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-3">On-Premises</p>
+  <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-8">
+    <!-- Total VMs -->
+    <a href="/vms" class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 block cursor-pointer hover:shadow-md hover:border-blue-200 transition-all">
+      <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide">Total VMs</p>
+      <p class="text-3xl font-bold text-gray-900 mt-1" x-text="stats.total_vms ?? '…'"></p>
+      <p class="text-sm text-gray-400 mt-1">across all workgroups</p>
+    </a>
+    <!-- Running VMs -->
+    <a href="/vms" class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 block cursor-pointer hover:shadow-md hover:border-blue-200 transition-all">
+      <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide">Running</p>
+      <p class="text-3xl font-bold text-green-600 mt-1" x-text="stats.running_vms ?? '…'"></p>
+      <p class="text-sm text-gray-400 mt-1">VMs currently online</p>
+    </a>
+    <!-- Active Jobs -->
+    <a href="/jobs" class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 block cursor-pointer hover:shadow-md hover:border-blue-200 transition-all">
+      <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide">Active Jobs</p>
+      <p class="text-3xl font-bold text-blue-600 mt-1" x-text="stats.active_jobs ?? '…'"></p>
+      <p class="text-sm text-gray-400 mt-1">pending / running</p>
+    </a>
+  </div>
+
+  <!-- Cloud Infrastructure stats -->
+  <div class="mb-8">
+    <div class="flex items-center justify-between mb-3">
+      <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide">Cloud Infrastructure</p>
+      <button @click="loadCloudStats()"
+              class="text-xs text-blue-500 hover:underline"
+              x-show="cloudStatsLoaded">Refresh</button>
+    </div>
+    <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4">
+
+      <!-- AWS EC2 -->
+      <a href="/aws#instances" class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 block cursor-pointer hover:shadow-md hover:border-blue-200 transition-all">
+        <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide">AWS EC2</p>
+        <p class="text-3xl font-bold text-gray-900 mt-1"
+           x-text="cloudStatDisplay(cloudStats.awsInstances)"></p>
+        <p class="text-sm mt-1">
+          <span class="text-green-600 font-medium"
+                x-show="cloudStats.awsRunning !== null && cloudStats.awsRunning !== -1"
+                x-text="cloudStats.awsRunning + ' running'"></span>
+          <span class="text-gray-400"
+                x-show="cloudStats.awsInstances === null"> loading</span>
+          <span class="text-gray-400"
+                x-show="cloudStats.awsInstances === -1">unavailable</span>
+        </p>
+      </a>
+
+      <!-- AWS AMIs -->
+      <a href="/aws#amis" class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 block cursor-pointer hover:shadow-md hover:border-blue-200 transition-all">
+        <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide">AWS AMIs</p>
+        <p class="text-3xl font-bold text-gray-900 mt-1"
+           x-text="cloudStatDisplay(cloudStats.awsAmis)"></p>
+        <p class="text-sm text-gray-400 mt-1">private images</p>
+      </a>
+
+      <!-- Azure VMs -->
+      <a href="/azure#vms" class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 block cursor-pointer hover:shadow-md hover:border-blue-200 transition-all">
+        <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide">Azure VMs</p>
+        <p class="text-3xl font-bold text-gray-900 mt-1"
+           x-text="cloudStatDisplay(cloudStats.azureVms)"></p>
+        <p class="text-sm mt-1">
+          <span class="text-green-600 font-medium"
+                x-show="cloudStats.azureRunning !== null && cloudStats.azureRunning !== -1"
+                x-text="cloudStats.azureRunning + ' running'"></span>
+          <span class="text-gray-400"
+                x-show="cloudStats.azureVms === null"> loading</span>
+          <span class="text-gray-400"
+                x-show="cloudStats.azureVms === -1">unavailable</span>
+        </p>
+      </a>
+
+      <!-- Azure Images -->
+      <a href="/azure#private" class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 block cursor-pointer hover:shadow-md hover:border-blue-200 transition-all">
+        <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide">Azure Images</p>
+        <p class="text-3xl font-bold text-gray-900 mt-1"
+           x-text="cloudStatDisplay(cloudStats.azureImages)"></p>
+        <p class="text-sm text-gray-400 mt-1">gallery + managed</p>
+      </a>
+
+      <!-- OVA Library -->
+      <a href="/images" class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 block cursor-pointer hover:shadow-md hover:border-blue-200 transition-all">
+        <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide">OVA Library</p>
+        <p class="text-3xl font-bold text-gray-900 mt-1"
+           x-text="cloudStatDisplay(cloudStats.ovas)"></p>
+        <p class="text-sm text-gray-400 mt-1">local OVA files</p>
+      </a>
+
+    </div>
+  </div>
+
+  <!-- Containers stats -->
+  <div class="mb-8">
+    <div class="flex items-center justify-between mb-3">
+      <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide">Containers</p>
+      <button @click="loadContainerStats()"
+              class="text-xs text-blue-500 hover:underline"
+              x-show="containerStatsLoaded">Refresh</button>
+    </div>
+    <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+
+      <!-- Portainer (on-prem) -->
+      <a href="/containers" class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 block cursor-pointer hover:shadow-md hover:border-blue-200 transition-all">
+        <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide">Portainer Endpoints</p>
+        <p class="text-3xl font-bold text-gray-900 mt-1"
+           x-text="cloudStatDisplay(containerStats.portainerTotal)"></p>
+        <p class="text-sm mt-1">
+          <span class="text-green-600 font-medium"
+                x-show="containerStats.portainerOnline !== null && containerStats.portainerOnline !== -1"
+                x-text="containerStats.portainerOnline + ' online'"></span>
+          <span class="text-gray-400"
+                x-show="containerStats.portainerTotal === null"> loading</span>
+          <span class="text-gray-400"
+                x-show="containerStats.portainerTotal === -1">unavailable</span>
+        </p>
+      </a>
+
+      <!-- ECS Tasks (AWS) -->
+      <a href="/containers#cloud" class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 block cursor-pointer hover:shadow-md hover:border-blue-200 transition-all">
+        <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide">ECS Tasks</p>
+        <p class="text-3xl font-bold text-gray-900 mt-1"
+           x-text="cloudStatDisplay(containerStats.ecsTasks)"></p>
+        <p class="text-sm text-gray-400 mt-1">running tasks</p>
+      </a>
+
+      <!-- ACI (Azure) -->
+      <a href="/containers#cloud" class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 block cursor-pointer hover:shadow-md hover:border-blue-200 transition-all">
+        <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide">ACI Containers</p>
+        <p class="text-3xl font-bold text-gray-900 mt-1"
+           x-text="cloudStatDisplay(containerStats.aciContainers)"></p>
+        <p class="text-sm mt-1">
+          <span class="text-green-600 font-medium"
+                x-show="containerStats.aciRunning !== null && containerStats.aciRunning !== -1"
+                x-text="containerStats.aciRunning + ' running'"></span>
+          <span class="text-gray-400"
+                x-show="containerStats.aciContainers === null"> loading</span>
+          <span class="text-gray-400"
+                x-show="containerStats.aciContainers === -1">unavailable</span>
+        </p>
+      </a>
+
+    </div>
+  </div>
+
+  <!-- Workgroup quick actions -->
+  <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+    <template x-for="wg in workgroups" :key="wg.name">
+      <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+        <div class="flex items-center justify-between mb-4">
+          <h2 class="font-semibold text-gray-800" x-text="wg.name + ' Workgroup'"></h2>
+          <span class="text-xs bg-gray-100 text-gray-600 rounded-full px-2 py-0.5"
+                x-text="(wg.count ?? '…') + ' VMs'"></span>
+        </div>
+        <div class="flex gap-3">
+          <button @click="bulkAction(wg.name, 'start')"
+                  :disabled="wg.loading"
+                  class="flex-1 bg-green-600 hover:bg-green-700 disabled:opacity-50 text-white
+                         text-sm font-medium py-2 rounded-lg transition">
+            <span x-show="!wg.loading">▶ Bulk Start</span>
+            <span x-show="wg.loading" x-cloak>Starting…</span>
+          </button>
+          <button @click="bulkAction(wg.name, 'stop')"
+                  :disabled="wg.loading"
+                  class="flex-1 bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white
+                         text-sm font-medium py-2 rounded-lg transition">
+            <span x-show="!wg.loading">■ Bulk Stop</span>
+            <span x-show="wg.loading" x-cloak>Stopping…</span>
+          </button>
+        </div>
+      </div>
+    </template>
+  </div>
+
+  <!-- Recent jobs -->
+  <div class="bg-white rounded-xl shadow-sm border border-gray-200">
+    <div class="flex items-center justify-between px-5 py-4 border-b border-gray-100">
+      <h2 class="font-semibold text-gray-800">Recent Jobs</h2>
+      <a href="/jobs" class="text-sm text-blue-600 hover:underline">View all →</a>
+    </div>
+    <div x-show="recentJobs.length === 0 && !loadingJobs" class="px-5 py-8 text-center text-gray-400 text-sm">
+      No jobs yet. Start a VM to create your first job.
+    </div>
+    <div x-show="loadingJobs" class="px-5 py-8 text-center text-gray-400 text-sm">Loading…</div>
+    <ul class="divide-y divide-gray-50">
+      <template x-for="job in recentJobs" :key="job.id">
+        <li class="px-5 py-3 flex items-center justify-between hover:bg-gray-50">
+          <div class="flex items-center gap-3 min-w-0">
+            <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium"
+                  :class="statusBadge(job.status)" x-text="job.status"></span>
+            <div class="min-w-0">
+              <p class="text-sm font-medium text-gray-800 truncate" x-text="jobLabel(job)"></p>
+              <p class="text-xs text-gray-400" x-text="timeAgo(job.created_at)"></p>
+            </div>
+          </div>
+          <a :href="'/jobs/' + job.id" class="text-xs text-blue-500 hover:underline ml-4 shrink-0">Details</a>
+        </li>
+      </template>
+    </ul>
+  </div>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  function dashboard() {
+    return {
+      stats: { total_vms: null, running_vms: null, active_jobs: null },
+      cloudStats: {
+        awsInstances: null, awsRunning: null, awsAmis: null,
+        azureVms: null, azureRunning: null, azureImages: null,
+        ovas: null,
+      },
+      cloudStatsLoaded: false,
+      containerStats: {
+        portainerTotal: null, portainerOnline: null,
+        ecsTasks: null,
+        aciContainers: null, aciRunning: null,
+      },
+      containerStatsLoaded: false,
+      workgroups: [],
+      recentJobs: [],
+      loadingJobs: true,
+
+      async init() {
+        requireAuth();
+        // Render workgroup buttons immediately from cached auth — no API call needed
+        const auth = Alpine.store('auth');
+        this.workgroups = auth.workgroups.map(name => ({ name, count: null, loading: false }));
+        await Promise.all([this.loadStats(), this.loadJobs()]);
+        this.loadCloudStats();
+        this.loadContainerStats();
+      },
+
+      async loadStats() {
+        try {
+          const resp = await API.get('/api/vms/dashboard-stats');
+          if (!resp) return;
+          this.stats.total_vms = resp.total_vms;
+          this.stats.running_vms = resp.running_vms;
+          this.stats.active_jobs = resp.active_jobs;
+          // Update per-workgroup VM counts
+          for (const wg of this.workgroups) {
+            wg.count = resp.workgroup_counts[wg.name] ?? 0;
+          }
+        } catch (e) {
+          console.error('Stats load error:', e);
+        }
+      },
+
+      async loadCloudStats() {
+        this.cloudStatsLoaded = false;
+        const [awsInst, awsAmis, azureVms, azureImgs, ovas] = await Promise.allSettled([
+          API.get('/api/aws/instances'),
+          API.get('/api/aws/amis'),
+          API.get('/api/azure/vms'),
+          API.get('/api/azure/images'),
+          API.get('/api/images/ovas'),
+        ]);
+
+        // AWS instances
+        if (awsInst.status === 'fulfilled' && awsInst.value) {
+          const list = awsInst.value.instances || [];
+          this.cloudStats.awsInstances = list.length;
+          this.cloudStats.awsRunning = list.filter(i => i.state === 'running').length;
+        } else {
+          this.cloudStats.awsInstances = -1;
+          this.cloudStats.awsRunning = -1;
+        }
+
+        // AWS AMIs
+        if (awsAmis.status === 'fulfilled' && awsAmis.value) {
+          this.cloudStats.awsAmis = awsAmis.value.count ?? (awsAmis.value.amis || []).length;
+        } else {
+          this.cloudStats.awsAmis = -1;
+        }
+
+        // Azure VMs
+        if (azureVms.status === 'fulfilled' && azureVms.value) {
+          const list = azureVms.value.vms || [];
+          this.cloudStats.azureVms = list.length;
+          this.cloudStats.azureRunning = list.filter(v => v.state === 'running').length;
+        } else {
+          this.cloudStats.azureVms = -1;
+          this.cloudStats.azureRunning = -1;
+        }
+
+        // Azure images
+        if (azureImgs.status === 'fulfilled' && azureImgs.value) {
+          this.cloudStats.azureImages = azureImgs.value.count ?? (azureImgs.value.images || []).length;
+        } else {
+          this.cloudStats.azureImages = -1;
+        }
+
+        // OVAs
+        if (ovas.status === 'fulfilled' && ovas.value) {
+          this.cloudStats.ovas = ovas.value.count ?? (ovas.value.ovas || []).length;
+        } else {
+          this.cloudStats.ovas = -1;
+        }
+
+        this.cloudStatsLoaded = true;
+      },
+
+      async loadContainerStats() {
+        this.containerStatsLoaded = false;
+
+        // Portainer: one call per workgroup, in parallel
+        const wgNames = this.workgroups.map(w => w.name.toLowerCase());
+        const portainerCalls = wgNames.length
+          ? wgNames.map(wg => API.get(`/api/containers/endpoints?workgroup=${encodeURIComponent(wg)}`))
+          : [Promise.resolve(null)];
+
+        const [portainerResults, ecsResult, aciResult] = await Promise.all([
+          Promise.allSettled(portainerCalls),
+          API.get('/api/containers/ecs-tasks').catch(() => null),
+          API.get('/api/containers/aci-containers').catch(() => null),
+        ]);
+
+        // Portainer endpoints (aggregate across workgroups)
+        let portainerTotal = 0, portainerOnline = 0, portainerOk = false;
+        for (const r of portainerResults) {
+          if (r.status === 'fulfilled' && r.value) {
+            portainerOk = true;
+            const eps = r.value.endpoints || [];
+            portainerTotal += eps.length;
+            portainerOnline += eps.filter(e => e.status === 1).length;
+          }
+        }
+        this.containerStats.portainerTotal = portainerOk ? portainerTotal : -1;
+        this.containerStats.portainerOnline = portainerOk ? portainerOnline : -1;
+
+        // ECS tasks (default: running only)
+        if (ecsResult) {
+          this.containerStats.ecsTasks = ecsResult.count ?? (ecsResult.tasks || []).length;
+        } else {
+          this.containerStats.ecsTasks = -1;
+        }
+
+        // ACI containers
+        if (aciResult) {
+          const list = aciResult.containers || [];
+          this.containerStats.aciContainers = list.length;
+          this.containerStats.aciRunning = list.filter(c => c.state === 'Running').length;
+        } else {
+          this.containerStats.aciContainers = -1;
+          this.containerStats.aciRunning = -1;
+        }
+
+        this.containerStatsLoaded = true;
+      },
+
+      async loadJobs() {
+        this.loadingJobs = true;
+        try {
+          const resp = await API.get('/api/jobs?page_size=8');
+          this.recentJobs = resp?.jobs || [];
+        } catch (e) {
+          console.error('Jobs load error:', e);
+        } finally {
+          this.loadingJobs = false;
+        }
+      },
+
+      async bulkAction(workgroup, action) {
+        const wg = this.workgroups.find(w => w.name === workgroup);
+        if (!wg) return;
+
+        const verb = action === 'start' ? 'start' : 'stop';
+        if (!confirm(`Bulk ${verb} all VMs in ${workgroup}?`)) return;
+
+        wg.loading = true;
+        try {
+          const endpoint = action === 'start' ? '/api/vms/bulk/start' : '/api/vms/bulk/stop';
+          const resp = await API.post(endpoint, { workgroup });
+          toast(`Bulk ${verb} queued (job: ${resp.job_id.slice(0,8)}…)`, 'success');
+          // Redirect to job detail
+          setTimeout(() => window.location.href = '/jobs/' + resp.job_id, 500);
+        } catch (e) {
+          toast(`Bulk ${verb} failed: ${e.message}`, 'error');
+          wg.loading = false;
+        }
+      },
+
+      jobLabel(job) {
+        const labels = {
+          vm_start: 'Start VM',
+          vm_stop: 'Stop VM',
+          bulk_start: `Bulk Start – ${job.workgroup}`,
+          bulk_stop: `Bulk Stop – ${job.workgroup}`,
+        };
+        return labels[job.job_type] || job.job_type;
+      },
+
+      cloudStatDisplay(val) {
+        if (val === null) return '…';
+        if (val === -1) return '–';
+        return val;
+      },
+
+      statusBadge,
+      timeAgo,
+    };
+  }
+</script>
+{% endblock %}

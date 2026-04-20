@@ -1,0 +1,261 @@
+{% extends "base.html" %}
+
+{% block title %}Security Settings – Infrastructure Management{% endblock %}
+
+{% block content %}
+<div class="max-w-2xl mx-auto py-8 px-4" x-data="settingsPage()" x-init="init()">
+
+  <h1 class="text-2xl font-bold text-gray-800 mb-1">Security Settings</h1>
+  <p class="text-sm text-gray-500 mb-8">Manage your security keys and account authentication.</p>
+
+  <!-- Toast / status -->
+  <div x-show="toast" x-cloak x-transition
+       :class="toastType === 'error' ? 'bg-red-50 border-red-200 text-red-700' : 'bg-green-50 border-green-200 text-green-700'"
+       class="mb-6 border rounded-lg px-4 py-3 text-sm"
+       x-text="toast"></div>
+
+  <!-- ── Account Info ──────────────────────────────────────────────────── -->
+  <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
+    <h2 class="text-base font-semibold text-gray-700 mb-4">Account</h2>
+    <dl class="space-y-2 text-sm">
+      <div class="flex justify-between">
+        <dt class="text-gray-500">Username</dt>
+        <dd class="font-medium" x-text="$store.auth.username"></dd>
+      </div>
+      <div class="flex justify-between">
+        <dt class="text-gray-500">Login method</dt>
+        <dd class="font-medium" x-text="authProvider"></dd>
+      </div>
+      <div class="flex justify-between">
+        <dt class="text-gray-500">MFA status</dt>
+        <dd>
+          <span x-show="mfaRequired"
+                class="inline-flex items-center gap-1 text-green-700 bg-green-50 px-2 py-0.5 rounded-full text-xs font-medium">
+            <!-- shield check -->
+            <svg class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                    d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/>
+            </svg>
+            Enabled
+          </span>
+          <span x-show="!mfaRequired"
+                class="inline-flex items-center gap-1 text-gray-500 bg-gray-100 px-2 py-0.5 rounded-full text-xs font-medium">
+            Not enabled — register a key below to activate MFA
+          </span>
+        </dd>
+      </div>
+    </dl>
+  </div>
+
+  <!-- ── Registered Security Keys ─────────────────────────────────────── -->
+  <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
+    <div class="flex items-center justify-between mb-4">
+      <h2 class="text-base font-semibold text-gray-700">Security Keys</h2>
+      <button @click="startRegistration()"
+              :disabled="registering"
+              class="flex items-center gap-1.5 text-sm bg-blue-700 hover:bg-blue-800 disabled:opacity-50
+                     text-white px-3 py-1.5 rounded-lg font-medium transition">
+        <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/>
+        </svg>
+        <span x-show="!registering">Register New Key</span>
+        <span x-show="registering" x-cloak>Waiting for key…</span>
+      </button>
+    </div>
+
+    <!-- Device name prompt (shown when registration is in progress) -->
+    <div x-show="namingKey" x-cloak
+         class="mb-4 bg-blue-50 border border-blue-200 rounded-lg p-4">
+      <p class="text-sm text-blue-800 mb-3 font-medium">Key registered! Give it a name so you can recognise it later.</p>
+      <div class="flex gap-2">
+        <input type="text" x-model="deviceName" placeholder="e.g. YubiKey 5C, Windows Hello…"
+               class="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm
+                      focus:outline-none focus:ring-2 focus:ring-blue-500">
+        <button @click="completeRegistration()"
+                class="bg-blue-700 hover:bg-blue-800 text-white text-sm font-medium px-4 py-2 rounded-lg transition">
+          Save
+        </button>
+        <button @click="cancelRegistration()"
+                class="text-sm text-gray-500 hover:text-gray-700 px-2 transition">Cancel</button>
+      </div>
+    </div>
+
+    <!-- Key list -->
+    <div x-show="credentials.length === 0 && !loading"
+         class="text-sm text-gray-400 text-center py-6">
+      No security keys registered yet.
+    </div>
+
+    <div x-show="loading" class="text-sm text-gray-400 text-center py-6">Loading…</div>
+
+    <ul class="divide-y divide-gray-100" x-show="credentials.length > 0">
+      <template x-for="cred in credentials" :key="cred.id">
+        <li class="flex items-center justify-between py-3">
+          <div class="flex items-center gap-3">
+            <div class="bg-gray-100 rounded-full p-2">
+              <svg class="h-5 w-5 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                      d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"/>
+              </svg>
+            </div>
+            <div>
+              <p class="text-sm font-medium text-gray-800" x-text="cred.device_name || 'Security Key'"></p>
+              <p class="text-xs text-gray-400">
+                Added <span x-text="timeAgo(cred.created_at)"></span>
+                <span x-show="cred.last_used_at">
+                  · Last used <span x-text="timeAgo(cred.last_used_at)"></span>
+                </span>
+              </p>
+            </div>
+          </div>
+          <button @click="deleteCredential(cred.id)"
+                  class="text-xs text-red-500 hover:text-red-700 transition font-medium">
+            Remove
+          </button>
+        </li>
+      </template>
+    </ul>
+  </div>
+
+</div>
+
+<script>
+function settingsPage() {
+  return {
+    credentials: [],
+    loading: true,
+    mfaRequired: false,
+    authProvider: 'Local',
+    registering: false,
+    namingKey: false,
+    deviceName: '',
+    toast: '',
+    toastType: 'success',
+    _pendingAttestation: null,
+    _pendingChallengeToken: null,
+
+    async init() {
+      requireAuth();
+      await this.loadProfile();
+      await this.loadCredentials();
+    },
+
+    async loadProfile() {
+      try {
+        const user = await API.get('/api/auth/me');
+        if (user) {
+          this.mfaRequired = user.mfa_required || false;
+          this.authProvider = user.auth_provider === 'azure_ad' ? 'Microsoft Azure AD' : 'Local (username/password)';
+        }
+      } catch (e) {
+        // non-critical
+      }
+    },
+
+    async loadCredentials() {
+      this.loading = true;
+      try {
+        const data = await API.get('/api/mfa/credentials');
+        this.credentials = data || [];
+      } catch (e) {
+        this.showToast('Failed to load security keys: ' + e.message, 'error');
+      } finally {
+        this.loading = false;
+      }
+    },
+
+    async startRegistration() {
+      if (!window.PublicKeyCredential) {
+        this.showToast('Your browser does not support WebAuthn / security keys.', 'error');
+        return;
+      }
+      this.registering = true;
+      this.namingKey = false;
+      this.toast = '';
+
+      try {
+        // 1. Get creation options from server
+        const { challenge_token, options } = await API.post('/api/mfa/register/begin', {});
+        this._pendingChallengeToken = challenge_token;
+
+        // 2. Invoke browser WebAuthn
+        const creationOptions = WebAuthnHelper.prepareCreationOptions(options);
+        let credential;
+        try {
+          credential = await navigator.credentials.create({ publicKey: creationOptions });
+        } catch (e) {
+          if (e.name === 'NotAllowedError') {
+            this.showToast('Key registration was cancelled or timed out.', 'error');
+          } else {
+            this.showToast('Registration error: ' + e.message, 'error');
+          }
+          this.registering = false;
+          return;
+        }
+
+        // 3. Prompt for a name before sending to server
+        this._pendingAttestation = WebAuthnHelper.serializeCredential(credential);
+        this.namingKey = true;
+        this.deviceName = '';
+      } catch (e) {
+        this.showToast('Failed to start registration: ' + e.message, 'error');
+        this.registering = false;
+      }
+    },
+
+    async completeRegistration() {
+      if (!this._pendingAttestation || !this._pendingChallengeToken) return;
+
+      try {
+        const result = await API.post('/api/mfa/register/complete', {
+          challenge_token: this._pendingChallengeToken,
+          device_name: this.deviceName || 'Security Key',
+          attestation_response: this._pendingAttestation,
+        });
+
+        this.showToast('Security key registered successfully!', 'success');
+        this.mfaRequired = true;
+        await this.loadCredentials();
+      } catch (e) {
+        this.showToast('Registration failed: ' + e.message, 'error');
+      } finally {
+        this.cancelRegistration();
+      }
+    },
+
+    cancelRegistration() {
+      this.registering = false;
+      this.namingKey = false;
+      this.deviceName = '';
+      this._pendingAttestation = null;
+      this._pendingChallengeToken = null;
+    },
+
+    async deleteCredential(id) {
+      if (!confirm('Remove this security key? You will need to re-register it to use it again.')) return;
+
+      const token = Alpine.store('auth').token;
+      const resp = await fetch('/api/mfa/credentials/' + id, {
+        method: 'DELETE',
+        headers: { 'Authorization': 'Bearer ' + token },
+      });
+
+      if (resp.status === 204) {
+        this.showToast('Security key removed.', 'success');
+        await this.loadCredentials();
+        if (this.credentials.length === 0) this.mfaRequired = false;
+      } else {
+        const data = await resp.json().catch(() => ({}));
+        this.showToast(data.detail || 'Failed to remove key.', 'error');
+      }
+    },
+
+    showToast(msg, type = 'success') {
+      this.toast = msg;
+      this.toastType = type;
+      setTimeout(() => { this.toast = ''; }, 5000);
+    },
+  };
+}
+</script>
+{% endblock %}

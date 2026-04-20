@@ -1,0 +1,169 @@
+{% extends "base.html" %}
+{% block title %}Jobs – Infrastructure Management{% endblock %}
+
+{% block content %}
+<div x-data="jobList()" x-init="init()">
+
+  <div class="flex items-center justify-between mb-6">
+    <div>
+      <h1 class="text-2xl font-bold text-gray-900">Job History</h1>
+      <p class="text-sm text-gray-500 mt-1" x-text="total + ' total jobs'"></p>
+    </div>
+    <button @click="loadJobs()" :disabled="loading"
+            class="text-sm bg-white border border-gray-300 hover:bg-gray-50 px-3 py-2 rounded-lg shadow-sm font-medium transition">
+      Refresh
+    </button>
+  </div>
+
+  <!-- Filters -->
+  <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-4 mb-6">
+    <div class="flex flex-wrap items-center gap-3">
+      <div class="flex items-center gap-2">
+        <label class="text-sm font-medium text-gray-600">Status:</label>
+        <select x-model="filterStatus" @change="page=1; loadJobs()"
+                class="text-sm border border-gray-300 rounded-lg px-2 py-1.5 focus:ring-2 focus:ring-blue-500">
+          <option value="">All</option>
+          <option>pending</option>
+          <option>running</option>
+          <option>completed</option>
+          <option>failed</option>
+          <option>cancelled</option>
+        </select>
+      </div>
+    </div>
+  </div>
+
+  <!-- Jobs table -->
+  <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+    <table class="w-full text-sm">
+      <thead>
+        <tr class="bg-gray-50 border-b border-gray-200 text-left">
+          <th class="px-4 py-3 font-semibold text-gray-600">Status</th>
+          <th class="px-4 py-3 font-semibold text-gray-600">Type</th>
+          <th class="px-4 py-3 font-semibold text-gray-600">Target</th>
+          <th class="px-4 py-3 font-semibold text-gray-600">Progress</th>
+          <th class="px-4 py-3 font-semibold text-gray-600">Created</th>
+          <th class="px-4 py-3 font-semibold text-gray-600">Duration</th>
+          <th class="px-4 py-3 font-semibold text-gray-600 text-right">Actions</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-gray-50">
+        <tr x-show="loading">
+          <td colspan="7" class="px-4 py-10 text-center text-gray-400">Loading…</td>
+        </tr>
+        <tr x-show="!loading && jobs.length === 0">
+          <td colspan="7" class="px-4 py-10 text-center text-gray-400">No jobs found.</td>
+        </tr>
+        <template x-for="job in jobs" :key="job.id">
+          <tr class="hover:bg-gray-50 transition">
+            <td class="px-4 py-3">
+              <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium"
+                    :class="statusBadge(job.status)" x-text="job.status"></span>
+            </td>
+            <td class="px-4 py-3 font-medium text-gray-800" x-text="jobLabel(job)"></td>
+            <td class="px-4 py-3 text-gray-500 max-w-[200px] truncate"
+                x-text="job.vm_path ? vmName(job.vm_path) : (job.workgroup || '–')"></td>
+            <td class="px-4 py-3">
+              <div x-show="job.status === 'running'" class="flex items-center gap-2">
+                <div class="flex-1 bg-gray-200 rounded-full h-1.5 max-w-[80px]">
+                  <div class="bg-blue-500 h-1.5 rounded-full progress-bar-fill"
+                       :style="'width:' + (job.progress_pct || 0) + '%'"></div>
+                </div>
+                <span class="text-xs text-gray-500" x-text="(job.progress_pct || 0) + '%'"></span>
+              </div>
+              <span x-show="job.status !== 'running'" class="text-gray-400 text-xs">–</span>
+            </td>
+            <td class="px-4 py-3 text-gray-500 text-xs" x-text="timeAgo(job.created_at)"></td>
+            <td class="px-4 py-3 text-gray-500 text-xs" x-text="formatDuration(job.duration_seconds)"></td>
+            <td class="px-4 py-3 text-right">
+              <a :href="'/jobs/' + job.id"
+                 class="text-blue-500 hover:underline text-xs font-medium mr-2">Details</a>
+              <button x-show="job.status === 'pending' || job.status === 'running'"
+                      @click="cancelJob(job)"
+                      class="text-red-500 hover:text-red-700 text-xs font-medium">Cancel</button>
+            </td>
+          </tr>
+        </template>
+      </tbody>
+    </table>
+
+    <!-- Pagination -->
+    <div class="flex items-center justify-between px-4 py-3 border-t border-gray-100"
+         x-show="total > pageSize">
+      <button @click="page--; loadJobs()" :disabled="page <= 1"
+              class="text-sm px-3 py-1.5 border border-gray-300 rounded-lg hover:bg-gray-50 disabled:opacity-40">← Prev</button>
+      <span class="text-sm text-gray-500"
+            x-text="'Page ' + page + ' of ' + Math.ceil(total / pageSize)"></span>
+      <button @click="page++; loadJobs()" :disabled="page * pageSize >= total"
+              class="text-sm px-3 py-1.5 border border-gray-300 rounded-lg hover:bg-gray-50 disabled:opacity-40">Next →</button>
+    </div>
+  </div>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  function jobList() {
+    return {
+      jobs: [],
+      total: 0,
+      page: 1,
+      pageSize: 20,
+      loading: true,
+      filterStatus: '',
+
+      async init() {
+        requireAuth();
+        await this.loadJobs();
+        // Poll every 5s for running job updates
+        setInterval(() => this.loadJobs(), 5000);
+      },
+
+      async loadJobs() {
+        this.loading = true;
+        try {
+          let url = `/api/jobs?page=${this.page}&page_size=${this.pageSize}`;
+          if (this.filterStatus) url += `&status=${this.filterStatus}`;
+          const resp = await API.get(url);
+          if (!resp) return;
+          this.jobs = resp.jobs || [];
+          this.total = resp.total || 0;
+        } catch (e) {
+          toast('Failed to load jobs: ' + e.message, 'error');
+        } finally {
+          this.loading = false;
+        }
+      },
+
+      async cancelJob(job) {
+        if (!confirm(`Cancel job ${job.id.slice(0,8)}…?`)) return;
+        try {
+          await API.del(`/api/jobs/${job.id}`);
+          toast('Job cancelled', 'success');
+          await this.loadJobs();
+        } catch (e) {
+          toast('Cancel failed: ' + e.message, 'error');
+        }
+      },
+
+      jobLabel(job) {
+        const labels = {
+          vm_start: 'Start VM', vm_stop: 'Stop VM',
+          bulk_start: 'Bulk Start', bulk_stop: 'Bulk Stop',
+          windows_update_run: 'Windows Update',
+        };
+        return labels[job.job_type] || job.job_type;
+      },
+
+      vmName(vmxPath) {
+        const parts = vmxPath.replace(/\\/g, '/').split('/');
+        const fname = parts[parts.length - 1];
+        return fname.replace('.vmx', '');
+      },
+
+      statusBadge, timeAgo, formatDuration,
+    };
+  }
+</script>
+{% endblock %}

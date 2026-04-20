@@ -1,0 +1,76 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: dashboardadmin
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-devpassword}
+      POSTGRES_DB: vmclidashboard
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dashboardadmin -d vmclidashboard"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Local Ollama for the natural-language chat assistant. Profiled so it
+  # only starts when the user explicitly opts in:
+  #   docker compose --profile chat up -d
+  # Leaving the profile off keeps cold-start fast and avoids the ~5 GB
+  # model pull on first use for people who won't turn on chat.
+  ollama:
+    image: ollama/ollama:latest
+    profiles: ["chat"]
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    environment:
+      OLLAMA_KEEP_ALIVE: "24h"
+    volumes:
+      - ollama_models:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    # GPU passthrough — requires Docker Desktop with WSL2 GPU support
+    # (automatic if the host has the NVIDIA driver installed). Comment
+    # this block out on machines without an NVIDIA GPU.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  app:
+    build:
+      context: .
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    # All settings come from .env at the repo root (populated by
+    # scripts/Onboard-Dashboard.ps1 on first run). DATABASE_URL is the one
+    # exception — it's assembled here so POSTGRES_PASSWORD interpolation
+    # stays in a single place and can't drift between files.
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=postgresql://dashboardadmin:${POSTGRES_PASSWORD:-devpassword}@db:5432/vmclidashboard
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      # Live-reload Python source without rebuilding the image.
+      - type: bind
+        source: ./web_dashboard
+        target: /app/web_dashboard
+
+volumes:
+  pgdata:
+  ollama_models:

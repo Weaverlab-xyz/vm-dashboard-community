@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en" x-data>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}Infrastructure Management{% endblock %}</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+  <script src="/static/js/app.js"></script>
+  <style>
+    [x-cloak] { display: none !important; }
+    .progress-bar-fill { transition: width 0.4s ease; }
+  </style>
+</head>
+<body class="bg-gray-50 min-h-screen font-sans text-gray-800">
+
+  <!-- Navigation -->
+  <nav class="{{ 'bg-blue-900' if app_env == 'production' else 'bg-orange-700' }} text-white shadow-lg" x-data x-cloak x-show="$store.auth.isLoggedIn">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div class="flex items-center justify-between h-16">
+        <!-- Brand -->
+        <div class="flex items-center space-x-3">
+          <svg class="h-7 w-7 {{ 'text-blue-300' if app_env == 'production' else 'text-orange-200' }}" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                  d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01" />
+          </svg>
+          <a href="/" class="text-lg font-bold tracking-tight {{ 'hover:text-blue-200' if app_env == 'production' else 'hover:text-orange-200' }}">Infrastructure Management</a>
+          {% if app_env != 'production' %}
+          <span class="text-xs font-semibold bg-orange-500 text-white px-2 py-0.5 rounded-full uppercase tracking-wide mr-3">Dev</span>
+          {% endif %}
+        </div>
+
+        <!-- Nav links -->
+        {% set nav_hover = 'hover:bg-blue-800' if app_env == 'production' else 'hover:bg-orange-600' %}
+        {% set nav_active = 'bg-blue-800' if app_env == 'production' else 'bg-orange-600' %}
+        <div class="hidden md:flex items-center space-x-1">
+          <a href="/" class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
+             {% if request.url.path == '/' %}{{ nav_active }}{% endif %}">Dashboard</a>
+          {% if chat_enabled %}
+          <a href="/chat" class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
+             {% if request.url.path.startswith('/chat') %}{{ nav_active }}{% endif %}">Chat</a>
+          {% endif %}
+          {% if vmware_enabled %}
+          <a href="/vms" class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
+             {% if request.url.path == '/vms' %}{{ nav_active }}{% endif %}">VMs</a>
+          {% endif %}
+          <a href="/aws" class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
+             {% if request.url.path == '/aws' %}{{ nav_active }}{% endif %}">AWS</a>
+          <a href="/azure" class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
+             {% if request.url.path == '/azure' %}{{ nav_active }}{% endif %}">Azure</a>
+          {% if portainer_enabled %}
+          <a href="/containers" class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
+             {% if request.url.path == '/containers' %}{{ nav_active }}{% endif %}">Containers</a>
+          {% endif %}
+          {% if ansible_enabled %}
+          <a href="/config-mgmt" class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
+             {% if request.url.path == '/config-mgmt' %}{{ nav_active }}{% endif %}">Config Mgmt</a>
+          {% endif %}
+          <a href="/jobs" class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
+             {% if request.url.path.startswith('/jobs') %}{{ nav_active }}{% endif %}">Jobs</a>
+          <a x-show="$store.auth.isAdmin" href="/users"
+             class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
+             {% if request.url.path.startswith('/users') %}{{ nav_active }}{% endif %}">Users</a>
+          <a x-show="$store.auth.isAdmin" href="/groups"
+             class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
+             {% if request.url.path.startswith('/groups') %}{{ nav_active }}{% endif %}">Groups</a>
+        </div>
+
+        <!-- User menu -->
+        {% set user_text = 'text-blue-200' if app_env == 'production' else 'text-orange-200' %}
+        {% set logout_btn = 'bg-blue-700 hover:bg-blue-600' if app_env == 'production' else 'bg-orange-600 hover:bg-orange-500' %}
+        <div class="flex items-center space-x-3">
+          <span class="text-sm {{ user_text }}" x-text="$store.auth.username"></span>
+          <a href="/settings"
+             class="text-sm {{ user_text }} hover:text-white transition" title="Security settings">
+            <svg class="h-5 w-5 inline" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                    d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/>
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+            </svg>
+          </a>
+          <button @click="$store.auth.logout()"
+                  class="text-sm {{ logout_btn }} px-3 py-1.5 rounded-md font-medium transition">
+            Logout
+          </button>
+        </div>
+      </div>
+    </div>
+  </nav>
+
+  <!-- Page content -->
+  <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    {% block content %}{% endblock %}
+  </main>
+
+  <!-- Approval gate: blocking modal shown while an Entitle approval is pending -->
+  {% if entitle_enabled %}
+  <div x-data="approvalModal()" x-init="window._approvalModal = $data" x-cloak>
+    <div x-show="visible"
+         class="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center"
+         x-transition.opacity>
+      <div class="bg-white rounded-lg shadow-xl max-w-md w-full mx-4 p-6">
+        <div class="flex items-center gap-3 mb-4">
+          <svg class="animate-spin h-6 w-6 text-blue-600" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"></path>
+          </svg>
+          <h3 class="text-lg font-semibold text-gray-900">Waiting for approval</h3>
+        </div>
+        <p class="text-sm text-gray-600 mb-2">
+          This action requires approval before it can run.
+        </p>
+        <p class="text-sm font-mono bg-gray-100 rounded px-2 py-1 mb-4 break-all"
+           x-text="action || 'Pending action'"></p>
+        <p class="text-xs text-gray-500" x-show="approvalId">
+          Approval ID: <span class="font-mono" x-text="approvalId"></span>
+        </p>
+      </div>
+    </div>
+  </div>
+  {% endif %}
+
+  <!-- Toast notification container -->
+  <div id="toast-container"
+       class="fixed bottom-4 right-4 space-y-2 z-50"
+       x-data="toastManager()"
+       x-init="window._toast = $data">
+    <template x-for="t in toasts" :key="t.id">
+      <div class="flex items-center gap-2 px-4 py-3 rounded-lg shadow-lg text-sm font-medium text-white max-w-xs"
+           :class="t.type === 'error' ? 'bg-red-600' : t.type === 'success' ? 'bg-green-600' : 'bg-blue-600'"
+           x-transition>
+        <span x-text="t.message"></span>
+      </div>
+    </template>
+  </div>
+
+  <script>
+    function toastManager() {
+      return {
+        toasts: [],
+        show(message, type = 'info', duration = 4000) {
+          const id = Date.now();
+          this.toasts.push({ id, message, type });
+          setTimeout(() => {
+            this.toasts = this.toasts.filter(t => t.id !== id);
+          }, duration);
+        }
+      };
+    }
+
+    // Shortcut: window.toast('msg') or window.toast('msg', 'error')
+    function toast(msg, type = 'info') {
+      if (window._toast) window._toast.show(msg, type);
+    }
+
+    function approvalModal() {
+      return {
+        visible: false,
+        action: '',
+        approvalId: '',
+        show(action, approvalId) {
+          this.action = action || '';
+          this.approvalId = approvalId || '';
+          this.visible = true;
+        },
+        hide() {
+          this.visible = false;
+          this.action = '';
+          this.approvalId = '';
+        }
+      };
+    }
+  </script>
+
+  {% block scripts %}{% endblock %}
+</body>
+</html>

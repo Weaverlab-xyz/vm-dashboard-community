@@ -1,0 +1,411 @@
+{% extends "base.html" %}
+{% block title %}Chat – Infrastructure Management{% endblock %}
+
+{% block content %}
+<div x-data="chatApp()" x-init="init()" class="max-w-3xl mx-auto">
+
+  <!-- Header -->
+  <div class="flex items-start justify-between mb-4">
+    <div>
+      <h1 class="text-2xl font-bold text-gray-900">Assistant</h1>
+      <p class="text-sm text-gray-500 mt-1">
+        Natural-language queries over your dashboard — read-only for now.
+        <span class="ml-1 text-xs text-gray-400 font-mono">model: {{ chat_model }}</span>
+      </p>
+    </div>
+    <button @click="resetChat()"
+            class="text-sm bg-white border border-gray-300 hover:bg-gray-50 px-3 py-2 rounded-lg shadow-sm font-medium transition"
+            :disabled="busy">
+      Clear
+    </button>
+  </div>
+
+  <!-- Transcript -->
+  <div class="bg-white rounded-xl border border-gray-200 p-4 mb-4 min-h-[50vh] max-h-[65vh] overflow-y-auto"
+       x-ref="transcript">
+    <template x-if="messages.length === 0">
+      <div class="text-center text-gray-400 py-12">
+        <p class="text-sm">Try: <span class="font-mono">"How many VMs are running?"</span></p>
+        <p class="text-sm mt-1">Or: <span class="font-mono">"Show me failed jobs from this week"</span></p>
+      </div>
+    </template>
+
+    <template x-for="(m, idx) in messages" :key="idx">
+      <div class="mb-4">
+        <!-- User -->
+        <template x-if="m.role === 'user'">
+          <div class="flex justify-end">
+            <div class="bg-blue-600 text-white rounded-2xl rounded-br-sm px-4 py-2 max-w-[80%] whitespace-pre-wrap"
+                 x-text="m.content"></div>
+          </div>
+        </template>
+
+        <!-- Assistant -->
+        <template x-if="m.role === 'assistant'">
+          <div class="flex justify-start">
+            <div class="bg-gray-100 text-gray-800 rounded-2xl rounded-bl-sm px-4 py-2 max-w-[80%] whitespace-pre-wrap"
+                 x-text="m.content || (m.pending ? '…' : '')"></div>
+          </div>
+        </template>
+
+        <!-- Tool activity (collapsed badges, shown inline under assistant turn) -->
+        <template x-if="m.role === 'tool_activity'">
+          <div class="flex justify-start">
+            <div class="text-xs text-gray-500 font-mono bg-gray-50 border border-gray-200 rounded-lg px-2 py-1">
+              <span x-show="m.ok === true">🔧</span>
+              <span x-show="m.ok === false">⚠️</span>
+              <span x-text="m.name + '(' + shortArgs(m.arguments) + ')'"></span>
+              <span x-show="m.status" x-text="' → ' + m.status" :class="m.ok ? 'text-green-600' : 'text-red-600'"></span>
+            </div>
+          </div>
+        </template>
+
+        <!-- Pending mutation — Confirm / Cancel card -->
+        <template x-if="m.role === 'pending_action'">
+          <div class="flex justify-start">
+            <div class="w-full max-w-[85%] bg-amber-50 border border-amber-300 rounded-xl px-4 py-3">
+              <div class="text-xs uppercase tracking-wide text-amber-700 font-semibold mb-1">
+                Confirmation required
+              </div>
+              <div class="text-sm text-gray-800 mb-1">
+                <span x-text="m.description"></span>
+              </div>
+              <div class="text-xs text-gray-500 font-mono mb-3">
+                <span x-text="m.tool_name + '(' + shortArgs(m.arguments) + ')'"></span>
+              </div>
+              <template x-if="m.preamble">
+                <div class="text-sm text-gray-700 italic mb-3" x-text="m.preamble"></div>
+              </template>
+              <template x-if="m.state === 'waiting'">
+                <div class="flex gap-2">
+                  <button @click="confirmAction(idx)"
+                          class="bg-amber-600 hover:bg-amber-700 text-white text-sm font-medium px-3 py-1.5 rounded-lg transition">
+                    Confirm
+                  </button>
+                  <button @click="cancelAction(idx)"
+                          class="bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 text-sm font-medium px-3 py-1.5 rounded-lg transition">
+                    Cancel
+                  </button>
+                </div>
+              </template>
+              <template x-if="m.state === 'running'">
+                <div class="text-sm text-gray-500">Running…</div>
+              </template>
+              <template x-if="m.state === 'done'">
+                <div class="text-sm" :class="m.result_ok ? 'text-green-700' : 'text-red-700'"
+                     x-text="m.result_summary"></div>
+              </template>
+              <template x-if="m.state === 'cancelled'">
+                <div class="text-sm text-gray-500">Cancelled.</div>
+              </template>
+              <template x-if="m.state === 'expired'">
+                <div class="text-sm text-red-600" x-text="m.error || 'This action expired. Ask again to re-propose it.'"></div>
+              </template>
+            </div>
+          </div>
+        </template>
+
+        <!-- Error -->
+        <template x-if="m.role === 'error'">
+          <div class="flex justify-start">
+            <div class="bg-red-50 border border-red-200 text-red-700 rounded-lg px-3 py-2 text-sm" x-text="m.content"></div>
+          </div>
+        </template>
+      </div>
+    </template>
+  </div>
+
+  <!-- Composer -->
+  <form @submit.prevent="send()" class="flex items-end gap-2">
+    <textarea
+      x-model="draft"
+      x-ref="composer"
+      @keydown.enter.prevent="!$event.shiftKey && send()"
+      rows="2"
+      :disabled="busy"
+      placeholder="Ask something… (Enter to send, Shift+Enter for newline)"
+      class="flex-1 rounded-xl border border-gray-300 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 p-3 text-sm resize-none"></textarea>
+    <button type="submit"
+            :disabled="busy || !draft.trim()"
+            class="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white px-4 py-3 rounded-xl font-medium transition">
+      <span x-show="!busy">Send</span>
+      <span x-show="busy">…</span>
+    </button>
+  </form>
+
+  <p class="text-xs text-gray-400 mt-2">
+    Tool calls run with your permissions. Responses may be wrong — verify anything you act on.
+    First message after a quiet period may take ~60–90 s while the model loads.
+  </p>
+</div>
+
+<script>
+function chatApp() {
+  return {
+    // UI state
+    draft: '',
+    busy: false,
+    messages: [],          // {role: 'user'|'assistant'|'tool_activity'|'error', content, ...}
+    history: [],           // server-shaped history sent back on each request
+
+    init() {
+      requireAuth();
+      this.$nextTick(() => this.$refs.composer?.focus());
+    },
+
+    resetChat() {
+      this.messages = [];
+      this.history = [];
+      this.$refs.composer?.focus();
+    },
+
+    shortArgs(args) {
+      if (!args) return '';
+      try {
+        const kv = Object.entries(args)
+          .filter(([, v]) => v !== undefined && v !== null && v !== '')
+          .map(([k, v]) => `${k}=${JSON.stringify(v)}`);
+        return kv.join(', ');
+      } catch {
+        return '';
+      }
+    },
+
+    scrollToEnd() {
+      this.$nextTick(() => {
+        const el = this.$refs.transcript;
+        if (el) el.scrollTop = el.scrollHeight;
+      });
+    },
+
+    async send() {
+      const text = this.draft.trim();
+      if (!text || this.busy) return;
+
+      this.messages.push({ role: 'user', content: text });
+      // Placeholder assistant bubble so the user sees "…" while the model thinks.
+      const assistantIdx = this.messages.push({ role: 'assistant', content: '', pending: true }) - 1;
+      this.draft = '';
+      this.busy = true;
+      this.scrollToEnd();
+
+      const token = Alpine.store('auth').token;
+
+      try {
+        const resp = await fetch('/api/chat/message', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+            Accept: 'text/event-stream',
+          },
+          body: JSON.stringify({ message: text, history: this.history }),
+        });
+
+        if (resp.status === 401) {
+          Alpine.store('auth').logout();
+          return;
+        }
+        if (!resp.ok || !resp.body) {
+          const errText = await resp.text().catch(() => `HTTP ${resp.status}`);
+          throw new Error(errText.slice(0, 300));
+        }
+
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = '';
+        let finalMessage = '';
+        let sawPendingAction = false;
+
+        // Track tool activity entries we've inserted, so we can update them
+        // in place when the result event arrives.
+        const pendingTools = [];
+
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+
+          // Parse SSE event blocks separated by blank line.
+          let idx;
+          while ((idx = buf.indexOf('\n\n')) !== -1) {
+            const chunk = buf.slice(0, idx);
+            buf = buf.slice(idx + 2);
+            const ev = this.parseSseChunk(chunk);
+            if (!ev) continue;
+
+            if (ev.event === 'tool_call') {
+              // Insert a tool_activity row right before the pending assistant bubble.
+              const entry = {
+                role: 'tool_activity',
+                name: ev.data.name,
+                arguments: ev.data.arguments,
+                status: null,
+                ok: null,
+              };
+              this.messages.splice(assistantIdx, 0, entry);
+              pendingTools.push(entry);
+              this.scrollToEnd();
+            } else if (ev.event === 'tool_result') {
+              // Update the matching pending tool_activity (FIFO by name).
+              const match = pendingTools.find(t => t.name === ev.data.name && t.status === null);
+              if (match) {
+                match.status = ev.data.status;
+                match.ok = ev.data.ok;
+              }
+            } else if (ev.event === 'pending_action') {
+              // Replace the pending assistant bubble with a Confirm/Cancel card.
+              // Find by marker, not by stashed index — tool_activity inserts shift it.
+              const pendingIdx = this.messages.findIndex(x => x.role === 'assistant' && x.pending);
+              const card = {
+                role: 'pending_action',
+                action_id: ev.data.action_id,
+                tool_name: ev.data.tool_name,
+                arguments: ev.data.arguments || {},
+                description: ev.data.description || '',
+                preamble: ev.data.preamble || '',
+                state: 'waiting',
+              };
+              if (pendingIdx >= 0) this.messages.splice(pendingIdx, 1, card);
+              else this.messages.push(card);
+              // Keep reading — `history` and `done` events still follow so we
+              // capture the up-to-date server history.
+              sawPendingAction = true;
+              this.scrollToEnd();
+            } else if (ev.event === 'message') {
+              finalMessage = ev.data.content || '';
+            } else if (ev.event === 'error') {
+              this.messages.splice(this.messages.length - 1, 1);
+              this.messages.push({ role: 'error', content: ev.data.detail || 'Error' });
+              this.scrollToEnd();
+              return;
+            } else if (ev.event === 'history') {
+              // Server sends the full conversation (sans system prompt) so
+              // tool exchanges round-trip. Replace ours wholesale.
+              if (Array.isArray(ev.data.messages)) {
+                this.history = ev.data.messages;
+              }
+            } else if (ev.event === 'done') {
+              // metrics already logged server-side; nothing to do here.
+            }
+          }
+        }
+
+        // Commit final assistant message — but only if no pending mutation
+        // took its place (in that case the bubble is now a Confirm card).
+        if (!sawPendingAction) {
+          const target = this.messages[this.messages.length - 1];
+          if (target && target.role === 'assistant') {
+            target.content = finalMessage;
+            target.pending = false;
+          } else {
+            this.messages.push({ role: 'assistant', content: finalMessage });
+          }
+        }
+
+        // History was already replaced from the server-sent `history` event.
+        this.scrollToEnd();
+      } catch (err) {
+        const target = this.messages[this.messages.length - 1];
+        if (target && target.role === 'assistant' && target.pending) {
+          this.messages.splice(this.messages.length - 1, 1);
+        }
+        this.messages.push({ role: 'error', content: err.message || String(err) });
+        this.scrollToEnd();
+      } finally {
+        this.busy = false;
+        this.$refs.composer?.focus();
+      }
+    },
+
+    async confirmAction(idx) {
+      const m = this.messages[idx];
+      if (!m || m.state !== 'waiting') return;
+      m.state = 'running';
+      const token = Alpine.store('auth').token;
+      try {
+        const resp = await fetch('/api/chat/confirm', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ action_id: m.action_id }),
+        });
+        if (resp.status === 410) {
+          const err = await resp.json().catch(() => ({}));
+          m.state = 'expired';
+          m.error = err.detail || 'This action expired.';
+          return;
+        }
+        if (!resp.ok) {
+          const err = await resp.text().catch(() => `HTTP ${resp.status}`);
+          m.state = 'expired';
+          m.error = err.slice(0, 300);
+          return;
+        }
+        const data = await resp.json();
+        m.result_ok = data.ok;
+        m.result = data.result;
+        m.result_summary = this.summarizeResult(data);
+        m.state = 'done';
+      } catch (err) {
+        m.state = 'expired';
+        m.error = err.message || String(err);
+      } finally {
+        this.scrollToEnd();
+      }
+    },
+
+    async cancelAction(idx) {
+      const m = this.messages[idx];
+      if (!m || m.state !== 'waiting') return;
+      const token = Alpine.store('auth').token;
+      try {
+        await fetch('/api/chat/cancel', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ action_id: m.action_id }),
+        });
+      } catch {
+        // Best-effort; the action will TTL out anyway.
+      }
+      m.state = 'cancelled';
+      this.scrollToEnd();
+    },
+
+    summarizeResult(data) {
+      if (!data.ok) {
+        const detail = data.result && (data.result.detail || data.result.error);
+        if (data.status === 403) return "You don't have permission to run that.";
+        if (data.status === 404) return 'Target not found — it may have been removed.';
+        if (data.status === 409) return detail || 'Operation already in progress.';
+        return `Failed (${data.status})${detail ? ': ' + detail : ''}`;
+      }
+      const r = data.result || {};
+      if (r.job_id) return `Queued — job ${r.job_id}.`;
+      if (r.message) return r.message;
+      return 'Done.';
+    },
+
+    parseSseChunk(chunk) {
+      let event = 'message';
+      const dataLines = [];
+      for (const line of chunk.split('\n')) {
+        if (line.startsWith('event:')) event = line.slice(6).trim();
+        else if (line.startsWith('data:')) dataLines.push(line.slice(5).trimStart());
+      }
+      if (dataLines.length === 0) return null;
+      try {
+        return { event, data: JSON.parse(dataLines.join('\n')) };
+      } catch {
+        return { event, data: { raw: dataLines.join('\n') } };
+      }
+    },
+  };
+}
+</script>
+{% endblock %}

@@ -1,0 +1,63 @@
+# FastAPI and web server
+fastapi==0.109.2
+uvicorn[standard]==0.27.1
+
+# Database
+sqlalchemy==2.0.27
+alembic==1.13.1
+psycopg2-binary==2.9.9
+
+# WSGI server (used in Docker / Container Apps)
+gunicorn==21.2.0
+
+# Data validation
+pydantic==2.6.1
+pydantic-settings==2.1.0
+
+# Authentication
+python-jose[cryptography]==3.3.0
+bcrypt==4.2.1
+fido2>=1.1.2
+msal>=1.28.0
+
+# File uploads and forms
+python-multipart==0.0.7
+
+# Templates
+jinja2==3.1.3
+
+# Async file operations
+aiofiles==23.2.1
+
+# WebSockets
+websockets==12.0
+
+# Environment variables
+python-dotenv==1.0.1
+
+# Rate limiting
+slowapi==0.1.9
+
+# AWS SDK
+boto3==1.34.69
+
+# Azure SDK
+azure-identity>=1.15.0
+azure-mgmt-compute>=30.0.0
+azure-mgmt-network>=25.0.0
+azure-mgmt-resource>=23.0.0
+azure-mgmt-containerinstance>=10.0.0
+azure-mgmt-storage>=21.0.0
+azure-keyvault-secrets>=4.7.0
+azure-mgmt-automation>=1.0.0
+
+# Async HTTP client (Portainer CE API)
+httpx>=0.27.0
+
+# Required by Azure SDK async clients (azure-mgmt-automation.aio, azure-identity.aio)
+aiohttp>=3.9.0
+
+# SSH client (direct VM access, Portainer agent install)
+# asyncssh is used instead of paramiko because paramiko 3+ dropped DSA key support,
+# and BeyondTrust Password Safe releases DSS private keys for managed SSH accounts.
+asyncssh>=2.14.0

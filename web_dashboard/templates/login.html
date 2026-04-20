@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Login – Infrastructure Management</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+  <script src="/static/js/app.js"></script>
+</head>
+<body class="bg-gradient-to-br from-blue-900 to-blue-700 min-h-screen flex items-center justify-center">
+
+  <div class="bg-white rounded-2xl shadow-2xl p-8 w-full max-w-sm"
+       x-data="loginForm()">
+
+    <!-- Logo -->
+    <div class="flex justify-center mb-6">
+      <div class="bg-blue-100 rounded-full p-4">
+        <svg class="h-10 w-10 text-blue-800" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01" />
+        </svg>
+      </div>
+    </div>
+
+    <h1 class="text-2xl font-bold text-center text-gray-800 mb-1">Infrastructure Management</h1>
+    <p class="text-sm text-center text-gray-500 mb-6">Sign in to manage your virtual machines</p>
+
+    <!-- Error alert -->
+    <div x-show="error" x-cloak
+         class="mb-4 bg-red-50 border border-red-200 text-red-700 rounded-lg px-4 py-3 text-sm"
+         x-text="error"></div>
+
+    <!-- ── Step 1: Password ─────────────────────────────────────────────── -->
+    <form x-show="step === 'password'" @submit.prevent="submitPassword">
+      <div class="mb-4">
+        <label class="block text-sm font-medium text-gray-700 mb-1">Username</label>
+        <input type="text" x-model="username" required
+               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm
+                      focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+               placeholder="Enter username"
+               :disabled="loading">
+      </div>
+
+      <div class="mb-6">
+        <label class="block text-sm font-medium text-gray-700 mb-1">Password</label>
+        <input type="password" x-model="password" required
+               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm
+                      focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+               placeholder="Enter password"
+               :disabled="loading">
+      </div>
+
+      <button type="submit"
+              class="w-full bg-blue-700 hover:bg-blue-800 disabled:opacity-50 text-white font-semibold
+                     py-2.5 rounded-lg transition text-sm"
+              :disabled="loading">
+        <span x-show="!loading">Sign In</span>
+        <span x-show="loading" x-cloak>Signing in…</span>
+      </button>
+
+      <!-- Microsoft OAuth button -->
+      <div class="mt-4 relative">
+        <div class="absolute inset-0 flex items-center">
+          <div class="w-full border-t border-gray-200"></div>
+        </div>
+        <div class="relative flex justify-center text-xs">
+          <span class="bg-white px-2 text-gray-400">or</span>
+        </div>
+      </div>
+
+      <a href="/api/auth/oauth/azure/login"
+         class="mt-4 w-full flex items-center justify-center gap-2 border border-gray-300
+                rounded-lg py-2.5 text-sm font-medium text-gray-700 hover:bg-gray-50 transition">
+        <!-- Microsoft logo -->
+        <svg width="18" height="18" viewBox="0 0 21 21" xmlns="http://www.w3.org/2000/svg">
+          <rect x="1" y="1" width="9" height="9" fill="#f25022"/>
+          <rect x="11" y="1" width="9" height="9" fill="#7fba00"/>
+          <rect x="1" y="11" width="9" height="9" fill="#00a4ef"/>
+          <rect x="11" y="11" width="9" height="9" fill="#ffb900"/>
+        </svg>
+        Sign in with Microsoft
+      </a>
+    </form>
+
+    <!-- ── Step 2: FIDO2 / Security Key ───────────────────────────────────── -->
+    <div x-show="step === 'fido2'" x-cloak>
+      <div class="flex flex-col items-center text-center mb-6">
+        <!-- Security key icon -->
+        <div class="bg-blue-50 rounded-full p-4 mb-4">
+          <svg class="h-10 w-10 text-blue-700" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                  d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"/>
+          </svg>
+        </div>
+        <h2 class="text-lg font-semibold text-gray-800 mb-1">Security Key Required</h2>
+        <p class="text-sm text-gray-500">
+          Touch your security key, use Windows Hello, or another authenticator to continue.
+        </p>
+      </div>
+
+      <button @click="submitFido2()"
+              class="w-full bg-blue-700 hover:bg-blue-800 disabled:opacity-50 text-white font-semibold
+                     py-2.5 rounded-lg transition text-sm mb-3"
+              :disabled="loading">
+        <span x-show="!loading">Verify with Security Key</span>
+        <span x-show="loading" x-cloak>Verifying…</span>
+      </button>
+
+      <button @click="step = 'password'; preAuthToken = ''; error = ''"
+              class="w-full text-sm text-gray-500 hover:text-gray-700 py-1 transition">
+        ← Back to password
+      </button>
+    </div>
+
+  </div>
+
+  <script>
+    document.addEventListener('alpine:init', () => {
+      // If already logged in, go straight to dashboard
+      if (localStorage.getItem('vm_cli_token')) {
+        window.location.href = '/';
+        return;
+      }
+
+      // OAuth callback: JWT delivered via URL fragment (#token=...)
+      const hash = window.location.hash;
+      if (hash.startsWith('#token=')) {
+        const token = hash.slice(7);
+        if (token) {
+          // Decode username from JWT payload (base64url middle segment)
+          try {
+            const parts = token.split('.');
+            const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')));
+            localStorage.setItem('vm_cli_token', token);
+            localStorage.setItem('vm_cli_username', payload.sub || '');
+            localStorage.setItem('vm_cli_workgroups', JSON.stringify([]));
+            // Fetch full profile to get workgroups
+            fetch('/api/auth/me', { headers: { 'Authorization': 'Bearer ' + token } })
+              .then(r => r.json())
+              .then(u => {
+                localStorage.setItem('vm_cli_workgroups', JSON.stringify(u.workgroups || []));
+                localStorage.setItem('vm_cli_is_admin', u.is_admin ? 'true' : 'false');
+              })
+              .finally(() => { window.location.href = '/'; });
+          } catch {
+            window.location.href = '/';
+          }
+        }
+      }
+
+      // Show error from OAuth redirect query params
+      const params = new URLSearchParams(window.location.search);
+      const oauthError = params.get('error');
+      if (oauthError) {
+        const messages = {
+          not_registered: 'Your Microsoft account is not registered in this system. Contact an administrator.',
+          oauth_error: 'Microsoft login failed: ' + (params.get('detail') || 'unknown error'),
+          invalid_state: 'OAuth session expired. Please try again.',
+          no_email: 'Could not retrieve your email from Microsoft. Contact an administrator.',
+          token_error: 'Failed to obtain token from Microsoft. Try again.',
+        };
+        window._oauthLoginError = messages[oauthError] || ('Login error: ' + oauthError);
+      }
+    });
+
+    function loginForm() {
+      return {
+        step: 'password',   // 'password' | 'fido2'
+        username: '',
+        password: '',
+        preAuthToken: '',
+        loading: false,
+        error: window._oauthLoginError || '',
+
+        // ── Step 1: Password ────────────────────────────────────────────────
+        async submitPassword() {
+          this.loading = true;
+          this.error = '';
+
+          const body = new URLSearchParams();
+          body.append('username', this.username);
+          body.append('password', this.password);
+
+          try {
+            const resp = await fetch('/api/auth/login', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+              body: body.toString(),
+            });
+
+            const data = await resp.json();
+
+            if (resp.status === 202 && data.mfa_required) {
+              // MFA required — advance to FIDO2 step
+              this.preAuthToken = data.pre_auth_token;
+              this.step = 'fido2';
+              return;
+            }
+
+            if (!resp.ok) {
+              this.error = data.detail || 'Login failed';
+              return;
+            }
+
+            this._storeAndRedirect(data);
+          } catch (e) {
+            this.error = 'Network error – is the server running?';
+          } finally {
+            this.loading = false;
+          }
+        },
+
+        // ── Step 2: FIDO2 assertion ─────────────────────────────────────────
+        async submitFido2() {
+          this.loading = true;
+          this.error = '';
+
+          try {
+            // 1. Get challenge options from server
+            const beginResp = await fetch(
+              '/api/auth/webauthn/login/begin?username=' + encodeURIComponent(this.username)
+            );
+            if (!beginResp.ok) {
+              const d = await beginResp.json();
+              this.error = d.detail || 'Failed to start security key verification';
+              return;
+            }
+            const { challenge_token, options } = await beginResp.json();
+
+            // 2. Invoke the browser WebAuthn API
+            const requestOptions = WebAuthnHelper.prepareRequestOptions(options);
+            let credential;
+            try {
+              credential = await navigator.credentials.get({ publicKey: requestOptions });
+            } catch (e) {
+              if (e.name === 'NotAllowedError') {
+                this.error = 'Security key verification was cancelled or timed out.';
+              } else {
+                this.error = 'Security key error: ' + e.message;
+              }
+              return;
+            }
+
+            // 3. Serialize and send to server
+            const assertionResponse = WebAuthnHelper.serializeCredential(credential);
+            assertionResponse.challenge_token = challenge_token;
+
+            const mfaResp = await fetch('/api/auth/login/mfa', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                pre_auth_token: this.preAuthToken,
+                assertion_response: assertionResponse,
+              }),
+            });
+
+            const mfaData = await mfaResp.json();
+            if (!mfaResp.ok) {
+              this.error = mfaData.detail || 'Security key verification failed';
+              return;
+            }
+
+            this._storeAndRedirect(mfaData);
+          } catch (e) {
+            this.error = 'Network error during verification: ' + e.message;
+          } finally {
+            this.loading = false;
+          }
+        },
+
+        async _storeAndRedirect(data) {
+          localStorage.setItem('vm_cli_token', data.access_token);
+          localStorage.setItem('vm_cli_username', data.username);
+          localStorage.setItem('vm_cli_workgroups', JSON.stringify(data.workgroups));
+          // Fetch profile to get is_admin flag (not in the login response)
+          try {
+            const me = await fetch('/api/auth/me', {
+              headers: { 'Authorization': 'Bearer ' + data.access_token }
+            }).then(r => r.json());
+            localStorage.setItem('vm_cli_is_admin', me.is_admin ? 'true' : 'false');
+          } catch { localStorage.setItem('vm_cli_is_admin', 'false'); }
+          window.location.href = '/';
+        },
+      };
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,233 @@
+{% extends "base.html" %}
+{% block title %}Job {{ job_id[:8] }} – Infrastructure Management{% endblock %}
+
+{% block content %}
+<div x-data="jobDetail('{{ job_id }}')" x-init="init()">
+
+  <!-- Back link -->
+  <a href="/jobs" class="inline-flex items-center gap-1 text-sm text-blue-600 hover:underline mb-4">
+    ← Back to Jobs
+  </a>
+
+  <!-- Header -->
+  <div class="flex items-start justify-between mb-6">
+    <div>
+      <h1 class="text-2xl font-bold text-gray-900" x-text="jobLabel()">Job Details</h1>
+      <p class="text-sm text-gray-400 font-mono mt-1">{{ job_id }}</p>
+    </div>
+    <span class="inline-flex items-center px-3 py-1 rounded-full text-sm font-semibold"
+          :class="statusBadge(job.status)" x-text="job.status || '…'"></span>
+  </div>
+
+  <!-- Info grid -->
+  <div class="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6">
+    <div class="bg-white rounded-xl border border-gray-200 p-4">
+      <p class="text-xs text-gray-500 mb-1">Workgroup</p>
+      <p class="font-semibold text-gray-800" x-text="job.workgroup || '–'"></p>
+    </div>
+    <div class="bg-white rounded-xl border border-gray-200 p-4">
+      <p class="text-xs text-gray-500 mb-1">Created by</p>
+      <p class="font-semibold text-gray-800" x-text="job.created_by || '–'"></p>
+    </div>
+    <div class="bg-white rounded-xl border border-gray-200 p-4">
+      <p class="text-xs text-gray-500 mb-1">Created</p>
+      <p class="font-semibold text-gray-800" x-text="timeAgo(job.created_at)"></p>
+    </div>
+    <div class="bg-white rounded-xl border border-gray-200 p-4">
+      <p class="text-xs text-gray-500 mb-1">Duration</p>
+      <p class="font-semibold text-gray-800" x-text="formatDuration(job.duration_seconds)"></p>
+    </div>
+  </div>
+
+  <!-- Target VM -->
+  <div class="bg-white rounded-xl border border-gray-200 p-4 mb-6" x-show="job.vm_path">
+    <p class="text-xs text-gray-500 mb-1">Target VM</p>
+    <p class="font-mono text-sm text-gray-700" x-text="job.vm_path"></p>
+  </div>
+
+  <!-- Progress bar -->
+  <div class="bg-white rounded-xl border border-gray-200 p-5 mb-6">
+    <div class="flex items-center justify-between mb-2">
+      <p class="text-sm font-semibold text-gray-700">Progress</p>
+      <span class="text-sm font-bold text-blue-600" x-text="(job.progress_pct || 0) + '%'"></span>
+    </div>
+    <div class="bg-gray-200 rounded-full h-3">
+      <div class="h-3 rounded-full progress-bar-fill"
+           :class="job.status === 'failed' ? 'bg-red-500' : job.status === 'completed' ? 'bg-green-500' : 'bg-blue-500'"
+           :style="'width:' + (job.progress_pct || 0) + '%'"></div>
+    </div>
+    <p class="text-sm text-gray-500 mt-2" x-text="job.progress_message || 'Waiting to start…'"></p>
+  </div>
+
+  <!-- Error message -->
+  <div x-show="job.error_message" class="bg-red-50 border border-red-200 rounded-xl p-4 mb-6">
+    <p class="text-sm font-semibold text-red-700 mb-1">Error</p>
+    <pre class="text-sm text-red-600 font-mono whitespace-pre-wrap overflow-x-auto" x-text="job.error_message"></pre>
+  </div>
+
+  <!-- Live log output -->
+  <div class="bg-white rounded-xl border border-gray-200 overflow-hidden mb-6">
+    <div class="flex items-center justify-between px-4 py-3 bg-gray-50 border-b border-gray-200">
+      <p class="text-sm font-semibold text-gray-700">Live Output</p>
+      <div class="flex items-center gap-2">
+        <button x-show="['ansible_run','azure_ansible_run'].includes(job.job_type) && ['completed','failed','cancelled'].includes(job.status)"
+                @click="loadLogs()"
+                :disabled="logsLoading"
+                class="text-xs px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded transition disabled:opacity-50">
+          <span x-text="logsLoading ? 'Loading…' : 'Load Logs'"></span>
+        </button>
+        <span x-show="wsConnected" class="h-2 w-2 rounded-full bg-green-500"></span>
+        <span x-show="!wsConnected" class="h-2 w-2 rounded-full bg-gray-400"></span>
+        <span class="text-xs text-gray-400" x-text="wsConnected ? 'Connected' : 'Disconnected'"></span>
+      </div>
+    </div>
+    <div class="bg-gray-900 text-gray-100 font-mono text-xs p-4 min-h-[150px] max-h-[400px] overflow-y-auto"
+         id="log-output">
+      <p x-show="logs.length === 0 && !logsLoading" class="text-gray-500">No output yet…</p>
+      <p x-show="logsLoading" class="text-gray-400">Fetching logs from CloudWatch…</p>
+      <template x-for="(line, i) in logs" :key="i">
+        <p class="leading-5" x-text="line"></p>
+      </template>
+    </div>
+  </div>
+
+  <!-- Actions -->
+  <div class="flex gap-3">
+    <button x-show="job.status === 'pending' || job.status === 'running'"
+            @click="cancelJob()"
+            class="px-4 py-2 bg-red-600 hover:bg-red-700 text-white text-sm font-medium rounded-lg transition">
+      Cancel Job
+    </button>
+    <a :href="['ec2_deploy','ec2_destroy'].includes(job.job_type) ? '/aws' : ['azure_deploy','azure_destroy','azure_create_image'].includes(job.job_type) ? '/azure' : ['iso_to_vmx','clone_to_ova','ova_to_ami','cloud_image_to_ova'].includes(job.job_type) ? '/images' : ['bulk_start','bulk_start_jobs','bulk_stop'].includes(job.job_type) ? '/' : ['ansible_run','azure_ansible_run','portainer_agent_install'].includes(job.job_type) ? '/config-mgmt' : '/vms'"
+       x-show="job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled'"
+       class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg transition">
+      ← <span x-text="['ec2_deploy','ec2_destroy'].includes(job.job_type) ? 'Back to AWS' : ['azure_deploy','azure_destroy','azure_create_image'].includes(job.job_type) ? 'Back to Azure' : ['iso_to_vmx','clone_to_ova','ova_to_ami','cloud_image_to_ova'].includes(job.job_type) ? 'Back to Images' : ['bulk_start','bulk_start_jobs','bulk_stop'].includes(job.job_type) ? 'Back to Dashboard' : ['ansible_run','azure_ansible_run','portainer_agent_install'].includes(job.job_type) ? 'Back to Config Mgmt' : 'Back to VMs'"></span>
+    </a>
+  </div>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  function jobDetail(jobId) {
+    return {
+      jobId,
+      job: {},
+      logs: [],
+      _lastLogLine: null,
+      wsConnected: false,
+      logsLoading: false,
+      tracker: null,
+
+      async init() {
+        requireAuth();
+        await this.loadJob();
+        if (this.job.job_type === 'ansible_run' &&
+            ['completed', 'failed', 'cancelled'].includes(this.job.status)) {
+          await this.loadLogs();
+        } else {
+          this.connectWs();
+        }
+      },
+
+      async loadJob() {
+        try {
+          const resp = await API.get(`/api/jobs/${this.jobId}`);
+          if (resp) this.job = resp;
+        } catch (e) {
+          toast('Failed to load job: ' + e.message, 'error');
+        }
+      },
+
+      connectWs() {
+        if (this.job.status && ['completed', 'failed', 'cancelled'].includes(this.job.status)) {
+          return; // No need for WS on terminal jobs
+        }
+
+        this.tracker = new JobTracker(this.jobId, {
+          onMessage: (data) => {
+            this.job.status = data.status || this.job.status;
+            this.job.progress_pct = data.progress_pct ?? this.job.progress_pct;
+            this.job.progress_message = data.progress_message ?? this.job.progress_message;
+            if (data.log_line && data.log_line !== this._lastLogLine) {
+              this._lastLogLine = data.log_line;
+              this.logs.push(data.log_line);
+              this.scrollLog();
+            }
+            if (data.type === 'state' && data.status && ['completed', 'failed', 'cancelled'].includes(data.status)) {
+              this.loadJob(); // Refresh for final details
+              this.wsConnected = false;
+            }
+          },
+          onClose: () => { this.wsConnected = false; },
+          onError: () => {
+            this.wsConnected = false;
+            // Fall back to polling
+            setTimeout(() => this.pollFallback(), 3000);
+          },
+        });
+
+        this.tracker.connect();
+        this.wsConnected = true;
+      },
+
+      async pollFallback() {
+        if (['completed', 'failed', 'cancelled'].includes(this.job.status)) return;
+        await this.loadJob();
+        if (!['completed', 'failed', 'cancelled'].includes(this.job.status)) {
+          setTimeout(() => this.pollFallback(), 3000);
+        }
+      },
+
+      scrollLog() {
+        this.$nextTick(() => {
+          const el = document.getElementById('log-output');
+          if (el) el.scrollTop = el.scrollHeight;
+        });
+      },
+
+      async loadLogs() {
+        this.logsLoading = true;
+        try {
+          const resp = await API.get(`/api/jobs/${this.jobId}/logs`);
+          if (resp && resp.lines && resp.lines.length > 0) {
+            this.logs = resp.lines;
+            this.$nextTick(() => this.scrollLog());
+          } else {
+            this.logs = [resp?.message || 'No logs available.'];
+          }
+        } catch (e) {
+          this.logs = [`Failed to load logs: ${e.message}`];
+        } finally {
+          this.logsLoading = false;
+        }
+      },
+
+      async cancelJob() {
+        if (!confirm('Cancel this job?')) return;
+        try {
+          await API.del(`/api/jobs/${this.jobId}`);
+          toast('Job cancelled', 'success');
+          await this.loadJob();
+        } catch (e) {
+          toast('Cancel failed: ' + e.message, 'error');
+        }
+      },
+
+      jobLabel() {
+        const labels = {
+          vm_start:   'Start VM',
+          vm_stop:    'Stop VM',
+          bulk_start: `Bulk Start – ${this.job.workgroup || ''}`,
+          bulk_stop:  `Bulk Stop – ${this.job.workgroup || ''}`,
+          iso_to_vmx: `Build VMX – ${this.job.extra_data?.vm_name || ''}`,
+        };
+        return labels[this.job.job_type] || this.job.job_type || 'Job Details';
+      },
+
+      statusBadge, timeAgo, formatDuration,
+    };
+  }
+</script>
+{% endblock %}

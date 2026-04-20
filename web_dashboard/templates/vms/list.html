@@ -1,0 +1,578 @@
+{% extends "base.html" %}
+{% block title %}VMs – Infrastructure Management{% endblock %}
+
+{% block content %}
+<div x-data="vmList()" x-init="init()" class="pb-12">
+
+  <!-- Header -->
+  <div class="flex items-center justify-between mb-4">
+    <div>
+      <h1 class="text-2xl font-bold text-gray-900">Virtual Machines</h1>
+      <p class="text-sm text-gray-500 mt-1">
+        <span x-text="'Showing ' + filteredVms.length + ' of ' + tabCount(activeTab) + ' in ' + (activeTab || '…')"></span>
+        <span x-show="cachedAt" class="ml-2 text-xs text-gray-400"
+              x-text="'· Updated ' + timeAgo(cachedAt)"></span>
+        <span x-show="runningCachedAt" class="ml-2 text-xs"
+              :class="isRunningStale() ? 'text-amber-500' : 'text-gray-400'"
+              x-text="'· Running status ' + timeAgo(runningCachedAt) + (isRunningStale() ? ' (stale)' : '')"></span>
+      </p>
+    </div>
+    <div class="flex items-center gap-2">
+      <button @click="injectIps()" :disabled="injectingIps"
+              title="Inject IPs from Password Safe into VMX files (helps Linux VMs that don't report IP via VMware Tools)"
+              class="flex items-center gap-2 text-sm bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50
+                     text-white px-3 py-2 rounded-lg shadow-sm font-medium transition">
+        <svg class="h-4 w-4" :class="injectingIps ? 'animate-spin' : ''" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+        </svg>
+        <span x-text="injectingIps ? 'Injecting…' : 'Refresh IPs'"></span>
+      </button>
+      <button @click="checkWorkgroupOnline(activeTab)" :disabled="checkingWorkgroup === activeTab"
+              title="Check network reachability (TCP connect) for all VMs in this workgroup"
+              class="flex items-center gap-2 text-sm bg-blue-600 hover:bg-blue-700 disabled:opacity-50
+                     text-white px-3 py-2 rounded-lg shadow-sm font-medium transition">
+        <svg class="h-4 w-4" :class="checkingWorkgroup === activeTab ? 'animate-pulse' : ''" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.111 16.404a5.5 5.5 0 017.778 0M12 20h.01m-7.08-7.071c3.904-3.905 10.236-3.905 14.14 0M1.394 9.393c5.857-5.857 15.355-5.857 21.213 0"/>
+        </svg>
+        <span x-text="checkingWorkgroup === activeTab ? 'Checking…' : 'Check Online'"></span>
+      </button>
+      <button @click="loadRunning()" :disabled="backgroundRefreshing"
+              title="Query PowerShell for current VMware power state (may take 10–30 seconds)"
+              class="flex items-center gap-2 text-sm bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50
+                     text-white px-3 py-2 rounded-lg shadow-sm font-medium transition">
+        <span class="relative flex h-2.5 w-2.5">
+          <span x-show="backgroundRefreshing" class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-300 opacity-75"></span>
+          <span class="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-300"></span>
+        </span>
+        <span x-text="backgroundRefreshing ? 'Checking…' : 'Refresh Running'"></span>
+      </button>
+      <button @click="syncInventory()" :disabled="syncing"
+              title="Scan all workgroup paths for new or removed VMs and update the inventory"
+              class="flex items-center gap-2 text-sm bg-white border border-gray-300 hover:bg-gray-50
+                     px-3 py-2 rounded-lg shadow-sm font-medium transition">
+        <svg class="h-4 w-4" :class="syncing ? 'animate-spin' : ''" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+        </svg>
+        <span x-text="syncing ? 'Syncing…' : 'Sync Inventory'"></span>
+      </button>
+    </div>
+  </div>
+
+  <!-- Workgroup tabs -->
+  <div class="flex gap-1 mb-4 bg-gray-100 p-1 rounded-xl w-fit">
+    <template x-for="wg in availableWorkgroups" :key="wg">
+      <button @click="activeTab = wg; applyFilters()"
+              :class="activeTab === wg
+                ? 'bg-white shadow text-gray-900 font-semibold'
+                : 'text-gray-500 hover:text-gray-700'"
+              class="flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm transition">
+        <span x-text="wg"></span>
+        <span x-show="tabCount(wg) > 0"
+              class="text-xs bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded-full font-normal"
+              x-text="tabCount(wg)"></span>
+      </button>
+    </template>
+  </div>
+
+  <!-- Filters -->
+  <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-4 mb-6">
+    <div class="flex flex-wrap items-center gap-3">
+      <!-- Status filter -->
+      <div class="flex items-center gap-2">
+        <label class="text-sm font-medium text-gray-600">Status:</label>
+        <select x-model="filterStatus" @change="applyFilters()"
+                class="text-sm border border-gray-300 rounded-lg px-2 py-1.5 focus:ring-2 focus:ring-blue-500">
+          <option value="">All</option>
+          <option value="running">Running</option>
+          <option value="stopped">Stopped</option>
+          <option value="online">Online</option>
+          <option value="offline">Offline</option>
+        </select>
+      </div>
+      <!-- Search -->
+      <div class="flex-1 min-w-[200px]">
+        <input type="text" x-model="search" @input="applyFilters()" placeholder="Search VM name…"
+               class="w-full text-sm border border-gray-300 rounded-lg px-3 py-1.5 focus:ring-2 focus:ring-blue-500">
+      </div>
+    </div>
+  </div>
+
+  <!-- Loading skeleton -->
+  <div x-show="loading && allVms.length === 0" class="space-y-2">
+    <template x-for="i in [1,2,3,4,5]">
+      <div class="bg-gray-100 rounded-xl h-14 animate-pulse"></div>
+    </template>
+  </div>
+
+  <!-- Decommission confirmation modal -->
+  <div x-show="showDecommissionModal" x-cloak
+       class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+       @click.self="showDecommissionModal = false">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md">
+
+      <div class="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+        <h3 class="text-lg font-semibold text-gray-800">Decommission VM</h3>
+        <button @click="showDecommissionModal = false" class="text-gray-400 hover:text-gray-600 text-xl">×</button>
+      </div>
+
+      <div class="px-6 py-5">
+        <div class="bg-yellow-50 border border-yellow-200 rounded-lg p-3 mb-3 text-sm">
+          <p class="font-semibold text-yellow-800">This action is irreversible.</p>
+          <p class="text-yellow-700 mt-1">
+            <span x-text="decommissionTarget?.vm_name" class="font-mono font-medium"></span>
+            will be stopped and marked as decommissioned in BeyondTrust.
+          </p>
+        </div>
+        <div x-show="decommissionTarget && !runningPaths.has(decommissionTarget.vmx_path)"
+             class="bg-blue-50 border border-blue-200 rounded-lg p-3 mb-3 text-sm">
+          <p class="text-blue-700">
+            <span class="font-semibold">VM is currently stopped.</span>
+            It will be started automatically before decommissioning.
+          </p>
+        </div>
+
+        <div class="mb-4">
+          <label class="block text-sm font-medium text-gray-700 mb-1">
+            Guest OS Password <span class="text-xs font-normal text-gray-400">(optional)</span>
+          </label>
+          <input type="password" x-model="guestPassword" placeholder="Leave blank to auto-retrieve from Password Safe"
+                 class="w-full text-sm border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500">
+          <p class="text-xs text-gray-400 mt-1">Only needed if this VM is not registered as a managed system in Password Safe.</p>
+        </div>
+
+        <label class="flex items-start gap-3 mb-5 cursor-pointer">
+          <input type="checkbox" x-model="deleteFolder"
+                 class="mt-0.5 h-4 w-4 rounded border-gray-300 text-red-600 focus:ring-red-500">
+          <div>
+            <span class="text-sm font-medium text-gray-700">Delete VM folder</span>
+            <p class="text-xs text-gray-400 mt-0.5">Permanently deletes the VM folder and all contents immediately after decommissioning.</p>
+          </div>
+        </label>
+
+        <div class="flex gap-3">
+          <button type="button" @click="showDecommissionModal = false"
+                  class="flex-1 py-2 border border-gray-300 rounded-lg text-sm font-medium hover:bg-gray-50 transition">
+            Cancel
+          </button>
+          <button type="button" @click="confirmDecommission()" :disabled="submittingDecommission"
+                  class="flex-1 py-2 bg-gray-700 hover:bg-gray-800 disabled:opacity-50
+                         text-white text-sm font-medium rounded-lg transition">
+            <span x-show="!submittingDecommission">Confirm Decommission</span>
+            <span x-show="submittingDecommission && decommissionTarget && !runningPaths.has(decommissionTarget.vmx_path)" x-cloak>Starting VM…</span>
+            <span x-show="submittingDecommission && (!decommissionTarget || runningPaths.has(decommissionTarget.vmx_path))" x-cloak>Queuing…</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Background refresh indicator (shown only while updating running status) -->
+  <div x-show="backgroundRefreshing"
+       class="fixed bottom-0 left-0 right-0 z-30 bg-white border-t border-gray-200 shadow-sm px-4 py-2 flex items-center gap-3">
+    <svg class="h-3.5 w-3.5 flex-shrink-0 text-blue-500 animate-spin"
+         fill="none" viewBox="0 0 24 24" stroke="currentColor">
+      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+            d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+    </svg>
+    <span class="text-xs text-gray-500">Updating VM running status…</span>
+    <div class="flex-1 h-1.5 bg-gray-100 rounded-full overflow-hidden">
+      <div class="h-full bg-blue-400 rounded-full animate-pulse w-full"></div>
+    </div>
+  </div>
+
+  <!-- VM table -->
+  <div x-show="!loading || allVms.length > 0"
+       class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+    <table class="w-full text-sm">
+      <thead>
+        <tr class="bg-gray-50 border-b border-gray-200 text-left">
+          <th class="px-4 py-3 font-semibold text-gray-600 w-14">Status</th>
+          <th class="px-4 py-3 font-semibold text-gray-600">VM Name</th>
+          <th class="px-4 py-3 font-semibold text-gray-600">OS</th>
+          <th class="px-4 py-3 font-semibold text-gray-600">IP Address</th>
+          <th class="px-4 py-3 font-semibold text-gray-600 text-right">Actions</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-gray-50">
+        <tr x-show="filteredVms.length === 0 && !loading">
+          <td colspan="5" class="px-4 py-10 text-center text-gray-400">No VMs match your filters.</td>
+        </tr>
+        <template x-for="vm in filteredVms" :key="vm.vmx_path">
+          <tr class="hover:bg-gray-50 transition">
+            <!-- Status dots: green = VMware power state, blue/red = network reachability -->
+            <td class="px-4 py-3">
+              <div class="flex items-center gap-1.5">
+                <span class="inline-block h-2.5 w-2.5 rounded-full"
+                      :class="runningPaths.has(vm.vmx_path) ? 'bg-green-500' : 'bg-gray-300'"
+                      :title="runningPaths.has(vm.vmx_path) ? 'Running (VMware)' : 'Stopped'"></span>
+                <template x-if="vm.is_online !== null && vm.is_online !== undefined">
+                  <span class="inline-block h-2 w-2 rounded-full"
+                        :class="vm.is_online ? 'bg-blue-400' : 'bg-red-300'"
+                        :title="vm.is_online
+                          ? 'Reachable · checked ' + timeAgo(vm.last_online_check_at)
+                          : 'Unreachable · checked ' + timeAgo(vm.last_online_check_at)"></span>
+                </template>
+              </div>
+            </td>
+            <!-- VM Name -->
+            <td class="px-4 py-3 font-medium text-gray-800" x-text="vm.vm_name"></td>
+            <!-- OS -->
+            <td class="px-4 py-3 text-xs text-gray-500" x-text="vm.os_type || '–'"></td>
+            <!-- IP Address (DB-backed, shown for all VMs with a known IP) -->
+            <td class="px-4 py-3 font-mono text-xs text-gray-500"
+                x-text="vm.ip_address || '–'"></td>
+            <!-- Actions -->
+            <td class="px-4 py-3 text-right space-x-2">
+              <template x-if="!runningPaths.has(vm.vmx_path)">
+                <button @click="startVm(vm)"
+                        :disabled="pendingVms.has(vm.vmx_path)"
+                        class="inline-flex items-center gap-1 px-3 py-1.5 bg-green-600 hover:bg-green-700
+                               disabled:opacity-50 text-white text-xs font-medium rounded-lg transition">
+                  <span x-show="!pendingVms.has(vm.vmx_path)">▶ Start</span>
+                  <span x-show="pendingVms.has(vm.vmx_path)" x-cloak>Starting…</span>
+                </button>
+              </template>
+              <template x-if="runningPaths.has(vm.vmx_path)">
+                <button @click="stopVm(vm)"
+                        :disabled="pendingVms.has(vm.vmx_path)"
+                        class="inline-flex items-center gap-1 px-3 py-1.5 bg-red-600 hover:bg-red-700
+                               disabled:opacity-50 text-white text-xs font-medium rounded-lg transition">
+                  <span x-show="!pendingVms.has(vm.vmx_path)">■ Stop</span>
+                  <span x-show="pendingVms.has(vm.vmx_path)" x-cloak>Stopping…</span>
+                </button>
+              </template>
+              <template x-if="runningPaths.has(vm.vmx_path) && vm.ip_address && !['Windows', 'FreeBSD'].some(os => (vm.os_type || '').includes(os)) && !['Kemp'].includes(vm.vm_name)">
+                <a :href="'/config-mgmt?portainer_ip=' + encodeURIComponent(vm.ip_address) + '&portainer_name=' + encodeURIComponent(vm.vm_name || '')"
+                   class="inline-flex items-center gap-1 px-3 py-1.5 bg-purple-600 hover:bg-purple-700
+                          text-white text-xs font-medium rounded-lg transition">
+                  Config Linux
+                </a>
+              </template>
+              <template x-if="runningPaths.has(vm.vmx_path) && vm.ip_address && (vm.os_type || '').includes('Windows')">
+                <a :href="'/config-mgmt?windows_ip=' + encodeURIComponent(vm.ip_address) + '&windows_name=' + encodeURIComponent(vm.vm_name || '')"
+                   class="inline-flex items-center gap-1 px-3 py-1.5 bg-sky-600 hover:bg-sky-700
+                          text-white text-xs font-medium rounded-lg transition">
+                  Config Windows
+                </a>
+              </template>
+              <!-- Ping / Check Online button -->
+              <button @click="checkVmOnline(vm)"
+                      :disabled="checkingOnline.has(vm.vmx_path)"
+                      title="Check if VM is reachable over the network (TCP connect)"
+                      class="inline-flex items-center gap-1 px-2 py-1.5 bg-blue-50 hover:bg-blue-100
+                             border border-blue-200 disabled:opacity-50 text-blue-700 text-xs
+                             font-medium rounded-lg transition">
+                <svg class="h-3.5 w-3.5" :class="checkingOnline.has(vm.vmx_path) ? 'animate-spin' : ''"
+                     fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                        d="M8.111 16.404a5.5 5.5 0 017.778 0M12 20h.01m-7.08-7.071c3.904-3.905 10.236-3.905 14.14 0M1.394 9.393c5.857-5.857 15.355-5.857 21.213 0"/>
+                </svg>
+              </button>
+              <button @click="openDecommission(vm)"
+                      :disabled="pendingVms.has(vm.vmx_path)"
+                      class="inline-flex items-center gap-1 px-3 py-1.5 bg-gray-600 hover:bg-gray-700
+                             disabled:opacity-50 text-white text-xs font-medium rounded-lg transition">
+                Decommission
+              </button>
+            </td>
+          </tr>
+        </template>
+      </tbody>
+    </table>
+  </div>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  function vmList() {
+    return {
+      allVms: [],
+      filteredVms: [],
+      runningPaths: new Set(),
+      runningInfo: {},   // vmx_path -> full VMInfo (ip_address, is_online, etc.)
+      loading: true,
+      cachedAt: null,
+      activeTab: '',
+      filterStatus: '',
+      search: '',
+      availableWorkgroups: [],
+      pendingVms: new Set(),
+
+      // Background refresh indicator (shown while loadRunning() is in-flight)
+      backgroundRefreshing: false,
+      runningCachedAt: null,
+
+      // Online check state
+      checkingOnline: new Set(),   // vmx_paths currently being pinged
+      checkingWorkgroup: null,     // workgroup name currently being checked
+
+      // IP injection
+      injectingIps: false,
+
+      // Inventory sync
+      syncing: false,
+
+      // Decommission
+      showDecommissionModal: false,
+      decommissionTarget: null,
+      deleteFolder: false,
+      guestPassword: '',
+      submittingDecommission: false,
+
+      async init() {
+        requireAuth();
+        this.loading = true;
+        try {
+          await this.loadAll();
+        } finally {
+          this.loading = false;
+        }
+      },
+
+      async loadAll() {
+        let resp;
+        try {
+          resp = await API.get('/api/vms');
+        } catch (e) {
+          toast('Failed to load VMs: ' + e.message, 'error');
+          return;
+        }
+        if (!resp) return;
+        this.allVms = resp.vms || [];
+        this.cachedAt = resp.cached_at || null;
+
+        // Build runningPaths + runningInfo from DB-backed VMInfo (no extra PS call needed)
+        const paths = new Set();
+        const info = {};
+        this.allVms.forEach(v => {
+          if (v.is_running) paths.add(v.vmx_path);
+          info[v.vmx_path] = v;
+        });
+        this.runningPaths = paths;
+        this.runningInfo = info;
+
+        const wgs = [...new Set(this.allVms.map(v => v.workgroup))].sort();
+        this.availableWorkgroups = wgs;
+        if (!this.activeTab && wgs.length) this.activeTab = wgs[0];
+        this.applyFilters();
+      },
+
+      async loadRunning() {
+        // Explicit user action — fire-and-forget: start background PS refresh, then poll
+        // until cached_at changes. No gunicorn timeout risk (automation jobs can be slow).
+        this.backgroundRefreshing = true;
+        const prevCachedAt = this.runningCachedAt;
+        try {
+          // Kick off background refresh (returns immediately)
+          await API.post('/api/vms/running/refresh', {});
+
+          // Poll every 4 s for up to 120 s waiting for fresh data
+          const deadline = Date.now() + 120000;
+          while (Date.now() < deadline) {
+            await new Promise(r => setTimeout(r, 4000));
+            const resp = await API.get('/api/vms/running');
+            if (!resp) break;
+            // cached_at changes only when the background task writes fresh data
+            if (resp.cached_at && resp.cached_at !== prevCachedAt) {
+              const paths = new Set();
+              const info = {};
+              (resp.vms || []).forEach(v => {
+                paths.add(v.vmx_path);
+                info[v.vmx_path] = { ...this.runningInfo[v.vmx_path], ...v };
+              });
+              this.runningPaths = paths;
+              this.allVms = this.allVms.map(v => ({
+                ...v,
+                is_running: paths.has(v.vmx_path),
+                ip_address: info[v.vmx_path]?.ip_address ?? v.ip_address,
+              }));
+              this.allVms.forEach(v => { this.runningInfo[v.vmx_path] = v; });
+              this.runningCachedAt = resp.cached_at;
+              if (this.filterStatus) this.applyFilters();
+              toast(`Running status updated — ${paths.size} VM(s) running`, 'success');
+              return;
+            }
+          }
+          toast('Running status refresh timed out — try again', 'error');
+        } catch (e) {
+          toast(`Refresh failed: ${e.message}`, 'error');
+        } finally {
+          this.backgroundRefreshing = false;
+        }
+      },
+
+      async checkVmOnline(vm) {
+        this.checkingOnline = new Set([...this.checkingOnline, vm.vmx_path]);
+        try {
+          const result = await API.post('/api/vms/check-online/single', { vmx_path: vm.vmx_path });
+          if (result) {
+            const idx = this.allVms.findIndex(v => v.vmx_path === vm.vmx_path);
+            if (idx !== -1) {
+              this.allVms[idx] = {
+                ...this.allVms[idx],
+                is_online: result.is_online,
+                last_online_check_at: result.checked_at,
+              };
+            }
+            this.runningInfo[vm.vmx_path] = { ...this.runningInfo[vm.vmx_path], ...result };
+            const msg = result.is_online ? `${vm.vm_name} is reachable` : `${vm.vm_name} is offline`;
+            toast(msg, result.is_online ? 'success' : 'error');
+            this.applyFilters();
+          }
+        } catch (e) {
+          toast(`Ping failed: ${e.message}`, 'error');
+        } finally {
+          const s = new Set(this.checkingOnline);
+          s.delete(vm.vmx_path);
+          this.checkingOnline = s;
+        }
+      },
+
+      async checkWorkgroupOnline(wg) {
+        if (!wg) return;
+        this.checkingWorkgroup = wg;
+        try {
+          const result = await API.post(`/api/vms/check-online?workgroup=${encodeURIComponent(wg)}`, {});
+          if (result) {
+            const byPath = {};
+            (result.results || []).forEach(r => { byPath[r.vmx_path] = r; });
+            this.allVms = this.allVms.map(v => byPath[v.vmx_path]
+              ? { ...v, is_online: byPath[v.vmx_path].is_online, last_online_check_at: byPath[v.vmx_path].checked_at }
+              : v
+            );
+            this.allVms.forEach(v => { this.runningInfo[v.vmx_path] = v; });
+            const online = (result.results || []).filter(r => r.is_online).length;
+            const total = result.results ? result.results.length : 0;
+            toast(`${wg}: ${online}/${total} VMs reachable`, online === total ? 'success' : 'error');
+            this.applyFilters();
+          }
+        } catch (e) {
+          toast(`Workgroup check failed: ${e.message}`, 'error');
+        } finally {
+          this.checkingWorkgroup = null;
+        }
+      },
+
+      async syncInventory() {
+        this.syncing = true;
+        try {
+          const result = await API.post('/api/vms/sync', {});
+          if (!result) return;
+          const added = result.added || 0;
+          const removed = result.removed || 0;
+          toast(`Inventory synced — ${added} added, ${removed} removed`, 'success');
+          await this.loadAll();
+        } catch (e) {
+          toast(`Sync failed: ${e.message}`, 'error');
+        } finally {
+          this.syncing = false;
+        }
+      },
+
+      applyFilters() {
+        let vms = this.allVms.filter(v => v.workgroup === this.activeTab);
+        if (this.filterStatus === 'running')  vms = vms.filter(v => this.runningPaths.has(v.vmx_path));
+        if (this.filterStatus === 'stopped')  vms = vms.filter(v => !this.runningPaths.has(v.vmx_path));
+        if (this.filterStatus === 'online')   vms = vms.filter(v => v.is_online === true);
+        if (this.filterStatus === 'offline')  vms = vms.filter(v => v.is_online === false);
+        if (this.search) {
+          const q = this.search.toLowerCase();
+          vms = vms.filter(v => v.vm_name.toLowerCase().includes(q));
+        }
+        this.filteredVms = vms;
+      },
+
+      tabCount(wg) {
+        return this.allVms.filter(v => v.workgroup === wg).length;
+      },
+
+      isRunningStale() {
+        if (!this.runningCachedAt) return false;
+        const ts = /Z$|[+-]\d{2}:\d{2}$/.test(this.runningCachedAt)
+          ? this.runningCachedAt
+          : this.runningCachedAt + 'Z';
+        return Date.now() - new Date(ts).getTime() > 30 * 60 * 1000;
+      },
+
+      async startVm(vm) {
+        this.pendingVms = new Set([...this.pendingVms, vm.vmx_path]);
+        try {
+          const resp = await API.post('/api/vms/start', { vmx_path: vm.vmx_path, ip_wait_timeout: 120 });
+          toast(`Start queued for ${vm.vm_name}`, 'success');
+          setTimeout(() => window.location.href = '/jobs/' + resp.job_id, 400);
+        } catch (e) {
+          toast(`Start failed: ${e.message}`, 'error');
+          const s = new Set(this.pendingVms);
+          s.delete(vm.vmx_path);
+          this.pendingVms = s;
+        }
+      },
+
+      async stopVm(vm) {
+        if (!confirm(`Stop ${vm.vm_name}?`)) return;
+        this.pendingVms = new Set([...this.pendingVms, vm.vmx_path]);
+        try {
+          const resp = await API.post('/api/vms/stop', { vmx_path: vm.vmx_path });
+          toast(`Stop queued for ${vm.vm_name}`, 'success');
+          setTimeout(() => window.location.href = '/jobs/' + resp.job_id, 400);
+        } catch (e) {
+          toast(`Stop failed: ${e.message}`, 'error');
+          const s = new Set(this.pendingVms);
+          s.delete(vm.vmx_path);
+          this.pendingVms = s;
+        }
+      },
+
+      openDecommission(vm) {
+        this.decommissionTarget = vm;
+        this.deleteFolder = false;
+        this.guestPassword = '';
+        this.showDecommissionModal = true;
+      },
+
+      async injectIps() {
+        this.injectingIps = true;
+        try {
+          const resp = await API.post('/api/vms/inject-ips', {});
+          toast('IP injection job queued', 'success');
+          setTimeout(() => window.location.href = '/jobs/' + resp.job_id, 400);
+        } catch (e) {
+          toast('IP injection failed: ' + e.message, 'error');
+        } finally {
+          this.injectingIps = false;
+        }
+      },
+
+      async confirmDecommission() {
+        if (!this.decommissionTarget) return;
+        this.submittingDecommission = true;
+        this.pendingVms = new Set([...this.pendingVms, this.decommissionTarget.vmx_path]);
+        try {
+          const isRunning = this.runningPaths.has(this.decommissionTarget.vmx_path);
+          if (!isRunning) {
+            toast(`Starting ${this.decommissionTarget.vm_name} before decommissioning…`, 'info');
+            await API.post('/api/vms/start', { vmx_path: this.decommissionTarget.vmx_path, ip_wait_timeout: 120 });
+          }
+          const resp = await API.post('/api/vms/decommission', {
+            vmx_path: this.decommissionTarget.vmx_path,
+            delete_folder: this.deleteFolder,
+            guest_password: this.guestPassword,
+          });
+          this.showDecommissionModal = false;
+          toast(`Decommission queued for ${this.decommissionTarget.vm_name}`, 'success');
+          setTimeout(() => window.location.href = '/jobs/' + resp.job_id, 400);
+        } catch (e) {
+          toast(`Decommission failed: ${e.message}`, 'error');
+          const s = new Set(this.pendingVms);
+          s.delete(this.decommissionTarget.vmx_path);
+          this.pendingVms = s;
+        } finally {
+          this.submittingDecommission = false;
+        }
+      },
+    };
+  }
+</script>
+{% endblock %}

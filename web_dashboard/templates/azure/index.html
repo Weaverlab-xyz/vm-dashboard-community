@@ -1,0 +1,804 @@
+{% extends "base.html" %}
+{% block title %}Azure — Infrastructure Management{% endblock %}
+
+{% block content %}
+<div x-data="azureDashboard()" x-init="init()" x-cloak>
+
+  <!-- Header -->
+  <div class="flex items-center justify-between mb-6">
+    <div>
+      <h1 class="text-2xl font-bold text-gray-900">Azure</h1>
+      <p class="text-sm text-gray-500 mt-1">Manage Azure VMs, images, and containers</p>
+    </div>
+    <div class="flex items-center gap-3">
+      <select x-model="location" @change="refreshNetworkOpts()"
+              class="text-sm border border-gray-300 rounded-md px-3 py-1.5 focus:ring-blue-500 focus:border-blue-500">
+        <template x-for="loc in networkOpts.locations" :key="loc">
+          <option :value="loc" x-text="loc"></option>
+        </template>
+      </select>
+      <button @click="refreshAll()" :disabled="loading"
+              class="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-4 py-2 rounded-lg transition disabled:opacity-50">
+        <svg class="h-4 w-4" :class="loading ? 'animate-spin' : ''" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+        </svg>
+        Refresh
+      </button>
+    </div>
+  </div>
+
+  <!-- Credential error banner -->
+  <div x-show="credError" class="mb-4 p-4 bg-red-50 border border-red-200 rounded-lg flex items-start gap-3">
+    <svg class="h-5 w-5 text-red-500 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
+    </svg>
+    <div>
+      <p class="text-sm font-medium text-red-700">Azure credentials not configured</p>
+      <p class="text-xs text-red-600 mt-1">Set AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, AZURE_TENANT_ID, and AZURE_SUBSCRIPTION_ID in your .env file.</p>
+    </div>
+  </div>
+
+  <!-- Tab Navigation -->
+  <div class="border-b border-gray-200 mb-6">
+    <nav class="-mb-px flex space-x-8">
+      <button @click="activeTab = 'marketplace'"
+              :class="activeTab === 'marketplace' ? 'border-blue-500 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700'"
+              class="py-3 px-1 border-b-2 font-medium text-sm transition">
+        Marketplace Images
+        <span x-show="marketplaceImages.length" class="ml-2 bg-gray-100 text-gray-600 text-xs px-2 py-0.5 rounded-full" x-text="marketplaceImages.length"></span>
+      </button>
+      <button @click="activeTab = 'private'"
+              :class="activeTab === 'private' ? 'border-blue-500 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700'"
+              class="py-3 px-1 border-b-2 font-medium text-sm transition">
+        Private Images
+        <span x-show="privateImages.length" class="ml-2 bg-gray-100 text-gray-600 text-xs px-2 py-0.5 rounded-full" x-text="privateImages.length"></span>
+      </button>
+      <button @click="activeTab = 'vms'"
+              :class="activeTab === 'vms' ? 'border-blue-500 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700'"
+              class="py-3 px-1 border-b-2 font-medium text-sm transition">
+        Azure VMs
+        <span x-show="vms.length" class="ml-2 bg-blue-100 text-blue-700 text-xs px-2 py-0.5 rounded-full" x-text="vms.length"></span>
+      </button>
+    </nav>
+  </div>
+
+  <!-- ── Tab 1: Marketplace Images ────────────────────────────────────────── -->
+  <div x-show="activeTab === 'marketplace'">
+    <!-- OS filter -->
+    <div class="flex items-center gap-2 mb-4">
+      <span class="text-sm text-gray-600 font-medium">Filter:</span>
+      <template x-for="os in ['all','ubuntu','rhel','debian']" :key="os">
+        <button @click="marketplaceFilter = os; loadMarketplace()"
+                :class="marketplaceFilter === os ? 'bg-blue-600 text-white' : 'bg-white text-gray-700 border border-gray-300 hover:bg-gray-50'"
+                class="text-xs font-medium px-3 py-1.5 rounded-md capitalize transition"
+                x-text="os === 'all' ? 'All' : os === 'rhel' ? 'RHEL / Rocky' : os.charAt(0).toUpperCase() + os.slice(1)">
+        </button>
+      </template>
+    </div>
+
+    <div class="bg-white shadow-sm rounded-lg border border-gray-200 overflow-hidden">
+      <div x-show="marketplaceLoading" class="p-8 text-center text-gray-400 text-sm">Loading marketplace images…</div>
+      <div x-show="!marketplaceLoading && marketplaceImages.length === 0" class="p-8 text-center text-gray-400 text-sm">No marketplace images found.</div>
+      <table x-show="!marketplaceLoading && marketplaceImages.length > 0" class="min-w-full divide-y divide-gray-200">
+        <thead class="bg-gray-50">
+          <tr>
+            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Name / SKU</th>
+            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Publisher</th>
+            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">OS</th>
+            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+          </tr>
+        </thead>
+        <tbody class="bg-white divide-y divide-gray-100">
+          <template x-for="img in marketplaceImages" :key="img.resource_id">
+            <tr class="hover:bg-gray-50">
+              <td class="px-4 py-3 text-sm font-medium text-gray-900">
+                <div x-text="img.name"></div>
+                <div class="text-xs text-gray-400" x-text="img.sku"></div>
+              </td>
+              <td class="px-4 py-3 text-sm text-gray-600" x-text="img.description"></td>
+              <td class="px-4 py-3">
+                <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium"
+                      :class="img.os_type === 'Windows' ? 'bg-blue-100 text-blue-800' : 'bg-green-100 text-green-800'"
+                      x-text="img.os_type">
+                </span>
+              </td>
+              <td class="px-4 py-3 text-sm">
+                <button @click="openDeployModal(img)"
+                        class="text-blue-600 hover:text-blue-800 font-medium text-xs">
+                  Deploy directly
+                </button>
+              </td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ── Tab 2: Private Images ─────────────────────────────────────────────── -->
+  <div x-show="activeTab === 'private'">
+    <div class="flex items-center justify-between mb-3">
+      <p class="text-sm text-gray-500">Gallery images + standalone Managed Images in your resource group.</p>
+      <button x-show="selectedImages.length > 1"
+              @click="openBulkDeployModal()"
+              class="flex items-center gap-2 bg-green-600 hover:bg-green-700 text-white text-sm font-medium px-4 py-2 rounded-lg transition">
+        Bulk Deploy (<span x-text="selectedImages.length"></span>)
+      </button>
+    </div>
+
+    <div class="bg-white shadow-sm rounded-lg border border-gray-200 overflow-hidden">
+      <div x-show="imagesLoading" class="p-8 text-center text-gray-400 text-sm">Loading images…</div>
+      <div x-show="!imagesLoading && privateImages.length === 0" class="p-8 text-center text-gray-400 text-sm">No private images found. Upload or capture a VM image to get started.</div>
+      <table x-show="!imagesLoading && privateImages.length > 0" class="min-w-full divide-y divide-gray-200">
+        <thead class="bg-gray-50">
+          <tr>
+            <th class="px-4 py-3"><input type="checkbox" @change="toggleAllImages($event)" class="rounded text-blue-600"></th>
+            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Name</th>
+            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Source</th>
+            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">OS</th>
+            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">State</th>
+            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+          </tr>
+        </thead>
+        <tbody class="bg-white divide-y divide-gray-100">
+          <template x-for="img in privateImages" :key="img.resource_id">
+            <tr class="hover:bg-gray-50" :class="selectedImages.includes(img.resource_id) ? 'bg-blue-50' : ''">
+              <td class="px-4 py-3">
+                <input type="checkbox" :value="img.resource_id"
+                       x-model="selectedImages"
+                       class="rounded text-blue-600">
+              </td>
+              <td class="px-4 py-3 text-sm font-medium text-gray-900">
+                <div x-text="img.name"></div>
+                <div x-show="img.sku" class="text-xs text-gray-400" x-text="img.sku"></div>
+              </td>
+              <td class="px-4 py-3 text-sm text-gray-600">
+                <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium"
+                      :class="img.source === 'gallery' ? 'bg-purple-100 text-purple-800' : 'bg-gray-100 text-gray-700'"
+                      x-text="img.source === 'gallery' ? 'Gallery' : 'Managed'">
+                </span>
+              </td>
+              <td class="px-4 py-3">
+                <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium"
+                      :class="img.os_type === 'Windows' ? 'bg-blue-100 text-blue-800' : 'bg-green-100 text-green-800'"
+                      x-text="img.os_type">
+                </span>
+              </td>
+              <td class="px-4 py-3">
+                <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium"
+                      :class="img.state === 'Succeeded' ? 'bg-green-100 text-green-700' : img.state === 'Creating' ? 'bg-yellow-100 text-yellow-700' : 'bg-gray-100 text-gray-600'"
+                      x-text="img.state || '—'">
+                </span>
+              </td>
+              <td class="px-4 py-3 flex items-center gap-3 text-sm">
+                <button @click="openDeployModal(img)"
+                        class="text-blue-600 hover:text-blue-800 font-medium text-xs">Deploy</button>
+                <button @click="confirmDeleteImage(img)"
+                        class="text-red-500 hover:text-red-700 font-medium text-xs">Delete</button>
+              </td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ── Tab 3: Azure VMs ───────────────────────────────────────────────────── -->
+  <div x-show="activeTab === 'vms'">
+    <div class="bg-white shadow-sm rounded-lg border border-gray-200 overflow-hidden">
+      <div x-show="vmsLoading" class="p-8 text-center text-gray-400 text-sm">Loading VMs…</div>
+      <div x-show="!vmsLoading && vms.length === 0" class="p-8 text-center text-gray-400 text-sm">No dashboard-deployed Azure VMs found.</div>
+      <table x-show="!vmsLoading && vms.length > 0" class="min-w-full divide-y divide-gray-200">
+        <thead class="bg-gray-50">
+          <tr>
+            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Name</th>
+            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">State</th>
+            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">IP Addresses</th>
+            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Size</th>
+            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Location</th>
+            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Deployed By</th>
+            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+          </tr>
+        </thead>
+        <tbody class="bg-white divide-y divide-gray-100">
+          <template x-for="vm in vms" :key="vm.vm_id">
+            <tr class="hover:bg-gray-50">
+              <td class="px-4 py-3 text-sm font-medium text-gray-900" x-text="vm.name"></td>
+              <td class="px-4 py-3">
+                <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium"
+                      :class="{
+                        'bg-green-100 text-green-700': vm.state && vm.state.toLowerCase().includes('running'),
+                        'bg-gray-100 text-gray-600': vm.state && (vm.state.toLowerCase().includes('deallocated') || vm.state.toLowerCase().includes('stopped')),
+                        'bg-yellow-100 text-yellow-700': vm.state && vm.state.toLowerCase().includes('starting'),
+                        'bg-blue-100 text-blue-700': !vm.state || vm.state === 'Unknown'
+                      }"
+                      x-text="vm.state || 'Unknown'">
+                </span>
+              </td>
+              <td class="px-4 py-3 text-sm text-gray-600">
+                <div x-show="vm.private_ip" x-text="'Private: ' + vm.private_ip" class="text-xs"></div>
+                <div x-show="vm.public_ip" x-text="'Public: ' + vm.public_ip" class="text-xs text-blue-600"></div>
+                <div x-show="!vm.private_ip && !vm.public_ip" class="text-xs text-gray-400">—</div>
+              </td>
+              <td class="px-4 py-3 text-sm text-gray-600 text-xs" x-text="vm.size || '—'"></td>
+              <td class="px-4 py-3 text-sm text-gray-600 text-xs" x-text="vm.location || '—'"></td>
+              <td class="px-4 py-3 text-sm text-gray-500 text-xs" x-text="vm.deployed_by || '—'"></td>
+              <td class="px-4 py-3 flex items-center gap-3 text-sm">
+                <a x-show="vm.job_id" :href="'/jobs/' + vm.job_id"
+                   class="text-blue-600 hover:text-blue-800 font-medium text-xs">Job</a>
+                <button @click="openCreateImageModal(vm)"
+                        class="text-green-600 hover:text-green-800 font-medium text-xs">Save Image</button>
+                <button @click="confirmDestroyVM(vm)"
+                        class="text-red-500 hover:text-red-700 font-medium text-xs">Destroy</button>
+              </td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+
+  <!-- ═══════════════════════════════════════════════════════════════════════ -->
+  <!-- Deploy Modal                                                            -->
+  <!-- ═══════════════════════════════════════════════════════════════════════ -->
+  <div x-show="deployModal.open" class="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-40" @click.self="deployModal.open = false">
+    <div class="bg-white rounded-xl shadow-2xl p-6 w-full max-w-lg mx-4 max-h-screen overflow-y-auto">
+      <h2 class="text-lg font-bold text-gray-900 mb-1">Deploy Azure VM</h2>
+      <p class="text-sm text-gray-500 mb-4" x-text="'Image: ' + (deployModal.image?.name || '')"></p>
+
+      <div class="space-y-3">
+        <div>
+          <label class="block text-xs font-medium text-gray-700 mb-1">VM Name <span class="text-red-500">*</span></label>
+          <input x-model="deployModal.vmName" type="text" placeholder="my-azure-vm"
+                 class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500">
+        </div>
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-xs font-medium text-gray-700 mb-1">VM Size</label>
+            <select x-model="deployModal.vmSize" class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm">
+              <template x-for="sz in networkOpts.vm_sizes" :key="sz">
+                <option :value="sz" x-text="sz"></option>
+              </template>
+            </select>
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-gray-700 mb-1">Location</label>
+            <select x-model="deployModal.location" class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm">
+              <template x-for="loc in networkOpts.locations" :key="loc">
+                <option :value="loc" x-text="loc"></option>
+              </template>
+            </select>
+          </div>
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-gray-700 mb-1">Subnet <span class="text-red-500">*</span></label>
+          <select x-model="deployModal.subnetId" class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm">
+            <option value="">Select a subnet…</option>
+            <template x-for="s in networkOpts.subnets" :key="s.id">
+              <option :value="s.id" x-text="s.vnet_name + ' / ' + s.name + (s.address_prefix ? ' (' + s.address_prefix + ')' : '')"></option>
+            </template>
+          </select>
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-gray-700 mb-1">Network Security Groups</label>
+          <div class="border border-gray-200 rounded-md p-2 max-h-28 overflow-y-auto space-y-1">
+            <template x-for="nsg in networkOpts.nsgs" :key="nsg.id">
+              <label class="flex items-center gap-2 text-xs cursor-pointer hover:bg-gray-50 p-1 rounded">
+                <input type="checkbox" :value="nsg.id" x-model="deployModal.nsgIds" class="rounded text-blue-600">
+                <span x-text="nsg.name"></span>
+              </label>
+            </template>
+            <p x-show="networkOpts.nsgs.length === 0" class="text-xs text-gray-400 p-1">No NSGs found.</p>
+          </div>
+        </div>
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-xs font-medium text-gray-700 mb-1">SSH Username</label>
+            <input x-model="deployModal.sshUsername" type="text" placeholder="azureuser"
+                   class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm">
+          </div>
+          <div class="flex items-end pb-0.5">
+            <label class="flex items-center gap-2 text-xs cursor-pointer">
+              <input type="checkbox" x-model="deployModal.createPublicIp" class="rounded text-blue-600">
+              <span class="font-medium text-gray-700">Create Public IP</span>
+            </label>
+          </div>
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-gray-700 mb-2">SSH Public Key <span class="text-red-500">*</span></label>
+          <div x-show="deployModal.keyvaultLoading" class="text-xs text-gray-400 py-2">Fetching key from Key Vault…</div>
+          <div x-show="!deployModal.keyvaultLoading && deployModal.keyvaultError"
+               class="text-xs text-red-500 py-2" x-text="deployModal.keyvaultError"></div>
+          <div x-show="!deployModal.keyvaultLoading && !deployModal.keyvaultError && deployModal.sshPublicKey">
+            <p class="text-xs text-green-600 mb-1">Key retrieved from vault: <span class="font-mono font-medium" x-text="deployModal.keyvaultSecretName"></span></p>
+            <textarea x-model="deployModal.sshPublicKey" rows="2" readonly
+                      class="w-full border border-gray-200 bg-gray-50 rounded-md px-3 py-2 text-xs font-mono resize-none text-gray-600 cursor-default"></textarea>
+          </div>
+        </div>
+      </div>
+
+      <div class="flex justify-end gap-3 mt-5">
+        <button @click="deployModal.open = false"
+                class="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50">
+          Cancel
+        </button>
+        <button @click="submitDeploy()" :disabled="deployModal.submitting"
+                class="px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg disabled:opacity-50">
+          <span x-show="!deployModal.submitting">Deploy VM</span>
+          <span x-show="deployModal.submitting">Deploying…</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════════════════════ -->
+  <!-- Bulk Deploy Modal                                                       -->
+  <!-- ═══════════════════════════════════════════════════════════════════════ -->
+  <div x-show="bulkModal.open" class="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-40" @click.self="bulkModal.open = false">
+    <div class="bg-white rounded-xl shadow-2xl p-6 w-full max-w-xl mx-4 max-h-screen overflow-y-auto">
+      <h2 class="text-lg font-bold text-gray-900 mb-4">Bulk Deploy Azure VMs</h2>
+
+      <!-- Per-image VM names -->
+      <div class="space-y-2 mb-4">
+        <label class="block text-xs font-semibold text-gray-700 uppercase tracking-wide mb-1">VM Names</label>
+        <template x-for="(img, idx) in bulkModal.items" :key="img.resource_id">
+          <div class="flex items-center gap-3">
+            <span class="text-xs text-gray-500 w-40 truncate" x-text="img.name"></span>
+            <input :x-model="'bulkModal.vmNames[' + idx + ']'" type="text"
+                   @input="bulkModal.vmNames[idx] = $event.target.value"
+                   :value="bulkModal.vmNames[idx]"
+                   :placeholder="'vm-' + (idx+1)"
+                   class="flex-1 border border-gray-300 rounded-md px-2 py-1.5 text-sm">
+          </div>
+        </template>
+      </div>
+
+      <!-- Shared network options -->
+      <div class="space-y-3 border-t border-gray-100 pt-4">
+        <label class="block text-xs font-semibold text-gray-700 uppercase tracking-wide mb-1">Shared Settings</label>
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-xs font-medium text-gray-700 mb-1">VM Size</label>
+            <select x-model="bulkModal.vmSize" class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm">
+              <template x-for="sz in networkOpts.vm_sizes" :key="sz">
+                <option :value="sz" x-text="sz"></option>
+              </template>
+            </select>
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-gray-700 mb-1">Location</label>
+            <select x-model="bulkModal.location" class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm">
+              <template x-for="loc in networkOpts.locations" :key="loc">
+                <option :value="loc" x-text="loc"></option>
+              </template>
+            </select>
+          </div>
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-gray-700 mb-1">Subnet</label>
+          <select x-model="bulkModal.subnetId" class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm">
+            <option value="">Select a subnet…</option>
+            <template x-for="s in networkOpts.subnets" :key="s.id">
+              <option :value="s.id" x-text="s.vnet_name + ' / ' + s.name"></option>
+            </template>
+          </select>
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-gray-700 mb-2">SSH Public Key</label>
+          <div x-show="bulkModal.keyvaultLoading" class="text-xs text-gray-400 py-2">Fetching key from Key Vault…</div>
+          <div x-show="!bulkModal.keyvaultLoading && bulkModal.keyvaultError"
+               class="text-xs text-red-500 py-2" x-text="bulkModal.keyvaultError"></div>
+          <div x-show="!bulkModal.keyvaultLoading && !bulkModal.keyvaultError && bulkModal.sshPublicKey">
+            <p class="text-xs text-green-600 mb-1">Key retrieved from vault: <span class="font-mono font-medium" x-text="bulkModal.keyvaultSecretName"></span></p>
+            <textarea x-model="bulkModal.sshPublicKey" rows="2" readonly
+                      class="w-full border border-gray-200 bg-gray-50 rounded-md px-3 py-2 text-xs font-mono resize-none text-gray-600 cursor-default"></textarea>
+          </div>
+        </div>
+      </div>
+
+      <div class="flex justify-end gap-3 mt-5">
+        <button @click="bulkModal.open = false"
+                class="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50">Cancel</button>
+        <button @click="submitBulkDeploy()" :disabled="bulkModal.submitting"
+                class="px-4 py-2 text-sm font-medium text-white bg-green-600 hover:bg-green-700 rounded-lg disabled:opacity-50">
+          <span x-show="!bulkModal.submitting">Deploy <span x-text="bulkModal.items.length"></span> VMs</span>
+          <span x-show="bulkModal.submitting">Deploying…</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════════════════════ -->
+  <!-- Create Image Modal                                                      -->
+  <!-- ═══════════════════════════════════════════════════════════════════════ -->
+  <div x-show="createImageModal.open" class="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-40" @click.self="createImageModal.open = false">
+    <div class="bg-white rounded-xl shadow-2xl p-6 w-full max-w-md mx-4">
+      <h2 class="text-lg font-bold text-gray-900 mb-1">Capture VM Image</h2>
+      <p class="text-sm text-gray-500 mb-4" x-text="'VM: ' + (createImageModal.vm?.name || '')"></p>
+      <div class="space-y-3">
+        <div>
+          <label class="block text-xs font-medium text-gray-700 mb-1">Image Name <span class="text-red-500">*</span></label>
+          <input x-model="createImageModal.name" type="text" placeholder="my-azure-image"
+                 class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm">
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-gray-700 mb-1">Description</label>
+          <input x-model="createImageModal.description" type="text" placeholder="Optional description"
+                 class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm">
+        </div>
+        <label class="flex items-start gap-3 cursor-pointer p-3 rounded-lg border"
+               :class="createImageModal.generalize ? 'border-orange-300 bg-orange-50' : 'border-gray-200 bg-white'">
+          <input type="checkbox" x-model="createImageModal.generalize" class="mt-0.5 rounded text-orange-500">
+          <div>
+            <div class="text-sm font-medium text-gray-800">Generalize VM before capture</div>
+            <div class="text-xs text-orange-600 mt-0.5" x-show="createImageModal.generalize">
+              Warning: The VM will be deallocated and generalized. It will be unusable after this operation.
+            </div>
+            <div class="text-xs text-gray-500 mt-0.5" x-show="!createImageModal.generalize">
+              Skip generalization (faster, but image may have instance-specific settings).
+            </div>
+          </div>
+        </label>
+      </div>
+      <div class="flex justify-end gap-3 mt-5">
+        <button @click="createImageModal.open = false"
+                class="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50">Cancel</button>
+        <button @click="submitCreateImage()"
+                :class="createImageModal.generalize ? 'bg-orange-600 hover:bg-orange-700' : 'bg-blue-600 hover:bg-blue-700'"
+                class="px-4 py-2 text-sm font-medium text-white rounded-lg">
+          Capture Image
+        </button>
+      </div>
+    </div>
+  </div>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function azureDashboard() {
+  return {
+    // State
+    loading: false,
+    credError: false,
+    activeTab: 'marketplace',
+    location: '{{ default_location }}',
+
+    // Data
+    marketplaceImages: [],
+    marketplaceFilter: 'ubuntu',
+    marketplaceLoading: false,
+    privateImages: [],
+    imagesLoading: false,
+    selectedImages: [],
+    vms: [],
+    vmsLoading: false,
+    networkOpts: { locations: ['{{ default_location }}'], vm_sizes: [], subnets: [], nsgs: [], ssh_keys: [], resource_groups: [] },
+    keyvaultAvailable: false,
+
+    // Modals
+    deployModal: {
+      open: false, image: null, vmName: '', vmSize: 'Standard_B2s',
+      location: '{{ default_location }}', subnetId: '', nsgIds: [], sshUsername: 'azureuser',
+      sshPublicKey: '', sshKeyMode: 'keyvault', createPublicIp: false, submitting: false,
+      keyvaultLoading: false, keyvaultError: '', keyvaultSecretName: '',
+    },
+    bulkModal: {
+      open: false, items: [], vmNames: [], vmSize: 'Standard_B2s',
+      location: '{{ default_location }}', subnetId: '', sshPublicKey: '',
+      sshKeyMode: 'keyvault', keyvaultLoading: false, keyvaultError: '', keyvaultSecretName: '',
+      submitting: false,
+    },
+    createImageModal: {
+      open: false, vm: null, name: '', description: '', generalize: false,
+    },
+
+    async init() {
+      requireAuth();
+      const hash = window.location.hash.slice(1);
+      if (['marketplace', 'private', 'vms'].includes(hash)) {
+        this.activeTab = hash;
+      }
+      await Promise.all([
+        this.loadNetworkOpts(),
+        this.loadMarketplace(),
+        this.loadPrivateImages(),
+        this.loadVMs(),
+        this.checkKeyvaultAvailable(),
+      ]);
+    },
+
+    async checkKeyvaultAvailable() {
+      try {
+        await API.get('/api/azure/keyvault-ssh-key');
+        this.keyvaultAvailable = true;
+      } catch (e) {
+        // 503 = "not configured" → hide the tab. Any other error → still show it.
+        this.keyvaultAvailable = (e.status !== 503);
+      }
+    },
+
+    async refreshAll() {
+      this.loading = true;
+      try {
+        await Promise.all([
+          this.loadNetworkOpts(),
+          this.loadMarketplace(),
+          this.loadPrivateImages(),
+          this.loadVMs(true),  // bust cache on manual refresh
+        ]);
+      } finally {
+        this.loading = false;
+      }
+    },
+
+    async loadNetworkOpts() {
+      try {
+        const data = await API.get('/api/azure/network-options');
+        this.networkOpts = data;
+        // Set default location
+        if (data.locations && data.locations.length && !data.locations.includes(this.location)) {
+          this.location = data.locations[0];
+        }
+      } catch (e) {
+        if (e.status === 503) this.credError = true;
+      }
+    },
+
+    async refreshNetworkOpts() {
+      await this.loadNetworkOpts();
+    },
+
+    async loadMarketplace() {
+      this.marketplaceLoading = true;
+      try {
+        const params = this.marketplaceFilter !== 'all' ? `?os_filter=${this.marketplaceFilter}` : '';
+        const data = await API.get('/api/azure/marketplace-images' + params);
+        this.marketplaceImages = data.images || [];
+      } catch (e) {
+        if (e.status === 503) this.credError = true;
+        toast('Failed to load marketplace images', 'error');
+      } finally {
+        this.marketplaceLoading = false;
+      }
+    },
+
+    async loadPrivateImages() {
+      this.imagesLoading = true;
+      try {
+        const data = await API.get('/api/azure/images');
+        this.privateImages = data.images || [];
+      } catch (e) {
+        if (e.status === 503) this.credError = true;
+        toast('Failed to load private images', 'error');
+      } finally {
+        this.imagesLoading = false;
+      }
+    },
+
+    async loadVMs(bust = false) {
+      this.vmsLoading = true;
+      try {
+        const data = await API.get(`/api/azure/vms${bust ? '?bust=true' : ''}`);
+        this.vms = data.vms || [];
+      } catch (e) {
+        if (e.status === 503) this.credError = true;
+      } finally {
+        this.vmsLoading = false;
+      }
+    },
+
+    toggleAllImages(event) {
+      if (event.target.checked) {
+        this.selectedImages = this.privateImages.map(i => i.resource_id);
+      } else {
+        this.selectedImages = [];
+      }
+    },
+
+    async openDeployModal(img) {
+      this.deployModal = {
+        open: false, image: img,
+        vmName: img.name ? img.name.replace(/-image$/i, '') : '',
+        vmSize: this.networkOpts.vm_sizes[0] || 'Standard_B2s',
+        location: this.location, subnetId: '', nsgIds: [], sshUsername: 'azureuser',
+        sshPublicKey: '', sshKeyMode: 'keyvault', createPublicIp: false, submitting: false,
+        keyvaultLoading: false, keyvaultError: '', keyvaultSecretName: '',
+      };
+      await this.loadNetworkOpts();
+      this.deployModal.open = true;
+      this.fetchKeyvaultKey();
+    },
+
+    async fetchKeyvaultKey() {
+      this.deployModal.keyvaultLoading = true;
+      this.deployModal.keyvaultError = '';
+      this.deployModal.sshPublicKey = '';
+      this.deployModal.keyvaultSecretName = '';
+      try {
+        const data = await API.get('/api/azure/keyvault-ssh-key');
+        this.deployModal.sshPublicKey = data.ssh_public_key;
+        this.deployModal.keyvaultSecretName = data.secret_name;
+      } catch (e) {
+        this.deployModal.keyvaultError = e.message || 'Failed to retrieve key from Key Vault';
+      } finally {
+        this.deployModal.keyvaultLoading = false;
+      }
+    },
+
+    async submitDeploy() {
+      const m = this.deployModal;
+      if (!m.vmName) return toast('VM Name is required', 'error');
+      if (!m.subnetId) return toast('Please select a subnet', 'error');
+      
+      const sshPublicKey = m.sshPublicKey.trim();
+      if (!sshPublicKey) return toast('SSH key not loaded — check Key Vault configuration.', 'error');
+
+      m.submitting = true;
+      try {
+        const result = await API.post('/api/azure/deploy', {
+          image_id: m.image.resource_id,
+          vm_name: m.vmName,
+          vm_size: m.vmSize,
+          location: m.location,
+          subnet_id: m.subnetId,
+          nsg_ids: m.nsgIds,
+          create_public_ip: m.createPublicIp,
+          ssh_username: m.sshUsername || 'azureuser',
+          ssh_public_key: sshPublicKey,
+          // Marketplace image metadata (optional)
+          image_publisher: m.image.publisher || null,
+          image_offer: m.image.offer || null,
+          image_sku: m.image.sku || null,
+          image_version: m.image.version || null,
+        });
+        m.open = false;
+        toast(`Azure VM deployment queued: ${m.vmName}`, 'success');
+        window.location.href = `/jobs/${result.job_id}`;
+      } catch (e) {
+        toast(e.message || 'Deploy failed', 'error');
+      } finally {
+        m.submitting = false;
+      }
+    },
+
+    openBulkDeployModal() {
+      const selected = this.privateImages.filter(i => this.selectedImages.includes(i.resource_id));
+      this.bulkModal = {
+        open: true,
+        items: selected,
+        vmNames: selected.map(img => img.name ? img.name.replace(/-image$/i, '') : ''),
+        vmSize: this.networkOpts.vm_sizes[0] || 'Standard_B2s',
+        location: this.location,
+        subnetId: '',
+        sshPublicKey: '',
+        sshKeyMode: 'keyvault',
+        keyvaultLoading: false,
+        keyvaultError: '',
+        keyvaultSecretName: '',
+        submitting: false,
+      };
+      this.fetchBulkKeyvaultKey();
+    },
+
+    async fetchBulkKeyvaultKey() {
+      this.bulkModal.keyvaultLoading = true;
+      this.bulkModal.keyvaultError = '';
+      this.bulkModal.sshPublicKey = '';
+      this.bulkModal.keyvaultSecretName = '';
+      try {
+        const data = await API.get('/api/azure/keyvault-ssh-key');
+        this.bulkModal.sshPublicKey = data.ssh_public_key;
+        this.bulkModal.keyvaultSecretName = data.secret_name;
+      } catch (e) {
+        this.bulkModal.keyvaultError = e.message || 'Failed to retrieve key from Key Vault';
+      } finally {
+        this.bulkModal.keyvaultLoading = false;
+      }
+    },
+
+    async submitBulkDeploy() {
+      const m = this.bulkModal;
+      if (!m.subnetId) return toast('Please select a subnet', 'error');
+
+      const sshPublicKey = m.sshPublicKey.trim();
+      if (!sshPublicKey) return toast('SSH key not loaded — check Key Vault configuration.', 'error');
+
+      const items = m.items.map((img, idx) => ({
+        vm_name: m.vmNames[idx] || `vm-${idx + 1}`,
+      }));
+      // Use first image for all (bulk deploys same image)
+      const firstImage = m.items[0];
+      const imageId = firstImage?.resource_id;
+
+      m.submitting = true;
+      try {
+        const result = await API.post('/api/azure/bulk-deploy', {
+          items,
+          image_id: imageId,
+          vm_size: m.vmSize,
+          location: m.location,
+          subnet_id: m.subnetId,
+          nsg_ids: [],
+          create_public_ip: false,
+          ssh_username: 'azureuser',
+          ssh_public_key: sshPublicKey,
+          // Marketplace image metadata (optional)
+          image_publisher: firstImage?.publisher || null,
+          image_offer: firstImage?.offer || null,
+          image_sku: firstImage?.sku || null,
+          image_version: firstImage?.version || null,
+        });
+        m.open = false;
+        const jobIds = result.jobs.map(j => j.job_id);
+        toast(`Bulk deploy queued: ${jobIds.length} VMs`, 'success');
+        if (jobIds.length === 1) {
+          window.location.href = `/jobs/${jobIds[0]}`;
+        } else {
+          window.location.href = '/jobs';
+        }
+      } catch (e) {
+        toast(e.message || 'Bulk deploy failed', 'error');
+      } finally {
+        m.submitting = false;
+      }
+    },
+
+    openCreateImageModal(vm) {
+      this.createImageModal = {
+        open: true, vm, name: `${vm.name}-image`, description: '', generalize: false,
+      };
+    },
+
+    async submitCreateImage() {
+      const m = this.createImageModal;
+      if (!m.name) return toast('Image name is required', 'error');
+      try {
+        const result = await API.post(`/api/azure/vms/${m.vm.name}/create-image`, {
+          name: m.name,
+          description: m.description,
+          generalize: m.generalize,
+        });
+        m.open = false;
+        toast(`Image capture queued: ${m.name}`, 'success');
+        window.location.href = `/jobs/${result.job_id}`;
+      } catch (e) {
+        toast(e.message || 'Image capture failed', 'error');
+      }
+    },
+
+    confirmDeleteImage(img) {
+      if (!confirm(`Delete image "${img.name}"? This cannot be undone.`)) return;
+      this.deleteImage(img);
+    },
+
+    async deleteImage(img) {
+      try {
+        await API.del(`/api/azure/images/${img.name}`);
+        toast(`Image "${img.name}" deleted`, 'success');
+        await this.loadPrivateImages();
+      } catch (e) {
+        toast(e.message || 'Delete failed', 'error');
+      }
+    },
+
+    confirmDestroyVM(vm) {
+      if (!confirm(`Destroy Azure VM "${vm.name}"?\n\nThis will permanently delete the VM, its NIC, and public IP.`)) return;
+      this.destroyVM(vm);
+    },
+
+    async destroyVM(vm) {
+      try {
+        const result = await API.del(`/api/azure/vms/${vm.name}`);
+        toast(`VM "${vm.name}" termination queued`, 'success');
+        window.location.href = `/jobs/${result.job_id}`;
+      } catch (e) {
+        toast(e.message || 'Destroy failed', 'error');
+      }
+    },
+  };
+}
+</script>
+{% endblock %}

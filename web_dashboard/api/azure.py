@@ -1,0 +1,862 @@
+"""
+Azure API endpoints:
+  GET    /api/azure/images              - List private images (gallery + managed)
+  GET    /api/azure/marketplace-images  - Browse Azure Marketplace images
+  GET    /api/azure/vms                 - List dashboard-deployed Azure VMs (live state)
+  GET    /api/azure/network-options     - Subnets, NSGs, VM sizes for the deploy form
+  GET    /api/azure/keyvault-ssh-key   - Retrieve SSH public key from Azure Key Vault
+  POST   /api/azure/deploy              - Deploy an Azure VM from an image
+  POST   /api/azure/bulk-deploy         - Deploy multiple Azure VMs
+  DELETE /api/azure/vms/{vm_name}       - Terminate a dashboard-deployed Azure VM
+  POST   /api/azure/vms/{vm_name}/create-image - Capture an image from a VM
+  DELETE /api/azure/images/{image_name} - Delete a managed image
+"""
+import logging
+from typing import Optional
+
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+
+logger = logging.getLogger(__name__)
+from sqlalchemy.orm import Session
+
+from ..config import settings
+from ..database import Job, User, get_db
+from ..models.azure import (
+    AzureBulkDeployRequest,
+    AzureBulkDeployResponse,
+    AzureCreateImageRequest,
+    AzureDeployRequest,
+    AzureDeployResponse,
+    AzureImageInfo,
+    AzureNetworkOptions,
+    AzureSubnetInfo,
+    AzureNSGInfo,
+    AzureSSHKeyInfo,
+    AzureVMInfo,
+)
+from ..services import azure_service, job_service, cache_service
+from ..services.azure_service import AzureError
+from .auth import get_current_user, require_permission
+
+router = APIRouter(prefix="/api/azure", tags=["azure"])
+
+
+def _rg():
+    return settings.azure_resource_group
+
+
+def _loc():
+    return settings.azure_location
+
+
+def _aci_rg():
+    return settings.azure_aci_resource_group or settings.azure_resource_group
+
+
+# ── Private images (gallery + managed) ───────────────────────────────────────
+
+@router.get("/images")
+async def list_images(
+    current_user: User = Depends(require_permission("azure", "read")),
+):
+    """List private images: Shared Image Gallery images + standalone Managed Images. Served from cache (5 min)."""
+    cache_key = cache_service.key_global("azure_images")
+    ttl = cache_service.TTL["azure_images"]
+
+    async def _fetch():
+        return await azure_service.list_private_images(
+            settings.azure_shared_image_gallery,
+            settings.azure_gallery_resource_group,
+            _rg(),
+        )
+
+    try:
+        images, cached_at = await cache_service.get_or_refresh(cache_key, ttl, _fetch)
+        return {
+            "images": [AzureImageInfo(**i) for i in images],
+            "count": len(images),
+            "cached_at": cached_at,
+        }
+    except AzureError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+# ── Marketplace images ────────────────────────────────────────────────────────
+
+@router.get("/marketplace-images")
+async def list_marketplace_images(
+    os_filter: Optional[str] = None,
+    current_user: User = Depends(require_permission("azure", "read")),
+):
+    """
+    Browse Azure Marketplace images. Pass ?os_filter=ubuntu|rhel|debian
+    to narrow results; omit for all.
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info("API: marketplace-images called with os_filter=%s", os_filter)
+    try:
+        images = await azure_service.list_marketplace_images(
+            _loc(), os_filter or "all"
+        )
+        logger.info("API: returned %d marketplace images", len(images))
+        return {"images": [AzureImageInfo(**i) for i in images], "count": len(images)}
+    except AzureError as e:
+        logger.error("API: AzureError - %s", e, exc_info=True)
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        logger.error("API: Unexpected error - %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Network options for deploy form ──────────────────────────────────────────
+
+@router.get("/network-options", response_model=AzureNetworkOptions)
+async def network_options(
+    current_user: User = Depends(require_permission("azure", "read")),
+):
+    """Return locations, VM sizes, subnets, NSGs. Served from cache (10 min)."""
+    cache_key = cache_service.key_global("azure_network_opts")
+    ttl = cache_service.TTL["azure_network_opts"]
+
+    async def _fetch():
+        return await azure_service.get_network_options(
+            _loc(), settings.azure_vnet_resource_group, _rg()
+        )
+
+    try:
+        opts, cached_at = await cache_service.get_or_refresh(cache_key, ttl, _fetch)
+        return AzureNetworkOptions(
+            locations=opts["locations"],
+            vm_sizes=opts["vm_sizes"],
+            subnets=[AzureSubnetInfo(**s) for s in opts["subnets"]],
+            nsgs=[AzureNSGInfo(**n) for n in opts["nsgs"]],
+            ssh_keys=[AzureSSHKeyInfo(**k) for k in opts["ssh_keys"]],
+            resource_groups=opts["resource_groups"],
+        )
+    except AzureError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+# ── Key Vault SSH key ─────────────────────────────────────────────────────────
+
+@router.get("/keyvault-ssh-key")
+async def get_keyvault_ssh_key(
+    current_user: User = Depends(require_permission("azure", "read")),
+):
+    """Retrieve the SSH public key stored in Azure Key Vault."""
+    if not settings.azure_key_vault_url or not settings.azure_ssh_key_secret_name:
+        raise HTTPException(
+            status_code=503,
+            detail="Key Vault not configured. Set AZURE_KEY_VAULT_URL and AZURE_SSH_KEY_SECRET_NAME.",
+        )
+    try:
+        key_text = await azure_service.get_ssh_key_from_vault(
+            settings.azure_key_vault_url,
+            settings.azure_ssh_key_secret_name,
+        )
+        return {"secret_name": settings.azure_ssh_key_secret_name, "ssh_public_key": key_text}
+    except AzureError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+# ── VM listing ────────────────────────────────────────────────────────────────
+
+@router.get("/vms")
+async def list_vms(
+    bust: bool = False,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("azure", "read")),
+):
+    """
+    List dashboard-deployed Azure VMs with live power state.
+    Served from cache (1 min TTL). Pass ?bust=true to force a fresh fetch.
+    """
+    cache_key = cache_service.key_global("azure_vms")
+    ttl = cache_service.TTL["azure_vms"]
+
+    # Pre-extract job metadata into plain dicts now (while db is open).
+    # The _fetch closure must NOT capture `db` — it may run as a background
+    # stale-while-revalidate task after the request (and db session) is closed.
+    # Include ALL azure_deploy jobs (any status) so VMs from older failed/running
+    # jobs are still surfaced via the fallback get_vm() lookup.
+    deploy_jobs = (
+        db.query(Job)
+        .filter(Job.job_type == "azure_deploy")
+        .order_by(Job.created_at.desc())
+        .all()
+    )
+    job_meta = {
+        j.metadata_dict["vm_name"]: {
+            "id": j.id,
+            "created_by": j.created_by,
+            "resource_group": j.metadata_dict.get("resource_group"),
+            "destroyed": j.metadata_dict.get("destroyed", False),
+        }
+        for j in deploy_jobs if j.metadata_dict.get("vm_name")
+    }
+
+    async def _fetch():
+        # Get all dashboard VMs from Azure (tagged ManagedBy=vm-cli-dashboard)
+        live_vms = await azure_service.describe_vms(_rg())
+        live_vm_names = {vm["name"] for vm in live_vms}
+
+        # Fallback: for job-known VMs not found by tag filter, fetch directly.
+        # This handles cases where Azure list() omits tags or tags were not applied.
+        for vm_name, meta in job_meta.items():
+            if vm_name not in live_vm_names and not meta["destroyed"]:
+                rg = meta["resource_group"] or _rg()
+                try:
+                    vm_data = await azure_service.get_vm(rg, vm_name)
+                    if vm_data:
+                        live_vms.append(vm_data)
+                        live_vm_names.add(vm_name)
+                except Exception:
+                    pass
+
+        result = []
+        for vm in live_vms:
+            meta = job_meta.get(vm["name"])
+            result.append({
+                **vm,
+                "job_id": meta["id"] if meta else None,
+                "deployed_by": meta["created_by"] if meta else "unknown",
+            })
+        return result
+
+    try:
+        if bust:
+            await cache_service.invalidate(cache_key)
+        raw, cached_at = await cache_service.get_or_refresh(cache_key, ttl, _fetch)
+        vms = [AzureVMInfo(**v) for v in raw]
+        return {"vms": vms, "count": len(vms), "cached_at": cached_at}
+    except AzureError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+# ── Deploy ────────────────────────────────────────────────────────────────────
+
+@router.post("/deploy", response_model=AzureDeployResponse)
+async def deploy_vm(
+    req: AzureDeployRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("azure", "write")),
+):
+    """
+    Deploy an Azure VM from a private image (gallery, managed, or marketplace).
+    Returns a job_id trackable at /api/jobs/{job_id} or /ws/jobs/{job_id}.
+    """
+    rg = req.resource_group or _rg()
+    loc = req.location or _loc()
+
+    job = job_service.create_job(
+        db,
+        job_type="azure_deploy",
+        created_by=current_user.username,
+        metadata={
+            "image_id": req.image_id,
+            "image_publisher": req.image_publisher,
+            "image_offer": req.image_offer,
+            "image_sku": req.image_sku,
+            "image_version": req.image_version,
+            "vm_name": req.vm_name,
+            "vm_size": req.vm_size,
+            "location": loc,
+            "resource_group": rg,
+            "subnet_id": req.subnet_id,
+            "nsg_ids": req.nsg_ids,
+            "create_public_ip": req.create_public_ip,
+        },
+    )
+
+    job_service.log_audit(
+        db, current_user.username, "azure_deploy",
+        details={"image_id": req.image_id, "vm_name": req.vm_name},
+    )
+
+    background_tasks.add_task(_run_deploy, job.id, req, rg, loc)
+
+    return AzureDeployResponse(
+        job_id=job.id,
+        vm_name=req.vm_name,
+        message=f"Azure VM deployment queued: {req.vm_name}",
+    )
+
+
+# ── Bulk Deploy ───────────────────────────────────────────────────────────────
+
+@router.post("/bulk-deploy", response_model=AzureBulkDeployResponse)
+async def bulk_deploy_vms(
+    req: AzureBulkDeployRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("azure", "write")),
+):
+    """
+    Deploy multiple Azure VMs in one request.
+    Each VM gets its own job_id. One ACI Jumpoint container is shared across the batch.
+    """
+    if not req.items:
+        raise HTTPException(status_code=400, detail="At least one VM item is required.")
+
+    rg = req.resource_group or _rg()
+    loc = req.location or _loc()
+
+    job_items = []
+    for item in req.items:
+        job = job_service.create_job(
+            db,
+            job_type="azure_deploy",
+            created_by=current_user.username,
+            metadata={
+                "image_id": req.image_id,
+                "vm_name": item.vm_name,
+                "vm_size": req.vm_size,
+                "location": loc,
+                "resource_group": rg,
+                "subnet_id": req.subnet_id,
+                "nsg_ids": req.nsg_ids,
+                "create_public_ip": req.create_public_ip,
+                "bulk": True,
+            },
+        )
+        job_service.log_audit(
+            db, current_user.username, "azure_deploy",
+            details={"image_id": req.image_id, "vm_name": item.vm_name, "bulk": True},
+        )
+        job_items.append((job.id, item.vm_name))
+
+    background_tasks.add_task(_run_bulk_deploy, job_items, req, rg, loc)
+
+    return AzureBulkDeployResponse(
+        jobs=[AzureDeployResponse(job_id=jid, vm_name=vn) for jid, vn in job_items]
+    )
+
+
+# ── Terminate ─────────────────────────────────────────────────────────────────
+
+@router.delete("/vms/{vm_name}")
+async def destroy_vm(
+    vm_name: str,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("azure", "delete")),
+):
+    """Terminate a dashboard-deployed Azure VM and clean up NIC/PIP."""
+    deploy_jobs = (
+        db.query(Job)
+        .filter(Job.job_type == "azure_deploy", Job.status == "completed")
+        .all()
+    )
+    deploy_job = None
+    for job in deploy_jobs:
+        meta = job.metadata_dict
+        if meta.get("vm_name") == vm_name and not meta.get("destroyed"):
+            deploy_job = job
+            break
+
+    if not deploy_job:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No active deployment found for VM '{vm_name}'. "
+                   "It may have already been terminated or was not deployed from this dashboard.",
+        )
+
+    destroy_job = job_service.create_job(
+        db,
+        job_type="azure_destroy",
+        created_by=current_user.username,
+        metadata={"vm_name": vm_name, "deploy_job_id": deploy_job.id},
+    )
+
+    job_service.log_audit(
+        db, current_user.username, "azure_destroy",
+        details={"vm_name": vm_name},
+    )
+
+    rg = deploy_job.metadata_dict.get("resource_group") or _rg()
+    background_tasks.add_task(_run_destroy, destroy_job.id, deploy_job.id, vm_name, rg)
+
+    return {"job_id": destroy_job.id, "status": "pending", "message": f"Azure VM '{vm_name}' termination queued"}
+
+
+# ── Create image from VM ──────────────────────────────────────────────────────
+
+@router.post("/vms/{vm_name}/create-image")
+async def create_image_from_vm(
+    vm_name: str,
+    req: AzureCreateImageRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("azure", "write")),
+):
+    """
+    Capture a managed image from an Azure VM.
+    If generalize=True: VM will be deallocated + generalized (VM becomes unusable).
+    """
+    deploy_jobs = (
+        db.query(Job)
+        .filter(Job.job_type == "azure_deploy", Job.status == "completed")
+        .all()
+    )
+    deploy_job = next(
+        (j for j in deploy_jobs if j.metadata_dict.get("vm_name") == vm_name
+         and not j.metadata_dict.get("destroyed")),
+        None,
+    )
+    rg = deploy_job.metadata_dict.get("resource_group") if deploy_job else _rg()
+
+    job = job_service.create_job(
+        db,
+        job_type="azure_create_image",
+        created_by=current_user.username,
+        metadata={
+            "vm_name": vm_name,
+            "image_name": req.name,
+            "description": req.description,
+            "generalize": req.generalize,
+            "resource_group": rg,
+        },
+    )
+
+    job_service.log_audit(
+        db, current_user.username, "azure_create_image",
+        details={"vm_name": vm_name, "image_name": req.name, "generalize": req.generalize},
+    )
+
+    background_tasks.add_task(_run_create_image, job.id, vm_name, rg, req)
+
+    return {"job_id": job.id, "status": "pending", "message": f"Image capture queued for VM '{vm_name}'"}
+
+
+# ── Delete image ──────────────────────────────────────────────────────────────
+
+@router.delete("/images/{image_name}")
+async def delete_image(
+    image_name: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("azure", "delete")),
+):
+    """Delete a standalone managed image from the resource group."""
+    try:
+        await azure_service.delete_image(_rg(), image_name)
+    except AzureError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    job_service.log_audit(
+        db, current_user.username, "azure_delete_image",
+        details={"image_name": image_name},
+    )
+    await cache_service.invalidate(cache_service.key_global("azure_images"))
+    return {"deleted": True, "image_name": image_name}
+
+
+# ── Background task helpers ───────────────────────────────────────────────────
+
+def _get_db_session():
+    from ..database import SessionLocal
+    return SessionLocal()
+
+
+async def _run_deploy(job_id: str, req: AzureDeployRequest, rg: str, loc: str):
+    db = _get_db_session()
+    result = {}
+    try:
+        job_service.set_running(db, job_id)
+
+        # Step 0: Quota check — fail fast before any resources are created
+        job_service.update_progress(db, job_id, 10, f"Checking Azure quota in {loc}…")
+        await azure_service.check_vm_quota(loc, req.vm_size)
+
+        # Step 1: Start ACI Jumpoint container (BeyondTrust only)
+        deploy_key_note = ""
+        if settings.beyondtrust_enabled:
+            from ..services import btapi_service
+            job_service.update_progress(db, job_id, 15, "Starting BeyondTrust ACI Jumpoint container…")
+            try:
+                try:
+                    deploy_key = await btapi_service.get_ps_secret(settings.azure_aci_ps_deploy_key_title)
+                except Exception as key_err:
+                    logger.warning("ACI deploy key fetch failed (%s) — creating ACI without deploy key", key_err)
+                    deploy_key = ""
+                    deploy_key_note = f" [deploy key fetch failed: {key_err}]"
+                # Fetch ACR credentials if configured
+                acr_username, acr_password = "", ""
+                if (settings.azure_acr_server
+                        and settings.azure_acr_username_secret_title
+                        and settings.azure_acr_password_secret_title):
+                    try:
+                        acr_username = await btapi_service.get_ps_secret(settings.azure_acr_username_secret_title)
+                        acr_password = await btapi_service.get_ps_secret(settings.azure_acr_password_secret_title)
+                    except Exception as acr_err:
+                        logger.warning("ACR credential fetch failed (%s) — ACI will attempt pull without ACR auth", acr_err)
+                aci_group_name = await azure_service.run_aci_jumpoint_task(
+                    rg=_aci_rg(),
+                    location=loc,
+                    subnet_id=settings.azure_aci_subnet_id,
+                    image=settings.azure_aci_jumpoint_image,
+                    cpu=settings.azure_aci_cpu,
+                    memory=settings.azure_aci_memory,
+                    deploy_key=deploy_key,
+                    acr_server=settings.azure_acr_server,
+                    acr_username=acr_username,
+                    acr_password=acr_password,
+                    storage_account=settings.azure_aci_storage_account,
+                    storage_account_rg=settings.azure_aci_storage_account_rg,
+                    file_share=settings.azure_aci_file_share,
+                )
+                result["aci_group_name"] = aci_group_name
+                job_service.update_progress(
+                    db, job_id, 30,
+                    f"ACI Jumpoint started ({aci_group_name}){deploy_key_note}, deploying VM…"
+                )
+            except Exception as e:
+                result["aci_error"] = str(e)
+                job_service.update_progress(
+                    db, job_id, 30,
+                    f"ACI Jumpoint failed (non-fatal): {e}{deploy_key_note} — continuing with VM deploy…"
+                )
+        else:
+            job_service.update_progress(db, job_id, 30, "Preparing Azure VM deploy…")
+
+        # Step 2: Deploy Azure VM (3-step: PIP → NIC → VM)
+        job_service.update_progress(db, job_id, 35, f"Creating Azure VM '{req.vm_name}'…")
+        try:
+            vm_result = await azure_service.deploy_vm(
+                rg=rg,
+                location=loc,
+                vm_name=req.vm_name,
+                vm_size=req.vm_size,
+                image_id=req.image_id,
+                subnet_id=req.subnet_id,
+                nsg_ids=req.nsg_ids,
+                create_public_ip=req.create_public_ip,
+                ssh_username=req.ssh_username,
+                ssh_public_key=req.ssh_public_key,
+                image_publisher=req.image_publisher,
+                image_offer=req.image_offer,
+                image_sku=req.image_sku,
+                image_version=req.image_version,
+            )
+            result.update(vm_result)
+        except AzureError as e:
+            if result.get("aci_group_name"):
+                try:
+                    await azure_service.stop_aci_jumpoint_task(_aci_rg(), result["aci_group_name"])
+                except Exception:
+                    pass
+            raise
+
+        hostname = result.get("private_ip") or result.get("public_ip") or req.vm_name
+        job_service.update_progress(
+            db, job_id, 70,
+            f"VM '{req.vm_name}' created ({hostname}), provisioning Shell Jump…"
+        )
+
+        # Step 3: BeyondTrust PRA — Shell Jump (optional)
+        if settings.beyondtrust_enabled:
+            from ..services import btapi_service
+            jump_group = settings.azure_bt_jump_group_name or settings.bt_jump_group_name
+            group_policy = settings.azure_bt_group_policy_name or settings.bt_group_policy_name
+            jumpoint_id = settings.azure_jumpoint_id or settings.bt_jumpoint_id
+            aci_note = f" (ACI: {result['aci_group_name']})" if result.get("aci_group_name") else (
+                f" (ACI failed: {result['aci_error']})" if result.get("aci_error") else " (no ACI)"
+            )
+            try:
+                bt_result = await btapi_service.provision_ec2_jump(
+                    instance_name=req.vm_name,
+                    hostname=hostname,
+                    jump_group_name=jump_group,
+                    group_policy_name=group_policy,
+                    jumpoint_id=jumpoint_id,
+                    tag="Azure",
+                )
+                result["bt_shell_jump_id"] = bt_result.get("shell_jump_id")
+                result["bt_jump_group_id"] = bt_result.get("jump_group_id")
+                job_service.update_progress(
+                    db, job_id, 90,
+                    f"Shell Jump created (ID: {bt_result.get('shell_jump_id')}, "
+                    f"group: {jump_group}){aci_note}"
+                )
+            except Exception as e:
+                result["bt_error"] = str(e)
+                job_service.update_progress(
+                    db, job_id, 90,
+                    f"VM deployed but Shell Jump provisioning failed: {e}{aci_note}"
+                )
+        else:
+            job_service.update_progress(db, job_id, 90, "VM deployed.")
+
+        job_service.set_completed(db, job_id, result)
+        await cache_service.invalidate(cache_service.key_global("azure_vms"))
+
+    except AzureError as e:
+        job_service.set_failed(db, job_id, str(e))
+    except Exception as e:
+        job_service.set_failed(db, job_id, f"Unexpected error: {e}")
+    finally:
+        db.close()
+
+
+async def _run_bulk_deploy(job_items: list, req: AzureBulkDeployRequest, rg: str, loc: str):
+    """Start ONE ACI Jumpoint for the batch, then deploy each VM sequentially."""
+    db = _get_db_session()
+    aci_group_name = None
+    try:
+        for job_id, _ in job_items:
+            job_service.set_running(db, job_id)
+
+        first_job_id = job_items[0][0]
+
+        # Step 0: Quota check — fail fast before any resources are created
+        job_service.update_progress(db, first_job_id, 5, f"Checking Azure quota in {loc}…")
+        await azure_service.check_vm_quota(loc, req.vm_size)
+
+        aci_error = None
+        deploy_key_note = ""
+        if settings.beyondtrust_enabled:
+            from ..services import btapi_service
+            job_service.update_progress(
+                db, first_job_id, 10,
+                f"Starting ACI Jumpoint for {len(job_items)}-VM batch…"
+            )
+            try:
+                try:
+                    deploy_key = await btapi_service.get_ps_secret(settings.azure_aci_ps_deploy_key_title)
+                except Exception as key_err:
+                    logger.warning("ACI deploy key fetch failed (%s) — creating ACI without deploy key", key_err)
+                    deploy_key = ""
+                    deploy_key_note = f" [deploy key fetch failed: {key_err}]"
+                # Fetch ACR credentials if configured
+                acr_username, acr_password = "", ""
+                if (settings.azure_acr_server
+                        and settings.azure_acr_username_secret_title
+                        and settings.azure_acr_password_secret_title):
+                    try:
+                        acr_username = await btapi_service.get_ps_secret(settings.azure_acr_username_secret_title)
+                        acr_password = await btapi_service.get_ps_secret(settings.azure_acr_password_secret_title)
+                    except Exception as acr_err:
+                        logger.warning("ACR credential fetch failed (%s) — ACI will attempt pull without ACR auth", acr_err)
+                aci_group_name = await azure_service.run_aci_jumpoint_task(
+                    rg=_aci_rg(),
+                    location=loc,
+                    subnet_id=settings.azure_aci_subnet_id,
+                    image=settings.azure_aci_jumpoint_image,
+                    cpu=settings.azure_aci_cpu,
+                    memory=settings.azure_aci_memory,
+                    deploy_key=deploy_key,
+                    acr_server=settings.azure_acr_server,
+                    acr_username=acr_username,
+                    acr_password=acr_password,
+                    storage_account=settings.azure_aci_storage_account,
+                    storage_account_rg=settings.azure_aci_storage_account_rg,
+                    file_share=settings.azure_aci_file_share,
+                )
+            except Exception as e:
+                aci_error = str(e)
+                aci_group_name = None
+        else:
+            job_service.update_progress(
+                db, first_job_id, 10,
+                f"Preparing {len(job_items)}-VM batch…"
+            )
+
+        for job_id, vm_name in job_items:
+            result: dict = {}
+            if aci_group_name:
+                result["aci_group_name"] = aci_group_name
+            elif aci_error:
+                result["aci_error"] = aci_error
+
+            try:
+                job_service.update_progress(db, job_id, 35, f"Creating Azure VM '{vm_name}'…")
+                vm_result = await azure_service.deploy_vm(
+                    rg=rg,
+                    location=loc,
+                    vm_name=vm_name,
+                    vm_size=req.vm_size,
+                    image_id=req.image_id,
+                    subnet_id=req.subnet_id,
+                    nsg_ids=req.nsg_ids,
+                    create_public_ip=req.create_public_ip,
+                    ssh_username=req.ssh_username,
+                    ssh_public_key=req.ssh_public_key,
+                    image_publisher=req.image_publisher,
+                    image_offer=req.image_offer,
+                    image_sku=req.image_sku,
+                    image_version=req.image_version,
+                )
+                result.update(vm_result)
+
+                hostname = result.get("private_ip") or result.get("public_ip") or vm_name
+                job_service.update_progress(
+                    db, job_id, 70,
+                    f"VM '{vm_name}' created ({hostname}), provisioning Shell Jump…"
+                )
+
+                if settings.beyondtrust_enabled:
+                    from ..services import btapi_service
+                    jump_group = settings.azure_bt_jump_group_name or settings.bt_jump_group_name
+                    group_policy = settings.azure_bt_group_policy_name or settings.bt_group_policy_name
+                    jumpoint_id = settings.azure_jumpoint_id or settings.bt_jumpoint_id
+                    aci_note = f" (ACI: {result['aci_group_name']})" if result.get("aci_group_name") else (
+                        f" (ACI failed: {result['aci_error']})" if result.get("aci_error") else " (no ACI)"
+                    )
+                    try:
+                        bt_result = await btapi_service.provision_ec2_jump(
+                            instance_name=vm_name,
+                            hostname=hostname,
+                            jump_group_name=jump_group,
+                            group_policy_name=group_policy,
+                            jumpoint_id=jumpoint_id,
+                            tag="Azure",
+                        )
+                        result["bt_shell_jump_id"] = bt_result.get("shell_jump_id")
+                        job_service.update_progress(
+                            db, job_id, 90,
+                            f"Shell Jump created (ID: {bt_result.get('shell_jump_id')}, "
+                            f"group: {jump_group}){aci_note}"
+                        )
+                    except Exception as e:
+                        result["bt_error"] = str(e)
+                        job_service.update_progress(
+                            db, job_id, 90, f"VM deployed but Shell Jump failed: {e}{aci_note}"
+                        )
+                else:
+                    job_service.update_progress(db, job_id, 90, "VM deployed.")
+
+                job_service.set_completed(db, job_id, result)
+
+            except AzureError as e:
+                job_service.set_failed(db, job_id, str(e))
+            except Exception as e:
+                job_service.set_failed(db, job_id, f"Unexpected error: {e}")
+
+        await cache_service.invalidate(cache_service.key_global("azure_vms"))
+
+    except Exception as e:
+        for job_id, _ in job_items:
+            job_service.set_failed(db, job_id, f"Bulk deploy error: {e}")
+    finally:
+        db.close()
+
+
+async def _run_destroy(destroy_job_id: str, deploy_job_id: str, vm_name: str, rg: str):
+    db = _get_db_session()
+    try:
+        job_service.set_running(db, destroy_job_id)
+        job_service.update_progress(db, destroy_job_id, 20, f"Terminating Azure VM '{vm_name}'…")
+
+        await azure_service.terminate_vm(rg, vm_name)
+
+        result = {"vm_name": vm_name, "terminated": True}
+        deploy_job = job_service.get_job(db, deploy_job_id)
+        if deploy_job:
+            meta = deploy_job.metadata_dict
+
+            # Stop ACI Jumpoint — only if no other active VMs share this container group
+            aci_group_name = meta.get("aci_group_name")
+            active_sibling_jobs = [
+                j for j in db.query(Job)
+                .filter(Job.job_type == "azure_deploy", Job.status == "completed")
+                .all()
+                if j.id != deploy_job_id
+                and not j.metadata_dict.get("destroyed")
+            ]
+            if aci_group_name:
+                sibling_count = sum(
+                    1 for j in active_sibling_jobs
+                    if j.metadata_dict.get("aci_group_name") == aci_group_name
+                )
+                if sibling_count == 0:
+                    job_service.update_progress(
+                        db, destroy_job_id, 50, "Stopping Jumpoint ACI container…"
+                    )
+                    try:
+                        await azure_service.stop_aci_jumpoint_task(_aci_rg(), aci_group_name)
+                        result["aci_group_stopped"] = aci_group_name
+                    except AzureError as e:
+                        result["aci_error"] = str(e)
+                else:
+                    job_service.update_progress(
+                        db, destroy_job_id, 50,
+                        f"ACI Jumpoint shared with {sibling_count} other active VM(s) — leaving running…"
+                    )
+                    result["aci_group_shared"] = aci_group_name
+
+            # Fallback: if no metadata-tracked ACI and no other active VMs remain,
+            # enumerate and stop all dashboard ACI jumpoints (covers untracked containers)
+            if not aci_group_name and not active_sibling_jobs:
+                job_service.update_progress(
+                    db, destroy_job_id, 50, "No active VMs remain — checking for orphaned ACI Jumpoints…"
+                )
+                try:
+                    running_acis = await azure_service.list_aci_tasks(_aci_rg())
+                    stopped_acis = []
+                    for aci in running_acis:
+                        try:
+                            await azure_service.stop_aci_jumpoint_task(_aci_rg(), aci["group_name"])
+                            stopped_acis.append(aci["group_name"])
+                        except AzureError as e:
+                            result.setdefault("aci_errors", []).append(f"{aci['group_name']}: {e}")
+                    if stopped_acis:
+                        result["aci_groups_stopped"] = stopped_acis
+                except AzureError as e:
+                    result["aci_error"] = str(e)
+
+            # Remove BeyondTrust Shell Jump (only if BT is enabled — see aws.py comment)
+            bt_shell_jump_id = meta.get("bt_shell_jump_id")
+            if bt_shell_jump_id and settings.beyondtrust_enabled:
+                from ..services import btapi_service
+                job_service.update_progress(
+                    db, destroy_job_id, 70,
+                    f"Removing BeyondTrust Shell Jump {bt_shell_jump_id}…"
+                )
+                try:
+                    await btapi_service.remove_ec2_jump(int(bt_shell_jump_id))
+                    result["bt_shell_jump_removed"] = bt_shell_jump_id
+                except Exception as e:
+                    result["bt_error"] = f"Shell Jump removal failed: {e}"
+
+            # Mark original deploy job as destroyed (mirrors AWS pattern)
+            meta["destroyed"] = True
+            job_service.set_completed(db, deploy_job_id, meta)
+
+        job_service.set_completed(db, destroy_job_id, result)
+        await cache_service.invalidate(cache_service.key_global("azure_vms"))
+
+    except AzureError as e:
+        job_service.set_failed(db, destroy_job_id, str(e))
+    except Exception as e:
+        job_service.set_failed(db, destroy_job_id, f"Unexpected error: {e}")
+    finally:
+        db.close()
+
+
+async def _run_create_image(
+    job_id: str, vm_name: str, rg: str, req: AzureCreateImageRequest
+):
+    db = _get_db_session()
+    try:
+        job_service.set_running(db, job_id)
+        if req.generalize:
+            job_service.update_progress(
+                db, job_id, 20,
+                f"Deallocating and generalizing VM '{vm_name}' (VM will be unusable after this)…"
+            )
+        else:
+            job_service.update_progress(db, job_id, 20, f"Capturing image from VM '{vm_name}'…")
+
+        result = await azure_service.create_image_from_vm(rg, vm_name, req.name, req.generalize)
+
+        job_service.update_progress(db, job_id, 90, f"Image '{req.name}' created successfully.")
+        job_service.set_completed(db, job_id, result)
+        await cache_service.invalidate(cache_service.key_global("azure_images"))
+
+    except AzureError as e:
+        job_service.set_failed(db, job_id, str(e))
+    except Exception as e:
+        job_service.set_failed(db, job_id, f"Unexpected error: {e}")
+    finally:
+        db.close()

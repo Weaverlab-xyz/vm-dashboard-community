@@ -1,0 +1,1455 @@
+{% extends "base.html" %}
+{% block title %}AWS – Infrastructure Management{% endblock %}
+
+{% block content %}
+<div x-data="awsDashboard()" x-init="init()">
+
+  <!-- Header -->
+  <div class="flex items-center justify-between mb-6">
+    <div>
+      <h1 class="text-2xl font-bold text-gray-900">AWS Cloud</h1>
+      <p class="text-sm text-gray-500 mt-1">Browse community images, manage private AMIs, and deploy EC2 instances</p>
+    </div>
+    <div class="flex items-center gap-2">
+      <span class="text-xs text-gray-400">Region: <span class="font-semibold text-gray-600" x-text="region"></span></span>
+      <button @click="refreshAll()" :disabled="loading"
+              class="text-sm bg-white border border-gray-300 hover:bg-gray-50 px-3 py-2 rounded-lg shadow-sm font-medium transition">
+        Refresh
+      </button>
+    </div>
+  </div>
+
+  <!-- AWS credential error banner -->
+  <div x-show="credentialError" x-cloak
+       class="mb-6 bg-amber-50 border border-amber-200 rounded-xl p-4 text-sm text-amber-800">
+    <p class="font-semibold mb-1">AWS credentials not configured</p>
+    <p x-text="credentialError"></p>
+    <p class="mt-1">Make sure AWS CLI is configured: <code class="bg-amber-100 px-1 rounded">aws configure</code></p>
+  </div>
+
+  <!-- Tab navigation -->
+  <div class="flex gap-1 mb-6 bg-gray-100 p-1 rounded-xl w-fit">
+    <button @click="activeTab = 'community'"
+            :class="activeTab === 'community'
+              ? 'bg-white shadow text-gray-900 font-semibold'
+              : 'text-gray-500 hover:text-gray-700'"
+            class="px-4 py-2 rounded-lg text-sm transition">
+      Community Images
+    </button>
+    <button @click="switchToPrivateAmis()"
+            :class="activeTab === 'amis'
+              ? 'bg-white shadow text-gray-900 font-semibold'
+              : 'text-gray-500 hover:text-gray-700'"
+            class="px-4 py-2 rounded-lg text-sm transition">
+      Private AMIs
+      <span x-show="amis.length > 0" class="ml-1.5 text-xs bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded-full font-normal"
+            x-text="amis.length"></span>
+    </button>
+    <button @click="activeTab = 'instances'"
+            :class="activeTab === 'instances'
+              ? 'bg-white shadow text-gray-900 font-semibold'
+              : 'text-gray-500 hover:text-gray-700'"
+            class="px-4 py-2 rounded-lg text-sm transition">
+      EC2 Instances
+      <span x-show="instances.length > 0" class="ml-1.5 text-xs bg-green-100 text-green-700 px-1.5 py-0.5 rounded-full font-normal"
+            x-text="instances.length"></span>
+    </button>
+  </div>
+
+  <!-- ── TAB: Community Images ───────────────────────────────────────────── -->
+  <div x-show="activeTab === 'community'">
+    <div class="flex items-center justify-between mb-4">
+      <div>
+        <h2 class="text-lg font-semibold text-gray-800">Community Images</h2>
+        <p class="text-xs text-gray-400 mt-0.5">Free-tier-compatible public AMIs from Amazon, Canonical, and Debian.
+          Copy one to your account to use it as a private AMI.</p>
+      </div>
+    </div>
+
+    <!-- OS filter buttons -->
+    <div class="flex gap-2 mb-4">
+      <template x-for="f in [{id:'all',label:'All'},{id:'amazon-linux',label:'Amazon Linux'},{id:'ubuntu',label:'Ubuntu'},{id:'debian',label:'Debian'}]" :key="f.id">
+        <button @click="setCommunityFilter(f.id)"
+                :class="communityFilter === f.id
+                  ? 'bg-blue-600 text-white shadow-sm'
+                  : 'bg-white border border-gray-300 text-gray-600 hover:bg-gray-50'"
+                class="px-3 py-1.5 rounded-lg text-xs font-medium transition"
+                x-text="f.label"></button>
+      </template>
+    </div>
+
+    <!-- Loading skeleton -->
+    <div x-show="loadingCommunity" class="space-y-2">
+      <template x-for="i in [1,2,3,4,5]">
+        <div class="bg-gray-100 rounded-xl h-12 animate-pulse"></div>
+      </template>
+    </div>
+
+    <div x-show="!loadingCommunity && communityAmis.length === 0 && !credentialError"
+         class="bg-white rounded-xl border border-gray-200 p-10 text-center text-gray-400 text-sm">
+      No community images found for this filter.
+    </div>
+
+    <div x-show="!loadingCommunity && communityAmis.length > 0"
+         class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+      <table class="w-full text-sm">
+        <thead>
+          <tr class="bg-gray-50 border-b border-gray-200 text-left">
+            <th class="px-4 py-3 font-semibold text-gray-600">OS</th>
+            <th class="px-4 py-3 font-semibold text-gray-600">Name</th>
+            <th class="px-4 py-3 font-semibold text-gray-600">AMI ID</th>
+            <th class="px-4 py-3 font-semibold text-gray-600">Arch</th>
+            <th class="px-4 py-3 font-semibold text-gray-600">Size</th>
+            <th class="px-4 py-3 font-semibold text-gray-600">Created</th>
+            <th class="px-4 py-3 font-semibold text-gray-600 text-right">Actions</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-50">
+          <template x-for="ami in communityAmis" :key="ami.ami_id">
+            <tr class="hover:bg-gray-50 transition">
+              <td class="px-4 py-3">
+                <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium"
+                      :class="{
+                        'bg-orange-100 text-orange-700': ami.os_type === 'amazon-linux',
+                        'bg-purple-100 text-purple-700': ami.os_type === 'ubuntu',
+                        'bg-red-100 text-red-700': ami.os_type === 'debian',
+                      }"
+                      x-text="ami.os_type"></span>
+              </td>
+              <td class="px-4 py-3 font-medium text-gray-800 max-w-[240px]">
+                <span class="truncate block" x-text="ami.name" :title="ami.name"></span>
+                <span x-show="ami.free_tier_note"
+                      class="inline-flex items-center gap-0.5 text-[10px] text-green-600 font-normal mt-0.5">
+                  ✓ <span x-text="ami.free_tier_note"></span>
+                </span>
+              </td>
+              <td class="px-4 py-3 font-mono text-xs text-gray-500" x-text="ami.ami_id"></td>
+              <td class="px-4 py-3 text-gray-500 text-xs" x-text="ami.architecture"></td>
+              <td class="px-4 py-3 text-gray-500 text-xs" x-text="ami.size_gb ? ami.size_gb + ' GB' : '–'"></td>
+              <td class="px-4 py-3 text-gray-500 text-xs" x-text="formatDate(ami.creation_date)"></td>
+              <td class="px-4 py-3 text-right">
+                <button @click="openCopyModal(ami)"
+                        class="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700
+                               text-white text-xs font-medium rounded-lg transition">
+                  Copy to Private
+                </button>
+              </td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ── TAB: Private AMIs ───────────────────────────────────────────────── -->
+  <div x-show="activeTab === 'amis'">
+    <div class="flex items-center justify-between mb-4">
+      <div>
+        <h2 class="text-lg font-semibold text-gray-800">Private AMIs</h2>
+        <p class="text-xs text-gray-400 mt-0.5">AMIs owned by your AWS account, including any copied from community images.</p>
+      </div>
+      <div class="flex items-center gap-3">
+        <span class="text-sm text-gray-400" x-text="amis.length + ' AMIs'"></span>
+        <button x-show="selectedAmiIds.length > 0"
+                @click="openBulkDeployModal()"
+                class="flex items-center gap-1.5 px-3 py-1.5 bg-green-600 hover:bg-green-700
+                       text-white text-xs font-semibold rounded-lg transition shadow-sm">
+          Bulk Deploy
+          <span class="bg-green-500 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full"
+                x-text="selectedAmiIds.length"></span>
+        </button>
+        <button x-show="selectedAmiIds.length > 0"
+                @click="selectedAmiIds = []"
+                class="px-2 py-1.5 text-xs text-gray-500 hover:text-gray-700 border border-gray-300
+                       rounded-lg hover:bg-gray-50 transition">
+          Clear
+        </button>
+      </div>
+    </div>
+
+    <!-- Loading skeleton -->
+    <div x-show="loadingAmis" class="space-y-2">
+      <template x-for="i in [1,2,3]">
+        <div class="bg-gray-100 rounded-xl h-14 animate-pulse"></div>
+      </template>
+    </div>
+
+    <div x-show="!loadingAmis && amis.length === 0 && !credentialError"
+         class="bg-white rounded-xl border border-gray-200 p-10 text-center text-gray-400 text-sm">
+      No private AMIs found. Copy a community image above, or upload an OVA via the CLI.
+    </div>
+
+    <div x-show="!loadingAmis && amis.length > 0"
+         class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+      <table class="w-full text-sm">
+        <thead>
+          <tr class="bg-gray-50 border-b border-gray-200 text-left">
+            <th class="px-4 py-3 w-10">
+              <input type="checkbox"
+                     @click="toggleSelectAllAmis()"
+                     :checked="selectedAmiIds.length > 0 && selectedAmiIds.length === amis.filter(a => a.state === 'available').length"
+                     class="rounded border-gray-300 text-blue-600 focus:ring-blue-500 cursor-pointer"
+                     title="Select all available AMIs">
+            </th>
+            <th class="px-4 py-3 font-semibold text-gray-600">AMI Name</th>
+            <th class="px-4 py-3 font-semibold text-gray-600">AMI ID</th>
+            <th class="px-4 py-3 font-semibold text-gray-600">State</th>
+            <th class="px-4 py-3 font-semibold text-gray-600">Arch</th>
+            <th class="px-4 py-3 font-semibold text-gray-600">Size</th>
+            <th class="px-4 py-3 font-semibold text-gray-600">Created</th>
+            <th class="px-4 py-3 font-semibold text-gray-600 text-right">Actions</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-50">
+          <template x-for="ami in amis" :key="ami.ami_id">
+            <tr class="hover:bg-gray-50 transition"
+                :class="selectedAmiIds.includes(ami.ami_id) ? 'bg-blue-50' : ''">
+              <td class="px-4 py-3 w-10">
+                <input type="checkbox"
+                       :disabled="ami.state !== 'available'"
+                       :checked="selectedAmiIds.includes(ami.ami_id)"
+                       @change="toggleSelectAmi(ami.ami_id)"
+                       class="rounded border-gray-300 text-blue-600 focus:ring-blue-500
+                              disabled:opacity-40 cursor-pointer">
+              </td>
+              <td class="px-4 py-3 font-medium text-gray-800 max-w-[200px]">
+                <span class="truncate block" x-text="ami.name"></span>
+                <span x-show="ami.tags && ami.tags.CopiedFrom"
+                      class="text-[10px] text-indigo-500 font-normal mt-0.5 block font-mono"
+                      x-text="'Copied from: ' + (ami.tags?.CopiedFrom || '')"></span>
+                <span x-show="ami.state === 'available' && !ami.ena_support"
+                      class="inline-flex items-center gap-0.5 text-[10px] font-medium text-amber-700
+                             bg-amber-100 px-1.5 py-0.5 rounded mt-0.5"
+                      title="ENA not enabled — cannot use t3/m5/c5/r5 instance types">
+                  ⚠ No ENA
+                </span>
+                <span x-show="ami.ena_support"
+                      class="inline-flex items-center gap-0.5 text-[10px] font-medium text-green-700
+                             bg-green-100 px-1.5 py-0.5 rounded mt-0.5">
+                  ✓ ENA
+                </span>
+              </td>
+              <td class="px-4 py-3 font-mono text-xs text-gray-500" x-text="ami.ami_id"></td>
+              <td class="px-4 py-3">
+                <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium"
+                      :class="ami.state === 'available' ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'"
+                      x-text="ami.state"></span>
+              </td>
+              <td class="px-4 py-3 text-gray-500 text-xs" x-text="ami.architecture"></td>
+              <td class="px-4 py-3 text-gray-500 text-xs" x-text="ami.size_gb ? ami.size_gb + ' GB' : '–'"></td>
+              <td class="px-4 py-3 text-gray-500 text-xs" x-text="formatDate(ami.creation_date)"></td>
+              <td class="px-4 py-3 text-right space-x-2">
+                <button x-show="ami.state === 'available' && !ami.ena_support"
+                        @click="enableEna(ami)"
+                        :disabled="enablingEna.has(ami.ami_id)"
+                        class="px-3 py-1.5 bg-amber-500 hover:bg-amber-600 disabled:opacity-50
+                               text-white text-xs font-medium rounded-lg transition"
+                        title="Re-register this AMI with ENA enabled (creates a new -ena copy, same snapshot)">
+                  <span x-show="!enablingEna.has(ami.ami_id)">Enable ENA</span>
+                  <span x-show="enablingEna.has(ami.ami_id)" x-cloak>Enabling…</span>
+                </button>
+                <button @click="openDeployModal(ami)"
+                        :disabled="ami.state !== 'available'"
+                        class="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-40
+                               text-white text-xs font-medium rounded-lg transition">
+                  Deploy
+                </button>
+                <button @click="deleteAmi(ami)"
+                        class="px-3 py-1.5 bg-red-600 hover:bg-red-700
+                               text-white text-xs font-medium rounded-lg transition">
+                  Delete
+                </button>
+              </td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ── TAB: EC2 Instances ─────────────────────────────────────────────── -->
+  <div x-show="activeTab === 'instances'">
+    <div class="flex items-center justify-between mb-4">
+      <h2 class="text-lg font-semibold text-gray-800">Deployed EC2 Instances</h2>
+      <div class="flex items-center gap-3">
+        <span x-show="cachedAtInstances" class="text-xs text-gray-400"
+              x-text="'Updated ' + timeAgo(cachedAtInstances)"></span>
+        <span class="text-sm text-gray-400" x-text="instances.length + ' instances'"></span>
+      </div>
+    </div>
+
+    <div x-show="loadingInstances" class="space-y-2">
+      <template x-for="i in [1,2]">
+        <div class="bg-gray-100 rounded-xl h-14 animate-pulse"></div>
+      </template>
+    </div>
+
+    <div x-show="!loadingInstances && instances.length === 0"
+         class="bg-white rounded-xl border border-gray-200 p-10 text-center text-gray-400 text-sm">
+      No instances deployed from this dashboard yet. Deploy an AMI from the Private AMIs tab.
+    </div>
+
+    <div x-show="!loadingInstances && instances.length > 0"
+         class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+      <table class="w-full text-sm">
+        <thead>
+          <tr class="bg-gray-50 border-b border-gray-200 text-left">
+            <th class="px-4 py-3 font-semibold text-gray-600">Status</th>
+            <th class="px-4 py-3 font-semibold text-gray-600">Name</th>
+            <th class="px-4 py-3 font-semibold text-gray-600">Instance ID</th>
+            <th class="px-4 py-3 font-semibold text-gray-600">Type</th>
+            <th class="px-4 py-3 font-semibold text-gray-600">Public IP</th>
+            <th class="px-4 py-3 font-semibold text-gray-600">Private IP</th>
+            <th class="px-4 py-3 font-semibold text-gray-600">Launched</th>
+            <th class="px-4 py-3 font-semibold text-gray-600 text-right">Actions</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-50">
+          <template x-for="inst in instances" :key="inst.instance_id">
+            <tr class="hover:bg-gray-50 transition">
+              <td class="px-4 py-3">
+                <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-xs font-medium"
+                      :class="instanceStateBadge(inst.state)">
+                  <span class="h-1.5 w-1.5 rounded-full"
+                        :class="inst.state === 'running' ? 'bg-green-500' : 'bg-gray-400'"></span>
+                  <span x-text="inst.state"></span>
+                </span>
+              </td>
+              <td class="px-4 py-3 font-medium text-gray-800" x-text="inst.name"></td>
+              <td class="px-4 py-3 font-mono text-xs text-gray-500" x-text="inst.instance_id"></td>
+              <td class="px-4 py-3 text-gray-500 text-xs" x-text="inst.instance_type"></td>
+              <td class="px-4 py-3 font-mono text-xs text-gray-600" x-text="inst.public_ip || '–'"></td>
+              <td class="px-4 py-3 font-mono text-xs text-gray-500" x-text="inst.private_ip || '–'"></td>
+              <td class="px-4 py-3 text-gray-400 text-xs" x-text="timeAgo(inst.launch_time)"></td>
+              <td class="px-4 py-3 text-right">
+                <div class="flex items-center justify-end gap-2">
+                  <a x-show="inst.job_id" :href="'/jobs/' + inst.job_id"
+                     class="text-xs text-blue-500 hover:underline">Job</a>
+                  <button @click="openSshKeyModal(inst)"
+                          x-show="inst.key_name"
+                          class="px-3 py-1.5 bg-gray-700 hover:bg-gray-800
+                                 text-white text-xs font-medium rounded-lg transition"
+                          title="Retrieve SSH private key from Secrets Manager">
+                    SSH Key
+                  </button>
+                  <button @click="openCreateImageModal(inst)"
+                          :disabled="inst.state !== 'running'"
+                          class="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40
+                                 text-white text-xs font-medium rounded-lg transition"
+                          title="Save running instance as a new AMI">
+                    Save as Image
+                  </button>
+                  <button @click="destroyInstance(inst)"
+                          :disabled="pendingDestroy.has(inst.instance_id)"
+                          class="px-3 py-1.5 bg-red-600 hover:bg-red-700 disabled:opacity-40
+                                 text-white text-xs font-medium rounded-lg transition">
+                    <span x-show="!pendingDestroy.has(inst.instance_id)">Destroy</span>
+                    <span x-show="pendingDestroy.has(inst.instance_id)" x-cloak>Destroying…</span>
+                  </button>
+                </div>
+              </td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ── Copy Modal ─────────────────────────────────────────────────────── -->
+  <div x-show="showCopyModal" x-cloak
+       class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+       @click.self="showCopyModal = false">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md">
+
+      <div class="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+        <h3 class="text-lg font-semibold text-gray-800">Copy to Private AMI</h3>
+        <button @click="showCopyModal = false" class="text-gray-400 hover:text-gray-600 text-xl">×</button>
+      </div>
+
+      <div class="px-6 py-5">
+        <!-- Source AMI info -->
+        <div class="bg-indigo-50 rounded-lg p-3 mb-5 text-sm">
+          <p class="font-medium text-indigo-800" x-text="selectedCommunityAmi?.name"></p>
+          <p class="font-mono text-xs text-indigo-500 mt-0.5" x-text="selectedCommunityAmi?.ami_id"></p>
+          <p class="text-xs text-green-600 mt-1" x-text="selectedCommunityAmi?.free_tier_note"></p>
+        </div>
+
+        <form @submit.prevent="submitCopy()">
+          <!-- Private AMI name -->
+          <div class="mb-4">
+            <label class="block text-sm font-medium text-gray-700 mb-1">Private AMI Name *</label>
+            <input type="text" x-model="copyForm.name" required
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm
+                          focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                   placeholder="e.g. my-amazon-linux-2023">
+            <p class="text-xs text-gray-400 mt-1">This will be the name of the AMI in your account.</p>
+          </div>
+
+          <!-- Description -->
+          <div class="mb-5">
+            <label class="block text-sm font-medium text-gray-700 mb-1">Description (optional)</label>
+            <input type="text" x-model="copyForm.description"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm
+                          focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                   placeholder="e.g. Amazon Linux 2023 base image">
+          </div>
+
+          <div class="bg-blue-50 rounded-lg px-3 py-2 mb-4 text-xs text-blue-700">
+            The copy runs as a background job. AWS typically takes 2–10 minutes.
+            You'll be redirected to the job page to track progress.
+          </div>
+
+          <!-- Error -->
+          <div x-show="copyError" class="mb-4 bg-red-50 border border-red-200 rounded-lg px-3 py-2 text-sm text-red-700"
+               x-text="copyError"></div>
+
+          <div class="flex gap-3">
+            <button type="button" @click="showCopyModal = false"
+                    class="flex-1 py-2 border border-gray-300 rounded-lg text-sm font-medium hover:bg-gray-50 transition">
+              Cancel
+            </button>
+            <button type="submit" :disabled="copying"
+                    class="flex-1 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50
+                           text-white text-sm font-medium rounded-lg transition">
+              <span x-show="!copying">Start Copy</span>
+              <span x-show="copying" x-cloak>Copying…</span>
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── SSH Key Modal ─────────────────────────────────────────────────── -->
+  <div x-show="showSshKeyModal" x-cloak
+       class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+       @click.self="closeSshKeyModal()">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-xl">
+
+      <div class="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+        <h3 class="text-lg font-semibold text-gray-800">SSH Key</h3>
+        <button @click="closeSshKeyModal()" class="text-gray-400 hover:text-gray-600 text-xl">×</button>
+      </div>
+
+      <div class="px-6 py-5 space-y-4">
+
+        <!-- Instance summary -->
+        <div class="bg-gray-50 rounded-lg p-3 text-sm">
+          <p class="font-medium text-gray-800" x-text="sshKeyInst?.name"></p>
+          <p class="font-mono text-xs text-gray-500 mt-0.5" x-text="sshKeyInst?.instance_id"></p>
+          <p class="text-xs text-gray-500 mt-1">
+            Key pair: <span class="font-mono font-semibold text-gray-700" x-text="sshKeyInst?.key_name"></span>
+          </p>
+        </div>
+
+        <!-- Loading / error state -->
+        <div x-show="sshKeyLoading" class="text-center py-6 text-sm text-gray-400">
+          Fetching key from Secrets Manager…
+        </div>
+
+        <div x-show="sshKeyError && !sshKeyLoading"
+             class="bg-red-50 border border-red-200 rounded-lg px-4 py-3 text-sm text-red-700">
+          <p class="font-semibold mb-1">Key not found</p>
+          <p x-text="sshKeyError"></p>
+          <p class="mt-2 text-xs text-red-500">
+            Store the .pem contents in Secrets Manager with the name shown above, then try again.
+          </p>
+        </div>
+
+        <template x-if="sshKeyData && !sshKeyLoading">
+          <div class="space-y-4">
+
+            <!-- Secrets Manager path -->
+            <div>
+              <label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">
+                Secrets Manager name
+              </label>
+              <div class="flex items-center gap-2">
+                <code class="flex-1 bg-gray-100 rounded-lg px-3 py-2 text-xs font-mono text-gray-700 break-all"
+                      x-text="sshKeyData.secret_name"></code>
+                <button @click="copyText(sshKeyData.secret_name, 'Secret name copied')"
+                        class="shrink-0 px-3 py-2 bg-gray-200 hover:bg-gray-300 text-gray-700 text-xs rounded-lg transition">
+                  Copy
+                </button>
+              </div>
+            </div>
+
+            <!-- SSH command -->
+            <div x-show="sshKeyData.ssh_command">
+              <label class="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">
+                SSH command
+              </label>
+              <div class="flex items-center gap-2">
+                <code class="flex-1 bg-blue-50 rounded-lg px-3 py-2 text-xs font-mono text-blue-800 break-all"
+                      x-text="sshKeyData.ssh_command"></code>
+                <button @click="copyText(sshKeyData.ssh_command, 'SSH command copied')"
+                        class="shrink-0 px-3 py-2 bg-blue-100 hover:bg-blue-200 text-blue-700 text-xs rounded-lg transition">
+                  Copy
+                </button>
+              </div>
+              <p class="text-xs text-gray-400 mt-1">
+                Replace <code class="bg-gray-100 px-1 rounded">&lt;key-file&gt;</code> with the path to your saved .pem file,
+                and adjust the username for your AMI (e.g. <code class="bg-gray-100 px-1 rounded">ubuntu</code>,
+                <code class="bg-gray-100 px-1 rounded">ec2-user</code>, <code class="bg-gray-100 px-1 rounded">admin</code>).
+              </p>
+            </div>
+
+            <!-- Private key -->
+            <div>
+              <div class="flex items-center justify-between mb-1">
+                <label class="text-xs font-semibold text-gray-500 uppercase tracking-wide">
+                  Private key (PEM)
+                </label>
+                <div class="flex items-center gap-2">
+                  <button @click="sshKeyVisible = !sshKeyVisible"
+                          class="text-xs text-gray-500 hover:text-gray-700 underline">
+                    <span x-text="sshKeyVisible ? 'Hide' : 'Show'"></span>
+                  </button>
+                  <button @click="copyText(sshKeyData.private_key, 'Private key copied')"
+                          class="px-3 py-1.5 bg-gray-700 hover:bg-gray-800 text-white text-xs rounded-lg transition">
+                    Copy
+                  </button>
+                </div>
+              </div>
+              <div x-show="sshKeyVisible" x-cloak>
+                <textarea readonly rows="8"
+                          class="w-full bg-gray-900 text-green-400 font-mono text-xs rounded-lg px-3 py-2
+                                 border border-gray-700 resize-none focus:outline-none"
+                          x-text="sshKeyData.private_key"></textarea>
+              </div>
+              <div x-show="!sshKeyVisible"
+                   class="bg-gray-100 rounded-lg px-3 py-3 text-xs text-gray-400 text-center">
+                Key hidden — click Show to reveal
+              </div>
+            </div>
+
+          </div>
+        </template>
+
+        <div class="flex justify-end pt-2">
+          <button @click="closeSshKeyModal()"
+                  class="px-4 py-2 border border-gray-300 rounded-lg text-sm font-medium hover:bg-gray-50 transition">
+            Close
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Create Image Modal ────────────────────────────────────────────── -->
+  <div x-show="showCreateImageModal" x-cloak
+       class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+       @click.self="showCreateImageModal = false">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md">
+
+      <div class="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+        <h3 class="text-lg font-semibold text-gray-800">Save Instance as Image</h3>
+        <button @click="showCreateImageModal = false" class="text-gray-400 hover:text-gray-600 text-xl">×</button>
+      </div>
+
+      <div class="px-6 py-5">
+        <!-- Source instance info -->
+        <div class="bg-indigo-50 rounded-lg p-3 mb-5 text-sm">
+          <p class="font-medium text-indigo-800" x-text="selectedInstance?.name"></p>
+          <p class="font-mono text-xs text-indigo-500 mt-0.5" x-text="selectedInstance?.instance_id"></p>
+          <p class="text-xs text-gray-500 mt-1">
+            <span x-text="selectedInstance?.instance_type"></span>
+            &nbsp;·&nbsp;
+            <span x-text="selectedInstance?.availability_zone"></span>
+          </p>
+        </div>
+
+        <form @submit.prevent="submitCreateImage()">
+          <!-- AMI name -->
+          <div class="mb-4">
+            <label class="block text-sm font-medium text-gray-700 mb-1">Image Name *</label>
+            <input type="text" x-model="createImageForm.name" required
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm
+                          focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                   placeholder="e.g. my-configured-server-v1">
+          </div>
+
+          <!-- Description -->
+          <div class="mb-4">
+            <label class="block text-sm font-medium text-gray-700 mb-1">Description (optional)</label>
+            <input type="text" x-model="createImageForm.description"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm
+                          focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                   placeholder="e.g. Post-configuration snapshot">
+          </div>
+
+          <!-- No-reboot option -->
+          <div class="mb-5 flex items-start gap-3">
+            <input type="checkbox" id="noReboot" x-model="createImageForm.no_reboot"
+                   class="mt-0.5 h-4 w-4 rounded border-gray-300 text-indigo-600">
+            <div>
+              <label for="noReboot" class="text-sm font-medium text-gray-700">No reboot</label>
+              <p class="text-xs text-gray-400 mt-0.5">
+                Keep the instance running during imaging. May result in filesystem inconsistencies
+                on Windows; generally safe for Linux.
+              </p>
+            </div>
+          </div>
+
+          <div class="bg-blue-50 rounded-lg px-3 py-2 mb-4 text-xs text-blue-700">
+            Image creation runs as a background job. AWS typically takes 5–20 minutes.
+            The new AMI will appear in your Private AMIs tab when ready.
+          </div>
+
+          <!-- Error -->
+          <div x-show="createImageError"
+               class="mb-4 bg-red-50 border border-red-200 rounded-lg px-3 py-2 text-sm text-red-700"
+               x-text="createImageError"></div>
+
+          <div class="flex gap-3">
+            <button type="button" @click="showCreateImageModal = false"
+                    class="flex-1 py-2 border border-gray-300 rounded-lg text-sm font-medium hover:bg-gray-50 transition">
+              Cancel
+            </button>
+            <button type="submit" :disabled="creatingImage"
+                    class="flex-1 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50
+                           text-white text-sm font-medium rounded-lg transition">
+              <span x-show="!creatingImage">Create Image</span>
+              <span x-show="creatingImage" x-cloak>Creating…</span>
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Deploy Modal ───────────────────────────────────────────────────── -->
+  <div x-show="showDeployModal" x-cloak
+       class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+       @click.self="showDeployModal = false">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
+
+      <div class="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+        <h3 class="text-lg font-semibold text-gray-800">Deploy AMI</h3>
+        <button @click="showDeployModal = false" class="text-gray-400 hover:text-gray-600 text-xl">×</button>
+      </div>
+
+      <div class="px-6 py-5">
+
+        <!-- Selected AMI info -->
+        <div class="bg-blue-50 rounded-lg p-3 mb-5 text-sm">
+          <p class="font-medium text-blue-800" x-text="selectedAmi?.name"></p>
+          <p class="font-mono text-xs text-blue-600 mt-0.5" x-text="selectedAmi?.ami_id"></p>
+        </div>
+
+        <!-- ENA warning banner -->
+        <div x-show="selectedAmi && !selectedAmi.ena_support && enaRequiredPrefixes.some(p => deployForm.instance_type.startsWith(p))"
+             x-cloak
+             class="mb-4 bg-amber-50 border border-amber-300 rounded-lg p-3 text-sm text-amber-800">
+          <p class="font-semibold">⚠ This AMI does not have ENA enabled</p>
+          <p class="mt-1 text-xs">The selected instance type (<span class="font-mono font-semibold" x-text="deployForm.instance_type"></span>)
+            requires Enhanced Networking (ENA). This deployment will fail unless you first click
+            <strong>Enable ENA</strong> (creates a new <code>-ena</code> copy of the AMI), or select a <strong>t2.*</strong> instance type instead.</p>
+        </div>
+
+        <!-- Loading network options -->
+        <div x-show="loadingNetworkOpts" class="py-6 text-center text-gray-400 text-sm">
+          Loading AWS network options…
+        </div>
+
+        <form x-show="!loadingNetworkOpts" @submit.prevent="submitDeploy()">
+
+          <!-- Instance Name -->
+          <div class="mb-4">
+            <label class="block text-sm font-medium text-gray-700 mb-1">Instance Name *</label>
+            <input type="text" x-model="deployForm.instance_name" required
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm
+                          focus:outline-none focus:ring-2 focus:ring-blue-500"
+                   placeholder="e.g. my-vm-deployment">
+          </div>
+
+          <!-- Instance Type -->
+          <div class="mb-4">
+            <label class="block text-sm font-medium text-gray-700 mb-1">Instance Type *</label>
+            <select x-model="deployForm.instance_type" required
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm
+                           focus:outline-none focus:ring-2 focus:ring-blue-500">
+              <template x-for="t in networkOpts.instance_types || []" :key="t">
+                <option :value="t" :selected="t === 't3.medium'" x-text="t"></option>
+              </template>
+            </select>
+          </div>
+
+          <!-- SSH Key (Secrets Manager) -->
+          <div class="mb-4">
+            <label class="block text-sm font-medium text-gray-700 mb-1">SSH Key (Secrets Manager) *</label>
+            <select x-model="deployForm.ssh_secret_name" required
+                    @change="fetchSshKeyPreview(deployForm.ssh_secret_name)"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm
+                           focus:outline-none focus:ring-2 focus:ring-blue-500">
+              <option value="">Select a secret…</option>
+              <template x-for="s in sshKeySecrets" :key="s.name">
+                <option :value="s.name" x-text="s.name + (s.description ? ' – ' + s.description : '')"></option>
+              </template>
+            </select>
+            <div x-show="deployForm.sshKeyPreviewLoading"
+                 class="mt-1.5 text-xs text-gray-400">Fetching key from Secrets Manager…</div>
+            <div x-show="deployForm.sshKeyPreviewError && !deployForm.sshKeyPreviewLoading"
+                 class="mt-1.5 text-xs text-red-500" x-text="deployForm.sshKeyPreviewError"></div>
+            <div x-show="deployForm.sshPublicKeyPreview && !deployForm.sshKeyPreviewLoading">
+              <p class="text-xs text-green-600 mt-1.5 mb-1">
+                Key retrieved: <span class="font-mono font-medium" x-text="deployForm.ssh_secret_name"></span>
+              </p>
+              <textarea readonly rows="2"
+                        class="w-full border border-gray-200 bg-gray-50 rounded-lg px-3 py-2
+                               text-xs font-mono resize-none text-gray-600 cursor-default"
+                        x-text="deployForm.sshPublicKeyPreview"></textarea>
+            </div>
+            <p x-show="sshKeySecrets.length === 0 && !sshKeysLoading"
+               class="text-xs text-amber-600 mt-1">
+              No secrets found. Store SSH public keys in Secrets Manager under the configured prefix to use this feature.
+            </p>
+          </div>
+
+          <!-- Subnet -->
+          <div class="mb-4">
+            <label class="block text-sm font-medium text-gray-700 mb-1">Subnet *</label>
+            <select x-model="deployForm.subnet_id" required
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm
+                           focus:outline-none focus:ring-2 focus:ring-blue-500">
+              <option value="">Select subnet…</option>
+              <template x-for="s in networkOpts.subnets || []" :key="s.id">
+                <option :value="s.id" x-text="s.name"></option>
+              </template>
+            </select>
+          </div>
+
+          <!-- Security Groups -->
+          <div class="mb-5">
+            <label class="block text-sm font-medium text-gray-700 mb-1">Security Groups *</label>
+            <div class="border border-gray-300 rounded-lg max-h-36 overflow-y-auto p-2 space-y-1">
+              <p x-show="(networkOpts.security_groups || []).length === 0"
+                 class="text-xs text-gray-400 p-1">No security groups found.</p>
+              <template x-for="sg in networkOpts.security_groups || []" :key="sg.id">
+                <label class="flex items-center gap-2 p-1 rounded hover:bg-gray-50 cursor-pointer">
+                  <input type="checkbox" :value="sg.id"
+                         @change="toggleSG($event, sg.id)"
+                         :checked="deployForm.security_group_ids.includes(sg.id)"
+                         class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+                  <span class="text-xs text-gray-700" x-text="sg.name"></span>
+                </label>
+              </template>
+            </div>
+            <p x-show="deployForm.security_group_ids.length === 0"
+               class="text-xs text-red-500 mt-1">Select at least one security group.</p>
+          </div>
+
+          <!-- Error -->
+          <div x-show="deployError" class="mb-4 bg-red-50 border border-red-200 rounded-lg px-3 py-2 text-sm text-red-700"
+               x-text="deployError"></div>
+
+          <div class="flex gap-3">
+            <button type="button" @click="showDeployModal = false"
+                    class="flex-1 py-2 border border-gray-300 rounded-lg text-sm font-medium hover:bg-gray-50 transition">
+              Cancel
+            </button>
+            <button type="submit"
+                    :disabled="deploying || deployForm.security_group_ids.length === 0"
+                    class="flex-1 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50
+                           text-white text-sm font-medium rounded-lg transition">
+              <span x-show="!deploying">Launch Instance</span>
+              <span x-show="deploying" x-cloak>Launching…</span>
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Bulk Deploy Modal ─────────────────────────────────────────────── -->
+  <div x-show="showBulkDeployModal" x-cloak
+       class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+       @click.self="showBulkDeployModal = false">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] flex flex-col">
+
+      <div class="flex items-center justify-between px-6 py-4 border-b border-gray-100 flex-shrink-0">
+        <div>
+          <h3 class="text-lg font-semibold text-gray-800">Bulk Deploy AMIs</h3>
+          <p class="text-xs text-gray-400 mt-0.5"
+             x-text="bulkDeployItems.length + ' AMI' + (bulkDeployItems.length !== 1 ? 's' : '') + ' selected — each will launch as a separate EC2 instance'"></p>
+        </div>
+        <button @click="showBulkDeployModal = false" class="text-gray-400 hover:text-gray-600 text-xl">×</button>
+      </div>
+
+      <!-- Results panel (shown after submission) -->
+      <div x-show="bulkDeployResults.length > 0" class="px-6 py-5 flex-1 overflow-y-auto">
+        <div class="bg-green-50 border border-green-200 rounded-xl p-4 mb-4">
+          <p class="font-semibold text-green-800 text-sm mb-1">
+            <span x-text="bulkDeployResults.length"></span> deployment<span x-show="bulkDeployResults.length !== 1">s</span> queued successfully!
+          </p>
+          <p class="text-xs text-green-600">Each instance is deploying in the background. Track each job below.</p>
+        </div>
+        <div class="space-y-2">
+          <template x-for="r in bulkDeployResults" :key="r.job_id">
+            <div class="flex items-center justify-between bg-gray-50 rounded-lg px-4 py-3 border border-gray-200">
+              <div>
+                <p class="text-sm font-medium text-gray-800" x-text="r.instance_name"></p>
+                <p class="text-xs text-gray-400 font-mono mt-0.5" x-text="r.ami_id"></p>
+              </div>
+              <a :href="'/jobs/' + r.job_id"
+                 class="text-xs bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded-lg font-medium transition">
+                View Job
+              </a>
+            </div>
+          </template>
+        </div>
+        <div class="mt-4 flex gap-3">
+          <button @click="showBulkDeployModal = false; selectedAmiIds = []"
+                  class="flex-1 py-2 border border-gray-300 rounded-lg text-sm font-medium hover:bg-gray-50 transition">
+            Close
+          </button>
+          <a href="/jobs"
+             class="flex-1 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg transition text-center">
+            View All Jobs
+          </a>
+        </div>
+      </div>
+
+      <!-- Form (shown before submission) -->
+      <div x-show="bulkDeployResults.length === 0" class="flex-1 overflow-y-auto">
+
+        <!-- Loading network options -->
+        <div x-show="loadingNetworkOpts" class="px-6 py-10 text-center text-gray-400 text-sm">
+          Loading AWS network options…
+        </div>
+
+        <div x-show="!loadingNetworkOpts" class="px-6 py-5 space-y-5">
+
+          <!-- Selected AMIs list with per-instance names -->
+          <div>
+            <label class="block text-sm font-semibold text-gray-700 mb-2">Instance Names</label>
+            <p class="text-xs text-gray-400 mb-3">Edit the name for each instance before launching.</p>
+            <div class="space-y-2 max-h-48 overflow-y-auto pr-1">
+              <template x-for="(item, idx) in bulkDeployItems" :key="item.ami_id">
+                <div class="flex items-center gap-3 bg-gray-50 border border-gray-200 rounded-lg px-3 py-2">
+                  <div class="flex-1 min-w-0">
+                    <p class="text-xs text-gray-500 font-mono truncate" x-text="item.ami_id"></p>
+                    <p class="text-xs text-gray-400 truncate mt-0.5" x-text="item.ami_name"></p>
+                  </div>
+                  <input type="text"
+                         x-model="bulkDeployItems[idx].instance_name"
+                         required
+                         class="w-44 border border-gray-300 rounded-lg px-2 py-1.5 text-xs
+                                focus:outline-none focus:ring-2 focus:ring-green-500"
+                         placeholder="instance-name">
+                </div>
+              </template>
+            </div>
+          </div>
+
+          <!-- Shared: Instance Type -->
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Instance Type <span class="text-gray-400 font-normal">(shared)</span></label>
+            <select x-model="deployForm.instance_type"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm
+                           focus:outline-none focus:ring-2 focus:ring-green-500">
+              <template x-for="t in networkOpts.instance_types || []" :key="t">
+                <option :value="t" :selected="t === 't3.medium'" x-text="t"></option>
+              </template>
+            </select>
+          </div>
+
+          <!-- Shared: SSH Key (Secrets Manager) -->
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">SSH Key <span class="text-gray-400 font-normal">(shared)</span></label>
+            <select x-model="deployForm.ssh_secret_name" required
+                    @change="fetchSshKeyPreview(deployForm.ssh_secret_name)"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm
+                           focus:outline-none focus:ring-2 focus:ring-green-500">
+              <option value="">Select a secret…</option>
+              <template x-for="s in sshKeySecrets" :key="s.name">
+                <option :value="s.name" x-text="s.name + (s.description ? ' – ' + s.description : '')"></option>
+              </template>
+            </select>
+            <div x-show="deployForm.sshPublicKeyPreview && !deployForm.sshKeyPreviewLoading">
+              <p class="text-xs text-green-600 mt-1.5 mb-1">
+                Key retrieved: <span class="font-mono font-medium" x-text="deployForm.ssh_secret_name"></span>
+              </p>
+              <textarea readonly rows="2"
+                        class="w-full border border-gray-200 bg-gray-50 rounded-lg px-3 py-2
+                               text-xs font-mono resize-none text-gray-600 cursor-default"
+                        x-text="deployForm.sshPublicKeyPreview"></textarea>
+            </div>
+          </div>
+
+          <!-- Shared: Subnet -->
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Subnet <span class="text-gray-400 font-normal">(shared)</span></label>
+            <select x-model="deployForm.subnet_id" required
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm
+                           focus:outline-none focus:ring-2 focus:ring-green-500">
+              <option value="">Select subnet…</option>
+              <template x-for="s in networkOpts.subnets || []" :key="s.id">
+                <option :value="s.id" x-text="s.name"></option>
+              </template>
+            </select>
+          </div>
+
+          <!-- Shared: Security Groups -->
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Security Groups <span class="text-gray-400 font-normal">(shared)</span></label>
+            <div class="border border-gray-300 rounded-lg max-h-32 overflow-y-auto p-2 space-y-1">
+              <p x-show="(networkOpts.security_groups || []).length === 0"
+                 class="text-xs text-gray-400 p-1">No security groups found.</p>
+              <template x-for="sg in networkOpts.security_groups || []" :key="sg.id">
+                <label class="flex items-center gap-2 p-1 rounded hover:bg-gray-50 cursor-pointer">
+                  <input type="checkbox" :value="sg.id"
+                         @change="toggleSG($event, sg.id)"
+                         :checked="deployForm.security_group_ids.includes(sg.id)"
+                         class="rounded border-gray-300 text-green-600 focus:ring-green-500">
+                  <span class="text-xs text-gray-700" x-text="sg.name"></span>
+                </label>
+              </template>
+            </div>
+            <p x-show="deployForm.security_group_ids.length === 0"
+               class="text-xs text-red-500 mt-1">Select at least one security group.</p>
+          </div>
+
+          <!-- Error -->
+          <div x-show="bulkDeployError"
+               class="bg-red-50 border border-red-200 rounded-lg px-3 py-2 text-sm text-red-700"
+               x-text="bulkDeployError"></div>
+
+          <div class="flex gap-3 pb-1">
+            <button type="button" @click="showBulkDeployModal = false"
+                    class="flex-1 py-2 border border-gray-300 rounded-lg text-sm font-medium hover:bg-gray-50 transition">
+              Cancel
+            </button>
+            <button @click="submitBulkDeploy()"
+                    :disabled="bulkDeploying || deployForm.security_group_ids.length === 0 || !deployForm.ssh_secret_name || !deployForm.subnet_id"
+                    class="flex-1 py-2 bg-green-600 hover:bg-green-700 disabled:opacity-50
+                           text-white text-sm font-medium rounded-lg transition">
+              <span x-show="!bulkDeploying">
+                Launch <span x-text="bulkDeployItems.length"></span> Instance<span x-show="bulkDeployItems.length !== 1">s</span>
+              </span>
+              <span x-show="bulkDeploying" x-cloak>Launching…</span>
+            </button>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  function awsDashboard() {
+    return {
+      region: 'us-east-2',
+      activeTab: 'community',
+
+      // Private AMIs
+      amis: [],
+      loadingAmis: false,
+
+      // Community images
+      communityAmis: [],
+      loadingCommunity: true,
+      communityFilter: 'all',
+
+      // Instances
+      instances: [],
+      loadingInstances: true,
+      cachedAtInstances: null,
+      cachedAtAmis: null,
+
+      // Shared
+      networkOpts: {},
+      loadingNetworkOpts: false,
+      loading: false,
+      credentialError: '',
+      pendingDestroy: new Set(),
+
+      // Copy modal
+      showCopyModal: false,
+      selectedCommunityAmi: null,
+      copyForm: { name: '', description: '' },
+      copying: false,
+      copyError: '',
+
+      // SSH Key modal
+      showSshKeyModal: false,
+      sshKeyInst: null,
+      sshKeyLoading: false,
+      sshKeyError: '',
+      sshKeyData: null,
+      sshKeyVisible: false,
+
+      // Create Image modal
+      showCreateImageModal: false,
+      selectedInstance: null,
+      createImageForm: { name: '', description: '', no_reboot: true },
+      creatingImage: false,
+      createImageError: '',
+
+      // Deploy modal (single)
+      showDeployModal: false,
+      selectedAmi: null,
+      sshKeySecrets: [],
+      sshKeysLoading: false,
+      deployForm: {
+        instance_name: '',
+        instance_type: 't3.medium',
+        ssh_secret_name: '',
+        sshPublicKeyPreview: '',
+        sshKeyPreviewLoading: false,
+        sshKeyPreviewError: '',
+        subnet_id: '',
+        security_group_ids: [],
+      },
+      deploying: false,
+      deployError: '',
+
+      // Bulk selection & deploy
+      selectedAmiIds: [],
+      showBulkDeployModal: false,
+      bulkDeployItems: [],
+      bulkDeploying: false,
+      bulkDeployError: '',
+      bulkDeployResults: [],
+
+      // ENA enablement
+      enablingEna: new Set(),
+      // Instance type prefixes that require ENA
+      enaRequiredPrefixes: ['t3.', 't4g.', 'm5.', 'm6i.', 'c5.', 'c6i.', 'r5.', 'r6i.', 'x2.'],
+
+      async init() {
+        requireAuth();
+        const hash = window.location.hash.slice(1);
+        if (['community', 'amis', 'instances'].includes(hash)) {
+          this.activeTab = hash;
+        }
+        // Load community images on start (default tab), instances in background
+        const tasks = [this.loadCommunityAmis(), this.loadInstances()];
+        if (hash === 'amis') tasks.push(this.loadAmis());
+        await Promise.all(tasks);
+        setInterval(() => this.loadInstances(), 30000);
+      },
+
+      async refreshAll() {
+        this.loading = true;
+        const tasks = [this.loadCommunityAmis(), this.loadInstances()];
+        if (this.activeTab === 'amis') tasks.push(this.loadAmis());
+        await Promise.all(tasks);
+        this.loading = false;
+      },
+
+      async switchToPrivateAmis() {
+        this.activeTab = 'amis';
+        if (this.amis.length === 0 && !this.loadingAmis) {
+          await this.loadAmis();
+        }
+      },
+
+      async loadAmis() {
+        this.loadingAmis = true;
+        this.credentialError = '';
+        try {
+          const resp = await API.get('/api/aws/amis');
+          if (resp) {
+            this.amis = resp.amis || [];
+            this.cachedAtAmis = resp.cached_at || null;
+          }
+        } catch (e) {
+          if (e.message.includes('credentials') || e.message.includes('configured')) {
+            this.credentialError = e.message;
+          } else {
+            toast('Failed to load AMIs: ' + e.message, 'error');
+          }
+        } finally {
+          this.loadingAmis = false;
+        }
+      },
+
+      async deleteAmi(ami) {
+        if (!confirm(`Deregister AMI "${ami.name}" (${ami.ami_id})?\n\nThis will also delete its backing EBS snapshots and cannot be undone.`)) return;
+        try {
+          const resp = await API.del('/api/aws/ami/' + ami.ami_id);
+          const snaps = resp.deleted_snapshots?.length ? ` (${resp.deleted_snapshots.length} snapshot(s) deleted)` : '';
+          toast(`AMI ${ami.ami_id} deregistered${snaps}.`, 'success');
+          await this.loadAmis();
+        } catch (e) {
+          toast('Deregister failed: ' + e.message, 'error');
+        }
+      },
+
+      async loadCommunityAmis() {
+        this.loadingCommunity = true;
+        const qs = this.communityFilter && this.communityFilter !== 'all'
+          ? '?os_filter=' + this.communityFilter : '';
+        try {
+          const resp = await API.get('/api/aws/community-amis' + qs);
+          if (resp) this.communityAmis = resp.amis || [];
+        } catch (e) {
+          if (e.message.includes('credentials') || e.message.includes('configured')) {
+            this.credentialError = e.message;
+          } else {
+            toast('Failed to load community images: ' + e.message, 'error');
+          }
+        } finally {
+          this.loadingCommunity = false;
+        }
+      },
+
+      async setCommunityFilter(filter) {
+        this.communityFilter = filter;
+        await this.loadCommunityAmis();
+      },
+
+      async loadInstances() {
+        this.loadingInstances = true;
+        try {
+          const resp = await API.get('/api/aws/instances');
+          if (resp) {
+            this.instances = resp.instances || [];
+            this.cachedAtInstances = resp.cached_at || null;
+          }
+        } catch (e) {
+          if (!this.credentialError) toast('Failed to load instances: ' + e.message, 'error');
+        } finally {
+          this.loadingInstances = false;
+        }
+      },
+
+      openCopyModal(ami) {
+        this.selectedCommunityAmi = ami;
+        this.copyForm = {
+          name: ami.name.replace(/[^a-zA-Z0-9-_.]/g, '-').slice(0, 128),
+          description: '',
+        };
+        this.copyError = '';
+        this.showCopyModal = true;
+      },
+
+      async submitCopy() {
+        if (!this.copyForm.name) {
+          this.copyError = 'Please enter a name for the private AMI.';
+          return;
+        }
+
+        this.copying = true;
+        this.copyError = '';
+
+        try {
+          const resp = await API.post('/api/aws/amis/copy', {
+            source_ami_id: this.selectedCommunityAmi.ami_id,
+            name: this.copyForm.name,
+            description: this.copyForm.description,
+          });
+          this.showCopyModal = false;
+          toast('AMI copy started!', 'success');
+          setTimeout(() => window.location.href = '/jobs/' + resp.job_id, 400);
+        } catch (e) {
+          this.copyError = e.message;
+        } finally {
+          this.copying = false;
+        }
+      },
+
+      async openDeployModal(ami) {
+        this.selectedAmi = ami;
+        this.deployForm = {
+          instance_name: ami.name.replace(/[^a-zA-Z0-9-]/g, '-').slice(0, 30),
+          instance_type: 't3.medium',
+          ssh_secret_name: '',
+          sshPublicKeyPreview: '',
+          sshKeyPreviewLoading: false,
+          sshKeyPreviewError: '',
+          subnet_id: '',
+          security_group_ids: [],
+        };
+        this.deployError = '';
+        this.showDeployModal = true;
+
+        // Load network options and SSH key secrets in parallel if not already fetched
+        const needsNetworkOpts = !this.networkOpts.subnets;
+        const needsSshSecrets = this.sshKeySecrets.length === 0;
+        if (needsNetworkOpts || needsSshSecrets) {
+          this.loadingNetworkOpts = needsNetworkOpts;
+          this.sshKeysLoading = needsSshSecrets;
+          try {
+            const fetches = [];
+            if (needsNetworkOpts) fetches.push(API.get('/api/aws/network-options').then(o => { if (o) this.networkOpts = o; }));
+            if (needsSshSecrets) fetches.push(API.get('/api/aws/secrets/ssh-keys').then(r => { this.sshKeySecrets = r?.secrets || []; }));
+            await Promise.all(fetches);
+          } catch (e) {
+            this.deployError = 'Failed to load AWS options: ' + e.message;
+          } finally {
+            this.loadingNetworkOpts = false;
+            this.sshKeysLoading = false;
+          }
+        }
+      },
+
+      async enableEna(ami) {
+        this.enablingEna = new Set([...this.enablingEna, ami.ami_id]);
+        try {
+          const resp = await API.post(`/api/aws/ami/${ami.ami_id}/enable-ena`, {});
+          toast(`New ENA-enabled AMI created: ${resp.new_ami_id} (${ami.name}-ena) — ready for t3/m5/c5/r5`, 'success');
+          await this.loadAmis();
+        } catch (e) {
+          toast(`Failed to enable ENA: ${e.message}`, 'error');
+        } finally {
+          this.enablingEna = new Set([...this.enablingEna].filter(id => id !== ami.ami_id));
+        }
+      },
+
+      toggleSG(event, sgId) {
+        if (event.target.checked) {
+          this.deployForm.security_group_ids = [...this.deployForm.security_group_ids, sgId];
+        } else {
+          this.deployForm.security_group_ids = this.deployForm.security_group_ids.filter(id => id !== sgId);
+        }
+      },
+
+      async fetchSshKeyPreview(secretName) {
+        if (!secretName) return;
+        this.deployForm.sshKeyPreviewLoading = true;
+        this.deployForm.sshKeyPreviewError = '';
+        this.deployForm.sshPublicKeyPreview = '';
+        try {
+          const data = await API.get(`/api/aws/secrets/ssh-keys/${encodeURIComponent(secretName)}`);
+          this.deployForm.sshPublicKeyPreview = data.public_key || '';
+        } catch (e) {
+          this.deployForm.sshKeyPreviewError = e.message || 'Failed to retrieve key';
+        } finally {
+          this.deployForm.sshKeyPreviewLoading = false;
+        }
+      },
+
+      async submitDeploy() {
+        if (!this.deployForm.instance_name || !this.deployForm.ssh_secret_name ||
+            !this.deployForm.subnet_id || this.deployForm.security_group_ids.length === 0) {
+          this.deployError = 'Please fill in all required fields.';
+          return;
+        }
+
+        this.deploying = true;
+        this.deployError = '';
+
+        try {
+          const body = {
+            ami_id: this.selectedAmi.ami_id,
+            instance_name: this.deployForm.instance_name,
+            instance_type: this.deployForm.instance_type,
+            ssh_secret_name: this.deployForm.ssh_secret_name,
+            subnet_id: this.deployForm.subnet_id,
+            security_group_ids: this.deployForm.security_group_ids,
+          };
+
+          const resp = await API.post('/api/aws/deploy', body);
+          this.showDeployModal = false;
+          toast('EC2 deployment started!', 'success');
+          setTimeout(() => window.location.href = '/jobs/' + resp.job_id, 400);
+        } catch (e) {
+          this.deployError = e.message;
+        } finally {
+          this.deploying = false;
+        }
+      },
+
+      async destroyInstance(inst) {
+        const name = inst.name || inst.instance_id;
+        if (!confirm(`Destroy instance "${name}" (${inst.instance_id})?\n\nThis will permanently terminate the EC2 instance. This cannot be undone.`)) return;
+
+        this.pendingDestroy = new Set([...this.pendingDestroy, inst.instance_id]);
+
+        try {
+          const resp = await API.del(`/api/aws/instances/${inst.instance_id}`);
+          toast(`Destroy queued for ${name}`, 'success');
+          setTimeout(() => window.location.href = '/jobs/' + resp.job_id, 400);
+        } catch (e) {
+          toast('Destroy failed: ' + e.message, 'error');
+          const s = new Set(this.pendingDestroy);
+          s.delete(inst.instance_id);
+          this.pendingDestroy = s;
+        }
+      },
+
+      toggleSelectAmi(amiId) {
+        const idx = this.selectedAmiIds.indexOf(amiId);
+        if (idx === -1) {
+          this.selectedAmiIds = [...this.selectedAmiIds, amiId];
+        } else {
+          this.selectedAmiIds = this.selectedAmiIds.filter(id => id !== amiId);
+        }
+      },
+
+      toggleSelectAllAmis() {
+        const available = this.amis.filter(a => a.state === 'available').map(a => a.ami_id);
+        if (this.selectedAmiIds.length === available.length) {
+          this.selectedAmiIds = [];
+        } else {
+          this.selectedAmiIds = [...available];
+        }
+      },
+
+      async openBulkDeployModal() {
+        this.bulkDeployItems = this.selectedAmiIds.map(id => {
+          const ami = this.amis.find(a => a.ami_id === id);
+          return {
+            ami_id: id,
+            ami_name: ami?.name || id,
+            instance_name: (ami?.name || id).replace(/[^a-zA-Z0-9-]/g, '-').slice(0, 30),
+          };
+        });
+        this.bulkDeployError = '';
+        this.bulkDeployResults = [];
+        // Reset shared config (keep previous key/subnet/SG selections if available)
+        this.deployForm.instance_name = '';
+        this.showBulkDeployModal = true;
+
+        const needsNetworkOpts = !this.networkOpts.subnets;
+        const needsSshSecrets = this.sshKeySecrets.length === 0;
+        if (needsNetworkOpts || needsSshSecrets) {
+          this.loadingNetworkOpts = needsNetworkOpts;
+          this.sshKeysLoading = needsSshSecrets;
+          try {
+            const fetches = [];
+            if (needsNetworkOpts) fetches.push(API.get('/api/aws/network-options').then(o => { if (o) this.networkOpts = o; }));
+            if (needsSshSecrets) fetches.push(API.get('/api/aws/secrets/ssh-keys').then(r => { this.sshKeySecrets = r?.secrets || []; }));
+            await Promise.all(fetches);
+          } catch (e) {
+            this.bulkDeployError = 'Failed to load AWS options: ' + e.message;
+          } finally {
+            this.loadingNetworkOpts = false;
+            this.sshKeysLoading = false;
+          }
+        }
+      },
+
+      async submitBulkDeploy() {
+        if (!this.deployForm.ssh_secret_name || !this.deployForm.subnet_id ||
+            this.deployForm.security_group_ids.length === 0) {
+          this.bulkDeployError = 'Please fill in all required fields.';
+          return;
+        }
+        if (this.bulkDeployItems.some(i => !i.instance_name)) {
+          this.bulkDeployError = 'All instances must have a name.';
+          return;
+        }
+
+        this.bulkDeploying = true;
+        this.bulkDeployError = '';
+
+        try {
+          const resp = await API.post('/api/aws/bulk-deploy', {
+            items: this.bulkDeployItems.map(i => ({
+              ami_id: i.ami_id,
+              instance_name: i.instance_name,
+            })),
+            instance_type: this.deployForm.instance_type,
+            ssh_secret_name: this.deployForm.ssh_secret_name,
+            subnet_id: this.deployForm.subnet_id,
+            security_group_ids: this.deployForm.security_group_ids,
+          });
+          this.bulkDeployResults = resp.jobs || [];
+          toast(`${resp.count} deployment${resp.count !== 1 ? 's' : ''} queued!`, 'success');
+        } catch (e) {
+          this.bulkDeployError = e.message;
+        } finally {
+          this.bulkDeploying = false;
+        }
+      },
+
+      async openSshKeyModal(inst) {
+        this.sshKeyInst = inst;
+        this.sshKeyData = null;
+        this.sshKeyError = '';
+        this.sshKeyVisible = false;
+        this.sshKeyLoading = true;
+        this.showSshKeyModal = true;
+        try {
+          const data = await API.get(`/api/aws/instances/${inst.instance_id}/ssh-key`);
+          this.sshKeyData = data;
+        } catch (e) {
+          this.sshKeyError = e.message;
+        } finally {
+          this.sshKeyLoading = false;
+        }
+      },
+
+      closeSshKeyModal() {
+        this.showSshKeyModal = false;
+        this.sshKeyData = null;
+        this.sshKeyError = '';
+        this.sshKeyVisible = false;
+      },
+
+      copyText(text, successMsg) {
+        navigator.clipboard.writeText(text).then(() => {
+          toast(successMsg || 'Copied!', 'success');
+        }).catch(() => {
+          toast('Copy failed — please copy manually.', 'error');
+        });
+      },
+
+      openCreateImageModal(inst) {
+        this.selectedInstance = inst;
+        this.createImageForm = {
+          name: (inst.name || inst.instance_id).replace(/[^a-zA-Z0-9-_.]/g, '-').slice(0, 128),
+          description: '',
+          no_reboot: true,
+        };
+        this.createImageError = '';
+        this.showCreateImageModal = true;
+      },
+
+      async submitCreateImage() {
+        if (!this.createImageForm.name) {
+          this.createImageError = 'Please enter a name for the image.';
+          return;
+        }
+
+        this.creatingImage = true;
+        this.createImageError = '';
+
+        try {
+          const resp = await API.post(
+            `/api/aws/instances/${this.selectedInstance.instance_id}/create-image`,
+            {
+              name: this.createImageForm.name,
+              description: this.createImageForm.description,
+              no_reboot: this.createImageForm.no_reboot,
+            }
+          );
+          this.showCreateImageModal = false;
+          toast('Image creation started!', 'success');
+          setTimeout(() => window.location.href = '/jobs/' + resp.job_id, 400);
+        } catch (e) {
+          this.createImageError = e.message;
+        } finally {
+          this.creatingImage = false;
+        }
+      },
+
+      instanceStateBadge(state) {
+        const map = {
+          running: 'bg-green-100 text-green-700',
+          stopped: 'bg-gray-100 text-gray-600',
+          stopping: 'bg-yellow-100 text-yellow-700',
+          pending: 'bg-blue-100 text-blue-700',
+          terminated: 'bg-red-100 text-red-600',
+          shutting_down: 'bg-orange-100 text-orange-700',
+        };
+        return map[state] || 'bg-gray-100 text-gray-600';
+      },
+
+      formatDate(isoStr) {
+        if (!isoStr) return '–';
+        return new Date(isoStr).toLocaleDateString();
+      },
+
+      timeAgo,
+    };
+  }
+</script>
+{% endblock %}
