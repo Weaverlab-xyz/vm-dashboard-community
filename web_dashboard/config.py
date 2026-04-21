@@ -75,11 +75,10 @@ class Settings(BaseSettings):
     # AWS / Terraform
     aws_region: str = "us-east-2"
     terraform_executable: str = "terraform"  # assumes terraform is in PATH
-    terraform_deployments_dir: str = r"C:\Scripts\VM_CLI\VM_DEMO_CLI\terraform\deployments"
 
-    # BeyondTrust PRA integration (btapi binary)
-    # Default points to the Linux binary baked into the Docker image.
-    # On Windows dev, override via .env: BTAPI_EXECUTABLE=C:\\Scripts\\VM_CLI\\VM_DEMO_CLI\\btapi\\btapi.exe
+    # BeyondTrust PRA integration (btapi binary).
+    # Default points to the Linux binary baked into the Docker image;
+    # override via .env on hosts where the binary lives elsewhere.
     btapi_executable: str = "/usr/local/bin/btapi"
     pscli_executable: str = "ps-cli"  # installed via beyondtrust-bips-cli; override in .env if needed
     # Password Safe / Secrets Safe credentials (used by ps-cli and REST API fallback)

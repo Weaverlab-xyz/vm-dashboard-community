@@ -19,20 +19,20 @@ deploying resources into your own AWS and Azure accounts. Target time:
 
 Install these once per machine:
 
-| Tool            | Why                                  | Where                                                     |
-|-----------------|--------------------------------------|-----------------------------------------------------------|
-| Docker Desktop  | Runs the dashboard and Postgres      | <https://www.docker.com/products/docker-desktop/>         |
-| PowerShell 7+   | Runs `scripts/Onboard-Dashboard.ps1` | <https://aka.ms/powershell>                               |
-| git             | Clone the repo                       | <https://git-scm.com/download/win>                        |
-| AWS CLI (v2)    | Create the IAM user and access key   | <https://aws.amazon.com/cli/>                             |
-| Azure CLI       | Create the Azure service principal   | <https://learn.microsoft.com/cli/azure/install-azure-cli> |
+| Tool            | Why                                | Where                                                     |
+|-----------------|------------------------------------|-----------------------------------------------------------|
+| Docker Desktop  | Runs the dashboard and Postgres    | <https://www.docker.com/products/docker-desktop/>         |
+| PowerShell 7+   | Runs the Windows onboarder (Windows only) | <https://aka.ms/powershell>                        |
+| git             | Clone the repo                     | macOS: `xcode-select --install`; Windows: <https://git-scm.com/download/win>; Linux: your package manager |
+| AWS CLI (v2)    | Create the IAM user and access key | <https://aws.amazon.com/cli/>                             |
+| Azure CLI       | Create the Azure service principal | <https://learn.microsoft.com/cli/azure/install-azure-cli> |
 
-Start Docker Desktop and wait for the whale icon to settle before
-continuing.
+Start Docker Desktop and wait for the whale/whale-like icon to settle
+before continuing.
 
 Clone the repo:
 
-```powershell
+```bash
 git clone <repo-url> vm-dashboard-community
 cd vm-dashboard-community
 ```
@@ -114,24 +114,32 @@ exist. Set `AZURE_LOCATION` to your preferred Azure region (e.g.
 
 ## Part C — Run the dashboard
 
+Pick the onboarder that matches your host OS. Both do the same thing:
+preflight checks, bootstrap `.env` on first run, generate JWT and DB
+secrets, bring up Compose, poll `/api/health`, open the browser.
+
 ### 1. First run
+
+**Windows** (PowerShell 7):
 
 ```powershell
 .\scripts\Onboard-Dashboard.ps1
 ```
 
-On first run the script copies `.env.example` to `.env` and opens it in
-Notepad. Fill in the **Required: AWS** and **Required: Azure** sections
-with the credentials you gathered in Parts A and B. Save and close
-Notepad.
+**macOS / Linux** (bash):
+
+```bash
+./scripts/onboard.sh
+```
+
+First run copies `.env.example` to `.env` and opens it in your editor
+(Notepad on Windows; `$EDITOR` or `nano` on macOS/Linux). Fill in the
+**Required: AWS** and **Required: Azure** sections with the credentials
+you gathered in Parts A and B. Save and close.
 
 ### 2. Second run
 
-```powershell
-.\scripts\Onboard-Dashboard.ps1
-```
-
-This time the script:
+Run the same command again. This time the script:
 
 - Generates `JWT_SECRET_KEY`, `POSTGRES_PASSWORD`, and
   `FIRST_RUN_ADMIN_PASSWORD` (the values stay in `.env`).
@@ -149,13 +157,25 @@ exists.
 
 ### 4. Stopping and restarting
 
-```powershell
-docker compose down          # stop the stack
-.\scripts\Onboard-Dashboard.ps1  # bring it back up
+```bash
+docker compose down              # stop the stack
+./scripts/onboard.sh             # bring it back up (Windows: .\scripts\Onboard-Dashboard.ps1)
 ```
 
 Postgres data persists in a named Docker volume (`pgdata`) across
 restarts.
+
+### Mac-specific notes
+
+- On Apple Silicon (M1/M2/M3/M4) the Docker images build natively as
+  `linux/arm64` — no platform flag needed.
+- The **VMware** feature flag (Appendix A) is Windows-only; leave
+  `VMWARE_ENABLED=false` on macOS.
+- The optional **Ollama chat** profile (Appendix C) uses an NVIDIA GPU
+  block in `docker-compose.yml`. On Macs that block is a no-op if you
+  don't start the `chat` profile. If you do enable chat on Mac, comment
+  out the `deploy.resources.reservations.devices` section — Ollama will
+  run on CPU/Metal without it.
 
 ---
 

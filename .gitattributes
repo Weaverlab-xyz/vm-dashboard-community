@@ -1,0 +1,22 @@
+# Normalize all text to LF in the repo. Windows checkouts get CRLF via
+# core.autocrlf; POSIX checkouts stay LF. Without this, shell scripts
+# committed from a Windows checkout can end up with CRLF in the repo and
+# fail on macOS/Linux with "bad interpreter: No such file or directory".
+* text=auto eol=lf
+
+# Force LF on shell scripts regardless of platform — they're parsed by
+# /bin/sh or /bin/bash and CRLF breaks the shebang.
+*.sh text eol=lf
+*.bash text eol=lf
+
+# Leave Windows-only scripts as CRLF for editors that expect it.
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary — never touch line endings.
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.pdf binary
