@@ -576,7 +576,11 @@ function settingsPage() {
       try {
         await API.patch(`/api/setup/feature/${intg.key}`, { enabled: newState });
         intg.enabled = newState;
-        this.showToast(`${intg.label} ${newState ? 'enabled' : 'disabled'}.`);
+        this.showToast(`${intg.label} ${newState ? 'enabled — configure credentials below' : 'disabled'}.`);
+        // Auto-open the config panel when enabling a feature that needs credentials
+        if (newState && intg.hasConfig) {
+          await this.openPanel(intg);
+        }
       } catch (e) {
         this.showToast(`Failed to update ${intg.label}: ${e.message}`, 'error');
       } finally {

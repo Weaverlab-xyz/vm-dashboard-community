@@ -325,8 +325,11 @@ def patch_feature_config(feature_name: str, payload: dict, request: Request):
     model_cls = _FEATURE_MODELS.get(feature_name)
     if model_cls is None:
         raise HTTPException(status_code=404, detail=f"Unknown feature: {feature_name}")
-    # Validate through the model, then write
+    # Validate through the model for type safety, but only persist keys that were
+    # explicitly sent — this prevents a toggle-only call ({enabled: true}) from
+    # blanking out credential fields that weren't included in the payload.
     validated = model_cls(**payload).model_dump()
-    _write_feature(feature_name, validated)
+    filtered = {k: v for k, v in validated.items() if k in payload}
+    _write_feature(feature_name, filtered)
     logger.info("Feature '%s' configuration updated.", feature_name)
     return {"ok": True}

@@ -12,6 +12,7 @@ deploying resources into your own AWS and Azure accounts. Target time:
 - [Appendix A — VMware Workstation integration](#appendix-a--vmware-workstation-integration)
 - [Appendix B — Sign in with Microsoft (Entra OAuth)](#appendix-b--sign-in-with-microsoft-entra-oauth)
 - [Appendix C — Local chat assistant (Ollama)](#appendix-c--local-chat-assistant-ollama)
+- [Appendix D — BeyondTrust integration](#appendix-d--beyondtrust-integration)
 
 ---
 
@@ -357,6 +358,83 @@ without a restart.
 Optional: map Entra group object IDs to dashboard workgroups from
 **Settings → Groups** — users in a mapped group are auto-created and
 assigned workgroups on first OAuth login.
+
+---
+
+## Appendix D — BeyondTrust integration
+
+Optional. Enables two things when both are configured:
+
+- **Secret retrieval (pscli / ps-cli)** — the dashboard checks out SSH
+  keys and passwords from BeyondTrust Password Safe on demand, so
+  credentials never need to be stored locally.
+- **Session context (btapi)** — used to pass session metadata back to
+  BeyondTrust PRA during remote access operations.
+
+Both tools are separate binaries that must be present inside the container.
+The dashboard feature flag controls both; configure the credentials that
+apply to your deployment.
+
+### Prerequisites
+
+- A **BeyondTrust Password Safe** (Secrets Safe) tenant
+- The **ps-cli** binary (`pscli`) accessible inside the container at the
+  path set in `PSCLI_EXECUTABLE` (default: the system PATH)
+- Optionally the **btapi** binary if your PRA tenant is separate from
+  Password Safe
+
+### Part 1 — Password Safe OAuth application (pscli)
+
+pscli authenticates to Password Safe with an OAuth 2.0 client credentials
+grant. Create the application in Password Safe:
+
+1. **Password Safe** → **Configuration** → **API Registration** →
+   **Add API Registration**.
+   - Authentication type: **Client Credentials**
+   - Copy the **Client ID** and **Client Secret**.
+2. Grant the registration access to the secrets and managed accounts the
+   dashboard needs. At minimum: **Secrets > Read**, **Requests > Create**,
+   **Credentials > Read**.
+
+### Part 2 — btapi credentials (if using PRA session recording)
+
+btapi authenticates to the BeyondTrust PRA API with its own client
+credentials. Obtain them from:
+
+**BeyondTrust PRA** → **Configuration** → **API Configuration** →
+**Add API Account**. Copy the **Client ID** and **Client Secret**.
+
+The API host is the hostname of your PRA appliance
+(e.g. `https://pra.company.com`). If your PRA and Password Safe are the
+same appliance, the host and credentials may be the same as Part 1.
+
+### Enable and configure
+
+1. **Settings → Integrations** → toggle **BeyondTrust PRA** on.
+   The configuration panel opens automatically.
+
+2. Fill in the **Password Safe** section:
+
+   | Field | Value |
+   |-------|-------|
+   | Password Safe URL | Base URL of your Password Safe instance, e.g. `https://ps.company.com` |
+   | OAuth Client ID | From the API Registration you created in Part 1 |
+   | OAuth Client Secret | From the API Registration |
+
+3. Fill in the **btapi** section (leave blank if not using PRA session recording):
+
+   | Field | Value |
+   |-------|-------|
+   | API Host | Your PRA appliance URL, e.g. `https://pra.company.com` |
+   | Client ID | From the PRA API Account |
+   | Client Secret | From the PRA API Account |
+
+4. Click **Save**. No restart required.
+
+> **Secret note:** Client secrets are encrypted with AES-256 in the
+> application database. Leaving a secret field blank on a subsequent save
+> keeps the stored value — you only need to re-enter secrets when rotating
+> them.
 
 ---
 
