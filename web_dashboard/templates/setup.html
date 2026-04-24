@@ -116,6 +116,42 @@
           </select>
         </div>
       </div>
+
+      <!-- AWS Advanced settings (collapsible) -->
+      <div class="border border-gray-200 rounded-lg overflow-hidden">
+        <button type="button" @click="showAwsAdvanced = !showAwsAdvanced"
+          class="w-full flex items-center justify-between px-4 py-3 text-sm font-medium text-gray-700 bg-gray-50 hover:bg-gray-100 transition-colors">
+          <span>Advanced settings — SSH key secrets &amp; SSM (optional)</span>
+          <svg class="w-4 h-4 transition-transform duration-200" :class="showAwsAdvanced ? 'rotate-180' : ''" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+          </svg>
+        </button>
+        <div x-show="showAwsAdvanced" x-transition class="px-4 py-4 space-y-4 border-t border-gray-200">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Secrets Manager SSH Key Prefix</label>
+            <input type="text" x-model="form.aws.ec2_ssh_keys_prefix"
+              class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+              placeholder="ec2/ssh-keypair">
+            <p class="mt-1 text-xs text-gray-500">
+              SSH public key secrets must be stored in AWS Secrets Manager under this prefix —
+              e.g. a secret named <code class="bg-gray-100 px-1 rounded">ec2/ssh-keypair/my-key</code>
+              containing a JSON object with a <code class="bg-gray-100 px-1 rounded">public_key</code> field.
+              The deploy modal lists all matching secrets so you can pick one per deployment.
+            </p>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">SSM Instance Profile (optional)</label>
+            <input type="text" x-model="form.aws.ec2_ssm_instance_profile"
+              class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+              placeholder="arn:aws:iam::123456789012:instance-profile/SSMRoleProfile  or  SSMRoleProfile">
+            <p class="mt-1 text-xs text-gray-500">
+              IAM instance profile to attach to every deployed EC2 instance for AWS Systems Manager (SSM) access.
+              Leave blank if you are not using SSM. Requires the <code class="bg-gray-100 px-1 rounded">AmazonSSMManagedInstanceCore</code> policy on the role.
+            </p>
+          </div>
+        </div>
+      </div>
+
       <p class="text-xs text-gray-400">See <a href="https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_access-keys.html" target="_blank" class="underline">IAM access keys docs</a> for setup instructions.</p>
     </div>
 
@@ -367,13 +403,15 @@ function wizard() {
     isReconfig: false,
     showOAuth: false,
     showAzureAdvanced: false,
+    showAwsAdvanced: false,
     authToken: localStorage.getItem('vm_cli_token') || '',
 
     steps: ['Admin', 'AWS', 'Azure', 'Features'],
 
     form: {
       admin:    { username: 'admin', password: '', confirm: '' },
-      aws:      { aws_access_key_id: '', aws_secret_access_key: '', aws_region: 'us-east-2' },
+      aws:      { aws_access_key_id: '', aws_secret_access_key: '', aws_region: 'us-east-2',
+                  ec2_ssh_keys_prefix: 'ec2/ssh-keypair', ec2_ssm_instance_profile: '' },
       azure:    { azure_client_id: '', azure_client_secret: '', azure_tenant_id: '',
                   azure_subscription_id: '', azure_resource_group: 'dashboard-rg', azure_location: 'centralus',
                   azure_vnet_resource_group: '', azure_shared_image_gallery: '',
@@ -470,8 +508,17 @@ function wizard() {
           if (cfgRes.ok) {
             const cfg = await cfgRes.json();
             // Pre-populate non-secret fields
-            if (cfg.aws_region)            this.form.aws.aws_region            = cfg.aws_region;
-            if (cfg.aws_access_key_id)     this.form.aws.aws_access_key_id     = cfg.aws_access_key_id;
+            if (cfg.aws_region)                this.form.aws.aws_region                = cfg.aws_region;
+            if (cfg.aws_access_key_id)         this.form.aws.aws_access_key_id         = cfg.aws_access_key_id;
+            // AWS advanced — expand panel if any previously configured
+            if (cfg.ec2_ssh_keys_prefix && cfg.ec2_ssh_keys_prefix !== 'ec2/ssh-keypair') {
+              this.form.aws.ec2_ssh_keys_prefix = cfg.ec2_ssh_keys_prefix;
+              this.showAwsAdvanced = true;
+            }
+            if (cfg.ec2_ssm_instance_profile) {
+              this.form.aws.ec2_ssm_instance_profile = cfg.ec2_ssm_instance_profile;
+              this.showAwsAdvanced = true;
+            }
             if (cfg.azure_client_id)       this.form.azure.azure_client_id     = cfg.azure_client_id;
             if (cfg.azure_tenant_id)       this.form.azure.azure_tenant_id     = cfg.azure_tenant_id;
             if (cfg.azure_subscription_id) this.form.azure.azure_subscription_id = cfg.azure_subscription_id;

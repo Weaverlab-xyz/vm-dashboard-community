@@ -48,6 +48,21 @@ from .auth import get_current_user, require_permission
 router = APIRouter(prefix="/api/aws", tags=["aws"])
 
 
+def _aws_cfg(key: str, fallback: str = "") -> str:
+    """Read a config key from config_service first, fall back to settings env var."""
+    from ..services import config_service
+    return config_service.get(key) or getattr(settings, key, None) or fallback
+
+def _aws_region() -> str:
+    return _aws_cfg("aws_region") or "us-east-2"
+
+def _ssh_keys_prefix() -> str:
+    return _aws_cfg("ec2_ssh_keys_prefix") or "ec2/ssh-keypair"
+
+def _ssm_instance_profile() -> str:
+    return _aws_cfg("ec2_ssm_instance_profile") or ""
+
+
 # ── AMI listing ───────────────────────────────────────────────────────────────
 
 @router.get("/amis", response_model=AMIListResponse)
@@ -59,7 +74,7 @@ async def list_amis(
     ttl = cache_service.TTL["aws_amis"]
 
     async def _fetch():
-        return await aws_service.list_amis(settings.aws_region)
+        return await aws_service.list_amis(_aws_region())
 
     try:
         amis, cached_at = await cache_service.get_or_refresh(cache_key, ttl, _fetch)
@@ -83,7 +98,7 @@ async def network_options(
     ttl = cache_service.TTL["aws_network_opts"]
 
     async def _fetch():
-        return await aws_service.get_network_options(settings.aws_region)
+        return await aws_service.get_network_options(_aws_region())
 
     try:
         opts, cached_at = await cache_service.get_or_refresh(cache_key, ttl, _fetch)
@@ -127,7 +142,7 @@ async def list_instances(
         if not instance_ids:
             return []
 
-        live_instances = await aws_service.describe_instances(settings.aws_region, instance_ids)
+        live_instances = await aws_service.describe_instances(_aws_region(), instance_ids)
         live_by_id = {inst["instance_id"]: inst for inst in live_instances}
         job_by_instance = {job.metadata_dict.get("instance_id"): job for job in active_jobs}
 
@@ -169,7 +184,7 @@ async def list_community_amis(
     to narrow results; omit for all three.
     """
     try:
-        amis = await aws_service.search_community_amis(settings.aws_region, os_filter)
+        amis = await aws_service.search_community_amis(_aws_region(), os_filter)
         return CommunityAMIListResponse(
             amis=[CommunityAMIInfo(**a) for a in amis],
             count=len(amis),
@@ -228,7 +243,7 @@ async def list_ssh_key_secrets(
     ttl = cache_service.TTL["aws_ssh_key_secrets"]
 
     async def _fetch():
-        return await aws_service.get_ssh_key_secrets(settings.aws_region, settings.ec2_ssh_keys_prefix)
+        return await aws_service.get_ssh_key_secrets(_aws_region(), _ssh_keys_prefix())
 
     try:
         secrets, _ = await cache_service.get_or_refresh(cache_key, ttl, _fetch)
@@ -247,7 +262,7 @@ async def get_ssh_key_secret(
 ):
     """Retrieve a specific SSH public key from Secrets Manager for preview in the deploy modal."""
     try:
-        detail = await aws_service.get_ssh_public_key_from_secret(settings.aws_region, secret_name)
+        detail = await aws_service.get_ssh_public_key_from_secret(_aws_region(), secret_name)
         return SSHKeySecretDetail(**detail)
     except AWSError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -378,7 +393,7 @@ async def enable_ami_ena(
     OVA-imported AMIs lack ENA by default; this is required for t3/m5/c5/r5+ instance types.
     This is a metadata-only change — no snapshot modification needed."""
     try:
-        new_ami_id = await aws_service.enable_ena_support(settings.aws_region, ami_id)
+        new_ami_id = await aws_service.enable_ena_support(_aws_region(), ami_id)
     except AWSError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -398,7 +413,7 @@ async def deregister_ami(
 ):
     """Deregister a private AMI and delete its backing EBS snapshots."""
     try:
-        deleted_snapshots = await aws_service.deregister_ami(settings.aws_region, ami_id)
+        deleted_snapshots = await aws_service.deregister_ami(_aws_region(), ami_id)
     except AWSError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -553,12 +568,12 @@ async def get_instance_ssh_key(
         )
 
     try:
-        private_key = await aws_service.get_keypair_private_key(settings.aws_region, key_name)
+        private_key = await aws_service.get_keypair_private_key(_aws_region(), key_name)
     except AWSError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
     # Get current IP from live instance state
-    instances = await aws_service.describe_instances(settings.aws_region, [instance_id])
+    instances = await aws_service.describe_instances(_aws_region(), [instance_id])
     ip = None
     if instances:
         ip = instances[0].get("public_ip") or instances[0].get("private_ip")
@@ -599,7 +614,7 @@ async def _run_deploy(
 
         # ── Step 1: Start ECS Jumpoint container first (BeyondTrust only) ─────
         from ..services import config_service as _cfg_svc
-        _aws_region = _cfg_svc.get("aws_region") or settings.aws_region or "us-east-2"
+        _aws_region = _aws_cfg("aws_region") or "us-east-2"
         if _cfg_svc.get_bool("beyondtrust_enabled"):
             from ..services import btapi_service
             job_service.update_progress(db, job_id, 15, "Starting BeyondTrust Jumpoint container…")
@@ -656,7 +671,7 @@ async def _run_deploy(
                 public_key=public_key,
                 subnet_id=subnet_id,
                 security_group_ids=security_group_ids,
-                iam_instance_profile=settings.ec2_ssm_instance_profile,
+                iam_instance_profile=_cfg_svc.get("ec2_ssm_instance_profile") or "",
                 os_type=os_type,
             )
             result.update(instance_result)
@@ -739,7 +754,7 @@ async def _run_bulk_deploy(
 
         # Step 1: Start ONE ECS Jumpoint container for the whole batch (BT only)
         from ..services import config_service as _cfg_svc
-        _aws_region = _cfg_svc.get("aws_region") or settings.aws_region or "us-east-2"
+        _aws_region = _aws_cfg("aws_region") or "us-east-2"
         first_job_id = job_items[0][0]
         ecs_error = None
         if _cfg_svc.get_bool("beyondtrust_enabled"):
@@ -798,7 +813,7 @@ async def _run_bulk_deploy(
                     public_key="" if is_windows else shared_public_key,
                     subnet_id=subnet_id,
                     security_group_ids=security_group_ids,
-                    iam_instance_profile=settings.ec2_ssm_instance_profile,
+                    iam_instance_profile=_cfg_svc.get("ec2_ssm_instance_profile") or "",
                 )
                 result.update(instance_result)
 
@@ -860,7 +875,7 @@ async def _run_destroy(destroy_job_id: str, deploy_job_id: str, instance_id: str
         job_service.set_running(db, destroy_job_id)
         job_service.update_progress(db, destroy_job_id, 20, f"Terminating instance {instance_id}…")
 
-        result = await aws_service.terminate_instance(settings.aws_region, instance_id)
+        result = await aws_service.terminate_instance(_aws_region(), instance_id)
 
         deploy_job = job_service.get_job(db, deploy_job_id)
         if deploy_job:
@@ -884,7 +899,7 @@ async def _run_destroy(destroy_job_id: str, deploy_job_id: str, instance_id: str
                     )
                     try:
                         await aws_service.stop_ecs_jumpoint_task(
-                            settings.aws_region, settings.bt_ecs_cluster, ecs_task_arn
+                            _aws_region(), settings.bt_ecs_cluster, ecs_task_arn
                         )
                         result["ecs_task_stopped"] = ecs_task_arn
                     except AWSError as e:
@@ -940,7 +955,7 @@ async def _run_create_image(job_id: str, instance_id: str, req: CreateImageReque
         job_service.update_progress(db, job_id, 10, f"Initiating image creation from instance {instance_id}…")
 
         new_ami_id = await aws_service.create_image_from_instance(
-            region=settings.aws_region,
+            region=_aws_region(),
             instance_id=instance_id,
             name=req.name,
             description=req.description,
@@ -956,7 +971,7 @@ async def _run_create_image(job_id: str, instance_id: str, req: CreateImageReque
         progress = 25
         for attempt in range(120):
             await asyncio.sleep(15)
-            status = await aws_service.get_ami_status(settings.aws_region, new_ami_id)
+            status = await aws_service.get_ami_status(_aws_region(), new_ami_id)
             state = status.get("state", "")
 
             if state == "available":
@@ -1007,7 +1022,7 @@ async def _run_ami_copy(job_id: str, req: CopyAMIRequest):
         job_service.update_progress(db, job_id, 10, f"Initiating AMI copy from {req.source_ami_id}…")
 
         new_ami_id = await aws_service.copy_ami(
-            region=settings.aws_region,
+            region=_aws_region(),
             source_ami_id=req.source_ami_id,
             name=req.name,
             description=req.description,
@@ -1022,7 +1037,7 @@ async def _run_ami_copy(job_id: str, req: CopyAMIRequest):
         progress = 30
         for attempt in range(80):
             await asyncio.sleep(15)
-            status = await aws_service.get_ami_status(settings.aws_region, new_ami_id)
+            status = await aws_service.get_ami_status(_aws_region(), new_ami_id)
             state = status.get("state", "")
 
             if state == "available":
