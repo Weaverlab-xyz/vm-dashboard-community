@@ -102,7 +102,7 @@ class Settings(BaseSettings):
     s3_bucket_prefix: str = "vm-import-ova"
     aws_iam_instance_profile: str = ""  # IAM instance profile for Packer surrogate EC2 (needs S3 read access)
     ec2_ssm_instance_profile: str = ""  # IAM instance profile to attach to dashboard-deployed EC2 instances (SSM access)
-    ec2_ssh_keys_prefix: str = "ec2/ssh-keypair"  # Secrets Manager prefix for SSH key secrets (EC2 deploy)
+    ec2_ssh_key_secret: str = ""  # Secrets Manager secret name holding the SSH public key for EC2 deploy
     ovf_tool_path: str = r"C:\Program Files (x86)\VMware\VMware Workstation\OVFTool\ovftool.exe"
     # Guest OS credentials for cloud-prep (retrieved from Password Safe via ps-cli)
     guest_user_secret_title: str = "Guest_User"

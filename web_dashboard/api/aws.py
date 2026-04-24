@@ -37,9 +37,7 @@ from ..models.aws import (
     EC2InstanceInfo,
     EC2InstanceListResponse,
     NetworkOptions,
-    SSHKeySecretListResponse,
     SSHKeySecretDetail,
-    SSHKeySecret,
 )
 from ..services import aws_service, job_service, cache_service
 from ..services.aws_service import AWSError
@@ -56,8 +54,8 @@ def _aws_cfg(key: str, fallback: str = "") -> str:
 def _aws_region() -> str:
     return _aws_cfg("aws_region") or "us-east-2"
 
-def _ssh_keys_prefix() -> str:
-    return _aws_cfg("ec2_ssh_keys_prefix") or "ec2/ssh-keypair"
+def _ssh_key_secret() -> str:
+    return _aws_cfg("ec2_ssh_key_secret") or ""
 
 def _ssm_instance_profile() -> str:
     return _aws_cfg("ec2_ssm_instance_profile") or ""
@@ -232,35 +230,19 @@ async def copy_community_ami(
     )
 
 
-# ── SSH key secrets (Secrets Manager) ────────────────────────────────────────
+# ── SSH key secret preview (Secrets Manager) ─────────────────────────────────
 
-@router.get("/secrets/ssh-keys", response_model=SSHKeySecretListResponse)
-async def list_ssh_key_secrets(
+@router.get("/secrets/ssh-key", response_model=SSHKeySecretDetail)
+async def get_configured_ssh_key(
     current_user: User = Depends(require_permission("aws", "read")),
 ):
-    """List SSH public key secrets stored in Secrets Manager under the configured prefix."""
-    cache_key = cache_service.key_global("aws_ssh_key_secrets")
-    ttl = cache_service.TTL["aws_ssh_key_secrets"]
-
-    async def _fetch():
-        return await aws_service.get_ssh_key_secrets(_aws_region(), _ssh_keys_prefix())
-
-    try:
-        secrets, _ = await cache_service.get_or_refresh(cache_key, ttl, _fetch)
-        return SSHKeySecretListResponse(
-            secrets=[SSHKeySecret(**s) for s in secrets],
-            count=len(secrets),
+    """Retrieve the configured SSH public key from Secrets Manager for preview in the deploy modal."""
+    secret_name = _ssh_key_secret()
+    if not secret_name:
+        raise HTTPException(
+            status_code=404,
+            detail="No SSH key secret configured. Go to Setup → AWS Advanced settings."
         )
-    except AWSError as e:
-        raise HTTPException(status_code=503, detail=str(e))
-
-
-@router.get("/secrets/ssh-keys/{secret_name:path}", response_model=SSHKeySecretDetail)
-async def get_ssh_key_secret(
-    secret_name: str,
-    current_user: User = Depends(require_permission("aws", "read")),
-):
-    """Retrieve a specific SSH public key from Secrets Manager for preview in the deploy modal."""
     try:
         detail = await aws_service.get_ssh_public_key_from_secret(_aws_region(), secret_name)
         return SSHKeySecretDetail(**detail)
@@ -289,7 +271,6 @@ async def deploy_ami(
             "ami_id": req.ami_id,
             "instance_name": req.instance_name,
             "instance_type": req.instance_type,
-            "ssh_secret_name": req.ssh_secret_name,
             "subnet_id": req.subnet_id,
             "security_group_ids": req.security_group_ids,
         },
@@ -306,7 +287,6 @@ async def deploy_ami(
         req.ami_id,
         req.instance_name,
         req.instance_type,
-        req.ssh_secret_name,
         req.subnet_id,
         req.security_group_ids,
     )
@@ -347,7 +327,6 @@ async def bulk_deploy_amis(
                 "ami_id": item.ami_id,
                 "instance_name": item.instance_name,
                 "instance_type": req.instance_type,
-                "ssh_secret_name": req.ssh_secret_name,
                 "subnet_id": req.subnet_id,
                 "security_group_ids": req.security_group_ids,
                 "bulk": True,
@@ -364,7 +343,6 @@ async def bulk_deploy_amis(
         _run_bulk_deploy,
         job_items,
         req.instance_type,
-        req.ssh_secret_name,
         req.subnet_id,
         req.security_group_ids,
     )
@@ -603,7 +581,6 @@ async def _run_deploy(
     ami_id: str,
     instance_name: str,
     instance_type: str,
-    ssh_secret_name: str,
     subnet_id: str,
     security_group_ids: list,
 ):
@@ -615,6 +592,7 @@ async def _run_deploy(
         # ── Step 1: Start ECS Jumpoint container first (BeyondTrust only) ─────
         from ..services import config_service as _cfg_svc
         _aws_region = _aws_cfg("aws_region") or "us-east-2"
+        ssh_secret_name = _cfg_svc.get("ec2_ssh_key_secret") or ""
         if _cfg_svc.get_bool("beyondtrust_enabled"):
             from ..services import btapi_service
             job_service.update_progress(db, job_id, 15, "Starting BeyondTrust Jumpoint container…")
@@ -735,7 +713,6 @@ async def _run_deploy(
 async def _run_bulk_deploy(
     job_items: list,
     instance_type: str,
-    ssh_secret_name: str,
     subnet_id: str,
     security_group_ids: list,
 ):
@@ -755,6 +732,7 @@ async def _run_bulk_deploy(
         # Step 1: Start ONE ECS Jumpoint container for the whole batch (BT only)
         from ..services import config_service as _cfg_svc
         _aws_region = _aws_cfg("aws_region") or "us-east-2"
+        ssh_secret_name = _cfg_svc.get("ec2_ssh_key_secret") or ""
         first_job_id = job_items[0][0]
         ecs_error = None
         if _cfg_svc.get_bool("beyondtrust_enabled"):

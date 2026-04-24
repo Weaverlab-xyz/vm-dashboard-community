@@ -26,7 +26,7 @@ class AWSSetup(BaseModel):
     aws_access_key_id: str = ""
     aws_secret_access_key: str = ""
     aws_region: str = "us-east-2"
-    ec2_ssh_keys_prefix: str = "ec2/ssh-keypair"
+    ec2_ssh_key_secret: str = ""
     ec2_ssm_instance_profile: str = ""
 
 

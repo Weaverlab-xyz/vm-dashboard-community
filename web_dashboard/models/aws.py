@@ -54,17 +54,6 @@ class NetworkOptions(BaseModel):
     cached_at: Optional[str] = None
 
 
-class SSHKeySecret(BaseModel):
-    name: str
-    description: str = ""
-    last_changed: str = ""
-
-
-class SSHKeySecretListResponse(BaseModel):
-    secrets: List[SSHKeySecret]
-    count: int
-
-
 class SSHKeySecretDetail(BaseModel):
     name: str
     public_key: str
@@ -75,7 +64,6 @@ class DeployRequest(BaseModel):
     ami_id: str = Field(..., description="AMI ID to deploy")
     instance_name: str = Field(..., description="Name tag for the instance")
     instance_type: str = Field(default="t3.medium", description="EC2 instance type")
-    ssh_secret_name: str = Field(..., description="Secrets Manager secret name holding the SSH public key")
     subnet_id: str = Field(..., description="VPC subnet ID")
     security_group_ids: List[str] = Field(..., description="Security group IDs")
 
@@ -128,7 +116,6 @@ class BulkDeployItem(BaseModel):
 class BulkDeployRequest(BaseModel):
     items: List[BulkDeployItem] = Field(..., description="List of AMIs to deploy with per-instance names")
     instance_type: str = Field(default="t3.medium", description="EC2 instance type (shared)")
-    ssh_secret_name: str = Field(..., description="Secrets Manager secret name holding the SSH public key (shared)")
     subnet_id: str = Field(..., description="VPC subnet ID (shared)")
     security_group_ids: List[str] = Field(..., description="Security group IDs (shared)")
 

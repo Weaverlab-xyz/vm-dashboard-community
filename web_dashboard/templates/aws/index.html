@@ -675,35 +675,23 @@
             </select>
           </div>
 
-          <!-- SSH Key (Secrets Manager) -->
+          <!-- SSH Key (configured via setup wizard) -->
           <div class="mb-4">
-            <label class="block text-sm font-medium text-gray-700 mb-1">SSH Key (Secrets Manager) *</label>
-            <select x-model="deployForm.ssh_secret_name" required
-                    @change="fetchSshKeyPreview(deployForm.ssh_secret_name)"
-                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm
-                           focus:outline-none focus:ring-2 focus:ring-blue-500">
-              <option value="">Select a secret…</option>
-              <template x-for="s in sshKeySecrets" :key="s.name">
-                <option :value="s.name" x-text="s.name + (s.description ? ' – ' + s.description : '')"></option>
-              </template>
-            </select>
-            <div x-show="deployForm.sshKeyPreviewLoading"
-                 class="mt-1.5 text-xs text-gray-400">Fetching key from Secrets Manager…</div>
-            <div x-show="deployForm.sshKeyPreviewError && !deployForm.sshKeyPreviewLoading"
-                 class="mt-1.5 text-xs text-red-500" x-text="deployForm.sshKeyPreviewError"></div>
-            <div x-show="deployForm.sshPublicKeyPreview && !deployForm.sshKeyPreviewLoading">
-              <p class="text-xs text-green-600 mt-1.5 mb-1">
-                Key retrieved: <span class="font-mono font-medium" x-text="deployForm.ssh_secret_name"></span>
-              </p>
+            <label class="block text-sm font-medium text-gray-700 mb-1">SSH Key (Secrets Manager)</label>
+            <div x-show="deployForm.sshKeyPreviewLoading" class="text-xs text-gray-400">Fetching key…</div>
+            <div x-show="!deployForm.sshKeyPreviewLoading && deployForm.sshPublicKeyPreview"
+                 class="rounded-lg border border-green-200 bg-green-50 px-3 py-2">
+              <p class="text-xs text-green-700 font-medium mb-1" x-text="'✓ ' + deployForm.sshKeyName"></p>
               <textarea readonly rows="2"
-                        class="w-full border border-gray-200 bg-gray-50 rounded-lg px-3 py-2
-                               text-xs font-mono resize-none text-gray-600 cursor-default"
+                        class="w-full border-0 bg-transparent text-xs font-mono resize-none text-gray-600 cursor-default p-0"
                         x-text="deployForm.sshPublicKeyPreview"></textarea>
             </div>
-            <p x-show="sshKeySecrets.length === 0 && !sshKeysLoading"
-               class="text-xs text-amber-600 mt-1">
-              No secrets found. Store SSH public keys in Secrets Manager under the configured prefix to use this feature.
-            </p>
+            <div x-show="!deployForm.sshKeyPreviewLoading && !deployForm.sshPublicKeyPreview"
+                 class="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
+              No SSH key configured or secret not found.
+              <a href="/setup" class="underline font-medium">Open setup wizard → AWS Advanced</a> to set a secret name.
+              Deployments to Linux instances will fail without an SSH public key.
+            </div>
           </div>
 
           <!-- Subnet -->
@@ -854,26 +842,17 @@
             </select>
           </div>
 
-          <!-- Shared: SSH Key (Secrets Manager) -->
+          <!-- Shared: SSH Key (configured via setup wizard) -->
           <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">SSH Key <span class="text-gray-400 font-normal">(shared)</span></label>
-            <select x-model="deployForm.ssh_secret_name" required
-                    @change="fetchSshKeyPreview(deployForm.ssh_secret_name)"
-                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm
-                           focus:outline-none focus:ring-2 focus:ring-green-500">
-              <option value="">Select a secret…</option>
-              <template x-for="s in sshKeySecrets" :key="s.name">
-                <option :value="s.name" x-text="s.name + (s.description ? ' – ' + s.description : '')"></option>
-              </template>
-            </select>
-            <div x-show="deployForm.sshPublicKeyPreview && !deployForm.sshKeyPreviewLoading">
-              <p class="text-xs text-green-600 mt-1.5 mb-1">
-                Key retrieved: <span class="font-mono font-medium" x-text="deployForm.ssh_secret_name"></span>
-              </p>
-              <textarea readonly rows="2"
-                        class="w-full border border-gray-200 bg-gray-50 rounded-lg px-3 py-2
-                               text-xs font-mono resize-none text-gray-600 cursor-default"
-                        x-text="deployForm.sshPublicKeyPreview"></textarea>
+            <label class="block text-sm font-medium text-gray-700 mb-1">SSH Key <span class="text-gray-400 font-normal">(shared, configured in wizard)</span></label>
+            <div x-show="deployForm.sshKeyPreviewLoading" class="text-xs text-gray-400">Fetching key…</div>
+            <div x-show="!deployForm.sshKeyPreviewLoading && deployForm.sshPublicKeyPreview"
+                 class="rounded-lg border border-green-200 bg-green-50 px-3 py-2">
+              <p class="text-xs text-green-700 font-medium" x-text="'✓ ' + deployForm.sshKeyName"></p>
+            </div>
+            <div x-show="!deployForm.sshKeyPreviewLoading && !deployForm.sshPublicKeyPreview"
+                 class="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
+              No SSH key configured. <a href="/setup" class="underline font-medium">Setup wizard → AWS Advanced</a>
             </div>
           </div>
 
@@ -921,7 +900,7 @@
               Cancel
             </button>
             <button @click="submitBulkDeploy()"
-                    :disabled="bulkDeploying || deployForm.security_group_ids.length === 0 || !deployForm.ssh_secret_name || !deployForm.subnet_id"
+                    :disabled="bulkDeploying || deployForm.security_group_ids.length === 0 || !deployForm.subnet_id"
                     class="flex-1 py-2 bg-green-600 hover:bg-green-700 disabled:opacity-50
                            text-white text-sm font-medium rounded-lg transition">
               <span x-show="!bulkDeploying">
@@ -993,15 +972,12 @@
       // Deploy modal (single)
       showDeployModal: false,
       selectedAmi: null,
-      sshKeySecrets: [],
-      sshKeysLoading: false,
       deployForm: {
         instance_name: '',
         instance_type: 't3.medium',
-        ssh_secret_name: '',
+        sshKeyName: '',
         sshPublicKeyPreview: '',
         sshKeyPreviewLoading: false,
-        sshKeyPreviewError: '',
         subnet_id: '',
         security_group_ids: [],
       },
@@ -1159,33 +1135,35 @@
         this.deployForm = {
           instance_name: ami.name.replace(/[^a-zA-Z0-9-]/g, '-').slice(0, 30),
           instance_type: 't3.medium',
-          ssh_secret_name: '',
+          sshKeyName: '',
           sshPublicKeyPreview: '',
-          sshKeyPreviewLoading: false,
-          sshKeyPreviewError: '',
+          sshKeyPreviewLoading: true,
           subnet_id: '',
           security_group_ids: [],
         };
         this.deployError = '';
         this.showDeployModal = true;
 
-        // Load network options and SSH key secrets in parallel if not already fetched
-        const needsNetworkOpts = !this.networkOpts.subnets;
-        const needsSshSecrets = this.sshKeySecrets.length === 0;
-        if (needsNetworkOpts || needsSshSecrets) {
-          this.loadingNetworkOpts = needsNetworkOpts;
-          this.sshKeysLoading = needsSshSecrets;
-          try {
-            const fetches = [];
-            if (needsNetworkOpts) fetches.push(API.get('/api/aws/network-options').then(o => { if (o) this.networkOpts = o; }));
-            if (needsSshSecrets) fetches.push(API.get('/api/aws/secrets/ssh-keys').then(r => { this.sshKeySecrets = r?.secrets || []; }));
-            await Promise.all(fetches);
-          } catch (e) {
-            this.deployError = 'Failed to load AWS options: ' + e.message;
-          } finally {
-            this.loadingNetworkOpts = false;
-            this.sshKeysLoading = false;
-          }
+        const fetches = [];
+        if (!this.networkOpts.subnets) {
+          this.loadingNetworkOpts = true;
+          fetches.push(API.get('/api/aws/network-options').then(o => { if (o) this.networkOpts = o; }));
+        }
+        fetches.push(
+          API.get('/api/aws/secrets/ssh-key').then(r => {
+            this.deployForm.sshKeyName = r?.name || '';
+            this.deployForm.sshPublicKeyPreview = r?.public_key || '';
+          }).catch(() => {
+            this.deployForm.sshPublicKeyPreview = '';
+          })
+        );
+        try {
+          await Promise.all(fetches);
+        } catch (e) {
+          this.deployError = 'Failed to load AWS options: ' + e.message;
+        } finally {
+          this.loadingNetworkOpts = false;
+          this.deployForm.sshKeyPreviewLoading = false;
         }
       },
 
@@ -1210,23 +1188,8 @@
         }
       },
 
-      async fetchSshKeyPreview(secretName) {
-        if (!secretName) return;
-        this.deployForm.sshKeyPreviewLoading = true;
-        this.deployForm.sshKeyPreviewError = '';
-        this.deployForm.sshPublicKeyPreview = '';
-        try {
-          const data = await API.get(`/api/aws/secrets/ssh-keys/${encodeURIComponent(secretName)}`);
-          this.deployForm.sshPublicKeyPreview = data.public_key || '';
-        } catch (e) {
-          this.deployForm.sshKeyPreviewError = e.message || 'Failed to retrieve key';
-        } finally {
-          this.deployForm.sshKeyPreviewLoading = false;
-        }
-      },
-
       async submitDeploy() {
-        if (!this.deployForm.instance_name || !this.deployForm.ssh_secret_name ||
+        if (!this.deployForm.instance_name ||
             !this.deployForm.subnet_id || this.deployForm.security_group_ids.length === 0) {
           this.deployError = 'Please fill in all required fields.';
           return;
@@ -1240,7 +1203,6 @@
             ami_id: this.selectedAmi.ami_id,
             instance_name: this.deployForm.instance_name,
             instance_type: this.deployForm.instance_type,
-            ssh_secret_name: this.deployForm.ssh_secret_name,
             subnet_id: this.deployForm.subnet_id,
             security_group_ids: this.deployForm.security_group_ids,
           };
@@ -1303,32 +1265,38 @@
         });
         this.bulkDeployError = '';
         this.bulkDeployResults = [];
-        // Reset shared config (keep previous key/subnet/SG selections if available)
         this.deployForm.instance_name = '';
+        this.deployForm.sshKeyPreviewLoading = true;
         this.showBulkDeployModal = true;
 
-        const needsNetworkOpts = !this.networkOpts.subnets;
-        const needsSshSecrets = this.sshKeySecrets.length === 0;
-        if (needsNetworkOpts || needsSshSecrets) {
-          this.loadingNetworkOpts = needsNetworkOpts;
-          this.sshKeysLoading = needsSshSecrets;
-          try {
-            const fetches = [];
-            if (needsNetworkOpts) fetches.push(API.get('/api/aws/network-options').then(o => { if (o) this.networkOpts = o; }));
-            if (needsSshSecrets) fetches.push(API.get('/api/aws/secrets/ssh-keys').then(r => { this.sshKeySecrets = r?.secrets || []; }));
-            await Promise.all(fetches);
-          } catch (e) {
-            this.bulkDeployError = 'Failed to load AWS options: ' + e.message;
-          } finally {
-            this.loadingNetworkOpts = false;
-            this.sshKeysLoading = false;
-          }
+        const fetches = [];
+        if (!this.networkOpts.subnets) {
+          this.loadingNetworkOpts = true;
+          fetches.push(API.get('/api/aws/network-options').then(o => { if (o) this.networkOpts = o; }));
+        }
+        // Fetch configured key preview if not already loaded from a prior modal open
+        if (!this.deployForm.sshKeyName) {
+          fetches.push(
+            API.get('/api/aws/secrets/ssh-key').then(r => {
+              this.deployForm.sshKeyName = r?.name || '';
+              this.deployForm.sshPublicKeyPreview = r?.public_key || '';
+            }).catch(() => {
+              this.deployForm.sshPublicKeyPreview = '';
+            })
+          );
+        }
+        try {
+          await Promise.all(fetches);
+        } catch (e) {
+          this.bulkDeployError = 'Failed to load AWS options: ' + e.message;
+        } finally {
+          this.loadingNetworkOpts = false;
+          this.deployForm.sshKeyPreviewLoading = false;
         }
       },
 
       async submitBulkDeploy() {
-        if (!this.deployForm.ssh_secret_name || !this.deployForm.subnet_id ||
-            this.deployForm.security_group_ids.length === 0) {
+        if (!this.deployForm.subnet_id || this.deployForm.security_group_ids.length === 0) {
           this.bulkDeployError = 'Please fill in all required fields.';
           return;
         }
@@ -1347,7 +1315,6 @@
               instance_name: i.instance_name,
             })),
             instance_type: this.deployForm.instance_type,
-            ssh_secret_name: this.deployForm.ssh_secret_name,
             subnet_id: this.deployForm.subnet_id,
             security_group_ids: this.deployForm.security_group_ids,
           });
