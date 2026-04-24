@@ -155,8 +155,8 @@
     </div>
   </div>
 
-  <!-- Workgroup quick actions -->
-  <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+  <!-- Workgroup quick actions (VMware only) -->
+  <div x-show="vmwareEnabled" class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
     <template x-for="wg in workgroups" :key="wg.name">
       <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
         <div class="flex items-center justify-between mb-4">
@@ -234,13 +234,18 @@
       workgroups: [],
       recentJobs: [],
       loadingJobs: true,
+      vmwareEnabled: false,
 
       async init() {
         requireAuth();
         // Render workgroup buttons immediately from cached auth — no API call needed
         const auth = Alpine.store('auth');
         this.workgroups = auth.workgroups.map(name => ({ name, count: null, loading: false }));
-        await Promise.all([this.loadStats(), this.loadJobs()]);
+        await Promise.all([
+          this.loadStats(),
+          this.loadJobs(),
+          fetch('/api/features').then(r => r.json()).then(f => { this.vmwareEnabled = !!f.vmware; }).catch(() => {}),
+        ]);
         this.loadCloudStats();
         this.loadContainerStats();
       },
