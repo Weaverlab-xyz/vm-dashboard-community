@@ -598,13 +598,15 @@ async def _run_deploy(
         job_service.set_running(db, job_id)
 
         # ── Step 1: Start ECS Jumpoint container first (BeyondTrust only) ─────
-        if settings.beyondtrust_enabled:
+        from ..services import config_service as _cfg_svc
+        _aws_region = _cfg_svc.get("aws_region") or settings.aws_region or "us-east-2"
+        if _cfg_svc.get_bool("beyondtrust_enabled"):
             from ..services import btapi_service
             job_service.update_progress(db, job_id, 15, "Starting BeyondTrust Jumpoint container…")
             try:
                 deploy_key = await btapi_service.get_ps_secret(settings.bt_ps_deploy_key_title)
                 ecs_task_arn = await aws_service.run_ecs_jumpoint_task(
-                    region=settings.aws_region,
+                    region=_aws_region,
                     cluster=settings.bt_ecs_cluster,
                     task_family=settings.bt_ecs_task_family,
                     subnet_id=subnet_id,
@@ -631,7 +633,7 @@ async def _run_deploy(
 
         # ── Step 2: Fetch SSH public key from Secrets Manager ──────────────────
         job_service.update_progress(db, job_id, 38, "Fetching SSH public key from Secrets Manager…")
-        ami_info = await aws_service.describe_ami(settings.aws_region, ami_id)
+        ami_info = await aws_service.describe_ami(_aws_region, ami_id)
         is_windows = "windows" in (ami_info.get("platform", "") or "").lower()
         if is_windows:
             public_key = ""
@@ -639,7 +641,7 @@ async def _run_deploy(
         else:
             from ..services.os_detection import detect_os_type
             os_type, _ = detect_os_type(ami_info.get("name", ""))
-            key_detail = await aws_service.get_ssh_public_key_from_secret(settings.aws_region, ssh_secret_name)
+            key_detail = await aws_service.get_ssh_public_key_from_secret(_aws_region, ssh_secret_name)
             public_key = key_detail["public_key"]
             result["ssh_secret_name"] = ssh_secret_name
 
@@ -647,7 +649,7 @@ async def _run_deploy(
         job_service.update_progress(db, job_id, 40, f"Launching EC2 instance ({os_type})…")
         try:
             instance_result = await aws_service.launch_instance(
-                region=settings.aws_region,
+                region=_aws_region,
                 ami_id=ami_id,
                 instance_name=instance_name,
                 instance_type=instance_type,
@@ -663,7 +665,7 @@ async def _run_deploy(
             if result.get("ecs_task_arn"):
                 try:
                     await aws_service.stop_ecs_jumpoint_task(
-                        settings.aws_region, settings.bt_ecs_cluster, result["ecs_task_arn"]
+                        _aws_region, settings.bt_ecs_cluster, result["ecs_task_arn"]
                     )
                 except Exception:
                     pass
@@ -677,7 +679,7 @@ async def _run_deploy(
         )
 
         # ── Step 3: BeyondTrust PRA — Shell Jump + policy (optional) ──────────
-        if settings.beyondtrust_enabled:
+        if _cfg_svc.get_bool("beyondtrust_enabled"):
             from ..services import btapi_service
             try:
                 bt_result = await btapi_service.provision_ec2_jump(
@@ -736,9 +738,11 @@ async def _run_bulk_deploy(
             job_service.set_running(db, job_id)
 
         # Step 1: Start ONE ECS Jumpoint container for the whole batch (BT only)
+        from ..services import config_service as _cfg_svc
+        _aws_region = _cfg_svc.get("aws_region") or settings.aws_region or "us-east-2"
         first_job_id = job_items[0][0]
         ecs_error = None
-        if settings.beyondtrust_enabled:
+        if _cfg_svc.get_bool("beyondtrust_enabled"):
             from ..services import btapi_service
             job_service.update_progress(
                 db, first_job_id, 10,
@@ -747,7 +751,7 @@ async def _run_bulk_deploy(
             try:
                 deploy_key = await btapi_service.get_ps_secret(settings.bt_ps_deploy_key_title)
                 ecs_task_arn = await aws_service.run_ecs_jumpoint_task(
-                    region=settings.aws_region,
+                    region=_aws_region,
                     cluster=settings.bt_ecs_cluster,
                     task_family=settings.bt_ecs_task_family,
                     subnet_id=subnet_id,
@@ -769,7 +773,7 @@ async def _run_bulk_deploy(
 
         # Step 2: Fetch SSH public key once for the whole batch
         job_service.update_progress(db, first_job_id, 18, "Fetching SSH public key from Secrets Manager…")
-        key_detail = await aws_service.get_ssh_public_key_from_secret(settings.aws_region, ssh_secret_name)
+        key_detail = await aws_service.get_ssh_public_key_from_secret(_aws_region, ssh_secret_name)
         shared_public_key = key_detail["public_key"]
 
         # Step 3: Deploy each instance, all sharing the same ECS task ARN
@@ -784,10 +788,10 @@ async def _run_bulk_deploy(
                 job_service.update_progress(
                     db, job_id, 40, f"Launching EC2 instance {item.instance_name}…"
                 )
-                ami_info = await aws_service.describe_ami(settings.aws_region, item.ami_id)
+                ami_info = await aws_service.describe_ami(_aws_region, item.ami_id)
                 is_windows = "windows" in (ami_info.get("platform", "") or "").lower()
                 instance_result = await aws_service.launch_instance(
-                    region=settings.aws_region,
+                    region=_aws_region,
                     ami_id=item.ami_id,
                     instance_name=item.instance_name,
                     instance_type=instance_type,
@@ -806,7 +810,7 @@ async def _run_bulk_deploy(
                 )
 
                 # Step 3: BeyondTrust PRA — Shell Jump per instance (optional)
-                if settings.beyondtrust_enabled:
+                if _cfg_svc.get_bool("beyondtrust_enabled"):
                     from ..services import btapi_service
                     try:
                         bt_result = await btapi_service.provision_ec2_jump(
