@@ -253,6 +253,20 @@ class Approval(Base):
     user = relationship("User")
 
 
+class AppConfig(Base):
+    """Encrypted key-value store for cloud credentials and feature flags.
+
+    Values are Fernet-encrypted with a key derived from JWT_SECRET_KEY so that
+    secrets at rest are protected even if someone reads the DB directly.
+    Written by the setup wizard; consumed by config_service.get().
+    """
+    __tablename__ = "app_config"
+
+    key = Column(String(128), primary_key=True)
+    value = Column(Text, nullable=True)         # Fernet-encrypted
+    updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 class ContainerStateCache(Base):
     """Cache for Portainer container state to improve dashboard performance."""
     __tablename__ = "container_state_cache"

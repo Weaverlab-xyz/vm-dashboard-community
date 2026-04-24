@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Setup — Infrastructure Management Dashboard</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+  <style>
+    [x-cloak] { display: none !important; }
+    .step-dot { transition: background-color 0.2s, border-color 0.2s; }
+  </style>
+</head>
+<body class="min-h-screen bg-gray-50 flex items-center justify-center p-4">
+
+<div x-data="wizard()" x-cloak class="w-full max-w-2xl">
+
+  <!-- Card -->
+  <div class="bg-white rounded-2xl shadow-lg overflow-hidden">
+
+    <!-- Header -->
+    <div class="bg-gradient-to-r from-slate-800 to-slate-700 px-8 py-6">
+      <h1 class="text-white text-xl font-semibold tracking-tight">
+        Infrastructure Management Dashboard
+      </h1>
+      <p class="text-slate-300 text-sm mt-1" x-text="isReconfig ? 'Reconfigure credentials and feature flags' : 'First-time setup — takes about 2 minutes'"></p>
+    </div>
+
+    <!-- Step progress -->
+    <div class="px-8 py-5 border-b border-gray-100 bg-gray-50">
+      <div class="flex items-center gap-2">
+        <template x-for="(label, i) in steps" :key="i">
+          <div class="flex items-center gap-2">
+            <!-- dot -->
+            <button
+              @click="jumpTo(i + 1)"
+              class="step-dot flex items-center justify-center w-7 h-7 rounded-full text-xs font-bold border-2 transition-all"
+              :class="{
+                'bg-blue-600 border-blue-600 text-white': step === i + 1,
+                'bg-green-500 border-green-500 text-white': step > i + 1,
+                'bg-white border-gray-300 text-gray-400': step < i + 1
+              }"
+              x-text="step > i + 1 ? '✓' : (i + 1)"
+            ></button>
+            <!-- label -->
+            <span
+              class="text-xs font-medium hidden sm:block"
+              :class="step === i + 1 ? 'text-blue-600' : (step > i + 1 ? 'text-green-600' : 'text-gray-400')"
+              x-text="label"
+            ></span>
+            <!-- connector -->
+            <div x-show="i < steps.length - 1" class="flex-1 h-px bg-gray-200 min-w-[24px]"></div>
+          </div>
+        </template>
+      </div>
+    </div>
+
+    <!-- Error banner -->
+    <div x-show="error" x-transition class="mx-8 mt-5 bg-red-50 border border-red-200 rounded-lg px-4 py-3">
+      <p class="text-red-700 text-sm" x-text="error"></p>
+    </div>
+
+    <!-- ── Step 1: Admin Account ── -->
+    <div x-show="step === 1" class="px-8 py-6 space-y-5">
+      <div>
+        <h2 class="text-lg font-semibold text-gray-900">Admin Account</h2>
+        <p class="text-gray-500 text-sm mt-1">
+          This account has full access to all dashboard features.
+          <span x-show="isReconfig" class="text-blue-600">Leave password blank to keep the current password.</span>
+        </p>
+      </div>
+      <div class="space-y-4">
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Username</label>
+          <input type="text" x-model="form.admin.username" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="admin">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">
+            Password <span x-show="!isReconfig" class="text-red-500">*</span>
+          </label>
+          <input type="password" x-model="form.admin.password" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" :placeholder="isReconfig ? 'Leave blank to keep current' : 'Minimum 8 characters'">
+        </div>
+        <div x-show="!isReconfig">
+          <label class="block text-sm font-medium text-gray-700 mb-1">Confirm Password <span class="text-red-500">*</span></label>
+          <input type="password" x-model="form.admin.confirm" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="Repeat password">
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Step 2: AWS ── -->
+    <div x-show="step === 2" class="px-8 py-6 space-y-5">
+      <div>
+        <h2 class="text-lg font-semibold text-gray-900">AWS Credentials</h2>
+        <p class="text-gray-500 text-sm mt-1">
+          Used to deploy EC2 instances. Create a dedicated IAM user with
+          <code class="bg-gray-100 px-1 rounded text-xs">AmazonEC2FullAccess</code> and
+          <code class="bg-gray-100 px-1 rounded text-xs">IAMReadOnlyAccess</code>,
+          then generate an access key.
+        </p>
+      </div>
+      <div class="space-y-4">
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Access Key ID</label>
+          <input type="text" x-model="form.aws.aws_access_key_id" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="AKIAIOSFODNN7EXAMPLE">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Secret Access Key</label>
+          <input type="password" x-model="form.aws.aws_secret_access_key" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500" :placeholder="isReconfig ? '••••••••  (leave blank to keep current)' : 'wJalrXUtnFEMI/K7MDENG/...'">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Default Region</label>
+          <select x-model="form.aws.aws_region" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <template x-for="r in awsRegions" :key="r.value">
+              <option :value="r.value" x-text="r.label"></option>
+            </template>
+          </select>
+        </div>
+      </div>
+      <p class="text-xs text-gray-400">See <a href="https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_access-keys.html" target="_blank" class="underline">IAM access keys docs</a> for setup instructions.</p>
+    </div>
+
+    <!-- ── Step 3: Azure ── -->
+    <div x-show="step === 3" class="px-8 py-6 space-y-5">
+      <div>
+        <h2 class="text-lg font-semibold text-gray-900">Azure Credentials</h2>
+        <p class="text-gray-500 text-sm mt-1">
+          Used to deploy Azure VMs. Create a service principal with Contributor rights:
+        </p>
+        <pre class="bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 mt-2 text-xs font-mono text-gray-700 whitespace-pre-wrap">az ad sp create-for-rbac --name dashboard-dev --role Contributor --scopes /subscriptions/&lt;sub-id&gt;</pre>
+      </div>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Client ID (appId)</label>
+          <input type="text" x-model="form.azure.azure_client_id" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Client Secret (password)</label>
+          <input type="password" x-model="form.azure.azure_client_secret" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500" :placeholder="isReconfig ? '••••••••  (leave blank to keep)' : 'From az ad sp output'">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Tenant ID (tenant)</label>
+          <input type="text" x-model="form.azure.azure_tenant_id" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Subscription ID</label>
+          <input type="text" x-model="form.azure.azure_subscription_id" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Resource Group</label>
+          <input type="text" x-model="form.azure.azure_resource_group" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="dashboard-rg">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Location</label>
+          <select x-model="form.azure.azure_location" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <template x-for="l in azureLocations" :key="l.value">
+              <option :value="l.value" x-text="l.label"></option>
+            </template>
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Step 4: Feature Flags ── -->
+    <div x-show="step === 4" class="px-8 py-6 space-y-5">
+      <div>
+        <h2 class="text-lg font-semibold text-gray-900">Feature Flags</h2>
+        <p class="text-gray-500 text-sm mt-1">
+          Enable optional integrations. All default to off — turn on only what you have infrastructure for.
+        </p>
+      </div>
+      <div class="space-y-3">
+        <template x-for="flag in featureFlags" :key="flag.key">
+          <div class="flex items-start gap-4 p-4 rounded-xl border"
+               :class="form.features[flag.key] ? 'border-blue-200 bg-blue-50' : 'border-gray-200 bg-white'">
+            <!-- Toggle -->
+            <button
+              @click="form.features[flag.key] = !form.features[flag.key]"
+              class="relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors mt-0.5"
+              :class="form.features[flag.key] ? 'bg-blue-600' : 'bg-gray-200'"
+            >
+              <span class="inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform"
+                    :class="form.features[flag.key] ? 'translate-x-6' : 'translate-x-1'"></span>
+            </button>
+            <div class="flex-1 min-w-0">
+              <p class="text-sm font-medium text-gray-900" x-text="flag.label"></p>
+              <p class="text-xs text-gray-500 mt-0.5" x-text="flag.desc"></p>
+              <p x-show="flag.note" class="text-xs text-amber-600 mt-1 font-medium" x-text="flag.note"></p>
+            </div>
+          </div>
+        </template>
+      </div>
+    </div>
+
+    <!-- ── Step 5: Done ── -->
+    <div x-show="step === 5" class="px-8 py-12 text-center space-y-4">
+      <div class="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto">
+        <svg class="w-8 h-8 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/>
+        </svg>
+      </div>
+      <h2 class="text-xl font-semibold text-gray-900" x-text="isReconfig ? 'Configuration updated' : 'Setup complete!'"></h2>
+      <p class="text-gray-500 text-sm" x-text="isReconfig ? 'Your new credentials are active immediately — no restart needed.' : 'Your credentials are stored encrypted in the database. You can now log in.'"></p>
+      <div class="pt-4">
+        <a href="/login"
+           class="inline-flex items-center gap-2 bg-blue-600 text-white px-6 py-2.5 rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors">
+          Go to login
+          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
+          </svg>
+        </a>
+      </div>
+    </div>
+
+    <!-- Navigation -->
+    <div x-show="step < 5" class="px-8 py-5 border-t border-gray-100 flex items-center justify-between bg-gray-50">
+      <button
+        @click="prev()"
+        x-show="step > 1"
+        class="px-4 py-2 text-sm text-gray-600 hover:text-gray-900 font-medium transition-colors"
+      >
+        ← Back
+      </button>
+      <div x-show="step === 1" class="text-xs text-gray-400">Step 1 of 4</div>
+
+      <button
+        @click="next()"
+        :disabled="saving"
+        class="ml-auto px-5 py-2.5 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-2"
+      >
+        <svg x-show="saving" class="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
+          <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+          <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"></path>
+        </svg>
+        <span x-text="step === 4 ? (saving ? 'Saving…' : (isReconfig ? 'Save changes' : 'Complete setup')) : 'Next →'"></span>
+      </button>
+    </div>
+
+  </div><!-- /card -->
+
+  <p class="text-center text-xs text-gray-400 mt-4">
+    Credentials are encrypted with AES-256 and stored in the application database.
+  </p>
+
+</div><!-- /wrapper -->
+
+<script>
+function wizard() {
+  return {
+    step: 1,
+    saving: false,
+    error: '',
+    isReconfig: false,
+    authToken: localStorage.getItem('vm_cli_token') || '',
+
+    steps: ['Admin', 'AWS', 'Azure', 'Features'],
+
+    form: {
+      admin:    { username: 'admin', password: '', confirm: '' },
+      aws:      { aws_access_key_id: '', aws_secret_access_key: '', aws_region: 'us-east-2' },
+      azure:    { azure_client_id: '', azure_client_secret: '', azure_tenant_id: '',
+                  azure_subscription_id: '', azure_resource_group: 'dashboard-rg', azure_location: 'centralus' },
+      features: { chat_enabled: false, vmware_enabled: false, beyondtrust_enabled: false,
+                  portainer_enabled: false, ansible_enabled: false, entitle_enabled: false },
+    },
+
+    awsRegions: [
+      { value: 'us-east-1',      label: 'US East (N. Virginia)' },
+      { value: 'us-east-2',      label: 'US East (Ohio)' },
+      { value: 'us-west-1',      label: 'US West (N. California)' },
+      { value: 'us-west-2',      label: 'US West (Oregon)' },
+      { value: 'ca-central-1',   label: 'Canada (Central)' },
+      { value: 'eu-west-1',      label: 'Europe (Ireland)' },
+      { value: 'eu-west-2',      label: 'Europe (London)' },
+      { value: 'eu-central-1',   label: 'Europe (Frankfurt)' },
+      { value: 'ap-southeast-1', label: 'Asia Pacific (Singapore)' },
+      { value: 'ap-southeast-2', label: 'Asia Pacific (Sydney)' },
+      { value: 'ap-northeast-1', label: 'Asia Pacific (Tokyo)' },
+    ],
+
+    azureLocations: [
+      { value: 'eastus',         label: 'East US' },
+      { value: 'eastus2',        label: 'East US 2' },
+      { value: 'westus2',        label: 'West US 2' },
+      { value: 'westus3',        label: 'West US 3' },
+      { value: 'centralus',      label: 'Central US' },
+      { value: 'northcentralus', label: 'North Central US' },
+      { value: 'southcentralus', label: 'South Central US' },
+      { value: 'canadacentral',  label: 'Canada Central' },
+      { value: 'northeurope',    label: 'North Europe' },
+      { value: 'westeurope',     label: 'West Europe' },
+      { value: 'uksouth',        label: 'UK South' },
+      { value: 'germanywestcentral', label: 'Germany West Central' },
+      { value: 'francecentral',  label: 'France Central' },
+      { value: 'australiaeast',  label: 'Australia East' },
+      { value: 'southeastasia',  label: 'Southeast Asia' },
+      { value: 'eastasia',       label: 'East Asia' },
+      { value: 'japaneast',      label: 'Japan East' },
+    ],
+
+    featureFlags: [
+      {
+        key:   'chat_enabled',
+        label: 'Natural-language chat (Ollama)',
+        desc:  'Local LLM assistant powered by Ollama. Pulls a ~5 GB model on first use.',
+        note:  '',
+      },
+      {
+        key:   'vmware_enabled',
+        label: 'VMware Workstation integration',
+        desc:  'Manage VMware VMs from the dashboard.',
+        note:  'Windows host only — requires VMware Workstation + SSH from the container.',
+      },
+      {
+        key:   'beyondtrust_enabled',
+        label: 'BeyondTrust PRA',
+        desc:  'Secret retrieval and session recording via BeyondTrust Password Safe.',
+        note:  'Requires a BeyondTrust tenant and the btapi binary.',
+      },
+      {
+        key:   'portainer_enabled',
+        label: 'Portainer CE',
+        desc:  'On-prem Docker host management via Portainer.',
+        note:  '',
+      },
+      {
+        key:   'ansible_enabled',
+        label: 'Ansible config management',
+        desc:  'Run Ansible playbooks via local Docker or AWS ECS Fargate.',
+        note:  '',
+      },
+      {
+        key:   'entitle_enabled',
+        label: 'Entitle approval workflows',
+        desc:  'Approval-gated actions via Entitle.',
+        note:  'Requires an Entitle tenant.',
+      },
+    ],
+
+    async init() {
+      // Check setup state and pre-populate if reconfiguring
+      try {
+        const res = await fetch('/api/setup/status');
+        const data = await res.json();
+        this.isReconfig = data.complete;
+
+        if (this.isReconfig && this.authToken) {
+          const cfgRes = await fetch('/api/setup/config', {
+            headers: { Authorization: `Bearer ${this.authToken}` }
+          });
+          if (cfgRes.ok) {
+            const cfg = await cfgRes.json();
+            // Pre-populate non-secret fields
+            if (cfg.aws_region)            this.form.aws.aws_region            = cfg.aws_region;
+            if (cfg.aws_access_key_id)     this.form.aws.aws_access_key_id     = cfg.aws_access_key_id;
+            if (cfg.azure_client_id)       this.form.azure.azure_client_id     = cfg.azure_client_id;
+            if (cfg.azure_tenant_id)       this.form.azure.azure_tenant_id     = cfg.azure_tenant_id;
+            if (cfg.azure_subscription_id) this.form.azure.azure_subscription_id = cfg.azure_subscription_id;
+            if (cfg.azure_resource_group)  this.form.azure.azure_resource_group = cfg.azure_resource_group;
+            if (cfg.azure_location)        this.form.azure.azure_location      = cfg.azure_location;
+            // Feature flags
+            for (const flag of this.featureFlags) {
+              if (cfg[flag.key] !== undefined) {
+                this.form.features[flag.key] = cfg[flag.key] === '1' || cfg[flag.key] === true;
+              }
+            }
+          }
+        }
+      } catch (e) {
+        // Non-fatal; proceed with empty form
+      }
+    },
+
+    jumpTo(n) {
+      if (n < this.step) this.step = n;
+    },
+
+    validateStep() {
+      this.error = '';
+      if (this.step === 1) {
+        if (!this.form.admin.username.trim()) { this.error = 'Username is required.'; return false; }
+        if (!this.isReconfig) {
+          if (this.form.admin.password.length < 8) { this.error = 'Password must be at least 8 characters.'; return false; }
+          if (this.form.admin.password !== this.form.admin.confirm) { this.error = 'Passwords do not match.'; return false; }
+        }
+      }
+      return true;
+    },
+
+    async next() {
+      if (!this.validateStep()) return;
+      if (this.step < 4) { this.step++; return; }
+      // Step 4 → submit
+      await this.submit();
+    },
+
+    prev() {
+      if (this.step > 1) this.step--;
+      this.error = '';
+    },
+
+    async submit() {
+      this.saving = true;
+      this.error  = '';
+      try {
+        const body = {
+          admin: {
+            username: this.form.admin.username,
+            password: this.form.admin.password,
+          },
+          aws:      this.form.aws,
+          azure:    this.form.azure,
+          features: this.form.features,
+        };
+
+        const url     = this.isReconfig ? '/api/setup/config' : '/api/setup/complete';
+        const method  = this.isReconfig ? 'PUT' : 'POST';
+        const headers = { 'Content-Type': 'application/json' };
+        if (this.isReconfig && this.authToken) {
+          headers['Authorization'] = `Bearer ${this.authToken}`;
+        }
+
+        const res = await fetch(url, { method, headers, body: JSON.stringify(body) });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          this.error = err.detail || `Error ${res.status} — please try again.`;
+          return;
+        }
+        this.step = 5;
+      } catch (e) {
+        this.error = 'Network error — is the server running?';
+      } finally {
+        this.saving = false;
+      }
+    },
+  };
+}
+</script>
+</body>
+</html>

@@ -74,41 +74,43 @@ _sub_id_cache: Optional[str] = None
 
 
 async def _ensure_creds() -> tuple:
-    """
-    Return (ClientSecretCredential, subscription_id), fetching from Password Safe
-    on first call and caching for subsequent calls.
+    """Return (ClientSecretCredential, subscription_id).
+
+    Priority: config_service (DB / wizard) → env vars (settings) → BeyondTrust.
+    Result is cached in-process; call invalidate_credentials() after a wizard update.
     """
     global _cred_cache, _sub_id_cache
     _require_azure()
     if _cred_cache is None:
         from ..config import settings
+        from . import config_service
 
-        if (settings.azure_client_id and settings.azure_client_secret
-                and settings.azure_tenant_id and settings.azure_subscription_id):
-            client_id = settings.azure_client_id
-            client_secret = settings.azure_client_secret
-            tenant_id = settings.azure_tenant_id
-            sub_id = settings.azure_subscription_id
-            source = "direct env vars"
+        # Config_service (DB) takes precedence; fall back to env vars via settings.
+        client_id     = config_service.get("azure_client_id")     or settings.azure_client_id
+        client_secret = config_service.get("azure_client_secret") or settings.azure_client_secret
+        tenant_id     = config_service.get("azure_tenant_id")     or settings.azure_tenant_id
+        sub_id        = config_service.get("azure_subscription_id") or settings.azure_subscription_id
+
+        if client_id and client_secret and tenant_id and sub_id:
+            source = "config store / env vars"
         elif settings.beyondtrust_enabled:
             from . import btapi_service
             try:
-                client_id = await btapi_service.get_ps_secret(settings.azure_client_id_secret_title)
+                client_id     = await btapi_service.get_ps_secret(settings.azure_client_id_secret_title)
                 client_secret = await btapi_service.get_ps_secret(settings.azure_client_secret_secret_title)
-                tenant_id = await btapi_service.get_ps_secret(settings.azure_tenant_id_secret_title)
-                sub_id = await btapi_service.get_ps_secret(settings.azure_subscription_id_secret_title)
+                tenant_id     = await btapi_service.get_ps_secret(settings.azure_tenant_id_secret_title)
+                sub_id        = await btapi_service.get_ps_secret(settings.azure_subscription_id_secret_title)
             except Exception as e:
                 raise AzureError(
-                    "Azure credentials not configured. Set AZURE_CLIENT_ID, "
-                    "AZURE_CLIENT_SECRET, AZURE_TENANT_ID, and "
-                    "AZURE_SUBSCRIPTION_ID in your .env file, or configure "
-                    f"BeyondTrust Password Safe lookup (underlying error: {e})."
+                    "Azure credentials not configured. Complete the setup wizard, "
+                    "set AZURE_CLIENT_ID/SECRET/TENANT_ID/SUBSCRIPTION_ID in .env, "
+                    f"or configure BeyondTrust Password Safe lookup (error: {e})."
                 ) from e
             source = "Password Safe"
         else:
             raise AzureError(
-                "Azure credentials not configured. Set AZURE_CLIENT_ID, "
-                "AZURE_CLIENT_SECRET, AZURE_TENANT_ID, and "
+                "Azure credentials not configured. Complete the setup wizard or "
+                "set AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, AZURE_TENANT_ID, and "
                 "AZURE_SUBSCRIPTION_ID in your .env file."
             )
 

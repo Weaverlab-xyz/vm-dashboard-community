@@ -26,21 +26,44 @@ def _require_boto3():
         raise AWSError("boto3 is not installed. Run: pip install boto3")
 
 
+def _aws_kwargs(region: str) -> dict:
+    """Build boto3 client kwargs, preferring config_service (DB) over env vars.
+
+    Explicit credential kwargs are passed so boto3 doesn't fall back to the
+    environment or instance metadata — the wizard is the authoritative source.
+    """
+    import os
+    try:
+        from . import config_service
+        key_id = config_service.get("aws_access_key_id") or os.environ.get("AWS_ACCESS_KEY_ID", "")
+        secret  = config_service.get("aws_secret_access_key") or os.environ.get("AWS_SECRET_ACCESS_KEY", "")
+        region  = config_service.get("aws_region") or region or os.environ.get("AWS_REGION", "us-east-2")
+    except Exception:
+        key_id = os.environ.get("AWS_ACCESS_KEY_ID", "")
+        secret  = os.environ.get("AWS_SECRET_ACCESS_KEY", "")
+
+    kwargs: dict = {"region_name": region}
+    if key_id and secret:
+        kwargs["aws_access_key_id"]     = key_id
+        kwargs["aws_secret_access_key"] = secret
+    return kwargs
+
+
 def _get_ec2(region: str):
     _require_boto3()
-    return boto3.client("ec2", region_name=region)
+    return boto3.client("ec2", **_aws_kwargs(region))
 
 
 def _get_sm(region: str):
     _require_boto3()
-    return boto3.client("secretsmanager", region_name=region)
+    return boto3.client("secretsmanager", **_aws_kwargs(region))
 
 
 # ── Secrets Manager ────────────────────────────────────────────────────────────
 
 def _get_secret_sync(secret_name: str, region: str) -> str:
     _require_boto3()
-    sm = boto3.client("secretsmanager", region_name=region)
+    sm = boto3.client("secretsmanager", **_aws_kwargs(region))
     resp = sm.get_secret_value(SecretId=secret_name)
     if "SecretString" in resp:
         return resp["SecretString"]

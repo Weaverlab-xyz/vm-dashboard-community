@@ -20,6 +20,7 @@ from slowapi.util import get_remote_address
 from .config import settings
 from .database import SessionLocal, User, create_admin_user, init_db
 from .services import cache_service
+from .services import config_service
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
@@ -250,6 +251,24 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 # This makes request.url.scheme reflect "https" when accessed through the proxy.
 app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
 
+
+# ── Setup guard middleware ────────────────────────────────────────────────────
+# Until the setup wizard has been completed, redirect all browser traffic to
+# /setup.  API and static paths are exempt so the wizard itself can load.
+
+from starlette.responses import RedirectResponse as _Redirect  # noqa: E402
+
+_SETUP_BYPASS_PREFIXES = ("/setup", "/api/setup", "/static", "/api/health", "/api/features")
+
+@app.middleware("http")
+async def setup_guard(request: Request, call_next):
+    path = request.url.path
+    if any(path.startswith(p) for p in _SETUP_BYPASS_PREFIXES):
+        return await call_next(request)
+    if not config_service.is_setup_complete():
+        return _Redirect("/setup", status_code=302)
+    return await call_next(request)
+
 # CORS
 app.add_middleware(
     CORSMiddleware,
@@ -271,12 +290,19 @@ if os.path.isdir(_static_dir):
 
 templates = Jinja2Templates(directory=_templates_dir)
 templates.env.globals["app_env"] = settings.app_env
-templates.env.globals["chat_enabled"] = settings.chat_enabled
-templates.env.globals["vmware_enabled"] = settings.vmware_enabled
-templates.env.globals["portainer_enabled"] = settings.portainer_enabled
-templates.env.globals["ansible_enabled"] = settings.ansible_enabled
-templates.env.globals["entitle_enabled"] = settings.entitle_enabled
-templates.env.globals["beyondtrust_enabled"] = settings.beyondtrust_enabled
+
+
+def _feature_flags() -> dict:
+    """Read feature flags from config_service (DB) with env-var fallback.
+    Called per-request so wizard changes are visible without a restart."""
+    return {
+        "chat_enabled":         config_service.get_bool("chat_enabled",         settings.chat_enabled),
+        "vmware_enabled":       config_service.get_bool("vmware_enabled",        settings.vmware_enabled),
+        "portainer_enabled":    config_service.get_bool("portainer_enabled",     settings.portainer_enabled),
+        "ansible_enabled":      config_service.get_bool("ansible_enabled",       settings.ansible_enabled),
+        "entitle_enabled":      config_service.get_bool("entitle_enabled",       settings.entitle_enabled),
+        "beyondtrust_enabled":  config_service.get_bool("beyondtrust_enabled",   settings.beyondtrust_enabled),
+    }
 
 
 # ── Register API routers ──────────────────────────────────────────────────────
@@ -286,8 +312,9 @@ templates.env.globals["beyondtrust_enabled"] = settings.beyondtrust_enabled
 # are absent — can still start cleanly with the corresponding flag set to
 # false.
 
-from .api import auth, jobs, websocket, aws, azure, mfa, tokens, users, groups, chat  # noqa: E402
+from .api import auth, jobs, websocket, aws, azure, mfa, tokens, users, groups, chat, setup  # noqa: E402
 
+app.include_router(setup.router)
 app.include_router(auth.router)
 app.include_router(mfa.router)
 app.include_router(tokens.router)
@@ -318,10 +345,16 @@ if settings.entitle_enabled:
 
 # ── HTML pages ────────────────────────────────────────────────────────────────
 
+@app.get("/setup", response_class=HTMLResponse, include_in_schema=False)
+async def setup_page(request: Request):
+    """First-run setup wizard. Accessible without authentication."""
+    return templates.TemplateResponse("setup.html", {"request": request})
+
+
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
 async def root(request: Request):
     """Serve the dashboard."""
-    return templates.TemplateResponse("dashboard.html", {"request": request})
+    return templates.TemplateResponse("dashboard.html", {"request": request, **_feature_flags()})
 
 
 @app.get("/login", response_class=HTMLResponse, include_in_schema=False)
@@ -331,43 +364,44 @@ async def login_page(request: Request):
 
 @app.get("/vms", response_class=HTMLResponse, include_in_schema=False)
 async def vms_page(request: Request):
-    if not settings.vmware_enabled:
+    if not config_service.get_bool("vmware_enabled", settings.vmware_enabled):
         raise HTTPException(status_code=404, detail="VMware integration is disabled")
-    return templates.TemplateResponse("vms/list.html", {"request": request})
+    return templates.TemplateResponse("vms/list.html", {"request": request, **_feature_flags()})
 
 
 @app.get("/jobs", response_class=HTMLResponse, include_in_schema=False)
 async def jobs_page(request: Request):
-    return templates.TemplateResponse("jobs/list.html", {"request": request})
+    return templates.TemplateResponse("jobs/list.html", {"request": request, **_feature_flags()})
 
 
 @app.get("/jobs/{job_id}", response_class=HTMLResponse, include_in_schema=False)
 async def job_detail_page(request: Request, job_id: str):
-    return templates.TemplateResponse("jobs/detail.html", {"request": request, "job_id": job_id})
+    return templates.TemplateResponse("jobs/detail.html", {"request": request, "job_id": job_id, **_feature_flags()})
 
 
 @app.get("/aws", response_class=HTMLResponse, include_in_schema=False)
 async def aws_page(request: Request):
-    return templates.TemplateResponse("aws/index.html", {"request": request})
+    return templates.TemplateResponse("aws/index.html", {"request": request, **_feature_flags()})
 
 
 @app.get("/azure", response_class=HTMLResponse, include_in_schema=False)
 async def azure_page(request: Request):
-    return templates.TemplateResponse("azure/index.html", {"request": request, "default_location": settings.azure_location})
+    location = config_service.get("azure_location") or settings.azure_location
+    return templates.TemplateResponse("azure/index.html", {"request": request, "default_location": location, **_feature_flags()})
 
 
 @app.get("/settings", response_class=HTMLResponse, include_in_schema=False)
 async def settings_page(request: Request):
-    return templates.TemplateResponse("settings.html", {"request": request})
+    return templates.TemplateResponse("settings.html", {"request": request, **_feature_flags()})
 
 
 @app.get("/chat", response_class=HTMLResponse, include_in_schema=False)
 async def chat_page(request: Request):
-    if not settings.chat_enabled:
+    if not config_service.get_bool("chat_enabled", settings.chat_enabled):
         raise HTTPException(status_code=404, detail="Chat is disabled")
     return templates.TemplateResponse(
         "chat/index.html",
-        {"request": request, "chat_model": settings.chat_model},
+        {"request": request, "chat_model": settings.chat_model, **_feature_flags()},
     )
 
 
@@ -397,15 +431,16 @@ async def health():
 
 @app.get("/api/features", tags=["health"])
 async def features():
-    """Expose the enabled feature set to the frontend so it can hide nav
-    entries for integrations the operator has disabled."""
+    """Expose the enabled feature set to the frontend (reads from config_service
+    so wizard changes are reflected immediately without a restart)."""
+    flags = _feature_flags()
     return {
-        "vmware": settings.vmware_enabled,
-        "beyondtrust": settings.beyondtrust_enabled,
-        "portainer": settings.portainer_enabled,
-        "ansible": settings.ansible_enabled,
-        "entitle": settings.entitle_enabled,
-        "chat": settings.chat_enabled,
+        "vmware":       flags["vmware_enabled"],
+        "beyondtrust":  flags["beyondtrust_enabled"],
+        "portainer":    flags["portainer_enabled"],
+        "ansible":      flags["ansible_enabled"],
+        "entitle":      flags["entitle_enabled"],
+        "chat":         flags["chat_enabled"],
     }
 
 
