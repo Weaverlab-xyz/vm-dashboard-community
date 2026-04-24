@@ -115,10 +115,10 @@ exist. Set `AZURE_LOCATION` to your preferred Azure region (e.g.
 ## Part C — Run the dashboard
 
 Pick the onboarder that matches your host OS. Both do the same thing:
-preflight checks, bootstrap `.env` on first run, generate JWT and DB
-secrets, bring up Compose, poll `/api/health`, open the browser.
+preflight checks, bootstrap `.env` (JWT and DB secrets only), bring up
+Compose, poll `/api/health`, open the browser.
 
-### 1. First run
+### 1. Run the onboard script (one command)
 
 **Windows** (PowerShell 7):
 
@@ -126,34 +126,40 @@ secrets, bring up Compose, poll `/api/health`, open the browser.
 .\scripts\Onboard-Dashboard.ps1
 ```
 
-**macOS / Linux** (bash):
+**macOS / Linux / Raspberry Pi** (bash):
 
 ```bash
 ./scripts/onboard.sh
 ```
 
-First run copies `.env.example` to `.env` and opens it in your editor
-(Notepad on Windows; `$EDITOR` or `nano` on macOS/Linux). Fill in the
-**Required: AWS** and **Required: Azure** sections with the credentials
-you gathered in Parts A and B. Save and close.
+The script:
 
-### 2. Second run
-
-Run the same command again. This time the script:
-
-- Generates `JWT_SECRET_KEY`, `POSTGRES_PASSWORD`, and
-  `FIRST_RUN_ADMIN_PASSWORD` (the values stay in `.env`).
-- Validates that no `REPLACE_ME_*` placeholders remain.
+- Verifies Docker is running and `docker compose` is available.
+- Copies `.env.example → .env` if missing (only bootstrap secrets needed — no cloud credentials in this file).
+- Auto-generates `JWT_SECRET_KEY` and `POSTGRES_PASSWORD` if they're still at defaults.
 - Brings up the Compose stack (`db` + `app`).
 - Waits for `http://localhost:8000/api/health` to respond.
-- Opens your browser at <http://localhost:8000>.
+- Opens your browser.
+
+### 2. Complete the setup wizard
+
+Your browser opens to the **setup wizard**. It appears automatically on
+first visit because no credentials are stored yet.
+
+| Step | What to fill in |
+|------|-----------------|
+| **1 — Admin account** | Username and password you'll use to log in |
+| **2 — AWS** | Access Key ID, Secret Access Key, and default region from Part A |
+| **3 — Azure** | Service principal credentials from Part B. Optionally expand **Sign in with Microsoft** to add Entra OAuth (see Appendix B) |
+| **4 — Feature flags** | Enable optional integrations — all default off (see Appendix A, C) |
+
+Click **Complete setup**. Credentials are encrypted with AES-256 and
+stored in the application database — not in any file on disk.
 
 ### 3. Log in
 
-Username: `admin`. Password: the `FIRST_RUN_ADMIN_PASSWORD` value from
-`.env`. Change the password from **Settings → Security** after your first
-login — the `FIRST_RUN_ADMIN_PASSWORD` env var is ignored once any user
-exists.
+The wizard redirects to `/login`. Sign in with the username and password
+you created in wizard Step 1.
 
 ### 4. Stopping and restarting
 
@@ -162,20 +168,26 @@ docker compose down              # stop the stack
 ./scripts/onboard.sh             # bring it back up (Windows: .\scripts\Onboard-Dashboard.ps1)
 ```
 
-Postgres data persists in a named Docker volume (`pgdata`) across
-restarts.
+Postgres data persists in the `pgdata` Docker volume across restarts. The
+wizard won't appear again — your credentials are already in the database.
 
-### Mac-specific notes
+### Reconfiguring credentials after first run
+
+To update credentials or toggle feature flags after setup, navigate to
+`/setup` in your browser while logged in as admin. The wizard reopens in
+reconfigure mode: existing values are pre-filled, and leaving a secret
+field blank keeps the stored value unchanged.
+
+### Mac / Linux notes
 
 - On Apple Silicon (M1/M2/M3/M4) the Docker images build natively as
-  `linux/arm64` — no platform flag needed.
-- The **VMware** feature flag (Appendix A) is Windows-only; leave
-  `VMWARE_ENABLED=false` on macOS.
+  `linux/arm64` — no platform flag needed. The same applies to
+  Raspberry Pi 5 (ARM64).
+- The **VMware** feature flag (Appendix A) is Windows-only; do not enable
+  it on macOS or Linux.
 - The optional **Ollama chat** profile (Appendix C) uses an NVIDIA GPU
-  block in `docker-compose.yml`. On Macs that block is a no-op if you
-  don't start the `chat` profile. If you do enable chat on Mac, comment
-  out the `deploy.resources.reservations.devices` section — Ollama will
-  run on CPU/Metal without it.
+  block in `docker-compose.yml`. On Macs / Raspberry Pi that block is a
+  no-op. Enable the chat profile; Ollama runs on CPU/Metal without it.
 
 ---
 
@@ -231,22 +243,23 @@ docker compose logs --tail 100 app
 
 Common causes:
 
-| Symptom in logs                                   | Likely cause                                      | Fix                                                                    |
-|---------------------------------------------------|---------------------------------------------------|------------------------------------------------------------------------|
-| `InvalidClientTokenId` / `InvalidSignature`       | AWS access key wrong or rotated                   | Rerun `aws iam create-access-key`, update `.env`, `docker compose up`  |
-| `AuthenticationFailed` from Azure                 | Azure SP secret wrong or expired                  | Regenerate with `az ad sp credential reset`, update `.env`             |
-| `connection refused` on port 5432                 | Postgres container not healthy                    | `docker compose ps`; check `db` container logs                          |
-| `Address already in use` on 8000                  | Another process is bound to 8000                  | Stop it, or change the port mapping in `docker-compose.yml`            |
+| Symptom in logs                                   | Likely cause                                      | Fix                                                                                          |
+|---------------------------------------------------|---------------------------------------------------|----------------------------------------------------------------------------------------------|
+| `InvalidClientTokenId` / `InvalidSignature`       | AWS access key wrong or rotated                   | Rerun `aws iam create-access-key`, then update via the reconfigure wizard (`/setup`)         |
+| `AuthenticationFailed` from Azure                 | Azure SP secret wrong or expired                  | Regenerate with `az ad sp credential reset`, then update via the reconfigure wizard (`/setup`) |
+| `connection refused` on port 5432                 | Postgres container not healthy                    | `docker compose ps`; check `db` container logs                                               |
+| `Address already in use` on 8000                  | Another process is bound to 8000                  | Stop it, or change the port mapping in `docker-compose.yml`                                  |
 
 ### Login fails with "Invalid credentials"
 
-- The admin account is only bootstrapped on the **very first** startup
-  when the users table is empty. If you've changed
-  `FIRST_RUN_ADMIN_PASSWORD` after first boot, it has no effect. Use the
-  password as it was when you first started the stack, then change it
-  from Settings.
-- To reset: `docker compose down -v` (⚠ wipes the database) then rerun
-  the onboarding script.
+- The admin account is created in **Step 1 of the setup wizard** on
+  first run. Use the username and password you entered there.
+- If you've forgotten the password, change it from **Settings → Security**
+  while logged in, or reset the entire stack:
+  ```bash
+  docker compose down -v   # ⚠ wipes the database and all stored credentials
+  ./scripts/onboard.sh     # brings it back up; wizard appears again on first visit
+  ```
 
 ### Where to file issues
 
@@ -323,20 +336,27 @@ principal in Part B.
 
 ### Wire it up
 
-Set in `.env`:
+**During initial setup:** In the setup wizard, go to Step 3 (Azure) and
+expand the **Sign in with Microsoft — optional** panel. Enter the Client
+ID, Client Secret, and Tenant ID, then complete the wizard as normal.
 
-```
-AZURE_OAUTH_CLIENT_ID=<the app's Application (client) ID>
-AZURE_OAUTH_CLIENT_SECRET=<the secret you just copied>
-AZURE_OAUTH_TENANT_ID=<your tenant id>
-```
+**After initial setup:** Navigate to `/setup` in your browser (admin
+login required). The wizard reopens in reconfigure mode. Go to Step 3
+and expand the OAuth panel — the Client ID and Tenant ID will be
+pre-filled if already configured; leave the secret field blank to keep
+the stored value.
 
-Restart the stack. The login page now shows a "Sign in with Microsoft"
-button.
+The redirect URI is derived automatically from your browser's host —
+you do not set it in the dashboard. Register the same URI that appears
+in the wizard hint (`{your-host}/api/auth/oauth/azure/callback`) in the
+Azure app registration under **Authentication**.
 
-Optional: map Entra group object IDs to dashboard workgroups using
-`AZURE_OAUTH_GROUP_MAP` in `.env` — users in a listed group are
-auto-created on first login.
+Once saved, the login page shows a **Sign in with Microsoft** button
+without a restart.
+
+Optional: map Entra group object IDs to dashboard workgroups from
+**Settings → Groups** — users in a mapped group are auto-created and
+assigned workgroups on first OAuth login.
 
 ---
 
@@ -347,9 +367,11 @@ dashboard assistant.
 
 ### Enable
 
-1. In `.env`, set `CHAT_ENABLED=true`.
+1. Toggle **Natural-language chat** on in either:
+   - The setup wizard → Step 4 (Features), or
+   - **Settings → Integrations** → Chat (after initial setup).
 2. Start the chat profile alongside the main stack:
-   ```powershell
+   ```bash
    docker compose --profile chat up -d
    ```
 3. The first request after startup pulls the model (~5 GB for the default

@@ -477,6 +477,16 @@ async def webauthn_login_begin(
 
 # ── Azure AD OAuth ────────────────────────────────────────────────────────────
 
+def _oauth_cfg() -> tuple:
+    """Return (client_id, client_secret, tenant_id) from DB config, falling back to env."""
+    from ..services import config_service
+    return (
+        config_service.get("azure_oauth_client_id") or settings.azure_oauth_client_id,
+        config_service.get("azure_oauth_client_secret") or settings.azure_oauth_client_secret,
+        config_service.get("azure_oauth_tenant_id") or settings.azure_oauth_tenant_id,
+    )
+
+
 def _build_redirect_uri(request: Request) -> str:
     """
     Derive the OAuth callback URI from the incoming request so that the flow
@@ -493,7 +503,8 @@ def _build_redirect_uri(request: Request) -> str:
 @router.get("/oauth/azure/login")
 async def oauth_azure_login(request: Request):
     """Redirect the browser to Azure AD for OAuth login."""
-    if not settings.azure_oauth_client_id or not settings.azure_oauth_tenant_id:
+    client_id, _, tenant_id = _oauth_cfg()
+    if not client_id or not tenant_id:
         raise HTTPException(
             status_code=501,
             detail="Azure AD OAuth is not configured on this server.",
@@ -506,9 +517,9 @@ async def oauth_azure_login(request: Request):
     import msal  # noqa: F401 (unused var `app` removed)
     # Build the authorization URL manually so we can include the state parameter
     auth_url = (
-        f"https://login.microsoftonline.com/{settings.azure_oauth_tenant_id}/oauth2/v2.0/authorize?"
+        f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/authorize?"
         + urlencode({
-            "client_id": settings.azure_oauth_client_id,
+            "client_id": client_id,
             "response_type": "code",
             "redirect_uri": redirect_uri,
             "scope": "openid profile email User.Read",
@@ -547,10 +558,11 @@ async def oauth_azure_callback(
 
     import msal
 
+    oauth_client_id, oauth_client_secret, oauth_tenant_id = _oauth_cfg()
     msal_app = msal.ConfidentialClientApplication(
-        client_id=settings.azure_oauth_client_id,
-        client_credential=settings.azure_oauth_client_secret,
-        authority=f"https://login.microsoftonline.com/{settings.azure_oauth_tenant_id}",
+        client_id=oauth_client_id,
+        client_credential=oauth_client_secret,
+        authority=f"https://login.microsoftonline.com/{oauth_tenant_id}",
     )
     result = msal_app.acquire_token_by_authorization_code(
         code=code,

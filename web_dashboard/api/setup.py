@@ -35,6 +35,10 @@ class AzureSetup(BaseModel):
     azure_subscription_id: str = ""
     azure_resource_group: str = "dashboard-rg"
     azure_location: str = "centralus"
+    # Optional: separate app registration for "Sign in with Microsoft"
+    azure_oauth_client_id: str = ""
+    azure_oauth_client_secret: str = ""
+    azure_oauth_tenant_id: str = ""
 
 
 class FeaturesSetup(BaseModel):
@@ -110,19 +114,29 @@ def _upsert_admin(username: str, password: str) -> None:
         db.close()
 
 
+_WIZARD_SECRET_FIELDS = frozenset({
+    "aws_secret_access_key",
+    "azure_client_secret",
+    "azure_oauth_client_secret",
+})
+
+
 def _apply_config(payload: SetupPayload) -> None:
     """Write all wizard values to the config store and invalidate service caches."""
     from ..services import config_service
 
     pairs: dict = {}
 
-    # AWS — only store non-empty values so we don't blank out existing creds
-    # when the user skips a section (empty string = not configured)
     for field, value in payload.aws.model_dump().items():
+        # Skip empty secret fields on reconfigure so existing DB values aren't blanked.
+        if field in _WIZARD_SECRET_FIELDS and not value:
+            continue
         pairs[field] = value
 
     # Azure
     for field, value in payload.azure.model_dump().items():
+        if field in _WIZARD_SECRET_FIELDS and not value:
+            continue
         pairs[field] = value
 
     # Feature flags — always store (explicit true/false is meaningful)

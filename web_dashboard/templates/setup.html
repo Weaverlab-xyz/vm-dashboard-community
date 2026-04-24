@@ -158,6 +158,61 @@
           </select>
         </div>
       </div>
+
+      <!-- Optional: Sign in with Microsoft (Entra ID OAuth) -->
+      <div class="mt-2 border border-gray-200 rounded-xl overflow-hidden">
+        <button type="button" @click="showOAuth = !showOAuth"
+                class="w-full flex items-center justify-between px-4 py-3 text-sm font-medium text-gray-700 bg-gray-50 hover:bg-gray-100 transition-colors">
+          <span class="flex items-center gap-2">
+            <!-- Microsoft logo mark -->
+            <svg class="w-4 h-4" viewBox="0 0 21 21" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <rect x="1" y="1" width="9" height="9" fill="#f25022"/>
+              <rect x="11" y="1" width="9" height="9" fill="#7fba00"/>
+              <rect x="1" y="11" width="9" height="9" fill="#00a4ef"/>
+              <rect x="11" y="11" width="9" height="9" fill="#ffb900"/>
+            </svg>
+            Sign in with Microsoft — optional
+          </span>
+          <svg class="w-4 h-4 text-gray-400 transition-transform duration-150" :class="showOAuth ? 'rotate-180' : ''"
+               fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/>
+          </svg>
+        </button>
+        <div x-show="showOAuth" x-transition class="px-4 py-4 space-y-4 border-t border-gray-200 bg-white">
+          <p class="text-xs text-gray-500">
+            Requires a <strong>separate</strong> Entra app registration (not the service principal above).
+            Grant delegated permissions: <code class="bg-gray-100 px-1 rounded">openid</code>
+            <code class="bg-gray-100 px-1 rounded">profile</code>
+            <code class="bg-gray-100 px-1 rounded">email</code>
+            <code class="bg-gray-100 px-1 rounded">User.Read</code>. Leave blank to disable.
+          </p>
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">OAuth App Client ID</label>
+              <input type="text" x-model="form.azure.azure_oauth_client_id"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                     placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">OAuth App Client Secret</label>
+              <input type="password" x-model="form.azure.azure_oauth_client_secret"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                     :placeholder="isReconfig ? '••••••••  (leave blank to keep)' : 'From app registration → Certificates &amp; secrets'">
+            </div>
+            <div class="sm:col-span-2">
+              <label class="block text-sm font-medium text-gray-700 mb-1">OAuth Tenant ID</label>
+              <input type="text" x-model="form.azure.azure_oauth_tenant_id"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                     placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">
+              <p class="text-xs text-gray-400 mt-1">
+                The redirect URI is auto-configured to
+                <code class="bg-gray-100 px-1 rounded">{your-host}/api/auth/oauth/azure/callback</code> —
+                add this in the app registration → Authentication.
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
 
     <!-- ── Step 4: Feature Flags ── -->
@@ -250,6 +305,7 @@ function wizard() {
     saving: false,
     error: '',
     isReconfig: false,
+    showOAuth: false,
     authToken: localStorage.getItem('vm_cli_token') || '',
 
     steps: ['Admin', 'AWS', 'Azure', 'Features'],
@@ -258,7 +314,8 @@ function wizard() {
       admin:    { username: 'admin', password: '', confirm: '' },
       aws:      { aws_access_key_id: '', aws_secret_access_key: '', aws_region: 'us-east-2' },
       azure:    { azure_client_id: '', azure_client_secret: '', azure_tenant_id: '',
-                  azure_subscription_id: '', azure_resource_group: 'dashboard-rg', azure_location: 'centralus' },
+                  azure_subscription_id: '', azure_resource_group: 'dashboard-rg', azure_location: 'centralus',
+                  azure_oauth_client_id: '', azure_oauth_client_secret: '', azure_oauth_tenant_id: '' },
       features: { chat_enabled: false, vmware_enabled: false, beyondtrust_enabled: false,
                   portainer_enabled: false, ansible_enabled: false, entitle_enabled: false },
     },
@@ -357,6 +414,12 @@ function wizard() {
             if (cfg.azure_subscription_id) this.form.azure.azure_subscription_id = cfg.azure_subscription_id;
             if (cfg.azure_resource_group)  this.form.azure.azure_resource_group = cfg.azure_resource_group;
             if (cfg.azure_location)        this.form.azure.azure_location      = cfg.azure_location;
+            // OAuth — expand panel automatically if previously configured
+            if (cfg.azure_oauth_client_id) {
+              this.form.azure.azure_oauth_client_id  = cfg.azure_oauth_client_id;
+              this.form.azure.azure_oauth_tenant_id  = cfg.azure_oauth_tenant_id || '';
+              this.showOAuth = true;
+            }
             // Feature flags
             for (const flag of this.featureFlags) {
               if (cfg[flag.key] !== undefined) {
