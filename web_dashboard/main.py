@@ -307,12 +307,28 @@ def _feature_flags() -> dict:
 
 # ── Register API routers ──────────────────────────────────────────────────────
 #
-# Optional integrations (VMware, Portainer, Ansible, Entitle) are imported
-# conditionally so the community edition — where the backing service modules
-# are absent — can still start cleanly with the corresponding flag set to
-# false.
+# Core routers are always included.
+#
+# Optional integration routers (VMware, Portainer, Ansible, Entitle) are also
+# always registered but protected by a runtime dependency that checks the
+# feature flag in config_service.  This means enabling a flag through the
+# Settings → Integrations panel takes effect immediately — no restart needed.
 
+from fastapi import Depends  # noqa: E402
 from .api import auth, jobs, websocket, aws, azure, mfa, tokens, users, groups, chat, setup  # noqa: E402
+
+
+def _feature_gate(flag: str):
+    """FastAPI dependency: 404 if the named feature flag is disabled."""
+    def _check():
+        if not config_service.get_bool(flag):
+            raise HTTPException(
+                status_code=404,
+                detail=f"This integration is not enabled. "
+                       f"Enable it in Settings → Integrations.",
+            )
+    return Depends(_check)
+
 
 app.include_router(setup.router)
 app.include_router(auth.router)
@@ -326,21 +342,29 @@ app.include_router(aws.router)
 app.include_router(azure.router)
 app.include_router(chat.router)
 
-if settings.vmware_enabled:
+try:
     from .api import vms  # noqa: E402
-    app.include_router(vms.router)
+    app.include_router(vms.router, dependencies=[_feature_gate("vmware_enabled")])
+except ImportError:
+    pass
 
-if settings.portainer_enabled:
+try:
     from .api import containers  # noqa: E402
-    app.include_router(containers.router)
+    app.include_router(containers.router, dependencies=[_feature_gate("portainer_enabled")])
+except ImportError:
+    pass
 
-if settings.ansible_enabled:
+try:
     from .api import config_mgmt  # noqa: E402
-    app.include_router(config_mgmt.router)
+    app.include_router(config_mgmt.router, dependencies=[_feature_gate("ansible_enabled")])
+except ImportError:
+    pass
 
-if settings.entitle_enabled:
+try:
     from .api import approvals  # noqa: E402
-    app.include_router(approvals.router)
+    app.include_router(approvals.router, dependencies=[_feature_gate("entitle_enabled")])
+except ImportError:
+    pass
 
 
 # ── HTML pages ────────────────────────────────────────────────────────────────

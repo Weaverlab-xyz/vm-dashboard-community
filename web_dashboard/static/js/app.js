@@ -108,9 +108,11 @@ const API = {
         return resp.json();
     },
 
-    get: (path) => API.request('GET', path),
-    post: (path, body) => API.request('POST', path, body),
-    del: (path) => API.request('DELETE', path),
+    get:   (path)        => API.request('GET',    path),
+    post:  (path, body)  => API.request('POST',   path, body),
+    put:   (path, body)  => API.request('PUT',    path, body),
+    patch: (path, body)  => API.request('PATCH',  path, body),
+    del:   (path)        => API.request('DELETE', path),
 };
 
 // ── WebSocket job tracker ─────────────────────────────────────────────────────
