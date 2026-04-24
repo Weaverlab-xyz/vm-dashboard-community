@@ -35,6 +35,14 @@ class AzureSetup(BaseModel):
     azure_subscription_id: str = ""
     azure_resource_group: str = "dashboard-rg"
     azure_location: str = "centralus"
+    # VNet/NSG lookup (defaults to azure_resource_group if blank)
+    azure_vnet_resource_group: str = ""
+    # Shared Image Gallery for private images (optional)
+    azure_shared_image_gallery: str = ""
+    azure_gallery_resource_group: str = ""
+    # Key Vault for SSH key retrieval (optional)
+    azure_key_vault_url: str = ""
+    azure_ssh_key_secret_name: str = ""
     # Optional: separate app registration for "Sign in with Microsoft"
     azure_oauth_client_id: str = ""
     azure_oauth_client_secret: str = ""

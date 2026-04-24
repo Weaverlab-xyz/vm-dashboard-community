@@ -41,16 +41,22 @@ from .auth import get_current_user, require_permission
 router = APIRouter(prefix="/api/azure", tags=["azure"])
 
 
+def _cfg(key: str, fallback: str = "") -> str:
+    """Read a value from config_service (DB/wizard) with env-var fallback."""
+    from ..services import config_service
+    return config_service.get(key) or getattr(settings, key, fallback)
+
+
 def _rg():
-    return settings.azure_resource_group
+    return _cfg("azure_resource_group") or "vm-cli-rg"
 
 
 def _loc():
-    return settings.azure_location
+    return _cfg("azure_location") or "centralus"
 
 
 def _aci_rg():
-    return settings.azure_aci_resource_group or settings.azure_resource_group
+    return _cfg("azure_aci_resource_group") or _rg()
 
 
 # ── Private images (gallery + managed) ───────────────────────────────────────
@@ -65,8 +71,8 @@ async def list_images(
 
     async def _fetch():
         return await azure_service.list_private_images(
-            settings.azure_shared_image_gallery,
-            settings.azure_gallery_resource_group,
+            _cfg("azure_shared_image_gallery"),
+            _cfg("azure_gallery_resource_group"),
             _rg(),
         )
 
@@ -121,7 +127,7 @@ async def network_options(
 
     async def _fetch():
         return await azure_service.get_network_options(
-            _loc(), settings.azure_vnet_resource_group, _rg()
+            _loc(), _cfg("azure_vnet_resource_group"), _rg()
         )
 
     try:
@@ -145,17 +151,16 @@ async def get_keyvault_ssh_key(
     current_user: User = Depends(require_permission("azure", "read")),
 ):
     """Retrieve the SSH public key stored in Azure Key Vault."""
-    if not settings.azure_key_vault_url or not settings.azure_ssh_key_secret_name:
+    kv_url    = _cfg("azure_key_vault_url")
+    kv_secret = _cfg("azure_ssh_key_secret_name")
+    if not kv_url or not kv_secret:
         raise HTTPException(
             status_code=503,
-            detail="Key Vault not configured. Set AZURE_KEY_VAULT_URL and AZURE_SSH_KEY_SECRET_NAME.",
+            detail="Key Vault not configured. Add the Key Vault URL and SSH key secret name in Settings → Azure.",
         )
     try:
-        key_text = await azure_service.get_ssh_key_from_vault(
-            settings.azure_key_vault_url,
-            settings.azure_ssh_key_secret_name,
-        )
-        return {"secret_name": settings.azure_ssh_key_secret_name, "ssh_public_key": key_text}
+        key_text = await azure_service.get_ssh_key_from_vault(kv_url, kv_secret)
+        return {"secret_name": kv_secret, "ssh_public_key": key_text}
     except AzureError as e:
         raise HTTPException(status_code=503, detail=str(e))
 
