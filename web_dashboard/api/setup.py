@@ -52,7 +52,6 @@ class AzureSetup(BaseModel):
 
 
 class FeaturesSetup(BaseModel):
-    chat_enabled: bool = False
     vmware_enabled: bool = False
     beyondtrust_enabled: bool = False
     portainer_enabled: bool = False
@@ -151,7 +150,6 @@ def _apply_config(payload: SetupPayload) -> None:
 
     # Feature flags — always store (explicit true/false is meaningful)
     pairs.update({
-        "chat_enabled":         "1" if payload.features.chat_enabled else "0",
         "vmware_enabled":       "1" if payload.features.vmware_enabled else "0",
         "beyondtrust_enabled":  "1" if payload.features.beyondtrust_enabled else "0",
         "portainer_enabled":    "1" if payload.features.portainer_enabled else "0",
@@ -226,11 +224,6 @@ def reconfigure(payload: SetupPayload, request: Request):
 # Each feature has its own typed model so the UI can GET current values and
 # PATCH only the keys relevant to that integration.  All require admin JWT.
 
-class ChatFeatureConfig(BaseModel):
-    enabled: bool = False
-    chat_model: str = "llama3.1:8b-instruct-q4_K_M"
-    ollama_base_url: str = "http://ollama:11434"
-
 class VMwareFeatureConfig(BaseModel):
     enabled: bool = False
 
@@ -264,7 +257,6 @@ class EntitleFeatureConfig(BaseModel):
 
 
 _FEATURE_MODELS = {
-    "chat":         ChatFeatureConfig,
     "vmware":       VMwareFeatureConfig,
     "beyondtrust":  BeyondTrustFeatureConfig,
     "portainer":    PortainerFeatureConfig,

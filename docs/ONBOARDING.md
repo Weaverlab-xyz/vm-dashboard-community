@@ -11,7 +11,7 @@ deploying resources into your own AWS and Azure accounts. Target time:
 - [Part E — Troubleshooting](#part-e--troubleshooting)
 - [Appendix A — VMware Workstation integration](#appendix-a--vmware-workstation-integration)
 - [Appendix B — Sign in with Microsoft (Entra OAuth)](#appendix-b--sign-in-with-microsoft-entra-oauth)
-- [Appendix C — Local chat assistant (Ollama)](#appendix-c--local-chat-assistant-ollama)
+- [Appendix C — MCP server (AI client integration)](#appendix-c--mcp-server-ai-client-integration)
 - [Appendix D — BeyondTrust integration](#appendix-d--beyondtrust-integration)
 
 ---
@@ -186,8 +186,8 @@ field blank keeps the stored value unchanged.
   Raspberry Pi 5 (ARM64).
 - The **VMware** feature flag (Appendix A) is Windows-only; do not enable
   it on macOS or Linux.
-- The optional **Ollama chat** profile (Appendix C) uses an NVIDIA GPU
-  block in `docker-compose.yml`. On Macs / Raspberry Pi that block is a
+- The optional **MCP server** (Appendix C) needs no extra containers —
+  it runs inside the main app. On Macs / Raspberry Pi that block is a
   no-op. Enable the chat profile; Ollama runs on CPU/Metal without it.
 
 ---
@@ -438,27 +438,72 @@ same appliance, the host and credentials may be the same as Part 1.
 
 ---
 
-## Appendix C — Local chat assistant (Ollama)
+## Appendix C — MCP server (AI client integration)
 
-Optional. Runs a local LLM in a sibling container for a natural-language
-dashboard assistant.
+The dashboard exposes an [MCP (Model Context Protocol)](https://modelcontextprotocol.io)
+server at `/mcp`. Any compatible AI client — Claude Desktop, Claude Code,
+Cursor, Continue, or any MCP-capable tool — can connect to it with read-only
+access to jobs, VMs, EC2 instances, and Azure VMs.
 
-### Enable
+No extra containers or services are needed — the server runs inside the main
+`app` container.
 
-1. Toggle **Natural-language chat** on in either:
-   - The setup wizard → Step 4 (Features), or
-   - **Settings → Integrations** → Chat (after initial setup).
-2. Start the chat profile alongside the main stack:
-   ```bash
-   docker compose --profile chat up -d
-   ```
-3. The first request after startup pulls the model (~5 GB for the default
-   `llama3.1:8b`). Expect a 2–5 minute delay on cold start.
-4. A "Chat" nav entry appears in the header.
+### Step 1 — Create a Personal Access Token
 
-### GPU acceleration
+1. Open the dashboard → **Settings** (top-right avatar or `/settings`).
+2. Scroll to **Security Keys → API Tokens** (or go directly to `/tokens`).
+3. Click **New Token**, give it a name (e.g. `claude-desktop`), set an
+   expiry if desired, and click **Create**.
+4. Copy the token — it looks like `vmcli_<64 hex characters>`.
+   It is shown only once.
 
-The `deploy` block in the `ollama` service requests an NVIDIA GPU. If
-your host has no NVIDIA GPU, comment that block out in
-`docker-compose.yml` before starting the profile, otherwise Compose will
-refuse to start the service.
+### Step 2 — Configure your AI client
+
+#### Claude Desktop
+
+Edit `~/Library/Application Support/Claude/claude_desktop_config.json`
+(macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows):
+
+```json
+{
+  "mcpServers": {
+    "vm-dashboard": {
+      "url": "http://localhost:8000/mcp",
+      "headers": {
+        "Authorization": "Bearer vmcli_<your-token>"
+      }
+    }
+  }
+}
+```
+
+Restart Claude Desktop. A new **vm-dashboard** entry appears in the tool
+picker.
+
+#### Claude Code (CLI)
+
+```bash
+claude mcp add --transport http vm-dashboard http://localhost:8000/mcp \
+  --header "Authorization: Bearer vmcli_<your-token>"
+```
+
+#### Other clients
+
+Point the client at `http://<host>:8000/mcp` with the
+`Authorization: Bearer vmcli_<token>` header. The server uses the
+HTTP Streamable transport (SSE).
+
+### Available tools
+
+| Tool | Description |
+|------|-------------|
+| `dashboard_summary` | Active jobs, today's failures, enabled integrations |
+| `list_jobs` | Recent jobs — filter by status and/or workgroup |
+| `get_job` | Full detail for one job by UUID |
+| `list_vms` | VMware VMs (requires VMware integration enabled) |
+| `list_ec2_instances` | EC2 instances deployed via this dashboard |
+| `list_amis` | Available AMIs from AWS |
+| `list_azure_vms` | Azure VMs deployed via this dashboard |
+
+All tools are **read-only**. Deploy, start, and stop actions must be
+performed through the web UI.

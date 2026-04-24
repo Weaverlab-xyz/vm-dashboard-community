@@ -248,16 +248,6 @@ class Settings(BaseSettings):
     epml_deb_path: str = r"C:\Scripts\VM_CLI\VM_DEMO_CLI\epml-client.amd64.deb"
     pathfinder_script_path: str = r"C:\Scripts\VM_CLI\VM_DEMO_CLI\make_pathfinder_user.sh"
 
-    # Chat / Ollama (natural-language API assistant)
-    # OLLAMA_BASE_URL points at the Ollama container inside docker-compose; override
-    # to an ACA internal FQDN (e.g. http://ollama.internal.<env>.azurecontainerapps.io)
-    # when the prod deployment lands.
-    chat_enabled: bool = False
-    ollama_base_url: str = "http://ollama:11434"
-    chat_model: str = "qwen2.5:14b-instruct-q4_K_M"
-    chat_max_tool_calls: int = 3          # safety cap per user message
-    chat_request_timeout: float = 300.0   # seconds; 8B model on CPU is slow on big prompts (~60s/turn warm)
-
     # Entitle approval workflows (per-endpoint gate via Depends(require_approval(...)))
     entitle_api_url: str = ""                       # e.g. "https://api.entitle.io/v1"
     entitle_api_token: str = ""                     # bearer token (Key Vault secret in prod)

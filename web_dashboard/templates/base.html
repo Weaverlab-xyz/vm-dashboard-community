@@ -36,10 +36,6 @@
         <div class="hidden md:flex items-center space-x-1">
           <a href="/" class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
              {% if request.url.path == '/' %}{{ nav_active }}{% endif %}">Dashboard</a>
-          {% if chat_enabled %}
-          <a href="/chat" class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
-             {% if request.url.path.startswith('/chat') %}{{ nav_active }}{% endif %}">Chat</a>
-          {% endif %}
           {% if vmware_enabled %}
           <a href="/vms" class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
              {% if request.url.path == '/vms' %}{{ nav_active }}{% endif %}">VMs</a>

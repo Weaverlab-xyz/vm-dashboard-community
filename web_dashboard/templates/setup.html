@@ -416,7 +416,7 @@ function wizard() {
                   azure_vnet_resource_group: '', azure_shared_image_gallery: '',
                   azure_gallery_resource_group: '', azure_key_vault_url: '', azure_ssh_key_secret_name: '',
                   azure_oauth_client_id: '', azure_oauth_client_secret: '', azure_oauth_tenant_id: '' },
-      features: { chat_enabled: false, vmware_enabled: false, beyondtrust_enabled: false,
+      features: { vmware_enabled: false, beyondtrust_enabled: false,
                   portainer_enabled: false, ansible_enabled: false, entitle_enabled: false },
     },
 
@@ -455,12 +455,6 @@ function wizard() {
     ],
 
     featureFlags: [
-      {
-        key:   'chat_enabled',
-        label: 'Natural-language chat (Ollama)',
-        desc:  'Local LLM assistant powered by Ollama. Pulls a ~5 GB model on first use.',
-        note:  '',
-      },
       {
         key:   'vmware_enabled',
         label: 'VMware Workstation integration',

@@ -296,7 +296,6 @@ def _feature_flags() -> dict:
     """Read feature flags from config_service (DB) with env-var fallback.
     Called per-request so wizard changes are visible without a restart."""
     return {
-        "chat_enabled":         config_service.get_bool("chat_enabled",         settings.chat_enabled),
         "vmware_enabled":       config_service.get_bool("vmware_enabled",        settings.vmware_enabled),
         "portainer_enabled":    config_service.get_bool("portainer_enabled",     settings.portainer_enabled),
         "ansible_enabled":      config_service.get_bool("ansible_enabled",       settings.ansible_enabled),
@@ -315,7 +314,8 @@ def _feature_flags() -> dict:
 # Settings → Integrations panel takes effect immediately — no restart needed.
 
 from fastapi import Depends  # noqa: E402
-from .api import auth, jobs, websocket, aws, azure, mfa, tokens, users, groups, chat, setup  # noqa: E402
+from .api import auth, jobs, websocket, aws, azure, mfa, tokens, users, groups, setup  # noqa: E402
+from .api.mcp_server import get_mcp_asgi_app  # noqa: E402
 
 
 def _feature_gate(flag: str):
@@ -340,7 +340,9 @@ app.include_router(jobs.router)
 app.include_router(websocket.router)
 app.include_router(aws.router)
 app.include_router(azure.router)
-app.include_router(chat.router)
+
+# MCP server — mounted as a sub-ASGI app so SSE streams pass through unmodified
+app.mount("/mcp", get_mcp_asgi_app())
 
 try:
     from .api import vms  # noqa: E402
@@ -419,16 +421,6 @@ async def settings_page(request: Request):
     return templates.TemplateResponse("settings.html", {"request": request, **_feature_flags()})
 
 
-@app.get("/chat", response_class=HTMLResponse, include_in_schema=False)
-async def chat_page(request: Request):
-    if not config_service.get_bool("chat_enabled", settings.chat_enabled):
-        raise HTTPException(status_code=404, detail="Chat is disabled")
-    return templates.TemplateResponse(
-        "chat/index.html",
-        {"request": request, "chat_model": settings.chat_model, **_feature_flags()},
-    )
-
-
 @app.get("/users", response_class=HTMLResponse, include_in_schema=False)
 async def users_page(request: Request):
     return templates.TemplateResponse(
@@ -464,7 +456,6 @@ async def features():
         "portainer":    flags["portainer_enabled"],
         "ansible":      flags["ansible_enabled"],
         "entitle":      flags["entitle_enabled"],
-        "chat":         flags["chat_enabled"],
     }
 
 

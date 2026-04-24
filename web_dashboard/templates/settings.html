@@ -117,6 +117,40 @@
     </ul>
   </div>
 
+  <!-- ── MCP Server ───────────────────────────────────────────────────── -->
+  <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
+    <h2 class="text-base font-semibold text-gray-700 mb-1">MCP Server</h2>
+    <p class="text-xs text-gray-400 mb-4">
+      Connect any MCP-compatible AI client (Claude Desktop, Claude Code, Cursor…) to this dashboard.
+      The server is mounted at <code class="bg-gray-100 px-1 rounded">/mcp</code> and uses a Personal Access Token for auth.
+    </p>
+
+    <ol class="list-decimal list-inside space-y-2 text-sm text-gray-700 mb-4">
+      <li>Create a Personal Access Token in <strong>Settings → Security Keys → API Tokens</strong> (or <code class="bg-gray-100 px-1 rounded">/tokens</code>).</li>
+      <li>Copy the token — it starts with <code class="bg-gray-100 px-1 rounded">vmcli_</code>.</li>
+      <li>Add the following block to your MCP client config and replace the placeholder:</li>
+    </ol>
+
+    <div class="relative">
+      <pre class="bg-gray-900 text-green-300 text-xs rounded-lg p-4 overflow-x-auto leading-relaxed"><code>{
+  "mcpServers": {
+    "vm-dashboard": {
+      "url": "<span x-text="mcpUrl"></span>",
+      "headers": {
+        "Authorization": "Bearer vmcli_&lt;your-pat-here&gt;"
+      }
+    }
+  }
+}</code></pre>
+    </div>
+
+    <p class="mt-3 text-xs text-gray-400">
+      Available tools: <code>dashboard_summary</code>, <code>list_jobs</code>, <code>get_job</code>,
+      <code>list_vms</code>, <code>list_ec2_instances</code>, <code>list_amis</code>, <code>list_azure_vms</code>.
+      All tools are read-only — deploy/start/stop actions must be performed through the web UI.
+    </p>
+  </div>
+
   <!-- ── Integrations (admin only) ────────────────────────────────────── -->
   <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6"
        x-show="isAdmin" x-cloak>
@@ -207,29 +241,6 @@
       <div x-show="panelError" x-transition
            class="bg-red-50 border border-red-200 rounded-lg px-4 py-3 text-red-700 text-sm"
            x-text="panelError"></div>
-
-      <!-- ── Chat ── -->
-      <template x-if="panel?.key === 'chat' && !panelLoading">
-        <div class="space-y-4">
-          <p class="text-sm text-gray-500">
-            Runs a local LLM via Ollama inside Docker Compose. The first request pulls the model (~5 GB); expect a delay on cold start.
-          </p>
-          <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">Model</label>
-            <input type="text" x-model="panelCfg.chat_model"
-                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                   placeholder="llama3.1:8b-instruct-q4_K_M">
-            <p class="text-xs text-gray-400 mt-1">Any model name from <a href="https://ollama.com/library" target="_blank" class="underline">ollama.com/library</a></p>
-          </div>
-          <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">Ollama base URL</label>
-            <input type="text" x-model="panelCfg.ollama_base_url"
-                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                   placeholder="http://ollama:11434">
-            <p class="text-xs text-gray-400 mt-1">Keep the default when using the bundled Ollama container.</p>
-          </div>
-        </div>
-      </template>
 
       <!-- ── BeyondTrust ── -->
       <template x-if="panel?.key === 'beyondtrust' && !panelLoading">
@@ -412,14 +423,13 @@ function settingsPage() {
     deviceName: '',
     toast: '',
     toastType: 'success',
+    mcpUrl: window.location.origin + '/mcp',
     _pendingAttestation: null,
     _pendingChallengeToken: null,
 
     // ── Integrations state ───────────────────────────────────────────────
     isAdmin: false,
     integrations: [
-      { key: 'chat',         label: 'Chat (Ollama)',           hasConfig: true,  enabled: false,
-        desc: 'Local LLM assistant powered by Ollama.' },
       { key: 'vmware',       label: 'VMware Workstation',      hasConfig: false, enabled: false,
         desc: 'VM management on a Windows host. Toggle to enable.' },
       { key: 'beyondtrust',  label: 'BeyondTrust PRA',         hasConfig: true,  enabled: false,

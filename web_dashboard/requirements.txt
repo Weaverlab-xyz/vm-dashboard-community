@@ -51,6 +51,9 @@ azure-mgmt-storage>=21.0.0
 azure-keyvault-secrets>=4.7.0
 azure-mgmt-automation>=1.0.0
 
+# MCP (Model Context Protocol) server — exposes dashboard tools to AI clients
+mcp>=1.0.0
+
 # Async HTTP client (Portainer CE API)
 httpx>=0.27.0
 
