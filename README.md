@@ -48,7 +48,7 @@ after first login — only if you have the backing infrastructure:
 
 - **VMware Workstation** — VM management (Windows host only; requires the
   Windows Compose override — see [docs/ONBOARDING.md](docs/ONBOARDING.md) Appendix A)
-- **BeyondTrust PRA** — secret retrieval and session recording
+- **BeyondTrust Password Safe and/or PRA** — secret retrieval and session recording
 - **Portainer CE** — on-prem Docker host management
 - **Ansible** — config-management jobs via local Docker or AWS ECS
 - **Entitle** — approval-workflow integration
