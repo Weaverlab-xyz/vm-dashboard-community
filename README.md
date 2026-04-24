@@ -52,7 +52,7 @@ after first login — only if you have the backing infrastructure:
 - **Portainer CE** — on-prem Docker host management
 - **Ansible** — config-management jobs via local Docker or AWS ECS
 - **Entitle** — approval-workflow integration
-- **Chat (Ollama)** — local LLM assistant (also requires `docker compose --profile chat up -d`)
+- **MCP server** — read-only AI client integration (Claude Desktop, Claude Code, Cursor…) via Personal Access Token; mounted at `/mcp`, no extra containers needed
 
 ## License
 

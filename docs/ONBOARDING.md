@@ -187,8 +187,7 @@ field blank keeps the stored value unchanged.
 - The **VMware** feature flag (Appendix A) is Windows-only; do not enable
   it on macOS or Linux.
 - The optional **MCP server** (Appendix C) needs no extra containers —
-  it runs inside the main app. On Macs / Raspberry Pi that block is a
-  no-op. Enable the chat profile; Ollama runs on CPU/Metal without it.
+  it runs inside the main app and is always available once the stack is up.
 
 ---
 
