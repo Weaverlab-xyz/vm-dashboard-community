@@ -1,0 +1,295 @@
+{% extends "base.html" %}
+
+{% block title %}Config Management – Infrastructure Management{% endblock %}
+
+{% block content %}
+<div x-data="configMgmt()" x-init="init()" class="space-y-6">
+
+  <!-- Header -->
+  <div class="flex items-center justify-between">
+    <div>
+      <h1 class="text-2xl font-bold text-gray-800">Config Management</h1>
+      <p class="text-sm text-gray-500 mt-1">Run Ansible playbooks against on-premises hypervisors.</p>
+    </div>
+    <a href="/jobs" class="text-sm text-blue-600 hover:underline">View all jobs →</a>
+  </div>
+
+  <!-- No targets configured -->
+  <template x-if="!loading && targets.length === 0">
+    <div class="bg-amber-50 border border-amber-200 rounded-xl p-6 text-center">
+      <svg class="h-10 w-10 text-amber-400 mx-auto mb-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+              d="M12 9v2m0 4h.01M12 3a9 9 0 100 18A9 9 0 0012 3z"/>
+      </svg>
+      <p class="text-sm font-semibold text-amber-800 mb-1">No on-premises hypervisors configured</p>
+      <p class="text-sm text-amber-700">
+        Enable at least one on-premises integration in
+        <a href="/settings" class="underline font-medium">Settings → Integrations</a>
+        and supply the host address. Supported targets: Proxmox VE, VMware vSphere / ESXi,
+        Microsoft Hyper-V, Nutanix AHV, XCP-ng / XenServer.
+      </p>
+    </div>
+  </template>
+
+  <!-- Loading skeleton -->
+  <template x-if="loading">
+    <div class="text-sm text-gray-400 text-center py-12">Loading…</div>
+  </template>
+
+  <!-- Run panel -->
+  <template x-if="!loading && targets.length > 0">
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+
+      <!-- Left: run form -->
+      <div class="lg:col-span-1 space-y-4">
+
+        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 space-y-4">
+          <h2 class="text-sm font-semibold text-gray-700 uppercase tracking-wide">Run a Playbook</h2>
+
+          <!-- Playbook picker -->
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Playbook</label>
+            <template x-if="playbooksLoading">
+              <p class="text-sm text-gray-400">Loading playbooks…</p>
+            </template>
+            <template x-if="!playbooksLoading && playbooks.length === 0">
+              <p class="text-sm text-amber-600">
+                No playbooks found. Configure a storage backend in
+                <a href="/settings" class="underline">Settings → Integrations → Ansible</a>.
+              </p>
+            </template>
+            <template x-if="!playbooksLoading && playbooks.length > 0">
+              <select x-model="form.playbook"
+                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm
+                             focus:outline-none focus:ring-2 focus:ring-blue-500">
+                <option value="">Select a playbook…</option>
+                <template x-for="pb in playbooks" :key="pb">
+                  <option :value="pb" x-text="pb"></option>
+                </template>
+              </select>
+            </template>
+          </div>
+
+          <!-- Target picker — only shows configured hypervisors -->
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Target</label>
+            <select x-model="form.target"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm
+                           focus:outline-none focus:ring-2 focus:ring-blue-500">
+              <option value="">Select a target…</option>
+              <template x-for="t in targets" :key="t.key">
+                <option :value="t.key" x-text="`${t.label} (${t.host})`"></option>
+              </template>
+            </select>
+            <p class="text-xs text-gray-400 mt-1">
+              Only configured and enabled hypervisors appear here.
+            </p>
+          </div>
+
+          <!-- Extra vars (optional) -->
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">
+              Extra Vars
+              <span class="text-gray-400 font-normal">(optional JSON)</span>
+            </label>
+            <textarea x-model="form.extra_vars_raw" rows="3"
+                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono
+                             focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
+                      placeholder='{"env": "prod", "version": "1.2.3"}'></textarea>
+            <p x-show="extraVarsError" class="text-xs text-red-600 mt-1" x-text="extraVarsError"></p>
+          </div>
+
+          <!-- Error / status -->
+          <p x-show="runError" x-cloak class="text-xs text-red-600" x-text="runError"></p>
+
+          <!-- Run button -->
+          <button @click="runPlaybook()"
+                  :disabled="running || !form.playbook || !form.target"
+                  class="w-full flex items-center justify-center gap-2 bg-blue-700 hover:bg-blue-800
+                         disabled:opacity-50 text-white text-sm font-medium px-4 py-2.5 rounded-lg transition">
+            <svg x-show="running" class="animate-spin h-4 w-4" fill="none" viewBox="0 0 24 24">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"></path>
+            </svg>
+            <span x-text="running ? 'Queuing…' : 'Run Playbook'"></span>
+          </button>
+        </div>
+
+        <!-- Configured targets legend -->
+        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+          <h2 class="text-sm font-semibold text-gray-700 uppercase tracking-wide mb-3">Configured Targets</h2>
+          <ul class="space-y-2">
+            <template x-for="t in targets" :key="t.key">
+              <li class="flex items-center gap-2 text-sm">
+                <span class="w-2 h-2 rounded-full bg-green-400 flex-shrink-0"></span>
+                <span class="font-medium text-gray-700" x-text="t.label"></span>
+                <span class="text-gray-400 font-mono text-xs truncate" x-text="t.host"></span>
+              </li>
+            </template>
+          </ul>
+          <p class="text-xs text-gray-400 mt-3">
+            To add a target, enable the integration in
+            <a href="/settings" class="underline">Settings → Integrations</a>.
+          </p>
+        </div>
+      </div>
+
+      <!-- Right: recent ansible jobs -->
+      <div class="lg:col-span-2">
+        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+          <div class="flex items-center justify-between mb-4">
+            <h2 class="text-sm font-semibold text-gray-700 uppercase tracking-wide">Recent Runs</h2>
+            <button @click="loadJobs()" class="text-xs text-blue-600 hover:underline">Refresh</button>
+          </div>
+
+          <div x-show="jobsLoading" class="text-sm text-gray-400 text-center py-8">Loading…</div>
+
+          <div x-show="!jobsLoading && recentJobs.length === 0" class="text-sm text-gray-400 text-center py-8">
+            No playbook runs yet. Use the form to launch one.
+          </div>
+
+          <div x-show="!jobsLoading && recentJobs.length > 0" class="overflow-hidden">
+            <table class="w-full text-sm">
+              <thead>
+                <tr class="border-b border-gray-200 text-left text-xs text-gray-500 uppercase tracking-wide">
+                  <th class="pb-2 pr-4">Playbook / Target</th>
+                  <th class="pb-2 pr-4">Status</th>
+                  <th class="pb-2 pr-4">Started</th>
+                  <th class="pb-2"></th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-gray-100">
+                <template x-for="job in recentJobs" :key="job.id">
+                  <tr>
+                    <td class="py-2.5 pr-4">
+                      <p class="font-medium text-gray-800 truncate max-w-xs" x-text="job.description"></p>
+                    </td>
+                    <td class="py-2.5 pr-4">
+                      <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium"
+                            :class="{
+                              'bg-green-100 text-green-800': job.status === 'completed',
+                              'bg-red-100 text-red-800': job.status === 'failed',
+                              'bg-blue-100 text-blue-800': job.status === 'running',
+                              'bg-gray-100 text-gray-700': job.status === 'queued',
+                            }">
+                        <span x-text="job.status"></span>
+                      </span>
+                    </td>
+                    <td class="py-2.5 pr-4 text-gray-500 text-xs" x-text="formatAge(job.created_at)"></td>
+                    <td class="py-2.5">
+                      <a :href="'/jobs/' + job.id"
+                         class="text-xs text-blue-600 hover:underline whitespace-nowrap">View →</a>
+                    </td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </template>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function configMgmt() {
+  return {
+    loading: true,
+    targets: [],
+    playbooks: [],
+    playbooksLoading: true,
+    jobsLoading: true,
+    recentJobs: [],
+    running: false,
+    runError: '',
+    extraVarsError: '',
+    form: {
+      playbook: '',
+      target: '',
+      extra_vars_raw: '',
+    },
+
+    async init() {
+      requireAuth();
+      await Promise.all([this.loadInventory(), this.loadPlaybooks(), this.loadJobs()]);
+      this.loading = false;
+    },
+
+    async loadInventory() {
+      try {
+        const data = await API.get('/api/config-mgmt/inventory');
+        this.targets = data.targets || [];
+      } catch (e) {
+        this.targets = [];
+      }
+    },
+
+    async loadPlaybooks() {
+      this.playbooksLoading = true;
+      try {
+        this.playbooks = await API.get('/api/config-mgmt/playbooks') || [];
+      } catch (e) {
+        this.playbooks = [];
+      } finally {
+        this.playbooksLoading = false;
+      }
+    },
+
+    async loadJobs() {
+      this.jobsLoading = true;
+      try {
+        const all = await API.get('/api/jobs?limit=20');
+        this.recentJobs = (all.jobs || []).filter(j => j.job_type === 'ansible_local');
+      } catch (e) {
+        this.recentJobs = [];
+      } finally {
+        this.jobsLoading = false;
+      }
+    },
+
+    async runPlaybook() {
+      this.runError = '';
+      this.extraVarsError = '';
+
+      let extra_vars = {};
+      if (this.form.extra_vars_raw.trim()) {
+        try {
+          extra_vars = JSON.parse(this.form.extra_vars_raw);
+        } catch (e) {
+          this.extraVarsError = 'Invalid JSON: ' + e.message;
+          return;
+        }
+      }
+
+      this.running = true;
+      try {
+        const result = await API.post('/api/config-mgmt/run', {
+          playbook: this.form.playbook,
+          target: this.form.target,
+          extra_vars,
+        });
+        toast(`Playbook queued — job ${result.job_id.slice(0, 8)}…`, 'success');
+        window.location.href = '/jobs/' + result.job_id;
+      } catch (e) {
+        this.runError = e.message || 'Failed to queue playbook run.';
+      } finally {
+        this.running = false;
+      }
+    },
+
+    formatAge(ts) {
+      if (!ts) return '';
+      const d = new Date(ts + (ts.endsWith('Z') ? '' : 'Z'));
+      const secs = Math.floor((Date.now() - d.getTime()) / 1000);
+      if (secs < 60) return `${secs}s ago`;
+      if (secs < 3600) return `${Math.floor(secs / 60)}m ago`;
+      return `${Math.floor(secs / 3600)}h ago`;
+    },
+  };
+}
+</script>
+{% endblock %}

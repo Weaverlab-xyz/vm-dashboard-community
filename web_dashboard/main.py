@@ -479,6 +479,13 @@ async def xcpng_page(request: Request):
     )
 
 
+@app.get("/config-mgmt", response_class=HTMLResponse, include_in_schema=False)
+async def config_mgmt_page(request: Request):
+    if not config_service.get_bool("ansible_enabled", settings.ansible_enabled):
+        raise HTTPException(status_code=404, detail="Ansible integration is disabled")
+    return templates.TemplateResponse("config-mgmt/index.html", {"request": request, **_feature_flags()})
+
+
 @app.get("/jobs", response_class=HTMLResponse, include_in_schema=False)
 async def jobs_page(request: Request):
     return templates.TemplateResponse("jobs/list.html", {"request": request, **_feature_flags()})

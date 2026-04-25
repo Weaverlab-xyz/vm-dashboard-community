@@ -70,6 +70,12 @@ services:
       - type: bind
         source: ./web_dashboard
         target: /app/web_dashboard
+      # Docker socket — lets the app launch sibling Ansible containers for
+      # local config-mgmt runs against on-premises hypervisors.
+      # Remove this mount if you do not use the Ansible integration.
+      - type: bind
+        source: /var/run/docker.sock
+        target: /var/run/docker.sock
 
 volumes:
   pgdata:
