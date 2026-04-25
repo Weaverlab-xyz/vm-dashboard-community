@@ -40,6 +40,10 @@
           <a href="/vms" class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
              {% if request.url.path == '/vms' %}{{ nav_active }}{% endif %}">VMs</a>
           {% endif %}
+          {% if proxmox_enabled %}
+          <a href="/proxmox" class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
+             {% if request.url.path == '/proxmox' %}{{ nav_active }}{% endif %}">Proxmox</a>
+          {% endif %}
           <a href="/aws" class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
              {% if request.url.path == '/aws' %}{{ nav_active }}{% endif %}">AWS</a>
           <a href="/gcp" class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}

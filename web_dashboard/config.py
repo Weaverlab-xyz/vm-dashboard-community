@@ -25,6 +25,16 @@ class Settings(BaseSettings):
     portainer_enabled: bool = True      # Containers router + /containers page + portainer warmer
     ansible_enabled: bool = True        # Config-mgmt router + /config-mgmt page
     entitle_enabled: bool = True        # Approvals router + approval modal in base.html
+    proxmox_enabled: bool = False       # Proxmox VE router + /proxmox page
+
+    # Proxmox VE connection
+    proxmox_host: str = ""              # hostname or IP of the Proxmox node/cluster
+    proxmox_port: int = 8006
+    proxmox_user: str = "root@pam"
+    proxmox_token_id: str = ""          # API token name (preferred auth)
+    proxmox_token_secret: str = ""      # API token value
+    proxmox_password: str = ""          # password auth (fallback if no token)
+    proxmox_verify_ssl: bool = False    # set True when using a valid TLS cert
 
     # Database
     database_url: str = "sqlite:///./vm_cli.db"

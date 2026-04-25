@@ -301,6 +301,7 @@ def _feature_flags() -> dict:
         "ansible_enabled":      config_service.get_bool("ansible_enabled",       settings.ansible_enabled),
         "entitle_enabled":      config_service.get_bool("entitle_enabled",       settings.entitle_enabled),
         "beyondtrust_enabled":  config_service.get_bool("beyondtrust_enabled",   settings.beyondtrust_enabled),
+        "proxmox_enabled":      config_service.get_bool("proxmox_enabled",       settings.proxmox_enabled),
     }
 
 
@@ -370,6 +371,12 @@ try:
 except ImportError:
     pass
 
+try:
+    from .api import proxmox  # noqa: E402
+    app.include_router(proxmox.router, dependencies=[_feature_gate("proxmox_enabled")])
+except ImportError:
+    pass
+
 
 # ── HTML pages ────────────────────────────────────────────────────────────────
 
@@ -395,6 +402,13 @@ async def vms_page(request: Request):
     if not config_service.get_bool("vmware_enabled", settings.vmware_enabled):
         raise HTTPException(status_code=404, detail="VMware integration is disabled")
     return templates.TemplateResponse("vms/list.html", {"request": request, **_feature_flags()})
+
+
+@app.get("/proxmox", response_class=HTMLResponse, include_in_schema=False)
+async def proxmox_page(request: Request):
+    if not config_service.get_bool("proxmox_enabled", settings.proxmox_enabled):
+        raise HTTPException(status_code=404, detail="Proxmox integration is disabled")
+    return templates.TemplateResponse("proxmox/index.html", {"request": request, **_feature_flags()})
 
 
 @app.get("/jobs", response_class=HTMLResponse, include_in_schema=False)
@@ -463,6 +477,7 @@ async def features():
         "portainer":    flags["portainer_enabled"],
         "ansible":      flags["ansible_enabled"],
         "entitle":      flags["entitle_enabled"],
+        "proxmox":      flags["proxmox_enabled"],
     }
 
 

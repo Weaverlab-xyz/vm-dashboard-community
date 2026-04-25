@@ -75,6 +75,7 @@ class FeaturesSetup(BaseModel):
     portainer_enabled: bool = False
     ansible_enabled: bool = False
     entitle_enabled: bool = False
+    proxmox_enabled: bool = False
 
 
 class SetupPayload(BaseModel):
@@ -181,6 +182,7 @@ def _apply_config(payload: SetupPayload) -> None:
         "portainer_enabled":    "1" if payload.features.portainer_enabled else "0",
         "ansible_enabled":      "1" if payload.features.ansible_enabled else "0",
         "entitle_enabled":      "1" if payload.features.entitle_enabled else "0",
+        "proxmox_enabled":      "1" if payload.features.proxmox_enabled else "0",
     })
 
     config_service.set_many(pairs)
@@ -295,6 +297,16 @@ class EntitleFeatureConfig(BaseModel):
     entitle_webhook_secret: str = ""    # encrypted at rest
     approval_gate_enabled: bool = False
 
+class ProxmoxFeatureConfig(BaseModel):
+    enabled: bool = False
+    proxmox_host: str = ""
+    proxmox_port: int = 8006
+    proxmox_user: str = "root@pam"
+    proxmox_token_id: str = ""
+    proxmox_token_secret: str = ""      # encrypted at rest
+    proxmox_password: str = ""          # encrypted at rest
+    proxmox_verify_ssl: bool = False
+
 
 _FEATURE_MODELS = {
     "vmware":       VMwareFeatureConfig,
@@ -302,11 +314,13 @@ _FEATURE_MODELS = {
     "portainer":    PortainerFeatureConfig,
     "ansible":      AnsibleFeatureConfig,
     "entitle":      EntitleFeatureConfig,
+    "proxmox":      ProxmoxFeatureConfig,
 }
 
 _SECRET_FEATURE_KEYS = frozenset({
     "pscli_client_secret", "bt_client_secret",
     "entitle_api_token", "entitle_webhook_secret",
+    "proxmox_token_secret", "proxmox_password",
 })
 
 

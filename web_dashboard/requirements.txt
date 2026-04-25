@@ -67,6 +67,10 @@ azure-storage-blob>=12.19.0
 # Async HTTP client (Portainer CE API)
 httpx>=0.27.0
 
+# Proxmox VE REST API
+proxmoxer>=2.0.0
+requests>=2.31.0
+
 # Required by Azure SDK async clients (azure-mgmt-automation.aio, azure-identity.aio)
 aiohttp>=3.9.0
 
