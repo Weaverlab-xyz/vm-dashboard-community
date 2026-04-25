@@ -9,21 +9,38 @@ build_inventory()
 get_configured_targets()
     Returns a list of {key, label, host} dicts for the UI target picker.
 
-run_playbook(playbook_b64, target, extra_vars)
-    Runs an Ansible playbook in a sibling Docker container (launched via the
-    mounted Docker socket).  Returns (combined_output, returncode).
-    Credentials are embedded in a temp inventory file that is deleted after
-    the run.  Hyper-V targets use ansible_connection=winrm; all others SSH.
+asset_type(name)
+    Returns the asset type based on file extension: playbook | script | rpm | deb.
+
+generate_playbook_yaml(asset_name)
+    Generates an Ansible playbook YAML that runs/installs a non-playbook asset.
+    The asset is expected at /ansible/assets/{asset_name} inside the container.
+
+fetch_ssh_key(cloud)
+    Retrieves the SSH private key PEM for a cloud provider from the appropriate
+    secret store (AWS Secrets Manager for "aws", GCP Secret Manager for "gcp").
+
+run_playbook(asset_b64, target, extra_vars, asset_name, ssh_key_pem)
+    Runs an Ansible playbook or provisioning asset in a sibling Docker container
+    (launched via the mounted Docker socket). Returns (combined_output, returncode).
+    Credentials and keys are embedded in a temp directory that is deleted after run.
+    Hyper-V targets use ansible_connection=winrm; all others SSH.
 """
 import asyncio
 import base64
 import json
 import logging
 import os
+import shlex
 import subprocess
 import tempfile
 
 logger = logging.getLogger(__name__)
+
+_EXT_TYPE: dict[str, str] = {
+    ".yml": "playbook", ".yaml": "playbook",
+    ".sh": "script", ".rpm": "rpm", ".deb": "deb",
+}
 
 
 def _cfg(key: str) -> str:
@@ -34,6 +51,110 @@ def _cfg(key: str) -> str:
 def _cfg_bool(key: str, default: bool = False) -> bool:
     from . import config_service
     return config_service.get_bool(key, default)
+
+
+# ── Asset type helpers ────────────────────────────────────────────────────────
+
+def asset_type(name: str) -> str:
+    """Return asset type based on file extension: playbook | script | rpm | deb."""
+    ext = ("." + name.rsplit(".", 1)[-1].lower()) if "." in name else ""
+    return _EXT_TYPE.get(ext, "playbook")
+
+
+def generate_playbook_yaml(asset_name: str) -> str:
+    """
+    Generate an Ansible playbook that runs/installs the given asset.
+
+    The asset is available at /ansible/assets/{basename} inside the container
+    (bind-mounted from {tmpdir}/assets/).  Raises ValueError for .yml assets
+    since those should be used as-is.
+    """
+    atype = asset_type(asset_name)
+    base = os.path.basename(asset_name)
+    container_path = f"/ansible/assets/{base}"
+
+    if atype == "script":
+        return f"""\
+- hosts: all
+  become: yes
+  tasks:
+    - name: Run {base}
+      ansible.builtin.script:
+        cmd: {container_path}
+        executable: /bin/bash
+"""
+
+    if atype == "rpm":
+        return f"""\
+- hosts: all
+  become: yes
+  tasks:
+    - name: Copy {base} to remote
+      ansible.builtin.copy:
+        src: {container_path}
+        dest: /tmp/{base}
+    - name: Install {base}
+      ansible.builtin.dnf:
+        name: /tmp/{base}
+        state: present
+        disable_gpg_check: true
+"""
+
+    if atype == "deb":
+        return f"""\
+- hosts: all
+  become: yes
+  tasks:
+    - name: Copy {base} to remote
+      ansible.builtin.copy:
+        src: {container_path}
+        dest: /tmp/{base}
+    - name: Install {base}
+      ansible.builtin.apt:
+        deb: /tmp/{base}
+"""
+
+    raise ValueError(f"Cannot auto-generate playbook for type {atype!r} — supply a .yml file")
+
+
+# ── SSH key retrieval ─────────────────────────────────────────────────────────
+
+def _fetch_aws_ssh_key_sync(secret_name: str) -> str:
+    from .aws_service import _get_secret_sync
+    region = _cfg("aws_region") or "us-east-1"
+    raw = _get_secret_sync(secret_name, region)
+    try:
+        data = json.loads(raw)
+        return data.get("private_key") or data.get("key") or raw
+    except (json.JSONDecodeError, TypeError, AttributeError):
+        return raw
+
+
+def _fetch_gcp_ssh_key_sync(secret_name: str) -> str:
+    from .gcp_service import _get_secret_sync
+    project_id = _cfg("gcp_project_id")
+    return _get_secret_sync(project_id, secret_name)
+
+
+async def fetch_ssh_key(cloud: str) -> str | None:
+    """
+    Fetch the SSH private key PEM for the given cloud.
+
+    "aws" → AWS Secrets Manager (ansible_ssh_key_sm_name config key)
+    "gcp" → GCP Secret Manager  (gcp_ssh_key_secret_name config key)
+    "azure" / "" → None (Azure VMs use password auth or are skipped)
+    """
+    if cloud == "aws":
+        secret_name = _cfg("ansible_ssh_key_sm_name")
+        if not secret_name:
+            return None
+        return await asyncio.to_thread(_fetch_aws_ssh_key_sync, secret_name)
+    if cloud == "gcp":
+        secret_name = _cfg("gcp_ssh_key_secret_name")
+        if not secret_name:
+            return None
+        return await asyncio.to_thread(_fetch_gcp_ssh_key_sync, secret_name)
+    return None
 
 
 # ── Per-hypervisor hostvars builders ─────────────────────────────────────────
@@ -192,42 +313,70 @@ def _run_sync(cmd: list[str]) -> tuple[str, int]:
 
 
 async def run_playbook(
-    playbook_b64: str,
+    asset_b64: str,
     target: str,
     extra_vars: dict | None = None,
+    asset_name: str = "playbook.yml",
+    ssh_key_pem: str | None = None,
 ) -> tuple[str, int]:
     """
-    Run an Ansible playbook in a sibling Docker container.
+    Run an Ansible playbook or provisioning asset in a sibling Docker container.
 
-    playbook_b64 — base64-encoded playbook YAML (from ansible_storage)
-    target       — inventory group key (e.g. "proxmox") or a bare host/IP
+    asset_b64    — base64-encoded asset bytes (.yml playbook, .sh script, .rpm, .deb)
+    target       — inventory group key (e.g. "proxmox") or bare host/IP for cloud
     extra_vars   — optional dict forwarded as --extra-vars JSON
+    asset_name   — original filename; drives whether to generate a wrapper playbook
+    ssh_key_pem  — PEM private key for cloud targets; written to tmpdir/id_rsa
 
-    Returns (combined_output, returncode).  Non-zero rc means the playbook
-    failed; the output text contains the Ansible error details.
+    Returns (combined_output, returncode).  Non-zero rc means Ansible failed;
+    the output text contains the error details.
 
-    The inventory JSON (including credentials) lives in a temp directory that
-    is deleted as soon as the container exits.
+    The temp directory (containing credentials and any SSH key) is deleted as
+    soon as the container exits.
     """
     image = _cfg("ansible_local_image") or "willhallonline/ansible:latest"
     inventory = build_inventory()
     is_group = target in inventory and target not in ("_meta", "on_premises")
+    atype = asset_type(asset_name)
 
     with tempfile.TemporaryDirectory(prefix="ansible_run_") as tmpdir:
-        pb_path = os.path.join(tmpdir, "playbook.yml")
-        with open(pb_path, "wb") as f:
-            f.write(base64.b64decode(playbook_b64))
 
+        # ── write asset and playbook ──────────────────────────────────────────
+        if atype == "playbook":
+            pb_path = os.path.join(tmpdir, "playbook.yml")
+            with open(pb_path, "wb") as f:
+                f.write(base64.b64decode(asset_b64))
+        else:
+            assets_dir = os.path.join(tmpdir, "assets")
+            os.makedirs(assets_dir, exist_ok=True)
+            asset_path = os.path.join(assets_dir, os.path.basename(asset_name))
+            with open(asset_path, "wb") as f:
+                f.write(base64.b64decode(asset_b64))
+            pb_path = os.path.join(tmpdir, "playbook.yml")
+            with open(pb_path, "w") as f:
+                f.write(generate_playbook_yaml(asset_name))
+
+        # ── write inventory ───────────────────────────────────────────────────
         inv_path = os.path.join(tmpdir, "inventory.json")
         with open(inv_path, "w") as f:
             json.dump(inventory, f)
 
         inv_arg = "/ansible/inventory.json" if is_group else f"{target},"
 
-        cmd: list[str] = [
-            "docker", "run", "--rm",
-            "-v", f"{tmpdir}:/ansible:ro",
-            image,
+        # ── write SSH key if provided ─────────────────────────────────────────
+        has_key = bool(ssh_key_pem)
+        if ssh_key_pem:
+            key_path = os.path.join(tmpdir, "id_rsa")
+            with open(key_path, "w") as f:
+                f.write(ssh_key_pem)
+            # chmod 600 on host side; container will also chmod to satisfy SSH
+            try:
+                os.chmod(key_path, 0o600)
+            except OSError:
+                pass  # Windows NTFS — container will handle it
+
+        # ── build ansible-playbook args ───────────────────────────────────────
+        ansible_args: list[str] = [
             "ansible-playbook",
             "-i", inv_arg,
             "/ansible/playbook.yml",
@@ -235,11 +384,29 @@ async def run_playbook(
             "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null",
         ]
         if is_group:
-            cmd += ["--limit", target]
+            ansible_args += ["--limit", target]
+        if has_key:
+            ansible_args += ["--private-key", "/ansible/id_rsa"]
         if extra_vars:
-            cmd += ["--extra-vars", json.dumps(extra_vars)]
+            ansible_args += ["--extra-vars", json.dumps(extra_vars)]
+
+        # Wrap in sh -c so we can chmod the key inside the container (needed on
+        # Windows Docker Desktop where host-side chmod may not propagate).
+        ansible_cmd_str = " ".join(shlex.quote(a) for a in ansible_args)
+        if has_key:
+            shell_cmd = f"chmod 600 /ansible/id_rsa 2>/dev/null; {ansible_cmd_str}"
+        else:
+            shell_cmd = ansible_cmd_str
+
+        cmd: list[str] = [
+            "docker", "run", "--rm",
+            "-v", f"{tmpdir}:/ansible",
+            image,
+            "sh", "-c", shell_cmd,
+        ]
 
         logger.info(
-            "ansible-local: target=%s image=%s is_group=%s", target, image, is_group
+            "ansible-local: target=%s image=%s is_group=%s atype=%s has_key=%s",
+            target, image, is_group, atype, has_key,
         )
         return await asyncio.to_thread(_run_sync, cmd)

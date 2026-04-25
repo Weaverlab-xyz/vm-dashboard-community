@@ -2,20 +2,27 @@
 
 ## What is it?
 
-The Ansible integration lets you run Ansible playbooks from the dashboard as
-tracked background jobs. Playbooks are stored in cloud object storage (S3,
-Azure Blob, or GCS) and executed by an Ansible runner container.
+The Ansible integration lets you run Ansible playbooks and provisioning assets
+(`.sh` scripts, `.rpm` / `.deb` packages) from the dashboard as tracked
+background jobs. Assets are stored in cloud object storage (S3, Azure Blob, or
+GCS) and executed by an Ansible runner container.
+
+**Storage and execution targets are independent.** You can store assets in S3
+and run them against on-premises Proxmox hosts, or store them in GCS and
+target EC2 instances — any combination works.
 
 Two execution paths are available:
 
 | Path | When to use | How it runs |
 |---|---|---|
-| **Local Docker** | On-premises hypervisors (Proxmox, vSphere, Hyper-V, Nutanix, XCP-ng) | Sibling container via the mounted Docker socket — no cloud infrastructure needed |
-| **Cloud runners** | Cloud VMs (EC2, Azure VMs, GCE) | AWS ECS task, Azure Container Instance, or GCP Cloud Run Job — one per cloud |
+| **Local Docker** | Any target — on-premises hypervisors *and* cloud VMs | Sibling container via the mounted Docker socket; assets fetched from cloud storage then Ansible SSHes/WinRMs to the target |
+| **Cloud runners** | Cloud VMs when you need the runner to be network-local to the VM | AWS ECS task, Azure Container Instance, or GCP Cloud Run Job — one per cloud |
 
-The **Config Mgmt** tab shows a playbook picker and a target picker. The target
-list is built automatically from whatever on-premises hypervisors are enabled
-and configured — if Hyper-V is not configured, it does not appear.
+The **Config Mgmt** tab shows an asset picker and a target picker. The target
+list is built automatically from:
+- On-premises hypervisors that are enabled and configured (Proxmox, vSphere,
+  Hyper-V, Nutanix, XCP-ng)
+- Cloud VMs already deployed via the AWS, Azure, and GCP tabs
 
 ---
 
@@ -23,14 +30,16 @@ and configured — if Hyper-V is not configured, it does not appear.
 
 | Requirement | Notes |
 |---|---|
-| Playbook storage | **One of:** S3 bucket, Azure Blob Storage container, or GCS bucket |
+| Asset storage | **One of:** S3 bucket, Azure Blob Storage container, or GCS bucket — stores `.yml`, `.sh`, `.rpm`, `.deb` files |
 | **Local runner:** Docker socket | Already mounted in `docker-compose.yml` — no extra setup |
-| **Cloud runners:** ECS / ACI / Cloud Run | Only needed for cloud VM targets |
+| **Cloud runners:** ECS / ACI / Cloud Run | Only needed if you prefer the runner to be cloud-local to the VM |
 | Credentials | Local runner reuses the credentials already stored for each hypervisor integration |
+| **Cloud VM SSH key (AWS)** | `ANSIBLE_SSH_KEY_SM_NAME` — AWS Secrets Manager secret holding the private key PEM |
+| **Cloud VM SSH key (GCP)** | `GCP_SSH_KEY_SECRET_NAME` — GCP Secret Manager secret holding the private key PEM |
 
 ---
 
-## Step 1 — Create playbook storage
+## Step 1 — Create asset storage
 
 Configure **one** storage backend. The dashboard auto-detects which is set; if
 multiple are configured, priority is S3 > Azure Blob > GCS.
@@ -39,7 +48,8 @@ multiple are configured, priority is S3 > Azure Blob > GCS.
 
 ```bash
 aws s3 mb s3://your-org-config-mgmt --region us-east-1
-aws s3 cp playbooks/ s3://your-org-config-mgmt/config-mgmt/ --recursive
+# Upload any mix of .yml, .sh, .rpm, .deb files
+aws s3 cp assets/ s3://your-org-config-mgmt/config-mgmt/ --recursive
 ```
 
 ```
@@ -59,7 +69,7 @@ az storage container create \
 az storage blob upload-batch \
   --account-name myorgplaybooks \
   --destination "playbooks/config-mgmt" \
-  --source ./playbooks
+  --source ./assets
 ```
 
 ```
@@ -75,7 +85,7 @@ Auth uses your existing Azure service principal. The SP needs the
 
 ```bash
 gsutil mb -l us-central1 gs://my-org-config-mgmt
-gsutil -m cp -r playbooks/ gs://my-org-config-mgmt/config-mgmt/
+gsutil -m cp -r assets/ gs://my-org-config-mgmt/config-mgmt/
 ```
 
 ```
@@ -95,24 +105,27 @@ on the bucket.
 **Setup wizard** — toggle **Ansible** on, then configure storage from Settings
 after the wizard completes.
 
-That's all that's required for local on-premises runs. Cloud runner config is
-optional — see the sections below.
+That's all that's required for local runs against any target. Cloud SSH key
+config and cloud runner config are optional — see the sections below.
 
 ---
 
-## Local Docker runner (on-premises targets)
+## Local Docker runner (on-premises and cloud targets)
 
 The local runner is automatic: no extra infrastructure is needed beyond the
-Docker socket already mounted in `docker-compose.yml`.
+Docker socket already mounted in `docker-compose.yml`. It handles both
+on-premises hypervisors and cloud VMs — the asset is always fetched from
+cloud storage regardless of where the target lives.
 
 ### How the inventory is built
 
-When you click **Run Playbook**, the dashboard calls `GET /api/config-mgmt/inventory`,
+When you click **Run**, the dashboard calls `GET /api/config-mgmt/inventory`,
 which returns a dynamic Ansible JSON inventory built from every on-premises
 hypervisor integration that is **both enabled and has a host configured**.
 
 Hypervisors that are not enabled or have no host set are silently omitted —
-the target picker only shows what is actually reachable.
+the target picker only shows what is actually reachable. Cloud VMs appear
+in separate optgroups populated from the AWS / Azure / GCP tab caches.
 
 | Hypervisor | Ansible connection | Credentials used |
 |---|---|---|
@@ -169,6 +182,38 @@ inventory are bind-mounted into `/ansible/` inside the container.
 
 ---
 
+## Provisioning assets (.sh / .rpm / .deb)
+
+In addition to Ansible playbooks (`.yml`), you can upload **scripts and
+packages** to the same storage bucket. The dashboard auto-generates a wrapper
+playbook based on the file extension.
+
+| Extension | What happens |
+|---|---|
+| `.yml` / `.yaml` | Playbook is used as-is |
+| `.sh` | `ansible.builtin.script` — script is copied to the remote host and executed with `/bin/bash` |
+| `.rpm` | `ansible.builtin.copy` + `ansible.builtin.dnf` — package is transferred and installed with `--disable-gpg-check` |
+| `.deb` | `ansible.builtin.copy` + `ansible.builtin.apt` — package is transferred and installed |
+
+Just drop the file in your storage prefix alongside your playbooks:
+
+```bash
+# S3 example — mix of asset types
+aws s3 cp hardening.yml        s3://your-org-config-mgmt/config-mgmt/
+aws s3 cp install-agent.sh     s3://your-org-config-mgmt/config-mgmt/
+aws s3 cp my-agent.rpm         s3://your-org-config-mgmt/config-mgmt/
+aws s3 cp my-agent.deb         s3://your-org-config-mgmt/config-mgmt/
+```
+
+The **Config Mgmt** tab shows all asset types in the picker. A colour badge
+indicates the type (Playbook / Script / RPM / DEB).
+
+> **Extra vars** are forwarded only to playbooks. For scripts and packages the
+> field is accepted but ignored — pass runtime parameters via the script itself
+> or encode them in the filename.
+
+---
+
 ## Cloud runners (cloud VM targets)
 
 Use cloud runners when your target VMs live in AWS, Azure, or GCP. Cloud
@@ -189,12 +234,14 @@ ANSIBLE_ECS_EXECUTION_ROLE_ARN=arn:aws:iam::123456789012:role/ecsTaskExecutionRo
 `ANSIBLE_ECS_EXECUTION_ROLE_ARN` is only required if your image is in a private
 ECR registry.
 
-SSH key source for cloud runners (cloud VMs need a key, not a password):
+SSH key source for AWS cloud targets (cloud VMs need a key, not a password):
 
 ```
-ANSIBLE_SSH_KEY_SM_NAME=ec2/ssh-keypair   # AWS Secrets Manager (preferred)
-ANSIBLE_SSH_KEY_SECRET=AWS_KEY            # BeyondTrust Password Safe (fallback)
+ANSIBLE_SSH_KEY_SM_NAME=ec2/ssh-keypair   # AWS Secrets Manager secret name/ARN
 ```
+
+The secret value may be a raw PEM string or a JSON object with a `private_key`
+field. The dashboard auto-detects which format is used.
 
 ### Azure ACI runner
 
@@ -236,6 +283,40 @@ gcloud compute networks vpc-access connectors create ansible-runner \
 
 Then set `GCP_ANSIBLE_VPC_CONNECTOR=projects/PROJECT_ID/locations/us-central1/connectors/ansible-runner`.
 
+### SSH key source for GCE targets
+
+```
+GCP_SSH_KEY_SECRET_NAME=ssh-ansible-keypair   # GCP Secret Manager secret name
+```
+
+Store the private key (PEM) as a secret in Secret Manager. The service account
+needs `roles/secretmanager.secretAccessor` on that secret.
+
+```bash
+gcloud secrets create ssh-ansible-keypair --replication-policy="automatic"
+gcloud secrets versions add ssh-ansible-keypair --data-file=~/.ssh/id_rsa
+gcloud secrets add-iam-policy-binding ssh-ansible-keypair \
+  --member="serviceAccount:SA_EMAIL" \
+  --role="roles/secretmanager.secretAccessor"
+```
+
+---
+
+## Cloud VM target discovery
+
+The **Config Mgmt** tab reads the instance lists already cached by the AWS,
+Azure, and GCP tabs — no extra API calls are needed. The target picker shows
+three optgroups:
+
+| Optgroup | Source | SSH key |
+|---|---|---|
+| EC2 Instances (AWS) | AWS instances tab cache | `ANSIBLE_SSH_KEY_SM_NAME` |
+| Azure Virtual Machines | Azure VMs tab cache | Password auth (no key required) |
+| GCE Instances (GCP) | GCP instances tab cache | `GCP_SSH_KEY_SECRET_NAME` |
+
+If you have not yet navigated to the cloud tab (so the cache is empty), visit
+it once to populate the list, then return to Config Mgmt.
+
 ---
 
 ## Playbook structure
@@ -269,8 +350,7 @@ Target the `proxmox`, `vsphere`, `hyperv`, `nutanix`, or `xcpng` group
 
 ### Cloud VM playbook (single-host, ad-hoc)
 
-For cloud targets you supply a bare IP or hostname in the target field.
-The dashboard passes it as `-i <host>,` to Ansible:
+For cloud targets the dashboard passes the IP as `-i <host>,` to Ansible:
 
 ```yaml
 # hardening.yml
@@ -282,6 +362,36 @@ The dashboard passes it as `-i <host>,` to Ansible:
         name: sshd
         state: started
         enabled: true
+```
+
+### Provisioning asset examples
+
+**Script (install-agent.sh)** — upload a `.sh` file; the dashboard wraps it
+automatically:
+
+```bash
+#!/bin/bash
+set -euo pipefail
+curl -fsSL https://packages.example.com/agent.sh | bash
+systemctl enable --now example-agent
+```
+
+**RPM package (my-agent-1.0.rpm)** — upload the `.rpm` directly. The dashboard
+generates:
+
+```yaml
+- hosts: all
+  become: yes
+  tasks:
+    - name: Copy my-agent-1.0.rpm to remote
+      ansible.builtin.copy:
+        src: /ansible/assets/my-agent-1.0.rpm
+        dest: /tmp/my-agent-1.0.rpm
+    - name: Install my-agent-1.0.rpm
+      ansible.builtin.dnf:
+        name: /tmp/my-agent-1.0.rpm
+        state: present
+        disable_gpg_check: true
 ```
 
 ---
@@ -319,13 +429,35 @@ runs on the same Docker network as the dashboard (`compose` default bridge).
 If the hypervisor is on a separate VLAN, ensure the Docker host has a route
 to it.
 
-### Playbook storage
+### Asset storage
 
-**"No playbook storage configured"** — set at least one of `ANSIBLE_S3_BUCKET`,
+**"No asset storage configured"** — set at least one of `ANSIBLE_S3_BUCKET`,
 `ANSIBLE_AZURE_STORAGE_ACCOUNT`, or `ANSIBLE_GCS_BUCKET`.
 
-**"S3 bucket not found"** — verify the bucket name and that the IAM user has
-`s3:GetObject` + `s3:ListBucket`.
+**Assets don't appear in the picker** — confirm the files are under the
+configured prefix (default: `config-mgmt/`) and have a supported extension
+(`.yml`, `.yaml`, `.sh`, `.rpm`, `.deb`). Navigate away and back to force a
+fresh list fetch.
+
+**"Permission denied" on .sh asset** — the script file must be executable on
+the remote host. The auto-generated playbook uses `ansible.builtin.script`
+which handles the copy, but if the remote shell rejects it, add
+`chmod +x /tmp/script.sh` as a preceding task in a custom `.yml` wrapper.
+
+**Cloud VMs not in the target list** — the list is read from the in-memory
+cache populated by the AWS / Azure / GCP tabs. Visit the relevant cloud tab
+first so the cache is warm, then return to Config Mgmt.
+
+**SSH authentication failed on cloud target (AWS)** — verify `ANSIBLE_SSH_KEY_SM_NAME`
+is set and the IAM role has `secretsmanager:GetSecretValue` on that secret.
+
+**SSH authentication failed on cloud target (GCP)** — verify `GCP_SSH_KEY_SECRET_NAME`
+is set and the service account has `roles/secretmanager.secretAccessor` on the
+secret. Ensure the public key is in the instance's `~/.ssh/authorized_keys`
+(injected at launch via `GCP_SSH_KEY_SECRET_NAME`).
+
+**"S3 bucket not found"** — verify the bucket name and that the IAM user/role has
+`s3:GetObject` + `s3:ListBucket` on the bucket.
 
 **Azure Blob: "Authorization failed"** — assign **Storage Blob Data Reader** to
 the service principal on the storage account:
