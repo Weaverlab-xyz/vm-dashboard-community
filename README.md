@@ -57,12 +57,24 @@ after first login — only if you have the backing infrastructure:
 
 - **VMware Workstation** — VM management (Windows host only; requires the
   Windows Compose override — see [docs/ONBOARDING.md](docs/ONBOARDING.md) Appendix A)
+- **Proxmox VE** — VM and node management via the Proxmox REST API
+- **VMware vSphere / ESXi** — VM power operations and inventory via SSH/API
+- **Microsoft Hyper-V** — VM management via WinRM
+- **Nutanix AHV** — VM management via Prism Central REST API
+- **XCP-ng / XenServer** — VM management via XAPI
+- **Ansible provisioning runner** — run playbooks and assets (`.sh` scripts,
+  `.rpm`/`.deb` packages) stored in S3, Azure Blob, or GCS against any target:
+  on-premises hypervisors (Proxmox, vSphere, Hyper-V, Nutanix, XCP-ng) *or*
+  cloud VMs (EC2, Azure VMs, GCE). The local Docker runner needs no extra
+  infrastructure — assets are fetched from cloud storage and Ansible SSHes
+  directly to the target. Cloud runners (ECS, ACI, GCP Cloud Run Jobs) are
+  available when you need the runner network-local to the VM.
+  See [docs/integrations/ansible.md](docs/integrations/ansible.md).
 - **BeyondTrust Password Safe and/or PRA** — secret retrieval and session recording
 - **Portainer CE** — on-prem Docker host management
-- **Ansible** — config-management jobs via local Docker or AWS ECS
 - **Entitle** — approval-workflow integration
 - **MCP server** — read-only AI client integration (Claude Desktop, Claude Code, Cursor…) via Personal Access Token; mounted at `/mcp`, no extra containers needed
 
 ## License
 
-TBD — see the repo's `LICENSE` file once the public release lands.
+MIT — see [LICENSE](LICENSE).
