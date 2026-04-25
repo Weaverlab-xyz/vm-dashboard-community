@@ -248,6 +248,16 @@ class Settings(BaseSettings):
     epml_deb_path: str = r"C:\Scripts\VM_CLI\VM_DEMO_CLI\epml-client.amd64.deb"
     pathfinder_script_path: str = r"C:\Scripts\VM_CLI\VM_DEMO_CLI\make_pathfinder_user.sh"
 
+    # GCP (Google Cloud Platform)
+    gcp_project_id: str = ""
+    gcp_region: str = "us-central1"
+    gcp_zone: str = "us-central1-a"
+    gcp_service_account_json: str = ""   # Full service account JSON key content, stored encrypted
+    gcp_network: str = "default"
+    gcp_subnetwork: str = ""             # Full subnetwork self-link or name
+    gcp_ssh_key_secret_name: str = ""    # Secret Manager secret name for SSH key pair
+    gcp_ssh_username: str = "gcp-user"
+
     # Entitle approval workflows (per-endpoint gate via Depends(require_approval(...)))
     entitle_api_url: str = ""                       # e.g. "https://api.entitle.io/v1"
     entitle_api_token: str = ""                     # bearer token (Key Vault secret in prod)

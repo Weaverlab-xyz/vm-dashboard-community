@@ -42,6 +42,8 @@
           {% endif %}
           <a href="/aws" class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
              {% if request.url.path == '/aws' %}{{ nav_active }}{% endif %}">AWS</a>
+          <a href="/gcp" class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
+             {% if request.url.path == '/gcp' %}{{ nav_active }}{% endif %}">GCP</a>
           <a href="/azure" class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
              {% if request.url.path == '/azure' %}{{ nav_active }}{% endif %}">Azure</a>
           {% if portainer_enabled %}

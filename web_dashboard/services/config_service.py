@@ -159,6 +159,7 @@ _SECRET_KEYS = frozenset({
     "aws_secret_access_key",
     "azure_client_secret",
     "azure_oauth_client_secret",
+    "gcp_service_account_json",
 })
 
 

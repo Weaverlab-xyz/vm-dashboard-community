@@ -1,8 +1,8 @@
 # Infrastructure Management Dashboard — Community Edition
 
-A self-hosted web dashboard for managing infrastructure across AWS, Azure, and
-(optionally) on-prem VMware Workstation. Bring your own cloud credentials; the
-dashboard deploys resources into **your** accounts.
+A self-hosted web dashboard for managing infrastructure across AWS, Azure, GCP,
+and (optionally) on-prem VMware Workstation. Bring your own cloud credentials;
+the dashboard deploys resources into **your** accounts.
 
 > **Status:** private preview. This README is a placeholder — a full rewrite
 > with screenshots and a demo video lands with the public release.
@@ -37,13 +37,15 @@ feature-test checklist.
 - **AWS** — EC2 deployment, AMI browsing, image capture, SSH-key management
 - **Azure** — VM deployment (Marketplace + private images), Shared Image
   Gallery, Azure Container Instances
+- **GCP** — Compute Engine deployment (public OS images + custom images),
+  instance management, image capture, Secret Manager SSH-key integration
 - **Identity** — local username/password, optional WebAuthn/FIDO2 MFA,
   optional Sign in with Microsoft (Entra ID)
 - **Jobs** — background task tracking with live WebSocket updates
 
 ## What's optional (feature-flagged, off by default)
 
-Enable these in the **setup wizard → Step 4** or **Settings → Integrations**
+Enable these in the **setup wizard → Step 5** or **Settings → Integrations**
 after first login — only if you have the backing infrastructure:
 
 - **VMware Workstation** — VM management (Windows host only; requires the

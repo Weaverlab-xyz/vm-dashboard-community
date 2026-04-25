@@ -51,6 +51,17 @@ class AzureSetup(BaseModel):
     azure_oauth_tenant_id: str = ""
 
 
+class GCPSetup(BaseModel):
+    gcp_project_id: str = ""
+    gcp_region: str = "us-central1"
+    gcp_zone: str = "us-central1-a"
+    gcp_service_account_json: str = ""   # Full SA JSON key — stored encrypted
+    gcp_network: str = "default"
+    gcp_subnetwork: str = ""
+    gcp_ssh_key_secret_name: str = ""
+    gcp_ssh_username: str = "gcp-user"
+
+
 class FeaturesSetup(BaseModel):
     vmware_enabled: bool = False
     beyondtrust_enabled: bool = False
@@ -63,6 +74,7 @@ class SetupPayload(BaseModel):
     admin: AdminSetup
     aws: AWSSetup
     azure: AzureSetup
+    gcp: GCPSetup = GCPSetup()
     features: FeaturesSetup
 
 
@@ -127,6 +139,7 @@ _WIZARD_SECRET_FIELDS = frozenset({
     "aws_secret_access_key",
     "azure_client_secret",
     "azure_oauth_client_secret",
+    "gcp_service_account_json",
 })
 
 
@@ -144,6 +157,12 @@ def _apply_config(payload: SetupPayload) -> None:
 
     # Azure
     for field, value in payload.azure.model_dump().items():
+        if field in _WIZARD_SECRET_FIELDS and not value:
+            continue
+        pairs[field] = value
+
+    # GCP
+    for field, value in payload.gcp.model_dump().items():
         if field in _WIZARD_SECRET_FIELDS and not value:
             continue
         pairs[field] = value

@@ -310,8 +310,109 @@
       </div>
     </div>
 
-    <!-- ── Step 4: Feature Flags ── -->
+    <!-- ── Step 4: GCP ── -->
     <div x-show="step === 4" class="px-8 py-6 space-y-5">
+      <div>
+        <h2 class="text-lg font-semibold text-gray-900">Google Cloud Credentials</h2>
+        <p class="text-gray-500 text-sm mt-1">
+          Used to deploy Compute Engine instances. Create a service account with the
+          <code class="bg-gray-100 px-1 rounded text-xs">Compute Admin</code> and
+          <code class="bg-gray-100 px-1 rounded text-xs">Secret Manager Secret Accessor</code> roles,
+          then download a JSON key:
+        </p>
+        <pre class="bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 mt-2 text-xs font-mono text-gray-700 whitespace-pre-wrap">gcloud iam service-accounts create dashboard-sa --display-name "Dashboard SA"
+gcloud projects add-iam-policy-binding &lt;PROJECT_ID&gt; \
+  --member "serviceAccount:dashboard-sa@&lt;PROJECT_ID&gt;.iam.gserviceaccount.com" \
+  --role "roles/compute.admin"
+gcloud iam service-accounts keys create sa-key.json \
+  --iam-account "dashboard-sa@&lt;PROJECT_ID&gt;.iam.gserviceaccount.com"</pre>
+      </div>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Project ID</label>
+          <input type="text" x-model="form.gcp.gcp_project_id"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                 placeholder="my-gcp-project-id">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Default Region</label>
+          <select x-model="form.gcp.gcp_region"
+                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <template x-for="r in gcpRegions" :key="r.value">
+              <option :value="r.value" x-text="r.label"></option>
+            </template>
+          </select>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Default Zone</label>
+          <input type="text" x-model="form.gcp.gcp_zone"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                 placeholder="us-central1-a">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">VPC Network</label>
+          <input type="text" x-model="form.gcp.gcp_network"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                 placeholder="default">
+        </div>
+      </div>
+
+      <!-- Service account JSON -->
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">
+          Service Account JSON Key
+          <span x-show="!isReconfig" class="text-red-500">*</span>
+        </label>
+        <textarea x-model="form.gcp.gcp_service_account_json" rows="6"
+                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  :placeholder="isReconfig ? '••••••••  (leave blank to keep current)' : 'Paste the full contents of sa-key.json here'"></textarea>
+        <p class="text-xs text-gray-400 mt-1">
+          Paste the full JSON key file (<code class="bg-gray-100 px-1 rounded">sa-key.json</code>).
+          It is stored encrypted in the dashboard database.
+        </p>
+      </div>
+
+      <!-- Advanced settings (SSH key) -->
+      <div class="border border-gray-200 rounded-lg overflow-hidden">
+        <button type="button" @click="showGcpAdvanced = !showGcpAdvanced"
+          class="w-full flex items-center justify-between px-4 py-3 text-sm font-medium text-gray-700 bg-gray-50 hover:bg-gray-100 transition-colors">
+          <span>Advanced settings — SSH key &amp; subnetwork (optional)</span>
+          <svg class="w-4 h-4 transition-transform duration-200" :class="showGcpAdvanced ? 'rotate-180' : ''" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+          </svg>
+        </button>
+        <div x-show="showGcpAdvanced" x-transition class="px-4 py-4 space-y-4 border-t border-gray-200">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">SSH Key Secret Name</label>
+            <input type="text" x-model="form.gcp.gcp_ssh_key_secret_name"
+              class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+              placeholder="my-ssh-keypair">
+            <p class="mt-1 text-xs text-gray-500">
+              Name of a GCP Secret Manager secret containing a JSON object with a
+              <code class="bg-gray-100 px-1 rounded">public_key</code> field (or raw public key).
+              Used for every Compute Engine deployment.
+            </p>
+          </div>
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">SSH Username</label>
+              <input type="text" x-model="form.gcp.gcp_ssh_username"
+                class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                placeholder="gcp-user">
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Default Subnetwork</label>
+              <input type="text" x-model="form.gcp.gcp_subnetwork"
+                class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                placeholder="projects/…/regions/us-central1/subnetworks/default">
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Step 5: Feature Flags ── -->
+    <div x-show="step === 5" class="px-8 py-6 space-y-5">
       <div>
         <h2 class="text-lg font-semibold text-gray-900">Feature Flags</h2>
         <p class="text-gray-500 text-sm mt-1">
@@ -341,8 +442,8 @@
       </div>
     </div>
 
-    <!-- ── Step 5: Done ── -->
-    <div x-show="step === 5" class="px-8 py-12 text-center space-y-4">
+    <!-- ── Step 6: Done ── -->
+    <div x-show="step === 6" class="px-8 py-12 text-center space-y-4">
       <div class="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto">
         <svg class="w-8 h-8 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/>
@@ -362,7 +463,7 @@
     </div>
 
     <!-- Navigation -->
-    <div x-show="step < 5" class="px-8 py-5 border-t border-gray-100 flex items-center justify-between bg-gray-50">
+    <div x-show="step < 6" class="px-8 py-5 border-t border-gray-100 flex items-center justify-between bg-gray-50">
       <button
         @click="prev()"
         x-show="step > 1"
@@ -370,7 +471,7 @@
       >
         ← Back
       </button>
-      <div x-show="step === 1" class="text-xs text-gray-400">Step 1 of 4</div>
+      <div x-show="step === 1" class="text-xs text-gray-400">Step 1 of 5</div>
 
       <button
         @click="next()"
@@ -381,7 +482,7 @@
           <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
           <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"></path>
         </svg>
-        <span x-text="step === 4 ? (saving ? 'Saving…' : (isReconfig ? 'Save changes' : 'Complete setup')) : 'Next →'"></span>
+        <span x-text="step === 5 ? (saving ? 'Saving…' : (isReconfig ? 'Save changes' : 'Complete setup')) : 'Next →'"></span>
       </button>
     </div>
 
@@ -403,9 +504,10 @@ function wizard() {
     showOAuth: false,
     showAzureAdvanced: false,
     showAwsAdvanced: false,
+    showGcpAdvanced: false,
     authToken: localStorage.getItem('vm_cli_token') || '',
 
-    steps: ['Admin', 'AWS', 'Azure', 'Features'],
+    steps: ['Admin', 'AWS', 'Azure', 'GCP', 'Features'],
 
     form: {
       admin:    { username: 'admin', password: '', confirm: '' },
@@ -416,6 +518,9 @@ function wizard() {
                   azure_vnet_resource_group: '', azure_shared_image_gallery: '',
                   azure_gallery_resource_group: '', azure_key_vault_url: '', azure_ssh_key_secret_name: '',
                   azure_oauth_client_id: '', azure_oauth_client_secret: '', azure_oauth_tenant_id: '' },
+      gcp:      { gcp_project_id: '', gcp_region: 'us-central1', gcp_zone: 'us-central1-a',
+                  gcp_service_account_json: '', gcp_network: 'default', gcp_subnetwork: '',
+                  gcp_ssh_key_secret_name: '', gcp_ssh_username: 'gcp-user' },
       features: { vmware_enabled: false, beyondtrust_enabled: false,
                   portainer_enabled: false, ansible_enabled: false, entitle_enabled: false },
     },
@@ -452,6 +557,32 @@ function wizard() {
       { value: 'southeastasia',  label: 'Southeast Asia' },
       { value: 'eastasia',       label: 'East Asia' },
       { value: 'japaneast',      label: 'Japan East' },
+    ],
+
+    gcpRegions: [
+      { value: 'us-central1',             label: 'US Central (Iowa)' },
+      { value: 'us-east1',                label: 'US East (South Carolina)' },
+      { value: 'us-east4',                label: 'US East (N. Virginia)' },
+      { value: 'us-west1',                label: 'US West (Oregon)' },
+      { value: 'us-west2',                label: 'US West (Los Angeles)' },
+      { value: 'us-west3',                label: 'US West (Salt Lake City)' },
+      { value: 'northamerica-northeast1', label: 'Canada (Montréal)' },
+      { value: 'northamerica-northeast2', label: 'Canada (Toronto)' },
+      { value: 'southamerica-east1',      label: 'South America (São Paulo)' },
+      { value: 'europe-west1',            label: 'Europe (Belgium)' },
+      { value: 'europe-west2',            label: 'Europe (London)' },
+      { value: 'europe-west3',            label: 'Europe (Frankfurt)' },
+      { value: 'europe-west4',            label: 'Europe (Netherlands)' },
+      { value: 'europe-west6',            label: 'Europe (Zürich)' },
+      { value: 'europe-north1',           label: 'Europe (Finland)' },
+      { value: 'europe-central2',         label: 'Europe (Warsaw)' },
+      { value: 'asia-east1',              label: 'Asia (Taiwan)' },
+      { value: 'asia-east2',              label: 'Asia (Hong Kong)' },
+      { value: 'asia-northeast1',         label: 'Asia (Tokyo)' },
+      { value: 'asia-northeast3',         label: 'Asia (Seoul)' },
+      { value: 'asia-south1',             label: 'Asia (Mumbai)' },
+      { value: 'asia-southeast1',         label: 'Asia (Singapore)' },
+      { value: 'australia-southeast1',    label: 'Australia (Sydney)' },
     ],
 
     featureFlags: [
@@ -530,6 +661,16 @@ function wizard() {
               this.form.azure.azure_oauth_tenant_id  = cfg.azure_oauth_tenant_id || '';
               this.showOAuth = true;
             }
+            // GCP non-secret fields
+            if (cfg.gcp_project_id)         this.form.gcp.gcp_project_id         = cfg.gcp_project_id;
+            if (cfg.gcp_region)             this.form.gcp.gcp_region             = cfg.gcp_region;
+            if (cfg.gcp_zone)               this.form.gcp.gcp_zone               = cfg.gcp_zone;
+            if (cfg.gcp_network)            this.form.gcp.gcp_network            = cfg.gcp_network;
+            // GCP advanced — expand if previously configured
+            const gcpAdv = ['gcp_ssh_key_secret_name', 'gcp_ssh_username', 'gcp_subnetwork'];
+            for (const f of gcpAdv) {
+              if (cfg[f]) { this.form.gcp[f] = cfg[f]; this.showGcpAdvanced = true; }
+            }
             // Feature flags
             for (const flag of this.featureFlags) {
               if (cfg[flag.key] !== undefined) {
@@ -561,8 +702,8 @@ function wizard() {
 
     async next() {
       if (!this.validateStep()) return;
-      if (this.step < 4) { this.step++; return; }
-      // Step 4 → submit
+      if (this.step < 5) { this.step++; return; }
+      // Step 5 → submit
       await this.submit();
     },
 
@@ -582,6 +723,7 @@ function wizard() {
           },
           aws:      this.form.aws,
           azure:    this.form.azure,
+          gcp:      this.form.gcp,
           features: this.form.features,
         };
 
@@ -598,7 +740,7 @@ function wizard() {
           this.error = err.detail || `Error ${res.status} — please try again.`;
           return;
         }
-        this.step = 5;
+        this.step = 6;
       } catch (e) {
         this.error = 'Network error — is the server running?';
       } finally {

@@ -1,0 +1,699 @@
+{% extends "base.html" %}
+
+{% block title %}GCP — Infrastructure Management{% endblock %}
+
+{% block content %}
+<div class="max-w-7xl mx-auto py-6 px-4 sm:px-6 lg:px-8"
+     x-data="gcpDashboard()"
+     x-init="init()">
+
+  <!-- Page header -->
+  <div class="flex items-center justify-between mb-6">
+    <div>
+      <h1 class="text-2xl font-bold text-gray-800">Google Cloud Platform</h1>
+      <p class="text-sm text-gray-500 mt-0.5">Compute Engine instances and images in
+        <span class="font-mono text-gray-700" x-text="projectId || 'unconfigured'"></span>
+      </p>
+    </div>
+    <button @click="refreshAll()" :disabled="loading || imagesLoading || instancesLoading"
+            class="flex items-center gap-1.5 text-sm text-gray-600 hover:text-gray-800 disabled:opacity-40 transition">
+      <svg class="w-4 h-4" :class="loading ? 'animate-spin' : ''" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+              d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+      </svg>
+      Refresh
+    </button>
+  </div>
+
+  <!-- Credential error banner -->
+  <div x-show="credError" x-transition x-cloak
+       class="mb-6 bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 flex items-start gap-3">
+    <svg class="w-5 h-5 text-amber-500 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+            d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.538-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
+    </svg>
+    <div>
+      <p class="text-sm font-medium text-amber-800" x-text="credError"></p>
+      <a href="/setup" class="text-xs text-amber-700 underline mt-0.5 block">Open setup wizard →</a>
+    </div>
+  </div>
+
+  <!-- Toast -->
+  <div x-show="toast" x-cloak x-transition
+       :class="toastType === 'error' ? 'bg-red-50 border-red-200 text-red-700' : 'bg-green-50 border-green-200 text-green-700'"
+       class="mb-4 border rounded-lg px-4 py-3 text-sm" x-text="toast"></div>
+
+  <!-- Tab bar -->
+  <div class="border-b border-gray-200 mb-6">
+    <nav class="-mb-px flex gap-6">
+      <button @click="activeTab = 'public'"
+              :class="activeTab === 'public' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'"
+              class="py-3 border-b-2 text-sm font-medium transition-colors">
+        Public Images
+        <span x-show="publicImages.length" class="ml-1.5 bg-gray-100 text-gray-600 text-xs px-1.5 py-0.5 rounded-full"
+              x-text="publicImages.length"></span>
+      </button>
+      <button @click="switchToCustom()"
+              :class="activeTab === 'custom' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'"
+              class="py-3 border-b-2 text-sm font-medium transition-colors">
+        Custom Images
+        <span x-show="customImages.length" class="ml-1.5 bg-gray-100 text-gray-600 text-xs px-1.5 py-0.5 rounded-full"
+              x-text="customImages.length"></span>
+      </button>
+      <button @click="switchToInstances()"
+              :class="activeTab === 'instances' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'"
+              class="py-3 border-b-2 text-sm font-medium transition-colors">
+        Compute Instances
+        <span x-show="instances.length" class="ml-1.5 bg-gray-100 text-gray-600 text-xs px-1.5 py-0.5 rounded-full"
+              x-text="instances.length"></span>
+      </button>
+    </nav>
+  </div>
+
+  <!-- ── Public Images ──────────────────────────────────────────────────── -->
+  <div x-show="activeTab === 'public'">
+
+    <!-- OS filter -->
+    <div class="flex flex-wrap gap-2 mb-4">
+      <template x-for="f in publicFilters" :key="f.key">
+        <button @click="setPublicFilter(f.key)"
+                :class="publicFilter === f.key
+                  ? 'bg-blue-600 text-white border-blue-600'
+                  : 'bg-white text-gray-600 border-gray-300 hover:border-blue-400'"
+                class="px-3 py-1.5 rounded-full text-xs font-medium border transition-colors"
+                x-text="f.label"></button>
+      </template>
+    </div>
+
+    <!-- Loading skeleton -->
+    <div x-show="publicLoading" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+      <template x-for="i in 6" :key="i">
+        <div class="bg-white rounded-xl border border-gray-200 p-4 animate-pulse space-y-2">
+          <div class="h-4 bg-gray-200 rounded w-3/4"></div>
+          <div class="h-3 bg-gray-100 rounded w-1/2"></div>
+        </div>
+      </template>
+    </div>
+
+    <!-- Image grid -->
+    <div x-show="!publicLoading" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+      <template x-for="img in publicImages" :key="img.self_link">
+        <div class="bg-white rounded-xl border border-gray-200 hover:border-blue-300 hover:shadow-sm transition-all p-4 flex flex-col gap-2">
+          <div class="flex items-start justify-between gap-2">
+            <div class="flex-1 min-w-0">
+              <p class="text-sm font-medium text-gray-900 truncate" x-text="img.name"></p>
+              <p class="text-xs text-gray-400 mt-0.5" x-text="img.os_label || img.family || 'Public'"></p>
+            </div>
+            <span class="flex-shrink-0 text-xs bg-blue-50 text-blue-700 border border-blue-200 px-1.5 py-0.5 rounded font-mono"
+                  x-text="img.disk_size_gb + ' GB'"></span>
+          </div>
+          <p class="text-xs text-gray-500 truncate" x-text="img.description || img.name"></p>
+          <p class="text-xs text-gray-400" x-text="img.creation_date ? img.creation_date.substring(0,10) : ''"></p>
+          <div class="mt-auto pt-2 flex gap-2">
+            <button @click="openDeployModal(img)"
+                    class="flex-1 text-xs bg-blue-700 hover:bg-blue-800 text-white px-3 py-1.5 rounded-lg font-medium transition">
+              Deploy VM
+            </button>
+          </div>
+        </div>
+      </template>
+      <div x-show="!publicLoading && publicImages.length === 0 && !credError"
+           class="col-span-full text-center py-12 text-gray-400 text-sm">
+        No public images found for this filter.
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Custom Images ──────────────────────────────────────────────────── -->
+  <div x-show="activeTab === 'custom'">
+
+    <!-- Loading skeleton -->
+    <div x-show="imagesLoading" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+      <template x-for="i in 4" :key="i">
+        <div class="bg-white rounded-xl border border-gray-200 p-4 animate-pulse space-y-2">
+          <div class="h-4 bg-gray-200 rounded w-3/4"></div>
+          <div class="h-3 bg-gray-100 rounded w-1/2"></div>
+        </div>
+      </template>
+    </div>
+
+    <div x-show="!imagesLoading" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+      <template x-for="img in customImages" :key="img.self_link">
+        <div class="bg-white rounded-xl border border-gray-200 hover:border-blue-300 hover:shadow-sm transition-all p-4 flex flex-col gap-2">
+          <div class="flex items-start justify-between gap-2">
+            <div class="flex-1 min-w-0">
+              <p class="text-sm font-medium text-gray-900 truncate" x-text="img.name"></p>
+              <p class="text-xs text-gray-400 mt-0.5" x-text="img.family || 'Custom'"></p>
+            </div>
+            <span :class="img.status === 'READY' ? 'bg-green-50 text-green-700 border-green-200' : 'bg-amber-50 text-amber-700 border-amber-200'"
+                  class="flex-shrink-0 text-xs border px-1.5 py-0.5 rounded font-medium" x-text="img.status"></span>
+          </div>
+          <p class="text-xs text-gray-500 line-clamp-2" x-text="img.description || '—'"></p>
+          <p class="text-xs text-gray-400" x-text="img.creation_date ? img.creation_date.substring(0,10) : ''"></p>
+          <div class="mt-auto pt-2 flex gap-2">
+            <button @click="openDeployModal(img)"
+                    class="flex-1 text-xs bg-blue-700 hover:bg-blue-800 text-white px-3 py-1.5 rounded-lg font-medium transition">
+              Deploy VM
+            </button>
+            <button @click="confirmDeleteImage(img)"
+                    class="text-xs border border-red-200 text-red-600 hover:bg-red-50 px-2.5 py-1.5 rounded-lg font-medium transition">
+              Delete
+            </button>
+          </div>
+        </div>
+      </template>
+      <div x-show="!imagesLoading && customImages.length === 0 && !credError"
+           class="col-span-full text-center py-12 text-gray-400 text-sm">
+        No custom images in this project. Deploy an instance and capture it to create one.
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Compute Instances ──────────────────────────────────────────────── -->
+  <div x-show="activeTab === 'instances'">
+    <div class="flex justify-end mb-3">
+      <button @click="loadInstances(true)"
+              class="text-xs text-gray-500 hover:text-gray-700 flex items-center gap-1 transition">
+        <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+        </svg>
+        Force refresh
+      </button>
+    </div>
+
+    <div x-show="instancesLoading" class="space-y-3">
+      <template x-for="i in 3" :key="i">
+        <div class="bg-white rounded-xl border border-gray-200 p-4 animate-pulse h-16"></div>
+      </template>
+    </div>
+
+    <div x-show="!instancesLoading" class="space-y-3">
+      <template x-for="inst in instances" :key="inst.instance_name + inst.zone">
+        <div class="bg-white rounded-xl border border-gray-200 hover:shadow-sm transition p-4">
+          <div class="flex items-center gap-4">
+            <!-- Status dot -->
+            <span class="flex-shrink-0 w-2.5 h-2.5 rounded-full"
+                  :class="{
+                    'bg-green-500': inst.status === 'RUNNING',
+                    'bg-red-400':   inst.status === 'TERMINATED',
+                    'bg-amber-400': ['STAGING','STOPPING','SUSPENDED'].includes(inst.status),
+                    'bg-gray-300':  !['RUNNING','TERMINATED','STAGING','STOPPING','SUSPENDED'].includes(inst.status)
+                  }"></span>
+            <!-- Details -->
+            <div class="flex-1 min-w-0">
+              <div class="flex items-center gap-2 flex-wrap">
+                <span class="text-sm font-medium text-gray-900" x-text="inst.instance_name"></span>
+                <span class="text-xs text-gray-400 font-mono" x-text="inst.machine_type"></span>
+                <span class="text-xs text-gray-400" x-text="inst.zone"></span>
+              </div>
+              <div class="flex flex-wrap gap-x-4 gap-y-0.5 mt-0.5">
+                <span class="text-xs text-gray-500" x-text="inst.private_ip ? '🔒 ' + inst.private_ip : '—'"></span>
+                <span x-show="inst.public_ip" class="text-xs text-blue-600" x-text="'🌐 ' + inst.public_ip"></span>
+                <span x-show="inst.deployed_by" class="text-xs text-gray-400" x-text="'by ' + inst.deployed_by"></span>
+              </div>
+            </div>
+            <!-- Actions -->
+            <div class="flex items-center gap-2 flex-shrink-0">
+              <button @click="openCaptureModal(inst)"
+                      class="text-xs border border-gray-200 text-gray-600 hover:bg-gray-50 px-2.5 py-1.5 rounded-lg transition">
+                Capture Image
+              </button>
+              <a x-show="inst.job_id" :href="'/jobs/' + inst.job_id"
+                 class="text-xs text-blue-600 hover:underline">Job</a>
+              <button @click="confirmDestroyInstance(inst)"
+                      class="text-xs border border-red-200 text-red-600 hover:bg-red-50 px-2.5 py-1.5 rounded-lg transition">
+                Terminate
+              </button>
+            </div>
+          </div>
+        </div>
+      </template>
+      <div x-show="!instancesLoading && instances.length === 0 && !credError"
+           class="text-center py-12 text-gray-400 text-sm">
+        No Compute Engine instances deployed via this dashboard yet.
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════════════════════
+       Deploy VM Modal
+  ═══════════════════════════════════════════════════════════════════════════ -->
+  <div x-show="deployModal" x-cloak x-transition
+       class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+       @click.self="deployModal = false">
+    <div class="bg-white rounded-2xl shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
+      <div class="px-6 py-5 border-b border-gray-100 flex items-center justify-between">
+        <h2 class="text-lg font-semibold text-gray-900">Deploy Compute Engine VM</h2>
+        <button @click="deployModal = false" class="text-gray-400 hover:text-gray-600 transition">
+          <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+          </svg>
+        </button>
+      </div>
+
+      <div class="px-6 py-5 space-y-4">
+
+        <!-- Selected image -->
+        <div class="bg-blue-50 border border-blue-200 rounded-lg px-4 py-3 text-sm">
+          <p class="text-xs text-blue-500 font-medium mb-0.5">Image</p>
+          <p class="text-blue-900 font-medium truncate" x-text="selectedImage?.name"></p>
+          <p class="text-xs text-blue-700 mt-0.5" x-text="selectedImage?.description || selectedImage?.os_label || ''"></p>
+        </div>
+
+        <!-- SSH key status -->
+        <div x-show="sshKeyPreview"
+             class="bg-green-50 border border-green-200 rounded-lg px-4 py-3 text-sm">
+          <p class="text-xs text-green-600 font-medium mb-0.5">SSH Key (from Secret Manager)</p>
+          <p class="text-green-900 font-mono text-xs truncate" x-text="sshKeyPreview"></p>
+        </div>
+        <div x-show="!sshKeyPreview && !sshKeyLoading"
+             class="bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 text-sm">
+          <p class="text-xs text-amber-700 font-medium">No SSH key configured.</p>
+          <a href="/setup" class="text-xs text-amber-600 underline">
+            Add a Secret Manager secret name in the wizard →
+          </a>
+        </div>
+
+        <!-- Instance name -->
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Instance Name <span class="text-red-500">*</span></label>
+          <input type="text" x-model="deployForm.instance_name"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                 placeholder="my-vm-01">
+          <p class="text-xs text-gray-400 mt-1">Lowercase letters, numbers, and hyphens only.</p>
+        </div>
+
+        <!-- Zone -->
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Zone</label>
+          <select x-model="deployForm.zone"
+                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <option value="">— use default zone —</option>
+            <template x-for="z in networkOpts.zones" :key="z">
+              <option :value="z" x-text="z"></option>
+            </template>
+          </select>
+        </div>
+
+        <!-- Machine type -->
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Machine Type</label>
+          <select x-model="deployForm.machine_type"
+                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <template x-for="mt in networkOpts.machine_types" :key="mt">
+              <option :value="mt" x-text="mt"></option>
+            </template>
+          </select>
+        </div>
+
+        <!-- Subnetwork -->
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Subnetwork</label>
+          <select x-model="deployForm.subnetwork"
+                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <option value="">— default network —</option>
+            <template x-for="sn in networkOpts.subnetworks" :key="sn.self_link">
+              <option :value="sn.self_link" x-text="sn.name + ' (' + sn.ip_cidr_range + ')'"></option>
+            </template>
+          </select>
+        </div>
+
+        <!-- Disk size -->
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Disk Size (GB)</label>
+          <input type="number" x-model.number="deployForm.disk_size_gb" min="10" max="2000"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+        </div>
+
+        <!-- External IP toggle -->
+        <div class="flex items-center justify-between">
+          <div>
+            <p class="text-sm font-medium text-gray-700">External IP</p>
+            <p class="text-xs text-gray-400">Attach an ephemeral public IP address.</p>
+          </div>
+          <button @click="deployForm.create_external_ip = !deployForm.create_external_ip"
+                  :class="deployForm.create_external_ip ? 'bg-blue-600' : 'bg-gray-200'"
+                  class="relative inline-flex h-6 w-11 items-center rounded-full transition-colors">
+            <span class="inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform"
+                  :class="deployForm.create_external_ip ? 'translate-x-6' : 'translate-x-1'"></span>
+          </button>
+        </div>
+
+        <!-- Deploy error -->
+        <div x-show="deployError" x-transition
+             class="bg-red-50 border border-red-200 rounded-lg px-4 py-3 text-red-700 text-sm"
+             x-text="deployError"></div>
+
+      </div>
+
+      <div class="px-6 py-4 border-t border-gray-100 flex justify-end gap-3">
+        <button @click="deployModal = false" class="px-4 py-2 text-sm text-gray-600 hover:text-gray-900 font-medium">
+          Cancel
+        </button>
+        <button @click="submitDeploy()"
+                :disabled="deploying || !deployForm.instance_name"
+                class="flex items-center gap-2 px-5 py-2 bg-blue-700 hover:bg-blue-800 disabled:opacity-50 text-white text-sm font-medium rounded-lg transition">
+          <svg x-show="deploying" class="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"></path>
+          </svg>
+          <span x-text="deploying ? 'Deploying…' : 'Deploy'"></span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════════════════════
+       Capture Image Modal
+  ═══════════════════════════════════════════════════════════════════════════ -->
+  <div x-show="captureModal" x-cloak x-transition
+       class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+       @click.self="captureModal = false">
+    <div class="bg-white rounded-2xl shadow-xl w-full max-w-md">
+      <div class="px-6 py-5 border-b border-gray-100 flex items-center justify-between">
+        <h2 class="text-lg font-semibold text-gray-900">Capture Custom Image</h2>
+        <button @click="captureModal = false" class="text-gray-400 hover:text-gray-600 transition">
+          <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+          </svg>
+        </button>
+      </div>
+      <div class="px-6 py-5 space-y-4">
+        <p class="text-sm text-gray-600">
+          Creates a custom image from the boot disk of
+          <strong x-text="captureTarget?.instance_name"></strong>. The instance stays running.
+        </p>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Image Name <span class="text-red-500">*</span></label>
+          <input type="text" x-model="captureForm.image_name"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                 :placeholder="'image-from-' + (captureTarget?.instance_name || 'vm')">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Description</label>
+          <input type="text" x-model="captureForm.description"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                 placeholder="Optional description">
+        </div>
+        <div x-show="captureError" class="bg-red-50 border border-red-200 rounded-lg px-3 py-2 text-sm text-red-700"
+             x-text="captureError"></div>
+      </div>
+      <div class="px-6 py-4 border-t border-gray-100 flex justify-end gap-3">
+        <button @click="captureModal = false" class="px-4 py-2 text-sm text-gray-600 font-medium">Cancel</button>
+        <button @click="submitCapture()"
+                :disabled="capturing || !captureForm.image_name"
+                class="flex items-center gap-2 px-5 py-2 bg-blue-700 hover:bg-blue-800 disabled:opacity-50 text-white text-sm font-medium rounded-lg transition">
+          <svg x-show="capturing" class="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"></path>
+          </svg>
+          <span x-text="capturing ? 'Capturing…' : 'Capture'"></span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+</div><!-- /max-w-7xl -->
+
+<script>
+function gcpDashboard() {
+  return {
+    // State
+    activeTab:       'public',
+    projectId:       '',
+    loading:         false,
+    publicLoading:   false,
+    imagesLoading:   false,
+    instancesLoading: false,
+    credError:       '',
+    toast:           '',
+    toastType:       'success',
+
+    // Data
+    publicImages:   [],
+    customImages:   [],
+    instances:      [],
+    networkOpts:    { zones: [], machine_types: [], subnetworks: [], region: '', ssh_key_configured: false },
+
+    // Public image OS filter
+    publicFilter: 'all',
+    publicFilters: [
+      { key: 'all',     label: 'All' },
+      { key: 'debian',  label: 'Debian' },
+      { key: 'ubuntu',  label: 'Ubuntu' },
+      { key: 'rhel',    label: 'RHEL' },
+      { key: 'rocky',   label: 'Rocky Linux' },
+      { key: 'centos',  label: 'CentOS' },
+      { key: 'cos',     label: 'Container-OS' },
+      { key: 'windows', label: 'Windows' },
+    ],
+
+    // Deploy modal
+    deployModal:   false,
+    selectedImage: null,
+    deployError:   '',
+    deploying:     false,
+    sshKeyPreview: '',
+    sshKeyLoading: false,
+    deployForm: {
+      instance_name:     '',
+      machine_type:      'e2-medium',
+      zone:              '',
+      subnetwork:        '',
+      create_external_ip: false,
+      disk_size_gb:       20,
+      network_tags:       [],
+    },
+
+    // Capture modal
+    captureModal:  false,
+    captureTarget: null,
+    captureError:  '',
+    capturing:     false,
+    captureForm: { image_name: '', description: '' },
+
+    async init() {
+      await Promise.all([
+        this.loadPublicImages(),
+        this.loadNetworkOpts(),
+      ]);
+      // Derive project ID from network opts response
+      // (also try to read it from a header or API)
+      this.loadProjectId();
+    },
+
+    async loadProjectId() {
+      try {
+        // Use the network options region to infer project was configured
+        if (this.networkOpts.region) {
+          // Project ID is not returned directly; attempt a lightweight call
+          const res = await API.get('/api/gcp/network-options');
+          // projectId is not in network-options, but we can show from instances
+        }
+      } catch (_) {}
+      // Try custom images which return project_id
+      try {
+        const res = await API.get('/api/gcp/custom-images');
+        if (res.project_id) this.projectId = res.project_id;
+      } catch (_) {}
+    },
+
+    async loadPublicImages() {
+      this.publicLoading = true;
+      this.credError = '';
+      try {
+        const res = await API.get(`/api/gcp/public-images?os_filter=${this.publicFilter}`);
+        this.publicImages = res.images || [];
+        if (res.project_id) this.projectId = res.project_id;
+      } catch (e) {
+        this.credError = e.message?.includes('400')
+          ? 'GCP project not configured — run the setup wizard.'
+          : (e.message || 'Failed to load public images');
+      } finally {
+        this.publicLoading = false;
+      }
+    },
+
+    setPublicFilter(f) {
+      this.publicFilter = f;
+      this.loadPublicImages();
+    },
+
+    async switchToCustom() {
+      this.activeTab = 'custom';
+      if (this.customImages.length === 0 && !this.imagesLoading) {
+        await this.loadCustomImages();
+      }
+    },
+
+    async loadCustomImages() {
+      this.imagesLoading = true;
+      try {
+        const res = await API.get('/api/gcp/custom-images');
+        this.customImages = res.images || [];
+        if (res.project_id) this.projectId = res.project_id;
+      } catch (e) {
+        this.credError = e.message || 'Failed to load custom images';
+      } finally {
+        this.imagesLoading = false;
+      }
+    },
+
+    async switchToInstances() {
+      this.activeTab = 'instances';
+      if (this.instances.length === 0 && !this.instancesLoading) {
+        await this.loadInstances();
+      }
+    },
+
+    async loadInstances(bust = false) {
+      this.instancesLoading = true;
+      try {
+        const res = await API.get('/api/gcp/instances' + (bust ? '?bust=true' : ''));
+        this.instances = res.instances || [];
+        if (res.project_id) this.projectId = res.project_id;
+      } catch (e) {
+        this.credError = e.message || 'Failed to load instances';
+      } finally {
+        this.instancesLoading = false;
+      }
+    },
+
+    async loadNetworkOpts() {
+      try {
+        const res = await API.get('/api/gcp/network-options');
+        this.networkOpts = res;
+        if (res.machine_types?.length && !this.deployForm.machine_type) {
+          this.deployForm.machine_type = res.machine_types.includes('e2-medium') ? 'e2-medium' : res.machine_types[0];
+        }
+      } catch (_) {}
+    },
+
+    async openDeployModal(img) {
+      this.selectedImage = img;
+      this.deployError   = '';
+      this.deploying     = false;
+      this.deployForm    = {
+        instance_name:      '',
+        machine_type:       this.networkOpts.machine_types?.includes('e2-medium') ? 'e2-medium' : (this.networkOpts.machine_types?.[0] || 'e2-medium'),
+        zone:               '',
+        subnetwork:         '',
+        create_external_ip: false,
+        disk_size_gb:       Math.max(img.disk_size_gb || 20, 20),
+        network_tags:       [],
+      };
+      this.sshKeyPreview = '';
+      this.sshKeyLoading = true;
+      this.deployModal   = true;
+
+      // Load SSH key preview
+      try {
+        const kv = await API.get('/api/gcp/secrets/ssh-key');
+        this.sshKeyPreview = kv.public_key_preview || '';
+      } catch (_) {
+        this.sshKeyPreview = '';
+      } finally {
+        this.sshKeyLoading = false;
+      }
+    },
+
+    async submitDeploy() {
+      if (!this.deployForm.instance_name.trim()) {
+        this.deployError = 'Instance name is required.';
+        return;
+      }
+      this.deploying   = true;
+      this.deployError = '';
+      try {
+        const body = {
+          image_self_link:    this.selectedImage.self_link,
+          image_name:         this.selectedImage.name,
+          instance_name:      this.deployForm.instance_name.trim().toLowerCase(),
+          machine_type:       this.deployForm.machine_type,
+          zone:               this.deployForm.zone,
+          subnetwork:         this.deployForm.subnetwork,
+          create_external_ip: this.deployForm.create_external_ip,
+          disk_size_gb:       this.deployForm.disk_size_gb,
+          network_tags:       this.deployForm.network_tags,
+        };
+        const res = await API.post('/api/gcp/deploy', body);
+        this.deployModal = false;
+        this.showToast(`Deployment started — Job ${res.job_id}`);
+        window.location.href = '/jobs/' + res.job_id;
+      } catch (e) {
+        this.deployError = e.message || 'Deploy failed';
+      } finally {
+        this.deploying = false;
+      }
+    },
+
+    openCaptureModal(inst) {
+      this.captureTarget = inst;
+      this.captureForm   = { image_name: '', description: '' };
+      this.captureError  = '';
+      this.capturing     = false;
+      this.captureModal  = true;
+    },
+
+    async submitCapture() {
+      if (!this.captureForm.image_name.trim()) return;
+      this.capturing   = true;
+      this.captureError = '';
+      try {
+        const res = await API.post(
+          `/api/gcp/instances/${this.captureTarget.instance_name}/create-image`,
+          this.captureForm,
+        );
+        this.captureModal = false;
+        this.showToast(`Image capture started — Job ${res.job_id}`);
+        window.location.href = '/jobs/' + res.job_id;
+      } catch (e) {
+        this.captureError = e.message || 'Capture failed';
+      } finally {
+        this.capturing = false;
+      }
+    },
+
+    async confirmDeleteImage(img) {
+      if (!confirm(`Delete image "${img.name}"? This cannot be undone.`)) return;
+      try {
+        await API.delete(`/api/gcp/images/${img.name}`);
+        this.customImages = this.customImages.filter(i => i.self_link !== img.self_link);
+        this.showToast(`Image ${img.name} deleted.`);
+      } catch (e) {
+        this.showToast(e.message || 'Delete failed', 'error');
+      }
+    },
+
+    async confirmDestroyInstance(inst) {
+      if (!confirm(`Terminate "${inst.instance_name}" in ${inst.zone}? This is permanent.`)) return;
+      try {
+        const res = await API.delete(`/api/gcp/instances/${inst.instance_name}?zone=${inst.zone}`);
+        this.showToast(`Terminate started — Job ${res.job_id}`);
+        window.location.href = '/jobs/' + res.job_id;
+      } catch (e) {
+        this.showToast(e.message || 'Terminate failed', 'error');
+      }
+    },
+
+    async refreshAll() {
+      this.loading = true;
+      await Promise.all([
+        this.loadPublicImages(),
+        this.loadCustomImages(),
+        this.loadInstances(true),
+        this.loadNetworkOpts(),
+      ]);
+      this.loading = false;
+    },
+
+    showToast(msg, type = 'success') {
+      this.toast     = msg;
+      this.toastType = type;
+      setTimeout(() => { this.toast = ''; }, 5000);
+    },
+  };
+}
+</script>
+{% endblock %}

@@ -314,7 +314,7 @@ def _feature_flags() -> dict:
 # Settings → Integrations panel takes effect immediately — no restart needed.
 
 from fastapi import Depends  # noqa: E402
-from .api import auth, jobs, websocket, aws, azure, mfa, tokens, users, groups, setup  # noqa: E402
+from .api import auth, jobs, websocket, aws, azure, gcp, mfa, tokens, users, groups, setup  # noqa: E402
 from .api.mcp_server import get_mcp_asgi_app  # noqa: E402
 
 
@@ -340,6 +340,7 @@ app.include_router(jobs.router)
 app.include_router(websocket.router)
 app.include_router(aws.router)
 app.include_router(azure.router)
+app.include_router(gcp.router)
 
 # MCP server — mounted as a sub-ASGI app so SSE streams pass through unmodified
 app.mount("/mcp", get_mcp_asgi_app())
@@ -414,6 +415,11 @@ async def aws_page(request: Request):
 async def azure_page(request: Request):
     location = config_service.get("azure_location") or settings.azure_location
     return templates.TemplateResponse("azure/index.html", {"request": request, "default_location": location, **_feature_flags()})
+
+
+@app.get("/gcp", response_class=HTMLResponse, include_in_schema=False)
+async def gcp_page(request: Request):
+    return templates.TemplateResponse("gcp/index.html", {"request": request, **_feature_flags()})
 
 
 @app.get("/settings", response_class=HTMLResponse, include_in_schema=False)

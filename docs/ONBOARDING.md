@@ -6,9 +6,10 @@ deploying resources into your own AWS and Azure accounts. Target time:
 
 - [Part A — AWS setup](#part-a--aws-setup)
 - [Part B — Azure setup](#part-b--azure-setup)
-- [Part C — Run the dashboard](#part-c--run-the-dashboard)
-- [Part D — Feature-test checklist](#part-d--feature-test-checklist)
-- [Part E — Troubleshooting](#part-e--troubleshooting)
+- [Part C — GCP setup](#part-c--gcp-setup)
+- [Part D — Run the dashboard](#part-d--run-the-dashboard)
+- [Part E — Feature-test checklist](#part-e--feature-test-checklist)
+- [Part F — Troubleshooting](#part-f--troubleshooting)
 - [Appendix A — VMware Workstation integration](#appendix-a--vmware-workstation-integration)
 - [Appendix B — Sign in with Microsoft (Entra OAuth)](#appendix-b--sign-in-with-microsoft-entra-oauth)
 - [Appendix C — MCP server (AI client integration)](#appendix-c--mcp-server-ai-client-integration)
@@ -27,6 +28,7 @@ Install these once per machine:
 | git             | Clone the repo                     | macOS: `xcode-select --install`; Windows: <https://git-scm.com/download/win>; Linux: your package manager |
 | AWS CLI (v2)    | Create the IAM user and access key | <https://aws.amazon.com/cli/>                             |
 | Azure CLI       | Create the Azure service principal | <https://learn.microsoft.com/cli/azure/install-azure-cli> |
+| gcloud CLI      | Create the GCP service account (optional) | <https://cloud.google.com/sdk/docs/install> |
 
 Start Docker Desktop and wait for the whale/whale-like icon to settle
 before continuing.
@@ -66,7 +68,7 @@ aws iam create-access-key --user-name dashboard-dev
 ```
 
 Copy the `AccessKeyId` and `SecretAccessKey` from the output — you will
-paste them into `.env` in Part C.
+paste them into `.env` in Part D.
 
 ### 3. Pick a default region
 
@@ -113,7 +115,84 @@ exist. Set `AZURE_LOCATION` to your preferred Azure region (e.g.
 
 ---
 
-## Part C — Run the dashboard
+## Part C — GCP setup
+
+The dashboard deploys Compute Engine instances into **your** GCP project using
+a service account. GCP is optional — AWS and Azure work without it.
+
+### 1. Prerequisites
+
+Install the Google Cloud CLI (gcloud) if you haven't already:
+<https://cloud.google.com/sdk/docs/install>
+
+```bash
+gcloud auth login
+gcloud config set project <YOUR_PROJECT_ID>
+```
+
+### 2. Enable required APIs
+
+```bash
+gcloud services enable compute.googleapis.com secretmanager.googleapis.com
+```
+
+### 3. Create a service account and download a key
+
+```bash
+# Create the service account
+gcloud iam service-accounts create dashboard-sa \
+  --display-name "VM Dashboard SA"
+
+# Grant Compute Admin and Secret Manager accessor
+gcloud projects add-iam-policy-binding <PROJECT_ID> \
+  --member "serviceAccount:dashboard-sa@<PROJECT_ID>.iam.gserviceaccount.com" \
+  --role "roles/compute.admin"
+
+gcloud projects add-iam-policy-binding <PROJECT_ID> \
+  --member "serviceAccount:dashboard-sa@<PROJECT_ID>.iam.gserviceaccount.com" \
+  --role "roles/secretmanager.secretAccessor"
+
+# Download the JSON key
+gcloud iam service-accounts keys create sa-key.json \
+  --iam-account "dashboard-sa@<PROJECT_ID>.iam.gserviceaccount.com"
+```
+
+Keep `sa-key.json` safe. You'll paste its entire contents into the wizard.
+
+### 4. (Optional) Store an SSH key pair in Secret Manager
+
+If you want the dashboard to inject SSH keys automatically:
+
+```bash
+# Create a JSON secret with your public key
+echo '{"public_key":"ssh-rsa AAAA... user@host"}' | \
+  gcloud secrets create my-ssh-keypair \
+    --data-file=- \
+    --replication-policy=automatic
+
+# Grant the service account access (if not already inherited from secretAccessor above)
+gcloud secrets add-iam-policy-binding my-ssh-keypair \
+  --member "serviceAccount:dashboard-sa@<PROJECT_ID>.iam.gserviceaccount.com" \
+  --role "roles/secretmanager.secretAccessor"
+```
+
+Note the secret name (`my-ssh-keypair`) — you'll enter it in the wizard.
+
+### 5. Enter credentials in the wizard
+
+When you run the onboard script, the wizard Step 4 (GCP) asks for:
+
+| Field | Where to get it |
+|-------|-----------------|
+| Project ID | `gcloud config get project` |
+| Region | Your preferred GCP region (e.g. `us-central1`) |
+| Zone | A zone in that region (e.g. `us-central1-a`) |
+| Service Account JSON | Full contents of `sa-key.json` |
+| SSH Key Secret Name | Name of the Secret Manager secret from step 4 |
+
+---
+
+## Part D — Run the dashboard
 
 Pick the onboarder that matches your host OS. Both do the same thing:
 preflight checks, bootstrap `.env` (JWT and DB secrets only), bring up
@@ -152,7 +231,8 @@ first visit because no credentials are stored yet.
 | **1 — Admin account** | Username and password you'll use to log in |
 | **2 — AWS** | Access Key ID, Secret Access Key, and default region from Part A |
 | **3 — Azure** | Service principal credentials from Part B. Optionally expand **Sign in with Microsoft** to add Entra OAuth (see Appendix B) |
-| **4 — Feature flags** | Enable optional integrations — all default off (see Appendix A, C) |
+| **4 — GCP** | Project ID, region/zone, and service account JSON key from Part C. Expand **Advanced** to set the SSH key secret name |
+| **5 — Feature flags** | Enable optional integrations — all default off (see Appendix A, C) |
 
 Click **Complete setup**. Credentials are encrypted with AES-256 and
 stored in the application database — not in any file on disk.
@@ -191,7 +271,7 @@ field blank keeps the stored value unchanged.
 
 ---
 
-## Part D — Feature-test checklist
+## Part E — Feature-test checklist
 
 Run through this checklist after first login to confirm the stack is
 healthy end-to-end.
@@ -220,11 +300,11 @@ healthy end-to-end.
 - [ ] **Jobs.** The Jobs page lists all actions you just took with
       timestamps, durations, and status.
 
-If any step fails, skip to [Part E](#part-e--troubleshooting).
+If any step fails, skip to [Part F](#part-f--troubleshooting).
 
 ---
 
-## Part E — Troubleshooting
+## Part F — Troubleshooting
 
 ### Onboarding script exits at preflight
 
