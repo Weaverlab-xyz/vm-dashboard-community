@@ -15,7 +15,7 @@ the dashboard deploys resources into **your** accounts.
 .\scripts\Onboard-Dashboard.ps1
 ```
 
-**macOS / Linux / Raspberry Pi** (bash):
+**macOS / Linux / WSL / Raspberry Pi** (bash):
 
 ```bash
 ./scripts/onboard.sh
@@ -24,9 +24,16 @@ the dashboard deploys resources into **your** accounts.
 The script checks prerequisites, generates bootstrap secrets (JWT signing
 key + Postgres password), and brings up the Docker Compose stack. Your
 browser opens automatically to a **setup wizard** where you create the
-admin account and enter your AWS and Azure credentials. Credentials are
-encrypted with AES-256 and stored in the database — nothing sensitive
-stays in any file on disk.
+admin account and enter your cloud credentials. Credentials are encrypted
+with AES-256 and stored in the database — nothing sensitive stays in any
+file on disk.
+
+> **WSL users:** Docker Desktop is not required. Install Docker Engine
+> directly in your WSL distro (`sudo apt install docker.io` or follow the
+> [official guide](https://docs.docker.com/engine/install/ubuntu/)), start
+> it with `sudo service docker start`, then run `./scripts/onboard.sh`.
+> The script detects WSL automatically and opens the dashboard in your
+> Windows browser.
 
 See [docs/ONBOARDING.md](docs/ONBOARDING.md) for the full walkthrough,
 including AWS IAM setup, Azure service principal setup, and the

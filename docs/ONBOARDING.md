@@ -1,8 +1,12 @@
 # Onboarding Guide — Infrastructure Management Dashboard (Community Edition)
 
-This guide walks you from a fresh Windows machine to a running dashboard
-deploying resources into your own AWS and Azure accounts. Target time:
+This guide walks you from a fresh machine to a running dashboard deploying
+resources into your own AWS, Azure, and GCP accounts. Target time:
 **under 30 minutes**.
+
+Supported hosts: **Windows** (PowerShell 7), **macOS**, **Linux**, and
+**WSL** (Windows Subsystem for Linux — Docker Engine in WSL, no Docker
+Desktop required).
 
 - [Part A — AWS setup](#part-a--aws-setup)
 - [Part B — Azure setup](#part-b--azure-setup)
@@ -23,15 +27,24 @@ Install these once per machine:
 
 | Tool            | Why                                | Where                                                     |
 |-----------------|------------------------------------|-----------------------------------------------------------|
-| Docker Desktop  | Runs the dashboard and Postgres    | <https://www.docker.com/products/docker-desktop/>         |
+| Docker          | Runs the dashboard and Postgres    | **Windows/Mac:** [Docker Desktop](https://www.docker.com/products/docker-desktop/) · **Linux/WSL:** [Docker Engine](https://docs.docker.com/engine/install/ubuntu/) |
 | PowerShell 7+   | Runs the Windows onboarder (Windows only) | <https://aka.ms/powershell>                        |
-| git             | Clone the repo                     | macOS: `xcode-select --install`; Windows: <https://git-scm.com/download/win>; Linux: your package manager |
+| git             | Clone the repo                     | macOS: `xcode-select --install`; Windows: <https://git-scm.com/download/win>; Linux/WSL: your package manager |
 | AWS CLI (v2)    | Create the IAM user and access key | <https://aws.amazon.com/cli/>                             |
 | Azure CLI       | Create the Azure service principal | <https://learn.microsoft.com/cli/azure/install-azure-cli> |
 | gcloud CLI      | Create the GCP service account (optional) | <https://cloud.google.com/sdk/docs/install> |
 
-Start Docker Desktop and wait for the whale/whale-like icon to settle
-before continuing.
+**Windows / macOS:** Start Docker Desktop and wait for the whale icon to
+settle before continuing.
+
+**Linux / WSL:** Start Docker Engine with `sudo service docker start` (or
+`sudo systemctl start docker` if your distro uses systemd). Add your user
+to the `docker` group once so you don't need `sudo` on every command:
+
+```bash
+sudo usermod -aG docker $USER
+# then open a new terminal (or run: newgrp docker)
+```
 
 Clone the repo:
 
@@ -206,7 +219,7 @@ Compose, poll `/api/health`, open the browser.
 .\scripts\Onboard-Dashboard.ps1
 ```
 
-**macOS / Linux / Raspberry Pi** (bash):
+**macOS / Linux / WSL / Raspberry Pi** (bash):
 
 ```bash
 ./scripts/onboard.sh
@@ -259,13 +272,22 @@ To update credentials or toggle feature flags after setup, navigate to
 reconfigure mode: existing values are pre-filled, and leaving a secret
 field blank keeps the stored value unchanged.
 
-### Mac / Linux notes
+### Platform notes
 
-- On Apple Silicon (M1/M2/M3/M4) the Docker images build natively as
+- **WSL (Windows Subsystem for Linux):** Docker Desktop is not required.
+  Install Docker Engine inside your WSL distro, start it with
+  `sudo service docker start`, then run `./scripts/onboard.sh`. The
+  script detects WSL automatically: it prints WSL-specific hints if the
+  daemon isn't running, and opens the dashboard in your Windows-side
+  browser (via `wslview` if installed, otherwise `cmd.exe /c start`).
+  Ports from WSL2 are automatically forwarded to Windows, so
+  `http://localhost:8000` works in your Windows browser without any extra
+  configuration.
+- **Apple Silicon (M1/M2/M3/M4):** Docker images build natively as
   `linux/arm64` — no platform flag needed. The same applies to
   Raspberry Pi 5 (ARM64).
-- The **VMware** feature flag (Appendix A) is Windows-only; do not enable
-  it on macOS or Linux.
+- The **VMware** feature flag (Appendix A) is Windows host-only; do not
+  enable it on macOS, Linux, or WSL.
 - The optional **MCP server** (Appendix C) needs no extra containers —
   it runs inside the main app and is always available once the stack is up.
 
@@ -310,10 +332,13 @@ If any step fails, skip to [Part F](#part-f--troubleshooting).
 
 - **"PowerShell 7+ is required"** — you're running Windows PowerShell 5.
   Install PS7 (<https://aka.ms/powershell>) and rerun with `pwsh`.
-- **"docker not found"** — Docker Desktop isn't installed or `docker`
-  isn't on PATH. Reinstall Docker Desktop and restart your terminal.
-- **"Docker daemon is not responding"** — Docker Desktop is installed
-  but not running. Launch it and wait for the whale icon to settle.
+- **"docker not found"** — Docker isn't installed or isn't on `PATH`.
+  Windows/Mac: reinstall Docker Desktop. Linux/WSL: install Docker Engine
+  (`sudo apt install docker.io`) and restart your terminal.
+- **"Docker daemon is not responding"** — Windows/Mac: Docker Desktop is
+  installed but not running — launch it and wait for the whale icon to
+  settle. Linux/WSL: run `sudo service docker start` (or
+  `sudo systemctl start docker`) then rerun the script.
 
 ### Stack starts but `/api/health` doesn't respond
 
