@@ -50,13 +50,23 @@ fail()  { printf "    %s%s%s\n" "$C_FAIL" "$1" "$C_RESET" >&2; }
 # ── 1. Preflight ────────────────────────────────────────────────────────
 step "Checking prerequisites"
 
+# Detect WSL early — used for daemon hint and browser open.
+_is_wsl=0
+if grep -qEi "(microsoft|wsl)" /proc/version 2>/dev/null; then _is_wsl=1; fi
+
 for cmd in git docker curl; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
         fail "'$cmd' not found on PATH."
         case "$cmd" in
-            docker) fail "Install Docker Desktop: https://www.docker.com/products/docker-desktop/" ;;
-            git)    fail "Install git (macOS: 'xcode-select --install'; Linux: use your package manager)" ;;
-            curl)   fail "Install curl via your package manager." ;;
+            docker)
+                if (( _is_wsl )); then
+                    fail "Install Docker Engine in WSL: https://docs.docker.com/engine/install/ubuntu/"
+                else
+                    fail "Install Docker Desktop: https://www.docker.com/products/docker-desktop/"
+                fi
+                ;;
+            git)  fail "Install git (macOS: 'xcode-select --install'; Linux: use your package manager)" ;;
+            curl) fail "Install curl via your package manager." ;;
         esac
         exit 1
     fi
@@ -64,8 +74,15 @@ for cmd in git docker curl; do
 done
 
 if ! docker info --format '{{.ServerVersion}}' >/dev/null 2>&1; then
-    fail "Docker daemon is not responding. Is Docker Desktop running?"
-    fail "Start Docker Desktop, wait for the whale icon to settle, then rerun."
+    fail "Docker daemon is not responding."
+    if (( _is_wsl )); then
+        fail "Start Docker Engine with one of:"
+        fail "  sudo service docker start        (WSL without systemd)"
+        fail "  sudo systemctl start docker      (WSL with systemd enabled)"
+        fail "Then rerun this script."
+    else
+        fail "Is Docker Desktop running? Start it, wait for the whale icon to settle, then rerun."
+    fi
     exit 1
 fi
 ok "Docker daemon responding"
@@ -176,10 +193,19 @@ fi
 echo
 ok "Dashboard is up at $DASHBOARD_URL"
 if ! (( NO_OPEN )); then
-    if command -v open >/dev/null 2>&1; then
+    if (( _is_wsl )); then
+        # Open in the Windows-side browser. Try wslu (wslview) first,
+        # then fall back to cmd.exe /c start which always works on WSL2.
+        if command -v wslview >/dev/null 2>&1; then
+            wslview "$DASHBOARD_URL" 2>/dev/null || true
+        else
+            /mnt/c/Windows/System32/cmd.exe /c "start $DASHBOARD_URL" 2>/dev/null || \
+                warn "Could not open browser automatically. Navigate to $DASHBOARD_URL in your Windows browser."
+        fi
+    elif command -v open >/dev/null 2>&1; then
         open "$DASHBOARD_URL" || true           # macOS
     elif command -v xdg-open >/dev/null 2>&1; then
-        xdg-open "$DASHBOARD_URL" >/dev/null 2>&1 || true  # Linux
+        xdg-open "$DASHBOARD_URL" >/dev/null 2>&1 || true  # Linux with X11/Wayland
     fi
 fi
 
