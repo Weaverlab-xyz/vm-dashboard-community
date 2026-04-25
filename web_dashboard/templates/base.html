@@ -44,6 +44,14 @@
           <a href="/proxmox" class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
              {% if request.url.path == '/proxmox' %}{{ nav_active }}{% endif %}">Proxmox</a>
           {% endif %}
+          {% if vsphere_enabled %}
+          <a href="/vsphere" class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
+             {% if request.url.path == '/vsphere' %}{{ nav_active }}{% endif %}">vSphere</a>
+          {% endif %}
+          {% if hyperv_enabled %}
+          <a href="/hyperv" class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
+             {% if request.url.path == '/hyperv' %}{{ nav_active }}{% endif %}">Hyper-V</a>
+          {% endif %}
           <a href="/aws" class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
              {% if request.url.path == '/aws' %}{{ nav_active }}{% endif %}">AWS</a>
           <a href="/gcp" class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}

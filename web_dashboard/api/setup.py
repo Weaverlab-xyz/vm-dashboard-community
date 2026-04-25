@@ -76,6 +76,8 @@ class FeaturesSetup(BaseModel):
     ansible_enabled: bool = False
     entitle_enabled: bool = False
     proxmox_enabled: bool = False
+    vsphere_enabled: bool = False
+    hyperv_enabled: bool = False
 
 
 class SetupPayload(BaseModel):
@@ -183,6 +185,8 @@ def _apply_config(payload: SetupPayload) -> None:
         "ansible_enabled":      "1" if payload.features.ansible_enabled else "0",
         "entitle_enabled":      "1" if payload.features.entitle_enabled else "0",
         "proxmox_enabled":      "1" if payload.features.proxmox_enabled else "0",
+        "vsphere_enabled":      "1" if payload.features.vsphere_enabled else "0",
+        "hyperv_enabled":       "1" if payload.features.hyperv_enabled else "0",
     })
 
     config_service.set_many(pairs)
@@ -307,6 +311,25 @@ class ProxmoxFeatureConfig(BaseModel):
     proxmox_password: str = ""          # encrypted at rest
     proxmox_verify_ssl: bool = False
 
+class VSphereFeatureConfig(BaseModel):
+    enabled: bool = False
+    vsphere_host: str = ""
+    vsphere_port: int = 443
+    vsphere_user: str = "administrator@vsphere.local"
+    vsphere_password: str = ""          # encrypted at rest
+    vsphere_verify_ssl: bool = False
+    vsphere_datacenter: str = ""
+
+class HyperVFeatureConfig(BaseModel):
+    enabled: bool = False
+    hyperv_host: str = ""
+    hyperv_port: int = 5985
+    hyperv_username: str = ""
+    hyperv_password: str = ""           # encrypted at rest
+    hyperv_use_ssl: bool = False
+    hyperv_verify_ssl: bool = False
+    hyperv_transport: str = "ntlm"
+
 
 _FEATURE_MODELS = {
     "vmware":       VMwareFeatureConfig,
@@ -315,12 +338,16 @@ _FEATURE_MODELS = {
     "ansible":      AnsibleFeatureConfig,
     "entitle":      EntitleFeatureConfig,
     "proxmox":      ProxmoxFeatureConfig,
+    "vsphere":      VSphereFeatureConfig,
+    "hyperv":       HyperVFeatureConfig,
 }
 
 _SECRET_FEATURE_KEYS = frozenset({
     "pscli_client_secret", "bt_client_secret",
     "entitle_api_token", "entitle_webhook_secret",
     "proxmox_token_secret", "proxmox_password",
+    "vsphere_password",
+    "hyperv_password",
 })
 
 

@@ -302,6 +302,8 @@ def _feature_flags() -> dict:
         "entitle_enabled":      config_service.get_bool("entitle_enabled",       settings.entitle_enabled),
         "beyondtrust_enabled":  config_service.get_bool("beyondtrust_enabled",   settings.beyondtrust_enabled),
         "proxmox_enabled":      config_service.get_bool("proxmox_enabled",       settings.proxmox_enabled),
+        "vsphere_enabled":      config_service.get_bool("vsphere_enabled",       settings.vsphere_enabled),
+        "hyperv_enabled":       config_service.get_bool("hyperv_enabled",        settings.hyperv_enabled),
     }
 
 
@@ -377,6 +379,18 @@ try:
 except ImportError:
     pass
 
+try:
+    from .api import vsphere  # noqa: E402
+    app.include_router(vsphere.router, dependencies=[_feature_gate("vsphere_enabled")])
+except ImportError:
+    pass
+
+try:
+    from .api import hyperv  # noqa: E402
+    app.include_router(hyperv.router, dependencies=[_feature_gate("hyperv_enabled")])
+except ImportError:
+    pass
+
 
 # ── HTML pages ────────────────────────────────────────────────────────────────
 
@@ -409,6 +423,24 @@ async def proxmox_page(request: Request):
     if not config_service.get_bool("proxmox_enabled", settings.proxmox_enabled):
         raise HTTPException(status_code=404, detail="Proxmox integration is disabled")
     return templates.TemplateResponse("proxmox/index.html", {"request": request, **_feature_flags()})
+
+
+@app.get("/vsphere", response_class=HTMLResponse, include_in_schema=False)
+async def vsphere_page(request: Request):
+    if not config_service.get_bool("vsphere_enabled", settings.vsphere_enabled):
+        raise HTTPException(status_code=404, detail="vSphere integration is disabled")
+    return templates.TemplateResponse("vsphere/index.html", {"request": request, **_feature_flags()})
+
+
+@app.get("/hyperv", response_class=HTMLResponse, include_in_schema=False)
+async def hyperv_page(request: Request):
+    if not config_service.get_bool("hyperv_enabled", settings.hyperv_enabled):
+        raise HTTPException(status_code=404, detail="Hyper-V integration is disabled")
+    host = config_service.get("hyperv_host") or settings.hyperv_host
+    return templates.TemplateResponse(
+        "hyperv/index.html",
+        {"request": request, "hyperv_host": host, **_feature_flags()},
+    )
 
 
 @app.get("/jobs", response_class=HTMLResponse, include_in_schema=False)
@@ -478,6 +510,8 @@ async def features():
         "ansible":      flags["ansible_enabled"],
         "entitle":      flags["entitle_enabled"],
         "proxmox":      flags["proxmox_enabled"],
+        "vsphere":      flags["vsphere_enabled"],
+        "hyperv":       flags["hyperv_enabled"],
     }
 
 

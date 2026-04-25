@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     ansible_enabled: bool = True        # Config-mgmt router + /config-mgmt page
     entitle_enabled: bool = True        # Approvals router + approval modal in base.html
     proxmox_enabled: bool = False       # Proxmox VE router + /proxmox page
+    vsphere_enabled: bool = False       # vSphere/ESXi router + /vsphere page
+    hyperv_enabled: bool = False        # Hyper-V router + /hyperv page (WinRM to Windows host)
 
     # Proxmox VE connection
     proxmox_host: str = ""              # hostname or IP of the Proxmox node/cluster
@@ -35,6 +37,23 @@ class Settings(BaseSettings):
     proxmox_token_secret: str = ""      # API token value
     proxmox_password: str = ""          # password auth (fallback if no token)
     proxmox_verify_ssl: bool = False    # set True when using a valid TLS cert
+
+    # vSphere / ESXi connection (pyVmomi — works with vCenter and standalone ESXi)
+    vsphere_host: str = ""              # hostname or IP of vCenter / ESXi host
+    vsphere_port: int = 443
+    vsphere_user: str = "administrator@vsphere.local"
+    vsphere_password: str = ""          # encrypted at rest
+    vsphere_verify_ssl: bool = False    # set True for a valid TLS cert
+    vsphere_datacenter: str = ""        # optional default datacenter filter
+
+    # Hyper-V connection (WinRM to Windows host running Hyper-V)
+    hyperv_host: str = ""               # hostname or IP of the Hyper-V host
+    hyperv_port: int = 5985             # 5985 = HTTP (default), 5986 = HTTPS
+    hyperv_username: str = ""           # Windows username (DOMAIN\user or user@domain)
+    hyperv_password: str = ""           # encrypted at rest
+    hyperv_use_ssl: bool = False        # use HTTPS (WinRM port 5986)
+    hyperv_verify_ssl: bool = False     # verify TLS cert (disable for self-signed)
+    hyperv_transport: str = "ntlm"     # ntlm (default), basic, kerberos
 
     # Database
     database_url: str = "sqlite:///./vm_cli.db"

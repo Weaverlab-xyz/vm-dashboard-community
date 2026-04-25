@@ -1,0 +1,472 @@
+{% extends "base.html" %}
+{% block title %}Hyper-V – Infrastructure Management{% endblock %}
+
+{% block content %}
+<div x-data="hypervDashboard()" x-init="init()" class="pb-12">
+
+  <!-- Header -->
+  <div class="flex items-center justify-between mb-4">
+    <div>
+      <h1 class="text-2xl font-bold text-gray-900">Hyper-V</h1>
+      <p class="text-sm text-gray-500 mt-1">
+        <span class="font-mono">{{ hyperv_host }}</span>
+        <span x-show="allVms.length > 0" class="ml-2">·
+          <span x-text="filteredVms.length + ' VM' + (filteredVms.length !== 1 ? 's' : '')"></span>
+          <span x-show="filteredVms.length !== allVms.length"
+                x-text="' of ' + allVms.length + ' total'"></span>
+        </span>
+        <span x-show="lastLoaded" class="ml-2 text-xs text-gray-400"
+              x-text="'· Loaded ' + timeAgo(lastLoaded)"></span>
+      </p>
+    </div>
+    <div class="flex items-center gap-2">
+      <button @click="refresh()" :disabled="loading"
+              class="flex items-center gap-2 text-sm bg-blue-600 hover:bg-blue-700 disabled:opacity-50
+                     text-white px-3 py-2 rounded-lg shadow-sm font-medium transition">
+        <svg class="h-4 w-4" :class="loading ? 'animate-spin' : ''" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+        </svg>
+        <span x-text="loading ? 'Refreshing…' : 'Refresh'"></span>
+      </button>
+    </div>
+  </div>
+
+  <!-- Error banner -->
+  <div x-show="error" class="mb-4 p-4 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700" x-text="error"></div>
+
+  <!-- Filters -->
+  <div class="flex items-center gap-3 mb-4">
+    <div class="relative">
+      <svg class="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0"/>
+      </svg>
+      <input type="text" x-model="search" placeholder="Search VMs…"
+             class="pl-9 pr-4 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 w-56">
+    </div>
+    <select x-model="stateFilter"
+            class="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+      <option value="">All states</option>
+      <option value="2">Running</option>
+      <option value="3">Off</option>
+      <option value="6">Saved</option>
+      <option value="9">Paused</option>
+    </select>
+    <!-- Running / total counters -->
+    <div class="ml-auto flex items-center gap-3 text-xs text-gray-500">
+      <span class="flex items-center gap-1.5">
+        <span class="w-2 h-2 rounded-full bg-green-500 inline-block"></span>
+        <span x-text="allVms.filter(v => v.state === 2).length + ' running'"></span>
+      </span>
+      <span class="flex items-center gap-1.5">
+        <span class="w-2 h-2 rounded-full bg-gray-400 inline-block"></span>
+        <span x-text="allVms.filter(v => v.state === 3).length + ' off'"></span>
+      </span>
+      <span x-show="allVms.filter(v => v.state === 6).length > 0" class="flex items-center gap-1.5">
+        <span class="w-2 h-2 rounded-full bg-amber-400 inline-block"></span>
+        <span x-text="allVms.filter(v => v.state === 6).length + ' saved'"></span>
+      </span>
+    </div>
+  </div>
+
+  <!-- VM Table -->
+  <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+    <!-- Loading skeleton -->
+    <div x-show="loading && allVms.length === 0" class="py-16 text-center text-gray-400 text-sm">
+      <svg class="animate-spin h-6 w-6 mx-auto mb-3 text-blue-500" fill="none" viewBox="0 0 24 24">
+        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"></path>
+      </svg>
+      Connecting to Hyper-V host…
+    </div>
+    <div x-show="!loading && allVms.length === 0 && !error"
+         class="py-16 text-center text-gray-400 text-sm">No VMs found on this host.</div>
+
+    <table x-show="allVms.length > 0" class="w-full text-sm">
+      <thead class="bg-gray-50 border-b border-gray-200">
+        <tr>
+          <th class="w-8 px-4 py-3"></th>
+          <th class="text-left px-4 py-3 font-medium text-gray-500">Name</th>
+          <th class="text-left px-4 py-3 font-medium text-gray-500">State</th>
+          <th class="text-left px-4 py-3 font-medium text-gray-500">Gen</th>
+          <th class="text-left px-4 py-3 font-medium text-gray-500">vCPUs</th>
+          <th class="text-left px-4 py-3 font-medium text-gray-500">CPU%</th>
+          <th class="text-left px-4 py-3 font-medium text-gray-500">Memory</th>
+          <th class="text-left px-4 py-3 font-medium text-gray-500">IP</th>
+          <th class="text-left px-4 py-3 font-medium text-gray-500">Uptime</th>
+          <th class="text-right px-4 py-3 font-medium text-gray-500">Actions</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-gray-100">
+        <template x-for="vm in filteredVms" :key="vm.vmid">
+          <tr class="hover:bg-gray-50 transition-colors">
+
+            <!-- State dot -->
+            <td class="px-4 py-3">
+              <span class="block w-2.5 h-2.5 rounded-full"
+                    :class="stateDot(vm.state)"></span>
+            </td>
+
+            <!-- Name + IS warning -->
+            <td class="px-4 py-3 max-w-xs">
+              <button @click="openDetail(vm)"
+                      class="font-medium text-gray-900 hover:text-blue-600 text-left truncate block w-full"
+                      x-text="vm.name"></button>
+              <span x-show="vm.is_running && !vm.integration_services_state"
+                    class="text-xs text-orange-500 mt-0.5 block"
+                    title="Integration Services not installed — graceful shutdown unavailable">
+                ⚠ No Integration Services
+              </span>
+            </td>
+
+            <!-- State label -->
+            <td class="px-4 py-3 text-gray-600 whitespace-nowrap" x-text="vm.state_label"></td>
+
+            <!-- Generation badge -->
+            <td class="px-4 py-3">
+              <span class="inline-block text-xs font-medium px-1.5 py-0.5 rounded"
+                    :class="vm.generation === 2
+                      ? 'bg-purple-100 text-purple-700'
+                      : 'bg-gray-100 text-gray-600'"
+                    x-text="'Gen ' + (vm.generation || 1)"></span>
+            </td>
+
+            <!-- vCPU count -->
+            <td class="px-4 py-3 text-gray-600" x-text="vm.processor_count || '—'"></td>
+
+            <!-- CPU usage — only meaningful when running -->
+            <td class="px-4 py-3 text-gray-600"
+                x-text="vm.is_running ? (vm.cpu_usage + '%') : '—'"></td>
+
+            <!-- Memory: assigned when running, startup (configured) when off -->
+            <td class="px-4 py-3 text-gray-600 whitespace-nowrap"
+                x-text="fmtMb(vm.is_running ? vm.mem_assigned_mb : vm.mem_startup_mb)"></td>
+
+            <!-- First IP -->
+            <td class="px-4 py-3 text-gray-600 font-mono text-xs"
+                x-text="(vm.ip_addresses && vm.ip_addresses[0]) || '—'"></td>
+
+            <!-- Uptime -->
+            <td class="px-4 py-3 text-gray-600 text-xs whitespace-nowrap"
+                x-text="vm.is_running ? fmtUptime(vm.uptime_secs) : '—'"></td>
+
+            <!-- Actions -->
+            <td class="px-4 py-3">
+              <div class="flex items-center gap-1.5 justify-end flex-wrap">
+
+                <!-- Off (3): Start -->
+                <template x-if="vm.state === 3">
+                  <button @click="powerOp(vm, 'start')" :disabled="vm._busy"
+                          class="px-2.5 py-1 text-xs font-medium rounded
+                                 bg-green-600 hover:bg-green-700 text-white
+                                 disabled:opacity-50 transition-colors">
+                    Start
+                  </button>
+                </template>
+
+                <!-- Saved (6): Start + Force Off -->
+                <template x-if="vm.state === 6">
+                  <div class="flex items-center gap-1.5">
+                    <button @click="powerOp(vm, 'start')" :disabled="vm._busy"
+                            title="Resume from saved state"
+                            class="px-2.5 py-1 text-xs font-medium rounded
+                                   bg-green-600 hover:bg-green-700 text-white
+                                   disabled:opacity-50 transition-colors">
+                      Start
+                    </button>
+                    <button @click="powerOp(vm, 'stop')" :disabled="vm._busy"
+                            class="px-2.5 py-1 text-xs font-medium rounded
+                                   bg-red-600 hover:bg-red-700 text-white
+                                   disabled:opacity-50 transition-colors">
+                      Force Off
+                    </button>
+                  </div>
+                </template>
+
+                <!-- Paused (9): Resume + Force Off -->
+                <template x-if="vm.state === 9">
+                  <div class="flex items-center gap-1.5">
+                    <button @click="powerOp(vm, 'resume')" :disabled="vm._busy"
+                            class="px-2.5 py-1 text-xs font-medium rounded
+                                   border border-green-600 text-green-600 hover:bg-green-50
+                                   disabled:opacity-50 transition-colors">
+                      Resume
+                    </button>
+                    <button @click="powerOp(vm, 'stop')" :disabled="vm._busy"
+                            class="px-2.5 py-1 text-xs font-medium rounded
+                                   bg-red-600 hover:bg-red-700 text-white
+                                   disabled:opacity-50 transition-colors">
+                      Force Off
+                    </button>
+                  </div>
+                </template>
+
+                <!-- Running (2): Shutdown + Force Off + Restart + Pause -->
+                <template x-if="vm.state === 2">
+                  <div class="flex items-center gap-1.5">
+                    <button @click="powerOp(vm, 'shutdown')"
+                            :disabled="vm._busy || !vm.integration_services_state"
+                            :title="vm.integration_services_state
+                              ? 'Graceful shutdown via Integration Services'
+                              : 'Requires Integration Services to be installed'"
+                            class="px-2.5 py-1 text-xs font-medium rounded
+                                   bg-blue-600 hover:bg-blue-700 text-white
+                                   disabled:opacity-50 transition-colors">
+                      Shutdown
+                    </button>
+                    <button @click="powerOp(vm, 'stop')" :disabled="vm._busy"
+                            title="Force power off (hard stop)"
+                            class="px-2.5 py-1 text-xs font-medium rounded
+                                   bg-red-600 hover:bg-red-700 text-white
+                                   disabled:opacity-50 transition-colors">
+                      Force Off
+                    </button>
+                    <button @click="powerOp(vm, 'restart')" :disabled="vm._busy"
+                            class="px-2.5 py-1 text-xs font-medium rounded
+                                   bg-orange-500 hover:bg-orange-600 text-white
+                                   disabled:opacity-50 transition-colors">
+                      Restart
+                    </button>
+                    <button @click="powerOp(vm, 'pause')" :disabled="vm._busy"
+                            title="Pause (Suspend-VM)"
+                            class="px-2.5 py-1 text-xs font-medium rounded
+                                   bg-gray-200 hover:bg-gray-300 text-gray-700
+                                   disabled:opacity-50 transition-colors">
+                      Pause
+                    </button>
+                  </div>
+                </template>
+
+                <!-- Transitioning states: show spinner -->
+                <template x-if="[4,10,11,12,13,14].includes(vm.state)">
+                  <span class="text-xs text-gray-400 italic" x-text="vm.state_label + '…'"></span>
+                </template>
+
+              </div>
+            </td>
+          </tr>
+        </template>
+      </tbody>
+    </table>
+  </div>
+
+
+  <!-- ── VM Detail Modal ──────────────────────────────────────────────────── -->
+  <div x-show="detail !== null"
+       class="fixed inset-0 z-50 flex items-center justify-center p-4"
+       style="background:rgba(0,0,0,.45)">
+    <div class="bg-white rounded-xl shadow-2xl w-full max-w-lg"
+         @click.outside="detail = null" x-show="detail !== null">
+
+      <!-- Modal header -->
+      <div class="flex items-center justify-between px-6 py-4 border-b border-gray-200">
+        <div class="flex items-center gap-2">
+          <span class="w-3 h-3 rounded-full inline-block"
+                :class="detail ? stateDot(detail.state) : ''"></span>
+          <h2 class="text-base font-semibold text-gray-900" x-text="detail ? detail.name : ''"></h2>
+        </div>
+        <button @click="detail = null" class="text-gray-400 hover:text-gray-600 transition-colors">
+          <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+          </svg>
+        </button>
+      </div>
+
+      <!-- Modal body -->
+      <div class="px-6 py-5 space-y-4 text-sm" x-show="detail !== null">
+        <div class="grid grid-cols-2 gap-4">
+
+          <div>
+            <p class="text-xs font-medium text-gray-400 uppercase tracking-wide mb-1">State</p>
+            <p class="font-medium text-gray-900" x-text="detail ? detail.state_label : ''"></p>
+          </div>
+          <div>
+            <p class="text-xs font-medium text-gray-400 uppercase tracking-wide mb-1">Generation</p>
+            <p class="font-medium text-gray-900" x-text="detail ? ('Gen ' + (detail.generation || 1)) : ''"></p>
+          </div>
+          <div>
+            <p class="text-xs font-medium text-gray-400 uppercase tracking-wide mb-1">vCPUs</p>
+            <p class="font-medium text-gray-900" x-text="detail ? detail.processor_count : ''"></p>
+          </div>
+          <div>
+            <p class="text-xs font-medium text-gray-400 uppercase tracking-wide mb-1">Memory</p>
+            <p class="font-medium text-gray-900"
+               x-text="detail ? fmtMb(detail.is_running ? detail.mem_assigned_mb : detail.mem_startup_mb) : ''"></p>
+          </div>
+          <div>
+            <p class="text-xs font-medium text-gray-400 uppercase tracking-wide mb-1">CPU Usage</p>
+            <p class="font-medium text-gray-900"
+               x-text="detail && detail.is_running ? (detail.cpu_usage + '%') : '—'"></p>
+          </div>
+          <div>
+            <p class="text-xs font-medium text-gray-400 uppercase tracking-wide mb-1">Uptime</p>
+            <p class="font-medium text-gray-900"
+               x-text="detail && detail.is_running ? fmtUptime(detail.uptime_secs) : '—'"></p>
+          </div>
+
+          <!-- Integration Services -->
+          <div class="col-span-2">
+            <p class="text-xs font-medium text-gray-400 uppercase tracking-wide mb-1">Integration Services</p>
+            <p class="font-medium" :class="isColor(detail ? detail.integration_services_state : '')"
+               x-text="isLabel(detail ? detail.integration_services_state : '')"></p>
+          </div>
+
+          <!-- IP Addresses -->
+          <div class="col-span-2" x-show="detail && detail.ip_addresses && detail.ip_addresses.length > 0">
+            <p class="text-xs font-medium text-gray-400 uppercase tracking-wide mb-1">IP Addresses</p>
+            <p class="font-mono text-gray-800" x-text="detail ? detail.ip_addresses.join(', ') : ''"></p>
+          </div>
+
+          <!-- Path -->
+          <div class="col-span-2" x-show="detail && detail.path">
+            <p class="text-xs font-medium text-gray-400 uppercase tracking-wide mb-1">VM Path</p>
+            <p class="font-mono text-xs text-gray-600 break-all" x-text="detail ? detail.path : ''"></p>
+          </div>
+
+          <!-- VMId -->
+          <div class="col-span-2">
+            <p class="text-xs font-medium text-gray-400 uppercase tracking-wide mb-1">VM ID</p>
+            <p class="font-mono text-xs text-gray-500" x-text="detail ? detail.vmid : ''"></p>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- Modal footer -->
+      <div class="px-6 py-4 border-t border-gray-200 flex justify-end">
+        <button @click="detail = null"
+                class="text-sm text-gray-600 hover:text-gray-800 transition-colors">Close</button>
+      </div>
+    </div>
+  </div>
+
+
+  <!-- ── Toast ─────────────────────────────────────────────────────────────── -->
+  <div x-show="toast" x-transition
+       class="fixed bottom-6 right-6 z-50 px-4 py-3 rounded-lg shadow-lg text-sm font-medium text-white max-w-sm"
+       :class="toastType === 'error' ? 'bg-red-600' : 'bg-gray-900'"
+       x-text="toast">
+  </div>
+
+</div><!-- /x-data -->
+
+
+<script>
+function hypervDashboard() {
+  return {
+    allVms: [],
+    loading: false,
+    error: '',
+    search: '',
+    stateFilter: '',
+    detail: null,
+    lastLoaded: null,
+    toast: '',
+    toastType: 'success',
+    _toastTimer: null,
+
+    get filteredVms() {
+      const q = this.search.toLowerCase();
+      return this.allVms.filter(vm => {
+        const matchSearch = !q ||
+          vm.name.toLowerCase().includes(q) ||
+          (vm.ip_addresses || []).some(ip => ip.includes(q));
+        const matchState = !this.stateFilter || String(vm.state) === this.stateFilter;
+        return matchSearch && matchState;
+      });
+    },
+
+    async init() {
+      requireAuth();
+      await this.refresh();
+    },
+
+    async refresh() {
+      this.loading = true;
+      this.error = '';
+      try {
+        const data = await API.get('/api/hyperv/vms');
+        this.allVms = (data || []).map(vm => ({ ...vm, _busy: false }));
+        this.lastLoaded = new Date();
+      } catch (e) {
+        this.error = e.message || 'Failed to connect to Hyper-V host.';
+      } finally {
+        this.loading = false;
+      }
+    },
+
+    async powerOp(vm, op) {
+      vm._busy = true;
+      try {
+        const { job_id } = await API.post(`/api/hyperv/power/${op}`, {
+          vmid: vm.vmid,
+          name: vm.name,
+        });
+        this.showToast(`${op} queued — redirecting to job…`);
+        setTimeout(() => { window.location.href = `/jobs/${job_id}`; }, 600);
+      } catch (e) {
+        this.showToast(e.message || `Failed to ${op} ${vm.name}`, 'error');
+        vm._busy = false;
+      }
+    },
+
+    openDetail(vm) {
+      this.detail = vm;
+    },
+
+    // ── Helpers ──────────────────────────────────────────────────────────
+
+    stateDot(state) {
+      const m = { 2: 'bg-green-500', 3: 'bg-gray-400', 6: 'bg-amber-400', 9: 'bg-blue-400' };
+      return m[state] || 'bg-yellow-400';
+    },
+
+    isLabel(state) {
+      if (!state) return 'Not installed';
+      if (state === 'Up to date') return 'Up to date';
+      if (state === 'Upgrade required') return 'Update available';
+      return state;
+    },
+
+    isColor(state) {
+      if (!state) return 'text-red-600';
+      if (state === 'Up to date') return 'text-green-600';
+      if (state === 'Upgrade required') return 'text-yellow-600';
+      return 'text-gray-600';
+    },
+
+    fmtMb(mb) {
+      if (mb == null || mb === 0) return '—';
+      if (mb >= 1024) return (mb / 1024).toFixed(1) + ' GB';
+      return mb + ' MB';
+    },
+
+    fmtUptime(secs) {
+      if (!secs) return '—';
+      const d = Math.floor(secs / 86400);
+      const h = Math.floor((secs % 86400) / 3600);
+      const m = Math.floor((secs % 3600) / 60);
+      if (d > 0) return `${d}d ${h}h`;
+      if (h > 0) return `${h}h ${m}m`;
+      return `${m}m`;
+    },
+
+    timeAgo(dt) {
+      if (!dt) return '';
+      const s = Math.round((new Date() - dt) / 1000);
+      if (s < 10) return 'just now';
+      if (s < 60) return `${s}s ago`;
+      if (s < 3600) return `${Math.floor(s/60)}m ago`;
+      return `${Math.floor(s/3600)}h ago`;
+    },
+
+    showToast(msg, type = 'success') {
+      clearTimeout(this._toastTimer);
+      this.toast = msg;
+      this.toastType = type;
+      this._toastTimer = setTimeout(() => { this.toast = ''; }, 4000);
+    },
+  };
+}
+</script>
+{% endblock %}

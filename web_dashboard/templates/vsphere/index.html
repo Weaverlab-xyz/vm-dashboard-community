@@ -1,0 +1,406 @@
+{% extends "base.html" %}
+{% block title %}vSphere – Infrastructure Management{% endblock %}
+
+{% block content %}
+<div x-data="vsphereDashboard()" x-init="init()" class="pb-12">
+
+  <!-- Header -->
+  <div class="flex items-center justify-between mb-4">
+    <div>
+      <h1 class="text-2xl font-bold text-gray-900">VMware vSphere</h1>
+      <p class="text-sm text-gray-500 mt-1">
+        <span x-text="connectionLabel"></span>
+        <span x-show="filteredVms.length > 0" class="ml-2">·
+          <span x-text="filteredVms.length + ' VM' + (filteredVms.length !== 1 ? 's' : '')"></span>
+        </span>
+        <span x-show="lastLoaded" class="ml-2 text-xs text-gray-400"
+              x-text="'· Loaded ' + timeAgo(lastLoaded)"></span>
+      </p>
+    </div>
+    <div class="flex items-center gap-2">
+      <button @click="refresh()" :disabled="loading"
+              class="flex items-center gap-2 text-sm bg-blue-600 hover:bg-blue-700 disabled:opacity-50
+                     text-white px-3 py-2 rounded-lg shadow-sm font-medium transition">
+        <svg class="h-4 w-4" :class="loading ? 'animate-spin' : ''" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+        </svg>
+        <span x-text="loading ? 'Refreshing…' : 'Refresh'"></span>
+      </button>
+    </div>
+  </div>
+
+  <!-- Error banner -->
+  <div x-show="error" class="mb-4 p-4 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700" x-text="error"></div>
+
+  <!-- Host tabs -->
+  <div class="flex gap-1 mb-4 border-b border-gray-200 overflow-x-auto">
+    <button @click="activeHost = ''"
+            :class="activeHost === '' ? 'border-b-2 border-blue-600 text-blue-600 font-semibold' : 'text-gray-500 hover:text-gray-700'"
+            class="px-4 py-2 text-sm whitespace-nowrap">
+      All hosts
+      <span class="ml-1 text-xs bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded-full" x-text="allVms.length"></span>
+    </button>
+    <template x-for="host in hosts" :key="host.name">
+      <button @click="activeHost = host.name"
+              :class="activeHost === host.name ? 'border-b-2 border-blue-600 text-blue-600 font-semibold' : 'text-gray-500 hover:text-gray-700'"
+              class="px-4 py-2 text-sm whitespace-nowrap flex items-center gap-1.5">
+        <span class="inline-block w-2 h-2 rounded-full"
+              :class="host.status === 'connected' ? 'bg-green-500' : 'bg-red-400'"></span>
+        <span x-text="host.name"></span>
+        <span class="text-xs bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded-full"
+              x-text="allVms.filter(v => v.host === host.name).length"></span>
+      </button>
+    </template>
+  </div>
+
+  <!-- Filters -->
+  <div class="flex flex-wrap items-center gap-3 mb-4">
+    <input type="text" x-model="search" placeholder="Search by name, guest OS, or annotation…"
+           class="flex-1 min-w-48 border border-gray-300 rounded-lg px-3 py-1.5 text-sm
+                  focus:outline-none focus:ring-2 focus:ring-blue-500">
+
+    <select x-model="filterStatus"
+            class="border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+      <option value="">All power states</option>
+      <option value="poweredOn">Powered On</option>
+      <option value="poweredOff">Powered Off</option>
+      <option value="suspended">Suspended</option>
+    </select>
+
+    <template x-if="datacenters.length > 1">
+      <select x-model="filterDc"
+              class="border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+        <option value="">All datacenters</option>
+        <template x-for="dc in datacenters" :key="dc">
+          <option :value="dc" x-text="dc"></option>
+        </template>
+      </select>
+    </template>
+  </div>
+
+  <!-- VM table -->
+  <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+    <div x-show="loading && allVms.length === 0" class="p-12 text-center text-gray-400">
+      <svg class="mx-auto h-8 w-8 animate-spin mb-3 text-blue-400" fill="none" viewBox="0 0 24 24">
+        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"></path>
+      </svg>
+      Connecting to vSphere and loading inventory…
+    </div>
+
+    <div x-show="!loading && allVms.length === 0 && !error" class="p-12 text-center text-gray-400">
+      No VMs found. Check your vSphere credentials in Settings → Integrations → vSphere.
+    </div>
+
+    <div x-show="!loading && filteredVms.length === 0 && allVms.length > 0" class="p-12 text-center text-gray-400">
+      No VMs match the current filters.
+    </div>
+
+    <table x-show="filteredVms.length > 0" class="min-w-full divide-y divide-gray-200">
+      <thead class="bg-gray-50">
+        <tr>
+          <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+          <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Name</th>
+          <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Guest OS</th>
+          <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Host</th>
+          <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">CPU</th>
+          <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Memory</th>
+          <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">IP</th>
+          <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+        </tr>
+      </thead>
+      <tbody class="bg-white divide-y divide-gray-100">
+        <template x-for="vm in filteredVms" :key="vm.moref">
+          <tr class="hover:bg-gray-50 transition-colors">
+            <!-- Power state -->
+            <td class="px-4 py-3">
+              <span class="inline-flex items-center gap-1.5 text-xs font-medium"
+                    :class="{
+                      'text-green-700': vm.power_state === 'poweredOn',
+                      'text-gray-400':  vm.power_state === 'poweredOff',
+                      'text-amber-600': vm.power_state === 'suspended'
+                    }">
+                <span class="inline-block w-2 h-2 rounded-full"
+                      :class="{
+                        'bg-green-500': vm.power_state === 'poweredOn',
+                        'bg-gray-300':  vm.power_state === 'poweredOff',
+                        'bg-amber-400': vm.power_state === 'suspended'
+                      }"></span>
+                <span x-text="powerLabel(vm.power_state)"></span>
+              </span>
+            </td>
+            <!-- Name -->
+            <td class="px-4 py-3">
+              <button @click="openDetail(vm)"
+                      class="text-sm font-medium text-blue-600 hover:text-blue-800 text-left"
+                      x-text="vm.name"></button>
+              <div x-show="vm.annotation" class="text-xs text-gray-400 truncate max-w-xs mt-0.5"
+                   x-text="vm.annotation"></div>
+            </td>
+            <!-- Guest OS -->
+            <td class="px-4 py-3 text-sm text-gray-600">
+              <span x-text="vm.guest_full_name || vm.guest_id || '—'"></span>
+              <template x-if="vm.tools_status === 'toolsNotInstalled' || vm.tools_status === 'toolsNotRunning'">
+                <span class="ml-1 text-xs text-amber-500" title="VMware Tools not running">⚠</span>
+              </template>
+            </td>
+            <!-- Host -->
+            <td class="px-4 py-3 text-sm text-gray-500" x-text="vm.host || '—'"></td>
+            <!-- CPU -->
+            <td class="px-4 py-3 text-sm text-gray-600"
+                x-text="vm.cpu_count ? vm.cpu_count + ' vCPU' : '—'"></td>
+            <!-- Memory -->
+            <td class="px-4 py-3 text-sm text-gray-600"
+                x-text="vm.mem_mb ? fmtMb(vm.mem_mb) : '—'"></td>
+            <!-- IP -->
+            <td class="px-4 py-3 text-sm font-mono text-gray-600">
+              <span x-text="vm.ip_addresses[0] || '—'"></span>
+              <template x-if="vm.ip_addresses.length > 1">
+                <span class="text-xs text-gray-400" x-text="'+' + (vm.ip_addresses.length - 1)"></span>
+              </template>
+            </td>
+            <!-- Actions -->
+            <td class="px-4 py-3">
+              <div class="flex items-center gap-1.5">
+                <!-- Power On -->
+                <template x-if="!vm.is_running">
+                  <button @click="powerOp(vm, 'start')"
+                          :disabled="pending.has(vm.moref)"
+                          class="text-xs px-2.5 py-1 rounded bg-green-600 hover:bg-green-700
+                                 disabled:opacity-40 text-white font-medium transition">
+                    <span x-text="pending.has(vm.moref) ? '…' : 'Power On'"></span>
+                  </button>
+                </template>
+                <!-- Shutdown (graceful) -->
+                <template x-if="vm.is_running && vm.tools_status === 'toolsOk'">
+                  <button @click="powerOp(vm, 'shutdown')"
+                          :disabled="pending.has(vm.moref)"
+                          title="Graceful shutdown via VMware Tools"
+                          class="text-xs px-2.5 py-1 rounded bg-amber-500 hover:bg-amber-600
+                                 disabled:opacity-40 text-white font-medium transition">
+                    <span x-text="pending.has(vm.moref) ? '…' : 'Shutdown'"></span>
+                  </button>
+                </template>
+                <!-- Force Off -->
+                <template x-if="vm.is_running">
+                  <button @click="powerOp(vm, 'stop')"
+                          :disabled="pending.has(vm.moref)"
+                          title="Force power off"
+                          class="text-xs px-2.5 py-1 rounded bg-red-600 hover:bg-red-700
+                                 disabled:opacity-40 text-white font-medium transition">
+                    <span x-text="pending.has(vm.moref) ? '…' : 'Force Off'"></span>
+                  </button>
+                </template>
+                <!-- Reset -->
+                <template x-if="vm.is_running">
+                  <button @click="powerOp(vm, 'reset')"
+                          :disabled="pending.has(vm.moref)"
+                          title="Hard reset"
+                          class="text-xs px-2.5 py-1 rounded bg-gray-500 hover:bg-gray-600
+                                 disabled:opacity-40 text-white font-medium transition">
+                    <span x-text="pending.has(vm.moref) ? '…' : 'Reset'"></span>
+                  </button>
+                </template>
+              </div>
+            </td>
+          </tr>
+        </template>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Host summary cards (shown when no filter active) -->
+  <template x-if="hosts.length > 0 && !activeHost">
+    <div class="mt-6 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+      <template x-for="host in hosts" :key="host.name">
+        <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-4">
+          <div class="flex items-center justify-between mb-3">
+            <p class="text-sm font-semibold text-gray-900 truncate" x-text="host.name"></p>
+            <span class="inline-flex items-center gap-1 text-xs"
+                  :class="host.status === 'connected' ? 'text-green-600' : 'text-red-500'">
+              <span class="w-1.5 h-1.5 rounded-full"
+                    :class="host.status === 'connected' ? 'bg-green-500' : 'bg-red-400'"></span>
+              <span x-text="host.status"></span>
+            </span>
+          </div>
+          <div class="space-y-1.5 text-xs text-gray-500">
+            <div class="flex justify-between">
+              <span>VMs</span>
+              <span class="font-medium text-gray-700" x-text="allVms.filter(v => v.host === host.name).length"></span>
+            </div>
+            <div class="flex justify-between">
+              <span>Running</span>
+              <span class="font-medium text-green-600" x-text="allVms.filter(v => v.host === host.name && v.is_running).length"></span>
+            </div>
+            <div x-show="host.cpu_cores > 0" class="flex justify-between">
+              <span>CPU</span>
+              <span class="font-medium text-gray-700" x-text="host.cpu_cores + ' cores @ ' + host.cpu_mhz + ' MHz'"></span>
+            </div>
+            <div x-show="host.mem_total_mb > 0" class="flex justify-between">
+              <span>Memory</span>
+              <span class="font-medium text-gray-700" x-text="fmtMb(host.mem_used_mb) + ' / ' + fmtMb(host.mem_total_mb)"></span>
+            </div>
+            <div x-show="host.in_maintenance" class="text-amber-600 font-medium">In maintenance mode</div>
+          </div>
+        </div>
+      </template>
+    </div>
+  </template>
+
+  <!-- Detail modal -->
+  <div x-show="detailVm" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" @click.self="detailVm = null">
+    <div class="bg-white rounded-xl shadow-xl w-full max-w-lg p-6">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-lg font-semibold text-gray-900" x-text="detailVm?.name || 'VM Detail'"></h2>
+        <button @click="detailVm = null" class="text-gray-400 hover:text-gray-600">
+          <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+          </svg>
+        </button>
+      </div>
+
+      <dl class="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
+        <div><dt class="text-gray-400">Power state</dt>
+          <dd :class="detailVm?.is_running ? 'text-green-600 font-medium' : 'text-gray-500'"
+              x-text="powerLabel(detailVm?.power_state)"></dd></div>
+        <div><dt class="text-gray-400">Host</dt><dd x-text="detailVm?.host || '—'"></dd></div>
+        <div><dt class="text-gray-400">Datacenter</dt><dd x-text="detailVm?.datacenter || '—'"></dd></div>
+        <div><dt class="text-gray-400">CPU</dt><dd x-text="detailVm?.cpu_count ? detailVm.cpu_count + ' vCPU' : '—'"></dd></div>
+        <div><dt class="text-gray-400">Memory</dt><dd x-text="detailVm?.mem_mb ? fmtMb(detailVm.mem_mb) : '—'"></dd></div>
+        <div><dt class="text-gray-400">Guest OS</dt><dd x-text="detailVm?.guest_full_name || detailVm?.guest_id || '—'"></dd></div>
+        <div><dt class="text-gray-400">VMware Tools</dt>
+          <dd :class="detailVm?.tools_status === 'toolsOk' ? 'text-green-600' : 'text-amber-500'"
+              x-text="toolsLabel(detailVm?.tools_status)"></dd></div>
+        <div><dt class="text-gray-400">Moref</dt><dd class="font-mono text-xs" x-text="detailVm?.moref"></dd></div>
+        <div class="col-span-2">
+          <dt class="text-gray-400">IP addresses</dt>
+          <dd x-text="(detailVm?.ip_addresses || []).join(', ') || '— (VMware Tools required)'"></dd>
+        </div>
+        <div x-show="detailVm?.annotation" class="col-span-2">
+          <dt class="text-gray-400">Annotation</dt>
+          <dd class="whitespace-pre-wrap text-xs" x-text="detailVm?.annotation"></dd>
+        </div>
+      </dl>
+    </div>
+  </div>
+
+</div>
+
+<script>
+function vsphereDashboard() {
+  return {
+    hosts: [],
+    datacenters: [],
+    allVms: [],
+    activeHost: '',
+    filterStatus: '',
+    filterDc: '',
+    search: '',
+    loading: false,
+    error: '',
+    lastLoaded: null,
+    pending: new Set(),
+    detailVm: null,
+
+    get connectionLabel() {
+      if (this.loading) return 'Connecting…';
+      if (this.hosts.length === 1 && this.hosts[0]?.name) return 'Connected to ' + this.hosts[0].name;
+      if (this.hosts.length > 1) return 'Connected · ' + this.hosts.length + ' hosts';
+      return 'vSphere';
+    },
+
+    async init() {
+      await this.refresh();
+    },
+
+    async refresh() {
+      this.loading = true;
+      this.error = '';
+      try {
+        const [hosts, dcs, vms] = await Promise.all([
+          API.get('/api/vsphere/hosts'),
+          API.get('/api/vsphere/datacenters'),
+          API.get('/api/vsphere/vms'),
+        ]);
+        this.hosts        = hosts;
+        this.datacenters  = dcs;
+        this.allVms       = vms;
+        this.lastLoaded   = new Date();
+      } catch (e) {
+        this.error = 'Failed to load vSphere inventory: ' + (e.detail || e.message || String(e));
+      } finally {
+        this.loading = false;
+      }
+    },
+
+    get filteredVms() {
+      let list = this.allVms;
+      if (this.activeHost)   list = list.filter(v => v.host === this.activeHost);
+      if (this.filterStatus) list = list.filter(v => v.power_state === this.filterStatus);
+      if (this.filterDc)     list = list.filter(v => v.datacenter === this.filterDc);
+      if (this.search) {
+        const q = this.search.toLowerCase();
+        list = list.filter(v =>
+          v.name.toLowerCase().includes(q) ||
+          (v.guest_full_name || '').toLowerCase().includes(q) ||
+          (v.annotation || '').toLowerCase().includes(q) ||
+          (v.ip_addresses || []).some(ip => ip.includes(q))
+        );
+      }
+      return list;
+    },
+
+    async powerOp(vm, op) {
+      this.pending = new Set([...this.pending, vm.moref]);
+      try {
+        const res = await API.post('/api/vsphere/power/' + op, {
+          moref: vm.moref,
+          name:  vm.name,
+          host:  vm.host,
+        });
+        if (res.job_id) window.location.href = '/jobs/' + res.job_id;
+      } catch (e) {
+        this.error = 'Operation failed: ' + (e.detail || e.message || String(e));
+        this.pending = new Set([...this.pending].filter(m => m !== vm.moref));
+      }
+    },
+
+    async openDetail(vm) {
+      this.detailVm = { ...vm };
+      try {
+        const detail = await API.get('/api/vsphere/vms/' + encodeURIComponent(vm.moref));
+        this.detailVm = detail;
+      } catch (_) { /* keep row data */ }
+    },
+
+    powerLabel(state) {
+      return { poweredOn: 'Powered On', poweredOff: 'Powered Off', suspended: 'Suspended' }[state] || state || '—';
+    },
+
+    toolsLabel(status) {
+      return {
+        toolsOk:            'Running (current)',
+        toolsOld:           'Running (outdated)',
+        toolsNotRunning:    'Not running',
+        toolsNotInstalled:  'Not installed',
+      }[status] || status || '—';
+    },
+
+    fmtMb(mb) {
+      if (!mb) return '—';
+      if (mb >= 1024) return (mb / 1024).toFixed(1) + ' GB';
+      return mb + ' MB';
+    },
+
+    timeAgo(d) {
+      if (!d) return '';
+      const secs = Math.floor((new Date() - new Date(d)) / 1000);
+      if (secs < 60)   return 'just now';
+      if (secs < 3600) return Math.floor(secs / 60) + 'm ago';
+      return Math.floor(secs / 3600) + 'h ago';
+    },
+  };
+}
+</script>
+{% endblock %}

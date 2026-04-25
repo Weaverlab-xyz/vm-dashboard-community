@@ -71,6 +71,12 @@ httpx>=0.27.0
 proxmoxer>=2.0.0
 requests>=2.31.0
 
+# VMware vSphere / ESXi (vSphere Web Services API)
+pyVmomi>=8.0.0
+
+# Microsoft Hyper-V (WinRM remote PowerShell)
+pywinrm>=0.4.3
+
 # Required by Azure SDK async clients (azure-mgmt-automation.aio, azure-identity.aio)
 aiohttp>=3.9.0
 

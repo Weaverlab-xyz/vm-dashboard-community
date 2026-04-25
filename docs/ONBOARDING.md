@@ -290,8 +290,9 @@ field blank keeps the stored value unchanged.
   enable it on macOS, Linux, or WSL.
 - The optional **MCP server** (Appendix C) needs no extra containers —
   it runs inside the main app and is always available once the stack is up.
-- **Portainer**, **Ansible**, **Proxmox VE**, and **Entitle** are optional
-  integrations with their own backing infrastructure. See the detailed guides in
+- **Portainer**, **Ansible**, **Proxmox VE**, **VMware vSphere / ESXi**,
+  **Microsoft Hyper-V**, and **Entitle** are optional integrations with their
+  own backing infrastructure. See the detailed guides in
   [`docs/integrations/`](integrations/).
 
 ---
