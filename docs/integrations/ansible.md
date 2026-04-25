@@ -3,25 +3,19 @@
 ## What is it?
 
 The Ansible integration lets you run Ansible playbooks from the dashboard as
-tracked background jobs. Playbooks are stored in an S3 bucket and executed by
-an Ansible runner container — an AWS ECS task, an Azure Container Instance
-(ACI), or a GCP Cloud Run Job — depending on where your target hosts live.
+tracked background jobs. Playbooks are stored in cloud object storage (S3,
+Azure Blob, or GCS) and executed by an Ansible runner container.
 
-The result is a **Config Mgmt** tab in the dashboard where you can select a
-playbook, pick a target host or workgroup, and launch a run — with live log
-streaming via the dashboard job monitor.
+Two execution paths are available:
 
----
+| Path | When to use | How it runs |
+|---|---|---|
+| **Local Docker** | On-premises hypervisors (Proxmox, vSphere, Hyper-V, Nutanix, XCP-ng) | Sibling container via the mounted Docker socket — no cloud infrastructure needed |
+| **Cloud runners** | Cloud VMs (EC2, Azure VMs, GCE) | AWS ECS task, Azure Container Instance, or GCP Cloud Run Job — one per cloud |
 
-## Use cases
-
-- **Post-deploy configuration** — after spinning up a new VM via the dashboard,
-  run a hardening or software-install playbook against it in the same workflow.
-- **Recurring config checks** — schedule playbooks (via external cron or
-  manual trigger) against your fleet without maintaining a separate Ansible
-  control node.
-- **Cross-cloud config management** — the same playbook bucket works for AWS
-  (ECS runner), Azure (ACI runner), and GCP (Cloud Run Jobs runner) targets.
+The **Config Mgmt** tab shows a playbook picker and a target picker. The target
+list is built automatically from whatever on-premises hypervisors are enabled
+and configured — if Hyper-V is not configured, it does not appear.
 
 ---
 
@@ -30,20 +24,18 @@ streaming via the dashboard job monitor.
 | Requirement | Notes |
 |---|---|
 | Playbook storage | **One of:** S3 bucket, Azure Blob Storage container, or GCS bucket |
-| Runner infrastructure | **One or more of:** AWS ECS cluster, Azure Container Instances, GCP Cloud Run |
-| SSH key source | BeyondTrust Password Safe managed account or AWS Secrets Manager secret |
-| BeyondTrust integration (optional) | SSH key checkout for managed accounts |
+| **Local runner:** Docker socket | Already mounted in `docker-compose.yml` — no extra setup |
+| **Cloud runners:** ECS / ACI / Cloud Run | Only needed for cloud VM targets |
+| Credentials | Local runner reuses the credentials already stored for each hypervisor integration |
 
 ---
 
-## Setup
-
-### Step 1 — Create playbook storage
+## Step 1 — Create playbook storage
 
 Configure **one** storage backend. The dashboard auto-detects which is set; if
-multiple are configured, S3 takes priority.
+multiple are configured, priority is S3 > Azure Blob > GCS.
 
-#### Option A — S3
+### Option A — S3
 
 ```bash
 aws s3 mb s3://your-org-config-mgmt --region us-east-1
@@ -56,7 +48,7 @@ ANSIBLE_S3_REGION=us-east-1
 ANSIBLE_S3_PREFIX=config-mgmt
 ```
 
-#### Option B — Azure Blob Storage
+### Option B — Azure Blob Storage
 
 ```bash
 az storage container create \
@@ -76,11 +68,10 @@ ANSIBLE_AZURE_CONTAINER=playbooks
 ANSIBLE_AZURE_PREFIX=config-mgmt
 ```
 
-Auth uses your existing Azure service principal (`AZURE_CLIENT_ID` /
-`AZURE_CLIENT_SECRET` / `AZURE_TENANT_ID`). The service principal needs the
+Auth uses your existing Azure service principal. The SP needs the
 **Storage Blob Data Reader** role on the storage account.
 
-#### Option C — GCS
+### Option C — GCS
 
 ```bash
 gsutil mb -l us-central1 gs://my-org-config-mgmt
@@ -92,14 +83,99 @@ ANSIBLE_GCS_BUCKET=my-org-config-mgmt
 ANSIBLE_GCS_PREFIX=config-mgmt
 ```
 
-Auth uses your GCP service account (`GCP_SERVICE_ACCOUNT_JSON` or ADC). The
-service account needs the **Storage Object Viewer** role on the bucket.
+Auth uses your GCP service account. The SA needs `roles/storage.objectViewer`
+on the bucket.
 
-### Step 2 — Configure the ECS task (AWS runner)
+---
 
-The ECS task definition uses the `willhallonline/ansible` Docker image by
-default. The task family and cluster can match your existing BeyondTrust
-Jumpoint cluster to share infrastructure:
+## Step 2 — Enable in the dashboard
+
+**Settings → Integrations → Ansible** — configure your storage backend.
+
+**Setup wizard** — toggle **Ansible** on, then configure storage from Settings
+after the wizard completes.
+
+That's all that's required for local on-premises runs. Cloud runner config is
+optional — see the sections below.
+
+---
+
+## Local Docker runner (on-premises targets)
+
+The local runner is automatic: no extra infrastructure is needed beyond the
+Docker socket already mounted in `docker-compose.yml`.
+
+### How the inventory is built
+
+When you click **Run Playbook**, the dashboard calls `GET /api/config-mgmt/inventory`,
+which returns a dynamic Ansible JSON inventory built from every on-premises
+hypervisor integration that is **both enabled and has a host configured**.
+
+Hypervisors that are not enabled or have no host set are silently omitted —
+the target picker only shows what is actually reachable.
+
+| Hypervisor | Ansible connection | Credentials used |
+|---|---|---|
+| Proxmox VE | SSH | `proxmox_password` (root@pam — requires password auth, not API-token-only) |
+| VMware vSphere / ESXi | SSH | `vsphere_password` (root on ESXi; SSH must be enabled) |
+| Microsoft Hyper-V | WinRM (`ansible_connection: winrm`) | `hyperv_username` + `hyperv_password`; transport/port from Settings |
+| Nutanix AHV | SSH | `nutanix_password` (targets the CVM SSH interface) |
+| XCP-ng / XenServer | SSH | `xcpng_password` (root — same credentials as the XAPI connection) |
+
+### Hyper-V WinRM requirements
+
+The Ansible `community.windows` collection (included in
+`willhallonline/ansible`) is required for Windows playbooks. If `pywinrm`
+is not bundled in your image, install it:
+
+```bash
+pip install pywinrm
+```
+
+Or use a custom image that includes it:
+
+```
+ANSIBLE_LOCAL_IMAGE=my-registry/ansible-winrm:latest
+```
+
+WinRM must be enabled on the Hyper-V host (`Enable-PSRemoting -Force`) — the
+same requirement as the Hyper-V management integration.
+
+### Proxmox SSH note
+
+The local runner authenticates to Proxmox via SSH using `proxmox_password`
+(the root@pam password). If you configured Proxmox with **API token only**
+(no password), the SSH connection will fail. Either:
+- Set `PROXMOX_PASSWORD` in addition to the token, or
+- Target Proxmox VMs individually by IP rather than using the `proxmox` group.
+
+### ESXi SSH note
+
+SSH is disabled by default on ESXi. Enable it via:
+**Host → Manage → Services → TSM-SSH → Start**, or:
+
+```bash
+vim-cmd hostsvc/enable_ssh
+```
+
+### Changing the Ansible image
+
+```
+ANSIBLE_LOCAL_IMAGE=willhallonline/ansible:latest
+```
+
+Any image with `ansible-playbook` on its `PATH` works. The playbook and
+inventory are bind-mounted into `/ansible/` inside the container.
+
+---
+
+## Cloud runners (cloud VM targets)
+
+Use cloud runners when your target VMs live in AWS, Azure, or GCP. Cloud
+runners launch a fresh container in the cloud that has network access to your
+VMs. They are not needed for on-premises targets.
+
+### AWS ECS runner
 
 ```
 ANSIBLE_ECS_CLUSTER=bt-jumpoint
@@ -111,60 +187,16 @@ ANSIBLE_ECS_EXECUTION_ROLE_ARN=arn:aws:iam::123456789012:role/ecsTaskExecutionRo
 ```
 
 `ANSIBLE_ECS_EXECUTION_ROLE_ARN` is only required if your image is in a private
-ECR registry that needs pull authentication.
+ECR registry.
 
-### Step 3 — SSH key configuration
-
-The Ansible runner authenticates to target hosts with an SSH key. Two sources
-are supported:
-
-**AWS Secrets Manager (preferred):**
+SSH key source for cloud runners (cloud VMs need a key, not a password):
 
 ```
-ANSIBLE_SSH_KEY_SM_NAME=ec2/ssh-keypair
+ANSIBLE_SSH_KEY_SM_NAME=ec2/ssh-keypair   # AWS Secrets Manager (preferred)
+ANSIBLE_SSH_KEY_SECRET=AWS_KEY            # BeyondTrust Password Safe (fallback)
 ```
 
-**BeyondTrust Password Safe (legacy fallback):**
-
-```
-ANSIBLE_SSH_KEY_SECRET=AWS_KEY
-```
-
-If `ANSIBLE_SSH_KEY_SM_NAME` is set, Secrets Manager is used. If it is blank,
-the dashboard falls back to fetching the key title from Password Safe.
-
-### Step 4 — Enable in the dashboard
-
-**`.env` file (set the storage backend you chose in Step 1):**
-
-```
-ANSIBLE_ENABLED=true
-
-# S3 (Option A)
-ANSIBLE_S3_BUCKET=your-org-config-mgmt
-ANSIBLE_S3_REGION=us-east-1
-
-# — or Azure Blob (Option B) —
-# ANSIBLE_AZURE_STORAGE_ACCOUNT=myorgplaybooks
-# ANSIBLE_AZURE_CONTAINER=playbooks
-
-# — or GCS (Option C) —
-# ANSIBLE_GCS_BUCKET=my-org-config-mgmt
-```
-
-**Settings → Integrations → Ansible** — three storage sections are shown;
-fill in whichever backend you chose and leave the others blank.
-**Setup wizard** — toggle **Ansible** on in Step 5, then configure storage
-from Settings after the wizard completes.
-
----
-
-## Azure runner (ACI)
-
-For targets in Azure, the dashboard launches an Azure Container Instance instead
-of an ECS task. The ACI uses the same playbook bucket (S3) and SSH key source.
-
-ACI-specific config:
+### Azure ACI runner
 
 ```
 AZURE_ACI_RESOURCE_GROUP=rg-config-mgmt
@@ -174,29 +206,18 @@ AZURE_ACI_CPU=1.0
 AZURE_ACI_MEMORY=2.0
 ```
 
-The ACI runner inherits your Azure credentials from `AZURE_CLIENT_ID` /
+The ACI runner inherits Azure credentials from `AZURE_CLIENT_ID` /
 `AZURE_CLIENT_SECRET` / `AZURE_TENANT_ID` / `AZURE_SUBSCRIPTION_ID`.
 
----
-
-## GCP runner (Cloud Run Jobs)
-
-For targets in GCP, the dashboard creates a one-shot Cloud Run Job instead of
-an ECS task or ACI. The job uses the same `willhallonline/ansible` image and
-the same S3 playbook bucket. Logs are retrieved from Cloud Logging after the job
-completes.
-
-GCP-specific config (`.env` or **Settings → Integrations → Ansible**):
+### GCP Cloud Run Jobs runner
 
 ```
-GCP_ANSIBLE_CLOUD_RUN_REGION=us-central1   # defaults to GCP_ZONE region if blank
+GCP_ANSIBLE_CLOUD_RUN_REGION=us-central1
 GCP_ANSIBLE_IMAGE=willhallonline/ansible:latest
-GCP_ANSIBLE_VPC_CONNECTOR=                 # optional — see below
+GCP_ANSIBLE_VPC_CONNECTOR=   # optional — see below
 ```
 
-The Cloud Run runner uses the same GCP service account credentials as the rest
-of the GCP integration (`GCP_SERVICE_ACCOUNT_JSON` or Application Default
-Credentials). Ensure the service account has the following roles:
+Required service account roles:
 
 | Role | Purpose |
 |---|---|
@@ -204,54 +225,52 @@ Credentials). Ensure the service account has the following roles:
 | `roles/logging.viewer` | Retrieve job output from Cloud Logging |
 | `roles/iam.serviceAccountUser` | Act as a service account when submitting jobs |
 
-### Accessing private target hosts
-
 Cloud Run Jobs run in a Google-managed VPC by default and cannot reach private
-RFC-1918 addresses on your VPC. To allow the runner to SSH to private GCE
-instances, either:
-
-**Option A — VPC connector (Serverless VPC Access):**
-
-Create a Serverless VPC Access connector in the same region as your Cloud Run
-job:
+RFC-1918 addresses. To reach private GCE instances, create a Serverless VPC
+Access connector:
 
 ```bash
 gcloud compute networks vpc-access connectors create ansible-runner \
-  --region us-central1 \
-  --network default \
-  --range 10.8.0.0/28
+  --region us-central1 --network default --range 10.8.0.0/28
 ```
 
-Then set:
-
-```
-GCP_ANSIBLE_VPC_CONNECTOR=projects/PROJECT_ID/locations/us-central1/connectors/ansible-runner
-```
-
-**Option B — Direct VPC Egress (Cloud Run v2 feature):**
-
-Direct VPC Egress attaches the Cloud Run job directly to your VPC subnet without
-a connector. Configure it via the `run.googleapis.com/vpc-access-egress`
-annotation in the job template — this is set automatically when
-`GCP_ANSIBLE_VPC_CONNECTOR` is non-empty, using private-ranges-only egress mode.
-
----
-
-## What it enables in the dashboard
-
-| Feature | Description |
-|---|---|
-| **Config Mgmt tab** | Lists available playbooks from the S3 bucket |
-| **Run playbook** | Select playbook + target → background job with live log streaming |
-| **Job history** | All Ansible runs tracked in the jobs table with exit code and duration |
-| **Post-deploy hook** | VM creation workflows can chain an Ansible run immediately after boot |
+Then set `GCP_ANSIBLE_VPC_CONNECTOR=projects/PROJECT_ID/locations/us-central1/connectors/ansible-runner`.
 
 ---
 
 ## Playbook structure
 
-The runner expects playbooks at the root of the S3 prefix (or in
-subdirectories). A minimal inventory-less playbook targeting a single host:
+### On-premises hypervisor playbook
+
+Target the `proxmox`, `vsphere`, `hyperv`, `nutanix`, or `xcpng` group
+(whichever is configured). Or use `on_premises` to hit all of them.
+
+```yaml
+# harden-proxmox.yml
+- hosts: proxmox
+  become: yes
+  tasks:
+    - name: Ensure auditd is running
+      service:
+        name: auditd
+        state: started
+        enabled: true
+```
+
+```yaml
+# restart-hyperv-service.yml
+- hosts: hyperv
+  tasks:
+    - name: Restart the dashboard service
+      win_service:
+        name: DashboardSvc
+        state: restarted
+```
+
+### Cloud VM playbook (single-host, ad-hoc)
+
+For cloud targets you supply a bare IP or hostname in the target field.
+The dashboard passes it as `-i <host>,` to Ansible:
 
 ```yaml
 # hardening.yml
@@ -265,55 +284,77 @@ subdirectories). A minimal inventory-less playbook targeting a single host:
         enabled: true
 ```
 
-The dashboard passes the target host IP (or hostname) as the Ansible inventory
-via `-i <host>,` at runtime — no static inventory file needed for single-host
-runs.
-
 ---
 
 ## Troubleshooting
 
-**Config Mgmt tab is missing** — check `ANSIBLE_ENABLED=true` in `.env` and
-restart the stack.
+### Local Docker runner
 
-**"No playbook storage configured"** — at least one of `ANSIBLE_S3_BUCKET`,
-`ANSIBLE_AZURE_STORAGE_ACCOUNT`, or `ANSIBLE_GCS_BUCKET` must be set.
+**"Target X is not a configured hypervisor"** — the hypervisor integration is
+either disabled or has no host set. Enable it and fill in the host in
+**Settings → Integrations**.
 
-**"S3 bucket not found"** — verify `ANSIBLE_S3_BUCKET` and that the IAM user
-has `s3:GetObject` and `s3:ListBucket` on the bucket.
+**No targets appear in the picker** — no on-premises hypervisor is both enabled
+and configured. Check **Settings → Integrations** and confirm that both the
+toggle is on and the host field is filled.
 
-**Azure Blob: "Authorization failed"** — the service principal (`AZURE_CLIENT_ID`)
-needs the **Storage Blob Data Reader** role on the storage account. Assign it
-with: `az role assignment create --role "Storage Blob Data Reader" --assignee <client-id> --scope /subscriptions/.../storageAccounts/<account>`.
+**"docker: command not found"** — the Docker socket is not mounted. Verify
+`docker-compose.yml` includes the `/var/run/docker.sock` bind mount and restart
+the stack.
 
-**GCS: "Access denied"** — the GCP service account needs
-`roles/storage.objectViewer` on the bucket:
+**SSH authentication failed (Proxmox / vSphere / XCP-ng)** — the stored
+password must work for SSH (not just the management API). For Proxmox, this
+means `PROXMOX_PASSWORD` must be set (API-token-only auth is not sufficient
+for SSH). For ESXi, SSH must be enabled on the host.
+
+**Hyper-V: "WinRM connection refused"** — WinRM is not enabled. Run
+`Enable-PSRemoting -Force` on the Hyper-V host.
+
+**Hyper-V: "pywinrm is not installed"** — the Ansible image doesn't include
+`pywinrm`. Set `ANSIBLE_LOCAL_IMAGE` to an image that does, or build a custom
+image.
+
+**Container starts but can't reach the hypervisor** — the Ansible container
+runs on the same Docker network as the dashboard (`compose` default bridge).
+If the hypervisor is on a separate VLAN, ensure the Docker host has a route
+to it.
+
+### Playbook storage
+
+**"No playbook storage configured"** — set at least one of `ANSIBLE_S3_BUCKET`,
+`ANSIBLE_AZURE_STORAGE_ACCOUNT`, or `ANSIBLE_GCS_BUCKET`.
+
+**"S3 bucket not found"** — verify the bucket name and that the IAM user has
+`s3:GetObject` + `s3:ListBucket`.
+
+**Azure Blob: "Authorization failed"** — assign **Storage Blob Data Reader** to
+the service principal on the storage account:
+```bash
+az role assignment create --role "Storage Blob Data Reader" \
+  --assignee <client-id> \
+  --scope /subscriptions/.../storageAccounts/<account>
+```
+
+**GCS: "Access denied"** — grant `roles/storage.objectViewer`:
 ```bash
 gsutil iam ch serviceAccount:SA_EMAIL:objectViewer gs://my-org-config-mgmt
 ```
 
+### Cloud runners
+
 **ECS task fails to start** — check CloudWatch logs for the task family
 `ansible-config-mgmt`. Common causes: missing execution role, ECR pull error,
-or subnet routing to the target host.
+or subnet routing to the target.
 
-**"SSH authentication failed" in playbook run** — confirm the key in Secrets
-Manager or Password Safe matches the `~/.ssh/authorized_keys` on the target VM.
-Test with `ssh -i /tmp/key user@host` from inside a container on the same
-network.
+**GCP: "Permission denied" creating Cloud Run Job** — add `roles/run.admin`
+and `roles/iam.serviceAccountUser` to the service account.
 
-**GCP: "Permission denied" creating Cloud Run Job** — ensure the service account
-has `roles/run.admin` and `roles/iam.serviceAccountUser` on the project.
-Run `gcloud projects get-iam-policy PROJECT_ID` to inspect the current bindings.
-
-**GCP: Cloud Run job starts but cannot reach target host** — the job is running
-in a managed VPC with no access to your private network. Set
-`GCP_ANSIBLE_VPC_CONNECTOR` to a Serverless VPC Access connector in the same
-region as your GCE instances.
-
-**GCP: logs are empty after a successful job** — the service account needs
-`roles/logging.viewer`. Add it with:
+**GCP: logs empty after successful job** — add `roles/logging.viewer`:
 ```bash
 gcloud projects add-iam-policy-binding PROJECT_ID \
   --member="serviceAccount:SA_EMAIL" \
   --role="roles/logging.viewer"
 ```
+
+**GCP: Cloud Run job can't reach target host** — set `GCP_ANSIBLE_VPC_CONNECTOR`
+to a Serverless VPC Access connector in the same region as your GCE instances.
