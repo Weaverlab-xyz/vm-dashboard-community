@@ -244,6 +244,10 @@ class Settings(BaseSettings):
     ansible_ecs_execution_role_arn: str = ""  # Set if image pull requires it
     ansible_ssh_key_secret: str = "AWS_KEY"        # Password Safe secret title (legacy fallback)
     ansible_ssh_key_sm_name: str = "ec2/ssh-keypair"  # AWS Secrets Manager secret name/ARN (preferred)
+    # GCP Cloud Run Jobs ansible runner (mirrors azure_ansible_aci_image / ACI runner)
+    gcp_ansible_cloud_run_region: str = ""   # defaults to gcp_region if blank
+    gcp_ansible_image: str = "willhallonline/ansible:latest"
+    gcp_ansible_vpc_connector: str = ""      # e.g. "projects/proj/locations/region/connectors/name" (optional, for private host access)
     epml_rpm_path: str = r"C:\Scripts\VM_CLI\VM_DEMO_CLI\epml-client.x86_64.rpm"
     epml_deb_path: str = r"C:\Scripts\VM_CLI\VM_DEMO_CLI\epml-client.amd64.deb"
     pathfinder_script_path: str = r"C:\Scripts\VM_CLI\VM_DEMO_CLI\make_pathfinder_user.sh"

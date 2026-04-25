@@ -3,10 +3,9 @@
 ## What is it?
 
 The Ansible integration lets you run Ansible playbooks from the dashboard as
-tracked background jobs. Playbooks are stored in an S3 bucket (or served from
-the local container) and executed by an Ansible runner container — either an
-AWS ECS task or an Azure Container Instance (ACI), depending on where your
-target hosts live.
+tracked background jobs. Playbooks are stored in an S3 bucket and executed by
+an Ansible runner container — an AWS ECS task, an Azure Container Instance
+(ACI), or a GCP Cloud Run Job — depending on where your target hosts live.
 
 The result is a **Config Mgmt** tab in the dashboard where you can select a
 playbook, pick a target host or workgroup, and launch a run — with live log
@@ -22,7 +21,7 @@ streaming via the dashboard job monitor.
   manual trigger) against your fleet without maintaining a separate Ansible
   control node.
 - **Cross-cloud config management** — the same playbook bucket works for AWS
-  (ECS runner) and Azure (ACI runner) targets.
+  (ECS runner), Azure (ACI runner), and GCP (Cloud Run Jobs runner) targets.
 
 ---
 
@@ -30,8 +29,8 @@ streaming via the dashboard job monitor.
 
 | Requirement | Notes |
 |---|---|
-| S3 bucket | Stores playbooks; the ECS/ACI task syncs it at run time |
-| AWS ECS cluster **or** Azure Container Instances | Runs the Ansible container; must have network access to target hosts |
+| S3 bucket | Stores playbooks; synced at run time by the runner container |
+| AWS ECS cluster **and/or** Azure Container Instances **and/or** GCP Cloud Run | Runs the Ansible container; must have network access to target hosts |
 | SSH key in BeyondTrust Password Safe or AWS Secrets Manager | The runner needs to authenticate to target VMs |
 | BeyondTrust integration (optional but recommended) | SSH key checkout for managed accounts |
 
@@ -128,6 +127,64 @@ The ACI runner inherits your Azure credentials from `AZURE_CLIENT_ID` /
 
 ---
 
+## GCP runner (Cloud Run Jobs)
+
+For targets in GCP, the dashboard creates a one-shot Cloud Run Job instead of
+an ECS task or ACI. The job uses the same `willhallonline/ansible` image and
+the same S3 playbook bucket. Logs are retrieved from Cloud Logging after the job
+completes.
+
+GCP-specific config (`.env` or **Settings → Integrations → Ansible**):
+
+```
+GCP_ANSIBLE_CLOUD_RUN_REGION=us-central1   # defaults to GCP_ZONE region if blank
+GCP_ANSIBLE_IMAGE=willhallonline/ansible:latest
+GCP_ANSIBLE_VPC_CONNECTOR=                 # optional — see below
+```
+
+The Cloud Run runner uses the same GCP service account credentials as the rest
+of the GCP integration (`GCP_SERVICE_ACCOUNT_JSON` or Application Default
+Credentials). Ensure the service account has the following roles:
+
+| Role | Purpose |
+|---|---|
+| `roles/run.admin` | Create, execute, and delete Cloud Run Jobs |
+| `roles/logging.viewer` | Retrieve job output from Cloud Logging |
+| `roles/iam.serviceAccountUser` | Act as a service account when submitting jobs |
+
+### Accessing private target hosts
+
+Cloud Run Jobs run in a Google-managed VPC by default and cannot reach private
+RFC-1918 addresses on your VPC. To allow the runner to SSH to private GCE
+instances, either:
+
+**Option A — VPC connector (Serverless VPC Access):**
+
+Create a Serverless VPC Access connector in the same region as your Cloud Run
+job:
+
+```bash
+gcloud compute networks vpc-access connectors create ansible-runner \
+  --region us-central1 \
+  --network default \
+  --range 10.8.0.0/28
+```
+
+Then set:
+
+```
+GCP_ANSIBLE_VPC_CONNECTOR=projects/PROJECT_ID/locations/us-central1/connectors/ansible-runner
+```
+
+**Option B — Direct VPC Egress (Cloud Run v2 feature):**
+
+Direct VPC Egress attaches the Cloud Run job directly to your VPC subnet without
+a connector. Configure it via the `run.googleapis.com/vpc-access-egress`
+annotation in the job template — this is set automatically when
+`GCP_ANSIBLE_VPC_CONNECTOR` is non-empty, using private-ranges-only egress mode.
+
+---
+
 ## What it enables in the dashboard
 
 | Feature | Description |
@@ -178,3 +235,20 @@ or subnet routing to the target host.
 Manager or Password Safe matches the `~/.ssh/authorized_keys` on the target VM.
 Test with `ssh -i /tmp/key user@host` from inside a container on the same
 network.
+
+**GCP: "Permission denied" creating Cloud Run Job** — ensure the service account
+has `roles/run.admin` and `roles/iam.serviceAccountUser` on the project.
+Run `gcloud projects get-iam-policy PROJECT_ID` to inspect the current bindings.
+
+**GCP: Cloud Run job starts but cannot reach target host** — the job is running
+in a managed VPC with no access to your private network. Set
+`GCP_ANSIBLE_VPC_CONNECTOR` to a Serverless VPC Access connector in the same
+region as your GCE instances.
+
+**GCP: logs are empty after a successful job** — the service account needs
+`roles/logging.viewer`. Add it with:
+```bash
+gcloud projects add-iam-policy-binding PROJECT_ID \
+  --member="serviceAccount:SA_EMAIL" \
+  --role="roles/logging.viewer"
+```

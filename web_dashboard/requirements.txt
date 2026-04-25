@@ -58,6 +58,7 @@ mcp>=1.0.0
 google-cloud-compute>=1.14.0
 google-cloud-secret-manager>=2.20.0
 google-cloud-storage>=2.14.0
+google-cloud-run>=0.10.0
 google-auth>=2.20.0
 
 # Azure Blob Storage (Packer template archive)

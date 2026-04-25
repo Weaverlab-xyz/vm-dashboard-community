@@ -487,3 +487,175 @@ def _terminate_instance_sync(project_id: str, zone: str, instance_name: str) -> 
 
 async def terminate_instance(project_id: str, zone: str, instance_name: str) -> None:
     await asyncio.to_thread(_terminate_instance_sync, project_id, zone, instance_name)
+
+
+# ── Cloud Run Jobs Ansible runner (mirrors ACI runner in azure_service.py) ───
+
+_ANSIBLE_RUNNER_PREFIX = "ansible-runner"
+
+
+def _require_run():
+    try:
+        from google.cloud import run_v2  # noqa: F401
+    except ImportError:
+        raise GCPError("google-cloud-run is not installed — run: pip install google-cloud-run")
+
+
+def _fetch_cloud_run_job_logs(project_id: str, job_name: str, execution_name: str, creds) -> str:
+    """Retrieve Cloud Run job stdout/stderr from Cloud Logging via REST."""
+    try:
+        from google.auth.transport.requests import AuthorizedSession
+        import requests as _requests
+    except ImportError:
+        return ""
+
+    exec_short = execution_name.split("/")[-1]
+    session = AuthorizedSession(creds or _gcp_creds())
+    url = "https://logging.googleapis.com/v2/entries:list"
+    body = {
+        "resourceNames": [f"projects/{project_id}"],
+        "filter": (
+            f'resource.type="cloud_run_job" '
+            f'resource.labels.job_name="{job_name}" '
+            f'resource.labels.execution_name="{exec_short}"'
+        ),
+        "orderBy": "timestamp asc",
+        "pageSize": 1000,
+    }
+    resp = session.post(url, json=body, timeout=30)
+    resp.raise_for_status()
+    data = resp.json()
+    lines = []
+    for entry in data.get("entries", []):
+        text = entry.get("textPayload") or entry.get("jsonPayload", {}).get("message", "")
+        if text:
+            lines.append(text)
+    return "\n".join(lines)
+
+
+def _run_cloud_run_ansible_sync(
+    project_id: str, region: str, image: str,
+    target_ip: str, ansible_user: str,
+    playbook_b64: str, ssh_key_b64: str, job_id: str,
+    vpc_connector: str = "",
+) -> tuple:
+    """
+    Create a Cloud Run Job that runs a single Ansible playbook, wait for it to
+    finish, return (exit_code, log_output), and delete the job.
+    """
+    import time
+    _require_run()
+    from google.cloud import run_v2
+
+    creds = _gcp_creds()
+    jobs_client = run_v2.JobsClient(credentials=creds)
+    executions_client = run_v2.ExecutionsClient(credentials=creds)
+
+    job_name = f"{_ANSIBLE_RUNNER_PREFIX}-{job_id[:8]}"
+    parent = f"projects/{project_id}/locations/{region}"
+    job_resource_name = f"{parent}/jobs/{job_name}"
+
+    cmd = (
+        "set -e && "
+        "echo \"$PLAYBOOK_B64\" | base64 -d > /tmp/playbook.yml && "
+        "echo \"$SSH_KEY_B64\" | base64 -d > /tmp/ssh_key && "
+        "chmod 600 /tmp/ssh_key && "
+        f"ansible-playbook -i '{target_ip},' "
+        "--forks 1 "
+        f"-u {ansible_user} "
+        "--private-key /tmp/ssh_key "
+        "--ssh-extra-args='-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null' "
+        "/tmp/playbook.yml"
+    )
+
+    task_template = run_v2.TaskTemplate(
+        containers=[
+            run_v2.Container(
+                image=image,
+                command=["sh", "-c", cmd],
+                env=[
+                    run_v2.EnvVar(name="PLAYBOOK_B64", value=playbook_b64),
+                    run_v2.EnvVar(name="SSH_KEY_B64", value=ssh_key_b64),
+                ],
+                resources=run_v2.ResourceRequirements(
+                    limits={"cpu": "1000m", "memory": "512Mi"},
+                ),
+            )
+        ],
+        max_retries=0,
+        timeout="1200s",
+    )
+
+    exec_template = run_v2.ExecutionTemplate(template=task_template)
+    if vpc_connector:
+        exec_template.annotations = {
+            "run.googleapis.com/vpc-access-connector": vpc_connector,
+            "run.googleapis.com/vpc-access-egress": "private-ranges-only",
+        }
+
+    job = run_v2.Job(
+        template=exec_template,
+        labels={"managed-by": "vm-cli-dashboard", "purpose": "ansible-runner"},
+    )
+
+    logger.info("Cloud Run Ansible: creating job %s in %s/%s", job_name, project_id, region)
+    create_op = jobs_client.create_job(parent=parent, job_id=job_name, job=job)
+    created_job = create_op.result()
+
+    output = ""
+    exit_code = 1
+    execution_name = None
+
+    try:
+        run_op = jobs_client.run_job(name=job_resource_name)
+        execution = run_op.result()
+        execution_name = execution.name
+
+        # Poll until execution completes (max 20 min)
+        for _ in range(120):
+            exec_info = executions_client.get_execution(name=execution_name)
+            if exec_info.completion_time and not exec_info.reconciling:
+                succeeded = exec_info.succeeded_count or 0
+                failed = exec_info.failed_count or 0
+                exit_code = 0 if (succeeded > 0 and failed == 0) else 1
+                break
+            time.sleep(10)
+
+        try:
+            output = _fetch_cloud_run_job_logs(project_id, job_name, execution_name, creds)
+        except Exception as log_err:
+            logger.warning("Cloud Run Ansible: could not retrieve logs: %s", log_err)
+
+    finally:
+        try:
+            del_op = jobs_client.delete_job(name=job_resource_name)
+            del_op.result()
+            logger.info("Cloud Run Ansible: deleted job %s", job_name)
+        except Exception as del_err:
+            logger.warning("Cloud Run Ansible: could not delete job %s: %s", job_name, del_err)
+
+    return exit_code, output
+
+
+async def run_cloud_run_ansible_task(
+    project_id: str, region: str, image: str,
+    target_ip: str, ansible_user: str,
+    playbook_b64: str, ssh_key_b64: str, job_id: str,
+    vpc_connector: str = "",
+) -> tuple:
+    """
+    Run an Ansible playbook via a GCP Cloud Run Job.
+    Returns (exit_code, output_log).
+    """
+    try:
+        return await asyncio.to_thread(
+            _run_cloud_run_ansible_sync,
+            project_id, region, image,
+            target_ip, ansible_user,
+            playbook_b64, ssh_key_b64, job_id,
+            vpc_connector,
+        )
+    except GCPError:
+        raise
+    except Exception as e:
+        raise GCPError(f"Failed to run Cloud Run Ansible task: {e}") from e

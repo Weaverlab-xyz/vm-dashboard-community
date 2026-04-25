@@ -273,6 +273,9 @@ class AnsibleFeatureConfig(BaseModel):
     ansible_s3_region: str = ""
     ansible_ecs_cluster: str = "bt-jumpoint"
     ansible_ecs_task_family: str = "ansible-config-mgmt"
+    gcp_ansible_cloud_run_region: str = ""
+    gcp_ansible_image: str = "willhallonline/ansible:latest"
+    gcp_ansible_vpc_connector: str = ""
 
 class EntitleFeatureConfig(BaseModel):
     enabled: bool = False
