@@ -290,6 +290,9 @@ field blank keeps the stored value unchanged.
   enable it on macOS, Linux, or WSL.
 - The optional **MCP server** (Appendix C) needs no extra containers —
   it runs inside the main app and is always available once the stack is up.
+- **Portainer**, **Ansible**, and **Entitle** are optional integrations with
+  their own backing infrastructure. See the detailed guides in
+  [`docs/integrations/`](integrations/).
 
 ---
 
@@ -385,6 +388,8 @@ Windows-only. Enables the dashboard to list, start, and stop VMware
 Workstation VMs on your local machine by SSHing from the container to
 the host.
 
+> **Full guide:** [docs/integrations/vmware.md](integrations/vmware.md)
+
 ### Prerequisites
 
 - VMware Workstation Pro installed
@@ -469,6 +474,8 @@ assigned workgroups on first OAuth login.
 
 Optional. Enables two things when both are configured:
 
+> **Full guide:** [docs/integrations/beyondtrust.md](integrations/beyondtrust.md)
+
 - **Secret retrieval (pscli / ps-cli)** — the dashboard checks out SSH
   keys and passwords from BeyondTrust Password Safe on demand, so
   credentials never need to be stored locally.
@@ -543,6 +550,8 @@ same appliance, the host and credentials may be the same as Part 1.
 ---
 
 ## Appendix C — MCP server (AI client integration)
+
+> **Full guide:** [docs/integrations/mcp-server.md](integrations/mcp-server.md)
 
 The dashboard exposes an [MCP (Model Context Protocol)](https://modelcontextprotocol.io)
 server at `/mcp`. Any compatible AI client — Claude Desktop, Claude Code,
