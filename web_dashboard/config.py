@@ -232,10 +232,18 @@ class Settings(BaseSettings):
                 result[k.strip()] = val.strip()
         return result
 
-    # Ansible Config Management
-    ansible_s3_bucket: str = ""               # Required — set in .env (e.g. "infra-config-mgmt")
-    ansible_s3_region: str = ""               # S3 bucket region — defaults to aws_region if empty
+    # Ansible Config Management — playbook storage (configure ONE backend)
+    # S3 backend
+    ansible_s3_bucket: str = ""               # e.g. "infra-config-mgmt"
+    ansible_s3_region: str = ""               # defaults to aws_region if blank
     ansible_s3_prefix: str = "config-mgmt"
+    # Azure Blob Storage backend
+    ansible_azure_storage_account: str = ""   # storage account name
+    ansible_azure_container: str = "playbooks"
+    ansible_azure_prefix: str = "config-mgmt"
+    # GCS backend
+    ansible_gcs_bucket: str = ""              # GCS bucket name
+    ansible_gcs_prefix: str = "config-mgmt"
     ansible_ecs_cluster: str = "bt-jumpoint"  # Shares cluster with BT Jumpoint
     ansible_ecs_task_family: str = "ansible-config-mgmt"
     ansible_ecs_image: str = "willhallonline/ansible:latest"

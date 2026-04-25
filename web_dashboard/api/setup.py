@@ -269,10 +269,21 @@ class PortainerFeatureConfig(BaseModel):
 
 class AnsibleFeatureConfig(BaseModel):
     enabled: bool = False
+    # S3 storage
     ansible_s3_bucket: str = ""
     ansible_s3_region: str = ""
+    ansible_s3_prefix: str = "config-mgmt"
+    # Azure Blob storage
+    ansible_azure_storage_account: str = ""
+    ansible_azure_container: str = "playbooks"
+    ansible_azure_prefix: str = "config-mgmt"
+    # GCS storage
+    ansible_gcs_bucket: str = ""
+    ansible_gcs_prefix: str = "config-mgmt"
+    # AWS ECS runner
     ansible_ecs_cluster: str = "bt-jumpoint"
     ansible_ecs_task_family: str = "ansible-config-mgmt"
+    # GCP Cloud Run runner
     gcp_ansible_cloud_run_region: str = ""
     gcp_ansible_image: str = "willhallonline/ansible:latest"
     gcp_ansible_vpc_connector: str = ""

@@ -29,29 +29,71 @@ streaming via the dashboard job monitor.
 
 | Requirement | Notes |
 |---|---|
-| S3 bucket | Stores playbooks; synced at run time by the runner container |
-| AWS ECS cluster **and/or** Azure Container Instances **and/or** GCP Cloud Run | Runs the Ansible container; must have network access to target hosts |
-| SSH key in BeyondTrust Password Safe or AWS Secrets Manager | The runner needs to authenticate to target VMs |
-| BeyondTrust integration (optional but recommended) | SSH key checkout for managed accounts |
+| Playbook storage | **One of:** S3 bucket, Azure Blob Storage container, or GCS bucket |
+| Runner infrastructure | **One or more of:** AWS ECS cluster, Azure Container Instances, GCP Cloud Run |
+| SSH key source | BeyondTrust Password Safe managed account or AWS Secrets Manager secret |
+| BeyondTrust integration (optional) | SSH key checkout for managed accounts |
 
 ---
 
 ## Setup
 
-### Step 1 — Create the S3 playbook bucket
+### Step 1 — Create playbook storage
+
+Configure **one** storage backend. The dashboard auto-detects which is set; if
+multiple are configured, S3 takes priority.
+
+#### Option A — S3
 
 ```bash
 aws s3 mb s3://your-org-config-mgmt --region us-east-1
-```
-
-Upload your playbooks:
-
-```bash
 aws s3 cp playbooks/ s3://your-org-config-mgmt/config-mgmt/ --recursive
 ```
 
-The prefix inside the bucket is controlled by `ANSIBLE_S3_PREFIX` (default:
-`config-mgmt`).
+```
+ANSIBLE_S3_BUCKET=your-org-config-mgmt
+ANSIBLE_S3_REGION=us-east-1
+ANSIBLE_S3_PREFIX=config-mgmt
+```
+
+#### Option B — Azure Blob Storage
+
+```bash
+az storage container create \
+  --account-name myorgplaybooks \
+  --name playbooks \
+  --auth-mode login
+
+az storage blob upload-batch \
+  --account-name myorgplaybooks \
+  --destination "playbooks/config-mgmt" \
+  --source ./playbooks
+```
+
+```
+ANSIBLE_AZURE_STORAGE_ACCOUNT=myorgplaybooks
+ANSIBLE_AZURE_CONTAINER=playbooks
+ANSIBLE_AZURE_PREFIX=config-mgmt
+```
+
+Auth uses your existing Azure service principal (`AZURE_CLIENT_ID` /
+`AZURE_CLIENT_SECRET` / `AZURE_TENANT_ID`). The service principal needs the
+**Storage Blob Data Reader** role on the storage account.
+
+#### Option C — GCS
+
+```bash
+gsutil mb -l us-central1 gs://my-org-config-mgmt
+gsutil -m cp -r playbooks/ gs://my-org-config-mgmt/config-mgmt/
+```
+
+```
+ANSIBLE_GCS_BUCKET=my-org-config-mgmt
+ANSIBLE_GCS_PREFIX=config-mgmt
+```
+
+Auth uses your GCP service account (`GCP_SERVICE_ACCOUNT_JSON` or ADC). The
+service account needs the **Storage Object Viewer** role on the bucket.
 
 ### Step 2 — Configure the ECS task (AWS runner)
 
@@ -93,17 +135,27 @@ the dashboard falls back to fetching the key title from Password Safe.
 
 ### Step 4 — Enable in the dashboard
 
-**`.env` file:**
+**`.env` file (set the storage backend you chose in Step 1):**
 
 ```
 ANSIBLE_ENABLED=true
+
+# S3 (Option A)
 ANSIBLE_S3_BUCKET=your-org-config-mgmt
 ANSIBLE_S3_REGION=us-east-1
-ANSIBLE_S3_PREFIX=config-mgmt
+
+# — or Azure Blob (Option B) —
+# ANSIBLE_AZURE_STORAGE_ACCOUNT=myorgplaybooks
+# ANSIBLE_AZURE_CONTAINER=playbooks
+
+# — or GCS (Option C) —
+# ANSIBLE_GCS_BUCKET=my-org-config-mgmt
 ```
 
-**Setup wizard** — toggle **Ansible** on in Step 5 and fill in the S3 bucket
-field. **Settings → Integrations → Ansible** after first login.
+**Settings → Integrations → Ansible** — three storage sections are shown;
+fill in whichever backend you chose and leave the others blank.
+**Setup wizard** — toggle **Ansible** on in Step 5, then configure storage
+from Settings after the wizard completes.
 
 ---
 
@@ -224,8 +276,21 @@ runs.
 **Config Mgmt tab is missing** — check `ANSIBLE_ENABLED=true` in `.env` and
 restart the stack.
 
+**"No playbook storage configured"** — at least one of `ANSIBLE_S3_BUCKET`,
+`ANSIBLE_AZURE_STORAGE_ACCOUNT`, or `ANSIBLE_GCS_BUCKET` must be set.
+
 **"S3 bucket not found"** — verify `ANSIBLE_S3_BUCKET` and that the IAM user
 has `s3:GetObject` and `s3:ListBucket` on the bucket.
+
+**Azure Blob: "Authorization failed"** — the service principal (`AZURE_CLIENT_ID`)
+needs the **Storage Blob Data Reader** role on the storage account. Assign it
+with: `az role assignment create --role "Storage Blob Data Reader" --assignee <client-id> --scope /subscriptions/.../storageAccounts/<account>`.
+
+**GCS: "Access denied"** — the GCP service account needs
+`roles/storage.objectViewer` on the bucket:
+```bash
+gsutil iam ch serviceAccount:SA_EMAIL:objectViewer gs://my-org-config-mgmt
+```
 
 **ECS task fails to start** — check CloudWatch logs for the task family
 `ansible-config-mgmt`. Common causes: missing execution role, ECR pull error,
