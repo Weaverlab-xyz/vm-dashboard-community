@@ -1,5 +1,22 @@
 # Entitle Integration
 
+> **Community edition limitation — read this first**
+>
+> The Entitle integration requires Entitle's servers to deliver a webhook
+> callback to your running dashboard. This means the dashboard must be
+> reachable at a **public HTTPS URL** — a laptop behind NAT or a container on
+> a home network will not work without extra tunnelling (e.g. ngrok).
+>
+> This is a structural constraint of the self-hosted model, not an Entitle
+> limitation. If you are evaluating the approval-gate workflow but cannot
+> expose a public endpoint, the **SaaS hosted tier** (coming soon) is the
+> right fit — we run the dashboard on a stable public URL with TLS, so webhook
+> delivery works out of the box without any networking changes on your side.
+>
+> The integration is fully implemented here and will work correctly for any
+> community deployment that already has a public-facing URL (e.g. a cloud VM,
+> a VPS, or a corporate server with an inbound HTTPS rule).
+
 ## What is it?
 
 The Entitle integration adds an **approval gate** in front of privileged
@@ -35,7 +52,7 @@ pending-approval modal; on approval the original action completes automatically.
 | Entitle tenant | [Entitle](https://www.entitle.io/) account with at least one configured resource and reviewer group |
 | API token | Created in the Entitle admin console |
 | Webhook secret | HMAC-SHA256 shared secret for inbound webhook callbacks |
-| Dashboard webhook endpoint publicly reachable | Entitle's servers must be able to POST to `https://your-dashboard/api/approvals/webhook` |
+| **Public HTTPS URL for the dashboard** | Entitle's servers must be able to POST to `https://your-dashboard/api/approvals/webhook` — a private/NAT'd host will not work without a tunnel. See note above. |
 
 ---
 
@@ -129,8 +146,9 @@ update `.env`.
 
 **Approval times out immediately** — verify `ENTITLE_DEFAULT_TTL_MINUTES` is
 set to a value large enough for your reviewer response time. Also confirm the
-Entitle webhook URL is publicly reachable (ngrok or a public IP if testing
-locally).
+Entitle webhook URL is publicly reachable. If you are running locally without
+a public IP, use a tunnel (`ngrok http 8000`) as a temporary workaround, or
+consider the SaaS hosted tier which provides a stable public endpoint.
 
 **"Entitle API error"** — check that `ENTITLE_API_TOKEN` is valid and not
 expired: `docker compose exec app curl -H "Authorization: Bearer $ENTITLE_API_TOKEN" "$ENTITLE_API_URL/me"`.
