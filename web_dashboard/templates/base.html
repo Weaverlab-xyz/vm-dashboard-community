@@ -52,6 +52,14 @@
           <a href="/hyperv" class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
              {% if request.url.path == '/hyperv' %}{{ nav_active }}{% endif %}">Hyper-V</a>
           {% endif %}
+          {% if nutanix_enabled %}
+          <a href="/nutanix" class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
+             {% if request.url.path == '/nutanix' %}{{ nav_active }}{% endif %}">Nutanix</a>
+          {% endif %}
+          {% if xcpng_enabled %}
+          <a href="/xcpng" class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
+             {% if request.url.path == '/xcpng' %}{{ nav_active }}{% endif %}">XCP-ng</a>
+          {% endif %}
           <a href="/aws" class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
              {% if request.url.path == '/aws' %}{{ nav_active }}{% endif %}">AWS</a>
           <a href="/gcp" class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}

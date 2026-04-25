@@ -672,6 +672,111 @@
         </div>
       </template>
 
+      <!-- ── Nutanix AHV ── -->
+      <template x-if="panel?.key === 'nutanix' && !panelLoading">
+        <div class="space-y-4">
+          <p class="text-sm text-gray-500">
+            Connects to <strong>Prism Central</strong> (or Prism Element) via the Nutanix REST API v3.
+            Supports start, graceful ACPI shutdown (requires Nutanix Guest Tools), force stop, reboot,
+            reset, pause, and resume.
+          </p>
+
+          <div class="grid grid-cols-3 gap-3">
+            <div class="col-span-2">
+              <label class="block text-sm font-medium text-gray-700 mb-1">Prism Central Host</label>
+              <input type="text" x-model="panelCfg.nutanix_host"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                     placeholder="prism.corp.local or 192.168.1.50">
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Port</label>
+              <input type="text" x-model="panelCfg.nutanix_port"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                     placeholder="9440">
+            </div>
+          </div>
+
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Username</label>
+              <input type="text" x-model="panelCfg.nutanix_username"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                     placeholder="admin">
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Password</label>
+              <input type="password" x-model="panelCfg.nutanix_password"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                     placeholder="••••••••">
+            </div>
+          </div>
+
+          <div class="flex items-center gap-2 pt-1">
+            <button @click="panelCfg.nutanix_verify_ssl = !panelCfg.nutanix_verify_ssl"
+                    class="relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors"
+                    :class="panelCfg.nutanix_verify_ssl ? 'bg-blue-600' : 'bg-gray-300'">
+              <span class="inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform"
+                    :class="panelCfg.nutanix_verify_ssl ? 'translate-x-6' : 'translate-x-1'"></span>
+            </button>
+            <span class="text-sm text-gray-700">Verify SSL certificate <span class="text-gray-400">(disable for self-signed / lab)</span></span>
+          </div>
+
+          <p class="text-xs text-gray-400 pt-1">
+            The API user needs the <strong>Prism Admin</strong> or <strong>Cluster Admin</strong> role.
+            See <a href="/docs/integrations/nutanix" class="underline" target="_blank">integration guide</a> for full setup.
+          </p>
+        </div>
+      </template>
+
+      <!-- ── XCP-ng / XenServer ── -->
+      <template x-if="panel?.key === 'xcpng' && !panelLoading">
+        <div class="space-y-4">
+          <p class="text-sm text-gray-500">
+            Connects to an <strong>XCP-ng</strong> or <strong>XenServer</strong> host or pool master
+            via the XAPI XML-RPC API (Python stdlib — no external SDK required). Supports start,
+            graceful shutdown/reboot (requires xe-guest-utilities), force stop, hard reboot, suspend,
+            resume, pause, and unpause.
+          </p>
+
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Host / Pool Master</label>
+            <input type="text" x-model="panelCfg.xcpng_host"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                   placeholder="xcpng.corp.local or 192.168.1.60">
+          </div>
+
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Username</label>
+              <input type="text" x-model="panelCfg.xcpng_username"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                     placeholder="root">
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Password</label>
+              <input type="password" x-model="panelCfg.xcpng_password"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                     placeholder="••••••••">
+            </div>
+          </div>
+
+          <div class="flex items-center gap-2 pt-1">
+            <button @click="panelCfg.xcpng_verify_ssl = !panelCfg.xcpng_verify_ssl"
+                    class="relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors"
+                    :class="panelCfg.xcpng_verify_ssl ? 'bg-blue-600' : 'bg-gray-300'">
+              <span class="inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform"
+                    :class="panelCfg.xcpng_verify_ssl ? 'translate-x-6' : 'translate-x-1'"></span>
+            </button>
+            <span class="text-sm text-gray-700">Verify SSL certificate <span class="text-gray-400">(disable for self-signed / lab)</span></span>
+          </div>
+
+          <p class="text-xs text-gray-400 pt-1">
+            Connect using the pool master address. Root or equivalent admin access is required.
+            See <a href="/docs/integrations/xcpng" class="underline" target="_blank">integration guide</a> for full setup.
+          </p>
+        </div>
+      </template>
+
     </div>
 
     <!-- Footer -->
@@ -728,6 +833,10 @@ function settingsPage() {
         desc: 'Enterprise VMware VM management via the vSphere Web Services API (pyVmomi).' },
       { key: 'hyperv',       label: 'Microsoft Hyper-V',        hasConfig: true,  enabled: false,
         desc: 'Hyper-V VM management via WinRM/PowerShell on a Windows host.' },
+      { key: 'nutanix',      label: 'Nutanix AHV',              hasConfig: true,  enabled: false,
+        desc: 'Nutanix AHV VM management via Prism Central REST API v3.' },
+      { key: 'xcpng',        label: 'XCP-ng / XenServer',       hasConfig: true,  enabled: false,
+        desc: 'XCP-ng and XenServer VM management via the XAPI XML-RPC API.' },
     ],
 
     // ── Slide-over panel state ───────────────────────────────────────────
@@ -870,6 +979,8 @@ function settingsPage() {
           proxmox: features.proxmox,
           vsphere: features.vsphere,
           hyperv: features.hyperv,
+          nutanix: features.nutanix,
+          xcpng: features.xcpng,
         };
         for (const intg of this.integrations) {
           intg.enabled = !!map[intg.key];

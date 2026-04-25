@@ -304,6 +304,8 @@ def _feature_flags() -> dict:
         "proxmox_enabled":      config_service.get_bool("proxmox_enabled",       settings.proxmox_enabled),
         "vsphere_enabled":      config_service.get_bool("vsphere_enabled",       settings.vsphere_enabled),
         "hyperv_enabled":       config_service.get_bool("hyperv_enabled",        settings.hyperv_enabled),
+        "nutanix_enabled":      config_service.get_bool("nutanix_enabled",       settings.nutanix_enabled),
+        "xcpng_enabled":        config_service.get_bool("xcpng_enabled",         settings.xcpng_enabled),
     }
 
 
@@ -391,6 +393,18 @@ try:
 except ImportError:
     pass
 
+try:
+    from .api import nutanix  # noqa: E402
+    app.include_router(nutanix.router, dependencies=[_feature_gate("nutanix_enabled")])
+except ImportError:
+    pass
+
+try:
+    from .api import xcpng  # noqa: E402
+    app.include_router(xcpng.router, dependencies=[_feature_gate("xcpng_enabled")])
+except ImportError:
+    pass
+
 
 # ── HTML pages ────────────────────────────────────────────────────────────────
 
@@ -440,6 +454,28 @@ async def hyperv_page(request: Request):
     return templates.TemplateResponse(
         "hyperv/index.html",
         {"request": request, "hyperv_host": host, **_feature_flags()},
+    )
+
+
+@app.get("/nutanix", response_class=HTMLResponse, include_in_schema=False)
+async def nutanix_page(request: Request):
+    if not config_service.get_bool("nutanix_enabled", settings.nutanix_enabled):
+        raise HTTPException(status_code=404, detail="Nutanix integration is disabled")
+    host = config_service.get("nutanix_host") or settings.nutanix_host
+    return templates.TemplateResponse(
+        "nutanix/index.html",
+        {"request": request, "nutanix_host": host, **_feature_flags()},
+    )
+
+
+@app.get("/xcpng", response_class=HTMLResponse, include_in_schema=False)
+async def xcpng_page(request: Request):
+    if not config_service.get_bool("xcpng_enabled", settings.xcpng_enabled):
+        raise HTTPException(status_code=404, detail="XCP-ng integration is disabled")
+    host = config_service.get("xcpng_host") or settings.xcpng_host
+    return templates.TemplateResponse(
+        "xcpng/index.html",
+        {"request": request, "xcpng_host": host, **_feature_flags()},
     )
 
 
@@ -512,6 +548,8 @@ async def features():
         "proxmox":      flags["proxmox_enabled"],
         "vsphere":      flags["vsphere_enabled"],
         "hyperv":       flags["hyperv_enabled"],
+        "nutanix":      flags["nutanix_enabled"],
+        "xcpng":        flags["xcpng_enabled"],
     }
 
 

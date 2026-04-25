@@ -78,6 +78,8 @@ class FeaturesSetup(BaseModel):
     proxmox_enabled: bool = False
     vsphere_enabled: bool = False
     hyperv_enabled: bool = False
+    nutanix_enabled: bool = False
+    xcpng_enabled: bool = False
 
 
 class SetupPayload(BaseModel):
@@ -187,6 +189,8 @@ def _apply_config(payload: SetupPayload) -> None:
         "proxmox_enabled":      "1" if payload.features.proxmox_enabled else "0",
         "vsphere_enabled":      "1" if payload.features.vsphere_enabled else "0",
         "hyperv_enabled":       "1" if payload.features.hyperv_enabled else "0",
+        "nutanix_enabled":      "1" if payload.features.nutanix_enabled else "0",
+        "xcpng_enabled":        "1" if payload.features.xcpng_enabled else "0",
     })
 
     config_service.set_many(pairs)
@@ -330,6 +334,21 @@ class HyperVFeatureConfig(BaseModel):
     hyperv_verify_ssl: bool = False
     hyperv_transport: str = "ntlm"
 
+class NutanixFeatureConfig(BaseModel):
+    enabled: bool = False
+    nutanix_host: str = ""
+    nutanix_port: int = 9440
+    nutanix_username: str = "admin"
+    nutanix_password: str = ""          # encrypted at rest
+    nutanix_verify_ssl: bool = False
+
+class XcpNgFeatureConfig(BaseModel):
+    enabled: bool = False
+    xcpng_host: str = ""
+    xcpng_username: str = "root"
+    xcpng_password: str = ""            # encrypted at rest
+    xcpng_verify_ssl: bool = False
+
 
 _FEATURE_MODELS = {
     "vmware":       VMwareFeatureConfig,
@@ -340,6 +359,8 @@ _FEATURE_MODELS = {
     "proxmox":      ProxmoxFeatureConfig,
     "vsphere":      VSphereFeatureConfig,
     "hyperv":       HyperVFeatureConfig,
+    "nutanix":      NutanixFeatureConfig,
+    "xcpng":        XcpNgFeatureConfig,
 }
 
 _SECRET_FEATURE_KEYS = frozenset({
@@ -348,6 +369,8 @@ _SECRET_FEATURE_KEYS = frozenset({
     "proxmox_token_secret", "proxmox_password",
     "vsphere_password",
     "hyperv_password",
+    "nutanix_password",
+    "xcpng_password",
 })
 
 

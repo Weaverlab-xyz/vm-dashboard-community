@@ -28,6 +28,8 @@ class Settings(BaseSettings):
     proxmox_enabled: bool = False       # Proxmox VE router + /proxmox page
     vsphere_enabled: bool = False       # vSphere/ESXi router + /vsphere page
     hyperv_enabled: bool = False        # Hyper-V router + /hyperv page (WinRM to Windows host)
+    nutanix_enabled: bool = False       # Nutanix AHV router + /nutanix page (Prism Central REST API)
+    xcpng_enabled: bool = False         # XCP-ng/XenServer router + /xcpng page (XAPI XML-RPC)
 
     # Proxmox VE connection
     proxmox_host: str = ""              # hostname or IP of the Proxmox node/cluster
@@ -45,6 +47,19 @@ class Settings(BaseSettings):
     vsphere_password: str = ""          # encrypted at rest
     vsphere_verify_ssl: bool = False    # set True for a valid TLS cert
     vsphere_datacenter: str = ""        # optional default datacenter filter
+
+    # Nutanix AHV connection (Prism Central REST API v3)
+    nutanix_host: str = ""              # Prism Central hostname or IP
+    nutanix_port: int = 9440
+    nutanix_username: str = "admin"
+    nutanix_password: str = ""          # encrypted at rest
+    nutanix_verify_ssl: bool = False    # set True for a valid TLS cert
+
+    # XCP-ng / XenServer connection (XAPI XML-RPC)
+    xcpng_host: str = ""               # XCP-ng host or pool master hostname/IP
+    xcpng_username: str = "root"
+    xcpng_password: str = ""            # encrypted at rest
+    xcpng_verify_ssl: bool = False      # set True for a valid TLS cert
 
     # Hyper-V connection (WinRM to Windows host running Hyper-V)
     hyperv_host: str = ""               # hostname or IP of the Hyper-V host
