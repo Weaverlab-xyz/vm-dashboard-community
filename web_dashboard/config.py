@@ -248,6 +248,14 @@ class Settings(BaseSettings):
     epml_deb_path: str = r"C:\Scripts\VM_CLI\VM_DEMO_CLI\epml-client.amd64.deb"
     pathfinder_script_path: str = r"C:\Scripts\VM_CLI\VM_DEMO_CLI\make_pathfinder_user.sh"
 
+    # Packer image builder — optional object-storage archives for built templates.
+    # Leave blank to skip archiving; fill in to have each successful build upload
+    # the generated .pkr.hcl to your bucket for auditing and re-use.
+    packer_aws_s3_bucket: str = ""
+    packer_azure_storage_account: str = ""
+    packer_azure_archive_container: str = "packer-templates"
+    packer_gcs_bucket: str = ""
+
     # GCP (Google Cloud Platform)
     gcp_project_id: str = ""
     gcp_region: str = "us-central1"

@@ -1,5 +1,7 @@
 FROM python:3.12-slim AS base
 
+ARG PACKER_VERSION=1.11.2
+
 WORKDIR /app
 
 # Install Python dependencies first so this layer caches when only app
@@ -22,12 +24,14 @@ EXPOSE 8000
 #   to the Windows host to run the PowerShell wrapper.
 # docker-ce-cli: optional Ansible integration runs config-mgmt jobs in
 #   sibling containers via the mounted Docker socket.
-# Both are included by default so the same image works whether the user
-# opts in to VMware / Ansible after first boot — they add ~80 MB total.
+# unzip: needed to extract the Packer binary archive.
+# All are included by default so the same image works whether the user
+# opts in to VMware / Ansible / Packer after first boot.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         openssh-client \
         ca-certificates \
         curl \
+        unzip \
     && install -m 0755 -d /etc/apt/keyrings \
     && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
     && chmod a+r /etc/apt/keyrings/docker.asc \
@@ -35,6 +39,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
        > /etc/apt/sources.list.d/docker.list \
     && apt-get update && apt-get install -y --no-install-recommends docker-ce-cli \
     && rm -rf /var/lib/apt/lists/*
+
+# Install Packer and pre-cache all three cloud plugins so packer init
+# does not require internet access at build time inside the container.
+RUN curl -fsSL "https://releases.hashicorp.com/packer/${PACKER_VERSION}/packer_${PACKER_VERSION}_linux_amd64.zip" \
+        -o /tmp/packer.zip \
+    && unzip -q /tmp/packer.zip -d /usr/local/bin/ \
+    && rm /tmp/packer.zip \
+    && packer plugins install github.com/hashicorp/amazon \
+    && packer plugins install github.com/hashicorp/azure \
+    && packer plugins install github.com/hashicorp/googlecompute
 
 # Entrypoint fixes SSH key permissions when the Windows override
 # bind-mounts a key from %USERPROFILE%. Docker Desktop surfaces Windows

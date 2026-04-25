@@ -67,6 +67,11 @@
         <span x-show="instances.length" class="ml-1.5 bg-gray-100 text-gray-600 text-xs px-1.5 py-0.5 rounded-full"
               x-text="instances.length"></span>
       </button>
+      <button @click="activeTab = 'build'"
+              :class="activeTab === 'build' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'"
+              class="py-3 border-b-2 text-sm font-medium transition-colors">
+        Build Image
+      </button>
     </nav>
   </div>
 
@@ -414,6 +419,96 @@
     </div>
   </div>
 
+  <!-- ── Build Image (Packer) ─────────────────────────────────────────────── -->
+  <div x-show="activeTab === 'build'">
+    <div class="max-w-2xl">
+      <div class="mb-4">
+        <h2 class="text-lg font-semibold text-gray-800">Build GCE Image with Packer</h2>
+        <p class="text-xs text-gray-400 mt-0.5">Provision a public GCE image with a shell script and register the result as a new custom image in your project. Runs as a tracked background job (typically 5–15 min).</p>
+      </div>
+
+      <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 space-y-5">
+
+        <!-- Image Name -->
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Image Name <span class="text-red-500">*</span></label>
+          <input type="text" x-model="gcpPackerForm.image_name"
+                 placeholder="my-hardened-debian"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500">
+          <p class="text-xs text-gray-400 mt-1">Lowercase letters, digits, and hyphens only. A timestamp is appended automatically.</p>
+        </div>
+
+        <!-- Source Image -->
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Source Image <span class="text-red-500">*</span></label>
+          <div class="flex gap-2 mb-2 flex-wrap">
+            <template x-for="p in gcpImagePresets" :key="p.id">
+              <button @click="gcpPackerForm.source_image = p.image"
+                      :class="gcpPackerForm.source_image === p.image ? 'bg-blue-600 text-white' : 'bg-white border border-gray-300 text-gray-600 hover:bg-gray-50'"
+                      class="text-xs font-medium px-3 py-1.5 rounded-md transition"
+                      x-text="p.label"></button>
+            </template>
+          </div>
+          <input type="text" x-model="gcpPackerForm.source_image"
+                 placeholder="debian-12"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:ring-blue-500 focus:border-blue-500">
+          <p class="text-xs text-gray-400 mt-1">Image name or family from any GCP public image project.</p>
+        </div>
+
+        <!-- Machine Type + SSH Username -->
+        <div class="grid grid-cols-2 gap-4">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Build Machine Type</label>
+            <select x-model="gcpPackerForm.machine_type"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500">
+              <option>e2-micro</option>
+              <option>e2-small</option>
+              <option>e2-medium</option>
+              <option>e2-standard-2</option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">SSH Username</label>
+            <input type="text" x-model="gcpPackerForm.ssh_username"
+                   placeholder="packer"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500">
+          </div>
+        </div>
+
+        <!-- Provisioner Script -->
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Provisioner Script</label>
+          <textarea x-model="gcpPackerForm.provisioner_script" rows="8"
+                    placeholder="#!/bin/sh&#10;# Install and configure your software here&#10;apt-get update -y&#10;apt-get install -y nginx"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:ring-blue-500 focus:border-blue-500 resize-y"></textarea>
+          <p class="text-xs text-gray-400 mt-1">Shell script run on the build instance. Leave empty to build a base image with no provisioning.</p>
+        </div>
+
+        <!-- Archive to GCS -->
+        <div x-show="packerArchiveBucketGcs" x-cloak
+             class="flex items-start gap-3 p-3 bg-gray-50 rounded-lg border border-gray-200">
+          <input type="checkbox" id="gcp-archive" x-model="gcpPackerForm.archive_template"
+                 class="mt-0.5 h-4 w-4 text-blue-600 border-gray-300 rounded">
+          <label for="gcp-archive" class="text-sm text-gray-700 cursor-pointer">
+            Archive generated template to GCS
+            <span class="block text-xs text-gray-400 font-mono mt-0.5" x-text="'gs://' + packerArchiveBucketGcs + '/packer-templates/{job-id}/'"></span>
+          </label>
+        </div>
+
+        <!-- Error -->
+        <div x-show="gcpPackerError" x-cloak class="p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700" x-text="gcpPackerError"></div>
+
+        <!-- Submit -->
+        <button @click="submitGcpPackerBuild()"
+                :disabled="gcpPackerBuilding || !gcpPackerForm.image_name || !gcpPackerForm.source_image"
+                class="w-full py-2.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-semibold rounded-lg transition">
+          <span x-show="!gcpPackerBuilding">Start Packer Build</span>
+          <span x-show="gcpPackerBuilding" x-cloak>Queuing build…</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
 </div><!-- /max-w-7xl -->
 
 <script>
@@ -472,6 +567,26 @@ function gcpDashboard() {
     captureError:  '',
     capturing:     false,
     captureForm: { image_name: '', description: '' },
+
+    // Packer image builder
+    gcpPackerForm: {
+      image_name:        '',
+      source_image:      'debian-12',
+      machine_type:      'e2-medium',
+      ssh_username:      'packer',
+      provisioner_script: '',
+      archive_template:  false,
+    },
+    gcpPackerBuilding:    false,
+    gcpPackerError:       '',
+    packerArchiveBucketGcs: '',
+    gcpImagePresets: [
+      { id: 'debian12',  label: 'Debian 12',      image: 'debian-12'              },
+      { id: 'ubuntu22',  label: 'Ubuntu 22.04',   image: 'ubuntu-2204-lts-amd64'  },
+      { id: 'ubuntu24',  label: 'Ubuntu 24.04',   image: 'ubuntu-2404-lts-amd64'  },
+      { id: 'rhel9',     label: 'RHEL 9',         image: 'rhel-9'                 },
+      { id: 'rocky9',    label: 'Rocky 9',        image: 'rocky-linux-9'          },
+    ],
 
     async init() {
       await Promise.all([
@@ -692,6 +807,22 @@ function gcpDashboard() {
       this.toast     = msg;
       this.toastType = type;
       setTimeout(() => { this.toast = ''; }, 5000);
+    },
+
+    async submitGcpPackerBuild() {
+      this.gcpPackerError = '';
+      if (!this.gcpPackerForm.image_name)   { this.gcpPackerError = 'Image name is required.'; return; }
+      if (!this.gcpPackerForm.source_image) { this.gcpPackerError = 'Source image is required.'; return; }
+      this.gcpPackerBuilding = true;
+      try {
+        const resp = await API.post('/api/packer/gcp/build', this.gcpPackerForm);
+        toast('Packer GCP build queued!', 'success');
+        setTimeout(() => window.location.href = '/jobs/' + resp.job_id, 400);
+      } catch (e) {
+        this.gcpPackerError = e.message;
+      } finally {
+        this.gcpPackerBuilding = false;
+      }
     },
   };
 }

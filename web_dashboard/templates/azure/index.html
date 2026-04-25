@@ -59,6 +59,11 @@
         Azure VMs
         <span x-show="vms.length" class="ml-2 bg-blue-100 text-blue-700 text-xs px-2 py-0.5 rounded-full" x-text="vms.length"></span>
       </button>
+      <button @click="activeTab = 'build'"
+              :class="activeTab === 'build' ? 'border-blue-500 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700'"
+              class="py-3 px-1 border-b-2 font-medium text-sm transition">
+        Build Image
+      </button>
     </nav>
   </div>
 
@@ -453,6 +458,100 @@
     </div>
   </div>
 
+  <!-- ── Tab 5: Build Image (Packer) ──────────────────────────────────────── -->
+  <div x-show="activeTab === 'build'">
+    <div class="max-w-2xl">
+      <div class="mb-4">
+        <h2 class="text-lg font-semibold text-gray-800">Build Azure Image with Packer</h2>
+        <p class="text-xs text-gray-400 mt-0.5">Provision a marketplace image with a shell script and register the result as a new Azure Managed Image. Runs as a tracked background job (typically 10–20 min).</p>
+      </div>
+
+      <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 space-y-5">
+
+        <!-- Image Name -->
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Image Name <span class="text-red-500">*</span></label>
+          <input type="text" x-model="azurePackerForm.image_name"
+                 placeholder="my-hardened-ubuntu"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500">
+        </div>
+
+        <!-- Source Image Presets -->
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Source Image <span class="text-red-500">*</span></label>
+          <div class="flex gap-2 mb-3 flex-wrap">
+            <template x-for="p in azureImagePresets" :key="p.id">
+              <button @click="applyAzurePreset(p)"
+                      :class="azurePackerForm.image_publisher === p.publisher ? 'bg-blue-600 text-white' : 'bg-white border border-gray-300 text-gray-600 hover:bg-gray-50'"
+                      class="text-xs font-medium px-3 py-1.5 rounded-md transition"
+                      x-text="p.label"></button>
+            </template>
+          </div>
+          <div class="grid grid-cols-3 gap-2">
+            <div>
+              <label class="block text-xs text-gray-500 mb-1">Publisher</label>
+              <input type="text" x-model="azurePackerForm.image_publisher"
+                     class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-xs focus:ring-blue-500 focus:border-blue-500">
+            </div>
+            <div>
+              <label class="block text-xs text-gray-500 mb-1">Offer</label>
+              <input type="text" x-model="azurePackerForm.image_offer"
+                     class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-xs focus:ring-blue-500 focus:border-blue-500">
+            </div>
+            <div>
+              <label class="block text-xs text-gray-500 mb-1">SKU</label>
+              <input type="text" x-model="azurePackerForm.image_sku"
+                     class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-xs focus:ring-blue-500 focus:border-blue-500">
+            </div>
+          </div>
+        </div>
+
+        <!-- VM Size -->
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Build VM Size</label>
+          <select x-model="azurePackerForm.vm_size"
+                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500">
+            <option>Standard_B1s</option>
+            <option>Standard_B2s</option>
+            <option>Standard_B2ms</option>
+            <option>Standard_D2s_v3</option>
+          </select>
+        </div>
+
+        <!-- Provisioner Script -->
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Provisioner Script</label>
+          <textarea x-model="azurePackerForm.provisioner_script" rows="8"
+                    placeholder="#!/bin/sh&#10;# Install and configure your software here&#10;apt-get update -y&#10;apt-get install -y nginx"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:ring-blue-500 focus:border-blue-500 resize-y"></textarea>
+          <p class="text-xs text-gray-400 mt-1">Shell script run before the Azure waagent deprovision step (which Packer always runs to generalize the image).</p>
+        </div>
+
+        <!-- Archive to Blob Storage -->
+        <div x-show="packerArchiveStorageAzure" x-cloak
+             class="flex items-start gap-3 p-3 bg-gray-50 rounded-lg border border-gray-200">
+          <input type="checkbox" id="azure-archive" x-model="azurePackerForm.archive_template"
+                 class="mt-0.5 h-4 w-4 text-blue-600 border-gray-300 rounded">
+          <label for="azure-archive" class="text-sm text-gray-700 cursor-pointer">
+            Archive generated template to Azure Blob Storage
+            <span class="block text-xs text-gray-400 font-mono mt-0.5" x-text="packerArchiveStorageAzure + '/packer-templates/{job-id}/'"></span>
+          </label>
+        </div>
+
+        <!-- Error -->
+        <div x-show="azurePackerError" x-cloak class="p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700" x-text="azurePackerError"></div>
+
+        <!-- Submit -->
+        <button @click="submitAzurePackerBuild()"
+                :disabled="azurePackerBuilding || !azurePackerForm.image_name || !azurePackerForm.image_publisher"
+                class="w-full py-2.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-semibold rounded-lg transition">
+          <span x-show="!azurePackerBuilding">Start Packer Build</span>
+          <span x-show="azurePackerBuilding" x-cloak>Queuing build…</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
 </div>
 {% endblock %}
 
@@ -495,10 +594,30 @@ function azureDashboard() {
       open: false, vm: null, name: '', description: '', generalize: false,
     },
 
+    // Packer image builder
+    azurePackerForm: {
+      image_name: '',
+      image_publisher: 'Canonical',
+      image_offer: '0001-com-ubuntu-server-jammy',
+      image_sku: '22_04-lts',
+      vm_size: 'Standard_B2s',
+      provisioner_script: '',
+      archive_template: false,
+    },
+    azurePackerBuilding: false,
+    azurePackerError: '',
+    packerArchiveStorageAzure: '',
+    azureImagePresets: [
+      { id: 'ubuntu22', label: 'Ubuntu 22.04 LTS', publisher: 'Canonical',   offer: '0001-com-ubuntu-server-jammy', sku: '22_04-lts' },
+      { id: 'ubuntu24', label: 'Ubuntu 24.04 LTS', publisher: 'Canonical',   offer: 'ubuntu-24_04-lts',             sku: 'server'   },
+      { id: 'debian12', label: 'Debian 12',         publisher: 'Debian',      offer: 'debian-12',                    sku: '12'       },
+      { id: 'rhel9',    label: 'RHEL 9',            publisher: 'RedHat',      offer: 'RHEL',                         sku: '9-lvm'    },
+    ],
+
     async init() {
       requireAuth();
       const hash = window.location.hash.slice(1);
-      if (['marketplace', 'private', 'vms'].includes(hash)) {
+      if (['marketplace', 'private', 'vms', 'build'].includes(hash)) {
         this.activeTab = hash;
       }
       await Promise.all([
@@ -796,6 +915,28 @@ function azureDashboard() {
         window.location.href = `/jobs/${result.job_id}`;
       } catch (e) {
         toast(e.message || 'Destroy failed', 'error');
+      }
+    },
+
+    applyAzurePreset(preset) {
+      this.azurePackerForm.image_publisher = preset.publisher;
+      this.azurePackerForm.image_offer     = preset.offer;
+      this.azurePackerForm.image_sku       = preset.sku;
+    },
+
+    async submitAzurePackerBuild() {
+      this.azurePackerError = '';
+      if (!this.azurePackerForm.image_name)      { this.azurePackerError = 'Image name is required.'; return; }
+      if (!this.azurePackerForm.image_publisher) { this.azurePackerError = 'Source image publisher is required.'; return; }
+      this.azurePackerBuilding = true;
+      try {
+        const resp = await API.post('/api/packer/azure/build', this.azurePackerForm);
+        toast('Packer Azure build queued!', 'success');
+        setTimeout(() => window.location.href = '/jobs/' + resp.job_id, 400);
+      } catch (e) {
+        this.azurePackerError = e.message;
+      } finally {
+        this.azurePackerBuilding = false;
       }
     },
   };

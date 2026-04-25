@@ -28,6 +28,8 @@ class AWSSetup(BaseModel):
     aws_region: str = "us-east-2"
     ec2_ssh_key_secret: str = ""
     ec2_ssm_instance_profile: str = ""
+    # Packer template archive (optional)
+    packer_aws_s3_bucket: str = ""
 
 
 class AzureSetup(BaseModel):
@@ -49,6 +51,9 @@ class AzureSetup(BaseModel):
     azure_oauth_client_id: str = ""
     azure_oauth_client_secret: str = ""
     azure_oauth_tenant_id: str = ""
+    # Packer template archive (optional)
+    packer_azure_storage_account: str = ""
+    packer_azure_archive_container: str = "packer-templates"
 
 
 class GCPSetup(BaseModel):
@@ -60,6 +65,8 @@ class GCPSetup(BaseModel):
     gcp_subnetwork: str = ""
     gcp_ssh_key_secret_name: str = ""
     gcp_ssh_username: str = "gcp-user"
+    # Packer template archive (optional)
+    packer_gcs_bucket: str = ""
 
 
 class FeaturesSetup(BaseModel):
