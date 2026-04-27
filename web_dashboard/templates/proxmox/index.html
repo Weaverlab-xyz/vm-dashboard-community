@@ -8,190 +8,402 @@
   <div class="flex items-center justify-between mb-4">
     <div>
       <h1 class="text-2xl font-bold text-gray-900">Proxmox VE</h1>
-      <p class="text-sm text-gray-500 mt-1">
-        <span x-text="'Showing ' + filteredResources.length + ' resource' + (filteredResources.length !== 1 ? 's' : '')"></span>
-        <span x-show="lastLoaded" class="ml-2 text-xs text-gray-400"
-              x-text="'· Loaded ' + timeAgo(lastLoaded)"></span>
-      </p>
+      <p class="text-sm text-gray-500 mt-1" x-text="headerSummary()"></p>
     </div>
-    <div class="flex items-center gap-2">
-      <button @click="refresh()" :disabled="loading"
-              class="flex items-center gap-2 text-sm bg-blue-600 hover:bg-blue-700 disabled:opacity-50
-                     text-white px-3 py-2 rounded-lg shadow-sm font-medium transition">
-        <svg class="h-4 w-4" :class="loading ? 'animate-spin' : ''" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
-        </svg>
-        <span x-text="loading ? 'Refreshing…' : 'Refresh'"></span>
-      </button>
-    </div>
+    <button @click="refresh()" :disabled="loading"
+            class="flex items-center gap-2 text-sm bg-blue-600 hover:bg-blue-700 disabled:opacity-50
+                   text-white px-3 py-2 rounded-lg shadow-sm font-medium transition">
+      <svg class="h-4 w-4" :class="loading ? 'animate-spin' : ''" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+      </svg>
+      <span x-text="loading ? 'Refreshing…' : 'Refresh'"></span>
+    </button>
   </div>
 
   <!-- Error banner -->
   <div x-show="error" class="mb-4 p-4 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700" x-text="error"></div>
 
-  <!-- Node tabs -->
-  <div class="flex gap-1 mb-4 border-b border-gray-200 overflow-x-auto">
-    <button @click="activeNode = ''"
-            :class="activeNode === '' ? 'border-b-2 border-blue-600 text-blue-600 font-semibold' : 'text-gray-500 hover:text-gray-700'"
-            class="px-4 py-2 text-sm whitespace-nowrap">
-      All nodes
-      <span class="ml-1 text-xs bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded-full" x-text="allResources.length"></span>
-    </button>
-    <template x-for="node in nodes" :key="node.node">
-      <button @click="activeNode = node.node"
-              :class="activeNode === node.node ? 'border-b-2 border-blue-600 text-blue-600 font-semibold' : 'text-gray-500 hover:text-gray-700'"
-              class="px-4 py-2 text-sm whitespace-nowrap flex items-center gap-1.5">
-        <span class="inline-block w-2 h-2 rounded-full"
-              :class="node.status === 'online' ? 'bg-green-500' : 'bg-red-400'"></span>
-        <span x-text="node.node"></span>
-        <span class="text-xs bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded-full"
-              x-text="allResources.filter(r => r.node === node.node).length"></span>
+  <!-- Main tabs -->
+  <div class="flex gap-1 mb-6 border-b border-gray-200">
+    <template x-for="tab in ['Cloud Images', 'Templates', 'VMs']" :key="tab">
+      <button @click="activeTab = tab"
+              :class="activeTab === tab
+                ? 'border-b-2 border-blue-600 text-blue-600 font-semibold'
+                : 'text-gray-500 hover:text-gray-700'"
+              class="px-4 py-2 text-sm whitespace-nowrap -mb-px">
+        <span x-text="tab"></span>
+        <span x-show="tab === 'Templates'" class="ml-1 text-xs bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded-full" x-text="templates.length"></span>
+        <span x-show="tab === 'VMs'" class="ml-1 text-xs bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded-full" x-text="allResources.length"></span>
       </button>
     </template>
   </div>
 
-  <!-- Filters -->
-  <div class="flex flex-wrap items-center gap-3 mb-4">
-    <input type="text" x-model="search" placeholder="Search by name, VMID, or tag…"
-           class="flex-1 min-w-48 border border-gray-300 rounded-lg px-3 py-1.5 text-sm
-                  focus:outline-none focus:ring-2 focus:ring-blue-500">
+  <!-- ═══════════════════════════════════════════════════════ TAB: Cloud Images -->
+  <div x-show="activeTab === 'Cloud Images'">
+    <p class="text-sm text-gray-500 mb-4">Select a cloud image to download to your Proxmox node and create a cloud-init template. Requires PVE 7.2+.</p>
 
-    <select x-model="filterStatus"
-            class="border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
-      <option value="">All statuses</option>
-      <option value="running">Running</option>
-      <option value="stopped">Stopped</option>
-    </select>
-
-    <select x-model="filterType"
-            class="border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
-      <option value="">QEMU + LXC</option>
-      <option value="qemu">QEMU VMs</option>
-      <option value="lxc">LXC containers</option>
-    </select>
+    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+      <template x-for="img in cloudImages" :key="img.id">
+        <div class="bg-white border border-gray-200 rounded-xl p-4 shadow-sm flex flex-col gap-3">
+          <!-- Distro icon / badge -->
+          <div class="flex items-center gap-3">
+            <span class="inline-flex items-center justify-center w-10 h-10 rounded-lg text-lg font-bold"
+                  :class="distroClass(img.distro)" x-text="distroIcon(img.distro)"></span>
+            <div class="flex-1 min-w-0">
+              <p class="text-sm font-semibold text-gray-900 truncate" x-text="img.name"></p>
+              <p class="text-xs text-gray-400 truncate font-mono" x-text="img.filename"></p>
+            </div>
+          </div>
+          <button @click="openImport(img)"
+                  class="w-full text-sm font-medium bg-blue-600 hover:bg-blue-700 text-white py-1.5 rounded-lg transition">
+            Import as Template
+          </button>
+        </div>
+      </template>
+    </div>
   </div>
 
-  <!-- Resource table -->
-  <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-    <div x-show="loading && allResources.length === 0" class="p-12 text-center text-gray-400">
+  <!-- ═══════════════════════════════════════════════════════ TAB: Templates -->
+  <div x-show="activeTab === 'Templates'">
+    <div x-show="loading && templates.length === 0" class="p-12 text-center text-gray-400">
       <svg class="mx-auto h-8 w-8 animate-spin mb-3 text-blue-400" fill="none" viewBox="0 0 24 24">
         <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
         <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"></path>
       </svg>
-      Loading Proxmox resources…
+      Loading templates…
+    </div>
+    <div x-show="!loading && templates.length === 0" class="p-12 text-center text-gray-400">
+      No QEMU templates found. Import a cloud image from the Cloud Images tab to create one.
     </div>
 
-    <div x-show="!loading && filteredResources.length === 0 && allResources.length === 0" class="p-12 text-center text-gray-400">
-      No VMs or containers found. Check your Proxmox credentials in Settings → Integrations → Proxmox VE.
-    </div>
-
-    <div x-show="!loading && filteredResources.length === 0 && allResources.length > 0" class="p-12 text-center text-gray-400">
-      No resources match the current filters.
-    </div>
-
-    <table x-show="filteredResources.length > 0" class="min-w-full divide-y divide-gray-200">
-      <thead class="bg-gray-50">
-        <tr>
-          <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
-          <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">VMID</th>
-          <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Name</th>
-          <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Type</th>
-          <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Node</th>
-          <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">CPU %</th>
-          <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Memory</th>
-          <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
-        </tr>
-      </thead>
-      <tbody class="bg-white divide-y divide-gray-100">
-        <template x-for="vm in filteredResources" :key="vm.node + '-' + vm.vmid">
-          <tr class="hover:bg-gray-50 transition-colors">
-            <!-- Status dot -->
-            <td class="px-4 py-3">
-              <span class="inline-flex items-center gap-1.5 text-xs font-medium"
-                    :class="vm.is_running ? 'text-green-700' : 'text-gray-400'">
-                <span class="inline-block w-2 h-2 rounded-full"
-                      :class="vm.is_running ? 'bg-green-500' : 'bg-gray-300'"></span>
-                <span x-text="vm.status"></span>
-              </span>
-            </td>
-            <!-- VMID -->
-            <td class="px-4 py-3 text-sm font-mono text-gray-600" x-text="vm.vmid"></td>
-            <!-- Name -->
-            <td class="px-4 py-3">
-              <button @click="openDetail(vm)"
-                      class="text-sm font-medium text-blue-600 hover:text-blue-800 text-left"
-                      x-text="vm.name || ('—')"></button>
-              <div x-show="vm.tags" class="mt-0.5">
-                <template x-for="tag in (vm.tags || '').split(';').filter(t => t.trim())" :key="tag">
-                  <span class="inline-block text-xs bg-indigo-50 text-indigo-600 px-1.5 py-0.5 rounded mr-1" x-text="tag.trim()"></span>
-                </template>
-              </div>
-            </td>
-            <!-- Type badge -->
-            <td class="px-4 py-3">
-              <span class="inline-block text-xs font-medium px-2 py-0.5 rounded-full"
-                    :class="vm.type === 'qemu' ? 'bg-purple-50 text-purple-700' : 'bg-teal-50 text-teal-700'"
-                    x-text="vm.type === 'qemu' ? 'QEMU' : 'LXC'"></span>
-            </td>
-            <!-- Node -->
-            <td class="px-4 py-3 text-sm text-gray-500" x-text="vm.node"></td>
-            <!-- CPU -->
-            <td class="px-4 py-3 text-sm text-gray-600">
-              <span x-show="vm.is_running" x-text="vm.cpu_usage + '%'"></span>
-              <span x-show="!vm.is_running" class="text-gray-300">—</span>
-            </td>
-            <!-- Memory -->
-            <td class="px-4 py-3 text-sm text-gray-600">
-              <template x-if="vm.mem_total > 0">
-                <span x-text="fmtBytes(vm.mem_used) + ' / ' + fmtBytes(vm.mem_total)"></span>
-              </template>
-              <span x-show="!vm.mem_total" class="text-gray-300">—</span>
-            </td>
-            <!-- Actions -->
-            <td class="px-4 py-3">
-              <div class="flex items-center gap-1.5">
-                <template x-if="!vm.is_running && !vm.template">
-                  <button @click="powerOp(vm, 'start')"
-                          :disabled="pending.has(vm.node + '-' + vm.vmid)"
-                          class="text-xs px-2.5 py-1 rounded bg-green-600 hover:bg-green-700
-                                 disabled:opacity-40 text-white font-medium transition">
-                    <span x-text="pending.has(vm.node + '-' + vm.vmid) ? '…' : 'Start'"></span>
-                  </button>
-                </template>
-                <template x-if="vm.is_running">
-                  <button @click="powerOp(vm, 'shutdown')"
-                          :disabled="pending.has(vm.node + '-' + vm.vmid)"
-                          class="text-xs px-2.5 py-1 rounded bg-amber-500 hover:bg-amber-600
-                                 disabled:opacity-40 text-white font-medium transition">
-                    <span x-text="pending.has(vm.node + '-' + vm.vmid) ? '…' : 'Shutdown'"></span>
-                  </button>
-                </template>
-                <template x-if="vm.is_running">
-                  <button @click="powerOp(vm, 'stop')"
-                          :disabled="pending.has(vm.node + '-' + vm.vmid)"
-                          title="Force power off"
-                          class="text-xs px-2.5 py-1 rounded bg-red-600 hover:bg-red-700
-                                 disabled:opacity-40 text-white font-medium transition">
-                    <span x-text="pending.has(vm.node + '-' + vm.vmid) ? '…' : 'Force Off'"></span>
-                  </button>
-                </template>
-                <template x-if="vm.is_running && vm.type === 'qemu'">
-                  <button @click="powerOp(vm, 'reboot')"
-                          :disabled="pending.has(vm.node + '-' + vm.vmid)"
-                          class="text-xs px-2.5 py-1 rounded bg-gray-500 hover:bg-gray-600
-                                 disabled:opacity-40 text-white font-medium transition">
-                    <span x-text="pending.has(vm.node + '-' + vm.vmid) ? '…' : 'Reboot'"></span>
-                  </button>
-                </template>
-              </div>
-            </td>
+    <div x-show="templates.length > 0" class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+      <table class="min-w-full divide-y divide-gray-200">
+        <thead class="bg-gray-50">
+          <tr>
+            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">VMID</th>
+            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Name</th>
+            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Node</th>
+            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">CPU</th>
+            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Memory</th>
+            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
           </tr>
-        </template>
-      </tbody>
-    </table>
+        </thead>
+        <tbody class="bg-white divide-y divide-gray-100">
+          <template x-for="tpl in templates" :key="tpl.node + '-' + tpl.vmid">
+            <tr class="hover:bg-gray-50">
+              <td class="px-4 py-3 text-sm font-mono text-gray-600" x-text="tpl.vmid"></td>
+              <td class="px-4 py-3 text-sm font-medium text-gray-900" x-text="tpl.name"></td>
+              <td class="px-4 py-3 text-sm text-gray-500" x-text="tpl.node"></td>
+              <td class="px-4 py-3 text-sm text-gray-600" x-text="tpl.cpu_cores + ' core' + (tpl.cpu_cores !== 1 ? 's' : '')"></td>
+              <td class="px-4 py-3 text-sm text-gray-600" x-text="fmtBytes(tpl.mem_total)"></td>
+              <td class="px-4 py-3">
+                <div class="flex items-center gap-2">
+                  <button @click="openDeploy(tpl)"
+                          class="text-xs px-2.5 py-1 rounded bg-green-600 hover:bg-green-700 text-white font-medium transition">
+                    Deploy
+                  </button>
+                  <button @click="confirmDelete(tpl)"
+                          class="text-xs px-2.5 py-1 rounded bg-red-600 hover:bg-red-700 text-white font-medium transition">
+                    Delete
+                  </button>
+                </div>
+              </td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </div>
   </div>
 
-  <!-- Detail modal -->
+  <!-- ═══════════════════════════════════════════════════════ TAB: VMs -->
+  <div x-show="activeTab === 'VMs'">
+
+    <!-- Node sub-tabs -->
+    <div class="flex gap-1 mb-4 border-b border-gray-200 overflow-x-auto">
+      <button @click="activeNode = ''"
+              :class="activeNode === '' ? 'border-b-2 border-blue-600 text-blue-600 font-semibold' : 'text-gray-500 hover:text-gray-700'"
+              class="px-4 py-2 text-sm whitespace-nowrap">
+        All nodes
+        <span class="ml-1 text-xs bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded-full" x-text="allResources.length"></span>
+      </button>
+      <template x-for="node in nodes" :key="node.node">
+        <button @click="activeNode = node.node"
+                :class="activeNode === node.node ? 'border-b-2 border-blue-600 text-blue-600 font-semibold' : 'text-gray-500 hover:text-gray-700'"
+                class="px-4 py-2 text-sm whitespace-nowrap flex items-center gap-1.5">
+          <span class="inline-block w-2 h-2 rounded-full"
+                :class="node.status === 'online' ? 'bg-green-500' : 'bg-red-400'"></span>
+          <span x-text="node.node"></span>
+          <span class="text-xs bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded-full"
+                x-text="allResources.filter(r => r.node === node.node).length"></span>
+        </button>
+      </template>
+    </div>
+
+    <!-- Filters -->
+    <div class="flex flex-wrap items-center gap-3 mb-4">
+      <input type="text" x-model="search" placeholder="Search by name, VMID, or tag…"
+             class="flex-1 min-w-48 border border-gray-300 rounded-lg px-3 py-1.5 text-sm
+                    focus:outline-none focus:ring-2 focus:ring-blue-500">
+      <select x-model="filterStatus"
+              class="border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+        <option value="">All statuses</option>
+        <option value="running">Running</option>
+        <option value="stopped">Stopped</option>
+      </select>
+      <select x-model="filterType"
+              class="border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+        <option value="">QEMU + LXC</option>
+        <option value="qemu">QEMU VMs</option>
+        <option value="lxc">LXC containers</option>
+      </select>
+    </div>
+
+    <!-- Resource table -->
+    <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+      <div x-show="loading && allResources.length === 0" class="p-12 text-center text-gray-400">
+        <svg class="mx-auto h-8 w-8 animate-spin mb-3 text-blue-400" fill="none" viewBox="0 0 24 24">
+          <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+          <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"></path>
+        </svg>
+        Loading Proxmox resources…
+      </div>
+      <div x-show="!loading && filteredResources.length === 0 && allResources.length === 0" class="p-12 text-center text-gray-400">
+        No VMs or containers found. Check your Proxmox credentials in Settings.
+      </div>
+      <div x-show="!loading && filteredResources.length === 0 && allResources.length > 0" class="p-12 text-center text-gray-400">
+        No resources match the current filters.
+      </div>
+
+      <table x-show="filteredResources.length > 0" class="min-w-full divide-y divide-gray-200">
+        <thead class="bg-gray-50">
+          <tr>
+            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">VMID</th>
+            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Name</th>
+            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Type</th>
+            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Node</th>
+            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">CPU %</th>
+            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Memory</th>
+            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+          </tr>
+        </thead>
+        <tbody class="bg-white divide-y divide-gray-100">
+          <template x-for="vm in filteredResources" :key="vm.node + '-' + vm.vmid">
+            <tr class="hover:bg-gray-50 transition-colors">
+              <td class="px-4 py-3">
+                <span class="inline-flex items-center gap-1.5 text-xs font-medium"
+                      :class="vm.is_running ? 'text-green-700' : 'text-gray-400'">
+                  <span class="inline-block w-2 h-2 rounded-full"
+                        :class="vm.is_running ? 'bg-green-500' : 'bg-gray-300'"></span>
+                  <span x-text="vm.status"></span>
+                </span>
+              </td>
+              <td class="px-4 py-3 text-sm font-mono text-gray-600" x-text="vm.vmid"></td>
+              <td class="px-4 py-3">
+                <button @click="openDetail(vm)"
+                        class="text-sm font-medium text-blue-600 hover:text-blue-800 text-left"
+                        x-text="vm.name || '—'"></button>
+                <div x-show="vm.tags" class="mt-0.5">
+                  <template x-for="tag in (vm.tags || '').split(';').filter(t => t.trim())" :key="tag">
+                    <span class="inline-block text-xs bg-indigo-50 text-indigo-600 px-1.5 py-0.5 rounded mr-1" x-text="tag.trim()"></span>
+                  </template>
+                </div>
+              </td>
+              <td class="px-4 py-3">
+                <span class="inline-block text-xs font-medium px-2 py-0.5 rounded-full"
+                      :class="vm.type === 'qemu' ? 'bg-purple-50 text-purple-700' : 'bg-teal-50 text-teal-700'"
+                      x-text="vm.type === 'qemu' ? 'QEMU' : 'LXC'"></span>
+              </td>
+              <td class="px-4 py-3 text-sm text-gray-500" x-text="vm.node"></td>
+              <td class="px-4 py-3 text-sm text-gray-600">
+                <span x-show="vm.is_running" x-text="vm.cpu_usage + '%'"></span>
+                <span x-show="!vm.is_running" class="text-gray-300">—</span>
+              </td>
+              <td class="px-4 py-3 text-sm text-gray-600">
+                <template x-if="vm.mem_total > 0">
+                  <span x-text="fmtBytes(vm.mem_used) + ' / ' + fmtBytes(vm.mem_total)"></span>
+                </template>
+                <span x-show="!vm.mem_total" class="text-gray-300">—</span>
+              </td>
+              <td class="px-4 py-3">
+                <div class="flex items-center gap-1.5">
+                  <template x-if="!vm.is_running">
+                    <button @click="powerOp(vm, 'start')" :disabled="pending.has(vm.node + '-' + vm.vmid)"
+                            class="text-xs px-2.5 py-1 rounded bg-green-600 hover:bg-green-700
+                                   disabled:opacity-40 text-white font-medium transition">
+                      <span x-text="pending.has(vm.node + '-' + vm.vmid) ? '…' : 'Start'"></span>
+                    </button>
+                  </template>
+                  <template x-if="vm.is_running">
+                    <button @click="powerOp(vm, 'shutdown')" :disabled="pending.has(vm.node + '-' + vm.vmid)"
+                            class="text-xs px-2.5 py-1 rounded bg-amber-500 hover:bg-amber-600
+                                   disabled:opacity-40 text-white font-medium transition">
+                      <span x-text="pending.has(vm.node + '-' + vm.vmid) ? '…' : 'Shutdown'"></span>
+                    </button>
+                  </template>
+                  <template x-if="vm.is_running">
+                    <button @click="powerOp(vm, 'stop')" :disabled="pending.has(vm.node + '-' + vm.vmid)"
+                            title="Force power off"
+                            class="text-xs px-2.5 py-1 rounded bg-red-600 hover:bg-red-700
+                                   disabled:opacity-40 text-white font-medium transition">
+                      <span x-text="pending.has(vm.node + '-' + vm.vmid) ? '…' : 'Force Off'"></span>
+                    </button>
+                  </template>
+                  <template x-if="vm.is_running && vm.type === 'qemu'">
+                    <button @click="powerOp(vm, 'reboot')" :disabled="pending.has(vm.node + '-' + vm.vmid)"
+                            class="text-xs px-2.5 py-1 rounded bg-gray-500 hover:bg-gray-600
+                                   disabled:opacity-40 text-white font-medium transition">
+                      <span x-text="pending.has(vm.node + '-' + vm.vmid) ? '…' : 'Reboot'"></span>
+                    </button>
+                  </template>
+                  <button @click="confirmDelete(vm)"
+                          class="text-xs px-2.5 py-1 rounded bg-red-100 hover:bg-red-200 text-red-700 font-medium transition">
+                    Delete
+                  </button>
+                </div>
+              </td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ MODAL: Import Image -->
+  <div x-show="importModal.open" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" @click.self="importModal.open = false">
+    <div class="bg-white rounded-xl shadow-xl w-full max-w-lg p-6">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-lg font-semibold text-gray-900">Import Cloud Image as Template</h2>
+        <button @click="importModal.open = false" class="text-gray-400 hover:text-gray-600">
+          <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+          </svg>
+        </button>
+      </div>
+
+      <div class="space-y-4">
+        <div class="p-3 bg-blue-50 rounded-lg text-sm text-blue-700">
+          <strong x-text="importModal.image?.name"></strong> will be downloaded to your Proxmox node and converted to a cloud-init template.
+        </div>
+
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Node <span class="text-red-500">*</span></label>
+          <select x-model="importModal.node" @change="loadStorage()" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <option value="">Select node…</option>
+            <template x-for="n in nodes" :key="n.node">
+              <option :value="n.node" x-text="n.node + ' (' + n.status + ')'"></option>
+            </template>
+          </select>
+        </div>
+
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Storage <span class="text-red-500">*</span></label>
+          <select x-model="importModal.storage" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <option value="">Select storage…</option>
+            <template x-for="s in importModal.storageList" :key="s.storage">
+              <option :value="s.storage" x-text="s.storage + ' (' + s.type + ', ' + fmtBytes(s.avail) + ' free)'"></option>
+            </template>
+          </select>
+          <p x-show="importModal.node && !importModal.storageList.length" class="text-xs text-gray-400 mt-1">Select a node to load storage options.</p>
+        </div>
+
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Template name <span class="text-red-500">*</span></label>
+          <input type="text" x-model="importModal.templateName" placeholder="e.g. ubuntu-2404-cloud"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+        </div>
+
+        <div class="grid grid-cols-3 gap-3">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">vCPUs</label>
+            <input type="number" x-model.number="importModal.vcpus" min="1" max="32"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Memory (MB)</label>
+            <input type="number" x-model.number="importModal.memoryMb" min="512" step="512"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Disk size</label>
+            <input type="text" x-model="importModal.diskSize" placeholder="20G"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+          </div>
+        </div>
+
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Default username</label>
+          <input type="text" x-model="importModal.username" placeholder="ubuntu"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+        </div>
+      </div>
+
+      <div class="flex justify-end gap-3 mt-6">
+        <button @click="importModal.open = false" class="px-4 py-2 text-sm text-gray-600 hover:text-gray-800">Cancel</button>
+        <button @click="submitImport()"
+                :disabled="!importModal.node || !importModal.storage || !importModal.templateName"
+                class="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-lg font-medium transition">
+          Start Import
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ MODAL: Deploy -->
+  <div x-show="deployModal.open" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" @click.self="deployModal.open = false">
+    <div class="bg-white rounded-xl shadow-xl w-full max-w-lg p-6">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-lg font-semibold text-gray-900">Deploy from Template</h2>
+        <button @click="deployModal.open = false" class="text-gray-400 hover:text-gray-600">
+          <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+          </svg>
+        </button>
+      </div>
+
+      <div class="space-y-4">
+        <div class="p-3 bg-gray-50 rounded-lg text-sm text-gray-700">
+          Cloning template <strong x-text="deployModal.template?.name"></strong>
+          (VMID <span class="font-mono" x-text="deployModal.template?.vmid"></span>)
+          on node <strong x-text="deployModal.template?.node"></strong>.
+        </div>
+
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">VM name <span class="text-red-500">*</span></label>
+          <input type="text" x-model="deployModal.vmName" placeholder="e.g. web-server-01"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+        </div>
+
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Username (cloud-init)</label>
+          <input type="text" x-model="deployModal.username" placeholder="leave blank to keep template default"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+        </div>
+
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">SSH public key (cloud-init)</label>
+          <textarea x-model="deployModal.sshKey" rows="3" placeholder="ssh-rsa AAAA…"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"></textarea>
+        </div>
+
+        <label class="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+          <input type="checkbox" x-model="deployModal.fullClone" class="rounded">
+          Full clone (independent disk copy)
+        </label>
+      </div>
+
+      <div class="flex justify-end gap-3 mt-6">
+        <button @click="deployModal.open = false" class="px-4 py-2 text-sm text-gray-600 hover:text-gray-800">Cancel</button>
+        <button @click="submitDeploy()"
+                :disabled="!deployModal.vmName"
+                class="px-4 py-2 text-sm bg-green-600 hover:bg-green-700 disabled:opacity-50 text-white rounded-lg font-medium transition">
+          Deploy VM
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ MODAL: VM Detail -->
   <div x-show="detailVm" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" @click.self="detailVm = null">
     <div class="bg-white rounded-xl shadow-xl w-full max-w-lg p-6">
       <div class="flex items-center justify-between mb-4">
@@ -205,7 +417,6 @@
           </svg>
         </button>
       </div>
-
       <dl class="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
         <div><dt class="text-gray-400">VMID</dt><dd class="font-mono" x-text="detailVm?.vmid"></dd></div>
         <div><dt class="text-gray-400">Node</dt><dd x-text="detailVm?.node"></dd></div>
@@ -220,18 +431,33 @@
           <dt class="text-gray-400">IP addresses</dt>
           <dd x-text="(detailVm?.ip_addresses || []).join(', ') || '— (guest agent may be required)'"></dd>
         </div>
-        <div x-show="detailVm?.description" class="col-span-2">
-          <dt class="text-gray-400">Description</dt>
-          <dd x-text="detailVm?.description"></dd>
-        </div>
-        <div x-show="detailVm?.tags" class="col-span-2">
-          <dt class="text-gray-400">Tags</dt>
-          <dd x-text="detailVm?.tags"></dd>
-        </div>
       </dl>
-
       <div x-show="detailLoading" class="mt-4 text-sm text-gray-400 text-center">Loading detail…</div>
     </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ MODAL: Delete confirm -->
+  <div x-show="deleteConfirm.open" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" @click.self="deleteConfirm.open = false">
+    <div class="bg-white rounded-xl shadow-xl w-full max-w-md p-6">
+      <h2 class="text-lg font-semibold text-gray-900 mb-2">Delete <span x-text="deleteConfirm.target?.name"></span>?</h2>
+      <p class="text-sm text-gray-500 mb-6">
+        VMID <span class="font-mono" x-text="deleteConfirm.target?.vmid"></span> on
+        <span x-text="deleteConfirm.target?.node"></span> will be stopped and permanently removed. This cannot be undone.
+      </p>
+      <div class="flex justify-end gap-3">
+        <button @click="deleteConfirm.open = false" class="px-4 py-2 text-sm text-gray-600 hover:text-gray-800">Cancel</button>
+        <button @click="submitDelete()"
+                class="px-4 py-2 text-sm bg-red-600 hover:bg-red-700 text-white rounded-lg font-medium transition">
+          Delete
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast -->
+  <div x-show="toast" x-transition
+       class="fixed bottom-6 right-6 z-50 px-4 py-3 rounded-lg shadow-lg text-sm font-medium text-white max-w-sm"
+       :class="toastType === 'error' ? 'bg-red-600' : 'bg-gray-900'" x-text="toast">
   </div>
 
 </div>
@@ -239,9 +465,12 @@
 <script>
 function proxmoxDashboard() {
   return {
+    activeTab: 'Cloud Images',
+    activeNode: '',
     nodes: [],
     allResources: [],
-    activeNode: '',
+    templates: [],
+    cloudImages: [],
     search: '',
     filterStatus: '',
     filterType: '',
@@ -251,8 +480,21 @@ function proxmoxDashboard() {
     pending: new Set(),
     detailVm: null,
     detailLoading: false,
+    toast: '',
+    toastType: 'success',
+    _toastTimer: null,
+
+    importModal: {
+      open: false, image: null, node: '', storage: '', storageList: [],
+      templateName: '', vcpus: 2, memoryMb: 2048, diskSize: '20G', username: 'ubuntu',
+    },
+    deployModal: {
+      open: false, template: null, vmName: '', username: '', sshKey: '', fullClone: true,
+    },
+    deleteConfirm: { open: false, target: null },
 
     async init() {
+      requireAuth();
       await this.refresh();
     },
 
@@ -260,12 +502,16 @@ function proxmoxDashboard() {
       this.loading = true;
       this.error = '';
       try {
-        const [nodes, resources] = await Promise.all([
+        const [nodes, resources, templates, cloudImages] = await Promise.all([
           API.get('/api/proxmox/nodes'),
           API.get('/api/proxmox/resources'),
+          API.get('/api/proxmox/templates'),
+          API.get('/api/proxmox/cloud-images'),
         ]);
         this.nodes = nodes;
         this.allResources = resources.filter(r => !r.template);
+        this.templates = templates;
+        this.cloudImages = cloudImages;
         this.lastLoaded = new Date();
       } catch (e) {
         this.error = 'Failed to load Proxmox resources: ' + (e.detail || e.message || String(e));
@@ -274,9 +520,17 @@ function proxmoxDashboard() {
       }
     },
 
+    headerSummary() {
+      const parts = [];
+      if (this.allResources.length) parts.push(`${this.allResources.length} VM${this.allResources.length !== 1 ? 's' : ''}`);
+      if (this.templates.length)    parts.push(`${this.templates.length} template${this.templates.length !== 1 ? 's' : ''}`);
+      if (this.lastLoaded) parts.push(`Loaded ${this.timeAgo(this.lastLoaded)}`);
+      return parts.join(' · ');
+    },
+
     get filteredResources() {
       let list = this.allResources;
-      if (this.activeNode) list = list.filter(r => r.node === this.activeNode);
+      if (this.activeNode)   list = list.filter(r => r.node === this.activeNode);
       if (this.filterStatus) list = list.filter(r => r.status === this.filterStatus);
       if (this.filterType)   list = list.filter(r => r.type === this.filterType);
       if (this.search) {
@@ -290,38 +544,114 @@ function proxmoxDashboard() {
       return list;
     },
 
+    // ── Cloud image helpers ────────────────────────────────────────────────────
+    distroIcon(d) {
+      return { ubuntu: 'U', debian: 'D', rocky: 'R', alma: 'A', centos: 'C' }[d] || '?';
+    },
+    distroClass(d) {
+      return {
+        ubuntu:  'bg-orange-100 text-orange-700',
+        debian:  'bg-red-100 text-red-700',
+        rocky:   'bg-green-100 text-green-700',
+        alma:    'bg-blue-100 text-blue-700',
+        centos:  'bg-purple-100 text-purple-700',
+      }[d] || 'bg-gray-100 text-gray-700';
+    },
+
+    // ── Import modal ───────────────────────────────────────────────────────────
+    openImport(img) {
+      this.importModal = {
+        open: true, image: img, node: '', storage: '', storageList: [],
+        templateName: img.id + '-template', vcpus: 2, memoryMb: 2048, diskSize: '20G', username: 'ubuntu',
+      };
+    },
+    async loadStorage() {
+      const node = this.importModal.node;
+      if (!node) return;
+      try {
+        this.importModal.storageList = await API.get(`/api/proxmox/storage?node=${encodeURIComponent(node)}`);
+      } catch (e) {
+        this.importModal.storageList = [];
+      }
+    },
+    async submitImport() {
+      const m = this.importModal;
+      try {
+        const res = await API.post('/api/proxmox/import-image', {
+          node: m.node, storage: m.storage,
+          image_url: m.image.url, image_filename: m.image.filename,
+          template_name: m.templateName, vcpus: m.vcpus,
+          memory_mb: m.memoryMb, disk_size: m.diskSize, username: m.username,
+        });
+        m.open = false;
+        window.location.href = '/jobs/' + res.job_id;
+      } catch (e) {
+        this.showToast('Import failed: ' + (e.detail || e.message), 'error');
+      }
+    },
+
+    // ── Deploy modal ───────────────────────────────────────────────────────────
+    openDeploy(tpl) {
+      this.deployModal = { open: true, template: tpl, vmName: '', username: '', sshKey: '', fullClone: true };
+    },
+    async submitDeploy() {
+      const m = this.deployModal;
+      try {
+        const res = await API.post('/api/proxmox/deploy', {
+          node: m.template.node, template_vmid: m.template.vmid,
+          vm_name: m.vmName, username: m.username,
+          ssh_public_key: m.sshKey, full_clone: m.fullClone,
+        });
+        m.open = false;
+        window.location.href = '/jobs/' + res.job_id;
+      } catch (e) {
+        this.showToast('Deploy failed: ' + (e.detail || e.message), 'error');
+      }
+    },
+
+    // ── Delete ─────────────────────────────────────────────────────────────────
+    confirmDelete(vm) {
+      this.deleteConfirm = { open: true, target: vm };
+    },
+    async submitDelete() {
+      const t = this.deleteConfirm.target;
+      try {
+        const res = await API.request('DELETE', `/api/proxmox/vms/${t.node}/${t.vmid}?vm_type=${t.type}`);
+        this.deleteConfirm.open = false;
+        window.location.href = '/jobs/' + res.job_id;
+      } catch (e) {
+        this.showToast('Delete failed: ' + (e.detail || e.message), 'error');
+        this.deleteConfirm.open = false;
+      }
+    },
+
+    // ── Power ops ──────────────────────────────────────────────────────────────
     async powerOp(vm, op) {
       const key = vm.node + '-' + vm.vmid;
       this.pending = new Set([...this.pending, key]);
       try {
         const res = await API.post('/api/proxmox/power/' + op, {
-          node: vm.node,
-          vmid: vm.vmid,
-          vm_type: vm.type,
-          name: vm.name,
+          node: vm.node, vmid: vm.vmid, vm_type: vm.type, name: vm.name,
         });
-        if (res.job_id) {
-          window.location.href = '/jobs/' + res.job_id;
-        }
+        if (res.job_id) window.location.href = '/jobs/' + res.job_id;
       } catch (e) {
-        this.error = 'Operation failed: ' + (e.detail || e.message || String(e));
+        this.showToast('Operation failed: ' + (e.detail || e.message), 'error');
         this.pending = new Set([...this.pending].filter(k => k !== key));
       }
     },
 
+    // ── VM detail ──────────────────────────────────────────────────────────────
     async openDetail(vm) {
       this.detailVm = { ...vm };
       this.detailLoading = true;
       try {
-        const detail = await API.get(`/api/proxmox/nodes/${vm.node}/${vm.type}/${vm.vmid}`);
-        this.detailVm = detail;
-      } catch (e) {
-        // keep the row data we already have
-      } finally {
+        this.detailVm = await API.get(`/api/proxmox/nodes/${vm.node}/${vm.type}/${vm.vmid}`);
+      } catch { /* keep row data */ } finally {
         this.detailLoading = false;
       }
     },
 
+    // ── Helpers ────────────────────────────────────────────────────────────────
     fmtBytes(bytes) {
       if (!bytes) return '0 B';
       const units = ['B', 'KB', 'MB', 'GB', 'TB'];
@@ -329,13 +659,17 @@ function proxmoxDashboard() {
       while (bytes >= 1024 && i < units.length - 1) { bytes /= 1024; i++; }
       return bytes.toFixed(i === 0 ? 0 : 1) + ' ' + units[i];
     },
-
     timeAgo(d) {
       if (!d) return '';
       const secs = Math.floor((new Date() - new Date(d)) / 1000);
-      if (secs < 60)  return 'just now';
+      if (secs < 60)   return 'just now';
       if (secs < 3600) return Math.floor(secs / 60) + 'm ago';
       return Math.floor(secs / 3600) + 'h ago';
+    },
+    showToast(msg, type = 'success') {
+      clearTimeout(this._toastTimer);
+      this.toast = msg; this.toastType = type;
+      this._toastTimer = setTimeout(() => { this.toast = ''; }, 4000);
     },
   };
 }

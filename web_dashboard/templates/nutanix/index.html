@@ -10,11 +10,6 @@
       <h1 class="text-2xl font-bold text-gray-900">Nutanix AHV</h1>
       <p class="text-sm text-gray-500 mt-1">
         <span class="font-mono">{{ nutanix_host }}</span>
-        <span x-show="allVms.length > 0" class="ml-2">·
-          <span x-text="filteredVms.length + ' VM' + (filteredVms.length !== 1 ? 's' : '')"></span>
-          <span x-show="filteredVms.length !== allVms.length"
-                x-text="' of ' + allVms.length + ' total'"></span>
-        </span>
         <span x-show="lastLoaded" class="ml-2 text-xs text-gray-400"
               x-text="'· Loaded ' + timeAgo(lastLoaded)"></span>
       </p>
@@ -33,167 +28,354 @@
   <!-- Error banner -->
   <div x-show="error" class="mb-4 p-4 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700" x-text="error"></div>
 
-  <!-- Filters -->
-  <div class="flex items-center gap-3 mb-4">
-    <div class="relative">
-      <svg class="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0"/>
-      </svg>
-      <input type="text" x-model="search" placeholder="Search VMs…"
-             class="pl-9 pr-4 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 w-56">
-    </div>
-    <select x-model="stateFilter"
-            class="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
-      <option value="">All states</option>
-      <option value="ON">Running</option>
-      <option value="OFF">Off</option>
-      <option value="PAUSED">Paused</option>
-      <option value="SUSPENDED">Suspended</option>
-    </select>
-    <select x-model="clusterFilter" x-show="clusters.length > 1"
-            class="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
-      <option value="">All clusters</option>
-      <template x-for="c in clusters" :key="c">
-        <option :value="c" x-text="c"></option>
+  <!-- Main tabs -->
+  <div class="flex gap-1 mb-6 border-b border-gray-200">
+    <template x-for="tab in ['Cloud Images', 'Images', 'VMs']" :key="tab">
+      <button @click="activeTab = tab"
+              :class="activeTab === tab
+                ? 'border-b-2 border-blue-600 text-blue-600 font-semibold'
+                : 'text-gray-500 hover:text-gray-700'"
+              class="px-4 py-2 text-sm whitespace-nowrap -mb-px">
+        <span x-text="tab"></span>
+        <span x-show="tab === 'Images'" class="ml-1 text-xs bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded-full" x-text="allImages.length"></span>
+        <span x-show="tab === 'VMs'" class="ml-1 text-xs bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded-full" x-text="allVms.length"></span>
+      </button>
+    </template>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ TAB: Cloud Images -->
+  <div x-show="activeTab === 'Cloud Images'">
+    <p class="text-sm text-gray-500 mb-4">Select a cloud image to import into the Nutanix Image Service. Once complete it will appear in the Images tab ready to deploy.</p>
+
+    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+      <template x-for="img in cloudImages" :key="img.id">
+        <div class="bg-white border border-gray-200 rounded-xl p-4 shadow-sm flex flex-col gap-3">
+          <div class="flex items-center gap-3">
+            <span class="inline-flex items-center justify-center w-10 h-10 rounded-lg text-lg font-bold"
+                  :class="distroClass(img.distro)" x-text="distroIcon(img.distro)"></span>
+            <div class="flex-1 min-w-0">
+              <p class="text-sm font-semibold text-gray-900 truncate" x-text="img.name"></p>
+              <p class="text-xs text-gray-400 truncate font-mono" x-text="img.filename"></p>
+            </div>
+          </div>
+          <button @click="openImport(img)"
+                  class="w-full text-sm font-medium bg-blue-600 hover:bg-blue-700 text-white py-1.5 rounded-lg transition">
+            Import to Image Service
+          </button>
+        </div>
       </template>
-    </select>
-    <div class="ml-auto flex items-center gap-3 text-xs text-gray-500">
-      <span class="flex items-center gap-1.5">
-        <span class="w-2 h-2 rounded-full bg-green-500 inline-block"></span>
-        <span x-text="allVms.filter(v => v.power_state === 'ON').length + ' running'"></span>
-      </span>
-      <span class="flex items-center gap-1.5">
-        <span class="w-2 h-2 rounded-full bg-gray-400 inline-block"></span>
-        <span x-text="allVms.filter(v => v.power_state === 'OFF').length + ' off'"></span>
-      </span>
     </div>
   </div>
 
-  <!-- VM Table -->
-  <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-    <div x-show="loading && allVms.length === 0" class="py-16 text-center text-gray-400 text-sm">
+  <!-- ═══════════════════════════════════════════════════════ TAB: Images -->
+  <div x-show="activeTab === 'Images'">
+    <div x-show="loading && allImages.length === 0" class="py-16 text-center text-gray-400 text-sm">
       <svg class="animate-spin h-6 w-6 mx-auto mb-3 text-blue-500" fill="none" viewBox="0 0 24 24">
         <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
         <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"></path>
       </svg>
-      Connecting to Prism Central…
+      Loading Image Service…
     </div>
-    <div x-show="!loading && allVms.length === 0 && !error"
-         class="py-16 text-center text-gray-400 text-sm">No VMs found.</div>
+    <div x-show="!loading && allImages.length === 0 && !error"
+         class="py-16 text-center text-gray-400 text-sm">No images found in the Nutanix Image Service.</div>
 
-    <table x-show="allVms.length > 0" class="w-full text-sm">
-      <thead class="bg-gray-50 border-b border-gray-200">
-        <tr>
-          <th class="w-8 px-4 py-3"></th>
-          <th class="text-left px-4 py-3 font-medium text-gray-500">Name</th>
-          <th class="text-left px-4 py-3 font-medium text-gray-500">State</th>
-          <th class="text-left px-4 py-3 font-medium text-gray-500">Cluster</th>
-          <th class="text-left px-4 py-3 font-medium text-gray-500">vCPUs</th>
-          <th class="text-left px-4 py-3 font-medium text-gray-500">Memory</th>
-          <th class="text-left px-4 py-3 font-medium text-gray-500">IP</th>
-          <th class="text-right px-4 py-3 font-medium text-gray-500">Actions</th>
-        </tr>
-      </thead>
-      <tbody class="divide-y divide-gray-100">
-        <template x-for="vm in filteredVms" :key="vm.uuid">
-          <tr class="hover:bg-gray-50 transition-colors">
-
-            <!-- State dot -->
-            <td class="px-4 py-3">
-              <span class="block w-2.5 h-2.5 rounded-full" :class="stateDot(vm.power_state)"></span>
-            </td>
-
-            <!-- Name + NGT warning -->
-            <td class="px-4 py-3 max-w-xs">
-              <button @click="openDetail(vm)"
-                      class="font-medium text-gray-900 hover:text-blue-600 text-left truncate block w-full"
-                      x-text="vm.name"></button>
-              <span x-show="vm.is_running && !vm.ngt_reachable"
-                    class="text-xs text-orange-500 mt-0.5 block"
-                    :title="vm.ngt_enabled ? 'NGT not reachable' : 'Nutanix Guest Tools not installed'">
-                ⚠ <span x-text="vm.ngt_enabled ? 'NGT unreachable' : 'No NGT'"></span>
-              </span>
-            </td>
-
-            <!-- State -->
-            <td class="px-4 py-3 text-gray-600 whitespace-nowrap" x-text="stateLabel(vm.power_state)"></td>
-
-            <!-- Cluster -->
-            <td class="px-4 py-3 text-gray-500 text-xs" x-text="vm.cluster || '—'"></td>
-
-            <!-- vCPUs -->
-            <td class="px-4 py-3 text-gray-600" x-text="vm.vcpus || '—'"></td>
-
-            <!-- Memory -->
-            <td class="px-4 py-3 text-gray-600 whitespace-nowrap" x-text="fmtMib(vm.mem_mib)"></td>
-
-            <!-- IP -->
-            <td class="px-4 py-3 text-gray-600 font-mono text-xs"
-                x-text="(vm.ip_addresses && vm.ip_addresses[0]) || '—'"></td>
-
-            <!-- Actions -->
-            <td class="px-4 py-3">
-              <div class="flex items-center gap-1.5 justify-end flex-wrap">
-
-                <!-- OFF: Power On -->
-                <template x-if="vm.power_state === 'OFF'">
-                  <button @click="powerOp(vm, 'start')" :disabled="vm._busy"
-                          class="px-2.5 py-1 text-xs font-medium rounded bg-green-600 hover:bg-green-700 text-white disabled:opacity-50 transition-colors">
-                    Power On
-                  </button>
-                </template>
-
-                <!-- PAUSED or SUSPENDED: Resume + Force Off -->
-                <template x-if="['PAUSED','SUSPENDED'].includes(vm.power_state)">
-                  <div class="flex items-center gap-1.5">
-                    <button @click="powerOp(vm, 'resume')" :disabled="vm._busy"
-                            class="px-2.5 py-1 text-xs font-medium rounded border border-green-600 text-green-600 hover:bg-green-50 disabled:opacity-50 transition-colors">
-                      Resume
-                    </button>
-                    <button @click="powerOp(vm, 'stop')" :disabled="vm._busy"
-                            class="px-2.5 py-1 text-xs font-medium rounded bg-red-600 hover:bg-red-700 text-white disabled:opacity-50 transition-colors">
-                      Force Off
-                    </button>
-                  </div>
-                </template>
-
-                <!-- ON: Shutdown + Force Off + Reboot + Pause -->
-                <template x-if="vm.power_state === 'ON'">
-                  <div class="flex items-center gap-1.5">
-                    <button @click="powerOp(vm, 'shutdown')"
-                            :disabled="vm._busy || !vm.ngt_reachable"
-                            :title="vm.ngt_reachable ? 'Graceful ACPI shutdown' : 'Requires Nutanix Guest Tools'"
-                            class="px-2.5 py-1 text-xs font-medium rounded bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-50 transition-colors">
-                      Shutdown
-                    </button>
-                    <button @click="powerOp(vm, 'stop')" :disabled="vm._busy"
-                            class="px-2.5 py-1 text-xs font-medium rounded bg-red-600 hover:bg-red-700 text-white disabled:opacity-50 transition-colors">
-                      Force Off
-                    </button>
-                    <button @click="powerOp(vm, 'reboot')"
-                            :disabled="vm._busy || !vm.ngt_reachable"
-                            :title="vm.ngt_reachable ? 'Graceful ACPI reboot' : 'Requires Nutanix Guest Tools'"
-                            class="px-2.5 py-1 text-xs font-medium rounded bg-orange-500 hover:bg-orange-600 text-white disabled:opacity-50 transition-colors">
-                      Reboot
-                    </button>
-                    <button @click="powerOp(vm, 'reset')" :disabled="vm._busy"
-                            title="Hard reset"
-                            class="px-2.5 py-1 text-xs font-medium rounded bg-gray-200 hover:bg-gray-300 text-gray-700 disabled:opacity-50 transition-colors">
-                      Reset
-                    </button>
-                  </div>
-                </template>
-
-              </div>
-            </td>
+    <div x-show="allImages.length > 0" class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+      <table class="w-full text-sm">
+        <thead class="bg-gray-50 border-b border-gray-200">
+          <tr>
+            <th class="text-left px-4 py-3 font-medium text-gray-500">Name</th>
+            <th class="text-left px-4 py-3 font-medium text-gray-500">State</th>
+            <th class="text-left px-4 py-3 font-medium text-gray-500">Type</th>
+            <th class="text-left px-4 py-3 font-medium text-gray-500">Size</th>
+            <th class="text-right px-4 py-3 font-medium text-gray-500">Actions</th>
           </tr>
-        </template>
-      </tbody>
-    </table>
+        </thead>
+        <tbody class="divide-y divide-gray-100">
+          <template x-for="img in allImages" :key="img.uuid">
+            <tr class="hover:bg-gray-50 transition-colors">
+              <td class="px-4 py-3 font-medium text-gray-900" x-text="img.name"></td>
+              <td class="px-4 py-3">
+                <span class="inline-flex items-center gap-1.5 text-xs font-medium"
+                      :class="img.state === 'COMPLETE' ? 'text-green-700' : 'text-amber-600'">
+                  <span class="w-2 h-2 rounded-full inline-block"
+                        :class="img.state === 'COMPLETE' ? 'bg-green-500' : 'bg-amber-400'"></span>
+                  <span x-text="img.state"></span>
+                </span>
+              </td>
+              <td class="px-4 py-3 text-gray-500 text-xs" x-text="img.image_type || '—'"></td>
+              <td class="px-4 py-3 text-gray-600" x-text="img.size_bytes ? fmtBytes(img.size_bytes) : '—'"></td>
+              <td class="px-4 py-3">
+                <div class="flex items-center gap-2 justify-end">
+                  <button @click="openDeploy(img)"
+                          :disabled="img.state !== 'COMPLETE'"
+                          class="text-xs px-2.5 py-1 rounded bg-green-600 hover:bg-green-700 disabled:opacity-40
+                                 text-white font-medium transition">
+                    Deploy VM
+                  </button>
+                  <button @click="confirmDeleteImage(img)"
+                          class="text-xs px-2.5 py-1 rounded bg-red-600 hover:bg-red-700 text-white font-medium transition">
+                    Delete
+                  </button>
+                </div>
+              </td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </div>
   </div>
 
+  <!-- ═══════════════════════════════════════════════════════ TAB: VMs -->
+  <div x-show="activeTab === 'VMs'">
 
-  <!-- Detail Modal -->
+    <!-- Filters -->
+    <div class="flex items-center gap-3 mb-4">
+      <div class="relative">
+        <svg class="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0"/>
+        </svg>
+        <input type="text" x-model="search" placeholder="Search VMs…"
+               class="pl-9 pr-4 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 w-56">
+      </div>
+      <select x-model="stateFilter"
+              class="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+        <option value="">All states</option>
+        <option value="ON">Running</option>
+        <option value="OFF">Off</option>
+        <option value="PAUSED">Paused</option>
+      </select>
+      <select x-model="clusterFilter" x-show="clusters.length > 1"
+              class="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+        <option value="">All clusters</option>
+        <template x-for="c in clusters" :key="c">
+          <option :value="c" x-text="c"></option>
+        </template>
+      </select>
+      <div class="ml-auto flex items-center gap-3 text-xs text-gray-500">
+        <span class="flex items-center gap-1.5">
+          <span class="w-2 h-2 rounded-full bg-green-500 inline-block"></span>
+          <span x-text="allVms.filter(v => v.power_state === 'ON').length + ' running'"></span>
+        </span>
+        <span class="flex items-center gap-1.5">
+          <span class="w-2 h-2 rounded-full bg-gray-400 inline-block"></span>
+          <span x-text="allVms.filter(v => v.power_state === 'OFF').length + ' off'"></span>
+        </span>
+      </div>
+    </div>
+
+    <!-- VM Table -->
+    <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+      <div x-show="loading && allVms.length === 0" class="py-16 text-center text-gray-400 text-sm">
+        <svg class="animate-spin h-6 w-6 mx-auto mb-3 text-blue-500" fill="none" viewBox="0 0 24 24">
+          <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+          <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"></path>
+        </svg>
+        Connecting to Prism Central…
+      </div>
+      <div x-show="!loading && allVms.length === 0 && !error"
+           class="py-16 text-center text-gray-400 text-sm">No VMs found.</div>
+
+      <table x-show="allVms.length > 0" class="w-full text-sm">
+        <thead class="bg-gray-50 border-b border-gray-200">
+          <tr>
+            <th class="w-8 px-4 py-3"></th>
+            <th class="text-left px-4 py-3 font-medium text-gray-500">Name</th>
+            <th class="text-left px-4 py-3 font-medium text-gray-500">State</th>
+            <th class="text-left px-4 py-3 font-medium text-gray-500">Cluster</th>
+            <th class="text-left px-4 py-3 font-medium text-gray-500">vCPUs</th>
+            <th class="text-left px-4 py-3 font-medium text-gray-500">Memory</th>
+            <th class="text-left px-4 py-3 font-medium text-gray-500">IP</th>
+            <th class="text-right px-4 py-3 font-medium text-gray-500">Actions</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-100">
+          <template x-for="vm in filteredVms" :key="vm.uuid">
+            <tr class="hover:bg-gray-50 transition-colors">
+
+              <td class="px-4 py-3">
+                <span class="block w-2.5 h-2.5 rounded-full" :class="stateDot(vm.power_state)"></span>
+              </td>
+
+              <td class="px-4 py-3 max-w-xs">
+                <button @click="openDetail(vm)"
+                        class="font-medium text-gray-900 hover:text-blue-600 text-left truncate block w-full"
+                        x-text="vm.name"></button>
+                <span x-show="vm.is_running && !vm.ngt_reachable"
+                      class="text-xs text-orange-500 mt-0.5 block"
+                      :title="vm.ngt_enabled ? 'NGT not reachable' : 'Nutanix Guest Tools not installed'">
+                  ⚠ <span x-text="vm.ngt_enabled ? 'NGT unreachable' : 'No NGT'"></span>
+                </span>
+              </td>
+
+              <td class="px-4 py-3 text-gray-600 whitespace-nowrap" x-text="stateLabel(vm.power_state)"></td>
+              <td class="px-4 py-3 text-gray-500 text-xs" x-text="vm.cluster || '—'"></td>
+              <td class="px-4 py-3 text-gray-600" x-text="vm.vcpus || '—'"></td>
+              <td class="px-4 py-3 text-gray-600 whitespace-nowrap" x-text="fmtMib(vm.mem_mib)"></td>
+              <td class="px-4 py-3 text-gray-600 font-mono text-xs"
+                  x-text="(vm.ip_addresses && vm.ip_addresses[0]) || '—'"></td>
+
+              <td class="px-4 py-3">
+                <div class="flex items-center gap-1.5 justify-end flex-wrap">
+                  <template x-if="vm.power_state === 'OFF'">
+                    <button @click="powerOp(vm, 'start')" :disabled="vm._busy"
+                            class="px-2.5 py-1 text-xs font-medium rounded bg-green-600 hover:bg-green-700 text-white disabled:opacity-50 transition-colors">
+                      Power On
+                    </button>
+                  </template>
+                  <template x-if="['PAUSED','SUSPENDED'].includes(vm.power_state)">
+                    <div class="flex items-center gap-1.5">
+                      <button @click="powerOp(vm, 'resume')" :disabled="vm._busy"
+                              class="px-2.5 py-1 text-xs font-medium rounded border border-green-600 text-green-600 hover:bg-green-50 disabled:opacity-50">
+                        Resume
+                      </button>
+                      <button @click="powerOp(vm, 'stop')" :disabled="vm._busy"
+                              class="px-2.5 py-1 text-xs font-medium rounded bg-red-600 hover:bg-red-700 text-white disabled:opacity-50">
+                        Force Off
+                      </button>
+                    </div>
+                  </template>
+                  <template x-if="vm.power_state === 'ON'">
+                    <div class="flex items-center gap-1.5">
+                      <button @click="powerOp(vm, 'shutdown')"
+                              :disabled="vm._busy || !vm.ngt_reachable"
+                              :title="vm.ngt_reachable ? 'Graceful ACPI shutdown' : 'Requires Nutanix Guest Tools'"
+                              class="px-2.5 py-1 text-xs font-medium rounded bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-50">
+                        Shutdown
+                      </button>
+                      <button @click="powerOp(vm, 'stop')" :disabled="vm._busy"
+                              class="px-2.5 py-1 text-xs font-medium rounded bg-red-600 hover:bg-red-700 text-white disabled:opacity-50">
+                        Force Off
+                      </button>
+                      <button @click="powerOp(vm, 'reboot')"
+                              :disabled="vm._busy || !vm.ngt_reachable"
+                              :title="vm.ngt_reachable ? 'Graceful ACPI reboot' : 'Requires Nutanix Guest Tools'"
+                              class="px-2.5 py-1 text-xs font-medium rounded bg-orange-500 hover:bg-orange-600 text-white disabled:opacity-50">
+                        Reboot
+                      </button>
+                    </div>
+                  </template>
+                  <button @click="confirmDeleteVm(vm)"
+                          class="px-2.5 py-1 text-xs font-medium rounded bg-red-100 hover:bg-red-200 text-red-700 transition-colors">
+                    Delete
+                  </button>
+                </div>
+              </td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ MODAL: Import Image -->
+  <div x-show="importModal.open" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" @click.self="importModal.open = false">
+    <div class="bg-white rounded-xl shadow-xl w-full max-w-md p-6">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-lg font-semibold text-gray-900">Import Cloud Image</h2>
+        <button @click="importModal.open = false" class="text-gray-400 hover:text-gray-600">
+          <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+          </svg>
+        </button>
+      </div>
+
+      <div class="space-y-4">
+        <div class="p-3 bg-blue-50 rounded-lg text-sm text-blue-700">
+          <strong x-text="importModal.image?.name"></strong> will be pulled from its public URL directly into the Nutanix Image Service.
+        </div>
+
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Image name in Nutanix <span class="text-red-500">*</span></label>
+          <input type="text" x-model="importModal.imageName"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+        </div>
+      </div>
+
+      <div class="flex justify-end gap-3 mt-6">
+        <button @click="importModal.open = false" class="px-4 py-2 text-sm text-gray-600 hover:text-gray-800">Cancel</button>
+        <button @click="submitImport()"
+                :disabled="!importModal.imageName"
+                class="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-lg font-medium transition">
+          Start Import
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ MODAL: Deploy VM -->
+  <div x-show="deployModal.open" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" @click.self="deployModal.open = false">
+    <div class="bg-white rounded-xl shadow-xl w-full max-w-lg p-6">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-lg font-semibold text-gray-900">Deploy VM from Image</h2>
+        <button @click="deployModal.open = false" class="text-gray-400 hover:text-gray-600">
+          <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+          </svg>
+        </button>
+      </div>
+
+      <div class="space-y-4">
+        <div class="p-3 bg-gray-50 rounded-lg text-sm text-gray-700">
+          Deploying from image <strong x-text="deployModal.image?.name"></strong>.
+        </div>
+
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">VM name <span class="text-red-500">*</span></label>
+          <input type="text" x-model="deployModal.vmName" placeholder="e.g. web-server-01"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+        </div>
+
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Cluster <span class="text-red-500">*</span></label>
+          <select x-model="deployModal.clusterUuid" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <option value="">Select cluster…</option>
+            <template x-for="c in clusters_list" :key="c.uuid">
+              <option :value="c.uuid" x-text="c.name"></option>
+            </template>
+          </select>
+        </div>
+
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Subnet <span class="text-red-500">*</span></label>
+          <select x-model="deployModal.subnetUuid" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <option value="">Select subnet…</option>
+            <template x-for="s in filteredSubnets" :key="s.uuid">
+              <option :value="s.uuid" x-text="s.name + (s.cluster_name ? ' (' + s.cluster_name + ')' : '')"></option>
+            </template>
+          </select>
+        </div>
+
+        <div class="grid grid-cols-3 gap-3">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">vCPUs</label>
+            <input type="number" x-model.number="deployModal.vcpus" min="1" max="32"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Memory (MiB)</label>
+            <input type="number" x-model.number="deployModal.memoryMib" min="512" step="512"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Disk (MiB)</label>
+            <input type="number" x-model.number="deployModal.diskMib" min="5120" step="1024"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+          </div>
+        </div>
+      </div>
+
+      <div class="flex justify-end gap-3 mt-6">
+        <button @click="deployModal.open = false" class="px-4 py-2 text-sm text-gray-600 hover:text-gray-800">Cancel</button>
+        <button @click="submitDeploy()"
+                :disabled="!deployModal.vmName || !deployModal.clusterUuid || !deployModal.subnetUuid"
+                class="px-4 py-2 text-sm bg-green-600 hover:bg-green-700 disabled:opacity-50 text-white rounded-lg font-medium transition">
+          Deploy VM
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ MODAL: VM Detail -->
   <div x-show="detail !== null" class="fixed inset-0 z-50 flex items-center justify-center p-4"
        style="background:rgba(0,0,0,.45)">
     <div class="bg-white rounded-xl shadow-2xl w-full max-w-lg" @click.outside="detail = null" x-show="detail !== null">
@@ -228,16 +410,11 @@
           </div>
           <div class="col-span-2">
             <p class="text-xs font-medium text-gray-400 uppercase tracking-wide mb-1">Nutanix Guest Tools</p>
-            <p class="font-medium" :class="ngtColor(detail)"
-               x-text="ngtLabel(detail)"></p>
+            <p class="font-medium" :class="ngtColor(detail)" x-text="ngtLabel(detail)"></p>
           </div>
           <div class="col-span-2" x-show="detail && detail.ip_addresses && detail.ip_addresses.length > 0">
             <p class="text-xs font-medium text-gray-400 uppercase tracking-wide mb-1">IP Addresses</p>
             <p class="font-mono" x-text="detail ? detail.ip_addresses.join(', ') : ''"></p>
-          </div>
-          <div class="col-span-2" x-show="detail && detail.description">
-            <p class="text-xs font-medium text-gray-400 uppercase tracking-wide mb-1">Description</p>
-            <p class="text-gray-700" x-text="detail ? detail.description : ''"></p>
           </div>
           <div class="col-span-2">
             <p class="text-xs font-medium text-gray-400 uppercase tracking-wide mb-1">UUID</p>
@@ -247,6 +424,21 @@
       </div>
       <div class="px-6 py-4 border-t border-gray-200 flex justify-end">
         <button @click="detail = null" class="text-sm text-gray-600 hover:text-gray-800">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ MODAL: Delete confirm -->
+  <div x-show="deleteConfirm.open" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" @click.self="deleteConfirm.open = false">
+    <div class="bg-white rounded-xl shadow-xl w-full max-w-md p-6">
+      <h2 class="text-lg font-semibold text-gray-900 mb-2">Delete <span x-text="deleteConfirm.name"></span>?</h2>
+      <p class="text-sm text-gray-500 mb-6" x-text="deleteConfirm.message"></p>
+      <div class="flex justify-end gap-3">
+        <button @click="deleteConfirm.open = false" class="px-4 py-2 text-sm text-gray-600 hover:text-gray-800">Cancel</button>
+        <button @click="submitDelete()"
+                class="px-4 py-2 text-sm bg-red-600 hover:bg-red-700 text-white rounded-lg font-medium transition">
+          Delete
+        </button>
       </div>
     </div>
   </div>
@@ -262,7 +454,12 @@
 <script>
 function nutanixDashboard() {
   return {
+    activeTab: 'Cloud Images',
+    cloudImages: [],
+    allImages: [],
     allVms: [],
+    clusters_list: [],
+    subnets_list: [],
     loading: false,
     error: '',
     search: '',
@@ -274,8 +471,20 @@ function nutanixDashboard() {
     toastType: 'success',
     _toastTimer: null,
 
+    importModal: { open: false, image: null, imageName: '' },
+    deployModal: {
+      open: false, image: null, vmName: '', clusterUuid: '', subnetUuid: '',
+      vcpus: 2, memoryMib: 4096, diskMib: 40960,
+    },
+    deleteConfirm: { open: false, name: '', message: '', action: null },
+
     get clusters() {
       return [...new Set(this.allVms.map(v => v.cluster).filter(Boolean))].sort();
+    },
+
+    get filteredSubnets() {
+      if (!this.deployModal.clusterUuid) return this.subnets_list;
+      return this.subnets_list.filter(s => s.cluster_uuid === this.deployModal.clusterUuid);
     },
 
     get filteredVms() {
@@ -300,8 +509,18 @@ function nutanixDashboard() {
       this.loading = true;
       this.error = '';
       try {
-        const data = await API.get('/api/nutanix/vms');
-        this.allVms = (data || []).map(vm => ({ ...vm, _busy: false }));
+        const [cloudImages, images, vms, clusters, subnets] = await Promise.all([
+          API.get('/api/nutanix/cloud-images'),
+          API.get('/api/nutanix/images'),
+          API.get('/api/nutanix/vms'),
+          API.get('/api/nutanix/clusters'),
+          API.get('/api/nutanix/subnets'),
+        ]);
+        this.cloudImages   = cloudImages;
+        this.allImages     = images || [];
+        this.allVms        = (vms || []).map(vm => ({ ...vm, _busy: false }));
+        this.clusters_list = clusters || [];
+        this.subnets_list  = subnets || [];
         this.lastLoaded = new Date();
       } catch (e) {
         this.error = e.message || 'Failed to connect to Prism Central.';
@@ -310,6 +529,104 @@ function nutanixDashboard() {
       }
     },
 
+    // ── Cloud image helpers ────────────────────────────────────────────────────
+    distroIcon(d) {
+      return { ubuntu: 'U', debian: 'D', rocky: 'R', alma: 'A', centos: 'C' }[d] || '?';
+    },
+    distroClass(d) {
+      return {
+        ubuntu:  'bg-orange-100 text-orange-700',
+        debian:  'bg-red-100 text-red-700',
+        rocky:   'bg-green-100 text-green-700',
+        alma:    'bg-blue-100 text-blue-700',
+        centos:  'bg-purple-100 text-purple-700',
+      }[d] || 'bg-gray-100 text-gray-700';
+    },
+
+    // ── Import modal ───────────────────────────────────────────────────────────
+    openImport(img) {
+      this.importModal = { open: true, image: img, imageName: img.name };
+    },
+    async submitImport() {
+      const m = this.importModal;
+      try {
+        const res = await API.post('/api/nutanix/import-image', {
+          name: m.imageName,
+          source_uri: m.image.url,
+        });
+        m.open = false;
+        window.location.href = '/jobs/' + res.job_id;
+      } catch (e) {
+        this.showToast('Import failed: ' + (e.detail || e.message), 'error');
+      }
+    },
+
+    // ── Deploy modal ───────────────────────────────────────────────────────────
+    openDeploy(img) {
+      this.deployModal = {
+        open: true, image: img, vmName: '', clusterUuid: '', subnetUuid: '',
+        vcpus: 2, memoryMib: 4096, diskMib: 40960,
+      };
+    },
+    async submitDeploy() {
+      const m = this.deployModal;
+      try {
+        const res = await API.post('/api/nutanix/deploy', {
+          vm_name: m.vmName,
+          image_uuid: m.image.uuid,
+          cluster_uuid: m.clusterUuid,
+          subnet_uuid: m.subnetUuid,
+          vcpus: m.vcpus,
+          num_sockets: 1,
+          memory_mib: m.memoryMib,
+          disk_size_mib: m.diskMib,
+        });
+        m.open = false;
+        window.location.href = '/jobs/' + res.job_id;
+      } catch (e) {
+        this.showToast('Deploy failed: ' + (e.detail || e.message), 'error');
+      }
+    },
+
+    // ── Delete helpers ─────────────────────────────────────────────────────────
+    confirmDeleteImage(img) {
+      this.deleteConfirm = {
+        open: true,
+        name: img.name,
+        message: 'This image will be permanently removed from the Nutanix Image Service.',
+        action: () => this._deleteImage(img),
+      };
+    },
+    confirmDeleteVm(vm) {
+      this.deleteConfirm = {
+        open: true,
+        name: vm.name,
+        message: 'This VM will be powered off and permanently deleted.',
+        action: () => this._deleteVm(vm),
+      };
+    },
+    async submitDelete() {
+      this.deleteConfirm.open = false;
+      if (this.deleteConfirm.action) await this.deleteConfirm.action();
+    },
+    async _deleteImage(img) {
+      try {
+        const res = await API.request('DELETE', `/api/nutanix/images/${img.uuid}?name=${encodeURIComponent(img.name)}`);
+        window.location.href = '/jobs/' + res.job_id;
+      } catch (e) {
+        this.showToast('Delete failed: ' + (e.detail || e.message), 'error');
+      }
+    },
+    async _deleteVm(vm) {
+      try {
+        const res = await API.request('DELETE', `/api/nutanix/vms/${vm.uuid}?name=${encodeURIComponent(vm.name)}`);
+        window.location.href = '/jobs/' + res.job_id;
+      } catch (e) {
+        this.showToast('Delete failed: ' + (e.detail || e.message), 'error');
+      }
+    },
+
+    // ── Power ops ──────────────────────────────────────────────────────────────
     async powerOp(vm, op) {
       vm._busy = true;
       try {
@@ -326,33 +643,36 @@ function nutanixDashboard() {
 
     openDetail(vm) { this.detail = vm; },
 
+    // ── Formatters & helpers ───────────────────────────────────────────────────
     stateDot(state) {
       return { ON: 'bg-green-500', OFF: 'bg-gray-400', PAUSED: 'bg-blue-400', SUSPENDED: 'bg-amber-400' }[state] || 'bg-yellow-400';
     },
-
     stateLabel(state) {
       return { ON: 'Running', OFF: 'Off', PAUSED: 'Paused', SUSPENDED: 'Suspended' }[state] || state || 'Unknown';
     },
-
     ngtLabel(vm) {
       if (!vm) return '';
       if (!vm.ngt_enabled) return 'Not installed';
       if (vm.ngt_reachable) return 'Enabled and reachable';
       return 'Enabled but unreachable';
     },
-
     ngtColor(vm) {
       if (!vm || !vm.ngt_enabled) return 'text-red-600';
       if (vm.ngt_reachable) return 'text-green-600';
       return 'text-yellow-600';
     },
-
+    fmtBytes(bytes) {
+      if (!bytes) return '0 B';
+      const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+      let i = 0;
+      while (bytes >= 1024 && i < units.length - 1) { bytes /= 1024; i++; }
+      return bytes.toFixed(i === 0 ? 0 : 1) + ' ' + units[i];
+    },
     fmtMib(mib) {
       if (!mib) return '—';
       if (mib >= 1024) return (mib / 1024).toFixed(1) + ' GB';
       return mib + ' MiB';
     },
-
     timeAgo(dt) {
       if (!dt) return '';
       const s = Math.round((new Date() - dt) / 1000);
@@ -361,7 +681,6 @@ function nutanixDashboard() {
       if (s < 3600) return `${Math.floor(s/60)}m ago`;
       return `${Math.floor(s/3600)}h ago`;
     },
-
     showToast(msg, type = 'success') {
       clearTimeout(this._toastTimer);
       this.toast = msg; this.toastType = type;
