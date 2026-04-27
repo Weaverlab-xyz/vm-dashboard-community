@@ -1,7 +1,7 @@
 # Infrastructure Management Dashboard — Community Edition
 
 A self-hosted web dashboard for managing infrastructure across AWS, Azure, GCP,
-and (optionally) on-prem VMware Workstation. Bring your own cloud credentials;
+and (optionally) on-prem infrastructure (VMware, Hyper-V, Proxmox, Nutanix).. Bring your own cloud credentials;
 the dashboard deploys resources into **your** accounts.
 
 > **Status:** private preview. This README is a placeholder — a full rewrite
