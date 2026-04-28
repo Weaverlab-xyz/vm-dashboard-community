@@ -3,13 +3,14 @@ BeyondTrust EPM for Linux (EPM-L) SaaS API service.
 
 PAT is read from config_service (DB-encrypted) with env var fallback.
 Authenticates via Bearer PAT against https://app.beyondtrust.io.
+sync_packages_to_storage() uploads packages via ansible_storage — whichever
+backend is configured (S3, Azure Blob Storage, or GCS).
 """
 import asyncio
 import logging
 import time
 from typing import Any
 
-import boto3
 import httpx
 
 logger = logging.getLogger(__name__)
@@ -100,11 +101,6 @@ def _get_package_filename(pkg: dict) -> str:
     return ""
 
 
-def _upload_bytes_to_s3(region: str, bucket: str, key: str, data: bytes) -> None:
-    s3 = boto3.client("s3", region_name=region)
-    s3.put_object(Bucket=bucket, Key=key, Body=data)
-
-
 async def list_packages() -> list[dict]:
     async with _client() as c:
         resp = await c.get("/api/epml/clientpkg")
@@ -186,9 +182,14 @@ async def download_package(url: str) -> bytes:
         return resp.content
 
 
-async def sync_packages_to_s3() -> dict:
-    from ..services import config_service
-    from ..config import settings
+async def sync_packages_to_storage() -> dict:
+    """Ensure packages exist, download each, upload to the configured asset storage backend.
+
+    Storage backend is determined by ansible_storage (S3 > Azure Blob > GCS).
+    Returns {"rpm_uploaded": bool, "deb_uploaded": bool, "packages": [...]}
+    """
+    from . import ansible_storage
+    from .ansible_storage import AnsibleStorageError
 
     pkgs = await ensure_packages()
     uploaded_rpm = False
@@ -209,16 +210,11 @@ async def sync_packages_to_s3() -> dict:
         logger.info("Downloading EPM-L package: %s", filename)
         data = await download_package(url)
 
-        prefix = config_service.get("ansible_s3_prefix") or settings.ansible_s3_prefix
-        bucket = config_service.get("ansible_s3_bucket") or settings.ansible_s3_bucket
-        if not bucket:
-            raise EpmlError("ansible_s3_bucket is not configured — cannot upload to S3.")
-
-        region = (config_service.get("ansible_s3_region") or settings.ansible_s3_region
-                  or settings.aws_region)
-        s3_key = f"{prefix}/{filename}"
-        await asyncio.to_thread(_upload_bytes_to_s3, region, bucket, s3_key, data)
-        logger.info("Uploaded %s to s3://%s/%s", filename, bucket, s3_key)
+        try:
+            await ansible_storage.upload_asset(filename, data)
+        except AnsibleStorageError as exc:
+            raise EpmlError(str(exc)) from exc
+        logger.info("Uploaded %s to asset storage", filename)
 
         if is_rpm:
             uploaded_rpm = True
