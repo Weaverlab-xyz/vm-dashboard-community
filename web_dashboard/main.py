@@ -258,7 +258,7 @@ app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
 
 from starlette.responses import RedirectResponse as _Redirect  # noqa: E402
 
-_SETUP_BYPASS_PREFIXES = ("/setup", "/api/setup", "/static", "/api/health", "/api/features")
+_SETUP_BYPASS_PREFIXES = ("/setup", "/api/setup", "/static", "/api/health", "/api/features", "/api/secrets")
 
 @app.middleware("http")
 async def setup_guard(request: Request, call_next):
@@ -274,7 +274,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "DELETE", "PUT"],
+    allow_methods=["GET", "POST", "DELETE", "PUT", "PATCH"],
     allow_headers=["*"],
 )
 
@@ -319,7 +319,7 @@ def _feature_flags() -> dict:
 # Settings → Integrations panel takes effect immediately — no restart needed.
 
 from fastapi import Depends  # noqa: E402
-from .api import auth, jobs, websocket, aws, azure, gcp, packer, mfa, tokens, users, groups, setup  # noqa: E402
+from .api import auth, jobs, websocket, aws, azure, gcp, packer, mfa, tokens, users, groups, setup, secrets  # noqa: E402
 from .api.mcp_server import get_mcp_asgi_app  # noqa: E402
 
 
@@ -336,6 +336,7 @@ def _feature_gate(flag: str):
 
 
 app.include_router(setup.router)
+app.include_router(secrets.router)
 app.include_router(auth.router)
 app.include_router(mfa.router)
 app.include_router(tokens.router)
@@ -402,6 +403,12 @@ except ImportError:
 try:
     from .api import xcpng  # noqa: E402
     app.include_router(xcpng.router, dependencies=[_feature_gate("xcpng_enabled")])
+except ImportError:
+    pass
+
+try:
+    from .api import epml  # noqa: E402
+    app.include_router(epml.router, dependencies=[_feature_gate("beyondtrust_enabled")])
 except ImportError:
     pass
 
@@ -515,6 +522,11 @@ async def gcp_page(request: Request):
 @app.get("/settings", response_class=HTMLResponse, include_in_schema=False)
 async def settings_page(request: Request):
     return templates.TemplateResponse("settings.html", {"request": request, **_feature_flags()})
+
+
+@app.get("/secrets", response_class=HTMLResponse, include_in_schema=False)
+async def secrets_page(request: Request):
+    return templates.TemplateResponse("secrets/index.html", {"request": request, **_feature_flags()})
 
 
 @app.get("/users", response_class=HTMLResponse, include_in_schema=False)

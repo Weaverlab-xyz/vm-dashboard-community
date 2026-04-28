@@ -271,6 +271,8 @@ class BeyondTrustFeatureConfig(BaseModel):
     bt_api_host: str = ""
     bt_client_id: str = ""
     bt_client_secret: str = ""      # encrypted at rest
+    # EPM for Linux (EPM-L) — SaaS API at app.beyondtrust.io
+    epml_pat: str = ""              # encrypted at rest; Bearer token for EPML API
 
 class PortainerFeatureConfig(BaseModel):
     enabled: bool = False
@@ -364,7 +366,7 @@ _FEATURE_MODELS = {
 }
 
 _SECRET_FEATURE_KEYS = frozenset({
-    "pscli_client_secret", "bt_client_secret",
+    "pscli_client_secret", "bt_client_secret", "epml_pat",
     "entitle_api_token", "entitle_webhook_secret",
     "proxmox_token_secret", "proxmox_password",
     "vsphere_password",

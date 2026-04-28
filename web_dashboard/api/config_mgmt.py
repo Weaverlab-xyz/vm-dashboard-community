@@ -53,6 +53,29 @@ async def list_playbooks(current_user: User = Depends(get_current_user)):
         raise HTTPException(status_code=502, detail=str(e))
 
 
+class UploadAssetRequest(BaseModel):
+    filename: str
+    content_b64: str
+
+
+@router.post("/upload", status_code=201)
+async def upload_asset(
+    req: UploadAssetRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Upload a playbook (.yml/.yaml), shell script (.sh), or package (.rpm/.deb) to storage."""
+    import base64
+    try:
+        data = base64.b64decode(req.content_b64)
+    except Exception:
+        raise HTTPException(status_code=400, detail="content_b64 is not valid base64.")
+    try:
+        await ansible_storage.upload_asset(req.filename, data)
+    except AnsibleStorageError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    return {"ok": True, "filename": req.filename, "size": len(data)}
+
+
 # ── Inventory ─────────────────────────────────────────────────────────────────
 
 @router.get("/inventory")

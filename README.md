@@ -71,6 +71,7 @@ after first login — only if you have the backing infrastructure:
   available when you need the runner network-local to the VM.
   See [docs/integrations/ansible.md](docs/integrations/ansible.md).
 - **BeyondTrust Password Safe and/or PRA** — secret retrieval and session recording
+- **BeyondTrust EPM for Linux (EPM-L)** — list and build agent packages, one-click sync of `.rpm`/`.deb` packages to your Ansible asset bucket, installation-token issuance for new endpoint registration. See [docs/integrations/epml.md](docs/integrations/epml.md).
 - **Portainer CE** — on-prem Docker host management
 - **Entitle** — approval-workflow integration
 - **MCP server** — read-only AI client integration (Claude Desktop, Claude Code, Cursor…) via Personal Access Token; mounted at `/mcp`, no extra containers needed

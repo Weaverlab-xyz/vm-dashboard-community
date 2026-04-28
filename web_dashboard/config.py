@@ -300,9 +300,9 @@ class Settings(BaseSettings):
     gcp_ansible_cloud_run_region: str = ""   # defaults to gcp_region if blank
     gcp_ansible_image: str = "willhallonline/ansible:latest"
     gcp_ansible_vpc_connector: str = ""      # e.g. "projects/proj/locations/region/connectors/name" (optional, for private host access)
-    epml_rpm_path: str = r"C:\Scripts\VM_CLI\VM_DEMO_CLI\epml-client.x86_64.rpm"
-    epml_deb_path: str = r"C:\Scripts\VM_CLI\VM_DEMO_CLI\epml-client.amd64.deb"
-    pathfinder_script_path: str = r"C:\Scripts\VM_CLI\VM_DEMO_CLI\make_pathfinder_user.sh"
+    epml_rpm_path: str = ""
+    epml_deb_path: str = ""
+    pathfinder_script_path: str = ""
 
     # Packer image builder — optional object-storage archives for built templates.
     # Leave blank to skip archiving; fill in to have each successful build upload

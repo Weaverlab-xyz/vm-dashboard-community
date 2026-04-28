@@ -162,6 +162,33 @@ def _gcs_fetch_sync(name: str) -> bytes:
     return blob.download_as_bytes()
 
 
+# ── Upload sync helpers ───────────────────────────────────────────────────────
+
+def _s3_upload_sync(name: str, data: bytes) -> None:
+    import io
+    bucket = _cfg("ansible_s3_bucket")
+    prefix = (_cfg("ansible_s3_prefix") or "config-mgmt").rstrip("/")
+    client = _s3_client()
+    client.upload_fileobj(io.BytesIO(data), bucket, f"{prefix}/{name}")
+
+
+def _azure_upload_sync(name: str, data: bytes) -> None:
+    svc = _azure_blob_client()
+    container = _cfg("ansible_azure_container") or "playbooks"
+    prefix = (_cfg("ansible_azure_prefix") or "config-mgmt").rstrip("/")
+    blob_client = svc.get_blob_client(container=container, blob=f"{prefix}/{name}")
+    blob_client.upload_blob(data, overwrite=True)
+
+
+def _gcs_upload_sync(name: str, data: bytes) -> None:
+    client = _gcs_client()
+    bucket_name = _cfg("ansible_gcs_bucket")
+    prefix = (_cfg("ansible_gcs_prefix") or "config-mgmt").rstrip("/")
+    bucket = client.bucket(bucket_name)
+    blob = bucket.blob(f"{prefix}/{name}")
+    blob.upload_from_string(data)
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 async def list_assets() -> list[dict]:
@@ -213,3 +240,29 @@ async def fetch_asset_b64(name: str) -> str:
 async def fetch_playbook_b64(name: str) -> str:
     """Alias for fetch_asset_b64 — kept for back-compat."""
     return await fetch_asset_b64(name)
+
+
+async def upload_asset(name: str, data: bytes) -> None:
+    """Write raw bytes to the configured storage backend under prefix/name."""
+    backend = _active_backend()
+    if not backend:
+        raise AnsibleStorageError(
+            "No asset storage configured. Set ANSIBLE_S3_BUCKET, "
+            "ANSIBLE_AZURE_STORAGE_ACCOUNT, or ANSIBLE_GCS_BUCKET."
+        )
+    if not any(name.endswith(ext) for ext in _ASSET_EXTENSIONS):
+        raise AnsibleStorageError(
+            f"Unsupported file type for '{name}'. "
+            f"Allowed extensions: {', '.join(sorted(_ASSET_EXTENSIONS))}"
+        )
+    try:
+        if backend == "s3":
+            await asyncio.to_thread(_s3_upload_sync, name, data)
+        elif backend == "azure_blob":
+            await asyncio.to_thread(_azure_upload_sync, name, data)
+        else:
+            await asyncio.to_thread(_gcs_upload_sync, name, data)
+    except AnsibleStorageError:
+        raise
+    except Exception as e:
+        raise AnsibleStorageError(f"Failed to upload '{name}' to {backend}: {e}") from e

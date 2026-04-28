@@ -6,11 +6,23 @@ at rest are protected even if someone gets direct DB access.
 
 An in-memory cache (populated on first access, updated on write) keeps
 service calls fast after the initial DB round-trip.
+
+External backend references: after a secrets migration the DB value for a
+secret key may be a reference string with a backend prefix, e.g.
+  aws_sm://dashboard/epml_pat
+  azure_kv://epml-pat
+  gcp_sm://dashboard-epml-pat
+  bt_safe://Dashboard/epml_pat
+
+get() detects these prefixes and resolves them transparently.  Resolved values
+are cached in _ext_cache for EXT_CACHE_TTL seconds so that every service call
+doesn't hit the external API.
 """
 import base64
 import hashlib
 import logging
 import threading
+import time
 from datetime import datetime
 from typing import Optional
 
@@ -22,6 +34,19 @@ _cache: dict = {}
 _cache_lock = threading.Lock()
 _cache_loaded: bool = False
 _setup_complete: Optional[bool] = None
+
+# External-backend value cache: key → (resolved_value, expiry_ts)
+_ext_cache: dict[str, tuple[str, float]] = {}
+_ext_cache_lock = threading.Lock()
+EXT_CACHE_TTL = 300  # seconds
+
+# Prefix → backend identifier (must match secrets_backend_service dispatch keys)
+_EXT_PREFIXES: dict[str, str] = {
+    "aws_sm://":   "aws_sm",
+    "azure_kv://": "azure_kv",
+    "gcp_sm://":   "gcp_sm",
+    "bt_safe://":  "bt_secrets_safe",
+}
 
 
 # ── Encryption ────────────────────────────────────────────────────────────────
@@ -72,15 +97,46 @@ def invalidate() -> None:
     global _cache_loaded
     with _cache_lock:
         _cache_loaded = False
+    with _ext_cache_lock:
+        _ext_cache.clear()
+
+
+# ── External reference resolution ─────────────────────────────────────────────
+
+def _resolve_external(raw: str) -> str:
+    """If raw is an external backend reference, fetch and cache the real value."""
+    for prefix, backend in _EXT_PREFIXES.items():
+        if raw.startswith(prefix):
+            ref = raw[len(prefix):]
+            now = time.monotonic()
+            with _ext_cache_lock:
+                cached = _ext_cache.get(raw)
+                if cached and cached[1] > now:
+                    return cached[0]
+            try:
+                from .secrets_backend_service import read_sync
+                value = read_sync(backend, ref)
+                with _ext_cache_lock:
+                    _ext_cache[raw] = (value, now + EXT_CACHE_TTL)
+                return value
+            except Exception as exc:
+                logger.error("Failed to resolve external secret %s: %s", raw[:60], exc)
+                return ""
+    return raw
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def get(key: str, default: str = "") -> str:
-    """Return the stored plaintext value for key, or default if not set."""
+    """Return the stored plaintext value for key, or default if not set.
+
+    Transparently resolves external backend references (aws_sm://, azure_kv://,
+    gcp_sm://, bt_safe://) — callers see only the actual secret value.
+    """
     _ensure_loaded()
     with _cache_lock:
-        return _cache.get(key, default)
+        raw = _cache.get(key, default)
+    return _resolve_external(raw)
 
 
 def get_bool(key: str, default: bool = False) -> bool:
