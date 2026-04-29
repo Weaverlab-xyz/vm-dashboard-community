@@ -208,8 +208,8 @@ When you run the onboard script, the wizard Step 4 (GCP) asks for:
 ## Part D — Run the dashboard
 
 Pick the onboarder that matches your host OS. Both do the same thing:
-preflight checks, bootstrap `.env` (JWT and DB secrets only), bring up
-Compose, poll `/api/health`, open the browser.
+preflight checks, generate the JWT key file and bootstrap `.env` (DB
+secret only), bring up Compose, poll `/api/health`, open the browser.
 
 ### 1. Run the onboard script (one command)
 
@@ -229,7 +229,11 @@ The script:
 
 - Verifies Docker is running and `docker compose` is available.
 - Copies `.env.example → .env` if missing (only bootstrap secrets needed — no cloud credentials in this file).
-- Auto-generates `JWT_SECRET_KEY` and `POSTGRES_PASSWORD` if they're still at defaults.
+- Generates `.jwt_secret_key` (owner-read-only on disk — this is the root of trust
+  for all encrypted credentials stored in the database). The file is excluded from git
+  and from the Docker build context; it is mounted into the container at runtime via
+  Docker Secrets and is never written to `.env`.
+- Auto-generates `POSTGRES_PASSWORD` in `.env` if it's still at the placeholder value.
 - Brings up the Compose stack (`db` + `app`).
 - Waits for `http://localhost:8000/api/health` to respond.
 - Opens your browser.
@@ -369,6 +373,32 @@ Common causes:
   docker compose down -v   # ⚠ wipes the database and all stored credentials
   ./scripts/onboard.sh     # brings it back up; wizard appears again on first visit
   ```
+
+### JWT key file: backup and loss recovery
+
+`.jwt_secret_key` at the repo root is the **root of trust** for all credentials
+you store through the setup wizard. The app uses it to encrypt every integration
+secret (AWS keys, Azure SP credentials, etc.) in the database.
+
+**Back it up** — copy it somewhere safe (password manager, encrypted drive) after
+first run. Do not commit it to git (it's in `.gitignore`).
+
+**If you lose it**, every stored credential is unrecoverable and the app will
+refuse to start (the key file is required). Recovery procedure:
+
+```bash
+# 1. Stop the stack
+docker compose down
+
+# 2. Remove the old key and database volume (⚠ wipes all stored credentials)
+rm .jwt_secret_key
+docker volume rm vm-dashboard-community_pgdata   # adjust prefix to match 'docker volume ls'
+
+# 3. Rerun the onboard script — it regenerates the key and the wizard reappears
+./scripts/onboard.sh
+```
+
+**Rotating the key** is not currently supported without clearing the database.
 
 ### Where to file issues
 
