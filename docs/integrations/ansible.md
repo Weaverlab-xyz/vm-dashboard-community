@@ -46,19 +46,24 @@ multiple are configured, priority is S3 > Azure Blob > GCS.
 
 ### Option A — S3
 
+Create the bucket and upload your initial assets:
+
 ```bash
 aws s3 mb s3://your-org-config-mgmt --region us-east-1
-# Upload any mix of .yml, .sh, .rpm, .deb files
 aws s3 cp assets/ s3://your-org-config-mgmt/config-mgmt/ --recursive
 ```
 
-```
-ANSIBLE_S3_BUCKET=your-org-config-mgmt
-ANSIBLE_S3_REGION=us-east-1
-ANSIBLE_S3_PREFIX=config-mgmt
-```
+Then configure in **Settings → Integrations → Ansible**:
+
+| Setting | Example |
+|---|---|
+| S3 Bucket | `your-org-config-mgmt` |
+| S3 Region | `us-east-1` |
+| S3 Prefix | `config-mgmt` |
 
 ### Option B — Azure Blob Storage
+
+Create the container and upload your initial assets:
 
 ```bash
 az storage container create \
@@ -72,26 +77,32 @@ az storage blob upload-batch \
   --source ./assets
 ```
 
-```
-ANSIBLE_AZURE_STORAGE_ACCOUNT=myorgplaybooks
-ANSIBLE_AZURE_CONTAINER=playbooks
-ANSIBLE_AZURE_PREFIX=config-mgmt
-```
+Then configure in **Settings → Integrations → Ansible**:
+
+| Setting | Example |
+|---|---|
+| Storage Account | `myorgplaybooks` |
+| Container | `playbooks` |
+| Prefix | `config-mgmt` |
 
 Auth uses your existing Azure service principal. The SP needs the
 **Storage Blob Data Reader** role on the storage account.
 
 ### Option C — GCS
 
+Create the bucket and upload your initial assets:
+
 ```bash
 gsutil mb -l us-central1 gs://my-org-config-mgmt
 gsutil -m cp -r assets/ gs://my-org-config-mgmt/config-mgmt/
 ```
 
-```
-ANSIBLE_GCS_BUCKET=my-org-config-mgmt
-ANSIBLE_GCS_PREFIX=config-mgmt
-```
+Then configure in **Settings → Integrations → Ansible**:
+
+| Setting | Example |
+|---|---|
+| GCS Bucket | `my-org-config-mgmt` |
+| GCS Prefix | `config-mgmt` |
 
 Auth uses your GCP service account. The SA needs `roles/storage.objectViewer`
 on the bucket.
@@ -431,8 +442,8 @@ to it.
 
 ### Asset storage
 
-**"No asset storage configured"** — set at least one of `ANSIBLE_S3_BUCKET`,
-`ANSIBLE_AZURE_STORAGE_ACCOUNT`, or `ANSIBLE_GCS_BUCKET`.
+**"No asset storage configured"** — configure a storage backend in
+**Settings → Integrations → Ansible** (S3, Azure Blob, or GCS).
 
 **Assets don't appear in the picker** — confirm the files are under the
 configured prefix (default: `config-mgmt/`) and have a supported extension

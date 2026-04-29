@@ -32,7 +32,7 @@ container being able to reach the Portainer URL.
 |---|---|
 | Portainer CE 2.x or later | Self-hosted; community edition is free |
 | Portainer API reachable from the dashboard container | Port 9000 (HTTP) or 9443 (HTTPS) |
-| BeyondTrust Password Safe (optional) | PAT can be stored there instead of in `.env` |
+| BeyondTrust Password Safe (optional) | PAT can be stored in Password Safe instead of the application database |
 
 ---
 
@@ -46,23 +46,22 @@ container being able to reach the Portainer URL.
 
 ### Step 2 — Enable and configure in the dashboard
 
-**Option A — `.env` file**
+**Option A — Setup wizard (first run)**
 
-```
-PORTAINER_ENABLED=true
-PORTAINER_URL=http://portainer.local:9000
-PORTAINER_PAT_SECRET_TITLE=Portainer_PAT   # BeyondTrust secret title (if using BT)
-PORTAINER_VERIFY_SSL=true                   # set false for self-signed certs
-```
+Toggle **Portainer** on in wizard Step 5 and fill in the fields.
 
-If you are **not** using BeyondTrust, store the token directly in Password Safe
-and set `PORTAINER_PAT_SECRET_TITLE`. If you prefer plain `.env` storage,
-extend the config to add a `PORTAINER_PAT` field (or keep it in Password Safe).
+**Option B — Settings → Integrations (after first run)**
 
-**Option B — Setup wizard / Settings → Integrations**
+Navigate to **Settings → Integrations → Portainer**, toggle it on, and fill in:
 
-Toggle **Portainer** on in wizard Step 5 or **Settings → Integrations →
-Portainer** and fill in the URL and PAT secret title fields.
+| Field | Example |
+|---|---|
+| Portainer URL | `http://portainer.local:9000` |
+| PAT (or BeyondTrust secret title) | token string, or `Portainer_PAT` if using BT |
+| Verify SSL | disable for self-signed certificates |
+
+If you have BeyondTrust configured, enter the Password Safe secret title and the
+dashboard will check out the PAT at runtime rather than storing it in the database.
 
 ### Step 3 — Verify
 
@@ -74,13 +73,8 @@ Click it to confirm the container list loads from your Portainer instance.
 ## Multiple Portainer instances (workgroups)
 
 The dashboard supports two Portainer instances (workgroups) simultaneously.
-Add a second instance with the `_HYDRA` suffix variables:
-
-```
-PORTAINER_URL_HYDRA=http://portainer-hydra.local:9000
-PORTAINER_PAT_SECRET_TITLE_HYDRA=Portainer_PAT_Hydra
-PORTAINER_VERIFY_SSL_HYDRA=true
-```
+Configure the second instance under **Settings → Integrations → Portainer →
+Second instance (Hydra)** with its own URL, PAT, and SSL setting.
 
 Both instances appear as separate workgroup sections in the Containers tab.
 
@@ -108,25 +102,22 @@ workflow can automatically install the Portainer Agent on the VM:
 3. It pulls and runs `portainer/agent:latest` on port 9001.
 4. The new agent appears in Portainer under **Environments** within ~30 seconds.
 
-The agent image and port are configurable:
-
-```
-PORTAINER_AGENT_IMAGE=portainer/agent:latest
-PORTAINER_AGENT_PORT=9001
-```
+The agent image and port are configurable in **Settings → Integrations →
+Portainer → Advanced**.
 
 ---
 
 ## Troubleshooting
 
-**Containers tab is missing** — check that `PORTAINER_ENABLED=true` is set in
-`.env` and that the stack was restarted after the change.
+**Containers tab is missing** — verify Portainer is toggled on in **Settings →
+Integrations → Portainer** and that the stack was restarted after enabling it.
 
 **"Connection refused" or timeout** — verify the Portainer URL is reachable from
-inside the container: `docker compose exec app curl -Is "$PORTAINER_URL/api/status"`.
+inside the container: `docker compose exec app curl -Is <portainer-url>/api/status`.
 
 **"Unauthorized" error** — the PAT may have expired or been deleted. Regenerate
-a new token in Portainer and update the `.env` value or Password Safe secret.
+a new token in Portainer and update it in **Settings → Integrations → Portainer**
+(or update the Password Safe secret if you are using BeyondTrust).
 
 **SSL certificate errors** — for self-signed certificates, set
 `PORTAINER_VERIFY_SSL=false`. For production, add your CA cert to the container's

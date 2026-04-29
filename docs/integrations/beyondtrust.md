@@ -5,9 +5,10 @@
 The BeyondTrust integration connects the dashboard to two BeyondTrust products:
 
 - **Password Safe (ps-cli)** — on-demand checkout of SSH keys and passwords
-  stored in BeyondTrust Secrets Safe. Credentials are never written to disk
-  or stored in the database; they are fetched at the moment the dashboard
-  needs them and discarded after use.
+  stored in BeyondTrust Secrets Safe. Target credentials (AWS keys, Azure
+  service principal secrets, SSH private keys) are fetched from Password Safe
+  at the moment the dashboard needs them and discarded after use, rather than
+  being stored in the dashboard's encrypted database.
 - **Privileged Remote Access (btapi)** — optional session-metadata callbacks
   to BeyondTrust PRA during remote access operations (Shell Jump / session
   recording context).
@@ -20,9 +21,11 @@ do not have a PRA deployment.
 
 ## Use cases
 
-- **Zero local credentials** — instead of storing AWS access keys, Azure
-  service principal secrets, or SSH private keys in `.env`, the dashboard
-  fetches them from Password Safe at runtime. Rotate credentials in one place.
+- **Vault-backed cloud credentials** — instead of entering AWS access keys,
+  Azure service principal secrets, or SSH private keys into the dashboard
+  (where they would be stored encrypted in the application database), the
+  dashboard fetches them from Password Safe at runtime. Rotate credentials in
+  one place; the dashboard always gets the current value.
 - **Audit trail** — every secret checkout creates a Password Safe audit record.
   You know who (the dashboard service account) requested what credential and
   when.
@@ -87,37 +90,21 @@ fill in the fields.
 1. Open **Settings** → **Integrations** → **BeyondTrust** → toggle on.
 2. Fill in the **Password Safe** section:
 
-   | Field | Env var | Example |
-   |---|---|---|
-   | Password Safe URL | `PSCLI_API_URL` | `https://ps.company.com` |
-   | OAuth Client ID | `PSCLI_CLIENT_ID` | (from API Registration) |
-   | OAuth Client Secret | `PSCLI_CLIENT_SECRET` | (from API Registration) |
+   | Field | Example |
+   |---|---|
+   | Password Safe URL | `https://ps.company.com` |
+   | OAuth Client ID | (from API Registration) |
+   | OAuth Client Secret | (from API Registration) |
 
 3. Fill in the **btapi** section (leave blank if not using PRA):
 
-   | Field | Env var | Example |
-   |---|---|---|
-   | API Host | `BT_API_HOST` | `https://pra.company.com` |
-   | Client ID | `BT_CLIENT_ID` | (from API Account) |
-   | Client Secret | `BT_CLIENT_SECRET` | (from API Account) |
+   | Field | Example |
+   |---|---|
+   | API Host | `https://pra.company.com` |
+   | Client ID | (from API Account) |
+   | Client Secret | (from API Account) |
 
 4. Click **Save**. No container restart is required.
-
-**Option C — `.env` file directly**
-
-```
-BEYONDTRUST_ENABLED=true
-
-# Password Safe / ps-cli
-PSCLI_API_URL=https://ps.company.com
-PSCLI_CLIENT_ID=<client-id>
-PSCLI_CLIENT_SECRET=<client-secret>
-
-# BeyondTrust PRA / btapi (optional)
-BT_API_HOST=https://pra.company.com
-BT_CLIENT_ID=<bt-client-id>
-BT_CLIENT_SECRET=<bt-client-secret>
-```
 
 ---
 
@@ -125,7 +112,7 @@ BT_CLIENT_SECRET=<bt-client-secret>
 
 | Feature | Description |
 |---|---|
-| **Zero-credential cloud** | AWS and Azure credentials resolved from Password Safe at startup; never stored in `.env` |
+| **Vault-backed cloud credentials** | AWS, Azure, and SSH credentials resolved from Password Safe at runtime rather than stored in the application database |
 | **SSH key checkout** | Ansible and BT Jumpoint tasks retrieve SSH private keys from Managed Accounts on demand |
 | **PRA session context** | Shell Jump sessions opened by the dashboard are tagged with job metadata in BeyondTrust PRA |
 | **Secret audit log** | Every checkout creates an immutable record in Password Safe |
@@ -160,7 +147,8 @@ Leave blank to fall back to the global `BT_JUMP_GROUP_NAME` / `BT_GROUP_POLICY_N
 ### Password Safe secret titles
 
 The dashboard looks up secrets by **title** in Password Safe. The defaults work
-for a standard deployment; override in `.env` if your titles differ:
+for a standard deployment; override in **Settings → Integrations → BeyondTrust**
+if your titles differ:
 
 ```
 BT_PS_DEPLOY_KEY_TITLE=Docker Deploy Key
@@ -174,9 +162,10 @@ BT_PS_DEPLOY_KEY_TITLE=Docker Deploy Key
 container. Verify the Dockerfile includes the BIPS CLI installation step and
 rebuild the image.
 
-**"Authentication failed" from ps-cli** — check that `PSCLI_CLIENT_ID` and
-`PSCLI_CLIENT_SECRET` are correct and that the API Registration has not expired.
-Run `docker compose exec app ps-cli --version` to confirm the binary is present.
+**"Authentication failed" from ps-cli** — verify the Client ID and Client Secret
+in **Settings → Integrations → BeyondTrust** match the API Registration in
+Password Safe and that the registration has not expired. Run
+`docker compose exec app ps-cli --version` to confirm the binary is present.
 
 **"btapi command failed"** — confirm `BT_API_HOST` is reachable from inside the
 container: `docker compose exec app curl -Is "$BT_API_HOST"`. If the host uses

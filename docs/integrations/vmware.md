@@ -82,16 +82,16 @@ volumes:
   - ${USERPROFILE}/.ssh/dev_dashboard_key:/root/.ssh/dev_dashboard_key:ro
 ```
 
-### 3. Enable the flag in `.env`
+### 3. Enable the integration
 
-```
-VMWARE_ENABLED=true
-SSH_USER=<your Windows username>
-SSH_HOST=host.docker.internal
-```
+Enable **VMware** in the setup wizard (Step 5) or **Settings → Integrations →
+VMware**. The dashboard also needs to know the SSH user and host to reach the
+Windows host — configure these in the same Settings panel:
 
-`host.docker.internal` is Docker Desktop's built-in DNS name for the Windows
-host — leave it as-is unless you have a custom Docker network.
+| Setting | Value |
+|---|---|
+| SSH User | your Windows username |
+| SSH Host | `host.docker.internal` (Docker Desktop's built-in hostname for the Windows host) |
 
 ### 4. Start the stack with both Compose files
 
@@ -129,8 +129,8 @@ non-functional on macOS, Linux, and WSL hosts.
 
 ## Troubleshooting
 
-**VMs tab is missing** — check that `VMWARE_ENABLED=true` is in `.env` and
-that you started the stack with the Windows override file.
+**VMs tab is missing** — verify VMware is toggled on in **Settings → Integrations
+→ VMware** and that you started the stack with the Windows override file.
 
 **"SSH connection refused"** — verify OpenSSH server is running:
 ```powershell

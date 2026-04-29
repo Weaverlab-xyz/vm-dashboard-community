@@ -67,23 +67,29 @@ pending-approval modal; on approval the original action completes automatically.
    `https://your-dashboard-url/api/approvals/webhook`.
 5. Copy the **signing secret** Entitle generates for the webhook.
 
-### Step 2 — Configure in `.env`
+### Step 2 — Enable and configure in the dashboard
 
-```
-ENTITLE_ENABLED=true
-ENTITLE_API_URL=https://api.entitle.io/v1
-ENTITLE_API_TOKEN=<your-bearer-token>
-ENTITLE_WEBHOOK_SECRET=<hmac-sha256-shared-secret>
-ENTITLE_DEFAULT_TTL_MINUTES=15
-APPROVAL_GATE_ENABLED=true
-```
+**Option A — Setup wizard (first run)**
 
-`ENTITLE_DEFAULT_TTL_MINUTES` controls how long the dashboard waits for an
-approval before auto-expiring the request and returning an error. Set higher for
-async reviewer workflows.
+Toggle **Entitle** on in wizard Step 5 and fill in the fields.
 
-`APPROVAL_GATE_ENABLED` is the master kill-switch. Set it to `false` to
-temporarily disable all gates without removing the Entitle configuration.
+**Option B — Settings → Integrations (after first run)**
+
+Navigate to **Settings → Integrations → Entitle**, toggle it on, and fill in:
+
+| Field | Example |
+|---|---|
+| API URL | `https://api.entitle.io/v1` |
+| API Token | (bearer token from Step 1) |
+| Webhook Secret | (signing secret from Step 1) |
+| Default TTL (minutes) | `15` |
+| Approval gate enabled | toggle on |
+
+`Default TTL` controls how long the dashboard waits for an approval before
+auto-expiring the request. Set higher for async reviewer workflows.
+
+`Approval gate enabled` is the master kill-switch — toggle it off to temporarily
+disable all gates without removing the Entitle configuration.
 
 ### Step 3 — Verify webhook delivery
 
@@ -137,12 +143,13 @@ general reviewer pool.
 
 ## Troubleshooting
 
-**Approval modal does not appear** — check that `APPROVAL_GATE_ENABLED=true`
-and `ENTITLE_ENABLED=true` are both set, then restart the stack.
+**Approval modal does not appear** — check that both **Entitle enabled** and
+**Approval gate enabled** are toggled on in **Settings → Integrations → Entitle**,
+then restart the stack.
 
-**"Webhook signature invalid"** — the `ENTITLE_WEBHOOK_SECRET` must match
-the signing secret shown in the Entitle console exactly. Copy it fresh and
-update `.env`.
+**"Webhook signature invalid"** — the webhook secret in **Settings → Integrations
+→ Entitle** must match the signing secret shown in the Entitle console exactly.
+Copy it fresh and save.
 
 **Approval times out immediately** — verify `ENTITLE_DEFAULT_TTL_MINUTES` is
 set to a value large enough for your reviewer response time. Also confirm the
@@ -150,5 +157,6 @@ Entitle webhook URL is publicly reachable. If you are running locally without
 a public IP, use a tunnel (`ngrok http 8000`) as a temporary workaround, or
 consider the SaaS hosted tier which provides a stable public endpoint.
 
-**"Entitle API error"** — check that `ENTITLE_API_TOKEN` is valid and not
-expired: `docker compose exec app curl -H "Authorization: Bearer $ENTITLE_API_TOKEN" "$ENTITLE_API_URL/me"`.
+**"Entitle API error"** — verify the API token in **Settings → Integrations →
+Entitle** is valid and not expired. Test it from inside the container:
+`docker compose exec app curl -H "Authorization: Bearer <token>" https://api.entitle.io/v1/me`.

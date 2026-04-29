@@ -94,19 +94,6 @@ Toggle **Microsoft Hyper-V** on. Fill in the connection fields:
 
 Click **Save**. No container restart is required.
 
-**Option B — `.env` file**
-
-```
-HYPERV_ENABLED=true
-HYPERV_HOST=hyperv.corp.local
-HYPERV_PORT=5985
-HYPERV_USERNAME=CORP\svc-dashboard
-HYPERV_PASSWORD=ChangeMe123!
-HYPERV_TRANSPORT=ntlm
-HYPERV_USE_SSL=false
-HYPERV_VERIFY_SSL=false
-```
-
 ### Step 4 — Verify
 
 The **Hyper-V** link appears in the navigation bar. Click it — you should see
@@ -221,7 +208,7 @@ In the dashboard: set **Port** to `5986`, enable **Use HTTPS**, and disable
 **Hyper-V tab is missing** — verify `HYPERV_ENABLED=true` and that the stack
 restarted after the change (or that you saved via Settings → Integrations).
 
-**"HYPERV_HOST is not configured"** — set the host field in `.env` or Settings.
+**"HYPERV_HOST is not configured"** — set the host field in **Settings → Integrations → Hyper-V**.
 
 **"pywinrm is not installed"** — run `pip install pywinrm` inside the container
 or rebuild the image: `docker compose build app`.

@@ -37,7 +37,9 @@ file on disk.
 
 See [docs/ONBOARDING.md](docs/ONBOARDING.md) for the full walkthrough,
 including AWS IAM setup, Azure service principal setup, and the
-feature-test checklist.
+feature-test checklist. See [docs/secrets-management.md](docs/secrets-management.md)
+for the credential storage model, external vault migration, and security
+best practices.
 
 ## What's included
 

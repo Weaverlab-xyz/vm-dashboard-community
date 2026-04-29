@@ -83,18 +83,6 @@ Toggle **Proxmox VE** on. Fill in the connection fields:
 
 Click **Save**. No container restart is required.
 
-**Option B — `.env` file**
-
-```
-PROXMOX_ENABLED=true
-PROXMOX_HOST=proxmox.local
-PROXMOX_PORT=8006
-PROXMOX_USER=root@pam
-PROXMOX_TOKEN_ID=dashboard
-PROXMOX_TOKEN_SECRET=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-PROXMOX_VERIFY_SSL=false
-```
-
 ### Step 4 — Verify
 
 The **Proxmox** link appears in the navigation bar. Click it — you should see
@@ -163,7 +151,7 @@ Then enable it in Proxmox: **VM → Options → QEMU Guest Agent → Enabled**.
 restarted after the change (or that you saved via Settings → Integrations).
 
 **"PROXMOX_HOST is not configured"** — the host field is required. Set it in
-`.env` or Settings → Integrations → Proxmox VE.
+**Settings → Integrations → Proxmox VE**.
 
 **"Connection refused" or timeout** — confirm port 8006 is reachable from
 inside the container:

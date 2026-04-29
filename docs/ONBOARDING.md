@@ -323,6 +323,8 @@ of filesystem permissions.
   **Microsoft Hyper-V**, **Nutanix AHV**, **XCP-ng / XenServer**, and
   **Entitle** are optional integrations with their own backing infrastructure.
   See the detailed guides in [`docs/integrations/`](integrations/).
+- **Secrets management** — how credentials are encrypted, how to migrate to an
+  external vault, and security best practices: [`docs/secrets-management.md`](secrets-management.md).
 
 ---
 

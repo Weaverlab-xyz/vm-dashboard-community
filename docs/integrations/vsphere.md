@@ -78,18 +78,6 @@ Toggle **VMware vSphere / ESXi** on. Fill in the connection fields:
 
 Click **Save**. No container restart is required.
 
-**Option B — `.env` file**
-
-```
-VSPHERE_ENABLED=true
-VSPHERE_HOST=vcenter.corp.local
-VSPHERE_PORT=443
-VSPHERE_USER=administrator@vsphere.local
-VSPHERE_PASSWORD=ChangeMe
-VSPHERE_VERIFY_SSL=false
-VSPHERE_DATACENTER=
-```
-
 ### Step 3 — Verify
 
 The **vSphere** link appears in the navigation bar. Click it — you should see
@@ -170,7 +158,7 @@ configuration applies — the API is identical for ESXi and vCenter.
 restarted after the change (or that you saved via Settings → Integrations).
 
 **"VSPHERE_HOST is not configured"** — the host field is required. Set it in
-`.env` or Settings → Integrations → VMware vSphere / ESXi.
+**Settings → Integrations → VMware vSphere / ESXi**.
 
 **"pyVmomi is not installed"** — run `pip install pyVmomi` inside the container,
 or rebuild the image: `docker compose build app`.

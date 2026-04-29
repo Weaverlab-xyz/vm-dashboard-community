@@ -71,8 +71,8 @@ The VM list page includes a **Cluster** filter dropdown. It is auto-populated fr
 Prism ships with a self-signed certificate. Either:
 
 - **Disable verify SSL** in the Settings panel (suitable for lab / on-premises use)
-- **Upload a trusted CA bundle** to the container and set `NUTANIX_CA_BUNDLE` in `.env`
-  to the path inside the container, then re-enable SSL verification
+- **Upload a trusted CA bundle** to the container and set the CA bundle path in
+  **Settings → Integrations → Nutanix → CA Bundle Path**, then re-enable SSL verification
 
 ---
 
