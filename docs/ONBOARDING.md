@@ -276,6 +276,29 @@ To update credentials or toggle feature flags after setup, navigate to
 reconfigure mode: existing values are pre-filled, and leaving a secret
 field blank keeps the stored value unchanged.
 
+### Migrate the JWT key to a cloud secrets manager (strongly recommended)
+
+`.jwt_secret_key` is the root of trust for the entire application — every
+integration credential stored in the database is encrypted with a key derived
+from it. While the onboard script protects it with owner-only filesystem
+permissions, it remains a plaintext file on disk, which is not appropriate for
+long-lived or shared deployments.
+
+**After completing the setup wizard, migrate the key to your cloud secrets
+manager:**
+
+1. Log in as admin and go to **Settings → Secrets Backend** (`/secrets`).
+2. Choose your provider (AWS Secrets Manager, Azure Key Vault, or GCP Secret
+   Manager) and enter the target secret name.
+3. Click **Migrate** — the dashboard uploads the key to your cloud vault,
+   updates its internal reference, and on all future startups will read the key
+   from the cloud rather than the local file.
+4. Once migration is confirmed, delete `.jwt_secret_key` from the repo directory.
+
+After migration the local file is no longer needed. Your cloud provider's
+access controls, audit logging, and key rotation capabilities become the
+security boundary instead of filesystem permissions.
+
 ### Platform notes
 
 - **WSL (Windows Subsystem for Linux):** Docker Desktop is not required.
@@ -380,8 +403,13 @@ Common causes:
 you store through the setup wizard. The app uses it to encrypt every integration
 secret (AWS keys, Azure SP credentials, etc.) in the database.
 
-**Back it up** — copy it somewhere safe (password manager, encrypted drive) after
-first run. Do not commit it to git (it's in `.gitignore`).
+**Migrate it as soon as possible** — see [Migrate the JWT key to a cloud secrets
+manager](#migrate-the-jwt-key-to-a-cloud-secrets-manager-strongly-recommended)
+above. Once migrated, the local file can be deleted and the cloud vault becomes
+the security boundary.
+
+**Until you migrate:** back it up somewhere safe (password manager, encrypted
+drive). Do not commit it to git (it's in `.gitignore`).
 
 **If you lose it**, every stored credential is unrecoverable and the app will
 refuse to start (the key file is required). Recovery procedure:
