@@ -159,13 +159,25 @@ new_hex() {
     fi
 }
 
-# ── 3. Auto-generate bootstrap secrets ──────────────────────────────────
+# ── 3. Generate JWT secret key file ────────────────────────────────────
+# The JWT key is the root of trust for DB-encrypted integration credentials.
+# It lives in .jwt_secret_key (Docker secret mount) rather than .env so
+# the rest of .env is safe to inspect or share for debugging.
+step "Checking JWT secret key"
+
+JWT_KEY_FILE="$REPO_ROOT/.jwt_secret_key"
+if [[ ! -f "$JWT_KEY_FILE" ]]; then
+    new_hex 32 > "$JWT_KEY_FILE"
+    chmod 600 "$JWT_KEY_FILE"
+    ok "Generated .jwt_secret_key (chmod 600)"
+else
+    ok ".jwt_secret_key already exists"
+fi
+
+# ── 4. Auto-generate remaining bootstrap secrets ────────────────────────
 step "Auto-generating bootstrap secrets"
 
 changed=0
-if [[ "$(read_env JWT_SECRET_KEY)" == "REPLACE_ME_WITH_32_BYTE_HEX" || -z "$(read_env JWT_SECRET_KEY)" ]]; then
-    set_env JWT_SECRET_KEY "$(new_hex 32)"; ok "Generated JWT_SECRET_KEY"; changed=1
-fi
 if [[ "$(read_env POSTGRES_PASSWORD)" == "REPLACE_ME_WITH_STRONG_PASSWORD" || -z "$(read_env POSTGRES_PASSWORD)" ]]; then
     set_env POSTGRES_PASSWORD "$(new_hex 16)"; ok "Generated POSTGRES_PASSWORD"; changed=1
 fi

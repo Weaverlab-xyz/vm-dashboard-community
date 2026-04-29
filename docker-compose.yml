@@ -62,6 +62,9 @@ services:
       - .env
     environment:
       - DATABASE_URL=postgresql://dashboardadmin:${POSTGRES_PASSWORD:-devpassword}@db:5432/vmclidashboard
+      - JWT_SECRET_KEY_FILE=/run/secrets/jwt_key
+    secrets:
+      - jwt_key
     depends_on:
       db:
         condition: service_healthy
@@ -80,3 +83,7 @@ services:
 volumes:
   pgdata:
   ollama_models:
+
+secrets:
+  jwt_key:
+    file: .jwt_secret_key

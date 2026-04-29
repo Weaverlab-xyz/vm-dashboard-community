@@ -6,7 +6,7 @@ import os
 import re
 import secrets
 from typing import Any, List
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -74,9 +74,26 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./vm_cli.db"
 
     # Security
-    jwt_secret_key: str = secrets.token_hex(32)  # Generate random key if not provided
+    # jwt_secret_key is loaded from jwt_secret_key_file (Docker secret mount) when set,
+    # or from /run/secrets/jwt_key if that path exists, then falls back to the env var.
+    jwt_secret_key_file: str = ""  # path written by the onboard script; set by Compose secrets
+    jwt_secret_key: str = secrets.token_hex(32)
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 480  # 8 hours
+
+    @model_validator(mode="after")
+    def _load_jwt_key_from_file(self) -> "Settings":
+        path = self.jwt_secret_key_file or ""
+        if not path and os.path.exists("/run/secrets/jwt_key"):
+            path = "/run/secrets/jwt_key"
+        if path:
+            try:
+                key = open(path).read().strip()  # noqa: WPS515
+                if key:
+                    object.__setattr__(self, "jwt_secret_key", key)
+            except OSError as exc:
+                raise ValueError(f"Cannot read JWT key from '{path}': {exc}") from exc
+        return self
 
     # First-run admin bootstrap. If no users exist at startup AND
     # first_run_admin_password is set, an admin account is created with these

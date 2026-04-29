@@ -152,12 +152,6 @@ function Set-EnvValue {
     Set-Content -LiteralPath $Path -Value $newLines -Encoding UTF8
 }
 
-# ── 3. Auto-generate secrets at first-run defaults ─────────────────────
-Write-Step "Auto-generating secrets at placeholder values"
-
-$envVars = Read-EnvFile -Path $envFile
-$changed = $false
-
 function New-HexSecret {
     param([int]$Bytes = 32)
     $b = New-Object byte[] $Bytes
@@ -165,12 +159,36 @@ function New-HexSecret {
     return ([System.BitConverter]::ToString($b) -replace "-", "").ToLowerInvariant()
 }
 
-if ($envVars.JWT_SECRET_KEY -eq "REPLACE_ME_WITH_32_BYTE_HEX" -or
-    -not $envVars.JWT_SECRET_KEY) {
-    Set-EnvValue -Path $envFile -Key "JWT_SECRET_KEY" -Value (New-HexSecret -Bytes 32)
-    Write-Ok "Generated JWT_SECRET_KEY"
-    $changed = $true
+# ── 3. Generate JWT secret key file ────────────────────────────────────
+# The JWT key is the root of trust for DB-encrypted integration credentials.
+# It lives in .jwt_secret_key (Docker secret mount) rather than .env so
+# the rest of .env is safe to inspect or share for debugging.
+Write-Step "Checking JWT secret key"
+
+$jwtKeyFile = Join-Path $repoRoot ".jwt_secret_key"
+if (-not (Test-Path $jwtKeyFile)) {
+    New-HexSecret -Bytes 32 | Set-Content -LiteralPath $jwtKeyFile -Encoding ASCII -NoNewline
+
+    # Restrict to current user only (equivalent of chmod 600).
+    $acl = Get-Acl -LiteralPath $jwtKeyFile
+    $acl.SetAccessRuleProtection($true, $false)
+    $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+    $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+        $me, "FullControl", "Allow"
+    )
+    $acl.SetAccessRule($rule)
+    Set-Acl -LiteralPath $jwtKeyFile -AclObject $acl
+
+    Write-Ok "Generated .jwt_secret_key (owner-only permissions)"
+} else {
+    Write-Ok ".jwt_secret_key already exists"
 }
+
+# ── 4. Auto-generate remaining bootstrap secrets ────────────────────────
+Write-Step "Auto-generating secrets at placeholder values"
+
+$envVars = Read-EnvFile -Path $envFile
+$changed = $false
 
 if ($envVars.POSTGRES_PASSWORD -eq "REPLACE_ME_WITH_STRONG_PASSWORD" -or
     -not $envVars.POSTGRES_PASSWORD) {

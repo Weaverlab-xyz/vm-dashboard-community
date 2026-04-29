@@ -1,0 +1,35 @@
+# Secrets — must never be baked into the image
+.env
+.jwt_secret_key
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Git history
+.git/
+
+# Terraform (not needed inside the container)
+terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+.terraform/
+
+# Python build artefacts
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Docs and scripts (not needed at runtime)
+docs/
+scripts/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
