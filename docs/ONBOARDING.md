@@ -284,20 +284,22 @@ from it. While the onboard script protects it with owner-only filesystem
 permissions, it remains a plaintext file on disk, which is not appropriate for
 long-lived or shared deployments.
 
-**After completing the setup wizard, migrate the key to your cloud secrets
-manager:**
+**After completing the setup wizard, migrate the key to your secrets manager:**
 
 1. Log in as admin and go to **Settings → Secrets Backend** (`/secrets`).
-2. Choose your provider (AWS Secrets Manager, Azure Key Vault, or GCP Secret
-   Manager) and enter the target secret name.
-3. Click **Migrate** — the dashboard uploads the key to your cloud vault,
-   updates its internal reference, and on all future startups will read the key
-   from the cloud rather than the local file.
+2. Choose your provider and enter the target secret name:
+   - **AWS Secrets Manager** — requires AWS credentials configured in the wizard
+   - **Azure Key Vault** — requires the Azure SP and Key Vault URL configured in the wizard
+   - **GCP Secret Manager** — requires GCP service account configured in the wizard
+   - **BeyondTrust Secrets Safe** — requires BeyondTrust configured under feature flags
+3. Click **Migrate** — the dashboard uploads the key to your vault, updates its
+   internal reference, and on all future startups reads the key from the cloud
+   rather than the local file.
 4. Once migration is confirmed, delete `.jwt_secret_key` from the repo directory.
 
-After migration the local file is no longer needed. Your cloud provider's
-access controls, audit logging, and key rotation capabilities become the
-security boundary instead of filesystem permissions.
+After migration the local file is no longer needed. Your vault's access controls,
+audit logging, and key rotation capabilities become the security boundary instead
+of filesystem permissions.
 
 ### Platform notes
 
