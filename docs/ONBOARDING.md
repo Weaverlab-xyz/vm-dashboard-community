@@ -373,6 +373,81 @@ If any step fails, skip to [Part F](#part-f--troubleshooting).
   settle. Linux/WSL: run `sudo service docker start` (or
   `sudo systemctl start docker`) then rerun the script.
 
+### WSL: `docker pull` fails with a certificate error
+
+**Symptom:** `docker pull postgres:16-alpine` (or any image) fails with:
+```
+x509: certificate signed by unknown authority
+```
+
+**Cause:** Your network uses an SSL-inspection proxy (Zscaler, Palo Alto, etc.)
+that re-signs outbound TLS traffic with a corporate root CA. WSL does not
+inherit Windows' trusted root store, so Docker inside WSL rejects the
+intercepted certificate.
+
+**Fix — run once per WSL distro install:**
+
+**Step 1 — identify and export the proxy root CA (PowerShell on Windows):**
+
+```powershell
+# List trusted roots — look for your security vendor (Zscaler, etc.)
+Get-ChildItem Cert:\LocalMachine\Root | Select-Object Subject, Thumbprint | Sort-Object Subject
+
+# Export the relevant cert (replace <Thumbprint> with the value above)
+$cert = Get-ChildItem Cert:\LocalMachine\Root\<Thumbprint>
+Export-Certificate -Cert $cert -FilePath "$env:TEMP\corp-root.cer" -Type CERT
+```
+
+If you are unsure which cert to export, export them all and let WSL sort it out:
+
+```powershell
+New-Item -ItemType Directory -Force "$env:TEMP\roots" | Out-Null
+Get-ChildItem Cert:\LocalMachine\Root | ForEach-Object {
+    Export-Certificate -Cert $_ `
+        -FilePath "$env:TEMP\roots\$($_.Thumbprint).cer" -Type CERT
+}
+```
+
+**Step 2 — import into WSL and update the system trust store:**
+
+```bash
+# Single cert
+openssl x509 -inform DER \
+    -in /mnt/c/Users/$(cmd.exe /c echo %USERNAME% 2>/dev/null | tr -d '\r')/AppData/Local/Temp/corp-root.cer \
+    -out /tmp/corp-root.pem
+sudo cp /tmp/corp-root.pem /usr/local/share/ca-certificates/corp-root.crt
+sudo update-ca-certificates
+```
+
+If you exported all certs, convert and import them in a loop:
+
+```bash
+WINTEMP="/mnt/c/Users/$(cmd.exe /c echo %USERNAME% 2>/dev/null | tr -d '\r')/AppData/Local/Temp/roots"
+sudo mkdir -p /usr/local/share/ca-certificates/windows-roots
+for f in "$WINTEMP"/*.cer; do
+    name=$(basename "$f" .cer)
+    openssl x509 -inform DER -in "$f" \
+        -out "/usr/local/share/ca-certificates/windows-roots/$name.crt" 2>/dev/null || true
+done
+sudo update-ca-certificates
+```
+
+**Step 3 — add the cert to Docker's registry trust store:**
+
+```bash
+sudo mkdir -p /etc/docker/certs.d/registry-1.docker.io
+sudo cp /tmp/corp-root.pem /etc/docker/certs.d/registry-1.docker.io/ca.crt
+sudo service docker restart
+```
+
+**Verify:**
+
+```bash
+docker pull hello-world
+```
+
+If that succeeds, rerun `./scripts/onboard.sh`.
+
 ### Stack starts but `/api/health` doesn't respond
 
 ```powershell
