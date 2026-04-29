@@ -60,7 +60,12 @@ for cmd in git docker curl; do
         case "$cmd" in
             docker)
                 if (( _is_wsl )); then
-                    fail "Install Docker Engine in WSL: https://docs.docker.com/engine/install/ubuntu/"
+                    fail "Install Docker in WSL (pick one):"
+                    fail "  Option A — distro package (no Cloudflare/CDN required):"
+                    fail "    sudo apt update && sudo apt install -y docker.io docker-compose-plugin"
+                    fail "    sudo usermod -aG docker \$USER && newgrp docker"
+                    fail "  Option B — Docker Engine (official upstream):"
+                    fail "    https://docs.docker.com/engine/install/ubuntu/"
                 else
                     fail "Install Docker Desktop: https://www.docker.com/products/docker-desktop/"
                 fi
@@ -76,7 +81,7 @@ done
 if ! docker info --format '{{.ServerVersion}}' >/dev/null 2>&1; then
     fail "Docker daemon is not responding."
     if (( _is_wsl )); then
-        fail "Start Docker Engine with one of:"
+        fail "Start the Docker daemon with one of:"
         fail "  sudo service docker start        (WSL without systemd)"
         fail "  sudo systemctl start docker      (WSL with systemd enabled)"
         fail "Then rerun this script."
@@ -86,6 +91,22 @@ if ! docker info --format '{{.ServerVersion}}' >/dev/null 2>&1; then
     exit 1
 fi
 ok "Docker daemon responding"
+
+# Detect which Compose variant is available.
+# docker.io (distro package) ships the compose plugin separately as docker-compose-plugin;
+# standalone docker-compose (v1) also works.
+if docker compose version >/dev/null 2>&1; then
+    _compose_cmd="docker compose"
+elif command -v docker-compose >/dev/null 2>&1; then
+    _compose_cmd="docker-compose"
+    warn "Using standalone docker-compose (v1). Consider installing docker-compose-plugin for v2."
+else
+    fail "Compose not found. Install it with one of:"
+    fail "  sudo apt install -y docker-compose-plugin   (v2 plugin, recommended)"
+    fail "  sudo apt install -y docker-compose          (v1 standalone)"
+    exit 1
+fi
+ok "Compose: $_compose_cmd"
 
 if [[ ! -f "$COMPOSE_FILE" ]]; then
     fail "docker-compose.yml not found at $COMPOSE_FILE."
@@ -153,13 +174,13 @@ fi
 # ── 4. Bring up the stack ───────────────────────────────────────────────
 step "Starting Docker Compose stack"
 
-compose_args=(compose -f "$COMPOSE_FILE" up -d)
+compose_args=(-f "$COMPOSE_FILE" up -d)
 (( BUILD )) && compose_args+=(--build)
 
-if ! docker "${compose_args[@]}"; then
-    fail "docker compose up failed."
+if ! $_compose_cmd "${compose_args[@]}"; then
+    fail "$_compose_cmd up failed."
     fail "Recent logs:"
-    docker compose -f "$COMPOSE_FILE" logs --tail 50 app || true
+    $_compose_cmd -f "$COMPOSE_FILE" logs --tail 50 app || true
     exit 1
 fi
 ok "Containers started"
@@ -180,7 +201,7 @@ done
 if ! (( ready )); then
     fail "Health endpoint did not respond within 90 seconds."
     fail "Recent app logs:"
-    docker compose -f "$COMPOSE_FILE" logs --tail 50 app || true
+    $_compose_cmd -f "$COMPOSE_FILE" logs --tail 50 app || true
     echo
     warn "Common causes:"
     warn "  - Invalid AWS or Azure credentials (app crashes at startup)"
@@ -214,4 +235,4 @@ printf "%sNext steps:%s\n" "$C_STEP" "$C_RESET"
 echo "  - The browser setup wizard will open automatically on first launch."
 echo "    Complete it to create your admin account and enter cloud credentials."
 echo "  - See docs/ONBOARDING.md for the full feature-test checklist."
-echo "  - Stop the stack with:  docker compose -f docker-compose.yml down"
+echo "  - Stop the stack with:  $_compose_cmd -f docker-compose.yml down"
