@@ -379,5 +379,5 @@ class _MCPAuth:
 
 def get_mcp_asgi_app() -> Callable:
     """Return the MCP ASGI app wrapped with PAT authentication."""
-    raw_app = mcp.streamable_http_app()
+    raw_app = mcp.sse_app()
     return _MCPAuth(raw_app)
