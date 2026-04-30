@@ -11,8 +11,8 @@ psycopg2-binary==2.9.9
 gunicorn==21.2.0
 
 # Data validation
-pydantic==2.6.1
-pydantic-settings==2.1.0
+pydantic>=2.7.2,<3.0.0
+pydantic-settings>=2.5.2
 
 # Authentication
 python-jose[cryptography]==3.3.0
