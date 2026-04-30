@@ -52,10 +52,15 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(_warm_aws_amis(),               name="warm_aws_amis"),
         asyncio.create_task(_warm_aws_network_opts(),       name="warm_aws_network_opts"),
         asyncio.create_task(_warm_aws_instances(),          name="warm_aws_instances"),
-
-        asyncio.create_task(_warm_azure_images(),           name="warm_azure_images"),
-        asyncio.create_task(_warm_azure_network_opts(),     name="warm_azure_network_opts"),
     ]
+    azure_configured = bool(
+        config_service.get("azure_client_id") or settings.azure_client_id
+    )
+    if azure_configured:
+        warmers += [
+            asyncio.create_task(_warm_azure_images(),       name="warm_azure_images"),
+            asyncio.create_task(_warm_azure_network_opts(), name="warm_azure_network_opts"),
+        ]
     if settings.portainer_enabled:
         warmers.append(
             asyncio.create_task(_warm_portainer_containers(), name="warm_portainer_containers")
