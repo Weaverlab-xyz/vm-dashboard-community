@@ -18,6 +18,14 @@ Desktop required).
 - [Appendix B — Sign in with Microsoft (Entra OAuth)](#appendix-b--sign-in-with-microsoft-entra-oauth)
 - [Appendix C — MCP server (AI client integration)](#appendix-c--mcp-server-ai-client-integration)
 - [Appendix D — BeyondTrust integration](#appendix-d--beyondtrust-integration)
+- [Appendix E — Proxmox VE integration](#appendix-e--proxmox-ve-integration)
+- [Appendix F — VMware vSphere / ESXi integration](#appendix-f--vmware-vsphere--esxi-integration)
+- [Appendix G — Microsoft Hyper-V integration](#appendix-g--microsoft-hyper-v-integration)
+- [Appendix H — Nutanix AHV integration](#appendix-h--nutanix-ahv-integration)
+- [Appendix I — XCP-ng / XenServer integration](#appendix-i--xcp-ng--xenserver-integration)
+- [Appendix J — Portainer CE integration](#appendix-j--portainer-ce-integration)
+- [Appendix K — Ansible config management](#appendix-k--ansible-config-management)
+- [Appendix L — Entitle approval workflows](#appendix-l--entitle-approval-workflows)
 
 ---
 
@@ -249,7 +257,7 @@ first visit because no credentials are stored yet.
 | **2 — AWS** | Access Key ID, Secret Access Key, and default region from Part A |
 | **3 — Azure** | Service principal credentials from Part B. Optionally expand **Sign in with Microsoft** to add Entra OAuth (see Appendix B) |
 | **4 — GCP** | Project ID, region/zone, and service account JSON key from Part C. Expand **Advanced** to set the SSH key secret name |
-| **5 — Feature flags** | Enable optional integrations — all default off (see Appendix A, C) |
+| **5 — Feature flags** | Enable optional integrations — all default off (see Appendices A, E–L for on-prem integrations; Appendix C for MCP) |
 
 Click **Complete setup**. Credentials are encrypted with AES-256 and
 stored in the application database — not in any file on disk.
@@ -315,8 +323,10 @@ of filesystem permissions.
 - **Apple Silicon (M1/M2/M3/M4):** Docker images build natively as
   `linux/arm64` — no platform flag needed. The same applies to
   Raspberry Pi 5 (ARM64).
-- The **VMware** feature flag (Appendix A) is Windows host-only; do not
-  enable it on macOS, Linux, or WSL.
+- The **VMware Workstation** feature flag (Appendix A) is Windows host-only;
+  do not enable it on macOS, Linux, or WSL. The **VMware vSphere / ESXi**
+  flag (Appendix F) connects to a remote vCenter/ESXi host and works on any
+  OS.
 - The optional **MCP server** (Appendix C) needs no extra containers —
   it runs inside the main app and is always available once the stack is up.
 - **Portainer**, **Ansible**, **Proxmox VE**, **VMware vSphere / ESXi**,
@@ -758,3 +768,154 @@ HTTP Streamable transport (SSE).
 
 All tools are **read-only**. Deploy, start, and stop actions must be
 performed through the web UI.
+
+---
+
+## Appendix E — Proxmox VE integration
+
+> **Full guide:** [docs/integrations/proxmox.md](integrations/proxmox.md)
+
+Optional. Connects to a Proxmox VE node or cluster via the Proxmox REST API.
+Supports VM and LXC container start, stop, reboot, and status listing. Works
+with Proxmox VE 6.x and later.
+
+### Enable the integration
+
+1. **Settings → Integrations** → toggle **Proxmox VE** on.
+2. Fill in your Proxmox host URL, a user with API access (e.g.
+   `root@pam` or a dedicated API user), and the corresponding API token or
+   password.
+3. Click **Save**. No restart required.
+
+See the full guide for creating a least-privilege API token on the Proxmox
+side.
+
+---
+
+## Appendix F — VMware vSphere / ESXi integration
+
+> **Full guide:** [docs/integrations/vsphere.md](integrations/vsphere.md)
+
+Optional. Connects to a vCenter Server or standalone ESXi host via the
+vSphere Web Services API (pyVmomi). Supports VM power operations and status
+listing. Works with vCenter 6.7+ and ESXi 6.7+. Works on any host OS —
+not Windows-only.
+
+### Enable the integration
+
+1. **Settings → Integrations** → toggle **VMware vSphere / ESXi** on.
+2. Fill in the vCenter or ESXi hostname, a read/write user (e.g. a dedicated
+   service account with the VM power-user role), and the datacenter name.
+   Standalone ESXi uses `ha-datacenter`.
+3. Click **Save**. No restart required.
+
+---
+
+## Appendix G — Microsoft Hyper-V integration
+
+> **Full guide:** [docs/integrations/hyperv.md](integrations/hyperv.md)
+
+Optional. Manages Hyper-V VMs on a Windows Server or Windows 10/11 Pro host
+via WinRM (Windows Remote Management) and remote PowerShell. No agent is
+required on the host.
+
+### Prerequisites
+
+- Windows Server 2016–2025 or Windows 10/11 Pro / Enterprise with Hyper-V
+  enabled on the target host.
+- WinRM enabled and reachable from the container:
+  ```powershell
+  Enable-PSRemoting -Force
+  ```
+- A Windows user account (local or domain) with Hyper-V Administrator rights
+  on the target host.
+
+### Enable the integration
+
+1. **Settings → Integrations** → toggle **Microsoft Hyper-V** on.
+2. Fill in the Hyper-V host address, username, and password.
+3. Click **Save**. No restart required.
+
+---
+
+## Appendix H — Nutanix AHV integration
+
+> **Full guide:** [docs/integrations/nutanix.md](integrations/nutanix.md)
+
+Optional. Connects to **Prism Central** (or Prism Element) via the Nutanix
+REST API v3. Supports VM start, graceful ACPI shutdown, force stop, reboot,
+and status listing. Graceful shutdown requires Nutanix Guest Tools to be
+installed in the VM.
+
+### Enable the integration
+
+1. **Settings → Integrations** → toggle **Nutanix AHV** on.
+2. Fill in the Prism Central hostname, a Prism user account (with VM power
+   operation permissions), and the password.
+3. Click **Save**. No restart required.
+
+---
+
+## Appendix I — XCP-ng / XenServer integration
+
+> **Full guide:** [docs/integrations/xcpng.md](integrations/xcpng.md)
+
+Optional. Connects to an XCP-ng or XenServer host or pool master via the
+XAPI XML-RPC API. Supports VM start, clean shutdown, force shutdown, reboot,
+and status listing.
+
+### Enable the integration
+
+1. **Settings → Integrations** → toggle **XCP-ng / XenServer** on.
+2. Fill in the host URL (e.g. `https://xcp-host.local`), username (typically
+   `root`), and password.
+3. Click **Save**. No restart required.
+
+---
+
+## Appendix J — Portainer CE integration
+
+> **Full guide:** [docs/integrations/portainer.md](integrations/portainer.md)
+
+Optional. Connects to a self-hosted **Portainer CE** instance to manage
+Docker containers from the dashboard.
+
+### Enable the integration
+
+1. **Settings → Integrations** → toggle **Portainer CE** on.
+2. Fill in the Portainer base URL and an API access token (created in
+   Portainer under **Account → Access Tokens**).
+3. Click **Save**. No restart required.
+
+---
+
+## Appendix K — Ansible config management
+
+> **Full guide:** [docs/integrations/ansible.md](integrations/ansible.md)
+
+Optional. Enables the **Config Mgmt** tab for running Ansible playbooks
+against managed VMs. Playbooks can run via local Docker or a remote
+AWS ECS Fargate cluster.
+
+### Enable the integration
+
+1. **Settings → Integrations** → toggle **Ansible config management** on.
+2. Configure your playbook runner (local Docker socket or ECS cluster ARN)
+   in the configuration panel.
+3. Click **Save**. No restart required.
+
+---
+
+## Appendix L — Entitle approval workflows
+
+> **Full guide:** [docs/integrations/entitle.md](integrations/entitle.md)
+
+Optional. Gates sensitive dashboard actions (VM deploy, termination, etc.)
+behind an **Entitle** approval workflow. Requires an active Entitle tenant.
+
+### Enable the integration
+
+1. **Settings → Integrations** → toggle **Entitle approval workflows** on.
+2. Fill in your Entitle API endpoint and API key from the Entitle admin
+   console.
+3. Click **Save**. No restart required.
