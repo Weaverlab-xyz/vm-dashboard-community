@@ -221,7 +221,8 @@ class Settings(BaseSettings):
     azure_aci_resource_group: str = ""            # defaults to azure_resource_group if empty
     azure_aci_subnet_id: str = ""                 # required for ACI VNet injection
     azure_aci_jumpoint_image: str = "beyondtrust/sra-jumpoint:latest"
-    azure_ansible_aci_image: str = "willhallonline/ansible:latest"  # Ansible image for ACI config mgmt runner
+    ansible_aci_image: str = "willhallonline/ansible:latest"  # Ansible image for ACI config mgmt runner
+    ansible_aci_ssh_key_secret_name: str = ""  # Azure Key Vault secret name for the Ansible SSH private key
     azure_aci_cpu: float = 1.0
     azure_aci_memory: float = 2.0
     # BeyondTrust Jumpoint Docker registry deploy key for Azure ACI launches.
@@ -323,11 +324,15 @@ class Settings(BaseSettings):
     # GCS backend
     ansible_gcs_bucket: str = ""              # GCS bucket name
     ansible_gcs_prefix: str = "config-mgmt"
+    ansible_runner: str = "local"              # "local" | "ecs" | "aci" | "gcp"
+    ansible_default_user: str = "ec2-user"    # SSH user for cloud runner targets
     ansible_ecs_cluster: str = "bt-jumpoint"  # Shares cluster with BT Jumpoint
     ansible_ecs_task_family: str = "ansible-config-mgmt"
     ansible_ecs_image: str = "willhallonline/ansible:latest"
     ansible_ecs_cpu: str = "256"
     ansible_ecs_memory: str = "512"
+    ansible_ecs_subnet_id: str = ""           # Fargate task subnet (VPC private subnet recommended)
+    ansible_ecs_security_group_ids: str = ""  # Comma-separated security group IDs (optional)
     ansible_ecs_execution_role_arn: str = ""  # Set if image pull requires it
     ansible_ssh_key_secret: str = "AWS_KEY"        # Password Safe secret title (legacy fallback)
     ansible_ssh_key_sm_name: str = "ec2/ssh-keypair"  # AWS Secrets Manager secret name/ARN (preferred)

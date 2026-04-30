@@ -758,6 +758,166 @@ async def list_ecs_tasks(region: str, cluster: str, include_stopped: bool = Fals
         raise AWSError("AWS credentials not configured.")
 
 
+# ── ECS Ansible runner ────────────────────────────────────────────────────────
+
+def _run_ecs_ansible_sync(
+    region: str,
+    cluster: str,
+    task_family: str,
+    image: str,
+    cpu: str,
+    memory: str,
+    subnet_id: str,
+    security_group_ids: list,
+    execution_role_arn: str,
+    target_ip: str,
+    ansible_user: str,
+    playbook_b64: str,
+    ssh_key_b64: str,
+    job_id: str,
+) -> tuple:
+    """Create an ECS Fargate task that runs one Ansible playbook, wait for it to
+    finish, retrieve CloudWatch logs, and return (exit_code, output)."""
+    import time
+    ecs = _get_ecs(region)
+    logs_client = boto3.client("logs", region_name=region)
+    log_group = "/ecs/ansible-runner"
+    log_stream_prefix = f"ansible/{job_id[:8]}"
+
+    try:
+        logs_client.create_log_group(logGroupName=log_group)
+    except ClientError as e:
+        if e.response["Error"]["Code"] != "ResourceAlreadyExistsException":
+            raise
+
+    cmd = (
+        "set -e && "
+        'echo "$PLAYBOOK_B64" | base64 -d > /tmp/playbook.yml && '
+        'echo "$SSH_KEY_B64" | base64 -d > /tmp/ssh_key && '
+        "chmod 600 /tmp/ssh_key && "
+        f"ansible-playbook -i '{target_ip},' --forks 1 "
+        f"-u {ansible_user} --private-key /tmp/ssh_key "
+        "--ssh-extra-args='-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null' "
+        "/tmp/playbook.yml"
+    )
+
+    td_kwargs: dict = dict(
+        family=task_family,
+        networkMode="awsvpc",
+        requiresCompatibilities=["FARGATE"],
+        cpu=str(cpu),
+        memory=str(memory),
+        containerDefinitions=[{
+            "name": "ansible",
+            "image": image,
+            "essential": True,
+            "command": ["sh", "-c", cmd],
+            "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                    "awslogs-group": log_group,
+                    "awslogs-region": region,
+                    "awslogs-stream-prefix": log_stream_prefix,
+                },
+            },
+        }],
+    )
+    if execution_role_arn:
+        td_kwargs["executionRoleArn"] = execution_role_arn
+
+    td_resp = ecs.register_task_definition(**td_kwargs)
+    task_def_arn = td_resp["taskDefinition"]["taskDefinitionArn"]
+
+    ecs.create_cluster(clusterName=cluster)
+
+    run_resp = ecs.run_task(
+        cluster=cluster,
+        taskDefinition=task_def_arn,
+        launchType="FARGATE",
+        networkConfiguration={"awsvpcConfiguration": {
+            "subnets": [subnet_id] if subnet_id else [],
+            "securityGroups": security_group_ids or [],
+            "assignPublicIp": "DISABLED" if subnet_id else "ENABLED",
+        }},
+        overrides={"containerOverrides": [{
+            "name": "ansible",
+            "environment": [
+                {"name": "PLAYBOOK_B64", "value": playbook_b64},
+                {"name": "SSH_KEY_B64", "value": ssh_key_b64},
+            ],
+        }]},
+        count=1,
+    )
+
+    tasks = run_resp.get("tasks", [])
+    if not tasks:
+        raise AWSError(f"ECS ansible task failed to start: {run_resp.get('failures', [])}")
+
+    task_arn = tasks[0]["taskArn"]
+    task_id = task_arn.split("/")[-1]
+
+    # Poll until stopped (max 20 min)
+    exit_code = 1
+    for _ in range(120):
+        desc = ecs.describe_tasks(cluster=cluster, tasks=[task_arn])
+        t = desc.get("tasks", [{}])[0]
+        if t.get("lastStatus") == "STOPPED":
+            for c in t.get("containers", []):
+                if c.get("name") == "ansible":
+                    ec = c.get("exitCode")
+                    exit_code = ec if ec is not None else 1
+                    break
+            break
+        time.sleep(10)
+
+    # Retrieve CloudWatch logs
+    output = ""
+    try:
+        log_stream = f"{log_stream_prefix}/ansible/{task_id}"
+        log_resp = logs_client.get_log_events(
+            logGroupName=log_group,
+            logStreamName=log_stream,
+            startFromHead=True,
+        )
+        output = "\n".join(e["message"] for e in log_resp.get("events", []))
+    except Exception as log_err:
+        logger.warning("ECS Ansible: could not retrieve logs: %s", log_err)
+
+    return exit_code, output
+
+
+async def run_ecs_ansible_task(
+    region: str,
+    cluster: str,
+    task_family: str,
+    image: str,
+    cpu: str,
+    memory: str,
+    subnet_id: str,
+    security_group_ids: list,
+    execution_role_arn: str,
+    target_ip: str,
+    ansible_user: str,
+    playbook_b64: str,
+    ssh_key_b64: str,
+    job_id: str,
+) -> tuple:
+    """Run an Ansible playbook via ECS Fargate. Returns (exit_code, output)."""
+    try:
+        return await asyncio.to_thread(
+            _run_ecs_ansible_sync,
+            region, cluster, task_family, image, cpu, memory,
+            subnet_id, security_group_ids, execution_role_arn,
+            target_ip, ansible_user, playbook_b64, ssh_key_b64, job_id,
+        )
+    except AWSError:
+        raise
+    except (ClientError, BotoCoreError) as e:
+        raise AWSError(f"Failed to run ECS Ansible task: {e}") from e
+    except NoCredentialsError:
+        raise AWSError("AWS credentials not configured.")
+
+
 def _describe_ami_sync(region: str, ami_id: str) -> dict:
     ec2 = _get_ec2(region)
     resp = ec2.describe_images(ImageIds=[ami_id])

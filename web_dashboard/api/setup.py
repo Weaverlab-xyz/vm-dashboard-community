@@ -302,6 +302,9 @@ class PortainerFeatureConfig(BaseModel):
 
 class AnsibleFeatureConfig(BaseModel):
     enabled: bool = False
+    # Runner selection
+    ansible_runner: str = "local"            # "local" | "ecs" | "aci" | "gcp"
+    ansible_default_user: str = "ec2-user"  # SSH user for cloud runner targets
     # S3 storage
     ansible_s3_bucket: str = ""
     ansible_s3_region: str = ""
@@ -316,9 +319,12 @@ class AnsibleFeatureConfig(BaseModel):
     # AWS ECS runner
     ansible_ecs_cluster: str = "bt-jumpoint"
     ansible_ecs_task_family: str = "ansible-config-mgmt"
+    ansible_ecs_subnet_id: str = ""
+    ansible_ecs_security_group_ids: str = ""
     # Azure ACI runner
     ansible_aci_image: str = "willhallonline/ansible:latest"
     ansible_aci_subnet_id: str = ""
+    ansible_aci_ssh_key_secret_name: str = ""
     ansible_aci_acr_server: str = ""
     ansible_aci_acr_username: str = ""
     ansible_aci_acr_password: str = ""      # encrypted at rest
