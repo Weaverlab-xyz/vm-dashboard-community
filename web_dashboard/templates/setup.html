@@ -616,6 +616,36 @@ function wizard() {
         desc:  'Approval-gated actions via Entitle.',
         note:  'Requires an Entitle tenant.',
       },
+      {
+        key:   'proxmox_enabled',
+        label: 'Proxmox VE',
+        desc:  'On-premises VM and LXC container management via the Proxmox REST API.',
+        note:  '',
+      },
+      {
+        key:   'vsphere_enabled',
+        label: 'VMware vSphere / ESXi',
+        desc:  'Enterprise VMware VM management via the vSphere Web Services API (pyVmomi).',
+        note:  '',
+      },
+      {
+        key:   'hyperv_enabled',
+        label: 'Microsoft Hyper-V',
+        desc:  'Hyper-V VM management via WinRM/PowerShell on a Windows host.',
+        note:  '',
+      },
+      {
+        key:   'nutanix_enabled',
+        label: 'Nutanix AHV',
+        desc:  'Nutanix AHV VM management via Prism Central REST API v3.',
+        note:  '',
+      },
+      {
+        key:   'xcpng_enabled',
+        label: 'XCP-ng / XenServer',
+        desc:  'XCP-ng and XenServer VM management via the XAPI XML-RPC API.',
+        note:  '',
+      },
     ],
 
     async init() {
