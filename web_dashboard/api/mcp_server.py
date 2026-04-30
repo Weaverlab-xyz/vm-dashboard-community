@@ -77,7 +77,7 @@ def _job_dict(job: Job) -> dict:
 # ── Tools ─────────────────────────────────────────────────────────────────────
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool()
 async def dashboard_summary() -> dict:
     """
     Return a high-level summary of the dashboard: active job count, recent
@@ -115,7 +115,7 @@ async def dashboard_summary() -> dict:
     }
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool()
 async def list_jobs(
     status: Optional[str] = None,
     workgroup: Optional[str] = None,
@@ -139,7 +139,7 @@ async def list_jobs(
         db.close()
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool()
 async def get_job(job_id: str) -> dict:
     """
     Return full details for a single job by its UUID.
@@ -160,7 +160,7 @@ async def get_job(job_id: str) -> dict:
         db.close()
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool()
 async def list_vms(workgroup: Optional[str] = None) -> dict:
     """
     List VMware VMs via the PowerShell CLI. Returns a list of VMs with their
@@ -178,7 +178,7 @@ async def list_vms(workgroup: Optional[str] = None) -> dict:
         return {"error": str(exc)}
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool()
 async def list_ec2_instances() -> dict:
     """
     List EC2 instances deployed via this dashboard (from job tracking records).
@@ -223,7 +223,7 @@ async def list_ec2_instances() -> dict:
     return {"instances": instances}
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool()
 async def list_amis(region: Optional[str] = None) -> dict:
     """
     List available AWS AMIs (from AWS Secrets Manager / Boto3). Requires AWS
@@ -237,7 +237,7 @@ async def list_amis(region: Optional[str] = None) -> dict:
         return {"error": str(exc)}
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool()
 async def list_azure_vms(resource_group: Optional[str] = None) -> dict:
     """
     List Azure VMs managed by this dashboard. Requires Azure credentials to be
@@ -379,5 +379,5 @@ class _MCPAuth:
 
 def get_mcp_asgi_app() -> Callable:
     """Return the MCP ASGI app wrapped with PAT authentication."""
-    raw_app = mcp.streamable_http_app()
+    raw_app = mcp.sse_app()
     return _MCPAuth(raw_app)

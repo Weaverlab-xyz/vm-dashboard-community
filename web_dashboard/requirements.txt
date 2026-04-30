@@ -12,7 +12,7 @@ gunicorn==21.2.0
 
 # Data validation
 pydantic>=2.7.2,<3.0.0
-pydantic-settings>=2.5.2
+pydantic-settings>=2.6.1
 
 # Authentication
 python-jose[cryptography]==3.3.0
@@ -52,7 +52,7 @@ azure-keyvault-secrets>=4.7.0
 azure-mgmt-automation>=1.0.0
 
 # MCP (Model Context Protocol) server — exposes dashboard tools to AI clients
-mcp>=1.0.0
+mcp>=1.2.0
 
 # Google Cloud SDK
 google-cloud-compute>=1.14.0
