@@ -14,6 +14,83 @@
     <a href="/jobs" class="text-sm text-blue-600 hover:underline">View all jobs →</a>
   </div>
 
+  <!-- AI Playbook Generator -->
+  <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 space-y-4">
+    <div class="flex items-center gap-2">
+      <svg class="h-5 w-5 text-purple-500 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+              d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m1.636-6.364l.707.707M12 21v-1
+                 M6.343 17.657l-.707.707M17.657 17.657l.707.707M12 8a4 4 0 100 8 4 4 0 000-8z"/>
+      </svg>
+      <h2 class="text-sm font-semibold text-gray-700 uppercase tracking-wide">Generate Playbook with AI</h2>
+      <span class="text-xs text-gray-400 font-normal ml-1">powered by Ollama</span>
+    </div>
+
+    <div class="space-y-3">
+      <textarea x-model="gen.prompt" rows="3"
+                :disabled="gen.loading"
+                class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm
+                       focus:outline-none focus:ring-2 focus:ring-purple-500 resize-y disabled:opacity-50"
+                placeholder="Describe the playbook you need — e.g. 'Install nginx and enable it on Ubuntu servers'"></textarea>
+
+      <div class="flex items-center gap-3">
+        <button @click="generatePlaybook()"
+                :disabled="gen.loading || !gen.prompt.trim()"
+                class="flex items-center gap-2 bg-purple-600 hover:bg-purple-700
+                       disabled:opacity-50 text-white text-sm font-medium px-4 py-2 rounded-lg transition">
+          <svg x-show="gen.loading" class="animate-spin h-4 w-4" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"></path>
+          </svg>
+          <span x-text="gen.loading ? 'Generating…' : 'Generate'"></span>
+        </button>
+        <p x-show="gen.loading" x-cloak class="text-xs text-gray-400">
+          This may take 30–60 s on CPU…
+        </p>
+      </div>
+
+      <!-- Error -->
+      <div x-show="gen.error" x-cloak class="rounded-lg bg-red-50 border border-red-200 p-3">
+        <p class="text-sm text-red-700" x-text="gen.error"></p>
+        <template x-if="gen.ollamaDown">
+          <p class="text-xs text-red-500 mt-1">
+            Start Ollama: <code class="bg-red-100 px-1 rounded">docker compose --profile chat up -d</code>
+          </p>
+        </template>
+      </div>
+
+      <!-- Output -->
+      <template x-if="gen.yaml">
+        <div class="space-y-2">
+          <div class="flex items-center justify-between">
+            <label class="text-xs font-medium text-gray-600 uppercase tracking-wide">Generated YAML</label>
+            <span class="text-xs text-gray-400">Edit before saving if needed</span>
+          </div>
+          <textarea x-model="gen.yaml" rows="14"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-xs font-mono
+                           focus:outline-none focus:ring-2 focus:ring-purple-500 resize-y bg-gray-50"></textarea>
+          <div class="flex items-center gap-3">
+            <input x-model="gen.filename" type="text"
+                   class="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm
+                          focus:outline-none focus:ring-2 focus:ring-purple-500"
+                   placeholder="playbook-name.yml"/>
+            <button @click="saveGenerated()"
+                    :disabled="gen.saving || !gen.yaml.trim() || !gen.filename.trim()"
+                    class="flex items-center gap-2 bg-green-600 hover:bg-green-700
+                           disabled:opacity-50 text-white text-sm font-medium px-4 py-2 rounded-lg transition whitespace-nowrap">
+              <svg x-show="gen.saving" class="animate-spin h-4 w-4" fill="none" viewBox="0 0 24 24">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"></path>
+              </svg>
+              <span x-text="gen.saving ? 'Saving…' : 'Save to storage'"></span>
+            </button>
+          </div>
+          <p x-show="gen.saveError" x-cloak class="text-xs text-red-600" x-text="gen.saveError"></p>
+        </div>
+      </template>
+    </div>
+  </div>
+
   <!-- No targets configured -->
   <template x-if="!loading && targets.length === 0 && !hasCloudTargets">
     <div class="bg-amber-50 border border-amber-200 rounded-xl p-6 text-center">
@@ -314,6 +391,16 @@ function configMgmt() {
       target: '',
       extra_vars_raw: '',
     },
+    gen: {
+      prompt: '',
+      yaml: '',
+      filename: '',
+      loading: false,
+      saving: false,
+      error: '',
+      saveError: '',
+      ollamaDown: false,
+    },
 
     get hasCloudTargets() {
       return this.cloudTargets.aws.length > 0
@@ -416,6 +503,49 @@ function configMgmt() {
         this.runError = e.message || 'Failed to queue run.';
       } finally {
         this.running = false;
+      }
+    },
+
+    async generatePlaybook() {
+      this.gen.error = '';
+      this.gen.saveError = '';
+      this.gen.yaml = '';
+      this.gen.ollamaDown = false;
+      this.gen.loading = true;
+      try {
+        const result = await API.post('/api/config-mgmt/playbooks/generate', {
+          prompt: this.gen.prompt,
+        });
+        this.gen.yaml = result.yaml;
+        this.gen.filename = result.suggested_filename;
+      } catch (e) {
+        this.gen.error = e.message || 'Generation failed.';
+        this.gen.ollamaDown = (e.message || '').toLowerCase().includes('ollama');
+      } finally {
+        this.gen.loading = false;
+      }
+    },
+
+    async saveGenerated() {
+      this.gen.saveError = '';
+      this.gen.saving = true;
+      try {
+        const encoder = new TextEncoder();
+        const bytes = encoder.encode(this.gen.yaml);
+        const b64 = btoa(String.fromCharCode(...bytes));
+        await API.post('/api/config-mgmt/upload', {
+          filename: this.gen.filename,
+          content_b64: b64,
+        });
+        toast(`Saved "${this.gen.filename}" to storage`, 'success');
+        this.gen.yaml = '';
+        this.gen.prompt = '';
+        this.gen.filename = '';
+        await this.loadAssets();
+      } catch (e) {
+        this.gen.saveError = e.message || 'Failed to save playbook.';
+      } finally {
+        this.gen.saving = false;
       }
     },
 

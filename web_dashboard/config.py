@@ -245,6 +245,12 @@ class Settings(BaseSettings):
     ssl_certfile: str = ""   # path to cert.pem, e.g. web_dashboard/certs/cert.pem
     ssl_keyfile: str = ""    # path to key.pem,  e.g. web_dashboard/certs/key.pem
 
+    # Ollama (local LLM — started via `docker compose --profile chat up -d`)
+    ollama_base_url: str = "http://ollama:11434"
+    chat_model: str = "llama3.1:8b-instruct-q4_K_M"
+    # 8B model on CPU is slow — allow up to 5 min for generation
+    chat_request_timeout: float = 300.0
+
     # FIDO2 / WebAuthn MFA
     webauthn_rp_id: str = "localhost"             # bare domain, no port (e.g. dashboard.example.com)
     webauthn_rp_name: str = "Infrastructure Management Dashboard"

@@ -64,8 +64,11 @@ google-auth>=2.20.0
 # Azure Blob Storage (Packer template archive)
 azure-storage-blob>=12.19.0
 
-# Async HTTP client (Portainer CE API)
+# Async HTTP client (Portainer CE API, Ollama)
 httpx>=0.27.0
+
+# YAML parsing (playbook generation validation)
+PyYAML>=6.0
 
 # Proxmox VE REST API
 proxmoxer>=2.0.0

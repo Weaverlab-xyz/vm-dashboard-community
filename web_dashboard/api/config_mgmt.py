@@ -32,6 +32,94 @@ from ..services import ansible_local_service
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/config-mgmt", tags=["config-mgmt"])
 
+_PLAYBOOK_SYSTEM_PROMPT = """
+You are an expert Ansible automation engineer. Generate complete, valid Ansible playbooks.
+
+STRICT OUTPUT RULES — violating any of these will break the pipeline:
+- Output ONLY raw YAML. No markdown code fences, no explanations, no preamble.
+- Every play must have a `name:` field.
+- Every task must have a `name:` field.
+- Use fully-qualified module names: ansible.builtin.apt, ansible.builtin.dnf,
+  ansible.builtin.copy, ansible.builtin.template, ansible.builtin.service, etc.
+- Prefer idempotent modules over ansible.builtin.command or ansible.builtin.shell.
+- Include `become: true` at the play level for tasks requiring root.
+- Set `gather_facts: true` unless the prompt explicitly says not to.
+- Use `state: present` (or equivalent) for install and configuration tasks.
+- The output must be syntactically valid YAML.
+""".strip()
+
+
+# ── AI playbook generation ────────────────────────────────────────────────────
+
+class GenerateRequest(BaseModel):
+    prompt: str
+    filename: str = ""  # optional; used only to suggest a save name to the client
+
+
+@router.post("/playbooks/generate")
+async def generate_playbook(
+    req: GenerateRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Generate an Ansible playbook from a natural-language prompt using the local
+    Ollama model.  Returns the raw YAML string.
+
+    Requires the Ollama container to be running:
+        docker compose --profile chat up -d
+    """
+    from ..services import ollama_service
+    from ..services.ollama_service import OllamaError
+
+    if not req.prompt.strip():
+        raise HTTPException(status_code=400, detail="prompt must not be empty.")
+
+    available = await ollama_service.healthcheck()
+    if not available:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Ollama is not running or the model is not loaded. "
+                "Start it with: docker compose --profile chat up -d"
+            ),
+        )
+
+    messages = [
+        {"role": "system", "content": _PLAYBOOK_SYSTEM_PROMPT},
+        {"role": "user",   "content": req.prompt.strip()},
+    ]
+    try:
+        result = await ollama_service.chat(messages, timeout=300.0)
+    except OllamaError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
+    yaml_text = (result.get("message") or {}).get("content", "").strip()
+
+    # Strip accidental markdown fences the model may add despite instructions.
+    if yaml_text.startswith("```"):
+        lines = yaml_text.splitlines()
+        yaml_text = "\n".join(
+            line for line in lines
+            if not line.strip().startswith("```")
+        ).strip()
+
+    # Validate it at least parses as YAML before sending to the client.
+    try:
+        import yaml
+        yaml.safe_load(yaml_text)
+    except Exception as exc:
+        logger.warning("generate_playbook: model returned invalid YAML: %s", exc)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Model returned output that is not valid YAML: {exc}",
+        )
+
+    suggested_name = req.filename.strip() or "generated-playbook.yml"
+    if not suggested_name.endswith((".yml", ".yaml")):
+        suggested_name += ".yml"
+
+    return {"yaml": yaml_text, "suggested_filename": suggested_name}
+
 
 # ── Asset / playbook listing ───────────────────────────────────────────────────
 
