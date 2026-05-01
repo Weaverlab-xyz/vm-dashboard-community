@@ -64,7 +64,7 @@ async function _waitForApproval(approvalId, action) {
     }
 }
 
-const API = {
+window.API = {
     async request(method, path, body = null, extraHeaders = {}) {
         const token = Alpine.store('auth').token;
         const opts = {
