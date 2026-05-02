@@ -14,6 +14,7 @@ not appear here.
 """
 import json
 import logging
+import os
 import subprocess
 
 logger = logging.getLogger(__name__)
@@ -53,9 +54,36 @@ def _gcp_cfg() -> tuple[str, str, str]:
 
 def _bt_cfg() -> tuple[str, str]:
     cs = _cs()
-    host = cs.get("secrets_bt_host") or cs.get("bt_api_host", "")
+    host = (cs.get("secrets_bt_host") or cs.get("bt_api_host", "")).rstrip("/")
     folder = cs.get("secrets_bt_folder") or "Dashboard"
     return host, folder
+
+
+def _pscli_env() -> dict:
+    cs = _cs()
+    env = dict(os.environ)
+    host, _ = _bt_cfg()
+    if host:
+        env.setdefault("PSCLI_API_URL", host)
+    for cfg_key, env_key in [
+        ("secrets_bt_client_id",     "PSCLI_CLIENT_ID"),
+        ("secrets_bt_client_secret", "PSCLI_CLIENT_SECRET"),
+    ]:
+        val = cs.get(cfg_key, "")
+        if val:
+            env[env_key] = val
+    return env
+
+
+def _ps_run(args: list, timeout: int = 30) -> list:
+    result = subprocess.run(
+        ["ps-cli", "--format", "json"] + args,
+        capture_output=True, text=True, timeout=timeout,
+        env=_pscli_env(),
+    )
+    if result.returncode != 0:
+        raise ValueError(f"ps-cli error: {(result.stderr or result.stdout)[:300]}")
+    return json.loads(result.stdout) if result.stdout.strip() else []
 
 
 # ── AWS Secrets Manager ───────────────────────────────────────────────────────
@@ -205,39 +233,22 @@ def test_bt_secrets_safe() -> dict:
     host, folder = _bt_cfg()
     if not host:
         raise ValueError(
-            "BeyondTrust host is not configured. Set it in Settings → BeyondTrust or Secrets → BeyondTrust."
+            "BeyondTrust host is not configured. Set it in Secrets → BeyondTrust Secrets Safe."
         )
-    result = subprocess.run(
-        ["ps-cli", "--format", "json", "secrets", "list"],
-        capture_output=True, text=True, timeout=15,
-    )
-    if result.returncode != 0:
-        raise ValueError(f"ps-cli test failed: {result.stderr[:300]}")
+    _ps_run(["secrets", "list"])
     return {"ok": True, "message": f"Connected to BeyondTrust Secrets Safe at {host} (folder: {folder})."}
 
 
 def write_bt_secrets_safe(key: str, value: str) -> str:
     _, folder = _bt_cfg()
     title = _bt_secret_title(key)
-    result = subprocess.run(
-        ["ps-cli", "--format", "json", "secrets", "create",
-         "-t", title, "-v", value, "--folder", folder],
-        capture_output=True, text=True, timeout=30,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"ps-cli secrets create failed: {result.stderr[:300]}")
+    _ps_run(["secrets", "create", "-t", title, "-v", value, "--folder", folder], timeout=30)
     logger.info("BT Safe: wrote secret %s", title)
     return title
 
 
 def read_bt_secrets_safe(ref: str) -> str:
-    result = subprocess.run(
-        ["ps-cli", "--format", "json", "secrets", "get", "-t", ref, "-d"],
-        capture_output=True, text=True, timeout=30,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"ps-cli secrets get failed: {result.stderr[:300]}")
-    data = json.loads(result.stdout)
+    data = _ps_run(["secrets", "get", "-t", ref, "-d"])
     if isinstance(data, list) and data:
         return data[0].get("Password", "")
     return ""

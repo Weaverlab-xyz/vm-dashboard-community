@@ -87,3 +87,6 @@ aiohttp>=3.9.0
 # asyncssh is used instead of paramiko because paramiko 3+ dropped DSA key support,
 # and BeyondTrust Password Safe releases DSS private keys for managed SSH accounts.
 asyncssh>=2.14.0
+
+# BeyondTrust Password Safe / Secrets Safe CLI (ps-cli)
+beyondtrust-bips-cli
