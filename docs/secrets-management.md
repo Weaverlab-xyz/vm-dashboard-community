@@ -32,7 +32,7 @@ complexity when compliance or separation-of-duties is a requirement.
 | **Cloud provider credentials** | AWS access key + secret, Azure SP client secret, GCP service account JSON | Encrypted DB (Tier 1) or external vault (Tier 2+) |
 | **Integration API tokens** | Portainer PAT, Entitle API token, BeyondTrust client secret | Encrypted DB (Tier 1) or external vault (Tier 2+) |
 | **SSH private keys** | EC2 keypair, GCP SSH key | External vault only (AWS SM / GCP SM); never in the DB |
-| **JWT root key** | `.jwt_secret_key` | Host filesystem (owner-read-only) or external vault after migration |
+| **JWT root key** | `.jwt_secret_key` | Host filesystem (owner-read-only) or Docker secret — see [why this can't be migrated](#why-the-jwt-root-key-cannot-be-migrated) |
 | **Database password** | `POSTGRES_PASSWORD` | `.env` (non-secret bootstrap; not an application credential) |
 
 The database password in `.env` is intentionally left there — it is only
@@ -104,23 +104,41 @@ user access to the vault.
 5. The plaintext value is no longer stored in the database. Future reads go
    to the vault.
 
-### Migrating the JWT root key
+### Why the JWT root key cannot be migrated
 
-The JWT key is the most sensitive secret because it protects all other
-encrypted values. Migrating it to a vault breaks the dependency on the local
-`.jwt_secret_key` file:
+The JWT root key derives the Fernet key that encrypts every value in the
+application database — including the cloud credentials the dashboard would
+need to call any external vault. There is no startup ordering in the
+community edition that resolves this:
 
-1. Ensure your chosen vault backend is configured and working.
-2. Go to **Settings → Secrets Backend** → select your backend → choose
-   **JWT Root Key** as the secret to migrate.
-3. After a successful migration, delete `.jwt_secret_key` from the repo
-   directory. The application reads it from the vault on every startup.
+```
+read JWT root key
+  └─ derive Fernet DEK
+       └─ decrypt DB row
+            └─ get vault credentials
+                 └─ call vault to fetch JWT root key  ← the loop
+```
 
-> **Before migrating the JWT key**, verify your vault credentials are correct
-> and the vault is reachable from inside the container
-> (`docker compose exec app curl <vault-endpoint>`). A failed migration rolls
-> back cleanly, but a successful migration followed by vault unavailability
-> will prevent the application from starting.
+The community edition therefore reads the JWT root key from one of these
+sources only, in order:
+
+1. The path in `JWT_SECRET_KEY_FILE` (set by `docker-compose.yml` to
+   `/run/secrets/jwt_key` when the host file exists).
+2. `/run/secrets/jwt_key` directly (Docker / Compose secret mount).
+3. The `JWT_SECRET_KEY` environment variable.
+4. A freshly generated random key — **only suitable for first-run/dev**;
+   it does not survive a restart and invalidates all existing sessions
+   and DB-encrypted values.
+
+> The hosted SaaS edition removes this limitation by fetching the root key
+> from Azure Key Vault using a workload-managed identity and OIDC federation
+> — no static credential is required to bootstrap. See
+> [SaaS comparison](saas-comparison.md) for details.
+
+To rotate the JWT root key in the community edition: stop the application,
+write a new key to the file/secret, restart. **All existing sessions are
+invalidated and every DB-encrypted value must be re-entered** through the
+setup wizard / Settings panels. Plan rotation accordingly.
 
 ### IAM permissions required per backend
 
@@ -174,8 +192,10 @@ for setup instructions.
 ## Security best practices
 
 **Do immediately after first run:**
-- [ ] Migrate the JWT root key to your cloud vault (see above).
-- [ ] Delete `.jwt_secret_key` from the host once migration is confirmed.
+- [ ] Verify the JWT root key file (`.jwt_secret_key` or
+  `/run/secrets/jwt_key`) has owner-only read permissions.
+- [ ] Back up the JWT root key to a secure offline location — losing it
+  renders the entire encrypted database unrecoverable.
 - [ ] Change the auto-generated admin password (`Settings → Security → Change Password`).
 
 **For any shared or long-lived deployment:**
