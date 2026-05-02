@@ -52,7 +52,7 @@ _SECRET_REGISTRY: list[tuple[str, str]] = [
     ("azure_oauth_client_secret", "Azure OAuth App Client Secret"),
     ("gcp_service_account_json",  "GCP Service Account JSON Key"),
     ("pscli_client_secret",       "BeyondTrust ps-cli Client Secret"),
-    ("bt_client_secret",          "BeyondTrust Password Safe Client Secret"),
+    ("bt_client_secret",          "BeyondTrust Privileged Remote Access Client Secret"),
     ("epml_pat",                  "BeyondTrust EPM-L Personal Access Token"),
     ("entitle_api_token",         "Entitle API Token"),
     ("entitle_webhook_secret",    "Entitle Webhook Secret"),
@@ -75,6 +75,17 @@ _BACKEND_PREFIXES: dict[str, str] = {
 
 _VALID_BACKENDS = frozenset(_BACKEND_PREFIXES)
 _EXTERNAL_BACKENDS = _VALID_BACKENDS - {"database"}
+
+# Credentials each backend reads to authenticate. Migrating one of these to the
+# same backend would brick config resolution on next restart (the dashboard
+# can't read its own auth credential through the backend that auth credential
+# unlocks), so the migration loop refuses to move them.
+_BOOTSTRAP_BLOCKLIST: dict[str, frozenset[str]] = {
+    "aws_sm":          frozenset({"aws_secret_access_key"}),
+    "azure_kv":        frozenset({"azure_client_secret"}),
+    "gcp_sm":          frozenset({"gcp_service_account_json"}),
+    "bt_secrets_safe": frozenset({"pscli_client_secret"}),
+}
 
 
 # ── Pydantic models ───────────────────────────────────────────────────────────
@@ -237,12 +248,24 @@ async def migrate_secrets(payload: MigratePayload, request: Request):
     from ..services import secrets_backend_service as sbs
 
     target_prefix = _BACKEND_PREFIXES[payload.target_backend]
+    blocked = _BOOTSTRAP_BLOCKLIST.get(payload.target_backend, frozenset())
 
     migrated: list[dict] = []
     skipped:  list[dict] = []
     errors:   list[dict] = []
 
     for key, description in _SECRET_REGISTRY:
+        if key in blocked:
+            skipped.append({
+                "key": key,
+                "reason": (
+                    f"bootstrap credential — {payload.target_backend} reads this "
+                    f"to authenticate; migrating it would brick the dashboard"
+                ),
+                "bootstrap": True,
+            })
+            continue
+
         cs._ensure_loaded()
         with cs._cache_lock:
             raw = cs._cache.get(key, "")

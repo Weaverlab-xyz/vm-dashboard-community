@@ -243,45 +243,63 @@
       <template x-if="panel?.key === 'beyondtrust' && !panelLoading">
         <div class="space-y-4">
           <p class="text-sm text-gray-500">
-            BeyondTrust PRA (Password Safe) integration for secret retrieval and session recording.
-            Requires the <code class="bg-gray-100 px-1 rounded">btapi</code> binary in the container and a BeyondTrust tenant.
+            Configure the BeyondTrust products the dashboard integrates with.
+            Each uses its own CLI binary in the container and its own OAuth credentials —
+            leave a section blank if you don't use that product.
           </p>
+
+          <!-- Password Safe -->
           <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">Password Safe URL</label>
-            <input type="text" x-model="panelCfg.pscli_api_url"
-                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                   placeholder="https://ps.company.com">
-          </div>
-          <div class="grid grid-cols-2 gap-3">
-            <div>
-              <label class="block text-sm font-medium text-gray-700 mb-1">OAuth Client ID</label>
-              <input type="text" x-model="panelCfg.pscli_client_id"
-                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500">
-            </div>
-            <div>
-              <label class="block text-sm font-medium text-gray-700 mb-1">OAuth Client Secret</label>
-              <input type="password" x-model="panelCfg.pscli_client_secret"
-                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                     placeholder="••••••••">
-            </div>
-          </div>
-          <div class="border-t border-gray-100 pt-4">
-            <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-3">btapi binary credentials (if different)</p>
+            <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Password Safe</p>
+            <p class="text-xs text-gray-400 mb-3">
+              Secret retrieval and managed-account credential checkout via the
+              <code class="bg-gray-100 px-1 rounded">ps-cli</code> binary.
+            </p>
             <div class="space-y-3">
               <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">API Host</label>
-                <input type="text" x-model="panelCfg.bt_api_host"
+                <label class="block text-sm font-medium text-gray-700 mb-1">Password Safe URL</label>
+                <input type="text" x-model="panelCfg.pscli_api_url"
                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                       placeholder="Same as Password Safe URL">
+                       placeholder="https://ps.company.com">
               </div>
               <div class="grid grid-cols-2 gap-3">
                 <div>
-                  <label class="block text-sm font-medium text-gray-700 mb-1">Client ID</label>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">OAuth Client ID</label>
+                  <input type="text" x-model="panelCfg.pscli_client_id"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">OAuth Client Secret</label>
+                  <input type="password" x-model="panelCfg.pscli_client_secret"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="••••••••">
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Privileged Remote Access -->
+          <div class="border-t border-gray-100 pt-4">
+            <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Privileged Remote Access (PRA)</p>
+            <p class="text-xs text-gray-400 mb-3">
+              Session recording and remote-access provisioning via the
+              <code class="bg-gray-100 px-1 rounded">btapi</code> binary.
+            </p>
+            <div class="space-y-3">
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">PRA API Host</label>
+                <input type="text" x-model="panelCfg.bt_api_host"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="https://pra.company.com">
+              </div>
+              <div class="grid grid-cols-2 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">OAuth Client ID</label>
                   <input type="text" x-model="panelCfg.bt_client_id"
                          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500">
                 </div>
                 <div>
-                  <label class="block text-sm font-medium text-gray-700 mb-1">Client Secret</label>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">OAuth Client Secret</label>
                   <input type="password" x-model="panelCfg.bt_client_secret"
                          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
                          placeholder="••••••••">
@@ -289,8 +307,10 @@
               </div>
             </div>
           </div>
+
+          <!-- EPM for Linux -->
           <div class="border-t border-gray-100 pt-4">
-            <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-3">EPM for Linux (EPM-L)</p>
+            <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">EPM for Linux (EPM-L)</p>
             <p class="text-xs text-gray-400 mb-3">
               Personal Access Token for the BeyondTrust SaaS API at
               <code class="bg-gray-100 px-1 rounded">app.beyondtrust.io</code>.
@@ -832,8 +852,8 @@ function settingsPage() {
     integrations: [
       { key: 'vmware',       label: 'VMware Workstation',      hasConfig: false, enabled: false,
         desc: 'VM management on a Windows host. Toggle to enable.' },
-      { key: 'beyondtrust',  label: 'BeyondTrust PRA',         hasConfig: true,  enabled: false,
-        desc: 'Secret retrieval and session recording via Password Safe.' },
+      { key: 'beyondtrust',  label: 'BeyondTrust',             hasConfig: true,  enabled: false,
+        desc: 'Password Safe secret retrieval and PRA session recording.' },
       { key: 'portainer',    label: 'Portainer CE',            hasConfig: true,  enabled: false,
         desc: 'On-prem Docker host management.' },
       { key: 'ansible',      label: 'Ansible',                 hasConfig: true,  enabled: false,
