@@ -1,8 +1,14 @@
 # Infrastructure Management Dashboard — Community Edition
 
 A self-hosted web dashboard for managing infrastructure across AWS, Azure, GCP,
-and (optionally) on-prem infrastructure (VMware, Hyper-V, Proxmox, Nutanix).. Bring your own cloud credentials;
+and (optionally) on-prem infrastructure (VMware, Hyper-V, Proxmox, Nutanix). Bring your own cloud credentials;
 the dashboard deploys resources into **your** accounts.
+
+> **Looking for a hosted version?** A managed SaaS edition is on the roadmap.
+> It removes the on-disk JWT root key by fetching it from Azure Key Vault via
+> a workload-managed identity (OIDC federation, no static credentials), and
+> adds multi-tenant isolation, automatic rotation, and managed upgrades.
+> See [docs/saas-comparison.md](docs/saas-comparison.md) for how it compares.
 
 > **Status:** private preview. This README is a placeholder — a full rewrite
 > with screenshots and a demo video lands with the public release.
