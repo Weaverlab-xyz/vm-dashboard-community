@@ -62,12 +62,10 @@ def _bt_cfg() -> tuple[str, str]:
 def _pscli_env() -> dict:
     cs = _cs()
     env = dict(os.environ)
-    host, _ = _bt_cfg()
-    if host:
-        env.setdefault("PSCLI_API_URL", host)
     for cfg_key, env_key in [
-        ("secrets_bt_client_id",     "PSCLI_CLIENT_ID"),
-        ("secrets_bt_client_secret", "PSCLI_CLIENT_SECRET"),
+        ("pscli_api_url",     "PSCLI_API_URL"),
+        ("pscli_client_id",   "PSCLI_CLIENT_ID"),
+        ("pscli_client_secret", "PSCLI_CLIENT_SECRET"),
     ]:
         val = cs.get(cfg_key, "")
         if val:
