@@ -9,6 +9,11 @@ WORKDIR /app
 COPY web_dashboard/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Install btapi (BeyondTrust PRA CLI) Linux binary — required for the
+# optional PRA Jump Group / Shell Jump integration in btapi_service.py.
+COPY btapi/btapi /usr/local/bin/btapi
+RUN chmod +x /usr/local/bin/btapi
+
 # Copy the application.
 COPY web_dashboard/ ./web_dashboard/
 

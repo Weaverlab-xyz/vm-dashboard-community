@@ -61,6 +61,29 @@ def _ssm_instance_profile() -> str:
     return _aws_cfg("ec2_ssm_instance_profile") or ""
 
 
+async def _resolve_aws_ecs_deploy_key() -> str:
+    """Return the BeyondTrust Jumpoint Docker deploy key for AWS ECS launches.
+
+    Resolution order:
+      1. Direct DB field `aws_ecs_docker_deploy_key` (preferred, backend-neutral
+         — config_service resolves through whichever secrets backend the user
+         picked on /secrets).
+      2. Legacy Password-Safe-only fallback via `bt_ps_deploy_key_title`.
+    Returns empty string if neither is configured (caller decides if that's fatal).
+    """
+    direct = _aws_cfg("aws_ecs_docker_deploy_key")
+    if direct:
+        return direct
+    title = _aws_cfg("bt_ps_deploy_key_title")
+    if title:
+        from ..services import btapi_service
+        try:
+            return await btapi_service.get_ps_secret(title)
+        except Exception as e:
+            logger.warning("AWS ECS deploy key fetch from Password Safe failed (%s)", e)
+    return ""
+
+
 # ── AMI listing ───────────────────────────────────────────────────────────────
 
 @router.get("/amis", response_model=AMIListResponse)
@@ -597,7 +620,7 @@ async def _run_deploy(
             from ..services import btapi_service
             job_service.update_progress(db, job_id, 15, "Starting BeyondTrust Jumpoint container…")
             try:
-                deploy_key = await btapi_service.get_ps_secret(settings.bt_ps_deploy_key_title)
+                deploy_key = await _resolve_aws_ecs_deploy_key()
                 ecs_task_arn = await aws_service.run_ecs_jumpoint_task(
                     region=_aws_region,
                     cluster=settings.bt_ecs_cluster,
@@ -742,7 +765,7 @@ async def _run_bulk_deploy(
                 f"Starting BeyondTrust Jumpoint container for {len(job_items)}-instance batch…"
             )
             try:
-                deploy_key = await btapi_service.get_ps_secret(settings.bt_ps_deploy_key_title)
+                deploy_key = await _resolve_aws_ecs_deploy_key()
                 ecs_task_arn = await aws_service.run_ecs_jumpoint_task(
                     region=_aws_region,
                     cluster=settings.bt_ecs_cluster,

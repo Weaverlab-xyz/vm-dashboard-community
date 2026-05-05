@@ -28,6 +28,9 @@ class AWSSetup(BaseModel):
     aws_region: str = "us-east-2"
     ec2_ssh_key_secret: str = ""
     ec2_ssm_instance_profile: str = ""
+    # BeyondTrust Jumpoint Docker deploy key (used by ECS Jumpoint task launches).
+    # Stored encrypted; resolved through whichever secrets backend the user picks.
+    aws_ecs_docker_deploy_key: str = ""
     # Packer template archive (optional)
     packer_aws_s3_bucket: str = ""
 
@@ -46,7 +49,21 @@ class AzureSetup(BaseModel):
     azure_gallery_resource_group: str = ""
     # Key Vault for SSH key retrieval (optional)
     azure_key_vault_url: str = ""
+    azure_ssh_keypair_secret_name: str = "azureVM-ssh-keypair"
+    # Legacy single-purpose secret names (used as fallback if keypair secret unset)
     azure_ssh_key_secret_name: str = ""
+    azure_ssh_private_key_secret_name: str = ""
+    # Container Registry (optional) — for ACI Ansible / Jumpoint runner pulls.
+    # Credentials are stored encrypted via config_service and resolved through
+    # whichever secrets backend the user picked on /secrets.
+    azure_acr_server: str = ""                                # e.g. myregistry.azurecr.io
+    azure_ansible_aci_image: str = "willhallonline/ansible:latest"
+    azure_aci_jumpoint_image: str = "beyondtrust/sra-jumpoint:latest"
+    azure_acr_username: str = ""
+    azure_acr_password: str = ""
+    # BeyondTrust Jumpoint Docker deploy key (used by ACI Jumpoint task launches).
+    # Stored encrypted; resolved through whichever secrets backend the user picks.
+    azure_aci_docker_deploy_key: str = ""
     # Optional: separate app registration for "Sign in with Microsoft"
     azure_oauth_client_id: str = ""
     azure_oauth_client_secret: str = ""
@@ -65,6 +82,10 @@ class GCPSetup(BaseModel):
     gcp_subnetwork: str = ""
     gcp_ssh_key_secret_name: str = ""
     gcp_ssh_username: str = "gcp-user"
+    # BeyondTrust Jumpoint Docker deploy key — pre-staged for upcoming GCP
+    # Cloud Run / GKE Jumpoint provisioning. Stored encrypted; resolved through
+    # whichever secrets backend the user picks. No consumer wires it today.
+    gcp_cloud_run_docker_deploy_key: str = ""
     # Packer template archive (optional)
     packer_gcs_bucket: str = ""
 

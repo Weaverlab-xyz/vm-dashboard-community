@@ -179,6 +179,11 @@ class Settings(BaseSettings):
     bt_ecs_cpu: str = "256"    # 0.25 vCPU
     bt_ecs_memory: str = "512"  # MB
     bt_ecs_execution_role_arn: str = ""  # Set to your ecsTaskExecutionRole ARN if required
+    # BeyondTrust Jumpoint Docker registry deploy key for AWS ECS launches.
+    # Stored encrypted via config_service; transparently resolved through whichever
+    # secrets backend the user picked on /secrets. The legacy `bt_ps_deploy_key_title`
+    # remains as a Password-Safe-only fallback.
+    aws_ecs_docker_deploy_key: str = ""
 
     # Portainer CE integration
     portainer_url: str = ""                          # e.g. "http://portainer.local:9000"  (Weaverlab)
@@ -219,22 +224,34 @@ class Settings(BaseSettings):
     azure_ansible_aci_image: str = "willhallonline/ansible:latest"  # Ansible image for ACI config mgmt runner
     azure_aci_cpu: float = 1.0
     azure_aci_memory: float = 2.0
-    azure_aci_ps_deploy_key_title: str = "ACI_Docker_Deploy_Key"  # BeyondTrust Password Safe secret for ACI deploy key
+    # BeyondTrust Jumpoint Docker registry deploy key for Azure ACI launches.
+    # Stored encrypted via config_service; transparently resolved through whichever
+    # secrets backend the user picked on /secrets. The legacy `*_ps_deploy_key_title`
+    # remains as a Password-Safe-only fallback.
+    azure_aci_docker_deploy_key: str = ""
+    azure_aci_ps_deploy_key_title: str = "ACI_Docker_Deploy_Key"  # Legacy: PS-only secret title (fallback)
     azure_aci_storage_account: str = ""           # Storage account name for /jpt persistent volume
     azure_aci_storage_account_rg: str = ""        # RG of the storage account (defaults to ACI RG if empty)
     azure_image_storage_account: str = ""         # Storage account for temp VHD upload during OVA→Azure image import
     azure_aci_file_share: str = "jpt"             # Azure File Share name for /jpt mount
     azure_jumpoint_id: int = 9                    # BeyondTrust Jumpoint ID for Azure VMs (ACI jumpoint, id=9 "ACI")
-    # ACR credentials (leave empty to pull from Docker Hub without auth)
+    # ACR credentials (leave empty to pull from Docker Hub without auth).
+    # Direct fields are preferred; values are stored encrypted in the DB and
+    # transparently resolved through the chosen secrets backend (PS / AWS SM /
+    # Azure KV / GCP SM) by config_service.get(). The legacy `*_secret_title`
+    # fields below remain as a Password-Safe-only fallback.
     azure_acr_server: str = ""                    # e.g. myregistry.azurecr.io
-    azure_acr_username_secret_title: str = ""     # Password Safe secret title for ACR username
-    azure_acr_password_secret_title: str = ""     # Password Safe secret title for ACR password
+    azure_acr_username: str = ""                  # ACR username / SP appId
+    azure_acr_password: str = ""                  # ACR password / SP secret (encrypted at rest)
+    azure_acr_username_secret_title: str = ""     # Legacy: PS-only secret title (fallback)
+    azure_acr_password_secret_title: str = ""     # Legacy: PS-only secret title (fallback)
     azure_bt_jump_group_name: str = ""            # BT jump group for Azure Shell Jumps (falls back to bt_jump_group_name)
     azure_bt_group_policy_name: str = ""          # BT group policy for Azure Shell Jumps (falls back to bt_group_policy_name)
     # Azure Key Vault — SSH key retrieval (optional; leave blank to disable)
     azure_key_vault_url: str = ""                     # e.g. "https://my-vault.vault.azure.net/"
-    azure_ssh_key_secret_name: str = ""               # Secret name for SSH public key (VM deploy)
-    azure_ssh_private_key_secret_name: str = ""               # Secret name for SSH private key (ConfigMgmt)
+    azure_ssh_keypair_secret_name: str = "azureVM-ssh-keypair"  # Unified secret: JSON {public_key, private_key}
+    azure_ssh_key_secret_name: str = ""               # Legacy: separate public-key secret (fallback)
+    azure_ssh_private_key_secret_name: str = ""       # Legacy: separate private-key secret (fallback)
 
     # Azure Automation (Hybrid Runbook Worker — set by Container App env vars from Terraform)
     azure_automation_account_name: str = ""
@@ -344,6 +361,11 @@ class Settings(BaseSettings):
     gcp_subnetwork: str = ""             # Full subnetwork self-link or name
     gcp_ssh_key_secret_name: str = ""    # Secret Manager secret name for SSH key pair
     gcp_ssh_username: str = "gcp-user"
+    # BeyondTrust Jumpoint Docker registry deploy key — pre-staged for the
+    # upcoming GCP Cloud Run / GKE Jumpoint provisioning support. Stored
+    # encrypted via config_service; transparently resolved through whichever
+    # secrets backend the user picked on /secrets. No consumer wires it today.
+    gcp_cloud_run_docker_deploy_key: str = ""
 
     # Entitle approval workflows (per-endpoint gate via Depends(require_approval(...)))
     entitle_api_url: str = ""                       # e.g. "https://api.entitle.io/v1"

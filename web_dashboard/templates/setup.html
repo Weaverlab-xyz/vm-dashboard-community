@@ -148,6 +148,16 @@
               Leave blank if you are not using SSM. Requires the <code class="bg-gray-100 px-1 rounded">AmazonSSMManagedInstanceCore</code> policy on the role.
             </p>
           </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">BeyondTrust Jumpoint Docker Deploy Key (optional)</label>
+            <input type="password" x-model="form.aws.aws_ecs_docker_deploy_key"
+              autocomplete="new-password"
+              class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+              :placeholder="isReconfig ? '••••••••  (leave blank to keep current)' : 'paste deploy key from BeyondTrust'">
+            <p class="mt-1 text-xs text-gray-500">
+              Required if you launch BeyondTrust Jumpoint containers in ECS. Stored encrypted in the dashboard DB and resolved through whichever secrets backend you select on the <code class="bg-gray-100 px-1 rounded">/secrets</code> page.
+            </p>
+          </div>
         </div>
       </div>
 
@@ -243,11 +253,79 @@
                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
                        placeholder="https://my-vault.vault.azure.net/">
               </div>
-              <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">SSH Public Key Secret Name</label>
-                <input type="text" x-model="form.azure.azure_ssh_key_secret_name"
+              <div class="sm:col-span-2">
+                <label class="block text-sm font-medium text-gray-700 mb-1">SSH Keypair Secret Name</label>
+                <input type="text" x-model="form.azure.azure_ssh_keypair_secret_name"
                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                       placeholder="dashboard-ssh-pubkey">
+                       placeholder="azureVM-ssh-keypair">
+                <p class="text-xs text-gray-500 mt-1">Key Vault secret containing JSON with <code>public_key</code> (used for VM deploys) and <code>private_key</code> (used by Ansible) fields.</p>
+              </div>
+              <div x-data="{ showLegacy: false }" class="sm:col-span-2">
+                <button type="button" @click="showLegacy = !showLegacy" class="text-xs text-blue-600 hover:underline">
+                  <span x-text="showLegacy ? '− Hide legacy (separate secrets)' : '+ Use legacy separate secrets instead'"></span>
+                </button>
+                <div x-show="showLegacy" x-cloak class="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-2">
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">SSH Public Key Secret Name (legacy)</label>
+                    <input type="text" x-model="form.azure.azure_ssh_key_secret_name"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                           placeholder="dashboard-ssh-pubkey">
+                  </div>
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">SSH Private Key Secret Name (legacy)</label>
+                    <input type="text" x-model="form.azure.azure_ssh_private_key_secret_name"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                           placeholder="dashboard-ssh-privkey">
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="border-t border-gray-100 pt-4">
+            <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-3">Container Registry — ACI Ansible / Jumpoint pulls (optional)</p>
+            <p class="text-xs text-gray-400 mb-3">Configure if you mirror the Ansible runner or BeyondTrust Jumpoint images in your own registry (e.g. to bypass Docker Hub rate limits). Credentials are stored encrypted in the dashboard DB and resolved through whichever secrets backend you select on the <code>/secrets</code> page.</p>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div class="sm:col-span-2">
+                <label class="block text-sm font-medium text-gray-700 mb-1">Registry Server</label>
+                <input type="text" x-model="form.azure.azure_acr_server"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="myregistry.azurecr.io">
+                <p class="text-xs text-gray-500 mt-1">Leave blank to pull all images from public Docker Hub without authentication.</p>
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Ansible Runner Image</label>
+                <input type="text" x-model="form.azure.azure_ansible_aci_image"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="willhallonline/ansible:latest">
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Jumpoint Image</label>
+                <input type="text" x-model="form.azure.azure_aci_jumpoint_image"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="beyondtrust/sra-jumpoint:latest">
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Registry Username</label>
+                <input type="text" x-model="form.azure.azure_acr_username"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       autocomplete="off"
+                       placeholder="appId or registry user">
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Registry Password</label>
+                <input type="password" x-model="form.azure.azure_acr_password"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       autocomplete="new-password"
+                       placeholder="leave blank to keep">
+              </div>
+              <div class="sm:col-span-2">
+                <label class="block text-sm font-medium text-gray-700 mb-1">BeyondTrust Jumpoint Docker Deploy Key (optional)</label>
+                <input type="password" x-model="form.azure.azure_aci_docker_deploy_key"
+                       autocomplete="new-password"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       :placeholder="isReconfig ? '••••••••  (leave blank to keep current)' : 'paste deploy key from BeyondTrust'">
+                <p class="text-xs text-gray-500 mt-1">Required if you launch BeyondTrust Jumpoint containers in ACI. Stored encrypted in the dashboard DB and resolved through whichever secrets backend you select on the <code>/secrets</code> page.</p>
               </div>
             </div>
           </div>
@@ -406,6 +484,16 @@ gcloud iam service-accounts keys create sa-key.json \
                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
                 placeholder="projects/…/regions/us-central1/subnetworks/default">
             </div>
+            <div class="sm:col-span-2">
+              <label class="block text-sm font-medium text-gray-700 mb-1">BeyondTrust Jumpoint Docker Deploy Key (optional)</label>
+              <input type="password" x-model="form.gcp.gcp_cloud_run_docker_deploy_key"
+                autocomplete="new-password"
+                class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                :placeholder="isReconfig ? '••••••••  (leave blank to keep current)' : 'paste deploy key from BeyondTrust'">
+              <p class="mt-1 text-xs text-gray-500">
+                Pre-staged for the upcoming GCP Cloud Run / GKE Jumpoint provisioning. Stored encrypted in the dashboard DB and resolved through whichever secrets backend you select on the <code class="bg-gray-100 px-1 rounded">/secrets</code> page. Not consumed by any code today.
+              </p>
+            </div>
           </div>
         </div>
       </div>
@@ -512,15 +600,24 @@ function wizard() {
     form: {
       admin:    { username: 'admin', password: '', confirm: '' },
       aws:      { aws_access_key_id: '', aws_secret_access_key: '', aws_region: 'us-east-2',
-                  ec2_ssh_key_secret: '', ec2_ssm_instance_profile: '' },
+                  ec2_ssh_key_secret: '', ec2_ssm_instance_profile: '',
+                  aws_ecs_docker_deploy_key: '' },
       azure:    { azure_client_id: '', azure_client_secret: '', azure_tenant_id: '',
                   azure_subscription_id: '', azure_resource_group: 'dashboard-rg', azure_location: 'centralus',
                   azure_vnet_resource_group: '', azure_shared_image_gallery: '',
-                  azure_gallery_resource_group: '', azure_key_vault_url: '', azure_ssh_key_secret_name: '',
+                  azure_gallery_resource_group: '', azure_key_vault_url: '',
+                  azure_ssh_keypair_secret_name: 'azureVM-ssh-keypair',
+                  azure_ssh_key_secret_name: '', azure_ssh_private_key_secret_name: '',
+                  azure_acr_server: '',
+                  azure_ansible_aci_image: 'willhallonline/ansible:latest',
+                  azure_aci_jumpoint_image: 'beyondtrust/sra-jumpoint:latest',
+                  azure_acr_username: '', azure_acr_password: '',
+                  azure_aci_docker_deploy_key: '',
                   azure_oauth_client_id: '', azure_oauth_client_secret: '', azure_oauth_tenant_id: '' },
       gcp:      { gcp_project_id: '', gcp_region: 'us-central1', gcp_zone: 'us-central1-a',
                   gcp_service_account_json: '', gcp_network: 'default', gcp_subnetwork: '',
-                  gcp_ssh_key_secret_name: '', gcp_ssh_username: 'gcp-user' },
+                  gcp_ssh_key_secret_name: '', gcp_ssh_username: 'gcp-user',
+                  gcp_cloud_run_docker_deploy_key: '' },
       features: { vmware_enabled: false, beyondtrust_enabled: false,
                   portainer_enabled: false, ansible_enabled: false, entitle_enabled: false },
     },
@@ -673,6 +770,10 @@ function wizard() {
               this.form.aws.ec2_ssm_instance_profile = cfg.ec2_ssm_instance_profile;
               this.showAwsAdvanced = true;
             }
+            if (cfg.aws_ecs_docker_deploy_key) {
+              this.form.aws.aws_ecs_docker_deploy_key = cfg.aws_ecs_docker_deploy_key;
+              this.showAwsAdvanced = true;
+            }
             if (cfg.azure_client_id)       this.form.azure.azure_client_id     = cfg.azure_client_id;
             if (cfg.azure_tenant_id)       this.form.azure.azure_tenant_id     = cfg.azure_tenant_id;
             if (cfg.azure_subscription_id) this.form.azure.azure_subscription_id = cfg.azure_subscription_id;
@@ -681,7 +782,12 @@ function wizard() {
             // Advanced Azure settings — expand panel if any were previously configured
             const advancedFields = ['azure_vnet_resource_group', 'azure_shared_image_gallery',
                                     'azure_gallery_resource_group', 'azure_key_vault_url',
-                                    'azure_ssh_key_secret_name'];
+                                    'azure_ssh_keypair_secret_name',
+                                    'azure_ssh_key_secret_name', 'azure_ssh_private_key_secret_name',
+                                    'azure_acr_server', 'azure_ansible_aci_image',
+                                    'azure_aci_jumpoint_image',
+                                    'azure_acr_username', 'azure_acr_password',
+                                    'azure_aci_docker_deploy_key'];
             for (const f of advancedFields) {
               if (cfg[f]) { this.form.azure[f] = cfg[f]; this.showAzureAdvanced = true; }
             }
@@ -697,7 +803,8 @@ function wizard() {
             if (cfg.gcp_zone)               this.form.gcp.gcp_zone               = cfg.gcp_zone;
             if (cfg.gcp_network)            this.form.gcp.gcp_network            = cfg.gcp_network;
             // GCP advanced — expand if previously configured
-            const gcpAdv = ['gcp_ssh_key_secret_name', 'gcp_ssh_username', 'gcp_subnetwork'];
+            const gcpAdv = ['gcp_ssh_key_secret_name', 'gcp_ssh_username', 'gcp_subnetwork',
+                            'gcp_cloud_run_docker_deploy_key'];
             for (const f of gcpAdv) {
               if (cfg[f]) { this.form.gcp[f] = cfg[f]; this.showGcpAdvanced = true; }
             }

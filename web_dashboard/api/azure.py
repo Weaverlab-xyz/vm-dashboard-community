@@ -47,6 +47,62 @@ def _cfg(key: str, fallback: str = "") -> str:
     return config_service.get(key) or getattr(settings, key, fallback)
 
 
+async def _resolve_azure_aci_deploy_key() -> str:
+    """Return the BeyondTrust Jumpoint Docker deploy key for Azure ACI launches.
+
+    Resolution order:
+      1. Direct DB field `azure_aci_docker_deploy_key` (preferred, backend-neutral
+         — config_service resolves through whichever secrets backend the user
+         picked on /secrets).
+      2. Legacy Password-Safe-only fallback via `azure_aci_ps_deploy_key_title`.
+    Returns empty string if neither is configured (caller decides if that's fatal).
+    """
+    direct = _cfg("azure_aci_docker_deploy_key")
+    if direct:
+        return direct
+    title = _cfg("azure_aci_ps_deploy_key_title")
+    if title:
+        from ..services import btapi_service
+        try:
+            return await btapi_service.get_ps_secret(title)
+        except Exception as e:
+            logger.warning("Azure ACI deploy key fetch from Password Safe failed (%s)", e)
+    return ""
+
+
+async def _resolve_acr_credentials() -> tuple:
+    """Return (acr_server, acr_username, acr_password) for the ACI Ansible runner.
+
+    Resolution order:
+      1. Direct DB fields `azure_acr_username` / `azure_acr_password` (preferred,
+         backend-neutral; whichever secrets backend the user selected on /secrets
+         resolves them transparently via config_service).
+      2. Legacy Password-Safe-only fallback via `azure_acr_*_secret_title` →
+         `btapi_service.get_ps_secret(...)`.
+
+    If `azure_acr_server` is unset, returns ("", "", "") so callers fall back to
+    an unauthenticated Docker Hub pull.
+    """
+    server = _cfg("azure_acr_server")
+    if not server:
+        return "", "", ""
+    username = _cfg("azure_acr_username")
+    password = _cfg("azure_acr_password")
+    if username and password:
+        return server, username, password
+    user_title = _cfg("azure_acr_username_secret_title")
+    pass_title = _cfg("azure_acr_password_secret_title")
+    if user_title and pass_title:
+        from ..services import btapi_service
+        try:
+            username = await btapi_service.get_ps_secret(user_title)
+            password = await btapi_service.get_ps_secret(pass_title)
+            return server, username, password
+        except Exception as e:
+            logger.warning("ACR credential fetch from Password Safe failed (%s) — pulling without auth", e)
+    return server, "", ""
+
+
 def _rg():
     return _cfg("azure_resource_group") or "vm-cli-rg"
 
@@ -150,17 +206,28 @@ async def network_options(
 async def get_keyvault_ssh_key(
     current_user: User = Depends(require_permission("azure", "read")),
 ):
-    """Retrieve the SSH public key stored in Azure Key Vault."""
-    kv_url    = _cfg("azure_key_vault_url")
-    kv_secret = _cfg("azure_ssh_key_secret_name")
-    if not kv_url or not kv_secret:
+    """Retrieve the SSH public key stored in Azure Key Vault.
+
+    Prefers the unified `azure_ssh_keypair_secret_name` (JSON with
+    public_key/private_key fields), falling back to legacy
+    `azure_ssh_key_secret_name`.
+    """
+    kv_url           = _cfg("azure_key_vault_url")
+    unified_secret   = _cfg("azure_ssh_keypair_secret_name")
+    legacy_secret    = _cfg("azure_ssh_key_secret_name")
+    if not kv_url:
         raise HTTPException(
             status_code=503,
-            detail="Key Vault not configured. Add the Key Vault URL and SSH key secret name in Settings → Azure.",
+            detail="Key Vault not configured. Add the Key Vault URL in Settings → Azure.",
         )
     try:
-        key_text = await azure_service.get_ssh_key_from_vault(kv_url, kv_secret)
-        return {"secret_name": kv_secret, "ssh_public_key": key_text}
+        key_text = await azure_service.resolve_azure_ssh_public_key(
+            kv_url, unified_secret, legacy_secret
+        )
+        return {
+            "secret_name": unified_secret or legacy_secret,
+            "ssh_public_key": key_text,
+        }
     except AzureError as e:
         raise HTTPException(status_code=503, detail=str(e))
 
@@ -481,30 +548,22 @@ async def _run_deploy(job_id: str, req: AzureDeployRequest, rg: str, loc: str):
             job_service.update_progress(db, job_id, 15, "Starting BeyondTrust ACI Jumpoint container…")
             try:
                 try:
-                    deploy_key = await btapi_service.get_ps_secret(settings.azure_aci_ps_deploy_key_title)
+                    deploy_key = await _resolve_azure_aci_deploy_key()
                 except Exception as key_err:
                     logger.warning("ACI deploy key fetch failed (%s) — creating ACI without deploy key", key_err)
                     deploy_key = ""
                     deploy_key_note = f" [deploy key fetch failed: {key_err}]"
-                # Fetch ACR credentials if configured
-                acr_username, acr_password = "", ""
-                if (settings.azure_acr_server
-                        and settings.azure_acr_username_secret_title
-                        and settings.azure_acr_password_secret_title):
-                    try:
-                        acr_username = await btapi_service.get_ps_secret(settings.azure_acr_username_secret_title)
-                        acr_password = await btapi_service.get_ps_secret(settings.azure_acr_password_secret_title)
-                    except Exception as acr_err:
-                        logger.warning("ACR credential fetch failed (%s) — ACI will attempt pull without ACR auth", acr_err)
+                # Fetch ACR credentials if configured (backend-neutral resolution).
+                acr_server, acr_username, acr_password = await _resolve_acr_credentials()
                 aci_group_name = await azure_service.run_aci_jumpoint_task(
                     rg=_aci_rg(),
                     location=loc,
                     subnet_id=settings.azure_aci_subnet_id,
-                    image=settings.azure_aci_jumpoint_image,
+                    image=_cfg("azure_aci_jumpoint_image"),
                     cpu=settings.azure_aci_cpu,
                     memory=settings.azure_aci_memory,
                     deploy_key=deploy_key,
-                    acr_server=settings.azure_acr_server,
+                    acr_server=acr_server,
                     acr_username=acr_username,
                     acr_password=acr_password,
                     storage_account=settings.azure_aci_storage_account,
@@ -628,30 +687,22 @@ async def _run_bulk_deploy(job_items: list, req: AzureBulkDeployRequest, rg: str
             )
             try:
                 try:
-                    deploy_key = await btapi_service.get_ps_secret(settings.azure_aci_ps_deploy_key_title)
+                    deploy_key = await _resolve_azure_aci_deploy_key()
                 except Exception as key_err:
                     logger.warning("ACI deploy key fetch failed (%s) — creating ACI without deploy key", key_err)
                     deploy_key = ""
                     deploy_key_note = f" [deploy key fetch failed: {key_err}]"
-                # Fetch ACR credentials if configured
-                acr_username, acr_password = "", ""
-                if (settings.azure_acr_server
-                        and settings.azure_acr_username_secret_title
-                        and settings.azure_acr_password_secret_title):
-                    try:
-                        acr_username = await btapi_service.get_ps_secret(settings.azure_acr_username_secret_title)
-                        acr_password = await btapi_service.get_ps_secret(settings.azure_acr_password_secret_title)
-                    except Exception as acr_err:
-                        logger.warning("ACR credential fetch failed (%s) — ACI will attempt pull without ACR auth", acr_err)
+                # Fetch ACR credentials if configured (backend-neutral resolution).
+                acr_server, acr_username, acr_password = await _resolve_acr_credentials()
                 aci_group_name = await azure_service.run_aci_jumpoint_task(
                     rg=_aci_rg(),
                     location=loc,
                     subnet_id=settings.azure_aci_subnet_id,
-                    image=settings.azure_aci_jumpoint_image,
+                    image=_cfg("azure_aci_jumpoint_image"),
                     cpu=settings.azure_aci_cpu,
                     memory=settings.azure_aci_memory,
                     deploy_key=deploy_key,
-                    acr_server=settings.azure_acr_server,
+                    acr_server=acr_server,
                     acr_username=acr_username,
                     acr_password=acr_password,
                     storage_account=settings.azure_aci_storage_account,

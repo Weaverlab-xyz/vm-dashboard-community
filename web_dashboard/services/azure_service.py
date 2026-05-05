@@ -10,6 +10,7 @@ Safe is only called once per server lifetime. Call invalidate_credentials() to
 force a refresh (e.g. after credential rotation).
 """
 import asyncio
+import json
 import logging
 import uuid
 from typing import Optional
@@ -150,14 +151,9 @@ def _get_resource(cred, sub_id):
 
 # ── Key Vault ─────────────────────────────────────────────────────────────────
 
-def _get_ssh_key_from_vault_sync(cred, vault_url: str, secret_name: str) -> str:
-    """Fetch a secret value from Azure Key Vault (blocking)."""
-    client = SecretClient(vault_url=vault_url, credential=cred)
-    value = client.get_secret(secret_name).value or ""
-    # Normalize \r\n line endings
-    value = value.replace("\r\n", "\n").replace("\r", "\n").strip()
-    # Azure Key Vault portal collapses PEM newlines to spaces when copy-pasting.
-    # Detect single-line PEM and reconstruct proper multi-line format.
+def _normalize_pem(value: str) -> str:
+    """Normalize line endings; reflow single-line PEM blobs from KV portal copy/paste."""
+    value = (value or "").replace("\\n", "\n").replace("\r\n", "\n").replace("\r", "\n").strip()
     if "\n" not in value and value.startswith("-----BEGIN"):
         header_end = value.index("-----", 5) + 5
         footer_start = value.rindex("-----END")
@@ -167,6 +163,14 @@ def _get_ssh_key_from_vault_sync(cred, vault_url: str, secret_name: str) -> str:
         body_b64 = "".join(body_raw.split())
         body = "\n".join(body_b64[i:i + 64] for i in range(0, len(body_b64), 64))
         value = f"{header}\n{body}\n{footer}\n"
+    return value
+
+
+def _get_ssh_key_from_vault_sync(cred, vault_url: str, secret_name: str) -> str:
+    """Fetch a secret value from Azure Key Vault (blocking)."""
+    client = SecretClient(vault_url=vault_url, credential=cred)
+    raw = client.get_secret(secret_name).value or ""
+    value = _normalize_pem(raw)
     lines = value.splitlines()
     logger.info(
         "SSH key from Key Vault '%s': total_chars=%d, lines=%d, first_line=%r, last_line=%r",
@@ -189,6 +193,123 @@ async def get_ssh_key_from_vault(vault_url: str, secret_name: str) -> str:
         raise AzureError(
             f"Failed to retrieve '{secret_name}' from Key Vault: {e}"
         ) from e
+
+
+def _get_ssh_keypair_from_vault_sync(cred, vault_url: str, secret_name: str) -> dict:
+    """Fetch a unified keypair secret expected to be JSON `{public_key, private_key}`.
+
+    Returns `{'public_key': str|None, 'private_key': str|None}`. On parse failure or
+    non-JSON content, returns `{None, None}` — callers must NEVER receive raw secret
+    material when the structure is unrecognized (would leak the private key to the
+    public-key consumer). Uses `strict=False` so unescaped control chars (real newlines
+    in PEM bodies) are tolerated.
+    """
+    client = SecretClient(vault_url=vault_url, credential=cred)
+    raw = (client.get_secret(secret_name).value or "").strip()
+    if not raw.startswith("{"):
+        logger.warning(
+            "SSH keypair secret '%s' is not a JSON object — ignoring. "
+            "Use legacy single-purpose secret names if you intend to store a raw key.",
+            secret_name,
+        )
+        return {"public_key": None, "private_key": None}
+    try:
+        data = json.JSONDecoder(strict=False).decode(raw)
+    except json.JSONDecodeError as e:
+        logger.warning(
+            "SSH keypair secret '%s' looks like JSON but failed to parse (%s). "
+            "Store the value as JSON with `public_key` and `private_key` string fields.",
+            secret_name, e,
+        )
+        return {"public_key": None, "private_key": None}
+    if not isinstance(data, dict):
+        logger.warning(
+            "SSH keypair secret '%s' parsed as %s, not an object — ignoring.",
+            secret_name, type(data).__name__,
+        )
+        return {"public_key": None, "private_key": None}
+    pub = _normalize_pem(data.get("public_key") or "")
+    priv = _normalize_pem(data.get("private_key") or "")
+    logger.info(
+        "SSH keypair from Key Vault '%s': pub_chars=%d, priv_chars=%d",
+        secret_name, len(pub), len(priv),
+    )
+    return {"public_key": pub or None, "private_key": priv or None}
+
+
+async def get_ssh_keypair_from_vault(vault_url: str, secret_name: str) -> dict:
+    """Retrieve the unified SSH keypair JSON secret from Azure Key Vault.
+
+    Returns dict with keys 'public_key' and 'private_key' (either may be None).
+    """
+    try:
+        cred, _ = await _ensure_creds()
+        return await asyncio.to_thread(
+            _get_ssh_keypair_from_vault_sync, cred, vault_url, secret_name
+        )
+    except AzureError:
+        raise
+    except Exception as e:
+        raise AzureError(
+            f"Failed to retrieve keypair '{secret_name}' from Key Vault: {e}"
+        ) from e
+
+
+async def _resolve_azure_ssh_key(
+    vault_url: str,
+    unified_secret_name: str,
+    legacy_secret_name: str,
+    *,
+    field: str,
+) -> str:
+    """Resolution: if unified keypair secret is configured, use it exclusively.
+    Otherwise fall back to legacy single-purpose secret. Never silently fall
+    through from unified → legacy when both reference the same vault, since the
+    legacy raw-string fetcher would expose the entire JSON value (including the
+    private key) to a public-key consumer.
+    `field` is 'public_key' or 'private_key'."""
+    if not vault_url:
+        raise AzureError("Azure Key Vault URL not configured.")
+    if unified_secret_name:
+        keypair = await get_ssh_keypair_from_vault(vault_url, unified_secret_name)
+        value = keypair.get(field)
+        if value:
+            return value
+        raise AzureError(
+            f"Unified keypair secret '{unified_secret_name}' is missing the "
+            f"'{field}' field, or its value is not valid JSON. Update the secret "
+            f'to JSON like {{"public_key": "ssh-rsa ...", "private_key": "-----BEGIN ..."}}, '
+            f"or clear AZURE_SSH_KEYPAIR_SECRET_NAME to use the legacy "
+            f"single-purpose secret name."
+        )
+    if legacy_secret_name:
+        return await get_ssh_key_from_vault(vault_url, legacy_secret_name)
+    legacy_var = (
+        "AZURE_SSH_KEY_SECRET_NAME" if field == "public_key"
+        else "AZURE_SSH_PRIVATE_KEY_SECRET_NAME"
+    )
+    raise AzureError(
+        "Azure SSH keypair not configured. Set AZURE_SSH_KEYPAIR_SECRET_NAME "
+        f"(preferred, JSON with public_key/private_key fields) or legacy {legacy_var}."
+    )
+
+
+async def resolve_azure_ssh_public_key(
+    vault_url: str, unified_secret_name: str, legacy_secret_name: str = ""
+) -> str:
+    """Return the SSH public key, preferring the unified keypair secret."""
+    return await _resolve_azure_ssh_key(
+        vault_url, unified_secret_name, legacy_secret_name, field="public_key"
+    )
+
+
+async def resolve_azure_ssh_private_key(
+    vault_url: str, unified_secret_name: str, legacy_secret_name: str = ""
+) -> str:
+    """Return the SSH private key, preferring the unified keypair secret."""
+    return await _resolve_azure_ssh_key(
+        vault_url, unified_secret_name, legacy_secret_name, field="private_key"
+    )
 
 
 # ── Marketplace image sources ─────────────────────────────────────────────────
