@@ -364,8 +364,11 @@ except ImportError:
     pass
 
 try:
+    # Containers router exposes Portainer (gated per-call by the page UI when
+    # portainer_enabled is false) plus ECS/ACI/Cloud Run endpoints that are
+    # independent of Portainer — so don't gate the whole router on portainer.
     from .api import containers  # noqa: E402
-    app.include_router(containers.router, dependencies=[_feature_gate("portainer_enabled")])
+    app.include_router(containers.router)
 except ImportError:
     pass
 
@@ -496,6 +499,17 @@ async def config_mgmt_page(request: Request):
     if not config_service.get_bool("ansible_enabled", settings.ansible_enabled):
         raise HTTPException(status_code=404, detail="Ansible integration is disabled")
     return templates.TemplateResponse("config-mgmt/index.html", {"request": request, **_feature_flags()})
+
+
+@app.get("/containers", response_class=HTMLResponse, include_in_schema=False)
+async def containers_page(request: Request):
+    # Always accessible: surfaces On-Premises (Portainer), AWS ECS, Azure ACI,
+    # GCP Cloud Run. Each tab self-gates on its own configuration.
+    portainer_enabled = config_service.get_bool("portainer_enabled", settings.portainer_enabled)
+    return templates.TemplateResponse(
+        "containers/index.html",
+        {"request": request, "portainer_enabled": portainer_enabled, **_feature_flags()},
+    )
 
 
 @app.get("/jobs", response_class=HTMLResponse, include_in_schema=False)

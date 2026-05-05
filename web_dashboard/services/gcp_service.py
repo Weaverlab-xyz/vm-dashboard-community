@@ -659,3 +659,66 @@ async def run_cloud_run_ansible_task(
         raise
     except Exception as e:
         raise GCPError(f"Failed to run Cloud Run Ansible task: {e}") from e
+
+
+# ── Cloud Run Services (long-running container instances) ─────────────────────
+
+def _list_cloud_run_services_sync(project_id: str, region: str) -> list[dict]:
+    """List Cloud Run services in a region. Each entry summarises the service."""
+    from google.cloud import run_v2
+    creds = _gcp_creds()
+    client = run_v2.ServicesClient(credentials=creds)
+    parent = f"projects/{project_id}/locations/{region}"
+    out: list[dict] = []
+    for svc in client.list_services(parent=parent):
+        image = ""
+        if svc.template and svc.template.containers:
+            image = svc.template.containers[0].image or ""
+        ready = False
+        for cond in (svc.terminal_condition,) if svc.terminal_condition else ():
+            if cond.type_ == "Ready":
+                ready = (cond.state == run_v2.Condition.State.CONDITION_SUCCEEDED)
+        traffic_pct = sum((t.percent or 0) for t in (svc.traffic_statuses or [])) or 100
+        last_modifier = svc.last_modifier or ""
+        out.append({
+            "name": svc.name.split("/")[-1],
+            "full_name": svc.name,
+            "region": region,
+            "image": image,
+            "uri": svc.uri or "",
+            "ready": ready,
+            "traffic_percent": traffic_pct,
+            "create_time": svc.create_time.isoformat() if svc.create_time else None,
+            "update_time": svc.update_time.isoformat() if svc.update_time else None,
+            "last_modifier": last_modifier,
+        })
+    return out
+
+
+async def list_cloud_run_services(project_id: str, region: str) -> list[dict]:
+    """List Cloud Run services in a region (async wrapper)."""
+    try:
+        return await asyncio.to_thread(_list_cloud_run_services_sync, project_id, region)
+    except GCPError:
+        raise
+    except Exception as e:
+        raise GCPError(f"Failed to list Cloud Run services in {region}: {e}") from e
+
+
+def _delete_cloud_run_service_sync(project_id: str, region: str, name: str) -> None:
+    from google.cloud import run_v2
+    creds = _gcp_creds()
+    client = run_v2.ServicesClient(credentials=creds)
+    full = f"projects/{project_id}/locations/{region}/services/{name}"
+    op = client.delete_service(name=full)
+    op.result(timeout=120)
+
+
+async def delete_cloud_run_service(project_id: str, region: str, name: str) -> None:
+    """Delete a Cloud Run service (async wrapper)."""
+    try:
+        await asyncio.to_thread(_delete_cloud_run_service_sync, project_id, region, name)
+    except GCPError:
+        raise
+    except Exception as e:
+        raise GCPError(f"Failed to delete Cloud Run service '{name}': {e}") from e

@@ -580,7 +580,7 @@ async def get_ami_status(region: str, ami_id: str) -> dict:
 
 def _get_ecs(region: str):
     _require_boto3()
-    return boto3.client("ecs", region_name=region)
+    return boto3.client("ecs", **_aws_kwargs(region))
 
 
 def _ensure_task_definition_sync(
@@ -641,7 +641,7 @@ def _run_ecs_task_sync(
 
     # Ensure the ECS service-linked role exists (required before first ECS use in an account)
     try:
-        iam = boto3.client("iam", region_name=region)
+        iam = boto3.client("iam", **_aws_kwargs(region))
         iam.create_service_linked_role(AWSServiceName="ecs.amazonaws.com")
     except ClientError as e:
         # "InvalidInput" means the role already exists — that's fine

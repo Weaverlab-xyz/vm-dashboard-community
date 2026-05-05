@@ -1,0 +1,1100 @@
+{% extends "base.html" %}
+{% block title %}Containers – Infrastructure Management{% endblock %}
+
+{% block content %}
+<div x-data="containersDashboard()" x-init="init()">
+
+  <!-- ── Header ──────────────────────────────────────────────────────────── -->
+  <div class="flex flex-col sm:flex-row sm:items-center justify-between mb-6 gap-3">
+    <div>
+      <h1 class="text-2xl font-bold text-gray-900">Containers</h1>
+      <p class="text-sm text-gray-500 mt-1">Manage Docker containers and cloud workloads</p>
+    </div>
+    <div class="flex items-center gap-2 flex-wrap">
+      <!-- Show all / running only toggle (on-prem only) -->
+      <label x-show="activeTab === 'onprem'"
+             class="flex items-center gap-1.5 text-sm text-gray-600 cursor-pointer">
+        <input type="checkbox" x-model="showAll" @change="loadContainers()"
+               class="rounded text-blue-600 focus:ring-blue-500">
+        Show stopped
+      </label>
+      <button @click="refresh()" :disabled="loading || ecsLoading || aciLoading"
+              class="text-sm bg-white border border-gray-300 hover:bg-gray-50 px-3 py-2 rounded-lg shadow-sm font-medium transition disabled:opacity-50">
+        Refresh
+      </button>
+    </div>
+  </div>
+
+  <!-- ── Top-level tabs: On-Premises | Cloud | GCP ─────────────────────── -->
+  <div class="mb-6 border-b border-gray-200">
+    <nav class="flex gap-1 -mb-px">
+      {% if portainer_enabled %}
+      <button @click="activeTab = 'onprem'"
+              :class="activeTab === 'onprem'
+                ? 'border-b-2 border-blue-600 text-blue-600 font-semibold'
+                : 'border-b-2 border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'"
+              class="px-4 py-2 text-sm transition whitespace-nowrap">
+        On-Premises
+      </button>
+      {% endif %}
+      <button @click="activeTab = 'cloud'"
+              :class="activeTab === 'cloud'
+                ? 'border-b-2 border-blue-600 text-blue-600 font-semibold'
+                : 'border-b-2 border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'"
+              class="px-4 py-2 text-sm transition whitespace-nowrap">
+        Cloud
+      </button>
+    </nav>
+  </div>
+
+
+  <!-- ── Indeterminate progress bar (any on-prem loading) ────────────────── -->
+  <div x-show="activeTab === 'onprem' && (endpointsLoading || loading)" x-cloak
+       class="fixed top-0 left-0 right-0 z-50 h-0.5 bg-gray-200 overflow-hidden">
+    <div class="h-full bg-blue-500 animate-[loading-bar_1.4s_ease-in-out_infinite]"
+         style="width: 40%"></div>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <!-- ON-PREMISES PANEL                                                     -->
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <div x-show="activeTab === 'onprem'">
+
+    <!-- ── Workgroup sub-tabs: Weaverlab | Hydra ──────────────────────── -->
+    <div class="mb-5 border-b border-gray-100">
+      <nav class="flex gap-1 -mb-px">
+        <button @click="switchPortainerWg('weaverlab')"
+                :class="activePortainerWg === 'weaverlab'
+                  ? 'border-b-2 border-indigo-500 text-indigo-600 font-semibold bg-indigo-50'
+                  : 'border-b-2 border-transparent text-gray-500 hover:text-gray-700 hover:bg-gray-50'"
+                class="px-4 py-2 text-sm transition whitespace-nowrap rounded-t-lg">
+          Weaverlab
+        </button>
+        <button @click="switchPortainerWg('hydra')"
+                :class="activePortainerWg === 'hydra'
+                  ? 'border-b-2 border-indigo-500 text-indigo-600 font-semibold bg-indigo-50'
+                  : 'border-b-2 border-transparent text-gray-500 hover:text-gray-700 hover:bg-gray-50'"
+                class="px-4 py-2 text-sm transition whitespace-nowrap rounded-t-lg">
+          Hydra
+        </button>
+      </nav>
+    </div>
+
+    <!-- ── Portainer Endpoint Tabs ─────────────────────────────────────── -->
+    <div class="mb-6 border-b border-gray-200">
+      <!-- skeleton while loading endpoints -->
+      <div x-show="endpoints.length === 0 && !portainerError" class="flex gap-2 pb-2">
+        <template x-for="i in [1,2]">
+          <div class="h-8 w-24 bg-gray-100 rounded animate-pulse"></div>
+        </template>
+      </div>
+      <!-- tabs -->
+      <nav x-show="endpoints.length > 0" class="flex gap-1 -mb-px">
+        <template x-for="ep in endpoints" :key="ep.id">
+          <button
+            @click="selectedEndpointId = ep.id; loadContainers()"
+            :class="selectedEndpointId === ep.id
+              ? 'border-b-2 border-blue-600 text-blue-600 font-semibold'
+              : 'border-b-2 border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'"
+            class="px-4 py-2 text-sm transition whitespace-nowrap flex items-center gap-1.5">
+            <span x-text="ep.name"></span>
+            <svg x-show="selectedEndpointId === ep.id && loading"
+                 class="animate-spin h-3 w-3 text-blue-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"></path>
+            </svg>
+            <span x-show="ep.status !== 1"
+                  class="ml-0.5 text-xs font-normal text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded-full">offline</span>
+          </button>
+        </template>
+      </nav>
+    </div>
+
+    <!-- ── Error banner ──────────────────────────────────────────────────── -->
+    <div x-show="portainerError" x-cloak
+         class="mb-6 bg-amber-50 border border-amber-200 rounded-xl p-4 text-sm text-amber-800">
+      <p class="font-semibold mb-1">Portainer connection error</p>
+      <p x-text="portainerError"></p>
+      <p class="mt-1 text-xs" x-show="activePortainerWg === 'weaverlab'">
+        Check that <code class="bg-amber-100 px-1 rounded">PORTAINER_URL</code> is set in
+        <code class="bg-amber-100 px-1 rounded">.env</code> and the
+        <code class="bg-amber-100 px-1 rounded">Portainer_PAT</code>
+        secret exists in BeyondTrust Password Safe.
+      </p>
+      <p class="mt-1 text-xs" x-show="activePortainerWg === 'hydra'">
+        Check that <code class="bg-amber-100 px-1 rounded">PORTAINER_URL_HYDRA</code> is set in
+        <code class="bg-amber-100 px-1 rounded">.env</code> and the
+        <code class="bg-amber-100 px-1 rounded">Portainer_PAT_Hydra</code>
+        secret exists in BeyondTrust Password Safe.
+      </p>
+    </div>
+
+    <!-- ── Containers Table ───────────────────────────────────────────────── -->
+    <div class="mb-4">
+      <div class="flex items-center justify-between mb-3">
+        <h2 class="text-lg font-semibold text-gray-800">
+          Containers
+          <span class="ml-2 text-sm font-normal text-gray-400"
+                x-text="selectedEndpointId ? containers.length + ' containers' : 'select an environment'"></span>
+        </h2>
+        <div class="flex gap-2">
+          <button @click="showDeployModal = true"
+                  :disabled="!selectedEndpointId"
+                  class="text-sm bg-blue-600 hover:bg-blue-700 disabled:opacity-40 text-white px-3 py-2 rounded-lg font-medium transition shadow-sm">
+            Deploy Container
+          </button>
+          <button @click="showStackModal = true"
+                  :disabled="!selectedEndpointId"
+                  class="text-sm bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40 text-white px-3 py-2 rounded-lg font-medium transition shadow-sm">
+            Deploy Stack
+          </button>
+        </div>
+      </div>
+
+      <!-- Loading skeleton -->
+      <div x-show="loading" class="space-y-2">
+        <template x-for="i in [1,2,3,4]">
+          <div class="bg-gray-100 rounded-xl h-14 animate-pulse"></div>
+        </template>
+        <p class="text-center text-xs text-gray-400 pt-2">Fetching containers from Portainer…</p>
+      </div>
+
+      <!-- Empty / no endpoint selected -->
+      <div x-show="!loading && !endpointsLoading && !selectedEndpointId && !portainerError"
+           class="bg-white rounded-xl border border-gray-200 p-10 text-center text-gray-400 text-sm">
+        Select an environment above to view containers.
+      </div>
+
+      <!-- Loading endpoints (cold start — waiting for environment list) -->
+      <div x-show="endpointsLoading && !portainerError"
+           class="bg-white rounded-xl border border-gray-200 p-10 text-center text-sm">
+        <div class="flex flex-col items-center gap-3 text-gray-400">
+          <svg class="animate-spin h-6 w-6 text-blue-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"></path>
+          </svg>
+          <span>Loading environments…</span>
+        </div>
+      </div>
+
+      <div x-show="!loading && selectedEndpointId && containers.length === 0 && !portainerError"
+           class="bg-white rounded-xl border border-gray-200 p-10 text-center text-gray-400 text-sm">
+        No containers found on this endpoint.
+      </div>
+
+      <!-- Table -->
+      <div x-show="!loading && containers.length > 0"
+           class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="bg-gray-50 border-b border-gray-200 text-left">
+              <th class="px-4 py-3 font-semibold text-gray-600">Name</th>
+              <th class="px-4 py-3 font-semibold text-gray-600">Image</th>
+              <th class="px-4 py-3 font-semibold text-gray-600">Status</th>
+              <th class="px-4 py-3 font-semibold text-gray-600">Ports</th>
+              <th class="px-4 py-3 font-semibold text-gray-600 text-right">Actions</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-gray-50">
+            <template x-for="c in containers" :key="c.id">
+              <tr class="hover:bg-gray-50 transition">
+                <td class="px-4 py-3">
+                  <span class="font-medium text-gray-800 font-mono text-xs"
+                        x-text="c.names[0] || c.short_id"></span>
+                </td>
+                <td class="px-4 py-3 text-gray-500 text-xs max-w-[200px] truncate font-mono"
+                    x-text="c.image" :title="c.image"></td>
+                <td class="px-4 py-3">
+                  <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium"
+                        :class="stateBadge(c.state)"
+                        x-text="c.state"></span>
+                  <span class="block text-xs text-gray-400 mt-0.5" x-text="c.status"></span>
+                </td>
+                <td class="px-4 py-3 text-xs text-gray-500 font-mono">
+                  <template x-for="p in c.ports.slice(0,3)" :key="p">
+                    <div x-text="p"></div>
+                  </template>
+                  <div x-show="c.ports.length > 3" class="text-gray-400"
+                       x-text="'+' + (c.ports.length - 3) + ' more'"></div>
+                  <span x-show="c.ports.length === 0" class="text-gray-300">—</span>
+                </td>
+                <td class="px-4 py-3 text-right">
+                  <div class="flex items-center justify-end gap-1">
+                    <button @click="startContainer(c)"
+                            :disabled="c.state === 'running' || actionPending === c.id"
+                            class="px-2.5 py-1 bg-green-600 hover:bg-green-700 disabled:opacity-30
+                                   text-white text-xs font-medium rounded-lg transition">
+                      Start
+                    </button>
+                    <button @click="stopContainer(c)"
+                            :disabled="c.state !== 'running' || actionPending === c.id"
+                            class="px-2.5 py-1 bg-amber-500 hover:bg-amber-600 disabled:opacity-30
+                                   text-white text-xs font-medium rounded-lg transition">
+                      Stop
+                    </button>
+                    <button @click="deleteContainer(c)"
+                            :disabled="actionPending === c.id"
+                            class="px-2.5 py-1 bg-red-600 hover:bg-red-700 disabled:opacity-30
+                                   text-white text-xs font-medium rounded-lg transition">
+                      Delete
+                    </button>
+                  </div>
+                </td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ── Stacks section ──────────────────────────────────────────────────── -->
+    <div x-show="stacks.length > 0" class="mt-8">
+      <h2 class="text-lg font-semibold text-gray-800 mb-3">
+        Stacks
+        <span class="ml-2 text-sm font-normal text-gray-400" x-text="stacks.length + ' stacks'"></span>
+      </h2>
+      <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="bg-gray-50 border-b border-gray-200 text-left">
+              <th class="px-4 py-3 font-semibold text-gray-600">Stack Name</th>
+              <th class="px-4 py-3 font-semibold text-gray-600">Status</th>
+              <th class="px-4 py-3 font-semibold text-gray-600">Type</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-gray-50">
+            <template x-for="s in stacks" :key="s.id">
+              <tr class="hover:bg-gray-50 transition">
+                <td class="px-4 py-3 font-medium text-gray-800" x-text="s.name"></td>
+                <td class="px-4 py-3">
+                  <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium"
+                        :class="s.status === 1 ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'"
+                        x-text="s.status === 1 ? 'Active' : 'Inactive'"></span>
+                </td>
+                <td class="px-4 py-3 text-gray-500 text-xs"
+                    x-text="s.type === 1 ? 'Swarm' : 'Compose'"></td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+  </div><!-- /On-Premises panel -->
+
+
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <!-- CLOUD PANEL                                                            -->
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <div x-show="activeTab === 'cloud'">
+
+    <!-- ── ECS Tasks section ──────────────────────────────────────────────── -->
+    <div class="mb-8">
+      <div class="flex items-center justify-between mb-3">
+        <h2 class="text-lg font-semibold text-gray-800">
+          ECS Tasks
+          <span class="ml-2 text-sm font-normal text-gray-400"
+                x-text="ecsCluster ? ecsTasks.length + ' tasks · ' + ecsCluster : ''"></span>
+        </h2>
+        <div class="flex items-center gap-3">
+          <button x-show="ecsShowStopped && ecsTasks.some(t => t.last_status === 'STOPPED')"
+                  @click="dismissAllStopped()"
+                  class="px-2.5 py-1 text-xs font-medium text-gray-600 border border-gray-300
+                         hover:bg-gray-50 rounded-lg transition">
+            Dismiss All Stopped
+          </button>
+          <label class="flex items-center gap-1.5 text-sm text-gray-600 cursor-pointer">
+            <input type="checkbox" x-model="ecsShowStopped" @change="loadEcsTasks()"
+                   class="rounded text-blue-600 focus:ring-blue-500">
+            Show stopped
+          </label>
+        </div>
+      </div>
+
+      <div x-show="ecsError" x-cloak
+           class="mb-4 bg-amber-50 border border-amber-200 rounded-xl p-4 text-sm text-amber-800">
+        <p class="font-semibold mb-1">ECS error</p>
+        <p x-text="ecsError"></p>
+      </div>
+
+      <div x-show="ecsLoading" class="space-y-2">
+        <template x-for="i in [1,2]">
+          <div class="bg-gray-100 rounded-xl h-14 animate-pulse"></div>
+        </template>
+      </div>
+
+      <div x-show="!ecsLoading && !ecsError && ecsTasks.length === 0"
+           class="bg-white rounded-xl border border-gray-200 p-8 text-center text-gray-400 text-sm">
+        No ECS tasks running in cluster.
+      </div>
+
+      <div x-show="!ecsLoading && ecsTasks.length > 0"
+           class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="bg-gray-50 border-b border-gray-200 text-left">
+              <th class="px-4 py-3 font-semibold text-gray-600">Task ID</th>
+              <th class="px-4 py-3 font-semibold text-gray-600">Definition</th>
+              <th class="px-4 py-3 font-semibold text-gray-600">Containers</th>
+              <th class="px-4 py-3 font-semibold text-gray-600">Status</th>
+              <th class="px-4 py-3 font-semibold text-gray-600">Started</th>
+              <th class="px-4 py-3 font-semibold text-gray-600">Stopped</th>
+              <th class="px-4 py-3 font-semibold text-gray-600 text-right">Actions</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-gray-50">
+            <template x-for="t in ecsTasks" :key="t.task_id">
+              <tr class="hover:bg-gray-50 transition"
+                  :class="t.last_status === 'STOPPED' ? 'opacity-60' : ''">
+                <td class="px-4 py-3 font-mono text-xs text-gray-700" x-text="t.task_id.slice(0,12)"></td>
+                <td class="px-4 py-3 text-xs text-gray-500 font-mono" x-text="t.task_definition"></td>
+                <td class="px-4 py-3 text-xs text-gray-500">
+                  <template x-for="c in t.containers" :key="c">
+                    <div x-text="c"></div>
+                  </template>
+                </td>
+                <td class="px-4 py-3">
+                  <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium"
+                        :class="ecsStatusBadge(t.last_status)"
+                        x-text="t.last_status"></span>
+                </td>
+                <td class="px-4 py-3 text-xs text-gray-400"
+                    x-text="t.started_at ? new Date(t.started_at).toLocaleString() : '—'"></td>
+                <td class="px-4 py-3 text-xs text-gray-400"
+                    x-text="t.stopped_at ? new Date(t.stopped_at).toLocaleString() : '—'"></td>
+                <td class="px-4 py-3 text-right">
+                  <template x-if="t.last_status === 'RUNNING'">
+                    <button @click="stopEcsTask(t)"
+                            :disabled="ecsActionPending === t.task_id"
+                            class="px-2.5 py-1 bg-amber-500 hover:bg-amber-600 disabled:opacity-30
+                                   text-white text-xs font-medium rounded-lg transition">
+                      <span x-show="ecsActionPending !== t.task_id">Stop</span>
+                      <span x-show="ecsActionPending === t.task_id" x-cloak>Stopping…</span>
+                    </button>
+                  </template>
+                  <template x-if="t.last_status !== 'RUNNING'">
+                    <button @click="dismissEcsTask(t.task_id)"
+                            class="px-2.5 py-1 text-xs font-medium text-gray-500 border border-gray-300
+                                   hover:bg-gray-100 rounded-lg transition">
+                      Dismiss
+                    </button>
+                  </template>
+                </td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ── ACI Containers section ──────────────────────────────────────────── -->
+    <div>
+      <div class="flex items-center justify-between mb-3">
+        <h2 class="text-lg font-semibold text-gray-800">
+          Azure Container Instances (ACI)
+          <span class="ml-2 text-sm font-normal text-gray-400"
+                x-text="aciRg ? aciContainers.length + ' instances · ' + aciRg : ''"></span>
+        </h2>
+        <div class="flex items-center gap-3">
+          <button @click="loadAciContainers()"
+                  :disabled="aciLoading"
+                  class="px-3 py-1.5 text-xs font-medium bg-blue-50 text-blue-600 border border-blue-300
+                         hover:bg-blue-100 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg transition">
+            <span x-show="!aciLoading">Refresh</span>
+            <span x-show="aciLoading" x-cloak>Loading…</span>
+          </button>
+        </div>
+      </div>
+
+      <div x-show="aciLoading" class="p-8 text-center text-gray-400 text-sm">Loading ACI containers…</div>
+
+      <div x-show="!aciLoading && aciError" class="p-4 bg-red-50 border border-red-200 rounded-lg text-red-600 text-sm" x-text="aciError"></div>
+
+      <div x-show="!aciLoading && !aciError && aciContainers.length === 0"
+           class="p-6 text-center text-gray-400 text-sm border border-gray-200 rounded-lg">
+        No ACI container instances.
+      </div>
+
+      <div x-show="!aciLoading && aciContainers.length > 0"
+           class="overflow-x-auto border border-gray-200 rounded-lg">
+        <table class="min-w-full divide-y divide-gray-200 bg-white">
+          <thead class="bg-gray-50">
+            <tr>
+              <th class="px-4 py-2 text-left text-xs font-medium text-gray-600 uppercase">Name</th>
+              <th class="px-4 py-2 text-left text-xs font-medium text-gray-600 uppercase">State</th>
+              <th class="px-4 py-2 text-left text-xs font-medium text-gray-600 uppercase">CPU / Memory</th>
+              <th class="px-4 py-2 text-left text-xs font-medium text-gray-600 uppercase">Containers</th>
+              <th class="px-4 py-2 text-left text-xs font-medium text-gray-600 uppercase">Created</th>
+              <th class="px-4 py-2 text-right text-xs font-medium text-gray-600 uppercase">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            <template x-for="c in aciContainers" :key="c.container_group_id">
+              <tr class="hover:bg-gray-50 border-t border-gray-200">
+                <td class="px-4 py-3 text-xs font-mono text-gray-700" x-text="c.container_group_name"></td>
+                <td class="px-4 py-3 text-xs">
+                  <span x-show="c.state === 'Succeeded'" class="px-2 py-1 bg-green-100 text-green-700 rounded">Running</span>
+                  <span x-show="c.state === 'Failed'" class="px-2 py-1 bg-red-100 text-red-700 rounded">Failed</span>
+                  <span x-show="!['Succeeded', 'Failed'].includes(c.state)" class="px-2 py-1 bg-gray-100 text-gray-700 rounded" x-text="c.state"></span>
+                </td>
+                <td class="px-4 py-3 text-xs text-gray-600" x-text="`${c.cpu.toFixed(2)} CPU / ${c.memory.toFixed(2)} GB`"></td>
+                <td class="px-4 py-3 text-xs text-gray-600">
+                  <template x-if="c.containers.length > 0">
+                    <div>
+                      <template x-for="(cont, idx) in c.containers" :key="idx">
+                        <div x-text="cont" class="text-gray-700"></div>
+                      </template>
+                    </div>
+                  </template>
+                  <template x-if="c.containers.length === 0">
+                    <span class="text-gray-400">—</span>
+                  </template>
+                </td>
+                <td class="px-4 py-3 text-xs text-gray-500" x-text="c.created_at ? new Date(c.created_at).toLocaleDateString() : '—'"></td>
+                <td class="px-4 py-3 text-right">
+                  <button @click="stopAciContainer(c)"
+                          :disabled="aciActionPending === c.container_group_name"
+                          class="px-2.5 py-1 text-xs font-medium text-red-600 border border-red-300
+                                 hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg transition">
+                    <span x-show="aciActionPending !== c.container_group_name">Stop</span>
+                    <span x-show="aciActionPending === c.container_group_name" x-cloak>Stopping…</span>
+                  </button>
+                </td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ── GCP Cloud Run section ──────────────────────────────────────────── -->
+    <div class="mb-8">
+      <div class="flex items-center justify-between mb-3">
+        <h2 class="text-lg font-semibold text-gray-800">
+          Cloud Run Services
+          <span class="ml-2 text-sm font-normal text-gray-500"
+                x-text="cloudRunProject ? cloudRunServices.length + ' services · ' + cloudRunProject + ' / ' + cloudRunRegion : ''"></span>
+        </h2>
+        <button @click="loadCloudRunServices()"
+                :disabled="cloudRunLoading"
+                class="px-3 py-1.5 text-sm rounded-lg border border-gray-300 hover:bg-gray-50 disabled:opacity-50">
+          <span x-text="cloudRunLoading ? 'Loading…' : 'Refresh'"></span>
+        </button>
+      </div>
+
+      <div x-show="cloudRunLoading" class="text-sm text-gray-500 py-6 text-center">
+        Loading Cloud Run services…
+      </div>
+
+      <div x-show="!cloudRunLoading && cloudRunError"
+           class="mb-3 px-3 py-2 rounded-lg bg-red-50 border border-red-200 text-sm text-red-700"
+           x-text="cloudRunError"></div>
+
+      <div x-show="!cloudRunLoading && !cloudRunError && cloudRunServices.length === 0"
+           class="text-sm text-gray-500 py-6 text-center">
+        No Cloud Run services in <span x-text="cloudRunProject + ' / ' + cloudRunRegion"></span>.
+      </div>
+
+      <div x-show="!cloudRunLoading && cloudRunServices.length > 0"
+           class="bg-white rounded-xl shadow-sm overflow-hidden border border-gray-200">
+        <table class="min-w-full divide-y divide-gray-200">
+          <thead class="bg-gray-50">
+            <tr>
+              <th class="px-4 py-3 text-left text-xs font-semibold uppercase text-gray-500">Name</th>
+              <th class="px-4 py-3 text-left text-xs font-semibold uppercase text-gray-500">Image</th>
+              <th class="px-4 py-3 text-left text-xs font-semibold uppercase text-gray-500">URI</th>
+              <th class="px-4 py-3 text-left text-xs font-semibold uppercase text-gray-500">Status</th>
+              <th class="px-4 py-3 text-right text-xs font-semibold uppercase text-gray-500">Actions</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-gray-100">
+            <template x-for="s in cloudRunServices" :key="s.name">
+              <tr class="hover:bg-gray-50">
+                <td class="px-4 py-3 text-sm font-medium text-gray-900" x-text="s.name"></td>
+                <td class="px-4 py-3 text-sm text-gray-600 font-mono break-all" x-text="s.image"></td>
+                <td class="px-4 py-3 text-sm">
+                  <a x-show="s.uri" :href="s.uri" target="_blank"
+                     class="text-blue-600 hover:underline break-all" x-text="s.uri"></a>
+                  <span x-show="!s.uri" class="text-gray-400">—</span>
+                </td>
+                <td class="px-4 py-3 text-sm">
+                  <span :class="s.ready
+                    ? 'bg-green-100 text-green-700 ring-1 ring-green-200'
+                    : 'bg-gray-100 text-gray-700 ring-1 ring-gray-200'"
+                        class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium">
+                    <span x-text="s.ready ? 'Ready' : 'Not ready'"></span>
+                  </span>
+                </td>
+                <td class="px-4 py-3 text-sm text-right">
+                  <button @click="deleteCloudRunService(s)"
+                          class="text-red-600 hover:underline">Delete</button>
+                </td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+      </div>
+
+      <p class="mt-2 text-xs text-gray-400">
+        Cloud Run services scale to zero on idle automatically — there is no separate "stop" action.
+        Delete removes the service permanently.
+      </p>
+    </div>
+
+  </div><!-- /Cloud panel -->
+
+
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <!-- Deploy Container Modal                                                -->
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <div x-show="showDeployModal" x-cloak
+       class="fixed inset-0 bg-black bg-opacity-40 flex items-center justify-center z-50 p-4"
+       @keydown.escape.window="showDeployModal = false">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto"
+         @click.stop>
+      <div class="flex items-center justify-between px-6 pt-5 pb-4 border-b border-gray-200">
+        <h3 class="text-lg font-bold text-gray-900">Deploy Container</h3>
+        <button @click="showDeployModal = false" class="text-gray-400 hover:text-gray-600 text-xl leading-none">&times;</button>
+      </div>
+
+      <form @submit.prevent="submitDeploy()" class="px-6 py-5 space-y-4">
+        <!-- Image -->
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Image</label>
+          <input type="text" x-model="deployForm.image" required
+                 placeholder="nginx:latest  or  registry.example.com/app:v1.2"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none font-mono">
+        </div>
+
+        <!-- Container name -->
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Container Name</label>
+          <input type="text" x-model="deployForm.name" required
+                 placeholder="my-nginx"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none">
+        </div>
+
+        <!-- Port mappings -->
+        <div>
+          <div class="flex items-center justify-between mb-1">
+            <label class="block text-sm font-medium text-gray-700">Port Mappings</label>
+            <button type="button" @click="deployForm.ports.push({host:'',container:'',protocol:'tcp'})"
+                    class="text-xs text-blue-600 hover:text-blue-800 font-medium">+ Add Port</button>
+          </div>
+          <template x-for="(p, i) in deployForm.ports" :key="i">
+            <div class="flex items-center gap-1 mb-1">
+              <input type="number" x-model="p.host" placeholder="Host port" min="1" max="65535"
+                     class="w-28 border border-gray-300 rounded-lg px-2 py-1.5 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none">
+              <span class="text-gray-400 text-xs">→</span>
+              <input type="number" x-model="p.container" placeholder="Container" min="1" max="65535"
+                     class="w-28 border border-gray-300 rounded-lg px-2 py-1.5 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none">
+              <select x-model="p.protocol"
+                      class="border border-gray-300 rounded-lg px-2 py-1.5 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none">
+                <option value="tcp">tcp</option>
+                <option value="udp">udp</option>
+              </select>
+              <button type="button" @click="deployForm.ports.splice(i,1)"
+                      class="text-red-400 hover:text-red-600 text-lg leading-none px-1">&times;</button>
+            </div>
+          </template>
+        </div>
+
+        <!-- Environment variables -->
+        <div>
+          <div class="flex items-center justify-between mb-1">
+            <label class="block text-sm font-medium text-gray-700">Environment Variables</label>
+            <button type="button" @click="deployForm.env.push({key:'',value:''})"
+                    class="text-xs text-blue-600 hover:text-blue-800 font-medium">+ Add Var</button>
+          </div>
+          <template x-for="(e, i) in deployForm.env" :key="i">
+            <div class="flex items-center gap-1 mb-1">
+              <input type="text" x-model="e.key" placeholder="KEY"
+                     class="w-36 border border-gray-300 rounded-lg px-2 py-1.5 text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:outline-none">
+              <span class="text-gray-400 text-xs">=</span>
+              <input type="text" x-model="e.value" placeholder="value"
+                     class="flex-1 border border-gray-300 rounded-lg px-2 py-1.5 text-sm font-mono focus:ring-2 focus:ring-blue-500 focus:outline-none">
+              <button type="button" @click="deployForm.env.splice(i,1)"
+                      class="text-red-400 hover:text-red-600 text-lg leading-none px-1">&times;</button>
+            </div>
+          </template>
+        </div>
+
+        <!-- Restart policy -->
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Restart Policy</label>
+          <select x-model="deployForm.restart_policy"
+                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none">
+            <option value="unless-stopped">unless-stopped</option>
+            <option value="always">always</option>
+            <option value="on-failure">on-failure</option>
+            <option value="no">no</option>
+          </select>
+        </div>
+
+        <!-- Buttons -->
+        <div class="flex gap-3 pt-2">
+          <button type="button" @click="showDeployModal = false"
+                  class="flex-1 border border-gray-300 text-gray-700 hover:bg-gray-50 px-4 py-2 rounded-xl text-sm font-medium transition">
+            Cancel
+          </button>
+          <button type="submit" :disabled="deploying"
+                  class="flex-1 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white px-4 py-2 rounded-xl text-sm font-semibold transition">
+            <span x-show="!deploying">Deploy</span>
+            <span x-show="deploying">Deploying…</span>
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <!-- Deploy Stack Modal                                                    -->
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <div x-show="showStackModal" x-cloak
+       class="fixed inset-0 bg-black bg-opacity-40 flex items-center justify-center z-50 p-4"
+       @keydown.escape.window="showStackModal = false">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto"
+         @click.stop>
+      <div class="flex items-center justify-between px-6 pt-5 pb-4 border-b border-gray-200">
+        <h3 class="text-lg font-bold text-gray-900">Deploy Stack</h3>
+        <button @click="showStackModal = false" class="text-gray-400 hover:text-gray-600 text-xl leading-none">&times;</button>
+      </div>
+
+      <form @submit.prevent="submitStack()" class="px-6 py-5 space-y-4">
+        <!-- Stack name -->
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Stack Name</label>
+          <input type="text" x-model="stackForm.name" required
+                 placeholder="my-app-stack"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none">
+        </div>
+
+        <!-- Environment variables -->
+        <div>
+          <div class="flex items-center justify-between mb-1">
+            <label class="block text-sm font-medium text-gray-700">Environment Variables</label>
+            <button type="button" @click="stackForm.env.push({key:'',value:''})"
+                    class="text-xs text-indigo-600 hover:text-indigo-800 font-medium">+ Add Var</button>
+          </div>
+          <template x-for="(e, i) in stackForm.env" :key="i">
+            <div class="flex items-center gap-1 mb-1">
+              <input type="text" x-model="e.key" placeholder="KEY"
+                     class="w-36 border border-gray-300 rounded-lg px-2 py-1.5 text-sm font-mono focus:ring-2 focus:ring-indigo-500 focus:outline-none">
+              <span class="text-gray-400 text-xs">=</span>
+              <input type="text" x-model="e.value" placeholder="value"
+                     class="flex-1 border border-gray-300 rounded-lg px-2 py-1.5 text-sm font-mono focus:ring-2 focus:ring-indigo-500 focus:outline-none">
+              <button type="button" @click="stackForm.env.splice(i,1)"
+                      class="text-red-400 hover:text-red-600 text-lg leading-none px-1">&times;</button>
+            </div>
+          </template>
+        </div>
+
+        <!-- Compose YAML -->
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Docker Compose YAML</label>
+          <textarea x-model="stackForm.compose_content" required rows="14"
+                    placeholder="services:&#10;  web:&#10;    image: nginx:latest&#10;    ports:&#10;      - &quot;80:80&quot;"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-indigo-500 focus:outline-none resize-y"></textarea>
+        </div>
+
+        <!-- Buttons -->
+        <div class="flex gap-3 pt-2">
+          <button type="button" @click="showStackModal = false"
+                  class="flex-1 border border-gray-300 text-gray-700 hover:bg-gray-50 px-4 py-2 rounded-xl text-sm font-medium transition">
+            Cancel
+          </button>
+          <button type="submit" :disabled="stackDeploying"
+                  class="flex-1 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white px-4 py-2 rounded-xl text-sm font-semibold transition">
+            <span x-show="!stackDeploying">Deploy Stack</span>
+            <span x-show="stackDeploying">Deploying…</span>
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+</div>
+{% endblock %}
+
+
+{% block scripts %}
+<style>
+@keyframes loading-bar {
+  0%   { transform: translateX(-150%); }
+  50%  { transform: translateX(250%); }
+  100% { transform: translateX(250%); }
+}
+</style>
+<script>
+function containersDashboard() {
+  return {
+    // Top-level tab
+    activeTab: '{% if portainer_enabled %}onprem{% else %}cloud{% endif %}',  // 'onprem' | 'cloud' | 'gcp'
+
+    // On-premises workgroup sub-tab
+    activePortainerWg: 'weaverlab', // 'weaverlab' | 'hydra'
+
+    // Portainer state
+    endpoints: [],
+    selectedEndpointId: '',
+    containers: [],
+    stacks: [],
+    loading: false,
+    endpointsLoading: false,
+    showAll: true,
+    portainerError: null,
+    actionPending: null,
+
+    // Deploy container modal
+    showDeployModal: false,
+    deploying: false,
+    deployForm: {
+      name: '',
+      image: '',
+      ports: [],
+      env: [],
+      restart_policy: 'unless-stopped',
+    },
+
+    // Deploy stack modal
+    showStackModal: false,
+    stackDeploying: false,
+    stackForm: {
+      name: '',
+      compose_content: '',
+      env: [],
+    },
+
+    // ECS Tasks
+    ecsTasks: [],
+    ecsCluster: '',
+    ecsLoading: false,
+    ecsError: null,
+    ecsShowStopped: false,
+    ecsActionPending: null,
+    ecsDismissed: JSON.parse(localStorage.getItem('ecs_dismissed') || '[]'),
+
+    // ACI Containers
+    aciContainers: [],
+    aciRg: '',
+    aciLoading: false,
+    aciError: null,
+
+    // GCP Cloud Run
+    cloudRunServices: [],
+    cloudRunProject: '',
+    cloudRunRegion: '',
+    cloudRunLoading: false,
+    cloudRunError: null,
+    aciActionPending: null,
+
+    // ── Lifecycle ──────────────────────────────────────────────────────────
+    async init() {
+      requireAuth();
+      const hash = window.location.hash.slice(1);
+      if (['onprem', 'cloud'].includes(hash)) {
+        this.activeTab = hash;
+      }
+      const tasks = [
+        this.loadEcsTasks(),
+        this.loadAciContainers(),
+        this.loadCloudRunServices(),
+      ];
+      {% if portainer_enabled %}
+      tasks.push(this.loadEndpoints());
+      {% endif %}
+      await Promise.all(tasks);
+    },
+
+    async refresh() {
+      if (this.activeTab === 'onprem') {
+        await this.loadEndpoints();
+        if (this.selectedEndpointId) {
+          await Promise.all([this.loadContainers(), this.loadStacks()]);
+        }
+      } else {
+        await Promise.all([
+          this.loadEcsTasks(),
+          this.loadAciContainers(),
+          this.loadCloudRunServices(),
+        ]);
+      }
+    },
+
+    // ── Workgroup switching ─────────────────────────────────────────────────
+    async switchPortainerWg(wg) {
+      if (this.activePortainerWg === wg) return;
+      this.activePortainerWg = wg;
+      this.endpoints = [];
+      this.selectedEndpointId = '';
+      this.containers = [];
+      this.stacks = [];
+      this.portainerError = null;
+      await this.loadEndpoints();
+    },
+
+    // ── Data fetching ──────────────────────────────────────────────────────
+    async loadEndpoints() {
+      this.endpointsLoading = true;
+      try {
+        const data = await API.get(`/api/containers/endpoints?workgroup=${this.activePortainerWg}`);
+        this.endpoints = data.endpoints || [];
+        this.portainerError = null;
+        if (!this.selectedEndpointId && this.endpoints.length > 0) {
+          this.selectedEndpointId = this.endpoints[0].id;
+          await Promise.all([this.loadContainers(), this.loadStacks()]);
+        }
+      } catch (e) {
+        this.portainerError = e.message;
+      } finally {
+        this.endpointsLoading = false;
+      }
+    },
+
+    async loadContainers() {
+      if (!this.selectedEndpointId) return;
+      this.loading = true;
+      this.portainerError = null;
+      try {
+        const data = await API.get(
+          `/api/containers?endpoint_id=${this.selectedEndpointId}&all_containers=${this.showAll}&workgroup=${this.activePortainerWg}`
+        );
+        this.containers = data.containers || [];
+      } catch (e) {
+        this.portainerError = e.message;
+        this.containers = [];
+      } finally {
+        this.loading = false;
+      }
+    },
+
+    async loadStacks() {
+      if (!this.selectedEndpointId) return;
+      try {
+        const data = await API.get(
+          `/api/containers/stacks?endpoint_id=${this.selectedEndpointId}&workgroup=${this.activePortainerWg}`
+        );
+        this.stacks = data.stacks || [];
+      } catch (e) {
+        this.stacks = [];
+      }
+    },
+
+    // ── Container actions ──────────────────────────────────────────────────
+    async startContainer(c) {
+      this.actionPending = c.id;
+      try {
+        await API.post(`/api/containers/${c.id}/start?endpoint_id=${this.selectedEndpointId}&workgroup=${this.activePortainerWg}`);
+        toast(`Started ${c.names[0] || c.short_id}`, 'success');
+        await this.loadContainers();
+      } catch (e) {
+        toast(e.message, 'error');
+      } finally {
+        this.actionPending = null;
+      }
+    },
+
+    async stopContainer(c) {
+      this.actionPending = c.id;
+      try {
+        await API.post(`/api/containers/${c.id}/stop?endpoint_id=${this.selectedEndpointId}&workgroup=${this.activePortainerWg}`);
+        toast(`Stopped ${c.names[0] || c.short_id}`, 'success');
+        await this.loadContainers();
+      } catch (e) {
+        toast(e.message, 'error');
+      } finally {
+        this.actionPending = null;
+      }
+    },
+
+    async deleteContainer(c) {
+      const name = c.names[0] || c.short_id;
+      if (!confirm(`Delete container "${name}"? This cannot be undone.`)) return;
+      this.actionPending = c.id;
+      try {
+        await API.del(`/api/containers/${c.id}?endpoint_id=${this.selectedEndpointId}&force=true&workgroup=${this.activePortainerWg}`);
+        toast(`Deleted ${name}`, 'success');
+        this.containers = this.containers.filter(x => x.id !== c.id);
+      } catch (e) {
+        toast(e.message, 'error');
+      } finally {
+        this.actionPending = null;
+      }
+    },
+
+    // ── Deploy container ───────────────────────────────────────────────────
+    async submitDeploy() {
+      this.deploying = true;
+      try {
+        const payload = {
+          endpoint_id: parseInt(this.selectedEndpointId),
+          name: this.deployForm.name,
+          image: this.deployForm.image,
+          ports: this.deployForm.ports
+            .filter(p => p.host && p.container)
+            .map(p => ({ host: parseInt(p.host), container: parseInt(p.container), protocol: p.protocol })),
+          env: this.deployForm.env.filter(e => e.key),
+          restart_policy: this.deployForm.restart_policy,
+        };
+        const resp = await API.post(`/api/containers/deploy?workgroup=${this.activePortainerWg}`, payload);
+        this.showDeployModal = false;
+        this._resetDeployForm();
+        window.location.href = `/jobs/${resp.job_id}`;
+      } catch (e) {
+        toast(e.message, 'error');
+      } finally {
+        this.deploying = false;
+      }
+    },
+
+    _resetDeployForm() {
+      this.deployForm = { name: '', image: '', ports: [], env: [], restart_policy: 'unless-stopped' };
+    },
+
+    // ── Deploy stack ───────────────────────────────────────────────────────
+    async submitStack() {
+      this.stackDeploying = true;
+      try {
+        const payload = {
+          endpoint_id: parseInt(this.selectedEndpointId),
+          name: this.stackForm.name,
+          compose_content: this.stackForm.compose_content,
+          env: this.stackForm.env.filter(e => e.key),
+        };
+        const resp = await API.post(`/api/containers/stacks?workgroup=${this.activePortainerWg}`, payload);
+        this.showStackModal = false;
+        this._resetStackForm();
+        window.location.href = `/jobs/${resp.job_id}`;
+      } catch (e) {
+        toast(e.message, 'error');
+      } finally {
+        this.stackDeploying = false;
+      }
+    },
+
+    _resetStackForm() {
+      this.stackForm = { name: '', compose_content: '', env: [] };
+    },
+
+    // ── ECS Tasks ──────────────────────────────────────────────────────────
+    async loadEcsTasks() {
+      this.ecsLoading = true;
+      this.ecsError = null;
+      try {
+        const data = await API.get(`/api/containers/ecs-tasks?include_stopped=${this.ecsShowStopped}`);
+        const all = data.tasks || [];
+        this.ecsTasks = all.filter(t => !this.ecsDismissed.includes(t.task_id));
+        this.ecsCluster = data.cluster || '';
+      } catch (e) {
+        this.ecsError = e.message;
+        this.ecsTasks = [];
+      } finally {
+        this.ecsLoading = false;
+      }
+    },
+
+    async stopEcsTask(t) {
+      this.ecsActionPending = t.task_id;
+      try {
+        await API.post(`/api/containers/ecs-tasks/${t.task_id}/stop`);
+        toast(`Stopped ECS task ${t.task_id.slice(0,12)}`, 'success');
+        await this.loadEcsTasks();
+      } catch (e) {
+        toast(e.message, 'error');
+      } finally {
+        this.ecsActionPending = null;
+      }
+    },
+
+    dismissEcsTask(taskId) {
+      this.ecsDismissed = [...this.ecsDismissed, taskId];
+      localStorage.setItem('ecs_dismissed', JSON.stringify(this.ecsDismissed));
+      this.ecsTasks = this.ecsTasks.filter(t => t.task_id !== taskId);
+    },
+
+    dismissAllStopped() {
+      const stoppedIds = this.ecsTasks
+        .filter(t => t.last_status === 'STOPPED')
+        .map(t => t.task_id);
+      this.ecsDismissed = [...new Set([...this.ecsDismissed, ...stoppedIds])];
+      localStorage.setItem('ecs_dismissed', JSON.stringify(this.ecsDismissed));
+      this.ecsTasks = this.ecsTasks.filter(t => t.last_status !== 'STOPPED');
+    },
+
+    // ── ACI Containers ─────────────────────────────────────────────────────
+    async loadAciContainers() {
+      this.aciLoading = true;
+      this.aciError = null;
+      try {
+        const data = await API.get('/api/containers/aci-containers');
+        this.aciContainers = data.containers || [];
+        this.aciRg = data.resource_group || '';
+      } catch (e) {
+        this.aciError = e.message;
+        this.aciContainers = [];
+      } finally {
+        this.aciLoading = false;
+      }
+    },
+
+    async stopAciContainer(c) {
+      if (!confirm(`Stop ACI container "${c.container_group_name}"?`)) return;
+      this.aciActionPending = c.container_group_name;
+      try {
+        await API.post(`/api/containers/aci-containers/${encodeURIComponent(c.container_group_name)}/stop`);
+        toast(`Stopped ${c.container_group_name}`, 'success');
+        await this.loadAciContainers();
+      } catch (e) {
+        toast(e.message, 'error');
+      } finally {
+        this.aciActionPending = null;
+      }
+    },
+
+    // ── GCP Cloud Run ──────────────────────────────────────────────────────
+    async loadCloudRunServices() {
+      this.cloudRunLoading = true;
+      this.cloudRunError = null;
+      try {
+        const data = await API.get('/api/containers/cloud-run-services');
+        this.cloudRunServices = data.services || [];
+        this.cloudRunProject = data.project_id || '';
+        this.cloudRunRegion = data.region || '';
+      } catch (e) {
+        this.cloudRunError = e.message;
+        this.cloudRunServices = [];
+      } finally {
+        this.cloudRunLoading = false;
+      }
+    },
+
+    async deleteCloudRunService(s) {
+      if (!confirm(`Delete Cloud Run service "${s.name}"? This is permanent.`)) return;
+      try {
+        await API.post(`/api/containers/cloud-run-services/${encodeURIComponent(s.name)}/stop`);
+        toast(`Deleted ${s.name}`, 'success');
+        await this.loadCloudRunServices();
+      } catch (e) {
+        toast(e.message, 'error');
+      }
+    },
+
+    // ── UI helpers ─────────────────────────────────────────────────────────
+    stateBadge(state) {
+      if (state === 'running') return 'bg-green-100 text-green-700';
+      if (state === 'exited')  return 'bg-gray-100 text-gray-500';
+      if (state === 'paused')  return 'bg-yellow-100 text-yellow-700';
+      return 'bg-blue-100 text-blue-600';
+    },
+
+    ecsStatusBadge(status) {
+      if (status === 'RUNNING')  return 'bg-green-100 text-green-700';
+      if (status === 'STOPPED')  return 'bg-gray-100 text-gray-500';
+      if (status === 'PENDING')  return 'bg-yellow-100 text-yellow-700';
+      return 'bg-blue-100 text-blue-600';
+    },
+  };
+}
+</script>
+{% endblock %}
