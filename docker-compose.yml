@@ -17,7 +17,6 @@ services:
       retries: 5
 
   app:
-    platform: linux/amd64   # btapi and packer are x86_64-only binaries
     build:
       context: .
     restart: unless-stopped

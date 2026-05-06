@@ -1,7 +1,7 @@
-# btapi (BeyondTrust PRA CLI) is distributed as an x86_64-only ELF binary.
-# Packer is also downloaded as linux_amd64 below. Pin to amd64 so both
-# binaries work under Rosetta on Apple Silicon and run natively on x86_64.
-FROM --platform=linux/amd64 python:3.12-slim AS base
+# Terraform, Packer, and all other tools are downloaded as architecture-aware
+# binaries (see RUN steps below), so the image builds and runs natively on
+# both ARM64 (Apple Silicon, AWS Graviton) and AMD64.
+FROM python:3.12-slim AS base
 
 ARG PACKER_VERSION=1.11.2
 
