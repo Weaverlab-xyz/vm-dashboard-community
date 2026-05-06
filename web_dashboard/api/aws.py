@@ -914,12 +914,12 @@ async def _run_destroy(destroy_job_id: str, deploy_job_id: str, instance_id: str
                     )
                     result["ecs_task_shared"] = ecs_task_arn
 
-            # Remove BeyondTrust Shell Jump (only if BT is enabled — a deploy
-            # that recorded a bt_shell_jump_id must have run with BT on; if
-            # the flag has since flipped off, leave the jump in place rather
-            # than crash on a missing import).
+            # Remove BeyondTrust Shell Jump if this deploy provisioned one.
+            # Check bt_shell_jump_id — not settings.beyondtrust_enabled — so
+            # the cleanup still runs even if the feature flag was toggled off
+            # after deployment (the jump exists in PRA regardless of the flag).
             bt_shell_jump_id = meta.get("bt_shell_jump_id")
-            if bt_shell_jump_id and settings.beyondtrust_enabled:
+            if bt_shell_jump_id:
                 job_service.update_progress(
                     db, destroy_job_id, 70,
                     f"Removing BeyondTrust Shell Jump {bt_shell_jump_id}…"
@@ -929,23 +929,26 @@ async def _run_destroy(destroy_job_id: str, deploy_job_id: str, instance_id: str
                     if tf_state:
                         from ..services import terraform_pra_service
                         await terraform_pra_service.remove_jump(tf_state)
+                        result["bt_shell_jump_removed"] = bt_shell_jump_id
+                        job_service.update_progress(
+                            db, destroy_job_id, 85,
+                            f"Shell Jump {bt_shell_jump_id} removed from PRA."
+                        )
                     else:
-                        # Fallback: VM was provisioned before the Terraform migration.
-                        # btapi is no longer available in the container; log and skip
-                        # rather than crash. The Shell Jump must be removed manually
-                        # from the BeyondTrust PRA console.
-                        logger.warning(
-                            "bt_shell_jump_id %s has no tf_state — was provisioned before "
-                            "Terraform migration. Remove Shell Jump manually from PRA console.",
-                            bt_shell_jump_id,
-                        )
-                        result["bt_error"] = (
+                        # Provisioned before the Terraform migration — no state to destroy with.
+                        # btapi is no longer in the container; log and skip.
+                        msg = (
                             f"Shell Jump {bt_shell_jump_id} requires manual removal from PRA "
-                            "(provisioned before Terraform migration)"
+                            "(provisioned before Terraform migration — no tf_state stored)"
                         )
-                    result["bt_shell_jump_removed"] = bt_shell_jump_id
+                        logger.warning(msg)
+                        result["bt_error"] = msg
+                        job_service.update_progress(db, destroy_job_id, 85, msg)
                 except Exception as e:
-                    result["bt_error"] = f"Shell Jump removal failed: {e}"
+                    err = f"Shell Jump removal failed: {e}"
+                    logger.error("bt_shell_jump_id=%s destroy error: %s", bt_shell_jump_id, e)
+                    result["bt_error"] = err
+                    job_service.update_progress(db, destroy_job_id, 85, err)
 
             # Mark original deploy job as destroyed
             meta["destroyed"] = True

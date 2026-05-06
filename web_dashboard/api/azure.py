@@ -860,9 +860,9 @@ async def _run_destroy(destroy_job_id: str, deploy_job_id: str, vm_name: str, rg
                 except AzureError as e:
                     result["aci_error"] = str(e)
 
-            # Remove BeyondTrust Shell Jump (only if BT is enabled — see aws.py comment)
+            # Remove BeyondTrust Shell Jump if this deploy provisioned one.
             bt_shell_jump_id = meta.get("bt_shell_jump_id")
-            if bt_shell_jump_id and settings.beyondtrust_enabled:
+            if bt_shell_jump_id:
                 job_service.update_progress(
                     db, destroy_job_id, 70,
                     f"Removing BeyondTrust Shell Jump {bt_shell_jump_id}…"
@@ -872,19 +872,24 @@ async def _run_destroy(destroy_job_id: str, deploy_job_id: str, vm_name: str, rg
                     if tf_state:
                         from ..services import terraform_pra_service
                         await terraform_pra_service.remove_jump(tf_state)
+                        result["bt_shell_jump_removed"] = bt_shell_jump_id
+                        job_service.update_progress(
+                            db, destroy_job_id, 85,
+                            f"Shell Jump {bt_shell_jump_id} removed from PRA."
+                        )
                     else:
-                        logger.warning(
-                            "bt_shell_jump_id %s has no tf_state — was provisioned before "
-                            "Terraform migration. Remove Shell Jump manually from PRA console.",
-                            bt_shell_jump_id,
-                        )
-                        result["bt_error"] = (
+                        msg = (
                             f"Shell Jump {bt_shell_jump_id} requires manual removal from PRA "
-                            "(provisioned before Terraform migration)"
+                            "(provisioned before Terraform migration — no tf_state stored)"
                         )
-                    result["bt_shell_jump_removed"] = bt_shell_jump_id
+                        logger.warning(msg)
+                        result["bt_error"] = msg
+                        job_service.update_progress(db, destroy_job_id, 85, msg)
                 except Exception as e:
-                    result["bt_error"] = f"Shell Jump removal failed: {e}"
+                    err = f"Shell Jump removal failed: {e}"
+                    logger.error("bt_shell_jump_id=%s destroy error: %s", bt_shell_jump_id, e)
+                    result["bt_error"] = err
+                    job_service.update_progress(db, destroy_job_id, 85, err)
 
             # Mark original deploy job as destroyed (mirrors AWS pattern)
             meta["destroyed"] = True
