@@ -289,9 +289,19 @@ class BeyondTrustFeatureConfig(BaseModel):
     pscli_api_url: str = ""
     pscli_client_id: str = ""
     pscli_client_secret: str = ""   # encrypted at rest
+    # PRA API credentials (used by the SRA Terraform provider for Shell Jump provisioning)
     bt_api_host: str = ""
     bt_client_id: str = ""
     bt_client_secret: str = ""      # encrypted at rest
+    # Shell Jump provisioning — Jump Group and Jumpoint must pre-exist in PRA
+    bt_jump_group_name: str = ""
+    bt_jumpoint_name: str = ""
+    # Azure-specific overrides (leave blank to fall back to the AWS values above)
+    azure_bt_jump_group_name: str = ""
+    azure_jumpoint_name: str = ""
+    # GCP-specific overrides (leave blank to fall back to the AWS values above)
+    gcp_bt_jump_group_name: str = ""
+    gcp_jumpoint_name: str = ""
     # EPM for Linux (EPM-L) — SaaS API at app.beyondtrust.io
     epml_pat: str = ""              # encrypted at rest; Bearer token for EPML API
 
@@ -302,6 +312,9 @@ class PortainerFeatureConfig(BaseModel):
 
 class AnsibleFeatureConfig(BaseModel):
     enabled: bool = False
+    # Runner selection
+    ansible_runner: str = "local"            # "local" | "ecs" | "aci" | "gcp"
+    ansible_default_user: str = "ec2-user"  # SSH user for cloud runner targets
     # S3 storage
     ansible_s3_bucket: str = ""
     ansible_s3_region: str = ""
@@ -316,6 +329,15 @@ class AnsibleFeatureConfig(BaseModel):
     # AWS ECS runner
     ansible_ecs_cluster: str = "bt-jumpoint"
     ansible_ecs_task_family: str = "ansible-config-mgmt"
+    ansible_ecs_subnet_id: str = ""
+    ansible_ecs_security_group_ids: str = ""
+    # Azure ACI runner
+    ansible_aci_image: str = "willhallonline/ansible:latest"
+    ansible_aci_subnet_id: str = ""
+    ansible_aci_ssh_key_secret_name: str = ""
+    ansible_aci_acr_server: str = ""
+    ansible_aci_acr_username: str = ""
+    ansible_aci_acr_password: str = ""      # encrypted at rest
     # GCP Cloud Run runner
     gcp_ansible_cloud_run_region: str = ""
     gcp_ansible_image: str = "willhallonline/ansible:latest"
@@ -394,6 +416,7 @@ _SECRET_FEATURE_KEYS = frozenset({
     "hyperv_password",
     "nutanix_password",
     "xcpng_password",
+    "ansible_aci_acr_password",
 })
 
 

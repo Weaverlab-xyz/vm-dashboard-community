@@ -152,7 +152,8 @@ class Settings(BaseSettings):
     bt_client_secret: str = ""
     bt_jump_group_name: str = "us-east-2"
     bt_group_policy_name: str = "BeyondTrust IT User"
-    bt_jumpoint_id: int = 7  # "AWS ECS" jumpoint for cloud instances
+    bt_jumpoint_id: int = 7  # legacy — superseded by bt_jumpoint_name for Terraform provider
+    bt_jumpoint_name: str = ""  # name of the pre-existing Jumpoint in PRA (required for Terraform path)
     bt_ps_deploy_key_title: str = "Docker Deploy Key"  # Password Safe secret title
 
     # Image Management (OVA / ISO / AMI building)
@@ -221,7 +222,8 @@ class Settings(BaseSettings):
     azure_aci_resource_group: str = ""            # defaults to azure_resource_group if empty
     azure_aci_subnet_id: str = ""                 # required for ACI VNet injection
     azure_aci_jumpoint_image: str = "beyondtrust/sra-jumpoint:latest"
-    azure_ansible_aci_image: str = "willhallonline/ansible:latest"  # Ansible image for ACI config mgmt runner
+    ansible_aci_image: str = "willhallonline/ansible:latest"  # Ansible image for ACI config mgmt runner
+    ansible_aci_ssh_key_secret_name: str = ""  # Azure Key Vault secret name for the Ansible SSH private key
     azure_aci_cpu: float = 1.0
     azure_aci_memory: float = 2.0
     # BeyondTrust Jumpoint Docker registry deploy key for Azure ACI launches.
@@ -234,7 +236,8 @@ class Settings(BaseSettings):
     azure_aci_storage_account_rg: str = ""        # RG of the storage account (defaults to ACI RG if empty)
     azure_image_storage_account: str = ""         # Storage account for temp VHD upload during OVA→Azure image import
     azure_aci_file_share: str = "jpt"             # Azure File Share name for /jpt mount
-    azure_jumpoint_id: int = 9                    # BeyondTrust Jumpoint ID for Azure VMs (ACI jumpoint, id=9 "ACI")
+    azure_jumpoint_id: int = 9                    # legacy — superseded by azure_jumpoint_name for Terraform provider
+    azure_jumpoint_name: str = ""                 # name of the pre-existing Jumpoint for Azure Shell Jumps
     # ACR credentials (leave empty to pull from Docker Hub without auth).
     # Direct fields are preferred; values are stored encrypted in the DB and
     # transparently resolved through the chosen secrets backend (PS / AWS SM /
@@ -323,11 +326,15 @@ class Settings(BaseSettings):
     # GCS backend
     ansible_gcs_bucket: str = ""              # GCS bucket name
     ansible_gcs_prefix: str = "config-mgmt"
+    ansible_runner: str = "local"              # "local" | "ecs" | "aci" | "gcp"
+    ansible_default_user: str = "ec2-user"    # SSH user for cloud runner targets
     ansible_ecs_cluster: str = "bt-jumpoint"  # Shares cluster with BT Jumpoint
     ansible_ecs_task_family: str = "ansible-config-mgmt"
     ansible_ecs_image: str = "willhallonline/ansible:latest"
     ansible_ecs_cpu: str = "256"
     ansible_ecs_memory: str = "512"
+    ansible_ecs_subnet_id: str = ""           # Fargate task subnet (VPC private subnet recommended)
+    ansible_ecs_security_group_ids: str = ""  # Comma-separated security group IDs (optional)
     ansible_ecs_execution_role_arn: str = ""  # Set if image pull requires it
     ansible_ssh_key_secret: str = "AWS_KEY"        # Password Safe secret title (legacy fallback)
     ansible_ssh_key_sm_name: str = "ec2/ssh-keypair"  # AWS Secrets Manager secret name/ARN (preferred)
@@ -361,6 +368,8 @@ class Settings(BaseSettings):
     # encrypted via config_service; transparently resolved through whichever
     # secrets backend the user picked on /secrets. No consumer wires it today.
     gcp_cloud_run_docker_deploy_key: str = ""
+    gcp_bt_jump_group_name: str = ""     # BT jump group for GCP Shell Jumps (falls back to bt_jump_group_name)
+    gcp_jumpoint_name: str = ""          # Jumpoint name for GCP Shell Jumps (falls back to bt_jumpoint_name)
 
     # Entitle approval workflows (per-endpoint gate via Depends(require_approval(...)))
     entitle_api_url: str = ""                       # e.g. "https://api.entitle.io/v1"

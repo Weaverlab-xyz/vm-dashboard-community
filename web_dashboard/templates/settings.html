@@ -243,9 +243,9 @@
       <template x-if="panel?.key === 'beyondtrust' && !panelLoading">
         <div class="space-y-4">
           <p class="text-sm text-gray-500">
-            Configure the BeyondTrust products the dashboard integrates with.
-            Each uses its own CLI binary in the container and its own OAuth credentials —
-            leave a section blank if you don't use that product.
+            BeyondTrust PRA (Password Safe) integration for secret retrieval and Shell Jump provisioning.
+            Shell Jumps are managed via the <strong>BeyondTrust SRA Terraform provider</strong> (ARM64-native, no binary dependency).
+            The Jump Group and Jumpoint referenced below must already exist in PRA — the dashboard does not create them.
           </p>
 
           <!-- Password Safe -->
@@ -278,19 +278,19 @@
             </div>
           </div>
 
-          <!-- Privileged Remote Access -->
+          <!-- Privileged Remote Access — Terraform provider -->
           <div class="border-t border-gray-100 pt-4">
             <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Privileged Remote Access (PRA)</p>
             <p class="text-xs text-gray-400 mb-3">
-              Session recording and remote-access provisioning via the
-              <code class="bg-gray-100 px-1 rounded">btapi</code> binary.
+              Shell Jump provisioning via the BeyondTrust SRA Terraform provider.
+              Runs natively on ARM64 — no binary dependency.
             </p>
             <div class="space-y-3">
               <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">PRA API Host</label>
                 <input type="text" x-model="panelCfg.bt_api_host"
                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                       placeholder="https://pra.company.com">
+                       placeholder="pra.company.com">
               </div>
               <div class="grid grid-cols-2 gap-3">
                 <div>
@@ -304,6 +304,58 @@
                          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
                          placeholder="••••••••">
                 </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Shell Jump provisioning -->
+          <div class="border-t border-gray-100 pt-4">
+            <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Shell Jump provisioning</p>
+            <p class="text-xs text-gray-400 mb-3">
+              The Jump Group and Jumpoint must already exist in PRA — the dashboard looks them up by name and creates Shell Jumps inside them.
+            </p>
+            <div class="grid grid-cols-2 gap-3 mb-3">
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Jump Group Name <span class="text-gray-400 font-normal">(AWS)</span></label>
+                <input type="text" x-model="panelCfg.bt_jump_group_name"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="us-east-2">
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Jumpoint Name <span class="text-gray-400 font-normal">(AWS)</span></label>
+                <input type="text" x-model="panelCfg.bt_jumpoint_name"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="AWS ECS">
+              </div>
+            </div>
+            <p class="text-xs text-gray-400 mb-2">Azure overrides — leave blank to reuse the AWS values above.</p>
+            <div class="grid grid-cols-2 gap-3 mb-3">
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Jump Group Name <span class="text-gray-400 font-normal">(Azure)</span></label>
+                <input type="text" x-model="panelCfg.azure_bt_jump_group_name"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="same as AWS">
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Jumpoint Name <span class="text-gray-400 font-normal">(Azure)</span></label>
+                <input type="text" x-model="panelCfg.azure_jumpoint_name"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="ACI">
+              </div>
+            </div>
+            <p class="text-xs text-gray-400 mb-2">GCP overrides — leave blank to reuse the AWS values above.</p>
+            <div class="grid grid-cols-2 gap-3">
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Jump Group Name <span class="text-gray-400 font-normal">(GCP)</span></label>
+                <input type="text" x-model="panelCfg.gcp_bt_jump_group_name"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="same as AWS">
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Jumpoint Name <span class="text-gray-400 font-normal">(GCP)</span></label>
+                <input type="text" x-model="panelCfg.gcp_jumpoint_name"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="same as AWS">
               </div>
             </div>
           </div>
@@ -357,6 +409,27 @@
             Ansible-based configuration management via AWS ECS Fargate, Azure ACI, or GCP Cloud Run Jobs.
             Configure <strong>one</strong> storage backend for playbooks (S3, Azure Blob, or GCS).
           </p>
+
+          <!-- Runner selection -->
+          <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide pt-1">Runner</p>
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Backend</label>
+              <select x-model="panelCfg.ansible_runner"
+                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                <option value="local">Local Docker (default)</option>
+                <option value="ecs">AWS ECS Fargate</option>
+                <option value="aci">Azure ACI</option>
+                <option value="gcp">GCP Cloud Run Jobs</option>
+              </select>
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Default SSH User</label>
+              <input type="text" x-model="panelCfg.ansible_default_user"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                     placeholder="ec2-user">
+            </div>
+          </div>
 
           <!-- Playbook storage — S3 -->
           <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide pt-1">Playbook Storage — S3</p>
@@ -419,19 +492,75 @@
                    placeholder="config-mgmt">
           </div>
 
-          <!-- AWS ECS runner -->
-          <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide pt-1">AWS Runner (ECS Fargate)</p>
+          <!-- Azure ACI runner -->
+          <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide pt-1">Azure Runner (ACI)</p>
           <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">ECS Cluster</label>
-            <input type="text" x-model="panelCfg.ansible_ecs_cluster"
+            <label class="block text-sm font-medium text-gray-700 mb-1">Ansible Image</label>
+            <input type="text" x-model="panelCfg.ansible_aci_image"
                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                   placeholder="bt-jumpoint">
+                   placeholder="willhallonline/ansible:latest">
           </div>
           <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">ECS Task Family</label>
-            <input type="text" x-model="panelCfg.ansible_ecs_task_family"
+            <label class="block text-sm font-medium text-gray-700 mb-1">Subnet ID <span class="text-gray-400 font-normal">(optional — for VNet access)</span></label>
+            <input type="text" x-model="panelCfg.ansible_aci_subnet_id"
                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                   placeholder="ansible-config-mgmt">
+                   placeholder="/subscriptions/.../resourceGroups/.../providers/Microsoft.Network/virtualNetworks/.../subnets/...">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">SSH Key Vault Secret <span class="text-gray-400 font-normal">(Key Vault secret name for Ansible SSH private key)</span></label>
+            <input type="text" x-model="panelCfg.ansible_aci_ssh_key_secret_name"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                   placeholder="ansible-ssh-private-key">
+          </div>
+          <p class="text-xs text-gray-400">ACR credentials — leave blank for Docker Hub images.</p>
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">ACR Server</label>
+              <input type="text" x-model="panelCfg.ansible_aci_acr_server"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                     placeholder="myorg.azurecr.io">
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">ACR Username</label>
+              <input type="text" x-model="panelCfg.ansible_aci_acr_username"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                     placeholder="myorg">
+            </div>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">ACR Password</label>
+            <input type="password" x-model="panelCfg.ansible_aci_acr_password"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                   placeholder="••••••••">
+          </div>
+
+          <!-- AWS ECS runner -->
+          <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide pt-1">AWS Runner (ECS Fargate)</p>
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">ECS Cluster</label>
+              <input type="text" x-model="panelCfg.ansible_ecs_cluster"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                     placeholder="bt-jumpoint">
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">ECS Task Family</label>
+              <input type="text" x-model="panelCfg.ansible_ecs_task_family"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                     placeholder="ansible-config-mgmt">
+            </div>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Subnet ID <span class="text-gray-400 font-normal">(private subnet for Fargate task)</span></label>
+            <input type="text" x-model="panelCfg.ansible_ecs_subnet_id"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                   placeholder="subnet-0abc1234">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Security Group IDs <span class="text-gray-400 font-normal">(comma-separated, optional)</span></label>
+            <input type="text" x-model="panelCfg.ansible_ecs_security_group_ids"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                   placeholder="sg-0abc1234, sg-0def5678">
           </div>
 
           <!-- GCP Cloud Run runner -->

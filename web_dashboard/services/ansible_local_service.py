@@ -140,9 +140,10 @@ async def fetch_ssh_key(cloud: str) -> str | None:
     """
     Fetch the SSH private key PEM for the given cloud.
 
-    "aws" → AWS Secrets Manager (ansible_ssh_key_sm_name config key)
-    "gcp" → GCP Secret Manager  (gcp_ssh_key_secret_name config key)
-    "azure" / "" → None (Azure VMs use password auth or are skipped)
+    "aws"   → AWS Secrets Manager (ansible_ssh_key_sm_name config key)
+    "gcp"   → GCP Secret Manager  (gcp_ssh_key_secret_name config key)
+    "azure" → Azure Key Vault     (ansible_aci_ssh_key_secret_name config key)
+    ""      → None
     """
     if cloud == "aws":
         secret_name = _cfg("ansible_ssh_key_sm_name")
@@ -154,6 +155,14 @@ async def fetch_ssh_key(cloud: str) -> str | None:
         if not secret_name:
             return None
         return await asyncio.to_thread(_fetch_gcp_ssh_key_sync, secret_name)
+    if cloud == "azure":
+        secret_name = _cfg("ansible_aci_ssh_key_secret_name")
+        vault_url = _cfg("azure_key_vault_url")
+        if not secret_name or not vault_url:
+            return None
+        from .azure_service import _ensure_creds, _get_ssh_key_from_vault_sync
+        cred, _ = await _ensure_creds()
+        return await asyncio.to_thread(_get_ssh_key_from_vault_sync, cred, vault_url, secret_name)
     return None
 
 

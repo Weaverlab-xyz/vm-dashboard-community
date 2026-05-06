@@ -171,7 +171,12 @@ class RunRequest(BaseModel):
     asset: str           # filename of any supported type (.yml, .sh, .deb, .rpm)
     target: str          # on-prem group key OR bare IP/hostname for cloud/ad-hoc
     cloud: str = ""      # "" | "aws" | "azure" | "gcp" — drives SSH key retrieval
+    ansible_user: str = ""  # SSH user for cloud runner targets; falls back to ansible_default_user
     extra_vars: dict = {}
+
+
+def _cfg(key: str) -> str:
+    return ansible_local_service._cfg(key)
 
 
 async def _run_job(
@@ -179,8 +184,10 @@ async def _run_job(
     asset: str,
     target: str,
     cloud: str,
+    ansible_user: str,
     extra_vars: dict,
 ) -> None:
+    import base64
     from ..database import SessionLocal
     db = SessionLocal()
     try:
@@ -191,16 +198,65 @@ async def _run_job(
             job_service.set_failed(db, job_id, f"Asset storage error: {e}")
             return
 
-        # Fetch cloud SSH key if applicable
-        ssh_key_pem: str | None = None
-        if cloud in ("aws", "gcp"):
+        runner = _cfg("ansible_runner") or "local"
+        is_adhoc = "." in target or ":" in target
+        is_playbook = ansible_local_service.asset_type(asset) == "playbook"
+
+        # Cloud runners only support bare-IP targets and .yml playbooks.
+        # Fall back to local for group targets or non-playbook assets.
+        if runner != "local" and is_adhoc and is_playbook:
+            resolved_user = (
+                ansible_user
+                or _cfg("ansible_default_user")
+                or "ec2-user"
+            )
+            key_cloud = cloud or runner  # "ecs"→"aws", "aci"→"azure", etc.
+            if runner == "ecs":
+                key_cloud = "aws"
+            elif runner == "aci":
+                key_cloud = "azure"
+            elif runner == "gcp":
+                key_cloud = "gcp"
+
+            job_service.update_progress(db, job_id, 10, f"Retrieving SSH key for {key_cloud.upper()}…")
+            ssh_key_pem: str | None = None
+            try:
+                ssh_key_pem = await ansible_local_service.fetch_ssh_key(key_cloud)
+            except Exception as exc:
+                logger.warning("SSH key retrieval failed (%s) — proceeding without key: %s", key_cloud, exc)
+
+            ssh_key_b64 = base64.b64encode(ssh_key_pem.encode()).decode() if ssh_key_pem else ""
+
+            job_service.update_progress(db, job_id, 20, f"Launching {runner.upper()} runner for {asset}…")
+            exit_code, output = await _dispatch_cloud_runner(
+                runner=runner,
+                target_ip=target,
+                ansible_user=resolved_user,
+                playbook_b64=asset_b64,
+                ssh_key_b64=ssh_key_b64,
+                job_id=job_id,
+            )
+
+            if exit_code == 0:
+                job_service.set_completed(db, job_id, {"output": output, "returncode": exit_code})
+            else:
+                job_service.set_failed(db, job_id, f"ansible-playbook exited {exit_code}:\n{output}")
+            return
+
+        # ── Local Docker runner (original path) ───────────────────────────────
+        if runner != "local" and not is_adhoc:
+            logger.debug("ansible_runner=%s ignored for group target %r — using local runner", runner, target)
+        if runner != "local" and not is_playbook:
+            logger.debug("ansible_runner=%s ignored for non-playbook asset %r — using local runner", runner, asset)
+
+        ssh_key_pem = None
+        if cloud in ("aws", "gcp", "azure"):
             job_service.update_progress(db, job_id, 10, f"Retrieving SSH key for {cloud.upper()}…")
             try:
                 ssh_key_pem = await ansible_local_service.fetch_ssh_key(cloud)
                 if not ssh_key_pem:
                     logger.warning(
-                        "No SSH key configured for %s (ansible_ssh_key_sm_name / gcp_ssh_key_secret_name) "
-                        "— proceeding without key; ensure the target allows password auth or agent forwarding",
+                        "No SSH key configured for %s — proceeding without key",
                         cloud,
                     )
             except Exception as exc:
@@ -218,14 +274,82 @@ async def _run_job(
         if rc == 0:
             job_service.set_completed(db, job_id, {"output": output, "returncode": rc})
         else:
-            job_service.set_failed(
-                db, job_id, f"ansible-playbook exited {rc}:\n{output}"
-            )
+            job_service.set_failed(db, job_id, f"ansible-playbook exited {rc}:\n{output}")
     except Exception as e:
-        logger.exception("ansible-local job %s failed: %s", job_id, e)
+        logger.exception("ansible job %s failed: %s", job_id, e)
         job_service.set_failed(db, job_id, str(e))
     finally:
         db.close()
+
+
+async def _dispatch_cloud_runner(
+    runner: str,
+    target_ip: str,
+    ansible_user: str,
+    playbook_b64: str,
+    ssh_key_b64: str,
+    job_id: str,
+) -> tuple:
+    """Route to the configured cloud Ansible runner. Returns (exit_code, output)."""
+    if runner == "ecs":
+        from ..services import aws_service
+        region = _cfg("aws_region") or "us-east-1"
+        sg_raw = _cfg("ansible_ecs_security_group_ids") or ""
+        sg_ids = [s.strip() for s in sg_raw.split(",") if s.strip()]
+        return await aws_service.run_ecs_ansible_task(
+            region=region,
+            cluster=_cfg("ansible_ecs_cluster") or "bt-jumpoint",
+            task_family=_cfg("ansible_ecs_task_family") or "ansible-config-mgmt",
+            image=_cfg("ansible_ecs_image") or "willhallonline/ansible:latest",
+            cpu=_cfg("ansible_ecs_cpu") or "256",
+            memory=_cfg("ansible_ecs_memory") or "512",
+            subnet_id=_cfg("ansible_ecs_subnet_id") or "",
+            security_group_ids=sg_ids,
+            execution_role_arn=_cfg("ansible_ecs_execution_role_arn") or "",
+            target_ip=target_ip,
+            ansible_user=ansible_user,
+            playbook_b64=playbook_b64,
+            ssh_key_b64=ssh_key_b64,
+            job_id=job_id,
+        )
+
+    if runner == "aci":
+        from ..services import azure_service
+        from ..services import config_service as cs
+        from ..config import settings
+        rg = cs.get("azure_resource_group") or settings.azure_resource_group
+        location = cs.get("azure_location") or settings.azure_location
+        return await azure_service.run_aci_ansible_task(
+            rg=rg,
+            location=location,
+            subnet_id=_cfg("ansible_aci_subnet_id") or "",
+            image=_cfg("ansible_aci_image") or "willhallonline/ansible:latest",
+            target_ip=target_ip,
+            ansible_user=ansible_user,
+            playbook_b64=playbook_b64,
+            ssh_key_b64=ssh_key_b64,
+            job_id=job_id,
+            acr_server=_cfg("ansible_aci_acr_server") or "",
+            acr_username=_cfg("ansible_aci_acr_username") or "",
+            acr_password=_cfg("ansible_aci_acr_password") or "",
+        )
+
+    if runner == "gcp":
+        from ..services import gcp_service
+        region = _cfg("gcp_ansible_cloud_run_region") or _cfg("gcp_region") or ""
+        return await gcp_service.run_cloud_run_ansible_task(
+            project_id=_cfg("gcp_project_id"),
+            region=region,
+            image=_cfg("gcp_ansible_image") or "willhallonline/ansible:latest",
+            target_ip=target_ip,
+            ansible_user=ansible_user,
+            playbook_b64=playbook_b64,
+            ssh_key_b64=ssh_key_b64,
+            job_id=job_id,
+            vpc_connector=_cfg("gcp_ansible_vpc_connector") or "",
+        )
+
+    raise ValueError(f"Unknown ansible_runner: {runner!r}")
 
 
 @router.post("/run")
@@ -267,6 +391,7 @@ async def run_playbook(
         owner_id=current_user.id,
     )
     background_tasks.add_task(
-        _run_job, job.id, payload.asset, payload.target, payload.cloud, payload.extra_vars
+        _run_job, job.id, payload.asset, payload.target, payload.cloud,
+        payload.ansible_user, payload.extra_vars,
     )
     return {"job_id": job.id, "status": "queued"}

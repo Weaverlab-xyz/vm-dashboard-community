@@ -1,4 +1,7 @@
-FROM python:3.12-slim AS base
+# btapi (BeyondTrust PRA CLI) is distributed as an x86_64-only ELF binary.
+# Packer is also downloaded as linux_amd64 below. Pin to amd64 so both
+# binaries work under Rosetta on Apple Silicon and run natively on x86_64.
+FROM --platform=linux/amd64 python:3.12-slim AS base
 
 ARG PACKER_VERSION=1.11.2
 
@@ -45,15 +48,33 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get update && apt-get install -y --no-install-recommends docker-ce-cli \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Packer and pre-cache all three cloud plugins so packer init
-# does not require internet access at build time inside the container.
-RUN curl -fsSL "https://releases.hashicorp.com/packer/${PACKER_VERSION}/packer_${PACKER_VERSION}_linux_amd64.zip" \
+# Install Packer (architecture-aware) and pre-cache all three cloud plugins
+# so packer init does not require internet access at build time.
+ARG TERRAFORM_VERSION=1.9.5
+RUN ARCH=$(dpkg --print-architecture) \
+    && curl -fsSL "https://releases.hashicorp.com/packer/${PACKER_VERSION}/packer_${PACKER_VERSION}_linux_${ARCH}.zip" \
         -o /tmp/packer.zip \
     && unzip -q /tmp/packer.zip -d /usr/local/bin/ \
     && rm /tmp/packer.zip \
     && packer plugins install github.com/hashicorp/amazon \
     && packer plugins install github.com/hashicorp/azure \
     && packer plugins install github.com/hashicorp/googlecompute
+
+# Install Terraform (architecture-aware) and pre-cache the BeyondTrust SRA
+# provider so containers have no outbound dependency at run time.
+# The plugin cache directory is set via TF_PLUGIN_CACHE_DIR in terraform_pra_service.py.
+ENV TF_PLUGIN_CACHE_DIR=/root/.terraform.d/plugin-cache
+RUN ARCH=$(dpkg --print-architecture) \
+    && curl -fsSL "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_${ARCH}.zip" \
+        -o /tmp/terraform.zip \
+    && unzip -q /tmp/terraform.zip -d /usr/local/bin/ \
+    && rm /tmp/terraform.zip \
+    && mkdir -p "${TF_PLUGIN_CACHE_DIR}" \
+    && mkdir -p /tmp/tf_provider_init \
+    && printf 'terraform {\n  required_providers {\n    sra = { source = "beyondtrust/sra", version = "~> 1.0" }\n  }\n}\n' \
+       > /tmp/tf_provider_init/main.tf \
+    && terraform -chdir=/tmp/tf_provider_init init \
+    && rm -rf /tmp/tf_provider_init
 
 # Entrypoint fixes SSH key permissions when the Windows override
 # bind-mounts a key from %USERPROFILE%. Docker Desktop surfaces Windows
