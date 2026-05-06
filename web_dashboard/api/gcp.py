@@ -300,7 +300,7 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
             network_tags=payload.network_tags or [],
         )
 
-        job_service.update_progress(db, job_id, 90, "Instance launched — fetching network details…")
+        hostname = result.get("private_ip") or result.get("public_ip") or payload.instance_name
 
         final_meta = {
             "instance_name": result["instance_name"],
@@ -313,6 +313,37 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
             "image_self_link": payload.image_self_link,
             "image_name":    payload.image_name,
         }
+
+        # ── BeyondTrust PRA — Shell Jump (optional) ───────────────────────────
+        if _cfg_svc.get_bool("beyondtrust_enabled"):
+            from ..services import terraform_pra_service
+            jump_group = _cfg_svc.get("gcp_bt_jump_group_name") or _cfg_svc.get("bt_jump_group_name") or settings.bt_jump_group_name
+            jumpoint_name = _cfg_svc.get("gcp_jumpoint_name") or _cfg_svc.get("bt_jumpoint_name") or settings.bt_jumpoint_name
+            job_service.update_progress(db, job_id, 90, f"Instance launched ({hostname}), provisioning Shell Jump…")
+            try:
+                bt_result = await terraform_pra_service.provision_jump(
+                    vm_name=payload.instance_name,
+                    hostname=hostname,
+                    jump_group_name=jump_group,
+                    jumpoint_name=jumpoint_name,
+                    tag="GCP",
+                )
+                final_meta["bt_shell_jump_id"] = bt_result.get("shell_jump_id")
+                final_meta["bt_jump_group_name"] = bt_result.get("jump_group_name")
+                final_meta["bt_tf_state"] = bt_result.get("tf_state_json")
+                job_service.update_progress(
+                    db, job_id, 95,
+                    f"Shell Jump created (ID: {bt_result.get('shell_jump_id')}, group: {jump_group})"
+                )
+            except Exception as bt_exc:
+                final_meta["bt_error"] = str(bt_exc)
+                job_service.update_progress(
+                    db, job_id, 95,
+                    f"Instance deployed but Shell Jump provisioning failed: {bt_exc}"
+                )
+        else:
+            job_service.update_progress(db, job_id, 95, "Instance launched.")
+
         job_service.set_completed(db, job_id, final_meta)
         await cache_service.invalidate(cache_service.key_global("gcp_instances"))
 
@@ -391,27 +422,91 @@ async def destroy_instance(
         raise HTTPException(status_code=400, detail="GCP project ID not configured.")
     resolved_zone = zone or _gcp_zone()
 
+    # Find the original deploy job so we can retrieve bt_tf_state for Shell Jump removal
+    deploy_jobs = (
+        db.query(Job)
+        .filter(Job.job_type == "gce_deploy", Job.status == "completed")
+        .all()
+    )
+    deploy_job = None
+    for j in deploy_jobs:
+        meta = j.metadata_dict
+        if meta.get("instance_name") == instance_name and not meta.get("destroyed"):
+            deploy_job = j
+            break
+
     job = job_service.create_job(
         db,
         job_type="gce_destroy",
         created_by=current_user.username,
-        metadata={"instance_name": instance_name, "zone": resolved_zone},
+        metadata={
+            "instance_name": instance_name,
+            "zone": resolved_zone,
+            "deploy_job_id": deploy_job.id if deploy_job else None,
+        },
     )
     job_service.log_audit(
         db, current_user.username, "gce_destroy",
         details={"instance_name": instance_name, "zone": resolved_zone},
     )
-    background_tasks.add_task(_run_destroy, job.id, project_id, resolved_zone, instance_name)
+    background_tasks.add_task(
+        _run_destroy, job.id, project_id, resolved_zone, instance_name,
+        deploy_job.id if deploy_job else None,
+    )
     return {"job_id": job.id, "status": "pending", "message": f"Terminating {instance_name}…"}
 
 
-async def _run_destroy(job_id: str, project_id: str, zone: str, instance_name: str) -> None:
+async def _run_destroy(
+    job_id: str, project_id: str, zone: str, instance_name: str,
+    deploy_job_id: Optional[str] = None,
+) -> None:
     db = _get_db_session()
     try:
         job_service.set_running(db, job_id)
-        job_service.update_progress(db, job_id, 30, f"Deleting instance {instance_name}…")
+        result = {"instance_name": instance_name, "zone": zone}
+
+        # Remove BeyondTrust Shell Jump before terminating the instance
+        deploy_meta = {}
+        if deploy_job_id:
+            deploy_job = job_service.get_job(db, deploy_job_id)
+            if deploy_job:
+                deploy_meta = deploy_job.metadata_dict
+
+        bt_shell_jump_id = deploy_meta.get("bt_shell_jump_id")
+        if bt_shell_jump_id and settings.beyondtrust_enabled:
+            job_service.update_progress(
+                db, job_id, 20,
+                f"Removing BeyondTrust Shell Jump {bt_shell_jump_id}…"
+            )
+            try:
+                tf_state = deploy_meta.get("bt_tf_state")
+                if tf_state:
+                    from ..services import terraform_pra_service
+                    await terraform_pra_service.remove_jump(tf_state)
+                else:
+                    logger.warning(
+                        "bt_shell_jump_id %s has no tf_state — was provisioned before "
+                        "Terraform migration. Remove Shell Jump manually from PRA console.",
+                        bt_shell_jump_id,
+                    )
+                    result["bt_error"] = (
+                        f"Shell Jump {bt_shell_jump_id} requires manual removal from PRA "
+                        "(provisioned before Terraform migration)"
+                    )
+                result["bt_shell_jump_removed"] = bt_shell_jump_id
+            except Exception as e:
+                result["bt_error"] = f"Shell Jump removal failed: {e}"
+
+        job_service.update_progress(db, job_id, 50, f"Deleting instance {instance_name}…")
         await gcp_service.terminate_instance(project_id=project_id, zone=zone, instance_name=instance_name)
-        job_service.set_completed(db, job_id, {"instance_name": instance_name, "zone": zone})
+
+        if deploy_job_id:
+            deploy_meta["destroyed"] = True
+            deploy_job = job_service.get_job(db, deploy_job_id)
+            if deploy_job:
+                job_service.set_completed(db, deploy_job_id, deploy_meta)
+
+        job_service.set_completed(db, job_id, result)
         await cache_service.invalidate(cache_service.key_global("gcp_instances"))
     except Exception as exc:
         logger.error("GCE destroy failed for job %s: %s", job_id, exc)

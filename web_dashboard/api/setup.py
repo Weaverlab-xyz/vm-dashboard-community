@@ -299,6 +299,9 @@ class BeyondTrustFeatureConfig(BaseModel):
     # Azure-specific overrides (leave blank to fall back to the AWS values above)
     azure_bt_jump_group_name: str = ""
     azure_jumpoint_name: str = ""
+    # GCP-specific overrides (leave blank to fall back to the AWS values above)
+    gcp_bt_jump_group_name: str = ""
+    gcp_jumpoint_name: str = ""
     # EPM for Linux (EPM-L) — SaaS API at app.beyondtrust.io
     epml_pat: str = ""              # encrypted at rest; Bearer token for EPML API
 

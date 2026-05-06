@@ -368,6 +368,8 @@ class Settings(BaseSettings):
     # encrypted via config_service; transparently resolved through whichever
     # secrets backend the user picked on /secrets. No consumer wires it today.
     gcp_cloud_run_docker_deploy_key: str = ""
+    gcp_bt_jump_group_name: str = ""     # BT jump group for GCP Shell Jumps (falls back to bt_jump_group_name)
+    gcp_jumpoint_name: str = ""          # Jumpoint name for GCP Shell Jumps (falls back to bt_jumpoint_name)
 
     # Entitle approval workflows (per-endpoint gate via Depends(require_approval(...)))
     entitle_api_url: str = ""                       # e.g. "https://api.entitle.io/v1"
