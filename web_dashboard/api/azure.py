@@ -620,24 +620,23 @@ async def _run_deploy(job_id: str, req: AzureDeployRequest, rg: str, loc: str):
 
         # Step 3: BeyondTrust PRA — Shell Jump (optional)
         if settings.beyondtrust_enabled:
-            from ..services import btapi_service
+            from ..services import terraform_pra_service
             jump_group = settings.azure_bt_jump_group_name or settings.bt_jump_group_name
-            group_policy = settings.azure_bt_group_policy_name or settings.bt_group_policy_name
-            jumpoint_id = settings.azure_jumpoint_id or settings.bt_jumpoint_id
+            jumpoint_name = settings.azure_jumpoint_name or settings.bt_jumpoint_name
             aci_note = f" (ACI: {result['aci_group_name']})" if result.get("aci_group_name") else (
                 f" (ACI failed: {result['aci_error']})" if result.get("aci_error") else " (no ACI)"
             )
             try:
-                bt_result = await btapi_service.provision_ec2_jump(
-                    instance_name=req.vm_name,
+                bt_result = await terraform_pra_service.provision_jump(
+                    vm_name=req.vm_name,
                     hostname=hostname,
                     jump_group_name=jump_group,
-                    group_policy_name=group_policy,
-                    jumpoint_id=jumpoint_id,
+                    jumpoint_name=jumpoint_name,
                     tag="Azure",
                 )
                 result["bt_shell_jump_id"] = bt_result.get("shell_jump_id")
-                result["bt_jump_group_id"] = bt_result.get("jump_group_id")
+                result["bt_jump_group_name"] = bt_result.get("jump_group_name")
+                result["bt_tf_state"] = bt_result.get("tf_state_json")
                 job_service.update_progress(
                     db, job_id, 90,
                     f"Shell Jump created (ID: {bt_result.get('shell_jump_id')}, "
@@ -752,23 +751,23 @@ async def _run_bulk_deploy(job_items: list, req: AzureBulkDeployRequest, rg: str
                 )
 
                 if settings.beyondtrust_enabled:
-                    from ..services import btapi_service
+                    from ..services import terraform_pra_service
                     jump_group = settings.azure_bt_jump_group_name or settings.bt_jump_group_name
-                    group_policy = settings.azure_bt_group_policy_name or settings.bt_group_policy_name
-                    jumpoint_id = settings.azure_jumpoint_id or settings.bt_jumpoint_id
+                    jumpoint_name = settings.azure_jumpoint_name or settings.bt_jumpoint_name
                     aci_note = f" (ACI: {result['aci_group_name']})" if result.get("aci_group_name") else (
                         f" (ACI failed: {result['aci_error']})" if result.get("aci_error") else " (no ACI)"
                     )
                     try:
-                        bt_result = await btapi_service.provision_ec2_jump(
-                            instance_name=vm_name,
+                        bt_result = await terraform_pra_service.provision_jump(
+                            vm_name=vm_name,
                             hostname=hostname,
                             jump_group_name=jump_group,
-                            group_policy_name=group_policy,
-                            jumpoint_id=jumpoint_id,
+                            jumpoint_name=jumpoint_name,
                             tag="Azure",
                         )
                         result["bt_shell_jump_id"] = bt_result.get("shell_jump_id")
+                        result["bt_jump_group_name"] = bt_result.get("jump_group_name")
+                        result["bt_tf_state"] = bt_result.get("tf_state_json")
                         job_service.update_progress(
                             db, job_id, 90,
                             f"Shell Jump created (ID: {bt_result.get('shell_jump_id')}, "
@@ -864,13 +863,25 @@ async def _run_destroy(destroy_job_id: str, deploy_job_id: str, vm_name: str, rg
             # Remove BeyondTrust Shell Jump (only if BT is enabled — see aws.py comment)
             bt_shell_jump_id = meta.get("bt_shell_jump_id")
             if bt_shell_jump_id and settings.beyondtrust_enabled:
-                from ..services import btapi_service
                 job_service.update_progress(
                     db, destroy_job_id, 70,
                     f"Removing BeyondTrust Shell Jump {bt_shell_jump_id}…"
                 )
                 try:
-                    await btapi_service.remove_ec2_jump(int(bt_shell_jump_id))
+                    tf_state = meta.get("bt_tf_state")
+                    if tf_state:
+                        from ..services import terraform_pra_service
+                        await terraform_pra_service.remove_jump(tf_state)
+                    else:
+                        logger.warning(
+                            "bt_shell_jump_id %s has no tf_state — was provisioned before "
+                            "Terraform migration. Remove Shell Jump manually from PRA console.",
+                            bt_shell_jump_id,
+                        )
+                        result["bt_error"] = (
+                            f"Shell Jump {bt_shell_jump_id} requires manual removal from PRA "
+                            "(provisioned before Terraform migration)"
+                        )
                     result["bt_shell_jump_removed"] = bt_shell_jump_id
                 except Exception as e:
                     result["bt_error"] = f"Shell Jump removal failed: {e}"

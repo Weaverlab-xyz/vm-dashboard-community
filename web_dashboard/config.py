@@ -152,7 +152,8 @@ class Settings(BaseSettings):
     bt_client_secret: str = ""
     bt_jump_group_name: str = "us-east-2"
     bt_group_policy_name: str = "BeyondTrust IT User"
-    bt_jumpoint_id: int = 7  # "AWS ECS" jumpoint for cloud instances
+    bt_jumpoint_id: int = 7  # legacy — superseded by bt_jumpoint_name for Terraform provider
+    bt_jumpoint_name: str = ""  # name of the pre-existing Jumpoint in PRA (required for Terraform path)
     bt_ps_deploy_key_title: str = "Docker Deploy Key"  # Password Safe secret title
 
     # Image Management (OVA / ISO / AMI building)
@@ -235,7 +236,8 @@ class Settings(BaseSettings):
     azure_aci_storage_account_rg: str = ""        # RG of the storage account (defaults to ACI RG if empty)
     azure_image_storage_account: str = ""         # Storage account for temp VHD upload during OVA→Azure image import
     azure_aci_file_share: str = "jpt"             # Azure File Share name for /jpt mount
-    azure_jumpoint_id: int = 9                    # BeyondTrust Jumpoint ID for Azure VMs (ACI jumpoint, id=9 "ACI")
+    azure_jumpoint_id: int = 9                    # legacy — superseded by azure_jumpoint_name for Terraform provider
+    azure_jumpoint_name: str = ""                 # name of the pre-existing Jumpoint for Azure Shell Jumps
     # ACR credentials (leave empty to pull from Docker Hub without auth).
     # Direct fields are preferred; values are stored encrypted in the DB and
     # transparently resolved through the chosen secrets backend (PS / AWS SM /

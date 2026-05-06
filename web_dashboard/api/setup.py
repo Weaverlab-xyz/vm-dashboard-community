@@ -289,9 +289,16 @@ class BeyondTrustFeatureConfig(BaseModel):
     pscli_api_url: str = ""
     pscli_client_id: str = ""
     pscli_client_secret: str = ""   # encrypted at rest
+    # PRA API credentials (used by the SRA Terraform provider for Shell Jump provisioning)
     bt_api_host: str = ""
     bt_client_id: str = ""
     bt_client_secret: str = ""      # encrypted at rest
+    # Shell Jump provisioning — Jump Group and Jumpoint must pre-exist in PRA
+    bt_jump_group_name: str = ""
+    bt_jumpoint_name: str = ""
+    # Azure-specific overrides (leave blank to fall back to the AWS values above)
+    azure_bt_jump_group_name: str = ""
+    azure_jumpoint_name: str = ""
     # EPM for Linux (EPM-L) — SaaS API at app.beyondtrust.io
     epml_pat: str = ""              # encrypted at rest; Bearer token for EPML API
 
