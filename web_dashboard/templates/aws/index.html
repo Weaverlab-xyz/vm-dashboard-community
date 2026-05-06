@@ -12,6 +12,10 @@
     </div>
     <div class="flex items-center gap-2">
       <span class="text-xs text-gray-400">Region: <span class="font-semibold text-gray-600" x-text="region"></span></span>
+      <button @click="openDeployModal(null)"
+              class="text-sm bg-white border border-gray-300 hover:bg-gray-50 px-3 py-2 rounded-lg shadow-sm font-medium transition">
+        Deploy from AMI ID…
+      </button>
       <button @click="refreshAll()" :disabled="loading"
               class="text-sm bg-white border border-gray-300 hover:bg-gray-50 px-3 py-2 rounded-lg shadow-sm font-medium transition">
         Refresh
@@ -638,13 +642,25 @@
 
       <div class="px-6 py-5">
 
-        <!-- Selected AMI info -->
-        <div class="bg-blue-50 rounded-lg p-3 mb-5 text-sm">
+        <!-- Selected AMI info — read-only when launched from a list row -->
+        <div x-show="selectedAmi" class="bg-blue-50 rounded-lg p-3 mb-5 text-sm">
           <p class="font-medium text-blue-800" x-text="selectedAmi?.name"></p>
           <p class="font-mono text-xs text-blue-600 mt-0.5" x-text="selectedAmi?.ami_id"></p>
         </div>
 
-        <!-- ENA warning banner -->
+        <!-- AMI ID — editable; prefilled from selectedAmi when present, free-text otherwise -->
+        <div class="mb-5">
+          <label class="block text-sm font-medium text-gray-700 mb-1">AMI ID *</label>
+          <input type="text" x-model="deployForm.ami_id" required
+                 placeholder="ami-0123456789abcdef0"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono
+                        focus:outline-none focus:ring-2 focus:ring-blue-500">
+          <p class="text-xs text-gray-400 mt-1">
+            Edit to deploy from any AMI ID your AWS account can access (Marketplace, BYOL, cross-account share, etc.).
+          </p>
+        </div>
+
+        <!-- ENA warning banner — only meaningful when we know the AMI's ENA flag -->
         <div x-show="selectedAmi && !selectedAmi.ena_support && enaRequiredPrefixes.some(p => deployForm.instance_type.startsWith(p))"
              x-cloak
              class="mb-4 bg-amber-50 border border-amber-300 rounded-lg p-3 text-sm text-amber-800">
@@ -1245,9 +1261,15 @@
       },
 
       async openDeployModal(ami) {
+        // ami may be null when invoked from "Deploy from AMI ID…" — user pastes
+        // an arbitrary AMI ID into deployForm.ami_id and we skip ENA checks.
         this.selectedAmi = ami;
+        const defaultName = ami
+          ? ami.name.replace(/[^a-zA-Z0-9-]/g, '-').slice(0, 30)
+          : '';
         this.deployForm = {
-          instance_name: ami.name.replace(/[^a-zA-Z0-9-]/g, '-').slice(0, 30),
+          ami_id: ami ? ami.ami_id : '',
+          instance_name: defaultName,
           instance_type: 't3.medium',
           sshKeyName: '',
           sshPublicKeyPreview: '',
@@ -1303,6 +1325,11 @@
       },
 
       async submitDeploy() {
+        const amiId = (this.deployForm.ami_id || '').trim();
+        if (!amiId || !amiId.startsWith('ami-')) {
+          this.deployError = 'Please enter a valid AMI ID (starts with "ami-").';
+          return;
+        }
         if (!this.deployForm.instance_name ||
             !this.deployForm.subnet_id || this.deployForm.security_group_ids.length === 0) {
           this.deployError = 'Please fill in all required fields.';
@@ -1314,7 +1341,7 @@
 
         try {
           const body = {
-            ami_id: this.selectedAmi.ami_id,
+            ami_id: amiId,
             instance_name: this.deployForm.instance_name,
             instance_type: this.deployForm.instance_type,
             subnet_id: this.deployForm.subnet_id,

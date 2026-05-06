@@ -17,6 +17,10 @@
           <option :value="loc" x-text="loc"></option>
         </template>
       </select>
+      <button @click="openDeployModal(null)"
+              class="text-sm bg-white border border-gray-300 hover:bg-gray-50 px-3 py-2 rounded-lg shadow-sm font-medium transition">
+        Deploy from URN/ID…
+      </button>
       <button @click="refreshAll()" :disabled="loading"
               class="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-4 py-2 rounded-lg transition disabled:opacity-50">
         <svg class="h-4 w-4" :class="loading ? 'animate-spin' : ''" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -250,9 +254,22 @@
   <div x-show="deployModal.open" class="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-40" @click.self="deployModal.open = false">
     <div class="bg-white rounded-xl shadow-2xl p-6 w-full max-w-lg mx-4 max-h-screen overflow-y-auto">
       <h2 class="text-lg font-bold text-gray-900 mb-1">Deploy Azure VM</h2>
-      <p class="text-sm text-gray-500 mb-4" x-text="'Image: ' + (deployModal.image?.name || '')"></p>
+      <p x-show="deployModal.image" class="text-sm text-gray-500 mb-4" x-text="'Image: ' + (deployModal.image?.name || '')"></p>
 
       <div class="space-y-3">
+        <!-- Free-text image reference — only when no image was preselected from a list row -->
+        <div x-show="!deployModal.image">
+          <label class="block text-xs font-medium text-gray-700 mb-1">
+            Image URN or Resource ID <span class="text-red-500">*</span>
+          </label>
+          <input x-model="deployModal.imageRef" type="text"
+                 placeholder="Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest    or    /subscriptions/…/images/…"
+                 class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm font-mono focus:ring-blue-500 focus:border-blue-500">
+          <p class="text-xs text-gray-400 mt-1">
+            Marketplace URN <span class="font-mono">publisher:offer:sku:version</span> or full ARM resource ID
+            (managed image / Shared Image Gallery version).
+          </p>
+        </div>
         <div>
           <label class="block text-xs font-medium text-gray-700 mb-1">VM Name <span class="text-red-500">*</span></label>
           <input x-model="deployModal.vmName" type="text" placeholder="my-azure-vm"
@@ -718,9 +735,13 @@ function azureDashboard() {
     },
 
     async openDeployModal(img) {
+      // img may be null when invoked from "Deploy from URN/ID…" — user pastes
+      // a marketplace URN (publisher:offer:sku:version) or a full ARM resource
+      // ID (managed image / Shared Image Gallery version) into imageRef.
       this.deployModal = {
         open: false, image: img,
-        vmName: img.name ? img.name.replace(/-image$/i, '') : '',
+        imageRef: '',
+        vmName: img?.name ? img.name.replace(/-image$/i, '') : '',
         vmSize: this.networkOpts.vm_sizes[0] || 'Standard_B2s',
         location: this.location, subnetId: '', nsgIds: [], sshUsername: 'azureuser',
         sshPublicKey: '', sshKeyMode: 'keyvault', createPublicIp: false, submitting: false,
@@ -729,6 +750,23 @@ function azureDashboard() {
       await this.loadNetworkOpts();
       this.deployModal.open = true;
       this.fetchKeyvaultKey();
+    },
+
+    // Parse a free-text image reference into the (image_id, marketplace fields)
+    // tuple the deploy API expects. Returns null if the value is unrecognisable.
+    _parseAzureImageRef(raw) {
+      const ref = (raw || '').trim();
+      if (!ref) return null;
+      if (ref.startsWith('/subscriptions/')) {
+        return { image_id: ref, image_publisher: null, image_offer: null,
+                 image_sku: null, image_version: null };
+      }
+      const parts = ref.split(':');
+      if (parts.length === 4 && parts.every(p => p.length > 0)) {
+        return { image_id: '', image_publisher: parts[0], image_offer: parts[1],
+                 image_sku: parts[2], image_version: parts[3] };
+      }
+      return null;
     },
 
     async fetchKeyvaultKey() {
@@ -751,14 +789,33 @@ function azureDashboard() {
       const m = this.deployModal;
       if (!m.vmName) return toast('VM Name is required', 'error');
       if (!m.subnetId) return toast('Please select a subnet', 'error');
-      
+
       const sshPublicKey = m.sshPublicKey.trim();
       if (!sshPublicKey) return toast('SSH key not loaded — check Key Vault configuration.', 'error');
+
+      // Resolve image reference: list-row image takes precedence, else parse imageRef.
+      let imageFields;
+      if (m.image) {
+        imageFields = {
+          image_id: m.image.resource_id,
+          image_publisher: m.image.publisher || null,
+          image_offer: m.image.offer || null,
+          image_sku: m.image.sku || null,
+          image_version: m.image.version || null,
+        };
+      } else {
+        const parsed = this._parseAzureImageRef(m.imageRef);
+        if (!parsed) return toast(
+          'Enter a marketplace URN (publisher:offer:sku:version) or a full ARM resource ID.',
+          'error'
+        );
+        imageFields = parsed;
+      }
 
       m.submitting = true;
       try {
         const result = await API.post('/api/azure/deploy', {
-          image_id: m.image.resource_id,
+          ...imageFields,
           vm_name: m.vmName,
           vm_size: m.vmSize,
           location: m.location,
@@ -767,11 +824,6 @@ function azureDashboard() {
           create_public_ip: m.createPublicIp,
           ssh_username: m.sshUsername || 'azureuser',
           ssh_public_key: sshPublicKey,
-          // Marketplace image metadata (optional)
-          image_publisher: m.image.publisher || null,
-          image_offer: m.image.offer || null,
-          image_sku: m.image.sku || null,
-          image_version: m.image.version || null,
         });
         m.open = false;
         toast(`Azure VM deployment queued: ${m.vmName}`, 'success');
