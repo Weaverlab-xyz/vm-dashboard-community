@@ -67,7 +67,7 @@ ENV TF_PLUGIN_CACHE_DIR=/root/.terraform.d/plugin-cache
 RUN ARCH=$(dpkg --print-architecture) \
     && curl -fsSL "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_${ARCH}.zip" \
         -o /tmp/terraform.zip \
-    && unzip -q /tmp/terraform.zip -d /usr/local/bin/ \
+    && unzip -qo /tmp/terraform.zip -d /usr/local/bin/ \
     && rm /tmp/terraform.zip \
     && mkdir -p "${TF_PLUGIN_CACHE_DIR}" \
     && mkdir -p /tmp/tf_provider_init \
