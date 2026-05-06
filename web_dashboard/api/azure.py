@@ -621,8 +621,10 @@ async def _run_deploy(job_id: str, req: AzureDeployRequest, rg: str, loc: str):
         # Step 3: BeyondTrust PRA — Shell Jump (optional)
         if settings.beyondtrust_enabled:
             from ..services import terraform_pra_service
-            jump_group = settings.azure_bt_jump_group_name or settings.bt_jump_group_name
-            jumpoint_name = settings.azure_jumpoint_name or settings.bt_jumpoint_name
+            # Resolve from config_service (wizard/DB) first, then env-var defaults.
+            # Azure-specific keys override the shared bt_* keys.
+            jump_group = _cfg("azure_bt_jump_group_name") or _cfg("bt_jump_group_name")
+            jumpoint_name = _cfg("azure_jumpoint_name") or _cfg("bt_jumpoint_name")
             aci_note = f" (ACI: {result['aci_group_name']})" if result.get("aci_group_name") else (
                 f" (ACI failed: {result['aci_error']})" if result.get("aci_error") else " (no ACI)"
             )
@@ -752,8 +754,8 @@ async def _run_bulk_deploy(job_items: list, req: AzureBulkDeployRequest, rg: str
 
                 if settings.beyondtrust_enabled:
                     from ..services import terraform_pra_service
-                    jump_group = settings.azure_bt_jump_group_name or settings.bt_jump_group_name
-                    jumpoint_name = settings.azure_jumpoint_name or settings.bt_jumpoint_name
+                    jump_group = _cfg("azure_bt_jump_group_name") or _cfg("bt_jump_group_name")
+                    jumpoint_name = _cfg("azure_jumpoint_name") or _cfg("bt_jumpoint_name")
                     aci_note = f" (ACI: {result['aci_group_name']})" if result.get("aci_group_name") else (
                         f" (ACI failed: {result['aci_error']})" if result.get("aci_error") else " (no ACI)"
                     )

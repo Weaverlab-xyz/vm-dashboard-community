@@ -150,7 +150,7 @@ class Settings(BaseSettings):
     bt_api_host: str = ""
     bt_client_id: str = ""
     bt_client_secret: str = ""
-    bt_jump_group_name: str = "us-east-2"
+    bt_jump_group_name: str = ""  # set via setup wizard / settings panel
     bt_group_policy_name: str = "BeyondTrust IT User"
     bt_jumpoint_id: int = 7  # legacy — superseded by bt_jumpoint_name for Terraform provider
     bt_jumpoint_name: str = ""  # name of the pre-existing Jumpoint in PRA (required for Terraform path)
