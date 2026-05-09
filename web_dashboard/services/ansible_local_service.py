@@ -119,21 +119,28 @@ def generate_playbook_yaml(asset_name: str) -> str:
 
 # ── SSH key retrieval ─────────────────────────────────────────────────────────
 
+def _normalize_key(value: str) -> str:
+    """Strip CR characters and normalize line endings. Some secret stores
+    (and copy-paste from PRA / Key Vault portals) deliver PEM blobs with
+    CRLF, which `cryptography` rejects via its line-based regex matchers."""
+    return (value or "").replace("\r\n", "\n").replace("\r", "\n")
+
+
 def _fetch_aws_ssh_key_sync(secret_name: str) -> str:
     from .aws_service import _get_secret_sync
     region = _cfg("aws_region") or "us-east-1"
     raw = _get_secret_sync(secret_name, region)
     try:
         data = json.loads(raw)
-        return data.get("private_key") or data.get("key") or raw
+        return _normalize_key(data.get("private_key") or data.get("key") or raw)
     except (json.JSONDecodeError, TypeError, AttributeError):
-        return raw
+        return _normalize_key(raw)
 
 
 def _fetch_gcp_ssh_key_sync(secret_name: str) -> str:
     from .gcp_service import _get_secret_sync
     project_id = _cfg("gcp_project_id")
-    return _get_secret_sync(project_id, secret_name)
+    return _normalize_key(_get_secret_sync(project_id, secret_name))
 
 
 async def fetch_ssh_key(cloud: str) -> str | None:
