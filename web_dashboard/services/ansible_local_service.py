@@ -126,21 +126,36 @@ def _normalize_key(value: str) -> str:
     return (value or "").replace("\r\n", "\n").replace("\r", "\n")
 
 
+def _extract_private_key(raw: str) -> str:
+    """If `raw` is a JSON `{private_key, public_key}` envelope, return the
+    private_key field; otherwise return the raw value. Always normalized."""
+    try:
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            return _normalize_key(data.get("private_key") or data.get("key") or raw)
+    except (json.JSONDecodeError, TypeError, AttributeError):
+        pass
+    return _normalize_key(raw)
+
+
 def _fetch_aws_ssh_key_sync(secret_name: str) -> str:
     from .aws_service import _get_secret_sync
     region = _cfg("aws_region") or "us-east-1"
-    raw = _get_secret_sync(secret_name, region)
-    try:
-        data = json.loads(raw)
-        return _normalize_key(data.get("private_key") or data.get("key") or raw)
-    except (json.JSONDecodeError, TypeError, AttributeError):
-        return _normalize_key(raw)
+    return _extract_private_key(_get_secret_sync(secret_name, region))
 
 
 def _fetch_gcp_ssh_key_sync(secret_name: str) -> str:
     from .gcp_service import _get_secret_sync
     project_id = _cfg("gcp_project_id")
-    return _normalize_key(_get_secret_sync(project_id, secret_name))
+    return _extract_private_key(_get_secret_sync(project_id, secret_name))
+
+
+def _fetch_azure_ssh_key_sync(cred, vault_url: str, secret_name: str) -> str:
+    from .azure_service import _get_ssh_key_from_vault_sync
+    # _get_ssh_key_from_vault_sync already runs _normalize_pem on the raw value
+    # but returns it whole — so when the secret is a JSON keypair envelope we
+    # still need to pull the private_key field out here.
+    return _extract_private_key(_get_ssh_key_from_vault_sync(cred, vault_url, secret_name))
 
 
 async def fetch_ssh_key(cloud: str) -> str | None:
@@ -151,6 +166,9 @@ async def fetch_ssh_key(cloud: str) -> str | None:
     "gcp"   → GCP Secret Manager  (gcp_ssh_key_secret_name config key)
     "azure" → Azure Key Vault     (ansible_aci_ssh_key_secret_name config key)
     ""      → None
+
+    All three paths handle either a raw PEM secret or a JSON
+    `{public_key, private_key}` envelope and return CRLF-normalized PEM.
     """
     if cloud == "aws":
         secret_name = _cfg("ansible_ssh_key_sm_name")
@@ -167,9 +185,9 @@ async def fetch_ssh_key(cloud: str) -> str | None:
         vault_url = _cfg("azure_key_vault_url")
         if not secret_name or not vault_url:
             return None
-        from .azure_service import _ensure_creds, _get_ssh_key_from_vault_sync
+        from .azure_service import _ensure_creds
         cred, _ = await _ensure_creds()
-        return await asyncio.to_thread(_get_ssh_key_from_vault_sync, cred, vault_url, secret_name)
+        return await asyncio.to_thread(_fetch_azure_ssh_key_sync, cred, vault_url, secret_name)
     return None
 
 
