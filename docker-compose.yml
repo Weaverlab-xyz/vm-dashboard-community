@@ -6,8 +6,12 @@ services:
       POSTGRES_USER: dashboardadmin
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-devpassword}
       POSTGRES_DB: vmclidashboard
+    # Host port 5433 (not the Postgres default 5432) so this stack can run
+    # alongside another local Postgres / dev dashboard on 5432. Inside the
+    # compose network the app still talks to db:5432 — only the host
+    # binding changes.
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -20,8 +24,10 @@ services:
     build:
       context: .
     restart: unless-stopped
+    # Host port 8001 to coexist with another dashboard on 8000. Browse at
+    # http://localhost:8001 . The container itself still listens on 8000.
     ports:
-      - "8000:8000"
+      - "8001:8000"
     # All settings come from .env at the repo root (populated by
     # scripts/Onboard-Dashboard.ps1 on first run). DATABASE_URL is the one
     # exception — it's assembled here so POSTGRES_PASSWORD interpolation
