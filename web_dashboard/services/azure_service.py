@@ -166,6 +166,16 @@ def _normalize_pem(value: str) -> str:
     return value
 
 
+def _clean_ssh_public_key(value: str) -> str:
+    """Flatten an SSH public key to a single line. Azure's `key_data` accepts
+    one OpenSSH public-key entry (`algorithm blob [comment]`); embedded CR/LF
+    or stray whitespace can cause the VM agent to reject the key."""
+    if not value:
+        return ""
+    flat = value.replace("\r", "").replace("\n", "").strip()
+    return " ".join(flat.split())
+
+
 def _get_ssh_key_from_vault_sync(cred, vault_url: str, secret_name: str) -> str:
     """Fetch a secret value from Azure Key Vault (blocking)."""
     client = SecretClient(vault_url=vault_url, credential=cred)
@@ -228,7 +238,7 @@ def _get_ssh_keypair_from_vault_sync(cred, vault_url: str, secret_name: str) -> 
             secret_name, type(data).__name__,
         )
         return {"public_key": None, "private_key": None}
-    pub = _normalize_pem(data.get("public_key") or "")
+    pub = _clean_ssh_public_key(data.get("public_key") or "")
     priv = _normalize_pem(data.get("private_key") or "")
     logger.info(
         "SSH keypair from Key Vault '%s': pub_chars=%d, priv_chars=%d",
@@ -516,9 +526,13 @@ def _deploy_vm_sync(
     cred, sub_id: str, rg: str, location: str, vm_name: str, vm_size: str,
     image_id: str, subnet_id: str, nsg_ids: list, create_public_ip: bool,
     ssh_username: str, ssh_public_key: str,
-    image_publisher: str = None, image_offer: str = None, 
+    image_publisher: str = None, image_offer: str = None,
     image_sku: str = None, image_version: str = None
 ) -> dict:
+    # Sanitize the public key as a defence-in-depth — callers should already
+    # be passing a single-line OpenSSH entry, but a stray CR/LF here will
+    # cause waagent to reject the key and SSH auth to silently fail.
+    ssh_public_key = _clean_ssh_public_key(ssh_public_key)
     compute = _get_compute(cred, sub_id)
     network = _get_network(cred, sub_id)
     tags = {"ManagedBy": "vm-cli-dashboard"}

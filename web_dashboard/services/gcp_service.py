@@ -308,18 +308,33 @@ async def get_secret(project_id: str, secret_name: str) -> str:
     return await asyncio.to_thread(_get_secret_sync, project_id, secret_name)
 
 
+def _clean_public_key(value: str) -> str:
+    """Sanitize an SSH public key for metadata injection.
+
+    GCE's instance "ssh-keys" metadata is line-delimited (`user:key\nuser:key…`),
+    so any CR or LF embedded inside a single key entry corrupts the value and
+    the guest agent silently rejects it. Strip all internal whitespace except
+    the single space separating algorithm/blob/comment.
+    """
+    if not value:
+        return ""
+    # Collapse any CR/LF into nothing — a valid ssh-rsa entry is one line.
+    flat = value.replace("\r", "").replace("\n", "").strip()
+    # Collapse runs of whitespace inside (algorithm[ ]blob[ ]comment).
+    return " ".join(flat.split())
+
+
 async def get_ssh_public_key(project_id: str, secret_name: str) -> str:
     """Retrieve an SSH public key from Secret Manager.
     Supports: JSON with a 'public_key' field, or raw public key string.
     """
     raw = await get_secret(project_id, secret_name)
-    raw = raw.strip()
     try:
         data = json.loads(raw)
         pub = data.get("public_key") or data.get("publicKey") or ""
-        return pub.strip()
+        return _clean_public_key(pub)
     except (json.JSONDecodeError, AttributeError):
-        return raw  # plain public key
+        return _clean_public_key(raw)  # plain public key
 
 
 # ── Instance operations ───────────────────────────────────────────────────────
@@ -340,6 +355,10 @@ def _launch_instance_sync(
 ) -> dict:
     _require_compute()
     from google.cloud import compute_v1
+
+    # Sanitize the public key — GCE's "ssh-keys" metadata is line-delimited,
+    # so any embedded CR/LF in this value silently corrupts the entry.
+    ssh_public_key = _clean_public_key(ssh_public_key)
 
     creds = _gcp_creds()
     client = compute_v1.InstancesClient(credentials=creds)
