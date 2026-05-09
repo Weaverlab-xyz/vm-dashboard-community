@@ -9,6 +9,7 @@ All blocking SDK calls run in asyncio.to_thread() so the FastAPI event loop
 is never blocked.
 """
 import asyncio
+import hashlib
 import json
 import logging
 from datetime import datetime, timezone
@@ -324,6 +325,19 @@ def _clean_public_key(value: str) -> str:
     return " ".join(flat.split())
 
 
+def _ssh_key_breadcrumbs(value: str) -> dict:
+    """Non-sensitive structured info about an SSH public key for log lines."""
+    if not value:
+        return {"algo": "(empty)", "len": 0, "comment": "(none)", "sha256_12": "—"}
+    parts = value.split(None, 2)
+    return {
+        "algo": parts[0] if parts else "(empty)",
+        "len": len(value),
+        "comment": parts[2] if len(parts) >= 3 else "(none)",
+        "sha256_12": hashlib.sha256(value.encode("utf-8", "replace")).hexdigest()[:12],
+    }
+
+
 async def get_ssh_public_key(project_id: str, secret_name: str) -> str:
     """Retrieve an SSH public key from Secret Manager.
     Supports: JSON with a 'public_key' field, or raw public key string.
@@ -331,10 +345,15 @@ async def get_ssh_public_key(project_id: str, secret_name: str) -> str:
     raw = await get_secret(project_id, secret_name)
     try:
         data = json.loads(raw)
-        pub = data.get("public_key") or data.get("publicKey") or ""
-        return _clean_public_key(pub)
+        pub = _clean_public_key(data.get("public_key") or data.get("publicKey") or "")
     except (json.JSONDecodeError, AttributeError):
-        return _clean_public_key(raw)  # plain public key
+        pub = _clean_public_key(raw)
+    crumbs = _ssh_key_breadcrumbs(pub)
+    logger.info(
+        "SSH public key from Secret Manager '%s': algo=%s len=%d sha256_12=%s comment=%r",
+        secret_name, crumbs["algo"], crumbs["len"], crumbs["sha256_12"], crumbs["comment"],
+    )
+    return pub
 
 
 # ── Instance operations ───────────────────────────────────────────────────────
@@ -359,6 +378,12 @@ def _launch_instance_sync(
     # Sanitize the public key — GCE's "ssh-keys" metadata is line-delimited,
     # so any embedded CR/LF in this value silently corrupts the entry.
     ssh_public_key = _clean_public_key(ssh_public_key)
+    crumbs = _ssh_key_breadcrumbs(ssh_public_key)
+    logger.info(
+        "GCP deploy %s: injecting SSH key algo=%s len=%d sha256_12=%s comment=%r as user=%s",
+        instance_name, crumbs["algo"], crumbs["len"], crumbs["sha256_12"], crumbs["comment"],
+        ssh_username,
+    )
 
     creds = _gcp_creds()
     client = compute_v1.InstancesClient(credentials=creds)

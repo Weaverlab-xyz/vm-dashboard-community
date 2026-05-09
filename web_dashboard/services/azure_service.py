@@ -10,6 +10,7 @@ Safe is only called once per server lifetime. Call invalidate_credentials() to
 force a refresh (e.g. after credential rotation).
 """
 import asyncio
+import hashlib
 import json
 import logging
 import uuid
@@ -176,6 +177,22 @@ def _clean_ssh_public_key(value: str) -> str:
     return " ".join(flat.split())
 
 
+def _ssh_key_breadcrumbs(value: str) -> dict:
+    """Non-sensitive structured info about an SSH public key for log lines.
+    Identifies the algorithm + comment + a sha256 prefix so two log lines
+    can be cross-referenced ("did the same key reach the cloud API as was
+    fetched from the secret?") without writing the key blob to disk."""
+    if not value:
+        return {"algo": "(empty)", "len": 0, "comment": "(none)", "sha256_12": "—"}
+    parts = value.split(None, 2)
+    return {
+        "algo": parts[0] if parts else "(empty)",
+        "len": len(value),
+        "comment": parts[2] if len(parts) >= 3 else "(none)",
+        "sha256_12": hashlib.sha256(value.encode("utf-8", "replace")).hexdigest()[:12],
+    }
+
+
 def _get_ssh_key_from_vault_sync(cred, vault_url: str, secret_name: str) -> str:
     """Fetch a secret value from Azure Key Vault (blocking)."""
     client = SecretClient(vault_url=vault_url, credential=cred)
@@ -240,9 +257,11 @@ def _get_ssh_keypair_from_vault_sync(cred, vault_url: str, secret_name: str) -> 
         return {"public_key": None, "private_key": None}
     pub = _clean_ssh_public_key(data.get("public_key") or "")
     priv = _normalize_pem(data.get("private_key") or "")
+    pub_crumbs = _ssh_key_breadcrumbs(pub)
     logger.info(
-        "SSH keypair from Key Vault '%s': pub_chars=%d, priv_chars=%d",
-        secret_name, len(pub), len(priv),
+        "SSH keypair from Key Vault '%s': pub algo=%s len=%d sha256_12=%s comment=%r, priv_chars=%d",
+        secret_name, pub_crumbs["algo"], pub_crumbs["len"], pub_crumbs["sha256_12"],
+        pub_crumbs["comment"], len(priv),
     )
     return {"public_key": pub or None, "private_key": priv or None}
 
@@ -533,6 +552,11 @@ def _deploy_vm_sync(
     # be passing a single-line OpenSSH entry, but a stray CR/LF here will
     # cause waagent to reject the key and SSH auth to silently fail.
     ssh_public_key = _clean_ssh_public_key(ssh_public_key)
+    crumbs = _ssh_key_breadcrumbs(ssh_public_key)
+    logger.info(
+        "Azure deploy %s: injecting SSH key algo=%s len=%d sha256_12=%s comment=%r as user=%s",
+        vm_name, crumbs["algo"], crumbs["len"], crumbs["sha256_12"], crumbs["comment"], ssh_username,
+    )
     compute = _get_compute(cred, sub_id)
     network = _get_network(cred, sub_id)
     tags = {"ManagedBy": "vm-cli-dashboard"}
