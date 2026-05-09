@@ -57,6 +57,25 @@ def _gcp_region() -> str:
     return parts[0] if len(parts) == 2 else zone
 
 
+def _jumpoint_name(vm_name: str) -> str:
+    """Deterministic Jumpoint VM name. Each user VM gets its own paired
+    Jumpoint, mirroring the AWS ECS pattern. GCE names cap at 63 chars."""
+    base = f"bt-jumpoint-{vm_name}".lower()
+    return base[:63]
+
+
+async def _resolve_gcp_jumpoint_deploy_key() -> str:
+    """Return the BeyondTrust SRA Jumpoint deploy key for GCP launches.
+    Resolves through whichever secrets backend the user picked on /secrets;
+    `gcp_cloud_run_docker_deploy_key` is the historical key name."""
+    from ..services import config_service
+    return (
+        config_service.get("gcp_cloud_run_docker_deploy_key")
+        or config_service.get("gcp_jumpoint_docker_deploy_key")
+        or ""
+    )
+
+
 def _gcp_ssh_secret() -> str:
     return _gcp_cfg("gcp_ssh_key_secret_name")
 
@@ -268,15 +287,56 @@ async def deploy_instance(
 async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, zone: str) -> None:
     from ..services import config_service as _cfg_svc
     db = _get_db_session()
+    bt_enabled = _cfg_svc.get_bool("beyondtrust_enabled")
+    jumpoint_name = ""
+    jumpoint_zone = zone
+    jumpoint_meta: dict = {}
     try:
         job_service.set_running(db, job_id)
+
+        # ── Step 1: Start BT Jumpoint on COS-on-GCE first (BeyondTrust only) ──
+        if bt_enabled:
+            jumpoint_name = _jumpoint_name(payload.instance_name)
+            jumpoint_image = _cfg_svc.get("gcp_jumpoint_image") or "beyondtrust/sra-jumpoint:latest"
+            jumpoint_machine = _cfg_svc.get("gcp_jumpoint_machine_type") or "e2-micro"
+            jumpoint_zone = _cfg_svc.get("gcp_jumpoint_zone") or zone
+            job_service.update_progress(db, job_id, 5, f"Starting BeyondTrust Jumpoint {jumpoint_name}…")
+            try:
+                deploy_key = await _resolve_gcp_jumpoint_deploy_key()
+                if not deploy_key:
+                    raise RuntimeError(
+                        "Jumpoint deploy key not configured "
+                        "(gcp_cloud_run_docker_deploy_key) — set it in the wizard."
+                    )
+                jumpoint_meta = await gcp_service.run_gce_jumpoint(
+                    project_id=project_id,
+                    zone=jumpoint_zone,
+                    name=jumpoint_name,
+                    container_image=jumpoint_image,
+                    deploy_key=deploy_key,
+                    subnetwork=payload.subnetwork or "",
+                    machine_type=jumpoint_machine,
+                    create_external_ip=True,
+                )
+                job_service.update_progress(
+                    db, job_id, 15,
+                    f"Jumpoint {jumpoint_name} {'reused' if jumpoint_meta.get('reused') else 'started'}, launching VM…"
+                )
+            except Exception as e:
+                # Non-fatal — continue to VM launch; user may already have a Jumpoint elsewhere.
+                jumpoint_meta = {"error": str(e)}
+                logger.warning("GCP Jumpoint provisioning failed (non-fatal): %s", e)
+                job_service.update_progress(
+                    db, job_id, 15,
+                    f"Jumpoint provisioning failed (non-fatal): {e} — continuing with VM launch…"
+                )
 
         # Retrieve SSH public key
         secret_name = _cfg_svc.get("gcp_ssh_key_secret_name") or ""
         ssh_username = _cfg_svc.get("gcp_ssh_username") or payload.ssh_username or "gcp-user"
         ssh_public_key = ""
         if secret_name:
-            job_service.update_progress(db, job_id, 10, "Retrieving SSH public key from Secret Manager…")
+            job_service.update_progress(db, job_id, 18, "Retrieving SSH public key from Secret Manager…")
             try:
                 ssh_public_key = await gcp_service.get_ssh_public_key(
                     project_id=project_id, secret_name=secret_name
@@ -313,6 +373,12 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
             "image_self_link": payload.image_self_link,
             "image_name":    payload.image_name,
         }
+        if bt_enabled:
+            if jumpoint_meta.get("error"):
+                final_meta["jumpoint_error"] = jumpoint_meta["error"]
+            elif jumpoint_meta.get("name"):
+                final_meta["jumpoint_name"] = jumpoint_meta["name"]
+                final_meta["jumpoint_zone"] = jumpoint_meta.get("zone", jumpoint_zone)
 
         # ── BeyondTrust PRA — Shell Jump (optional) ───────────────────────────
         if _cfg_svc.get_bool("beyondtrust_enabled"):
@@ -504,6 +570,38 @@ async def _run_destroy(
 
         job_service.update_progress(db, job_id, 50, f"Deleting instance {instance_name}…")
         await gcp_service.terminate_instance(project_id=project_id, zone=zone, instance_name=instance_name)
+
+        # Clean up paired Jumpoint VM, but only if no other live deploy still references it
+        # (multiple VMs may share the same Jumpoint via deploy_key — sibling-aware cleanup).
+        jumpoint_name = deploy_meta.get("jumpoint_name") if deploy_job_id else None
+        if jumpoint_name:
+            sibling_count = sum(
+                1 for j in db.query(Job).filter(
+                    Job.job_type == "gce_deploy", Job.status == "completed"
+                ).all()
+                if j.id != deploy_job_id
+                and not j.metadata_dict.get("destroyed")
+                and j.metadata_dict.get("jumpoint_name") == jumpoint_name
+            )
+            if sibling_count == 0:
+                jumpoint_zone = deploy_meta.get("jumpoint_zone", zone)
+                job_service.update_progress(
+                    db, job_id, 75, f"Stopping paired Jumpoint {jumpoint_name}…"
+                )
+                try:
+                    await gcp_service.stop_gce_jumpoint(
+                        project_id=project_id, zone=jumpoint_zone, name=jumpoint_name
+                    )
+                    result["jumpoint_stopped"] = jumpoint_name
+                except Exception as e:
+                    logger.warning("Jumpoint cleanup failed for %s: %s", jumpoint_name, e)
+                    result["jumpoint_error"] = f"cleanup failed: {e}"
+            else:
+                result["jumpoint_shared"] = jumpoint_name
+                logger.info(
+                    "Leaving Jumpoint %s running — %d other active deploy(s) reference it",
+                    jumpoint_name, sibling_count,
+                )
 
         if deploy_job_id:
             deploy_meta["destroyed"] = True

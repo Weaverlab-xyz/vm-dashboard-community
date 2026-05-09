@@ -533,6 +533,152 @@ async def terminate_instance(project_id: str, zone: str, instance_name: str) -> 
     await asyncio.to_thread(_terminate_instance_sync, project_id, zone, instance_name)
 
 
+# ── BeyondTrust SRA Jumpoint on COS-on-GCE ────────────────────────────────────
+# Cloud Run Service requires the container to bind to $PORT and serve HTTP; the
+# BT SRA Jumpoint is an outbound-only daemon, so Cloud Run is not viable. Use a
+# small Container-Optimised-OS GCE instance instead — closest behavioural match
+# to AWS ECS Fargate / Azure ACI for this purpose.
+
+_JUMPOINT_LABEL = "bt-jumpoint"
+
+
+def _jumpoint_container_spec_yaml(container_image: str, deploy_key: str) -> str:
+    """Generate the gce-container-declaration metadata YAML.
+    COS reads this on first boot and runs the container under containerd."""
+    import yaml
+    spec = {
+        "spec": {
+            "containers": [{
+                "name": "jumpoint",
+                "image": container_image,
+                "env": [{"name": "DEPLOY_KEY", "value": deploy_key}],
+                "stdin": False,
+                "tty": False,
+            }],
+            "restartPolicy": "Always",
+        }
+    }
+    return yaml.safe_dump(spec, default_flow_style=False)
+
+
+def _run_gce_jumpoint_sync(
+    project_id: str,
+    zone: str,
+    name: str,
+    container_image: str,
+    deploy_key: str,
+    network: str = "",
+    subnetwork: str = "",
+    machine_type: str = "e2-micro",
+    cos_image_family: str = "cos-stable",
+    create_external_ip: bool = True,
+) -> dict:
+    """Launch a small COS GCE instance running the BT Jumpoint container.
+    Idempotent on existence: if an instance with the same name is already
+    RUNNING in the zone, returns its info without re-creating."""
+    _require_compute()
+    from google.cloud import compute_v1
+    from google.api_core.exceptions import NotFound
+
+    creds = _gcp_creds()
+    client = compute_v1.InstancesClient(credentials=creds)
+
+    # Reuse if already present
+    try:
+        existing = client.get(project=project_id, zone=zone, instance=name)
+        return {
+            "name": name, "zone": zone, "self_link": existing.self_link,
+            "status": existing.status, "reused": True,
+        }
+    except NotFound:
+        pass
+
+    instance = compute_v1.Instance()
+    instance.name = name
+    instance.machine_type = f"zones/{zone}/machineTypes/{machine_type}"
+
+    # Boot disk from Container-Optimised OS
+    disk = compute_v1.AttachedDisk()
+    disk.boot = True
+    disk.auto_delete = True
+    disk.initialize_params = compute_v1.AttachedDiskInitializeParams()
+    disk.initialize_params.source_image = (
+        f"projects/cos-cloud/global/images/family/{cos_image_family}"
+    )
+    disk.initialize_params.disk_size_gb = 10
+    instance.disks = [disk]
+
+    # Network
+    nic = compute_v1.NetworkInterface()
+    if subnetwork:
+        nic.subnetwork = subnetwork
+    elif network:
+        nic.network = network
+    if create_external_ip:
+        nic.access_configs = [compute_v1.AccessConfig(
+            name="External NAT", type_="ONE_TO_ONE_NAT",
+        )]
+    instance.network_interfaces = [nic]
+
+    # COS reads gce-container-declaration on first boot and runs the container
+    container_yaml = _jumpoint_container_spec_yaml(container_image, deploy_key)
+    instance.metadata = compute_v1.Metadata(items=[
+        compute_v1.Items(key="gce-container-declaration", value=container_yaml),
+        compute_v1.Items(key="google-logging-enabled", value="true"),
+    ])
+
+    instance.labels = {"managed-by": "vm-dashboard", "purpose": _JUMPOINT_LABEL}
+
+    logger.info(
+        "Starting GCE COS Jumpoint '%s' in %s (image=%s, machine=%s, deploy_key_len=%d)",
+        name, zone, container_image, machine_type, len(deploy_key or ""),
+    )
+    op = client.insert(project=project_id, zone=zone, instance_resource=instance)
+    op.result(timeout=300)
+
+    info = client.get(project=project_id, zone=zone, instance=name)
+    return {
+        "name": name, "zone": zone, "self_link": info.self_link,
+        "status": info.status, "reused": False,
+    }
+
+
+async def run_gce_jumpoint(
+    project_id: str,
+    zone: str,
+    name: str,
+    container_image: str,
+    deploy_key: str,
+    network: str = "",
+    subnetwork: str = "",
+    machine_type: str = "e2-micro",
+    create_external_ip: bool = True,
+) -> dict:
+    """Async wrapper for _run_gce_jumpoint_sync."""
+    try:
+        return await asyncio.to_thread(
+            _run_gce_jumpoint_sync,
+            project_id, zone, name, container_image, deploy_key,
+            network, subnetwork, machine_type, "cos-stable", create_external_ip,
+        )
+    except GCPError:
+        raise
+    except Exception as e:
+        raise GCPError(f"Failed to start GCE Jumpoint '{name}': {e}") from e
+
+
+async def stop_gce_jumpoint(project_id: str, zone: str, name: str) -> None:
+    """Delete the GCE Jumpoint instance. Quiet no-op if it doesn't exist."""
+    try:
+        await asyncio.to_thread(_terminate_instance_sync, project_id, zone, name)
+    except Exception as e:
+        # NotFound is benign; log everything else
+        msg = str(e)
+        if "404" in msg or "not found" in msg.lower():
+            return
+        raise GCPError(f"Failed to stop GCE Jumpoint '{name}': {e}") from e
+
+
 # ── Cloud Run Jobs Ansible runner (mirrors ACI runner in azure_service.py) ───
 
 _ANSIBLE_RUNNER_PREFIX = "ansible-runner"

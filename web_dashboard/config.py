@@ -363,11 +363,15 @@ class Settings(BaseSettings):
     gcp_subnetwork: str = ""             # Full subnetwork self-link or name
     gcp_ssh_key_secret_name: str = ""    # Secret Manager secret name for SSH key pair
     gcp_ssh_username: str = "gcp-user"
-    # BeyondTrust Jumpoint Docker registry deploy key — pre-staged for the
-    # upcoming GCP Cloud Run / GKE Jumpoint provisioning support. Stored
-    # encrypted via config_service; transparently resolved through whichever
-    # secrets backend the user picked on /secrets. No consumer wires it today.
+    # BeyondTrust Jumpoint Docker registry deploy key. Stored encrypted via
+    # config_service; transparently resolved through whichever secrets backend
+    # the user picked on /secrets. The historical key name was retained when
+    # the Jumpoint host moved from Cloud Run (HTTP-required) to a small
+    # Container-Optimised-OS GCE instance.
     gcp_cloud_run_docker_deploy_key: str = ""
+    gcp_jumpoint_image: str = "beyondtrust/sra-jumpoint:latest"
+    gcp_jumpoint_machine_type: str = "e2-micro"
+    gcp_jumpoint_zone: str = ""          # blank → use the deploy zone
     gcp_bt_jump_group_name: str = ""     # BT jump group for GCP Shell Jumps (falls back to bt_jump_group_name)
     gcp_jumpoint_name: str = ""          # Jumpoint name for GCP Shell Jumps (falls back to bt_jumpoint_name)
 
