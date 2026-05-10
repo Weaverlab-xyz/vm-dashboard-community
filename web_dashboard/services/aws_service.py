@@ -1135,3 +1135,101 @@ async def create_image_from_instance(
         raise AWSError(f"Failed to create image from {instance_id}: {e}") from e
     except NoCredentialsError:
         raise AWSError("AWS credentials not configured.")
+
+
+# ── Export AMI to VHD (portable artefact for cross-cloud promotion) ───────────
+
+def _export_image_to_vhd_sync(
+    region: str,
+    ami_id: str,
+    s3_bucket: str,
+    s3_prefix: str,
+    role_name: str,
+    description: str,
+    poll_interval: int,
+    timeout: int,
+    progress_cb,
+) -> dict:
+    """Trigger ec2:ExportImage for an AMI and poll until completion.
+
+    Requires the `vmimport` IAM service role (or one named via role_name) with
+    trust policy permitting vmie.amazonaws.com — see
+    https://docs.aws.amazon.com/vm-import/latest/userguide/required-permissions.html
+
+    Returns {task_id, s3_url, format}.
+    """
+    import time
+    ec2 = _get_ec2(region)
+
+    prefix = s3_prefix.rstrip("/") + "/" if s3_prefix and not s3_prefix.endswith("/") else (s3_prefix or "")
+    if progress_cb:
+        progress_cb(f"Starting AWS export-image for {ami_id} → s3://{s3_bucket}/{prefix}")
+
+    resp = ec2.export_image(
+        ImageId=ami_id,
+        DiskImageFormat="VHD",
+        S3ExportLocation={"S3Bucket": s3_bucket, "S3Prefix": prefix},
+        RoleName=role_name,
+        Description=description or f"Exported by vm-cli-dashboard from {ami_id}",
+    )
+    task_id = resp["ExportImageTaskId"]
+    if progress_cb:
+        progress_cb(f"Export task created: {task_id}")
+
+    started = time.time()
+    last_progress = ""
+    while True:
+        tasks = ec2.describe_export_image_tasks(ExportImageTaskIds=[task_id]).get("ExportImageTasks", [])
+        if not tasks:
+            raise AWSError(f"Export task {task_id} disappeared")
+        task = tasks[0]
+        status = (task.get("Status") or "").lower()
+        msg = task.get("StatusMessage") or task.get("Progress") or ""
+        if msg and msg != last_progress and progress_cb:
+            progress_cb(f"Export {task_id}: {status} ({msg})")
+            last_progress = msg
+
+        if status == "completed":
+            s3_url = f"s3://{s3_bucket}/{prefix}{task_id}.vhd"
+            if progress_cb:
+                progress_cb(f"Export complete: {s3_url}")
+            return {"task_id": task_id, "s3_url": s3_url, "format": "vhd"}
+        if status in ("cancelled", "deleted"):
+            raise AWSError(f"Export task {task_id} ended in state '{status}': {msg}")
+        if status == "failed":
+            raise AWSError(f"Export task {task_id} failed: {msg}")
+
+        if time.time() - started > timeout:
+            raise AWSError(f"Export task {task_id} timed out after {timeout}s (last status: {status})")
+
+        time.sleep(poll_interval)
+
+
+async def export_image_to_vhd(
+    region: str,
+    ami_id: str,
+    s3_bucket: str,
+    s3_prefix: str = "exports/",
+    role_name: str = "vmimport",
+    description: str = "",
+    poll_interval: int = 30,
+    timeout: int = 7200,
+    progress_cb=None,
+) -> dict:
+    """Export an AMI to a VHD in S3. Returns {task_id, s3_url, format}.
+
+    progress_cb is an optional sync callable taking a single string for
+    streaming status into a Job log.
+    """
+    try:
+        return await asyncio.to_thread(
+            _export_image_to_vhd_sync,
+            region, ami_id, s3_bucket, s3_prefix, role_name,
+            description, poll_interval, timeout, progress_cb,
+        )
+    except AWSError:
+        raise
+    except (ClientError, BotoCoreError) as e:
+        raise AWSError(f"Failed to export {ami_id} to VHD: {e}") from e
+    except NoCredentialsError:
+        raise AWSError("AWS credentials not configured.")

@@ -916,3 +916,104 @@ async def delete_cloud_run_service(project_id: str, region: str, name: str) -> N
         raise
     except Exception as e:
         raise GCPError(f"Failed to delete Cloud Run service '{name}': {e}") from e
+
+
+# ── Export custom image to VHD on GCS (portable artefact) ─────────────────────
+
+def _export_custom_image_to_vhd_sync(
+    project_id: str,
+    image_name: str,
+    dest_bucket: str,
+    dest_object: str,
+    network: str,
+    subnet: str,
+    timeout: int,
+    progress_cb,
+) -> dict:
+    """Trigger the Daisy gce_vm_image_export workflow via Cloud Build.
+
+    The container `gcr.io/compute-image-tools/gce_vm_image_export` accepts
+    `-format=vpc` to produce a VHD blob written to gs://dest_bucket/dest_object.
+    Args also include `-source_image` and `-destination_uri`.
+
+    Returns {gs_url, format, build_id}.
+    """
+    from google.cloud.devtools import cloudbuild_v1
+    creds = _gcp_creds()
+    client = cloudbuild_v1.CloudBuildClient(credentials=creds)
+
+    dest_uri = f"gs://{dest_bucket}/{dest_object}"
+    args = [
+        "-timeout=" + f"{max(timeout - 600, 600)}s",
+        "-source_image=" + image_name,
+        "-client_id=api",
+        "-format=vpc",
+        "-destination_uri=" + dest_uri,
+    ]
+    if network:
+        args.append("-network=" + network)
+    if subnet:
+        args.append("-subnet=" + subnet)
+
+    build = cloudbuild_v1.Build(
+        steps=[
+            cloudbuild_v1.BuildStep(
+                name="gcr.io/compute-image-tools/gce_vm_image_export:release",
+                args=args,
+                env=["BUILD_ID=$BUILD_ID"],
+            )
+        ],
+        timeout={"seconds": timeout},
+        tags=["vm-cli-dashboard", "image-export"],
+    )
+
+    if progress_cb:
+        progress_cb(f"Submitting Cloud Build export for {image_name} → {dest_uri}")
+
+    op = client.create_build(project_id=project_id, build=build)
+    metadata = op.metadata
+    build_id = metadata.build.id if metadata and metadata.build else ""
+    if progress_cb and build_id:
+        progress_cb(f"Cloud Build {build_id} started — polling")
+
+    # op.result() blocks until the build finishes; SDK raises on non-SUCCESS.
+    result = op.result(timeout=timeout)
+    status = cloudbuild_v1.Build.Status(result.status).name if result.status else "UNKNOWN"
+    if status != "SUCCESS":
+        raise GCPError(f"Cloud Build {build_id} ended in status {status}: {result.status_detail}")
+
+    if progress_cb:
+        progress_cb(f"Export complete: {dest_uri}")
+
+    return {"gs_url": dest_uri, "format": "vhd", "build_id": build_id}
+
+
+async def export_custom_image_to_vhd(
+    project_id: str,
+    image_name: str,
+    dest_bucket: str,
+    dest_object: str,
+    network: str = "",
+    subnet: str = "",
+    timeout: int = 7200,
+    progress_cb=None,
+) -> dict:
+    """Export a GCE custom image to a VHD on GCS via the Daisy workflow.
+
+    Returns {gs_url, format, build_id}. progress_cb is an optional sync callable
+    taking a single string for streaming status into a Job log.
+    """
+    try:
+        from google.cloud.devtools import cloudbuild_v1  # noqa: F401
+    except ImportError:
+        raise GCPError("google-cloud-build is not installed — run: pip install google-cloud-build")
+    try:
+        return await asyncio.to_thread(
+            _export_custom_image_to_vhd_sync,
+            project_id, image_name, dest_bucket, dest_object,
+            network, subnet, timeout, progress_cb,
+        )
+    except GCPError:
+        raise
+    except Exception as e:
+        raise GCPError(f"Failed to export image {image_name} to VHD: {e}") from e

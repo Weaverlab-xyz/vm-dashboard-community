@@ -1334,3 +1334,194 @@ async def stop_aci_container_group(rg: str, container_group_name: str) -> None:
         raise
     except Exception as e:
         raise AzureError(f"Failed to stop ACI container group: {e}") from e
+
+
+# ── Export managed image to VHD blob (portable artefact) ──────────────────────
+
+def _export_managed_image_to_vhd_sync(
+    cred,
+    sub_id: str,
+    image_rg: str,
+    image_name: str,
+    dest_storage_account: str,
+    dest_container: str,
+    dest_blob_name: str,
+    sas_duration_seconds: int,
+    poll_interval: int,
+    timeout: int,
+    progress_cb,
+) -> dict:
+    """Snapshot the image's OS disk, grant SAS access, server-side copy to blob.
+
+    The managed image format is not directly downloadable; the canonical export
+    pattern is snapshot → SAS → server-side blob copy → revoke + cleanup. The
+    snapshot and SAS access are torn down on success or failure.
+
+    Returns {blob_url, format, snapshot_name}.
+    """
+    import time
+    from azure.mgmt.compute.models import GrantAccessData
+    from azure.storage.blob import BlobServiceClient
+
+    compute = _get_compute(cred, sub_id)
+
+    image = compute.images.get(image_rg, image_name)
+    os_disk = image.storage_profile.os_disk
+    location = image.location
+
+    # Identify the underlying source (managed disk, snapshot, or unmanaged blob).
+    source_disk_id = None
+    if os_disk.managed_disk and os_disk.managed_disk.id:
+        source_disk_id = os_disk.managed_disk.id
+    elif os_disk.snapshot and os_disk.snapshot.id:
+        source_disk_id = os_disk.snapshot.id
+    elif os_disk.blob_uri:
+        if progress_cb:
+            progress_cb(f"Image is unmanaged — copying blob {os_disk.blob_uri} directly")
+        return _copy_unmanaged_blob_sync(
+            cred, os_disk.blob_uri, dest_storage_account, dest_container,
+            dest_blob_name, poll_interval, timeout, progress_cb,
+        )
+    else:
+        raise AzureError(f"Image {image_name} has no recognizable OS disk source for export")
+
+    # 1. Take a snapshot of the source disk (works for both Disk and Snapshot IDs —
+    #    snapshots created from snapshots are supported).
+    snapshot_name = f"export-{image_name}-{uuid.uuid4().hex[:8]}"
+    if progress_cb:
+        progress_cb(f"Creating snapshot {snapshot_name} from {source_disk_id}")
+    snap_params = {
+        "location": location,
+        "creation_data": {"create_option": "Copy", "source_resource_id": source_disk_id},
+        "incremental": False,
+    }
+    compute.snapshots.begin_create_or_update(image_rg, snapshot_name, snap_params).result()
+
+    sas_url = None
+    try:
+        # 2. Grant read access to the snapshot — yields a SAS-style URL we can pass
+        #    to the destination blob's start_copy_from_url for a fully server-side copy.
+        if progress_cb:
+            progress_cb(f"Granting SAS access on {snapshot_name}")
+        access_op = compute.snapshots.begin_grant_access(
+            image_rg, snapshot_name,
+            GrantAccessData(access="Read", duration_in_seconds=sas_duration_seconds),
+        )
+        access = access_op.result()
+        sas_url = access.access_sas
+
+        # 3. Kick off server-side copy to the destination blob.
+        account_url = f"https://{dest_storage_account}.blob.core.windows.net"
+        svc = BlobServiceClient(account_url=account_url, credential=cred)
+        container_client = svc.get_container_client(dest_container)
+        try:
+            container_client.create_container()
+        except Exception:
+            pass
+        blob_client = container_client.get_blob_client(dest_blob_name)
+
+        if progress_cb:
+            progress_cb(f"Starting server-side copy → {account_url}/{dest_container}/{dest_blob_name}")
+        blob_client.start_copy_from_url(sas_url)
+
+        # 4. Poll copy status.
+        started = time.time()
+        last_progress = ""
+        while True:
+            props = blob_client.get_blob_properties()
+            status = (props.copy.status or "").lower()
+            progress = props.copy.progress or ""
+            if progress and progress != last_progress and progress_cb:
+                progress_cb(f"Copy {status}: {progress}")
+                last_progress = progress
+
+            if status == "success":
+                blob_url = f"{account_url}/{dest_container}/{dest_blob_name}"
+                if progress_cb:
+                    progress_cb(f"Copy complete: {blob_url}")
+                return {"blob_url": blob_url, "format": "vhd", "snapshot_name": snapshot_name}
+            if status in ("failed", "aborted"):
+                raise AzureError(f"Blob copy ended in state '{status}': {props.copy.status_description}")
+
+            if time.time() - started > timeout:
+                raise AzureError(f"Blob copy timed out after {timeout}s (last status: {status})")
+            time.sleep(poll_interval)
+
+    finally:
+        # Best-effort cleanup. Errors here are logged but do not mask the primary outcome.
+        try:
+            compute.snapshots.begin_revoke_access(image_rg, snapshot_name).wait()
+        except Exception as e:
+            logger.warning("Failed to revoke SAS on snapshot %s: %s", snapshot_name, e)
+        try:
+            compute.snapshots.begin_delete(image_rg, snapshot_name).wait()
+        except Exception as e:
+            logger.warning("Failed to delete snapshot %s: %s", snapshot_name, e)
+
+
+def _copy_unmanaged_blob_sync(
+    cred,
+    source_blob_url: str,
+    dest_storage_account: str,
+    dest_container: str,
+    dest_blob_name: str,
+    poll_interval: int,
+    timeout: int,
+    progress_cb,
+) -> dict:
+    """Server-side copy from one Azure blob URL to another (unmanaged image path)."""
+    import time
+    from azure.storage.blob import BlobServiceClient
+
+    account_url = f"https://{dest_storage_account}.blob.core.windows.net"
+    svc = BlobServiceClient(account_url=account_url, credential=cred)
+    container_client = svc.get_container_client(dest_container)
+    try:
+        container_client.create_container()
+    except Exception:
+        pass
+    blob_client = container_client.get_blob_client(dest_blob_name)
+
+    blob_client.start_copy_from_url(source_blob_url)
+    started = time.time()
+    while True:
+        props = blob_client.get_blob_properties()
+        status = (props.copy.status or "").lower()
+        if status == "success":
+            blob_url = f"{account_url}/{dest_container}/{dest_blob_name}"
+            return {"blob_url": blob_url, "format": "vhd", "snapshot_name": ""}
+        if status in ("failed", "aborted"):
+            raise AzureError(f"Blob copy ended in state '{status}': {props.copy.status_description}")
+        if time.time() - started > timeout:
+            raise AzureError(f"Blob copy timed out after {timeout}s")
+        time.sleep(poll_interval)
+
+
+async def export_managed_image_to_vhd(
+    image_rg: str,
+    image_name: str,
+    dest_storage_account: str,
+    dest_container: str,
+    dest_blob_name: str,
+    sas_duration_seconds: int = 3600,
+    poll_interval: int = 15,
+    timeout: int = 7200,
+    progress_cb=None,
+) -> dict:
+    """Export a managed image (or unmanaged image) to a VHD blob.
+
+    Returns {blob_url, format, snapshot_name}. progress_cb is an optional sync
+    callable taking a single string for streaming status into a Job log.
+    """
+    try:
+        cred, sub_id = await _ensure_creds()
+        return await asyncio.to_thread(
+            _export_managed_image_to_vhd_sync,
+            cred, sub_id, image_rg, image_name,
+            dest_storage_account, dest_container, dest_blob_name,
+            sas_duration_seconds, poll_interval, timeout, progress_cb,
+        )
+    except AzureError:
+        raise
+    except Exception as e:
+        raise AzureError(f"Failed to export image {image_name} to VHD: {e}") from e

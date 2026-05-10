@@ -132,13 +132,32 @@ VMDK) sitting in your active storage backend, recorded as a
 `RegisteredImage` row. Targets: AMI / Managed Image / Custom Image,
 one or more.
 
-**Phase 1 (today):** the registry, the registration UI, and a
+**Phase 1 (shipped):** the registry, the registration UI, and a
 "Promote" button that returns **operator-readable manual steps** for
-the source/target combination you pick. The operator runs the steps,
-the resulting cloud-native image ID is recorded back in the registry
-via a follow-up promote (or by editing the row). Cross-cloud
-automation is Phase 2 — the API shape doesn't change, just the
-`automated` flag flips and the dashboard runs the steps for you.
+the source/target combination you pick.
+
+**Phase 2 (shipped):** the **build → export → register** half of the
+loop is automated. After a successful Packer build, the dashboard
+exports the image to a portable VHD via the cloud's native API,
+deposits the VHD in your active storage backend, and creates the
+matching `RegisteredImage` row automatically — no separate "register"
+click needed. Per cloud:
+
+- **AWS** — `ec2:ExportImage` writes a VHD to `s3://<active>/<prefix>/images/`. Requires the `vmimport` IAM service role; override the role name with `aws_vmimport_role_name` in config if you've named yours differently.
+- **Azure** — Snapshot the managed image's OS disk, grant a read-only SAS URL, server-side blob-copy into the active Azure Blob container as a VHD, then revoke and clean up the snapshot. No egress through the dashboard.
+- **GCP** — Submit a Cloud Build job running the upstream `gcr.io/compute-image-tools/gce_vm_image_export` Daisy workflow with `-format=vpc`, writing the VHD to `gs://<active>/images/`.
+
+The export only fires when the build cloud matches the active /storage
+backend (AWS↔s3, Azure↔azure_blob, GCP↔gcs). On a mismatch the build
+still completes; the operator can promote manually from /images. Phase 3
+will add cross-backend copy so any active backend can host any cloud's
+exports.
+
+**Still manual:** cross-cloud *promotion* (importing the registered VHD
+into a different cloud's native image format) — the "Promote" button
+still returns manual steps for the import side. Phase 4 will replace
+that with native VM-import automation; the API shape doesn't change,
+just the `automated` flag flips.
 
 **Why a manual-steps phase first.** Cross-cloud VM import is a real
 multi-step process: format conversion (VHD ↔ VMDK ↔ RAW), per-cloud

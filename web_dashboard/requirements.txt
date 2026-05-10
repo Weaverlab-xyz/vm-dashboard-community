@@ -59,6 +59,11 @@ google-cloud-compute>=1.14.0
 google-cloud-secret-manager>=2.20.0
 google-cloud-storage>=2.14.0
 google-cloud-run>=0.10.0
+# google-cloud-build powers the GCP image-export Daisy workflow trigger in
+# services/gcp_service.export_custom_image_to_vhd. Pulled in here rather
+# than added to a runtime install path so it's part of the image's
+# pre-resolved dependency set.
+google-cloud-build>=3.20.0
 google-auth>=2.20.0
 
 # Azure Blob Storage (Packer template archive)
