@@ -1,0 +1,256 @@
+#!/usr/bin/env bash
+# GCP sandbox bootstrap for the VM Dashboard.
+#
+# GCP equivalent of the AWS / Azure sandbox isolation pattern:
+#
+#   • Custom VPC with two subnets:
+#     - jumpoint-subnet: VMs land here with --no-address (no public IP) but
+#       can still egress to the internet via a Cloud NAT gateway attached
+#       to a Cloud Router. This is where the BT Jumpoint COS-on-GCE VM
+#       lives so it can phone home to PRA's relay.
+#     - vm-subnet:       NO Cloud NAT mapping. VMs deployed here have no
+#       public IP and no NAT path → they cannot reach the internet at all.
+#       Only routable via the VPC's internal IP space, so the Jumpoint
+#       (sibling subnet) is the only reachable outbound proxy for SSH.
+#
+#   • Firewall rules:
+#     - allow-internal: any-protocol within VPC
+#     - allow-ssh-from-jumpoint: TCP 22 from jumpoint-subnet → vm-subnet
+#     - block-egress-vm: explicit egress deny on vm-subnet (belt-and-suspenders;
+#       Cloud NAT absence already prevents internet, but the rule makes it
+#       observable and audit-friendly).
+#
+#   • Service account with the minimum roles needed for the dashboard's
+#     deploy/destroy/image flows.
+#
+#   • Secret Manager: SSH keypair JSON.
+
+set -Eeuo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/common.sh"
+
+require_wsl
+require_cmd gcloud
+require_cmd jq
+require_cmd ssh-keygen
+
+NAME="${SANDBOX_NAME_PREFIX}"
+PROJECT_ID="${GCP_PROJECT_ID:-$(gcloud config get-value project 2>/dev/null || true)}"
+REGION="${GCP_REGION:-us-central1}"
+ZONE="${GCP_ZONE:-${REGION}-a}"
+
+[[ -n "$PROJECT_ID" && "$PROJECT_ID" != "(unset)" ]] || \
+  die "No GCP project set. Run: gcloud config set project YOUR-PROJECT  (or export GCP_PROJECT_ID=…)"
+
+ensure_logged_in "gcloud" "gcloud auth print-access-token --quiet" \
+  "Run: gcloud auth login && gcloud auth application-default login"
+
+section "GCP sandbox in project $PROJECT_ID, region $REGION ($ZONE)"
+
+# Apply the sandbox label everywhere we can (GCP uses labels, not tags).
+LABELS="${SANDBOX_TAG_KEY//-/_}=${SANDBOX_TAG_VALUE//-/_}"
+
+VPC="${NAME}-vpc"
+JP_SUBNET="${NAME}-jumpoint-subnet"
+VM_SUBNET="${NAME}-vm-subnet"
+ROUTER="${NAME}-router"
+NAT="${NAME}-nat"
+
+# ── 1. Enable required APIs ───────────────────────────────────────────────────
+section "Enable APIs"
+for api in compute.googleapis.com secretmanager.googleapis.com iam.googleapis.com; do
+  gcloud services enable "$api" --project "$PROJECT_ID" --quiet
+done
+ok "Enabled compute, secretmanager, iam"
+
+# ── 2. VPC + subnets ─────────────────────────────────────────────────────────
+section "VPC + subnets"
+if ! gcloud compute networks describe "$VPC" --project "$PROJECT_ID" >/dev/null 2>&1; then
+  gcloud compute networks create "$VPC" --project "$PROJECT_ID" \
+    --subnet-mode=custom --bgp-routing-mode=regional --quiet >/dev/null
+  ok "Created VPC $VPC (custom mode)"
+else
+  ok "Reusing VPC $VPC"
+fi
+
+if ! gcloud compute networks subnets describe "$JP_SUBNET" --project "$PROJECT_ID" --region "$REGION" >/dev/null 2>&1; then
+  gcloud compute networks subnets create "$JP_SUBNET" \
+    --project "$PROJECT_ID" --network "$VPC" --region "$REGION" \
+    --range 10.99.1.0/24 --quiet >/dev/null
+  ok "Created jumpoint subnet $JP_SUBNET (10.99.1.0/24)"
+else
+  ok "Reusing jumpoint subnet $JP_SUBNET"
+fi
+
+if ! gcloud compute networks subnets describe "$VM_SUBNET" --project "$PROJECT_ID" --region "$REGION" >/dev/null 2>&1; then
+  gcloud compute networks subnets create "$VM_SUBNET" \
+    --project "$PROJECT_ID" --network "$VPC" --region "$REGION" \
+    --range 10.99.2.0/24 --quiet >/dev/null
+  ok "Created VM subnet $VM_SUBNET (10.99.2.0/24)"
+else
+  ok "Reusing VM subnet $VM_SUBNET"
+fi
+
+state_write gcp vpc "$VPC"
+state_write gcp jp_subnet "$JP_SUBNET"
+state_write gcp vm_subnet "$VM_SUBNET"
+
+# ── 3. Cloud Router + Cloud NAT (only the jumpoint subnet) ───────────────────
+section "Cloud Router + Cloud NAT (jumpoint subnet only)"
+if ! gcloud compute routers describe "$ROUTER" --project "$PROJECT_ID" --region "$REGION" >/dev/null 2>&1; then
+  gcloud compute routers create "$ROUTER" \
+    --project "$PROJECT_ID" --network "$VPC" --region "$REGION" --quiet >/dev/null
+  ok "Created router $ROUTER"
+else
+  ok "Reusing router $ROUTER"
+fi
+
+# NAT gateway with explicit subnet listing — ONLY jumpoint-subnet gets internet.
+if ! gcloud compute routers nats describe "$NAT" \
+      --project "$PROJECT_ID" --router "$ROUTER" --router-region "$REGION" >/dev/null 2>&1; then
+  gcloud compute routers nats create "$NAT" \
+    --project "$PROJECT_ID" --router "$ROUTER" --router-region "$REGION" \
+    --nat-custom-subnet-ip-ranges "$JP_SUBNET" \
+    --auto-allocate-nat-external-ips --quiet >/dev/null
+  ok "Created NAT $NAT (NAT'd subnets: $JP_SUBNET only)"
+else
+  ok "Reusing NAT $NAT"
+fi
+state_write gcp router "$ROUTER"
+state_write gcp nat    "$NAT"
+
+# ── 4. Firewall rules ────────────────────────────────────────────────────────
+section "Firewall rules"
+NETWORK_TAG_JP="bt-jumpoint"        # tag the dashboard's COS Jumpoint VM
+NETWORK_TAG_VM="${NAME}-vm"         # tag deployed user VMs (advisory; dashboard
+                                    # doesn't auto-tag, but firewall scopes by tag).
+
+# Allow internal communication anywhere in the VPC.
+gcloud compute firewall-rules create "${NAME}-allow-internal" \
+  --project "$PROJECT_ID" --network "$VPC" \
+  --direction INGRESS --priority 65534 \
+  --allow all --source-ranges 10.99.0.0/16 \
+  --quiet >/dev/null 2>&1 || true
+
+# Allow SSH from Jumpoint → user VMs.
+gcloud compute firewall-rules create "${NAME}-allow-ssh-from-jumpoint" \
+  --project "$PROJECT_ID" --network "$VPC" \
+  --direction INGRESS --priority 1000 \
+  --action ALLOW --rules tcp:22 \
+  --source-tags "$NETWORK_TAG_JP" --target-tags "$NETWORK_TAG_VM" \
+  --quiet >/dev/null 2>&1 || true
+
+# Belt-and-suspenders: explicit deny on egress from VM-tagged hosts to anything
+# outside the VPC. (Cloud NAT absence already prevents internet, but this
+# makes the intent obvious to auditors and survives someone mis-attaching a
+# NAT mapping later.)
+gcloud compute firewall-rules create "${NAME}-deny-vm-egress" \
+  --project "$PROJECT_ID" --network "$VPC" \
+  --direction EGRESS --priority 1000 \
+  --action DENY --rules all \
+  --target-tags "$NETWORK_TAG_VM" \
+  --destination-ranges 0.0.0.0/0 \
+  --quiet >/dev/null 2>&1 || true
+# …but allow them to reach back into the VPC (so SSH replies work).
+gcloud compute firewall-rules create "${NAME}-allow-vm-egress-vpc" \
+  --project "$PROJECT_ID" --network "$VPC" \
+  --direction EGRESS --priority 999 \
+  --action ALLOW --rules all \
+  --target-tags "$NETWORK_TAG_VM" \
+  --destination-ranges 10.99.0.0/16 \
+  --quiet >/dev/null 2>&1 || true
+
+ok "Firewall rules: allow-internal, allow-ssh-from-jumpoint, deny-vm-egress, allow-vm-egress-vpc"
+
+# ── 5. Service account ──────────────────────────────────────────────────────
+section "Service account"
+SA_ID="${NAME}-sa"
+SA_EMAIL="${SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
+
+if ! gcloud iam service-accounts describe "$SA_EMAIL" --project "$PROJECT_ID" >/dev/null 2>&1; then
+  gcloud iam service-accounts create "$SA_ID" \
+    --project "$PROJECT_ID" \
+    --display-name "Dashboard sandbox SA" --quiet >/dev/null
+  ok "Created SA $SA_EMAIL"
+else
+  ok "Reusing SA $SA_EMAIL"
+fi
+
+for role in roles/compute.admin roles/secretmanager.secretAccessor \
+             roles/iam.serviceAccountUser roles/run.admin; do
+  gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+    --member "serviceAccount:$SA_EMAIL" --role "$role" \
+    --condition=None --quiet >/dev/null
+done
+ok "Granted compute.admin, secretmanager.secretAccessor, iam.serviceAccountUser, run.admin"
+
+SA_KEY_PATH="$(state_dir gcp)/sa-key.json"
+if [[ ! -s "$SA_KEY_PATH" ]]; then
+  gcloud iam service-accounts keys create "$SA_KEY_PATH" \
+    --iam-account "$SA_EMAIL" --project "$PROJECT_ID" --quiet >/dev/null
+  chmod 600 "$SA_KEY_PATH"
+  ok "Created SA key at $SA_KEY_PATH (mode 600)"
+else
+  ok "Reusing SA key at $SA_KEY_PATH"
+fi
+
+# ── 6. Secret Manager: SSH keypair JSON ─────────────────────────────────────
+section "Secret Manager — SSH keypair"
+SSH_SECRET="dashboard-sandbox-ssh-keypair"
+
+if ! gcloud secrets describe "$SSH_SECRET" --project "$PROJECT_ID" >/dev/null 2>&1; then
+  TMPDIR="$(mktemp -d)"; trap 'rm -rf "$TMPDIR"' EXIT
+  ssh-keygen -t rsa -b 4096 -N "" -C "dashboard-sandbox" -f "$TMPDIR/key" >/dev/null
+  PUB="$(cat "$TMPDIR/key.pub")"
+  PRIV="$(cat "$TMPDIR/key")"
+  jq -n --arg pub "$PUB" --arg priv "$PRIV" \
+    '{public_key:$pub, private_key:$priv}' > "$TMPDIR/keypair.json"
+  gcloud secrets create "$SSH_SECRET" \
+    --project "$PROJECT_ID" --replication-policy=automatic \
+    --labels="$LABELS" --data-file "$TMPDIR/keypair.json" --quiet >/dev/null
+  ok "Created secret $SSH_SECRET"
+else
+  ok "Reusing secret $SSH_SECRET"
+fi
+
+# ── 7. Print config to paste into /setup ────────────────────────────────────
+print_dashboard_config "GCP sandbox configuration" \
+  "gcp_project_id=$PROJECT_ID" \
+  "gcp_region=$REGION" \
+  "gcp_zone=$ZONE" \
+  "gcp_network=$VPC" \
+  "gcp_subnetwork=$VM_SUBNET                                # User VMs land here (no NAT, no internet)" \
+  "gcp_jumpoint_subnetwork=$JP_SUBNET                       # Jumpoint COS lands here (Cloud NAT)" \
+  "gcp_ssh_key_secret_name=$SSH_SECRET                      # JSON {public_key, private_key}" \
+  "gcp_jumpoint_image=beyondtrust/sra-jumpoint:latest" \
+  "gcp_jumpoint_machine_type=e2-micro" \
+  "gcp_service_account_json=\$(cat $SA_KEY_PATH | jq -c .)   # paste the JSON contents" \
+  "" \
+  "# BeyondTrust deploy key — set in /setup or /secrets:" \
+  "gcp_cloud_run_docker_deploy_key=…"
+
+cat <<EOF
+Sandbox topology summary
+
+  VPC $VPC
+    ├─ $JP_SUBNET (10.99.1.0/24) → Cloud NAT → internet  [Jumpoint COS]
+    └─ $VM_SUBNET (10.99.2.0/24) → no NAT → no internet  [user VMs]
+
+  Firewall:
+    • allow-internal      : within 10.99.0.0/16
+    • allow-ssh-from-jumpoint : tag $NETWORK_TAG_JP → tag $NETWORK_TAG_VM, tcp/22
+    • deny-vm-egress      : tag $NETWORK_TAG_VM → 0.0.0.0/0 (any proto)
+    • allow-vm-egress-vpc : tag $NETWORK_TAG_VM → 10.99.0.0/16
+
+Service-account JSON cached at $SA_KEY_PATH (mode 600).
+
+NB: the dashboard tags VMs as `bt-jumpoint` for the Jumpoint COS GCE
+instance; user VMs need the `${NETWORK_TAG_VM}` network tag for the firewall
+egress-deny rule to apply. Add this to your GCP deploy form's "network tags"
+field, or set as the default in Settings → GCP.
+
+To tear it down:
+  ./scripts/sandbox/rollback.sh --cloud gcp
+
+EOF
