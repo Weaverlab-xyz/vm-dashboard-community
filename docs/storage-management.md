@@ -55,13 +55,29 @@ lives on its own page because:
 | Type | Extensions | Used by |
 |---|---|---|
 | Ansible playbook | `.yml`, `.yaml` | Ansible runner — executed as-is |
-| Shell script | `.sh` | Ansible runner — auto-wrapped in a generated playbook |
+| Shell script | `.sh` | Ansible runner — auto-wrapped: `ansible.builtin.script` |
+| PowerShell script | `.ps1` | Ansible runner — auto-wrapped: `ansible.windows.win_script` (Windows targets only; the host's inventory must set `ansible_connection=winrm`) |
 | RPM package | `.rpm` | Ansible runner — auto-wrapped: copy + dnf install |
 | DEB package | `.deb` | Ansible runner — auto-wrapped: copy + apt install |
 
 Files outside this set are rejected at upload. Assets are stored under a
 configurable key prefix (default `config-mgmt/`), so multiple deployments
 can share a bucket if the prefix differs.
+
+## Uploading
+
+Two equivalent paths to put an asset in storage:
+
+1. **`/storage` page** — drag-and-drop or pick a file in the Upload card,
+   click Upload. Goes straight to the active backend. Available to any
+   logged-in user.
+2. **`/config-mgmt` page** — same upload form, plus inline run controls
+   for executing the asset against your hypervisor inventory or cloud
+   instances. Available to any logged-in user.
+
+Either path uses the same `POST /api/storage/upload` endpoint behind
+the scenes. The `/config-mgmt`-side `POST /api/config-mgmt/upload`
+endpoint also still works (delegates to the same service).
 
 ---
 
@@ -160,6 +176,7 @@ you need a record.
 | `POST /api/storage/test` | admin | Reachability probe (lists assets in the named backend). |
 | `GET /api/storage/list` | logged-in user | Assets in the active backend. |
 | `GET /api/storage/list/{backend}` | admin | Assets in a specific backend (used by the migrate UI's source picker). |
+| `POST /api/storage/upload` | logged-in user | Upload `{filename, content_b64}` to the active backend. |
 | `POST /api/storage/migrate` | admin | Copy `{source, target, overwrite}` → returns `{copied, skipped, failed}`. |
 | `DELETE /api/storage/asset/{name}` | admin | Remove a single asset from the active backend. |
 

@@ -39,7 +39,8 @@ logger = logging.getLogger(__name__)
 
 _EXT_TYPE: dict[str, str] = {
     ".yml": "playbook", ".yaml": "playbook",
-    ".sh": "script", ".rpm": "rpm", ".deb": "deb",
+    ".sh": "script", ".ps1": "powershell",
+    ".rpm": "rpm", ".deb": "deb",
 }
 
 
@@ -82,6 +83,19 @@ def generate_playbook_yaml(asset_name: str) -> str:
       ansible.builtin.script:
         cmd: {container_path}
         executable: /bin/bash
+"""
+
+    if atype == "powershell":
+        # Targets Windows hosts via WinRM. The host's inventory entry must
+        # set ansible_connection=winrm (set in your hypervisor hostvars).
+        # win_script copies the .ps1 to the remote temp dir, runs it under
+        # PowerShell.exe, and removes it afterwards.
+        return f"""\
+- hosts: all
+  tasks:
+    - name: Run {base}
+      ansible.windows.win_script:
+        cmd: {container_path}
 """
 
     if atype == "rpm":

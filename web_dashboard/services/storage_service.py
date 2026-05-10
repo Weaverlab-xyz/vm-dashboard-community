@@ -35,8 +35,15 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-_ASSET_EXTENSIONS = {".yml", ".yaml", ".sh", ".rpm", ".deb"}
-_TYPE_MAP = {".yml": "playbook", ".yaml": "playbook", ".sh": "script", ".rpm": "rpm", ".deb": "deb"}
+_ASSET_EXTENSIONS = {".yml", ".yaml", ".sh", ".ps1", ".rpm", ".deb"}
+_TYPE_MAP = {
+    ".yml":  "playbook",
+    ".yaml": "playbook",
+    ".sh":   "script",
+    ".ps1":  "powershell",
+    ".rpm":  "rpm",
+    ".deb":  "deb",
+}
 
 BACKENDS = ("s3", "azure_blob", "gcs")
 

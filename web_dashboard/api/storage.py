@@ -246,6 +246,33 @@ async def migrate(
     }
 
 
+# ── POST /api/storage/upload (active backend only) ───────────────────────────
+
+class UploadAssetRequest(BaseModel):
+    filename: str
+    content_b64: str
+
+
+@router.post("/upload", status_code=201)
+async def upload_asset(
+    req: UploadAssetRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Upload an asset to the active backend. Open to any logged-in user —
+    matches the existing /api/config-mgmt/upload endpoint so the same access
+    decision applies. Allowed extensions: .yml/.yaml, .sh, .ps1, .rpm, .deb."""
+    import base64
+    try:
+        data = base64.b64decode(req.content_b64)
+    except Exception:
+        raise HTTPException(status_code=400, detail="content_b64 is not valid base64.")
+    try:
+        await storage_service.upload_asset(req.filename, data)
+    except StorageError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    return {"ok": True, "filename": req.filename, "size": len(data)}
+
+
 # ── DELETE /api/storage/asset/{name} (active backend only) ───────────────────
 
 @router.delete("/asset/{name:path}")

@@ -142,6 +142,53 @@
     </button>
   </div>
 
+  <!-- ── Upload (active backend) ──────────────────────────────────────────── -->
+  <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
+    <h2 class="text-base font-semibold text-gray-700 mb-1">Upload an asset</h2>
+    <p class="text-sm text-gray-500 mb-4">
+      Pick a playbook or script — it goes straight into the active backend
+      and becomes available on /config-mgmt for runs against your VMs and
+      cloud instances.
+      <span x-show="!activeBackend" x-cloak class="block text-amber-600 mt-1">
+        No active backend selected. Choose one above before uploading.
+      </span>
+    </p>
+
+    <div class="flex flex-wrap items-center gap-3">
+      <input type="file" @change="onFilePick($event)"
+             accept=".yml,.yaml,.sh,.ps1,.rpm,.deb"
+             :disabled="!activeBackend || uploading"
+             class="text-sm file:mr-3 file:py-1.5 file:px-3 file:rounded-lg
+                    file:border file:border-gray-300 file:text-xs file:font-medium
+                    file:bg-white file:hover:bg-gray-50 file:cursor-pointer
+                    disabled:opacity-50">
+      <button @click="uploadFile()"
+              :disabled="!pendingFile || !activeBackend || uploading"
+              class="bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-4 py-2 rounded-lg disabled:opacity-50">
+        <span x-show="!uploading">Upload</span>
+        <span x-show="uploading" x-cloak>Uploading…</span>
+      </button>
+      <span x-show="pendingFile" x-cloak class="text-xs text-gray-500">
+        Ready: <span class="font-mono" x-text="pendingFile?.name"></span>
+        <span x-text="pendingFile ? ` (${formatBytes(pendingFile.size)})` : ''"></span>
+      </span>
+    </div>
+
+    <p class="text-xs text-gray-400 mt-3">
+      Allowed types:
+      <code class="bg-gray-100 px-1 rounded">.yml</code>
+      <code class="bg-gray-100 px-1 rounded">.yaml</code>
+      <code class="bg-gray-100 px-1 rounded">.sh</code>
+      <code class="bg-gray-100 px-1 rounded">.ps1</code>
+      <code class="bg-gray-100 px-1 rounded">.rpm</code>
+      <code class="bg-gray-100 px-1 rounded">.deb</code>.
+      Scripts and packages are auto-wrapped in a generated playbook at run
+      time; <code class="bg-gray-100 px-1 rounded">.ps1</code> targets Windows
+      hosts (the host's Ansible inventory must set
+      <code class="bg-gray-100 px-1 rounded">ansible_connection=winrm</code>).
+    </p>
+  </div>
+
   <!-- ── Asset list (active backend) ──────────────────────────────────────── -->
   <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
     <div class="flex items-center justify-between mb-4">
@@ -284,6 +331,8 @@ function storagePage() {
     migrate: { source: '', target: '', overwrite: false },
     migrating: false,
     migrationResult: null,
+    pendingFile: null,
+    uploading: false,
     toast: '', toastType: 'success',
 
     async init() {
@@ -364,6 +413,45 @@ function storagePage() {
         this.showToast(e.message || 'Test failed', 'error');
       } finally {
         this.testing[backend] = false;
+      }
+    },
+
+    onFilePick(event) {
+      const f = event?.target?.files?.[0];
+      this.pendingFile = f || null;
+    },
+
+    async uploadFile() {
+      if (!this.pendingFile || !this.activeBackend) return;
+      const allowed = ['.yml', '.yaml', '.sh', '.ps1', '.rpm', '.deb'];
+      const lower = this.pendingFile.name.toLowerCase();
+      if (!allowed.some(ext => lower.endsWith(ext))) {
+        this.showToast(`Unsupported file type. Allowed: ${allowed.join(', ')}`, 'error');
+        return;
+      }
+      this.uploading = true;
+      try {
+        // Read file as base64. Done in two steps so the binary is preserved
+        // even for .deb/.rpm payloads.
+        const buf = await this.pendingFile.arrayBuffer();
+        const bytes = new Uint8Array(buf);
+        let bin = '';
+        for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+        const b64 = btoa(bin);
+        await API.post('/api/storage/upload', {
+          filename: this.pendingFile.name,
+          content_b64: b64,
+        });
+        this.showToast(`Uploaded ${this.pendingFile.name}`);
+        this.pendingFile = null;
+        // Reset the file input so picking the same file again re-fires the change event.
+        const inp = document.querySelector('input[type="file"]');
+        if (inp) inp.value = '';
+        await this.loadAssets();
+      } catch (e) {
+        this.showToast(e.message || 'Upload failed', 'error');
+      } finally {
+        this.uploading = false;
       }
     },
 
