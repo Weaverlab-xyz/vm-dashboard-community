@@ -1,0 +1,233 @@
+# GCP sandbox bootstrap for the VM Dashboard (Windows PowerShell variant).
+# Functional twin of setup-gcp.sh. See docs/CLOUD_SANDBOX.md for topology.
+
+[CmdletBinding()] param()
+$ErrorActionPreference = 'Stop'
+
+$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+. (Join-Path $ScriptDir 'lib/Common.ps1')
+
+Assert-Command gcloud
+Assert-Command jq
+Assert-Command ssh-keygen
+
+$Name      = $Script:SandboxNamePrefix
+$ProjectId = if ($env:GCP_PROJECT_ID) { $env:GCP_PROJECT_ID } else {
+    (gcloud config get-value project 2>$null).Trim()
+}
+$Region    = if ($env:GCP_REGION) { $env:GCP_REGION } else { 'us-central1' }
+$Zone      = if ($env:GCP_ZONE)   { $env:GCP_ZONE }   else { "$Region-a" }
+
+if (-not $ProjectId -or $ProjectId -eq '(unset)') {
+    Write-Die 'No GCP project set. Run: gcloud config set project YOUR-PROJECT  (or set $env:GCP_PROJECT_ID)'
+}
+
+Assert-LoggedIn 'gcloud' { gcloud auth print-access-token --quiet } `
+    'Run: gcloud auth login && gcloud auth application-default login'
+
+Write-Section "GCP sandbox in project $ProjectId, region $Region ($Zone)"
+
+# GCP labels can't contain hyphens-as-keys — substitute underscore.
+$Labels = "$($Script:SandboxTagKey -replace '-','_')=$($Script:SandboxTagValue -replace '-','_')"
+
+$Vpc       = "$Name-vpc"
+$JpSubnet  = "$Name-jumpoint-subnet"
+$VmSubnet  = "$Name-vm-subnet"
+$Router    = "$Name-router"
+$Nat       = "$Name-nat"
+
+$NetTagJp  = 'bt-jumpoint'      # the dashboard's Jumpoint COS VM gets this tag
+$NetTagVm  = "$Name-vm"         # the dashboard auto-attaches this to user VMs
+
+# ── 1. Enable required APIs ───────────────────────────────────────────────────
+Write-Section 'Enable APIs'
+foreach ($api in @('compute.googleapis.com','secretmanager.googleapis.com','iam.googleapis.com')) {
+    gcloud services enable $api --project $ProjectId --quiet | Out-Null
+}
+Write-Ok 'Enabled compute, secretmanager, iam'
+
+# ── 2. VPC + subnets ─────────────────────────────────────────────────────────
+Write-Section 'VPC + subnets'
+& gcloud compute networks describe $Vpc --project $ProjectId *> $null
+if ($LASTEXITCODE -ne 0) {
+    gcloud compute networks create $Vpc --project $ProjectId `
+        --subnet-mode=custom --bgp-routing-mode=regional --quiet | Out-Null
+    Write-Ok "Created VPC $Vpc (custom mode)"
+} else {
+    Write-Ok "Reusing VPC $Vpc"
+}
+
+& gcloud compute networks subnets describe $JpSubnet --project $ProjectId --region $Region *> $null
+if ($LASTEXITCODE -ne 0) {
+    gcloud compute networks subnets create $JpSubnet `
+        --project $ProjectId --network $Vpc --region $Region `
+        --range 10.99.1.0/24 --quiet | Out-Null
+    Write-Ok "Created jumpoint subnet $JpSubnet (10.99.1.0/24)"
+} else {
+    Write-Ok "Reusing jumpoint subnet $JpSubnet"
+}
+
+& gcloud compute networks subnets describe $VmSubnet --project $ProjectId --region $Region *> $null
+if ($LASTEXITCODE -ne 0) {
+    gcloud compute networks subnets create $VmSubnet `
+        --project $ProjectId --network $Vpc --region $Region `
+        --range 10.99.2.0/24 --quiet | Out-Null
+    Write-Ok "Created VM subnet $VmSubnet (10.99.2.0/24)"
+} else {
+    Write-Ok "Reusing VM subnet $VmSubnet"
+}
+
+Set-StateValue gcp vpc       $Vpc
+Set-StateValue gcp jp_subnet $JpSubnet
+Set-StateValue gcp vm_subnet $VmSubnet
+
+# ── 3. Cloud Router + Cloud NAT (only the jumpoint subnet) ───────────────────
+Write-Section 'Cloud Router + Cloud NAT (jumpoint subnet only)'
+& gcloud compute routers describe $Router --project $ProjectId --region $Region *> $null
+if ($LASTEXITCODE -ne 0) {
+    gcloud compute routers create $Router `
+        --project $ProjectId --network $Vpc --region $Region --quiet | Out-Null
+    Write-Ok "Created router $Router"
+} else {
+    Write-Ok "Reusing router $Router"
+}
+
+& gcloud compute routers nats describe $Nat --project $ProjectId --router $Router --router-region $Region *> $null
+if ($LASTEXITCODE -ne 0) {
+    gcloud compute routers nats create $Nat `
+        --project $ProjectId --router $Router --router-region $Region `
+        --nat-custom-subnet-ip-ranges $JpSubnet `
+        --auto-allocate-nat-external-ips --quiet | Out-Null
+    Write-Ok "Created NAT $Nat (NAT'd subnets: $JpSubnet only)"
+} else {
+    Write-Ok "Reusing NAT $Nat"
+}
+Set-StateValue gcp router $Router
+Set-StateValue gcp nat    $Nat
+
+# ── 4. Firewall rules ────────────────────────────────────────────────────────
+Write-Section 'Firewall rules'
+
+# Idempotent — gcloud returns non-zero if the rule already exists; swallow.
+gcloud compute firewall-rules create "$Name-allow-internal" `
+    --project $ProjectId --network $Vpc --direction INGRESS --priority 65534 `
+    --allow all --source-ranges 10.99.0.0/16 --quiet 2>$null | Out-Null
+
+gcloud compute firewall-rules create "$Name-allow-ssh-from-jumpoint" `
+    --project $ProjectId --network $Vpc --direction INGRESS --priority 1000 `
+    --action ALLOW --rules tcp:22 `
+    --source-tags $NetTagJp --target-tags $NetTagVm --quiet 2>$null | Out-Null
+
+gcloud compute firewall-rules create "$Name-deny-vm-egress" `
+    --project $ProjectId --network $Vpc --direction EGRESS --priority 1000 `
+    --action DENY --rules all `
+    --target-tags $NetTagVm --destination-ranges 0.0.0.0/0 --quiet 2>$null | Out-Null
+
+gcloud compute firewall-rules create "$Name-allow-vm-egress-vpc" `
+    --project $ProjectId --network $Vpc --direction EGRESS --priority 999 `
+    --action ALLOW --rules all `
+    --target-tags $NetTagVm --destination-ranges 10.99.0.0/16 --quiet 2>$null | Out-Null
+
+Write-Ok 'Firewall rules: allow-internal, allow-ssh-from-jumpoint, deny-vm-egress, allow-vm-egress-vpc'
+
+# ── 5. Service account ──────────────────────────────────────────────────────
+Write-Section 'Service account'
+$SaId    = "$Name-sa"
+$SaEmail = "$SaId@$ProjectId.iam.gserviceaccount.com"
+
+& gcloud iam service-accounts describe $SaEmail --project $ProjectId *> $null
+if ($LASTEXITCODE -ne 0) {
+    gcloud iam service-accounts create $SaId --project $ProjectId `
+        --display-name 'Dashboard sandbox SA' --quiet | Out-Null
+    Write-Ok "Created SA $SaEmail"
+} else {
+    Write-Ok "Reusing SA $SaEmail"
+}
+
+foreach ($role in @('roles/compute.admin','roles/secretmanager.secretAccessor',
+                    'roles/iam.serviceAccountUser','roles/run.admin')) {
+    gcloud projects add-iam-policy-binding $ProjectId `
+        --member "serviceAccount:$SaEmail" --role $role --condition=None --quiet | Out-Null
+}
+Write-Ok 'Granted compute.admin, secretmanager.secretAccessor, iam.serviceAccountUser, run.admin'
+
+$SaKeyPath = Join-Path (Get-StateDir gcp) 'sa-key.json'
+if (-not (Test-Path $SaKeyPath) -or (Get-Item $SaKeyPath).Length -eq 0) {
+    gcloud iam service-accounts keys create $SaKeyPath `
+        --iam-account $SaEmail --project $ProjectId --quiet | Out-Null
+    if ($IsLinux -or $IsMacOS) {
+        & chmod 600 $SaKeyPath 2>$null
+    } else {
+        $acl = Get-Acl $SaKeyPath
+        $acl.SetAccessRuleProtection($true, $false)
+        $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+            ([System.Security.Principal.WindowsIdentity]::GetCurrent()).Name,
+            'Read,Write','Allow')
+        $acl.AddAccessRule($rule)
+        Set-Acl $SaKeyPath $acl
+    }
+    Write-Ok "Created SA key at $SaKeyPath (owner-only)"
+} else {
+    Write-Ok "Reusing SA key at $SaKeyPath"
+}
+
+# ── 6. Secret Manager: SSH keypair JSON ─────────────────────────────────────
+Write-Section 'Secret Manager — SSH keypair'
+$SshSecret = "$Name-ssh-keypair"
+& gcloud secrets describe $SshSecret --project $ProjectId *> $null
+if ($LASTEXITCODE -ne 0) {
+    $kpJson = New-SshKeyPairJson
+    $tmp    = [System.IO.Path]::GetTempFileName()
+    try {
+        Set-Content -Path $tmp -Value $kpJson -Encoding utf8 -NoNewline
+        gcloud secrets create $SshSecret `
+            --project $ProjectId --replication-policy=automatic `
+            --labels=$Labels --data-file $tmp --quiet | Out-Null
+        Write-Ok "Created secret $SshSecret"
+    } finally { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
+} else {
+    Write-Ok "Reusing secret $SshSecret"
+}
+
+# ── 7. Print config to paste into /setup ────────────────────────────────────
+Write-DashboardConfig 'GCP sandbox configuration' @(
+    "gcp_project_id=$ProjectId",
+    "gcp_region=$Region",
+    "gcp_zone=$Zone",
+    "gcp_network=$Vpc",
+    "gcp_subnetwork=$VmSubnet                                # User VMs land here (no NAT, no internet)",
+    "gcp_jumpoint_subnetwork=$JpSubnet                       # Jumpoint COS lands here (Cloud NAT)",
+    "gcp_ssh_key_secret_name=$SshSecret                      # JSON {public_key, private_key}",
+    'gcp_jumpoint_image=beyondtrust/sra-jumpoint:latest',
+    'gcp_jumpoint_machine_type=e2-micro',
+    "gcp_default_network_tag=$NetTagVm                       # Auto-attached to every dashboard-deployed VM so the sandbox firewall rules apply",
+    "gcp_service_account_json=`$(Get-Content $SaKeyPath -Raw)",
+    '',
+    '# BeyondTrust deploy key — set in /setup or /secrets:',
+    'gcp_cloud_run_docker_deploy_key=…'
+)
+
+@"
+Sandbox topology summary
+
+  VPC $Vpc
+    ├─ $JpSubnet (10.99.1.0/24) → Cloud NAT → internet  [Jumpoint COS]
+    └─ $VmSubnet (10.99.2.0/24) → no NAT → no internet  [user VMs]
+
+  Firewall:
+    • allow-internal      : within 10.99.0.0/16
+    • allow-ssh-from-jumpoint : tag $NetTagJp → tag $NetTagVm, tcp/22
+    • deny-vm-egress      : tag $NetTagVm → 0.0.0.0/0 (any proto)
+    • allow-vm-egress-vpc : tag $NetTagVm → 10.99.0.0/16
+
+Service-account JSON cached at $SaKeyPath (owner-only).
+
+The dashboard auto-applies the bt-jumpoint network tag to its Jumpoint COS
+GCE instance and reads gcp_default_network_tag from config to attach
+$NetTagVm to every user VM it deploys, so the sandbox firewall rules take
+effect automatically — no per-deploy manual tagging needed.
+
+To tear it down:
+  .\scripts\sandbox\Windows\Rollback-Sandbox.ps1 -Cloud gcp
+
+"@ | Write-Host

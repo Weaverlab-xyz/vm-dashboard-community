@@ -250,6 +250,6 @@ Sandbox topology summary
     └─ private ${PRIVATE_SUBNET_ID}  (10.99.2.0/24) → no internet     [user EC2s]
 
 To tear it down:
-  ./scripts/sandbox/rollback.sh --cloud aws
+  ./scripts/sandbox/Linux/rollback.sh --cloud aws
 
 EOF

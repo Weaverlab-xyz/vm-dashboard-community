@@ -195,6 +195,6 @@ Service principal credentials cached at:
   $SP_JSON_PATH  (mode 600)
 
 To tear it down:
-  ./scripts/sandbox/rollback.sh --cloud azure
+  ./scripts/sandbox/Linux/rollback.sh --cloud azure
 
 EOF

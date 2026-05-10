@@ -68,16 +68,31 @@ cd vm-dashboard-community
 
 If you're labbing this up — testing the dashboard, demoing it, or running
 training environments — there's a faster alternative to Parts A, B, and C
-below. The repo ships three bash scripts that provision **fully isolated**
-sandbox infrastructure in AWS, Azure, and GCP with a single command each:
+below. The repo ships bash scripts (WSL / Linux / macOS) and PowerShell
+equivalents (Windows) that provision **fully isolated** sandbox
+infrastructure in AWS, Azure, and GCP with a single command each:
 
 ```bash
-./scripts/sandbox/00-prereqs.sh        # one-time prereq check (WSL/Linux)
-./scripts/sandbox/setup-aws.sh         # provision AWS sandbox
-./scripts/sandbox/setup-azure.sh       # provision Azure sandbox
-./scripts/sandbox/setup-gcp.sh         # provision GCP sandbox
-./scripts/sandbox/rollback.sh --cloud all -y   # tear it all down
+# Bash (WSL / Linux / macOS)
+./scripts/sandbox/Linux/00-prereqs.sh        # one-time prereq check
+./scripts/sandbox/Linux/setup-aws.sh         # provision AWS sandbox
+./scripts/sandbox/Linux/setup-azure.sh       # provision Azure sandbox
+./scripts/sandbox/Linux/setup-gcp.sh         # provision GCP sandbox
+./scripts/sandbox/Linux/rollback.sh --cloud all -y   # tear it all down
 ```
+
+```powershell
+# PowerShell (Windows)
+.\scripts\sandbox\Windows\Test-SandboxPrereqs.ps1
+.\scripts\sandbox\Windows\Setup-AwsSandbox.ps1
+.\scripts\sandbox\Windows\Setup-AzureSandbox.ps1
+.\scripts\sandbox\Windows\Setup-GcpSandbox.ps1
+.\scripts\sandbox\Windows\Rollback-Sandbox.ps1 -Cloud all -Yes
+```
+
+Both variants are functionally equivalent — same resources, same tags,
+same idempotency, same printed config block. Pick whichever fits your
+shell.
 
 What you get per cloud:
 

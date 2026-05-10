@@ -1,10 +1,15 @@
 # Cloud Sandbox Guide
 
-A walkthrough of `scripts/sandbox/` — three WSL/Linux bash scripts plus a
-rollback that provision **isolated lab environments** in AWS, Azure, and
-GCP for the VM Dashboard. Target audience: testers and lab operators who
-want a production-style network topology without hand-clicking through
-three cloud consoles.
+A walkthrough of `scripts/sandbox/` — bash and PowerShell scripts that
+provision **isolated lab environments** in AWS, Azure, and GCP for the
+VM Dashboard. Target audience: testers and lab operators who want a
+production-style network topology without hand-clicking through three
+cloud consoles.
+
+Each cloud has both a bash variant (WSL / Linux / macOS) and a
+PowerShell variant (Windows). Both variants are functionally equivalent
+— same resources, same tags, same idempotency, same printed config
+block — so pick whichever fits your shell.
 
 > If you're onboarding for the first time and just want to deploy VMs to
 > your own clouds without isolation guarantees, the
@@ -65,52 +70,74 @@ file or partial setup doesn't strand resources.
 
 ## Prerequisites
 
-WSL Ubuntu (or bare Linux, or macOS — bash). The scripts target WSL but
-run anywhere bash + the cloud CLIs work.
+The scripts run on WSL Ubuntu, bare Linux, macOS (bash variants in
+[`scripts/sandbox/Linux/`](../scripts/sandbox/Linux)) or Windows
+PowerShell 7 (variants in [`scripts/sandbox/Windows/`](../scripts/sandbox/Windows)).
+Pick whichever fits your shell.
 
 ```bash
-./scripts/sandbox/00-prereqs.sh
+# Bash (WSL / Linux / macOS)
+./scripts/sandbox/Linux/00-prereqs.sh
 ```
 
-The prereq script verifies:
+```powershell
+# PowerShell (Windows)
+.\scripts\sandbox\Windows\Test-SandboxPrereqs.ps1
+```
+
+Both prereq scripts verify the same things:
 
 - `aws` (CLI v2)
 - `az`
 - `gcloud`
 - `docker` + `docker compose v2`
-- `jq`, `ssh-keygen`, `curl`, `unzip`
+- `jq`, `ssh-keygen`
 
-…and prints `apt`/`curl` install hints for anything missing. After
-installing whatever it flags, authenticate the CLIs you plan to use:
+…and print install hints (`apt` / `curl` on Linux, `winget` on Windows)
+for anything missing. After installing whatever they flag, authenticate
+the CLIs you plan to use:
 
-```bash
+```
 aws configure                                            # or: aws sso login
 az login
 gcloud auth login && gcloud auth application-default login
 ```
 
 Each setup script verifies its own CLI is authenticated before doing
-anything destructive — running `setup-azure.sh` without `az login` fails
+anything destructive — running the Azure setup without `az login` fails
 fast with a "not authenticated" message.
 
 ## Quick start
 
 ```bash
-# One-time prereq check
-./scripts/sandbox/00-prereqs.sh
+# Bash
+./scripts/sandbox/Linux/00-prereqs.sh
 
 # Provision whichever clouds you want — order doesn't matter, run any subset
-./scripts/sandbox/setup-aws.sh
-./scripts/sandbox/setup-azure.sh
-./scripts/sandbox/setup-gcp.sh
+./scripts/sandbox/Linux/setup-aws.sh
+./scripts/sandbox/Linux/setup-azure.sh
+./scripts/sandbox/Linux/setup-gcp.sh
 
 # Bring up the dashboard
-./scripts/onboard.sh        # or .\scripts\Onboard-Dashboard.ps1 on Windows
-
-# Open http://localhost:8001 (community edition's default port; the main
-# onboarder uses 8000 — the sandbox scripts work either way) and paste
-# the printed config blocks into the /setup wizard.
+./scripts/onboard.sh
 ```
+
+```powershell
+# PowerShell
+.\scripts\sandbox\Windows\Test-SandboxPrereqs.ps1
+
+# Provision whichever clouds you want — order doesn't matter, run any subset
+.\scripts\sandbox\Windows\Setup-AwsSandbox.ps1
+.\scripts\sandbox\Windows\Setup-AzureSandbox.ps1
+.\scripts\sandbox\Windows\Setup-GcpSandbox.ps1
+
+# Bring up the dashboard
+.\scripts\Onboard-Dashboard.ps1
+```
+
+Then open `http://localhost:8001` (community edition's default port; the
+main onboarder uses 8000 — the sandbox scripts work either way) and
+paste the printed config blocks into the `/setup` wizard.
 
 Each setup script is **idempotent** — re-running picks up where it left
 off and reuses anything tagged `managed-by=dashboard-sandbox`. Safe to
@@ -303,16 +330,31 @@ Running infrastructure adds the obvious things:
 If GCP idle cost matters, tear down between sessions:
 
 ```bash
-./scripts/sandbox/rollback.sh --cloud gcp -y
+# Bash
+./scripts/sandbox/Linux/rollback.sh --cloud gcp -y
+```
+
+```powershell
+# PowerShell
+.\scripts\sandbox\Windows\Rollback-Sandbox.ps1 -Cloud gcp -Yes
 ```
 
 ## Tearing it all down
 
 ```bash
-./scripts/sandbox/rollback.sh --cloud aws         # one cloud
-./scripts/sandbox/rollback.sh --cloud azure
-./scripts/sandbox/rollback.sh --cloud gcp
-./scripts/sandbox/rollback.sh --cloud all -y      # all three, skip prompts
+# Bash
+./scripts/sandbox/Linux/rollback.sh --cloud aws         # one cloud
+./scripts/sandbox/Linux/rollback.sh --cloud azure
+./scripts/sandbox/Linux/rollback.sh --cloud gcp
+./scripts/sandbox/Linux/rollback.sh --cloud all -y      # all three, skip prompts
+```
+
+```powershell
+# PowerShell
+.\scripts\sandbox\Windows\Rollback-Sandbox.ps1 -Cloud aws
+.\scripts\sandbox\Windows\Rollback-Sandbox.ps1 -Cloud azure
+.\scripts\sandbox\Windows\Rollback-Sandbox.ps1 -Cloud gcp
+.\scripts\sandbox\Windows\Rollback-Sandbox.ps1 -Cloud all -Yes
 ```
 
 What rollback does:
@@ -336,22 +378,34 @@ existing role created outside the sandbox is preserved.
 
 ## Customising
 
-Common environment-variable overrides:
+Common environment-variable overrides — both variants honour the same
+env vars:
 
 ```bash
-AWS_REGION=us-west-2          ./scripts/sandbox/setup-aws.sh
-AZURE_LOCATION=westus2        ./scripts/sandbox/setup-azure.sh
-GCP_PROJECT_ID=my-proj GCP_REGION=us-east1 ./scripts/sandbox/setup-gcp.sh
-SANDBOX_STATE_DIR=/path/to/state ./scripts/sandbox/setup-aws.sh
+# Bash
+AWS_REGION=us-west-2          ./scripts/sandbox/Linux/setup-aws.sh
+AZURE_LOCATION=westus2        ./scripts/sandbox/Linux/setup-azure.sh
+GCP_PROJECT_ID=my-proj GCP_REGION=us-east1 ./scripts/sandbox/Linux/setup-gcp.sh
+SANDBOX_STATE_DIR=/path/to/state ./scripts/sandbox/Linux/setup-aws.sh
+```
+
+```powershell
+# PowerShell
+$env:AWS_REGION = 'us-west-2';       .\scripts\sandbox\Windows\Setup-AwsSandbox.ps1
+$env:AZURE_LOCATION = 'westus2';     .\scripts\sandbox\Windows\Setup-AzureSandbox.ps1
+$env:GCP_PROJECT_ID = 'my-proj'
+$env:GCP_REGION = 'us-east1';        .\scripts\sandbox\Windows\Setup-GcpSandbox.ps1
+$env:SANDBOX_STATE_DIR = 'C:\state'; .\scripts\sandbox\Windows\Setup-AwsSandbox.ps1
 ```
 
 CIDRs (10.99.0.0/16), subnet sizes, machine types, and IAM scope are
 intentionally hard-coded. The sandbox is opinionated. Edit the script
 directly if you need a different topology.
 
-The `SANDBOX_NAME_PREFIX` and `SANDBOX_TAG_VALUE` env vars in
-`scripts/sandbox/lib/common.sh` rename the prefix/tag if you want multiple
-isolated sandboxes per cloud account — but most users don't need this.
+The `SANDBOX_NAME_PREFIX` and `SANDBOX_TAG_VALUE` constants in
+`scripts/sandbox/Linux/lib/common.sh` (or `Windows/lib/Common.ps1`) rename
+the prefix/tag if you want multiple isolated sandboxes per cloud account
+— but most users don't need this.
 
 ## Caveats
 

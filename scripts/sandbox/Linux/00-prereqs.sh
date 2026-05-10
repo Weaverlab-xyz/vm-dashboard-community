@@ -93,12 +93,12 @@ Next steps — authenticate each CLI you plan to use:
 
 Then:
 
-  ./scripts/sandbox/setup-aws.sh
-  ./scripts/sandbox/setup-azure.sh
-  ./scripts/sandbox/setup-gcp.sh
+  ./scripts/sandbox/Linux/setup-aws.sh
+  ./scripts/sandbox/Linux/setup-azure.sh
+  ./scripts/sandbox/Linux/setup-gcp.sh
 
 To tear it all down:
 
-  ./scripts/sandbox/rollback.sh --cloud all
+  ./scripts/sandbox/Linux/rollback.sh --cloud all
 
 EOF

@@ -252,6 +252,6 @@ ${NETWORK_TAG_VM} to every user VM it deploys, so the sandbox firewall
 rules take effect automatically — no per-deploy manual tagging needed.
 
 To tear it down:
-  ./scripts/sandbox/rollback.sh --cloud gcp
+  ./scripts/sandbox/Linux/rollback.sh --cloud gcp
 
 EOF

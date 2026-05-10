@@ -1,11 +1,25 @@
 # Cloud sandbox bootstrappers
 
-WSL-first bash scripts that provision an **isolated lab environment** in
-AWS, Azure, and GCP for the VM Dashboard. Each cloud's sandbox follows the
-same pattern: one network segment runs the BeyondTrust SRA Jumpoint
+Bash and PowerShell scripts that provision an **isolated lab environment**
+in AWS, Azure, and GCP for the VM Dashboard. Each cloud's sandbox follows
+the same pattern: one network segment runs the BeyondTrust SRA Jumpoint
 container with internet egress (so it can phone home to PRA), and a
 second segment hosts your deployed lab VMs with **no internet path** —
 the Jumpoint is the only outbound proxy.
+
+| Task | Bash (WSL / Linux / macOS) | PowerShell (Windows / cross-platform) |
+|---|---|---|
+| Prereqs   | `00-prereqs.sh`     | `Test-SandboxPrereqs.ps1`   |
+| AWS       | `setup-aws.sh`      | `Setup-AwsSandbox.ps1`       |
+| Azure     | `setup-azure.sh`    | `Setup-AzureSandbox.ps1`     |
+| GCP       | `setup-gcp.sh`      | `Setup-GcpSandbox.ps1`       |
+| Rollback  | `rollback.sh`       | `Rollback-Sandbox.ps1`       |
+| Shared    | `lib/common.sh`     | `lib/Common.ps1`             |
+
+Both variants are functionally equivalent — same tags, same idempotency,
+same printed config block. Pick whichever fits your shell. State files
+written by one variant are readable by the other (same
+`~/.dashboard-sandbox/<cloud>/` location).
 
 | Cloud | Jumpoint host | VM isolation mechanism |
 |---|---|---|
@@ -15,24 +29,30 @@ the Jumpoint is the only outbound proxy.
 
 ## Prerequisites
 
-Run on WSL Ubuntu (also fine on bare Linux). Needs:
+Tools needed regardless of which variant you run:
 
 - `aws` CLI v2
 - `az` CLI
 - `gcloud` SDK
 - `docker` + `docker compose v2` (for running the dashboard itself)
-- `jq`, `ssh-keygen`, `curl`, `unzip`
+- `jq`, `ssh-keygen`
 
-The `00-prereqs.sh` script verifies all of these and prints apt/curl install
-hints for anything missing:
+The prereq script verifies them and prints install hints for anything
+missing:
 
 ```bash
-./scripts/sandbox/00-prereqs.sh
+# Bash (WSL / Linux / macOS)
+./scripts/sandbox/Linux/00-prereqs.sh
+```
+
+```powershell
+# PowerShell (Windows)
+.\scripts\sandbox\Windows\Test-SandboxPrereqs.ps1
 ```
 
 Then authenticate each CLI you plan to use:
 
-```bash
+```
 aws configure                                            # or: aws sso login
 az login
 gcloud auth login && gcloud auth application-default login
@@ -44,9 +64,17 @@ Each setup script is **idempotent** — re-running picks up where it left off
 and reuses any existing resources tagged `managed-by=dashboard-sandbox`.
 
 ```bash
-./scripts/sandbox/setup-aws.sh
-./scripts/sandbox/setup-azure.sh
-./scripts/sandbox/setup-gcp.sh
+# Bash
+./scripts/sandbox/Linux/setup-aws.sh
+./scripts/sandbox/Linux/setup-azure.sh
+./scripts/sandbox/Linux/setup-gcp.sh
+```
+
+```powershell
+# PowerShell
+.\scripts\sandbox\Windows\Setup-AwsSandbox.ps1
+.\scripts\sandbox\Windows\Setup-AzureSandbox.ps1
+.\scripts\sandbox\Windows\Setup-GcpSandbox.ps1
 ```
 
 Each script ends with a config block to paste into the dashboard's `/setup`
@@ -85,8 +113,15 @@ A running Jumpoint container/VM adds:
 ## Tear-down
 
 ```bash
-./scripts/sandbox/rollback.sh --cloud aws         # one cloud
-./scripts/sandbox/rollback.sh --cloud all -y      # all three, no confirm
+# Bash
+./scripts/sandbox/Linux/rollback.sh --cloud aws         # one cloud
+./scripts/sandbox/Linux/rollback.sh --cloud all -y      # all three, no confirm
+```
+
+```powershell
+# PowerShell
+.\scripts\sandbox\Windows\Rollback-Sandbox.ps1 -Cloud aws
+.\scripts\sandbox\Windows\Rollback-Sandbox.ps1 -Cloud all -Yes
 ```
 
 Rollback enumerates resources by the `managed-by=dashboard-sandbox` tag/label
@@ -108,12 +143,21 @@ Sensitive files (Azure SP creds, GCP SA key) are written with mode 600.
 
 ## Customising
 
-Common env-var overrides:
+Common env-var overrides — both variants read the same env vars:
 
 ```bash
-AWS_REGION=us-west-2          ./scripts/sandbox/setup-aws.sh
-AZURE_LOCATION=westus2        ./scripts/sandbox/setup-azure.sh
-GCP_PROJECT_ID=my-proj GCP_REGION=us-east1 ./scripts/sandbox/setup-gcp.sh
+# Bash
+AWS_REGION=us-west-2          ./scripts/sandbox/Linux/setup-aws.sh
+AZURE_LOCATION=westus2        ./scripts/sandbox/Linux/setup-azure.sh
+GCP_PROJECT_ID=my-proj GCP_REGION=us-east1 ./scripts/sandbox/Linux/setup-gcp.sh
+```
+
+```powershell
+# PowerShell
+$env:AWS_REGION = 'us-west-2';      .\scripts\sandbox\Windows\Setup-AwsSandbox.ps1
+$env:AZURE_LOCATION = 'westus2';    .\scripts\sandbox\Windows\Setup-AzureSandbox.ps1
+$env:GCP_PROJECT_ID = 'my-proj'
+$env:GCP_REGION = 'us-east1';       .\scripts\sandbox\Windows\Setup-GcpSandbox.ps1
 ```
 
 CIDRs, subnet sizes, machine types, and IAM scope are intentionally not
