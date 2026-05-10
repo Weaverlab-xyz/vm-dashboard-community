@@ -89,7 +89,7 @@
           <!-- Target picker — on-prem groups + cloud VMs -->
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">Target</label>
-            <select x-model="form.target"
+            <select x-model="form.target" @change="onTargetChange()"
                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm
                            focus:outline-none focus:ring-2 focus:ring-blue-500">
               <option value="">Select a target…</option>
@@ -133,6 +133,20 @@
             <p class="text-xs text-gray-400 mt-1">
               Cloud VMs are read from the instance lists on the AWS / Azure / GCP tabs.
             </p>
+          </div>
+
+          <!-- SSH user — only shown for cloud targets, since on-prem hypervisor
+               groups carry their own auth. Pre-filled from the per-cloud
+               default in Settings → Ansible; override per job as needed. -->
+          <div x-show="targetCloud" x-cloak>
+            <label class="block text-sm font-medium text-gray-700 mb-1">
+              SSH User
+              <span class="text-gray-400 font-normal">(suggestion — edit if your image expects a different user)</span>
+            </label>
+            <input type="text" x-model="form.ansible_user"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono
+                          focus:outline-none focus:ring-2 focus:ring-blue-500"
+                   :placeholder="targetCloud ? (sshUserSuggestions[targetCloud] || 'ec2-user') : 'ec2-user'">
           </div>
 
           <!-- Extra vars (optional) -->
@@ -312,12 +326,44 @@ function configMgmt() {
     form: {
       asset: '',
       target: '',
+      ansible_user: '',
       extra_vars_raw: '',
     },
+    // Per-cloud SSH user suggestions (populated by loadCloudTargets) — used to
+    // pre-fill form.ansible_user when the user picks a cloud target. The user
+    // can override per job; the value the form actually submits is whatever's
+    // in form.ansible_user at submit time.
+    sshUserSuggestions: {},
     get hasCloudTargets() {
       return this.cloudTargets.aws.length > 0
           || this.cloudTargets.azure.length > 0
           || this.cloudTargets.gcp.length > 0;
+    },
+
+    // Detect cloud prefix on the selected target so the SSH-user field can
+    // show/hide and the per-cloud suggestion can pre-fill.
+    get targetCloud() {
+      const t = this.form.target;
+      if (t.startsWith('aws:'))   return 'aws';
+      if (t.startsWith('azure:')) return 'azure';
+      if (t.startsWith('gcp:'))   return 'gcp';
+      return '';
+    },
+
+    // When the user picks a different cloud target, pre-fill ansible_user
+    // with the matching per-cloud suggestion (only if the field is empty or
+    // still holds the previous cloud's suggestion — never overwrite a value
+    // the user has explicitly typed).
+    onTargetChange() {
+      const cloud = this.targetCloud;
+      if (!cloud) return;
+      const suggestion = this.sshUserSuggestions[cloud] || '';
+      const currentVal = this.form.ansible_user || '';
+      const otherSuggestions = Object.values(this.sshUserSuggestions).filter(v => v);
+      // Treat the field as "unset" if it's empty OR matches a previous suggestion.
+      if (!currentVal || otherSuggestions.includes(currentVal)) {
+        this.form.ansible_user = suggestion;
+      }
     },
 
     get selectedAsset() {
@@ -362,9 +408,16 @@ function configMgmt() {
 
     async loadCloudTargets() {
       try {
-        this.cloudTargets = await API.get('/api/config-mgmt/cloud-targets') || { aws: [], azure: [], gcp: [] };
+        const data = await API.get('/api/config-mgmt/cloud-targets') || {};
+        this.cloudTargets = {
+          aws:   data.aws   || [],
+          azure: data.azure || [],
+          gcp:   data.gcp   || [],
+        };
+        this.sshUserSuggestions = data.default_users || {};
       } catch (e) {
         this.cloudTargets = { aws: [], azure: [], gcp: [] };
+        this.sshUserSuggestions = {};
       }
     },
 
@@ -407,6 +460,7 @@ function configMgmt() {
           asset: this.form.asset,
           target,
           cloud,
+          ansible_user: (this.form.ansible_user || '').trim(),
           extra_vars,
         });
         toast(`Queued — job ${result.job_id.slice(0, 8)}…`, 'success');

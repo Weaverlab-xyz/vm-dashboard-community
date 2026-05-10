@@ -314,7 +314,12 @@ class AnsibleFeatureConfig(BaseModel):
     enabled: bool = False
     # Runner selection
     ansible_runner: str = "local"            # "local" | "ecs" | "aci" | "gcp"
-    ansible_default_user: str = "ec2-user"  # SSH user for cloud runner targets
+    # Per-cloud SSH user (each cloud ships with its own stock username
+    # convention — see config.py for context).
+    ansible_aws_user: str = "ec2-user"
+    ansible_azure_user: str = "azureuser"
+    ansible_gcp_user: str = "gcp-user"
+    ansible_default_user: str = "ec2-user"   # fallback for unknown cloud tags
     # S3 storage
     ansible_s3_bucket: str = ""
     ansible_s3_region: str = ""

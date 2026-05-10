@@ -324,7 +324,16 @@ class Settings(BaseSettings):
     ansible_gcs_bucket: str = ""              # GCS bucket name
     ansible_gcs_prefix: str = "config-mgmt"
     ansible_runner: str = "local"              # "local" | "ecs" | "aci" | "gcp"
-    ansible_default_user: str = "ec2-user"    # SSH user for cloud runner targets
+    # Per-cloud SSH user for Ansible cloud runner targets. Each cloud's stock
+    # AMI / image family ships with a different default username, so a single
+    # global value would be wrong for at least two of the three. Set the one
+    # matching the runner you actually use; the others can stay at the default.
+    # ansible_default_user is the final fallback when an unrecognised cloud
+    # tag is passed (rare, ad-hoc target paths).
+    ansible_aws_user: str = "ec2-user"        # Amazon Linux default; "ubuntu" / "admin" for other AMIs
+    ansible_azure_user: str = "azureuser"     # Azure Linux VM convention
+    ansible_gcp_user: str = "gcp-user"        # matches the gcp_ssh_username default
+    ansible_default_user: str = "ec2-user"    # fallback for unknown cloud tags
     ansible_ecs_cluster: str = "bt-jumpoint"  # Shares cluster with BT Jumpoint
     ansible_ecs_task_family: str = "ansible-config-mgmt"
     ansible_ecs_image: str = "willhallonline/ansible:latest"

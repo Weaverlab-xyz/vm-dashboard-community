@@ -162,7 +162,18 @@ async def get_cloud_targets(current_user: User = Depends(get_current_user)):
     except Exception as exc:
         logger.debug("cloud-targets: GCP cache read failed: %s", exc)
 
-    return targets
+    # Per-cloud default SSH user — surfaced as a *suggestion* the run-asset
+    # form pre-fills when the operator picks a cloud target. Not a secret;
+    # logged-in user is sufficient auth.
+    default_user = _cfg("ansible_default_user") or "ec2-user"
+    return {
+        **targets,
+        "default_users": {
+            "aws":   _cfg("ansible_aws_user")   or default_user,
+            "azure": _cfg("ansible_azure_user") or default_user,
+            "gcp":   _cfg("ansible_gcp_user")   or default_user,
+        },
+    }
 
 
 # ── Playbook / asset run ───────────────────────────────────────────────────────
@@ -205,11 +216,6 @@ async def _run_job(
         # Cloud runners only support bare-IP targets and .yml playbooks.
         # Fall back to local for group targets or non-playbook assets.
         if runner != "local" and is_adhoc and is_playbook:
-            resolved_user = (
-                ansible_user
-                or _cfg("ansible_default_user")
-                or "ec2-user"
-            )
             key_cloud = cloud or runner  # "ecs"→"aws", "aci"→"azure", etc.
             if runner == "ecs":
                 key_cloud = "aws"
@@ -217,6 +223,25 @@ async def _run_job(
                 key_cloud = "azure"
             elif runner == "gcp":
                 key_cloud = "gcp"
+
+            # SSH user: explicit ansible_user from the run request wins,
+            # else the per-cloud config key, else the global fallback.
+            cloud_user_keys = {
+                "aws":   "ansible_aws_user",
+                "azure": "ansible_azure_user",
+                "gcp":   "ansible_gcp_user",
+            }
+            cloud_default = {
+                "aws":   "ec2-user",
+                "azure": "azureuser",
+                "gcp":   "gcp-user",
+            }.get(key_cloud, "ec2-user")
+            resolved_user = (
+                ansible_user
+                or _cfg(cloud_user_keys.get(key_cloud, ""))
+                or _cfg("ansible_default_user")
+                or cloud_default
+            )
 
             job_service.update_progress(db, job_id, 10, f"Retrieving SSH key for {key_cloud.upper()}…")
             ssh_key_pem: str | None = None
