@@ -295,6 +295,22 @@ A few things the community edition does *not* try to do. They're
 SaaS priorities — see [docs/saas-comparison.md](saas-comparison.md)
 for the hosted-edition philosophy.
 
+- **One-click cross-cloud promote.** Community automates *build →
+  export → register*; the "Promote" button still returns manual steps
+  for the cross-storage copy and the native VM-import. SaaS runs both
+  as durable workflows (Temporal-backed) so a 45-minute AWS-to-Azure
+  import survives dashboard restarts without orphan tasks and without
+  the operator having to babysit `aws ec2 import-image` polling. Same
+  registry, same /images UI, same audit trail — the `automated` flag
+  on the promote response just flips to `true` and the manual steps
+  pane is replaced with a live job stream.
+- **Live cloud-side pre-flight.** Community's pre-flight checks read
+  local config only (artefact recorded, format compat, cross-storage
+  required, target creds configured). SaaS adds live probes —
+  vmimport role exists, VM-import quota available, source blob
+  HEAD-reachable — that need replay-safe state to be useful. The
+  community model surfaces those as warnings *after* the import fails;
+  SaaS surfaces them *before*.
 - **Local image builds via Azure Arc.** The hosted edition can
   register an Azure Arc runbook worker on your on-prem build host and
   run image builds *there*, against your VMware / Hyper-V hypervisor,
