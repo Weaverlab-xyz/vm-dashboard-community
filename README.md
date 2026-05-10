@@ -13,6 +13,26 @@ the dashboard deploys resources into **your** accounts.
 > **Status:** private preview. This README is a placeholder — a full rewrite
 > with screenshots and a demo video lands with the public release.
 
+## How the dashboard thinks
+
+Before you spin it up, the four reference docs below explain the
+opinions baked into the codebase — what the dashboard does *for* you,
+and what discipline it expects from you. Read them in order if you're
+new to the tool; skim if you already know how this kind of platform
+works:
+
+| Doc | What's in it | Read this when |
+|---|---|---|
+| [Infrastructure as Code](docs/infrastructure-as-code.md) | The Terraform-per-deploy model, per-job state, idempotent destroy, where Packer + the sandbox bootstrappers fit. | You're about to deploy your first cloud VM and want to know what's actually running underneath. |
+| [Config Management](docs/config-management.md) | Why one-shot ephemeral runners are the security argument, the .yml/.sh/.ps1/.rpm/.deb wrap rules, on-prem vs cloud target paths. | You're about to run an Ansible job and want to know how the runner handles secrets and isolation. |
+| [Secrets Management](docs/secrets-management.md) | Tier 1 (encrypted DB) → Tier 2 (external vault) → Tier 3 (vault-backed runtime checkout); migration UI; why the JWT root key can't move. | You're deciding where to store cloud credentials and how to evolve that over time. |
+| [Storage Management](docs/storage-management.md) | Four backends (S3, Azure Blob, GCS, Local/UNC); migration; why backends are a deployment-level concern, not a per-feature one. | You're about to enable the Ansible feature flag — storage is a prerequisite. |
+
+Together they're the philosophy of the tool: **declarative,
+version-controlled, idempotent, ephemeral where it should be and
+persistent where it must be**. The features in the rest of this
+README make sense in that frame.
+
 ## Quick start
 
 **Windows** (PowerShell 7):
@@ -43,9 +63,8 @@ file on disk.
 
 See [docs/ONBOARDING.md](docs/ONBOARDING.md) for the full walkthrough,
 including AWS IAM setup, Azure service principal setup, and the
-feature-test checklist. See [docs/secrets-management.md](docs/secrets-management.md)
-for the credential storage model, external vault migration, and security
-best practices.
+feature-test checklist. The "How the dashboard thinks" docs above
+go deeper on each axis once you're up and running.
 
 ## What's included
 
@@ -70,14 +89,16 @@ after first login — only if you have the backing infrastructure:
 - **Microsoft Hyper-V** — VM management via WinRM
 - **Nutanix AHV** — VM management via Prism Central REST API
 - **XCP-ng / XenServer** — VM management via XAPI
-- **Ansible provisioning runner** — run playbooks and assets (`.sh` scripts,
-  `.rpm`/`.deb` packages) stored in S3, Azure Blob, or GCS against any target:
-  on-premises hypervisors (Proxmox, vSphere, Hyper-V, Nutanix, XCP-ng) *or*
-  cloud VMs (EC2, Azure VMs, GCE). The local Docker runner needs no extra
-  infrastructure — assets are fetched from cloud storage and Ansible SSHes
-  directly to the target. Cloud runners (ECS, ACI, GCP Cloud Run Jobs) are
-  available when you need the runner network-local to the VM.
-  See [docs/integrations/ansible.md](docs/integrations/ansible.md).
+- **Ansible provisioning runner** — run playbooks (`.yml`) and provisioning
+  assets (`.sh`, `.ps1`, `.rpm`, `.deb`) against any target: on-premises
+  hypervisors (Proxmox, vSphere, Hyper-V, Nutanix, XCP-ng) *or* cloud VMs
+  (EC2, Azure VMs, GCE). Assets live in storage you configure on `/storage`
+  (AWS S3 / Azure Blob / GCS / Local-or-UNC); the runner can be local Docker
+  for any target reachable from the dashboard host, or AWS ECS / Azure ACI /
+  GCP Cloud Run Jobs for VMs in private cloud subnets. Every runner is
+  one-shot — see [docs/config-management.md](docs/config-management.md) for
+  the security argument. Integration setup in
+  [docs/integrations/ansible.md](docs/integrations/ansible.md).
 - **BeyondTrust Password Safe and/or PRA** — secret retrieval and session recording
 - **BeyondTrust EPM for Linux (EPM-L)** — list and build agent packages, one-click sync of `.rpm`/`.deb` packages to your Ansible asset bucket, installation-token issuance for new endpoint registration. See [docs/integrations/epml.md](docs/integrations/epml.md).
 - **Portainer CE** — on-prem Docker host management
