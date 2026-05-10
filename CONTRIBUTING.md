@@ -99,11 +99,58 @@ you're working in.
 - Adding multi-tenant assumptions or hosted-only auth flows. Those
   belong in the SaaS codebase.
 
-## Testing with integrations off
+## Testing
 
-The community edition must run with every optional flag off. Before
-merging, verify in a fresh `.env` with only `AWS_*`, `AZURE_*`,
-`GCP_*` set:
+### Where the community can help most
+
+The maintainer's home lab covers **VMware Workstation** and
+**Hyper-V** — those two integrations get exercised on every PR that
+touches `web_dashboard/`. The other on-premises hypervisor integrations
+ship without regular hands-on coverage:
+
+- **Proxmox VE** (`/proxmox`, `services/proxmox_service.py`)
+- **VMware vSphere / ESXi** (`/vsphere`, `services/vsphere_service.py`)
+- **Nutanix AHV** (`/nutanix`, `services/nutanix_service.py`)
+- **XCP-ng / XenServer** (`/xcpng`, `services/xcpng_service.py`)
+
+If you run any of those in your own lab, you are exactly the person we
+need help from. Useful contributions include:
+
+- **Bug reports** — file an issue when an action fails. Include the
+  hypervisor version, what you clicked, the job's `extra_data` from
+  `/api/jobs/{id}`, and the relevant lines from `docker compose logs app`.
+- **PRs that fix what you find.** SDK behaviour drifts across hypervisor
+  versions — a fix that worked for Nutanix Prism 6.x may need rework
+  for 7.x. Patches that only widen the supported version matrix are
+  welcome.
+- **PRs that round out a feature** — add list/deploy/destroy parity
+  with the other hypervisors. The pattern is consistent across services
+  so a vSphere addition usually maps cleanly to a Proxmox one.
+- **Smoke-test reports on a PR.** Even a "ran the new vSphere change
+  against ESXi 8.0 U2 in my lab, deploy worked, destroy worked, list
+  shows correct power state" comment closes the gap that the maintainer
+  can't.
+
+To enable an integration, flip its flag in `Settings → Integrations`
+(or in the setup wizard on first run) and fill in the connection
+details. The relevant Appendix in [docs/ONBOARDING.md](docs/ONBOARDING.md)
+has the field-by-field walkthrough for each hypervisor.
+
+When you report a finding, please mention:
+
+- Hypervisor product + version (e.g. `Proxmox VE 8.2.4`,
+  `Nutanix AOS 6.10`, `vCenter 8.0 U2`).
+- Whether you reached the failure via the UI or via `/api/...` directly.
+- Whether the same action works against another hypervisor in your lab,
+  if you have one — helps us tell "dashboard bug" from "this hypervisor
+  rejects the call we make".
+
+### Sanity check: integrations off
+
+Independent of the above, the community edition must still **boot
+cleanly** with every optional flag off — no contributor PR should
+break that. Before merging, verify in a fresh `.env` with only `AWS_*`,
+`AZURE_*`, `GCP_*` set:
 
 - `/api/features` returns all optional flags `false`.
 - Feature-gated pages 404:
