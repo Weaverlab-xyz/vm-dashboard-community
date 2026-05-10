@@ -23,8 +23,9 @@ migration UI so you can copy assets between them without downtime.
 | **AWS S3** | S3 bucket + key prefix | Teams already on AWS; cheapest at scale |
 | **Azure Blob Storage** | Storage account + container + blob prefix | Teams on Azure; integrates with Azure SP creds |
 | **Google Cloud Storage** | GCS bucket + object prefix | Teams on GCP; same SA creds as Compute Engine |
+| **Local Filesystem / UNC** | Filesystem path inside the dashboard container, or a corporate `\\server\share` UNC accessed via SMB | On-prem hypervisor targets when a corporate file share is the source of truth — see [the constraint below](#constraint-local-backend-only-works-with-the-local-ansible-runner) |
 
-All three are interchangeable from the dashboard's perspective. Switching
+All four are interchangeable from the dashboard's perspective. Switching
 backends does **not** move data; the Migrate panel does that explicitly,
 and only deletes from the source if you ask it to (today: never — see
 "Migration semantics" below).
@@ -131,6 +132,33 @@ deploys, set those creds first in `/setup` or the matching Settings panel.
 |---|---|
 | **Bucket** | Required. The bucket must already exist. |
 | **Object prefix** | Defaults to `config-mgmt`. |
+
+### Local Filesystem / UNC
+
+| Field | Notes |
+|---|---|
+| **Path** | Required. Either a path inside the dashboard container (typically a bind-mounted host directory like `/srv/playbooks`) or a UNC `\\server\share[\subpath]`. UNC paths use the SMB protocol via the `smbprotocol` Python library — no host-side mount or `cifs-utils` required. |
+| **Username / Password / Domain** | Optional, used only for UNC. Username may be `bare` or `DOMAIN\user`; the Domain field is convenience for the latter. Password is encrypted at rest in the dashboard's config DB. |
+
+#### Constraint: local backend only works with the local Ansible runner
+
+The Local backend is only selectable when **Settings → Ansible → Runner**
+is set to **Local Docker (default)**. Cloud Ansible runners (AWS ECS,
+Azure ACI, GCP Cloud Run) live in cloud-only VPCs/VNets and have no
+network path back to a corporate file server. If you tried to use a UNC
+path from a Fargate task, the SMB connection would fail at TCP 445 and
+the run would error before the playbook ran.
+
+The dashboard enforces this in two places:
+
+- **Frontend**: the radio button for the Local backend is disabled with
+  an inline note when the runner isn't `local`.
+- **Backend**: `PATCH /api/storage/config` returns a 400 if you try to
+  set `storage_active_backend=local` while `ansible_runner != local`.
+
+Concrete fit: if your contributors test on-prem hypervisor targets
+(Proxmox VE, vSphere/ESXi, Nutanix AHV, XCP-ng, Hyper-V) with playbooks
+hosted on a corporate share, the Local backend is the right choice.
 
 After filling in fields, click **Test connection** to probe the backend —
 it lists the bucket/container as a quick reachability check. Save with

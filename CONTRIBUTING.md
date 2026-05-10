@@ -145,6 +145,25 @@ When you report a finding, please mention:
   if you have one — helps us tell "dashboard bug" from "this hypervisor
   rejects the call we make".
 
+### Local Filesystem / UNC storage backend
+
+The Local backend on `/storage` is a contributor-testing focus area for
+the same reason: the maintainer's lab uses it for VMware Workstation and
+Hyper-V, but any combination of (on-prem hypervisor) × (corporate file
+share) is worth testing. Specifically useful:
+
+- **UNC paths** against domain-joined Windows file servers (`\\server\share`
+  with AD username + password / domain).
+- **Bind-mounted host directories** for Linux dashboard hosts pointing at
+  e.g. `/mnt/playbooks` exposed in `docker-compose.yml`.
+- The constraint that this backend **only activates when the Ansible
+  runner is `local`** — if you switch the runner to ECS/ACI/Cloud Run,
+  the radio button on `/storage` should disable with a useful tooltip,
+  and `PATCH /api/storage/config` should return 400. Confirm both.
+
+See [docs/storage-management.md → Local Filesystem / UNC](docs/storage-management.md#local-filesystem--unc)
+for the field-by-field walkthrough.
+
 ### Sanity check: integrations off
 
 Independent of the above, the community edition must still **boot

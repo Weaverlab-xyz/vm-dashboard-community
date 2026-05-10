@@ -325,6 +325,16 @@ class Settings(BaseSettings):
     storage_azure_prefix: str = "config-mgmt"
     storage_gcs_bucket: str = ""
     storage_gcs_prefix: str = "config-mgmt"
+    # Local filesystem / SMB UNC backend. Path can be either a normal
+    # filesystem path inside the container (e.g. a bind-mounted host dir)
+    # or a UNC \\server\share[\subpath]. UNC paths are read via the
+    # smbprotocol library — no host-side mount required. Username /
+    # password / domain only apply to UNC paths. Only useful for
+    # on-premises hypervisor targets — see storage-management.md.
+    storage_local_path: str = ""
+    storage_local_username: str = ""
+    storage_local_password: str = ""           # encrypted at rest
+    storage_local_domain: str = ""
 
     ansible_runner: str = "local"              # "local" | "ecs" | "aci" | "gcp"
     # Per-cloud SSH user for Ansible cloud runner targets. Each cloud's stock

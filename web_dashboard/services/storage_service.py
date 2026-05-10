@@ -45,7 +45,7 @@ _TYPE_MAP = {
     ".deb":  "deb",
 }
 
-BACKENDS = ("s3", "azure_blob", "gcs")
+BACKENDS = ("s3", "azure_blob", "gcs", "local")
 
 
 def _asset_type(name: str) -> str:
@@ -84,6 +84,8 @@ def _backend_configured(backend: str) -> bool:
         return bool(_cfg("storage_azure_account"))
     if backend == "gcs":
         return bool(_cfg("storage_gcs_bucket"))
+    if backend == "local":
+        return bool(_cfg("storage_local_path"))
     return False
 
 
@@ -261,12 +263,152 @@ def _gcs_delete_sync(name: str) -> None:
     blob.delete()
 
 
+# ── Local filesystem / SMB UNC backend ───────────────────────────────────────
+# Path may be either a normal filesystem path (anything not starting with
+# `\\` or `//`) or a UNC `\\server\share[\subpath]`. UNC paths are read via
+# the smbprotocol library — no host-side mount required. Credentials only
+# apply to UNC. Only useful for on-prem hypervisor targets running off the
+# local Ansible runner; cloud runners (ECS / ACI / Cloud Run) have no path
+# back to a corporate file server.
+
+
+def _is_unc(path: str) -> bool:
+    return path.startswith("\\\\") or path.startswith("//")
+
+
+def _local_smb_register():
+    """Configure smbclient session with the optional credentials. Idempotent
+    — registering the same server twice replaces the previous registration."""
+    import smbclient
+    user = _cfg("storage_local_username")
+    pwd  = _cfg("storage_local_password")
+    dom  = _cfg("storage_local_domain")
+    if user:
+        # Pull the server name out of the UNC path so we can register
+        # per-server credentials. smbclient uses these on subsequent ops.
+        path = _cfg("storage_local_path").replace("\\", "/").lstrip("/")
+        server = path.split("/", 1)[0] if path else ""
+        if server:
+            smbclient.register_session(
+                server,
+                username=(f"{dom}\\{user}" if dom else user),
+                password=pwd or None,
+            )
+
+
+def _local_normalise(path: str) -> str:
+    """Smbclient accepts either back- or forward-slash. We normalise to
+    backslashes for UNC and forward-slashes for filesystem to match each
+    OS's idiom in error messages."""
+    return path.rstrip("/\\")
+
+
+def _local_path_for(name: str) -> str:
+    base = _local_normalise(_cfg("storage_local_path"))
+    sep = "\\" if _is_unc(base) else "/"
+    return f"{base}{sep}{name}"
+
+
+def _local_list_sync() -> list[dict]:
+    base = _local_normalise(_cfg("storage_local_path"))
+    if not base:
+        raise StorageError("storage_local_path is not set.")
+    if _is_unc(base):
+        import smbclient
+        _local_smb_register()
+        out = []
+        try:
+            for entry in smbclient.scandir(base):
+                if not entry.is_file():
+                    continue
+                if any(entry.name.endswith(ext) for ext in _ASSET_EXTENSIONS):
+                    try:
+                        size = entry.stat().st_size
+                    except Exception:
+                        size = 0
+                    out.append({"name": entry.name, "type": _asset_type(entry.name), "size": size})
+        except Exception as e:
+            raise StorageError(f"SMB list failed for {base}: {e}") from e
+    else:
+        import os
+        if not os.path.isdir(base):
+            raise StorageError(f"Path '{base}' does not exist or is not a directory.")
+        out = []
+        for name in os.listdir(base):
+            full = os.path.join(base, name)
+            if not os.path.isfile(full):
+                continue
+            if any(name.endswith(ext) for ext in _ASSET_EXTENSIONS):
+                out.append({"name": name, "type": _asset_type(name), "size": os.path.getsize(full)})
+    return sorted(out, key=lambda x: x["name"])
+
+
+def _local_fetch_sync(name: str) -> bytes:
+    target = _local_path_for(name)
+    if _is_unc(target):
+        import smbclient
+        _local_smb_register()
+        try:
+            with smbclient.open_file(target, mode="rb") as f:
+                return f.read()
+        except Exception as e:
+            raise StorageError(f"SMB read failed for {target}: {e}") from e
+    else:
+        try:
+            with open(target, "rb") as f:
+                return f.read()
+        except FileNotFoundError:
+            raise StorageError(f"Asset '{name}' not found at {target}.")
+        except Exception as e:
+            raise StorageError(f"Local read failed for {target}: {e}") from e
+
+
+def _local_upload_sync(name: str, data: bytes) -> None:
+    target = _local_path_for(name)
+    if _is_unc(target):
+        import smbclient
+        _local_smb_register()
+        try:
+            with smbclient.open_file(target, mode="wb") as f:
+                f.write(data)
+        except Exception as e:
+            raise StorageError(f"SMB write failed for {target}: {e}") from e
+    else:
+        import os
+        os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
+        try:
+            with open(target, "wb") as f:
+                f.write(data)
+        except Exception as e:
+            raise StorageError(f"Local write failed for {target}: {e}") from e
+
+
+def _local_delete_sync(name: str) -> None:
+    target = _local_path_for(name)
+    if _is_unc(target):
+        import smbclient
+        _local_smb_register()
+        try:
+            smbclient.remove(target)
+        except Exception as e:
+            raise StorageError(f"SMB delete failed for {target}: {e}") from e
+    else:
+        import os
+        try:
+            os.remove(target)
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            raise StorageError(f"Local delete failed for {target}: {e}") from e
+
+
 # ── Backend dispatch table ────────────────────────────────────────────────────
 
 _BACKEND_OPS = {
     "s3":         {"list": _s3_list_sync,    "fetch": _s3_fetch_sync,    "upload": _s3_upload_sync,    "delete": _s3_delete_sync},
     "azure_blob": {"list": _azure_list_sync, "fetch": _azure_fetch_sync, "upload": _azure_upload_sync, "delete": _azure_delete_sync},
     "gcs":        {"list": _gcs_list_sync,   "fetch": _gcs_fetch_sync,   "upload": _gcs_upload_sync,   "delete": _gcs_delete_sync},
+    "local":      {"list": _local_list_sync, "fetch": _local_fetch_sync, "upload": _local_upload_sync, "delete": _local_delete_sync},
 }
 
 

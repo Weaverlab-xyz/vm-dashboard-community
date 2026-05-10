@@ -37,6 +37,7 @@ _REQUIRED_FIELDS = {
     "s3":         ["storage_s3_bucket"],
     "azure_blob": ["storage_azure_account"],
     "gcs":        ["storage_gcs_bucket"],
+    "local":      ["storage_local_path"],
 }
 
 # All editable per-backend config keys, in canonical order.
@@ -44,7 +45,13 @@ _BACKEND_KEYS = {
     "s3":         ["storage_s3_bucket",       "storage_s3_region",       "storage_s3_prefix"],
     "azure_blob": ["storage_azure_account",   "storage_azure_container", "storage_azure_prefix"],
     "gcs":        ["storage_gcs_bucket",      "storage_gcs_prefix"],
+    "local":      ["storage_local_path",      "storage_local_username",  "storage_local_password",
+                   "storage_local_domain"],
 }
+
+# Backends that only make sense for the local Ansible runner (no cloud
+# runner has a network path back to a corporate file server).
+_LOCAL_RUNNER_ONLY_BACKENDS = {"local"}
 
 
 def _cfg_get(key: str) -> str:
@@ -66,18 +73,32 @@ async def list_backends(current_user: User = Depends(get_current_user)):
     Ansible feature-flag prereq gate."""
     cfgd = set(storage_service.configured_backends())
     active = storage_service.active_backend()
+    runner = _cfg_get("ansible_runner") or "local"
+    labels = {
+        "s3":         "AWS S3",
+        "azure_blob": "Azure Blob Storage",
+        "gcs":        "Google Cloud Storage",
+        "local":      "Local Filesystem / UNC",
+    }
     return {
         "backends": [
             {
-                "id":         b,
-                "label":      {"s3": "AWS S3", "azure_blob": "Azure Blob Storage", "gcs": "Google Cloud Storage"}[b],
-                "configured": b in cfgd,
-                "active":     b == active,
+                "id":            b,
+                "label":         labels[b],
+                "configured":    b in cfgd,
+                "active":        b == active,
+                # Whether this backend is selectable given the current runner.
+                # Local-runner-only backends (UNC) refuse to activate when a
+                # cloud runner is selected; surface that to the UI so the
+                # radio can disable with a useful tooltip.
+                "selectable":    b not in _LOCAL_RUNNER_ONLY_BACKENDS or runner == "local",
+                "runner_locked": b in _LOCAL_RUNNER_ONLY_BACKENDS,
             }
             for b in BACKENDS
         ],
-        "active":     active,
-        "any_active": bool(active),
+        "active":         active,
+        "any_active":     bool(active),
+        "ansible_runner": runner,
     }
 
 
@@ -106,6 +127,10 @@ class StorageConfigPatch(BaseModel):
     storage_azure_prefix:     str | None = None
     storage_gcs_bucket:     str | None = None
     storage_gcs_prefix:     str | None = None
+    storage_local_path:     str | None = None
+    storage_local_username: str | None = None
+    storage_local_password: str | None = None
+    storage_local_domain:   str | None = None
 
 
 @router.patch("/config")
@@ -134,6 +159,22 @@ async def patch_config(
                         detail=(
                             f"Cannot activate '{chosen}' — missing required field "
                             f"'{k}'. Set it before activating this backend."
+                        ),
+                    )
+            # Local-runner-only backends (e.g. UNC) won't work with cloud
+            # runners — the runner has no network path back to the file
+            # server. Reject the activation explicitly so users don't get
+            # mysterious "tcp 445 timed out" errors at job time.
+            if chosen in _LOCAL_RUNNER_ONLY_BACKENDS:
+                runner = _cfg_get("ansible_runner") or "local"
+                if runner != "local":
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"Backend '{chosen}' only works with the local "
+                            f"Ansible runner. Settings → Ansible currently "
+                            f"selects '{runner}'. Switch the runner to "
+                            f"'local' before activating this backend."
                         ),
                     )
     _cfg_set_many(raw)

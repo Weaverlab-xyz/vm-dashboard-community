@@ -37,15 +37,25 @@
 
     <div class="space-y-3 mb-6">
       <template x-for="b in backends" :key="b.id">
-        <label class="flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition"
-               :class="cfg.storage_active_backend === b.id ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:border-gray-300'">
-          <input type="radio" :value="b.id" x-model="cfg.storage_active_backend" class="mt-0.5 accent-blue-600">
+        <label class="flex items-start gap-3 p-3 rounded-lg border transition"
+               :class="[
+                 cfg.storage_active_backend === b.id ? 'border-blue-500 bg-blue-50' : 'border-gray-200',
+                 b.selectable ? 'cursor-pointer hover:border-gray-300' : 'opacity-60 cursor-not-allowed',
+               ]"
+               :title="!b.selectable ? 'This backend only works with ansible_runner=local. Switch runner in Settings → Ansible.' : ''">
+          <input type="radio" :value="b.id" x-model="cfg.storage_active_backend"
+                 :disabled="!b.selectable"
+                 class="mt-0.5 accent-blue-600">
           <div class="flex-1">
             <div class="flex items-center gap-2">
               <span class="text-sm font-medium text-gray-800" x-text="b.label"></span>
               <span x-show="b.configured" class="text-[10px] uppercase font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded">configured</span>
               <span x-show="b.active"     class="text-[10px] uppercase font-semibold text-blue-700  bg-blue-50  border border-blue-200  px-1.5 py-0.5 rounded">active</span>
+              <span x-show="b.runner_locked" x-cloak class="text-[10px] uppercase font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded">local runner only</span>
             </div>
+            <p x-show="!b.selectable" x-cloak class="text-xs text-amber-700 mt-1">
+              Requires <code class="bg-amber-50 px-1 rounded">ansible_runner=local</code> (current: <span class="font-mono" x-text="ansibleRunner"></span>). Switch in Settings → Ansible to enable.
+            </p>
           </div>
         </label>
       </template>
@@ -131,6 +141,51 @@
                 class="text-xs px-3 py-1.5 border border-gray-300 rounded-lg hover:bg-white disabled:opacity-50">
           <span x-show="!testing.gcs">Test connection</span>
           <span x-show="testing.gcs" x-cloak>Testing…</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- ── Local Filesystem / UNC fields ─────────────────────────────────── -->
+    <div class="grid grid-cols-2 gap-4 mb-5 p-4 bg-gray-50 rounded-lg border border-gray-200">
+      <div class="col-span-2 flex items-center gap-2">
+        <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide">Local Filesystem / UNC</p>
+        <span class="text-[10px] uppercase font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded">local runner only</span>
+      </div>
+      <p class="col-span-2 text-xs text-gray-500 -mt-1">
+        Either a path inside the dashboard container (typically a bind-mounted host
+        directory) or a UNC share like <code class="bg-white px-1 rounded">\\fileserver\share\playbooks</code>.
+        UNC reads go through the SMB protocol — no host-side mount needed. Username /
+        password / domain are only used for UNC.
+      </p>
+      <div class="col-span-2">
+        <label class="block text-sm font-medium text-gray-700 mb-1">Path</label>
+        <input type="text" x-model="cfg.storage_local_path"
+               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+               placeholder="\\fileserver\share\playbooks">
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Username <span class="text-gray-400 font-normal">(UNC only)</span></label>
+        <input type="text" x-model="cfg.storage_local_username"
+               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+               placeholder="svc-dashboard">
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Password <span class="text-gray-400 font-normal">(UNC only, encrypted)</span></label>
+        <input type="password" x-model="cfg.storage_local_password"
+               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+               placeholder="••••••••">
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Domain <span class="text-gray-400 font-normal">(UNC only)</span></label>
+        <input type="text" x-model="cfg.storage_local_domain"
+               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+               placeholder="CORP">
+      </div>
+      <div class="col-span-2">
+        <button @click="testBackend('local')" :disabled="!cfg.storage_local_path || testing.local"
+                class="text-xs px-3 py-1.5 border border-gray-300 rounded-lg hover:bg-white disabled:opacity-50">
+          <span x-show="!testing.local">Test connection</span>
+          <span x-show="testing.local" x-cloak>Testing…</span>
         </button>
       </div>
     </div>
@@ -323,11 +378,14 @@ function storagePage() {
       storage_s3_bucket: '', storage_s3_region: '', storage_s3_prefix: '',
       storage_azure_account: '', storage_azure_container: '', storage_azure_prefix: '',
       storage_gcs_bucket: '', storage_gcs_prefix: '',
+      storage_local_path: '', storage_local_username: '',
+      storage_local_password: '', storage_local_domain: '',
     },
+    ansibleRunner: 'local',
     assets: [],
     loadingAssets: false,
     saving: false,
-    testing: { s3: false, azure_blob: false, gcs: false },
+    testing: { s3: false, azure_blob: false, gcs: false, local: false },
     migrate: { source: '', target: '', overwrite: false },
     migrating: false,
     migrationResult: null,
@@ -341,7 +399,12 @@ function storagePage() {
     },
 
     backendLabel(id) {
-      return ({s3: 'AWS S3', azure_blob: 'Azure Blob Storage', gcs: 'Google Cloud Storage'})[id] || id;
+      return ({
+        s3:         'AWS S3',
+        azure_blob: 'Azure Blob Storage',
+        gcs:        'Google Cloud Storage',
+        local:      'Local Filesystem / UNC',
+      })[id] || id;
     },
 
     formatBytes(n) {
@@ -357,6 +420,7 @@ function storagePage() {
         const data = await API.get('/api/storage/backends');
         this.backends = data.backends || [];
         this.activeBackend = data.active || '';
+        this.ansibleRunner = data.ansible_runner || 'local';
       } catch (e) {
         this.showToast(e.message || 'Failed to load backends', 'error');
       }
