@@ -6,6 +6,8 @@ encodes, and how the on-premises and cloud paths fit together.
 
 The companion docs:
 
+- [Infrastructure as Code](infrastructure-as-code.md) — how the dashboard
+  stands the infra up in the first place
 - [Secrets Management](secrets-management.md) — where credentials live
 - [Storage Management](storage-management.md) — where playbooks and
   assets live

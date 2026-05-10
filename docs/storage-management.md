@@ -9,7 +9,9 @@ small, sensitive, and live in a per-key encrypted store. Storage holds
 bigger, mostly-non-sensitive payloads (playbooks, shell scripts, package
 files) that need to be readable by Ansible runners across hosts. For the
 philosophy and best-practice side of running playbooks against your
-fleet, see [Config Management](config-management.md).
+fleet, see [Config Management](config-management.md). For the IaC layer
+that stood the targets up in the first place, see
+[Infrastructure as Code](infrastructure-as-code.md).
 
 ---
 

@@ -406,6 +406,9 @@ of filesystem permissions.
 - **Config management** — philosophy, best practices, and how the
   dashboard's ephemeral-runner approach reduces secret sprawl:
   [`docs/config-management.md`](config-management.md).
+- **Infrastructure as code** — how cloud VMs, Shell Jumps, and images
+  are provisioned through Terraform/Packer modules with per-job state:
+  [`docs/infrastructure-as-code.md`](infrastructure-as-code.md).
 
 ---
 
