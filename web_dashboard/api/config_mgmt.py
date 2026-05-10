@@ -25,8 +25,8 @@ from ..database import get_db
 from ..auth import get_current_user
 from ..models.user import User
 from ..services import job_service
-from ..services import ansible_storage
-from ..services.ansible_storage import AnsibleStorageError
+from ..services import storage_service
+from ..services.storage_service import StorageError
 from ..services import ansible_local_service
 
 logger = logging.getLogger(__name__)
@@ -39,8 +39,8 @@ router = APIRouter(prefix="/api/config-mgmt", tags=["config-mgmt"])
 async def list_assets(current_user: User = Depends(get_current_user)):
     """List all available assets (.yml, .sh, .deb, .rpm) from configured storage."""
     try:
-        return await ansible_storage.list_assets()
-    except AnsibleStorageError as e:
+        return await storage_service.list_assets()
+    except StorageError as e:
         raise HTTPException(status_code=502, detail=str(e))
 
 
@@ -48,8 +48,8 @@ async def list_assets(current_user: User = Depends(get_current_user)):
 async def list_playbooks(current_user: User = Depends(get_current_user)):
     """List playbook names (.yml/.yaml) from configured storage — back-compat alias."""
     try:
-        return await ansible_storage.list_playbooks()
-    except AnsibleStorageError as e:
+        return await storage_service.list_playbooks()
+    except StorageError as e:
         raise HTTPException(status_code=502, detail=str(e))
 
 
@@ -70,8 +70,8 @@ async def upload_asset(
     except Exception:
         raise HTTPException(status_code=400, detail="content_b64 is not valid base64.")
     try:
-        await ansible_storage.upload_asset(req.filename, data)
-    except AnsibleStorageError as e:
+        await storage_service.upload_asset(req.filename, data)
+    except StorageError as e:
         raise HTTPException(status_code=502, detail=str(e))
     return {"ok": True, "filename": req.filename, "size": len(data)}
 
@@ -204,8 +204,8 @@ async def _run_job(
     try:
         job_service.update_progress(db, job_id, 5, f"Fetching asset '{asset}'…")
         try:
-            asset_b64 = await ansible_storage.fetch_asset_b64(asset)
-        except AnsibleStorageError as e:
+            asset_b64 = await storage_service.fetch_asset_b64(asset)
+        except StorageError as e:
             job_service.set_failed(db, job_id, f"Asset storage error: {e}")
             return
 

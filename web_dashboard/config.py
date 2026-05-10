@@ -311,18 +311,21 @@ class Settings(BaseSettings):
                 result[k.strip()] = val.strip()
         return result
 
-    # Ansible Config Management — playbook storage (configure ONE backend)
-    # S3 backend
-    ansible_s3_bucket: str = ""               # e.g. "infra-config-mgmt"
-    ansible_s3_region: str = ""               # defaults to aws_region if blank
-    ansible_s3_prefix: str = "config-mgmt"
-    # Azure Blob Storage backend
-    ansible_azure_storage_account: str = ""   # storage account name
-    ansible_azure_container: str = "playbooks"
-    ansible_azure_prefix: str = "config-mgmt"
-    # GCS backend
-    ansible_gcs_bucket: str = ""              # GCS bucket name
-    ansible_gcs_prefix: str = "config-mgmt"
+    # Cloud object storage. Originally introduced for Ansible playbooks; now
+    # exposed as its own /storage page so future features can reuse the same
+    # backend abstraction. Three backends supported — S3, Azure Blob, GCS —
+    # configured independently. The active backend is the one selected via
+    # storage_active_backend; others can be configured-but-idle for migration.
+    storage_active_backend: str = ""           # "s3" | "azure_blob" | "gcs"
+    storage_s3_bucket: str = ""                # e.g. "infra-asset-store"
+    storage_s3_region: str = ""                # defaults to aws_region if blank
+    storage_s3_prefix: str = "config-mgmt"
+    storage_azure_account: str = ""            # storage account name
+    storage_azure_container: str = "playbooks"
+    storage_azure_prefix: str = "config-mgmt"
+    storage_gcs_bucket: str = ""
+    storage_gcs_prefix: str = "config-mgmt"
+
     ansible_runner: str = "local"              # "local" | "ecs" | "aci" | "gcp"
     # Per-cloud SSH user for Ansible cloud runner targets. Each cloud's stock
     # AMI / image family ships with a different default username, so a single

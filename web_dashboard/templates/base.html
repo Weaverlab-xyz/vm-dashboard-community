@@ -85,6 +85,9 @@
           <a x-show="$store.auth.isAdmin" href="/secrets"
              class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
              {% if request.url.path.startswith('/secrets') %}{{ nav_active }}{% endif %}">Secrets</a>
+          <a x-show="$store.auth.isAdmin" href="/storage"
+             class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
+             {% if request.url.path.startswith('/storage') %}{{ nav_active }}{% endif %}">Storage</a>
         </div>
 
         <!-- User menu -->

@@ -320,17 +320,9 @@ class AnsibleFeatureConfig(BaseModel):
     ansible_azure_user: str = "azureuser"
     ansible_gcp_user: str = "gcp-user"
     ansible_default_user: str = "ec2-user"   # fallback for unknown cloud tags
-    # S3 storage
-    ansible_s3_bucket: str = ""
-    ansible_s3_region: str = ""
-    ansible_s3_prefix: str = "config-mgmt"
-    # Azure Blob storage
-    ansible_azure_storage_account: str = ""
-    ansible_azure_container: str = "playbooks"
-    ansible_azure_prefix: str = "config-mgmt"
-    # GCS storage
-    ansible_gcs_bucket: str = ""
-    ansible_gcs_prefix: str = "config-mgmt"
+    # NOTE: storage backend config moved to its own /storage page; the
+    # Ansible feature requires a configured + active storage backend before
+    # `enabled` can be flipped on (UI-enforced; see /api/storage/backends).
     # AWS ECS runner
     ansible_ecs_cluster: str = "bt-jumpoint"
     ansible_ecs_task_family: str = "ansible-config-mgmt"

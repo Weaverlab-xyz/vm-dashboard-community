@@ -177,8 +177,9 @@
           <!-- Toggle -->
           <button
             @click="toggleIntegration(intg)"
-            :disabled="intg.saving"
-            class="relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors disabled:opacity-50"
+            :disabled="intg.saving || (intg.key === 'ansible' && !intg.enabled && !ansibleEnableAllowed)"
+            :title="intg.key === 'ansible' && !intg.enabled && !ansibleEnableAllowed ? 'Configure storage on /storage first' : ''"
+            class="relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             :class="intg.enabled ? 'bg-blue-600' : 'bg-gray-300'"
           >
             <span class="inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform"
@@ -189,6 +190,12 @@
           <div class="flex-1 min-w-0">
             <p class="text-sm font-medium text-gray-900" x-text="intg.label"></p>
             <p class="text-xs text-gray-500 leading-snug" x-text="intg.desc"></p>
+            <p x-show="intg.key === 'ansible' && !intg.enabled && !ansibleEnableAllowed" x-cloak
+               class="text-xs text-amber-600 leading-snug mt-0.5">
+              Configure asset storage on
+              <a href="/storage" class="underline">/storage</a>
+              before enabling.
+            </p>
           </div>
 
           <!-- Configure button (only for features with extra config) -->
@@ -448,65 +455,24 @@
             </div>
           </div>
 
-          <!-- Playbook storage — S3 -->
-          <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide pt-1">Playbook Storage — S3</p>
-          <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">S3 Bucket</label>
-            <input type="text" x-model="panelCfg.ansible_s3_bucket"
-                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                   placeholder="infra-config-mgmt">
-          </div>
-          <div class="grid grid-cols-2 gap-3">
-            <div>
-              <label class="block text-sm font-medium text-gray-700 mb-1">S3 Region <span class="text-gray-400 font-normal">(blank = AWS region)</span></label>
-              <input type="text" x-model="panelCfg.ansible_s3_region"
-                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                     placeholder="us-east-2">
-            </div>
-            <div>
-              <label class="block text-sm font-medium text-gray-700 mb-1">S3 Key Prefix</label>
-              <input type="text" x-model="panelCfg.ansible_s3_prefix"
-                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                     placeholder="config-mgmt">
-            </div>
-          </div>
-
-          <!-- Playbook storage — Azure Blob -->
-          <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide pt-1">Playbook Storage — Azure Blob Storage</p>
-          <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">Storage Account</label>
-            <input type="text" x-model="panelCfg.ansible_azure_storage_account"
-                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                   placeholder="myorgplaybooks">
-          </div>
-          <div class="grid grid-cols-2 gap-3">
-            <div>
-              <label class="block text-sm font-medium text-gray-700 mb-1">Container</label>
-              <input type="text" x-model="panelCfg.ansible_azure_container"
-                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                     placeholder="playbooks">
-            </div>
-            <div>
-              <label class="block text-sm font-medium text-gray-700 mb-1">Blob Prefix</label>
-              <input type="text" x-model="panelCfg.ansible_azure_prefix"
-                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                     placeholder="config-mgmt">
-            </div>
-          </div>
-
-          <!-- Playbook storage — GCS -->
-          <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide pt-1">Playbook Storage — GCS</p>
-          <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">GCS Bucket</label>
-            <input type="text" x-model="panelCfg.ansible_gcs_bucket"
-                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                   placeholder="my-org-config-mgmt">
-          </div>
-          <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">GCS Prefix</label>
-            <input type="text" x-model="panelCfg.ansible_gcs_prefix"
-                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                   placeholder="config-mgmt">
+          <!-- Storage backend pointer + prereq gate -->
+          <div class="rounded-lg border p-4"
+               :class="storageReady ? 'border-emerald-200 bg-emerald-50' : 'border-amber-200 bg-amber-50'">
+            <p class="text-xs font-semibold uppercase tracking-wide mb-1"
+               :class="storageReady ? 'text-emerald-700' : 'text-amber-700'">
+              Asset storage <span x-show="storageReady" x-cloak>— configured</span>
+              <span x-show="!storageReady" x-cloak>— required</span>
+            </p>
+            <p class="text-sm text-gray-700 mb-2" x-show="storageReady" x-cloak>
+              Active backend: <strong x-text="storageBackendLabel"></strong>. Enable
+              the Ansible feature flag below to start running playbooks.
+            </p>
+            <p class="text-sm text-gray-700 mb-2" x-show="!storageReady" x-cloak>
+              The Ansible feature flag can't be turned on until at least one
+              storage backend is configured and selected as active. Configure
+              storage on the dedicated <a href="/storage" class="text-blue-600 hover:underline">/storage</a>
+              page, then return here to enable Ansible.
+            </p>
           </div>
 
           <!-- Azure ACI runner -->
@@ -1025,11 +991,22 @@ function settingsPage() {
     panelError: '',
     panelCfg: {},
 
+    // Storage backend prereq state — populated by GET /api/storage/backends
+    // on page load (gates the Ansible enable toggle in the integrations
+    // list) and refreshed when the Ansible panel opens (renders the
+    // configured/active hint inside the panel body).
+    storageReady: false,
+    storageBackendLabel: '',
+    // Mirror flag for the toggle — kept separate so the panel's hint can
+    // refresh independently of the toggle state.
+    ansibleEnableAllowed: false,
+
     async init() {
       requireAuth();
       await this.loadProfile();
       await this.loadCredentials();
       await this.loadFeatureFlags();
+      await this.loadStorageStatus();   // gates the Ansible enable toggle
     },
 
     async loadProfile() {
@@ -1196,10 +1173,28 @@ function settingsPage() {
         this.panelCfg = await API.get(`/api/setup/feature/${intg.key}`);
         // Remove the 'enabled' key — that's controlled by the toggle, not the form
         delete this.panelCfg.enabled;
+        // Ansible requires a configured + active storage backend before enable.
+        if (intg.key === 'ansible') {
+          await this.loadStorageStatus();
+        }
       } catch (e) {
         this.panelError = 'Failed to load configuration: ' + e.message;
       } finally {
         this.panelLoading = false;
+      }
+    },
+
+    async loadStorageStatus() {
+      try {
+        const data = await API.get('/api/storage/backends');
+        this.storageReady = !!data.any_active;
+        this.ansibleEnableAllowed = this.storageReady;
+        const active = (data.backends || []).find(b => b.active);
+        this.storageBackendLabel = active ? active.label : '';
+      } catch (e) {
+        this.storageReady = false;
+        this.ansibleEnableAllowed = false;
+        this.storageBackendLabel = '';
       }
     },
 

@@ -104,7 +104,7 @@ async def get_job_logs(
     from ..services import ansible_service
     from ..services.ansible_service import AnsibleError
 
-    region = settings.ansible_s3_region or settings.aws_region
+    region = settings.storage_s3_region or settings.aws_region
     try:
         lines = await ansible_service.fetch_cloudwatch_logs(region, log_group, log_stream)
         return {"lines": lines, "log_group": log_group, "log_stream": log_stream}

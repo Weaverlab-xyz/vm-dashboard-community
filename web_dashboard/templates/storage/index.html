@@ -1,0 +1,406 @@
+{% extends "base.html" %}
+
+{% block title %}Storage – Infrastructure Management{% endblock %}
+
+{% block content %}
+<div class="max-w-5xl mx-auto py-8 px-4" x-data="storagePage()" x-init="init()">
+
+  <div class="flex items-center justify-between mb-1">
+    <h1 class="text-2xl font-bold text-gray-800">Storage</h1>
+    <span x-show="activeBackend" x-cloak
+          class="inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
+      <span class="h-1.5 w-1.5 rounded-full bg-emerald-500"></span>
+      Active: <span x-text="backendLabel(activeBackend)"></span>
+    </span>
+  </div>
+  <p class="text-sm text-gray-500 mb-8">
+    Cloud object storage for the dashboard's playbooks, scripts, and other
+    assets. Configure one or more backends; pick one as active. Use
+    <strong>Migrate</strong> to copy assets between backends — the source
+    is preserved so you can verify before deleting.
+  </p>
+
+  <!-- Toast -->
+  <div x-show="toast" x-cloak x-transition
+       :class="toastType === 'error' ? 'bg-red-50 border-red-200 text-red-700' : 'bg-green-50 border-green-200 text-green-700'"
+       class="mb-6 border rounded-lg px-4 py-3 text-sm" x-text="toast"></div>
+
+  <!-- ── Active backend picker ─────────────────────────────────────────────── -->
+  <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
+    <h2 class="text-base font-semibold text-gray-700 mb-1">Backend</h2>
+    <p class="text-sm text-gray-500 mb-5">
+      The active backend is what new uploads write to and what features (such as
+      Ansible) read from. Backends with required fields filled in will show
+      <span class="text-emerald-700 font-medium">configured</span>; the active
+      one is highlighted.
+    </p>
+
+    <div class="space-y-3 mb-6">
+      <template x-for="b in backends" :key="b.id">
+        <label class="flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition"
+               :class="cfg.storage_active_backend === b.id ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:border-gray-300'">
+          <input type="radio" :value="b.id" x-model="cfg.storage_active_backend" class="mt-0.5 accent-blue-600">
+          <div class="flex-1">
+            <div class="flex items-center gap-2">
+              <span class="text-sm font-medium text-gray-800" x-text="b.label"></span>
+              <span x-show="b.configured" class="text-[10px] uppercase font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded">configured</span>
+              <span x-show="b.active"     class="text-[10px] uppercase font-semibold text-blue-700  bg-blue-50  border border-blue-200  px-1.5 py-0.5 rounded">active</span>
+            </div>
+          </div>
+        </label>
+      </template>
+    </div>
+
+    <!-- ── S3 fields ──────────────────────────────────────────────────────── -->
+    <div class="grid grid-cols-3 gap-4 mb-5 p-4 bg-gray-50 rounded-lg border border-gray-200">
+      <p class="col-span-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">AWS S3</p>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Bucket</label>
+        <input type="text" x-model="cfg.storage_s3_bucket"
+               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+               placeholder="infra-asset-store">
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Region <span class="text-gray-400 font-normal">(blank → AWS region)</span></label>
+        <input type="text" x-model="cfg.storage_s3_region"
+               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+               placeholder="us-east-2">
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Key Prefix</label>
+        <input type="text" x-model="cfg.storage_s3_prefix"
+               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+               placeholder="config-mgmt">
+      </div>
+      <div class="col-span-3">
+        <button @click="testBackend('s3')" :disabled="!cfg.storage_s3_bucket || testing.s3"
+                class="text-xs px-3 py-1.5 border border-gray-300 rounded-lg hover:bg-white disabled:opacity-50">
+          <span x-show="!testing.s3">Test connection</span>
+          <span x-show="testing.s3" x-cloak>Testing…</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- ── Azure fields ──────────────────────────────────────────────────── -->
+    <div class="grid grid-cols-3 gap-4 mb-5 p-4 bg-gray-50 rounded-lg border border-gray-200">
+      <p class="col-span-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Azure Blob Storage</p>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Storage Account</label>
+        <input type="text" x-model="cfg.storage_azure_account"
+               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+               placeholder="myassets">
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Container</label>
+        <input type="text" x-model="cfg.storage_azure_container"
+               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+               placeholder="playbooks">
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Blob Prefix</label>
+        <input type="text" x-model="cfg.storage_azure_prefix"
+               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+               placeholder="config-mgmt">
+      </div>
+      <div class="col-span-3">
+        <button @click="testBackend('azure_blob')" :disabled="!cfg.storage_azure_account || testing.azure_blob"
+                class="text-xs px-3 py-1.5 border border-gray-300 rounded-lg hover:bg-white disabled:opacity-50">
+          <span x-show="!testing.azure_blob">Test connection</span>
+          <span x-show="testing.azure_blob" x-cloak>Testing…</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- ── GCS fields ────────────────────────────────────────────────────── -->
+    <div class="grid grid-cols-2 gap-4 mb-5 p-4 bg-gray-50 rounded-lg border border-gray-200">
+      <p class="col-span-2 text-xs font-semibold text-gray-500 uppercase tracking-wide">Google Cloud Storage</p>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Bucket</label>
+        <input type="text" x-model="cfg.storage_gcs_bucket"
+               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+               placeholder="my-asset-bucket">
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Object Prefix</label>
+        <input type="text" x-model="cfg.storage_gcs_prefix"
+               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+               placeholder="config-mgmt">
+      </div>
+      <div class="col-span-2">
+        <button @click="testBackend('gcs')" :disabled="!cfg.storage_gcs_bucket || testing.gcs"
+                class="text-xs px-3 py-1.5 border border-gray-300 rounded-lg hover:bg-white disabled:opacity-50">
+          <span x-show="!testing.gcs">Test connection</span>
+          <span x-show="testing.gcs" x-cloak>Testing…</span>
+        </button>
+      </div>
+    </div>
+
+    <button @click="saveConfig()" :disabled="saving"
+            class="bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-4 py-2 rounded-lg disabled:opacity-50">
+      <span x-show="!saving">Save configuration</span>
+      <span x-show="saving" x-cloak>Saving…</span>
+    </button>
+  </div>
+
+  <!-- ── Asset list (active backend) ──────────────────────────────────────── -->
+  <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
+    <div class="flex items-center justify-between mb-4">
+      <h2 class="text-base font-semibold text-gray-700">Stored assets</h2>
+      <button @click="loadAssets()" :disabled="loadingAssets"
+              class="text-xs px-3 py-1.5 border border-gray-300 rounded-lg hover:bg-gray-50 disabled:opacity-50">
+        <span x-show="!loadingAssets">Refresh</span>
+        <span x-show="loadingAssets" x-cloak>Loading…</span>
+      </button>
+    </div>
+    <div x-show="!activeBackend" class="text-sm text-gray-400 py-6 text-center">
+      No active backend selected.
+    </div>
+    <div x-show="activeBackend && assets.length === 0 && !loadingAssets" class="text-sm text-gray-400 py-6 text-center">
+      No assets in <span x-text="backendLabel(activeBackend)"></span> yet. Use the
+      <a class="text-blue-600 hover:underline" href="/config-mgmt">Config Management</a>
+      page to upload playbooks and scripts.
+    </div>
+    <div x-show="assets.length > 0" class="overflow-x-auto">
+      <table class="min-w-full text-sm">
+        <thead>
+          <tr class="text-left text-xs uppercase text-gray-500 border-b border-gray-200">
+            <th class="pb-2 pr-4">Name</th>
+            <th class="pb-2 pr-4">Type</th>
+            <th class="pb-2 pr-4 text-right">Size</th>
+            <th class="pb-2"></th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-100">
+          <template x-for="a in assets" :key="a.name">
+            <tr class="hover:bg-gray-50">
+              <td class="py-2 pr-4 font-mono" x-text="a.name"></td>
+              <td class="py-2 pr-4">
+                <span class="text-[10px] uppercase font-semibold px-1.5 py-0.5 rounded bg-gray-100 text-gray-700" x-text="a.type"></span>
+              </td>
+              <td class="py-2 pr-4 text-right text-gray-500" x-text="formatBytes(a.size || 0)"></td>
+              <td class="py-2 text-right">
+                <button @click="deleteAsset(a.name)" class="text-xs text-red-600 hover:text-red-800">Delete</button>
+              </td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ── Migrate ──────────────────────────────────────────────────────────── -->
+  <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+    <h2 class="text-base font-semibold text-gray-700 mb-1">Migrate between backends</h2>
+    <p class="text-sm text-gray-500 mb-5">
+      Copy every asset from a source backend to a target backend. The source is
+      <strong>preserved</strong> — verify the target is healthy, then delete from
+      the source manually if you want a clean cutover. Files already present in
+      the target are skipped unless you tick <em>Overwrite existing</em>.
+    </p>
+
+    <div class="grid grid-cols-2 gap-4 mb-4">
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Source</label>
+        <select x-model="migrate.source"
+                class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+          <option value="">Select source…</option>
+          <template x-for="b in backends.filter(x => x.configured)" :key="b.id">
+            <option :value="b.id" x-text="b.label"></option>
+          </template>
+        </select>
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Target</label>
+        <select x-model="migrate.target"
+                class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+          <option value="">Select target…</option>
+          <template x-for="b in backends.filter(x => x.configured && x.id !== migrate.source)" :key="b.id">
+            <option :value="b.id" x-text="b.label"></option>
+          </template>
+        </select>
+      </div>
+    </div>
+
+    <label class="flex items-center gap-2 mb-4 text-sm text-gray-700">
+      <input type="checkbox" x-model="migrate.overwrite" class="accent-blue-600">
+      Overwrite existing assets in target
+    </label>
+
+    <button @click="runMigrate()"
+            :disabled="!migrate.source || !migrate.target || migrate.source === migrate.target || migrating"
+            class="bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-4 py-2 rounded-lg disabled:opacity-50">
+      <span x-show="!migrating">Migrate assets</span>
+      <span x-show="migrating" x-cloak>Migrating…</span>
+    </button>
+
+    <div x-show="migrationResult" x-cloak class="mt-4 p-4 bg-gray-50 rounded-lg border border-gray-200 text-sm">
+      <p class="font-semibold mb-2" x-text="migrationResult?.summary"></p>
+      <details x-show="(migrationResult?.copied || []).length > 0" class="mb-1">
+        <summary class="cursor-pointer text-emerald-700">Copied (<span x-text="migrationResult?.copied?.length"></span>)</summary>
+        <ul class="ml-4 mt-1 text-xs text-gray-600 font-mono">
+          <template x-for="n in migrationResult?.copied || []" :key="n">
+            <li x-text="n"></li>
+          </template>
+        </ul>
+      </details>
+      <details x-show="(migrationResult?.skipped || []).length > 0" class="mb-1">
+        <summary class="cursor-pointer text-gray-600">Skipped (<span x-text="migrationResult?.skipped?.length"></span>)</summary>
+        <ul class="ml-4 mt-1 text-xs text-gray-600 font-mono">
+          <template x-for="n in migrationResult?.skipped || []" :key="n">
+            <li x-text="n"></li>
+          </template>
+        </ul>
+      </details>
+      <details x-show="(migrationResult?.failed || []).length > 0">
+        <summary class="cursor-pointer text-red-700">Failed (<span x-text="migrationResult?.failed?.length"></span>)</summary>
+        <ul class="ml-4 mt-1 text-xs text-gray-600 font-mono">
+          <template x-for="f in migrationResult?.failed || []" :key="f.name">
+            <li><span x-text="f.name"></span> — <span class="text-red-600" x-text="f.error"></span></li>
+          </template>
+        </ul>
+      </details>
+    </div>
+  </div>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function storagePage() {
+  return {
+    backends: [],
+    activeBackend: '',
+    cfg: {
+      storage_active_backend: '',
+      storage_s3_bucket: '', storage_s3_region: '', storage_s3_prefix: '',
+      storage_azure_account: '', storage_azure_container: '', storage_azure_prefix: '',
+      storage_gcs_bucket: '', storage_gcs_prefix: '',
+    },
+    assets: [],
+    loadingAssets: false,
+    saving: false,
+    testing: { s3: false, azure_blob: false, gcs: false },
+    migrate: { source: '', target: '', overwrite: false },
+    migrating: false,
+    migrationResult: null,
+    toast: '', toastType: 'success',
+
+    async init() {
+      requireAuth();
+      await Promise.all([this.loadBackends(), this.loadConfig(), this.loadAssets()]);
+    },
+
+    backendLabel(id) {
+      return ({s3: 'AWS S3', azure_blob: 'Azure Blob Storage', gcs: 'Google Cloud Storage'})[id] || id;
+    },
+
+    formatBytes(n) {
+      if (!n) return '—';
+      const u = ['B', 'KB', 'MB', 'GB'];
+      let i = 0; let v = n;
+      while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+      return `${v.toFixed(i === 0 ? 0 : 1)} ${u[i]}`;
+    },
+
+    async loadBackends() {
+      try {
+        const data = await API.get('/api/storage/backends');
+        this.backends = data.backends || [];
+        this.activeBackend = data.active || '';
+      } catch (e) {
+        this.showToast(e.message || 'Failed to load backends', 'error');
+      }
+    },
+
+    async loadConfig() {
+      try {
+        const data = await API.get('/api/storage/config');
+        this.cfg = { ...this.cfg, ...data };
+      } catch (e) {
+        this.showToast(e.message || 'Failed to load config', 'error');
+      }
+    },
+
+    async loadAssets() {
+      if (!this.activeBackend) { this.assets = []; return; }
+      this.loadingAssets = true;
+      try {
+        const data = await API.get('/api/storage/list');
+        this.assets = data.items || [];
+      } catch (e) {
+        this.showToast(e.message || 'Failed to list assets', 'error');
+        this.assets = [];
+      } finally {
+        this.loadingAssets = false;
+      }
+    },
+
+    async saveConfig() {
+      this.saving = true;
+      try {
+        await API.patch('/api/storage/config', this.cfg);
+        this.showToast('Saved.');
+        await Promise.all([this.loadBackends(), this.loadAssets()]);
+      } catch (e) {
+        this.showToast(e.message || 'Save failed', 'error');
+      } finally {
+        this.saving = false;
+      }
+    },
+
+    async testBackend(backend) {
+      this.testing[backend] = true;
+      try {
+        // Save first so the test reads the latest values.
+        await API.patch('/api/storage/config', this.cfg);
+        const res = await API.post('/api/storage/test', { backend });
+        if (res.ok) {
+          this.showToast(`${this.backendLabel(backend)}: OK (${res.count} item${res.count === 1 ? '' : 's'})`);
+        } else {
+          this.showToast(`${this.backendLabel(backend)}: ${res.error}`, 'error');
+        }
+      } catch (e) {
+        this.showToast(e.message || 'Test failed', 'error');
+      } finally {
+        this.testing[backend] = false;
+      }
+    },
+
+    async deleteAsset(name) {
+      if (!confirm(`Delete '${name}' from ${this.backendLabel(this.activeBackend)}?`)) return;
+      try {
+        await API.del(`/api/storage/asset/${encodeURIComponent(name)}`);
+        this.showToast(`Deleted ${name}`);
+        await this.loadAssets();
+      } catch (e) {
+        this.showToast(e.message || 'Delete failed', 'error');
+      }
+    },
+
+    async runMigrate() {
+      this.migrating = true;
+      this.migrationResult = null;
+      try {
+        this.migrationResult = await API.post('/api/storage/migrate', {
+          source:    this.migrate.source,
+          target:    this.migrate.target,
+          overwrite: !!this.migrate.overwrite,
+        });
+        this.showToast(this.migrationResult.summary);
+      } catch (e) {
+        this.showToast(e.message || 'Migration failed', 'error');
+      } finally {
+        this.migrating = false;
+      }
+    },
+
+    showToast(msg, type = 'success') {
+      this.toast = msg;
+      this.toastType = type;
+      setTimeout(() => { this.toast = ''; }, 4500);
+    },
+  };
+}
+</script>
+{% endblock %}
