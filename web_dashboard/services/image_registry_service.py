@@ -255,6 +255,127 @@ def compute_manual_steps(image: dict, target_cloud: str) -> str:
     return f"No manual-steps template for {src} → {target_cloud}. Add one in image_registry_service.py."
 
 
+# ── Pre-flight ────────────────────────────────────────────────────────────────
+#
+# Pure-Python checks (artefact recorded, format compat, cross-storage required,
+# target creds configured) that surface obvious blockers before the operator
+# runs the manual import. No network I/O — every probe reads local state, so
+# the call returns synchronously in <100ms and there's no SaaS-only durability
+# concern. Live cloud-side checks (vmimport role exists, quota available) can
+# be layered on later without changing the response shape.
+
+def _format_compat_check(fmt: str, target: str) -> dict:
+    matrix = {
+        "aws":   {"vhd": "pass", "vmdk": "pass", "raw": "pass", "ova": "pass"},
+        "azure": {"vhd": "pass"},
+        "gcp":   {"vhd": "pass", "raw": "pass", "vmdk": "warn"},
+    }
+    status = matrix.get(target, {}).get(fmt) or ("fail" if fmt else "warn")
+    if not fmt:
+        detail = "artefact_format is unset; the import API needs to know the format."
+    elif status == "pass":
+        detail = f"{target.upper()} import accepts {fmt.upper()} natively."
+    elif status == "warn":
+        detail = f"{target.upper()} import accepts {fmt.upper()} but conversion is slower or less reliable."
+    else:
+        detail = f"Format {fmt.upper()} not supported by {target.upper()} import. Convert with qemu-img first."
+    return {"name": "Artefact format compatibility", "status": status, "detail": detail}
+
+
+def _cross_storage_check(src: str, target: str) -> dict:
+    return {
+        "name":   "Cross-storage copy required",
+        "status": "warn",
+        "detail": (
+            f"Artefact is in {src.upper()} storage; {target.upper()} import expects it in "
+            f"{target.upper()} storage. Run azcopy/aws s3 cp/gsutil per the manual steps "
+            f"(Phase 3 will automate this)."
+        ),
+    }
+
+
+def _aws_creds_configured() -> dict:
+    from . import config_service
+    have = bool(config_service.get("aws_access_key_id")) and bool(config_service.get("aws_secret_access_key"))
+    return {
+        "name":   "Target credentials configured",
+        "status": "pass" if have else "fail",
+        "detail": (
+            "AWS credentials present in config." if have
+            else "aws_access_key_id / aws_secret_access_key not set. Configure in the setup wizard."
+        ),
+    }
+
+
+def _azure_creds_configured() -> dict:
+    from . import config_service
+    have = all(config_service.get(k) for k in (
+        "azure_client_id", "azure_client_secret", "azure_tenant_id", "azure_subscription_id"
+    ))
+    return {
+        "name":   "Target credentials configured",
+        "status": "pass" if have else "fail",
+        "detail": (
+            "Azure service-principal credentials present." if have
+            else "azure_client_id/secret/tenant/subscription not set. Configure in the setup wizard."
+        ),
+    }
+
+
+def _gcp_creds_configured() -> dict:
+    from . import config_service
+    have = bool(config_service.get("gcp_project_id")) and bool(config_service.get("gcp_service_account_json"))
+    return {
+        "name":   "Target credentials configured",
+        "status": "pass" if have else "fail",
+        "detail": (
+            "GCP project + service-account JSON present." if have
+            else "gcp_project_id / gcp_service_account_json not set. Configure in the setup wizard."
+        ),
+    }
+
+
+def compute_preflight_checks(image: dict, target_cloud: str) -> list[dict]:
+    """Return a list of {name, status, detail} pre-flight items.
+
+    Each item has status in {"pass", "warn", "fail"}. None of the checks
+    block the operator from proceeding to the manual-steps view; they're
+    advisory. Phase 4 (SaaS-only) will add live cloud-side checks
+    (vmimport role probe, quota probe, source-blob HEAD).
+    """
+    if target_cloud not in VALID_CLOUDS:
+        raise ImageRegistryError(f"Unknown target_cloud '{target_cloud}'.")
+
+    checks: list[dict] = []
+    artefact_url = image.get("artefact_url")
+    if artefact_url:
+        checks.append({
+            "name":   "Artefact recorded",
+            "status": "pass",
+            "detail": artefact_url,
+        })
+    else:
+        checks.append({
+            "name":   "Artefact recorded",
+            "status": "fail",
+            "detail": "No artefact_url on this image. Re-run the build (Phase 2 auto-export) or set the URL manually.",
+        })
+
+    checks.append(_format_compat_check((image.get("artefact_format") or "").lower(), target_cloud))
+
+    src = image["source_cloud"]
+    if src != target_cloud:
+        checks.append(_cross_storage_check(src, target_cloud))
+
+    checks.append({
+        "aws":   _aws_creds_configured,
+        "azure": _azure_creds_configured,
+        "gcp":   _gcp_creds_configured,
+    }[target_cloud]())
+
+    return checks
+
+
 def record_promotion(
     db: Session,
     image_id: str,

@@ -153,11 +153,39 @@ still completes; the operator can promote manually from /images. Phase 3
 will add cross-backend copy so any active backend can host any cloud's
 exports.
 
+**Phase 2 Step 4 (shipped):** the **Promote** modal runs an advisory
+**pre-flight check** the moment you pick a target cloud. The checks
+are pure-Python (no cloud-side API calls, returns in <100ms) and cover
+the local-state blockers an operator can resolve before pasting the
+manual import commands:
+
+- Artefact recorded — `artefact_url` and `artefact_format` are set
+- Format compatibility — VHD/VMDK/RAW/OVA matrix per target cloud
+- Cross-storage copy required — flagged whenever the source and target
+  clouds differ (the artefact lives in the source cloud's storage; the
+  target's import API expects it in the target's storage)
+- Target credentials configured — the dashboard's config store has
+  the credentials the target cloud's import API will use
+
+Failing checks don't block — the manual-steps button still works —
+but they're surfaced visually so the operator doesn't run a 30-minute
+import only to discover credentials were missing. The endpoint is
+`POST /api/images/{id}/preflight` with `{target_cloud}` body; response
+shape is `{checks: [{name, status: pass|warn|fail, detail}]}`.
+
+Live cloud-side pre-flight (vmimport IAM role probe, quota probe,
+source-blob HEAD) is **SaaS-only** in the hosted edition — the
+durability guarantees needed to safely run cross-cloud VM-import tasks
+(survive dashboard restart mid-poll, multi-region replay) don't fit
+the community edition's single-PostgreSQL-container model.
+
 **Still manual:** cross-cloud *promotion* (importing the registered VHD
 into a different cloud's native image format) — the "Promote" button
-still returns manual steps for the import side. Phase 4 will replace
-that with native VM-import automation; the API shape doesn't change,
-just the `automated` flag flips.
+still returns manual steps for the import side. Native VM-import
+automation is **SaaS-only** for the same reason as live pre-flight: an
+in-flight import task whose dashboard polling state is lost on restart
+becomes an orphan resource. The community edition stays at "automate
+build + export, surface promote as guided manual steps."
 
 **Why a manual-steps phase first.** Cross-cloud VM import is a real
 multi-step process: format conversion (VHD ↔ VMDK ↔ RAW), per-cloud

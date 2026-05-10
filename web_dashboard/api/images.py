@@ -93,6 +93,37 @@ async def delete_image(
     return {"ok": True}
 
 
+# ── Pre-flight ───────────────────────────────────────────────────────────────
+
+@router.post("/{image_id}/preflight")
+async def preflight_image(
+    image_id: str,
+    payload: PromoteImageRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Return advisory pre-flight checks for promoting `image_id` to a target.
+
+    Pure-Python: artefact recorded, format compat, cross-storage requirement,
+    target credentials configured. Synchronous (<100ms). None of these block
+    the operator from running the actual promote — they're surfaced in the
+    promote modal so blockers are visible before the operator copies the
+    manual import commands."""
+    if payload.target_cloud not in VALID_CLOUDS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown target_cloud '{payload.target_cloud}'.",
+        )
+    image = image_registry_service.get_image(db, image_id)
+    if not image:
+        raise HTTPException(status_code=404, detail=f"Image {image_id} not found.")
+    try:
+        checks = image_registry_service.compute_preflight_checks(image, payload.target_cloud)
+    except ImageRegistryError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"image_id": image_id, "target_cloud": payload.target_cloud, "checks": checks}
+
+
 # ── Promote ──────────────────────────────────────────────────────────────────
 
 @router.post("/{image_id}/promote")

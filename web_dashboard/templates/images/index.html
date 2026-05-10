@@ -202,7 +202,7 @@
           <label class="block text-sm font-medium text-gray-700 mb-1">Target cloud</label>
           <div class="flex gap-2">
             <template x-for="c in ['aws','azure','gcp']" :key="c">
-              <button @click="promoteTarget = c"
+              <button @click="selectTarget(c)"
                       :disabled="c === promoteImage?.source_cloud"
                       class="flex-1 px-3 py-2 text-sm border rounded-lg transition disabled:opacity-30"
                       :class="promoteTarget === c ? 'border-blue-600 bg-blue-50' : 'border-gray-300 hover:bg-gray-50'">
@@ -218,6 +218,28 @@
           <input type="text" x-model="promoteRegion"
                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
                  placeholder="us-west-2 / westus2 / us-central1">
+        </div>
+
+        <!-- Pre-flight check results (Step 4) -->
+        <div x-show="preflightLoading || preflightChecks.length > 0" x-cloak
+             class="border border-gray-200 rounded-lg p-3 bg-gray-50">
+          <div class="text-xs font-semibold text-gray-700 mb-2">Pre-flight checks</div>
+          <div x-show="preflightLoading" x-cloak class="text-xs text-gray-500">Running…</div>
+          <ul class="space-y-1.5">
+            <template x-for="chk in preflightChecks" :key="chk.name">
+              <li class="flex items-start gap-2 text-xs">
+                <span class="inline-block w-14 flex-shrink-0 text-center font-mono uppercase rounded px-1 py-0.5"
+                      :class="preflightBadge(chk.status)" x-text="chk.status"></span>
+                <span>
+                  <span class="font-medium text-gray-800" x-text="chk.name"></span>
+                  <span class="text-gray-600 ml-1" x-text="'— ' + chk.detail"></span>
+                </span>
+              </li>
+            </template>
+          </ul>
+          <p x-show="preflightHasFail" x-cloak class="mt-2 text-xs text-red-700">
+            Resolve the failing checks before running the manual steps — they will block the import.
+          </p>
         </div>
 
         <button @click="submitPromote()" :disabled="!promoteTarget || promoting"
@@ -259,6 +281,9 @@ function imagesPage() {
     promoteRegion: '',
     promoting: false,
     promoteResult: null,
+    preflightLoading: false,
+    preflightChecks: [],
+    get preflightHasFail() { return this.preflightChecks.some(c => c.status === 'fail'); },
     form: { name:'', version:'', description:'', source_cloud:'aws', source_region:'', source_image_id:'', artefact_url:'', artefact_format:'' },
     toast: '', toastType: 'success',
 
@@ -325,7 +350,38 @@ function imagesPage() {
       this.promoteTarget = '';
       this.promoteRegion = '';
       this.promoteResult = null;
+      this.preflightChecks = [];
+      this.preflightLoading = false;
       this.showPromote = true;
+    },
+
+    preflightBadge(status) {
+      return ({
+        pass: 'bg-emerald-100 text-emerald-700',
+        warn: 'bg-amber-100 text-amber-700',
+        fail: 'bg-red-100 text-red-700',
+      })[status] || 'bg-gray-100 text-gray-700';
+    },
+
+    async selectTarget(c) {
+      this.promoteTarget = c;
+      if (!this.promoteImage || c === this.promoteImage.source_cloud) {
+        this.preflightChecks = [];
+        return;
+      }
+      this.preflightLoading = true;
+      this.preflightChecks = [];
+      try {
+        const data = await API.post(`/api/images/${this.promoteImage.id}/preflight`, {
+          target_cloud:  c,
+          target_region: this.promoteRegion || null,
+        });
+        this.preflightChecks = data.checks || [];
+      } catch (e) {
+        this.showToast(e.message || 'Pre-flight failed', 'error');
+      } finally {
+        this.preflightLoading = false;
+      }
     },
 
     async submitPromote() {
