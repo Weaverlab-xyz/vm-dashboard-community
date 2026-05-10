@@ -324,7 +324,7 @@ def _feature_flags() -> dict:
 # Settings → Integrations panel takes effect immediately — no restart needed.
 
 from fastapi import Depends  # noqa: E402
-from .api import auth, jobs, websocket, aws, azure, gcp, packer, mfa, tokens, users, groups, setup, secrets, storage  # noqa: E402
+from .api import auth, jobs, websocket, aws, azure, gcp, packer, mfa, tokens, users, groups, setup, secrets, storage, images  # noqa: E402
 from .api.mcp_server import get_mcp_asgi_app  # noqa: E402
 
 
@@ -343,6 +343,7 @@ def _feature_gate(flag: str):
 app.include_router(setup.router)
 app.include_router(secrets.router)
 app.include_router(storage.router)
+app.include_router(images.router)
 app.include_router(auth.router)
 app.include_router(mfa.router)
 app.include_router(tokens.router)
@@ -552,6 +553,11 @@ async def secrets_page(request: Request):
 @app.get("/storage", response_class=HTMLResponse, include_in_schema=False)
 async def storage_page(request: Request):
     return templates.TemplateResponse("storage/index.html", {"request": request, **_feature_flags()})
+
+
+@app.get("/images", response_class=HTMLResponse, include_in_schema=False)
+async def images_page(request: Request):
+    return templates.TemplateResponse("images/index.html", {"request": request, **_feature_flags()})
 
 
 @app.get("/users", response_class=HTMLResponse, include_in_schema=False)

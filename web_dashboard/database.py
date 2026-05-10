@@ -285,6 +285,51 @@ class ContainerStateCache(Base):
     last_updated = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
 
 
+class RegisteredImage(Base):
+    """Operator-registered image artefacts. The dashboard's source-of-truth
+    record for "this image exists, here's where the artefact lives, here's
+    what cloud-native images derive from it." Cross-cloud promotion records
+    are stored in `promotions` as JSON because each target carries a
+    different shape (AMI ID + region for AWS, resource ID for Azure, full
+    self_link for GCP)."""
+    __tablename__ = "registered_images"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    name = Column(String(200), nullable=False, index=True)
+    version = Column(String(64), nullable=False)
+    description = Column(Text, nullable=True)
+
+    # Where the image was first built / registered.
+    source_cloud = Column(String(20), nullable=False)        # "aws" | "azure" | "gcp"
+    source_image_id = Column(String(500), nullable=True)     # AMI / managed image / custom image ID
+    source_region = Column(String(64), nullable=True)        # AWS region / Azure location / GCP region
+
+    # Optional storage URL for the portable artefact (e.g. s3://bucket/key,
+    # https://acct.blob.core.windows.net/c/k, gs://bucket/key). Lets the
+    # promote flow re-import without re-running Packer.
+    artefact_url = Column(String(1000), nullable=True)
+    artefact_format = Column(String(20), nullable=True)      # "vhd" | "raw" | "vmdk" | "ova"
+
+    # Per-target promotion records. Shape:
+    #   { "aws":   {"image_id": "ami-…", "region": "us-east-2", "status": "completed"|"manual"|"failed", "notes": "..."},
+    #     "azure": {"image_id": "/subscriptions/.../images/…", "status": ...},
+    #     "gcp":   {"self_link": "...", "status": ...} }
+    promotions = Column(Text, nullable=True)                 # JSON
+
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_by = Column(String(100), nullable=False)
+
+    @property
+    def promotions_dict(self) -> dict:
+        if not self.promotions:
+            return {}
+        try:
+            import json
+            return json.loads(self.promotions)
+        except Exception:
+            return {}
+
+
 # ========== DATABASE UTILITIES ==========
 
 def get_db() -> Session:

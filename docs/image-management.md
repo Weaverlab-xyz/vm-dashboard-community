@@ -124,15 +124,33 @@ The deploy forms also accept a free-text "Deploy from AMI ID / URN /
 Image URI" so you can launch from anything your account can see, not
 only the curated lists.
 
-### Storage-backed promotion (the new bit)
+### Storage-backed promotion (the lifecycle this doc anchors)
 
-The lifecycle this doc is mostly about. Source of truth: the image
-artefact (RAW / VHD / VMDK) sitting in your active storage backend.
-Targets: AMI / Managed Image / Custom Image, one or more. Promotion
-is *not* automatic — the operator picks which clouds to promote to
-and the dashboard runs the cloud-native VM-import flow against each.
+The lifecycle this doc is mostly about, surfaced on the
+**`/images`** page. Source of truth: the image artefact (RAW / VHD /
+VMDK) sitting in your active storage backend, recorded as a
+`RegisteredImage` row. Targets: AMI / Managed Image / Custom Image,
+one or more.
 
-Format expectations on each target:
+**Phase 1 (today):** the registry, the registration UI, and a
+"Promote" button that returns **operator-readable manual steps** for
+the source/target combination you pick. The operator runs the steps,
+the resulting cloud-native image ID is recorded back in the registry
+via a follow-up promote (or by editing the row). Cross-cloud
+automation is Phase 2 — the API shape doesn't change, just the
+`automated` flag flips and the dashboard runs the steps for you.
+
+**Why a manual-steps phase first.** Cross-cloud VM import is a real
+multi-step process: format conversion (VHD ↔ VMDK ↔ RAW), per-cloud
+import API (`ec2 import-image` / `az image create` / `gcloud compute
+images create`), per-cloud IAM (the dashboard's service principals
+need import-specific permissions on top of deploy permissions), and
+quota (cloud import services have separate quotas from compute).
+Surfacing the steps explicitly first lets operators validate
+permissions and quotas in their accounts before we automate against
+them.
+
+Format expectations per target:
 
 | Target | Native import format | Path |
 |---|---|---|

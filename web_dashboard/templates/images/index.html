@@ -1,0 +1,366 @@
+{% extends "base.html" %}
+
+{% block title %}Images – Infrastructure Management{% endblock %}
+
+{% block content %}
+<div class="max-w-6xl mx-auto py-8 px-4" x-data="imagesPage()" x-init="init()">
+
+  <div class="flex items-center justify-between mb-1">
+    <h1 class="text-2xl font-bold text-gray-800">Image Registry</h1>
+    <button @click="openRegister()"
+            class="bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-3 py-1.5 rounded-lg">
+      Register image
+    </button>
+  </div>
+  <p class="text-sm text-gray-500 mb-8">
+    The dashboard's record of which images exist, where their portable
+    artefacts live, and which clouds have promotions of each. Build with
+    Packer (or capture an existing instance), <strong>Register</strong>
+    here, then <strong>Promote</strong> to additional clouds. See
+    <a href="/docs/image-management.md" class="text-blue-600 hover:underline">image-management.md</a>
+    for the philosophy.
+  </p>
+
+  <!-- Toast -->
+  <div x-show="toast" x-cloak x-transition
+       :class="toastType === 'error' ? 'bg-red-50 border-red-200 text-red-700' : 'bg-green-50 border-green-200 text-green-700'"
+       class="mb-6 border rounded-lg px-4 py-3 text-sm" x-text="toast"></div>
+
+  <!-- ── Image list ─────────────────────────────────────────────────────── -->
+  <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden mb-6">
+    <div x-show="loading" x-cloak class="p-6 text-center text-sm text-gray-400">Loading…</div>
+    <div x-show="!loading && images.length === 0" x-cloak class="p-10 text-center text-sm text-gray-400">
+      No registered images yet. Click <strong>Register image</strong> above to record an existing
+      AMI, Azure Managed Image, or GCP Custom Image.
+    </div>
+    <table x-show="!loading && images.length > 0" x-cloak class="min-w-full text-sm">
+      <thead>
+        <tr class="text-left text-xs uppercase text-gray-500 bg-gray-50 border-b border-gray-200">
+          <th class="px-4 py-3">Name / version</th>
+          <th class="px-4 py-3">Source</th>
+          <th class="px-4 py-3">Promoted to</th>
+          <th class="px-4 py-3">Created</th>
+          <th class="px-4 py-3 text-right">Actions</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-gray-100">
+        <template x-for="img in images" :key="img.id">
+          <tr class="hover:bg-gray-50 align-top">
+            <td class="px-4 py-3">
+              <div class="font-medium text-gray-900" x-text="img.name"></div>
+              <div class="text-xs text-gray-500 font-mono" x-text="img.version"></div>
+              <div x-show="img.description" x-cloak class="text-xs text-gray-400 mt-1 max-w-md" x-text="img.description"></div>
+            </td>
+            <td class="px-4 py-3">
+              <span class="text-[10px] uppercase font-semibold px-1.5 py-0.5 rounded"
+                    :class="cloudBadge(img.source_cloud)" x-text="img.source_cloud"></span>
+              <div x-show="img.source_image_id" x-cloak class="text-xs text-gray-500 font-mono mt-1 truncate max-w-xs" :title="img.source_image_id" x-text="img.source_image_id"></div>
+              <div x-show="img.source_region" x-cloak class="text-xs text-gray-400" x-text="img.source_region"></div>
+            </td>
+            <td class="px-4 py-3">
+              <div class="flex flex-col gap-1">
+                <template x-for="cloud in ['aws','azure','gcp']" :key="cloud">
+                  <div x-show="cloud !== img.source_cloud" class="text-xs">
+                    <template x-if="img.promotions[cloud]">
+                      <span :class="promoStatusClass(img.promotions[cloud].status)"
+                            class="inline-block px-1.5 py-0.5 rounded font-mono">
+                        <span x-text="cloud"></span>: <span x-text="img.promotions[cloud].status"></span>
+                      </span>
+                    </template>
+                    <template x-if="!img.promotions[cloud]">
+                      <span class="text-gray-300" x-text="cloud + ': not promoted'"></span>
+                    </template>
+                  </div>
+                </template>
+              </div>
+            </td>
+            <td class="px-4 py-3 text-xs text-gray-500">
+              <div x-text="formatDate(img.created_at)"></div>
+              <div class="text-gray-400" x-text="img.created_by"></div>
+            </td>
+            <td class="px-4 py-3 text-right whitespace-nowrap">
+              <button @click="openPromote(img)"
+                      class="text-xs px-2 py-1 border border-gray-300 rounded hover:bg-gray-50">Promote</button>
+              <button @click="deleteImage(img)"
+                      class="text-xs px-2 py-1 text-red-600 hover:underline ml-1">Delete</button>
+            </td>
+          </tr>
+        </template>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- ── Register modal ─────────────────────────────────────────────────── -->
+  <div x-show="showRegister" x-cloak
+       class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+       @click.self="showRegister = false">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
+      <div class="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+        <h3 class="text-lg font-semibold">Register an existing image</h3>
+        <button @click="showRegister = false" class="text-gray-400 hover:text-gray-600 text-xl">&times;</button>
+      </div>
+      <div class="px-6 py-5 space-y-4">
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Name *</label>
+            <input type="text" x-model="form.name" required
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                   placeholder="hardened-ubuntu-22.04">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Version *</label>
+            <input type="text" x-model="form.version" required
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                   placeholder="2026-04-12">
+          </div>
+        </div>
+
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Description</label>
+          <textarea x-model="form.description" rows="2"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                    placeholder="What's in this image — provisioner, CIS controls, etc."></textarea>
+        </div>
+
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Source cloud *</label>
+            <select x-model="form.source_cloud"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              <option value="aws">AWS</option>
+              <option value="azure">Azure</option>
+              <option value="gcp">GCP</option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Source region / location</label>
+            <input type="text" x-model="form.source_region"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                   placeholder="us-east-2">
+          </div>
+        </div>
+
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Source image ID</label>
+          <input type="text" x-model="form.source_image_id"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                 placeholder="ami-… / /subscriptions/…/images/… / projects/…/images/…">
+          <p class="text-xs text-gray-400 mt-1">The cloud-native ID of the existing image — what the deploy form would launch.</p>
+        </div>
+
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Artefact URL <span class="text-gray-400 font-normal">(optional, recommended)</span></label>
+          <input type="text" x-model="form.artefact_url"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                 placeholder="s3://bucket/key  /  https://acct.blob.core.windows.net/c/k  /  gs://bucket/key">
+          <p class="text-xs text-gray-400 mt-1">Where the portable VHD/RAW lives if you've exported one. Lets the promote flow re-import without rebuilding.</p>
+        </div>
+
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Artefact format</label>
+          <select x-model="form.artefact_format"
+                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            <option value="">(none)</option>
+            <option value="vhd">VHD</option>
+            <option value="raw">RAW</option>
+            <option value="vmdk">VMDK</option>
+            <option value="ova">OVA</option>
+          </select>
+        </div>
+      </div>
+      <div class="px-6 py-4 border-t border-gray-100 flex justify-end gap-3">
+        <button @click="showRegister = false" class="px-4 py-2 text-sm border border-gray-300 rounded-lg">Cancel</button>
+        <button @click="submitRegister()" :disabled="!form.name || !form.version || saving"
+                class="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-medium rounded-lg">
+          <span x-show="!saving">Register</span>
+          <span x-show="saving" x-cloak>Saving…</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Promote modal ──────────────────────────────────────────────────── -->
+  <div x-show="showPromote" x-cloak
+       class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+       @click.self="showPromote = false">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
+      <div class="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+        <h3 class="text-lg font-semibold">
+          Promote <span class="font-mono text-base" x-text="promoteImage?.name + ' / ' + promoteImage?.version"></span>
+        </h3>
+        <button @click="showPromote = false" class="text-gray-400 hover:text-gray-600 text-xl">&times;</button>
+      </div>
+      <div class="px-6 py-5 space-y-4">
+        <p class="text-sm text-gray-500">
+          Source: <span class="font-mono" x-text="promoteImage?.source_cloud"></span>
+          <span x-show="promoteImage?.source_image_id" x-cloak>
+            (<span class="font-mono" x-text="promoteImage?.source_image_id"></span>)
+          </span>
+        </p>
+
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Target cloud</label>
+          <div class="flex gap-2">
+            <template x-for="c in ['aws','azure','gcp']" :key="c">
+              <button @click="promoteTarget = c"
+                      :disabled="c === promoteImage?.source_cloud"
+                      class="flex-1 px-3 py-2 text-sm border rounded-lg transition disabled:opacity-30"
+                      :class="promoteTarget === c ? 'border-blue-600 bg-blue-50' : 'border-gray-300 hover:bg-gray-50'">
+                <span x-text="c"></span>
+                <span x-show="c === promoteImage?.source_cloud" x-cloak class="text-[10px] text-gray-400 ml-1">(source)</span>
+              </button>
+            </template>
+          </div>
+        </div>
+
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Target region <span class="text-gray-400 font-normal">(optional)</span></label>
+          <input type="text" x-model="promoteRegion"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                 placeholder="us-west-2 / westus2 / us-central1">
+        </div>
+
+        <button @click="submitPromote()" :disabled="!promoteTarget || promoting"
+                class="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-medium px-4 py-2 rounded-lg">
+          <span x-show="!promoting">Generate manual steps</span>
+          <span x-show="promoting" x-cloak>Working…</span>
+        </button>
+
+        <div x-show="promoteResult" x-cloak class="mt-4 p-4 bg-gray-900 rounded-lg text-xs text-green-300 font-mono whitespace-pre-wrap" x-text="promoteResult?.manual_steps"></div>
+
+        <p x-show="promoteResult" x-cloak class="text-xs text-gray-500">
+          The promotion is recorded as <strong>manual</strong> in the registry.
+          When you finish the steps above, return to this page and click
+          <strong>Promote</strong> again with the resulting native image ID
+          (a future patch will replace this with one-click automation; see
+          <a href="/docs/image-management.md" class="text-blue-600 hover:underline">image-management.md</a>).
+        </p>
+      </div>
+      <div class="px-6 py-4 border-t border-gray-100 flex justify-end">
+        <button @click="showPromote = false" class="px-4 py-2 text-sm border border-gray-300 rounded-lg">Close</button>
+      </div>
+    </div>
+  </div>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function imagesPage() {
+  return {
+    images: [],
+    loading: true,
+    showRegister: false,
+    saving: false,
+    showPromote: false,
+    promoteImage: null,
+    promoteTarget: '',
+    promoteRegion: '',
+    promoting: false,
+    promoteResult: null,
+    form: { name:'', version:'', description:'', source_cloud:'aws', source_region:'', source_image_id:'', artefact_url:'', artefact_format:'' },
+    toast: '', toastType: 'success',
+
+    async init() {
+      requireAuth();
+      await this.loadImages();
+    },
+
+    async loadImages() {
+      this.loading = true;
+      try {
+        const data = await API.get('/api/images');
+        this.images = data.images || [];
+      } catch (e) {
+        this.showToast(e.message || 'Failed to load images', 'error');
+      } finally {
+        this.loading = false;
+      }
+    },
+
+    cloudBadge(cloud) {
+      return ({
+        aws:   'bg-orange-50 text-orange-700 border border-orange-200',
+        azure: 'bg-sky-50 text-sky-700 border border-sky-200',
+        gcp:   'bg-indigo-50 text-indigo-700 border border-indigo-200',
+      })[cloud] || 'bg-gray-50 text-gray-700 border border-gray-200';
+    },
+
+    promoStatusClass(status) {
+      return ({
+        completed: 'bg-emerald-50 text-emerald-700 border border-emerald-200',
+        manual:    'bg-amber-50 text-amber-700 border border-amber-200',
+        pending:   'bg-blue-50 text-blue-700 border border-blue-200',
+        failed:    'bg-red-50 text-red-700 border border-red-200',
+      })[status] || 'bg-gray-50 text-gray-700 border border-gray-200';
+    },
+
+    formatDate(iso) {
+      if (!iso) return '';
+      try { return new Date(iso).toLocaleDateString(); } catch (_) { return iso; }
+    },
+
+    openRegister() {
+      this.form = { name:'', version:'', description:'', source_cloud:'aws', source_region:'', source_image_id:'', artefact_url:'', artefact_format:'' };
+      this.showRegister = true;
+    },
+
+    async submitRegister() {
+      this.saving = true;
+      try {
+        await API.post('/api/images', this.form);
+        this.showToast(`Registered ${this.form.name}/${this.form.version}.`);
+        this.showRegister = false;
+        await this.loadImages();
+      } catch (e) {
+        this.showToast(e.message || 'Register failed', 'error');
+      } finally {
+        this.saving = false;
+      }
+    },
+
+    openPromote(img) {
+      this.promoteImage = img;
+      this.promoteTarget = '';
+      this.promoteRegion = '';
+      this.promoteResult = null;
+      this.showPromote = true;
+    },
+
+    async submitPromote() {
+      if (!this.promoteTarget || !this.promoteImage) return;
+      this.promoting = true;
+      try {
+        this.promoteResult = await API.post(`/api/images/${this.promoteImage.id}/promote`, {
+          target_cloud:  this.promoteTarget,
+          target_region: this.promoteRegion || null,
+        });
+        await this.loadImages();
+      } catch (e) {
+        this.showToast(e.message || 'Promote failed', 'error');
+      } finally {
+        this.promoting = false;
+      }
+    },
+
+    async deleteImage(img) {
+      if (!confirm(`Delete '${img.name}/${img.version}' from the registry? Cloud-native images are NOT touched.`)) return;
+      try {
+        await API.del(`/api/images/${img.id}`);
+        this.showToast(`Deleted ${img.name}/${img.version}.`);
+        await this.loadImages();
+      } catch (e) {
+        this.showToast(e.message || 'Delete failed', 'error');
+      }
+    },
+
+    showToast(msg, type='success') {
+      this.toast = msg;
+      this.toastType = type;
+      setTimeout(() => { this.toast = ''; }, 4500);
+    },
+  };
+}
+</script>
+{% endblock %}
