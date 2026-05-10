@@ -400,6 +400,12 @@ of filesystem permissions.
   See the detailed guides in [`docs/integrations/`](integrations/).
 - **Secrets management** — how credentials are encrypted, how to migrate to an
   external vault, and security best practices: [`docs/secrets-management.md`](secrets-management.md).
+- **Storage management** — where playbooks and asset files live, and how to
+  migrate between cloud object stores or a corporate file share:
+  [`docs/storage-management.md`](storage-management.md).
+- **Config management** — philosophy, best practices, and how the
+  dashboard's ephemeral-runner approach reduces secret sprawl:
+  [`docs/config-management.md`](config-management.md).
 
 ---
 

@@ -7,7 +7,9 @@ other large assets that don't fit in the encrypted credentials database
 The companion to [Secrets Management](secrets-management.md): secrets are
 small, sensitive, and live in a per-key encrypted store. Storage holds
 bigger, mostly-non-sensitive payloads (playbooks, shell scripts, package
-files) that need to be readable by Ansible runners across hosts.
+files) that need to be readable by Ansible runners across hosts. For the
+philosophy and best-practice side of running playbooks against your
+fleet, see [Config Management](config-management.md).
 
 ---
 
