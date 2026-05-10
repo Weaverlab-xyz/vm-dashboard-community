@@ -8,6 +8,8 @@ The companion docs:
 
 - [Infrastructure as Code](infrastructure-as-code.md) — how the dashboard
   stands the infra up in the first place
+- [Image Management](image-management.md) — what's *on* the VMs
+  before config-management runs against them
 - [Secrets Management](secrets-management.md) — where credentials live
 - [Storage Management](storage-management.md) — where playbooks and
   assets live

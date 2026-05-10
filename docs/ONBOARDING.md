@@ -409,6 +409,10 @@ of filesystem permissions.
 - **Infrastructure as code** — how cloud VMs, Shell Jumps, and images
   are provisioned through Terraform/Packer modules with per-job state:
   [`docs/infrastructure-as-code.md`](infrastructure-as-code.md).
+- **Image management** — the build-once-promote-many lifecycle: build
+  a portable image artefact, store it in your storage backend, then
+  promote it to AWS / Azure / GCP:
+  [`docs/image-management.md`](image-management.md).
 
 ---
 
