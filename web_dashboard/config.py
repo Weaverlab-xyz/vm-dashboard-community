@@ -137,23 +137,22 @@ class Settings(BaseSettings):
     aws_region: str = "us-east-2"
     terraform_executable: str = "terraform"  # assumes terraform is in PATH
 
-    # BeyondTrust PRA integration (btapi binary).
-    # Default points to the Linux binary baked into the Docker image;
-    # override via .env on hosts where the binary lives elsewhere.
-    btapi_executable: str = "/usr/local/bin/btapi"
+    # BeyondTrust integration. Two distinct API surfaces:
+    #   • PRA (Privileged Remote Access)  — Shell Jump provisioning via the
+    #     Terraform sra provider in services/terraform_pra_service.py. Uses
+    #     bt_api_host / bt_client_id / bt_client_secret (OAuth2).
+    #   • Password Safe / Secrets Safe    — secret + managed-account
+    #     retrieval via the ps-cli binary in services/btapi_service.py. Uses
+    #     pscli_api_url / pscli_client_id / pscli_client_secret.
     pscli_executable: str = "ps-cli"  # installed via beyondtrust-bips-cli; override in .env if needed
-    # Password Safe / Secrets Safe credentials (used by ps-cli and REST API fallback)
     pscli_api_url: str = ""      # e.g. "https://ps.company.com"
     pscli_client_id: str = ""
     pscli_client_secret: str = ""
-    # These are passed explicitly to btapi subprocesses (not inherited from session env)
-    bt_api_host: str = ""
+    bt_api_host: str = ""        # PRA host, used by terraform_pra_service
     bt_client_id: str = ""
     bt_client_secret: str = ""
     bt_jump_group_name: str = ""  # set via setup wizard / settings panel
-    bt_group_policy_name: str = "BeyondTrust IT User"
-    bt_jumpoint_id: int = 7  # legacy — superseded by bt_jumpoint_name for Terraform provider
-    bt_jumpoint_name: str = ""  # name of the pre-existing Jumpoint in PRA (required for Terraform path)
+    bt_jumpoint_name: str = ""    # name of the pre-existing Jumpoint in PRA (required for Terraform path)
     bt_ps_deploy_key_title: str = "Docker Deploy Key"  # Password Safe secret title
 
     # Image Management (OVA / ISO / AMI building)
@@ -236,7 +235,6 @@ class Settings(BaseSettings):
     azure_aci_storage_account_rg: str = ""        # RG of the storage account (defaults to ACI RG if empty)
     azure_image_storage_account: str = ""         # Storage account for temp VHD upload during OVA→Azure image import
     azure_aci_file_share: str = "jpt"             # Azure File Share name for /jpt mount
-    azure_jumpoint_id: int = 9                    # legacy — superseded by azure_jumpoint_name for Terraform provider
     azure_jumpoint_name: str = ""                 # name of the pre-existing Jumpoint for Azure Shell Jumps
     # ACR credentials (leave empty to pull from Docker Hub without auth).
     # Direct fields are preferred; values are stored encrypted in the DB and
@@ -249,7 +247,6 @@ class Settings(BaseSettings):
     azure_acr_username_secret_title: str = ""     # Legacy: PS-only secret title (fallback)
     azure_acr_password_secret_title: str = ""     # Legacy: PS-only secret title (fallback)
     azure_bt_jump_group_name: str = ""            # BT jump group for Azure Shell Jumps (falls back to bt_jump_group_name)
-    azure_bt_group_policy_name: str = ""          # BT group policy for Azure Shell Jumps (falls back to bt_group_policy_name)
     # Azure Key Vault — SSH key retrieval (optional; leave blank to disable)
     azure_key_vault_url: str = ""                     # e.g. "https://my-vault.vault.azure.net/"
     azure_ssh_keypair_secret_name: str = "azureVM-ssh-keypair"  # Unified secret: JSON {public_key, private_key}

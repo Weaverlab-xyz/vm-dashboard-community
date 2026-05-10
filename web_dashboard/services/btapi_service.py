@@ -1,16 +1,19 @@
 """
-BeyondTrust PRA service for Jump Group and Shell Jump management.
-Uses btapi subprocess (asyncio.to_thread pattern, same as powershell.py).
+BeyondTrust Password Safe + ps-cli wrapper for the dashboard.
 
-Required environment variables (inherited from process env or set in .env):
-  BT_CLIENT_ID     - BeyondTrust API account client ID
-  BT_CLIENT_SECRET - BeyondTrust API account client secret
-  BT_API_HOST      - BeyondTrust PRA appliance hostname (e.g. "pra.example.com")
+The previous Jump Group / Shell Jump provisioning surface here has been
+replaced by the Terraform PRA provider (services/terraform_pra_service.py).
+This module now exposes only what the rest of the codebase still needs:
 
-Secret retrieval (get_ps_secret) uses ps-cli (beyondtrust-bips-cli Python
-package) which handles OAuth2 auth automatically via PSCLI_* env vars and
-works cross-platform. The btapi binary (Linux) is baked into the Docker
-image at /usr/local/bin/btapi; on Windows dev use BTAPI_EXECUTABLE override.
+  - get_ps_secret(title)           — fetch a vaulted secret by title
+  - get_ps_credential(...)         — managed-account password / SSH key checkout
+  - list_ps_managed_systems(...)   — Password Safe inventory queries
+
+All secret + credential calls go through ps-cli (the beyondtrust-bips-cli
+Python package), which handles OAuth2 auth via PSCLI_* env vars and works
+cross-platform. The legacy btapi binary path is retained internally for
+the OAuth2 endpoint that still uses BT_CLIENT_ID / BT_CLIENT_SECRET /
+BT_API_HOST credentials.
 """
 import asyncio
 import json
@@ -18,7 +21,6 @@ import os
 import re
 import subprocess
 import sys
-from typing import Optional
 
 from ..config import settings
 
@@ -67,30 +69,6 @@ def _read_windows_env(name: str) -> str:
     return ""
 
 
-def _bt_env() -> dict:
-    """Build environment dict for btapi (BeyondTrust PRA) subprocess calls.
-    Resolution order for BT_* credentials:
-      1. config_service (DB-backed, set via setup wizard / settings panel)
-      2. settings (.env / pydantic-settings)
-      3. Inherited os.environ
-      4. Windows registry (set via setx or System Properties)
-    """
-    env = dict(os.environ)
-    for cfg_key, env_key in [
-        ("bt_api_host", "BT_API_HOST"),
-        ("bt_client_id", "BT_CLIENT_ID"),
-        ("bt_client_secret", "BT_CLIENT_SECRET"),
-    ]:
-        val = _cfg(cfg_key)
-        if val:
-            env[env_key] = val
-        elif env_key not in env:
-            reg_val = _read_windows_env(env_key)
-            if reg_val:
-                env[env_key] = reg_val
-    return env
-
-
 def _pscli_env() -> dict:
     """Build environment dict for ps-cli (BeyondTrust Password Safe) subprocess calls.
     Resolution order for PSCLI_* credentials:
@@ -116,209 +94,14 @@ def _pscli_env() -> dict:
 
 
 class BTAPIError(Exception):
-    """Raised when a btapi operation fails."""
+    """Raised when a Password Safe / ps-cli operation fails."""
 
 
-_DNS_ERROR_FRAGMENTS = ("NameResolutionError", "No address associated with hostname", "getaddrinfo failed")
-
-
-def _run(args: list, payload: dict = None, timeout: int = 60, retries: int = 3, retry_delay: float = 5.0):
-    """
-    Run btapi synchronously.
-    Pass payload as JSON on stdin if provided.
-    Returns parsed JSON output, or None if stdout is empty.
-    Raises BTAPIError on non-zero exit code.
-    Retries up to `retries` times on transient DNS/connection failures.
-    """
-    import time
-
-    cmd = [settings.btapi_executable] + args
-    # When no payload, explicitly close stdin so btapi doesn't block waiting
-    # on inherited stdin (which is a closed pipe in a headless uvicorn process).
-    run_kwargs = dict(capture_output=True, text=True, timeout=timeout, env=_bt_env())
-    if payload is not None:
-        run_kwargs["input"] = json.dumps(payload)
-    else:
-        run_kwargs["stdin"] = subprocess.DEVNULL
-
-    last_error: BTAPIError | None = None
-    for attempt in range(1, retries + 1):
-        result = subprocess.run(cmd, **run_kwargs)
-
-        # Strip PyInstaller deprecation warnings from stderr
-        stderr_lines = [
-            line for line in result.stderr.splitlines()
-            if not any(kw in line for kw in (
-                "UserWarning", "pkg_resources", "Setuptools<", "PyInstaller", "slated for removal"
-            ))
-        ]
-        stderr = "\n".join(stderr_lines).strip()
-
-        if result.returncode != 0:
-            error_text = stderr or result.stdout.strip()
-            last_error = BTAPIError(
-                f"btapi {' '.join(str(a) for a in args[:2])} failed: {error_text}"
-            )
-            # Retry on transient DNS / connection failures
-            if attempt < retries and any(frag in error_text for frag in _DNS_ERROR_FRAGMENTS):
-                time.sleep(retry_delay)
-                continue
-            raise last_error
-
-        stdout = result.stdout.strip()
-        if not stdout:
-            return None
-        return json.loads(stdout)
-
-    raise last_error  # exhausted retries
-
-
-# ── Jump Group ────────────────────────────────────────────────────────────────
-
-def _list_jump_groups() -> list:
-    return _run(["list", "jump-group"]) or []
-
-
-def _find_jump_group(name: str) -> Optional[dict]:
-    for g in _list_jump_groups():
-        if g.get("name") == name:
-            return g
-    return None
-
-
-def _create_jump_group(name: str) -> dict:
-    # Derive a safe code_name: "us-east-2" → "us_east_2"
-    code_name = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
-    result = _run(["add", "jump-group"], payload={"name": name, "code_name": code_name})
-    if not result:
-        raise BTAPIError(f"No response when creating jump group '{name}'")
-    return result
-
-
-def _get_or_create_jump_group(name: str) -> dict:
-    """Return existing jump group by name, or create it."""
-    existing = _find_jump_group(name)
-    if existing:
-        return existing
-    return _create_jump_group(name)
-
-
-# ── Shell Jump ────────────────────────────────────────────────────────────────
-
-def _create_shell_jump(
-    name: str,
-    hostname: str,
-    jump_group_id: int,
-    jumpoint_id: int,
-    port: int = 22,
-    tag: str = "AWS",
-    comments: str = "",
-) -> dict:
-    payload = {
-        "name": name,
-        "hostname": hostname,
-        "jump_group_id": jump_group_id,
-        "jump_group_type": "shared",
-        "jumpoint_id": jumpoint_id,
-        "port": port,
-        "protocol": "ssh",
-        "terminal": "xterm",
-        "keep_alive": 0,
-        "tag": tag,
-    }
-    if comments:
-        payload["comments"] = comments
-    # Resource path confirmed from live API: jump-item/shell-jump
-    result = _run(["add", "jump-item/shell-jump"], payload=payload)
-    if not result:
-        raise BTAPIError(f"No response when creating shell jump '{name}'")
-    return result
-
-
-def _delete_shell_jump(shell_jump_id: int) -> None:
-    _run(["delete", "jump-item/shell-jump", str(shell_jump_id)])
-
-
-# ── Group Policy ──────────────────────────────────────────────────────────────
-
-def _find_group_policy(name: str) -> Optional[dict]:
-    policies = _run(["list", "group-policy"]) or []
-    for p in policies:
-        if p.get("name") == name:
-            return p
-    return None
-
-
-def _grant_jump_group_to_policy(group_policy_id: int, jump_group_id: int) -> None:
-    """Grant a shared jump group access to a group policy."""
-    _run(
-        ["do", f"group-policy/{group_policy_id}/jump-group-policy"],
-        payload={
-            "jump_group_id": jump_group_id,
-            "jump_group_type": "shared",
-        },
-    )
-
-
-# ── Public async API ──────────────────────────────────────────────────────────
-
-async def provision_ec2_jump(
-    instance_name: str,
-    hostname: str,
-    jump_group_name: str,
-    group_policy_name: str,
-    jumpoint_id: int,
-    port: int = 22,
-    tag: str = "AWS",
-) -> dict:
-    """
-    Provision BeyondTrust PRA access for a newly deployed EC2 instance:
-      1. Get or create a Jump Group named jump_group_name.
-      2. Create a Shell Jump pointing at hostname with the instance name,
-         reachable via the specified Jumpoint.
-      3. Grant group_policy_name access to the Jump Group (idempotent).
-
-    Returns a dict with jump_group_id, shell_jump_id, shell_jump_name.
-    Raises BTAPIError if btapi is unavailable or a required step fails.
-    """
-    # Step 1: Ensure the Jump Group exists
-    jump_group = await asyncio.to_thread(_get_or_create_jump_group, jump_group_name)
-    jump_group_id = jump_group["id"]
-
-    # Step 2: Create the Shell Jump
-    shell_jump = await asyncio.to_thread(
-        _create_shell_jump,
-        instance_name,
-        hostname,
-        jump_group_id,
-        jumpoint_id,
-        port,
-        tag,
-        "Auto-provisioned by Infrastructure Management Dashboard",
-    )
-
-    # Step 3: Grant group policy access (best-effort — may already be granted)
-    policy = await asyncio.to_thread(_find_group_policy, group_policy_name)
-    if policy:
-        try:
-            await asyncio.to_thread(
-                _grant_jump_group_to_policy, policy["id"], jump_group_id
-            )
-        except BTAPIError:
-            # Grant may fail if access is already granted — not fatal
-            pass
-
-    return {
-        "jump_group_id": jump_group_id,
-        "jump_group_name": jump_group_name,
-        "shell_jump_id": shell_jump.get("id"),
-        "shell_jump_name": instance_name,
-    }
-
-
-async def remove_ec2_jump(shell_jump_id: int) -> None:
-    """Remove a Shell Jump when the EC2 instance is destroyed."""
-    await asyncio.to_thread(_delete_shell_jump, shell_jump_id)
+# Shell Jump / Jump Group / Group Policy provisioning was previously handled
+# here via the legacy btapi binary. Community is now fully on the Terraform
+# PRA provider (services/terraform_pra_service.py); the btapi-based path is
+# gone. The remaining surface in this module is Password Safe secret +
+# managed-account retrieval via ps-cli.
 
 
 # ── Password Safe managed systems/accounts (ps-cli) ──────────────────────────
