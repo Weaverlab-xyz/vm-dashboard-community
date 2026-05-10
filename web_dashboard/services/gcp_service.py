@@ -628,6 +628,10 @@ def _run_gce_jumpoint_sync(
     ])
 
     instance.labels = {"managed-by": "vm-dashboard", "purpose": _JUMPOINT_LABEL}
+    # Network tag — paired with the sandbox firewall rule
+    # `${prefix}-allow-ssh-from-jumpoint` (source-tags=bt-jumpoint) so the
+    # Jumpoint can SSH into VMs in the user-VM subnet.
+    instance.tags = compute_v1.Tags(items=[_JUMPOINT_LABEL])
 
     logger.info(
         "Starting GCE COS Jumpoint '%s' in %s (image=%s, machine=%s, deploy_key_len=%d)",

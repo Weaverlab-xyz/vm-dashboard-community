@@ -225,6 +225,7 @@ print_dashboard_config "GCP sandbox configuration" \
   "gcp_ssh_key_secret_name=$SSH_SECRET                      # JSON {public_key, private_key}" \
   "gcp_jumpoint_image=beyondtrust/sra-jumpoint:latest" \
   "gcp_jumpoint_machine_type=e2-micro" \
+  "gcp_default_network_tag=$NETWORK_TAG_VM                  # Auto-attached to every dashboard-deployed VM so the sandbox firewall rules apply" \
   "gcp_service_account_json=\$(cat $SA_KEY_PATH | jq -c .)   # paste the JSON contents" \
   "" \
   "# BeyondTrust deploy key — set in /setup or /secrets:" \
@@ -245,10 +246,10 @@ Sandbox topology summary
 
 Service-account JSON cached at $SA_KEY_PATH (mode 600).
 
-NB: the dashboard tags VMs as `bt-jumpoint` for the Jumpoint COS GCE
-instance; user VMs need the `${NETWORK_TAG_VM}` network tag for the firewall
-egress-deny rule to apply. Add this to your GCP deploy form's "network tags"
-field, or set as the default in Settings → GCP.
+The dashboard auto-applies the `bt-jumpoint` network tag to its Jumpoint
+COS GCE instance and reads gcp_default_network_tag from config to attach
+${NETWORK_TAG_VM} to every user VM it deploys, so the sandbox firewall
+rules take effect automatically — no per-deploy manual tagging needed.
 
 To tear it down:
   ./scripts/sandbox/rollback.sh --cloud gcp

@@ -372,6 +372,11 @@ class Settings(BaseSettings):
     gcp_jumpoint_image: str = "beyondtrust/sra-jumpoint:latest"
     gcp_jumpoint_machine_type: str = "e2-micro"
     gcp_jumpoint_zone: str = ""          # blank → use the deploy zone
+    # Network tag(s) automatically attached to every dashboard-deployed user
+    # VM. Comma-separated. Used to scope sandbox firewall rules (e.g. the
+    # egress-deny rule on the sandbox VM subnet keys off this tag). Set to
+    # `dashboard-sandbox-vm` when paired with scripts/sandbox/setup-gcp.sh.
+    gcp_default_network_tag: str = ""
     gcp_bt_jump_group_name: str = ""     # BT jump group for GCP Shell Jumps (falls back to bt_jump_group_name)
     gcp_jumpoint_name: str = ""          # Jumpoint name for GCP Shell Jumps (falls back to bt_jumpoint_name)
 

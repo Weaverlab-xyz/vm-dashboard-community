@@ -122,10 +122,12 @@ need a different topology.
 
 ## Limitations / known caveats
 
-- **GCP firewall egress-deny by tag**: requires that lab VMs you deploy via
-  the dashboard carry the `dashboard-sandbox-vm` network tag. The deploy
-  form's "Network tags" field accepts a comma-separated list; add the tag
-  there or set it as the default in `Settings → GCP`.
+- **GCP auto-tagging**: the sandbox firewall rules key off network tags
+  (`bt-jumpoint` for the Jumpoint host, `dashboard-sandbox-vm` for user
+  VMs). The dashboard auto-attaches both — the Jumpoint COS VM is tagged
+  `bt-jumpoint` at launch, and `gcp_default_network_tag` (set by
+  `setup-gcp.sh` in the printed config block) is merged into every user
+  VM's tag list at deploy time. No manual tagging required.
 - **Azure NSG deny on `Internet` service tag**: blocks public IPs Microsoft
   has classified. Some Azure-internal endpoints (DNS, NTP) are reachable via
   `AzurePlatformDNS` and `AzurePlatformGUI` service tags — this is by design.

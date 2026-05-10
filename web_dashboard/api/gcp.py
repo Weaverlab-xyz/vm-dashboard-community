@@ -346,6 +346,12 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
 
         job_service.update_progress(db, job_id, 20, "Launching Compute Engine instance…")
 
+        # Merge config-driven default network tags (used by sandbox firewall
+        # rules) with any tags the user supplied on the deploy form.
+        default_tag_csv = _cfg_svc.get("gcp_default_network_tag") or ""
+        default_tags = [t.strip() for t in default_tag_csv.split(",") if t.strip()]
+        merged_tags = list(dict.fromkeys((payload.network_tags or []) + default_tags))
+
         result = await gcp_service.launch_instance(
             project_id=project_id,
             zone=zone,
@@ -357,7 +363,7 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
             ssh_username=ssh_username,
             ssh_public_key=ssh_public_key,
             disk_size_gb=payload.disk_size_gb,
-            network_tags=payload.network_tags or [],
+            network_tags=merged_tags,
         )
 
         hostname = result.get("private_ip") or result.get("public_ip") or payload.instance_name
