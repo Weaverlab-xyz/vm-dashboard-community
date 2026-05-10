@@ -8,6 +8,7 @@ Supported hosts: **Windows** (PowerShell 7), **macOS**, **Linux**, and
 **WSL** (Windows Subsystem for Linux — Docker Engine in WSL, no Docker
 Desktop required).
 
+- [Quick path: cloud sandbox](#quick-path-cloud-sandbox) — automated, isolated lab infra in any/all of AWS/Azure/GCP
 - [Part A — AWS setup](#part-a--aws-setup)
 - [Part B — Azure setup](#part-b--azure-setup)
 - [Part C — GCP setup](#part-c--gcp-setup)
@@ -60,6 +61,55 @@ Clone the repo:
 git clone <repo-url> vm-dashboard-community
 cd vm-dashboard-community
 ```
+
+---
+
+## Quick path: cloud sandbox
+
+If you're labbing this up — testing the dashboard, demoing it, or running
+training environments — there's a faster alternative to Parts A, B, and C
+below. The repo ships three bash scripts that provision **fully isolated**
+sandbox infrastructure in AWS, Azure, and GCP with a single command each:
+
+```bash
+./scripts/sandbox/00-prereqs.sh        # one-time prereq check (WSL/Linux)
+./scripts/sandbox/setup-aws.sh         # provision AWS sandbox
+./scripts/sandbox/setup-azure.sh       # provision Azure sandbox
+./scripts/sandbox/setup-gcp.sh         # provision GCP sandbox
+./scripts/sandbox/rollback.sh --cloud all -y   # tear it all down
+```
+
+What you get per cloud:
+
+- A dedicated VPC/VNet with two subnets — one for the BeyondTrust SRA
+  Jumpoint container (internet egress so it can phone home to PRA), one
+  for your lab VMs (**no** internet egress).
+- A managed-by-dashboard service principal / IAM role / service account
+  with the minimum permissions needed.
+- An SSH key pair stored as `{public_key, private_key}` JSON in the
+  cloud's secret manager.
+- Tagged resources so the rollback script can clean up reliably.
+
+Each setup script ends with a config block to paste into the dashboard's
+`/setup` wizard or **Settings → Integrations** panels — those values
+replace the manual setup in Parts A/B/C below.
+
+**When to use the sandbox path:**
+- ✅ Repeatable, isolated lab environments for testing or demos.
+- ✅ One-command tear-down at the end of a session.
+- ✅ Network isolation between deployed VMs and the public internet.
+- ❌ Production or shared dashboards with existing cloud infra — the
+  scripts create new VPCs/VNets and assume they own them.
+
+**See [docs/CLOUD_SANDBOX.md](CLOUD_SANDBOX.md)** for the full walkthrough:
+topology diagrams per cloud, cost estimates, verification, customisation
+hooks, and troubleshooting. The [`scripts/sandbox/README.md`](../scripts/sandbox/README.md)
+also has a one-line summary per file if you want a quick orientation
+before reading the long doc.
+
+After running the sandbox scripts, **skip ahead to
+[Part D — Run the dashboard](#part-d--run-the-dashboard)** — Parts A, B,
+and C are the manual alternative.
 
 ---
 
