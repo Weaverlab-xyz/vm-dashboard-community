@@ -3,20 +3,35 @@
 ## What is it?
 
 The Ansible integration lets you run Ansible playbooks and provisioning assets
-(`.sh` scripts, `.rpm` / `.deb` packages) from the dashboard as tracked
-background jobs. Assets are stored in cloud object storage (S3, Azure Blob, or
-GCS) and executed by an Ansible runner container.
+(`.sh` / `.ps1` scripts, `.rpm` / `.deb` packages) from the dashboard as tracked
+background jobs. Assets are stored on a [storage backend](../storage-management.md)
+of your choice and executed by a one-shot Ansible runner container that's
+destroyed when the run finishes.
+
+> **Read these first:**
+> - [`docs/config-management.md`](../config-management.md) — philosophy,
+>   best practices, the security argument for one-shot runners, and where
+>   SaaS extends this.
+> - [`docs/storage-management.md`](../storage-management.md) — full
+>   reference for the four storage backends (AWS S3, Azure Blob, GCS,
+>   Local / UNC), their per-backend settings, and the migrate flow.
+>
+> This page is the *integration-specific* guide: feature-flag activation,
+> per-runner setup, cloud-VM credential plumbing, and Ansible-specific
+> troubleshooting.
 
 **Storage and execution targets are independent.** You can store assets in S3
-and run them against on-premises Proxmox hosts, or store them in GCS and
-target EC2 instances — any combination works.
+and run them against on-premises Proxmox hosts, or store them on a corporate
+UNC share and target EC2 instances — any combination works (with one
+constraint: cloud runners can't read from a UNC backend; see
+[storage-management.md](../storage-management.md#constraint-local-backend-only-works-with-the-local-ansible-runner)).
 
-Two execution paths are available:
+Four execution paths are available:
 
 | Path | When to use | How it runs |
 |---|---|---|
-| **Local Docker** | Any target — on-premises hypervisors *and* cloud VMs | Sibling container via the mounted Docker socket; assets fetched from cloud storage then Ansible SSHes/WinRMs to the target |
-| **Cloud runners** | Cloud VMs when you need the runner to be network-local to the VM | AWS ECS task, Azure Container Instance, or GCP Cloud Run Job — one per cloud |
+| **Local Docker** | Any target — on-premises hypervisors *and* cloud VMs reachable from the dashboard host | Sibling container spawned via the mounted Docker socket; assets fetched from storage then Ansible SSHes / WinRMs to the target |
+| **Cloud runners** | Cloud VMs in private subnets without a path back to the dashboard host | AWS ECS task, Azure Container Instance, or GCP Cloud Run Job — one per cloud |
 
 The **Config Mgmt** tab shows an asset picker and a target picker. The target
 list is built automatically from:
@@ -30,7 +45,7 @@ list is built automatically from:
 
 | Requirement | Notes |
 |---|---|
-| Asset storage | **One of:** S3 bucket, Azure Blob Storage container, or GCS bucket — stores `.yml`, `.sh`, `.rpm`, `.deb` files |
+| Asset storage | **An active storage backend** configured on `/storage`. Required before the Ansible feature flag can be enabled. See [docs/storage-management.md](../storage-management.md). |
 | **Local runner:** Docker socket | Already mounted in `docker-compose.yml` — no extra setup |
 | **Cloud runners:** ECS / ACI / Cloud Run | Only needed if you prefer the runner to be cloud-local to the VM |
 | Credentials | Local runner reuses the credentials already stored for each hypervisor integration |
@@ -39,85 +54,55 @@ list is built automatically from:
 
 ---
 
-## Step 1 — Create asset storage
+## Step 1 — Configure storage
 
-Configure **one** storage backend. The dashboard auto-detects which is set; if
-multiple are configured, priority is S3 > Azure Blob > GCS.
+The four backends — S3, Azure Blob, GCS, Local Filesystem / UNC — are
+configured on the dedicated **`/storage`** page. The Ansible feature flag
+will refuse to enable until at least one backend is configured and
+selected as active.
 
-### Option A — S3
+Picking the right backend by use case:
 
-Create the bucket and upload your initial assets:
-
-```bash
-aws s3 mb s3://your-org-config-mgmt --region us-east-1
-aws s3 cp assets/ s3://your-org-config-mgmt/config-mgmt/ --recursive
-```
-
-Then configure in **Settings → Integrations → Ansible**:
-
-| Setting | Example |
+| Use case | Recommended backend |
 |---|---|
-| S3 Bucket | `your-org-config-mgmt` |
-| S3 Region | `us-east-1` |
-| S3 Prefix | `config-mgmt` |
+| Cloud VMs as targets, cloud Ansible runner | The matching cloud's bucket (S3 / Blob / GCS) |
+| On-prem hypervisor targets, dashboard host on a corporate LAN | Local Filesystem / UNC |
+| Mixed fleet, dashboard host has internet egress | Any cloud bucket — runner downloads the asset before SSH/WinRM |
 
-### Option B — Azure Blob Storage
-
-Create the container and upload your initial assets:
-
-```bash
-az storage container create \
-  --account-name myorgplaybooks \
-  --name playbooks \
-  --auth-mode login
-
-az storage blob upload-batch \
-  --account-name myorgplaybooks \
-  --destination "playbooks/config-mgmt" \
-  --source ./assets
-```
-
-Then configure in **Settings → Integrations → Ansible**:
-
-| Setting | Example |
-|---|---|
-| Storage Account | `myorgplaybooks` |
-| Container | `playbooks` |
-| Prefix | `config-mgmt` |
-
-Auth uses your existing Azure service principal. The SP needs the
-**Storage Blob Data Reader** role on the storage account.
-
-### Option C — GCS
-
-Create the bucket and upload your initial assets:
-
-```bash
-gsutil mb -l us-central1 gs://my-org-config-mgmt
-gsutil -m cp -r assets/ gs://my-org-config-mgmt/config-mgmt/
-```
-
-Then configure in **Settings → Integrations → Ansible**:
-
-| Setting | Example |
-|---|---|
-| GCS Bucket | `my-org-config-mgmt` |
-| GCS Prefix | `config-mgmt` |
-
-Auth uses your GCP service account. The SA needs `roles/storage.objectViewer`
-on the bucket.
+Configuration steps, asset upload, migration between backends, and per-
+backend IAM details all live in [docs/storage-management.md](../storage-management.md).
+Come back here when storage shows green on `/storage`.
 
 ---
 
 ## Step 2 — Enable in the dashboard
 
-**Settings → Integrations → Ansible** — configure your storage backend.
+1. Open **`/storage`** and configure at least one backend; pick it as active.
+2. Open **Settings → Integrations**. The Ansible toggle, previously
+   greyed out, is now selectable.
+3. Click **Configure** on the Ansible row to set the runner
+   (`local` / `ecs` / `aci` / `gcp`) and the per-cloud SSH usernames
+   (see below).
+4. Toggle Ansible **on**. Done.
 
-**Setup wizard** — toggle **Ansible** on, then configure storage from Settings
-after the wizard completes.
+Cloud SSH key config and cloud runner config are optional — see the
+sections below if you plan to target cloud VMs.
 
-That's all that's required for local runs against any target. Cloud SSH key
-config and cloud runner config are optional — see the sections below.
+### Per-cloud SSH user
+
+Each cloud's stock image ships with a different default username
+(`ec2-user` / `azureuser` / `gcp-user`), so the Settings → Ansible
+panel exposes three fields rather than one:
+
+| Field | Default | Override per job? |
+|---|---|---|
+| `ansible_aws_user` | `ec2-user` | Yes — the run-asset form on `/config-mgmt` pre-fills from this when the operator picks an `aws:` target, but the field stays editable. |
+| `ansible_azure_user` | `azureuser` | Yes — same flow for `azure:` targets. |
+| `ansible_gcp_user` | `gcp-user` | Yes — same flow for `gcp:` targets. |
+
+The pre-fill is non-clobbering: a value the operator types by hand is
+never overwritten when they switch targets. The submitted `ansible_user`
+is whatever the field holds at submit time.
 
 ---
 
@@ -193,35 +178,38 @@ inventory are bind-mounted into `/ansible/` inside the container.
 
 ---
 
-## Provisioning assets (.sh / .rpm / .deb)
+## Provisioning assets (.sh / .ps1 / .rpm / .deb)
 
 In addition to Ansible playbooks (`.yml`), you can upload **scripts and
-packages** to the same storage bucket. The dashboard auto-generates a wrapper
-playbook based on the file extension.
+packages** to the same storage backend. The dashboard auto-generates a
+wrapper playbook based on the file extension.
 
 | Extension | What happens |
 |---|---|
 | `.yml` / `.yaml` | Playbook is used as-is |
-| `.sh` | `ansible.builtin.script` — script is copied to the remote host and executed with `/bin/bash` |
+| `.sh` | `ansible.builtin.script` — script copied to the remote host and executed with `/bin/bash` |
+| `.ps1` | `ansible.windows.win_script` — copied and run on a Windows host (target must have `ansible_connection=winrm`) |
 | `.rpm` | `ansible.builtin.copy` + `ansible.builtin.dnf` — package is transferred and installed with `--disable-gpg-check` |
 | `.deb` | `ansible.builtin.copy` + `ansible.builtin.apt` — package is transferred and installed |
 
-Just drop the file in your storage prefix alongside your playbooks:
+Two ways to upload:
 
-```bash
-# S3 example — mix of asset types
-aws s3 cp hardening.yml        s3://your-org-config-mgmt/config-mgmt/
-aws s3 cp install-agent.sh     s3://your-org-config-mgmt/config-mgmt/
-aws s3 cp my-agent.rpm         s3://your-org-config-mgmt/config-mgmt/
-aws s3 cp my-agent.deb         s3://your-org-config-mgmt/config-mgmt/
-```
+- **`/storage` page** — file picker + Upload button, goes to the active
+  backend.
+- **`/config-mgmt` page** — same upload form, plus inline run controls.
 
-The **Config Mgmt** tab shows all asset types in the picker. A colour badge
-indicates the type (Playbook / Script / RPM / DEB).
+Either way, the upload hits `POST /api/storage/upload` and the file
+appears in the asset picker on next refresh. You can also write
+directly to the underlying bucket / share with the cloud's native tools
+(`aws s3 cp`, `az storage blob upload`, `gsutil cp`) if you'd rather
+script it.
 
-> **Extra vars** are forwarded only to playbooks. For scripts and packages the
-> field is accepted but ignored — pass runtime parameters via the script itself
-> or encode them in the filename.
+The **Config Mgmt** tab shows all asset types in the picker. A colour
+badge indicates the type (Playbook / Script / PowerShell / RPM / DEB).
+
+> **Extra vars** are forwarded only to playbooks. For scripts and
+> packages the field is accepted but ignored — pass runtime parameters
+> via the script itself or encode them in the filename.
 
 ---
 
@@ -442,46 +430,41 @@ to it.
 
 ### Asset storage
 
-**"No asset storage configured"** — configure a storage backend in
-**Settings → Integrations → Ansible** (S3, Azure Blob, or GCS).
+> Storage backend configuration, asset-list issues, and per-provider
+> IAM permission errors live in [docs/storage-management.md](../storage-management.md#troubleshooting).
+> The items below are Ansible-runner-specific concerns that the storage
+> page doesn't cover.
 
-**Assets don't appear in the picker** — confirm the files are under the
-configured prefix (default: `config-mgmt/`) and have a supported extension
-(`.yml`, `.yaml`, `.sh`, `.rpm`, `.deb`). Navigate away and back to force a
-fresh list fetch.
+**"No active storage backend" when running** — the Ansible feature flag
+got enabled while a backend was active, but it's since been
+deactivated. Re-pick a backend on `/storage` and Save.
 
-**"Permission denied" on .sh asset** — the script file must be executable on
-the remote host. The auto-generated playbook uses `ansible.builtin.script`
-which handles the copy, but if the remote shell rejects it, add
-`chmod +x /tmp/script.sh` as a preceding task in a custom `.yml` wrapper.
+**"Permission denied" on .sh asset at run time** — the auto-generated
+wrapper uses `ansible.builtin.script` which copies + runs the file with
+`executable: /bin/bash`. If the remote rejects it, write a custom `.yml`
+playbook with an explicit `mode: '0755'` copy + a task to invoke it.
 
-**Cloud VMs not in the target list** — the list is read from the in-memory
-cache populated by the AWS / Azure / GCP tabs. Visit the relevant cloud tab
-first so the cache is warm, then return to Config Mgmt.
+**.ps1 asset fails with "WinRM connection refused"** — the target's
+inventory hostvars don't have `ansible_connection=winrm`. Hyper-V
+hostvars set this automatically. For other hypervisors hosting Windows
+guests, you'll need a custom playbook that sets `vars:` explicitly, or
+extend the relevant `services/<hypervisor>_service.py` to detect Windows
+guests.
 
-**SSH authentication failed on cloud target (AWS)** — verify `ANSIBLE_SSH_KEY_SM_NAME`
-is set and the IAM role has `secretsmanager:GetSecretValue` on that secret.
+**Cloud VMs not in the target list** — the list is read from the
+in-memory cache populated by the AWS / Azure / GCP tabs. Visit the
+relevant cloud tab first so the cache is warm, then return to Config
+Mgmt.
 
-**SSH authentication failed on cloud target (GCP)** — verify `GCP_SSH_KEY_SECRET_NAME`
-is set and the service account has `roles/secretmanager.secretAccessor` on the
-secret. Ensure the public key is in the instance's `~/.ssh/authorized_keys`
-(injected at launch via `GCP_SSH_KEY_SECRET_NAME`).
+**SSH authentication failed on cloud target (AWS)** — verify
+`ANSIBLE_SSH_KEY_SM_NAME` is set and the IAM role has
+`secretsmanager:GetSecretValue` on that secret.
 
-**"S3 bucket not found"** — verify the bucket name and that the IAM user/role has
-`s3:GetObject` + `s3:ListBucket` on the bucket.
-
-**Azure Blob: "Authorization failed"** — assign **Storage Blob Data Reader** to
-the service principal on the storage account:
-```bash
-az role assignment create --role "Storage Blob Data Reader" \
-  --assignee <client-id> \
-  --scope /subscriptions/.../storageAccounts/<account>
-```
-
-**GCS: "Access denied"** — grant `roles/storage.objectViewer`:
-```bash
-gsutil iam ch serviceAccount:SA_EMAIL:objectViewer gs://my-org-config-mgmt
-```
+**SSH authentication failed on cloud target (GCP)** — verify
+`GCP_SSH_KEY_SECRET_NAME` is set and the service account has
+`roles/secretmanager.secretAccessor` on the secret. Ensure the public
+key is in the instance's `~/.ssh/authorized_keys` (injected at launch
+via `GCP_SSH_KEY_SECRET_NAME`).
 
 ### Cloud runners
 
