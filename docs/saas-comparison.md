@@ -1,16 +1,27 @@
 # Community vs. SaaS — what ships today
 
-The community edition is the only shipping edition of the dashboard
-right now. The hosted SaaS edition is a target architecture, not a
-released product. This doc is narrowly about **the structural
-difference that exists today**: where the JWT root key lives, and why
-that pins community to a host-filesystem secret while SaaS will use a
-managed-identity-backed vault.
+The dashboard codebase has two shipping deployment topologies today:
 
-For the full list of planned SaaS features (durable cross-cloud
-workflows, multi-tenancy, AI-assisted generation, drift detection,
-compliance-as-code, etc.) — and which ones can already be tested in a
-dev environment — see [saas-roadmap.md](saas-roadmap.md).
+- **Community** — runs on a host you control, secrets in an on-disk
+  `.env` or via the `/setup` wizard, JWT root key on the filesystem.
+  This is the open-source path.
+- **Prod (single-tenant)** — dashboard runs **cloud-hosted** on Azure.
+  Secrets, including the JWT root key, are pulled from Azure Key Vault
+  at startup via the dashboard's **managed identity** — no static
+  credential exists on disk or in the image. Same dashboard codebase
+  as community; different startup scaffolding
+  (`Start-DevEnvironment.ps1` mirrors the same flow via `az login`
+  for dev). The prod topology also supports an **Azure Arc-enrolled
+  on-prem worker** that hosts customer-owned image artefacts (OVAs)
+  locally and runs Azure Automation runbooks to promote them to cloud
+  providers — see the on-prem image promotion item in
+  [saas-roadmap.md](saas-roadmap.md).
+
+This doc covers the one structural difference that's **fully shipping
+today**: the root-key bootstrap. For the broader feature roadmap
+(multi-tenancy, durable cross-cloud workflows, AI-assisted generation,
+drift detection, compliance-as-code, etc.) and which items are built,
+planned, or researching, see [saas-roadmap.md](saas-roadmap.md).
 
 ---
 
@@ -27,58 +38,68 @@ encrypted database the JWT root key unlocks.
 See [secrets-management.md → Why the JWT root key cannot be migrated](secrets-management.md#why-the-jwt-root-key-cannot-be-migrated)
 for the loop in detail.
 
-## How the SaaS edition breaks the cycle (designed, not yet built)
+## How the prod topology breaks the cycle (built today)
 
-The hosted edition's design replaces the on-disk root key with a
-vault-backed one fetched at startup via **workload identity** — no
-static credential is required to bootstrap:
+The prod deployment scaffolding pulls every dashboard secret — including
+the JWT root key (`JWT_SECRET_KEY` in env, stored as
+`dashboard-jwt-secret` in the `assetmgmtdashboard` Key Vault) — from
+Azure Key Vault at startup. No static credential exists on the host:
 
-- Each dashboard tenant runs as a workload (Azure Container Apps
-  revision / AKS pod) with a system-assigned **Azure managed
-  identity**.
-- At process start, the dashboard exchanges its **OIDC federated
-  token** for an Azure AD access token. There is no client secret
-  on disk, in the image, or in the environment.
-- The access token reads the root key from a tenant-scoped **Azure
-  Key Vault**. The dashboard then derives the Fernet DEK exactly as
-  in the community edition.
-- Key Vault diagnostics provide the audit trail; rotation is a Key
-  Vault operation that the next pod start picks up automatically.
+- The cloud-hosted dashboard runs with a managed identity that has
+  `Key Vault Secrets User` on the vault.
+- At startup, `Start-DevEnvironment.ps1` (or its prod equivalent)
+  authenticates to Key Vault using the managed identity (prod) or the
+  developer's `az login` session (dev), fetches the secret bundle, and
+  exports each value into the container's environment.
+- The dashboard process reads the root key from `JWT_SECRET_KEY` env
+  and derives the Fernet DEK exactly as in the community edition.
+- Secrets are never written to disk — the script is explicit about
+  this. Rotation is a Key Vault operation; the next container start
+  picks up the new values.
+- Key Vault diagnostic logs provide the audit trail for every secret
+  read.
 
 Everything *above* the root key is identical to community: the same
 encrypted database, the same `_SECRET_REGISTRY`, the same `/secrets`
 migration UI for moving individual application credentials to AWS SM,
 Azure KV, GCP SM, or BeyondTrust Secrets Safe.
 
+The remaining SaaS-shaped work on top of this prod topology — workload
+identity (OIDC federation) instead of a system-assigned managed
+identity, per-tenant Key Vault scoping, Container Apps as the runtime
+instead of an Arc-enrolled VM — is documented in
+[saas-roadmap.md](saas-roadmap.md). The bootstrap loop itself is
+already solved.
+
 ## Side-by-side
 
-| | Community (shipping) | SaaS (designed) |
-|---|---|---|
-| JWT root key location | Host filesystem / Docker secret | Azure Key Vault |
-| How the dashboard authenticates to the key store | n/a (local file) | Managed identity + OIDC federation (no static credential) |
-| Application secrets (cloud creds, integration tokens) | Encrypted DB → migratable to external vault | Same |
-| Rotating the root key | Stop app, replace key file, restart, **re-enter all DB-encrypted values** | Rotate in Key Vault; next pod start picks up the new key |
-| Audit trail for root-key access | Filesystem ACL only | Key Vault diagnostic logs |
-| Static credentials on the host | JWT root key file | None |
+| | Community (shipping) | Prod topology (shipping) | SaaS multi-tenant (planned) |
+|---|---|---|---|
+| JWT root key location | Host filesystem / Docker secret | Azure Key Vault, hydrated to env at startup | Per-tenant Azure Key Vault |
+| How the dashboard authenticates to the key store | n/a (local file) | Arc-host managed identity (prod) / `az login` (dev) | Workload identity + OIDC federation per Container Apps revision |
+| Application secrets (cloud creds, integration tokens) | Encrypted DB → migratable to external vault | Same, with KV-hydrated env as primary | Same, with per-tenant KV |
+| Rotating the root key | Stop app, replace key file, restart, **re-enter all DB-encrypted values** | Rotate in Key Vault, next container start picks it up | Same, with per-tenant rotation |
+| Audit trail for root-key access | Filesystem ACL only | Key Vault diagnostic logs (single-tenant scope) | Key Vault diagnostic logs (per-tenant scope) |
+| Static credentials on the host | JWT root key file | None | None |
 
 ## When to choose which
 
 **Stay on community when:**
 - You are running locally or on a single host you control.
 - Filesystem-level secret protection is acceptable for your threat model.
-- You want full control of the deployment topology.
+- You want full control of the deployment topology and no Azure dependency.
 
-**Move to SaaS when it ships, if:**
-- Your security model requires the root key to live in a vault rather
-  than on disk.
-- You need audit logging for every root-key access.
-- You want to avoid managing static credentials anywhere in the system.
+**Use the prod topology when:**
+- Your security model requires the JWT root key to live in a vault, not on disk.
+- You already have Azure infrastructure and a managed-identity story for the host.
+- Single-tenant is fine (multi-tenancy is on the SaaS roadmap, not in prod today).
+
+**Wait for SaaS multi-tenant when:**
+- You need per-tenant Key Vault scoping, workload identity (federated OIDC),
+  and the broader multi-tenancy primitives in [saas-roadmap.md](saas-roadmap.md).
 
 There is no community-edition workaround that keeps the JWT root key
 out of the host filesystem without breaking the bootstrap. If that
-requirement is firm, the SaaS edition (or a custom deployment that
-implements the managed-identity bootstrap design above) is the
-supported path.
-
-The broader feature roadmap — what else SaaS will offer beyond this
-bootstrap problem — lives in [saas-roadmap.md](saas-roadmap.md).
+requirement is firm, the prod topology (or a custom Azure deployment
+following the same managed-identity pattern) is the supported path
+today; the multi-tenant SaaS edition extends it.
