@@ -158,8 +158,8 @@ make_sg() {
     --query 'GroupId' --output text
 }
 
-JUMPOINT_SG="$(make_sg "${NAME}-jumpoint-sg" "Jumpoint ECS task — outbound to internet, ingress from VPC")"
-VM_SG="$(make_sg "${NAME}-vm-sg" "Sandbox VMs — egress within VPC only, ingress SSH from Jumpoint SG")"
+JUMPOINT_SG="$(make_sg "${NAME}-jumpoint-sg" "Jumpoint ECS task - outbound to internet, ingress from VPC")"
+VM_SG="$(make_sg "${NAME}-vm-sg" "Sandbox VMs - egress within VPC only, ingress SSH from Jumpoint SG")"
 
 # Wipe default egress so we control rules explicitly. revoke is idempotent
 # enough — it errors if absent, swallow.
