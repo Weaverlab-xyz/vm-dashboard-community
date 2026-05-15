@@ -133,11 +133,14 @@ async def list_images(
         )
 
     try:
-        images, cached_at = await cache_service.get_or_refresh(cache_key, ttl, _fetch)
+        payload, cached_at = await cache_service.get_or_refresh(cache_key, ttl, _fetch)
+        images = payload.get("images", [])
+        warnings = payload.get("warnings", [])
         return {
             "images": [AzureImageInfo(**i) for i in images],
             "count": len(images),
             "cached_at": cached_at,
+            "warnings": warnings,
         }
     except AzureError as e:
         raise HTTPException(status_code=503, detail=str(e))
@@ -194,7 +197,6 @@ async def network_options(
             subnets=[AzureSubnetInfo(**s) for s in opts["subnets"]],
             nsgs=[AzureNSGInfo(**n) for n in opts["nsgs"]],
             ssh_keys=[AzureSSHKeyInfo(**k) for k in opts["ssh_keys"]],
-            resource_groups=opts["resource_groups"],
         )
     except AzureError as e:
         raise HTTPException(status_code=503, detail=str(e))

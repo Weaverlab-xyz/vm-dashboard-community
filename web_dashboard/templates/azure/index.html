@@ -135,6 +135,19 @@
       </button>
     </div>
 
+    <div x-show="privateImagesWarnings.length > 0" class="mb-3 p-3 bg-amber-50 border border-amber-200 rounded-lg">
+      <div class="flex items-start gap-3">
+        <svg class="h-5 w-5 text-amber-500 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
+        </svg>
+        <div class="text-xs text-amber-800 space-y-1">
+          <template x-for="(w, i) in privateImagesWarnings" :key="i">
+            <p x-text="w"></p>
+          </template>
+        </div>
+      </div>
+    </div>
+
     <div class="bg-white shadow-sm rounded-lg border border-gray-200 overflow-hidden">
       <div x-show="imagesLoading" class="p-8 text-center text-gray-400 text-sm">Loading images…</div>
       <div x-show="!imagesLoading && privateImages.length === 0" class="p-8 text-center text-gray-400 text-sm">No private images found. Upload or capture a VM image to get started.</div>
@@ -591,7 +604,8 @@ function azureDashboard() {
     selectedImages: [],
     vms: [],
     vmsLoading: false,
-    networkOpts: { locations: ['{{ default_location }}'], vm_sizes: [], subnets: [], nsgs: [], ssh_keys: [], resource_groups: [] },
+    networkOpts: { locations: ['{{ default_location }}'], vm_sizes: [], subnets: [], nsgs: [], ssh_keys: [] },
+    privateImagesWarnings: [],
     keyvaultAvailable: false,
 
     // Modals
@@ -706,6 +720,7 @@ function azureDashboard() {
       try {
         const data = await API.get('/api/azure/images');
         this.privateImages = data.images || [];
+        this.privateImagesWarnings = data.warnings || [];
       } catch (e) {
         if (e.status === 503) this.credError = true;
         toast('Failed to load private images', 'error');

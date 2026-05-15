@@ -361,9 +361,10 @@ _MARKETPLACE_SOURCES = {
 
 # ── Image operations ──────────────────────────────────────────────────────────
 
-def _list_private_images_sync(cred, sub_id: str, gallery: str, gallery_rg: str, rg: str) -> list:
+def _list_private_images_sync(cred, sub_id: str, gallery: str, gallery_rg: str, rg: str) -> dict:
     compute = _get_compute(cred, sub_id)
     results = []
+    warnings: list[str] = []
 
     # Shared Image Gallery images
     if gallery and gallery_rg:
@@ -390,6 +391,11 @@ def _list_private_images_sync(cred, sub_id: str, gallery: str, gallery_rg: str, 
                 })
         except Exception as e:
             logger.warning("Failed to list gallery images from %s/%s: %s", gallery_rg, gallery, e)
+            warnings.append(
+                f"Shared Image Gallery '{gallery}' in resource group '{gallery_rg}' is "
+                f"configured but inaccessible: {e}. Grant the dashboard service principal "
+                f"Reader on that resource group."
+            )
 
     # Standalone managed images in resource group
     try:
@@ -409,11 +415,14 @@ def _list_private_images_sync(cred, sub_id: str, gallery: str, gallery_rg: str, 
             })
     except Exception as e:
         logger.warning("Failed to list managed images from rg=%s: %s", rg, e)
+        warnings.append(
+            f"Managed images in resource group '{rg}' could not be listed: {e}."
+        )
 
-    return results
+    return {"images": results, "warnings": warnings}
 
 
-async def list_private_images(gallery: str, gallery_rg: str, rg: str) -> list:
+async def list_private_images(gallery: str, gallery_rg: str, rg: str) -> dict:
     try:
         cred, sub_id = await _ensure_creds()
         return await asyncio.to_thread(_list_private_images_sync, cred, sub_id, gallery, gallery_rg, rg)
@@ -912,17 +921,18 @@ def _get_ssh_keys_sync(cred, sub_id: str, rg: str) -> list:
 
 def _get_network_options_sync(cred, sub_id: str, location: str, vnet_rg: str, rg: str) -> dict:
     network = _get_network(cred, sub_id)
-    resource_client = _get_resource(cred, sub_id)
     compute = _get_compute(cred, sub_id)
 
-    rgs = [rg_item.name for rg_item in resource_client.resource_groups.list()]
-
-    sizes = sorted(
-        [s for s in compute.virtual_machine_sizes.list(location)
-         if s.name.startswith(("Standard_B", "Standard_D", "Standard_E", "Standard_F"))],
-        key=lambda s: (s.number_of_cores, s.memory_in_mb)
-    )
-    sizes = [s.name for s in sizes]
+    try:
+        sizes_raw = sorted(
+            [s for s in compute.virtual_machine_sizes.list(location)
+             if s.name.startswith(("Standard_B", "Standard_D", "Standard_E", "Standard_F"))],
+            key=lambda s: (s.number_of_cores, s.memory_in_mb)
+        )
+        sizes = [s.name for s in sizes_raw]
+    except Exception as e:
+        logger.warning("Failed to list VM sizes for location=%s: %s", location, e)
+        sizes = []
 
     locations = [
         "eastus", "eastus2", "westus", "westus2", "westus3",
@@ -970,7 +980,6 @@ def _get_network_options_sync(cred, sub_id: str, location: str, vnet_rg: str, rg
         "subnets": subnets,
         "nsgs": nsgs,
         "ssh_keys": ssh_keys,
-        "resource_groups": rgs,
     }
 
 
