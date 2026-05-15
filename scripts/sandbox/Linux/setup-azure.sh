@@ -114,12 +114,17 @@ section "Key Vault + SSH keypair"
 # KV names are globally unique; postfix with subscription hash for collision-safety.
 KV_NAME="$(printf '%s-kv-%s' "$NAME" "$(printf '%s' "$SUBSCRIPTION_ID" | tr -d '-' | head -c6)")"
 KV_NAME="${KV_NAME:0:24}"
-if ! az keyvault show -g "$RG" -n "$KV_NAME" >/dev/null 2>&1; then
+if az keyvault show -g "$RG" -n "$KV_NAME" >/dev/null 2>&1; then
+  ok "Reusing Key Vault $KV_NAME"
+elif az keyvault show-deleted -n "$KV_NAME" >/dev/null 2>&1; then
+  # KV names are globally reserved during soft-delete retention; recover
+  # rather than fail or wait out the 90-day window.
+  az keyvault recover -n "$KV_NAME" -l "$LOCATION" >/dev/null
+  ok "Recovered soft-deleted Key Vault $KV_NAME"
+else
   az keyvault create -g "$RG" -n "$KV_NAME" -l "$LOCATION" \
     --enable-rbac-authorization false --tags "$TAGS" >/dev/null
   ok "Created Key Vault $KV_NAME"
-else
-  ok "Reusing Key Vault $KV_NAME"
 fi
 KV_URL="https://${KV_NAME}.vault.azure.net/"
 state_write azure kv_name "$KV_NAME"
