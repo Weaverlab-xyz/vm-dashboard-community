@@ -154,7 +154,7 @@ Copy it fresh and save.
 **Approval times out immediately** — verify `ENTITLE_DEFAULT_TTL_MINUTES` is
 set to a value large enough for your reviewer response time. Also confirm the
 Entitle webhook URL is publicly reachable. If you are running locally without
-a public IP, use a tunnel (`ngrok http 8000`) as a temporary workaround, or
+a public IP, use a tunnel (`ngrok http 8001`) as a temporary workaround, or
 consider the SaaS hosted tier which provides a stable public endpoint.
 
 **"Entitle API error"** — verify the API token in **Settings → Integrations →

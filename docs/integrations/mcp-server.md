@@ -59,7 +59,7 @@ Edit the config file for your platform:
 {
   "mcpServers": {
     "vm-dashboard": {
-      "url": "http://localhost:8000/mcp",
+      "url": "http://localhost:8001/mcp",
       "headers": {
         "Authorization": "Bearer vmcli_<your-token>"
       }
@@ -74,7 +74,7 @@ selector.
 #### Claude Code (CLI)
 
 ```bash
-claude mcp add --transport http vm-dashboard http://localhost:8000/mcp \
+claude mcp add --transport http vm-dashboard http://localhost:8001/mcp \
   --header "Authorization: Bearer vmcli_<your-token>"
 ```
 
@@ -82,13 +82,13 @@ Run `claude mcp list` to confirm the server was added.
 
 #### Cursor / Continue / other clients
 
-Point the client at `http://<host>:8000/mcp` with an
+Point the client at `http://<host>:8001/mcp` with an
 `Authorization: Bearer vmcli_<token>` header. The server uses the **HTTP
 Streamable transport** (SSE-based), which is the MCP standard transport for
 remote servers.
 
 If the dashboard is running on a remote machine (not `localhost`), replace
-`localhost:8000` with the hostname or IP of that machine.
+`localhost:8001` with the hostname or IP of that machine.
 
 ---
 
@@ -123,8 +123,8 @@ in the web UI or via the REST API.
 
 If your AI client runs on a different machine than the dashboard:
 
-1. Replace `localhost:8000` with the dashboard host's IP or hostname.
-2. Make sure port 8000 is open between the two machines (firewall / security
+1. Replace `localhost:8001` with the dashboard host's IP or hostname.
+2. Make sure port 8001 is open between the two machines (firewall / security
    group).
 3. For production use, place the dashboard behind a reverse proxy with TLS and
    use `https://` in the MCP URL.
@@ -134,7 +134,7 @@ If your AI client runs on a different machine than the dashboard:
 ## Troubleshooting
 
 **"Connection refused"** — verify the dashboard is running:
-`curl http://localhost:8000/api/health`. If it returns `{"status":"ok"}` but
+`curl http://localhost:8001/api/health`. If it returns `{"status":"ok"}` but
 the MCP client still fails, check that the client is using `http://` not
 `https://` (unless you have TLS configured).
 

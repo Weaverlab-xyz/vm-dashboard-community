@@ -308,7 +308,7 @@ The script:
   Docker Secrets and is never written to `.env`.
 - Auto-generates `POSTGRES_PASSWORD` in `.env` if it's still at the placeholder value.
 - Brings up the Compose stack (`db` + `app`).
-- Waits for `http://localhost:8000/api/health` to respond.
+- Waits for `http://localhost:8001/api/health` to respond.
 - Opens your browser.
 
 ### 2. Complete the setup wizard
@@ -383,7 +383,7 @@ of filesystem permissions.
   daemon isn't running, and opens the dashboard in your Windows-side
   browser (via `wslview` if installed, otherwise `cmd.exe /c start`).
   Ports from WSL2 are automatically forwarded to Windows, so
-  `http://localhost:8000` works in your Windows browser without any extra
+  `http://localhost:8001` works in your Windows browser without any extra
   configuration.
 - **Apple Silicon (M1/M2/M3/M4):** Docker images build natively as
   `linux/arm64` — no platform flag needed. The same applies to
@@ -551,7 +551,7 @@ Common causes:
 | `InvalidClientTokenId` / `InvalidSignature`       | AWS access key wrong or rotated                   | Rerun `aws iam create-access-key`, then update via the reconfigure wizard (`/setup`)         |
 | `AuthenticationFailed` from Azure                 | Azure SP secret wrong or expired                  | Regenerate with `az ad sp credential reset`, then update via the reconfigure wizard (`/setup`) |
 | `connection refused` on port 5432                 | Postgres container not healthy                    | `docker compose ps`; check `db` container logs                                               |
-| `Address already in use` on 8000                  | Another process is bound to 8000                  | Stop it, or change the port mapping in `docker-compose.yml`                                  |
+| `Address already in use` on 8001                  | Another process is bound to 8001                  | Stop it, or change the port mapping in `docker-compose.yml`                                  |
 
 ### Login fails with "Invalid credentials"
 
@@ -767,7 +767,7 @@ principal in Part B.
    - Name: `Dashboard OAuth (dev)`
    - Supported account types: single-tenant
 2. **Authentication** → **Add platform** → **Web**.
-   - Redirect URI: `http://localhost:8000/api/auth/oauth/azure/callback`
+   - Redirect URI: `http://localhost:8001/api/auth/oauth/azure/callback`
 3. **API permissions** → **Add a permission** → **Microsoft Graph** →
    **Delegated** → `openid`, `profile`, `email`.
 4. **Certificates & secrets** → **New client secret**. Copy the value.
@@ -926,7 +926,7 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json`
 {
   "mcpServers": {
     "vm-dashboard": {
-      "url": "http://localhost:8000/mcp",
+      "url": "http://localhost:8001/mcp",
       "headers": {
         "Authorization": "Bearer vmcli_<your-token>"
       }
@@ -941,13 +941,13 @@ picker.
 #### Claude Code (CLI)
 
 ```bash
-claude mcp add --transport http vm-dashboard http://localhost:8000/mcp \
+claude mcp add --transport http vm-dashboard http://localhost:8001/mcp \
   --header "Authorization: Bearer vmcli_<your-token>"
 ```
 
 #### Other clients
 
-Point the client at `http://<host>:8000/mcp` with the
+Point the client at `http://<host>:8001/mcp` with the
 `Authorization: Bearer vmcli_<token>` header. The server uses the
 HTTP Streamable transport (SSE).
 
