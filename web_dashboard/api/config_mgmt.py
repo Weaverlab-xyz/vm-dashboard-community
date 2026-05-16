@@ -21,7 +21,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from ..database import get_db
+from ..database import Job, get_db
 from ..auth import get_current_user
 from ..models.user import User
 from ..services import job_service
@@ -97,13 +97,25 @@ async def get_inventory(current_user: User = Depends(get_current_user)):
 # ── Cloud targets ─────────────────────────────────────────────────────────────
 
 @router.get("/cloud-targets")
-async def get_cloud_targets(current_user: User = Depends(get_current_user)):
+async def get_cloud_targets(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     """
-    Return running cloud VM targets (EC2 + Azure VMs + GCE instances) with IPs.
+    Return cloud VM targets (EC2 + Azure VMs + GCE instances) with IPs for the
+    Config Mgmt page's target picker.
 
-    Reads from the in-memory cache populated by the cloud tabs — no extra API
-    calls are made here.  Returns empty lists for any cloud that is not
-    configured or has no deployed instances in the cache.
+    Source of truth is the ``jobs`` table: every successful cloud deploy lands
+    a completed Job whose ``metadata_dict`` carries ``instance_id``/``vm_name``,
+    ``private_ip``, and ``public_ip``. We enumerate those directly instead of
+    relying on the cache populated by the cloud tabs — the cache may be empty
+    on a freshly-restarted server, after a cache-invalidation following a
+    deploy, or when the user has never opened the relevant cloud tab. Previously
+    those cases left this endpoint returning empty lists even though the
+    instances clearly existed (issue #12).
+
+    Destroyed instances are excluded (``metadata_dict['destroyed'] == True``
+    after the destroy job runs).
 
     Response shape:
         {
@@ -112,55 +124,39 @@ async def get_cloud_targets(current_user: User = Depends(get_current_user)):
           "gcp":   [{name, ip, zone}, ...],
         }
     """
-    from ..services import cache_service
-
     targets: dict = {"aws": [], "azure": [], "gcp": []}
 
-    # AWS EC2 — populated by the AWS tab warmer
-    try:
-        cached = await cache_service.get(cache_service.key_global("aws_instances"))
-        if cached:
-            for inst in (cached.get("data") or []):
-                if inst.get("state") == "running":
-                    ip = inst.get("public_ip") or inst.get("private_ip")
-                    if ip:
-                        targets["aws"].append({
-                            "name": inst.get("name") or inst.get("instance_id", ""),
-                            "ip": ip,
-                            "instance_id": inst.get("instance_id"),
-                        })
-    except Exception as exc:
-        logger.debug("cloud-targets: AWS cache read failed: %s", exc)
+    # Pull completed deploys for all three clouds in one trip.
+    deploy_jobs = (
+        db.query(Job)
+        .filter(
+            Job.job_type.in_(("ec2_deploy", "azure_deploy", "gce_deploy")),
+            Job.status == "completed",
+        )
+        .order_by(Job.created_at.desc())
+        .all()
+    )
 
-    # Azure VMs — populated by the Azure tab warmer
-    try:
-        cached = await cache_service.get(cache_service.key_global("azure_vms"))
-        if cached:
-            for vm in (cached.get("data") or []):
-                ip = vm.get("public_ip") or vm.get("private_ip")
-                if ip:
-                    targets["azure"].append({
-                        "name": vm.get("name", ""),
-                        "ip": ip,
-                    })
-    except Exception as exc:
-        logger.debug("cloud-targets: Azure cache read failed: %s", exc)
+    for job in deploy_jobs:
+        meta = job.metadata_dict
+        if meta.get("destroyed"):
+            continue
+        ip = meta.get("public_ip") or meta.get("private_ip")
+        if not ip:
+            continue
 
-    # GCE Instances — populated by the GCP tab warmer
-    try:
-        cached = await cache_service.get(cache_service.key_global("gcp_instances"))
-        if cached:
-            for inst in (cached.get("data") or []):
-                if inst.get("status") == "RUNNING":
-                    ip = inst.get("public_ip") or inst.get("private_ip")
-                    if ip:
-                        targets["gcp"].append({
-                            "name": inst.get("instance_name", ""),
-                            "ip": ip,
-                            "zone": inst.get("zone", ""),
-                        })
-    except Exception as exc:
-        logger.debug("cloud-targets: GCP cache read failed: %s", exc)
+        if job.job_type == "ec2_deploy":
+            iid = meta.get("instance_id")
+            name = meta.get("instance_name") or iid or ""
+            targets["aws"].append({"name": name, "ip": ip, "instance_id": iid})
+        elif job.job_type == "azure_deploy":
+            targets["azure"].append({"name": meta.get("vm_name", ""), "ip": ip})
+        elif job.job_type == "gce_deploy":
+            targets["gcp"].append({
+                "name": meta.get("instance_name", ""),
+                "ip": ip,
+                "zone": meta.get("zone", ""),
+            })
 
     # Per-cloud default SSH user — surfaced as a *suggestion* the run-asset
     # form pre-fills when the operator picks a cloud target. Not a secret;
