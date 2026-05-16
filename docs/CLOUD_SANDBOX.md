@@ -135,8 +135,7 @@ fast with a "not authenticated" message.
 .\scripts\Onboard-Dashboard.ps1
 ```
 
-Then open `http://localhost:8001` (community edition's default port; the
-main onboarder uses 8000 — the sandbox scripts work either way) and
+Then open `http://localhost:8001` (the community edition's default port) and
 paste the printed config blocks into the `/setup` wizard.
 
 Each setup script is **idempotent** — re-running picks up where it left

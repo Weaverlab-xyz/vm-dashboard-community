@@ -9,7 +9,7 @@ Any MCP-compatible client (Claude Desktop, Claude Code, Cursor, etc.) can connec
     {
       "mcpServers": {
         "vm-dashboard": {
-          "url": "http://localhost:8000/mcp",
+          "url": "http://localhost:8001/mcp",
           "headers": {"Authorization": "Bearer vmcli_<your-pat>"}
         }
       }

@@ -88,11 +88,11 @@ agent-install playbook.
 ```bash
 # Default expiry: 480 minutes (8 hours)
 curl -H "Authorization: Bearer $DASHBOARD_JWT" \
-     http://localhost:8000/api/epml/token
+     http://localhost:8001/api/epml/token
 
 # Custom expiry (minutes, 30 – 525600)
 curl -H "Authorization: Bearer $DASHBOARD_JWT" \
-     "http://localhost:8000/api/epml/token?expiry_minutes=1440"
+     "http://localhost:8001/api/epml/token?expiry_minutes=1440"
 ```
 
 **As an Ansible extra var:**
@@ -126,14 +126,14 @@ If packages are stale or a new version exists, trigger a fresh build:
 
 ```bash
 curl -X POST -H "Authorization: Bearer $DASHBOARD_JWT" \
-     http://localhost:8000/api/epml/trigger-build
+     http://localhost:8001/api/epml/trigger-build
 ```
 
 Check build progress:
 
 ```bash
 curl -H "Authorization: Bearer $DASHBOARD_JWT" \
-     http://localhost:8000/api/epml/build-status
+     http://localhost:8001/api/epml/build-status
 ```
 
 ---
