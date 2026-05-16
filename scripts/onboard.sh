@@ -32,8 +32,8 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 ENV_FILE="$REPO_ROOT/.env"
 ENV_EXAMPLE="$REPO_ROOT/.env.example"
 COMPOSE_FILE="$REPO_ROOT/docker-compose.yml"
-HEALTH_URL="http://localhost:8000/api/health"
-DASHBOARD_URL="http://localhost:8000"
+HEALTH_URL="http://localhost:8001/api/health"
+DASHBOARD_URL="http://localhost:8001"
 
 # ANSI color helpers (no-op when stdout is not a TTY).
 if [[ -t 1 ]]; then
@@ -217,7 +217,7 @@ if ! (( ready )); then
     echo
     warn "Common causes:"
     warn "  - Invalid AWS or Azure credentials (app crashes at startup)"
-    warn "  - Port 8000 already in use by another process"
+    warn "  - Port 8001 already in use by another process"
     warn "  - Database container still initializing — try rerunning in ~30s"
     exit 1
 fi
