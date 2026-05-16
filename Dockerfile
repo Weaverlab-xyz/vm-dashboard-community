@@ -18,7 +18,7 @@ COPY web_dashboard/ ./web_dashboard/
 # Container-sane defaults; .env overrides these at runtime.
 ENV LOG_DIR=/tmp/logs \
     WEBAUTHN_RP_ID=localhost \
-    WEBAUTHN_ORIGIN=http://localhost:8000
+    WEBAUTHN_ORIGIN=http://localhost:8001
 
 EXPOSE 8000
 

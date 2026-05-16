@@ -109,7 +109,7 @@ class Settings(BaseSettings):
     api_version: str = "0.1.0"
 
     # CORS
-    cors_origins: List[str] = ["http://localhost:8000", "http://localhost:3000"]
+    cors_origins: List[str] = ["http://localhost:8001", "http://localhost:3000"]
 
     # PowerShell
     vm_cli_wrapper_path: str = r"C:\Scripts\VM_CLI\VM_DEMO_CLI\vm_cli_api_wrapper.ps1"
@@ -267,15 +267,15 @@ class Settings(BaseSettings):
     # FIDO2 / WebAuthn MFA
     webauthn_rp_id: str = "localhost"             # bare domain, no port (e.g. dashboard.example.com)
     webauthn_rp_name: str = "Infrastructure Management Dashboard"
-    webauthn_origin: str = "http://localhost:8000"  # must exactly match scheme://host:port browser uses
+    webauthn_origin: str = "http://localhost:8001"  # must exactly match scheme://host:port browser uses
 
     # Azure AD OAuth Login (SEPARATE app registration from resource-management service principal)
     # Create a new App Registration; required delegated permissions: openid, profile, email
-    # Add redirect URI: http://localhost:8000/api/auth/oauth/azure/callback
+    # Add redirect URI: http://localhost:8001/api/auth/oauth/azure/callback
     azure_oauth_client_id: str = ""
     azure_oauth_client_secret: str = ""
     azure_oauth_tenant_id: str = ""
-    azure_oauth_redirect_uri: str = "http://localhost:8000/api/auth/oauth/azure/callback"
+    azure_oauth_redirect_uri: str = "http://localhost:8001/api/auth/oauth/azure/callback"
     # Group-to-workgroup mapping: JSON dict of { "entra_group_object_id": "WorkgroupName" }
     # Users are matched against their group claims and assigned the corresponding workgroups.
     # Members of any listed group are auto-created on first login — no pre-registration needed.
