@@ -253,6 +253,86 @@ async def get_keyvault_ssh_key(
         raise HTTPException(status_code=503, detail=str(e))
 
 
+# ── VM SSH key retrieval (mirrors /api/aws/instances/{id}/ssh-key) ───────────
+
+@router.get("/vms/{vm_name}/ssh-key")
+async def get_vm_ssh_key(
+    vm_name: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("azure", "read")),
+):
+    """Return the SSH private key for an Azure VM deployed via this dashboard.
+
+    The private key comes from the unified keypair secret in Azure Key Vault
+    (`azure_ssh_keypair_secret_name`, JSON `{public_key, private_key}`) or its
+    legacy single-purpose fallback. Closes issue #7 where operators had no way
+    to retrieve the private key matching the public key the dashboard had just
+    injected into the VM, so SSH attempts with a locally-stored copy could
+    fail silently if the local file and the KV secret had drifted.
+
+    Includes a `keypair_matches` field with the result of verifying that the
+    stored public_key actually corresponds to the stored private_key — if
+    `false`, the operator knows the unified KV secret is internally
+    inconsistent and SSH will not work until it's repaired.
+    """
+    kv_url           = _cfg("azure_key_vault_url")
+    unified_secret   = _cfg("azure_ssh_keypair_secret_name")
+    legacy_pubkey    = _cfg("azure_ssh_key_secret_name")
+    legacy_privkey   = _cfg("azure_ssh_private_key_secret_name")
+    if not kv_url:
+        raise HTTPException(
+            status_code=503,
+            detail="Key Vault not configured. Add the Key Vault URL in Settings → Azure.",
+        )
+
+    # Pull both keys so we can run the match check below.
+    try:
+        public_key = await azure_service.resolve_azure_ssh_public_key(
+            kv_url, unified_secret, legacy_pubkey,
+        )
+    except AzureError as e:
+        raise HTTPException(status_code=503, detail=f"Public key fetch failed: {e}")
+    try:
+        private_key = await azure_service.resolve_azure_ssh_private_key(
+            kv_url, unified_secret, legacy_privkey,
+        )
+    except AzureError as e:
+        raise HTTPException(status_code=503, detail=f"Private key fetch failed: {e}")
+
+    # Pull current IP from the deploy job so the response can include an
+    # ssh-ready command. Falls back to nothing if the Job row is missing
+    # (e.g. the VM was provisioned before Job.cloud_resource_id was added).
+    job = db.query(Job).filter(Job.cloud_resource_id == vm_name).first()
+    if job is None:
+        for j in db.query(Job).filter(Job.job_type == "azure_deploy").all():
+            if j.metadata_dict.get("vm_name") == vm_name:
+                job = j
+                break
+
+    meta = job.metadata_dict if job else {}
+    ip = meta.get("public_ip") or meta.get("private_ip")
+    ssh_username = meta.get("ssh_username") or "azureuser"
+    ssh_command = f"ssh -i <key-file> {ssh_username}@{ip}" if ip else None
+
+    keypair_check = azure_service.verify_ssh_keypair(public_key, private_key)
+
+    return {
+        "vm_name": vm_name,
+        "public_key": public_key,
+        "private_key": private_key,
+        "secret_name": unified_secret or legacy_pubkey,
+        "ip": ip,
+        "ssh_username": ssh_username,
+        "ssh_command": ssh_command,
+        "keypair_matches": keypair_check["matches"],
+        "keypair_check_error": keypair_check.get("error"),
+        # `derived_public_key` is the OpenSSH public string computed from the
+        # private key — when keypair_matches is False this lets the operator
+        # see exactly what their private key SHOULD pair with vs what's in KV.
+        "derived_public_key": keypair_check.get("derived_public_key"),
+    }
+
+
 # ── VM listing ────────────────────────────────────────────────────────────────
 
 @router.get("/vms")
@@ -378,6 +458,7 @@ async def deploy_vm(
             "subnet_id": req.subnet_id,
             "nsg_ids": req.nsg_ids,
             "create_public_ip": req.create_public_ip,
+            "ssh_username": req.ssh_username,  # so /vms/{name}/ssh-key can echo the right user
             "workgroup": workgroup,
         },
     )
@@ -434,6 +515,7 @@ async def bulk_deploy_vms(
                 "subnet_id": req.subnet_id,
                 "nsg_ids": req.nsg_ids,
                 "create_public_ip": req.create_public_ip,
+                "ssh_username": req.ssh_username,
                 "workgroup": workgroup,
                 "bulk": True,
             },

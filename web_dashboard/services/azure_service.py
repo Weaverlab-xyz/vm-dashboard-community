@@ -341,6 +341,54 @@ async def resolve_azure_ssh_private_key(
     )
 
 
+def verify_ssh_keypair(public_key: str, private_key: str) -> dict:
+    """Verify that an SSH public key matches an SSH/PEM private key.
+
+    Returns ``{"matches": bool, "derived_public_key": str|None, "error": str|None}``.
+    `derived_public_key` is the OpenSSH public-key string derived from the
+    private key — surfaced so callers can show the operator both keys
+    side-by-side when a mismatch is detected. Issue #7: deploys had no way to
+    catch a stale-pair unified KV secret (operator updated the private_key
+    field but forgot to refresh public_key), so SSH silently failed because
+    Azure was provisioning the OLD public key while the operator had the NEW
+    private key locally.
+
+    Returns matches=False with a populated `error` string for any load /
+    decode failure (encrypted private key without a passphrase, malformed
+    PEM, unsupported algorithm, etc.) — the caller treats those as "can't
+    verify" rather than crashing the request.
+    """
+    if not public_key or not private_key:
+        return {"matches": False, "derived_public_key": None,
+                "error": "public_key or private_key is empty"}
+    try:
+        from cryptography.hazmat.primitives import serialization
+        priv_bytes = private_key.encode("utf-8")
+        # Try OpenSSH format first (modern ssh-keygen default), then PEM
+        # (RSA / EC). load_ssh_private_key accepts both since cryptography
+        # 35.0+ but we keep the fallback for older releases.
+        try:
+            priv = serialization.load_ssh_private_key(priv_bytes, password=None)
+        except (ValueError, Exception):  # noqa: BLE001 — cryptography raises various types
+            priv = serialization.load_pem_private_key(priv_bytes, password=None)
+        derived = priv.public_key().public_bytes(
+            encoding=serialization.Encoding.OpenSSH,
+            format=serialization.PublicFormat.OpenSSH,
+        ).decode("utf-8")
+        # Compare just the `<algorithm> <blob>` portion — comments differ.
+        # E.g. "ssh-rsa AAAA... user@host" ≡ "ssh-rsa AAAA..." for matching.
+        def _strip_comment(k: str) -> str:
+            parts = k.strip().split(None, 2)
+            return f"{parts[0]} {parts[1]}" if len(parts) >= 2 else k.strip()
+        return {
+            "matches": _strip_comment(derived) == _strip_comment(public_key),
+            "derived_public_key": derived,
+            "error": None,
+        }
+    except Exception as e:  # noqa: BLE001
+        return {"matches": False, "derived_public_key": None, "error": str(e)}
+
+
 # ── Marketplace image sources ─────────────────────────────────────────────────
 
 _MARKETPLACE_SOURCES = {
