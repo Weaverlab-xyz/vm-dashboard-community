@@ -8,7 +8,7 @@ GET  /api/setup/config     — current config with secrets redacted (admin JWT i
 """
 import logging
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
@@ -215,6 +215,8 @@ def _apply_config(payload: SetupPayload) -> None:
     })
 
     config_service.set_many(pairs)
+    # Belt-and-suspenders: force the next config_service.get() to reload from DB.
+    config_service.invalidate()
 
     # Invalidate Azure credential cache so the service picks up new values.
     try:
@@ -222,6 +224,23 @@ def _apply_config(payload: SetupPayload) -> None:
         azure_service.invalidate_credentials()
     except Exception:
         pass
+
+
+# Data caches whose payload is derived from cloud/config values written via the
+# setup wizard. Invalidated after every wizard save so the next page load
+# rebuilds them against the new config instead of serving stale pre-save data.
+_CONFIG_DEPENDENT_CACHES = (
+    "azure_images", "azure_network_opts", "azure_vms", "azure_marketplace",
+    "aws_amis", "aws_network_opts", "aws_instances", "aws_ssh_key_secrets",
+    "cfgmgmt_instances", "cfgmgmt_s3status",
+    "portainer_endpoints", "portainer_containers", "portainer_stacks",
+)
+
+
+async def _invalidate_data_caches() -> None:
+    from ..services import cache_service
+    for name in _CONFIG_DEPENDENT_CACHES:
+        await cache_service.invalidate(cache_service.key_global(name))
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -244,7 +263,7 @@ def get_config(request: Request):
 
 
 @router.post("/complete", status_code=201)
-def complete_setup(payload: SetupPayload, request: Request):
+def complete_setup(payload: SetupPayload, request: Request, background_tasks: BackgroundTasks):
     """
     Initial wizard submission — no auth required.
     Returns 409 if setup has already been completed (use PUT /api/setup/config instead).
@@ -258,12 +277,13 @@ def complete_setup(payload: SetupPayload, request: Request):
     _upsert_admin(payload.admin.username, payload.admin.password)
     _apply_config(payload)
     config_service.mark_setup_complete()
+    background_tasks.add_task(_invalidate_data_caches)
     logger.info("Setup wizard completed by first-run submission.")
     return {"ok": True}
 
 
 @router.put("/config")
-def reconfigure(payload: SetupPayload, request: Request):
+def reconfigure(payload: SetupPayload, request: Request, background_tasks: BackgroundTasks):
     """
     Reconfigure credentials and feature flags. Admin JWT required.
     Admin account password is updated only when payload.admin.password is non-empty.
@@ -272,6 +292,7 @@ def reconfigure(payload: SetupPayload, request: Request):
     if payload.admin.password:
         _upsert_admin(payload.admin.username, payload.admin.password)
     _apply_config(payload)
+    background_tasks.add_task(_invalidate_data_caches)
     logger.info("Configuration updated via reconfigure endpoint.")
     return {"ok": True}
 
