@@ -34,11 +34,21 @@
         {% set nav_hover = 'hover:bg-blue-800' if app_env == 'production' else 'hover:bg-orange-600' %}
         {% set nav_active = 'bg-blue-800' if app_env == 'production' else 'bg-orange-600' %}
         <div class="hidden md:flex items-center space-x-1">
+          {# Order per issue #17:
+             Dashboard → on-prem hypervisors (Workstation, Proxmox, vSphere, Hyper-V,
+             Nutanix, XCP-ng) → AWS → Azure → GCP → Containers → Storage →
+             Configuration (renamed from "Config Mgmt") → Secrets → Users → Groups.
+             Jobs, Images, and Workgroups are kept and slotted where they
+             logically belong (Jobs alongside other operational links, Workgroups
+             with Groups in the admin section, Images with Storage as a content
+             section). #}
           <a href="/" class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
              {% if request.url.path == '/' %}{{ nav_active }}{% endif %}">Dashboard</a>
+
+          {# ── On-premises hypervisors ───────────────────────────────────────── #}
           {% if vmware_enabled %}
           <a href="/vms" class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
-             {% if request.url.path == '/vms' %}{{ nav_active }}{% endif %}">VMs</a>
+             {% if request.url.path == '/vms' %}{{ nav_active }}{% endif %}">Workstation</a>
           {% endif %}
           {% if proxmox_enabled %}
           <a href="/proxmox" class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
@@ -60,22 +70,37 @@
           <a href="/xcpng" class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
              {% if request.url.path == '/xcpng' %}{{ nav_active }}{% endif %}">XCP-ng</a>
           {% endif %}
+
+          {# ── Cloud providers ──────────────────────────────────────────────── #}
           <a href="/aws" class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
              {% if request.url.path == '/aws' %}{{ nav_active }}{% endif %}">AWS</a>
-          <a href="/gcp" class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
-             {% if request.url.path == '/gcp' %}{{ nav_active }}{% endif %}">GCP</a>
           <a href="/azure" class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
              {% if request.url.path == '/azure' %}{{ nav_active }}{% endif %}">Azure</a>
+          <a href="/gcp" class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
+             {% if request.url.path == '/gcp' %}{{ nav_active }}{% endif %}">GCP</a>
+
+          {# ── Workloads / artefacts ────────────────────────────────────────── #}
           {% if portainer_enabled %}
           <a href="/containers" class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
              {% if request.url.path == '/containers' %}{{ nav_active }}{% endif %}">Containers</a>
           {% endif %}
+          <a x-show="$store.auth.isAdmin" href="/images"
+             class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
+             {% if request.url.path.startswith('/images') %}{{ nav_active }}{% endif %}">Images</a>
+          <a x-show="$store.auth.isAdmin" href="/storage"
+             class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
+             {% if request.url.path.startswith('/storage') %}{{ nav_active }}{% endif %}">Storage</a>
           {% if ansible_enabled %}
           <a href="/config-mgmt" class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
-             {% if request.url.path == '/config-mgmt' %}{{ nav_active }}{% endif %}">Config Mgmt</a>
+             {% if request.url.path == '/config-mgmt' %}{{ nav_active }}{% endif %}">Configuration</a>
           {% endif %}
           <a href="/jobs" class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
              {% if request.url.path.startswith('/jobs') %}{{ nav_active }}{% endif %}">Jobs</a>
+
+          {# ── Admin ────────────────────────────────────────────────────────── #}
+          <a x-show="$store.auth.isAdmin" href="/secrets"
+             class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
+             {% if request.url.path.startswith('/secrets') %}{{ nav_active }}{% endif %}">Secrets</a>
           <a x-show="$store.auth.isAdmin" href="/users"
              class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
              {% if request.url.path.startswith('/users') %}{{ nav_active }}{% endif %}">Users</a>
@@ -85,15 +110,6 @@
           <a x-show="$store.auth.isAdmin" href="/workgroups"
              class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
              {% if request.url.path.startswith('/workgroups') %}{{ nav_active }}{% endif %}">Workgroups</a>
-          <a x-show="$store.auth.isAdmin" href="/secrets"
-             class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
-             {% if request.url.path.startswith('/secrets') %}{{ nav_active }}{% endif %}">Secrets</a>
-          <a x-show="$store.auth.isAdmin" href="/storage"
-             class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
-             {% if request.url.path.startswith('/storage') %}{{ nav_active }}{% endif %}">Storage</a>
-          <a x-show="$store.auth.isAdmin" href="/images"
-             class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
-             {% if request.url.path.startswith('/images') %}{{ nav_active }}{% endif %}">Images</a>
         </div>
 
         <!-- User menu -->
