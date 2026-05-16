@@ -62,25 +62,44 @@
             </template>
             <template x-if="!assetsLoading && assets.length > 0">
               <div class="space-y-1">
-                <select x-model="form.asset"
+                <select x-model="form.asset_key"
                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm
                                focus:outline-none focus:ring-2 focus:ring-blue-500">
                   <option value="">Select an asset…</option>
-                  <template x-for="a in assets" :key="a.name">
-                    <option :value="a.name" x-text="a.name"></option>
+                  <template x-for="a in assets" :key="a.backend + '|' + a.name">
+                    <option :value="a.backend + '|' + a.name"
+                            x-text="a.name + ' (' + backendLabel(a.backend) + ')'"></option>
                   </template>
                 </select>
-                <!-- Type badge for selected asset -->
+                <!-- Type + backend badge for selected asset -->
                 <template x-if="selectedAsset">
-                  <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium"
-                        :class="{
-                          'bg-blue-100 text-blue-800':   selectedAsset.type === 'playbook',
-                          'bg-purple-100 text-purple-800': selectedAsset.type === 'script',
-                          'bg-orange-100 text-orange-800': selectedAsset.type === 'rpm',
-                          'bg-green-100 text-green-800':  selectedAsset.type === 'deb',
-                        }">
-                    <span x-text="assetTypeLabel(selectedAsset.type)"></span>
-                  </span>
+                  <div class="flex items-center gap-1.5">
+                    <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium"
+                          :class="{
+                            'bg-blue-100 text-blue-800':   selectedAsset.type === 'playbook',
+                            'bg-purple-100 text-purple-800': selectedAsset.type === 'script',
+                            'bg-orange-100 text-orange-800': selectedAsset.type === 'rpm',
+                            'bg-green-100 text-green-800':  selectedAsset.type === 'deb',
+                          }">
+                      <span x-text="assetTypeLabel(selectedAsset.type)"></span>
+                    </span>
+                    <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium"
+                          :class="selectedAsset.backend === 'local' ? 'bg-amber-100 text-amber-800' : 'bg-blue-100 text-blue-800'"
+                          x-text="backendLabel(selectedAsset.backend)"></span>
+                  </div>
+                </template>
+                <!-- Warning: local asset + cloud target won't work because
+                     cloud-side ansible runner can't reach the dashboard's
+                     local filesystem (issue #16). -->
+                <template x-if="selectedAsset && selectedAsset.backend === 'local' && targetCloud">
+                  <div class="mt-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-xs text-amber-800">
+                    <strong>Local storage can't be used for cloud runs.</strong>
+                    This asset lives on the dashboard's local filesystem, which
+                    the cloud-side Ansible runner cannot reach. Open the
+                    <a href="/storage" class="underline">Storage</a> page and
+                    use <em>Move</em> to copy it to a cloud backend
+                    (S3 / Azure Blob / GCS) before running.
+                  </div>
                 </template>
               </div>
             </template>
@@ -167,7 +186,7 @@
 
           <!-- Run button -->
           <button @click="runAsset()"
-                  :disabled="running || !form.asset || !form.target"
+                  :disabled="running || !form.asset_key || !form.target"
                   class="w-full flex items-center justify-center gap-2 bg-blue-700 hover:bg-blue-800
                          disabled:opacity-50 text-white text-sm font-medium px-4 py-2.5 rounded-lg transition">
             <svg x-show="running" class="animate-spin h-4 w-4" fill="none" viewBox="0 0 24 24">
@@ -324,7 +343,11 @@ function configMgmt() {
     runError: '',
     extraVarsError: '',
     form: {
-      asset: '',
+      // asset_key is the composite "<backend>|<name>" string the dropdown
+      // binds to. The submit handler splits it into asset + asset_backend
+      // for the API. Stored as a composite so the same filename can appear
+      // on multiple backends (issue #16).
+      asset_key: '',
       target: '',
       ansible_user: '',
       extra_vars_raw: '',
@@ -367,12 +390,23 @@ function configMgmt() {
     },
 
     get selectedAsset() {
-      if (!this.form.asset) return null;
-      return this.assets.find(a => a.name === this.form.asset) || null;
+      if (!this.form.asset_key) return null;
+      const [backend, ...rest] = this.form.asset_key.split('|');
+      const name = rest.join('|');  // filenames can contain '|' in theory
+      return this.assets.find(a => a.backend === backend && a.name === name) || null;
     },
 
     assetTypeLabel(type) {
       return { playbook: 'Playbook', script: 'Script (.sh)', rpm: 'Package (.rpm)', deb: 'Package (.deb)' }[type] || type;
+    },
+
+    backendLabel(id) {
+      return ({
+        s3:         'AWS S3',
+        azure_blob: 'Azure Blob',
+        gcs:        'GCS',
+        local:      'Local',
+      })[id] || id;
     },
 
     async init() {
@@ -454,10 +488,21 @@ function configMgmt() {
       else if (target.startsWith('azure:')) { cloud = 'azure'; target = target.slice(6); }
       else if (target.startsWith('gcp:'))   { cloud = 'gcp';   target = target.slice(4); }
 
+      // Split the composite asset_key (e.g. "s3|deploy.yml") into name +
+      // backend so the API can fetch from the exact backend the user picked.
+      if (!this.form.asset_key) {
+        this.runError = 'Pick an asset first.';
+        this.running = false;
+        return;
+      }
+      const [assetBackend, ...rest] = this.form.asset_key.split('|');
+      const assetName = rest.join('|');
+
       this.running = true;
       try {
         const result = await API.post('/api/config-mgmt/run', {
-          asset: this.form.asset,
+          asset: assetName,
+          asset_backend: assetBackend,
           target,
           cloud,
           ansible_user: (this.form.ansible_user || '').trim(),

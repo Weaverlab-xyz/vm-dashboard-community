@@ -244,7 +244,7 @@
     </p>
   </div>
 
-  <!-- ── Asset list (active backend) ──────────────────────────────────────── -->
+  <!-- ── Asset list (every configured backend) ────────────────────────────── -->
   <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
     <div class="flex items-center justify-between mb-4">
       <h2 class="text-base font-semibold text-gray-700">Stored assets</h2>
@@ -254,11 +254,13 @@
         <span x-show="loadingAssets" x-cloak>Loading…</span>
       </button>
     </div>
-    <div x-show="!activeBackend" class="text-sm text-gray-400 py-6 text-center">
-      No active backend selected.
-    </div>
-    <div x-show="activeBackend && assets.length === 0 && !loadingAssets" class="text-sm text-gray-400 py-6 text-center">
-      No assets in <span x-text="backendLabel(activeBackend)"></span> yet. Use the
+    <p class="text-xs text-gray-500 mb-3">
+      Showing assets across every configured backend. Use <em>Move</em> to
+      relocate a playbook from the local filesystem to a cloud backend so the
+      cloud-side Ansible runner can fetch it.
+    </p>
+    <div x-show="!loadingAssets && assets.length === 0" class="text-sm text-gray-400 py-6 text-center">
+      No assets yet. Use the
       <a class="text-blue-600 hover:underline" href="/config-mgmt">Config Management</a>
       page to upload playbooks and scripts.
     </div>
@@ -267,26 +269,73 @@
         <thead>
           <tr class="text-left text-xs uppercase text-gray-500 border-b border-gray-200">
             <th class="pb-2 pr-4">Name</th>
+            <th class="pb-2 pr-4">Backend</th>
             <th class="pb-2 pr-4">Type</th>
             <th class="pb-2 pr-4 text-right">Size</th>
-            <th class="pb-2"></th>
+            <th class="pb-2 text-right">Actions</th>
           </tr>
         </thead>
         <tbody class="divide-y divide-gray-100">
-          <template x-for="a in assets" :key="a.name">
+          <template x-for="a in assets" :key="a.backend + ':' + a.name">
             <tr class="hover:bg-gray-50">
               <td class="py-2 pr-4 font-mono" x-text="a.name"></td>
+              <td class="py-2 pr-4">
+                <span class="text-[10px] uppercase font-semibold px-1.5 py-0.5 rounded"
+                      :class="a.backend === 'local' ? 'bg-amber-100 text-amber-800' : 'bg-blue-100 text-blue-800'"
+                      x-text="backendLabel(a.backend)"></span>
+              </td>
               <td class="py-2 pr-4">
                 <span class="text-[10px] uppercase font-semibold px-1.5 py-0.5 rounded bg-gray-100 text-gray-700" x-text="a.type"></span>
               </td>
               <td class="py-2 pr-4 text-right text-gray-500" x-text="formatBytes(a.size || 0)"></td>
-              <td class="py-2 text-right">
-                <button @click="deleteAsset(a.name)" class="text-xs text-red-600 hover:text-red-800">Delete</button>
+              <td class="py-2 text-right whitespace-nowrap">
+                <button @click="openMove(a)"
+                        :disabled="moveTargets(a.backend).length === 0"
+                        class="text-xs text-blue-600 hover:text-blue-800 disabled:text-gray-300 disabled:cursor-not-allowed mr-3"
+                        :title="moveTargets(a.backend).length === 0 ? 'No other backends configured' : 'Move to another backend'">
+                  Move
+                </button>
+                <button @click="deleteAsset(a)" class="text-xs text-red-600 hover:text-red-800">Delete</button>
               </td>
             </tr>
           </template>
         </tbody>
       </table>
+    </div>
+  </div>
+
+  <!-- ── Move modal ───────────────────────────────────────────────────────── -->
+  <div x-show="moveModal.open" x-cloak
+       class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+       @click.self="moveModal.open = false">
+    <div class="bg-white rounded-xl shadow-xl w-full max-w-md p-6">
+      <h3 class="text-base font-semibold text-gray-800 mb-3">Move asset</h3>
+      <p class="text-sm text-gray-600 mb-4">
+        Move <code class="bg-gray-100 px-1.5 py-0.5 rounded" x-text="moveModal.name"></code>
+        from <strong x-text="backendLabel(moveModal.from)"></strong> to:
+      </p>
+      <select x-model="moveModal.to"
+              class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm mb-4">
+        <option value="">Select target backend…</option>
+        <template x-for="b in moveTargets(moveModal.from)" :key="b">
+          <option :value="b" x-text="backendLabel(b)"></option>
+        </template>
+      </select>
+      <p class="text-xs text-gray-400 mb-4">
+        The asset is copied first, then deleted from the source. If the copy succeeds
+        but the delete fails, the asset will exist on both backends and you'll be
+        asked to clean up the source manually.
+      </p>
+      <div class="flex justify-end gap-2">
+        <button @click="moveModal.open = false"
+                class="px-4 py-2 text-sm text-gray-600 hover:text-gray-800">Cancel</button>
+        <button @click="doMove()"
+                :disabled="!moveModal.to || moveModal.busy"
+                class="px-4 py-2 text-sm bg-blue-700 hover:bg-blue-800 text-white rounded-lg font-medium disabled:bg-gray-300">
+          <span x-show="!moveModal.busy">Move</span>
+          <span x-show="moveModal.busy" x-cloak>Moving…</span>
+        </button>
+      </div>
     </div>
   </div>
 
@@ -391,6 +440,7 @@ function storagePage() {
     migrationResult: null,
     pendingFile: null,
     uploading: false,
+    moveModal: { open: false, name: '', from: '', to: '', busy: false },
     toast: '', toastType: 'success',
 
     async init() {
@@ -436,16 +486,50 @@ function storagePage() {
     },
 
     async loadAssets() {
-      if (!this.activeBackend) { this.assets = []; return; }
       this.loadingAssets = true;
       try {
-        const data = await API.get('/api/storage/list');
+        // Aggregate across every configured backend (issue #16). Each item
+        // carries its `backend` field so the table can render Move/Delete
+        // against the right backend.
+        const data = await API.get('/api/storage/list-all');
         this.assets = data.items || [];
       } catch (e) {
         this.showToast(e.message || 'Failed to list assets', 'error');
         this.assets = [];
       } finally {
         this.loadingAssets = false;
+      }
+    },
+
+    // Backends an asset can be moved to (any configured backend other than its
+    // current one). Pulled from this.backends populated by loadBackends().
+    moveTargets(currentBackend) {
+      return this.backends
+        .filter(b => b.configured && b.id !== currentBackend)
+        .map(b => b.id);
+    },
+
+    openMove(asset) {
+      this.moveModal = {
+        open: true, name: asset.name, from: asset.backend, to: '', busy: false,
+      };
+    },
+
+    async doMove() {
+      const m = this.moveModal;
+      if (!m.to) return;
+      m.busy = true;
+      try {
+        await API.post('/api/storage/move', {
+          name: m.name, from_backend: m.from, to_backend: m.to,
+        });
+        this.showToast(`Moved ${m.name} → ${this.backendLabel(m.to)}`);
+        this.moveModal.open = false;
+        await this.loadAssets();
+      } catch (e) {
+        this.showToast(e.message || 'Move failed', 'error');
+      } finally {
+        m.busy = false;
       }
     },
 
@@ -519,11 +603,15 @@ function storagePage() {
       }
     },
 
-    async deleteAsset(name) {
-      if (!confirm(`Delete '${name}' from ${this.backendLabel(this.activeBackend)}?`)) return;
+    async deleteAsset(asset) {
+      // Accepts either an asset object (with .name + .backend) or a string
+      // (legacy callers). When given a string, target the active backend.
+      const name = typeof asset === 'string' ? asset : asset.name;
+      const backend = typeof asset === 'string' ? this.activeBackend : asset.backend;
+      if (!confirm(`Delete '${name}' from ${this.backendLabel(backend)}?`)) return;
       try {
-        await API.del(`/api/storage/asset/${encodeURIComponent(name)}`);
-        this.showToast(`Deleted ${name}`);
+        await API.del(`/api/storage/asset-in/${encodeURIComponent(backend)}/${encodeURIComponent(name)}`);
+        this.showToast(`Deleted ${name} from ${this.backendLabel(backend)}`);
         await this.loadAssets();
       } catch (e) {
         this.showToast(e.message || 'Delete failed', 'error');

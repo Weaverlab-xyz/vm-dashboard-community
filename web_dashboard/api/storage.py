@@ -327,3 +327,58 @@ async def delete_asset(
     except StorageError as e:
         raise HTTPException(status_code=502, detail=str(e))
     return {"ok": True, "deleted": name}
+
+
+# ── GET /api/storage/list-all ────────────────────────────────────────────────
+
+@router.get("/list-all")
+async def list_all(current_user: User = Depends(get_current_user)):
+    """Aggregated asset list across every *configured* backend. Each item is
+    tagged with the backend it lives on so the Storage page can render
+    per-backend rows and the Config Mgmt page can warn when a local-only asset
+    is paired with a cloud target."""
+    items = await storage_service.list_all_assets()
+    return {"items": items, "count": len(items)}
+
+
+# ── POST /api/storage/move ───────────────────────────────────────────────────
+
+class MoveRequest(BaseModel):
+    name: str
+    from_backend: str
+    to_backend: str
+
+
+@router.post("/move")
+async def move_asset(
+    req: MoveRequest,
+    current_user: User = Depends(require_permission("admin", "write")),
+):
+    """Move a single asset from one backend to another (copy + delete source).
+    Used to relocate playbooks from local filesystem to a cloud backend so a
+    cloud-side ansible runner can fetch them. Atomicity: if the copy succeeds
+    but the source delete fails, the asset ends up duplicated and the response
+    error message tells the operator to clean the source up by hand."""
+    try:
+        await storage_service.move_asset(req.name, req.from_backend, req.to_backend)
+    except StorageError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"ok": True, "moved": req.name, "from": req.from_backend, "to": req.to_backend}
+
+
+# ── DELETE /api/storage/asset-in/{backend}/{name} ────────────────────────────
+
+@router.delete("/asset-in/{backend}/{name:path}")
+async def delete_asset_in(
+    backend: str,
+    name: str,
+    current_user: User = Depends(require_permission("admin", "delete")),
+):
+    """Delete an asset from a *specific* backend (sibling of /asset/{name}
+    which targets the active backend). Needed once the UI surfaces assets
+    from multiple backends side by side."""
+    try:
+        await storage_service.delete_asset_in(backend, name)
+    except StorageError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    return {"ok": True, "deleted": name, "backend": backend}

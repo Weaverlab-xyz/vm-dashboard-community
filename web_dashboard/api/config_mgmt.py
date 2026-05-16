@@ -37,9 +37,13 @@ router = APIRouter(prefix="/api/config-mgmt", tags=["config-mgmt"])
 
 @router.get("/assets")
 async def list_assets(current_user: User = Depends(get_current_user)):
-    """List all available assets (.yml, .sh, .deb, .rpm) from configured storage."""
+    """List all available assets (.yml, .sh, .deb, .rpm) across every configured
+    storage backend, each item tagged with the backend it lives on. Issue #16:
+    operators can now keep playbooks on local filesystem AND on a cloud backend
+    side-by-side — the UI uses the per-asset backend tag to warn when a local
+    asset is paired with a cloud target."""
     try:
-        return await storage_service.list_assets()
+        return await storage_service.list_all_assets()
     except StorageError as e:
         raise HTTPException(status_code=502, detail=str(e))
 
@@ -180,6 +184,11 @@ class RunRequest(BaseModel):
     cloud: str = ""      # "" | "aws" | "azure" | "gcp" — drives SSH key retrieval
     ansible_user: str = ""  # SSH user for cloud runner targets; falls back to ansible_default_user
     extra_vars: dict = {}
+    # Which storage backend the asset should be fetched from. Empty = active
+    # backend (back-compat). With multi-backend support (issue #16), the UI
+    # passes the backend explicitly because the same asset name may exist on
+    # multiple backends.
+    asset_backend: str = ""
 
 
 def _cfg(key: str) -> str:
@@ -193,6 +202,7 @@ async def _run_job(
     cloud: str,
     ansible_user: str,
     extra_vars: dict,
+    asset_backend: str = "",
 ) -> None:
     import base64
     from ..database import SessionLocal
@@ -200,7 +210,13 @@ async def _run_job(
     try:
         job_service.update_progress(db, job_id, 5, f"Fetching asset '{asset}'…")
         try:
-            asset_b64 = await storage_service.fetch_asset_b64(asset)
+            if asset_backend:
+                raw = await storage_service.fetch_asset_in(asset_backend, asset)
+                asset_b64 = base64.b64encode(raw).decode()
+            else:
+                # Back-compat: caller didn't specify a backend → fall back to
+                # the active backend's copy.
+                asset_b64 = await storage_service.fetch_asset_b64(asset)
         except StorageError as e:
             job_service.set_failed(db, job_id, f"Asset storage error: {e}")
             return
@@ -401,6 +417,26 @@ async def run_playbook(
             ),
         )
 
+    # Issue #16: with multi-backend storage, the same asset name can exist on
+    # local *and* on a cloud backend. Cloud-side ansible runners (ECS task,
+    # ACI, Cloud Run) cannot reach the dashboard's local filesystem, so refuse
+    # the local-asset + cloud-target combo up front with an actionable error
+    # rather than letting the runner blow up partway through.
+    asset_backend = payload.asset_backend or storage_service.active_backend()
+    is_cloud_target = bool(payload.cloud) or (is_adhoc and not payload.target.startswith(("10.", "192.168.", "172.")))
+    runner = _cfg("ansible_runner") or "local"
+    runs_in_cloud_runner = runner in ("ecs", "aci", "gcp")
+    if asset_backend == "local" and (is_cloud_target or runs_in_cloud_runner):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Asset '{payload.asset}' lives on local filesystem storage, "
+                f"which the cloud-side ansible runner cannot reach. Open the "
+                f"Storage page and use the Move action to copy this asset to "
+                f"a cloud backend (S3 / Azure Blob / GCS), then re-run the job."
+            ),
+        )
+
     atype = ansible_local_service.asset_type(payload.asset)
     description = f"Ansible ({atype}): {payload.asset} → {payload.target}"
 
@@ -413,6 +449,6 @@ async def run_playbook(
     )
     background_tasks.add_task(
         _run_job, job.id, payload.asset, payload.target, payload.cloud,
-        payload.ansible_user, payload.extra_vars,
+        payload.ansible_user, payload.extra_vars, asset_backend,
     )
     return {"job_id": job.id, "status": "queued"}

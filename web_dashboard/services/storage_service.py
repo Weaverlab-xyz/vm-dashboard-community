@@ -522,6 +522,88 @@ async def upload_asset_to(backend: str, name: str, data: bytes) -> None:
         raise StorageError(f"Failed to upload '{name}' to {backend}: {e}") from e
 
 
+async def delete_asset_in(backend: str, name: str) -> None:
+    """Delete an asset from a specific backend (sibling of delete_asset which
+    targets the active backend)."""
+    _validate_backend(backend)
+    try:
+        await asyncio.to_thread(_BACKEND_OPS[backend]["delete"], name)
+    except StorageError:
+        raise
+    except Exception as e:
+        raise StorageError(f"Failed to delete '{name}' from {backend}: {e}") from e
+
+
+# ── Public API: multi-backend views (config-mgmt + /storage page) ────────────
+
+async def list_all_assets() -> list[dict]:
+    """Return assets across every configured backend, tagged with the
+    backend they live on. Duplicate names (same asset on multiple backends)
+    appear once per backend so the UI can show where each copy lives.
+    Used by the Config Mgmt asset picker and the Storage page asset table.
+    """
+    out: list[dict] = []
+    for backend in configured_backends():
+        try:
+            items = await list_assets_in(backend)
+        except StorageError as exc:
+            logger.warning("list_all_assets: %s skipped (%s)", backend, exc)
+            continue
+        for item in items:
+            out.append({**item, "backend": backend})
+    return out
+
+
+# Cloud-eligible backends — these are reachable from a containerised ansible
+# runner (ECS task, ACI, Cloud Run). The `local` backend is the filesystem
+# of the dashboard host and is NOT reachable from cloud runners — the
+# Config Mgmt page surfaces a warning when a user picks a local asset for
+# a cloud target. See issue #16.
+CLOUD_BACKENDS = ("s3", "azure_blob", "gcs")
+
+
+def is_cloud_backend(backend: str) -> bool:
+    return backend in CLOUD_BACKENDS
+
+
+async def move_asset(name: str, from_backend: str, to_backend: str) -> None:
+    """Copy an asset from one backend to another, then delete the source.
+    Used by the Storage page's "Move" action — operators typically use it
+    to relocate a playbook from local filesystem to a cloud backend so a
+    cloud-side ansible runner can fetch it.
+    """
+    _validate_backend(from_backend)
+    _validate_backend(to_backend)
+    if from_backend == to_backend:
+        raise StorageError(f"Source and target backend are the same ({from_backend}).")
+    if not any(name.endswith(ext) for ext in _ASSET_EXTENSIONS):
+        raise StorageError(
+            f"Unsupported file type for '{name}'. "
+            f"Allowed extensions: {', '.join(sorted(_ASSET_EXTENSIONS))}"
+        )
+    # Copy first; only delete the source if the copy succeeded so a failure
+    # mid-flight doesn't lose data.
+    try:
+        data = await asyncio.to_thread(_BACKEND_OPS[from_backend]["fetch"], name)
+    except Exception as e:
+        raise StorageError(f"Failed to read '{name}' from {from_backend}: {e}") from e
+    try:
+        await asyncio.to_thread(_BACKEND_OPS[to_backend]["upload"], name, data)
+    except Exception as e:
+        raise StorageError(f"Failed to write '{name}' to {to_backend}: {e}") from e
+    try:
+        await asyncio.to_thread(_BACKEND_OPS[from_backend]["delete"], name)
+    except Exception as e:
+        # Copy succeeded but delete didn't — the asset is now duplicated. Surface
+        # the warning rather than failing the whole operation so the user can
+        # manually clean up the source.
+        raise StorageError(
+            f"Asset copied to {to_backend} but source delete from {from_backend} "
+            f"failed: {e}. The asset is now present on both backends; remove the "
+            f"source copy manually if needed."
+        ) from e
+
+
 async def test_backend(backend: str) -> dict:
     """Probe a backend for reachability — list assets and report success/error.
     Used by /api/storage/test for the page's "Test connection" button."""
