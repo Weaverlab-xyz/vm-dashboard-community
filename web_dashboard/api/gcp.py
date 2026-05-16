@@ -115,7 +115,7 @@ async def list_public_images(
     cache_key = cache_service.key_global(f"gcp_public_images_{os_filter}")
     cached = await cache_service.get(cache_key)
     if cached:
-        return cached
+        return cached["data"]
 
     project_id = _gcp_project()
     if not project_id:
@@ -143,7 +143,7 @@ async def list_custom_images(
     cache_key = cache_service.key_global("gcp_custom_images")
     cached = await cache_service.get(cache_key)
     if cached:
-        return cached
+        return cached["data"]
 
     try:
         images = await gcp_service.list_custom_images(project_id=project_id)
@@ -169,7 +169,11 @@ async def network_options(
     if not bust:
         cached = await cache_service.get(cache_key)
         if cached:
-            return cached
+            # cache_service.get() wraps the payload in {"data": ..., "cached_at": ...};
+            # return the inner payload so the response matches the cache-miss shape
+            # (issue #5 — deploy modal dropdowns were blank on cache hit because the
+            # frontend received {data, cached_at} instead of the options dict).
+            return cached["data"]
 
     try:
         opts = await gcp_service.get_network_options(
@@ -213,7 +217,10 @@ async def list_instances(
     if not bust:
         cached = await cache_service.get(cache_key)
         if cached:
-            inst_list = cached.get("instances") if isinstance(cached, dict) else None
+            # cache_service.get() wraps the payload in {"data": ..., "cached_at": ...};
+            # unwrap to get the actual response (GCPInstanceListResponse shape).
+            payload = cached.get("data") or {}
+            inst_list = payload.get("instances")
             if inst_list is not None:
                 filtered = []
                 for inst in inst_list:
@@ -224,8 +231,8 @@ async def list_instances(
                         if inst_wg is None or inst_wg not in accessible:
                             continue
                     filtered.append(inst)
-                cached = {**cached, "instances": filtered}
-            return cached
+                payload = {**payload, "instances": filtered}
+            return payload
 
     deploy_jobs = (
         db.query(Job)
