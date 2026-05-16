@@ -80,7 +80,10 @@ def _ps_run(args: list, timeout: int = 30) -> list:
         env=_pscli_env(),
     )
     if result.returncode != 0:
-        raise ValueError(f"ps-cli error: {(result.stderr or result.stdout)[:300]}")
+        # Widen the stderr/stdout window to 2000 chars so callers see the
+        # full ps-cli traceback rather than a 300-char prefix that gets
+        # truncated mid-line — issue #14 reported the message was unreadable.
+        raise ValueError(f"ps-cli error: {(result.stderr or result.stdout)[:2000]}")
     return json.loads(result.stdout) if result.stdout.strip() else []
 
 
@@ -180,7 +183,14 @@ def test_gcp_sm() -> dict:
         raise ValueError("GCP project is not configured. Set it in Setup → GCP or Secrets → GCP Secret Manager.")
     client = _gcp_client()
     parent = f"projects/{project}"
-    next(client.list_secrets(request={"parent": parent, "page_size": 1}), None)
+    # list_secrets returns a ListSecretsPager which is iterable but not an
+    # iterator — calling next() on it directly raises "ListSecretsPager object
+    # is not an iterator" (issue #14). Wrap in iter() to advance one element,
+    # or stop after the first hit. We don't need the result; we just need the
+    # API call to succeed without raising for credential / permission errors.
+    pager = client.list_secrets(request={"parent": parent, "page_size": 1})
+    for _ in pager:
+        break
     return {"ok": True, "message": f"Connected to GCP Secret Manager for project {project}."}
 
 
@@ -232,6 +242,25 @@ def test_bt_secrets_safe() -> dict:
     if not host:
         raise ValueError(
             "BeyondTrust host is not configured. Set it in Secrets → BeyondTrust Secrets Safe."
+        )
+    # ps-cli needs OAuth credentials (PSCLI_API_URL / CLIENT_ID / CLIENT_SECRET).
+    # Without them, ps-cli's App() constructor fails during plugin init with an
+    # opaque cement-framework traceback (issue #14). Surface a clear error
+    # before invoking the binary so the user knows what to configure.
+    cs = _cs()
+    api_url = cs.get("pscli_api_url", "")
+    client_id = cs.get("pscli_client_id", "")
+    client_secret = cs.get("pscli_client_secret", "")
+    missing = [name for name, val in (
+        ("pscli_api_url", api_url),
+        ("pscli_client_id", client_id),
+        ("pscli_client_secret", client_secret),
+    ) if not val]
+    if missing:
+        raise ValueError(
+            "ps-cli credentials are not configured: missing "
+            + ", ".join(missing)
+            + ". Set these on the Setup wizard or in Settings → BeyondTrust."
         )
     _ps_run(["secrets", "list"])
     return {"ok": True, "message": f"Connected to BeyondTrust Secrets Safe at {host} (folder: {folder})."}
