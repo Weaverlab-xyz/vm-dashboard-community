@@ -1,31 +1,52 @@
 #!/usr/bin/env bash
-# Sandbox bootstrappers prereq check (WSL / Linux).
+# Sandbox bootstrappers prereq check (WSL / Linux / macOS).
 # Verifies docker, docker-compose-v2, aws, az, gcloud, jq are available.
-# Prints apt-install hints for anything missing.
+# Prints platform-appropriate install hints for anything missing.
 
 set -Eeuo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/common.sh"
 
-require_wsl
+require_supported_os
+
+case "$(uname -s)" in
+  Darwin) PLATFORM=darwin ;;
+  *)      PLATFORM=linux ;;
+esac
 
 section "Checking prerequisites"
 
-declare -A APT_HINTS=(
-  [docker]="sudo apt-get install -y docker.io && sudo usermod -aG docker \$USER"
-  [docker-compose]="sudo apt-get install -y docker-compose-v2"
-  [jq]="sudo apt-get install -y jq"
-  [curl]="sudo apt-get install -y curl"
-  [unzip]="sudo apt-get install -y unzip"
-)
-
-# AWS CLI v2: not in apt; vendor URL.
-declare -A SPECIAL_HINTS=(
-  [aws]="curl -fsSL https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o /tmp/awscli.zip && unzip -q /tmp/awscli.zip -d /tmp && sudo /tmp/aws/install"
-  [az]="curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash"
-  [gcloud]="curl -fsSL https://sdk.cloud.google.com | bash && exec -l \$SHELL  # then: gcloud init"
-)
+# Platform-appropriate install hints. Implemented as a function (rather than
+# associative arrays) so this script parses on macOS' default bash 3.2.
+install_hint() {
+  local cmd="$1"
+  if [[ "$PLATFORM" == "darwin" ]]; then
+    case "$cmd" in
+      docker)         echo "brew install --cask docker  # then launch Docker Desktop" ;;
+      docker-compose) echo "(bundled with Docker Desktop on macOS)" ;;
+      jq)             echo "brew install jq" ;;
+      curl)           echo "(preinstalled on macOS)" ;;
+      unzip)          echo "(preinstalled on macOS)" ;;
+      aws)            echo "brew install awscli" ;;
+      az)             echo "brew install azure-cli" ;;
+      gcloud)         echo "brew install --cask google-cloud-sdk" ;;
+      *)              echo "" ;;
+    esac
+  else
+    case "$cmd" in
+      docker)         echo "sudo apt-get install -y docker.io && sudo usermod -aG docker \$USER" ;;
+      docker-compose) echo "sudo apt-get install -y docker-compose-v2" ;;
+      jq)             echo "sudo apt-get install -y jq" ;;
+      curl)           echo "sudo apt-get install -y curl" ;;
+      unzip)          echo "sudo apt-get install -y unzip" ;;
+      aws)            echo "curl -fsSL https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o /tmp/awscli.zip && unzip -q /tmp/awscli.zip -d /tmp && sudo /tmp/aws/install" ;;
+      az)             echo "curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash" ;;
+      gcloud)         echo "curl -fsSL https://sdk.cloud.google.com | bash && exec -l \$SHELL  # then: gcloud init" ;;
+      *)              echo "" ;;
+    esac
+  fi
+}
 
 CHECKS=(docker jq curl unzip aws az gcloud)
 DOCKER_COMPOSE_OK=0
@@ -56,22 +77,25 @@ else
   MISSING+=("docker-compose")
 fi
 
-# Confirm the user is in the docker group (else `docker ps` fails without sudo).
+# Confirm the user can reach the docker daemon (else `docker ps` fails without sudo).
 if command -v docker >/dev/null 2>&1; then
   if ! docker info >/dev/null 2>&1; then
-    warn "docker is installed but the current user can't reach the daemon. Run:"
-    warn "    sudo usermod -aG docker \$USER && newgrp docker"
-    warn "(Or in WSL: ensure Docker Desktop's WSL integration is enabled for this distro.)"
+    warn "docker is installed but the current user can't reach the daemon."
+    if [[ "$PLATFORM" == "darwin" ]]; then
+      warn "    Ensure Docker Desktop is running (open -a Docker)."
+    else
+      warn "    Run: sudo usermod -aG docker \$USER && newgrp docker"
+      warn "    (Or in WSL: ensure Docker Desktop's WSL integration is enabled for this distro.)"
+    fi
   fi
 fi
 
 if (( ${#MISSING[@]} > 0 )); then
   section "Install missing prereqs"
   for m in "${MISSING[@]}"; do
-    if [[ -n "${APT_HINTS[$m]:-}" ]]; then
-      printf "  \033[0;33m%-15s\033[0m → %s\n" "$m" "${APT_HINTS[$m]}"
-    elif [[ -n "${SPECIAL_HINTS[$m]:-}" ]]; then
-      printf "  \033[0;33m%-15s\033[0m → %s\n" "$m" "${SPECIAL_HINTS[$m]}"
+    hint="$(install_hint "$m")"
+    if [[ -n "$hint" ]]; then
+      printf "  \033[0;33m%-15s\033[0m → %s\n" "$m" "$hint"
     else
       printf "  \033[0;33m%-15s\033[0m → (no install hint; consult docs)\n" "$m"
     fi

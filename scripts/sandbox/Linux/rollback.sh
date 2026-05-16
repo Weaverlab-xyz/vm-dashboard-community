@@ -34,7 +34,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$CLOUD" ]] || die "Specify --cloud aws|azure|gcp|all"
-require_wsl
+require_supported_os
 
 # ── AWS rollback ─────────────────────────────────────────────────────────────
 rollback_aws() {
