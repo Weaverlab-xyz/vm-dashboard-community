@@ -115,8 +115,8 @@
   // default (issue #8 — VMware is rarely enabled in the community build so
   // /vms is a poor fallback for unrecognised job types).
   //
-  // Unmapped job types fall back to /jobs (the job list page), which is
-  // safe regardless of which integrations are configured.
+  // Unmapped job types fall back to the Dashboard, which is always
+  // reachable regardless of which integrations are configured.
   const JOB_ORIGIN = {
     // AWS
     ec2_deploy:        { href: '/aws',         label: 'AWS' },
@@ -176,8 +176,11 @@
       logsLoading: false,
       tracker: null,
 
-      originHref(jobType)  { return (JOB_ORIGIN[jobType] || { href: '/jobs' }).href; },
-      originLabel(jobType) { return (JOB_ORIGIN[jobType] || { label: 'Jobs' }).label; },
+      // Fallback when the job_type isn't in JOB_ORIGIN (typically only hit
+      // when a new job_type is added without updating the map). Dashboard
+      // is the user's preferred fallback over /jobs.
+      originHref(jobType)  { return (JOB_ORIGIN[jobType] || { href: '/' }).href; },
+      originLabel(jobType) { return (JOB_ORIGIN[jobType] || { label: 'Dashboard' }).label; },
 
       async init() {
         requireAuth();
