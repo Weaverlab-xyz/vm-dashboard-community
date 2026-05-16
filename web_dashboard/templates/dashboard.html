@@ -10,153 +10,65 @@
     <p class="text-sm text-gray-500 mt-1">Infrastructure overview</p>
   </div>
 
-  <!-- Stats cards -->
-  <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-3">On-Premises</p>
-  <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-8">
-    <!-- Total VMs -->
-    <a href="/vms" class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 block cursor-pointer hover:shadow-md hover:border-blue-200 transition-all">
-      <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide">Total VMs</p>
-      <p class="text-3xl font-bold text-gray-900 mt-1" x-text="stats.total_vms ?? '…'"></p>
-      <p class="text-sm text-gray-400 mt-1">across all workgroups</p>
-    </a>
-    <!-- Running VMs -->
-    <a href="/vms" class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 block cursor-pointer hover:shadow-md hover:border-blue-200 transition-all">
-      <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide">Running</p>
-      <p class="text-3xl font-bold text-green-600 mt-1" x-text="stats.running_vms ?? '…'"></p>
-      <p class="text-sm text-gray-400 mt-1">VMs currently online</p>
-    </a>
-    <!-- Active Jobs -->
-    <a href="/jobs" class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 block cursor-pointer hover:shadow-md hover:border-blue-200 transition-all">
-      <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide">Active Jobs</p>
-      <p class="text-3xl font-bold text-blue-600 mt-1" x-text="stats.active_jobs ?? '…'"></p>
-      <p class="text-sm text-gray-400 mt-1">pending / running</p>
+  <!-- Loading state -->
+  <div x-show="!featuresLoaded" class="py-12 text-center text-gray-400 text-sm">
+    Loading integrations…
+  </div>
+
+  <!-- Empty state: nothing configured -->
+  <div x-show="featuresLoaded && visibleSections.length === 0"
+       class="bg-white rounded-xl shadow-sm border border-gray-200 p-10 text-center">
+    <p class="text-base font-medium text-gray-800 mb-2">No integrations configured yet.</p>
+    <p class="text-sm text-gray-500 mb-4">
+      Add cloud credentials or enable a hypervisor in the setup wizard to see tiles here.
+    </p>
+    <a href="/setup"
+       class="inline-block bg-blue-700 hover:bg-blue-800 text-white text-sm font-medium px-4 py-2 rounded-lg transition">
+      Open Setup Wizard
     </a>
   </div>
 
-  <!-- Cloud Infrastructure stats -->
-  <div class="mb-8">
-    <div class="flex items-center justify-between mb-3">
-      <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide">Cloud Infrastructure</p>
-      <button @click="loadCloudStats()"
-              class="text-xs text-blue-500 hover:underline"
-              x-show="cloudStatsLoaded">Refresh</button>
+  <!-- Sections (rendered dynamically from tileSections) -->
+  <template x-for="section in tileSections" :key="section.id">
+    <div x-show="visibleTiles(section.tiles).length > 0" class="mb-8">
+      <div class="flex items-center justify-between mb-3">
+        <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide" x-text="section.label"></p>
+        <button @click="refreshSection(section)"
+                class="text-xs text-blue-500 hover:underline"
+                x-show="section.refreshable && section.loaded">Refresh</button>
+      </div>
+      <div :class="section.gridClass">
+        <template x-for="tile in visibleTiles(section.tiles)" :key="tile.key">
+          <a :href="tile.href"
+             class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 block cursor-pointer hover:shadow-md hover:border-blue-200 transition-all">
+            <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide" x-text="tile.title"></p>
+            <p class="text-3xl font-bold mt-1"
+               :class="tile.valueClass || 'text-gray-900'"
+               x-text="displayStat(stats[tile.key]?.value)"></p>
+            <p class="text-sm mt-1">
+              <!-- Secondary stat (e.g., "3 running") -->
+              <span class="text-green-600 font-medium"
+                    x-show="tile.secondaryLabel && stats[tile.key]?.secondary != null && stats[tile.key]?.secondary !== -1"
+                    x-text="stats[tile.key]?.secondary + ' ' + tile.secondaryLabel"></span>
+              <!-- Static description (when no secondary stat) -->
+              <span class="text-gray-400"
+                    x-show="!tile.secondaryLabel && tile.description"
+                    x-text="tile.description"></span>
+              <!-- Loading / unavailable indicators -->
+              <span class="text-gray-400"
+                    x-show="stats[tile.key]?.value === null">loading</span>
+              <span class="text-gray-400"
+                    x-show="stats[tile.key]?.value === -1">unavailable</span>
+            </p>
+          </a>
+        </template>
+      </div>
     </div>
-    <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4">
+  </template>
 
-      <!-- AWS EC2 -->
-      <a href="/aws#instances" class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 block cursor-pointer hover:shadow-md hover:border-blue-200 transition-all">
-        <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide">AWS EC2</p>
-        <p class="text-3xl font-bold text-gray-900 mt-1"
-           x-text="cloudStatDisplay(cloudStats.awsInstances)"></p>
-        <p class="text-sm mt-1">
-          <span class="text-green-600 font-medium"
-                x-show="cloudStats.awsRunning !== null && cloudStats.awsRunning !== -1"
-                x-text="cloudStats.awsRunning + ' running'"></span>
-          <span class="text-gray-400"
-                x-show="cloudStats.awsInstances === null"> loading</span>
-          <span class="text-gray-400"
-                x-show="cloudStats.awsInstances === -1">unavailable</span>
-        </p>
-      </a>
-
-      <!-- AWS AMIs -->
-      <a href="/aws#amis" class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 block cursor-pointer hover:shadow-md hover:border-blue-200 transition-all">
-        <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide">AWS AMIs</p>
-        <p class="text-3xl font-bold text-gray-900 mt-1"
-           x-text="cloudStatDisplay(cloudStats.awsAmis)"></p>
-        <p class="text-sm text-gray-400 mt-1">private images</p>
-      </a>
-
-      <!-- Azure VMs -->
-      <a href="/azure#vms" class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 block cursor-pointer hover:shadow-md hover:border-blue-200 transition-all">
-        <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide">Azure VMs</p>
-        <p class="text-3xl font-bold text-gray-900 mt-1"
-           x-text="cloudStatDisplay(cloudStats.azureVms)"></p>
-        <p class="text-sm mt-1">
-          <span class="text-green-600 font-medium"
-                x-show="cloudStats.azureRunning !== null && cloudStats.azureRunning !== -1"
-                x-text="cloudStats.azureRunning + ' running'"></span>
-          <span class="text-gray-400"
-                x-show="cloudStats.azureVms === null"> loading</span>
-          <span class="text-gray-400"
-                x-show="cloudStats.azureVms === -1">unavailable</span>
-        </p>
-      </a>
-
-      <!-- Azure Images -->
-      <a href="/azure#private" class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 block cursor-pointer hover:shadow-md hover:border-blue-200 transition-all">
-        <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide">Azure Images</p>
-        <p class="text-3xl font-bold text-gray-900 mt-1"
-           x-text="cloudStatDisplay(cloudStats.azureImages)"></p>
-        <p class="text-sm text-gray-400 mt-1">gallery + managed</p>
-      </a>
-
-      <!-- OVA Library -->
-      <a href="/images" class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 block cursor-pointer hover:shadow-md hover:border-blue-200 transition-all">
-        <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide">OVA Library</p>
-        <p class="text-3xl font-bold text-gray-900 mt-1"
-           x-text="cloudStatDisplay(cloudStats.ovas)"></p>
-        <p class="text-sm text-gray-400 mt-1">local OVA files</p>
-      </a>
-
-    </div>
-  </div>
-
-  <!-- Containers stats -->
-  <div class="mb-8">
-    <div class="flex items-center justify-between mb-3">
-      <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide">Containers</p>
-      <button @click="loadContainerStats()"
-              class="text-xs text-blue-500 hover:underline"
-              x-show="containerStatsLoaded">Refresh</button>
-    </div>
-    <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
-
-      <!-- Portainer (on-prem) -->
-      <a href="/containers" class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 block cursor-pointer hover:shadow-md hover:border-blue-200 transition-all">
-        <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide">Portainer Endpoints</p>
-        <p class="text-3xl font-bold text-gray-900 mt-1"
-           x-text="cloudStatDisplay(containerStats.portainerTotal)"></p>
-        <p class="text-sm mt-1">
-          <span class="text-green-600 font-medium"
-                x-show="containerStats.portainerOnline !== null && containerStats.portainerOnline !== -1"
-                x-text="containerStats.portainerOnline + ' online'"></span>
-          <span class="text-gray-400"
-                x-show="containerStats.portainerTotal === null"> loading</span>
-          <span class="text-gray-400"
-                x-show="containerStats.portainerTotal === -1">unavailable</span>
-        </p>
-      </a>
-
-      <!-- ECS Tasks (AWS) -->
-      <a href="/containers#cloud" class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 block cursor-pointer hover:shadow-md hover:border-blue-200 transition-all">
-        <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide">ECS Tasks</p>
-        <p class="text-3xl font-bold text-gray-900 mt-1"
-           x-text="cloudStatDisplay(containerStats.ecsTasks)"></p>
-        <p class="text-sm text-gray-400 mt-1">running tasks</p>
-      </a>
-
-      <!-- ACI (Azure) -->
-      <a href="/containers#cloud" class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 block cursor-pointer hover:shadow-md hover:border-blue-200 transition-all">
-        <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide">ACI Containers</p>
-        <p class="text-3xl font-bold text-gray-900 mt-1"
-           x-text="cloudStatDisplay(containerStats.aciContainers)"></p>
-        <p class="text-sm mt-1">
-          <span class="text-green-600 font-medium"
-                x-show="containerStats.aciRunning !== null && containerStats.aciRunning !== -1"
-                x-text="containerStats.aciRunning + ' running'"></span>
-          <span class="text-gray-400"
-                x-show="containerStats.aciContainers === null"> loading</span>
-          <span class="text-gray-400"
-                x-show="containerStats.aciContainers === -1">unavailable</span>
-        </p>
-      </a>
-
-    </div>
-  </div>
-
-  <!-- Workgroup quick actions (VMware only) -->
-  <div x-show="vmwareEnabled" class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+  <!-- Workgroup quick actions (gated on vmware flag — bulk start/stop is a VMware action) -->
+  <div x-show="features.vmware && workgroups.length > 0"
+       class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
     <template x-for="wg in workgroups" :key="wg.name">
       <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
         <div class="flex items-center justify-between mb-4">
@@ -191,7 +103,7 @@
       <a href="/jobs" class="text-sm text-blue-600 hover:underline">View all →</a>
     </div>
     <div x-show="recentJobs.length === 0 && !loadingJobs" class="px-5 py-8 text-center text-gray-400 text-sm">
-      No jobs yet. Start a VM to create your first job.
+      No jobs yet.
     </div>
     <div x-show="loadingJobs" class="px-5 py-8 text-center text-gray-400 text-sm">Loading…</div>
     <ul class="divide-y divide-gray-50">
@@ -218,154 +130,234 @@
 <script>
   function dashboard() {
     return {
-      stats: { total_vms: null, running_vms: null, active_jobs: null },
-      cloudStats: {
-        awsInstances: null, awsRunning: null, awsAmis: null,
-        azureVms: null, azureRunning: null, azureImages: null,
-        ovas: null,
-      },
-      cloudStatsLoaded: false,
-      containerStats: {
-        portainerTotal: null, portainerOnline: null,
-        ecsTasks: null,
-        aciContainers: null, aciRunning: null,
-      },
-      containerStatsLoaded: false,
+      // Feature flags loaded from /api/features
+      features: {},
+      featuresLoaded: false,
+
+      // Tile stats keyed by tile.key — each entry is {value, secondary?}
+      // null = loading, -1 = unavailable, number = OK
+      stats: {},
+
       workgroups: [],
       recentJobs: [],
       loadingJobs: true,
-      vmwareEnabled: false,
+
+      // ── Tile catalog ──────────────────────────────────────────────────────
+      // Each section: id, label, grid class, refreshable, list of tiles.
+      // Each tile:
+      //   key:       unique id used to index this.stats
+      //   title:     display label
+      //   href:      target URL
+      //   flag:      feature key from /api/features ('vmware', 'aws', etc.)
+      //              tile hides when this flag is false. Omit for always-on.
+      //   fetcher:   async () => ({value, secondary?})
+      //   secondaryLabel / description: subtext shown below the value
+      //   valueClass: optional Tailwind class override for the big number
+      tileSections: [
+        {
+          id: 'onprem',
+          label: 'On-Premises',
+          gridClass: 'grid grid-cols-1 sm:grid-cols-3 gap-4',
+          refreshable: false,
+          tiles: [
+            {
+              key: 'total_vms', title: 'Total VMs', href: '/vms',
+              flag: 'vmware', description: 'across all workgroups',
+            },
+            {
+              key: 'running_vms', title: 'Running', href: '/vms',
+              flag: 'vmware', description: 'VMs currently online',
+              valueClass: 'text-green-600',
+            },
+            {
+              key: 'active_jobs', title: 'Active Jobs', href: '/jobs',
+              description: 'pending / running',
+              valueClass: 'text-blue-600',
+              // jobs tile is always-on (jobs run for every integration)
+            },
+          ],
+        },
+        {
+          id: 'cloud',
+          label: 'Cloud Infrastructure',
+          gridClass: 'grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4',
+          refreshable: true,
+          tiles: [
+            { key: 'aws_instances', title: 'AWS EC2',     href: '/aws#instances', flag: 'aws',   secondaryLabel: 'running' },
+            { key: 'aws_amis',      title: 'AWS AMIs',    href: '/aws#amis',      flag: 'aws',   description: 'private images' },
+            { key: 'azure_vms',     title: 'Azure VMs',   href: '/azure#vms',     flag: 'azure', secondaryLabel: 'running' },
+            { key: 'azure_images',  title: 'Azure Images',href: '/azure#private', flag: 'azure', description: 'gallery + managed' },
+            { key: 'gcp_instances', title: 'GCP Instances', href: '/gcp',         flag: 'gcp',   secondaryLabel: 'running' },
+            { key: 'ovas',          title: 'OVA Library', href: '/images',        flag: 'vmware', description: 'local OVA files' },
+          ],
+        },
+        {
+          id: 'hypervisors',
+          label: 'Hypervisors',
+          gridClass: 'grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4',
+          refreshable: true,
+          tiles: [
+            { key: 'proxmox_vms', title: 'Proxmox',  href: '/proxmox', flag: 'proxmox', secondaryLabel: 'running' },
+            { key: 'vsphere_vms', title: 'vSphere',  href: '/vsphere', flag: 'vsphere', secondaryLabel: 'running' },
+            { key: 'hyperv_vms',  title: 'Hyper-V',  href: '/hyperv',  flag: 'hyperv',  secondaryLabel: 'running' },
+            { key: 'nutanix_vms', title: 'Nutanix',  href: '/nutanix', flag: 'nutanix', secondaryLabel: 'running' },
+            { key: 'xcpng_vms',   title: 'XCP-ng',   href: '/xcpng',   flag: 'xcpng',   secondaryLabel: 'running' },
+          ],
+        },
+        {
+          id: 'containers',
+          label: 'Containers',
+          gridClass: 'grid grid-cols-1 sm:grid-cols-3 gap-4',
+          refreshable: true,
+          tiles: [
+            { key: 'portainer_endpoints', title: 'Portainer Endpoints', href: '/containers',       flag: 'portainer', secondaryLabel: 'online' },
+            { key: 'ecs_tasks',           title: 'ECS Tasks',           href: '/containers#cloud', flag: 'aws',       description: 'running tasks' },
+            { key: 'aci_containers',      title: 'ACI Containers',      href: '/containers#cloud', flag: 'azure',     secondaryLabel: 'running' },
+          ],
+        },
+      ],
 
       async init() {
         requireAuth();
         // Render workgroup buttons immediately from cached auth — no API call needed
         const auth = Alpine.store('auth');
         this.workgroups = auth.workgroups.map(name => ({ name, count: null, loading: false }));
-        await Promise.all([
-          this.loadStats(),
-          this.loadJobs(),
-          fetch('/api/features').then(r => r.json()).then(f => { this.vmwareEnabled = !!f.vmware; }).catch(() => {}),
-        ]);
-        this.loadCloudStats();
-        this.loadContainerStats();
+
+        // Pre-initialise stats slots for every tile (so x-show keys are reactive)
+        for (const section of this.tileSections) {
+          for (const tile of section.tiles) {
+            this.stats[tile.key] = { value: null, secondary: null };
+          }
+        }
+
+        await this.loadFeatures();
+        // Load on-prem stats + jobs in parallel; cloud/hypervisor/containers in background
+        await Promise.all([this.loadOnPremStats(), this.loadJobs()]);
+        this.refreshSection(this.tileSections.find(s => s.id === 'cloud'));
+        this.refreshSection(this.tileSections.find(s => s.id === 'hypervisors'));
+        this.refreshSection(this.tileSections.find(s => s.id === 'containers'));
       },
 
-      async loadStats() {
+      async loadFeatures() {
+        try {
+          const r = await fetch('/api/features');
+          this.features = await r.json();
+        } catch (e) {
+          this.features = {};
+        }
+        this.featuresLoaded = true;
+      },
+
+      // Tiles visible iff: no flag (always-on) OR features[flag] is truthy
+      visibleTiles(tiles) {
+        return tiles.filter(t => !t.flag || this.features[t.flag]);
+      },
+
+      // Sections visible iff at least one tile is visible
+      get visibleSections() {
+        return this.tileSections.filter(s => this.visibleTiles(s.tiles).length > 0);
+      },
+
+      displayStat(val) {
+        if (val === null || val === undefined) return '…';
+        if (val === -1) return '–';
+        return val;
+      },
+
+      async loadOnPremStats() {
+        if (!this.features.vmware) return;
         try {
           const resp = await API.get('/api/vms/dashboard-stats');
           if (!resp) return;
-          this.stats.total_vms = resp.total_vms;
-          this.stats.running_vms = resp.running_vms;
-          this.stats.active_jobs = resp.active_jobs;
-          // Update per-workgroup VM counts
+          this.stats.total_vms   = { value: resp.total_vms };
+          this.stats.running_vms = { value: resp.running_vms };
+          this.stats.active_jobs = { value: resp.active_jobs };
           for (const wg of this.workgroups) {
             wg.count = resp.workgroup_counts[wg.name] ?? 0;
           }
         } catch (e) {
-          console.error('Stats load error:', e);
+          // No /api/vms endpoint (community without VMware) — quietly mark unavailable
+          this.stats.total_vms   = { value: -1 };
+          this.stats.running_vms = { value: -1 };
         }
-      },
-
-      async loadCloudStats() {
-        this.cloudStatsLoaded = false;
-        const [awsInst, awsAmis, azureVms, azureImgs, ovas] = await Promise.allSettled([
-          API.get('/api/aws/instances'),
-          API.get('/api/aws/amis'),
-          API.get('/api/azure/vms'),
-          API.get('/api/azure/images'),
-          API.get('/api/images/ovas'),
-        ]);
-
-        // AWS instances
-        if (awsInst.status === 'fulfilled' && awsInst.value) {
-          const list = awsInst.value.instances || [];
-          this.cloudStats.awsInstances = list.length;
-          this.cloudStats.awsRunning = list.filter(i => i.state === 'running').length;
-        } else {
-          this.cloudStats.awsInstances = -1;
-          this.cloudStats.awsRunning = -1;
-        }
-
-        // AWS AMIs
-        if (awsAmis.status === 'fulfilled' && awsAmis.value) {
-          this.cloudStats.awsAmis = awsAmis.value.count ?? (awsAmis.value.amis || []).length;
-        } else {
-          this.cloudStats.awsAmis = -1;
-        }
-
-        // Azure VMs
-        if (azureVms.status === 'fulfilled' && azureVms.value) {
-          const list = azureVms.value.vms || [];
-          this.cloudStats.azureVms = list.length;
-          this.cloudStats.azureRunning = list.filter(v => v.state === 'running').length;
-        } else {
-          this.cloudStats.azureVms = -1;
-          this.cloudStats.azureRunning = -1;
-        }
-
-        // Azure images
-        if (azureImgs.status === 'fulfilled' && azureImgs.value) {
-          this.cloudStats.azureImages = azureImgs.value.count ?? (azureImgs.value.images || []).length;
-        } else {
-          this.cloudStats.azureImages = -1;
-        }
-
-        // OVAs
-        if (ovas.status === 'fulfilled' && ovas.value) {
-          this.cloudStats.ovas = ovas.value.count ?? (ovas.value.ovas || []).length;
-        } else {
-          this.cloudStats.ovas = -1;
-        }
-
-        this.cloudStatsLoaded = true;
-      },
-
-      async loadContainerStats() {
-        this.containerStatsLoaded = false;
-
-        // Portainer: one call per workgroup, in parallel
-        const wgNames = this.workgroups.map(w => w.name.toLowerCase());
-        const portainerCalls = wgNames.length
-          ? wgNames.map(wg => API.get(`/api/containers/endpoints?workgroup=${encodeURIComponent(wg)}`))
-          : [Promise.resolve(null)];
-
-        const [portainerResults, ecsResult, aciResult] = await Promise.all([
-          Promise.allSettled(portainerCalls),
-          API.get('/api/containers/ecs-tasks').catch(() => null),
-          API.get('/api/containers/aci-containers').catch(() => null),
-        ]);
-
-        // Portainer endpoints (aggregate across workgroups)
-        let portainerTotal = 0, portainerOnline = 0, portainerOk = false;
-        for (const r of portainerResults) {
-          if (r.status === 'fulfilled' && r.value) {
-            portainerOk = true;
-            const eps = r.value.endpoints || [];
-            portainerTotal += eps.length;
-            portainerOnline += eps.filter(e => e.status === 1).length;
+        // Active jobs is always-on; load it separately if vmware was off
+        if (this.stats.active_jobs.value === null || this.stats.active_jobs.value === -1) {
+          try {
+            const j = await API.get('/api/jobs?page_size=1&status=running');
+            this.stats.active_jobs = { value: j?.total ?? 0 };
+          } catch (e) {
+            this.stats.active_jobs = { value: -1 };
           }
         }
-        this.containerStats.portainerTotal = portainerOk ? portainerTotal : -1;
-        this.containerStats.portainerOnline = portainerOk ? portainerOnline : -1;
+      },
 
-        // ECS tasks (default: running only)
-        if (ecsResult) {
-          this.containerStats.ecsTasks = ecsResult.count ?? (ecsResult.tasks || []).length;
-        } else {
-          this.containerStats.ecsTasks = -1;
+      async refreshSection(section) {
+        if (!section) return;
+        section.loaded = false;
+        const visible = this.visibleTiles(section.tiles);
+
+        // Map tile.key → fetcher promise
+        const tasks = visible.map(t => this._fetchTile(t).then(r => [t.key, r]).catch(() => [t.key, {value: -1}]));
+        const results = await Promise.all(tasks);
+        for (const [key, val] of results) {
+          this.stats[key] = val;
         }
+        section.loaded = true;
+      },
 
-        // ACI containers
-        if (aciResult) {
-          const list = aciResult.containers || [];
-          this.containerStats.aciContainers = list.length;
-          this.containerStats.aciRunning = list.filter(c => c.state === 'Running').length;
-        } else {
-          this.containerStats.aciContainers = -1;
-          this.containerStats.aciRunning = -1;
+      // Per-tile data fetcher — keyed by tile.key. Each returns {value, secondary?}.
+      async _fetchTile(tile) {
+        const k = tile.key;
+        // Cloud
+        if (k === 'aws_instances')    return this._fetchListCount('/api/aws/instances',         'instances', i => i.state === 'running');
+        if (k === 'aws_amis')         return this._fetchListCount('/api/aws/amis',              'amis');
+        if (k === 'azure_vms')        return this._fetchListCount('/api/azure/vms',             'vms',       v => v.state === 'running');
+        if (k === 'azure_images')     return this._fetchListCount('/api/azure/images',          'images');
+        if (k === 'gcp_instances')    return this._fetchListCount('/api/gcp/instances',         'instances', i => (i.status || '').toUpperCase() === 'RUNNING');
+        if (k === 'ovas')             return this._fetchListCount('/api/images/ovas',           'ovas');
+        // Hypervisors
+        if (k === 'proxmox_vms')      return this._fetchListCount('/api/proxmox/resources?type=vm', 'resources', v => v.status === 'running');
+        if (k === 'vsphere_vms')      return this._fetchListCount('/api/vsphere/vms',           'vms',       v => v.power_state === 'poweredOn' || v.state === 'running');
+        if (k === 'hyperv_vms')       return this._fetchListCount('/api/hyperv/vms',            'vms',       v => v.state === 'Running' || v.state === 'running');
+        if (k === 'nutanix_vms')      return this._fetchListCount('/api/nutanix/vms',           'vms',       v => v.power_state === 'ON' || v.state === 'running');
+        if (k === 'xcpng_vms')        return this._fetchListCount('/api/xcpng/vms',             'vms',       v => v.power_state === 'Running' || v.state === 'running');
+        // Containers
+        if (k === 'portainer_endpoints') return this._fetchPortainer();
+        if (k === 'ecs_tasks')        return this._fetchListCount('/api/containers/ecs-tasks',  'tasks');
+        if (k === 'aci_containers')   return this._fetchListCount('/api/containers/aci-containers', 'containers', c => c.state === 'Running');
+        return { value: -1 };
+      },
+
+      async _fetchListCount(url, listKey, runningPredicate) {
+        try {
+          const r = await API.get(url);
+          if (!r) return { value: -1 };
+          const list = r[listKey] || [];
+          const out = { value: r.count ?? list.length };
+          if (runningPredicate) out.secondary = list.filter(runningPredicate).length;
+          return out;
+        } catch (e) {
+          return { value: -1 };
         }
+      },
 
-        this.containerStatsLoaded = true;
+      async _fetchPortainer() {
+        // One call per workgroup so endpoints are visible to non-admin users
+        const wgNames = this.workgroups.map(w => w.name.toLowerCase());
+        const calls = wgNames.length
+          ? wgNames.map(wg => API.get(`/api/containers/endpoints?workgroup=${encodeURIComponent(wg)}`).catch(() => null))
+          : [API.get('/api/containers/endpoints').catch(() => null)];
+        const results = await Promise.all(calls);
+        let total = 0, online = 0, anyOk = false;
+        for (const r of results) {
+          if (r) {
+            anyOk = true;
+            const eps = r.endpoints || [];
+            total += eps.length;
+            online += eps.filter(e => e.status === 1).length;
+          }
+        }
+        return anyOk ? { value: total, secondary: online } : { value: -1 };
       },
 
       async loadJobs() {
@@ -374,7 +366,7 @@
           const resp = await API.get('/api/jobs?page_size=8');
           this.recentJobs = resp?.jobs || [];
         } catch (e) {
-          console.error('Jobs load error:', e);
+          // Quiet — jobs require auth but should always work for a logged-in user
         } finally {
           this.loadingJobs = false;
         }
@@ -392,7 +384,6 @@
           const endpoint = action === 'start' ? '/api/vms/bulk/start' : '/api/vms/bulk/stop';
           const resp = await API.post(endpoint, { workgroup });
           toast(`Bulk ${verb} queued (job: ${resp.job_id.slice(0,8)}…)`, 'success');
-          // Redirect to job detail
           setTimeout(() => window.location.href = '/jobs/' + resp.job_id, 500);
         } catch (e) {
           toast(`Bulk ${verb} failed: ${e.message}`, 'error');
@@ -406,14 +397,12 @@
           vm_stop: 'Stop VM',
           bulk_start: `Bulk Start – ${job.workgroup}`,
           bulk_stop: `Bulk Stop – ${job.workgroup}`,
+          ec2_deploy: 'EC2 Deploy',
+          azure_deploy: 'Azure VM Deploy',
+          gce_deploy: 'GCE Deploy',
+          ami_copy: 'AMI Copy',
         };
         return labels[job.job_type] || job.job_type;
-      },
-
-      cloudStatDisplay(val) {
-        if (val === null) return '…';
-        if (val === -1) return '–';
-        return val;
       },
 
       statusBadge,

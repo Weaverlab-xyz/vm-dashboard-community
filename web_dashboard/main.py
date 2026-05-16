@@ -596,12 +596,26 @@ async def features():
     """Expose the enabled feature set to the frontend (reads from config_service
     so wizard changes are reflected immediately without a restart)."""
     flags = _feature_flags()
+    # AWS/Azure/GCP aren't gated by a feature flag — they're "configured" iff
+    # credentials are present. The dashboard uses these to hide tiles on bare installs.
+    aws_configured = bool(
+        config_service.get("aws_access_key_id")
+        or os.environ.get("AWS_ACCESS_KEY_ID", "")
+    )
+    azure_configured = bool(
+        (config_service.get("azure_client_id") or settings.azure_client_id)
+        and (config_service.get("azure_subscription_id") or settings.azure_subscription_id)
+    )
+    gcp_configured = bool(config_service.get("gcp_project_id") or settings.gcp_project_id)
     return {
         "vmware":       flags["vmware_enabled"],
         "beyondtrust":  flags["beyondtrust_enabled"],
         "portainer":    flags["portainer_enabled"],
         "ansible":      flags["ansible_enabled"],
         "entitle":      flags["entitle_enabled"],
+        "aws":          aws_configured,
+        "azure":        azure_configured,
+        "gcp":          gcp_configured,
         "proxmox":      flags["proxmox_enabled"],
         "vsphere":      flags["vsphere_enabled"],
         "hyperv":       flags["hyperv_enabled"],
