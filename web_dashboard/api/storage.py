@@ -382,3 +382,40 @@ async def delete_asset_in(
     except StorageError as e:
         raise HTTPException(status_code=502, detail=str(e))
     return {"ok": True, "deleted": name, "backend": backend}
+
+
+# ── POST /api/storage/bulk-delete ────────────────────────────────────────────
+
+class BulkDeleteItem(BaseModel):
+    backend: str
+    name: str
+
+
+class BulkDeleteRequest(BaseModel):
+    items: list[BulkDeleteItem]
+
+
+@router.post("/bulk-delete")
+async def bulk_delete(
+    req: BulkDeleteRequest,
+    current_user: User = Depends(require_permission("admin", "delete")),
+):
+    """Delete many assets in one call. Each item names its source backend so
+    the UI can mix assets from different backends in a single bulk action
+    (issue #13). Continues on per-item failure and returns a per-item
+    success/error report — the user gets to see which ones worked."""
+    if not req.items:
+        raise HTTPException(status_code=400, detail="No items to delete.")
+    deleted: list[dict] = []
+    failed:  list[dict] = []
+    for item in req.items:
+        try:
+            await storage_service.delete_asset_in(item.backend, item.name)
+            deleted.append({"name": item.name, "backend": item.backend})
+        except StorageError as e:
+            failed.append({"name": item.name, "backend": item.backend, "error": str(e)})
+    return {
+        "deleted": deleted,
+        "failed":  failed,
+        "summary": f"{len(deleted)} deleted, {len(failed)} failed",
+    }

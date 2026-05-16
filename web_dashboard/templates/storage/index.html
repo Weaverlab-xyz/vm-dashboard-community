@@ -248,16 +248,28 @@
   <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
     <div class="flex items-center justify-between mb-4">
       <h2 class="text-base font-semibold text-gray-700">Stored assets</h2>
-      <button @click="loadAssets()" :disabled="loadingAssets"
-              class="text-xs px-3 py-1.5 border border-gray-300 rounded-lg hover:bg-gray-50 disabled:opacity-50">
-        <span x-show="!loadingAssets">Refresh</span>
-        <span x-show="loadingAssets" x-cloak>Loading…</span>
-      </button>
+      <div class="flex items-center gap-2">
+        <button @click="bulkDelete()"
+                x-show="selected.length > 0"
+                :disabled="bulkDeleting"
+                class="text-xs px-3 py-1.5 rounded-lg font-medium text-white bg-red-600 hover:bg-red-700 disabled:opacity-50">
+          <span x-show="!bulkDeleting">
+            Delete <span x-text="selected.length"></span> selected
+          </span>
+          <span x-show="bulkDeleting" x-cloak>Deleting…</span>
+        </button>
+        <button @click="loadAssets()" :disabled="loadingAssets"
+                class="text-xs px-3 py-1.5 border border-gray-300 rounded-lg hover:bg-gray-50 disabled:opacity-50">
+          <span x-show="!loadingAssets">Refresh</span>
+          <span x-show="loadingAssets" x-cloak>Loading…</span>
+        </button>
+      </div>
     </div>
     <p class="text-xs text-gray-500 mb-3">
       Showing assets across every configured backend. Use <em>Move</em> to
       relocate a playbook from the local filesystem to a cloud backend so the
-      cloud-side Ansible runner can fetch it.
+      cloud-side Ansible runner can fetch it. Tick rows and click
+      <em>Delete N selected</em> to clean up multiple assets in one shot.
     </p>
     <div x-show="!loadingAssets && assets.length === 0" class="text-sm text-gray-400 py-6 text-center">
       No assets yet. Use the
@@ -268,6 +280,14 @@
       <table class="min-w-full text-sm">
         <thead>
           <tr class="text-left text-xs uppercase text-gray-500 border-b border-gray-200">
+            <th class="pb-2 pr-3 w-8">
+              <input type="checkbox"
+                     :checked="allSelected"
+                     :indeterminate.prop="selected.length > 0 && !allSelected"
+                     @change="toggleSelectAll($event.target.checked)"
+                     class="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                     title="Select all visible">
+            </th>
             <th class="pb-2 pr-4">Name</th>
             <th class="pb-2 pr-4">Backend</th>
             <th class="pb-2 pr-4">Type</th>
@@ -278,6 +298,12 @@
         <tbody class="divide-y divide-gray-100">
           <template x-for="a in assets" :key="a.backend + ':' + a.name">
             <tr class="hover:bg-gray-50">
+              <td class="py-2 pr-3">
+                <input type="checkbox"
+                       :checked="isSelected(a)"
+                       @change="toggleSelected(a, $event.target.checked)"
+                       class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+              </td>
               <td class="py-2 pr-4 font-mono" x-text="a.name"></td>
               <td class="py-2 pr-4">
                 <span class="text-[10px] uppercase font-semibold px-1.5 py-0.5 rounded"
@@ -441,6 +467,10 @@ function storagePage() {
     pendingFile: null,
     uploading: false,
     moveModal: { open: false, name: '', from: '', to: '', busy: false },
+    // Bulk-delete state. `selected` holds composite "<backend>|<name>" keys
+    // so we can mix assets from different backends in one batch (issue #13).
+    selected: [],
+    bulkDeleting: false,
     toast: '', toastType: 'success',
 
     async init() {
@@ -493,6 +523,10 @@ function storagePage() {
         // against the right backend.
         const data = await API.get('/api/storage/list-all');
         this.assets = data.items || [];
+        // Drop any selection rows that no longer exist (e.g. after bulk
+        // delete or move). Keeps the "Delete N selected" counter honest.
+        const live = new Set(this.assets.map(a => this._key(a)));
+        this.selected = this.selected.filter(k => live.has(k));
       } catch (e) {
         this.showToast(e.message || 'Failed to list assets', 'error');
         this.assets = [];
@@ -600,6 +634,56 @@ function storagePage() {
         this.showToast(e.message || 'Upload failed', 'error');
       } finally {
         this.uploading = false;
+      }
+    },
+
+    // ── Bulk-selection helpers (issue #13) ─────────────────────────────────
+    _key(asset) { return asset.backend + '|' + asset.name; },
+
+    isSelected(asset) { return this.selected.includes(this._key(asset)); },
+
+    toggleSelected(asset, checked) {
+      const k = this._key(asset);
+      if (checked) {
+        if (!this.selected.includes(k)) this.selected.push(k);
+      } else {
+        this.selected = this.selected.filter(x => x !== k);
+      }
+    },
+
+    get allSelected() {
+      return this.assets.length > 0 && this.selected.length === this.assets.length;
+    },
+
+    toggleSelectAll(checked) {
+      this.selected = checked ? this.assets.map(a => this._key(a)) : [];
+    },
+
+    async bulkDelete() {
+      if (this.selected.length === 0) return;
+      const items = this.selected.map(k => {
+        const [backend, ...rest] = k.split('|');
+        return { backend, name: rest.join('|') };
+      });
+      if (!confirm(`Delete ${items.length} asset${items.length === 1 ? '' : 's'}? This cannot be undone.`)) return;
+      this.bulkDeleting = true;
+      try {
+        const res = await API.post('/api/storage/bulk-delete', { items });
+        if (res.failed && res.failed.length) {
+          // Keep failed rows checked so the user can retry; clear the rest.
+          const failedKeys = new Set(res.failed.map(f => f.backend + '|' + f.name));
+          this.selected = this.selected.filter(k => failedKeys.has(k));
+          const first = res.failed[0];
+          this.showToast(`${res.summary}. First failure: ${first.name} — ${first.error}`, 'error');
+        } else {
+          this.selected = [];
+          this.showToast(res.summary);
+        }
+        await this.loadAssets();
+      } catch (e) {
+        this.showToast(e.message || 'Bulk delete failed', 'error');
+      } finally {
+        this.bulkDeleting = false;
       }
     },
 
