@@ -43,8 +43,8 @@ $repoRoot    = Split-Path -Parent $PSScriptRoot
 $envFile     = Join-Path $repoRoot ".env"
 $envExample  = Join-Path $repoRoot ".env.example"
 $composeFile = Join-Path $repoRoot "docker-compose.yml"
-$healthUrl   = "http://localhost:8000/api/health"
-$dashboardUrl = "http://localhost:8000"
+$healthUrl   = "http://localhost:8001/api/health"
+$dashboardUrl = "http://localhost:8001"
 
 function Write-Step   { param([string]$m) Write-Host "==>" $m -ForegroundColor Cyan }
 function Write-Ok     { param([string]$m) Write-Host "   " $m -ForegroundColor Green }
@@ -273,7 +273,7 @@ if (-not $ready) {
     Write-Host ""
     Write-Warn "Common causes:"
     Write-Warn "  - Invalid AWS or Azure credentials (app crashes at startup)"
-    Write-Warn "  - Port 8000 already in use by another process"
+    Write-Warn "  - Port 8001 already in use by another process"
     Write-Warn "  - Database container still initializing — try rerunning in ~30s"
     exit 1
 }
