@@ -280,8 +280,14 @@ async def run_build(
                 progress_pct = min(90, progress_pct + 1)
             on_progress(progress_pct, readable[:200])
 
+    # -on-error=cleanup is Packer's default but we set it explicitly so the
+    # intent is obvious: on build failure, Packer terminates the EC2/GCE/Azure
+    # build instance and deletes the in-progress AMI/snapshot/managed image
+    # before exiting. The previous value (-on-error=abort) suppressed cleanup
+    # and left orphaned compute instances running in the user's cloud account
+    # whenever a provisioner script failed (issue #21).
     rc, _ = await _stream_command(
-        ["packer", "build", "-machine-readable", "-on-error=abort", "."],
+        ["packer", "build", "-machine-readable", "-on-error=cleanup", "."],
         cwd=build_dir,
         env=env,
         on_line=_on_line,
