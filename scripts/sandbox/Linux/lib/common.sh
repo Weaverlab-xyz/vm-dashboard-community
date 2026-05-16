@@ -27,16 +27,14 @@ require_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "$1 not found on PATH. Run scripts/sandbox/00-prereqs.sh first."
 }
 
-require_wsl() {
-  # Detect WSL via /proc/version. Allowed on plain Linux too — these scripts
-  # don't actually depend on WSL, but the docs+install paths target WSL.
-  if grep -qiE "microsoft|wsl" /proc/version 2>/dev/null; then
-    return 0
-  fi
-  if [[ "$(uname -s)" == "Linux" ]]; then
-    return 0
-  fi
-  die "These scripts target WSL or Linux. Detected: $(uname -s)."
+require_supported_os() {
+  # WSL/Linux/macOS are all supported — the cloud CLIs and helpers used
+  # here are portable. The /proc/version probe is kept for diagnostics only.
+  local os; os="$(uname -s)"
+  case "$os" in
+    Linux|Darwin) return 0 ;;
+    *) die "These scripts target Linux, WSL, or macOS. Detected: $os." ;;
+  esac
 }
 
 # Confirms (and caches) the cloud CLI is logged in. Each CLI has its own
