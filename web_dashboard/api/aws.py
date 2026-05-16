@@ -39,11 +39,31 @@ from ..models.aws import (
     NetworkOptions,
     SSHKeySecretDetail,
 )
-from ..services import aws_service, job_service, cache_service
+from ..services import aws_service, job_service, cache_service, workgroup_service
 from ..services.aws_service import AWSError
-from .auth import get_current_user, require_permission
+from .auth import get_current_user, require_admin, require_permission
+
+from pydantic import BaseModel
 
 router = APIRouter(prefix="/api/aws", tags=["aws"])
+
+
+def _validate_workgroup(db: Session, user: User, workgroup: str) -> str:
+    """Validate that `workgroup` exists and the user has access. Returns canonical name."""
+    wg = workgroup_service.get(db, workgroup)
+    if not wg:
+        raise HTTPException(status_code=400, detail=f"Unknown workgroup '{workgroup}'")
+    canonical = wg.name
+    if not user.is_admin and canonical not in [w.lower() for w in user.workgroups_list]:
+        raise HTTPException(status_code=403, detail=f"You do not have access to workgroup '{canonical}'")
+    return canonical
+
+
+def _accessible_workgroups(user: User) -> Optional[List[str]]:
+    """Return the canonical workgroup names the user can see, or None for admins."""
+    if user.is_admin:
+        return None
+    return [w.lower() for w in user.workgroups_list]
 
 
 def _aws_cfg(key: str, fallback: str = "") -> str:
@@ -132,13 +152,23 @@ async def network_options(
 
 @router.get("/instances", response_model=EC2InstanceListResponse)
 async def list_instances(
+    workgroup: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("aws", "read")),
 ):
     """
     List dashboard-deployed EC2 instances. Served from cache (1 min TTL).
     Queries jobs DB for completed ec2_deploy jobs, then fetches live state from AWS.
+
+    Filtering: non-admins see only instances whose `Job.workgroup` is in their
+    workgroup list. Admins see all. `?workgroup=<name>` narrows further.
     """
+    accessible = _accessible_workgroups(current_user)
+    if workgroup is not None:
+        canonical = workgroup.lower()
+        if accessible is not None and canonical not in accessible:
+            raise HTTPException(status_code=403, detail=f"No access to workgroup '{canonical}'")
+
     cache_key = cache_service.key_global("aws_instances")
     ttl = cache_service.TTL["aws_instances"]
 
@@ -173,12 +203,11 @@ async def list_instances(
             if not live:
                 continue
             job = job_by_instance.get(iid)
-            job_meta = job.metadata_dict if job else {}
+            wg = (job.workgroup or "").lower() if job and job.workgroup else None
             result.append({
                 **live,
-                # key_name comes from live EC2 describe response (populated for old key-pair
-                # deployments; None for new Secrets Manager deployments — hides the SSH Key button).
                 "key_name": live.get("key_name"),
+                "workgroup": wg,
                 "job_id": job.id if job else None,
                 "deployed_by": job.created_by if job else None,
             })
@@ -186,7 +215,16 @@ async def list_instances(
 
     try:
         raw, cached_at = await cache_service.get_or_refresh(cache_key, ttl, _fetch)
-        instances = [EC2InstanceInfo(**i) for i in raw]
+        filtered = []
+        for inst in raw:
+            inst_wg = inst.get("workgroup")
+            if workgroup is not None and inst_wg != workgroup.lower():
+                continue
+            if accessible is not None:
+                if inst_wg is None or inst_wg not in accessible:
+                    continue
+            filtered.append(inst)
+        instances = [EC2InstanceInfo(**i) for i in filtered]
         return EC2InstanceListResponse(instances=instances, count=len(instances), cached_at=cached_at)
     except AWSError as e:
         raise HTTPException(status_code=503, detail=str(e))
@@ -286,22 +324,26 @@ async def deploy_ami(
     Launch an EC2 instance from an AMI using the AWS API.
     Returns a job_id trackable at /api/jobs/{job_id} or /api/ws/jobs/{job_id}.
     """
+    workgroup = _validate_workgroup(db, current_user, req.workgroup)
+
     job = job_service.create_job(
         db,
         job_type="ec2_deploy",
         created_by=current_user.username,
+        workgroup=workgroup,
         metadata={
             "ami_id": req.ami_id,
             "instance_name": req.instance_name,
             "instance_type": req.instance_type,
             "subnet_id": req.subnet_id,
             "security_group_ids": req.security_group_ids,
+            "workgroup": workgroup,
         },
     )
 
     job_service.log_audit(
         db, current_user.username, "ec2_deploy",
-        details={"ami_id": req.ami_id, "instance_name": req.instance_name},
+        details={"ami_id": req.ami_id, "instance_name": req.instance_name, "workgroup": workgroup},
     )
 
     background_tasks.add_task(
@@ -312,6 +354,7 @@ async def deploy_ami(
         req.instance_type,
         req.subnet_id,
         req.security_group_ids,
+        workgroup,
     )
 
     return DeployResponse(
@@ -339,6 +382,8 @@ async def bulk_deploy_amis(
     if not req.items:
         raise HTTPException(status_code=400, detail="At least one AMI item is required.")
 
+    workgroup = _validate_workgroup(db, current_user, req.workgroup)
+
     # Create one job per instance up front so callers get all job IDs immediately
     job_items: list[tuple[str, object]] = []
     for item in req.items:
@@ -346,18 +391,20 @@ async def bulk_deploy_amis(
             db,
             job_type="ec2_deploy",
             created_by=current_user.username,
+            workgroup=workgroup,
             metadata={
                 "ami_id": item.ami_id,
                 "instance_name": item.instance_name,
                 "instance_type": req.instance_type,
                 "subnet_id": req.subnet_id,
                 "security_group_ids": req.security_group_ids,
+                "workgroup": workgroup,
                 "bulk": True,
             },
         )
         job_service.log_audit(
             db, current_user.username, "ec2_deploy",
-            details={"ami_id": item.ami_id, "instance_name": item.instance_name, "bulk": True},
+            details={"ami_id": item.ami_id, "instance_name": item.instance_name, "workgroup": workgroup, "bulk": True},
         )
         job_items.append((job.id, item))
 
@@ -368,6 +415,7 @@ async def bulk_deploy_amis(
         req.instance_type,
         req.subnet_id,
         req.security_group_ids,
+        workgroup,
     )
 
     results = [
@@ -430,6 +478,52 @@ async def deregister_ami(
         "ami_id": ami_id,
         "deleted_snapshots": deleted_snapshots,
     }
+
+
+# ── Reassign workgroup ───────────────────────────────────────────────────────
+
+class _WorkgroupReassignRequest(BaseModel):
+    workgroup: str
+
+
+@router.patch("/instances/{instance_id}/workgroup")
+async def reassign_instance_workgroup(
+    instance_id: str,
+    req: _WorkgroupReassignRequest,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_admin),
+):
+    """Rewrite the `Workgroup` tag on an EC2 instance and update the originating
+    Job row. Admin only."""
+    wg = workgroup_service.get(db, req.workgroup)
+    if not wg:
+        raise HTTPException(status_code=400, detail=f"Unknown workgroup '{req.workgroup}'")
+    canonical = wg.name
+
+    region = _aws_cfg("aws_region") or "us-east-2"
+    try:
+        await aws_service.set_workgroup_tag(region, instance_id, canonical)
+    except AWSError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    job = db.query(Job).filter(Job.cloud_resource_id == instance_id).first()
+    if job is None:
+        for j in db.query(Job).filter(Job.job_type == "ec2_deploy").all():
+            if j.metadata_dict.get("instance_id") == instance_id:
+                job = j
+                break
+
+    if job is not None:
+        job.workgroup = canonical
+        meta = job.metadata_dict
+        meta["workgroup"] = canonical
+        job.metadata_dict = meta
+        if not job.cloud_resource_id:
+            job.cloud_resource_id = instance_id
+        db.commit()
+
+    await cache_service.invalidate(cache_service.key_global("aws_instances"))
+    return {"instance_id": instance_id, "workgroup": canonical, "job_id": job.id if job else None}
 
 
 # ── Terminate ─────────────────────────────────────────────────────────────────
@@ -606,6 +700,7 @@ async def _run_deploy(
     instance_type: str,
     subnet_id: str,
     security_group_ids: list,
+    workgroup: str = "",
 ):
     db = _get_db_session()
     result = {}
@@ -674,8 +769,11 @@ async def _run_deploy(
                 security_group_ids=security_group_ids,
                 iam_instance_profile=_cfg_svc.get("ec2_ssm_instance_profile") or "",
                 os_type=os_type,
+                workgroup=workgroup,
             )
             result.update(instance_result)
+            if instance_result.get("instance_id"):
+                job_service.set_cloud_resource_id(db, job_id, instance_result["instance_id"])
         except AWSError as e:
             # EC2 failed — stop ECS task if it was started
             if result.get("ecs_task_arn"):
@@ -739,6 +837,7 @@ async def _run_bulk_deploy(
     instance_type: str,
     subnet_id: str,
     security_group_ids: list,
+    workgroup: str = "",
 ):
     """
     Background task for bulk EC2 deployment.
@@ -816,8 +915,11 @@ async def _run_bulk_deploy(
                     subnet_id=subnet_id,
                     security_group_ids=security_group_ids,
                     iam_instance_profile=_cfg_svc.get("ec2_ssm_instance_profile") or "",
+                    workgroup=workgroup,
                 )
                 result.update(instance_result)
+                if instance_result.get("instance_id"):
+                    job_service.set_cloud_resource_id(db, job_id, instance_result["instance_id"])
 
                 instance_id = result["instance_id"]
                 hostname = result.get("private_ip") or result.get("public_ip") or instance_id

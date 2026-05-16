@@ -555,7 +555,8 @@ def _deploy_vm_sync(
     image_id: str, subnet_id: str, nsg_ids: list, create_public_ip: bool,
     ssh_username: str, ssh_public_key: str,
     image_publisher: str = None, image_offer: str = None,
-    image_sku: str = None, image_version: str = None
+    image_sku: str = None, image_version: str = None,
+    workgroup: str = "",
 ) -> dict:
     # Sanitize the public key as a defence-in-depth — callers should already
     # be passing a single-line OpenSSH entry, but a stray CR/LF here will
@@ -569,6 +570,8 @@ def _deploy_vm_sync(
     compute = _get_compute(cred, sub_id)
     network = _get_network(cred, sub_id)
     tags = {"ManagedBy": "vm-cli-dashboard"}
+    if workgroup:
+        tags["workgroup"] = workgroup
 
     public_ip_id = None
     pip_name = f"{vm_name}-pip"
@@ -680,8 +683,9 @@ async def deploy_vm(
     rg: str, location: str, vm_name: str, vm_size: str,
     image_id: str, subnet_id: str, nsg_ids: list, create_public_ip: bool,
     ssh_username: str, ssh_public_key: str,
-    image_publisher: str = None, image_offer: str = None, 
-    image_sku: str = None, image_version: str = None
+    image_publisher: str = None, image_offer: str = None,
+    image_sku: str = None, image_version: str = None,
+    workgroup: str = "",
 ) -> dict:
     try:
         cred, sub_id = await _ensure_creds()
@@ -691,11 +695,33 @@ async def deploy_vm(
             image_id, subnet_id, nsg_ids, create_public_ip,
             ssh_username, ssh_public_key,
             image_publisher, image_offer, image_sku, image_version,
+            workgroup,
         )
     except AzureError:
         raise
     except Exception as e:
         raise AzureError(f"Failed to deploy VM {vm_name}: {e}") from e
+
+
+def _set_workgroup_tag_sync(cred, sub_id: str, rg: str, vm_name: str, workgroup: str) -> None:
+    """Merge a `workgroup` tag into the VM's existing tags (preserves others)."""
+    compute = _get_compute(cred, sub_id)
+    vm = compute.virtual_machines.get(rg, vm_name)
+    tags = dict(vm.tags or {})
+    tags["workgroup"] = workgroup
+    compute.virtual_machines.begin_update(rg, vm_name, {"tags": tags}).result()
+
+
+async def set_workgroup_tag(rg: str, vm_name: str, workgroup: str) -> None:
+    """Rewrite the `workgroup` tag on an Azure VM (preserves other tags). Used
+    by the admin reassign endpoint."""
+    try:
+        cred, sub_id = await _ensure_creds()
+        await asyncio.to_thread(_set_workgroup_tag_sync, cred, sub_id, rg, vm_name, workgroup)
+    except AzureError:
+        raise
+    except Exception as e:
+        raise AzureError(f"Failed to set workgroup tag on {vm_name}: {e}") from e
 
 
 def _describe_vms_sync(cred, sub_id: str, rg: str) -> list:
@@ -747,6 +773,7 @@ def _describe_vms_sync(cred, sub_id: str, rg: str) -> list:
                 _os_type_str(vm.storage_profile.os_disk.os_type)
                 if vm.storage_profile and vm.storage_profile.os_disk else ""
             ),
+            "workgroup": (tags.get("workgroup") or "").lower() or None,
         })
     return results
 

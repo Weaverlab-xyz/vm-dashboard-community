@@ -73,8 +73,11 @@ class User(Base):
 
     @workgroups_list.setter
     def workgroups_list(self, value: List[str]):
-        """Set workgroups from list"""
-        self.workgroups = json.dumps(value)
+        """Set workgroups from list. Names are lowercased to match the canonical
+        form stored in the workgroups table. Old TitleCase rows continue to
+        resolve via case-insensitive lookups in workgroup_service."""
+        normalized = [v.lower() for v in (value or []) if isinstance(v, str)]
+        self.workgroups = json.dumps(normalized)
 
     @property
     def permissions_dict(self) -> dict:
@@ -134,6 +137,10 @@ class Job(Base):
     job_type = Column(String(50), nullable=False, index=True)  # 'vm_start', 'vm_stop', 'bulk_start', etc.
     workgroup = Column(String(50), index=True)
     vm_path = Column(Text)
+    # Cloud SDK resource id (EC2 instance id, Azure VM name, GCP instance id) for
+    # cloud-deploy jobs. Indexed so the reassign endpoints can find the originating
+    # Job row when an admin rewrites a resource's Workgroup tag/label.
+    cloud_resource_id = Column(String(255), index=True, nullable=True)
     status = Column(String(20), nullable=False, default="pending", index=True)  # pending, running, completed, failed, cancelled
     progress_pct = Column(Integer, default=0)
     progress_message = Column(Text)
@@ -226,6 +233,31 @@ class VMStateCache(Base):
     last_seen_running_at = Column(DateTime, nullable=True)   # last PS-confirmed running time
     is_online = Column(Boolean, nullable=True)               # Python socket reachability
     last_online_check_at = Column(DateTime, nullable=True)   # when ping was last attempted
+
+
+class Workgroup(Base):
+    """User-managed workgroup: scopes RBAC + cloud resource visibility.
+
+    `name` is canonical lowercase (regex enforced in service layer) so it can be
+    written verbatim into AWS instance tags (`Workgroup=<name>`), Azure resource
+    tags (`workgroup=<name>`), and GCP labels (`workgroup=<name>`) — all of which
+    have casing/character restrictions tighter than the dashboard UI.
+
+    Lookups in `workgroup_service` are case-insensitive so existing TitleCase
+    strings in `users.workgroups` and `oauth_group_mappings.workgroup` keep
+    resolving without a data migration. `display_name` preserves the original
+    casing for UI rendering.
+    """
+    __tablename__ = "workgroups"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    name = Column(String(64), unique=True, nullable=False, index=True)
+    display_name = Column(String(200), nullable=False)
+    description = Column(Text, nullable=True)
+    local_vm_path = Column(Text, nullable=True)  # UNC path for VMware local VMs; null in community
+    is_default = Column(Boolean, default=False, nullable=False, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_by_user_id = Column(String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
 
 
 class Approval(Base):
@@ -374,6 +406,8 @@ def init_db():
             "ALTER TABLE vm_state_cache ADD COLUMN last_seen_running_at TIMESTAMP",
             "ALTER TABLE vm_state_cache ADD COLUMN is_online BOOLEAN",
             "ALTER TABLE vm_state_cache ADD COLUMN last_online_check_at TIMESTAMP",
+            "ALTER TABLE jobs ADD COLUMN cloud_resource_id VARCHAR(255)",
+            "CREATE INDEX ix_jobs_cloud_resource_id ON jobs(cloud_resource_id)",
         ]
         for stmt in _migrations:
             if _is_sqlite:
@@ -396,6 +430,12 @@ def init_db():
         if not _is_sqlite:
             conn.commit()
         # Advisory lock released automatically when conn closes.
+
+    # Seed workgroups table on first boot. Imported here (not at module top)
+    # to avoid a circular import: workgroup_service imports from database.
+    from .services import workgroup_service
+    with SessionLocal() as _seed_db:
+        workgroup_service.seed_if_empty(_seed_db)
 
     print("Database initialized successfully!")
 

@@ -8,9 +8,10 @@ Mirrors the AWS and Azure router patterns:
 """
 import json
 import logging
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ..config import settings
@@ -24,9 +25,9 @@ from ..models.gcp import (
     GCPNetworkOptions,
     GCPSSHKeyDetail,
 )
-from ..services import cache_service, job_service
+from ..services import cache_service, job_service, workgroup_service
 from ..services import gcp_service
-from .auth import require_permission
+from .auth import require_admin, require_permission
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +84,24 @@ def _gcp_ssh_secret() -> str:
 def _get_db_session():
     from ..database import SessionLocal
     return SessionLocal()
+
+
+def _validate_workgroup(db: Session, user: User, workgroup: str) -> str:
+    """Validate that `workgroup` exists and the user has access. Returns canonical name."""
+    wg = workgroup_service.get(db, workgroup)
+    if not wg:
+        raise HTTPException(status_code=400, detail=f"Unknown workgroup '{workgroup}'")
+    canonical = wg.name
+    if not user.is_admin and canonical not in [w.lower() for w in user.workgroups_list]:
+        raise HTTPException(status_code=403, detail=f"You do not have access to workgroup '{canonical}'")
+    return canonical
+
+
+def _accessible_workgroups(user: User) -> Optional[List[str]]:
+    """Return the canonical workgroup names the user can see, or None for admins."""
+    if user.is_admin:
+        return None
+    return [w.lower() for w in user.workgroups_list]
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -171,18 +190,41 @@ async def network_options(
 @router.get("/instances", response_model=GCPInstanceListResponse)
 async def list_instances(
     bust: bool = Query(False),
+    workgroup: Optional[str] = None,
     current_user: User = Depends(require_permission("gcp", "read")),
     db: Session = Depends(get_db),
 ):
-    """List GCE instances deployed via this dashboard (derived from job records + live GCP state)."""
+    """List GCE instances deployed via this dashboard (derived from job records + live GCP state).
+
+    Non-admins see only instances whose Job.workgroup (or `workgroup` label) is
+    in their workgroup list. `?workgroup=<name>` narrows further.
+    """
     project_id = _gcp_project()
     if not project_id:
         raise HTTPException(status_code=400, detail="GCP project ID not configured — run the setup wizard.")
+
+    accessible = _accessible_workgroups(current_user)
+    if workgroup is not None:
+        canonical = workgroup.lower()
+        if accessible is not None and canonical not in accessible:
+            raise HTTPException(status_code=403, detail=f"No access to workgroup '{canonical}'")
 
     cache_key = cache_service.key_global("gcp_instances")
     if not bust:
         cached = await cache_service.get(cache_key)
         if cached:
+            inst_list = cached.get("instances") if isinstance(cached, dict) else None
+            if inst_list is not None:
+                filtered = []
+                for inst in inst_list:
+                    inst_wg = (inst.get("workgroup") or "").lower() or None
+                    if workgroup is not None and inst_wg != workgroup.lower():
+                        continue
+                    if accessible is not None:
+                        if inst_wg is None or inst_wg not in accessible:
+                            continue
+                    filtered.append(inst)
+                cached = {**cached, "instances": filtered}
             return cached
 
     deploy_jobs = (
@@ -208,7 +250,12 @@ async def list_instances(
         zone = data.get("zone") or _gcp_zone()
         if name:
             by_zone.setdefault(zone, []).append(name)
-            job_meta[name] = {"job_id": job.id, "deployed_by": job.created_by, "extra": data}
+            job_meta[name] = {
+                "job_id": job.id,
+                "deployed_by": job.created_by,
+                "extra": data,
+                "workgroup": (job.workgroup or data.get("workgroup") or "").lower() or None,
+            }
 
     instances = []
     try:
@@ -218,13 +265,24 @@ async def list_instances(
                 meta = job_meta.get(inst["instance_name"], {})
                 inst["job_id"] = meta.get("job_id")
                 inst["deployed_by"] = meta.get("deployed_by")
+                inst["workgroup"] = meta.get("workgroup") or inst.get("workgroup")
                 instances.append(inst)
     except gcp_service.GCPError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-    result = GCPInstanceListResponse(instances=instances, project_id=project_id, zone=_gcp_zone())
-    await cache_service.set(cache_key, result.model_dump(), ttl=60)
-    return result
+    full = GCPInstanceListResponse(instances=instances, project_id=project_id, zone=_gcp_zone())
+    await cache_service.set(cache_key, full.model_dump(), ttl=60)
+
+    filtered = []
+    for inst in instances:
+        inst_wg = (inst.get("workgroup") or "").lower() or None
+        if workgroup is not None and inst_wg != workgroup.lower():
+            continue
+        if accessible is not None:
+            if inst_wg is None or inst_wg not in accessible:
+                continue
+        filtered.append(inst)
+    return GCPInstanceListResponse(instances=filtered, project_id=project_id, zone=_gcp_zone())
 
 
 @router.get("/secrets/ssh-key", response_model=GCPSSHKeyDetail)
@@ -259,11 +317,14 @@ async def deploy_instance(
         raise HTTPException(status_code=400, detail="GCP project ID not configured — run the setup wizard.")
 
     zone = payload.zone or _gcp_zone()
+    workgroup = _validate_workgroup(db, current_user, payload.workgroup)
+    payload.workgroup = workgroup
 
     job = job_service.create_job(
         db,
         job_type="gce_deploy",
         created_by=current_user.username,
+        workgroup=workgroup,
         metadata={
             "project_id":       project_id,
             "zone":             zone,
@@ -271,13 +332,15 @@ async def deploy_instance(
             "machine_type":     payload.machine_type,
             "image_self_link":  payload.image_self_link,
             "image_name":       payload.image_name,
+            "workgroup":        workgroup,
         },
     )
+    job_service.set_cloud_resource_id(db, job.id, payload.instance_name)
     job_service.log_audit(
         db,
         current_user.username,
         "gce_deploy",
-        details={"instance_name": payload.instance_name, "zone": zone, "machine_type": payload.machine_type},
+        details={"instance_name": payload.instance_name, "zone": zone, "machine_type": payload.machine_type, "workgroup": workgroup},
     )
 
     background_tasks.add_task(_run_deploy, job.id, payload, project_id, zone)
@@ -352,6 +415,7 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
         default_tags = [t.strip() for t in default_tag_csv.split(",") if t.strip()]
         merged_tags = list(dict.fromkeys((payload.network_tags or []) + default_tags))
 
+        wg = getattr(payload, "workgroup", "") or ""
         result = await gcp_service.launch_instance(
             project_id=project_id,
             zone=zone,
@@ -364,6 +428,7 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
             ssh_public_key=ssh_public_key,
             disk_size_gb=payload.disk_size_gb,
             network_tags=merged_tags,
+            labels={"workgroup": wg} if wg else None,
         )
 
         hostname = result.get("private_ip") or result.get("public_ip") or payload.instance_name
@@ -424,6 +489,57 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
         job_service.set_failed(db, job_id, str(exc))
     finally:
         db.close()
+
+
+class _WorkgroupReassignRequest(BaseModel):
+    workgroup: str
+
+
+@router.patch("/instances/{instance_name}/workgroup")
+async def reassign_instance_workgroup(
+    instance_name: str,
+    req: _WorkgroupReassignRequest,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_admin),
+):
+    """Rewrite the `workgroup` label on a GCE instance and update the originating
+    Job row. Admin only."""
+    project_id = _gcp_project()
+    if not project_id:
+        raise HTTPException(status_code=400, detail="GCP project ID not configured")
+
+    wg = workgroup_service.get(db, req.workgroup)
+    if not wg:
+        raise HTTPException(status_code=400, detail=f"Unknown workgroup '{req.workgroup}'")
+    canonical = wg.name
+
+    job = db.query(Job).filter(Job.cloud_resource_id == instance_name).first()
+    if job is None:
+        for j in db.query(Job).filter(Job.job_type == "gce_deploy").all():
+            if j.metadata_dict.get("instance_name") == instance_name:
+                job = j
+                break
+
+    zone = (job.metadata_dict.get("zone") if job else None) or _gcp_zone()
+
+    try:
+        await gcp_service.set_workgroup_label(project_id, zone, instance_name, canonical)
+    except gcp_service.GCPError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"GCE label update failed: {exc}")
+
+    if job is not None:
+        job.workgroup = canonical
+        meta = job.metadata_dict
+        meta["workgroup"] = canonical
+        job.metadata_dict = meta
+        if not job.cloud_resource_id:
+            job.cloud_resource_id = instance_name
+        db.commit()
+
+    await cache_service.invalidate(cache_service.key_global("gcp_instances"))
+    return {"instance_name": instance_name, "workgroup": canonical, "job_id": job.id if job else None}
 
 
 @router.post("/instances/{instance_name}/create-image", response_model=GCPDeployResponse)

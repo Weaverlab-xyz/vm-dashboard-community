@@ -677,6 +677,22 @@
 
         <form x-show="!loadingNetworkOpts" @submit.prevent="submitDeploy()">
 
+          <!-- Workgroup -->
+          <div class="mb-4">
+            <label class="block text-sm font-medium text-gray-700 mb-1">Workgroup *</label>
+            <select x-model="deployForm.workgroup" required
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm
+                           focus:outline-none focus:ring-2 focus:ring-blue-500">
+              <option value="">Select workgroup…</option>
+              <template x-for="w in availableWorkgroups" :key="w">
+                <option :value="w" x-text="w"></option>
+              </template>
+            </select>
+            <p class="text-xs text-gray-400 mt-1">
+              Written as the <code>Workgroup</code> tag on the instance. Controls who can see it.
+            </p>
+          </div>
+
           <!-- Instance Name -->
           <div class="mb-4">
             <label class="block text-sm font-medium text-gray-700 mb-1">Instance Name *</label>
@@ -1092,7 +1108,9 @@
         sshKeyPreviewLoading: false,
         subnet_id: '',
         security_group_ids: [],
+        workgroup: '',
       },
+      availableWorkgroups: [],
       deploying: false,
       deployError: '',
 
@@ -1133,6 +1151,9 @@
         if (['community', 'amis', 'instances', 'build'].includes(hash)) {
           this.activeTab = hash;
         }
+        API.get('/api/groups/workgroups')
+          .then(r => { this.availableWorkgroups = r || []; })
+          .catch(() => { this.availableWorkgroups = []; });
         // Load community images on start (default tab), instances in background
         const tasks = [this.loadCommunityAmis(), this.loadInstances()];
         if (hash === 'amis') tasks.push(this.loadAmis());
@@ -1276,6 +1297,8 @@
           sshKeyPreviewLoading: true,
           subnet_id: '',
           security_group_ids: [],
+          workgroup: this.availableWorkgroups.includes('default') ? 'default' :
+                     (this.availableWorkgroups[0] || ''),
         };
         this.deployError = '';
         this.showDeployModal = true;
@@ -1346,6 +1369,7 @@
             instance_type: this.deployForm.instance_type,
             subnet_id: this.deployForm.subnet_id,
             security_group_ids: this.deployForm.security_group_ids,
+            workgroup: this.deployForm.workgroup,
           };
 
           const resp = await API.post('/api/aws/deploy', body);
@@ -1458,6 +1482,7 @@
             instance_type: this.deployForm.instance_type,
             subnet_id: this.deployForm.subnet_id,
             security_group_ids: this.deployForm.security_group_ids,
+            workgroup: this.deployForm.workgroup,
           });
           this.bulkDeployResults = resp.jobs || [];
           toast(`${resp.count} deployment${resp.count !== 1 ? 's' : ''} queued!`, 'success');

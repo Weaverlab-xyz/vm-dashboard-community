@@ -494,6 +494,7 @@ def _describe_instances_sync(project_id: str, zone: str, instance_names: list[st
                 for ac in nic.access_configs:
                     if ac.nat_i_p:
                         public_ip = ac.nat_i_p
+            labels = dict(info.labels) if info.labels else {}
             results.append({
                 "instance_name": info.name,
                 "zone":          zone,
@@ -503,6 +504,7 @@ def _describe_instances_sync(project_id: str, zone: str, instance_names: list[st
                 "private_ip":    private_ip,
                 "self_link":     info.self_link,
                 "creation_timestamp": info.creation_timestamp or "",
+                "workgroup":     labels.get("workgroup") or None,
             })
         except Exception as exc:
             logger.warning("Could not describe GCE instance %s: %s", name, exc)
@@ -517,6 +519,40 @@ def _describe_instances_sync(project_id: str, zone: str, instance_names: list[st
 
 async def describe_instances(project_id: str, zone: str, instance_names: list[str]) -> list[dict]:
     return await asyncio.to_thread(_describe_instances_sync, project_id, zone, instance_names)
+
+
+def _set_workgroup_label_sync(project_id: str, zone: str, instance_name: str, workgroup: str) -> None:
+    """Merge a `workgroup` label into the instance (preserves other labels).
+    Compute Engine requires the current `label_fingerprint` for optimistic
+    concurrency on label edits."""
+    _require_compute()
+    from google.cloud import compute_v1
+
+    creds = _gcp_creds()
+    client = compute_v1.InstancesClient(credentials=creds)
+    info = client.get(project=project_id, zone=zone, instance=instance_name)
+    labels = dict(info.labels) if info.labels else {}
+    labels["workgroup"] = workgroup
+    req = compute_v1.InstancesSetLabelsRequest(
+        labels=labels,
+        label_fingerprint=info.label_fingerprint,
+    )
+    op = client.set_labels(
+        project=project_id,
+        zone=zone,
+        instance=instance_name,
+        instances_set_labels_request_resource=req,
+    )
+    try:
+        op.result(timeout=30)
+    except Exception:
+        pass
+
+
+async def set_workgroup_label(project_id: str, zone: str, instance_name: str, workgroup: str) -> None:
+    """Rewrite the `workgroup` label on a GCE instance (preserves other labels).
+    Used by the admin reassign endpoint."""
+    await asyncio.to_thread(_set_workgroup_label_sync, project_id, zone, instance_name, workgroup)
 
 
 def _terminate_instance_sync(project_id: str, zone: str, instance_name: str) -> None:

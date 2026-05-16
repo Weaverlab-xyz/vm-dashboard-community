@@ -25,6 +25,7 @@ class GCPInstanceInfo(BaseModel):
     private_ip: Optional[str] = None
     self_link: str = ""
     creation_timestamp: str = ""
+    workgroup: Optional[str] = None  # from `workgroup` GCE label; None = unassigned
     job_id: Optional[str] = None
     deployed_by: Optional[str] = None
 
@@ -56,6 +57,7 @@ class GCPDeployRequest(BaseModel):
     ssh_username: str = "gcp-user"
     disk_size_gb: int = 20
     network_tags: List[str] = []
+    workgroup: str              # written as `workgroup` GCE label
 
 
 class GCPDeployResponse(BaseModel):

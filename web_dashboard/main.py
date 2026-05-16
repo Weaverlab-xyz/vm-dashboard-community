@@ -325,6 +325,7 @@ def _feature_flags() -> dict:
 
 from fastapi import Depends  # noqa: E402
 from .api import auth, jobs, websocket, aws, azure, gcp, packer, mfa, tokens, users, groups, setup, secrets, storage, images  # noqa: E402
+from .api import workgroups as workgroups_api  # noqa: E402
 from .api.mcp_server import get_mcp_asgi_app  # noqa: E402
 
 
@@ -349,6 +350,7 @@ app.include_router(mfa.router)
 app.include_router(tokens.router)
 app.include_router(users.router)
 app.include_router(groups.router)
+app.include_router(workgroups_api.router)
 app.include_router(jobs.router)
 app.include_router(websocket.router)
 app.include_router(aws.router)
@@ -574,6 +576,11 @@ async def groups_page(request: Request):
         "groups/index.html",
         {"request": request, "workgroups": list(settings.workgroups.keys())},
     )
+
+
+@app.get("/workgroups", response_class=HTMLResponse, include_in_schema=False)
+async def workgroups_page(request: Request):
+    return templates.TemplateResponse("workgroups/index.html", {"request": request})
 
 
 # ── Health / diagnostic ───────────────────────────────────────────────────────

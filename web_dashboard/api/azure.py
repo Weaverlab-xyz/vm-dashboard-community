@@ -12,9 +12,10 @@ Azure API endpoints:
   DELETE /api/azure/images/{image_name} - Delete a managed image
 """
 import logging
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 from sqlalchemy.orm import Session
@@ -34,11 +35,29 @@ from ..models.azure import (
     AzureSSHKeyInfo,
     AzureVMInfo,
 )
-from ..services import azure_service, job_service, cache_service
+from ..services import azure_service, job_service, cache_service, workgroup_service
 from ..services.azure_service import AzureError
-from .auth import get_current_user, require_permission
+from .auth import get_current_user, require_admin, require_permission
 
 router = APIRouter(prefix="/api/azure", tags=["azure"])
+
+
+def _validate_workgroup(db: Session, user: User, workgroup: str) -> str:
+    """Validate that `workgroup` exists and the user has access. Returns canonical name."""
+    wg = workgroup_service.get(db, workgroup)
+    if not wg:
+        raise HTTPException(status_code=400, detail=f"Unknown workgroup '{workgroup}'")
+    canonical = wg.name
+    if not user.is_admin and canonical not in [w.lower() for w in user.workgroups_list]:
+        raise HTTPException(status_code=403, detail=f"You do not have access to workgroup '{canonical}'")
+    return canonical
+
+
+def _accessible_workgroups(user: User) -> Optional[List[str]]:
+    """Return the canonical workgroup names the user can see, or None for admins."""
+    if user.is_admin:
+        return None
+    return [w.lower() for w in user.workgroups_list]
 
 
 def _cfg(key: str, fallback: str = "") -> str:
@@ -239,21 +258,26 @@ async def get_keyvault_ssh_key(
 @router.get("/vms")
 async def list_vms(
     bust: bool = False,
+    workgroup: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("azure", "read")),
 ):
     """
     List dashboard-deployed Azure VMs with live power state.
     Served from cache (1 min TTL). Pass ?bust=true to force a fresh fetch.
+
+    Non-admins see only VMs whose Job.workgroup (or workgroup tag) is in their
+    workgroup list. `?workgroup=<name>` narrows further.
     """
+    accessible = _accessible_workgroups(current_user)
+    if workgroup is not None:
+        canonical = workgroup.lower()
+        if accessible is not None and canonical not in accessible:
+            raise HTTPException(status_code=403, detail=f"No access to workgroup '{canonical}'")
+
     cache_key = cache_service.key_global("azure_vms")
     ttl = cache_service.TTL["azure_vms"]
 
-    # Pre-extract job metadata into plain dicts now (while db is open).
-    # The _fetch closure must NOT capture `db` — it may run as a background
-    # stale-while-revalidate task after the request (and db session) is closed.
-    # Include ALL azure_deploy jobs (any status) so VMs from older failed/running
-    # jobs are still surfaced via the fallback get_vm() lookup.
     deploy_jobs = (
         db.query(Job)
         .filter(Job.job_type == "azure_deploy")
@@ -266,17 +290,15 @@ async def list_vms(
             "created_by": j.created_by,
             "resource_group": j.metadata_dict.get("resource_group"),
             "destroyed": j.metadata_dict.get("destroyed", False),
+            "workgroup": (j.workgroup or j.metadata_dict.get("workgroup") or "").lower() or None,
         }
         for j in deploy_jobs if j.metadata_dict.get("vm_name")
     }
 
     async def _fetch():
-        # Get all dashboard VMs from Azure (tagged ManagedBy=vm-cli-dashboard)
         live_vms = await azure_service.describe_vms(_rg())
         live_vm_names = {vm["name"] for vm in live_vms}
 
-        # Fallback: for job-known VMs not found by tag filter, fetch directly.
-        # This handles cases where Azure list() omits tags or tags were not applied.
         for vm_name, meta in job_meta.items():
             if vm_name not in live_vm_names and not meta["destroyed"]:
                 rg = meta["resource_group"] or _rg()
@@ -291,8 +313,10 @@ async def list_vms(
         result = []
         for vm in live_vms:
             meta = job_meta.get(vm["name"])
+            wg = (meta or {}).get("workgroup") or vm.get("workgroup")
             result.append({
                 **vm,
+                "workgroup": wg,
                 "job_id": meta["id"] if meta else None,
                 "deployed_by": meta["created_by"] if meta else "unknown",
             })
@@ -302,7 +326,17 @@ async def list_vms(
         if bust:
             await cache_service.invalidate(cache_key)
         raw, cached_at = await cache_service.get_or_refresh(cache_key, ttl, _fetch)
-        vms = [AzureVMInfo(**v) for v in raw]
+        filtered = []
+        for vm in raw:
+            vm_wg = (vm.get("workgroup") or "").lower() or None
+            vm["workgroup"] = vm_wg
+            if workgroup is not None and vm_wg != workgroup.lower():
+                continue
+            if accessible is not None:
+                if vm_wg is None or vm_wg not in accessible:
+                    continue
+            filtered.append(vm)
+        vms = [AzureVMInfo(**v) for v in filtered]
         return {"vms": vms, "count": len(vms), "cached_at": cached_at}
     except AzureError as e:
         raise HTTPException(status_code=503, detail=str(e))
@@ -323,11 +357,14 @@ async def deploy_vm(
     """
     rg = req.resource_group or _rg()
     loc = req.location or _loc()
+    workgroup = _validate_workgroup(db, current_user, req.workgroup)
+    req.workgroup = workgroup
 
     job = job_service.create_job(
         db,
         job_type="azure_deploy",
         created_by=current_user.username,
+        workgroup=workgroup,
         metadata={
             "image_id": req.image_id,
             "image_publisher": req.image_publisher,
@@ -341,12 +378,14 @@ async def deploy_vm(
             "subnet_id": req.subnet_id,
             "nsg_ids": req.nsg_ids,
             "create_public_ip": req.create_public_ip,
+            "workgroup": workgroup,
         },
     )
+    job_service.set_cloud_resource_id(db, job.id, req.vm_name)
 
     job_service.log_audit(
         db, current_user.username, "azure_deploy",
-        details={"image_id": req.image_id, "vm_name": req.vm_name},
+        details={"image_id": req.image_id, "vm_name": req.vm_name, "workgroup": workgroup},
     )
 
     background_tasks.add_task(_run_deploy, job.id, req, rg, loc)
@@ -376,6 +415,8 @@ async def bulk_deploy_vms(
 
     rg = req.resource_group or _rg()
     loc = req.location or _loc()
+    workgroup = _validate_workgroup(db, current_user, req.workgroup)
+    req.workgroup = workgroup
 
     job_items = []
     for item in req.items:
@@ -383,6 +424,7 @@ async def bulk_deploy_vms(
             db,
             job_type="azure_deploy",
             created_by=current_user.username,
+            workgroup=workgroup,
             metadata={
                 "image_id": req.image_id,
                 "vm_name": item.vm_name,
@@ -392,12 +434,14 @@ async def bulk_deploy_vms(
                 "subnet_id": req.subnet_id,
                 "nsg_ids": req.nsg_ids,
                 "create_public_ip": req.create_public_ip,
+                "workgroup": workgroup,
                 "bulk": True,
             },
         )
+        job_service.set_cloud_resource_id(db, job.id, item.vm_name)
         job_service.log_audit(
             db, current_user.username, "azure_deploy",
-            details={"image_id": req.image_id, "vm_name": item.vm_name, "bulk": True},
+            details={"image_id": req.image_id, "vm_name": item.vm_name, "workgroup": workgroup, "bulk": True},
         )
         job_items.append((job.id, item.vm_name))
 
@@ -406,6 +450,53 @@ async def bulk_deploy_vms(
     return AzureBulkDeployResponse(
         jobs=[AzureDeployResponse(job_id=jid, vm_name=vn) for jid, vn in job_items]
     )
+
+
+# ── Reassign workgroup ───────────────────────────────────────────────────────
+
+class _WorkgroupReassignRequest(BaseModel):
+    workgroup: str
+
+
+@router.patch("/vms/{vm_name}/workgroup")
+async def reassign_vm_workgroup(
+    vm_name: str,
+    req: _WorkgroupReassignRequest,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_admin),
+):
+    """Rewrite the `workgroup` tag on an Azure VM and update the originating Job
+    row. Admin only."""
+    wg = workgroup_service.get(db, req.workgroup)
+    if not wg:
+        raise HTTPException(status_code=400, detail=f"Unknown workgroup '{req.workgroup}'")
+    canonical = wg.name
+
+    job = db.query(Job).filter(Job.cloud_resource_id == vm_name).first()
+    if job is None:
+        for j in db.query(Job).filter(Job.job_type == "azure_deploy").all():
+            if j.metadata_dict.get("vm_name") == vm_name:
+                job = j
+                break
+
+    rg = (job.metadata_dict.get("resource_group") if job else None) or _rg()
+
+    try:
+        await azure_service.set_workgroup_tag(rg, vm_name, canonical)
+    except AzureError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    if job is not None:
+        job.workgroup = canonical
+        meta = job.metadata_dict
+        meta["workgroup"] = canonical
+        job.metadata_dict = meta
+        if not job.cloud_resource_id:
+            job.cloud_resource_id = vm_name
+        db.commit()
+
+    await cache_service.invalidate(cache_service.key_global("azure_vms"))
+    return {"vm_name": vm_name, "workgroup": canonical, "job_id": job.id if job else None}
 
 
 # ── Terminate ─────────────────────────────────────────────────────────────────
@@ -604,6 +695,7 @@ async def _run_deploy(job_id: str, req: AzureDeployRequest, rg: str, loc: str):
                 image_offer=req.image_offer,
                 image_sku=req.image_sku,
                 image_version=req.image_version,
+                workgroup=getattr(req, "workgroup", "") or "",
             )
             result.update(vm_result)
         except AzureError as e:
@@ -745,6 +837,7 @@ async def _run_bulk_deploy(job_items: list, req: AzureBulkDeployRequest, rg: str
                     image_offer=req.image_offer,
                     image_sku=req.image_sku,
                     image_version=req.image_version,
+                    workgroup=getattr(req, "workgroup", "") or "",
                 )
                 result.update(vm_result)
 

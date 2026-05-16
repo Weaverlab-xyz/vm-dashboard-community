@@ -7,8 +7,8 @@ from pydantic import BaseModel
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from ..config import settings
 from ..database import OAuthGroupMapping, get_db
+from ..services import workgroup_service
 from .auth import get_current_user, require_admin
 
 router = APIRouter(prefix="/api/groups", tags=["groups"])
@@ -64,8 +64,8 @@ def list_group_mappings(db: Session = Depends(get_db)):
 @router.post("", response_model=GroupMappingResponse, dependencies=[Depends(require_admin)])
 def create_group_mapping(payload: GroupMappingCreate, db: Session = Depends(get_db)):
     """Add a new Entra group → workgroup mapping."""
-    valid_workgroups = list(settings.workgroups.keys())
-    if payload.workgroup not in valid_workgroups:
+    if not workgroup_service.exists(db, payload.workgroup):
+        valid_workgroups = workgroup_service.list_names(db)
         raise HTTPException(
             status_code=400,
             detail=f"Unknown workgroup '{payload.workgroup}'. Valid values: {valid_workgroups}",
@@ -97,6 +97,6 @@ def delete_group_mapping(mapping_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/workgroups", dependencies=[Depends(get_current_user)])
-def list_available_workgroups():
+def list_available_workgroups(db: Session = Depends(get_db)):
     """Return the workgroup names configured on this server."""
-    return list(settings.workgroups.keys())
+    return workgroup_service.list_names(db)

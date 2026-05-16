@@ -301,8 +301,15 @@ def _launch_instance_sync(
     security_group_ids: list,
     iam_instance_profile: str = "",
     os_type: str = "",
+    workgroup: str = "",
 ) -> dict:
     ec2 = _get_ec2(region)
+    tags = [
+        {"Key": "Name", "Value": instance_name},
+        {"Key": "ManagedBy", "Value": "vm-cli-dashboard"},
+    ]
+    if workgroup:
+        tags.append({"Key": "Workgroup", "Value": workgroup})
     kwargs: dict = dict(
         ImageId=ami_id,
         InstanceType=instance_type,
@@ -313,10 +320,7 @@ def _launch_instance_sync(
         TagSpecifications=[
             {
                 "ResourceType": "instance",
-                "Tags": [
-                    {"Key": "Name", "Value": instance_name},
-                    {"Key": "ManagedBy", "Value": "vm-cli-dashboard"},
-                ],
+                "Tags": tags,
             }
         ],
     )
@@ -352,6 +356,7 @@ async def launch_instance(
     security_group_ids: list,
     iam_instance_profile: str = "",
     os_type: str = "",
+    workgroup: str = "",
 ) -> dict:
     """Launch a new EC2 instance and return its ID and initial state.
 
@@ -359,13 +364,15 @@ async def launch_instance(
     Pass an empty string to skip key injection (e.g. for Windows AMIs).
     *iam_instance_profile* attaches an instance profile by name (e.g. for SSM access).
     *os_type* controls OS-specific UserData (e.g. SSM agent install for Debian).
+    *workgroup*, when non-empty, is written as a `Workgroup=<name>` tag so the
+    instance is discoverable per-workgroup by the dashboard and external tools.
     """
     try:
         return await asyncio.to_thread(
             _launch_instance_sync,
             region, ami_id, instance_name, instance_type,
             public_key, subnet_id, security_group_ids,
-            iam_instance_profile, os_type,
+            iam_instance_profile, os_type, workgroup,
         )
     except (ClientError, BotoCoreError) as e:
         raise AWSError(f"Failed to launch instance: {e}") from e
@@ -379,6 +386,29 @@ async def terminate_instance(region: str, instance_id: str) -> dict:
         return await asyncio.to_thread(_terminate_instance_sync, region, instance_id)
     except (ClientError, BotoCoreError) as e:
         raise AWSError(f"Failed to terminate instance {instance_id}: {e}") from e
+    except NoCredentialsError:
+        raise AWSError("AWS credentials not configured.")
+
+
+def _set_workgroup_tag_sync(region: str, instance_id: str, workgroup: str) -> None:
+    """Overwrite the `Workgroup` tag on an existing instance."""
+    ec2 = _get_ec2(region)
+    ec2.create_tags(
+        Resources=[instance_id],
+        Tags=[{"Key": "Workgroup", "Value": workgroup}],
+    )
+
+
+async def set_workgroup_tag(region: str, instance_id: str, workgroup: str) -> None:
+    """Rewrite (or create) the `Workgroup=<name>` tag on an EC2 instance.
+
+    Used by the admin reassign endpoint. AWS `create_tags` is upsert semantics
+    so this works whether or not the tag exists.
+    """
+    try:
+        await asyncio.to_thread(_set_workgroup_tag_sync, region, instance_id, workgroup)
+    except (ClientError, BotoCoreError) as e:
+        raise AWSError(f"Failed to set Workgroup tag on {instance_id}: {e}") from e
     except NoCredentialsError:
         raise AWSError("AWS credentials not configured.")
 

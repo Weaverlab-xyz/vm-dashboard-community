@@ -38,6 +38,17 @@ def create_job(
     return job
 
 
+def set_cloud_resource_id(db: Session, job_id: str, resource_id: str) -> Optional[Job]:
+    """Record the cloud SDK resource id (EC2 instance id, Azure VM name, GCP
+    instance id) on a Job so the reassign endpoints can find this Job when an
+    admin rewrites the resource's Workgroup tag/label."""
+    job = db.query(Job).filter(Job.id == job_id).first()
+    if job:
+        job.cloud_resource_id = resource_id
+        db.commit()
+    return job
+
+
 def set_running(db: Session, job_id: str) -> Optional[Job]:
     """Mark a job as running."""
     job = db.query(Job).filter(Job.id == job_id).first()

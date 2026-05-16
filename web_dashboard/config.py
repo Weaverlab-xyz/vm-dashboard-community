@@ -127,11 +127,12 @@ class Settings(BaseSettings):
     # Rate Limiting
     rate_limit_per_minute: int = 60
 
-    # Workgroups (from original CLI)
-    workgroups: dict = {
-        "Hydra": r"P:\VMware\Hydra",
-        "Weaverlab": r"P:\VMware\Shield\WeaverLab"
-    }
+    # Workgroups — community edition seeds a single `default` workgroup at first
+    # boot. Admins create additional workgroups via the /workgroups UI; each can
+    # have an optional local_vm_path for VMware local-VM scanning. The runtime
+    # reads from the `workgroups` DB table; this dict is only the bootstrap
+    # seed source and stays empty in the community edition.
+    workgroups: dict = {}
 
     # AWS / Terraform
     aws_region: str = "us-east-2"

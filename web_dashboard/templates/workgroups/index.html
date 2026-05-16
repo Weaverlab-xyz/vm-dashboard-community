@@ -1,0 +1,237 @@
+{% extends "base.html" %}
+
+{% block title %}Workgroups – Infrastructure Management{% endblock %}
+
+{% block content %}
+<div class="max-w-5xl mx-auto py-8 px-4" x-data="workgroupsPage()" x-init="init()">
+
+  <h1 class="text-2xl font-bold text-gray-800 mb-1">Workgroups</h1>
+  <p class="text-sm text-gray-500 mb-8">
+    Workgroups scope RBAC and cloud-resource visibility. Each cloud VM is tagged
+    with the workgroup it belongs to. Users see only resources in their assigned
+    workgroups.
+  </p>
+
+  <!-- Toast -->
+  <div x-show="toast" x-cloak x-transition
+       :class="toastType === 'error' ? 'bg-red-50 border-red-200 text-red-700' : 'bg-green-50 border-green-200 text-green-700'"
+       class="mb-6 border rounded-lg px-4 py-3 text-sm" x-text="toast"></div>
+
+  <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+    <div class="flex items-center justify-between mb-4">
+      <h2 class="text-base font-semibold text-gray-700">All Workgroups</h2>
+      <button @click="openCreate()"
+              class="flex items-center gap-1.5 text-sm bg-blue-700 hover:bg-blue-800
+                     text-white px-3 py-1.5 rounded-lg font-medium transition">
+        <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/>
+        </svg>
+        Create Workgroup
+      </button>
+    </div>
+
+    <div x-show="loading" class="py-6 text-center text-gray-400 text-sm">Loading…</div>
+
+    <div x-show="!loading && workgroups.length === 0" class="py-8 text-center text-gray-400 text-sm">
+      No workgroups yet. Click "Create Workgroup" to add one.
+    </div>
+
+    <div x-show="!loading && workgroups.length > 0" class="overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead>
+          <tr class="text-left text-xs text-gray-500 uppercase tracking-wide border-b border-gray-100">
+            <th class="pb-2 pr-4">Name</th>
+            <th class="pb-2 pr-4">Display Name</th>
+            <th class="pb-2 pr-4">Description</th>
+            <th class="pb-2 pr-4">Local VM Path</th>
+            <th class="pb-2 pr-4">Members</th>
+            <th class="pb-2"></th>
+          </tr>
+        </thead>
+        <tbody>
+          <template x-for="w in workgroups" :key="w.id">
+            <tr class="border-b border-gray-50 hover:bg-gray-50">
+              <td class="py-2.5 pr-4 font-mono text-xs text-gray-700">
+                <span x-text="w.name"></span>
+                <span x-show="w.is_default"
+                      class="ml-1 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-yellow-50 text-yellow-700">
+                  default
+                </span>
+              </td>
+              <td class="py-2.5 pr-4 font-medium text-gray-800" x-text="w.display_name"></td>
+              <td class="py-2.5 pr-4 text-xs text-gray-500" x-text="w.description || '—'"></td>
+              <td class="py-2.5 pr-4 font-mono text-xs text-gray-500" x-text="w.local_vm_path || '—'"></td>
+              <td class="py-2.5 pr-4 text-xs text-gray-700" x-text="w.member_count"></td>
+              <td class="py-2.5 text-right">
+                <button @click="openEdit(w)"
+                        class="text-xs text-blue-600 hover:text-blue-800 font-medium transition mr-2">
+                  Edit
+                </button>
+                <button @click="deleteWorkgroup(w)"
+                        :disabled="w.is_default"
+                        :class="w.is_default ? 'text-gray-300 cursor-not-allowed' : 'text-red-500 hover:text-red-700'"
+                        class="text-xs font-medium transition">
+                  Delete
+                </button>
+              </td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Create / Edit modal -->
+  <div x-show="modalOpen" x-cloak
+       class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
+    <div class="bg-white rounded-xl shadow-xl w-full max-w-lg p-6">
+      <h3 class="text-lg font-semibold text-gray-800 mb-4" x-text="modalMode === 'create' ? 'Create Workgroup' : 'Edit Workgroup'"></h3>
+
+      <div class="space-y-4">
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Name (lowercase, hyphens, no spaces)</label>
+          <input type="text" x-model="form.name" :disabled="modalMode === 'edit'"
+                 placeholder="team-alpha"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-200 disabled:bg-gray-50 disabled:text-gray-500"/>
+          <p x-show="modalMode === 'edit'" class="text-[11px] text-gray-400 mt-1">
+            Name is immutable. Delete and recreate if you need to rename.
+          </p>
+        </div>
+
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Display Name</label>
+          <input type="text" x-model="form.display_name"
+                 placeholder="Team Alpha"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-200"/>
+        </div>
+
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Description (optional)</label>
+          <textarea x-model="form.description" rows="2"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-200"></textarea>
+        </div>
+
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">
+            Local VM Path (optional, for VMware local-VM scanning)
+          </label>
+          <input type="text" x-model="form.local_vm_path"
+                 placeholder="P:\VMware\TeamAlpha"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-200"/>
+        </div>
+
+        <div x-show="modalMode === 'create'" class="flex items-center gap-2">
+          <input type="checkbox" id="wg_is_default" x-model="form.is_default"
+                 class="rounded border-gray-300 text-blue-600 focus:ring-blue-200"/>
+          <label for="wg_is_default" class="text-xs text-gray-600">
+            Mark as default workgroup
+          </label>
+        </div>
+      </div>
+
+      <div class="mt-6 flex items-center justify-end gap-2">
+        <button @click="modalOpen = false"
+                class="px-4 py-2 text-sm text-gray-600 hover:text-gray-800">
+          Cancel
+        </button>
+        <button @click="save()"
+                class="px-4 py-2 text-sm bg-blue-700 hover:bg-blue-800 text-white rounded-lg font-medium">
+          Save
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+function workgroupsPage() {
+  return {
+    workgroups: [],
+    loading: true,
+    toast: '',
+    toastType: 'success',
+    modalOpen: false,
+    modalMode: 'create',
+    form: {name: '', display_name: '', description: '', local_vm_path: '', is_default: false},
+
+    async init() {
+      if (!requireAuth()) return;
+      await this.load();
+    },
+
+    async load() {
+      this.loading = true;
+      try {
+        const r = await API.get('/api/workgroups');
+        this.workgroups = r;
+      } catch (e) {
+        this.flash('Failed to load workgroups: ' + (e.message || e), 'error');
+      } finally {
+        this.loading = false;
+      }
+    },
+
+    openCreate() {
+      this.modalMode = 'create';
+      this.form = {name: '', display_name: '', description: '', local_vm_path: '', is_default: false};
+      this.modalOpen = true;
+    },
+
+    openEdit(w) {
+      this.modalMode = 'edit';
+      this.form = {
+        name: w.name,
+        display_name: w.display_name,
+        description: w.description || '',
+        local_vm_path: w.local_vm_path || '',
+        is_default: w.is_default,
+      };
+      this.modalOpen = true;
+    },
+
+    async save() {
+      try {
+        if (this.modalMode === 'create') {
+          await API.post('/api/workgroups', {
+            name: this.form.name.trim().toLowerCase(),
+            display_name: this.form.display_name.trim(),
+            description: this.form.description.trim() || null,
+            local_vm_path: this.form.local_vm_path.trim() || null,
+            is_default: this.form.is_default,
+          });
+          this.flash('Workgroup created.', 'success');
+        } else {
+          await API.patch('/api/workgroups/' + encodeURIComponent(this.form.name), {
+            display_name: this.form.display_name.trim(),
+            description: this.form.description.trim() || null,
+            local_vm_path: this.form.local_vm_path.trim() || null,
+          });
+          this.flash('Workgroup updated.', 'success');
+        }
+        this.modalOpen = false;
+        await this.load();
+      } catch (e) {
+        this.flash('Save failed: ' + (e.message || e), 'error');
+      }
+    },
+
+    async deleteWorkgroup(w) {
+      if (!confirm(`Delete workgroup '${w.name}'? This cannot be undone.`)) return;
+      try {
+        await API.delete('/api/workgroups/' + encodeURIComponent(w.name));
+        this.flash('Workgroup deleted.', 'success');
+        await this.load();
+      } catch (e) {
+        this.flash('Delete failed: ' + (e.message || e), 'error');
+      }
+    },
+
+    flash(msg, type) {
+      this.toast = msg;
+      this.toastType = type;
+      setTimeout(() => { this.toast = ''; }, 4000);
+    },
+  };
+}
+</script>
+{% endblock %}

@@ -301,6 +301,18 @@
           </a>
         </div>
 
+        <!-- Workgroup -->
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Workgroup <span class="text-red-500">*</span></label>
+          <select x-model="deployForm.workgroup" required
+                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <option value="">Select workgroup…</option>
+            <template x-for="w in availableWorkgroups" :key="w">
+              <option :value="w" x-text="w"></option>
+            </template>
+          </select>
+        </div>
+
         <!-- Instance name -->
         <div>
           <label class="block text-sm font-medium text-gray-700 mb-1">Instance Name <span class="text-red-500">*</span></label>
@@ -580,7 +592,9 @@ function gcpDashboard() {
       create_external_ip: false,
       disk_size_gb:       20,
       network_tags:       [],
+      workgroup:          '',
     },
+    availableWorkgroups: [],
 
     // Capture modal
     captureModal:  false,
@@ -610,6 +624,9 @@ function gcpDashboard() {
     ],
 
     async init() {
+      API.get('/api/groups/workgroups')
+        .then(r => { this.availableWorkgroups = r || []; })
+        .catch(() => { this.availableWorkgroups = []; });
       await Promise.all([
         this.loadPublicImages(),
         this.loadNetworkOpts(),
@@ -617,6 +634,11 @@ function gcpDashboard() {
       // Derive project ID from network opts response
       // (also try to read it from a header or API)
       this.loadProjectId();
+    },
+
+    _defaultWorkgroup() {
+      if (this.availableWorkgroups.includes('default')) return 'default';
+      return this.availableWorkgroups[0] || '';
     },
 
     async loadProjectId() {
@@ -722,6 +744,7 @@ function gcpDashboard() {
         create_external_ip: false,
         disk_size_gb:       Math.max(img?.disk_size_gb || 20, 20),
         network_tags:       [],
+        workgroup:          this._defaultWorkgroup(),
       };
       this.sshKeyPreview = '';
       this.sshKeyLoading = true;
@@ -762,6 +785,7 @@ function gcpDashboard() {
           create_external_ip: this.deployForm.create_external_ip,
           disk_size_gb:       this.deployForm.disk_size_gb,
           network_tags:       this.deployForm.network_tags,
+          workgroup:          this.deployForm.workgroup,
         };
         const res = await API.post('/api/gcp/deploy', body);
         this.deployModal = false;

@@ -36,6 +36,7 @@ class EC2InstanceInfo(BaseModel):
     launch_time: str = ""
     availability_zone: str = ""
     key_name: Optional[str] = None
+    workgroup: Optional[str] = None  # from Job.workgroup; None = unassigned
     # Dashboard-specific fields (from DB)
     job_id: Optional[str] = None
     deployed_by: Optional[str] = None
@@ -66,6 +67,7 @@ class DeployRequest(BaseModel):
     instance_type: str = Field(default="t3.medium", description="EC2 instance type")
     subnet_id: str = Field(..., description="VPC subnet ID")
     security_group_ids: List[str] = Field(..., description="Security group IDs")
+    workgroup: str = Field(..., description="Workgroup the instance belongs to (written as Workgroup tag)")
 
 
 class DeployResponse(BaseModel):
@@ -118,6 +120,7 @@ class BulkDeployRequest(BaseModel):
     instance_type: str = Field(default="t3.medium", description="EC2 instance type (shared)")
     subnet_id: str = Field(..., description="VPC subnet ID (shared)")
     security_group_ids: List[str] = Field(..., description="Security group IDs (shared)")
+    workgroup: str = Field(..., description="Workgroup all deployed instances belong to (written as Workgroup tag)")
 
 
 class BulkDeployJobResult(BaseModel):

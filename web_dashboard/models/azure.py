@@ -36,6 +36,7 @@ class AzureVMInfo(BaseModel):
     location: str = ""
     size: str = ""
     os_type: str = ""
+    workgroup: Optional[str] = None  # from `workgroup` resource tag; None = unassigned
     job_id: Optional[str] = None
     deployed_by: Optional[str] = None
 
@@ -80,6 +81,7 @@ class AzureDeployRequest(BaseModel):
     create_public_ip: bool = False
     ssh_username: str = "azureuser"
     ssh_public_key: str        # RSA public key text
+    workgroup: str             # written as `workgroup` resource tag
     # Marketplace image metadata (optional, used if present)
     image_publisher: Optional[str] = None
     image_offer: Optional[str] = None
@@ -102,6 +104,7 @@ class AzureBulkDeployRequest(BaseModel):
     create_public_ip: bool = False
     ssh_username: str = "azureuser"
     ssh_public_key: str
+    workgroup: str             # written as `workgroup` resource tag on all VMs
     # Marketplace image metadata (optional, used if present)
     image_publisher: Optional[str] = None
     image_offer: Optional[str] = None

@@ -141,7 +141,7 @@ def require_admin(current_user: User = Depends(get_current_user)) -> User:
 
 # ── Permission constants ───────────────────────────────────────────────────────
 
-PERMISSION_SCOPES = ["vms", "aws", "azure", "gcp", "images", "containers", "config_mgmt", "jobs"]
+PERMISSION_SCOPES = ["vms", "aws", "azure", "gcp", "images", "containers", "config_mgmt", "jobs", "workgroups"]
 PERMISSION_LEVELS = ["read", "write", "delete"]
 
 
