@@ -98,10 +98,10 @@
             class="px-4 py-2 bg-red-600 hover:bg-red-700 text-white text-sm font-medium rounded-lg transition">
       Cancel Job
     </button>
-    <a :href="['ec2_deploy','ec2_destroy'].includes(job.job_type) ? '/aws' : ['azure_deploy','azure_destroy','azure_create_image'].includes(job.job_type) ? '/azure' : ['iso_to_vmx','clone_to_ova','ova_to_ami','cloud_image_to_ova'].includes(job.job_type) ? '/images' : ['bulk_start','bulk_start_jobs','bulk_stop'].includes(job.job_type) ? '/' : ['ansible_run','azure_ansible_run','portainer_agent_install'].includes(job.job_type) ? '/config-mgmt' : '/vms'"
+    <a :href="originHref(job.job_type)"
        x-show="job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled'"
        class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg transition">
-      ← <span x-text="['ec2_deploy','ec2_destroy'].includes(job.job_type) ? 'Back to AWS' : ['azure_deploy','azure_destroy','azure_create_image'].includes(job.job_type) ? 'Back to Azure' : ['iso_to_vmx','clone_to_ova','ova_to_ami','cloud_image_to_ova'].includes(job.job_type) ? 'Back to Images' : ['bulk_start','bulk_start_jobs','bulk_stop'].includes(job.job_type) ? 'Back to Dashboard' : ['ansible_run','azure_ansible_run','portainer_agent_install'].includes(job.job_type) ? 'Back to Config Mgmt' : 'Back to VMs'"></span>
+      ← <span x-text="'Back to ' + originLabel(job.job_type)"></span>
     </a>
   </div>
 
@@ -110,6 +110,62 @@
 
 {% block scripts %}
 <script>
+  // Job-type → return-link mapping. The Back button on the job detail page
+  // sends the user to the originating section so they don't land on /vms by
+  // default (issue #8 — VMware is rarely enabled in the community build so
+  // /vms is a poor fallback for unrecognised job types).
+  //
+  // Unmapped job types fall back to /jobs (the job list page), which is
+  // safe regardless of which integrations are configured.
+  const JOB_ORIGIN = {
+    // AWS
+    ec2_deploy:        { href: '/aws',         label: 'AWS' },
+    ec2_destroy:       { href: '/aws',         label: 'AWS' },
+    ec2_create_image:  { href: '/aws',         label: 'AWS' },
+    ami_copy:          { href: '/aws',         label: 'AWS' },
+    packer_aws_build:  { href: '/aws',         label: 'AWS' },
+    // Azure
+    azure_deploy:        { href: '/azure',     label: 'Azure' },
+    azure_destroy:       { href: '/azure',     label: 'Azure' },
+    azure_create_image:  { href: '/azure',     label: 'Azure' },
+    packer_azure_build:  { href: '/azure',     label: 'Azure' },
+    azure_ansible_run:   { href: '/config-mgmt', label: 'Configuration' },
+    // GCP
+    gce_deploy:         { href: '/gcp',        label: 'GCP' },
+    gce_destroy:        { href: '/gcp',        label: 'GCP' },
+    gce_capture_image:  { href: '/gcp',        label: 'GCP' },
+    packer_gcp_build:   { href: '/gcp',        label: 'GCP' },
+    // VMware / Workstation
+    vm_start:           { href: '/vms',        label: 'Workstation' },
+    vm_stop:            { href: '/vms',        label: 'Workstation' },
+    vm_decommission:    { href: '/vms',        label: 'Workstation' },
+    bulk_start:         { href: '/vms',        label: 'Workstation' },
+    bulk_start_jobs:    { href: '/vms',        label: 'Workstation' },
+    bulk_stop:          { href: '/vms',        label: 'Workstation' },
+    // Images
+    iso_to_vmx:           { href: '/images',   label: 'Images' },
+    clone_to_ova:         { href: '/images',   label: 'Images' },
+    ova_to_ami:           { href: '/images',   label: 'Images' },
+    cloud_image_to_ova:   { href: '/images',   label: 'Images' },
+    // Config management
+    ansible_run:               { href: '/config-mgmt', label: 'Configuration' },
+    ansible_local:             { href: '/config-mgmt', label: 'Configuration' },
+    portainer_agent_install:   { href: '/config-mgmt', label: 'Configuration' },
+    // Containers
+    container_deploy:   { href: '/containers', label: 'Containers' },
+    stack_deploy:       { href: '/containers', label: 'Containers' },
+    // Hypervisors
+    nutanix_deploy:        { href: '/nutanix', label: 'Nutanix' },
+    nutanix_import_image:  { href: '/nutanix', label: 'Nutanix' },
+    nutanix_delete_image:  { href: '/nutanix', label: 'Nutanix' },
+    nutanix_delete_vm:     { href: '/nutanix', label: 'Nutanix' },
+    proxmox_deploy:        { href: '/proxmox', label: 'Proxmox' },
+    proxmox_import_image:  { href: '/proxmox', label: 'Proxmox' },
+    proxmox_delete:        { href: '/proxmox', label: 'Proxmox' },
+    // BeyondTrust EPM-L
+    epml_sync:          { href: '/settings',   label: 'Settings' },
+  };
+
   function jobDetail(jobId) {
     return {
       jobId,
@@ -119,6 +175,9 @@
       wsConnected: false,
       logsLoading: false,
       tracker: null,
+
+      originHref(jobType)  { return (JOB_ORIGIN[jobType] || { href: '/jobs' }).href; },
+      originLabel(jobType) { return (JOB_ORIGIN[jobType] || { label: 'Jobs' }).label; },
 
       async init() {
         requireAuth();
