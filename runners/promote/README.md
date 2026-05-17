@@ -48,7 +48,9 @@ IAM role or container env overrides).
 | `--dest-azure-container` | `--target azure` | Container name                           |
 | `--dest-azure-blob`    | `--target azure` | Blob name                                  |
 | `--dest-gcs-bucket`    | `--target gcs`   | GCS bucket                                 |
-| `--dest-gcs-object`    | `--target gcs`   | GCS object name                            |
+| `--dest-gcs-object`    | `--target gcs`   | GCS object name (should end in `.tar.gz`)  |
+
+**GCP target quirk:** GCP's `compute.images.insert` requires the source object to be a `.tar.gz` containing exactly one entry named `disk.raw`. When `--target gcs` is paired with `--target-format raw` (the dashboard's only supported GCP path today), the runner automatically tar+gzips the converted raw file under that name before upload. The dashboard always passes `--dest-gcs-object` ending in `.tar.gz` for this reason.
 
 Credential env vars per target:
 

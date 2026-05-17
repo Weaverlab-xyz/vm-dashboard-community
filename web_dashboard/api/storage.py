@@ -139,6 +139,14 @@ async def get_config(current_user: User = Depends(require_permission("admin", "r
         "promote_runner_azure_staging_prefix",
         "promote_runner_azure_target_resource_group",
         "promote_runner_azure_target_storage_account_id",
+        "promote_runner_gcp_region",
+        "promote_runner_gcp_cpu",
+        "promote_runner_gcp_memory",
+        "promote_runner_gcp_vpc_connector",
+        "promote_runner_gcp_service_account",
+        "promote_runner_gcp_staging_bucket",
+        "promote_runner_gcp_staging_prefix",
+        "promote_runner_gcp_image_family",
     ):
         out[k] = _cfg_get(k)
     return out
@@ -185,6 +193,15 @@ class StorageConfigPatch(BaseModel):
     promote_runner_azure_staging_prefix:            str | None = None
     promote_runner_azure_target_resource_group:     str | None = None
     promote_runner_azure_target_storage_account_id: str | None = None
+    # GCP-target promote runner
+    promote_runner_gcp_region:           str | None = None
+    promote_runner_gcp_cpu:              str | None = None
+    promote_runner_gcp_memory:           str | None = None
+    promote_runner_gcp_vpc_connector:    str | None = None
+    promote_runner_gcp_service_account:  str | None = None
+    promote_runner_gcp_staging_bucket:   str | None = None
+    promote_runner_gcp_staging_prefix:   str | None = None
+    promote_runner_gcp_image_family:     str | None = None
 
 
 @router.patch("/config")
