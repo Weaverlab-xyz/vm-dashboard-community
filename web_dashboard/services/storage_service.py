@@ -613,3 +613,517 @@ async def test_backend(backend: str) -> dict:
         return {"ok": True, "count": len(items)}
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+
+# ── Image-path I/O ───────────────────────────────────────────────────────────
+#
+# Distinct from the asset functions above for three reasons:
+#   1. Asset I/O is gated by _ASSET_EXTENSIONS (playbooks/scripts/packages).
+#      Image blobs use VM disk formats (.vhd, .raw, .tar.gz, ...) which aren't
+#      on that list and have a deliberately separate allowlist.
+#   2. Image transfers can be multi-GB. These helpers stream through SDK-
+#      native multipart / chunked I/O so callers don't have to load the
+#      whole blob into a Python bytes object.
+#   3. Callers provide full keys (no _<backend>_prefix() mangling). The
+#      image-registry artefact URL is the source of truth for paths and the
+#      registry already stores them as full-bucket-key strings.
+#
+# Used by the hub-backed image registry (cross-backend artefact copy + the
+# per-target-cloud promote runners).
+
+_IMAGE_EXTENSIONS = {".vhd", ".raw", ".tar.gz", ".vmdk", ".qcow2"}
+
+
+def _is_image_filename(name: str) -> bool:
+    """True if `name` ends with a supported VM disk-image extension. Handles
+    multi-dot extensions like `.tar.gz` (which a naive rsplit doesn't)."""
+    lower = (name or "").lower()
+    return any(lower.endswith(ext) for ext in _IMAGE_EXTENSIONS)
+
+
+# ── Per-backend image sync helpers ───────────────────────────────────────────
+
+def _s3_upload_image_sync(key: str, fileobj) -> None:
+    bucket = _cfg("storage_s3_bucket")
+    client = _s3_client()
+    # boto3.upload_fileobj auto-switches to multipart at ~8 MiB so this stays
+    # bounded in memory regardless of the source size.
+    client.upload_fileobj(fileobj, bucket, key)
+
+
+def _s3_download_image_sync(key: str, fileobj) -> None:
+    bucket = _cfg("storage_s3_bucket")
+    client = _s3_client()
+    # Symmetric to upload_fileobj — streams to the given writable file-like.
+    client.download_fileobj(bucket, key, fileobj)
+
+
+def _s3_delete_image_sync(key: str) -> None:
+    bucket = _cfg("storage_s3_bucket")
+    client = _s3_client()
+    client.delete_object(Bucket=bucket, Key=key)
+
+
+def _s3_head_image_sync(key: str) -> Optional[dict]:
+    from botocore.exceptions import ClientError
+    bucket = _cfg("storage_s3_bucket")
+    client = _s3_client()
+    try:
+        resp = client.head_object(Bucket=bucket, Key=key)
+    except ClientError as e:
+        code = (e.response or {}).get("Error", {}).get("Code", "")
+        if code in ("NoSuchKey", "404", "NotFound"):
+            return None
+        raise
+    last_modified = resp.get("LastModified")
+    return {
+        "size": resp.get("ContentLength", 0),
+        "etag": (resp.get("ETag") or "").strip('"'),
+        "content_type": resp.get("ContentType", ""),
+        "last_modified": last_modified.isoformat() if last_modified else None,
+    }
+
+
+def _s3_copy_same_sync(src_key: str, dst_key: str) -> None:
+    bucket = _cfg("storage_s3_bucket")
+    client = _s3_client()
+    # Server-side copy within the same bucket — no bytes transit through this
+    # process and the operation works for any object size.
+    client.copy_object(Bucket=bucket, Key=dst_key, CopySource={"Bucket": bucket, "Key": src_key})
+
+
+def _s3_presigned_url_sync(key: str, expiry_seconds: int, method: str) -> str:
+    bucket = _cfg("storage_s3_bucket")
+    client = _s3_client()
+    aws_op = {"GET": "get_object", "PUT": "put_object"}.get(method.upper())
+    if not aws_op:
+        raise StorageError(f"Unsupported presigned URL method '{method}' for S3.")
+    return client.generate_presigned_url(
+        aws_op,
+        Params={"Bucket": bucket, "Key": key},
+        ExpiresIn=expiry_seconds,
+    )
+
+
+def _azure_upload_image_sync(key: str, fileobj) -> None:
+    svc = _azure_blob_client()
+    blob_client = svc.get_blob_client(container=_azure_container(), blob=key)
+    blob_client.upload_blob(fileobj, overwrite=True)
+
+
+def _azure_download_image_sync(key: str, fileobj) -> None:
+    svc = _azure_blob_client()
+    blob_client = svc.get_blob_client(container=_azure_container(), blob=key)
+    downloader = blob_client.download_blob()
+    downloader.readinto(fileobj)
+
+
+def _azure_delete_image_sync(key: str) -> None:
+    svc = _azure_blob_client()
+    blob_client = svc.get_blob_client(container=_azure_container(), blob=key)
+    blob_client.delete_blob()
+
+
+def _azure_head_image_sync(key: str) -> Optional[dict]:
+    from azure.core.exceptions import ResourceNotFoundError
+    svc = _azure_blob_client()
+    blob_client = svc.get_blob_client(container=_azure_container(), blob=key)
+    try:
+        props = blob_client.get_blob_properties()
+    except ResourceNotFoundError:
+        return None
+    return {
+        "size": props.size,
+        "etag": (props.etag or "").strip('"'),
+        "content_type": (props.content_settings.content_type if props.content_settings else "") or "",
+        "last_modified": props.last_modified.isoformat() if props.last_modified else None,
+    }
+
+
+def _azure_copy_same_sync(src_key: str, dst_key: str) -> None:
+    # Azure server-side copy: ask the destination blob to pull from a URL
+    # pointing at the source blob in the same account. The fastest path uses
+    # a same-account URL with a short-lived SAS; user-delegation key works
+    # with the AAD credential we already have.
+    from datetime import datetime, timedelta, timezone
+    from azure.storage.blob import BlobSasPermissions, generate_blob_sas
+    svc = _azure_blob_client()
+    account = _cfg("storage_azure_account")
+    container = _azure_container()
+    start = datetime.now(timezone.utc) - timedelta(minutes=5)
+    expiry = datetime.now(timezone.utc) + timedelta(hours=1)
+    udk = svc.get_user_delegation_key(start, expiry)
+    sas = generate_blob_sas(
+        account_name=account,
+        container_name=container,
+        blob_name=src_key,
+        user_delegation_key=udk,
+        permission=BlobSasPermissions(read=True),
+        expiry=expiry,
+        start=start,
+    )
+    src_url = f"https://{account}.blob.core.windows.net/{container}/{src_key}?{sas}"
+    dst_client = svc.get_blob_client(container=container, blob=dst_key)
+    dst_client.start_copy_from_url(src_url)
+
+
+def _azure_presigned_url_sync(key: str, expiry_seconds: int, method: str) -> str:
+    from datetime import datetime, timedelta, timezone
+    from azure.storage.blob import BlobSasPermissions, generate_blob_sas
+    svc = _azure_blob_client()
+    account = _cfg("storage_azure_account")
+    container = _azure_container()
+    start = datetime.now(timezone.utc) - timedelta(minutes=5)
+    expiry = datetime.now(timezone.utc) + timedelta(seconds=expiry_seconds)
+    # AAD credential → must mint a user-delegation key (no account key needed).
+    udk = svc.get_user_delegation_key(start, expiry)
+    m = method.upper()
+    if m == "GET":
+        perms = BlobSasPermissions(read=True)
+    elif m == "PUT":
+        perms = BlobSasPermissions(write=True, create=True)
+    else:
+        raise StorageError(f"Unsupported presigned URL method '{method}' for Azure Blob.")
+    sas = generate_blob_sas(
+        account_name=account,
+        container_name=container,
+        blob_name=key,
+        user_delegation_key=udk,
+        permission=perms,
+        expiry=expiry,
+        start=start,
+    )
+    return f"https://{account}.blob.core.windows.net/{container}/{key}?{sas}"
+
+
+def _gcs_upload_image_sync(key: str, fileobj) -> None:
+    client = _gcs_client()
+    bucket = client.bucket(_cfg("storage_gcs_bucket"))
+    blob = bucket.blob(key)
+    # upload_from_file streams in chunks for files > resumable threshold
+    # (8 MiB by default). rewind() to make this re-runnable on a SpooledFile.
+    if hasattr(fileobj, "seek"):
+        try:
+            fileobj.seek(0)
+        except OSError:
+            pass
+    blob.upload_from_file(fileobj, rewind=False)
+
+
+def _gcs_download_image_sync(key: str, fileobj) -> None:
+    client = _gcs_client()
+    bucket = client.bucket(_cfg("storage_gcs_bucket"))
+    blob = bucket.blob(key)
+    blob.download_to_file(fileobj)
+
+
+def _gcs_delete_image_sync(key: str) -> None:
+    client = _gcs_client()
+    bucket = client.bucket(_cfg("storage_gcs_bucket"))
+    blob = bucket.blob(key)
+    blob.delete()
+
+
+def _gcs_head_image_sync(key: str) -> Optional[dict]:
+    from google.cloud.exceptions import NotFound
+    client = _gcs_client()
+    bucket = client.bucket(_cfg("storage_gcs_bucket"))
+    blob = bucket.blob(key)
+    try:
+        blob.reload()
+    except NotFound:
+        return None
+    return {
+        "size": blob.size or 0,
+        "etag": (blob.etag or "").strip('"'),
+        "content_type": blob.content_type or "",
+        "last_modified": blob.updated.isoformat() if blob.updated else None,
+    }
+
+
+def _gcs_copy_same_sync(src_key: str, dst_key: str) -> None:
+    client = _gcs_client()
+    bucket = client.bucket(_cfg("storage_gcs_bucket"))
+    src_blob = bucket.blob(src_key)
+    # rewrite() is GCS's server-side copy primitive — handles any object size
+    # without bytes flowing through this process.
+    new_blob = bucket.blob(dst_key)
+    token = None
+    while True:
+        token, _written, _total = new_blob.rewrite(src_blob, token=token)
+        if token is None:
+            break
+
+
+def _gcs_presigned_url_sync(key: str, expiry_seconds: int, method: str) -> str:
+    from datetime import timedelta
+    client = _gcs_client()
+    bucket = client.bucket(_cfg("storage_gcs_bucket"))
+    blob = bucket.blob(key)
+    m = method.upper()
+    if m not in ("GET", "PUT"):
+        raise StorageError(f"Unsupported presigned URL method '{method}' for GCS.")
+    return blob.generate_signed_url(
+        version="v4",
+        expiration=timedelta(seconds=expiry_seconds),
+        method=m,
+    )
+
+
+def _local_upload_image_sync(key: str, fileobj) -> None:
+    target = _cfg("storage_local_path").rstrip("/").rstrip("\\") + "/" + key.lstrip("/")
+    if _is_unc(target):
+        import smbclient
+        _local_smb_register()
+        with smbclient.open_file(target, mode="wb") as f:
+            while True:
+                chunk = fileobj.read(8 * 1024 * 1024)
+                if not chunk:
+                    break
+                f.write(chunk)
+    else:
+        import os
+        os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
+        with open(target, "wb") as f:
+            while True:
+                chunk = fileobj.read(8 * 1024 * 1024)
+                if not chunk:
+                    break
+                f.write(chunk)
+
+
+def _local_download_image_sync(key: str, fileobj) -> None:
+    target = _cfg("storage_local_path").rstrip("/").rstrip("\\") + "/" + key.lstrip("/")
+    if _is_unc(target):
+        import smbclient
+        _local_smb_register()
+        with smbclient.open_file(target, mode="rb") as f:
+            while True:
+                chunk = f.read(8 * 1024 * 1024)
+                if not chunk:
+                    break
+                fileobj.write(chunk)
+    else:
+        with open(target, "rb") as f:
+            while True:
+                chunk = f.read(8 * 1024 * 1024)
+                if not chunk:
+                    break
+                fileobj.write(chunk)
+
+
+def _local_delete_image_sync(key: str) -> None:
+    target = _cfg("storage_local_path").rstrip("/").rstrip("\\") + "/" + key.lstrip("/")
+    if _is_unc(target):
+        import smbclient
+        _local_smb_register()
+        try:
+            smbclient.remove(target)
+        except Exception:
+            pass
+    else:
+        import os
+        try:
+            os.remove(target)
+        except FileNotFoundError:
+            pass
+
+
+def _local_head_image_sync(key: str) -> Optional[dict]:
+    target = _cfg("storage_local_path").rstrip("/").rstrip("\\") + "/" + key.lstrip("/")
+    if _is_unc(target):
+        import smbclient
+        _local_smb_register()
+        try:
+            st = smbclient.stat(target)
+        except Exception:
+            return None
+        return {"size": st.st_size, "etag": "", "content_type": "", "last_modified": None}
+    else:
+        import os
+        try:
+            st = os.stat(target)
+        except FileNotFoundError:
+            return None
+        from datetime import datetime, timezone
+        return {
+            "size": st.st_size,
+            "etag": "",
+            "content_type": "",
+            "last_modified": datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat(),
+        }
+
+
+def _local_copy_same_sync(src_key: str, dst_key: str) -> None:
+    # No server-side primitive — copy via a small buffer.
+    import io
+    buf = io.BytesIO()
+    _local_download_image_sync(src_key, buf)
+    buf.seek(0)
+    _local_upload_image_sync(dst_key, buf)
+
+
+def _local_presigned_url_unsupported(*_args, **_kwargs):
+    raise StorageError(
+        "Local/SMB backend doesn't support presigned URLs — cloud SDKs need an "
+        "HTTPS URL they can pull from. Use s3/azure_blob/gcs for promote artefacts."
+    )
+
+
+_IMAGE_OPS = {
+    "s3": {
+        "upload":   _s3_upload_image_sync,
+        "download": _s3_download_image_sync,
+        "delete":   _s3_delete_image_sync,
+        "head":     _s3_head_image_sync,
+        "copy":     _s3_copy_same_sync,
+        "presign":  _s3_presigned_url_sync,
+    },
+    "azure_blob": {
+        "upload":   _azure_upload_image_sync,
+        "download": _azure_download_image_sync,
+        "delete":   _azure_delete_image_sync,
+        "head":     _azure_head_image_sync,
+        "copy":     _azure_copy_same_sync,
+        "presign":  _azure_presigned_url_sync,
+    },
+    "gcs": {
+        "upload":   _gcs_upload_image_sync,
+        "download": _gcs_download_image_sync,
+        "delete":   _gcs_delete_image_sync,
+        "head":     _gcs_head_image_sync,
+        "copy":     _gcs_copy_same_sync,
+        "presign":  _gcs_presigned_url_sync,
+    },
+    "local": {
+        "upload":   _local_upload_image_sync,
+        "download": _local_download_image_sync,
+        "delete":   _local_delete_image_sync,
+        "head":     _local_head_image_sync,
+        "copy":     _local_copy_same_sync,
+        "presign":  _local_presigned_url_unsupported,
+    },
+}
+
+
+# ── Public image-path API ────────────────────────────────────────────────────
+
+async def upload_image_to(backend: str, key: str, fileobj) -> None:
+    """Stream `fileobj` into `backend` at the full key `key`. The fileobj must
+    be a binary, seekable file-like (open("rb"), io.BytesIO, etc). Multi-GB
+    safe — each backend uses its SDK's chunked/multipart path."""
+    _validate_backend(backend)
+    if not _is_image_filename(key):
+        raise StorageError(
+            f"'{key}' isn't a supported image format. Allowed extensions: "
+            f"{', '.join(sorted(_IMAGE_EXTENSIONS))}."
+        )
+    try:
+        await asyncio.to_thread(_IMAGE_OPS[backend]["upload"], key, fileobj)
+    except StorageError:
+        raise
+    except Exception as e:
+        raise StorageError(f"Failed to upload image '{key}' to {backend}: {e}") from e
+
+
+async def download_image_to(backend: str, key: str, fileobj) -> None:
+    """Stream the image at `key` from `backend` into the writable binary
+    fileobj. Multi-GB safe."""
+    _validate_backend(backend)
+    try:
+        await asyncio.to_thread(_IMAGE_OPS[backend]["download"], key, fileobj)
+    except StorageError:
+        raise
+    except Exception as e:
+        raise StorageError(f"Failed to download image '{key}' from {backend}: {e}") from e
+
+
+async def delete_image_in(backend: str, key: str) -> None:
+    """Delete an image-path blob from `backend`. Used by the promote flow to
+    clean up the target-cloud staged copy after a successful cloud-side
+    import."""
+    _validate_backend(backend)
+    try:
+        await asyncio.to_thread(_IMAGE_OPS[backend]["delete"], key)
+    except StorageError:
+        raise
+    except Exception as e:
+        raise StorageError(f"Failed to delete image '{key}' from {backend}: {e}") from e
+
+
+async def head_image_in(backend: str, key: str) -> Optional[dict]:
+    """Return `{size, etag, content_type, last_modified}` for the blob at
+    `key`, or None if it doesn't exist. Used to verify a copy succeeded
+    before relying on the dest blob."""
+    _validate_backend(backend)
+    try:
+        return await asyncio.to_thread(_IMAGE_OPS[backend]["head"], key)
+    except StorageError:
+        raise
+    except Exception as e:
+        raise StorageError(f"Failed to head image '{key}' on {backend}: {e}") from e
+
+
+async def presigned_url(
+    backend: str,
+    key: str,
+    expiry_seconds: int = 3600,
+    method: str = "GET",
+) -> str:
+    """Mint a short-lived HTTPS URL the cloud SDKs can fetch directly. S3 uses
+    a SigV4 presigned URL, Azure a user-delegation SAS, GCS a v4 signed URL.
+    `local` is not supported."""
+    _validate_backend(backend)
+    if expiry_seconds <= 0:
+        raise StorageError("presigned_url expiry_seconds must be > 0")
+    try:
+        return await asyncio.to_thread(_IMAGE_OPS[backend]["presign"], key, expiry_seconds, method)
+    except StorageError:
+        raise
+    except Exception as e:
+        raise StorageError(f"Failed to mint presigned URL for {backend}/{key}: {e}") from e
+
+
+async def copy(src_backend: str, src_key: str, dst_backend: str, dst_key: str) -> None:
+    """Copy an image-path blob. Same-backend uses the SDK's server-side copy
+    (S3 CopyObject, Azure start_copy_from_url, GCS rewrite) and is cheap for
+    any size. Cross-backend streams through a temp file on disk — fine for
+    administrative / small-file moves but the heavy promote-time transfers
+    are routed through per-target-cloud runners in later PRs, not this
+    function."""
+    _validate_backend(src_backend)
+    _validate_backend(dst_backend)
+    if not _is_image_filename(dst_key):
+        raise StorageError(
+            f"'{dst_key}' isn't a supported image format. Allowed extensions: "
+            f"{', '.join(sorted(_IMAGE_EXTENSIONS))}."
+        )
+
+    if src_backend == dst_backend:
+        try:
+            await asyncio.to_thread(_IMAGE_OPS[src_backend]["copy"], src_key, dst_key)
+            return
+        except StorageError:
+            raise
+        except Exception as e:
+            raise StorageError(
+                f"Failed to copy {src_backend}/{src_key} → {dst_backend}/{dst_key}: {e}"
+            ) from e
+
+    # Cross-backend: stream through a temp file so memory stays bounded for
+    # multi-GB images. Heavy promote transfers in later PRs use cloud-native
+    # runners with presigned URLs; this fallback covers admin moves.
+    import os
+    import tempfile
+    fd, tmp_path = tempfile.mkstemp(prefix="storage_copy_")
+    os.close(fd)
+    try:
+        with open(tmp_path, "wb") as out:
+            await asyncio.to_thread(_IMAGE_OPS[src_backend]["download"], src_key, out)
+        with open(tmp_path, "rb") as inp:
+            await asyncio.to_thread(_IMAGE_OPS[dst_backend]["upload"], dst_key, inp)
+    finally:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
