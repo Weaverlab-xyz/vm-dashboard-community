@@ -1263,3 +1263,261 @@ async def export_image_to_vhd(
         raise AWSError(f"Failed to export {ami_id} to VHD: {e}") from e
     except NoCredentialsError:
         raise AWSError("AWS credentials not configured.")
+
+
+# ── Import VHD from S3 (cross-cloud promote target side) ─────────────────────
+
+def _import_image_from_vhd_sync(
+    region: str,
+    s3_bucket: str,
+    s3_key: str,
+    role_name: str,
+    description: str,
+    disk_format: str,
+    poll_interval: int,
+    timeout: int,
+    progress_cb,
+) -> dict:
+    """Trigger ec2:ImportImage from an S3 object and poll until the import
+    completes. Returns {task_id, image_id, status}. Mirrors
+    `_export_image_to_vhd_sync`'s polling shape so the promote-flow Job sees
+    matching status lines for both directions.
+
+    The `vmimport` IAM service role (or whatever `role_name` points at) must
+    trust vmie.amazonaws.com and have s3:GetObject on the bucket/key — same
+    role used by export-image. AWS docs:
+    https://docs.aws.amazon.com/vm-import/latest/userguide/required-permissions.html
+    """
+    import time
+    ec2 = _get_ec2(region)
+
+    if progress_cb:
+        progress_cb(f"Starting AWS import-image from s3://{s3_bucket}/{s3_key} ({disk_format})")
+
+    resp = ec2.import_image(
+        Description=description or f"Imported by vm-cli-dashboard from s3://{s3_bucket}/{s3_key}",
+        DiskContainers=[{
+            "Description": description or "promote target",
+            "Format": disk_format.upper(),
+            "UserBucket": {"S3Bucket": s3_bucket, "S3Key": s3_key},
+        }],
+        RoleName=role_name,
+    )
+    task_id = resp["ImportTaskId"]
+    if progress_cb:
+        progress_cb(f"Import task created: {task_id}")
+
+    started = time.time()
+    last_progress = ""
+    while True:
+        tasks = ec2.describe_import_image_tasks(ImportTaskIds=[task_id]).get("ImportImageTasks", [])
+        if not tasks:
+            raise AWSError(f"Import task {task_id} disappeared")
+        task = tasks[0]
+        status = (task.get("Status") or "").lower()
+        msg = task.get("StatusMessage") or task.get("Progress") or ""
+        if msg and msg != last_progress and progress_cb:
+            progress_cb(f"Import {task_id}: {status} ({msg})")
+            last_progress = msg
+
+        if status == "completed":
+            image_id = task.get("ImageId")
+            if progress_cb:
+                progress_cb(f"Import complete: {image_id}")
+            return {"task_id": task_id, "image_id": image_id, "status": status}
+        if status in ("cancelled", "deleted", "cancelling", "deleting"):
+            raise AWSError(f"Import task {task_id} ended in state '{status}': {msg}")
+        if status == "failed":
+            raise AWSError(f"Import task {task_id} failed: {msg}")
+
+        if time.time() - started > timeout:
+            raise AWSError(f"Import task {task_id} timed out after {timeout}s (last status: {status})")
+
+        time.sleep(poll_interval)
+
+
+async def import_image_from_vhd(
+    region: str,
+    s3_bucket: str,
+    s3_key: str,
+    role_name: str = "vmimport",
+    description: str = "",
+    disk_format: str = "vhd",
+    poll_interval: int = 30,
+    timeout: int = 7200,
+    progress_cb=None,
+) -> dict:
+    """Import a VHD (or other supported format) from S3 into a new AMI.
+    Returns {task_id, image_id, status}. Polls until terminal state."""
+    try:
+        return await asyncio.to_thread(
+            _import_image_from_vhd_sync,
+            region, s3_bucket, s3_key, role_name, description,
+            disk_format, poll_interval, timeout, progress_cb,
+        )
+    except AWSError:
+        raise
+    except (ClientError, BotoCoreError) as e:
+        raise AWSError(f"Failed to import s3://{s3_bucket}/{s3_key}: {e}") from e
+    except NoCredentialsError:
+        raise AWSError("AWS credentials not configured.")
+
+
+# ── ECS Promote-runner task ──────────────────────────────────────────────────
+
+def _run_promote_runner_ecs_sync(
+    region: str,
+    cluster: str,
+    task_family: str,
+    image: str,
+    cpu: str,
+    memory: str,
+    subnet_id: str,
+    security_group_ids: list,
+    execution_role_arn: str,
+    task_role_arn: str,
+    runner_args: list,
+    job_id: str,
+    poll_seconds_max: int = 7200,
+) -> tuple:
+    """Launch the promote-runner ECS Fargate task and wait for it to stop.
+    Returns (exit_code, log_output).
+
+    Modelled on `_run_ecs_ansible_sync` — same task-def-register / run-task /
+    poll-describe-tasks / pull-CloudWatch-logs shape. The runner image,
+    command-line args, and IAM are the only meaningful differences.
+
+    runner_args is the argv list passed to the container's entrypoint
+    (e.g. ["--source-url", "https://…", "--target", "s3", ...]). The
+    dashboard pre-signs the source URL and assembles the args list; we
+    don't validate the shape here.
+    """
+    import time
+    ecs = _get_ecs(region)
+    logs_client = boto3.client("logs", **_aws_kwargs(region))
+    log_group = "/ecs/promote-runner"
+    log_stream_prefix = f"promote/{job_id[:8]}"
+
+    try:
+        logs_client.create_log_group(logGroupName=log_group)
+    except ClientError as e:
+        if e.response["Error"]["Code"] != "ResourceAlreadyExistsException":
+            raise
+
+    td_kwargs: dict = dict(
+        family=task_family,
+        networkMode="awsvpc",
+        requiresCompatibilities=["FARGATE"],
+        cpu=str(cpu),
+        memory=str(memory),
+        containerDefinitions=[{
+            "name": "promote-runner",
+            "image": image,
+            "essential": True,
+            # ECS Fargate launches the container's entrypoint with this argv
+            # appended. Our Dockerfile sets ENTRYPOINT to the python script,
+            # so `command` here becomes argparse argv.
+            "command": list(runner_args),
+            "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                    "awslogs-group": log_group,
+                    "awslogs-region": region,
+                    "awslogs-stream-prefix": log_stream_prefix,
+                },
+            },
+        }],
+    )
+    if execution_role_arn:
+        td_kwargs["executionRoleArn"] = execution_role_arn
+    if task_role_arn:
+        # The runner uses this role for S3 write to the staging bucket.
+        td_kwargs["taskRoleArn"] = task_role_arn
+
+    td_resp = ecs.register_task_definition(**td_kwargs)
+    task_def_arn = td_resp["taskDefinition"]["taskDefinitionArn"]
+
+    ecs.create_cluster(clusterName=cluster)
+
+    run_resp = ecs.run_task(
+        cluster=cluster,
+        taskDefinition=task_def_arn,
+        launchType="FARGATE",
+        networkConfiguration={"awsvpcConfiguration": {
+            "subnets": [subnet_id] if subnet_id else [],
+            "securityGroups": security_group_ids or [],
+            # Public IP is needed to reach the presigned source URL when the
+            # subnet doesn't have a NAT gateway. Operators with a NAT can
+            # switch this off via subnet routing.
+            "assignPublicIp": "ENABLED",
+        }},
+        count=1,
+    )
+
+    tasks = run_resp.get("tasks", [])
+    if not tasks:
+        raise AWSError(f"ECS promote-runner task failed to start: {run_resp.get('failures', [])}")
+    task_arn = tasks[0]["taskArn"]
+    task_id = task_arn.split("/")[-1]
+
+    # Poll until STOPPED. VHD transfers of 10+ GB can take a while so the
+    # default cap of 2 hours is generous; caller can shrink for tests.
+    exit_code = 1
+    waited = 0
+    while waited < poll_seconds_max:
+        desc = ecs.describe_tasks(cluster=cluster, tasks=[task_arn])
+        t = desc.get("tasks", [{}])[0]
+        if t.get("lastStatus") == "STOPPED":
+            for c in t.get("containers", []):
+                if c.get("name") == "promote-runner":
+                    ec = c.get("exitCode")
+                    exit_code = ec if ec is not None else 1
+                    break
+            break
+        time.sleep(10)
+        waited += 10
+
+    output = ""
+    try:
+        log_stream = f"{log_stream_prefix}/promote-runner/{task_id}"
+        log_resp = logs_client.get_log_events(
+            logGroupName=log_group,
+            logStreamName=log_stream,
+            startFromHead=True,
+        )
+        output = "\n".join(e.get("message", "") for e in log_resp.get("events", []))
+    except Exception as e:
+        output = f"(failed to read CloudWatch logs: {e})"
+
+    return (exit_code, output)
+
+
+async def run_promote_runner_ecs(
+    region: str,
+    cluster: str,
+    task_family: str,
+    image: str,
+    cpu: str,
+    memory: str,
+    subnet_id: str,
+    security_group_ids: list,
+    execution_role_arn: str,
+    task_role_arn: str,
+    runner_args: list,
+    job_id: str,
+    poll_seconds_max: int = 7200,
+) -> tuple:
+    """Async wrapper around the ECS launch+poll. Returns (exit_code, log_output)."""
+    try:
+        return await asyncio.to_thread(
+            _run_promote_runner_ecs_sync,
+            region, cluster, task_family, image, cpu, memory,
+            subnet_id, security_group_ids, execution_role_arn,
+            task_role_arn, runner_args, job_id, poll_seconds_max,
+        )
+    except AWSError:
+        raise
+    except (ClientError, BotoCoreError) as e:
+        raise AWSError(f"Failed to launch promote-runner ECS task: {e}") from e
+    except NoCredentialsError:
+        raise AWSError("AWS credentials not configured.")

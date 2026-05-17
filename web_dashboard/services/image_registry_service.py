@@ -406,3 +406,155 @@ def record_promotion(
     db.commit()
     db.refresh(row)
     return _row_to_dict(row)
+
+
+# ── Automated promote: AWS target ────────────────────────────────────────────
+#
+# Replaces the CLI walkthrough for AWS-as-target promotes. The dashboard runs
+# the conversion + upload inside an ECS Fargate task (so multi-GB transfers
+# don't block the gunicorn web tier), then calls ec2:ImportImage against the
+# staged S3 object, polls until the resulting AMI is `Available`, and
+# finally deletes the staged S3 blob.
+#
+# Same-cloud (AWS source → AWS target, cross-region) skips the runner — a
+# native ec2 copy-image does it server-side.
+#
+# Azure / GCP targets are PR 4 / PR 5; this PR keeps their flow on the
+# manual-steps return for backwards compatibility.
+
+
+def _parse_hub_url(artefact_url: str) -> tuple[str, str]:
+    """Return (backend, key) for an artefact_url written by Phase 3 export.
+    `s3://bucket/key` -> ("s3", "key"), Azure https URL -> ("azure_blob",
+    "<key-inside-container>"), gs://... -> ("gcs", "key"). Raises
+    ImageRegistryError if the URL shape doesn't match a hub backend — the
+    operator probably hand-rolled it and the automated promote can't drive
+    it without parsing help."""
+    url = (artefact_url or "").strip()
+    if url.startswith("s3://"):
+        rest = url[len("s3://"):]
+        _, _, key = rest.partition("/")
+        return ("s3", key)
+    if url.startswith("gs://"):
+        rest = url[len("gs://"):]
+        _, _, key = rest.partition("/")
+        return ("gcs", key)
+    if url.startswith("https://") and ".blob.core.windows.net/" in url:
+        # https://<account>.blob.core.windows.net/<container>/<key>
+        after_host = url.split(".blob.core.windows.net/", 1)[1]
+        _, _, key = after_host.partition("/")
+        return ("azure_blob", key)
+    raise ImageRegistryError(
+        f"artefact_url '{url}' isn't on a recognised hub backend (s3/azure_blob/gcs). "
+        "Re-run the build with Phase 3 export to populate the hub URL, or use the "
+        "manual-steps fallback."
+    )
+
+
+async def promote_to_aws_automated(
+    db: Session,
+    image_id: str,
+    *,
+    target_region: str,
+    progress_cb=None,
+) -> dict:
+    """Drive an end-to-end automated promote of `image_id` to AWS as `target_region`.
+
+    Steps:
+      1. Resolve hub artefact URL -> (backend, key).
+      2. Pick a staging S3 bucket+key in the target.
+      3. Launch the ECS promote-runner task with a presigned hub URL; wait.
+      4. ec2:ImportImage from the staged S3 object; poll until terminal.
+      5. After AMI reaches `Available`, delete the staged S3 blob.
+      6. Update `RegisteredImage.promotions["aws"]` with the new AMI ID.
+
+    progress_cb is an optional sync callable taking a single string; the
+    caller wires it to job_service.update_progress.
+    """
+    from . import promote_runner_service, storage_service, aws_service
+
+    if not target_region:
+        raise ImageRegistryError("target_region is required for AWS promote.")
+    image = get_image(db, image_id)
+    if not image:
+        raise ImageRegistryError(f"Image {image_id} not found.")
+    if not image.get("artefact_url"):
+        raise ImageRegistryError(
+            "Image has no artefact_url. Re-build with Phase 3 export to populate it, "
+            "or fall back to the manual-steps walkthrough."
+        )
+
+    hub_backend, hub_key = _parse_hub_url(image["artefact_url"])
+    source_format = (image.get("artefact_format") or "vhd").lower()
+    target_format = "vhd"  # AWS import_image accepts VHD natively; no conversion if source is VHD.
+
+    dest_bucket, dest_key = promote_runner_service.resolve_aws_staging(image["name"], image["version"])
+
+    def _say(msg: str) -> None:
+        logger.info("[promote %s -> aws] %s", image_id, msg)
+        if progress_cb:
+            progress_cb(msg)
+
+    # 1+2: kick the ECS runner
+    _say(f"Launching promote runner: {hub_backend}://{hub_key} -> s3://{dest_bucket}/{dest_key}")
+    await promote_runner_service.run_for_aws_target(
+        job_id=image_id,  # caller picks the actual Job id; we just use it as a tag.
+        hub_backend=hub_backend,
+        hub_key=hub_key,
+        source_format=source_format,
+        target_format=target_format,
+        dest_bucket=dest_bucket,
+        dest_key=dest_key,
+        aws_region=target_region,
+    )
+
+    # 3: ec2:ImportImage from the staged S3 object
+    from . import config_service
+    role_name = config_service.get("aws_vmimport_role_name") or "vmimport"
+    _say(f"Calling ec2:ImportImage from s3://{dest_bucket}/{dest_key}")
+    import_result = await aws_service.import_image_from_vhd(
+        region=target_region,
+        s3_bucket=dest_bucket,
+        s3_key=dest_key,
+        role_name=role_name,
+        description=f"Promoted from registered image {image['name']}/{image['version']}",
+        disk_format=target_format,
+        progress_cb=_say,
+    )
+    new_ami_id = import_result["image_id"]
+    _say(f"Import complete: {new_ami_id}")
+
+    # 4: cleanup staged S3 blob — only after the AMI is Available (the import
+    # poll above already waits for the terminal state, so we can delete now).
+    # Use boto3 directly so we delete from the staging bucket the operator
+    # configured, which may not be `storage_s3_bucket` (delete_image_in
+    # hard-codes that one).
+    try:
+        _say(f"Cleaning up staged S3 object s3://{dest_bucket}/{dest_key}")
+        import asyncio
+        from .aws_service import _aws_kwargs
+        import boto3
+        await asyncio.to_thread(
+            lambda: boto3.client("s3", **_aws_kwargs(target_region)).delete_object(
+                Bucket=dest_bucket, Key=dest_key,
+            )
+        )
+    except Exception as e:
+        # Best-effort — staged object remaining is non-fatal, operator can
+        # sweep manually. Log it but don't fail the promote.
+        logger.warning(
+            "Failed to delete staged S3 object s3://%s/%s after successful promote: %s",
+            dest_bucket, dest_key, e,
+        )
+
+    # 5: record final promotion state
+    updated = record_promotion(
+        db,
+        image_id,
+        "aws",
+        status="completed",
+        image_id_value=new_ami_id,
+        region=target_region,
+        notes=f"Imported via promote-runner ECS task (import_task={import_result['task_id']}).",
+    )
+    return updated
