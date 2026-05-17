@@ -158,6 +158,28 @@
       </select>
     </div>
 
+    <!-- Bulk action toolbar -->
+    <div x-show="selectedVmIds.length > 0"
+         class="mb-3 p-3 bg-blue-50 border border-blue-200 rounded-lg flex items-center justify-between">
+      <span class="text-sm text-blue-900">
+        Selected: <strong x-text="selectedVmIds.length"></strong>
+      </span>
+      <div class="flex items-center gap-2">
+        <button @click="openBulkAssign()"
+                class="text-xs px-3 py-1.5 rounded bg-blue-600 hover:bg-blue-700 text-white font-medium">
+          Assign workgroup
+        </button>
+        <button @click="submitBulkClear()"
+                class="text-xs px-3 py-1.5 rounded bg-gray-200 hover:bg-gray-300 text-gray-700 font-medium">
+          Clear workgroup
+        </button>
+        <button @click="selectedVmIds = []; selectAll = false"
+                class="text-xs text-gray-500 hover:text-gray-700">
+          Cancel
+        </button>
+      </div>
+    </div>
+
     <!-- Resource table -->
     <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
       <div x-show="loading && allResources.length === 0" class="p-12 text-center text-gray-400">
@@ -177,11 +199,15 @@
       <table x-show="filteredResources.length > 0" class="min-w-full divide-y divide-gray-200">
         <thead class="bg-gray-50">
           <tr>
+            <th class="w-8 px-4 py-3">
+              <input type="checkbox" @change="toggleSelectAll($event.target.checked)" :checked="selectAll" class="rounded">
+            </th>
             <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
             <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">VMID</th>
             <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Name</th>
             <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Type</th>
             <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Node</th>
+            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Workgroup</th>
             <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">CPU %</th>
             <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Memory</th>
             <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
@@ -190,6 +216,9 @@
         <tbody class="bg-white divide-y divide-gray-100">
           <template x-for="vm in filteredResources" :key="vm.node + '-' + vm.vmid">
             <tr class="hover:bg-gray-50 transition-colors">
+              <td class="px-4 py-3">
+                <input type="checkbox" :value="_vmKey(vm)" x-model="selectedVmIds" class="rounded">
+              </td>
               <td class="px-4 py-3">
                 <span class="inline-flex items-center gap-1.5 text-xs font-medium"
                       :class="vm.is_running ? 'text-green-700' : 'text-gray-400'">
@@ -215,6 +244,12 @@
                       x-text="vm.type === 'qemu' ? 'QEMU' : 'LXC'"></span>
               </td>
               <td class="px-4 py-3 text-sm text-gray-500" x-text="vm.node"></td>
+              <td class="px-4 py-3 text-sm">
+                <span x-show="vm.workgroup"
+                      class="inline-block text-xs font-medium bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded-full"
+                      x-text="vm.workgroup"></span>
+                <span x-show="!vm.workgroup" class="text-gray-300">—</span>
+              </td>
               <td class="px-4 py-3 text-sm text-gray-600">
                 <span x-show="vm.is_running" x-text="vm.cpu_usage + '%'"></span>
                 <span x-show="!vm.is_running" class="text-gray-300">—</span>
@@ -465,6 +500,34 @@
     </div>
   </div>
 
+  <!-- ═══════════════════════════════════════════════════════ MODAL: Bulk assign workgroup -->
+  <div x-show="bulkAssignModal.open" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" @click.self="bulkAssignModal.open = false">
+    <div class="bg-white rounded-xl shadow-xl w-full max-w-md p-6">
+      <h2 class="text-lg font-semibold text-gray-900 mb-2">Assign workgroup</h2>
+      <p class="text-sm text-gray-500 mb-4">
+        Tag <strong x-text="selectedVmIds.length"></strong> selected VM(s) with a workgroup.
+      </p>
+      <div class="mb-6">
+        <label class="block text-sm font-medium text-gray-700 mb-1">Workgroup <span class="text-red-500">*</span></label>
+        <select x-model="bulkAssignModal.workgroup" required
+                class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+          <option value="">Select workgroup…</option>
+          <template x-for="w in availableWorkgroups" :key="w">
+            <option :value="w" x-text="w"></option>
+          </template>
+        </select>
+      </div>
+      <div class="flex justify-end gap-3">
+        <button @click="bulkAssignModal.open = false" class="px-4 py-2 text-sm text-gray-600 hover:text-gray-800">Cancel</button>
+        <button @click="submitBulkAssign()"
+                :disabled="!bulkAssignModal.workgroup"
+                class="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-lg font-medium transition">
+          Assign
+        </button>
+      </div>
+    </div>
+  </div>
+
   <!-- Toast -->
   <div x-show="toast" x-transition
        class="fixed bottom-6 right-6 z-50 px-4 py-3 rounded-lg shadow-lg text-sm font-medium text-white max-w-sm"
@@ -505,6 +568,9 @@ function proxmoxDashboard() {
     },
     deleteConfirm: { open: false, target: null },
     availableWorkgroups: [],
+    selectedVmIds: [],
+    selectAll: false,
+    bulkAssignModal: { open: false, workgroup: '' },
 
     async init() {
       requireAuth();
@@ -521,6 +587,53 @@ function proxmoxDashboard() {
     _defaultWorkgroup() {
       if (this.availableWorkgroups.includes('default')) return 'default';
       return this.availableWorkgroups[0] || '';
+    },
+
+    // ── Bulk workgroup assignment ───────────────────────────────────────────
+    _vmKey(vm) {
+      // Proxmox VMIDs aren't unique across cluster nodes, so include the node.
+      return `${vm.node}/${vm.vmid}`;
+    },
+
+    toggleSelectAll(checked) {
+      this.selectAll = checked;
+      this.selectedVmIds = checked ? this.filteredResources.map(v => this._vmKey(v)) : [];
+    },
+
+    openBulkAssign() {
+      this.bulkAssignModal = { open: true, workgroup: this._defaultWorkgroup() };
+    },
+
+    async submitBulkAssign() {
+      const wg = this.bulkAssignModal.workgroup;
+      if (!wg || this.selectedVmIds.length === 0) return;
+      try {
+        await API.post('/api/workgroup-overrides/bulk', {
+          provider: 'proxmox', vm_ids: this.selectedVmIds, workgroup: wg,
+        });
+        this.bulkAssignModal.open = false;
+        this.selectedVmIds = [];
+        this.selectAll = false;
+        this.showToast(`Assigned workgroup '${wg}'.`);
+        await this.refresh();
+      } catch (e) {
+        this.showToast('Assign failed: ' + (e.detail || e.message || e), 'error');
+      }
+    },
+
+    async submitBulkClear() {
+      if (this.selectedVmIds.length === 0) return;
+      try {
+        await API.request('DELETE', '/api/workgroup-overrides/bulk', {
+          provider: 'proxmox', vm_ids: this.selectedVmIds,
+        });
+        this.selectedVmIds = [];
+        this.selectAll = false;
+        this.showToast('Cleared workgroup.');
+        await this.refresh();
+      } catch (e) {
+        this.showToast('Clear failed: ' + (e.detail || e.message || e), 'error');
+      }
     },
 
     async refresh() {

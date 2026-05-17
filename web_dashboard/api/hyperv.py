@@ -12,22 +12,51 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from ..auth import get_current_user
 from ..models.user import User
-from ..services import job_service
+from ..services import job_service, workgroup_override_service
 from ..services import hyperv_service
 from ..services.hyperv_service import HyperVError
 
 router = APIRouter(prefix="/api/hyperv", tags=["hyperv"])
 
+PROVIDER = "hyperv"
+
+
+def _override_key(vm: dict) -> str:
+    """Composite VM identity for the workgroup-override table."""
+    return str(vm.get("vmid", ""))
+
 
 # ── List endpoints ────────────────────────────────────────────────────────────
 
 @router.get("/vms")
-async def get_vms(current_user: User = Depends(get_current_user)):
-    """List all Hyper-V VMs on the configured host."""
+async def get_vms(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """List all Hyper-V VMs on the configured host.
+
+    Each entry's `workgroup` is resolved from the vm_workgroup_overrides table.
+    Non-admin callers see only VMs whose workgroup is in their accessible list;
+    VMs with no override are admin-only.
+    """
     try:
-        return await hyperv_service.list_vms()
+        vms = await hyperv_service.list_vms()
     except HyperVError as e:
         raise HTTPException(status_code=502, detail=str(e))
+
+    keys = [_override_key(vm) for vm in vms]
+    overrides = workgroup_override_service.get_many(db, PROVIDER, keys)
+
+    accessible = None if current_user.is_admin else [w.lower() for w in current_user.workgroups_list]
+    out = []
+    for vm in vms:
+        vm["workgroup"] = overrides.get(_override_key(vm))
+        if accessible is not None:
+            wg = vm["workgroup"]
+            if wg is None or wg not in accessible:
+                continue
+        out.append(vm)
+    return out
 
 
 # ── Power operations ──────────────────────────────────────────────────────────

@@ -5,7 +5,7 @@ import json
 import uuid
 from datetime import datetime
 from typing import Optional, List
-from sqlalchemy import create_engine, Column, String, Integer, DateTime, Boolean, Text, LargeBinary, ForeignKey, text
+from sqlalchemy import create_engine, Column, String, Integer, DateTime, Boolean, Text, LargeBinary, ForeignKey, UniqueConstraint, text
 from sqlalchemy.orm import declarative_base, relationship
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.pool import NullPool, QueuePool
@@ -258,6 +258,33 @@ class Workgroup(Base):
     is_default = Column(Boolean, default=False, nullable=False, index=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     created_by_user_id = Column(String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+
+
+class VMWorkgroupOverride(Base):
+    """Workgroup assignments for VMs the dashboard didn't deploy itself.
+
+    Cloud and Proxmox/Nutanix dashboard-driven deploys already record
+    `workgroup` on the corresponding Job row, but VMs that pre-existed on the
+    on-prem hypervisor — or live on a hypervisor with no deploy flow at all
+    (Hyper-V, vSphere, XCP-ng) — have no Job to hang a workgroup off of.
+    An admin assigns those via the bulk-assign action on the provider page,
+    which writes a row here.
+
+    `vm_id` is normalized per-provider in each *_service module's
+    _override_key() helper: Proxmox uses "<node>/<vmid>", everything else
+    uses the VM's native uuid/moref.
+    """
+    __tablename__ = "vm_workgroup_overrides"
+
+    id = Column(Integer, primary_key=True)
+    provider = Column(String(20), nullable=False, index=True)   # proxmox|nutanix|hyperv|vsphere|xcpng
+    vm_id = Column(String(128), nullable=False)
+    workgroup = Column(String(64), ForeignKey("workgroups.name", ondelete="CASCADE"), nullable=False, index=True)
+    created_by = Column(String(100), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    __table_args__ = (UniqueConstraint("provider", "vm_id", name="uq_vm_workgroup_override"),)
 
 
 class Approval(Base):
