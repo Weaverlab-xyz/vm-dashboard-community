@@ -197,9 +197,10 @@ async def list_marketplace_images(
 
 @router.get("/network-options", response_model=AzureNetworkOptions)
 async def network_options(
+    bust: bool = False,
     current_user: User = Depends(require_permission("azure", "read")),
 ):
-    """Return locations, VM sizes, subnets, NSGs. Served from cache (10 min)."""
+    """Return locations, VM sizes, subnets, NSGs. Served from cache (10 min). Pass ?bust=true to force a fresh fetch."""
     cache_key = cache_service.key_global("azure_network_opts")
     ttl = cache_service.TTL["azure_network_opts"]
 
@@ -209,6 +210,8 @@ async def network_options(
         )
 
     try:
+        if bust:
+            await cache_service.invalidate(cache_key)
         opts, cached_at = await cache_service.get_or_refresh(cache_key, ttl, _fetch)
         return AzureNetworkOptions(
             locations=opts["locations"],
@@ -216,6 +219,7 @@ async def network_options(
             subnets=[AzureSubnetInfo(**s) for s in opts["subnets"]],
             nsgs=[AzureNSGInfo(**n) for n in opts["nsgs"]],
             ssh_keys=[AzureSSHKeyInfo(**k) for k in opts["ssh_keys"]],
+            warnings=opts.get("warnings", []),
         )
     except AzureError as e:
         raise HTTPException(status_code=503, detail=str(e))

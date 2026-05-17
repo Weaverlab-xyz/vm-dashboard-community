@@ -66,6 +66,7 @@ class AzureNetworkOptions(BaseModel):
     subnets: List[AzureSubnetInfo] = []
     nsgs: List[AzureNSGInfo] = []
     ssh_keys: List[AzureSSHKeyInfo] = []
+    warnings: List[str] = []
 
 
 # ── Deploy request / response ─────────────────────────────────────────────────
