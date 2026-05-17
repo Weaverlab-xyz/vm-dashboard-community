@@ -445,9 +445,12 @@ def _list_private_images_sync(cred, sub_id: str, gallery: str, gallery_rg: str, 
                 f"Reader on that resource group."
             )
 
-    # Standalone managed images in resource group
+    # Standalone managed images in resource group. When a separate gallery RG is
+    # configured, scope managed-image lookup to that RG instead of the VM RG so
+    # the gallery setting fully controls where private images come from.
+    effective_rg = gallery_rg or rg
     try:
-        for img in compute.images.list_by_resource_group(rg):
+        for img in compute.images.list_by_resource_group(effective_rg):
             results.append({
                 "resource_id": img.id,
                 "name": img.name,
@@ -462,9 +465,9 @@ def _list_private_images_sync(cred, sub_id: str, gallery: str, gallery_rg: str, 
                 "location": img.location or "",
             })
     except Exception as e:
-        logger.warning("Failed to list managed images from rg=%s: %s", rg, e)
+        logger.warning("Failed to list managed images from rg=%s: %s", effective_rg, e)
         warnings.append(
-            f"Managed images in resource group '{rg}' could not be listed: {e}."
+            f"Managed images in resource group '{effective_rg}' could not be listed: {e}."
         )
 
     return {"images": results, "warnings": warnings}
