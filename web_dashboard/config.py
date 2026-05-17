@@ -318,6 +318,12 @@ class Settings(BaseSettings):
     # configured independently. The active backend is the one selected via
     # storage_active_backend; others can be configured-but-idle for migration.
     storage_active_backend: str = ""           # "s3" | "azure_blob" | "gcs"
+    # Image-registry hub backend — the single backend that holds the canonical
+    # VHD/raw artefact for every registered image regardless of build cloud.
+    # When unset, falls back to storage_active_backend so single-backend installs
+    # Just Work. Used by the Packer export+register flow and the (upcoming)
+    # per-target-cloud promote runners.
+    storage_hub_backend: str = ""              # "" | "s3" | "azure_blob" | "gcs"
     storage_s3_bucket: str = ""                # e.g. "infra-asset-store"
     storage_s3_region: str = ""                # defaults to aws_region if blank
     storage_s3_prefix: str = "config-mgmt"

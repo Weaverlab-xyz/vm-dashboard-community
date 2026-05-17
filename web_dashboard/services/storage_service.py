@@ -106,6 +106,18 @@ def active_backend() -> str:
     return cfgd[0] if cfgd else ""
 
 
+def hub_backend() -> str:
+    """The image-registry hub backend — single source of truth for the
+    canonical VHD/raw artefact across builds. Resolves explicit
+    `storage_hub_backend` config; falls back to `active_backend()` so
+    single-backend installs Just Work without operator intervention.
+    Returns "" if no backend is usable."""
+    chosen = _cfg("storage_hub_backend")
+    if chosen and chosen in BACKENDS and _backend_configured(chosen):
+        return chosen
+    return active_backend()
+
+
 # ── S3 backend ────────────────────────────────────────────────────────────────
 
 def _s3_client():
@@ -639,6 +651,42 @@ def _is_image_filename(name: str) -> bool:
     multi-dot extensions like `.tar.gz` (which a naive rsplit doesn't)."""
     lower = (name or "").lower()
     return any(lower.endswith(ext) for ext in _IMAGE_EXTENSIONS)
+
+
+def image_key(backend: str, image_name: str, ext: str = "vhd", ts: Optional[str] = None) -> str:
+    """Build the canonical full key for an image artefact on `backend`.
+
+    S3 prepends `storage_s3_prefix` because the same bucket is also the asset
+    store; Azure and GCS use the configured container/bucket directly so just
+    the `images/` sub-prefix is enough. `ts` is auto-generated if omitted so
+    repeated builds of the same image name produce distinct keys.
+    """
+    if ts is None:
+        from datetime import datetime
+        ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    blob = f"images/{image_name}-{ts}.{ext}"
+    if backend == "s3":
+        prefix = (_cfg("storage_s3_prefix") or "config-mgmt").rstrip("/")
+        return f"{prefix}/{blob}" if prefix else blob
+    return blob
+
+
+def image_url(backend: str, key: str) -> str:
+    """Canonical URL for an image-path key on `backend`. Used to populate
+    `RegisteredImage.artefact_url` — the same shape the cloud SDKs accept
+    as an import source."""
+    if backend == "s3":
+        return f"s3://{_cfg('storage_s3_bucket')}/{key}"
+    if backend == "azure_blob":
+        account = _cfg("storage_azure_account")
+        container = _cfg("storage_azure_container") or "playbooks"
+        return f"https://{account}.blob.core.windows.net/{container}/{key}"
+    if backend == "gcs":
+        return f"gs://{_cfg('storage_gcs_bucket')}/{key}"
+    if backend == "local":
+        base = _cfg("storage_local_path").rstrip("/").rstrip("\\")
+        return f"file://{base}/{key.lstrip('/')}"
+    raise StorageError(f"Unknown backend '{backend}'")
 
 
 # ── Per-backend image sync helpers ───────────────────────────────────────────
