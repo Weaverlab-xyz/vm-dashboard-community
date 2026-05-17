@@ -129,6 +129,16 @@ async def get_config(current_user: User = Depends(require_permission("admin", "r
         "promote_runner_ecs_task_role_arn",
         "promote_runner_aws_staging_bucket",
         "promote_runner_aws_staging_prefix",
+        "promote_runner_azure_resource_group",
+        "promote_runner_azure_location",
+        "promote_runner_azure_subnet_id",
+        "promote_runner_azure_cpu",
+        "promote_runner_azure_memory_gb",
+        "promote_runner_azure_staging_account",
+        "promote_runner_azure_staging_container",
+        "promote_runner_azure_staging_prefix",
+        "promote_runner_azure_target_resource_group",
+        "promote_runner_azure_target_storage_account_id",
     ):
         out[k] = _cfg_get(k)
     return out
@@ -164,6 +174,17 @@ class StorageConfigPatch(BaseModel):
     promote_runner_ecs_task_role_arn:      str | None = None
     promote_runner_aws_staging_bucket:     str | None = None
     promote_runner_aws_staging_prefix:     str | None = None
+    # Azure-target promote runner
+    promote_runner_azure_resource_group:            str | None = None
+    promote_runner_azure_location:                  str | None = None
+    promote_runner_azure_subnet_id:                 str | None = None
+    promote_runner_azure_cpu:                       str | None = None
+    promote_runner_azure_memory_gb:                 str | None = None
+    promote_runner_azure_staging_account:           str | None = None
+    promote_runner_azure_staging_container:         str | None = None
+    promote_runner_azure_staging_prefix:            str | None = None
+    promote_runner_azure_target_resource_group:     str | None = None
+    promote_runner_azure_target_storage_account_id: str | None = None
 
 
 @router.patch("/config")

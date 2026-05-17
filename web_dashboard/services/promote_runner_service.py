@@ -20,7 +20,7 @@ task-launch time — no source-side credentials live in the container.
 import logging
 from typing import Optional
 
-from . import aws_service, config_service, storage_service
+from . import aws_service, azure_service, config_service, storage_service
 from ..config import settings
 
 logger = logging.getLogger(__name__)
@@ -153,6 +153,147 @@ async def run_for_aws_target(
         task_role_arn=cfg["task_role_arn"],
         runner_args=runner_args,
         job_id=job_id,
+    )
+    if exit_code != 0:
+        raise PromoteRunnerError(
+            f"Promote runner exited with code {exit_code}. See log_output for details.",
+            log_output=output,
+        )
+    return (exit_code, output)
+
+
+# ── Azure target ─────────────────────────────────────────────────────────────
+
+
+def _resolve_azure_runner_config() -> dict:
+    """Resolve ACI plumbing + dest staging knobs for the Azure promote runner.
+    Falls back to the dashboard's primary Azure resource group / location /
+    storage account so single-tenant installs Just Work without setting any
+    new keys."""
+    rg = _cfg("promote_runner_azure_resource_group") or _cfg("azure_resource_group")
+    location = _cfg("promote_runner_azure_location") or _cfg("azure_location") or "centralus"
+    subnet_id = _cfg("promote_runner_azure_subnet_id")
+    image = _cfg("promote_runner_image") or "weaverlab-xyz/dashboard-promote-runner:latest"
+    try:
+        cpu = float(_cfg("promote_runner_azure_cpu") or "2")
+        memory_gb = float(_cfg("promote_runner_azure_memory_gb") or "4")
+    except ValueError as e:
+        raise PromoteRunnerError(f"Invalid CPU/memory in promote runner config: {e}")
+
+    staging_account = _cfg("promote_runner_azure_staging_account") or _cfg("storage_azure_account")
+    staging_container = (
+        _cfg("promote_runner_azure_staging_container")
+        or _cfg("storage_azure_container")
+        or "playbooks"
+    )
+    staging_prefix = (_cfg("promote_runner_azure_staging_prefix") or "promote-staging").strip("/")
+
+    # ACR creds for pulling the runner image when operators host a private build.
+    acr_server = _cfg("azure_acr_server")
+    acr_username = _cfg("azure_acr_username")
+    acr_password = _cfg("azure_acr_password")
+
+    missing = []
+    if not rg:
+        missing.append("promote_runner_azure_resource_group (or azure_resource_group)")
+    if not staging_account:
+        missing.append("promote_runner_azure_staging_account (or storage_azure_account)")
+    if missing:
+        raise PromoteRunnerError(
+            "Azure promote runner is not configured. Set on /storage: "
+            + ", ".join(missing) + "."
+        )
+
+    return {
+        "rg": rg,
+        "location": location,
+        "subnet_id": subnet_id,
+        "image": image,
+        "cpu": cpu,
+        "memory_gb": memory_gb,
+        "staging_account": staging_account,
+        "staging_container": staging_container,
+        "staging_prefix": staging_prefix,
+        "acr_server": acr_server,
+        "acr_username": acr_username,
+        "acr_password": acr_password,
+    }
+
+
+def resolve_azure_staging(image_name: str, version: str) -> tuple[str, str, str]:
+    """Return (storage_account, container, blob_name) for where the Azure
+    promote runner should drop the converted VHD before image-create."""
+    cfg = _resolve_azure_runner_config()
+    blob_name = f"{cfg['staging_prefix']}/{image_name}-{version}.vhd"
+    return (cfg["staging_account"], cfg["staging_container"], blob_name)
+
+
+async def run_for_azure_target(
+    *,
+    job_id: str,
+    hub_backend: str,
+    hub_key: str,
+    source_format: str,
+    target_format: str,
+    dest_account: str,
+    dest_container: str,
+    dest_blob: str,
+    presign_expiry_seconds: int = 7200,
+) -> tuple:
+    """Launch the Azure promote-runner ACI container group to copy
+    `hub_backend://hub_key` into `https://<dest_account>.blob.core.windows.net/
+    <dest_container>/<dest_blob>`, converting format if needed. Returns
+    (exit_code, log_output).
+
+    Azure SP credentials (tenant/client/secret) are passed to the runner as
+    secure env vars so the container can write to the dest blob via the
+    same identity the dashboard uses elsewhere — no extra IAM plumbing.
+    """
+    cfg = _resolve_azure_runner_config()
+
+    source_url = await storage_service.presigned_url(
+        hub_backend, hub_key, expiry_seconds=presign_expiry_seconds, method="GET",
+    )
+
+    runner_args = [
+        "--source-url", source_url,
+        "--source-format", source_format,
+        "--target-format", target_format,
+        "--target", "azure",
+        "--dest-azure-account", dest_account,
+        "--dest-azure-container", dest_container,
+        "--dest-azure-blob", dest_blob,
+    ]
+    azure_env = {
+        "AZURE_TENANT_ID":     _cfg("azure_tenant_id"),
+        "AZURE_CLIENT_ID":     _cfg("azure_client_id"),
+        "AZURE_CLIENT_SECRET": _cfg("azure_client_secret"),
+    }
+    if not all(azure_env.values()):
+        raise PromoteRunnerError(
+            "Azure service-principal credentials (azure_tenant_id / azure_client_id / "
+            "azure_client_secret) must be set so the runner can authenticate to the "
+            "dest storage account."
+        )
+
+    logger.info(
+        "Launching Azure promote-runner ACI for job %s: hub=%s://%s -> "
+        "https://%s.blob.core.windows.net/%s/%s",
+        job_id, hub_backend, hub_key, dest_account, dest_container, dest_blob,
+    )
+    exit_code, output = await azure_service.run_aci_promote_runner_task(
+        rg=cfg["rg"],
+        location=cfg["location"],
+        subnet_id=cfg["subnet_id"],
+        image=cfg["image"],
+        cpu=cfg["cpu"],
+        memory_gb=cfg["memory_gb"],
+        runner_args=runner_args,
+        azure_env=azure_env,
+        job_id=job_id,
+        acr_server=cfg["acr_server"],
+        acr_username=cfg["acr_username"],
+        acr_password=cfg["acr_password"],
     )
     if exit_code != 0:
         raise PromoteRunnerError(

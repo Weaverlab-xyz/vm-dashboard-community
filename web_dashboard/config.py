@@ -364,6 +364,29 @@ class Settings(BaseSettings):
     promote_runner_aws_staging_bucket: str = ""          # fallback: storage_s3_bucket
     promote_runner_aws_staging_prefix: str = "promote-staging"
 
+    # ── Azure-target promote runner (ACI) ────────────────────────────────────
+    # Same image as the AWS path; the dashboard passes `--target azure` at
+    # task-launch time. Falls back to the existing Azure-side knobs (ACI
+    # Ansible runner / Azure config) so single-account installs only need to
+    # set non-default values.
+    promote_runner_azure_resource_group: str = ""        # fallback: azure_resource_group
+    promote_runner_azure_location: str = ""              # fallback: azure_location
+    promote_runner_azure_subnet_id: str = ""             # optional ACI VNet binding
+    promote_runner_azure_cpu: str = "2"                  # qemu-img headroom
+    promote_runner_azure_memory_gb: str = "4"            # ~4 GiB for multi-GB VHDs
+    # Target staging — where the runner drops the converted VHD before the
+    # image-create call consumes it. Same hub account+container by default so
+    # operators don't need to provision a second account.
+    promote_runner_azure_staging_account: str = ""       # fallback: storage_azure_account
+    promote_runner_azure_staging_container: str = ""     # fallback: storage_azure_container
+    promote_runner_azure_staging_prefix: str = "promote-staging"
+    # The RG the resulting managed image lands in. Defaults to azure_resource_group.
+    promote_runner_azure_target_resource_group: str = ""
+    # Storage account ARM ID the resulting managed image's OS disk references.
+    # Optional — if blank, Azure assigns one. Set when locking the image to a
+    # specific account is required (compliance, BYOK).
+    promote_runner_azure_target_storage_account_id: str = ""
+
     ansible_runner: str = "local"              # "local" | "ecs" | "aci" | "gcp"
     # Per-cloud SSH user for Ansible cloud runner targets. Each cloud's stock
     # AMI / image family ships with a different default username, so a single
