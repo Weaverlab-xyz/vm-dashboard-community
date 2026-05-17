@@ -111,7 +111,7 @@
           <label class="block text-sm font-medium text-gray-700 mb-1">Default Region</label>
           <select x-model="form.aws.aws_region" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
             <template x-for="r in awsRegions" :key="r.value">
-              <option :value="r.value" x-text="r.label"></option>
+              <option :value="r.value" :selected="r.value === form.aws.aws_region" x-text="r.label"></option>
             </template>
           </select>
         </div>
@@ -198,7 +198,7 @@
           <label class="block text-sm font-medium text-gray-700 mb-1">Location</label>
           <select x-model="form.azure.azure_location" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
             <template x-for="l in azureLocations" :key="l.value">
-              <option :value="l.value" x-text="l.label"></option>
+              <option :value="l.value" :selected="l.value === form.azure.azure_location" x-text="l.label"></option>
             </template>
           </select>
         </div>
@@ -417,7 +417,7 @@ gcloud iam service-accounts keys create sa-key.json \
           <select x-model="form.gcp.gcp_region"
                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
             <template x-for="r in gcpRegions" :key="r.value">
-              <option :value="r.value" x-text="r.label"></option>
+              <option :value="r.value" :selected="r.value === form.gcp.gcp_region" x-text="r.label"></option>
             </template>
           </select>
         </div>
