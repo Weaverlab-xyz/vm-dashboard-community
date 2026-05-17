@@ -12,11 +12,19 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from ..auth import get_current_user
 from ..models.user import User
-from ..services import job_service, workgroup_service
+from ..services import job_service, workgroup_service, workgroup_override_service
 from ..services import proxmox_service
 from ..services.proxmox_service import ProxmoxError
 
 router = APIRouter(prefix="/api/proxmox", tags=["proxmox"])
+
+PROVIDER = "proxmox"
+
+
+def _override_key(vm: dict) -> str:
+    """Composite VM identity for the workgroup-override table. Proxmox VMIDs
+    aren't unique across nodes in a cluster, so node has to be in the key."""
+    return f"{vm.get('node', '')}/{vm.get('vmid', '')}"
 
 
 def _validate_workgroup(db: Session, user: User, workgroup: str) -> str:
@@ -64,14 +72,34 @@ async def get_storage(
 @router.get("/resources")
 async def get_resources(
     node: str = "",
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """List all VMs and containers. Pass ?node=<name> to filter to one node."""
+    """List all VMs and containers. Pass ?node=<name> to filter to one node.
+
+    Each entry's `workgroup` is resolved from the vm_workgroup_overrides table.
+    Non-admin callers see only VMs whose workgroup is in their accessible list;
+    VMs with no override are admin-only.
+    """
     try:
         nodes = [node] if node else None
-        return await proxmox_service.list_resources(nodes)
+        resources = await proxmox_service.list_resources(nodes)
     except ProxmoxError as e:
         raise HTTPException(status_code=502, detail=str(e))
+
+    keys = [_override_key(vm) for vm in resources]
+    overrides = workgroup_override_service.get_many(db, PROVIDER, keys)
+
+    accessible = None if current_user.is_admin else [w.lower() for w in current_user.workgroups_list]
+    out = []
+    for vm in resources:
+        vm["workgroup"] = overrides.get(_override_key(vm))
+        if accessible is not None:
+            wg = vm["workgroup"]
+            if wg is None or wg not in accessible:
+                continue
+        out.append(vm)
+    return out
 
 
 @router.get("/templates")

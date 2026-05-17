@@ -326,6 +326,7 @@ def _feature_flags() -> dict:
 from fastapi import Depends  # noqa: E402
 from .api import auth, jobs, websocket, aws, azure, gcp, packer, mfa, tokens, users, groups, setup, secrets, storage, images  # noqa: E402
 from .api import workgroups as workgroups_api  # noqa: E402
+from .api import workgroup_overrides as workgroup_overrides_api  # noqa: E402
 from .api.mcp_server import get_mcp_asgi_app  # noqa: E402
 
 
@@ -351,6 +352,7 @@ app.include_router(tokens.router)
 app.include_router(users.router)
 app.include_router(groups.router)
 app.include_router(workgroups_api.router)
+app.include_router(workgroup_overrides_api.router)
 app.include_router(jobs.router)
 app.include_router(websocket.router)
 app.include_router(aws.router)
