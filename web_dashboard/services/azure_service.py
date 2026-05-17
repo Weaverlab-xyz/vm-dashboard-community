@@ -423,14 +423,19 @@ def _list_private_images_sync(cred, sub_id: str, gallery: str, gallery_rg: str, 
                 ))
                 versions.sort(key=lambda v: v.name, reverse=True)
                 latest = versions[0] if versions else None
+                published = None
+                if latest is not None:
+                    pub_profile = getattr(latest, "publishing_profile", None)
+                    published = getattr(pub_profile, "published_date", None) if pub_profile else None
+                    if published is None:
+                        # Some SDK versions expose this directly on the version
+                        published = getattr(latest, "time_created", None)
                 results.append({
                     "resource_id": img_def.id,
                     "name": img_def.name,
                     "description": img_def.description or "",
                     "state": latest.provisioning_state if latest else "Unknown",
-                    "creation_date": (
-                        latest.time_created.isoformat() if latest and latest.time_created else ""
-                    ),
+                    "creation_date": published.isoformat() if published else "",
                     "os_type": _os_type_str(img_def.os_type),
                     "source": "gallery",
                     "gallery_name": gallery,
@@ -439,11 +444,18 @@ def _list_private_images_sync(cred, sub_id: str, gallery: str, gallery_rg: str, 
                 })
         except Exception as e:
             logger.warning("Failed to list gallery images from %s/%s: %s", gallery_rg, gallery, e)
-            warnings.append(
-                f"Shared Image Gallery '{gallery}' in resource group '{gallery_rg}' is "
-                f"configured but inaccessible: {e}. Grant the dashboard service principal "
-                f"Reader on that resource group."
-            )
+            status = getattr(e, "status_code", None) or getattr(getattr(e, "response", None), "status_code", None)
+            if status in (401, 403):
+                warnings.append(
+                    f"Shared Image Gallery '{gallery}' in resource group '{gallery_rg}' is "
+                    f"configured but inaccessible: {e}. Grant the dashboard service principal "
+                    f"Reader on that resource group."
+                )
+            else:
+                warnings.append(
+                    f"Shared Image Gallery '{gallery}' in resource group '{gallery_rg}' "
+                    f"could not be listed: {e}."
+                )
 
     # Standalone managed images in resource group. When a separate gallery RG is
     # configured, scope managed-image lookup to that RG instead of the VM RG so
