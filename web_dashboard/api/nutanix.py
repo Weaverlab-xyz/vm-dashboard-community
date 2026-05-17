@@ -9,7 +9,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from ..database import get_db
+from ..database import Job, get_db
 from ..auth import get_current_user
 from ..models.user import User
 from ..services import job_service, workgroup_service, workgroup_override_service
@@ -77,9 +77,13 @@ async def get_vms(
 ):
     """List all VMs from Prism Central.
 
-    Each entry's `workgroup` is resolved from the vm_workgroup_overrides table.
+    Each entry's `workgroup` is resolved in this order:
+      1. vm_workgroup_overrides — an admin's explicit re-tag wins.
+      2. The matching nutanix_deploy Job — for VMs the dashboard deployed.
+      3. None.
+
     Non-admin callers see only VMs whose workgroup is in their accessible list;
-    VMs with no override are admin-only.
+    VMs with no resolved workgroup are admin-only.
     """
     try:
         vms = await nutanix_service.list_vms()
@@ -89,12 +93,31 @@ async def get_vms(
     keys = [_override_key(vm) for vm in vms]
     overrides = workgroup_override_service.get_many(db, PROVIDER, keys)
 
+    # Build {vm_name: workgroup} from nutanix_deploy jobs so VMs deployed
+    # through PR #30's flow inherit their deploy-time workgroup even before
+    # an admin bulk-assigns one. vm_name is stored in the job's metadata at
+    # deploy time. We can't key on uuid because _run_deploy doesn't write
+    # the created VM's uuid back to the job yet.
+    job_workgroups: dict[str, str] = {}
+    deploy_jobs = (
+        db.query(Job)
+        .filter(Job.job_type == "nutanix_deploy", Job.workgroup.isnot(None))
+        .all()
+    )
+    for j in deploy_jobs:
+        meta = j.metadata_dict or {}
+        vm_name = meta.get("vm_name")
+        if vm_name and j.workgroup:
+            job_workgroups[vm_name] = j.workgroup
+
     accessible = None if current_user.is_admin else [w.lower() for w in current_user.workgroups_list]
     out = []
     for vm in vms:
-        vm["workgroup"] = overrides.get(_override_key(vm))
+        wg = overrides.get(_override_key(vm))
+        if wg is None:
+            wg = job_workgroups.get(vm.get("name", ""))
+        vm["workgroup"] = wg
         if accessible is not None:
-            wg = vm["workgroup"]
             if wg is None or wg not in accessible:
                 continue
         out.append(vm)
@@ -131,9 +154,9 @@ async def import_image(
     job = job_service.create_job(
         db,
         job_type="nutanix_import_image",
-        description=f"Nutanix: import image '{payload.name}'",
+        created_by=current_user.username,
         workgroup="nutanix",
-        owner_id=current_user.id,
+        metadata={"image_name": payload.name, "source_uri": payload.source_uri},
     )
     background_tasks.add_task(_run_import, job.id, payload.name, payload.source_uri)
     return {"job_id": job.id, "status": "queued"}
@@ -186,9 +209,16 @@ async def deploy(
     job = job_service.create_job(
         db,
         job_type="nutanix_deploy",
-        description=f"Nutanix: deploy VM '{payload.vm_name}' from image {payload.image_uuid[:8]}…",
+        created_by=current_user.username,
         workgroup=canonical,
-        owner_id=current_user.id,
+        # vm_name is what /api/nutanix/vms joins on to surface the deploy-time
+        # workgroup on the matching live VM (vm_uuid isn't known until the
+        # deploy completes, and _run_deploy doesn't currently write it back).
+        metadata={
+            "vm_name": payload.vm_name,
+            "image_uuid": payload.image_uuid,
+            "cluster_uuid": payload.cluster_uuid,
+        },
     )
     background_tasks.add_task(_run_deploy, job.id, payload)
     return {"job_id": job.id, "status": "queued"}
@@ -220,9 +250,9 @@ async def delete_image(
     job = job_service.create_job(
         db,
         job_type="nutanix_delete_image",
-        description=f"Nutanix: delete image {name or uuid}",
+        created_by=current_user.username,
         workgroup="nutanix",
-        owner_id=current_user.id,
+        metadata={"image_uuid": uuid, "image_name": name},
     )
     background_tasks.add_task(_run_delete_image, job.id, uuid, name)
     return {"job_id": job.id, "status": "queued"}
@@ -254,9 +284,9 @@ async def delete_vm(
     job = job_service.create_job(
         db,
         job_type="nutanix_delete_vm",
-        description=f"Nutanix: delete VM {name or uuid}",
+        created_by=current_user.username,
         workgroup="nutanix",
-        owner_id=current_user.id,
+        metadata={"vm_uuid": uuid, "vm_name": name},
     )
     background_tasks.add_task(_run_delete_vm, job.id, uuid, name)
     return {"job_id": job.id, "status": "queued"}
@@ -294,10 +324,14 @@ def _power_endpoint(op: str):
         job = job_service.create_job(
             db,
             job_type=f"nutanix_{op}",
-            description=f"Nutanix {op}: {label}"
-            + (f" ({payload.cluster})" if payload.cluster else ""),
+            created_by=current_user.username,
             workgroup=payload.cluster or "nutanix",
-            owner_id=current_user.id,
+            metadata={
+                "vm_uuid": payload.uuid,
+                "vm_name": payload.name,
+                "cluster": payload.cluster,
+                "op": op,
+            },
         )
         background_tasks.add_task(
             _run_power_op, job.id, payload.uuid, payload.name, op, label

@@ -9,7 +9,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from ..database import get_db
+from ..database import Job, get_db
 from ..auth import get_current_user
 from ..models.user import User
 from ..services import job_service, workgroup_service, workgroup_override_service
@@ -77,9 +77,13 @@ async def get_resources(
 ):
     """List all VMs and containers. Pass ?node=<name> to filter to one node.
 
-    Each entry's `workgroup` is resolved from the vm_workgroup_overrides table.
+    Each entry's `workgroup` is resolved in this order:
+      1. vm_workgroup_overrides — an admin's explicit re-tag wins.
+      2. The matching proxmox_deploy Job — for VMs the dashboard deployed.
+      3. None.
+
     Non-admin callers see only VMs whose workgroup is in their accessible list;
-    VMs with no override are admin-only.
+    VMs with no resolved workgroup are admin-only.
     """
     try:
         nodes = [node] if node else None
@@ -90,12 +94,31 @@ async def get_resources(
     keys = [_override_key(vm) for vm in resources]
     overrides = workgroup_override_service.get_many(db, PROVIDER, keys)
 
+    # Build {(node, vm_name): workgroup} from proxmox_deploy jobs so VMs
+    # deployed through PR #30's flow inherit their deploy-time workgroup
+    # even before an admin bulk-assigns one. vm_name + node are stored in
+    # the job's metadata at deploy time.
+    job_workgroups: dict[tuple[str, str], str] = {}
+    deploy_jobs = (
+        db.query(Job)
+        .filter(Job.job_type == "proxmox_deploy", Job.workgroup.isnot(None))
+        .all()
+    )
+    for j in deploy_jobs:
+        meta = j.metadata_dict or {}
+        vm_name = meta.get("vm_name")
+        vm_node = meta.get("node")
+        if vm_name and vm_node and j.workgroup:
+            job_workgroups[(vm_node, vm_name)] = j.workgroup
+
     accessible = None if current_user.is_admin else [w.lower() for w in current_user.workgroups_list]
     out = []
     for vm in resources:
-        vm["workgroup"] = overrides.get(_override_key(vm))
+        wg = overrides.get(_override_key(vm))
+        if wg is None:
+            wg = job_workgroups.get((vm.get("node", ""), vm.get("name", "")))
+        vm["workgroup"] = wg
         if accessible is not None:
-            wg = vm["workgroup"]
             if wg is None or wg not in accessible:
                 continue
         out.append(vm)
@@ -174,9 +197,13 @@ async def import_image(
     job = job_service.create_job(
         db,
         job_type="proxmox_import_image",
-        description=f"Proxmox: import {payload.image_filename} → {payload.template_name} on {payload.node}",
+        created_by=current_user.username,
         workgroup=payload.node,
-        owner_id=current_user.id,
+        metadata={
+            "node": payload.node,
+            "image_filename": payload.image_filename,
+            "template_name": payload.template_name,
+        },
     )
     background_tasks.add_task(_run_import, job.id, payload)
     return {"job_id": job.id, "status": "queued"}
@@ -226,9 +253,16 @@ async def deploy(
     job = job_service.create_job(
         db,
         job_type="proxmox_deploy",
-        description=f"Proxmox: deploy {payload.vm_name} from template {payload.template_vmid} on {payload.node}",
+        created_by=current_user.username,
         workgroup=canonical,
-        owner_id=current_user.id,
+        # vm_name + node are what /api/proxmox/resources joins on to surface
+        # the deploy-time workgroup on the matching live VM. template_vmid is
+        # informational.
+        metadata={
+            "vm_name": payload.vm_name,
+            "node": payload.node,
+            "template_vmid": payload.template_vmid,
+        },
     )
     background_tasks.add_task(_run_deploy, job.id, payload)
     return {"job_id": job.id, "status": "queued"}
@@ -262,9 +296,9 @@ async def delete_vm(
     job = job_service.create_job(
         db,
         job_type="proxmox_delete",
-        description=f"Proxmox: delete {label}",
+        created_by=current_user.username,
         workgroup=node,
-        owner_id=current_user.id,
+        metadata={"node": node, "vmid": vmid, "vm_type": vm_type},
     )
     background_tasks.add_task(_run_delete, job.id, node, vmid, vm_type, label)
     return {"job_id": job.id, "status": "queued"}
@@ -303,9 +337,15 @@ def _power_endpoint(op: str):
         job = job_service.create_job(
             db,
             job_type=f"proxmox_{op}",
-            description=f"Proxmox {op}: {label} on {payload.node}",
+            created_by=current_user.username,
             workgroup=payload.node,
-            owner_id=current_user.id,
+            metadata={
+                "node": payload.node,
+                "vmid": payload.vmid,
+                "vm_type": payload.vm_type,
+                "vm_name": payload.name,
+                "op": op,
+            },
         )
         background_tasks.add_task(
             _run_power_op, job.id, payload.node, payload.vmid, payload.vm_type, op,
