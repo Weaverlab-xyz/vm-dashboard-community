@@ -389,23 +389,82 @@ def _write_provisioner(build_dir: Path, script: str) -> None:
     path.chmod(0o755)
 
 
-# ── Export + auto-register helpers (Phase 2 — build-once, promote-many) ───────
+# ── Export + auto-register helpers (Phase 2/3 — build-once, promote-many) ────
 #
-# Each helper runs after the cloud-native Packer build succeeds. It checks that
-# the operator's active /storage backend matches the build cloud (so the export
-# lands in their authoritative artefact home), exports the freshly built image
-# to a portable VHD via cloud-native APIs, and registers the result on the
-# /images page so it can be tracked + promoted.
+# Each helper runs after the cloud-native Packer build succeeds. The flow:
 #
-# Mismatch (e.g. AWS build but active backend is GCS) is non-fatal — the build
-# itself succeeded and the operator can promote manually via /images. Phase 3
-# will add cross-backend copy so any active backend can host any cloud's
-# exports.
+#   1. Native export to same-cloud storage (only cloud-native APIs can pull
+#      bytes out of a freshly built AMI / managed image / GCE image, so the
+#      first hop is always same-cloud — S3 for AWS, Blob for Azure, GCS for
+#      GCP).
+#   2. If the hub backend (`storage_service.hub_backend()`) is the same as
+#      same-cloud storage, register with the URL the native export already
+#      produced — done.
+#   3. Else, copy the artefact from same-cloud staging to the hub backend
+#      (Phase 3 cross-backend copy), delete the same-cloud staging blob, and
+#      register with the hub URL.
+#
+# Result: `RegisteredImage.artefact_url` always points at the hub regardless
+# of which cloud built the image, satisfying the "hub holds the source of
+# truth" design contract. Per-cloud storage is still required for the export
+# step (AWS only exports to S3, Azure to Blob, GCS to GCS) but it's used as
+# transient staging when the operator's hub is on a different cloud.
 
 def _versioned_blob_name(image_name: str, ext: str = "vhd") -> str:
     from datetime import datetime
     ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
     return f"images/{image_name}-{ts}.{ext}"
+
+
+async def _land_on_hub(
+    db,
+    job_id: str,
+    *,
+    build_backend: str,
+    build_key: str,
+    image_name: str,
+    image_ext: str = "vhd",
+) -> tuple[str, str]:
+    """Ensure the artefact at `build_key` on `build_backend` ends up on the
+    hub backend. If the hub IS the build backend, no-op (returns the input).
+    Otherwise copies to the hub, deletes the build-side staging copy, and
+    returns the new (hub_backend, hub_key) pair.
+
+    Returns: (final_backend, final_key) for use in artefact_url generation.
+    Raises StorageError on copy failure — caller decides whether to surface
+    it to the build job as an export_error or fall back to the build-side URL.
+    """
+    hub = storage_service.hub_backend()
+    if not hub:
+        # No usable hub — treat the build-side staging as the artefact home.
+        # This matches pre-Phase-3 behavior for installs that haven't set up
+        # any backend at all.
+        return (build_backend, build_key)
+    if hub == build_backend:
+        return (build_backend, build_key)
+
+    hub_key = storage_service.image_key(hub, image_name, ext=image_ext)
+    job_service.update_progress(
+        db, job_id, 97,
+        f"Copying artefact to hub backend '{hub}': {build_backend}://{build_key} → {hub}://{hub_key}",
+    )
+    await storage_service.copy(
+        src_backend=build_backend, src_key=build_key,
+        dst_backend=hub, dst_key=hub_key,
+    )
+    # Clean up the build-side staging copy so the operator doesn't pay for
+    # two copies of every multi-GB VHD. Best-effort — log if it fails but
+    # don't fail the whole build, the canonical artefact is already on the
+    # hub at this point.
+    try:
+        job_service.update_progress(db, job_id, 98, f"Cleaning up build-side staging on '{build_backend}'")
+        await storage_service.delete_image_in(build_backend, build_key)
+    except Exception as e:
+        logger.warning(
+            "Failed to delete build-side staging copy %s://%s after hub copy: %s",
+            build_backend, build_key, e,
+        )
+    return (hub, hub_key)
 
 
 async def _export_and_register_aws(
@@ -417,11 +476,14 @@ async def _export_and_register_aws(
         result["export_skipped"] = "no AMI ID parsed from packer output"
         return
 
-    backend = storage_service.active_backend()
-    if backend != "s3":
+    # AWS ec2 export-image only writes to S3 — the operator must have an S3
+    # bucket configured even if their hub backend is Azure/GCS. After the
+    # native export, _land_on_hub() handles the cross-backend copy when the
+    # hub isn't S3.
+    if not _cfg("storage_s3_bucket"):
         msg = (
-            f"Export skipped: active storage backend is '{backend or 'none'}', "
-            f"expected 's3' for AWS builds. Promote manually from /images."
+            "Export skipped: no S3 bucket configured (set storage_s3_bucket on /storage). "
+            "AWS native export only writes to S3 — required even when the hub is on another cloud."
         )
         job_service.update_progress(db, job_id, 99, msg)
         result["export_skipped"] = msg
@@ -447,6 +509,17 @@ async def _export_and_register_aws(
         )
         result["export"] = export
 
+        # AWS export_image picks the object name (`<task-id>.vhd`). Derive the
+        # S3 key from the returned URL so _land_on_hub knows what to copy.
+        s3_url = export["s3_url"]
+        build_key = s3_url[len(f"s3://{bucket}/"):]
+        final_backend, final_key = await _land_on_hub(
+            db, job_id,
+            build_backend="s3", build_key=build_key,
+            image_name=req.image_name, image_ext="vhd",
+        )
+        artefact_url = storage_service.image_url(final_backend, final_key)
+
         registered = image_registry_service.register_image(
             db,
             name=req.image_name,
@@ -456,10 +529,11 @@ async def _export_and_register_aws(
             description=f"Auto-registered from packer build {job_id}",
             source_image_id=artefact_id,
             source_region=region,
-            artefact_url=export["s3_url"],
+            artefact_url=artefact_url,
             artefact_format="vhd",
         )
         result["registered_image_id"] = registered["id"]
+        result["artefact_backend"] = final_backend
         job_service.update_progress(db, job_id, 99, f"Image registered: {registered['id']}")
     except Exception as e:
         msg = f"Export/register failed: {e}"
@@ -477,11 +551,14 @@ async def _export_and_register_azure(
         result["export_skipped"] = "no managed image ID parsed from packer output"
         return
 
-    backend = storage_service.active_backend()
-    if backend != "azure_blob":
+    # Azure managed-image → VHD export requires an Azure storage account.
+    # Required even when the hub is on another cloud — Azure exports only to
+    # its own Blob; _land_on_hub copies to the hub afterwards.
+    if not _cfg("storage_azure_account"):
         msg = (
-            f"Export skipped: active storage backend is '{backend or 'none'}', "
-            f"expected 'azure_blob' for Azure builds. Promote manually from /images."
+            "Export skipped: no Azure storage account configured "
+            "(set storage_azure_account on /storage). "
+            "Azure native export only writes to Blob — required even when the hub is on another cloud."
         )
         job_service.update_progress(db, job_id, 99, msg)
         result["export_skipped"] = msg
@@ -509,6 +586,15 @@ async def _export_and_register_azure(
         )
         result["export"] = export
 
+        # `blob_name` is the full key inside the container — the canonical
+        # build-side staging path for _land_on_hub.
+        final_backend, final_key = await _land_on_hub(
+            db, job_id,
+            build_backend="azure_blob", build_key=blob_name,
+            image_name=req.image_name, image_ext="vhd",
+        )
+        artefact_url = storage_service.image_url(final_backend, final_key)
+
         registered = image_registry_service.register_image(
             db,
             name=req.image_name,
@@ -518,10 +604,11 @@ async def _export_and_register_azure(
             description=f"Auto-registered from packer build {job_id}",
             source_image_id=artefact_id,
             source_region=_cfg("azure_location") or "centralus",
-            artefact_url=export["blob_url"],
+            artefact_url=artefact_url,
             artefact_format="vhd",
         )
         result["registered_image_id"] = registered["id"]
+        result["artefact_backend"] = final_backend
         job_service.update_progress(db, job_id, 99, f"Image registered: {registered['id']}")
     except Exception as e:
         msg = f"Export/register failed: {e}"
@@ -539,11 +626,12 @@ async def _export_and_register_gcp(
         result["export_skipped"] = "no image name parsed from packer output"
         return
 
-    backend = storage_service.active_backend()
-    if backend != "gcs":
+    # GCP image export only writes to GCS — required even when the hub is on
+    # another cloud. _land_on_hub copies to the hub afterwards.
+    if not _cfg("storage_gcs_bucket"):
         msg = (
-            f"Export skipped: active storage backend is '{backend or 'none'}', "
-            f"expected 'gcs' for GCP builds. Promote manually from /images."
+            "Export skipped: no GCS bucket configured (set storage_gcs_bucket on /storage). "
+            "GCP native export only writes to GCS — required even when the hub is on another cloud."
         )
         job_service.update_progress(db, job_id, 99, msg)
         result["export_skipped"] = msg
@@ -570,6 +658,13 @@ async def _export_and_register_gcp(
         )
         result["export"] = export
 
+        final_backend, final_key = await _land_on_hub(
+            db, job_id,
+            build_backend="gcs", build_key=object_path,
+            image_name=req.image_name, image_ext="vhd",
+        )
+        artefact_url = storage_service.image_url(final_backend, final_key)
+
         registered = image_registry_service.register_image(
             db,
             name=req.image_name,
@@ -579,10 +674,11 @@ async def _export_and_register_gcp(
             description=f"Auto-registered from packer build {job_id}",
             source_image_id=artefact_id,
             source_region=_cfg("gcp_zone") or "",
-            artefact_url=export["gs_url"],
+            artefact_url=artefact_url,
             artefact_format="vhd",
         )
         result["registered_image_id"] = registered["id"]
+        result["artefact_backend"] = final_backend
         job_service.update_progress(db, job_id, 99, f"Image registered: {registered['id']}")
     except Exception as e:
         msg = f"Export/register failed: {e}"

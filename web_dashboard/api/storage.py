@@ -108,7 +108,10 @@ async def list_backends(current_user: User = Depends(get_current_user)):
 async def get_config(current_user: User = Depends(require_permission("admin", "read"))):
     """Return all per-backend config values. Admin-only because the field
     list overlaps with cloud account scoping."""
-    out: dict = {"storage_active_backend": _cfg_get("storage_active_backend")}
+    out: dict = {
+        "storage_active_backend": _cfg_get("storage_active_backend"),
+        "storage_hub_backend":    _cfg_get("storage_hub_backend"),
+    }
     for keys in _BACKEND_KEYS.values():
         for k in keys:
             out[k] = _cfg_get(k)
@@ -119,6 +122,7 @@ async def get_config(current_user: User = Depends(require_permission("admin", "r
 
 class StorageConfigPatch(BaseModel):
     storage_active_backend: str | None = None
+    storage_hub_backend:    str | None = None
     storage_s3_bucket:      str | None = None
     storage_s3_region:      str | None = None
     storage_s3_prefix:      str | None = None
@@ -175,6 +179,35 @@ async def patch_config(
                             f"Ansible runner. Settings → Ansible currently "
                             f"selects '{runner}'. Switch the runner to "
                             f"'local' before activating this backend."
+                        ),
+                    )
+    if "storage_hub_backend" in raw:
+        chosen_hub = raw["storage_hub_backend"]
+        # Empty string means "fall back to active backend" — that's valid.
+        if chosen_hub and chosen_hub not in BACKENDS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid hub backend '{chosen_hub}'. Valid: {', '.join(BACKENDS)}.",
+            )
+        # Hub holds VHD artefacts the promote runners read via HTTPS, so the
+        # local/UNC backend can't be a hub (no presigned URL surface).
+        if chosen_hub == "local":
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Local/SMB backend can't host the image-registry hub — promote "
+                    "runners need a cloud-native URL. Pick s3, azure_blob, or gcs."
+                ),
+            )
+        if chosen_hub:
+            required = _REQUIRED_FIELDS[chosen_hub]
+            for k in required:
+                if not (raw.get(k) or _cfg_get(k)):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"Cannot set hub to '{chosen_hub}' — missing required field "
+                            f"'{k}'. Configure that backend before pointing the hub at it."
                         ),
                     )
     _cfg_set_many(raw)
