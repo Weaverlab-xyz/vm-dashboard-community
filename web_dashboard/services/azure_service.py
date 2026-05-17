@@ -1012,6 +1012,13 @@ def _get_ssh_keys_sync(cred, sub_id: str, rg: str) -> list:
 def _get_network_options_sync(cred, sub_id: str, location: str, vnet_rg: str, rg: str) -> dict:
     network = _get_network(cred, sub_id)
     compute = _get_compute(cred, sub_id)
+    warnings: list[str] = []
+
+    def _status_code(exc: Exception):
+        return (
+            getattr(exc, "status_code", None)
+            or getattr(getattr(exc, "response", None), "status_code", None)
+        )
 
     try:
         sizes_raw = sorted(
@@ -1023,6 +1030,7 @@ def _get_network_options_sync(cred, sub_id: str, location: str, vnet_rg: str, rg
     except Exception as e:
         logger.warning("Failed to list VM sizes for location=%s: %s", location, e)
         sizes = []
+        warnings.append(f"VM sizes for location '{location}' could not be listed: {e}.")
 
     locations = [
         "eastus", "eastus2", "westus", "westus2", "westus3",
@@ -1050,6 +1058,13 @@ def _get_network_options_sync(cred, sub_id: str, location: str, vnet_rg: str, rg
                 })
     except Exception as e:
         logger.warning("Failed to list subnets from rg=%s: %s", search_rg, e, exc_info=True)
+        if _status_code(e) in (401, 403):
+            warnings.append(
+                f"Subnets in resource group '{search_rg}' are inaccessible: {e}. "
+                f"Grant the dashboard service principal Reader on that resource group."
+            )
+        else:
+            warnings.append(f"Subnets in resource group '{search_rg}' could not be listed: {e}.")
 
     nsgs = []
     try:
@@ -1059,10 +1074,17 @@ def _get_network_options_sync(cred, sub_id: str, location: str, vnet_rg: str, rg
             nsgs.append({"id": nsg.id, "name": nsg.name, "resource_group": search_rg})
     except Exception as e:
         logger.warning("Failed to list NSGs from rg=%s: %s", search_rg, e, exc_info=True)
+        if _status_code(e) in (401, 403):
+            warnings.append(
+                f"Network Security Groups in resource group '{search_rg}' are inaccessible: {e}. "
+                f"Grant the dashboard service principal Reader on that resource group."
+            )
+        else:
+            warnings.append(f"Network Security Groups in resource group '{search_rg}' could not be listed: {e}.")
 
     ssh_keys = _get_ssh_keys_sync(cred, sub_id, rg)
 
-    logger.info("Network options: returning subnets=%d, nsgs=%d, ssh_keys=%d, locations=%d, sizes=%d", 
+    logger.info("Network options: returning subnets=%d, nsgs=%d, ssh_keys=%d, locations=%d, sizes=%d",
                 len(subnets), len(nsgs), len(ssh_keys), len(locations), len(sizes))
     return {
         "locations": locations,
@@ -1070,6 +1092,7 @@ def _get_network_options_sync(cred, sub_id: str, location: str, vnet_rg: str, rg
         "subnets": subnets,
         "nsgs": nsgs,
         "ssh_keys": ssh_keys,
+        "warnings": warnings,
     }
 
 
