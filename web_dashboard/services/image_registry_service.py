@@ -558,3 +558,127 @@ async def promote_to_aws_automated(
         notes=f"Imported via promote-runner ECS task (import_task={import_result['task_id']}).",
     )
     return updated
+
+
+# ── Automated promote: Azure target ──────────────────────────────────────────
+
+
+async def promote_to_azure_automated(
+    db: Session,
+    image_id: str,
+    *,
+    target_resource_group: Optional[str] = None,
+    target_location: Optional[str] = None,
+    os_type: str = "Linux",
+    hyper_v_generation: str = "V2",
+    progress_cb=None,
+) -> dict:
+    """End-to-end Azure promote: parse hub URL, kick the ACI runner,
+    call `compute.images.begin_create_or_update`, cleanup staging,
+    record promotion.
+
+    Mirrors `promote_to_aws_automated` — same resolve-hub / kick-runner /
+    SDK-import / cleanup / record shape. Diffs:
+      - Runner is ACI in target Azure RG instead of ECS Fargate.
+      - SDK call is `images.begin_create_or_update(...).result()` instead
+        of `ec2.import_image` + poll.
+      - `promotions["azure"]` carries `resource_id` (full ARM path)
+        instead of an AMI id.
+
+    target_resource_group / target_location default to the operator's
+    Azure RG / location config; os_type defaults to Linux + V2 which
+    matches the Phase-1 manual-steps walkthrough.
+    """
+    from . import promote_runner_service, azure_service, config_service
+
+    image = get_image(db, image_id)
+    if not image:
+        raise ImageRegistryError(f"Image {image_id} not found.")
+    if not image.get("artefact_url"):
+        raise ImageRegistryError(
+            "Image has no artefact_url. Re-build with Phase 3 export to populate it, "
+            "or fall back to the manual-steps walkthrough."
+        )
+
+    hub_backend, hub_key = _parse_hub_url(image["artefact_url"])
+    source_format = (image.get("artefact_format") or "vhd").lower()
+    target_format = "vhd"  # Azure managed image only accepts VHD.
+
+    target_rg = target_resource_group or config_service.get(
+        "promote_runner_azure_target_resource_group"
+    ) or config_service.get("azure_resource_group")
+    if not target_rg:
+        raise ImageRegistryError(
+            "target_resource_group is required (no fallback in promote_runner_azure_target_resource_group or azure_resource_group)."
+        )
+    target_loc = target_location or config_service.get("azure_location") or "centralus"
+    target_storage_account_id = config_service.get("promote_runner_azure_target_storage_account_id") or ""
+
+    dest_account, dest_container, dest_blob = promote_runner_service.resolve_azure_staging(
+        image["name"], image["version"],
+    )
+    blob_uri = f"https://{dest_account}.blob.core.windows.net/{dest_container}/{dest_blob}"
+    target_image_name = f"{image['name']}-{image['version']}"
+
+    def _say(msg: str) -> None:
+        logger.info("[promote %s -> azure] %s", image_id, msg)
+        if progress_cb:
+            progress_cb(msg)
+
+    # 1+2: kick the ACI runner — converts (if formats differ) + uploads to dest.
+    _say(f"Launching promote runner: {hub_backend}://{hub_key} -> {blob_uri}")
+    await promote_runner_service.run_for_azure_target(
+        job_id=image_id,
+        hub_backend=hub_backend,
+        hub_key=hub_key,
+        source_format=source_format,
+        target_format=target_format,
+        dest_account=dest_account,
+        dest_container=dest_container,
+        dest_blob=dest_blob,
+    )
+
+    # 3: ask Azure compute to create a managed image from the staged blob.
+    _say(f"Creating managed image '{target_image_name}' in {target_rg} from {blob_uri[:80]}…")
+    img_result = await azure_service.create_image_from_blob(
+        target_rg=target_rg,
+        location=target_loc,
+        image_name=target_image_name,
+        blob_uri=blob_uri,
+        os_type=os_type,
+        hyper_v_generation=hyper_v_generation,
+        storage_account_id=target_storage_account_id,
+        progress_cb=_say,
+    )
+    resource_id = img_result["resource_id"]
+    state = img_result["provisioning_state"]
+    _say(f"Image create returned: {state} ({resource_id})")
+
+    if state and state.lower() != "succeeded":
+        # Cloud-side import didn't reach a clean state — record failure and
+        # leave the staged blob in place so the operator can inspect.
+        raise ImageRegistryError(
+            f"Image create finished with provisioning_state '{state}' — see Azure activity log."
+        )
+
+    # 4: cleanup staged blob — only after the cloud-side image is Succeeded.
+    try:
+        _say(f"Cleaning up staged blob {dest_account}/{dest_container}/{dest_blob}")
+        await azure_service.delete_staged_blob(dest_account, dest_container, dest_blob)
+    except Exception as e:
+        logger.warning(
+            "Failed to delete staged blob %s/%s/%s after successful promote: %s",
+            dest_account, dest_container, dest_blob, e,
+        )
+
+    # 5: record final promotion state.
+    updated = record_promotion(
+        db,
+        image_id,
+        "azure",
+        status="completed",
+        image_id_value=resource_id,
+        region=target_loc,
+        notes=f"Imported via promote-runner ACI in {target_rg}.",
+    )
+    return updated

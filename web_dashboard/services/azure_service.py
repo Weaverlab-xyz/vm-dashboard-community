@@ -1647,3 +1647,276 @@ async def export_managed_image_to_vhd(
         raise
     except Exception as e:
         raise AzureError(f"Failed to export image {image_name} to VHD: {e}") from e
+
+
+# ── Import VHD to managed image (cross-cloud promote target side) ────────────
+
+def _create_image_from_blob_sync(
+    cred,
+    sub_id: str,
+    target_rg: str,
+    location: str,
+    image_name: str,
+    blob_uri: str,
+    os_type: str,
+    hyper_v_generation: str,
+    storage_account_id: str,
+    progress_cb,
+) -> dict:
+    """Create a managed image from a VHD blob URI. Returns
+    {resource_id, provisioning_state, name}.
+
+    Mirrors `images.begin_create_or_update` from the Azure compute SDK. The
+    blob URI must be reachable from the target subscription — usually it
+    lives in `storage_account_id`'s same subscription, which the dashboard's
+    AAD credential already has access to. Promotes uses this after the
+    promote runner has staged the VHD in the dest container.
+    """
+    from azure.mgmt.compute.models import (
+        Image, ImageStorageProfile, ImageOSDisk, OperatingSystemTypes as ComputeOSType,
+        OperatingSystemStateTypes, HyperVGenerationTypes, SubResource,
+    )
+
+    if progress_cb:
+        progress_cb(f"Creating managed image '{image_name}' in {target_rg} from {blob_uri[:80]}…")
+
+    compute = _get_compute(cred, sub_id)
+
+    os_t = ComputeOSType.LINUX if os_type.lower() == "linux" else ComputeOSType.WINDOWS
+    gen = (
+        HyperVGenerationTypes.V2
+        if (hyper_v_generation or "").upper() in ("V2", "GEN2")
+        else HyperVGenerationTypes.V1
+    )
+
+    os_disk_kwargs: dict = {
+        "os_type": os_t,
+        "os_state": OperatingSystemStateTypes.GENERALIZED,
+        "blob_uri": blob_uri,
+    }
+    if storage_account_id:
+        os_disk_kwargs["storage_account"] = SubResource(id=storage_account_id)
+
+    img_params = Image(
+        location=location,
+        hyper_v_generation=gen,
+        storage_profile=ImageStorageProfile(
+            os_disk=ImageOSDisk(**os_disk_kwargs),
+            zone_resilient=False,
+        ),
+        tags={"ManagedBy": "vm-cli-dashboard", "Purpose": "promote-target"},
+    )
+
+    poller = compute.images.begin_create_or_update(target_rg, image_name, img_params)
+    img = poller.result()
+    if progress_cb:
+        progress_cb(f"Image create returned: {img.provisioning_state} ({img.id})")
+    return {
+        "resource_id": img.id,
+        "name": img.name,
+        "provisioning_state": img.provisioning_state,
+    }
+
+
+async def create_image_from_blob(
+    target_rg: str,
+    location: str,
+    image_name: str,
+    blob_uri: str,
+    os_type: str = "Linux",
+    hyper_v_generation: str = "V2",
+    storage_account_id: str = "",
+    progress_cb=None,
+) -> dict:
+    """Create a managed image from a VHD blob. Returns {resource_id, name,
+    provisioning_state}. `blob_uri` should be the full HTTPS blob URL (no
+    SAS — same-subscription AAD trust is sufficient when the operator's
+    dashboard SP has read on the source storage account)."""
+    try:
+        cred, sub_id = await _ensure_creds()
+        return await asyncio.to_thread(
+            _create_image_from_blob_sync,
+            cred, sub_id, target_rg, location, image_name, blob_uri,
+            os_type, hyper_v_generation, storage_account_id, progress_cb,
+        )
+    except AzureError:
+        raise
+    except Exception as e:
+        raise AzureError(f"Failed to create image '{image_name}' from blob: {e}") from e
+
+
+# ── ACI Promote-runner task ──────────────────────────────────────────────────
+
+_PROMOTE_RUNNER_PREFIX = "promote-runner"
+
+
+def _run_aci_promote_runner_sync(
+    cred,
+    sub_id: str,
+    rg: str,
+    location: str,
+    subnet_id: str,
+    image: str,
+    cpu: float,
+    memory_gb: float,
+    runner_args: list,
+    azure_env: dict,
+    job_id: str,
+    acr_server: str = "",
+    acr_username: str = "",
+    acr_password: str = "",
+    poll_seconds_max: int = 7200,
+) -> tuple:
+    """Launch the promote-runner image as an ACI container group, wait for
+    it to stop, return (exit_code, log_output), and delete the group.
+
+    Mirrors `_run_aci_ansible_sync`. The runner takes its argv from the
+    container `command` field rather than env vars; Azure credentials for
+    the dest-side upload are passed as `secure_value` env vars.
+    """
+    import time
+    aci = _get_aci(cred, sub_id)
+    group_name = f"{_PROMOTE_RUNNER_PREFIX}-{job_id[:8]}"
+
+    env_vars = []
+    for k, v in (azure_env or {}).items():
+        # Tenant ID and client ID aren't strictly secret but treating
+        # everything uniformly keeps the ACI portal from leaking them.
+        env_vars.append(EnvironmentVariable(name=k, secure_value=v))
+
+    container = Container(
+        name="promote-runner",
+        image=image,
+        resources=ResourceRequirements(
+            requests=ResourceRequests(cpu=cpu, memory_in_gb=memory_gb),
+        ),
+        # ENTRYPOINT in the runner Dockerfile launches the python script;
+        # ACI maps `command` to the container CMD, which becomes argparse
+        # argv. Don't pre-pend python -m anything.
+        command=list(runner_args),
+        environment_variables=env_vars,
+    )
+
+    group_params = ContainerGroup(
+        location=location,
+        containers=[container],
+        os_type=OperatingSystemTypes.LINUX,
+        restart_policy="Never",
+        tags={"ManagedBy": "vm-cli-dashboard", "Purpose": "promote-runner"},
+    )
+    if subnet_id:
+        from azure.mgmt.containerinstance.models import ContainerGroupSubnetId
+        group_params.subnet_ids = [ContainerGroupSubnetId(id=subnet_id)]
+    if acr_server and acr_username and acr_password:
+        from azure.mgmt.containerinstance.models import ImageRegistryCredential
+        group_params.image_registry_credentials = [
+            ImageRegistryCredential(server=acr_server, username=acr_username, password=acr_password)
+        ]
+
+    logger.info("ACI promote-runner: creating container group %s in %s/%s", group_name, rg, location)
+    aci.container_groups.begin_create_or_update(rg, group_name, group_params).result()
+
+    output = ""
+    exit_code = 1
+    state = ""
+    try:
+        waited = 0
+        # Default 2 hours — multi-GB transfers + qemu-img convert can take a while.
+        while waited < poll_seconds_max:
+            cg = aci.container_groups.get(rg, group_name)
+            state = (cg.instance_view.state if cg.instance_view else "") or ""
+            if state in ("Succeeded", "Failed", "Stopped"):
+                break
+            time.sleep(10)
+            waited += 10
+
+        try:
+            log_resp = aci.containers.list_logs(rg, group_name, "promote-runner")
+            output = log_resp.content or ""
+        except Exception as log_err:
+            logger.warning("ACI promote-runner: could not retrieve logs: %s", log_err)
+            output = f"(failed to retrieve container logs: {log_err})"
+
+        try:
+            cg = aci.container_groups.get(rg, group_name)
+            for c in (cg.containers or []):
+                if c.name == "promote-runner" and c.instance_view and c.instance_view.current_state:
+                    ec = c.instance_view.current_state.exit_code
+                    exit_code = ec if ec is not None else (0 if state == "Succeeded" else 1)
+                    break
+            else:
+                exit_code = 0 if state == "Succeeded" else 1
+        except Exception as ec_err:
+            logger.warning("ACI promote-runner: could not get exit code: %s", ec_err)
+            exit_code = 0 if state == "Succeeded" else 1
+
+    finally:
+        # Always delete the container group — same lifecycle as ACI Ansible
+        # and ACI Jumpoint. Promote runs are one-shot.
+        try:
+            aci.container_groups.begin_delete(rg, group_name).result()
+            logger.info("ACI promote-runner: deleted container group %s", group_name)
+        except Exception as del_err:
+            logger.warning("ACI promote-runner: could not delete group %s: %s", group_name, del_err)
+
+    return exit_code, output
+
+
+async def run_aci_promote_runner_task(
+    rg: str,
+    location: str,
+    subnet_id: str,
+    image: str,
+    cpu: float,
+    memory_gb: float,
+    runner_args: list,
+    azure_env: dict,
+    job_id: str,
+    acr_server: str = "",
+    acr_username: str = "",
+    acr_password: str = "",
+    poll_seconds_max: int = 7200,
+) -> tuple:
+    """Run the promote-runner image as an ACI container group.
+    Returns (exit_code, log_output)."""
+    try:
+        cred, sub_id = await _ensure_creds()
+        return await asyncio.to_thread(
+            _run_aci_promote_runner_sync,
+            cred, sub_id, rg, location, subnet_id, image, cpu, memory_gb,
+            runner_args, azure_env, job_id, acr_server, acr_username,
+            acr_password, poll_seconds_max,
+        )
+    except AzureError:
+        raise
+    except Exception as e:
+        raise AzureError(f"Failed to run ACI promote-runner task: {e}") from e
+
+
+def _delete_staged_blob_sync(
+    cred,
+    storage_account: str,
+    container: str,
+    blob_name: str,
+) -> None:
+    """Delete a single blob from an Azure storage account. Used for promote
+    cleanup after the cloud-side image-create reaches Succeeded."""
+    from azure.storage.blob import BlobServiceClient
+    account_url = f"https://{storage_account}.blob.core.windows.net"
+    svc = BlobServiceClient(account_url=account_url, credential=cred)
+    blob_client = svc.get_blob_client(container=container, blob=blob_name)
+    blob_client.delete_blob()
+
+
+async def delete_staged_blob(storage_account: str, container: str, blob_name: str) -> None:
+    """Best-effort cleanup of a staged blob in any Azure storage account
+    the dashboard's AAD credential can reach. Unlike
+    `storage_service.delete_image_in("azure_blob", ...)` this targets an
+    explicit account/container instead of the configured hub container."""
+    try:
+        cred, _sub_id = await _ensure_creds()
+        await asyncio.to_thread(
+            _delete_staged_blob_sync, cred, storage_account, container, blob_name,
+        )
+    except Exception as e:
+        raise AzureError(f"Failed to delete staged blob {storage_account}/{container}/{blob_name}: {e}") from e
