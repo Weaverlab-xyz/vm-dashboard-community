@@ -320,6 +320,17 @@
         </div>
 
         <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Workgroup <span class="text-red-500">*</span></label>
+          <select x-model="deployModal.workgroup" required
+                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <option value="">Select workgroup…</option>
+            <template x-for="w in availableWorkgroups" :key="w">
+              <option :value="w" x-text="w"></option>
+            </template>
+          </select>
+        </div>
+
+        <div>
           <label class="block text-sm font-medium text-gray-700 mb-1">VM name <span class="text-red-500">*</span></label>
           <input type="text" x-model="deployModal.vmName" placeholder="e.g. web-server-01"
                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
@@ -367,7 +378,7 @@
       <div class="flex justify-end gap-3 mt-6">
         <button @click="deployModal.open = false" class="px-4 py-2 text-sm text-gray-600 hover:text-gray-800">Cancel</button>
         <button @click="submitDeploy()"
-                :disabled="!deployModal.vmName || !deployModal.clusterUuid || !deployModal.subnetUuid"
+                :disabled="!deployModal.vmName || !deployModal.clusterUuid || !deployModal.subnetUuid || !deployModal.workgroup"
                 class="px-4 py-2 text-sm bg-green-600 hover:bg-green-700 disabled:opacity-50 text-white rounded-lg font-medium transition">
           Deploy VM
         </button>
@@ -474,9 +485,10 @@ function nutanixDashboard() {
     importModal: { open: false, image: null, imageName: '' },
     deployModal: {
       open: false, image: null, vmName: '', clusterUuid: '', subnetUuid: '',
-      vcpus: 2, memoryMib: 4096, diskMib: 40960,
+      vcpus: 2, memoryMib: 4096, diskMib: 40960, workgroup: '',
     },
     deleteConfirm: { open: false, name: '', message: '', action: null },
+    availableWorkgroups: [],
 
     get clusters() {
       return [...new Set(this.allVms.map(v => v.cluster).filter(Boolean))].sort();
@@ -502,7 +514,19 @@ function nutanixDashboard() {
 
     async init() {
       requireAuth();
+      this._loadWorkgroups();
       await this.refresh();
+    },
+
+    _loadWorkgroups() {
+      API.get('/api/groups/workgroups')
+        .then(r => { this.availableWorkgroups = r || []; })
+        .catch(() => { this.availableWorkgroups = []; });
+    },
+
+    _defaultWorkgroup() {
+      if (this.availableWorkgroups.includes('default')) return 'default';
+      return this.availableWorkgroups[0] || '';
     },
 
     async refresh() {
@@ -566,6 +590,7 @@ function nutanixDashboard() {
       this.deployModal = {
         open: true, image: img, vmName: '', clusterUuid: '', subnetUuid: '',
         vcpus: 2, memoryMib: 4096, diskMib: 40960,
+        workgroup: this._defaultWorkgroup(),
       };
     },
     async submitDeploy() {
@@ -580,6 +605,7 @@ function nutanixDashboard() {
           num_sockets: 1,
           memory_mib: m.memoryMib,
           disk_size_mib: m.diskMib,
+          workgroup: m.workgroup,
         });
         m.open = false;
         window.location.href = '/jobs/' + res.job_id;

@@ -12,11 +12,22 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from ..auth import get_current_user
 from ..models.user import User
-from ..services import job_service
+from ..services import job_service, workgroup_service
 from ..services import nutanix_service
 from ..services.nutanix_service import NutanixError
 
 router = APIRouter(prefix="/api/nutanix", tags=["nutanix"])
+
+
+def _validate_workgroup(db: Session, user: User, workgroup: str) -> str:
+    """Validate that `workgroup` exists and the user has access. Returns canonical name."""
+    wg = workgroup_service.get(db, workgroup)
+    if not wg:
+        raise HTTPException(status_code=400, detail=f"Unknown workgroup '{workgroup}'")
+    canonical = wg.name
+    if not user.is_admin and canonical not in [w.lower() for w in user.workgroups_list]:
+        raise HTTPException(status_code=403, detail=f"You do not have access to workgroup '{canonical}'")
+    return canonical
 
 
 # ── Cloud image catalog ───────────────────────────────────────────────────────
@@ -106,6 +117,7 @@ class DeployRequest(BaseModel):
     image_uuid: str
     cluster_uuid: str
     subnet_uuid: str
+    workgroup: str
     vcpus: int = 2
     num_sockets: int = 1
     memory_mib: int = 4096
@@ -141,11 +153,12 @@ async def deploy(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    canonical = _validate_workgroup(db, current_user, payload.workgroup)
     job = job_service.create_job(
         db,
         job_type="nutanix_deploy",
         description=f"Nutanix: deploy VM '{payload.vm_name}' from image {payload.image_uuid[:8]}…",
-        workgroup="nutanix",
+        workgroup=canonical,
         owner_id=current_user.id,
     )
     background_tasks.add_task(_run_deploy, job.id, payload)
