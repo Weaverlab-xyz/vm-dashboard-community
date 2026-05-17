@@ -33,7 +33,13 @@ logger = logging.getLogger(__name__)
 _cache: dict = {}
 _cache_lock = threading.Lock()
 _cache_loaded: bool = False
+_cache_loaded_at: float = 0.0
 _setup_complete: Optional[bool] = None
+
+# Time-to-live for the in-memory config cache. Bounds how long another gunicorn
+# worker can keep serving stale values after this process writes new ones
+# (config_service.set_many only invalidates the local worker's cache).
+_CACHE_TTL_SECONDS = 5.0
 
 # External-backend value cache: key → (resolved_value, expiry_ts)
 _ext_cache: dict[str, tuple[str, float]] = {}
@@ -72,7 +78,7 @@ def _decrypt(token: str) -> str:
 # ── Cache management ──────────────────────────────────────────────────────────
 
 def _load_cache() -> None:
-    global _cache, _cache_loaded
+    global _cache, _cache_loaded, _cache_loaded_at
     from ..database import SessionLocal, AppConfig
     db = SessionLocal()
     try:
@@ -83,13 +89,18 @@ def _load_cache() -> None:
         with _cache_lock:
             _cache = loaded
             _cache_loaded = True
+            _cache_loaded_at = time.monotonic()
     finally:
         db.close()
 
 
 def _ensure_loaded() -> None:
-    if not _cache_loaded:
-        _load_cache()
+    # Cross-worker freshness: even if this worker's cache is "loaded", drop it
+    # after _CACHE_TTL_SECONDS so writes from a sibling gunicorn worker (whose
+    # invalidate() call only affected its own memory) become visible here.
+    if _cache_loaded and (time.monotonic() - _cache_loaded_at) < _CACHE_TTL_SECONDS:
+        return
+    _load_cache()
 
 
 def invalidate() -> None:
