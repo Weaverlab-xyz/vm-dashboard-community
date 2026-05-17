@@ -20,7 +20,7 @@ task-launch time — no source-side credentials live in the container.
 import logging
 from typing import Optional
 
-from . import aws_service, azure_service, config_service, storage_service
+from . import aws_service, azure_service, config_service, gcp_service, storage_service
 from ..config import settings
 
 logger = logging.getLogger(__name__)
@@ -294,6 +294,119 @@ async def run_for_azure_target(
         acr_server=cfg["acr_server"],
         acr_username=cfg["acr_username"],
         acr_password=cfg["acr_password"],
+    )
+    if exit_code != 0:
+        raise PromoteRunnerError(
+            f"Promote runner exited with code {exit_code}. See log_output for details.",
+            log_output=output,
+        )
+    return (exit_code, output)
+
+
+# ── GCP target ───────────────────────────────────────────────────────────────
+
+
+def _resolve_gcp_runner_config() -> dict:
+    """Resolve Cloud Run + staging knobs for the GCP promote runner. Falls
+    back to existing gcp_* and storage_gcs_* keys so single-tenant installs
+    don't have to set anything beyond enabling a runner-capable SA."""
+    project_id = _cfg("gcp_project_id")
+    region = _cfg("promote_runner_gcp_region") or _cfg("gcp_region")
+    image = _cfg("promote_runner_image") or "weaverlab-xyz/dashboard-promote-runner:latest"
+    cpu = _cfg("promote_runner_gcp_cpu") or "2000m"
+    memory = _cfg("promote_runner_gcp_memory") or "4Gi"
+    vpc_connector = _cfg("promote_runner_gcp_vpc_connector")
+    sa_email = _cfg("promote_runner_gcp_service_account")
+
+    staging_bucket = _cfg("promote_runner_gcp_staging_bucket") or _cfg("storage_gcs_bucket")
+    staging_prefix = (_cfg("promote_runner_gcp_staging_prefix") or "promote-staging").strip("/")
+
+    missing = []
+    if not project_id:
+        missing.append("gcp_project_id")
+    if not region:
+        missing.append("promote_runner_gcp_region (or gcp_region)")
+    if not staging_bucket:
+        missing.append("promote_runner_gcp_staging_bucket (or storage_gcs_bucket)")
+    if missing:
+        raise PromoteRunnerError(
+            "GCP promote runner is not configured. Set on /storage: "
+            + ", ".join(missing) + "."
+        )
+
+    return {
+        "project_id": project_id,
+        "region": region,
+        "image": image,
+        "cpu": cpu,
+        "memory": memory,
+        "vpc_connector": vpc_connector,
+        "service_account_email": sa_email,
+        "staging_bucket": staging_bucket,
+        "staging_prefix": staging_prefix,
+    }
+
+
+def resolve_gcp_staging(image_name: str, version: str) -> tuple[str, str]:
+    """Return (bucket, object_name) for where the GCP promote runner should
+    drop the wrapped tar.gz before images.insert consumes it. The `.tar.gz`
+    extension is significant — the runner produces a gzip-tar containing
+    `disk.raw` and GCP image-insert requires that exact shape."""
+    cfg = _resolve_gcp_runner_config()
+    object_name = f"{cfg['staging_prefix']}/{image_name}-{version}.tar.gz"
+    return (cfg["staging_bucket"], object_name)
+
+
+async def run_for_gcp_target(
+    *,
+    job_id: str,
+    hub_backend: str,
+    hub_key: str,
+    source_format: str,
+    dest_bucket: str,
+    dest_object: str,
+    presign_expiry_seconds: int = 7200,
+) -> tuple:
+    """Launch the Cloud Run promote-runner job to copy `hub_backend://hub_key`
+    into `gs://dest_bucket/dest_object`, converting vhd → raw and tar.gz-
+    wrapping along the way. Returns (exit_code, log_output).
+
+    `dest_object` must end in `.tar.gz` because GCP's images.insert reads
+    the source as a gzip-tar with a single `disk.raw` entry. The runner
+    handles the tar wrap automatically when `--target gcs --target-format raw`.
+    Caller (orchestrator) is responsible for naming the object accordingly.
+    """
+    cfg = _resolve_gcp_runner_config()
+
+    source_url = await storage_service.presigned_url(
+        hub_backend, hub_key, expiry_seconds=presign_expiry_seconds, method="GET",
+    )
+
+    runner_args = [
+        "--source-url", source_url,
+        "--source-format", source_format,
+        # Forced to "raw" for GCP — images.insert source must be a gzip-tar
+        # whose single entry is `disk.raw`. The runner does the tar wrap.
+        "--target-format", "raw",
+        "--target", "gcs",
+        "--dest-gcs-bucket", dest_bucket,
+        "--dest-gcs-object", dest_object,
+    ]
+
+    logger.info(
+        "Launching GCP promote-runner Cloud Run job for %s: hub=%s://%s -> gs://%s/%s",
+        job_id, hub_backend, hub_key, dest_bucket, dest_object,
+    )
+    exit_code, output = await gcp_service.run_cloud_run_promote_runner_task(
+        project_id=cfg["project_id"],
+        region=cfg["region"],
+        image=cfg["image"],
+        runner_args=runner_args,
+        job_id=job_id,
+        cpu=cfg["cpu"],
+        memory=cfg["memory"],
+        vpc_connector=cfg["vpc_connector"],
+        service_account_email=cfg["service_account_email"],
     )
     if exit_code != 0:
         raise PromoteRunnerError(

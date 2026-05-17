@@ -387,6 +387,21 @@ class Settings(BaseSettings):
     # specific account is required (compliance, BYOK).
     promote_runner_azure_target_storage_account_id: str = ""
 
+    # ── GCP-target promote runner (Cloud Run job) ────────────────────────────
+    # Same image as the AWS/Azure path; the dashboard passes `--target gcs`
+    # at launch time. The runner additionally wraps the converted raw disk
+    # into a `disk.raw` tar.gz before upload (GCP image-insert quirk —
+    # documented in runners/promote/README.md). Falls back to existing
+    # gcp_* / storage_gcs_* keys for single-tenant installs.
+    promote_runner_gcp_region: str = ""                  # fallback: gcp_region
+    promote_runner_gcp_cpu: str = "2000m"                # qemu-img headroom
+    promote_runner_gcp_memory: str = "4Gi"               # ~4 GiB for multi-GB VHDs + tar wrap
+    promote_runner_gcp_vpc_connector: str = ""           # optional, for private-network egress
+    promote_runner_gcp_service_account: str = ""         # optional: workload-identity SA email for the runner
+    promote_runner_gcp_staging_bucket: str = ""          # fallback: storage_gcs_bucket
+    promote_runner_gcp_staging_prefix: str = "promote-staging"
+    promote_runner_gcp_image_family: str = ""            # optional family label on the resulting custom image
+
     ansible_runner: str = "local"              # "local" | "ecs" | "aci" | "gcp"
     # Per-cloud SSH user for Ansible cloud runner targets. Each cloud's stock
     # AMI / image family ships with a different default username, so a single

@@ -184,6 +184,55 @@ async def _run_aws_automated_promote(
         db.close()
 
 
+async def _run_gcp_automated_promote(
+    image_id: str,
+    target_region: str,
+    job_id: str,
+) -> None:
+    """Background-task wrapper for GCP automated promote. Mirrors the
+    AWS / Azure wrappers."""
+    from ..database import SessionLocal
+    db = SessionLocal()
+    try:
+        def _progress(msg: str) -> None:
+            try:
+                job_service.update_progress(db, job_id, 50, msg[:200])
+            except Exception:
+                logger.exception("Failed to update job %s progress", job_id)
+
+        try:
+            updated = await image_registry_service.promote_to_gcp_automated(
+                db, image_id,
+                target_region=target_region or None,
+                progress_cb=_progress,
+            )
+            promo = (updated.get("promotions") or {}).get("gcp") or {}
+            job_service.set_completed(db, job_id, {
+                "self_link": promo.get("self_link") or promo.get("image_id"),
+                "region":    promo.get("region"),
+                "promotions": updated.get("promotions"),
+            })
+        except (ImageRegistryError, PromoteRunnerError) as e:
+            extra = ""
+            if isinstance(e, PromoteRunnerError) and getattr(e, "log_output", ""):
+                extra = "\n--- runner log ---\n" + e.log_output[-4000:]
+            job_service.set_failed(db, job_id, f"{e}{extra}")
+            try:
+                image_registry_service.record_promotion(
+                    db, image_id, "gcp",
+                    status="failed",
+                    region=target_region,
+                    notes=str(e),
+                )
+            except Exception:
+                logger.exception("Failed to record promotion failure for %s", image_id)
+        except Exception as e:
+            logger.exception("Automated GCP promote of %s raised unexpectedly", image_id)
+            job_service.set_failed(db, job_id, f"Unexpected: {e}")
+    finally:
+        db.close()
+
+
 async def _run_azure_automated_promote(
     image_id: str,
     target_resource_group: str,
@@ -355,7 +404,45 @@ async def promote_image(
             "job_id":    job.id,
         }
 
-    # Manual fallback — GCP targets (PR 5) and any explicit ?manual=1.
+    if payload.target_cloud == "gcp" and not manual:
+        if not (image.get("artefact_url") or "").strip():
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Image has no artefact_url — automated promote needs the hub-backed "
+                    "VHD. Re-run the build so Phase 3 export populates it, or use "
+                    "?manual=1 for the CLI walkthrough."
+                ),
+            )
+        job = job_service.create_job(
+            db,
+            job_type="image_promote_gcp",
+            created_by=current_user.username,
+            workgroup=None,
+            metadata={
+                "image_id":      image_id,
+                "image_name":    image["name"],
+                "image_version": image["version"],
+                "target_cloud":  "gcp",
+                "target_region": payload.target_region,
+            },
+        )
+        image_registry_service.record_promotion(
+            db, image_id, "gcp",
+            status="running",
+            region=payload.target_region,
+            notes=f"Automated promote in progress (job {job.id}).",
+        )
+        background_tasks.add_task(
+            _run_gcp_automated_promote, image_id, payload.target_region or "", job.id,
+        )
+        return {
+            "ok":        True,
+            "automated": True,
+            "job_id":    job.id,
+        }
+
+    # Manual fallback — any explicit ?manual=1.
     notes = image_registry_service.compute_manual_steps(image, payload.target_cloud)
     updated = image_registry_service.record_promotion(
         db,

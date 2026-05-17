@@ -1053,3 +1053,237 @@ async def export_custom_image_to_vhd(
         raise
     except Exception as e:
         raise GCPError(f"Failed to export image {image_name} to VHD: {e}") from e
+
+
+# ── Import GCS-staged tar.gz → custom image (cross-cloud promote target) ─────
+
+def _create_image_from_gcs_sync(
+    project_id: str,
+    image_name: str,
+    gcs_url: str,
+    description: str,
+    family: str,
+    progress_cb,
+) -> dict:
+    """Call `compute.images.insert` with `rawDisk.source = <gs://...>` and
+    poll until the operation completes. Returns
+    {name, self_link, status}. Mirrors the AWS / Azure import shape so the
+    image-registry orchestration can treat all three targets uniformly.
+
+    The GCS object must be a .tar.gz containing exactly one `disk.raw`
+    entry — see runners/promote/entrypoint.py for the wrapping step.
+    """
+    _require_compute()
+    from google.cloud import compute_v1
+
+    if progress_cb:
+        progress_cb(f"Creating custom image '{image_name}' in {project_id} from {gcs_url}")
+
+    creds = _gcp_creds()
+    images_client = compute_v1.ImagesClient(credentials=creds)
+
+    image = compute_v1.Image(
+        name=image_name,
+        description=description,
+        family=family or None,
+        raw_disk=compute_v1.RawDisk(source=gcs_url),
+    )
+    op = images_client.insert(project=project_id, image_resource=image)
+    op.result()  # blocks until READY/FAILED
+
+    created = images_client.get(project=project_id, image=image_name)
+    if progress_cb:
+        progress_cb(f"Image insert returned: status={created.status} ({created.self_link})")
+    return {
+        "name": created.name,
+        "self_link": created.self_link,
+        "status": created.status or "",
+    }
+
+
+async def create_image_from_gcs(
+    project_id: str,
+    image_name: str,
+    gcs_url: str,
+    description: str = "",
+    family: str = "",
+    progress_cb=None,
+) -> dict:
+    """Create a GCP custom image from a tar.gz on GCS. Returns
+    {name, self_link, status}. Caller is expected to have already staged
+    the tar.gz at `gcs_url` (the promote runner does this)."""
+    try:
+        return await asyncio.to_thread(
+            _create_image_from_gcs_sync,
+            project_id, image_name, gcs_url, description, family, progress_cb,
+        )
+    except GCPError:
+        raise
+    except Exception as e:
+        raise GCPError(f"Failed to create image '{image_name}' from {gcs_url}: {e}") from e
+
+
+# ── Cloud Run Promote-runner Job ─────────────────────────────────────────────
+
+_PROMOTE_RUNNER_PREFIX = "promote-runner"
+
+
+def _run_cloud_run_promote_runner_sync(
+    project_id: str,
+    region: str,
+    image: str,
+    runner_args: list,
+    job_id: str,
+    cpu: str,
+    memory: str,
+    timeout_seconds: int,
+    vpc_connector: str = "",
+    service_account_email: str = "",
+) -> tuple:
+    """Create a Cloud Run Job that runs the promote-runner image, wait for it
+    to finish, return (exit_code, log_output), and delete the job.
+
+    Modelled on `_run_cloud_run_ansible_sync` — same create/run/poll/delete
+    shape. Differences:
+      - Container args come from `runner_args`, not env-var-decoded script.
+      - Wider default CPU/memory (qemu-img headroom for multi-GB VHDs).
+      - Optional service account so the container can write to the dest
+        GCS bucket via workload identity instead of a JSON key.
+    """
+    import time
+    _require_run()
+    from google.cloud import run_v2
+
+    creds = _gcp_creds()
+    jobs_client = run_v2.JobsClient(credentials=creds)
+    executions_client = run_v2.ExecutionsClient(credentials=creds)
+
+    job_name = f"{_PROMOTE_RUNNER_PREFIX}-{job_id[:8]}"
+    parent = f"projects/{project_id}/locations/{region}"
+    job_resource_name = f"{parent}/jobs/{job_name}"
+
+    container = run_v2.Container(
+        image=image,
+        # Dockerfile ENTRYPOINT runs the python script; `args` becomes argv.
+        # Cloud Run distinguishes command (override entrypoint) from args
+        # (append to entrypoint), so we use `args` to keep the entrypoint
+        # intact.
+        args=list(runner_args),
+        resources=run_v2.ResourceRequirements(
+            limits={"cpu": cpu, "memory": memory},
+        ),
+    )
+
+    task_template = run_v2.TaskTemplate(
+        containers=[container],
+        max_retries=0,
+        timeout=f"{int(timeout_seconds)}s",
+    )
+    if service_account_email:
+        task_template.service_account = service_account_email
+
+    exec_template = run_v2.ExecutionTemplate(template=task_template)
+    if vpc_connector:
+        exec_template.annotations = {
+            "run.googleapis.com/vpc-access-connector": vpc_connector,
+            "run.googleapis.com/vpc-access-egress": "private-ranges-only",
+        }
+
+    job = run_v2.Job(
+        template=exec_template,
+        labels={"managed-by": "vm-cli-dashboard", "purpose": "promote-runner"},
+    )
+
+    logger.info(
+        "Cloud Run promote-runner: creating job %s in %s/%s",
+        job_name, project_id, region,
+    )
+    create_op = jobs_client.create_job(parent=parent, job_id=job_name, job=job)
+    create_op.result()
+
+    output = ""
+    exit_code = 1
+    execution_name = None
+
+    try:
+        run_op = jobs_client.run_job(name=job_resource_name)
+        execution = run_op.result()
+        execution_name = execution.name
+
+        # Poll until completion. Multi-GB image transfers + qemu-img + tar
+        # can easily exceed 20 minutes, so allow up to 2h by default.
+        waited = 0
+        # Poll every 10s; ceiling at the explicit timeout passed in (the
+        # Cloud Run Job's own timeout will cut us off too).
+        while waited < timeout_seconds:
+            exec_info = executions_client.get_execution(name=execution_name)
+            if exec_info.completion_time and not exec_info.reconciling:
+                succeeded = exec_info.succeeded_count or 0
+                failed = exec_info.failed_count or 0
+                exit_code = 0 if (succeeded > 0 and failed == 0) else 1
+                break
+            time.sleep(10)
+            waited += 10
+
+        try:
+            output = _fetch_cloud_run_job_logs(project_id, job_name, execution_name, creds)
+        except Exception as log_err:
+            logger.warning("Cloud Run promote-runner: could not retrieve logs: %s", log_err)
+            output = f"(failed to retrieve Cloud Logging entries: {log_err})"
+
+    finally:
+        try:
+            del_op = jobs_client.delete_job(name=job_resource_name)
+            del_op.result()
+            logger.info("Cloud Run promote-runner: deleted job %s", job_name)
+        except Exception as del_err:
+            logger.warning("Cloud Run promote-runner: could not delete job %s: %s", job_name, del_err)
+
+    return exit_code, output
+
+
+async def run_cloud_run_promote_runner_task(
+    project_id: str,
+    region: str,
+    image: str,
+    runner_args: list,
+    job_id: str,
+    cpu: str = "2000m",
+    memory: str = "4Gi",
+    timeout_seconds: int = 7200,
+    vpc_connector: str = "",
+    service_account_email: str = "",
+) -> tuple:
+    """Run the promote-runner image as a Cloud Run Job. Returns
+    (exit_code, log_output)."""
+    try:
+        return await asyncio.to_thread(
+            _run_cloud_run_promote_runner_sync,
+            project_id, region, image, runner_args, job_id,
+            cpu, memory, timeout_seconds, vpc_connector, service_account_email,
+        )
+    except GCPError:
+        raise
+    except Exception as e:
+        raise GCPError(f"Failed to run Cloud Run promote-runner job: {e}") from e
+
+
+def _delete_gcs_object_sync(bucket: str, object_name: str) -> None:
+    """Delete a single GCS object. Used for promote cleanup after the
+    cloud-side image-create reaches READY."""
+    try:
+        from google.cloud import storage as gcs  # noqa: F401
+    except ImportError:
+        raise GCPError("google-cloud-storage is not installed")
+    from google.cloud import storage as gcs
+    client = gcs.Client(credentials=_gcp_creds(), project=_cfg("gcp_project_id"))
+    client.bucket(bucket).blob(object_name).delete()
+
+
+async def delete_gcs_object(bucket: str, object_name: str) -> None:
+    """Best-effort cleanup of a staged GCS object. Targets an explicit bucket
+    so it works even when the staging lives outside `storage_gcs_bucket`."""
+    try:
+        await asyncio.to_thread(_delete_gcs_object_sync, bucket, object_name)
+    except Exception as e:
+        raise GCPError(f"Failed to delete gs://{bucket}/{object_name}: {e}") from e

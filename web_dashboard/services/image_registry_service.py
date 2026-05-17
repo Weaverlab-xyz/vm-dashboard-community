@@ -682,3 +682,122 @@ async def promote_to_azure_automated(
         notes=f"Imported via promote-runner ACI in {target_rg}.",
     )
     return updated
+
+
+# ── Automated promote: GCP target ────────────────────────────────────────────
+
+
+async def promote_to_gcp_automated(
+    db: Session,
+    image_id: str,
+    *,
+    target_region: Optional[str] = None,
+    progress_cb=None,
+) -> dict:
+    """End-to-end GCP promote: parse hub URL, kick the Cloud Run runner
+    (which converts vhd → raw and tar.gz-wraps), call `images.insert`,
+    cleanup staging, record promotion.
+
+    Mirrors `promote_to_aws_automated` / `promote_to_azure_automated`.
+    Diffs:
+      - Runner is Cloud Run Job in the dashboard's GCP project.
+      - SDK call is `images.insert(rawDisk.source=gs://...tar.gz)`.
+      - `promotions["gcp"]` carries `self_link` instead of an AMI id /
+        Azure resource ID, normalized into the `image_id` slot.
+
+    target_region is informational on GCP — custom images are global,
+    not region-bound. We still record it on `promotions["gcp"].region`
+    so the operator can read back which region's Cloud Run handled the
+    promote (latency / sovereignty signal).
+    """
+    from . import promote_runner_service, gcp_service, config_service
+
+    image = get_image(db, image_id)
+    if not image:
+        raise ImageRegistryError(f"Image {image_id} not found.")
+    if not image.get("artefact_url"):
+        raise ImageRegistryError(
+            "Image has no artefact_url. Re-build with Phase 3 export to populate it, "
+            "or fall back to the manual-steps walkthrough."
+        )
+
+    hub_backend, hub_key = _parse_hub_url(image["artefact_url"])
+    source_format = (image.get("artefact_format") or "vhd").lower()
+
+    project_id = config_service.get("gcp_project_id")
+    if not project_id:
+        raise ImageRegistryError(
+            "gcp_project_id is not set — needed to invoke compute.images.insert."
+        )
+    target_loc = target_region or config_service.get("promote_runner_gcp_region") or config_service.get("gcp_region") or ""
+    family = config_service.get("promote_runner_gcp_image_family") or ""
+
+    dest_bucket, dest_object = promote_runner_service.resolve_gcp_staging(
+        image["name"], image["version"],
+    )
+    gcs_url = f"gs://{dest_bucket}/{dest_object}"
+    # GCP custom-image names must be lowercase, alphanumeric + dash, ≤ 63
+    # chars. The registry name+version usually already conforms; lowercase
+    # to be safe and let the caller sort out edge cases via the existing
+    # validation surface.
+    target_image_name = f"{image['name']}-{image['version']}".lower()
+
+    def _say(msg: str) -> None:
+        logger.info("[promote %s -> gcp] %s", image_id, msg)
+        if progress_cb:
+            progress_cb(msg)
+
+    # 1+2: kick the Cloud Run runner — vhd → raw → tar.gz → GCS.
+    _say(f"Launching promote runner: {hub_backend}://{hub_key} -> {gcs_url}")
+    await promote_runner_service.run_for_gcp_target(
+        job_id=image_id,
+        hub_backend=hub_backend,
+        hub_key=hub_key,
+        source_format=source_format,
+        dest_bucket=dest_bucket,
+        dest_object=dest_object,
+    )
+
+    # 3: ask GCP compute to create a custom image from the staged tar.gz.
+    _say(f"Calling compute.images.insert '{target_image_name}' from {gcs_url}")
+    img_result = await gcp_service.create_image_from_gcs(
+        project_id=project_id,
+        image_name=target_image_name,
+        gcs_url=gcs_url,
+        description=f"Promoted from registered image {image['name']}/{image['version']}",
+        family=family,
+        progress_cb=_say,
+    )
+    self_link = img_result["self_link"]
+    status = (img_result.get("status") or "").upper()
+    _say(f"Image insert returned: status={status} ({self_link})")
+
+    if status and status != "READY":
+        raise ImageRegistryError(
+            f"images.insert finished with status '{status}' — see GCP Activity log."
+        )
+
+    # 4: cleanup the staged GCS tar.gz now that the image is READY.
+    try:
+        _say(f"Cleaning up staged object gs://{dest_bucket}/{dest_object}")
+        await gcp_service.delete_gcs_object(dest_bucket, dest_object)
+    except Exception as e:
+        logger.warning(
+            "Failed to delete staged GCS object gs://%s/%s after successful promote: %s",
+            dest_bucket, dest_object, e,
+        )
+
+    # 5: record final promotion state. Self-link goes into both `image_id`
+    # (so the record_promotion contract is uniform) and `self_link` for the
+    # UI to render a deep-link.
+    updated = record_promotion(
+        db,
+        image_id,
+        "gcp",
+        status="completed",
+        image_id_value=self_link,
+        region=target_loc,
+        self_link=self_link,
+        notes=f"Imported via promote-runner Cloud Run job in {project_id}/{target_loc or '<no-region>'}.",
+    )
+    return updated
