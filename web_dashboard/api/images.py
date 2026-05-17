@@ -1,21 +1,28 @@
 """Image registry API.
 
 Operator-facing CRUD over the RegisteredImage table plus a promote
-endpoint that returns structured manual-steps payloads (Phase 1) — Phase
-2 will replace the manual-steps return with native VM-import automation.
+endpoint that runs the SDK-driven automated path for AWS targets
+(Phase 4 — PR 3) and still returns the manual-steps walkthrough for
+Azure / GCP targets (those land in PRs 4 and 5).
 
   GET    /api/images                    — list registered images
   POST   /api/images                    — register an image
   GET    /api/images/{id}               — fetch one
   DELETE /api/images/{id}               — remove from registry (does NOT
                                           delete derived cloud-native images)
-  POST   /api/images/{id}/promote       — record a promotion to a target
-                                          cloud; for cross-cloud, returns
-                                          the manual-steps payload
+  POST   /api/images/{id}/promote       — promote to a target cloud:
+                                          - AWS target → kicks off the
+                                            automated ECS runner + import
+                                            path as a background Job
+                                          - Azure/GCP target → returns the
+                                            manual-steps payload (Phase 1
+                                            shape, unchanged)
+                                          Pass `?manual=1` to force manual
+                                          steps even for AWS targets.
 """
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from ..database import User, get_db
@@ -23,8 +30,9 @@ from ..models.image_registry import (
     PromoteImageRequest,
     RegisterImageRequest,
 )
-from ..services import image_registry_service
+from ..services import image_registry_service, job_service
 from ..services.image_registry_service import ImageRegistryError, VALID_CLOUDS
+from ..services.promote_runner_service import PromoteRunnerError
 from .auth import get_current_user, require_permission
 
 logger = logging.getLogger(__name__)
@@ -126,21 +134,78 @@ async def preflight_image(
 
 # ── Promote ──────────────────────────────────────────────────────────────────
 
+async def _run_aws_automated_promote(
+    image_id: str, target_region: str, job_id: str,
+) -> None:
+    """Background-task wrapper around image_registry_service.promote_to_aws_automated.
+    Owns its own DB session because BackgroundTasks runs after the request
+    handler returns and the request session is closed."""
+    from ..database import SessionLocal
+    db = SessionLocal()
+    try:
+        def _progress(msg: str) -> None:
+            try:
+                job_service.update_progress(db, job_id, 50, msg[:200])
+            except Exception:
+                logger.exception("Failed to update job %s progress", job_id)
+
+        try:
+            updated = await image_registry_service.promote_to_aws_automated(
+                db, image_id, target_region=target_region, progress_cb=_progress,
+            )
+            promo = (updated.get("promotions") or {}).get("aws") or {}
+            job_service.set_completed(db, job_id, {
+                "ami_id":     promo.get("image_id"),
+                "region":     promo.get("region"),
+                "promotions": updated.get("promotions"),
+            })
+        except (ImageRegistryError, PromoteRunnerError) as e:
+            # Surface the runner log tail (if any) so the operator can read
+            # qemu-img output / S3 upload errors from the Job page.
+            extra = ""
+            if isinstance(e, PromoteRunnerError) and getattr(e, "log_output", ""):
+                extra = "\n--- runner log ---\n" + e.log_output[-4000:]
+            job_service.set_failed(db, job_id, f"{e}{extra}")
+            # Record the failed state on the image too so the /images page
+            # row reflects reality.
+            try:
+                image_registry_service.record_promotion(
+                    db, image_id, "aws",
+                    status="failed",
+                    region=target_region,
+                    notes=str(e),
+                )
+            except Exception:
+                logger.exception("Failed to record promotion failure for %s", image_id)
+        except Exception as e:
+            logger.exception("Automated AWS promote of %s raised unexpectedly", image_id)
+            job_service.set_failed(db, job_id, f"Unexpected: {e}")
+    finally:
+        db.close()
+
+
 @router.post("/{image_id}/promote")
 async def promote_image(
     image_id: str,
     payload: PromoteImageRequest,
+    background_tasks: BackgroundTasks,
+    manual: bool = False,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("admin", "write")),
 ):
-    """Record a promotion intent. For Phase 1 this is always a manual-steps
-    flow — the dashboard returns operator-readable instructions, the
-    operator runs them, and updates the recorded image_id field via a
-    follow-up PATCH (or by re-running this endpoint with `image_id_value`).
+    """Promote a registered image to a target cloud.
 
-    Phase 2 will branch here on whether the source/target combination has an
-    automated import path; the manual-steps return shape stays the same so
-    the frontend doesn't need to change."""
+    AWS targets (no `?manual=1`):  enqueue a background Job that drives the
+    ECS promote runner + ec2:ImportImage end-to-end. Endpoint returns
+    `{job_id, automated: true}` and the operator polls /jobs/{id} for
+    status; on success the resulting AMI ID is recorded in
+    `RegisteredImage.promotions["aws"]`.
+
+    Azure / GCP targets (and any target with `?manual=1`):  unchanged from
+    Phase 1 — returns the operator-readable CLI walkthrough and writes a
+    `manual`-status promotion record. Used until PRs 4 and 5 wire the
+    other two clouds.
+    """
     if payload.target_cloud not in VALID_CLOUDS:
         raise HTTPException(
             status_code=400,
@@ -151,6 +216,52 @@ async def promote_image(
     if not image:
         raise HTTPException(status_code=404, detail=f"Image {image_id} not found.")
 
+    if payload.target_cloud == "aws" and not manual:
+        if not payload.target_region:
+            raise HTTPException(
+                status_code=400,
+                detail="target_region is required for AWS automated promote (e.g. 'us-east-2').",
+            )
+        if not (image.get("artefact_url") or "").strip():
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Image has no artefact_url — automated promote needs the hub-backed "
+                    "VHD. Re-run the build so Phase 3 export populates it, or use "
+                    "?manual=1 for the CLI walkthrough."
+                ),
+            )
+        job = job_service.create_job(
+            db,
+            job_type="image_promote_aws",
+            created_by=current_user.username,
+            workgroup=None,
+            metadata={
+                "image_id":      image_id,
+                "image_name":    image["name"],
+                "image_version": image["version"],
+                "target_cloud":  "aws",
+                "target_region": payload.target_region,
+            },
+        )
+        # Mark the promotion as "running" on the image right away so the
+        # /images page reflects the in-flight state.
+        image_registry_service.record_promotion(
+            db, image_id, "aws",
+            status="running",
+            region=payload.target_region,
+            notes=f"Automated promote in progress (job {job.id}).",
+        )
+        background_tasks.add_task(
+            _run_aws_automated_promote, image_id, payload.target_region, job.id,
+        )
+        return {
+            "ok":        True,
+            "automated": True,
+            "job_id":    job.id,
+        }
+
+    # Manual fallback — Azure/GCP targets and any explicit ?manual=1.
     notes = image_registry_service.compute_manual_steps(image, payload.target_cloud)
     updated = image_registry_service.record_promotion(
         db,
@@ -161,8 +272,8 @@ async def promote_image(
         notes=notes,
     )
     return {
-        "ok":         True,
-        "automated":  False,         # Phase 2: flips to true when we add native import
+        "ok":           True,
+        "automated":    False,
         "manual_steps": notes,
-        "image":      updated,
+        "image":        updated,
     }

@@ -115,6 +115,22 @@ async def get_config(current_user: User = Depends(require_permission("admin", "r
     for keys in _BACKEND_KEYS.values():
         for k in keys:
             out[k] = _cfg_get(k)
+    # Promote-runner config — kept on /storage because it shares the hub
+    # backend's lifecycle (runner reads hub via presigned URL).
+    for k in (
+        "promote_runner_image",
+        "promote_runner_ecs_cluster",
+        "promote_runner_ecs_task_family",
+        "promote_runner_ecs_cpu",
+        "promote_runner_ecs_memory",
+        "promote_runner_ecs_subnet_id",
+        "promote_runner_ecs_security_group_ids",
+        "promote_runner_ecs_execution_role_arn",
+        "promote_runner_ecs_task_role_arn",
+        "promote_runner_aws_staging_bucket",
+        "promote_runner_aws_staging_prefix",
+    ):
+        out[k] = _cfg_get(k)
     return out
 
 
@@ -135,6 +151,19 @@ class StorageConfigPatch(BaseModel):
     storage_local_username: str | None = None
     storage_local_password: str | None = None
     storage_local_domain:   str | None = None
+    # Promote-runner overrides — operators only set these when overriding the
+    # public image or pinning the ECS task to specific network plumbing.
+    promote_runner_image:                  str | None = None
+    promote_runner_ecs_cluster:            str | None = None
+    promote_runner_ecs_task_family:        str | None = None
+    promote_runner_ecs_cpu:                str | None = None
+    promote_runner_ecs_memory:             str | None = None
+    promote_runner_ecs_subnet_id:          str | None = None
+    promote_runner_ecs_security_group_ids: str | None = None
+    promote_runner_ecs_execution_role_arn: str | None = None
+    promote_runner_ecs_task_role_arn:      str | None = None
+    promote_runner_aws_staging_bucket:     str | None = None
+    promote_runner_aws_staging_prefix:     str | None = None
 
 
 @router.patch("/config")

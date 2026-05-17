@@ -343,6 +343,27 @@ class Settings(BaseSettings):
     storage_local_password: str = ""           # encrypted at rest
     storage_local_domain: str = ""
 
+    # ── Promote runner ───────────────────────────────────────────────────────
+    # Transient container launched in the target cloud to convert + upload a
+    # VM image artefact during cross-cloud promotion. Same image (defaulting
+    # to a public build under weaverlab-xyz) serves AWS / Azure / GCP targets;
+    # the target's own runner orchestration (ECS task / ACI / Cloud Run job)
+    # is configured separately per cloud — only AWS-target is wired today.
+    promote_runner_image: str = "weaverlab-xyz/dashboard-promote-runner:latest"
+    promote_runner_ecs_cluster: str = ""                 # fallback: ansible_ecs_cluster
+    promote_runner_ecs_task_family: str = "promote-runner"
+    promote_runner_ecs_cpu: str = "1024"                 # qemu-img wants headroom
+    promote_runner_ecs_memory: str = "4096"              # ~4 GiB for multi-GB VHDs
+    promote_runner_ecs_subnet_id: str = ""               # fallback: ansible_ecs_subnet_id
+    promote_runner_ecs_security_group_ids: str = ""      # fallback: ansible_ecs_security_group_ids
+    promote_runner_ecs_execution_role_arn: str = ""      # required (image pull + log write)
+    promote_runner_ecs_task_role_arn: str = ""           # required (S3 write to staging bucket)
+    # Where the runner drops the converted artefact before AWS image-import
+    # consumes it. Defaults to the storage S3 bucket under a `promote-staging/`
+    # prefix so operators don't have to provision a separate bucket.
+    promote_runner_aws_staging_bucket: str = ""          # fallback: storage_s3_bucket
+    promote_runner_aws_staging_prefix: str = "promote-staging"
+
     ansible_runner: str = "local"              # "local" | "ecs" | "aci" | "gcp"
     # Per-cloud SSH user for Ansible cloud runner targets. Each cloud's stock
     # AMI / image family ships with a different default username, so a single
