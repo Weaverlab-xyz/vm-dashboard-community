@@ -369,6 +369,17 @@
         </div>
 
         <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Workgroup <span class="text-red-500">*</span></label>
+          <select x-model="deployModal.workgroup" required
+                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <option value="">Select workgroup…</option>
+            <template x-for="w in availableWorkgroups" :key="w">
+              <option :value="w" x-text="w"></option>
+            </template>
+          </select>
+        </div>
+
+        <div>
           <label class="block text-sm font-medium text-gray-700 mb-1">VM name <span class="text-red-500">*</span></label>
           <input type="text" x-model="deployModal.vmName" placeholder="e.g. web-server-01"
                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
@@ -395,7 +406,7 @@
       <div class="flex justify-end gap-3 mt-6">
         <button @click="deployModal.open = false" class="px-4 py-2 text-sm text-gray-600 hover:text-gray-800">Cancel</button>
         <button @click="submitDeploy()"
-                :disabled="!deployModal.vmName"
+                :disabled="!deployModal.vmName || !deployModal.workgroup"
                 class="px-4 py-2 text-sm bg-green-600 hover:bg-green-700 disabled:opacity-50 text-white rounded-lg font-medium transition">
           Deploy VM
         </button>
@@ -490,12 +501,26 @@ function proxmoxDashboard() {
     },
     deployModal: {
       open: false, template: null, vmName: '', username: '', sshKey: '', fullClone: true,
+      workgroup: '',
     },
     deleteConfirm: { open: false, target: null },
+    availableWorkgroups: [],
 
     async init() {
       requireAuth();
+      this._loadWorkgroups();
       await this.refresh();
+    },
+
+    _loadWorkgroups() {
+      API.get('/api/groups/workgroups')
+        .then(r => { this.availableWorkgroups = r || []; })
+        .catch(() => { this.availableWorkgroups = []; });
+    },
+
+    _defaultWorkgroup() {
+      if (this.availableWorkgroups.includes('default')) return 'default';
+      return this.availableWorkgroups[0] || '';
     },
 
     async refresh() {
@@ -592,7 +617,10 @@ function proxmoxDashboard() {
 
     // ── Deploy modal ───────────────────────────────────────────────────────────
     openDeploy(tpl) {
-      this.deployModal = { open: true, template: tpl, vmName: '', username: '', sshKey: '', fullClone: true };
+      this.deployModal = {
+        open: true, template: tpl, vmName: '', username: '', sshKey: '', fullClone: true,
+        workgroup: this._defaultWorkgroup(),
+      };
     },
     async submitDeploy() {
       const m = this.deployModal;
@@ -601,6 +629,7 @@ function proxmoxDashboard() {
           node: m.template.node, template_vmid: m.template.vmid,
           vm_name: m.vmName, username: m.username,
           ssh_public_key: m.sshKey, full_clone: m.fullClone,
+          workgroup: m.workgroup,
         });
         m.open = false;
         window.location.href = '/jobs/' + res.job_id;
