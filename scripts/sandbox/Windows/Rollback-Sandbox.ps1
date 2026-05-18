@@ -127,6 +127,48 @@ function Invoke-AwsRollback {
         }
     }
 
+    # 4. Promote-runner task role — same pattern, only delete if we created it.
+    $promoteRole = "$($Script:SandboxNamePrefix)-promote-runner-task"
+    $promoteTagsJson = aws iam list-role-tags --role-name $promoteRole --output json 2>$null
+    if ($LASTEXITCODE -eq 0 -and $promoteTagsJson) {
+        $tags = $promoteTagsJson | ConvertFrom-Json
+        $matching = $tags.Tags | Where-Object { $_.Key -eq $Script:SandboxTagKey -and $_.Value -eq $Script:SandboxTagValue }
+        if ($matching) {
+            & aws iam delete-role-policy --role-name $promoteRole `
+                --policy-name 'promote-runner-s3-write' *> $null
+            & aws iam delete-role --role-name $promoteRole *> $null
+            if ($LASTEXITCODE -eq 0) { Write-Ok "Deleted IAM role $promoteRole" }
+            else { Write-Warn "Could not delete $promoteRole" }
+        }
+    }
+
+    # 5. vmimport — only delete if we tagged it. `vmimport` is a well-known AWS
+    # name; an operator may have one pre-existing for unrelated reasons, so the
+    # tag check is critical here.
+    $vmiTagsJson = aws iam list-role-tags --role-name vmimport --output json 2>$null
+    if ($LASTEXITCODE -eq 0 -and $vmiTagsJson) {
+        $tags = $vmiTagsJson | ConvertFrom-Json
+        $matching = $tags.Tags | Where-Object { $_.Key -eq $Script:SandboxTagKey -and $_.Value -eq $Script:SandboxTagValue }
+        if ($matching) {
+            & aws iam delete-role-policy --role-name vmimport `
+                --policy-name 'vmimport-s3-and-ec2' *> $null
+            & aws iam delete-role --role-name vmimport *> $null
+            if ($LASTEXITCODE -eq 0) { Write-Ok 'Deleted IAM role vmimport' }
+            else { Write-Warn 'Could not delete vmimport' }
+        }
+    }
+
+    # 6. Storage / promote-staging S3 bucket — empty then delete.
+    $accountId = (aws sts get-caller-identity --query Account --output text 2>$null).Trim()
+    $storageBucket = "$($Script:SandboxNamePrefix)-storage-$accountId"
+    & aws s3api head-bucket --bucket $storageBucket --region $region *> $null
+    if ($LASTEXITCODE -eq 0) {
+        & aws s3 rm "s3://$storageBucket" --recursive --region $region *> $null
+        & aws s3api delete-bucket --bucket $storageBucket --region $region *> $null
+        if ($LASTEXITCODE -eq 0) { Write-Ok "Deleted S3 bucket $storageBucket" }
+        else { Write-Warn "Could not delete S3 bucket $storageBucket (may have versioned objects)" }
+    }
+
     Clear-StateDir aws
     Write-Ok 'AWS sandbox state cleared'
 }
@@ -229,12 +271,23 @@ function Invoke-GcpRollback {
     & gcloud secrets delete "$prefix-ssh-keypair" --project $projectId --quiet *> $null
     if ($LASTEXITCODE -eq 0) { Write-Ok "Deleted secret $prefix-ssh-keypair" }
 
-    # 5. Service account.
+    # 5. Storage / promote-staging GCS bucket — empty then delete. (Bucket-scoped
+    # IAM bindings go with the bucket; no separate cleanup step needed.)
+    $storageBucket = "$projectId-$prefix-storage"
+    & gcloud storage buckets describe "gs://$storageBucket" --project $projectId *> $null
+    if ($LASTEXITCODE -eq 0) {
+        & gcloud storage rm "gs://$storageBucket" --recursive --project $projectId --quiet *> $null
+        if ($LASTEXITCODE -eq 0) { Write-Ok "Deleted GCS bucket gs://$storageBucket" }
+        else { Write-Warn "Could not delete bucket gs://$storageBucket (may have retained objects)" }
+    }
+
+    # 6. Service account.
     $saEmail = "$prefix-sa@$projectId.iam.gserviceaccount.com"
     & gcloud iam service-accounts describe $saEmail --project $projectId *> $null
     if ($LASTEXITCODE -eq 0) {
         foreach ($role in @('roles/compute.admin','roles/secretmanager.secretAccessor',
-                            'roles/iam.serviceAccountUser','roles/run.admin')) {
+                            'roles/iam.serviceAccountUser','roles/run.admin','roles/run.developer',
+                            'roles/run.invoker')) {
             & gcloud projects remove-iam-policy-binding $projectId `
                 --member "serviceAccount:$saEmail" --role $role --condition=None --quiet *> $null
         }

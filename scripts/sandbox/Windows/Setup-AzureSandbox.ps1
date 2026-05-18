@@ -166,6 +166,49 @@ $sp = Get-Content $SpPath -Raw | ConvertFrom-Json
 $SpAppId    = $sp.appId
 $SpPassword = $sp.password
 
+# ── 6b. Image-hub container + promote-runner Azure plumbing ──────────────────
+# Provisions the prerequisites the dashboard's automated cross-cloud image
+# promote runner needs (see docs/image-management.md, runners/promote/README.md):
+#
+#   • A `hub` blob container on the storage account that doubles as both the
+#     image-registry hub and the staging container the promote-runner ACI
+#     writes converted VHDs to (under promote-staging/).
+#   • Storage Blob Data Contributor on the storage account for the SP — the
+#     SP already has Contributor on the RG (control plane), but the runner
+#     does AAD-authenticated *data plane* blob writes which need this
+#     dedicated role.
+#   • Microsoft.ContainerInstance resource provider registered so ACI works
+#     in this subscription without a first-use 5-minute provisioning wait.
+Write-Section 'Image-hub container + promote-runner Azure plumbing'
+
+az storage container-rm create -g $Rg --storage-account $SaName -n 'hub' 2>$null | Out-Null
+Write-Ok "Blob container 'hub' on storage account $SaName"
+
+$SpObjectId = (az ad sp list --display-name $SpName --query '[0].id' -o tsv).Trim()
+$SaScope = "/subscriptions/$SubscriptionId/resourceGroups/$Rg/providers/Microsoft.Storage/storageAccounts/$SaName"
+$existingBlobRole = (az role assignment list --assignee $SpObjectId --scope $SaScope `
+    --role 'Storage Blob Data Contributor' --query '[0].id' -o tsv 2>$null).Trim()
+if ($existingBlobRole) {
+    Write-Ok "SP already has Storage Blob Data Contributor on $SaName"
+} else {
+    az role assignment create --assignee-object-id $SpObjectId `
+        --assignee-principal-type ServicePrincipal `
+        --role 'Storage Blob Data Contributor' --scope $SaScope | Out-Null
+    Write-Ok "Granted SP Storage Blob Data Contributor on $SaName"
+}
+
+# Register the ACI provider if not already (no-op if registered). The
+# promote runner launches as an ACI container group.
+$AciState = (az provider show --namespace Microsoft.ContainerInstance `
+    --query registrationState -o tsv 2>$null)
+if (-not $AciState) { $AciState = 'NotRegistered' }
+if ($AciState -ne 'Registered') {
+    az provider register --namespace Microsoft.ContainerInstance --wait | Out-Null
+    Write-Ok "Registered Microsoft.ContainerInstance provider"
+} else {
+    Write-Ok "Microsoft.ContainerInstance already registered"
+}
+
 # ── 7. Print config to paste into /setup ─────────────────────────────────────
 Write-DashboardConfig 'Azure sandbox configuration' @(
     "azure_subscription_id=$SubscriptionId",
@@ -183,6 +226,19 @@ Write-DashboardConfig 'Azure sandbox configuration' @(
     "azure_aci_file_share=jpt",
     "azure_key_vault_url=$KvUrl",
     "azure_ssh_keypair_secret_name=$SshSecret               # JSON {public_key, private_key}",
+    '',
+    '# Image-registry hub + automated cross-cloud promote:',
+    "storage_azure_account=$SaName                          # Image hub + promote staging",
+    'storage_azure_container=hub                              # Container for hub artefacts',
+    'storage_active_backend=azure_blob                        # Active asset backend',
+    'storage_hub_backend=azure_blob                           # Image hub (defaults to active if unset)',
+    'promote_runner_image=weaverlab-xyz/dashboard-promote-runner:latest   # Build + push to your ACR until public tag exists',
+    "promote_runner_azure_resource_group=$Rg                  # ACI lands here",
+    "promote_runner_azure_location=$Location",
+    "promote_runner_azure_subnet_id=$AciSubnetId            # Reuses the Jumpoint ACI subnet",
+    "promote_runner_azure_staging_account=$SaName            # Same account as hub by default",
+    'promote_runner_azure_staging_container=hub',
+    "promote_runner_azure_target_resource_group=$Rg           # Resulting managed image lands here",
     '',
     '# BeyondTrust deploy key — set in /setup or /secrets:',
     'azure_aci_docker_deploy_key=…'
