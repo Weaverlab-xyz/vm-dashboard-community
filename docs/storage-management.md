@@ -91,17 +91,22 @@ endpoint also still works (delegates to the same service).
 
 ## Configuring storage
 
-Open `/storage` (admin only). The page has three sections:
+Open `/storage` (admin only). The page has four sections:
 
 1. **Backend** — pick the active backend with a radio button. Each
    backend's configuration card shows below; fill in the fields for the
    one(s) you want to use. A backend appears as **configured** when its
    primary identifier (bucket / storage-account / bucket name) is set,
    regardless of whether it's the active one.
-2. **Stored assets** — once a backend is active, the list shows what's
+2. **Image-registry hub** — pick the backend that holds the canonical
+   VHD/raw artefact for every registered image. Leave on "Same as
+   active backend" for single-backend installs; only change it if you
+   want the image hub on a different cloud than your day-to-day asset
+   uploads. See [Image-registry hub](#image-registry-hub) below.
+3. **Stored assets** — once a backend is active, the list shows what's
    in it. Use Config Management's upload form (`/config-mgmt`) to add
    playbooks; this page is read-mostly except for delete.
-3. **Migrate** — covered below.
+4. **Migrate** — covered below.
 
 ### Required cloud credentials
 
@@ -170,6 +175,57 @@ hosted on a corporate share, the Local backend is the right choice.
 After filling in fields, click **Test connection** to probe the backend —
 it lists the bucket/container as a quick reachability check. Save with
 **Save configuration**; activation flips the moment the save succeeds.
+
+---
+
+## Image-registry hub
+
+The hub backend is the single storage backend that holds the canonical
+VHD/raw artefact for every registered image, regardless of which cloud
+built it. It's the source the cross-cloud promote flow reads from when
+it kicks off a per-target runner — see
+[Image Management](image-management.md) for the full lifecycle and
+[`runners/promote/README.md`](../runners/promote/README.md) for the
+runner internals.
+
+**Configuration.** On `/storage`, the **Image-registry hub** picker
+has four options:
+
+- **Same as active backend** (default) — `storage_hub_backend` is
+  unset; `storage_service.hub_backend()` resolves to whatever
+  `active_backend()` returns. Single-backend installs need nothing
+  more.
+- **S3 / Azure Blob / GCS** — pin the hub to that backend explicitly.
+  Useful when your day-to-day asset uploads live in one cloud but you
+  want the image hub in another (e.g. day-to-day in S3, image hub in
+  GCS for cost reasons).
+
+Local / SMB backends can't be the hub. The promote runners need an
+HTTPS-reachable URL for the source artefact, which the local
+filesystem doesn't offer. The page's picker doesn't list `local`;
+posting it via the API returns a 400 with a pointer to this section.
+
+**What the hub does.** After every successful Packer build the
+dashboard exports a portable VHD via the cloud's native export API
+into same-cloud storage. If that same-cloud storage *is* the hub (e.g.
+build cloud = AWS, hub = S3), no extra hop. If it isn't (build cloud
+= AWS, hub = Azure Blob), the dashboard runs
+`storage_service.copy(build_backend, build_key, hub, hub_key)` to
+stream the VHD into the hub and deletes the build-side staging copy.
+
+**What it doesn't do.** The hub is not where the promote runner
+*uploads* to. Each target cloud has its own staging container the
+runner writes into (`promote_runner_aws_staging_bucket`,
+`promote_runner_azure_staging_container`,
+`promote_runner_gcp_staging_bucket`) so the cloud's import API reads
+from local storage. The hub stays the read-only source-of-truth.
+
+**Promote-runner config.** The `/storage` page also hosts the
+`promote_runner_*` config keys (image override, ECS/ACI/Cloud Run
+plumbing, target-side staging, IAM role ARNs). The
+[runner README](../runners/promote/README.md) has the full table —
+the `/storage` form is just the surface that round-trips them through
+`PATCH /api/storage/config`.
 
 ---
 

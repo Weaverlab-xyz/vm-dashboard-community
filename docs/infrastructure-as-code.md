@@ -7,8 +7,9 @@ encodes, and how each cloud's deployment path fits the same model.
 The companion docs:
 
 - [Image Management](image-management.md) — how the *images* the
-  Terraform deploys consume are built, stored, and promoted across
-  clouds
+  Terraform deploys consume are built, hubbed in a single storage
+  backend, and one-click promoted to AWS / Azure / GCP via the
+  per-target promote runners
 - [Config Management](config-management.md) — what to install on the
   infra you've stood up
 - [Storage Management](storage-management.md) — where your IaC-side

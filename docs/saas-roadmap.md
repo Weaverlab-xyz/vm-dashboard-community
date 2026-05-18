@@ -78,31 +78,30 @@ get them automatically because they depend on Azure infrastructure
 
 ## Image lifecycle
 
-### One-click cross-cloud promote (Steps 5–6)
+> **Shipped in community (was on this list):** one-click cross-cloud
+> promote and live cloud-side checks. The runner-driven flow
+> documented in [Image Management](image-management.md) runs entirely
+> in the community edition for AWS/Azure/GCP targets. SaaS now layers
+> only the durable-replay guarantee on top — a 45-minute import that
+> survives a dashboard restart mid-poll without orphan cloud-side
+> tasks. Same registry, same `/images` UI, same audit trail.
 
-- **What community does:** automates **build → export → register**
-  (Phase 2 Steps 1–4) and returns operator-readable manual steps for
-  the cross-storage copy + native VM-import.
-- **What SaaS adds:** durable Temporal-backed workflows for both
-  cross-storage copy (S3 ↔ Azure Blob ↔ GCS) and native VM-import
-  (`aws ec2 import-image`, Azure `images` create, GCP
-  `images.insert` with Daisy). Survives dashboard restart mid-poll
-  without orphan cloud-side tasks.
-- **Status:** Planned. Full plan in the private repo at
-  `docs/image-promote-saas-plan.md`.
-- **Dev-testable?** Yes. Temporal runs in docker-compose; the
-  workflow + activities are plain Python. The plan's 8-test
-  validation list explicitly includes kill-mid-poll recovery.
+### Durable cross-cloud promote (SaaS replay-safety)
 
-### Live cloud-side pre-flight
-
-- **What community does:** pure-Python pre-flight (artefact recorded,
-  format compat, cross-storage required, target creds configured).
-- **What SaaS adds:** live cloud-side probes — `vmimport` role
-  exists, VM-import quota available, source blob HEAD-reachable.
+- **What community does:** runner-driven promote (ECS / ACI / Cloud
+  Run) drives the full conversion + import end-to-end. A dashboard
+  restart while a long-running import is in flight leaves the
+  cloud-side task running but the dashboard-side polling Job is gone
+  — the operator has to reconcile via the cloud console.
+- **What SaaS adds:** Temporal-backed workflows wrap both the runner
+  task and the cloud-side `ec2.ImportImage` / `images.create_or_update` /
+  `images.insert` poll. A dashboard restart resumes the workflow at
+  the last activity boundary; orphan tasks become impossible.
 - **Status:** Planned.
-- **Dev-testable?** Yes. The probes are direct cloud API calls;
-  community already exercises the same credential paths for builds.
+- **Dev-testable?** Yes. Temporal runs in docker-compose; the
+  workflow + activities are plain Python wrapping the existing
+  `promote_runner_service` + `image_registry_service.promote_to_*_automated`
+  entry points.
 
 ### On-prem image promotion via Azure Arc
 
