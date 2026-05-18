@@ -168,6 +168,48 @@ fi
 SP_APP_ID="$(jq -r '.appId'    "$SP_JSON_PATH")"
 SP_PASSWORD="$(jq -r '.password' "$SP_JSON_PATH")"
 
+# ── 6b. Image-hub container + promote-runner Azure plumbing ──────────────────
+# Provisions the prerequisites the dashboard's automated cross-cloud image
+# promote runner needs (see docs/image-management.md, runners/promote/README.md):
+#
+#   • A `hub` blob container on the storage account that doubles as both the
+#     image-registry hub and the staging container the promote-runner ACI
+#     writes converted VHDs to (under promote-staging/).
+#   • Storage Blob Data Contributor on the storage account for the SP — the
+#     SP already has Contributor on the RG (control plane), but the runner
+#     does AAD-authenticated *data plane* blob writes which need this
+#     dedicated role.
+#   • Microsoft.ContainerInstance resource provider registered so ACI works
+#     in this subscription without a first-use 5-minute provisioning wait.
+section "Image-hub container + promote-runner Azure plumbing"
+
+az storage container-rm create -g "$RG" --storage-account "$SA_NAME" -n "hub" \
+  >/dev/null 2>&1 || true
+ok "Blob container 'hub' on storage account $SA_NAME"
+
+SP_OBJECT_ID="$(az ad sp list --display-name "$SP_NAME" --query '[0].id' -o tsv)"
+SA_SCOPE="/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RG/providers/Microsoft.Storage/storageAccounts/$SA_NAME"
+if az role assignment list --assignee "$SP_OBJECT_ID" --scope "$SA_SCOPE" \
+     --role "Storage Blob Data Contributor" --query '[0].id' -o tsv 2>/dev/null | grep -q .; then
+  ok "SP already has Storage Blob Data Contributor on $SA_NAME"
+else
+  az role assignment create --assignee-object-id "$SP_OBJECT_ID" \
+    --assignee-principal-type ServicePrincipal \
+    --role "Storage Blob Data Contributor" --scope "$SA_SCOPE" >/dev/null
+  ok "Granted SP Storage Blob Data Contributor on $SA_NAME"
+fi
+
+# Register the ACI provider if not already (no-op if registered). The
+# promote runner launches as an ACI container group.
+ACI_STATE="$(az provider show --namespace Microsoft.ContainerInstance \
+  --query registrationState -o tsv 2>/dev/null || echo NotRegistered)"
+if [[ "$ACI_STATE" != "Registered" ]]; then
+  az provider register --namespace Microsoft.ContainerInstance --wait >/dev/null
+  ok "Registered Microsoft.ContainerInstance provider"
+else
+  ok "Microsoft.ContainerInstance already registered"
+fi
+
 # ── 7. Print config to paste into /setup ─────────────────────────────────────
 print_dashboard_config "Azure sandbox configuration" \
   "azure_subscription_id=$SUBSCRIPTION_ID" \
@@ -185,6 +227,19 @@ print_dashboard_config "Azure sandbox configuration" \
   "azure_aci_file_share=jpt" \
   "azure_key_vault_url=$KV_URL" \
   "azure_ssh_keypair_secret_name=$SSH_SECRET               # JSON {public_key, private_key}" \
+  "" \
+  "# Image-registry hub + automated cross-cloud promote:" \
+  "storage_azure_account=$SA_NAME                          # Image hub + promote staging" \
+  "storage_azure_container=hub                              # Container for hub artefacts" \
+  "storage_active_backend=azure_blob                        # Active asset backend" \
+  "storage_hub_backend=azure_blob                           # Image hub (defaults to active if unset)" \
+  "promote_runner_image=weaverlab-xyz/dashboard-promote-runner:latest   # Build + push to your ACR until public tag exists" \
+  "promote_runner_azure_resource_group=$RG                  # ACI lands here" \
+  "promote_runner_azure_location=$LOCATION" \
+  "promote_runner_azure_subnet_id=$ACI_SUBNET_ID            # Reuses the Jumpoint ACI subnet" \
+  "promote_runner_azure_staging_account=$SA_NAME            # Same account as hub by default" \
+  "promote_runner_azure_staging_container=hub" \
+  "promote_runner_azure_target_resource_group=$RG           # Resulting managed image lands here" \
   "" \
   "# BeyondTrust deploy key — set in /setup or /secrets:" \
   "azure_aci_docker_deploy_key=…"
