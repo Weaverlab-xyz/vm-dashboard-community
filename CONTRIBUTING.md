@@ -80,6 +80,31 @@ bash (`scripts/sandbox/Linux/`) and PowerShell
 (`scripts/sandbox/Windows/`) variants exist — match whichever shell
 you're working in.
 
+### Where to land new target-cloud support for image promotion
+
+Cross-cloud image promotion is driven by transient containers under
+[`runners/promote/`](runners/promote/) — one image, multiple targets.
+Adding a fourth target cloud (Oracle Cloud, on-prem KVM, …) means:
+
+1. Extending [`runners/promote/entrypoint.py`](runners/promote/entrypoint.py)
+   with a new `upload_<target>(...)` path + a `--target <name>` arg.
+2. Adding a `services/<cloud>_service.py` helper that launches the
+   container as a transient task in that cloud (mirror
+   `aws_service.run_promote_runner_ecs` /
+   `azure_service.run_aci_promote_runner_task` /
+   `gcp_service.run_cloud_run_promote_runner_task`).
+3. Adding a `services/<cloud>_service.create_image_from_<storage>(...)`
+   that calls the cloud's image-import API against the staged blob.
+4. Wiring `services/promote_runner_service.run_for_<target>_target(...)`
+   + `services/image_registry_service.promote_to_<target>_automated(...)`
+   + the branch in `api/images.py`.
+5. Adding the `promote_runner_<cloud>_*` config keys to `config.py`
+   and `api/storage.py`.
+
+[`runners/promote/README.md`](runners/promote/README.md) is the
+runner-internals reference; [`docs/image-management.md`](docs/image-management.md)
+is the operator-facing flow. Update both when adding a target.
+
 ## What to avoid
 
 - Adding dependencies to [web_dashboard/requirements.txt](web_dashboard/requirements.txt)

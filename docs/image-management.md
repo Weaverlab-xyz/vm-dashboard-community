@@ -127,90 +127,117 @@ only the curated lists.
 ### Storage-backed promotion (the lifecycle this doc anchors)
 
 The lifecycle this doc is mostly about, surfaced on the
-**`/images`** page. Source of truth: the image artefact (RAW / VHD /
-VMDK) sitting in your active storage backend, recorded as a
-`RegisteredImage` row. Targets: AMI / Managed Image / Custom Image,
-one or more.
+**`/images`** page. Source of truth: the image artefact (VHD by default)
+sitting in your **hub backend**, recorded as a `RegisteredImage` row.
+Targets: AMI / Managed Image / Custom Image, one or more.
 
-**Phase 1 (shipped):** the registry, the registration UI, and a
-"Promote" button that returns **operator-readable manual steps** for
-the source/target combination you pick.
+The end-to-end flow:
 
-**Phase 2 (shipped):** the **build → export → register** half of the
-loop is automated. After a successful Packer build, the dashboard
-exports the image to a portable VHD via the cloud's native API,
-deposits the VHD in your active storage backend, and creates the
-matching `RegisteredImage` row automatically — no separate "register"
-click needed. Per cloud:
+```mermaid
+flowchart LR
+    build[Packer build<br/>AWS/Azure/GCP] --> export[Native export to<br/>same-cloud storage]
+    export -->|same-backend as hub:<br/>no copy| hub[(Hub backend<br/>S3 / Blob / GCS)]
+    export -->|different cloud:<br/>cross-backend copy| hub
+    hub -->|presigned URL| runner[Target-cloud runner<br/>ECS / ACI / Cloud Run]
+    runner -->|qemu-img convert<br/>+ upload| staging[(Target-cloud staging)]
+    staging --> import[Cloud import API<br/>ec2.ImportImage<br/>images.create_or_update<br/>images.insert]
+    import --> ami[Native image<br/>AMI / Managed Image / Custom Image]
+    ami --> promo[RegisteredImage.promotions]
+    style hub fill:#e0e7ff
+    style ami fill:#d1fae5
+```
 
-- **AWS** — `ec2:ExportImage` writes a VHD to `s3://<active>/<prefix>/images/`. Requires the `vmimport` IAM service role; override the role name with `aws_vmimport_role_name` in config if you've named yours differently.
-- **Azure** — Snapshot the managed image's OS disk, grant a read-only SAS URL, server-side blob-copy into the active Azure Blob container as a VHD, then revoke and clean up the snapshot. No egress through the dashboard.
-- **GCP** — Submit a Cloud Build job running the upstream `gcr.io/compute-image-tools/gce_vm_image_export` Daisy workflow with `-format=vpc`, writing the VHD to `gs://<active>/images/`.
+#### Build → hub
 
-The export only fires when the build cloud matches the active /storage
-backend (AWS↔s3, Azure↔azure_blob, GCP↔gcs). On a mismatch the build
-still completes; the operator can promote manually from /images. Phase 3
-will add cross-backend copy so any active backend can host any cloud's
-exports.
+After a successful Packer build the dashboard exports the image to a
+portable VHD via the cloud's native API and lands it on the **hub**
+backend, recording the resulting URL on `RegisteredImage.artefact_url`.
+You set the hub on `/storage` via `storage_hub_backend`; if unset it
+falls back to the active backend (so single-backend installs Just
+Work without configuration). Per build cloud:
 
-**Phase 2 Step 4 (shipped):** the **Promote** modal runs an advisory
-**pre-flight check** the moment you pick a target cloud. The checks
-are pure-Python (no cloud-side API calls, returns in <100ms) and cover
-the local-state blockers an operator can resolve before pasting the
-manual import commands:
+- **AWS** — `ec2:ExportImage` writes a VHD to S3. Requires the
+  `vmimport` IAM service role; override the role name with
+  `aws_vmimport_role_name` if you've named yours differently.
+- **Azure** — Snapshot the managed image's OS disk, grant a read-only
+  SAS URL, server-side blob-copy into the configured Azure Blob
+  container as a VHD, then revoke and clean up the snapshot. No
+  egress through the dashboard.
+- **GCP** — Submit a Cloud Build job running the upstream
+  `gcr.io/compute-image-tools/gce_vm_image_export` Daisy workflow
+  with `-format=vpc`, writing the VHD to GCS.
+
+When the build cloud matches the hub backend, the native export *is*
+the hub upload — no extra copy. When they differ (e.g. AWS build with
+hub = Azure Blob), the dashboard runs `storage_service.copy()` to
+stream the VHD from same-cloud staging into the hub, then deletes the
+staging copy so you don't pay for two. See `_land_on_hub()` in
+[`api/packer.py`](../web_dashboard/api/packer.py).
+
+#### Pre-flight checks
+
+The **Promote** modal runs an advisory pre-flight check the moment
+you pick a target cloud. The checks are pure-Python (no cloud-side
+API calls, returns in <100ms) and cover the local-state blockers
+visible without leaving the dashboard:
 
 - Artefact recorded — `artefact_url` and `artefact_format` are set
 - Format compatibility — VHD/VMDK/RAW/OVA matrix per target cloud
-- Cross-storage copy required — flagged whenever the source and target
-  clouds differ (the artefact lives in the source cloud's storage; the
-  target's import API expects it in the target's storage)
+- Cross-storage copy required — informational, since the runner
+  handles it automatically
 - Target credentials configured — the dashboard's config store has
   the credentials the target cloud's import API will use
 
-Failing checks don't block — the manual-steps button still works —
-but they're surfaced visually so the operator doesn't run a 30-minute
-import only to discover credentials were missing. The endpoint is
-`POST /api/images/{id}/preflight` with `{target_cloud}` body; response
-shape is `{checks: [{name, status: pass|warn|fail, detail}]}`.
+Failing checks don't block — the **Promote** button still works —
+but they're surfaced visually so the operator doesn't kick off a
+30-minute import only to discover credentials were missing. The
+endpoint is `POST /api/images/{id}/preflight` with `{target_cloud}`
+body; response shape is `{checks: [{name, status: pass|warn|fail, detail}]}`.
+Runner-time errors (IAM mid-flight, quota, format quirks) surface
+on `/jobs/<id>` once the actual promote runs.
 
-Live cloud-side pre-flight (vmimport IAM role probe, quota probe,
-source-blob HEAD) is **SaaS-only** in the hosted edition — the
-durability guarantees needed to safely run cross-cloud VM-import tasks
-(survive dashboard restart mid-poll, multi-region replay) don't fit
-the community edition's single-PostgreSQL-container model.
+#### Automated cross-cloud promote
 
-**Still manual:** cross-cloud *promotion* (importing the registered VHD
-into a different cloud's native image format) — the "Promote" button
-still returns manual steps for the import side. Native VM-import
-automation is **SaaS-only** for the same reason as live pre-flight: an
-in-flight import task whose dashboard polling state is lost on restart
-becomes an orphan resource. The community edition stays at "automate
-build + export, surface promote as guided manual steps."
+When you click **Promote** on an image, the dashboard enqueues an
+`image_promote_<target>` Job and runs the conversion + import in a
+transient container in the *target* cloud:
 
-**Why a manual-steps phase first.** Cross-cloud VM import is a real
-multi-step process: format conversion (VHD ↔ VMDK ↔ RAW), per-cloud
-import API (`ec2 import-image` / `az image create` / `gcloud compute
-images create`), per-cloud IAM (the dashboard's service principals
-need import-specific permissions on top of deploy permissions), and
-quota (cloud import services have separate quotas from compute).
-Surfacing the steps explicitly first lets operators validate
-permissions and quotas in their accounts before we automate against
-them.
+| Target | Runner | Cloud SDK call | Conversion |
+|---|---|---|---|
+| AWS | ECS Fargate task | `ec2.ImportImage` | None (VHD passthrough) |
+| Azure | ACI container group | `compute.images.begin_create_or_update` | None (VHD passthrough) |
+| GCP | Cloud Run Job | `compute.images.insert` | `qemu-img vhd → raw` + `tar.gz`-wrap with `disk.raw` entry |
+
+The runner pulls the hub artefact via a short-lived presigned URL
+minted at task-launch time, so it never holds hub-side credentials.
+On exit the dashboard calls the cloud's image-import API against the
+staged blob, polls until the resulting image is `Available` /
+`Succeeded` / `READY`, then deletes the staged copy and records the
+final identifier on `RegisteredImage.promotions[<target>]`.
+
+The runner image is `weaverlab-xyz/dashboard-promote-runner:latest`
+by default; override via `promote_runner_image` if you maintain a
+hardened private build. See
+[`runners/promote/README.md`](../runners/promote/README.md) for the
+operator prerequisites (IAM, quotas, networking) per target cloud,
+the full list of `promote_runner_*` config keys, and the build
+instructions until the public image is published.
+
+If your dashboard credentials can't reach the target — e.g. cross-
+account promotes or air-gapped tenants — pass `?manual=1` on the
+promote endpoint (or click "Show manual steps instead" in the modal)
+and the dashboard returns the operator-runnable CLI walkthrough as
+before. The promotion is recorded as `manual` in the registry; run
+the commands yourself, then re-promote (or `record_promotion` via the
+API) to fill in the resulting native image ID.
 
 Format expectations per target:
 
 | Target | Native import format | Path |
 |---|---|---|
-| AWS | VMDK / OVA / RAW / VHD via `aws ec2 import-image` | S3 → `import-image` task → AMI |
-| Azure | VHD via `az image create --source` | Azure Blob → `Microsoft.Compute/images` resource → Managed Image |
-| GCP | RAW (tar.gz wrapped) via `gcloud compute images create --source-uri` | GCS → `images.insert` → Custom Image |
-
-The "matching backend per cloud" design means the artefact you upload
-to S3 is reachable by AWS's import API without cross-cloud egress; the
-same logical artefact gets a copy in Azure Blob for Azure imports and
-in GCS for GCP imports. Migration is two-step: build once, archive to
-*your active backend*, then a "fan-out" step copies to the matching
-storage in any cloud you're promoting to.
+| AWS | VMDK / OVA / RAW / VHD via `ec2.ImportImage` | hub → staging S3 → `import-image` task → AMI |
+| Azure | VHD via `Microsoft.Compute/images` | hub → staging Blob → `images.create_or_update` → Managed Image |
+| GCP | tar.gz containing `disk.raw` via `images.insert` | hub → staging GCS → `images.insert` → Custom Image |
 
 ---
 
@@ -229,12 +256,14 @@ A typical build-and-promote cycle:
    is also registered as that cloud's native image (AMI / Managed
    Image / Custom Image). You can deploy from it immediately even
    without promotion.
-4. **Promote** (optional) — operator picks one or more target clouds
-   in the image's promote panel. For each:
-   - The artefact is copied to the matching storage in that cloud
-     (S3 / Azure Blob / GCS).
-   - The cloud's VM-import API is called.
-   - The resulting native image ID is recorded against the build job.
+4. **Promote** (optional) — operator picks a target cloud (+ region
+   for AWS, resource group for Azure) in the image's promote panel.
+   The dashboard enqueues an `image_promote_<target>` Job; the target
+   cloud's runner pulls the hub artefact, converts format if needed,
+   uploads to target-cloud staging, calls the cloud's VM-import API,
+   and records the resulting native image ID on
+   `RegisteredImage.promotions[<target>]`. Staged blobs are deleted
+   after the cloud-side image reaches its terminal-ready state.
 5. **Deploy** — the per-cloud deploy forms see the new images in
    their respective lists and can launch instances from them.
 
@@ -295,22 +324,14 @@ A few things the community edition does *not* try to do. They're
 SaaS priorities — see [docs/saas-comparison.md](saas-comparison.md)
 for the hosted-edition philosophy.
 
-- **One-click cross-cloud promote.** Community automates *build →
-  export → register*; the "Promote" button still returns manual steps
-  for the cross-storage copy and the native VM-import. SaaS runs both
-  as durable workflows (Temporal-backed) so a 45-minute AWS-to-Azure
-  import survives dashboard restarts without orphan tasks and without
-  the operator having to babysit `aws ec2 import-image` polling. Same
-  registry, same /images UI, same audit trail — the `automated` flag
-  on the promote response just flips to `true` and the manual steps
-  pane is replaced with a live job stream.
-- **Live cloud-side pre-flight.** Community's pre-flight checks read
-  local config only (artefact recorded, format compat, cross-storage
-  required, target creds configured). SaaS adds live probes —
-  vmimport role exists, VM-import quota available, source blob
-  HEAD-reachable — that need replay-safe state to be useful. The
-  community model surfaces those as warnings *after* the import fails;
-  SaaS surfaces them *before*.
+> **Already shipped in community (was previously on this list):**
+> one-click cross-cloud promote and pre-flight cloud-credential checks.
+> The runner-driven promote flow above runs in the community edition;
+> SaaS retains a stronger guarantee — durable replay-safe workflows
+> (Temporal-backed) so a 45-minute import survives a dashboard restart
+> mid-poll without orphan tasks. Same registry, same `/images` UI,
+> same audit trail; the SaaS edition just adds replay-safety on top.
+
 - **Local image builds via Azure Arc.** The hosted edition can
   register an Azure Arc runbook worker on your on-prem build host and
   run image builds *there*, against your VMware / Hyper-V hypervisor,
