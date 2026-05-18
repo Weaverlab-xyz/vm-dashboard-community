@@ -12,14 +12,40 @@
       Register image
     </button>
   </div>
-  <p class="text-sm text-gray-500 mb-8">
+  <p class="text-sm text-gray-500 mb-6">
     The dashboard's record of which images exist, where their portable
-    artefacts live, and which clouds have promotions of each. Build with
-    Packer (or capture an existing instance), <strong>Register</strong>
-    here, then <strong>Promote</strong> to additional clouds. See
-    <a href="/docs/image-management.md" class="text-blue-600 hover:underline">image-management.md</a>
-    for the philosophy.
+    artefacts live, and which clouds have promotions of each. Build a
+    portable VHD with Packer (or capture an existing instance),
+    <strong>Register</strong> it here, then <strong>Promote</strong> to
+    any cloud you need it in — the dashboard runs the cross-cloud
+    conversion + import in a transient runner inside the
+    <em>target</em> cloud so the dashboard host stays out of the heavy
+    lifting.
   </p>
+
+  <!-- ── Pipeline diagram ───────────────────────────────────────────────── -->
+  <!-- Mirrors the canonical flowchart in docs/image-management.md; keep them
+       in sync when the pipeline shape changes. Mermaid.js is loaded only on
+       this page (via {% block scripts %} below) so other dashboard pages
+       don't pull the library. -->
+  <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
+    <h2 class="text-sm font-medium text-gray-700 mb-3">How cross-cloud promote works</h2>
+    <div class="overflow-x-auto">
+      <div class="mermaid text-sm">
+flowchart LR
+    build["Packer build<br/>AWS / Azure / GCP"] --> export["Native export to<br/>same-cloud storage"]
+    export -- "same-backend as hub<br/>(no copy)" --> hub[("Hub backend<br/>S3 / Blob / GCS")]
+    export -- "different cloud<br/>(cross-backend copy)" --> hub
+    hub -- "presigned URL" --> runner["Target-cloud runner<br/>ECS / ACI / Cloud Run"]
+    runner -- "qemu-img convert<br/>+ upload" --> staging[("Target-cloud staging")]
+    staging --> imp["Cloud import API<br/>ec2.ImportImage<br/>images.create_or_update<br/>images.insert"]
+    imp --> ami["Native image<br/>AMI / Managed Image / Custom Image"]
+    ami --> promo["RegisteredImage.promotions"]
+    style hub fill:#e0e7ff
+    style ami fill:#d1fae5
+      </div>
+    </div>
+  </div>
 
   <!-- Toast -->
   <div x-show="toast" x-cloak x-transition
@@ -314,6 +340,18 @@
 {% endblock %}
 
 {% block scripts %}
+<!-- Mermaid renders the pipeline-diagram block in the page header. Loaded
+     only on /images (not in base.html) so other dashboard pages don't pull
+     the ~700 KB library. -->
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js" defer></script>
+<script defer>
+  document.addEventListener('DOMContentLoaded', () => {
+    if (window.mermaid) {
+      window.mermaid.initialize({ startOnLoad: true, theme: 'default', securityLevel: 'strict' });
+    }
+  });
+</script>
+
 <script>
 function imagesPage() {
   return {
