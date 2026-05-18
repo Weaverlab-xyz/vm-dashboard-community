@@ -58,14 +58,30 @@
               <div x-show="img.source_region" x-cloak class="text-xs text-gray-400" x-text="img.source_region"></div>
             </td>
             <td class="px-4 py-3">
-              <div class="flex flex-col gap-1">
+              <div class="flex flex-col gap-1.5">
                 <template x-for="cloud in ['aws','azure','gcp']" :key="cloud">
                   <div x-show="cloud !== img.source_cloud" class="text-xs">
                     <template x-if="img.promotions[cloud]">
-                      <span :class="promoStatusClass(img.promotions[cloud].status)"
-                            class="inline-block px-1.5 py-0.5 rounded font-mono">
-                        <span x-text="cloud"></span>: <span x-text="img.promotions[cloud].status"></span>
-                      </span>
+                      <div class="flex flex-col gap-0.5">
+                        <span :class="promoStatusClass(img.promotions[cloud].status)"
+                              class="inline-block self-start px-1.5 py-0.5 rounded font-mono">
+                          <span x-text="cloud"></span>: <span x-text="img.promotions[cloud].status"></span>
+                        </span>
+                        <!-- Resulting image identifier (AMI / Azure resource_id / GCP self_link) -->
+                        <span x-show="img.promotions[cloud].status === 'completed' && (img.promotions[cloud].image_id || img.promotions[cloud].self_link)"
+                              x-cloak
+                              class="text-[10px] text-gray-500 font-mono truncate max-w-xs"
+                              :title="img.promotions[cloud].self_link || img.promotions[cloud].image_id"
+                              x-text="promoShortId(cloud, img.promotions[cloud])"></span>
+                        <!-- Region / location -->
+                        <span x-show="img.promotions[cloud].region" x-cloak class="text-[10px] text-gray-400" x-text="img.promotions[cloud].region"></span>
+                        <!-- Failed: truncated note so the operator can see why -->
+                        <span x-show="img.promotions[cloud].status === 'failed' && img.promotions[cloud].notes"
+                              x-cloak
+                              class="text-[10px] text-red-600 truncate max-w-xs"
+                              :title="img.promotions[cloud].notes"
+                              x-text="img.promotions[cloud].notes.split('\n')[0]"></span>
+                      </div>
                     </template>
                     <template x-if="!img.promotions[cloud]">
                       <span class="text-gray-300" x-text="cloud + ': not promoted'"></span>
@@ -214,10 +230,25 @@
         </div>
 
         <div>
-          <label class="block text-sm font-medium text-gray-700 mb-1">Target region <span class="text-gray-400 font-normal">(optional)</span></label>
+          <label class="block text-sm font-medium text-gray-700 mb-1">
+            Target region
+            <span class="text-gray-400 font-normal" x-show="promoteTarget === 'aws'" x-cloak>(required for AWS — e.g. us-west-2)</span>
+            <span class="text-gray-400 font-normal" x-show="promoteTarget === 'azure'" x-cloak>(Azure location, optional — defaults to your configured location)</span>
+            <span class="text-gray-400 font-normal" x-show="promoteTarget === 'gcp'" x-cloak>(informational — GCP custom images are global)</span>
+            <span class="text-gray-400 font-normal" x-show="!promoteTarget" x-cloak>(optional)</span>
+          </label>
           <input type="text" x-model="promoteRegion"
                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
                  placeholder="us-west-2 / westus2 / us-central1">
+        </div>
+
+        <div x-show="promoteTarget === 'azure'" x-cloak>
+          <label class="block text-sm font-medium text-gray-700 mb-1">
+            Target resource group <span class="text-gray-400 font-normal">(optional — defaults to your configured Azure RG)</span>
+          </label>
+          <input type="text" x-model="promoteResourceGroup"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                 placeholder="my-images-rg">
         </div>
 
         <!-- Pre-flight check results (Step 4) -->
@@ -242,21 +273,36 @@
           </p>
         </div>
 
-        <button @click="submitPromote()" :disabled="!promoteTarget || promoting"
-                class="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-medium px-4 py-2 rounded-lg">
-          <span x-show="!promoting">Generate manual steps</span>
-          <span x-show="promoting" x-cloak>Working…</span>
-        </button>
-
-        <div x-show="promoteResult" x-cloak class="mt-4 p-4 bg-gray-900 rounded-lg text-xs text-green-300 font-mono whitespace-pre-wrap" x-text="promoteResult?.manual_steps"></div>
-
-        <p x-show="promoteResult" x-cloak class="text-xs text-gray-500">
-          The promotion is recorded as <strong>manual</strong> in the registry.
-          When you finish the steps above, return to this page and click
-          <strong>Promote</strong> again with the resulting native image ID
-          (a future patch will replace this with one-click automation; see
-          <a href="/docs/image-management.md" class="text-blue-600 hover:underline">image-management.md</a>).
+        <div class="flex items-center gap-3">
+          <button @click="submitPromote(false)" :disabled="!promoteTarget || promoting"
+                  class="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-medium px-4 py-2 rounded-lg">
+            <span x-show="!promoting || manualMode">Promote</span>
+            <span x-show="promoting && !manualMode" x-cloak>Starting…</span>
+          </button>
+          <button @click="submitPromote(true)" :disabled="!promoteTarget || promoting" type="button"
+                  class="text-sm text-gray-600 hover:text-gray-800 underline disabled:opacity-50">
+            <span x-show="!promoting || !manualMode">Show manual steps instead</span>
+            <span x-show="promoting && manualMode" x-cloak>Working…</span>
+          </button>
+        </div>
+        <p class="text-xs text-gray-500">
+          <strong>Promote</strong> runs the conversion + cloud-side import in the target cloud's
+          own runner (ECS for AWS, ACI for Azure, Cloud Run for GCP). The dashboard returns a
+          Job ID and opens the job page so you can watch progress. Use <strong>Show manual
+          steps</strong> if your dashboard credentials can't reach the target.
         </p>
+
+        <!-- Manual-steps walkthrough — only when the operator chose the fallback. -->
+        <div x-show="promoteResult && promoteResult.manual_steps" x-cloak>
+          <div class="mt-4 p-4 bg-gray-900 rounded-lg text-xs text-green-300 font-mono whitespace-pre-wrap"
+               x-text="promoteResult?.manual_steps"></div>
+          <p class="text-xs text-gray-500 mt-2">
+            The promotion is recorded as <strong>manual</strong> in the registry. Run the
+            commands above; when the resulting image is in place, click <strong>Promote</strong>
+            again on this image to retry the automated path (or update the promotion record
+            directly via the API).
+          </p>
+        </div>
       </div>
       <div class="px-6 py-4 border-t border-gray-100 flex justify-end">
         <button @click="showPromote = false" class="px-4 py-2 text-sm border border-gray-300 rounded-lg">Close</button>
@@ -279,7 +325,9 @@ function imagesPage() {
     promoteImage: null,
     promoteTarget: '',
     promoteRegion: '',
+    promoteResourceGroup: '',
     promoting: false,
+    manualMode: false,
     promoteResult: null,
     preflightLoading: false,
     preflightChecks: [],
@@ -315,6 +363,7 @@ function imagesPage() {
     promoStatusClass(status) {
       return ({
         completed: 'bg-emerald-50 text-emerald-700 border border-emerald-200',
+        running:   'bg-blue-50 text-blue-700 border border-blue-200',
         manual:    'bg-amber-50 text-amber-700 border border-amber-200',
         pending:   'bg-blue-50 text-blue-700 border border-blue-200',
         failed:    'bg-red-50 text-red-700 border border-red-200',
@@ -349,10 +398,24 @@ function imagesPage() {
       this.promoteImage = img;
       this.promoteTarget = '';
       this.promoteRegion = '';
+      this.promoteResourceGroup = '';
       this.promoteResult = null;
+      this.manualMode = false;
       this.preflightChecks = [];
       this.preflightLoading = false;
       this.showPromote = true;
+    },
+
+    promoShortId(cloud, promo) {
+      // Trim the cloud-native identifier to something readable in the table
+      // cell. AMI ids are already short; Azure resource IDs and GCP self-links
+      // are long enough that we show the last segment with a tooltip on the
+      // full string.
+      const v = promo?.self_link || promo?.image_id || '';
+      if (!v) return '';
+      if (cloud === 'aws') return v;                  // ami-…
+      const seg = v.split('/').filter(Boolean).pop(); // last path segment
+      return seg || v;
     },
 
     preflightBadge(status) {
@@ -384,14 +447,31 @@ function imagesPage() {
       }
     },
 
-    async submitPromote() {
+    async submitPromote(manual) {
       if (!this.promoteTarget || !this.promoteImage) return;
       this.promoting = true;
+      this.manualMode = !!manual;
+      // Reset prior manual-steps panel so we don't briefly render the old run.
+      this.promoteResult = null;
       try {
-        this.promoteResult = await API.post(`/api/images/${this.promoteImage.id}/promote`, {
+        const path = `/api/images/${this.promoteImage.id}/promote` + (manual ? '?manual=1' : '');
+        const body = {
           target_cloud:  this.promoteTarget,
           target_region: this.promoteRegion || null,
-        });
+          target_resource_group: this.promoteResourceGroup || null,
+        };
+        const data = await API.post(path, body);
+        if (data && data.automated && data.job_id) {
+          // Automated path — kick off, refresh list so the row flips to
+          // running, then jump to the job page like cloud deploys do.
+          this.showToast(`Promote queued — opening job ${data.job_id}…`);
+          await this.loadImages();
+          this.showPromote = false;
+          window.location.href = '/jobs/' + data.job_id;
+          return;
+        }
+        // Manual path — show the CLI walkthrough panel.
+        this.promoteResult = data;
         await this.loadImages();
       } catch (e) {
         this.showToast(e.message || 'Promote failed', 'error');
