@@ -199,6 +199,142 @@ if ($LASTEXITCODE -eq 0) {
 $RoleArn = (aws iam get-role --role-name $RoleName --query 'Role.Arn' --output text).Trim()
 Set-StateValue aws ecs_role_arn $RoleArn
 
+# ── 7b. Image-hub S3 bucket + promote-runner IAM ─────────────────────────────
+# Provisions the prerequisites the dashboard's automated cross-cloud image
+# promote runner needs (see docs/image-management.md, runners/promote/README.md):
+#
+#   • An S3 bucket that doubles as (a) the image-registry hub for the active
+#     storage backend and (b) the staging bucket the promote-runner Fargate
+#     task writes converted VHDs to (under promote-staging/).
+#   • An ECS task role with s3:PutObject on that bucket — the runner
+#     container's IAM principal during the upload step.
+#   • The well-known `vmimport` IAM service role that AWS's ec2:ImportImage
+#     assumes when reading the staged VHD to create the resulting AMI.
+Write-Section 'Image-hub S3 bucket + promote-runner IAM'
+
+$StorageBucket = "$Name-storage-$AccountId"
+$bucketExists = $false
+& aws s3api head-bucket --bucket $StorageBucket --region $Region *> $null
+if ($LASTEXITCODE -eq 0) { $bucketExists = $true }
+
+if ($bucketExists) {
+    Write-Ok "Reusing S3 bucket $StorageBucket"
+} else {
+    # us-east-1 has its own create-bucket dance (no LocationConstraint allowed).
+    if ($Region -eq 'us-east-1') {
+        aws s3api create-bucket --bucket $StorageBucket --region $Region | Out-Null
+    } else {
+        aws s3api create-bucket --bucket $StorageBucket --region $Region `
+            --create-bucket-configuration "LocationConstraint=$Region" | Out-Null
+    }
+    aws s3api put-bucket-tagging --bucket $StorageBucket `
+        --tagging "TagSet=[{Key=$($Script:SandboxTagKey),Value=$($Script:SandboxTagValue)}]" 2>$null | Out-Null
+    # Lock down public access — this bucket holds VHDs the dashboard presigns
+    # short-lived URLs for; it should never serve anonymous reads.
+    aws s3api put-public-access-block --bucket $StorageBucket `
+        --public-access-block-configuration `
+          'BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true' `
+        2>$null | Out-Null
+    Write-Ok "Created S3 bucket $StorageBucket"
+}
+Set-StateValue aws storage_bucket $StorageBucket
+
+$PromoteTaskRoleName = "$Name-promote-runner-task"
+& aws iam get-role --role-name $PromoteTaskRoleName *> $null
+if ($LASTEXITCODE -eq 0) {
+    Write-Ok "Reusing IAM role $PromoteTaskRoleName"
+} else {
+    $assumePolicy = '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ecs-tasks.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
+    aws iam create-role --role-name $PromoteTaskRoleName `
+        --assume-role-policy-document $assumePolicy `
+        --tags "Key=$($Script:SandboxTagKey),Value=$($Script:SandboxTagValue)" | Out-Null
+    Write-Ok "Created IAM role $PromoteTaskRoleName"
+}
+$promoteInlinePolicy = @"
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject",
+        "s3:AbortMultipartUpload",
+        "s3:ListBucketMultipartUploads",
+        "s3:ListMultipartUploadParts"
+      ],
+      "Resource": "arn:aws:s3:::$StorageBucket/promote-staging/*"
+    }
+  ]
+}
+"@
+aws iam put-role-policy --role-name $PromoteTaskRoleName `
+    --policy-name 'promote-runner-s3-write' `
+    --policy-document $promoteInlinePolicy | Out-Null
+$PromoteTaskRoleArn = (aws iam get-role --role-name $PromoteTaskRoleName --query 'Role.Arn' --output text).Trim()
+Write-Ok "Granted promote-runner task role S3 write on s3://$StorageBucket/promote-staging/*"
+Set-StateValue aws promote_task_role_arn $PromoteTaskRoleArn
+
+# vmimport service role — well-known name AWS expects unless overridden via
+# aws_vmimport_role_name in the dashboard config. ec2:ImportImage assumes
+# this role server-side to read the staged VHD + write the resulting AMI.
+$VmImportRoleName = 'vmimport'
+& aws iam get-role --role-name $VmImportRoleName *> $null
+if ($LASTEXITCODE -eq 0) {
+    Write-Ok "Reusing IAM role $VmImportRoleName"
+} else {
+    $vmiTrust = @"
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {"Service": "vmie.amazonaws.com"},
+      "Action": "sts:AssumeRole",
+      "Condition": {"StringEquals": {"sts:ExternalId": "vmimport"}}
+    }
+  ]
+}
+"@
+    aws iam create-role --role-name $VmImportRoleName `
+        --assume-role-policy-document $vmiTrust `
+        --tags "Key=$($Script:SandboxTagKey),Value=$($Script:SandboxTagValue)" | Out-Null
+    Write-Ok "Created IAM role $VmImportRoleName"
+}
+$vmiPolicy = @"
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:GetBucketLocation",
+        "s3:GetBucketAcl",
+        "s3:ListBucket"
+      ],
+      "Resource": [
+        "arn:aws:s3:::$StorageBucket",
+        "arn:aws:s3:::$StorageBucket/*"
+      ]
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "ec2:ModifySnapshotAttribute",
+        "ec2:CopySnapshot",
+        "ec2:RegisterImage",
+        "ec2:Describe*"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
+"@
+aws iam put-role-policy --role-name $VmImportRoleName `
+    --policy-name 'vmimport-s3-and-ec2' `
+    --policy-document $vmiPolicy | Out-Null
+Write-Ok "Granted $VmImportRoleName read on s3://$StorageBucket/* + ec2 image-import perms"
+
 # ── 8. Print config to paste into /setup ──────────────────────────────────────
 Write-DashboardConfig 'AWS sandbox configuration' @(
     "aws_region=$Region",
@@ -211,6 +347,18 @@ Write-DashboardConfig 'AWS sandbox configuration' @(
     "bt_ecs_execution_role_arn=$RoleArn",
     "bt_ecs_jumpoint_subnet_id=$PublicSubnetId         # Jumpoint task lands here (public, IGW-routed)",
     "bt_ecs_jumpoint_security_group_id=$JumpointSg      # SG for the Jumpoint task",
+    "",
+    "# Image-registry hub + automated cross-cloud promote:",
+    "storage_s3_bucket=$StorageBucket                                       # Image hub + promote staging",
+    "storage_active_backend=s3                                                  # Active asset backend",
+    "storage_hub_backend=s3                                                     # Image hub (defaults to active if unset)",
+    "promote_runner_image=weaverlab-xyz/dashboard-promote-runner:latest         # Build + push to your ECR until public tag exists",
+    "promote_runner_ecs_cluster=$EcsCluster                                    # Reuses Jumpoint cluster",
+    "promote_runner_ecs_execution_role_arn=$RoleArn                            # Image pull + CloudWatch logs",
+    "promote_runner_ecs_task_role_arn=$PromoteTaskRoleArn                    # S3 PutObject on the staging bucket",
+    "promote_runner_ecs_subnet_id=$PublicSubnetId                             # Runner needs egress to the presigned source URL",
+    "promote_runner_ecs_security_group_ids=$JumpointSg                         # Reuses Jumpoint SG (egress 443)",
+    "aws_vmimport_role_name=$VmImportRoleName                                 # Service role ec2:ImportImage assumes",
     "",
     "# Plus your AWS credentials:",
     'aws_access_key_id=…',
