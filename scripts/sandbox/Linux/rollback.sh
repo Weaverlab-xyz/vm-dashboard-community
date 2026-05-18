@@ -139,6 +139,41 @@ rollback_aws() {
       || warn "Could not delete ecsTaskExecutionRole"
   fi
 
+  # 4. Promote-runner task role — same pattern, only delete if we created it.
+  local promote_role="${SANDBOX_NAME_PREFIX}-promote-runner-task"
+  if aws iam list-role-tags --role-name "$promote_role" 2>/dev/null \
+       | jq -e ".Tags[]? | select(.Key==\"$SANDBOX_TAG_KEY\" and .Value==\"$SANDBOX_TAG_VALUE\")" >/dev/null 2>&1; then
+    # Delete the inline policy first.
+    aws iam delete-role-policy --role-name "$promote_role" \
+      --policy-name "promote-runner-s3-write" >/dev/null 2>&1 || true
+    aws iam delete-role --role-name "$promote_role" >/dev/null 2>&1 \
+      && ok "Deleted IAM role $promote_role" \
+      || warn "Could not delete $promote_role"
+  fi
+
+  # 5. vmimport — only delete if we tagged it. `vmimport` is a well-known
+  # AWS name; an operator may have one pre-existing for unrelated reasons,
+  # so the tag check is critical here.
+  if aws iam list-role-tags --role-name vmimport 2>/dev/null \
+       | jq -e ".Tags[]? | select(.Key==\"$SANDBOX_TAG_KEY\" and .Value==\"$SANDBOX_TAG_VALUE\")" >/dev/null 2>&1; then
+    aws iam delete-role-policy --role-name vmimport \
+      --policy-name "vmimport-s3-and-ec2" >/dev/null 2>&1 || true
+    aws iam delete-role --role-name vmimport >/dev/null 2>&1 \
+      && ok "Deleted IAM role vmimport" \
+      || warn "Could not delete vmimport"
+  fi
+
+  # 6. Storage / promote-staging S3 bucket — empty then delete.
+  local storage_bucket="${SANDBOX_NAME_PREFIX}-storage-$(aws sts get-caller-identity --query Account --output text 2>/dev/null)"
+  if aws s3api head-bucket --bucket "$storage_bucket" --region "$region" >/dev/null 2>&1; then
+    # Versioning might be off in the sandbox, but rm --recursive handles
+    # both versioned and unversioned objects.
+    aws s3 rm "s3://$storage_bucket" --recursive --region "$region" >/dev/null 2>&1 || true
+    aws s3api delete-bucket --bucket "$storage_bucket" --region "$region" >/dev/null 2>&1 \
+      && ok "Deleted S3 bucket $storage_bucket" \
+      || warn "Could not delete S3 bucket $storage_bucket (may have versioned objects)"
+  fi
+
   state_clear aws
   ok "AWS sandbox state cleared"
 }
@@ -240,11 +275,21 @@ rollback_gcp() {
   gcloud secrets delete "${prefix}-ssh-keypair" --project "$project_id" --quiet >/dev/null 2>&1 \
     && ok "Deleted secret ${prefix}-ssh-keypair" || true
 
-  # 5. Service account (revoke role bindings + delete the SA).
+  # 5. Storage / promote-staging GCS bucket — empty then delete. (Bucket-scoped
+  # IAM bindings go with the bucket; no separate cleanup step needed.)
+  local storage_bucket="${project_id}-${prefix}-storage"
+  if gcloud storage buckets describe "gs://$storage_bucket" --project "$project_id" >/dev/null 2>&1; then
+    gcloud storage rm "gs://$storage_bucket" --recursive --project "$project_id" --quiet >/dev/null 2>&1 \
+      && ok "Deleted GCS bucket gs://$storage_bucket" \
+      || warn "Could not delete bucket gs://$storage_bucket (may have retained objects)"
+  fi
+
+  # 6. Service account (revoke role bindings + delete the SA).
   local sa_email="${prefix}-sa@${project_id}.iam.gserviceaccount.com"
   if gcloud iam service-accounts describe "$sa_email" --project "$project_id" >/dev/null 2>&1; then
     for role in roles/compute.admin roles/secretmanager.secretAccessor \
-                 roles/iam.serviceAccountUser roles/run.admin; do
+                 roles/iam.serviceAccountUser roles/run.admin roles/run.developer \
+                 roles/run.invoker; do
       gcloud projects remove-iam-policy-binding "$project_id" \
         --member "serviceAccount:$sa_email" --role "$role" \
         --condition=None --quiet >/dev/null 2>&1 || true

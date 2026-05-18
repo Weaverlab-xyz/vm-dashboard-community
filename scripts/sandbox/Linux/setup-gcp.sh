@@ -59,10 +59,12 @@ NAT="${NAME}-nat"
 
 # ── 1. Enable required APIs ───────────────────────────────────────────────────
 section "Enable APIs"
-for api in compute.googleapis.com secretmanager.googleapis.com iam.googleapis.com; do
+# run.googleapis.com is needed for the dashboard's automated image promote
+# (the runner launches as a Cloud Run Job in the target project).
+for api in compute.googleapis.com secretmanager.googleapis.com iam.googleapis.com run.googleapis.com; do
   gcloud services enable "$api" --project "$PROJECT_ID" --quiet
 done
-ok "Enabled compute, secretmanager, iam"
+ok "Enabled compute, secretmanager, iam, run"
 
 # ── 2. VPC + subnets ─────────────────────────────────────────────────────────
 section "VPC + subnets"
@@ -178,12 +180,13 @@ else
 fi
 
 for role in roles/compute.admin roles/secretmanager.secretAccessor \
-             roles/iam.serviceAccountUser roles/run.admin; do
+             roles/iam.serviceAccountUser roles/run.admin roles/run.developer \
+             roles/run.invoker; do
   gcloud projects add-iam-policy-binding "$PROJECT_ID" \
     --member "serviceAccount:$SA_EMAIL" --role "$role" \
     --condition=None --quiet >/dev/null
 done
-ok "Granted compute.admin, secretmanager.secretAccessor, iam.serviceAccountUser, run.admin"
+ok "Granted compute.admin, secretmanager.secretAccessor, iam.serviceAccountUser, run.{admin,developer,invoker}"
 
 SA_KEY_PATH="$(state_dir gcp)/sa-key.json"
 if [[ ! -s "$SA_KEY_PATH" ]]; then
@@ -194,6 +197,43 @@ if [[ ! -s "$SA_KEY_PATH" ]]; then
 else
   ok "Reusing SA key at $SA_KEY_PATH"
 fi
+
+# ── 5b. Image-hub GCS bucket + promote-runner plumbing ───────────────────────
+# Provisions the prerequisites the dashboard's automated cross-cloud image
+# promote runner needs (see docs/image-management.md, runners/promote/README.md):
+#
+#   • A GCS bucket that doubles as the image-registry hub and the staging
+#     bucket the promote-runner Cloud Run Job writes converted tar.gz disks
+#     to (under promote-staging/) before compute.images.insert consumes
+#     them.
+#   • storage.objectAdmin on that bucket for the dashboard SA — the runner
+#     uploads as this SA via workload identity.
+section "Image-hub GCS bucket + promote-runner IAM"
+
+# GCS bucket names are globally unique; prefix with project ID to avoid
+# collisions in shared organisations.
+STORAGE_BUCKET="${PROJECT_ID}-${NAME}-storage"
+# gcloud storage buckets describe returns nonzero if missing.
+if gcloud storage buckets describe "gs://$STORAGE_BUCKET" --project "$PROJECT_ID" >/dev/null 2>&1; then
+  ok "Reusing GCS bucket gs://$STORAGE_BUCKET"
+else
+  gcloud storage buckets create "gs://$STORAGE_BUCKET" \
+    --project "$PROJECT_ID" --location "$REGION" \
+    --uniform-bucket-level-access \
+    --public-access-prevention --quiet >/dev/null
+  gcloud storage buckets update "gs://$STORAGE_BUCKET" \
+    --project "$PROJECT_ID" \
+    --update-labels "$LABELS" --quiet >/dev/null 2>&1 || true
+  ok "Created GCS bucket gs://$STORAGE_BUCKET (uniform access, public prevention)"
+fi
+state_write gcp storage_bucket "$STORAGE_BUCKET"
+
+# Grant the dashboard SA objectAdmin on the bucket — covers upload (runner)
+# + read (dashboard mints signed URLs) + delete (cleanup after promote).
+gcloud storage buckets add-iam-policy-binding "gs://$STORAGE_BUCKET" \
+  --member "serviceAccount:$SA_EMAIL" --role "roles/storage.objectAdmin" \
+  --quiet >/dev/null
+ok "Granted $SA_EMAIL storage.objectAdmin on gs://$STORAGE_BUCKET"
 
 # ── 6. Secret Manager: SSH keypair JSON ─────────────────────────────────────
 section "Secret Manager — SSH keypair"
@@ -227,6 +267,15 @@ print_dashboard_config "GCP sandbox configuration" \
   "gcp_jumpoint_machine_type=e2-micro" \
   "gcp_default_network_tag=$NETWORK_TAG_VM                  # Auto-attached to every dashboard-deployed VM so the sandbox firewall rules apply" \
   "gcp_service_account_json=\$(cat $SA_KEY_PATH | jq -c .)   # paste the JSON contents" \
+  "" \
+  "# Image-registry hub + automated cross-cloud promote:" \
+  "storage_gcs_bucket=$STORAGE_BUCKET                       # Image hub + promote staging" \
+  "storage_active_backend=gcs                                # Active asset backend" \
+  "storage_hub_backend=gcs                                   # Image hub (defaults to active if unset)" \
+  "promote_runner_image=weaverlab-xyz/dashboard-promote-runner:latest   # Build + push to Artifact Registry until public tag exists" \
+  "promote_runner_gcp_region=$REGION                         # Cloud Run Job lands here" \
+  "promote_runner_gcp_service_account=$SA_EMAIL              # Workload-identity SA for the runner" \
+  "promote_runner_gcp_staging_bucket=$STORAGE_BUCKET" \
   "" \
   "# BeyondTrust deploy key — set in /setup or /secrets:" \
   "gcp_cloud_run_docker_deploy_key=…"
