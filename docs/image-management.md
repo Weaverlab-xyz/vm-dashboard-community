@@ -135,14 +135,14 @@ The end-to-end flow:
 
 ```mermaid
 flowchart LR
-    build[Packer build<br/>AWS/Azure/GCP] --> export[Native export to<br/>same-cloud storage]
-    export -->|same-backend as hub:<br/>no copy| hub[(Hub backend<br/>S3 / Blob / GCS)]
-    export -->|different cloud:<br/>cross-backend copy| hub
-    hub -->|presigned URL| runner[Target-cloud runner<br/>ECS / ACI / Cloud Run]
-    runner -->|qemu-img convert<br/>+ upload| staging[(Target-cloud staging)]
-    staging --> import[Cloud import API<br/>ec2.ImportImage<br/>images.create_or_update<br/>images.insert]
-    import --> ami[Native image<br/>AMI / Managed Image / Custom Image]
-    ami --> promo[RegisteredImage.promotions]
+    build["Packer build<br/>AWS / Azure / GCP"] --> export["Native export to<br/>same-cloud storage"]
+    export -- "same-backend as hub<br/>(no copy)" --> hub[("Hub backend<br/>S3 / Blob / GCS")]
+    export -- "different cloud<br/>(cross-backend copy)" --> hub
+    hub -- "presigned URL" --> runner["Target-cloud runner<br/>ECS / ACI / Cloud Run"]
+    runner -- "qemu-img convert<br/>+ upload" --> staging[("Target-cloud staging")]
+    staging --> imp["Cloud import API<br/>ec2.ImportImage<br/>images.create_or_update<br/>images.insert"]
+    imp --> ami["Native image<br/>AMI / Managed Image / Custom Image"]
+    ami --> promo["RegisteredImage.promotions"]
     style hub fill:#e0e7ff
     style ami fill:#d1fae5
 ```
