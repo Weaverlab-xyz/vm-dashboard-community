@@ -49,3 +49,7 @@ logs/
 *.swp
 .DS_Store
 Thumbs.db
+sa-key.json
+Cloudflare_CA.crt
+Dockerfile
+Dockerfile
