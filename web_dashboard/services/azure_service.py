@@ -457,30 +457,50 @@ def _list_private_images_sync(cred, sub_id: str, gallery: str, gallery_rg: str, 
                     f"could not be listed: {e}."
                 )
 
-    # Standalone managed images in resource group. When a separate gallery RG is
-    # configured, scope managed-image lookup to that RG instead of the VM RG so
-    # the gallery setting fully controls where private images come from.
-    effective_rg = gallery_rg or rg
-    try:
-        for img in compute.images.list_by_resource_group(effective_rg):
-            results.append({
-                "resource_id": img.id,
-                "name": img.name,
-                "description": (img.tags or {}).get("Description", ""),
-                "state": img.provisioning_state or "",
-                "creation_date": "",
-                "os_type": (_os_type_str(img.storage_profile.os_disk.os_type)
-                           if img.storage_profile and img.storage_profile.os_disk else "Linux"),
-                "source": "managed",
-                "gallery_name": "",
-                "sku": "",
-                "location": img.location or "",
-            })
-    except Exception as e:
-        logger.warning("Failed to list managed images from rg=%s: %s", effective_rg, e)
-        warnings.append(
-            f"Managed images in resource group '{effective_rg}' could not be listed: {e}."
-        )
+    # Standalone managed images. When a gallery RG is configured we scan BOTH
+    # the gallery RG and the VM RG so Packer builds (which land in the VM RG
+    # via build_resource_group_name) show up alongside gallery-resident
+    # artefacts. Dedup by resource_id in case both keys point at the same RG.
+    rgs_to_scan: list[tuple[str, str]] = []
+    if gallery_rg:
+        rgs_to_scan.append(("gallery", gallery_rg))
+    if rg and rg != gallery_rg:
+        rgs_to_scan.append(("vm", rg))
+
+    seen_image_ids: set[str] = set()
+    for label, scan_rg in rgs_to_scan:
+        try:
+            for img in compute.images.list_by_resource_group(scan_rg):
+                if img.id in seen_image_ids:
+                    continue
+                seen_image_ids.add(img.id)
+                results.append({
+                    "resource_id": img.id,
+                    "name": img.name,
+                    "description": (img.tags or {}).get("Description", ""),
+                    "state": img.provisioning_state or "",
+                    "creation_date": "",
+                    "os_type": (_os_type_str(img.storage_profile.os_disk.os_type)
+                               if img.storage_profile and img.storage_profile.os_disk else "Linux"),
+                    "source": "managed",
+                    "gallery_name": "",
+                    "sku": "",
+                    "location": img.location or "",
+                    "resource_group": scan_rg,
+                })
+        except Exception as e:
+            logger.warning("Failed to list managed images from rg=%s (%s): %s", scan_rg, label, e)
+            status = (getattr(e, "status_code", None)
+                      or getattr(getattr(e, "response", None), "status_code", None))
+            if status in (401, 403):
+                warnings.append(
+                    f"Managed images in resource group '{scan_rg}' are inaccessible: {e}. "
+                    f"Grant the dashboard service principal Reader on that resource group."
+                )
+            else:
+                warnings.append(
+                    f"Managed images in resource group '{scan_rg}' could not be listed: {e}."
+                )
 
     return {"images": results, "warnings": warnings}
 
