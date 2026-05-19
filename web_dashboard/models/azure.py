@@ -19,6 +19,7 @@ class AzureImageInfo(BaseModel):
     gallery_name: str = ""
     sku: str = ""
     location: str = ""
+    resource_group: str = ""  # RG the managed image lives in (empty for gallery rows)
     # Marketplace image fields (optional)
     publisher: Optional[str] = None
     offer: Optional[str] = None
