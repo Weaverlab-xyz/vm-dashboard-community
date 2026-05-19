@@ -26,8 +26,14 @@
   <!-- ── Pipeline diagram ───────────────────────────────────────────────── -->
   <!-- Mirrors the canonical flowchart in docs/image-management.md; keep them
        in sync when the pipeline shape changes. Mermaid.js is loaded only on
-       this page (via {% block scripts %} below) so other dashboard pages
-       don't pull the library. -->
+       this page (page-local CDN tag below) so other dashboard pages don't
+       pull the library. -->
+  {# Maintainer note: HTML comments do NOT shield Jinja tag literals from the
+     template parser. Never paste brace-percent or double-brace tokens into an
+     HTML comment in this file; rephrase in prose or wrap in a raw block. The
+     last time someone did that, /images 500'd until the comment was edited.
+     Restating the rule inside a Jinja comment (this block) is intentional —
+     Jinja strips its own comments before parsing tags. #}
   <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
     <h2 class="text-sm font-medium text-gray-700 mb-3">How cross-cloud promote works</h2>
     <div class="overflow-x-auto">
