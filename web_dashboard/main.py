@@ -188,14 +188,20 @@ async def _warm_aws_instances() -> None:
     )
 
 
+def _live_cfg(key: str) -> str:
+    """Return the live config_service value, falling back to startup settings."""
+    from .services import config_service
+    return config_service.get(key) or getattr(settings, key, "")
+
+
 async def _warm_azure_images() -> None:
     from .services import azure_service
     await _warm_loop(
         "azure_images",
         fetcher=lambda: azure_service.list_private_images(
-            settings.azure_shared_image_gallery,
-            settings.azure_gallery_resource_group,
-            settings.azure_resource_group,
+            _live_cfg("azure_shared_image_gallery"),
+            _live_cfg("azure_gallery_resource_group"),
+            _live_cfg("azure_resource_group"),
         ),
         key_fn=lambda: cache_service.key_global("azure_images"),
         ttl=cache_service.TTL["azure_images"],
@@ -207,9 +213,9 @@ async def _warm_azure_network_opts() -> None:
     await _warm_loop(
         "azure_network_opts",
         fetcher=lambda: azure_service.get_network_options(
-            settings.azure_location,
-            settings.azure_vnet_resource_group,
-            settings.azure_resource_group,
+            _live_cfg("azure_location"),
+            _live_cfg("azure_vnet_resource_group"),
+            _live_cfg("azure_resource_group"),
         ),
         key_fn=lambda: cache_service.key_global("azure_network_opts"),
         ttl=cache_service.TTL["azure_network_opts"],
