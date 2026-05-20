@@ -93,6 +93,29 @@ After the build succeeds, the resulting image's ID is captured in
 `Job.extra_data` and the artefact (when exported) is uploaded to your
 storage backend.
 
+#### Loading the provisioner script from storage
+
+Every Packer form (AWS / Azure / GCP) has a **Load from storage**
+dropdown next to the Provisioner Script field. It lists every
+`.sh` / `.bash` asset across every configured storage backend
+(local, S3, Azure Blob, GCS) tagged with the backend it lives on —
+`setup.sh (S3)`, `setup.sh (Local)` — so identical filenames on
+different backends are unambiguous.
+
+Selecting an entry fetches the script via
+[`GET /api/storage/fetch/{backend}/{name}`](../web_dashboard/api/storage.py)
+and drops the text into the textarea. The operator can still tweak
+it before submitting; a blue subtitle echoes which backend + name
+the script came from so an edited version doesn't quietly drift
+from its stored copy.
+
+This means you can keep your hardening scripts version-controlled
+on disk or in object storage, upload them once via
+[Storage Management](./storage-management.md), and pick them from
+the dropdown for every build instead of copy-pasting. Useful when
+the same script is reused across cloud providers — store it once on
+a cloud backend and load it for all three builds.
+
 ### Capture from a running instance
 
 The "I have a VM I've been hand-tuning, snapshot it as an image" path.
