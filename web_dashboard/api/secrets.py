@@ -324,3 +324,127 @@ async def migrate_secrets(payload: MigratePayload, request: Request):
         "skipped":        skipped,
         "errors":         errors,
     }
+
+
+# ── Per-secret CRUD ───────────────────────────────────────────────────────────
+#
+# All secret values are constrained to JSON (validate_json_value in
+# secrets_backend_service) so the UI can ship one editor that works across
+# every backend. The endpoints below mirror the existing /list/test/migrate
+# admin guard.
+#
+# BSS (BeyondTrust Secrets Safe) gets two additional read-only endpoints to
+# enumerate Safes and Folders so the frontend can render a tree. Write/delete
+# on safes and folders is intentionally NOT exposed — ps-cli doesn't provide
+# those operations; operators manage Safe/Folder lifecycle in BeyondInsight.
+
+class SecretCreateRequest(BaseModel):
+    backend: str
+    key:     str
+    value:   str  # must be valid JSON
+
+
+class SecretUpdateRequest(BaseModel):
+    backend: str
+    value:   str  # must be valid JSON
+
+
+@router.get("/items")
+async def list_secret_items(request: Request, backend: str, folder: str = ""):
+    """List secrets in the named backend. For bt_secrets_safe, pass ?folder=
+    to scope the result to a single Folder; omitted means the configured
+    default folder."""
+    _require_admin(request)
+    from ..services import secrets_backend_service as sbs
+    try:
+        items = await asyncio.to_thread(sbs.list_sync, backend, folder=folder)
+    except (ValueError, Exception) as e:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"backend": backend, "items": items, "count": len(items)}
+
+
+@router.get("/items/{backend}/{ref:path}")
+async def get_secret_item(backend: str, ref: str, request: Request):
+    """Return the value of one secret. Value is whatever string is stored —
+    the editor on the frontend treats it as JSON."""
+    _require_admin(request)
+    from ..services import secrets_backend_service as sbs
+    try:
+        value = await asyncio.to_thread(sbs.read_sync, backend, ref)
+    except (ValueError, Exception) as e:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"backend": backend, "ref": ref, "value": value}
+
+
+@router.post("/items", status_code=201)
+async def create_secret_item(payload: SecretCreateRequest, request: Request):
+    """Create a new secret. Value must parse as JSON."""
+    _require_admin(request)
+    from ..services import secrets_backend_service as sbs
+    try:
+        ref = await asyncio.to_thread(
+            sbs.write_sync_validated, payload.backend, payload.key, payload.value,
+        )
+    except (ValueError, Exception) as e:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"backend": payload.backend, "key": payload.key, "ref": ref}
+
+
+@router.patch("/items/{backend}/{ref:path}")
+async def update_secret_item(backend: str, ref: str, payload: SecretUpdateRequest, request: Request):
+    """Update the value of an existing secret. New value must parse as JSON.
+    The path's `backend` and the body's `backend` must agree."""
+    _require_admin(request)
+    if payload.backend != backend:
+        raise HTTPException(status_code=400, detail="backend in URL and body must match")
+    from ..services import secrets_backend_service as sbs
+    try:
+        new_ref = await asyncio.to_thread(
+            sbs.write_sync_validated, backend, ref, payload.value,
+        )
+    except (ValueError, Exception) as e:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"backend": backend, "ref": new_ref}
+
+
+@router.delete("/items/{backend}/{ref:path}")
+async def delete_secret_item(backend: str, ref: str, request: Request):
+    """Delete a secret."""
+    _require_admin(request)
+    from ..services import secrets_backend_service as sbs
+    try:
+        await asyncio.to_thread(sbs.delete_sync, backend, ref)
+    except (ValueError, Exception) as e:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"ok": True, "backend": backend, "ref": ref}
+
+
+# ── BSS hierarchy browse (read-only — ps-cli has no create/delete) ───────────
+
+@router.get("/bss/safes")
+async def list_bss_safes(request: Request):
+    """List BeyondTrust Safes (top-level containers). Read-only.
+
+    ps-cli doesn't manage Safe lifecycle — operators create Safes in the
+    BeyondInsight portal. This endpoint exists so the dashboard can render
+    the picker without forcing the operator to type a Safe name."""
+    _require_admin(request)
+    from ..services import secrets_backend_service as sbs
+    try:
+        safes = await asyncio.to_thread(sbs.list_bt_safes)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"safes": safes, "count": len(safes)}
+
+
+@router.get("/bss/folders")
+async def list_bss_folders(request: Request, safe: str = ""):
+    """List BeyondTrust Folders. Pass ?safe= to scope to one Safe.
+    Read-only for the same reason as Safes."""
+    _require_admin(request)
+    from ..services import secrets_backend_service as sbs
+    try:
+        folders = await asyncio.to_thread(sbs.list_bt_folders, safe)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"folders": folders, "count": len(folders), "safe": safe}

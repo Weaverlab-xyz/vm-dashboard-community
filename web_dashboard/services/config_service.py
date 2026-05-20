@@ -199,6 +199,42 @@ def set_many(pairs: dict) -> None:
         db.close()
 
 
+def delete(key: str) -> None:
+    """Remove a key from app_config (and the in-memory cache). No-op if the
+    key isn't present. Used by the Secrets page CRUD when the active backend
+    is `database`."""
+    from ..database import SessionLocal, AppConfig
+    db = SessionLocal()
+    try:
+        existing = db.query(AppConfig).filter(AppConfig.key == key).first()
+        if existing:
+            db.delete(existing)
+            db.commit()
+        with _cache_lock:
+            _cache.pop(key, None)
+    finally:
+        db.close()
+
+
+def list_all() -> list[dict]:
+    """Return every app_config row as {key, updated_at}. Values are NOT
+    returned — call get(key) for individual decrypted reads. Used by the
+    Secrets page to enumerate database-backed secrets."""
+    from ..database import SessionLocal, AppConfig
+    db = SessionLocal()
+    try:
+        rows = db.query(AppConfig).order_by(AppConfig.key).all()
+        return [
+            {
+                "key":        row.key,
+                "updated_at": row.updated_at.isoformat() if row.updated_at else "",
+            }
+            for row in rows
+        ]
+    finally:
+        db.close()
+
+
 # ── Setup state ───────────────────────────────────────────────────────────────
 
 def is_setup_complete() -> bool:

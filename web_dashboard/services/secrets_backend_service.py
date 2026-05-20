@@ -324,3 +324,303 @@ def read_sync(backend: str, ref: str) -> str:
     if not fn:
         raise ValueError(f"Cannot read from backend: {backend}")
     return fn(ref)
+
+
+# ── Secret browse / CRUD (issue: Secrets page expansion) ─────────────────────
+#
+# The functions below give the Secrets page full CRUD over individual secrets
+# across every configured backend. Every secret value is constrained to a JSON
+# string by `validate_json_value` so all backends behave uniformly and the UI
+# can ship one editor for every store.
+#
+# For BeyondTrust Secrets Safe (BSS) we read safes/folders/secrets but do NOT
+# create/delete safes or folders — ps-cli doesn't expose those operations.
+# Hierarchy management for BSS must happen in BeyondInsight; we surface a
+# read-only view here so operators can browse + run CRUD on secrets within
+# whatever folders BeyondInsight already owns.
+
+
+def validate_json_value(value: str) -> None:
+    """Raise ValueError if `value` is not parseable as JSON.
+
+    All backends accept arbitrary strings, but the dashboard's Secrets page
+    constrains the editor to JSON so the value can be parsed back into a
+    structured object regardless of backend. This guard runs at the API edge
+    before any backend write."""
+    try:
+        json.loads(value)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise ValueError(f"Secret value is not valid JSON: {exc}") from exc
+
+
+# ── AWS SM — list + delete ────────────────────────────────────────────────────
+
+def list_aws_sm() -> list[dict]:
+    region, prefix = _aws_cfg()
+    import boto3
+    client = boto3.client("secretsmanager", region_name=region)
+    out: list[dict] = []
+    next_token = None
+    while True:
+        kwargs: dict = {"MaxResults": 100}
+        if prefix:
+            kwargs["Filters"] = [{"Key": "name", "Values": [prefix]}]
+        if next_token:
+            kwargs["NextToken"] = next_token
+        resp = client.list_secrets(**kwargs)
+        for s in resp.get("SecretList", []):
+            out.append({
+                "name":        s["Name"],
+                "description": s.get("Description", ""),
+                "updated_at":  (s.get("LastChangedDate") or s.get("CreatedDate")).isoformat() if (s.get("LastChangedDate") or s.get("CreatedDate")) else "",
+                "ref":         s["Name"],  # backend-specific id used for read/delete
+            })
+        next_token = resp.get("NextToken")
+        if not next_token:
+            break
+    return out
+
+
+def delete_aws_sm(ref: str) -> None:
+    region, _ = _aws_cfg()
+    import boto3
+    client = boto3.client("secretsmanager", region_name=region)
+    # ForceDeleteWithoutRecovery skips the 7-day retention window — the
+    # dashboard's "Delete" button is an intentional admin action, not a
+    # mistake-recovery affordance.
+    client.delete_secret(SecretId=ref, ForceDeleteWithoutRecovery=True)
+    logger.info("AWS SM: deleted secret %s", ref)
+
+
+# ── Azure KV — list + delete ──────────────────────────────────────────────────
+
+def list_azure_kv() -> list[dict]:
+    client, _ = _azure_kv_client()
+    out: list[dict] = []
+    for prop in client.list_properties_of_secrets():
+        out.append({
+            "name":        prop.name,
+            "description": "",
+            "updated_at":  prop.updated_on.isoformat() if prop.updated_on else "",
+            "ref":         prop.name,
+        })
+    return out
+
+
+def delete_azure_kv(ref: str) -> None:
+    client, _ = _azure_kv_client()
+    # begin_delete_secret returns a poller; we wait so the UI's subsequent
+    # refresh doesn't show the deleted secret still present.
+    poller = client.begin_delete_secret(ref)
+    try:
+        poller.wait()
+    except Exception:  # noqa: BLE001 — KV can throw on soft-delete edge cases
+        pass
+    logger.info("Azure KV: deleted secret %s", ref)
+
+
+# ── GCP SM — list + delete ────────────────────────────────────────────────────
+
+def list_gcp_sm() -> list[dict]:
+    project, prefix, _ = _gcp_cfg()
+    client = _gcp_client()
+    parent = f"projects/{project}"
+    out: list[dict] = []
+    for secret in client.list_secrets(request={"parent": parent}):
+        # secret.name is "projects/PROJECT/secrets/<id>"
+        secret_id = secret.name.rsplit("/", 1)[-1]
+        if prefix and not secret_id.startswith(prefix):
+            continue
+        out.append({
+            "name":        secret_id,
+            "description": (secret.labels or {}).get("description", ""),
+            "updated_at":  secret.create_time.isoformat() if secret.create_time else "",
+            "ref":         secret_id,
+        })
+    return out
+
+
+def delete_gcp_sm(ref: str) -> None:
+    project, _, _ = _gcp_cfg()
+    client = _gcp_client()
+    name = f"projects/{project}/secrets/{ref}"
+    client.delete_secret(request={"name": name})
+    logger.info("GCP SM: deleted secret %s", ref)
+
+
+# ── BeyondTrust Secrets Safe — browse hierarchy + secret CRUD ────────────────
+
+def list_bt_safes() -> list[dict]:
+    """Return BeyondTrust Safes (top-level containers). Read-only — ps-cli
+    has no `safes create` command, so operators must create Safes in the
+    BeyondInsight portal."""
+    raw = _ps_run(["safes", "list"])
+    if not isinstance(raw, list):
+        return []
+    out: list[dict] = []
+    for s in raw:
+        out.append({
+            "name":        s.get("Name") or s.get("SafeName") or "",
+            "description": s.get("Description", ""),
+            "id":          s.get("Id") or s.get("SafeId"),
+        })
+    return out
+
+
+def list_bt_folders(safe: str = "") -> list[dict]:
+    """Return BeyondTrust Folders within a Safe (or all folders if `safe` is
+    empty). Read-only for the same reason as Safes — ps-cli doesn't manage
+    folder lifecycle."""
+    args = ["folders", "list"]
+    if safe:
+        args.extend(["-s", safe])
+    raw = _ps_run(args)
+    if not isinstance(raw, list):
+        return []
+    out: list[dict] = []
+    for f in raw:
+        out.append({
+            "name":        f.get("Name") or f.get("FolderName") or "",
+            "safe":        f.get("SafeName") or safe or "",
+            "id":          f.get("Id") or f.get("FolderId"),
+        })
+    return out
+
+
+def list_bt_secrets_safe(folder: str = "") -> list[dict]:
+    """Return secrets in a folder (or in the configured default folder if
+    none specified). Each item carries `ref = "Folder/Title"` so the existing
+    `read_bt_secrets_safe` path can fetch it by title."""
+    _, default_folder = _bt_cfg()
+    target_folder = folder or default_folder
+    args = ["secrets", "list"]
+    if target_folder:
+        args.extend(["--folder", target_folder])
+    raw = _ps_run(args)
+    if not isinstance(raw, list):
+        return []
+    out: list[dict] = []
+    for s in raw:
+        title = s.get("Title") or s.get("Name") or ""
+        out.append({
+            "name":        title,
+            "folder":      s.get("Folder") or target_folder,
+            "description": s.get("Description", ""),
+            # ref needs the folder prefix when one is set so it matches the
+            # `_bt_secret_title` format used by writes; if listing surfaced a
+            # plain title without a folder, just use the title.
+            "ref":         f"{target_folder}/{title}" if target_folder else title,
+        })
+    return out
+
+
+def delete_bt_secrets_safe(ref: str) -> None:
+    # ps-cli accepts the Title for `secrets delete`; the title may include
+    # the folder prefix that the listing returned.
+    _ps_run(["secrets", "delete", "-t", ref], timeout=30)
+    logger.info("BT Safe: deleted secret %s", ref)
+
+
+# ── Database backend (config_service-backed) ──────────────────────────────────
+#
+# When `database` is the active backend, secret values live in the
+# Fernet-encrypted `app_config` table managed by `config_service`. The
+# operator-facing CRUD here lets them list/create/edit/delete those rows
+# the same way as cloud-backed secrets.
+
+def list_database() -> list[dict]:
+    """List secrets stored in the Fernet-encrypted app_config table. Excludes
+    obvious non-secret config rows (region, prefix, flag-style keys) by
+    convention — only return rows that look like operator-managed secrets."""
+    from . import config_service
+    out: list[dict] = []
+    try:
+        rows = config_service.list_all()
+    except AttributeError:
+        # Fallback if config_service doesn't expose list_all (older versions)
+        return out
+    for row in rows:
+        key = row.get("key") if isinstance(row, dict) else getattr(row, "key", "")
+        if not key:
+            continue
+        # Filter to entries that smell like secrets — exclude pure config keys
+        # like *_url, *_region, *_enabled, etc. Operators can still see them
+        # on Settings; the Secrets page is for credential material.
+        skip_suffixes = ("_url", "_region", "_prefix", "_enabled", "_path", "_host", "_port", "_account_name")
+        if any(key.endswith(s) for s in skip_suffixes):
+            continue
+        out.append({
+            "name":        key,
+            "description": "",
+            "updated_at":  "",
+            "ref":         key,
+        })
+    return out
+
+
+def write_database(key: str, value: str) -> str:
+    from . import config_service
+    config_service.set(key, value)
+    logger.info("DB: wrote secret %s", key)
+    return key
+
+
+def read_database(ref: str) -> str:
+    from . import config_service
+    return config_service.get(ref) or ""
+
+
+def delete_database(ref: str) -> None:
+    from . import config_service
+    config_service.delete(ref)
+    logger.info("DB: deleted secret %s", ref)
+
+
+# ── Dispatch tables for list / delete + JSON-validated write ─────────────────
+
+_LIST_FN = {
+    "aws_sm":          list_aws_sm,
+    "azure_kv":        list_azure_kv,
+    "gcp_sm":          list_gcp_sm,
+    "bt_secrets_safe": list_bt_secrets_safe,
+    "database":        list_database,
+}
+
+_DELETE_FN = {
+    "aws_sm":          delete_aws_sm,
+    "azure_kv":        delete_azure_kv,
+    "gcp_sm":          delete_gcp_sm,
+    "bt_secrets_safe": delete_bt_secrets_safe,
+    "database":        delete_database,
+}
+
+# Database read/write are added to the existing dispatch maps below so the
+# rest of the code can treat database as just another backend.
+_WRITE_FN["database"] = write_database
+_READ_FN["database"]  = read_database
+
+
+def list_sync(backend: str, **filters) -> list[dict]:
+    """Return all secrets in `backend`. For BSS, `filters['folder']` narrows."""
+    fn = _LIST_FN.get(backend)
+    if not fn:
+        raise ValueError(f"Cannot list backend: {backend}")
+    if backend == "bt_secrets_safe":
+        return fn(folder=filters.get("folder", ""))
+    return fn()
+
+
+def delete_sync(backend: str, ref: str) -> None:
+    fn = _DELETE_FN.get(backend)
+    if not fn:
+        raise ValueError(f"Cannot delete from backend: {backend}")
+    fn(ref)
+
+
+def write_sync_validated(backend: str, key: str, value: str) -> str:
+    """Write wrapper that enforces JSON value validation. Use this from the
+    Secrets page CRUD path; the existing `write_sync` is kept for callers that
+    write internal infrastructure values (Terraform output, deploy artefacts)
+    where JSON shape isn't enforced."""
+    validate_json_value(value)
+    return write_sync(backend, key, value)
