@@ -231,6 +231,100 @@ Folders. Deletes require the container to be empty — ps-cli refuses to
 remove a Safe that still has Folders or a Folder that still has
 Folders or Secrets, and the dashboard surfaces that error verbatim.
 
+### Optional: Entitle approval workflow on read / update / delete
+
+The dashboard's service principal / IAM identity needs read access to every
+backend it manages — that's how it resolves cloud-credential references at
+runtime. By default any admin user can pull any secret value through
+**Browse & Edit** with a single click, which means the *machine identity's*
+privilege effectively flows through to the human user.
+
+When the optional [Entitle](https://www.entitle.io/) integration is
+enabled, the dashboard mediates secret access through an approval workflow
+instead. Each gated operation kicks off an Entitle request; the human
+sees a "Waiting for approval…" modal; the value is revealed (or the
+write / delete proceeds) only after an approver approves the request in
+Entitle. The human never gets the underlying cloud / vault credentials —
+they only get a one-shot approved view of the specific secret they
+requested.
+
+**What's gated**
+
+| Operation | Gated when Entitle is on? | Why |
+|---|---|---|
+| Read secret value | ✅ | The moment of disclosure |
+| Update secret value | ✅ | Mutation that affects every downstream consumer |
+| Delete secret | ✅ | Destructive |
+| Create new secret | ❌ | The operator already knows the value they're setting; second-set-of-eyes adds friction without protecting against any disclosure |
+| List secret names | ❌ | Names aren't sensitive |
+| Browse Safes / Folders (BSS) | ❌ | Hierarchy navigation; container CRUD is admin-only |
+
+**How approvals flow**
+
+1. Operator clicks **View** (or **Edit** / **Delete**) on a secret.
+2. The dashboard endpoint calls `entitle_service.create_request(...)`
+   and returns `202 Accepted` with `{approval_id, poll_url, expires_at}`.
+   An `Approval` row is persisted in `pending`.
+3. The frontend's `API.request` helper detects the 202, shows the
+   approval-pending modal, and polls `GET /api/approvals/{id}` every
+   five seconds.
+4. The approver (a different human) decides in Entitle. Entitle calls
+   the dashboard's webhook (`POST /api/approvals/webhook`) signed with
+   HMAC-SHA256; the dashboard verifies the signature and flips the row's
+   status to `approved` or `denied`.
+5. The frontend sees the new status, dismisses the modal, and
+   automatically retries the original call with the
+   `X-Entitle-Approval-Id` header. The dashboard:
+   - re-verifies the user, action, and payload hash match the approved
+     row (so the operator can't get approval for `read secret A` and
+     swap to `read secret B`),
+   - marks the row `consumed` so the approval can't be replayed,
+   - executes the underlying secret operation,
+   - returns the value (or success) to the operator.
+
+**Configuration**
+
+| Setting | Where | Notes |
+|---|---|---|
+| `entitle_enabled` | Settings → Integrations | Master switch for the Entitle integration. Off by default. |
+| `approval_gate_enabled` | Settings → Integrations | Per-installation flag that activates `require_approval` dependencies. Must be on **with** `entitle_enabled` for gating to take effect. |
+| `entitle_api_url` | Settings / Secrets | e.g. `https://api.entitle.io/v1` |
+| `entitle_api_token` | Settings / Secrets | Bearer token for the workspace |
+| `entitle_webhook_secret` | Settings / Secrets | HMAC-SHA256 shared secret; set the same value inside Entitle's webhook config |
+| `entitle_default_ttl_minutes` | Settings | TTL for newly-created requests (default 15) |
+
+When either flag is off, `require_approval` short-circuits and the gated
+endpoints behave exactly like un-gated ones.
+
+**Caveats — read these before turning it on**
+
+- **Public ingress required.** Entitle's webhook is the only channel
+  that flips an approval from `pending` to `approved`. If the dashboard
+  isn't reachable from Entitle's egress, approvals never resolve and
+  every gated request times out at `entitle_default_ttl_minutes` with
+  no useful error. Self-hosted, air-gapped, or VPN-only installs cannot
+  use this feature today; we have no plans to add a polling fallback.
+- **Approval latency.** Every gated operation becomes a two-step flow
+  with seconds-to-minutes of additional latency depending on the
+  approver's SLA. UI is responsive (operator sees the modal
+  immediately), but the secret value is not.
+- **Payload binding.** The approval is bound to the request body's
+  canonical hash. Re-sending the same request after approval works;
+  swapping the body invalidates the approval.
+- **Webhook secret.** A misconfigured `entitle_webhook_secret` rejects
+  every webhook with 401. The first time you turn this on, check the
+  dashboard logs for `Entitle webhook rejected` warnings.
+- **The operator is often the approver.** In small teams the same
+  human raises the request and approves it. That gives you the audit
+  trail but not a real second-set-of-eyes control. If second-eyes
+  matters to you, configure Entitle policies so the requester cannot
+  approve their own request.
+- **Not a replacement for vault-side audit.** Even with Entitle on,
+  see the *Non-goals* section below — the dashboard isn't a
+  regulator-grade audit system.
+
+---
+
 ### Non-goals — what Browse & Edit deliberately does *not* include
 
 The Browse & Edit feature is intentionally lightweight day-to-day CRUD.

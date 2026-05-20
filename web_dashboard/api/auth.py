@@ -215,7 +215,15 @@ def require_approval(action: str):
         current_user: User = Depends(get_current_user),
         db: Session = Depends(get_db),
     ) -> User:
-        if not settings.approval_gate_enabled:
+        # Gate runs iff Entitle integration is on AND the master gate flag
+        # is on. Either off → bypass and let the endpoint proceed without
+        # an approval. This means installations that haven't configured a
+        # publicly routable host for Entitle webhooks (or simply don't want
+        # an approval workflow) keep their existing zero-friction CRUD.
+        from ..services import config_service
+        entitle_on = config_service.get_bool("entitle_enabled", settings.entitle_enabled)
+        gate_on    = config_service.get_bool("approval_gate_enabled", settings.approval_gate_enabled)
+        if not entitle_on or not gate_on:
             return current_user
 
         body = await request.body()

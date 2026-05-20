@@ -11,7 +11,7 @@ POST /api/secrets/migrate      — migrate DB-stored secrets to the configured e
 import asyncio
 import logging
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
@@ -40,6 +40,14 @@ def _require_admin(request: Request) -> None:
             raise HTTPException(status_code=403, detail="Admin access required")
     finally:
         db.close()
+
+
+def _require_admin_dep(request: Request) -> None:
+    """FastAPI Depends-compatible wrapper around `_require_admin`. Used so
+    that approval-gated endpoints fail fast on non-admin callers BEFORE the
+    approval dependency creates an Entitle request the caller couldn't
+    consume anyway."""
+    _require_admin(request)
 
 
 # ── Secret registry ───────────────────────────────────────────────────────────
@@ -363,11 +371,27 @@ async def list_secret_items(request: Request, backend: str, folder: str = ""):
     return {"backend": backend, "items": items, "count": len(items)}
 
 
-@router.get("/items/{backend}/{ref:path}")
-async def get_secret_item(backend: str, ref: str, request: Request):
+# Approval-gated read/update/delete. `require_approval` is a no-op when
+# either `entitle_enabled` or `approval_gate_enabled` is false, so every
+# installation gets the un-gated zero-friction CRUD until they explicitly
+# turn Entitle on in Settings. Create is intentionally NOT gated: the
+# operator who creates a secret already knows the value they're setting.
+from .auth import require_approval as _require_approval
+
+_READ_GATE   = Depends(_require_approval("secret_read"))
+_UPDATE_GATE = Depends(_require_approval("secret_update"))
+_DELETE_GATE = Depends(_require_approval("secret_delete"))
+
+
+@router.get("/items/{backend}/{ref:path}", dependencies=[Depends(_require_admin_dep), _READ_GATE])
+async def get_secret_item(backend: str, ref: str):
     """Return the value of one secret. Value is whatever string is stored —
-    the editor on the frontend treats it as JSON."""
-    _require_admin(request)
+    the editor on the frontend treats it as JSON.
+
+    When Entitle approval gating is on, this returns 202 with an
+    `approval_id` on the first call; the frontend polls
+    `/api/approvals/{id}` and retries with `X-Entitle-Approval-Id` once
+    the approver approves."""
     from ..services import secrets_backend_service as sbs
     try:
         value = await asyncio.to_thread(sbs.read_sync, backend, ref)
@@ -378,7 +402,12 @@ async def get_secret_item(backend: str, ref: str, request: Request):
 
 @router.post("/items", status_code=201)
 async def create_secret_item(payload: SecretCreateRequest, request: Request):
-    """Create a new secret. Value must parse as JSON."""
+    """Create a new secret. Value must parse as JSON.
+
+    Intentionally not approval-gated — the operator already knows the
+    value they're setting; the second-set-of-eyes control adds friction
+    without disclosure to protect against.
+    """
     _require_admin(request)
     from ..services import secrets_backend_service as sbs
     try:
@@ -390,11 +419,10 @@ async def create_secret_item(payload: SecretCreateRequest, request: Request):
     return {"backend": payload.backend, "key": payload.key, "ref": ref}
 
 
-@router.patch("/items/{backend}/{ref:path}")
-async def update_secret_item(backend: str, ref: str, payload: SecretUpdateRequest, request: Request):
+@router.patch("/items/{backend}/{ref:path}", dependencies=[Depends(_require_admin_dep), _UPDATE_GATE])
+async def update_secret_item(backend: str, ref: str, payload: SecretUpdateRequest):
     """Update the value of an existing secret. New value must parse as JSON.
     The path's `backend` and the body's `backend` must agree."""
-    _require_admin(request)
     if payload.backend != backend:
         raise HTTPException(status_code=400, detail="backend in URL and body must match")
     from ..services import secrets_backend_service as sbs
@@ -407,10 +435,9 @@ async def update_secret_item(backend: str, ref: str, payload: SecretUpdateReques
     return {"backend": backend, "ref": new_ref}
 
 
-@router.delete("/items/{backend}/{ref:path}")
-async def delete_secret_item(backend: str, ref: str, request: Request):
+@router.delete("/items/{backend}/{ref:path}", dependencies=[Depends(_require_admin_dep), _DELETE_GATE])
+async def delete_secret_item(backend: str, ref: str):
     """Delete a secret."""
-    _require_admin(request)
     from ..services import secrets_backend_service as sbs
     try:
         await asyncio.to_thread(sbs.delete_sync, backend, ref)
