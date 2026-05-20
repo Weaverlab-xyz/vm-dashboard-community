@@ -73,9 +73,13 @@ def _pscli_env() -> dict:
     return env
 
 
-def _ps_run(args: list, timeout: int = 30) -> list:
+def _ps_run(args: list, timeout: int = 30):
     result = subprocess.run(
         ["ps-cli", "--format", "json"] + args,
+        # Closed stdin so destructive subcommands (delete-safe, etc.) that
+        # would otherwise prompt for confirmation fail fast rather than
+        # hanging until the timeout fires.
+        stdin=subprocess.DEVNULL,
         capture_output=True, text=True, timeout=timeout,
         env=_pscli_env(),
     )
@@ -84,7 +88,15 @@ def _ps_run(args: list, timeout: int = 30) -> list:
         # full ps-cli traceback rather than a 300-char prefix that gets
         # truncated mid-line — issue #14 reported the message was unreadable.
         raise ValueError(f"ps-cli error: {(result.stderr or result.stdout)[:2000]}")
-    return json.loads(result.stdout) if result.stdout.strip() else []
+    if not result.stdout.strip():
+        return []
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError:
+        # Some create/delete subcommands return a plain string (e.g. "Safe
+        # created: <guid>") instead of JSON. Return raw text in that case
+        # so callers that care can parse it.
+        return result.stdout.strip()
 
 
 # ── AWS Secrets Manager ───────────────────────────────────────────────────────
@@ -451,10 +463,13 @@ def delete_gcp_sm(ref: str) -> None:
 # ── BeyondTrust Secrets Safe — browse hierarchy + secret CRUD ────────────────
 
 def list_bt_safes() -> list[dict]:
-    """Return BeyondTrust Safes (top-level containers). Read-only — ps-cli
-    has no `safes create` command, so operators must create Safes in the
-    BeyondInsight portal."""
-    raw = _ps_run(["safes", "list"])
+    """Return BeyondTrust Safes (top-level containers).
+
+    Subcommand: `ps-cli list-safes`. The returned objects expose Name +
+    Description + Id; callers thread the Id through to create-folder
+    (`-pid`) and delete-safe (`-id`) as the upstream parent reference.
+    """
+    raw = _ps_run(["list-safes"])
     if not isinstance(raw, list):
         return []
     out: list[dict] = []
@@ -467,13 +482,52 @@ def list_bt_safes() -> list[dict]:
     return out
 
 
+def create_bt_safe(name: str, description: str = "") -> dict:
+    """Create a new BeyondTrust Safe. Returns {name, id, description}."""
+    if not name:
+        raise ValueError("Safe name is required.")
+    args = ["create-safe", "-n", name]
+    if description:
+        args.extend(["-d", description])
+    raw = _ps_run(args, timeout=30)
+    safe_id = ""
+    if isinstance(raw, dict):
+        safe_id = raw.get("Id") or raw.get("SafeId") or ""
+    elif isinstance(raw, list) and raw:
+        safe_id = raw[0].get("Id") or raw[0].get("SafeId") or ""
+    logger.info("BT Safe: created safe %s (%s)", name, safe_id)
+    return {"name": name, "id": safe_id, "description": description}
+
+
+def update_bt_safe(safe_id: str, new_name: str) -> dict:
+    """Rename a BeyondTrust Safe by GUID."""
+    if not safe_id or not new_name:
+        raise ValueError("safe_id and new_name are required.")
+    _ps_run(["update-safe", "-id", safe_id, "-n", new_name], timeout=30)
+    logger.info("BT Safe: renamed safe %s → %s", safe_id, new_name)
+    return {"id": safe_id, "name": new_name}
+
+
+def delete_bt_safe(safe_id: str) -> None:
+    """Delete a BeyondTrust Safe by GUID."""
+    if not safe_id:
+        raise ValueError("safe_id is required.")
+    _ps_run(["delete-safe", "-id", safe_id], timeout=30)
+    logger.info("BT Safe: deleted safe %s", safe_id)
+
+
 def list_bt_folders(safe: str = "") -> list[dict]:
-    """Return BeyondTrust Folders within a Safe (or all folders if `safe` is
-    empty). Read-only for the same reason as Safes — ps-cli doesn't manage
-    folder lifecycle."""
-    args = ["folders", "list"]
+    """Return BeyondTrust Folders. When `safe` is supplied, restrict the
+    result to that Safe (matched against the parent path the CLI returns).
+
+    Subcommand: `ps-cli list -p <path>`. Without a path filter the CLI
+    walks every accessible folder.
+    """
+    args = ["list"]
     if safe:
-        args.extend(["-s", safe])
+        # -p restricts the list to a parent path. Top-level path is the
+        # Safe name itself.
+        args.extend(["-p", safe])
     raw = _ps_run(args)
     if not isinstance(raw, list):
         return []
@@ -483,8 +537,37 @@ def list_bt_folders(safe: str = "") -> list[dict]:
             "name":        f.get("Name") or f.get("FolderName") or "",
             "safe":        f.get("SafeName") or safe or "",
             "id":          f.get("Id") or f.get("FolderId"),
+            "parent_id":   f.get("ParentId") or "",
         })
     return out
+
+
+def create_bt_folder(parent_id: str, name: str) -> dict:
+    """Create a new BeyondTrust Folder under a Safe or another Folder.
+
+    `parent_id` is the Safe GUID (for a top-level folder) or the Folder
+    GUID (for a nested folder). Returns {name, id, parent_id}.
+    """
+    if not parent_id or not name:
+        raise ValueError("parent_id and folder name are required.")
+    raw = _ps_run(["create", "-pid", parent_id, "-n", name], timeout=30)
+    folder_id = ""
+    if isinstance(raw, dict):
+        folder_id = raw.get("Id") or raw.get("FolderId") or ""
+    elif isinstance(raw, list) and raw:
+        folder_id = raw[0].get("Id") or raw[0].get("FolderId") or ""
+    logger.info("BT Safe: created folder %s under %s (%s)", name, parent_id, folder_id)
+    return {"name": name, "id": folder_id, "parent_id": parent_id}
+
+
+def delete_bt_folder(folder_id: str) -> None:
+    """Delete a BeyondTrust Folder by GUID. The folder must be empty; ps-cli
+    will refuse to delete a folder that still has child folders or secrets,
+    and the error gets surfaced through _ps_run."""
+    if not folder_id:
+        raise ValueError("folder_id is required.")
+    _ps_run(["delete", "-id", folder_id], timeout=30)
+    logger.info("BT Safe: deleted folder %s", folder_id)
 
 
 def list_bt_secrets_safe(folder: str = "") -> list[dict]:

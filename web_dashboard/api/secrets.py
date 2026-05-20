@@ -419,15 +419,29 @@ async def delete_secret_item(backend: str, ref: str, request: Request):
     return {"ok": True, "backend": backend, "ref": ref}
 
 
-# ── BSS hierarchy browse (read-only — ps-cli has no create/delete) ───────────
+# ── BSS hierarchy CRUD ───────────────────────────────────────────────────────
+#
+# ps-cli exposes create-safe / update-safe / delete-safe and create / delete
+# for folders, so the dashboard ships the full hierarchy CRUD. Operations
+# below thin-wrap the secrets_backend_service helpers.
+
+class BssSafeCreate(BaseModel):
+    name: str
+    description: str = ""
+
+
+class BssSafeUpdate(BaseModel):
+    name: str  # new name
+
+
+class BssFolderCreate(BaseModel):
+    parent_id: str  # Safe GUID for top-level folders; Folder GUID for nested
+    name: str
+
 
 @router.get("/bss/safes")
 async def list_bss_safes(request: Request):
-    """List BeyondTrust Safes (top-level containers). Read-only.
-
-    ps-cli doesn't manage Safe lifecycle — operators create Safes in the
-    BeyondInsight portal. This endpoint exists so the dashboard can render
-    the picker without forcing the operator to type a Safe name."""
+    """List BeyondTrust Safes (top-level containers)."""
     _require_admin(request)
     from ..services import secrets_backend_service as sbs
     try:
@@ -437,10 +451,45 @@ async def list_bss_safes(request: Request):
     return {"safes": safes, "count": len(safes)}
 
 
+@router.post("/bss/safes", status_code=201)
+async def create_bss_safe(payload: BssSafeCreate, request: Request):
+    """Create a new BeyondTrust Safe via `ps-cli create-safe`."""
+    _require_admin(request)
+    from ..services import secrets_backend_service as sbs
+    try:
+        safe = await asyncio.to_thread(sbs.create_bt_safe, payload.name, payload.description)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(e))
+    return safe
+
+
+@router.patch("/bss/safes/{safe_id}")
+async def update_bss_safe(safe_id: str, payload: BssSafeUpdate, request: Request):
+    """Rename a BeyondTrust Safe via `ps-cli update-safe`."""
+    _require_admin(request)
+    from ..services import secrets_backend_service as sbs
+    try:
+        safe = await asyncio.to_thread(sbs.update_bt_safe, safe_id, payload.name)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(e))
+    return safe
+
+
+@router.delete("/bss/safes/{safe_id}")
+async def delete_bss_safe(safe_id: str, request: Request):
+    """Delete a BeyondTrust Safe via `ps-cli delete-safe`."""
+    _require_admin(request)
+    from ..services import secrets_backend_service as sbs
+    try:
+        await asyncio.to_thread(sbs.delete_bt_safe, safe_id)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"ok": True, "id": safe_id}
+
+
 @router.get("/bss/folders")
 async def list_bss_folders(request: Request, safe: str = ""):
-    """List BeyondTrust Folders. Pass ?safe= to scope to one Safe.
-    Read-only for the same reason as Safes."""
+    """List BeyondTrust Folders. Pass ?safe= to scope to one Safe."""
     _require_admin(request)
     from ..services import secrets_backend_service as sbs
     try:
@@ -448,3 +497,29 @@ async def list_bss_folders(request: Request, safe: str = ""):
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=400, detail=str(e))
     return {"folders": folders, "count": len(folders), "safe": safe}
+
+
+@router.post("/bss/folders", status_code=201)
+async def create_bss_folder(payload: BssFolderCreate, request: Request):
+    """Create a new BeyondTrust Folder via `ps-cli create`."""
+    _require_admin(request)
+    from ..services import secrets_backend_service as sbs
+    try:
+        folder = await asyncio.to_thread(sbs.create_bt_folder, payload.parent_id, payload.name)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(e))
+    return folder
+
+
+@router.delete("/bss/folders/{folder_id}")
+async def delete_bss_folder(folder_id: str, request: Request):
+    """Delete a BeyondTrust Folder via `ps-cli delete`. ps-cli refuses to
+    delete a folder that still contains child folders or secrets — the
+    error is surfaced to the caller as-is."""
+    _require_admin(request)
+    from ..services import secrets_backend_service as sbs
+    try:
+        await asyncio.to_thread(sbs.delete_bt_folder, folder_id)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"ok": True, "id": folder_id}

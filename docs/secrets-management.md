@@ -182,10 +182,13 @@ The **Browse & Edit** section lets you:
 - Pick any backend (Database, AWS SM, Azure KV, GCP SM, BT Secrets Safe).
 - List every secret in that backend.
 - Create a new secret, edit an existing one, or delete one.
-- For BeyondTrust Secrets Safe specifically: navigate the
-  `Safe → Folder → Secret` hierarchy with read-only Safe and Folder
-  pickers. If a secret only sits one level deep, that folder acts as
-  both the Safe and the Folder (per the BeyondInsight convention).
+- For BeyondTrust Secrets Safe specifically: navigate the full
+  `Safe → Folder → Secret` hierarchy with create / rename / delete
+  actions on Safes and create / delete on Folders, all driven by the
+  ps-cli subcommands (`create-safe`, `update-safe`, `delete-safe`,
+  `create`, `delete`). If a secret only sits one level deep, that
+  folder acts as both the Safe and the Folder (per the BeyondInsight
+  convention).
 
 ### JSON-only values
 
@@ -215,15 +218,18 @@ the value from any backend without backend-specific parsing.
 | Read secret value | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Create / update secret | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Delete secret | ✅ | ✅ | ✅ | ✅ | ✅ |
-| List Safes | — | — | — | — | ✅ (read-only) |
-| List Folders | — | — | — | — | ✅ (read-only) |
-| Create / delete Safe | — | — | — | — | ❌ (use BeyondInsight) |
-| Create / delete Folder | — | — | — | — | ❌ (use BeyondInsight) |
+| List Safes | — | — | — | — | ✅ |
+| Create / rename / delete Safe | — | — | — | — | ✅ |
+| List Folders | — | — | — | — | ✅ |
+| Create / delete Folder | — | — | — | — | ✅ |
 
-For BeyondTrust specifically, `ps-cli` does not expose `safes create`
-or `folders create` subcommands. Safe and Folder lifecycle stays in
-BeyondInsight; the dashboard renders read-only pickers so operators
-don't have to type folder paths by hand.
+BeyondTrust hierarchy management is driven through the
+[ps-cli subcommands](https://docs.beyondtrust.com/bips/docs/ps-cli-application):
+`list-safes` / `create-safe` / `update-safe` / `delete-safe` for Safes,
+and `list` / `create` / `delete` (parent identified via `-pid`) for
+Folders. Deletes require the container to be empty — ps-cli refuses to
+remove a Safe that still has Folders or a Folder that still has
+Folders or Secrets, and the dashboard surfaces that error verbatim.
 
 ### Non-goals — what Browse & Edit deliberately does *not* include
 
