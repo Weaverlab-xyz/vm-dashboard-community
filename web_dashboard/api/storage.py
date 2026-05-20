@@ -466,6 +466,30 @@ async def move_asset(
     return {"ok": True, "moved": req.name, "from": req.from_backend, "to": req.to_backend}
 
 
+# ── GET /api/storage/fetch/{backend}/{name} ──────────────────────────────────
+
+@router.get("/fetch/{backend}/{name:path}")
+async def fetch_asset(
+    backend: str,
+    name: str,
+    current_user: User = Depends(get_current_user),
+):
+    """Return the raw bytes of a stored asset as base64. Used by the Packer
+    image builder forms to load a stored .sh script into the provisioner
+    textarea instead of forcing the operator to copy-paste from elsewhere."""
+    try:
+        data = await storage_service.fetch_asset_in(backend, name)
+    except StorageError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    import base64
+    return {
+        "name": name,
+        "backend": backend,
+        "content_b64": base64.b64encode(data).decode(),
+        "size": len(data),
+    }
+
+
 # ── DELETE /api/storage/asset-in/{backend}/{name} ────────────────────────────
 
 @router.delete("/asset-in/{backend}/{name:path}")

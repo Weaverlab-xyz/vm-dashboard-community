@@ -1011,11 +1011,30 @@
 
         <!-- Provisioner Script -->
         <div>
-          <label class="block text-sm font-medium text-gray-700 mb-1">Provisioner Script</label>
+          <div class="flex items-center justify-between mb-1">
+            <label class="block text-sm font-medium text-gray-700">Provisioner Script</label>
+            <div class="flex items-center gap-2" x-show="storedScripts.length > 0">
+              <label class="text-xs text-gray-500">Load from storage:</label>
+              <select @change="loadProvisionerScript($event.target.value); $event.target.value = ''"
+                      :disabled="loadingScript"
+                      class="text-xs border border-gray-300 rounded px-2 py-1 focus:ring-blue-500 focus:border-blue-500 disabled:opacity-50">
+                <option value="">— pick a .sh script —</option>
+                <template x-for="s in storedScripts" :key="s.backend + '|' + s.name">
+                  <option :value="s.backend + '|' + s.name"
+                          x-text="s.name + ' (' + backendLabelShort(s.backend) + ')'"></option>
+                </template>
+              </select>
+            </div>
+          </div>
           <textarea x-model="packerForm.provisioner_script" rows="8"
                     placeholder="#!/bin/sh&#10;# Install and configure your software here&#10;apt-get update -y&#10;apt-get install -y nginx&#10;systemctl enable nginx"
                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:ring-blue-500 focus:border-blue-500 resize-y"></textarea>
-          <p class="text-xs text-gray-400 mt-1">Shell script run on the build instance. Leave empty to build a base image with no provisioning.</p>
+          <p class="text-xs text-gray-400 mt-1">
+            Shell script run on the build instance. Leave empty to build a base image with no provisioning.
+            <span x-show="packerForm.loaded_from" x-cloak class="text-blue-600">
+              Loaded from <code x-text="packerForm.loaded_from.replace('|', ' — ')"></code>; edit in place if needed.
+            </span>
+          </p>
         </div>
 
         <!-- Archive to S3 (shown only if configured) -->
@@ -1135,10 +1154,16 @@
         ssh_username: 'ec2-user',
         provisioner_script: '',
         archive_template: false,
+        loaded_from: '',  // "backend|name" of the script just loaded; lets the user redo the load
       },
       packerBuilding: false,
       packerError: '',
       packerArchiveBucketAws: '',
+      // Scripts available across every configured storage backend — populated
+      // at init via /api/storage/list-all. The Provisioner Script section
+      // offers them so operators don't have to copy-paste from elsewhere.
+      storedScripts: [],
+      loadingScript: false,
       awsImagePresets: [
         { id: 'al2023',  label: 'Amazon Linux 2023', ami: '', user: 'ec2-user' },
         { id: 'ubuntu',  label: 'Ubuntu 22.04',       ami: '', user: 'ubuntu'  },
@@ -1154,11 +1179,58 @@
         API.get('/api/groups/workgroups')
           .then(r => { this.availableWorkgroups = r || []; })
           .catch(() => { this.availableWorkgroups = []; });
+        // Load .sh scripts across every storage backend so the Packer
+        // provisioner field can offer them as a dropdown.
+        this.loadStoredScripts();
         // Load community images on start (default tab), instances in background
         const tasks = [this.loadCommunityAmis(), this.loadInstances()];
         if (hash === 'amis') tasks.push(this.loadAmis());
         await Promise.all(tasks);
         setInterval(() => this.loadInstances(), 30000);
+      },
+
+      async loadStoredScripts() {
+        try {
+          const data = await API.get('/api/storage/list-all');
+          this.storedScripts = (data.items || []).filter(a =>
+            a.type === 'script' || a.name.endsWith('.sh') || a.name.endsWith('.bash')
+          );
+        } catch (e) {
+          this.storedScripts = [];
+        }
+      },
+
+      async loadProvisionerScript(key) {
+        if (!key) return;
+        const [backend, ...rest] = key.split('|');
+        const name = rest.join('|');
+        this.loadingScript = true;
+        try {
+          const r = await API.get(`/api/storage/fetch/${encodeURIComponent(backend)}/${encodeURIComponent(name)}`);
+          // Decode base64 to text. atob is safe for ASCII scripts; for any
+          // bytes > 127 we'd need TextDecoder, but provisioner scripts are
+          // shell text so ASCII / UTF-8 ranges are fine.
+          const bin = atob(r.content_b64 || '');
+          let text;
+          try {
+            const bytes = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+            text = new TextDecoder('utf-8').decode(bytes);
+          } catch (_) {
+            text = bin;
+          }
+          this.packerForm.provisioner_script = text;
+          this.packerForm.loaded_from = key;
+          toast(`Loaded ${name} from ${backend}`, 'success');
+        } catch (e) {
+          toast(e.message || 'Failed to load script', 'error');
+        } finally {
+          this.loadingScript = false;
+        }
+      },
+
+      backendLabelShort(id) {
+        return ({ s3: 'S3', azure_blob: 'Azure', gcs: 'GCS', local: 'Local' })[id] || id;
       },
 
       async refreshAll() {
