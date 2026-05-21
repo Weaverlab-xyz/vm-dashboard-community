@@ -59,6 +59,10 @@ def _bt_cfg() -> tuple[str, str]:
     return host, folder
 
 
+def _bt_owner() -> str:
+    return _cs().get("secrets_bt_owner", "") or ""
+
+
 def _pscli_env() -> dict:
     cs = _cs()
     env = dict(os.environ)
@@ -280,16 +284,41 @@ def test_bt_secrets_safe() -> dict:
 
 def write_bt_secrets_safe(key: str, value: str) -> str:
     _, folder = _bt_cfg()
+    owner = _bt_owner()
+    if not owner:
+        raise ValueError(
+            "BeyondTrust secret owner is not configured. Set 'Secret Owner' "
+            "on the Secrets Backend page (secrets_bt_owner) to the "
+            "BeyondInsight user that should own dashboard-created secrets — "
+            "typically the user linked to your ps-cli OAuth registration."
+        )
     title = _bt_secret_title(key)
-    _ps_run(["secrets", "create", "-t", title, "-v", value, "--folder", folder], timeout=30)
-    logger.info("BT Safe: wrote secret %s", title)
+    # Store as a Text-type secret rather than a credential (-p PASSWORD).
+    # Dashboard values are JSON blobs that can exceed BeyondTrust's password
+    # length limit (notably gcp_service_account_json), and text secrets carry
+    # arbitrary content without the credential-style username pairing.
+    args = ["secrets", "create-secret", "-t", title, "--text", value,
+            "-o", owner, "-ot", "User"]
+    if folder:
+        args.extend(["-fn", folder])
+    _ps_run(args, timeout=30)
+    logger.info("BT Safe: wrote secret %s (folder=%s, owner=%s)", title, folder, owner)
     return title
 
 
 def read_bt_secrets_safe(ref: str) -> str:
     data = _ps_run(["secrets", "get", "-t", ref, "-d"])
-    if isinstance(data, list) and data:
-        return data[0].get("Password", "")
+    if not isinstance(data, list) or not data:
+        return ""
+    entry = data[0]
+    # Text-type secrets put the payload in Text (sometimes returned as
+    # FileContent/Content depending on ps-cli version); older
+    # credential-type secrets used Password. Probe both so a backend that
+    # still holds legacy credential entries keeps working.
+    for field in ("Text", "FileContent", "Content", "Password"):
+        val = entry.get(field)
+        if val:
+            return val
     return ""
 
 
@@ -573,25 +602,27 @@ def delete_bt_folder(folder_id: str) -> None:
 def list_bt_secrets_safe(folder: str = "") -> list[dict]:
     """Return secrets in a folder (or in the configured default folder if
     none specified). Each item carries `ref = "Folder/Title"` so the existing
-    `read_bt_secrets_safe` path can fetch it by title."""
+    `read_bt_secrets_safe` path can fetch it by title.
+
+    `ps-cli secrets list` has no folder filter — the folder is encoded in the
+    secret title (`<Folder>/<Title>`), matching how get/delete address them.
+    We list everything and filter by the `Folder` field client-side.
+    """
     _, default_folder = _bt_cfg()
     target_folder = folder or default_folder
-    args = ["secrets", "list"]
-    if target_folder:
-        args.extend(["--folder", target_folder])
-    raw = _ps_run(args)
+    raw = _ps_run(["secrets", "list"])
     if not isinstance(raw, list):
         return []
     out: list[dict] = []
     for s in raw:
+        item_folder = s.get("Folder") or ""
+        if target_folder and item_folder != target_folder:
+            continue
         title = s.get("Title") or s.get("Name") or ""
         out.append({
             "name":        title,
-            "folder":      s.get("Folder") or target_folder,
+            "folder":      item_folder or target_folder,
             "description": s.get("Description", ""),
-            # ref needs the folder prefix when one is set so it matches the
-            # `_bt_secret_title` format used by writes; if listing surfaced a
-            # plain title without a folder, just use the title.
             "ref":         f"{target_folder}/{title}" if target_folder else title,
         })
     return out
