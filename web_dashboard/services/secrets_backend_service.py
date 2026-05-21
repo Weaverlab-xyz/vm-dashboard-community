@@ -292,17 +292,54 @@ def write_bt_secrets_safe(key: str, value: str) -> str:
             "BeyondInsight user that should own dashboard-created secrets — "
             "typically the user linked to your ps-cli OAuth registration."
         )
+    if not folder:
+        raise ValueError(
+            "BeyondTrust folder is not configured. Set 'Folder Name' on the "
+            "Secrets Backend page (secrets_bt_folder)."
+        )
+    # ps-cli's `-fn <name>` silently no-ops when the folder doesn't exist
+    # (exit 0, nothing persisted), so we resolve to a concrete FolderId up
+    # front and pass `-fid` instead. That also surfaces a clear error to
+    # operators who picked a folder name that ps-cli can't see.
+    folder_id = _resolve_bt_folder_id(folder)
+    if not folder_id:
+        raise ValueError(
+            f"BeyondTrust folder {folder!r} is not visible to ps-cli. "
+            f"`folders list` returned no folder by that name. Either pick "
+            f"an existing folder on the Secrets Backend page or create one "
+            f"first (BeyondTrust Safes are not Folders — Dashboard the Safe "
+            f"and Dashboard the Folder are different things)."
+        )
     title = _bt_secret_title(key)
     # Store as a Text-type secret rather than a credential (-p PASSWORD).
     # Dashboard values are JSON blobs that can exceed BeyondTrust's password
     # length limit (notably gcp_service_account_json), and text secrets carry
     # arbitrary content without the credential-style username pairing.
     args = ["secrets", "create-secret", "-t", title, "--text", value,
-            "-o", owner, "-ot", "User"]
-    if folder:
-        args.extend(["-fn", folder])
+            "-o", owner, "-ot", "User", "-fid", folder_id]
     _ps_run(args, timeout=30)
-    logger.info("BT Safe: wrote secret %s (folder=%s, owner=%s)", title, folder, owner)
+    # ps-cli has been observed to exit 0 from `create-secret` even when the
+    # underlying write was silently dropped. Round-trip the title through
+    # `secrets get` to confirm the row is actually there and lives in the
+    # folder we targeted, then promote any mismatch to a real error so the
+    # migration UI shows a red row instead of green-on-fail.
+    check = _ps_run(["secrets", "get", "-t", title])
+    if not isinstance(check, list) or not check:
+        raise ValueError(
+            f"BeyondTrust secret {title!r} was not persisted (post-write "
+            f"`secrets get` returned no entry). ps-cli exited 0 but did not "
+            f"actually create the secret — typically a permission issue on "
+            f"folder {folder!r}, or the linked user can't write to it."
+        )
+    actual_folder_id = check[0].get("FolderId")
+    if actual_folder_id != folder_id:
+        raise ValueError(
+            f"BeyondTrust secret {title!r} landed in folder "
+            f"{check[0].get('Folder')!r} (id={actual_folder_id}) instead of "
+            f"the configured folder {folder!r} (id={folder_id})."
+        )
+    logger.info("BT Safe: wrote+verified secret %s (folder=%s/%s, owner=%s)",
+                title, folder, folder_id, owner)
     return title
 
 
@@ -546,18 +583,17 @@ def delete_bt_safe(safe_id: str) -> None:
 
 
 def list_bt_folders(safe: str = "") -> list[dict]:
-    """Return BeyondTrust Folders. When `safe` is supplied, restrict the
-    result to that Safe (matched against the parent path the CLI returns).
+    """Return BeyondTrust Folders visible to the ps-cli user.
 
-    Subcommand: `ps-cli list -p <path>`. Without a path filter the CLI
-    walks every accessible folder.
+    Subcommand: `ps-cli folders list`. Bare `ps-cli list` is not a valid
+    top-level command (commit ebab6ef shipped that by mistake; ps-cli's
+    argparse rejects it with "invalid choice: 'list'"). `folders list`
+    returns every folder the API user can see, with no Safe-scoping
+    parameter, so the `safe` kwarg is accepted for API parity but is
+    only echoed back on each entry — actual filtering happens client
+    side if at all.
     """
-    args = ["list"]
-    if safe:
-        # -p restricts the list to a parent path. Top-level path is the
-        # Safe name itself.
-        args.extend(["-p", safe])
-    raw = _ps_run(args)
+    raw = _ps_run(["folders", "list"])
     if not isinstance(raw, list):
         return []
     out: list[dict] = []
@@ -566,9 +602,20 @@ def list_bt_folders(safe: str = "") -> list[dict]:
             "name":        f.get("Name") or f.get("FolderName") or "",
             "safe":        f.get("SafeName") or safe or "",
             "id":          f.get("Id") or f.get("FolderId"),
-            "parent_id":   f.get("ParentId") or "",
+            "parent_id":   f.get("ParentId") or f.get("ParentFolderId") or "",
         })
     return out
+
+
+def _resolve_bt_folder_id(name: str) -> str:
+    """Resolve a folder name to its ps-cli FolderId via `folders list`.
+    Returns "" if no folder by that name is visible to the API user."""
+    if not name:
+        return ""
+    for f in list_bt_folders():
+        if f.get("name") == name:
+            return f.get("id") or ""
+    return ""
 
 
 def create_bt_folder(parent_id: str, name: str) -> dict:
