@@ -107,6 +107,7 @@ class BackendConfigPayload(BaseModel):
     secrets_gcp_prefix: str = "dashboard"
     secrets_bt_host: str = ""
     secrets_bt_folder: str = "Dashboard"
+    secrets_bt_owner: str = ""
 
 
 class MigratePayload(BaseModel):
@@ -161,6 +162,7 @@ async def get_backend_config(request: Request):
         "secrets_gcp_prefix":  cs.get("secrets_gcp_prefix", "dashboard"),
         "secrets_bt_host":     cs.get("secrets_bt_host", ""),
         "secrets_bt_folder":   cs.get("secrets_bt_folder", "Dashboard"),
+        "secrets_bt_owner":    cs.get("secrets_bt_owner", ""),
     }
 
 
@@ -179,6 +181,7 @@ async def update_backend_config(payload: BackendConfigPayload, request: Request)
         "secrets_gcp_prefix":   payload.secrets_gcp_prefix,
         "secrets_bt_host":      payload.secrets_bt_host,
         "secrets_bt_folder":    payload.secrets_bt_folder,
+        "secrets_bt_owner":     payload.secrets_bt_owner,
     })
     logger.info("Secrets backend config updated: backend=%s", payload.backend)
     return {"ok": True}
