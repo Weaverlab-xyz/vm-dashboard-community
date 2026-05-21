@@ -119,6 +119,32 @@ fill in the fields.
 
 ---
 
+## Preparing images for BT management
+
+Images built by the dashboard's Packer flow (`/images/aws`, `/images/azure`, `/images/gcp`) can be pre-conditioned for BeyondTrust pickup using the provisioner scripts under [`provisioners/beyondtrust/`](../../provisioners/beyondtrust/):
+
+- [`bt-ready-debian.sh`](../../provisioners/beyondtrust/bt-ready-debian.sh) — Debian, Ubuntu.
+- [`bt-ready-rpm.sh`](../../provisioners/beyondtrust/bt-ready-rpm.sh) — RHEL, Rocky, CentOS Stream, AlmaLinux, Amazon Linux 2 / 2023.
+
+What they prepare:
+
+- **PRA Shell Jump connectivity** — sshd hardened (key-only, no root password, sensible client-alive), passwordless sudo wired to the cloud-default user via a `/etc/sudoers.d/90-bt-ready` drop-in, host clock synced. The sshd drop-in is written as `00-bt-ready.conf` so it loads lex-first and wins against any later compliance drop-ins (sshd is first-occurrence-wins).
+- **Conservative baseline hygiene** — security updates applied, persistent journald, opt-in unattended security updates (`BT_AUTOPATCH=1`), image cleaned for re-launch (host keys + machine-id + cloud-init state stripped).
+- **Optional CIS / STIG remediation** (`BT_APPLY_CIS=1`) — installs OpenSCAP + SCAP Security Guide and applies a per-distro profile (default CIS L1 Server). Override via `BT_CIS_PROFILE=stig` or `cis_level2_server` (short names auto-expand to the SSG namespace). Report HTML lands at `/var/log/bt-ready/cis-report.html` on the built image. Debian-proper has no SSG CIS profile shipped, and Amazon Linux 2023's SSG coverage is incomplete — both warn and skip.
+
+What they deliberately don't do (covered in the script README):
+
+- No new local accounts (sudoers wired to the existing cloud-default user).
+- No Password Safe Managed Account creation (those are admin-managed in PS).
+- No EPM-L agent install (registration tokens expire 8h after issue; needs a first-boot hook, separate effort).
+- No host firewall (cloud security groups are the source of truth).
+
+**Cross-cloud constraint**: Azure's Packer builder invokes scripts as `sudo -E sh '{{ .Path }}'`, forcing `/bin/sh` regardless of shebang. Both scripts are strict POSIX `sh` (verified with `dash -n`) so they behave identically on AWS, Azure, and GCP.
+
+**Using them**: upload the appropriate script to your active storage backend via `/storage`, then on the AWS / Azure / GCP build page pick it from the **Load from storage** dropdown above the Provisioner Script textarea. Full smoke-test recipe and the operator-overridable env vars (`BT_TARGET_USER`, `BT_AUTOPATCH`, `BT_SKIP_UPDATES`, `BT_SKIP_CLEANUP`, `BT_APPLY_CIS`, `BT_CIS_PROFILE`) are in [`provisioners/beyondtrust/README.md`](../../provisioners/beyondtrust/README.md).
+
+---
+
 ## Advanced configuration
 
 ### Jump group and policy (PRA Shell Jump routing)
