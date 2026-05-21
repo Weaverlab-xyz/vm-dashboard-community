@@ -15,24 +15,24 @@
 <body class="bg-gray-50 min-h-screen font-sans text-gray-800">
 
   <!-- Navigation -->
-  <nav class="{{ 'bg-blue-900' if app_env == 'production' else 'bg-orange-700' }} text-white shadow-lg" x-data x-cloak x-show="$store.auth.isLoggedIn">
-    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+  <nav class="{{ 'bg-blue-900' if app_env == 'production' else 'bg-emerald-700' }} text-white shadow-lg" x-data x-cloak x-show="$store.auth.isLoggedIn">
+    <div class="max-w-screen-2xl mx-auto px-4 sm:px-6 lg:px-8">
       <div class="flex items-center justify-between h-16">
         <!-- Brand -->
         <div class="flex items-center space-x-3">
-          <svg class="h-7 w-7 {{ 'text-blue-300' if app_env == 'production' else 'text-orange-200' }}" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <svg class="h-7 w-7 {{ 'text-blue-300' if app_env == 'production' else 'text-emerald-200' }}" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                   d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01" />
           </svg>
-          <a href="/" class="text-lg font-bold tracking-tight {{ 'hover:text-blue-200' if app_env == 'production' else 'hover:text-orange-200' }}">Infrastructure Management</a>
+          <a href="/" class="text-lg font-bold tracking-tight {{ 'hover:text-blue-200' if app_env == 'production' else 'hover:text-emerald-200' }}">Infrastructure Management</a>
           {% if app_env != 'production' %}
-          <span class="text-xs font-semibold bg-orange-500 text-white px-2 py-0.5 rounded-full uppercase tracking-wide mr-3">Dev</span>
+          <span class="text-xs font-semibold bg-emerald-500 text-white px-2 py-0.5 rounded-full uppercase tracking-wide mr-3">Community</span>
           {% endif %}
         </div>
 
         <!-- Nav links -->
-        {% set nav_hover = 'hover:bg-blue-800' if app_env == 'production' else 'hover:bg-orange-600' %}
-        {% set nav_active = 'bg-blue-800' if app_env == 'production' else 'bg-orange-600' %}
+        {% set nav_hover = 'hover:bg-blue-800' if app_env == 'production' else 'hover:bg-emerald-600' %}
+        {% set nav_active = 'bg-blue-800' if app_env == 'production' else 'bg-emerald-600' %}
         <div class="hidden md:flex items-center space-x-1">
           {# Order per issue #17:
              Dashboard → on-prem hypervisors (Workstation, Proxmox, vSphere, Hyper-V,
@@ -42,79 +42,79 @@
              logically belong (Jobs alongside other operational links, Workgroups
              with Groups in the admin section, Images with Storage as a content
              section). #}
-          <a href="/" class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
+          <a href="/" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
              {% if request.url.path == '/' %}{{ nav_active }}{% endif %}">Dashboard</a>
 
           {# ── On-premises hypervisors ───────────────────────────────────────── #}
           {% if vmware_enabled %}
-          <a href="/vms" class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
+          <a href="/vms" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
              {% if request.url.path == '/vms' %}{{ nav_active }}{% endif %}">Workstation</a>
           {% endif %}
           {% if proxmox_enabled %}
-          <a href="/proxmox" class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
+          <a href="/proxmox" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
              {% if request.url.path == '/proxmox' %}{{ nav_active }}{% endif %}">Proxmox</a>
           {% endif %}
           {% if vsphere_enabled %}
-          <a href="/vsphere" class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
+          <a href="/vsphere" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
              {% if request.url.path == '/vsphere' %}{{ nav_active }}{% endif %}">vSphere</a>
           {% endif %}
           {% if hyperv_enabled %}
-          <a href="/hyperv" class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
+          <a href="/hyperv" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
              {% if request.url.path == '/hyperv' %}{{ nav_active }}{% endif %}">Hyper-V</a>
           {% endif %}
           {% if nutanix_enabled %}
-          <a href="/nutanix" class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
+          <a href="/nutanix" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
              {% if request.url.path == '/nutanix' %}{{ nav_active }}{% endif %}">Nutanix</a>
           {% endif %}
           {% if xcpng_enabled %}
-          <a href="/xcpng" class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
+          <a href="/xcpng" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
              {% if request.url.path == '/xcpng' %}{{ nav_active }}{% endif %}">XCP-ng</a>
           {% endif %}
 
           {# ── Cloud providers ──────────────────────────────────────────────── #}
-          <a href="/aws" class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
+          <a href="/aws" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
              {% if request.url.path == '/aws' %}{{ nav_active }}{% endif %}">AWS</a>
-          <a href="/azure" class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
+          <a href="/azure" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
              {% if request.url.path == '/azure' %}{{ nav_active }}{% endif %}">Azure</a>
-          <a href="/gcp" class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
+          <a href="/gcp" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
              {% if request.url.path == '/gcp' %}{{ nav_active }}{% endif %}">GCP</a>
 
           {# ── Workloads / artefacts ────────────────────────────────────────── #}
           {% if portainer_enabled %}
-          <a href="/containers" class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
+          <a href="/containers" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
              {% if request.url.path == '/containers' %}{{ nav_active }}{% endif %}">Containers</a>
           {% endif %}
           <a x-show="$store.auth.isAdmin" href="/images"
-             class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
+             class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
              {% if request.url.path.startswith('/images') %}{{ nav_active }}{% endif %}">Images</a>
           <a x-show="$store.auth.isAdmin" href="/storage"
-             class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
+             class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
              {% if request.url.path.startswith('/storage') %}{{ nav_active }}{% endif %}">Storage</a>
           {% if ansible_enabled %}
-          <a href="/config-mgmt" class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
+          <a href="/config-mgmt" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
              {% if request.url.path == '/config-mgmt' %}{{ nav_active }}{% endif %}">Configuration</a>
           {% endif %}
-          <a href="/jobs" class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
+          <a href="/jobs" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
              {% if request.url.path.startswith('/jobs') %}{{ nav_active }}{% endif %}">Jobs</a>
 
           {# ── Admin ────────────────────────────────────────────────────────── #}
           <a x-show="$store.auth.isAdmin" href="/secrets"
-             class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
+             class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
              {% if request.url.path.startswith('/secrets') %}{{ nav_active }}{% endif %}">Secrets</a>
           <a x-show="$store.auth.isAdmin" href="/users"
-             class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
+             class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
              {% if request.url.path.startswith('/users') %}{{ nav_active }}{% endif %}">Users</a>
           <a x-show="$store.auth.isAdmin" href="/groups"
-             class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
+             class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
              {% if request.url.path.startswith('/groups') %}{{ nav_active }}{% endif %}">Groups</a>
           <a x-show="$store.auth.isAdmin" href="/workgroups"
-             class="px-3 py-2 rounded-md text-sm font-medium {{ nav_hover }}
+             class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
              {% if request.url.path.startswith('/workgroups') %}{{ nav_active }}{% endif %}">Workgroups</a>
         </div>
 
         <!-- User menu -->
-        {% set user_text = 'text-blue-200' if app_env == 'production' else 'text-orange-200' %}
-        {% set logout_btn = 'bg-blue-700 hover:bg-blue-600' if app_env == 'production' else 'bg-orange-600 hover:bg-orange-500' %}
+        {% set user_text = 'text-blue-200' if app_env == 'production' else 'text-emerald-200' %}
+        {% set logout_btn = 'bg-blue-700 hover:bg-blue-600' if app_env == 'production' else 'bg-emerald-600 hover:bg-emerald-500' %}
         <div class="flex items-center space-x-3">
           <span class="text-sm {{ user_text }}" x-text="$store.auth.username"></span>
           <a href="/settings"
