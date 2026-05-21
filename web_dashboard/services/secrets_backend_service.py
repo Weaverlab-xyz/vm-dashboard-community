@@ -63,6 +63,31 @@ def _bt_owner() -> str:
     return _cs().get("secrets_bt_owner", "") or ""
 
 
+def _bt_owner_id() -> str:
+    """Return secrets_bt_owner as a stringified positive integer, or raise
+    ValueError with operator guidance. ps-cli's `-o` accepts only numeric
+    BeyondInsight User IDs — pasting a username causes create-secret to
+    exit 0 with 'Can't create the secret, owners can only contain valid
+    integer values' on stdout, which is the trap commit history calls out."""
+    raw = _bt_owner().strip()
+    if not raw:
+        raise ValueError(
+            "BeyondTrust secret owner is not configured. Set 'Secret Owner' "
+            "on the Secrets Backend page (secrets_bt_owner) to the numeric "
+            "BeyondInsight User ID (e.g. 2) that owns dashboard-created "
+            "secrets — find it in BeyondInsight under Configuration → "
+            "Role Based Access → User Management."
+        )
+    if not raw.isdigit():
+        raise ValueError(
+            f"BeyondTrust secret owner {raw!r} is not a numeric User ID. "
+            f"ps-cli's -o flag accepts only integer IDs; usernames silently "
+            f"fail. Set 'Secret Owner' on the Secrets Backend page to the "
+            f"numeric BeyondInsight User ID (e.g. 2)."
+        )
+    return raw
+
+
 def _pscli_env() -> dict:
     cs = _cs()
     env = dict(os.environ)
@@ -77,12 +102,25 @@ def _pscli_env() -> dict:
     return env
 
 
+# Non-JSON ps-cli stdout starting with one of these tokens means the call
+# failed even though the process exited 0 — observed in the wild on
+# `secrets create-secret` when owner-id validation fails ("Can't create the
+# secret, owners can only contain valid integer values"). We surface those
+# as a real ValueError rather than returning the message to callers that
+# expect data.
+_PSCLI_STDOUT_ERROR_PREFIXES = (
+    "can't ", "cant ", "cannot ", "error", "exception", "forbidden",
+    "unauthorized", "not found", "invalid", "failed", "missing setting",
+    "unable to",
+)
+
+
 def _ps_run(args: list, timeout: int = 30):
     result = subprocess.run(
-        ["ps-cli", "--format", "json"] + args,
-        # Closed stdin so destructive subcommands (delete-safe, etc.) that
-        # would otherwise prompt for confirmation fail fast rather than
-        # hanging until the timeout fires.
+        # -y auto-confirms destructive subcommands (delete, etc.) that would
+        # otherwise call input() and EOF against our closed stdin. Cheap
+        # to leave on globally — read paths ignore it.
+        ["ps-cli", "-y", "--format", "json"] + args,
         stdin=subprocess.DEVNULL,
         capture_output=True, text=True, timeout=timeout,
         env=_pscli_env(),
@@ -92,15 +130,21 @@ def _ps_run(args: list, timeout: int = 30):
         # full ps-cli traceback rather than a 300-char prefix that gets
         # truncated mid-line — issue #14 reported the message was unreadable.
         raise ValueError(f"ps-cli error: {(result.stderr or result.stdout)[:2000]}")
-    if not result.stdout.strip():
+    stdout = result.stdout.strip()
+    if not stdout:
         return []
     try:
-        return json.loads(result.stdout)
+        return json.loads(stdout)
     except json.JSONDecodeError:
-        # Some create/delete subcommands return a plain string (e.g. "Safe
-        # created: <guid>") instead of JSON. Return raw text in that case
-        # so callers that care can parse it.
-        return result.stdout.strip()
+        # Some create/delete subcommands return a plain string on success
+        # (e.g. "Secret deleted successfully: <guid>", "Safe created: <guid>");
+        # others emit an error sentence to stdout while still exiting 0. We
+        # treat the latter as a real failure so callers don't silently treat
+        # an error message as a success payload.
+        first_word = stdout.lower().lstrip()
+        if first_word.startswith(_PSCLI_STDOUT_ERROR_PREFIXES):
+            raise ValueError(f"ps-cli error: {stdout[:2000]}")
+        return stdout
 
 
 # ── AWS Secrets Manager ───────────────────────────────────────────────────────
@@ -284,14 +328,7 @@ def test_bt_secrets_safe() -> dict:
 
 def write_bt_secrets_safe(key: str, value: str) -> str:
     _, folder = _bt_cfg()
-    owner = _bt_owner()
-    if not owner:
-        raise ValueError(
-            "BeyondTrust secret owner is not configured. Set 'Secret Owner' "
-            "on the Secrets Backend page (secrets_bt_owner) to the "
-            "BeyondInsight user that should own dashboard-created secrets — "
-            "typically the user linked to your ps-cli OAuth registration."
-        )
+    owner = _bt_owner_id()
     if not folder:
         raise ValueError(
             "BeyondTrust folder is not configured. Set 'Folder Name' on the "
