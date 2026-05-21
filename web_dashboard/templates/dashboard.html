@@ -188,6 +188,7 @@
             { key: 'azure_vms',     title: 'Azure VMs',   href: '/azure#vms',     flag: 'azure', secondaryLabel: 'running' },
             { key: 'azure_images',  title: 'Azure Images',href: '/azure#private', flag: 'azure', description: 'gallery + managed' },
             { key: 'gcp_instances', title: 'GCP Instances', href: '/gcp',         flag: 'gcp',   secondaryLabel: 'running' },
+            { key: 'gcp_images',    title: 'GCP Images',  href: '/gcp',           flag: 'gcp',   description: 'custom images' },
             { key: 'ovas',          title: 'OVA Library', href: '/images',        flag: 'vmware', description: 'local OVA files' },
           ],
         },
@@ -314,6 +315,7 @@
         if (k === 'azure_vms')        return this._fetchListCount('/api/azure/vms',             'vms',       v => v.state === 'running');
         if (k === 'azure_images')     return this._fetchListCount('/api/azure/images',          'images');
         if (k === 'gcp_instances')    return this._fetchListCount('/api/gcp/instances',         'instances', i => (i.status || '').toUpperCase() === 'RUNNING');
+        if (k === 'gcp_images')       return this._fetchListCount('/api/gcp/custom-images',     'images');
         if (k === 'ovas')             return this._fetchListCount('/api/images/ovas',           'ovas');
         // Hypervisors
         if (k === 'proxmox_vms')      return this._fetchListCount('/api/proxmox/resources?type=vm', 'resources', v => v.status === 'running');
