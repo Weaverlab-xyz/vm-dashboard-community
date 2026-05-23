@@ -128,6 +128,49 @@ get them automatically because they depend on Azure infrastructure
   dispatch leg needs a real Arc-enrolled worker registered against
   the dev tenant's Azure Automation account.
 
+### Containerised Arc-worker for zero-touch SaaS spokes
+
+- **What community does:** none — community is single-host; there is
+  no concept of a remote worker that performs cloud-side actions on
+  the dashboard's behalf.
+- **What prod adds today:** the Arc-worker lives on a customer-owned
+  machine. The customer is responsible for: enrolling that machine in
+  Azure Arc, installing the Hybrid Worker extension, installing the
+  Automation runbook prerequisites (PowerShell modules, Az.* modules,
+  AWS Tools for PowerShell, GCP SDK, qemu-img, etc.), keeping those
+  prereqs current, and granting the worker the cloud-side IAM the
+  runbooks need to push artefacts.
+- **What SaaS adds beyond prod:** ship the Arc worker as a **single
+  container image** the customer pulls and runs. The image bundles
+  every runbook prereq pre-installed and pre-versioned; enrollment
+  with the SaaS tenant happens via a short-lived registration token
+  the dashboard mints (similar to a GitLab runner token), so the
+  spoke comes online with a `docker run` and a paste-the-token step.
+  Cloud-side IAM still belongs to the customer (we don't ask for
+  their cloud creds), but the worker container surfaces a clear
+  "here are the IAM permissions I need" doc the operator hands to
+  their cloud team.
+
+  This gives SaaS a true **hub-and-spoke** topology: the hub is the
+  hosted dashboard; each customer runs N containerised spokes wherever
+  their on-prem image artefacts live (VMware host, Hyper-V host,
+  laptop, NAS — anywhere Docker runs). The spoke is the *only* piece
+  the customer hosts, and it's ~one command to install.
+
+- **Status:** Researching. Open questions: which runbook prereqs are
+  pinnable vs. drift-prone, whether the worker registers via Azure
+  Arc machine-enrollment or via a dashboard-native gRPC channel,
+  signed-image distribution (the worker holds cloud creds in memory
+  during a runbook run, so image provenance matters).
+- **Dev-testable?** Partial. The container can be built and run on
+  the docker-compose dev rig; the SaaS-side registration handshake
+  needs the hosted dashboard side to exist before end-to-end testing.
+- **Why it matters for SaaS:** removes the highest-friction step in
+  the current Arc-worker onboarding. Most SaaS prospects bounce when
+  they read "Step 3: enroll your machine in Azure Arc and install
+  the following 7 PowerShell modules" — packaging the worker as
+  pull-and-run shortens onboarding from days to minutes.
+
 ### Continuous CVE scanning per image version
 
 - **What community does:** build job log is the only manifest;
