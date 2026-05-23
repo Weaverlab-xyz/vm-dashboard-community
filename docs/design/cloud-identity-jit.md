@@ -206,26 +206,45 @@ Two consequences worth calling out:
   its in-process MSAL cache so the next token reflects the new
   assignment. Handled in the SDK factory (§6.2).
 
-### 5.3 GCP — Entitle adds an IAM binding (verify mechanism at build time)
+### 5.3 GCP — Entitle adds/removes an IAM binding via `setIamPolicy`
 
 - **Baseline identity:** SA `dashboard-baseline@project.iam.gserviceaccount.com`
   with `roles/viewer` and `roles/storage.objectViewer`.
 - **Operation roles:** `roles/compute.instanceAdmin.v1`,
   `roles/storage.objectAdmin`, etc.
-- **Grant mechanism (per Entitle docs):** Entitle calls
-  `projects.setIamPolicy` to add a binding granting the dashboard SA
-  the operation role. **Open question — confirm at build time:** does
-  Entitle's GCP integration use an IAM Condition with `request.time`
-  for native expiry, or does the agent rely on a scheduled
-  `setIamPolicy` to remove the binding at TTL? The docs say
-  "time-bound" but don't specify the mechanism. Plan for both:
-  - Preferred: IAM Condition (`request.time < timestamp(expiry)`) — GCP
-    enforces expiry server-side, no agent dependency.
-  - Fallback: scheduled remove via agent — same drift risk as AWS;
-    needs sweeper.
-- **Cross-project:** the binding lives on the workload project, not the
-  dashboard project. The Entitle integration must have
-  `iam.securityAdmin` (or equivalent) on each workload project.
+- **Grant mechanism (validated):** Entitle calls
+  `projects.setIamPolicy` (also `storage.buckets.setIamPolicy`,
+  `iam.serviceAccounts.setIamPolicy` for narrower scopes) to add a
+  binding granting the dashboard SA the operation role. At TTL expiry,
+  Entitle calls `setIamPolicy` again to remove the binding. **This is
+  agent-scheduled revocation, not IAM-Condition-based native expiry**
+  — confirmed by the integration's `iam_policy_auditing: true` option
+  which embeds grant time and request number into the IAM policy
+  itself (a marker that wouldn't be needed if Conditions enforced
+  expiry server-side).
+- **Deployment model is flexible.** Unlike AWS pod-based-identity, GCP
+  supports four ways to host Entitle:
+  - **Cloud-hosted** (Entitle calls GCP APIs from its own cloud; known
+    egress IPs the customer allow-lists) — no in-customer footprint.
+  - **Self-hosted agent**
+  - **GKE pod-based identity**
+  - **EKS-hosted agent**
+
+  Community installs without GKE can use the cloud-hosted model and
+  avoid running an agent. Document the egress IP allow-list step.
+- **Audit option to enable:** set `iam_policy_auditing: true` in the
+  Entitle GCP integration config — this writes the grant timestamp and
+  Entitle request ID into the IAM policy itself, joining cleanly with
+  the `entitle:{request_id}` user-agent tag the dashboard already
+  appends (§6.7).
+- **Drift risk same as AWS.** Because revocation is Entitle-driven
+  (cloud-hosted or agent), an Entitle outage between attach and revoke
+  can leave bindings active past TTL. The hourly sweeper (§6.7)
+  reconciles this; checks active bindings against `EntitleActivation`
+  rows and reports orphans.
+- **Cross-project:** the binding lives on the workload project, not
+  the dashboard project. The Entitle integration must have
+  `resourcemanager.projects.setIamPolicy` on each workload project.
 
 ## 6. Dashboard-side design
 
@@ -536,10 +555,14 @@ the Entitle REST API at runtime. The provider is setup-time only.
 
 ### 8.4 Phase 3 — GCP
 
-- Resolve §5.3 open question (IAM Condition vs scheduled revoke).
 - Operator runs `terraform/entitle_setup/` with `gcp.enabled=true`.
-- If GCP integration is scheduled-revoke (not Condition-based), deploy
-  the sweeper service.
+- Enable `iam_policy_auditing: true` on the Entitle GCP integration so
+  grant_time / request_number are embedded in the IAM policy for
+  audit joins.
+- Choose deployment model (cloud-hosted with IP allow-list, vs
+  self-hosted agent / GKE / EKS). Cloud-hosted is the recommended
+  default for community installs.
+- Deploy the GCP sweeper service (same component pattern as AWS).
 - Flip `gcp.enabled=true`.
 
 ### 8.5 Phase 4 — tighten baseline
@@ -551,9 +574,9 @@ not silently use over-privileged baseline creds.
 
 ## 9. Open questions
 
-- **GCP grant mechanism.** §5.3 — does Entitle use an IAM Condition
-  with `request.time` (native expiry) or a scheduled `setIamPolicy`
-  remove (agent-dependent)? Determines whether we need a GCP sweeper.
+- ~~**GCP grant mechanism.**~~ **Resolved (v2.1):** Entitle uses
+  `setIamPolicy` calls to add and later remove bindings. Not
+  Condition-based. Sweeper required, matching AWS.
 - **Entitle access-request REST shape.** The intro docs confirm
   `Access Requests` is a manageable entity. We need the exact POST
   body shape (resource ID? bundle ID? role ID?) for the synthetic-user
@@ -706,7 +729,8 @@ corrects.
 | No native machine-identity type                                          | All workflow examples reference "employee" / "Alice" — same; no service-account predicate documented                                                                       |
 | Terraform provider is setup-time only, no runtime access-request resource | Provider resources: integrations, workflows, policies, resources, roles, bundles, permissions, agent_token, access_request_forward (forward, not create). No `entitle_access_request` resource — [entitle-terraform-provider](https://docs.beyondtrust.com/entitle/docs/entitle-terraform-provider) |
 | Terraform provider auth is bearer-token                                  | "API bearer authorizations via an Entitle API token… `api_key` or `ENTITLE_API_KEY`" — same                                                                                |
-| GCP grant mechanism (provisional)                                        | Listed as supported integration but specific grant mechanism not documented in pages reviewed. Open question §9                                                            |
+| GCP grant mechanism is `setIamPolicy` add/remove, not IAM Conditions     | "resourcemanager.projects.setIamPolicy / storage.buckets.setIamPolicy / iam.serviceAccounts.setIamPolicy" permissions; `iam_policy_auditing: true` option embeds grant_time + request_number in the policy (only meaningful if Entitle is the one editing it) — [entitle-integration-gcp](https://docs.beyondtrust.com/entitle/docs/entitle-integration-gcp) |
+| GCP supports cloud-hosted (no agent) deployment                          | Cloud-hosted mode with known egress IPs documented for allow-listing — same                                                                                                |
 
 **v1 assumptions that were wrong and are now removed:**
 
