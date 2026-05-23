@@ -472,6 +472,14 @@ class Settings(BaseSettings):
     entitle_default_ttl_minutes: int = 15           # how long an approval is valid before auto-expiry
     approval_gate_enabled: bool = False             # master kill-switch — set true to activate gates
 
+    # Cloud-identity JIT (machine-flow elevations via Entitle)
+    # See docs/design/cloud-identity-jit.md for the design.
+    # Phase 0 ships the scaffolding behind this flag; default OFF means
+    # cloud_identity_service.elevate() is a no-op and every cloud write
+    # uses today's standing credentials.
+    cloud_identity_gate_enabled: bool = False
+    machine_ttl_ceiling_minutes: int = 60           # hard upper bound per elevation request
+
     class Config:
         env_file = os.path.join(os.path.dirname(__file__), ".env")
         env_file_encoding = "utf-8"

@@ -309,7 +309,49 @@ class Approval(Base):
     consumed_at = Column(DateTime, nullable=True)
     denial_reason = Column(Text, nullable=True)
 
+    # principal_kind: "user" for human-facing approvals (the original flow),
+    # "machine" for cloud-identity JIT elevations issued by the dashboard
+    # on its own behalf. Webhook handler is shared; this column lets policy
+    # routing fork on identity type.
+    principal_kind = Column(String(16), nullable=False, default="user", index=True)
+
     user = relationship("User")
+
+
+class EntitleActivation(Base):
+    """Per-cloud-write machine-identity elevation issued via Entitle.
+
+    Phase 0 of the cloud-identity JIT design ships this table empty. When
+    ``cloud_identity_gate_enabled`` is False (default), ``cloud_identity_service``
+    short-circuits and no rows are inserted. When the gate is on, every
+    write-path cloud SDK call is preceded by an elevation request whose
+    lifecycle is tracked here.
+
+    Internal ``status`` values:
+      - pending     — request submitted to Entitle, awaiting workflow
+      - granted     — Entitle agent has finished granting cloud-side IAM;
+                      dashboard may proceed to call the cloud SDK
+      - denied      — Entitle workflow rejected the request (security alert)
+      - failed      — cloud-side IAM call failed (operator alert)
+      - revoked     — TTL elapsed or explicit revoke (terminal)
+    """
+    __tablename__ = "entitle_activations"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    cloud = Column(String(16), nullable=False, index=True)        # aws | azure | gcp
+    operation = Column(String(64), nullable=False, index=True)    # e.g. "aws:ec2:deploy"
+    role = Column(String(255), nullable=True)                     # IAM policy / role / binding granted
+    requester_user_id = Column(String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    entitle_request_id = Column(String(255), nullable=True, unique=True, index=True)
+    entitle_policy_id = Column(String(255), nullable=True)
+    auto_approved = Column(Boolean, nullable=False, default=True)
+    status = Column(String(20), nullable=False, default="pending", index=True)
+    denial_reason = Column(Text, nullable=True)
+    payload_hash = Column(String(64), nullable=False)
+    requested_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    granted_at = Column(DateTime, nullable=True)
+    expires_at = Column(DateTime, nullable=True)
+    revoked_at = Column(DateTime, nullable=True)
 
 
 class AppConfig(Base):
@@ -468,6 +510,8 @@ def init_db():
             "CREATE INDEX ix_jobs_cloud_resource_id ON jobs(cloud_resource_id)",
             "ALTER TABLE app_config ADD COLUMN workgroup VARCHAR(64)",
             "CREATE INDEX ix_app_config_key_workgroup ON app_config(key, workgroup)",
+            "ALTER TABLE approvals ADD COLUMN principal_kind VARCHAR(16) DEFAULT 'user' NOT NULL",
+            "CREATE INDEX ix_approvals_principal_kind ON approvals(principal_kind)",
         ]
         for stmt in _migrations:
             if _is_sqlite:
