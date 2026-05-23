@@ -273,6 +273,26 @@ bearer-token auth. Required fields per the Entitle reference:
   cloud principal (`dashboard-baseline-aws@machine.internal` etc.).
   See §6.8.
 
+**Status discovery: polling, not webhook.** After submission the
+submitter polls `GET /public/v1/accessRequests/{id}` at 250–500ms
+intervals until status reaches `granted` (or `denied` / `expired`).
+Polling is preferred over webhook here because:
+
+- The worker thread is synchronously waiting — there's no other work
+  for it to do.
+- Polling does not require a public-ingress webhook endpoint, which
+  preserves the "machine gate works on installs behind NAT" property
+  from §10 (the human gate still needs ingress).
+- Auto-approve workflows typically complete in 1–3s ⇒ ~6–12 GETs per
+  elevation. Bounded cost.
+- Worker death cleanly terminates the polling; no orphan webhooks.
+
+Webhooks (`POST /public/v1/workflowsWebhooks`) are used for the
+**out-of-band denial / revocation** path (§6.4, §6.5) — events that
+need to reach the operator's alert sink even when no worker is
+polling. These reuse the existing HMAC-verified
+`/api/approvals/webhook` handler from the human-gate plumbing.
+
 The new shape is a **request submitter**:
 
 ```python
@@ -611,14 +631,17 @@ not silently use over-privileged baseline creds.
   {synthetic-user}}`. Bearer-token auth. The `behalfOf` field is
   Entitle's native mechanism for the machine-identity pattern; no
   workaround needed.
-- **Polling vs webhook for grant completion.** Entitle has "Workflow
-  webhooks" and "Audit Logs Webhooks." Confirm whether there's a
-  webhook fired *when the agent has finished granting* (vs just *when
-  the workflow approved*). The dashboard cannot proceed to call the
-  cloud SDK until the agent has actually attached the policy — there
-  may be a small gap between "approved" and "granted-server-side."
-  Plan: poll for `granted` state explicitly, treat `approved` as
-  insufficient.
+- ~~**Polling vs webhook for grant completion.**~~ **Resolved
+  (v2.3):** poll `GET /public/v1/accessRequests/{id}` for grant
+  completion; use `workflowsWebhooks` only for out-of-band denial /
+  revocation alerts. See §6.1 for the rationale (synchronous worker
+  thread, no public ingress required, bounded cost). One remaining
+  build-time confirmation: that the `status` field exposes a
+  `granted` (or equivalent agent-finished) state distinct from
+  `approved` (workflow approved but agent may not have completed the
+  cloud-side call yet). If not exposed, fall back to a short fixed
+  wait (~500ms) after `approved` before invoking the cloud SDK,
+  retrying on `AccessDenied`.
 - **Per-operation ceiling vs global.** Some operations (Packer image
   capture) want ~30min; tag rewrite wants ~2min. Default to a global
   60min ceiling; allow per-operation overrides in the JSON matrix.
@@ -761,6 +784,8 @@ corrects.
 | GCP supports cloud-hosted (no agent) deployment                          | Cloud-hosted mode with known egress IPs documented for allow-listing — same                                                                                                |
 | Access-request endpoint exists with our needed fields                    | `POST /public/v1/accessRequests` with `duration`, `justification`, `target` (bundle or role), and `behalfOf` (optional) — [accessrequests_create](https://docs.beyondtrust.com/entitle/reference/accessrequests_create) |
 | `behalfOf` field natively supports machine-identity pattern              | "Enables requests on behalf of another user/service account" — same. Resolves the §6.8 encoding cleanly; no workaround needed                                              |
+| Access-request status endpoint exists for polling                        | `GET /public/v1/accessRequests/{id}` returns the request with status — [accessrequests_show](https://docs.beyondtrust.com/entitle/reference/accessrequests_show)             |
+| Workflow webhooks can be registered                                      | `POST /public/v1/workflowsWebhooks` with `name`, `url`, optional `headers` and `additionalParams` — [workflowswebhooks_create](https://docs.beyondtrust.com/entitle/reference/workflowswebhooks_create) |
 
 **v1 assumptions that were wrong and are now removed:**
 
