@@ -45,12 +45,15 @@ Concretely:
 - Every code path that *mutates* cloud state (`deploy`, `destroy`, `set-tags`,
   `capture-image`, `attach-volume`, `assume-role-for-Packer`, etc.) goes through
   a **credential resolver** that asks Entitle for a time-bound activation of a
-  matching cloud role. If Entitle approves, the resolver hands the SDK a
-  short-lived credential. If Entitle denies or is unreachable, the operation
-  fails with a clear, operator-actionable error.
-- Activations are cached for the lifetime Entitle returns (typically 15–60
-  minutes), so a deploy that fires three SDK calls doesn't trigger three
-  approval requests.
+  matching cloud role. **No human approver is in the loop** — Entitle policy
+  auto-approves the request if it satisfies the policy (principal, action,
+  TTL ≤ ceiling) and denies otherwise.
+- Activations are short-lived. Policy default is **TTL ≤ 60 minutes** per
+  request, no extension, no renewal — a new operation gets a new request and
+  a new credential. Anything requesting a longer TTL is **denied, alerted,
+  and audited** as anomalous.
+- Activations are cached in-process for their natural TTL, so a deploy that
+  fires three SDK calls doesn't trigger three Entitle round-trips.
 
 ## 3. Non-goals
 
@@ -66,17 +69,31 @@ Concretely:
 
 ## 4. Threat model & what this buys
 
-| Threat                              | Before                       | After                                                                  |
-|-------------------------------------|------------------------------|------------------------------------------------------------------------|
-| Leaked AWS access key               | Full `ec2:*` until rotated   | Read-only inventory; writes require Entitle approval bound to action   |
-| Leaked Azure SP secret              | Subscription Contributor     | Reader; writes require PIM activation Entitle authored                 |
-| Leaked GCP SA JSON                  | Project-wide Admin           | Project Viewer; writes require time-bound IAM Condition Entitle-issued |
-| Compromised dashboard host          | Same as above                | Same as above — privilege is bounded by approval + TTL                 |
-| Insider misuse (rogue admin)        | No second pair of eyes       | Entitle policy can require a peer reviewer for the machine action      |
-| Bug → runaway deploy loop           | Unbounded blast radius       | Each elevation TTL-bounded; reviewer sees pattern in Entitle audit log |
+The point is **not** a human-in-the-loop second pair of eyes. The point is:
+
+1. **Zero standing write privilege** — a stolen credential alone unlocks
+   nothing destructive.
+2. **Hard TTL ceiling per elevation** — even a successful elevation is
+   bounded to ≤60min, no extension, no renewal.
+3. **Anomaly signal** — any request asking for more than the policy ceiling
+   is *denied and alerted*. Legitimate dashboard code never asks for more
+   than the ceiling, so a denied request is high-fidelity signal that
+   something is wrong (bug, or attacker probing).
+
+| Threat                              | Before                       | After                                                                            |
+|-------------------------------------|------------------------------|----------------------------------------------------------------------------------|
+| Leaked AWS access key               | Full `ec2:*` until rotated   | Read-only inventory only; writes need a fresh Entitle activation each time       |
+| Leaked Azure SP secret              | Subscription Contributor     | Reader only; same                                                                |
+| Leaked GCP SA JSON                  | Project-wide Admin           | Project Viewer only; same                                                        |
+| Attacker tries to extend TTL        | n/a                          | **Denied + alerted** — policy ceiling is fixed; no API path to raise it          |
+| Attacker uses creds off-hours       | Indistinguishable from app   | Every activation is a discrete logged event with timestamp, action, and TTL      |
+| Compromised dashboard host          | Same as standing creds       | Bounded — even with full host control, attacker is capped by ceiling per request |
+| Insider misuse (rogue admin)        | No bound                     | Same ceiling applies; can't grant themselves longer creds via the dashboard      |
+| Bug → runaway deploy loop           | Unbounded blast radius       | Each elevation is its own request; rate-of-requests visible in Entitle audit log |
 
 The dashboard is **already a privileged box** — what changes is that the
-*credentials it holds* are no longer the ceiling on what an attacker can do.
+*credentials it holds* are no longer the ceiling on what an attacker can do,
+and **every escalation past the policy is a high-confidence detection event**.
 
 ## 5. Per-cloud activation mechanics
 
@@ -267,14 +284,45 @@ The mapping lives in `config_service` as a JSON blob editable from
 Anything not in the matrix is **denied** rather than defaulting to the
 baseline — fail closed, force the operator to declare it.
 
-### 6.4 Approval modal: machine vs human
+### 6.4 Auto-approval policy (no human modal)
 
-The existing modal lives at `templates/_approval_modal.html`. The machine
-flow re-uses the same modal — operator sees "Waiting for Entitle approval
-for **EC2 deploy** (machine action)" with the same polling behaviour, but
-the approval body in Entitle's UI shows `principal: dashboard-baseline`
-rather than the operator's username. Entitle policy can require a different
-reviewer pool for `principal_kind=machine` than for `principal_kind=user`.
+Machine activations are **not** routed through the human approval modal.
+The Entitle policy auto-decides:
+
+```
+ALLOW  if  principal ∈ {dashboard-baseline-{aws,azure,gcp}}
+       AND action ∈ {configured operation matrix}
+       AND ttl_minutes ≤ machine_ttl_ceiling   (default 60)
+       AND payload_hash matches the originating request
+
+DENY + ALERT  otherwise.
+```
+
+The policy lives in Entitle (per the existing Entitle config flow); the
+dashboard just submits the request and reads the decision. No reviewer
+pool, no modal, no polling UI for the operator — the resolver `await`s
+the decision in-process and the typical end-to-end latency is one
+HTTP round-trip to Entitle plus the per-cloud activation call (sub-
+second for AWS STS, 1–3s for Azure PIM, 1–5s for GCP IAM Condition
+propagation).
+
+`machine_ttl_ceiling` is configurable in **Settings → Integrations →
+Entitle → Machine identity gate** but is intentionally a *ceiling*, not
+a *default* — the resolver always asks for the minimum it needs for the
+operation (e.g. 15min for a single EC2 deploy, 30min for a Packer image
+capture). The ceiling is the hard upper bound that Entitle will refuse
+to exceed.
+
+**Denials are alerts.** Every denied request fires:
+
+1. A row in `EntitleActivation` with `status="denied"` and the reason.
+2. A webhook to the operator's configured alert sink (Slack / email /
+   PagerDuty — wired through the existing notification framework).
+3. A banner on the dashboard's admin home for the next 24h:
+   "Cloud elevation denied — review Entitle audit log."
+
+A legitimate dashboard never produces these alerts, so any occurrence is
+worth investigating.
 
 ### 6.5 Cache invalidation
 
@@ -294,28 +342,42 @@ Three triggers invalidate a cached activation:
 
 ### 6.6 Graceful failure
 
-If Entitle is unreachable or denies the request:
+There are two failure modes — they're treated very differently.
 
-- **Read paths** never see an Entitle call (baseline only), so they never
-  break.
-- **Write paths** return `503 Service Unavailable` with the message
-  `"Approval service unavailable; cloud write paths are gated by Entitle.
-   Disable Settings → Integrations → Entitle → Machine identity gate if
-   you need to operate without approval."`
+**Entitle unreachable** (network failure, Entitle outage):
+
+- Read paths never hit Entitle (baseline only) — unaffected.
+- Write paths return `503 Service Unavailable`: `"Cloud elevation service
+  is unreachable. Cloud write paths are gated; retry when service is
+  restored."`
 - We **do not** auto-fall-back to the baseline + a "best-effort" write.
   Silent privilege fall-back is the bug class this whole design exists to
   prevent.
-- The "disable" toggle is intentionally not in the UI as a one-click — it
-  requires the operator to flip `cloud_identity_gate_enabled=false` in
-  config. Friction is the point.
+- The kill-switch (`cloud_identity_gate_enabled=false` in config) exists
+  for genuine emergency-break-glass; it is *not* in the UI as a one-click.
+  Friction is the point.
+
+**Entitle denies** (policy refusal — TTL over ceiling, unknown action,
+payload-hash mismatch):
+
+- Write path returns `403 Forbidden` with the Entitle denial reason.
+- The denial is treated as a **security event**, not a routine error:
+  - Alert sink fires (Slack/email/PagerDuty).
+  - Admin-home banner appears.
+  - The audit row stays in `EntitleActivation` with `status="denied"`.
+- Operators should investigate every denial. They are not expected in
+  normal operation.
 
 ### 6.7 Audit trail
 
 Each `EntitleActivation` row records:
 
-- `operation`, `cloud`, `role`, `requester_user_id`, `approver_user_id` (from
-  Entitle), `payload_hash`, `entitle_request_id`, `granted_at`, `expires_at`,
-  `revoked_at`.
+- `operation`, `cloud`, `role`, `requester_user_id` (who in the dashboard
+  triggered the action), `entitle_policy_id` (which Entitle policy clause
+  matched), `auto_approved` (always true for machine flows), `status`
+  (`granted` | `denied` | `revoked` | `expired`), `denial_reason` (if
+  denied), `payload_hash`, `entitle_request_id`, `granted_at`,
+  `expires_at`, `revoked_at`.
 
 Plus, on every cloud write call the resolver passes through, the resolver
 appends a session tag (AWS) / `_x-ms-correlation-request-id` header (Azure)
@@ -330,6 +392,8 @@ Wizard Step 5 ("Entitle") gains a sub-section **Machine identity gate**:
 | Field                              | Notes |
 |------------------------------------|-------|
 | `cloud_identity_gate_enabled`      | Master toggle |
+| `machine_ttl_ceiling_minutes`      | Hard upper bound Entitle will honour per activation; default 60. Requests above this are denied + alerted |
+| Alert sink (Slack/email/PagerDuty) | Where denial events are routed |
 | AWS baseline access key ID/secret  | Replaces the existing single AWS credential pair; this one is RO |
 | AWS Entitle trust issuer URL       | From Entitle's per-AWS-account config |
 | AWS operation→role JSON            | The matrix from §6.3, AWS columns |
@@ -389,10 +453,19 @@ write paths must fail rather than silently use over-privileged baseline creds.
 
 ## 9. Open questions
 
-- **Entitle's machine-principal model.** Entitle's product is human-centric.
-  Does the `principal_kind=machine` distinction need a separate Entitle
-  "resource" namespace, or do we just label requests with a synthetic
-  username (`dashboard-baseline@machine`)? Confirm with Entitle solutions.
+- **Entitle policy authoring for auto-approval.** Confirm the exact policy
+  DSL needed to express `auto-approve if principal=X AND action=Y AND
+  ttl≤60min; deny otherwise`. Entitle's product is human-centric so the
+  no-reviewer policy path may need product confirmation. If they can't
+  express it natively, fallback is a thin "policy decision endpoint"
+  Entitle calls before showing a reviewer (effectively pre-empting human
+  review). Worst case: we run a single bot reviewer account that
+  auto-clicks approve on policy-matching requests — ugly but works.
+- **Ceiling per cloud or global?** Default in the design is one global
+  `machine_ttl_ceiling`. Some operations (e.g. Packer image capture) may
+  legitimately want 30–45min while a tag rewrite needs 2min. Decide
+  whether the ceiling is per-(cloud,operation) or global. Recommendation:
+  per-operation, with global default of 60min.
 - **AWS instance profile passrole.** `dashboard-ec2-deploy` needs `iam:PassRole`
   on the instance profile used by deployed EC2s. If customers want per-workgroup
   instance profiles, the role policy gets one `PassRole` per workgroup — or
@@ -412,28 +485,43 @@ write paths must fail rather than silently use over-privileged baseline creds.
 
 ## 10. Trade-offs we're accepting
 
-- **Latency.** Every cold write path now adds an Entitle round-trip (~1s
-  approval-pending screen if the approver is in-tab, much longer if async).
-  This is the point — but it's a UX shift.
-- **Public ingress requirement.** Inherited from the human gate. Already
-  documented in [`integrations/entitle.md`](../integrations/entitle.md).
-- **Multi-tenant Entitle bills.** Activating machine-identity requests
-  consumes Entitle request volume; price against expected deploy rate.
+- **Latency.** Every cold write path adds an Entitle round-trip plus a
+  per-cloud activation call. With auto-approval, this is sub-second for
+  AWS, 1–3s for Azure (PIM), 1–5s for GCP (IAM Condition propagation).
+  Cached for the activation TTL, so amortizes well across multi-call
+  operations.
+- **Webhook ingress.** Not required for machine flows specifically — the
+  resolver waits synchronously for the policy decision rather than the
+  async-webhook pattern used by human approvals. But the human gate
+  (still optional, still useful for secret reads / updates / deletes)
+  does need ingress. If the operator runs *only* the machine gate they
+  can avoid the public-URL requirement.
+- **Entitle request volume.** Each cold cache miss is one Entitle
+  request. Worth pricing against expected deploy rate, but volume is
+  bounded by the cache TTL so realistic upper bound is ~1 req/min/cloud
+  on a busy dashboard.
 - **Operational complexity.** Three cloud-native primitives (STS / PIM /
   IAM Conditions) each have their own failure modes. We're trading one
   failure mode (leaked credential) for several smaller ones (PIM lag,
   Condition propagation, STS clock skew). The sweeper + observability
   in §6.7 is how we keep that manageable.
+- **Alert-fatigue risk.** Because *every* denial is treated as a security
+  event, a bug in the operation matrix that requests an unconfigured
+  action will fire alerts until fixed. This is a deliberate design choice
+  (loud over quiet) but the operator needs a runbook for triaging the
+  first few denials post-rollout.
 
 ## 11. What we're NOT doing in v1
 
 - Per-workgroup role mapping. The matrix is global. If `team-alpha` and
   `team-bravo` need different IAM scopes, add it in v2.
-- Multi-approver workflows on machine activations. Entitle policy can do
-  it; we just don't surface the configuration in the wizard yet.
-- Re-using a single Entitle approval for multiple consecutive operations
-  ("approve a deploy session" rather than each call). Tempting but blurs
-  the payload-hash binding; defer.
+- Human-in-the-loop approval for machine flows. Policy is auto-approve
+  within ceiling, deny otherwise. Routing machine activations to a human
+  reviewer is explicitly out of scope — the existing *user* gate already
+  covers that use case for secret operations.
+- TTL extension or renewal. A long-running operation must request a new
+  activation when its current credential expires; we don't extend in
+  place. Keeps the audit trail tidy and the ceiling meaningful.
 - Replacing the IAM-user-with-keys baseline with IRSA / Workload Identity /
   Workload Identity Federation. Worth doing eventually; out of scope for
   this design which is about *write* paths.
@@ -447,19 +535,15 @@ operator                dashboard            Entitle           AWS STS         A
    |                       |                    |                |                |
    | POST /api/aws/deploy  |                    |                |                |
    |---------------------->|                    |                |                |
-   |                       | resolver.get_credential(aws:ec2:deploy)              |
+   |                       | POST /policy/decide (action=aws:ec2:deploy,         |
+   |                       |   principal=dashboard-baseline-aws, ttl=15min,      |
+   |                       |   payload_hash=...)                                 |
    |                       |------------------->|                |                |
-   |                       |   create machine request            |                |
+   |                       |   ALLOW + signed JWT (TTL bounded)  |                |
    |                       |<-------------------|                |                |
-   |   202 + poll URL      |                    |                |                |
-   |<----------------------|                    |                |                |
-   |   (operator sees pending-approval modal)                                     |
-   |                       |                    |                |                |
-   |                       |     webhook: approved (HMAC)        |                |
-   |                       |<-------------------|                |                |
-   |                       | AssumeRoleWithWebIdentity (Entitle JWT)              |
+   |                       | AssumeRoleWithWebIdentity (Entitle JWT)             |
    |                       |---------------------------------->  |                |
-   |                       |     temp creds (15-60min)           |                |
+   |                       |     temp creds (15min)              |                |
    |                       |<----------------------------------  |                |
    |                       | RunInstances + CreateTags(ManagedBy, Workgroup, entitle:<id>) |
    |                       |--------------------------------------------------> |
@@ -467,6 +551,16 @@ operator                dashboard            Entitle           AWS STS         A
    |                       |<-------------------------------------------------- |
    |   200 + job id        |                                                    |
    |<----------------------|                                                    |
+
+(No operator-visible modal. Total added latency ≈ 200-500ms vs current path.)
+
+If Entitle DENIES (e.g. ttl request exceeded ceiling):
+
+   |                       |   DENY (reason: ttl_exceeds_ceiling)|
+   |                       |<-------------------|
+   |   403 + reason        |
+   |<----------------------|
+   (Alert sink fires; admin-home banner; EntitleActivation row inserted with status=denied)
 ```
 
 ## Appendix B — Why not just shrink the three IAM users?
