@@ -275,7 +275,43 @@ bearer-token auth. Required fields per the Entitle reference:
 
 **Status discovery: polling, not webhook.** After submission the
 submitter polls `GET /public/v1/accessRequests/{id}` at 250–500ms
-intervals until status reaches `granted` (or `denied` / `expired`).
+intervals until status reaches a terminal state.
+
+Confirmed response shape:
+
+```json
+{
+  "id": "string",
+  "number": 0,
+  "status": "string",
+  "duration": 0,
+  "justification": "string",
+  "roles": ["string"],
+  "target": {"type": "string"},
+  "user": {"id": "string", "email": "string"},
+  "behalfOf": {"id": "string", "email": "string"}
+}
+```
+
+Confirmed `status` enum and our state-machine mapping:
+
+| Entitle status         | Dashboard action                                        |
+|------------------------|---------------------------------------------------------|
+| `waitingForApproval`   | Keep polling (workflow stage in progress)               |
+| `approved`             | Keep polling (decision made, agent has not granted yet) |
+| `waitingForIT`         | Keep polling (cloud-side grant in flight)               |
+| `permissionInProgress` | Keep polling (cloud-side grant in flight)               |
+| **`granted`**          | **Proceed** — cloud-side permission is in place         |
+| `rejected`             | Fail loudly → security alert (policy denied)            |
+| `failed`               | Fail loudly → operator alert (cloud-side error)         |
+| `cancelled`            | Fail (admin or caller cancelled)                        |
+| `revoked`              | Cache evict + fail any in-flight call                   |
+
+Crucially, `granted` is **distinct** from `approved` — the latter just
+means the workflow decision is in, while the agent may still be
+attaching the IAM policy. The dashboard MUST wait for `granted` before
+calling the cloud SDK, or it will race and see `AccessDenied`.
+
 Polling is preferred over webhook here because:
 
 - The worker thread is synchronously waiting — there's no other work
@@ -634,14 +670,17 @@ not silently use over-privileged baseline creds.
 - ~~**Polling vs webhook for grant completion.**~~ **Resolved
   (v2.3):** poll `GET /public/v1/accessRequests/{id}` for grant
   completion; use `workflowsWebhooks` only for out-of-band denial /
-  revocation alerts. See §6.1 for the rationale (synchronous worker
-  thread, no public ingress required, bounded cost). One remaining
-  build-time confirmation: that the `status` field exposes a
-  `granted` (or equivalent agent-finished) state distinct from
-  `approved` (workflow approved but agent may not have completed the
-  cloud-side call yet). If not exposed, fall back to a short fixed
-  wait (~500ms) after `approved` before invoking the cloud SDK,
-  retrying on `AccessDenied`.
+  revocation alerts. See §6.1 for the rationale.
+- ~~**`granted` distinct from `approved`?**~~ **Resolved (v2.4):**
+  yes. Confirmed `status` enum is `waitingForApproval`, `approved`,
+  `waitingForIT`, `permissionInProgress`, `granted`, `rejected`,
+  `failed`, `cancelled`, `revoked`. The state machine mapping is in
+  §6.1.
+- **TTL expiry state.** The enum does not include `expired`. After
+  `duration` elapses, does the request stay `granted` (with the
+  cloud-side permission simply removed) or transition to `revoked`?
+  Confirm at build time so the sweeper logic in §6.7 reconciles
+  correctly.
 - **Per-operation ceiling vs global.** Some operations (Packer image
   capture) want ~30min; tag rewrite wants ~2min. Default to a global
   60min ceiling; allow per-operation overrides in the JSON matrix.
@@ -786,6 +825,8 @@ corrects.
 | `behalfOf` field natively supports machine-identity pattern              | "Enables requests on behalf of another user/service account" — same. Resolves the §6.8 encoding cleanly; no workaround needed                                              |
 | Access-request status endpoint exists for polling                        | `GET /public/v1/accessRequests/{id}` returns the request with status — [accessrequests_show](https://docs.beyondtrust.com/entitle/reference/accessrequests_show)             |
 | Workflow webhooks can be registered                                      | `POST /public/v1/workflowsWebhooks` with `name`, `url`, optional `headers` and `additionalParams` — [workflowswebhooks_create](https://docs.beyondtrust.com/entitle/reference/workflowswebhooks_create) |
+| Status enum exposes `granted` distinct from `approved`                   | Confirmed values: `waitingForApproval`, `approved`, `waitingForIT`, `permissionInProgress`, `granted`, `rejected`, `failed`, `cancelled`, `revoked`. Dashboard waits for `granted` before invoking the cloud SDK |
+| Response shape includes `behalfOf` echo                                  | Response `behalfOf: {id, email}` lets the dashboard verify the request it polled is the one it submitted, defending against id-confusion bugs                                                                  |
 
 **v1 assumptions that were wrong and are now removed:**
 
