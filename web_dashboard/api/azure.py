@@ -681,6 +681,68 @@ async def create_image_from_vm(
     return {"job_id": job.id, "status": "pending", "message": f"Image capture queued for VM '{vm_name}'"}
 
 
+# ── Export managed image to portable VHD on hub backend ──────────────────────
+
+class ExportImageRequest(BaseModel):
+    image_name: str  # Registry name to record the exported image under
+    resource_group: Optional[str] = None  # Defaults to the configured azure_resource_group
+
+
+class ExportImageResponse(BaseModel):
+    job_id: str
+    status: str
+    message: str
+
+
+@router.post("/images/{image_name}/export", response_model=ExportImageResponse)
+async def export_managed_image(
+    image_name: str,
+    req: ExportImageRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("azure", "write")),
+):
+    """Manually export a managed image to VHD on the hub backend and register
+    it in the image registry. Useful when the auto-export during build was
+    skipped or failed."""
+    from .packer import export_and_register_azure
+
+    rg = req.resource_group or _rg()
+    job = job_service.create_job(
+        db,
+        job_type="azure_export_image",
+        created_by=current_user.username,
+        metadata={"image_name": image_name, "registry_name": req.image_name, "resource_group": rg},
+    )
+    job_service.log_audit(
+        db, current_user.username, "azure_export_image",
+        details={"image_name": image_name, "registry_name": req.image_name},
+    )
+
+    async def _run():
+        d = _get_db_session()
+        try:
+            job_service.set_running(d, job.id)
+            result = await export_and_register_azure(
+                d, job.id, req.image_name, image_name, rg, current_user.username,
+            )
+            if result.get("export_error") or result.get("export_skipped"):
+                job_service.set_failed(d, job.id, result.get("export_error") or result["export_skipped"])
+            else:
+                job_service.set_completed(d, job.id, result)
+        except Exception as e:
+            job_service.set_failed(d, job.id, f"Export failed: {e}")
+        finally:
+            d.close()
+
+    background_tasks.add_task(_run)
+    return ExportImageResponse(
+        job_id=job.id,
+        status="pending",
+        message=f"Export of {image_name} queued",
+    )
+
+
 # ── Delete image ──────────────────────────────────────────────────────────────
 
 @router.delete("/images/{image_name}")

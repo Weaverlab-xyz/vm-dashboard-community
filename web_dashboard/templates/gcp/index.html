@@ -166,6 +166,13 @@
                     class="flex-1 text-xs bg-blue-700 hover:bg-blue-800 text-white px-3 py-1.5 rounded-lg font-medium transition">
               Deploy VM
             </button>
+            <button @click="exportImage(img)"
+                    :disabled="exportingImages.has(img.self_link)"
+                    class="text-xs border border-indigo-200 text-indigo-700 hover:bg-indigo-50 disabled:opacity-40 px-2.5 py-1.5 rounded-lg font-medium transition"
+                    title="Export this custom image to a portable VHD on the hub backend">
+              <span x-show="!exportingImages.has(img.self_link)">Export VHD</span>
+              <span x-show="exportingImages.has(img.self_link)" x-cloak>Queuing…</span>
+            </button>
             <button @click="confirmDeleteImage(img)"
                     class="text-xs border border-red-200 text-red-600 hover:bg-red-50 px-2.5 py-1.5 rounded-lg font-medium transition">
               Delete
@@ -580,6 +587,7 @@ function gcpDashboard() {
     // Data
     publicImages:   [],
     customImages:   [],
+    exportingImages: new Set(),
     instances:      [],
     networkOpts:    { zones: [], machine_types: [], subnetworks: [], region: '', ssh_key_configured: false },
 
@@ -900,6 +908,26 @@ function gcpDashboard() {
         this.showToast(`Image ${img.name} deleted.`);
       } catch (e) {
         this.showToast(e.message || 'Delete failed', 'error');
+      }
+    },
+
+    async exportImage(img) {
+      const defaultName = (img.name || '').replace(/[^a-zA-Z0-9._-]/g, '-').slice(0, 64);
+      const imageName = prompt(
+        `Export "${img.name}" to a portable VHD on the hub backend?\n\n` +
+        `This may take 30+ minutes. The exported VHD will be registered in the image registry under the name below.\n\n` +
+        `Registry name:`,
+        defaultName,
+      );
+      if (!imageName) return;
+      this.exportingImages = new Set([...this.exportingImages, img.self_link]);
+      try {
+        const resp = await API.post(`/api/gcp/images/${encodeURIComponent(img.name)}/export`, { image_name: imageName.trim() });
+        this.showToast(`Export job queued. Redirecting…`);
+        setTimeout(() => { window.location.href = `/jobs/${resp.job_id}`; }, 600);
+      } catch (e) {
+        this.showToast(`Export failed to queue: ${e.message}`, 'error');
+        this.exportingImages = new Set([...this.exportingImages].filter(s => s !== img.self_link));
       }
     },
 

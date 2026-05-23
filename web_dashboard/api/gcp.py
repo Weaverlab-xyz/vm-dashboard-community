@@ -747,6 +747,70 @@ async def _run_destroy(
         db.close()
 
 
+# ── Export custom image to portable VHD on hub backend ───────────────────────
+
+class ExportImageRequest(BaseModel):
+    image_name: str  # Registry name to record the exported image under
+
+
+class ExportImageResponse(BaseModel):
+    job_id: str
+    status: str
+    message: str
+
+
+@router.post("/images/{image_name}/export", response_model=ExportImageResponse)
+async def export_custom_image(
+    image_name: str,
+    req: ExportImageRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("gcp", "write")),
+):
+    """Manually export a custom GCE image to VHD on the hub backend and
+    register it in the image registry. Useful when the auto-export during
+    build was skipped or failed."""
+    from .packer import export_and_register_gcp
+
+    project_id = _gcp_project()
+    if not project_id:
+        raise HTTPException(status_code=400, detail="GCP project ID not configured.")
+
+    job = job_service.create_job(
+        db,
+        job_type="gcp_export_image",
+        created_by=current_user.username,
+        metadata={"image_name": image_name, "registry_name": req.image_name, "project_id": project_id},
+    )
+    job_service.log_audit(
+        db, current_user.username, "gcp_export_image",
+        details={"image_name": image_name, "registry_name": req.image_name},
+    )
+
+    async def _run():
+        d = _get_db_session()
+        try:
+            job_service.set_running(d, job.id)
+            result = await export_and_register_gcp(
+                d, job.id, req.image_name, image_name, project_id, current_user.username,
+            )
+            if result.get("export_error") or result.get("export_skipped"):
+                job_service.set_failed(d, job.id, result.get("export_error") or result["export_skipped"])
+            else:
+                job_service.set_completed(d, job.id, result)
+        except Exception as e:
+            job_service.set_failed(d, job.id, f"Export failed: {e}")
+        finally:
+            d.close()
+
+    background_tasks.add_task(_run)
+    return ExportImageResponse(
+        job_id=job.id,
+        status="pending",
+        message=f"Export of {image_name} queued",
+    )
+
+
 @router.delete("/images/{image_name}")
 async def delete_image(
     image_name: str,

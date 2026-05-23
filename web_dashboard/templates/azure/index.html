@@ -195,6 +195,13 @@
               <td class="px-4 py-3 flex items-center gap-3 text-sm">
                 <button @click="openDeployModal(img)"
                         class="text-blue-600 hover:text-blue-800 font-medium text-xs">Deploy</button>
+                <button @click="exportImage(img)"
+                        :disabled="exportingImages.has(img.resource_id)"
+                        class="text-indigo-600 hover:text-indigo-800 disabled:opacity-40 font-medium text-xs"
+                        title="Export this managed image to a portable VHD on the hub backend">
+                  <span x-show="!exportingImages.has(img.resource_id)">Export VHD</span>
+                  <span x-show="exportingImages.has(img.resource_id)" x-cloak>Queuing…</span>
+                </button>
                 <button @click="confirmDeleteImage(img)"
                         class="text-red-500 hover:text-red-700 font-medium text-xs">Delete</button>
               </td>
@@ -735,6 +742,7 @@ function azureDashboard() {
     privateImages: [],
     imagesLoading: false,
     selectedImages: [],
+    exportingImages: new Set(),
     vms: [],
     vmsLoading: false,
     networkOpts: { locations: ['{{ default_location }}'], vm_sizes: [], subnets: [], nsgs: [], ssh_keys: [] },
@@ -1195,6 +1203,28 @@ function azureDashboard() {
         await this.loadPrivateImages();
       } catch (e) {
         toast(e.message || 'Delete failed', 'error');
+      }
+    },
+
+    async exportImage(img) {
+      const defaultName = (img.name || '').replace(/[^a-zA-Z0-9._-]/g, '-').slice(0, 64);
+      const imageName = prompt(
+        `Export "${img.name}" to a portable VHD on the hub backend?\n\n` +
+        `This may take 30+ minutes. The exported VHD will be registered in the image registry under the name below.\n\n` +
+        `Registry name:`,
+        defaultName,
+      );
+      if (!imageName) return;
+      this.exportingImages = new Set([...this.exportingImages, img.resource_id]);
+      try {
+        const body = { image_name: imageName.trim() };
+        if (img.resource_group) body.resource_group = img.resource_group;
+        const resp = await API.post(`/api/azure/images/${encodeURIComponent(img.name)}/export`, body);
+        toast(`Export job queued. Redirecting to job detail…`, 'success');
+        setTimeout(() => { window.location.href = `/jobs/${resp.job_id}`; }, 600);
+      } catch (e) {
+        toast(`Export failed to queue: ${e.message}`, 'error');
+        this.exportingImages = new Set([...this.exportingImages].filter(id => id !== img.resource_id));
       }
     },
 

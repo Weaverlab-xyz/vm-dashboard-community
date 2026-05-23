@@ -584,6 +584,66 @@ async def destroy_instance(
     )
 
 
+# ── Export AMI to portable VHD on hub backend ────────────────────────────────
+
+class ExportImageRequest(BaseModel):
+    image_name: str  # Registry name to record the exported image under
+
+
+class ExportImageResponse(BaseModel):
+    job_id: str
+    status: str
+    message: str
+
+
+@router.post("/amis/{ami_id}/export", response_model=ExportImageResponse)
+async def export_ami(
+    ami_id: str,
+    req: ExportImageRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("aws", "write")),
+):
+    """Manually export an existing AMI to VHD on the hub backend and register
+    it in the image registry. Useful when the auto-export in the Packer build
+    flow was skipped or failed but the AMI itself is fine."""
+    from .packer import export_and_register_aws  # local import: avoid cycle
+
+    job = job_service.create_job(
+        db,
+        job_type="aws_export_image",
+        created_by=current_user.username,
+        metadata={"ami_id": ami_id, "image_name": req.image_name, "region": _aws_region()},
+    )
+    job_service.log_audit(
+        db, current_user.username, "aws_export_image",
+        details={"ami_id": ami_id, "image_name": req.image_name},
+    )
+
+    async def _run():
+        d = _get_db_session()
+        try:
+            job_service.set_running(d, job.id)
+            result = await export_and_register_aws(
+                d, job.id, req.image_name, ami_id, _aws_region(), current_user.username,
+            )
+            if result.get("export_error") or result.get("export_skipped"):
+                job_service.set_failed(d, job.id, result.get("export_error") or result["export_skipped"])
+            else:
+                job_service.set_completed(d, job.id, result)
+        except Exception as e:
+            job_service.set_failed(d, job.id, f"Export failed: {e}")
+        finally:
+            d.close()
+
+    background_tasks.add_task(_run)
+    return ExportImageResponse(
+        job_id=job.id,
+        status="pending",
+        message=f"Export of {ami_id} queued",
+    )
+
+
 # ── Create image from instance ────────────────────────────────────────────────
 
 @router.post("/instances/{instance_id}/create-image", response_model=CreateImageResponse)

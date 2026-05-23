@@ -211,7 +211,10 @@ async def _run_aws_build(job_id: str, req: AWSPackerBuildRequest, created_by: st
                     result["archive_error"] = str(e)
 
         # Export to portable VHD + auto-register (Phase 2)
-        await _export_and_register_aws(db, job_id, req, result, region, created_by)
+        export_result = await export_and_register_aws(
+            db, job_id, req.image_name, result.get("artifact_id") or "", region, created_by,
+        )
+        result.update(export_result)
 
         job_service.set_completed(db, job_id, result)
 
@@ -281,7 +284,10 @@ async def _run_azure_build(job_id: str, req: AzurePackerBuildRequest, created_by
                     result["archive_error"] = str(e)
 
         # Export to portable VHD + auto-register (Phase 2)
-        await _export_and_register_azure(db, job_id, req, result, resource_group, created_by)
+        export_result = await export_and_register_azure(
+            db, job_id, req.image_name, result.get("artifact_id") or "", resource_group, created_by,
+        )
+        result.update(export_result)
 
         job_service.set_completed(db, job_id, result)
 
@@ -352,7 +358,10 @@ async def _run_gcp_build(job_id: str, req: GCPPackerBuildRequest, created_by: st
                     result["archive_error"] = str(e)
 
         # Export to portable VHD + auto-register (Phase 2)
-        await _export_and_register_gcp(db, job_id, req, result, project_id, created_by)
+        export_result = await export_and_register_gcp(
+            db, job_id, req.image_name, result.get("artifact_id") or "", project_id, created_by,
+        )
+        result.update(export_result)
 
         job_service.set_completed(db, job_id, result)
 
@@ -467,14 +476,20 @@ async def _land_on_hub(
     return (hub, hub_key)
 
 
-async def _export_and_register_aws(
-    db, job_id: str, req: AWSPackerBuildRequest, result: dict,
+async def export_and_register_aws(
+    db, job_id: str, image_name: str, artefact_id: str,
     region: str, created_by: str,
-) -> None:
-    artefact_id = result.get("artifact_id")
+) -> dict:
+    """Export an AMI to VHD on the hub backend and register the result.
+
+    Returns a dict with keys among {export, registered_image_id,
+    artefact_backend, export_error, export_skipped}. Used by both the
+    Packer post-build flow and the manual /api/aws/images/{id}/export
+    endpoint."""
+    result: dict = {}
     if not artefact_id:
-        result["export_skipped"] = "no AMI ID parsed from packer output"
-        return
+        result["export_skipped"] = "no AMI ID provided"
+        return result
 
     # AWS ec2 export-image only writes to S3 — the operator must have an S3
     # bucket configured even if their hub backend is Azure/GCS. After the
@@ -487,7 +502,7 @@ async def _export_and_register_aws(
         )
         job_service.update_progress(db, job_id, 99, msg)
         result["export_skipped"] = msg
-        return
+        return result
 
     bucket = _cfg("storage_s3_bucket")
     s3_prefix = (_cfg("storage_s3_prefix") or "config-mgmt").rstrip("/") + "/images/"
@@ -516,17 +531,17 @@ async def _export_and_register_aws(
         final_backend, final_key = await _land_on_hub(
             db, job_id,
             build_backend="s3", build_key=build_key,
-            image_name=req.image_name, image_ext="vhd",
+            image_name=image_name, image_ext="vhd",
         )
         artefact_url = storage_service.image_url(final_backend, final_key)
 
         registered = image_registry_service.register_image(
             db,
-            name=req.image_name,
+            name=image_name,
             version=export["task_id"],
             source_cloud="aws",
             created_by=created_by,
-            description=f"Auto-registered from packer build {job_id}",
+            description=f"Registered by job {job_id}",
             source_image_id=artefact_id,
             source_region=region,
             artefact_url=artefact_url,
@@ -540,20 +555,23 @@ async def _export_and_register_aws(
         logger.exception("AWS export/register failed for job %s", job_id)
         job_service.update_progress(db, job_id, 99, msg)
         result["export_error"] = str(e)
+    return result
 
 
-async def _export_and_register_azure(
-    db, job_id: str, req: AzurePackerBuildRequest, result: dict,
+async def export_and_register_azure(
+    db, job_id: str, image_name: str, artefact_id: str,
     resource_group: str, created_by: str,
-) -> None:
-    artefact_id = result.get("artifact_id")
-    if not artefact_id:
-        result["export_skipped"] = "no managed image ID parsed from packer output"
-        return
+) -> dict:
+    """Export an Azure managed image to VHD on the hub and register.
 
-    # Azure managed-image → VHD export requires an Azure storage account.
-    # Required even when the hub is on another cloud — Azure exports only to
-    # its own Blob; _land_on_hub copies to the hub afterwards.
+    `artefact_id` is the managed-image full resource path (from Packer's
+    `artifact_id`) or a bare name. The last path segment is taken as
+    the source image name. `image_name` is the registry name."""
+    result: dict = {}
+    if not artefact_id:
+        result["export_skipped"] = "no managed image ID provided"
+        return result
+
     if not _cfg("storage_azure_account"):
         msg = (
             "Export skipped: no Azure storage account configured "
@@ -562,23 +580,21 @@ async def _export_and_register_azure(
         )
         job_service.update_progress(db, job_id, 99, msg)
         result["export_skipped"] = msg
-        return
+        return result
 
-    # Packer azure-arm artifact ID is the full resource path. The image name is
-    # the last segment; the resource group is configurable on the build request.
-    image_name = artefact_id.rstrip("/").split("/")[-1]
+    src_image_name = artefact_id.rstrip("/").split("/")[-1]
     storage_account = _cfg("storage_azure_account")
     container = _cfg("storage_azure_container") or "playbooks"
-    blob_name = _versioned_blob_name(req.image_name)
+    blob_name = _versioned_blob_name(image_name)
 
     def _on_progress(line: str) -> None:
         job_service.update_progress(db, job_id, 96, line[:200])
 
     try:
-        job_service.update_progress(db, job_id, 96, f"Exporting {image_name} to blob {storage_account}/{container}/{blob_name}")
+        job_service.update_progress(db, job_id, 96, f"Exporting {src_image_name} to blob {storage_account}/{container}/{blob_name}")
         export = await azure_service.export_managed_image_to_vhd(
             image_rg=resource_group,
-            image_name=image_name,
+            image_name=src_image_name,
             dest_storage_account=storage_account,
             dest_container=container,
             dest_blob_name=blob_name,
@@ -586,22 +602,20 @@ async def _export_and_register_azure(
         )
         result["export"] = export
 
-        # `blob_name` is the full key inside the container — the canonical
-        # build-side staging path for _land_on_hub.
         final_backend, final_key = await _land_on_hub(
             db, job_id,
             build_backend="azure_blob", build_key=blob_name,
-            image_name=req.image_name, image_ext="vhd",
+            image_name=image_name, image_ext="vhd",
         )
         artefact_url = storage_service.image_url(final_backend, final_key)
 
         registered = image_registry_service.register_image(
             db,
-            name=req.image_name,
+            name=image_name,
             version=blob_name.split("/")[-1].rsplit(".", 1)[0],
             source_cloud="azure",
             created_by=created_by,
-            description=f"Auto-registered from packer build {job_id}",
+            description=f"Registered by job {job_id}",
             source_image_id=artefact_id,
             source_region=_cfg("azure_location") or "centralus",
             artefact_url=artefact_url,
@@ -615,19 +629,22 @@ async def _export_and_register_azure(
         logger.exception("Azure export/register failed for job %s", job_id)
         job_service.update_progress(db, job_id, 99, msg)
         result["export_error"] = str(e)
+    return result
 
 
-async def _export_and_register_gcp(
-    db, job_id: str, req: GCPPackerBuildRequest, result: dict,
+async def export_and_register_gcp(
+    db, job_id: str, image_name: str, artefact_id: str,
     project_id: str, created_by: str,
-) -> None:
-    artefact_id = result.get("artifact_id")
-    if not artefact_id:
-        result["export_skipped"] = "no image name parsed from packer output"
-        return
+) -> dict:
+    """Export a GCP custom image to VHD on the hub and register.
 
-    # GCP image export only writes to GCS — required even when the hub is on
-    # another cloud. _land_on_hub copies to the hub afterwards.
+    `artefact_id` is the source custom image name. `image_name` is the
+    registry name."""
+    result: dict = {}
+    if not artefact_id:
+        result["export_skipped"] = "no image name provided"
+        return result
+
     if not _cfg("storage_gcs_bucket"):
         msg = (
             "Export skipped: no GCS bucket configured (set storage_gcs_bucket on /storage). "
@@ -635,10 +652,10 @@ async def _export_and_register_gcp(
         )
         job_service.update_progress(db, job_id, 99, msg)
         result["export_skipped"] = msg
-        return
+        return result
 
     bucket = _cfg("storage_gcs_bucket")
-    object_path = _versioned_blob_name(req.image_name)
+    object_path = _versioned_blob_name(image_name)
     network = _cfg("gcp_export_network") or ""
     subnet = _cfg("gcp_export_subnet") or ""
 
@@ -661,17 +678,17 @@ async def _export_and_register_gcp(
         final_backend, final_key = await _land_on_hub(
             db, job_id,
             build_backend="gcs", build_key=object_path,
-            image_name=req.image_name, image_ext="vhd",
+            image_name=image_name, image_ext="vhd",
         )
         artefact_url = storage_service.image_url(final_backend, final_key)
 
         registered = image_registry_service.register_image(
             db,
-            name=req.image_name,
+            name=image_name,
             version=export.get("build_id") or object_path.split("/")[-1].rsplit(".", 1)[0],
             source_cloud="gcp",
             created_by=created_by,
-            description=f"Auto-registered from packer build {job_id}",
+            description=f"Registered by job {job_id}",
             source_image_id=artefact_id,
             source_region=_cfg("gcp_zone") or "",
             artefact_url=artefact_url,
@@ -685,3 +702,4 @@ async def _export_and_register_gcp(
         logger.exception("GCP export/register failed for job %s", job_id)
         job_service.update_progress(db, job_id, 99, msg)
         result["export_error"] = str(e)
+    return result
