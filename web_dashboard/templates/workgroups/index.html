@@ -155,7 +155,7 @@ function workgroupsPage() {
     form: {name: '', display_name: '', description: '', local_vm_path: '', is_default: false},
 
     async init() {
-      if (!requireAuth()) return;
+      requireAuth();
       await this.load();
     },
 
