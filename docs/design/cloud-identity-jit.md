@@ -305,7 +305,7 @@ Confirmed `status` enum and our state-machine mapping:
 | `rejected`             | Fail loudly → security alert (policy denied)            |
 | `failed`               | Fail loudly → operator alert (cloud-side error)         |
 | `cancelled`            | Fail (admin or caller cancelled)                        |
-| `revoked`              | Cache evict + fail any in-flight call                   |
+| `revoked`              | Cache evict + fail any in-flight call. Covers BOTH explicit revocation AND natural TTL expiry — Entitle uses one terminal state for both |
 
 Crucially, `granted` is **distinct** from `approved` — the latter just
 means the workflow decision is in, while the agent may still be
@@ -466,11 +466,13 @@ investigating.
 
 Cached `ElevationHandle`s are released by:
 
-1. **TTL** — `now ≥ expires_at - 30s` safety margin.
-2. **Webhook revocation** — Entitle posts `status="revoked"` to the
-   webhook; cache evicted; cloud-side teardown is Entitle's
-   responsibility but we wait for confirmation before declaring
-   release.
+1. **TTL** — `now ≥ expires_at - 30s` safety margin. The dashboard's
+   in-process clock; Entitle separately auto-revokes at the same
+   point and flips status to `revoked`.
+2. **Webhook revocation** — Entitle posts `status=revoked` to the
+   workflow webhook (covers both natural TTL expiry and explicit
+   admin revoke; Entitle uses the single `revoked` terminal state for
+   both). Cache evicted on receipt.
 3. **Manual** — `POST /api/cloud-identity/{cloud}/{operation}/revoke`
    (admin only) for the break-glass case.
 
@@ -676,11 +678,12 @@ not silently use over-privileged baseline creds.
   `waitingForIT`, `permissionInProgress`, `granted`, `rejected`,
   `failed`, `cancelled`, `revoked`. The state machine mapping is in
   §6.1.
-- **TTL expiry state.** The enum does not include `expired`. After
-  `duration` elapses, does the request stay `granted` (with the
-  cloud-side permission simply removed) or transition to `revoked`?
-  Confirm at build time so the sweeper logic in §6.7 reconciles
-  correctly.
+- ~~**TTL expiry state.**~~ **Resolved (v2.5):** when the request's
+  duration elapses, Entitle auto-revokes the cloud-side access and
+  the request's `status` flips to `revoked`. This means TTL expiry
+  and explicit revocation share the same terminal state — the
+  sweeper in §6.7 just reconciles `revoked` against the dashboard's
+  `EntitleActivation` rows. No separate `expired` handling.
 - **Per-operation ceiling vs global.** Some operations (Packer image
   capture) want ~30min; tag rewrite wants ~2min. Default to a global
   60min ceiling; allow per-operation overrides in the JSON matrix.
