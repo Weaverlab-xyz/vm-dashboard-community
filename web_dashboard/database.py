@@ -318,12 +318,43 @@ class AppConfig(Base):
     Values are Fernet-encrypted with a key derived from JWT_SECRET_KEY so that
     secrets at rest are protected even if someone reads the DB directly.
     Written by the setup wizard; consumed by config_service.get().
+
+    The optional `workgroup` column lets prod-style multi-tenant deployments
+    have per-workgroup overrides for the same key. NULL means "global";
+    config_service.get() falls back to the NULL row when no workgroup-scoped
+    row exists. Community installs leave `workgroup` NULL always and behave
+    as before.
     """
     __tablename__ = "app_config"
 
     key = Column(String(128), primary_key=True)
     value = Column(Text, nullable=True)         # Fernet-encrypted
+    workgroup = Column(String(64), nullable=True)
     updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class SecretVault(Base):
+    """Registry of external secret-store endpoints the dashboard can resolve
+    references against.
+
+    Used by the multi-vault reference scheme: a config row with
+    ``azure_kv://<vault-id>/<secret-name>`` looks up the vault row by
+    (id, backend) and routes the read to that vault's endpoint with that
+    vault's credentials. When the table is empty (community / fresh install)
+    the legacy ``azure_kv://<secret-name>`` shape continues to resolve via
+    the singleton config_service.get('azure_kv_*') keys, so behaviour is
+    unchanged until an operator registers a vault.
+    """
+    __tablename__ = "secret_vaults"
+
+    id = Column(String(64), primary_key=True)              # e.g. "primary", "tenant-alpha-eu"
+    backend = Column(String(32), nullable=False)           # azure_kv | aws_sm | gcp_sm | bt_secrets_safe
+    endpoint = Column(Text, nullable=False)                # e.g. https://my-vault.vault.azure.net
+    credentials_ref = Column(Text, nullable=True)          # optional reference to creds (e.g. distinct SP per vault)
+    workgroup = Column(String(64), nullable=True)          # if set, only this workgroup resolves here
+    is_default = Column(Boolean, nullable=False, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_by_user_id = Column(String(36), nullable=True)
 
 
 class ContainerStateCache(Base):
@@ -435,6 +466,8 @@ def init_db():
             "ALTER TABLE vm_state_cache ADD COLUMN last_online_check_at TIMESTAMP",
             "ALTER TABLE jobs ADD COLUMN cloud_resource_id VARCHAR(255)",
             "CREATE INDEX ix_jobs_cloud_resource_id ON jobs(cloud_resource_id)",
+            "ALTER TABLE app_config ADD COLUMN workgroup VARCHAR(64)",
+            "CREATE INDEX ix_app_config_key_workgroup ON app_config(key, workgroup)",
         ]
         for stmt in _migrations:
             if _is_sqlite:

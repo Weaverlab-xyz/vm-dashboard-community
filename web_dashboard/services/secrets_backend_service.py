@@ -176,9 +176,26 @@ def write_aws_sm(key: str, value: str) -> str:
     return secret_name
 
 
-def read_aws_sm(ref: str) -> str:
-    region, _ = _aws_cfg()
+def read_aws_sm(ref: str, vault_id: str | None = None) -> str:
+    """Read an AWS SM secret. When vault_id is given and a SecretVault row
+    exists for it, the row's endpoint is interpreted as the region.
+    Otherwise the legacy `aws_region` config is used."""
     import boto3
+    region = None
+    if vault_id:
+        from ..database import SessionLocal, SecretVault
+        db = SessionLocal()
+        try:
+            row = db.query(SecretVault).filter(
+                SecretVault.id == vault_id,
+                SecretVault.backend == "aws_sm",
+            ).first()
+        finally:
+            db.close()
+        if row:
+            region = row.endpoint
+    if region is None:
+        region, _ = _aws_cfg()
     client = boto3.client("secretsmanager", region_name=region)
     resp = client.get_secret_value(SecretId=ref)
     return resp.get("SecretString", "")
@@ -218,8 +235,44 @@ def write_azure_kv(key: str, value: str) -> str:
     return name
 
 
-def read_azure_kv(ref: str) -> str:
-    client, _ = _azure_kv_client()
+def _azure_kv_client_for(vault_id: str):
+    """Return (SecretClient, url) for a named SecretVault row.
+
+    Falls back to the singleton _azure_kv_client() if the vault row is
+    missing — same path the resolver takes when the vault registry is
+    empty. Keeps the multi-vault scheme additive rather than breaking.
+    """
+    from azure.identity import ClientSecretCredential
+    from azure.keyvault.secrets import SecretClient
+    from ..database import SessionLocal, SecretVault
+    db = SessionLocal()
+    try:
+        row = db.query(SecretVault).filter(
+            SecretVault.id == vault_id,
+            SecretVault.backend == "azure_kv",
+        ).first()
+    finally:
+        db.close()
+    if not row:
+        return _azure_kv_client()
+    url = row.endpoint
+    # credentials_ref support is deferred to Phase 5.5; for now the dashboard's
+    # primary Azure SP credentials are used for every vault. Document so the
+    # operator knows.
+    _, tenant, client_id, client_secret = _azure_kv_cfg()
+    cred = ClientSecretCredential(
+        tenant_id=tenant,
+        client_id=client_id,
+        client_secret=client_secret,
+    )
+    return SecretClient(vault_url=url, credential=cred), url
+
+
+def read_azure_kv(ref: str, vault_id: str | None = None) -> str:
+    if vault_id:
+        client, _ = _azure_kv_client_for(vault_id)
+    else:
+        client, _ = _azure_kv_client()
     secret = client.get_secret(ref)
     return secret.value or ""
 
@@ -282,8 +335,25 @@ def write_gcp_sm(key: str, value: str) -> str:
     return secret_id
 
 
-def read_gcp_sm(ref: str) -> str:
-    project, _, _ = _gcp_cfg()
+def read_gcp_sm(ref: str, vault_id: str | None = None) -> str:
+    """Read a GCP SM secret. When vault_id is given and a SecretVault row
+    exists for it, the row's endpoint is interpreted as the GCP project
+    id. Otherwise the legacy `gcp_project_id` config is used."""
+    project = None
+    if vault_id:
+        from ..database import SessionLocal, SecretVault
+        db = SessionLocal()
+        try:
+            row = db.query(SecretVault).filter(
+                SecretVault.id == vault_id,
+                SecretVault.backend == "gcp_sm",
+            ).first()
+        finally:
+            db.close()
+        if row:
+            project = row.endpoint
+    if project is None:
+        project, _, _ = _gcp_cfg()
     client = _gcp_client()
     name = f"projects/{project}/secrets/{ref}/versions/latest"
     resp = client.access_secret_version(request={"name": name})
@@ -380,7 +450,12 @@ def write_bt_secrets_safe(key: str, value: str) -> str:
     return title
 
 
-def read_bt_secrets_safe(ref: str) -> str:
+def read_bt_secrets_safe(ref: str, vault_id: str | None = None) -> str:
+    # BT Secrets Safe is hosted by the PSCLI install; vault_id has no
+    # routing effect today (the ps-cli wrapper auths once, hits one host).
+    # The arg is accepted for shape parity with the other read_* functions
+    # so read_sync can dispatch uniformly.
+    _ = vault_id
     data = _ps_run(["secrets", "get", "-t", ref, "-d"])
     if not isinstance(data, list) or not data:
         return ""
@@ -434,11 +509,11 @@ def write_sync(backend: str, key: str, value: str) -> str:
     return fn(key, value)
 
 
-def read_sync(backend: str, ref: str) -> str:
+def read_sync(backend: str, ref: str, vault_id: str | None = None) -> str:
     fn = _READ_FN.get(backend)
     if not fn:
         raise ValueError(f"Cannot read from backend: {backend}")
-    return fn(ref)
+    return fn(ref, vault_id=vault_id)
 
 
 # ── Secret browse / CRUD (issue: Secrets page expansion) ─────────────────────
@@ -763,7 +838,10 @@ def write_database(key: str, value: str) -> str:
     return key
 
 
-def read_database(ref: str) -> str:
+def read_database(ref: str, vault_id: str | None = None) -> str:
+    # The 'database' backend doesn't route through vault_id (the DB is the
+    # single store). vault_id arg accepted for shape parity with read_sync.
+    _ = vault_id
     from . import config_service
     return config_service.get(ref) or ""
 

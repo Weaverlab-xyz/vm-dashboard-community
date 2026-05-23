@@ -8,15 +8,35 @@ An in-memory cache (populated on first access, updated on write) keeps
 service calls fast after the initial DB round-trip.
 
 External backend references: after a secrets migration the DB value for a
-secret key may be a reference string with a backend prefix, e.g.
+secret key may be a reference string with a backend prefix. Two shapes are
+recognised:
+
+Legacy (single-vault, the historical default):
   aws_sm://dashboard/epml_pat
   azure_kv://epml-pat
   gcp_sm://dashboard-epml-pat
   bt_safe://Dashboard/epml_pat
 
-get() detects these prefixes and resolves them transparently.  Resolved values
-are cached in _ext_cache for EXT_CACHE_TTL seconds so that every service call
-doesn't hit the external API.
+Multi-vault (used when an operator has registered named vaults in the
+`secret_vaults` table):
+  azure_kv://primary/epml-pat
+  azure_kv://tenant-alpha-eu/epml-pat
+  aws_sm://dev-account/dashboard/epml_pat
+
+The multi-vault parser only treats the first slash-segment as a vault id
+if it matches a registered ``SecretVault.id`` for that backend. Otherwise
+the whole reference is passed through to the read function as-is — so
+legacy refs like ``aws_sm://dashboard/epml_pat`` keep working even when
+the secret_vaults table is non-empty.
+
+get() detects these prefixes and resolves them transparently. Resolved
+values are cached in _ext_cache for EXT_CACHE_TTL seconds so every service
+call doesn't hit the external API.
+
+Workgroup scoping: get() accepts an optional ``workgroup`` arg. When given,
+lookup prefers a (key, workgroup) row, then falls back to (key, NULL).
+Community installs leave the column NULL on every row and pass workgroup=None;
+the column exists for schema parity with the prod multi-tenant deployment.
 """
 import base64
 import hashlib
@@ -78,6 +98,12 @@ def _decrypt(token: str) -> str:
 # ── Cache management ──────────────────────────────────────────────────────────
 
 def _load_cache() -> None:
+    """Populate the in-memory cache keyed on (key, workgroup_or_None).
+
+    Workgroup is stored as None in the dict when the DB row's workgroup
+    column is NULL. Lookups in get() check (key, workgroup) first, fall
+    back to (key, None).
+    """
     global _cache, _cache_loaded, _cache_loaded_at
     from ..database import SessionLocal, AppConfig
     db = SessionLocal()
@@ -85,7 +111,8 @@ def _load_cache() -> None:
         rows = db.query(AppConfig).all()
         loaded: dict = {}
         for row in rows:
-            loaded[row.key] = _decrypt(row.value) if row.value else ""
+            wg = getattr(row, "workgroup", None)
+            loaded[(row.key, wg)] = _decrypt(row.value) if row.value else ""
         with _cache_lock:
             _cache = loaded
             _cache_loaded = True
@@ -114,21 +141,72 @@ def invalidate() -> None:
 
 # ── External reference resolution ─────────────────────────────────────────────
 
-def _resolve_external(raw: str) -> str:
-    """If raw is an external backend reference, fetch and cache the real value."""
+def _is_registered_vault(vault_id: str, backend: str) -> bool:
+    """True if a SecretVault row exists for (id=vault_id, backend=backend).
+
+    Used by the multi-vault parser to decide whether the first path segment
+    is a vault id or part of the secret name. Cheap: indexed lookup, no
+    network. Returns False on any error so a missing/empty table makes the
+    parser fall through to legacy single-vault behaviour.
+    """
+    try:
+        from ..database import SessionLocal, SecretVault
+        db = SessionLocal()
+        try:
+            return db.query(SecretVault.id).filter(
+                SecretVault.id == vault_id,
+                SecretVault.backend == backend,
+            ).first() is not None
+        finally:
+            db.close()
+    except Exception:
+        return False
+
+
+def _parse_ref(raw: str, backend: str) -> tuple[str | None, str]:
+    """Split a reference into (vault_id, secret_ref).
+
+    Returns (None, secret_ref) when the reference uses the legacy
+    single-vault shape (no slash, or first segment isn't a registered
+    vault). Returns (vault_id, secret_ref) when the first slash-segment
+    matches a registered vault for the given backend.
+    """
+    for prefix, b in _EXT_PREFIXES.items():
+        if backend == b:
+            stripped = raw[len(prefix):]
+            break
+    else:
+        return None, raw
+
+    if "/" not in stripped:
+        return None, stripped
+
+    first, rest = stripped.split("/", 1)
+    if _is_registered_vault(first, backend):
+        return first, rest
+    return None, stripped
+
+
+def _resolve_external(raw: str, workgroup: str | None = None) -> str:
+    """If raw is an external backend reference, fetch and cache the real value.
+
+    The workgroup arg is reserved for future per-workgroup default-vault
+    resolution; today it only flows through for telemetry / cache-key
+    separation."""
     for prefix, backend in _EXT_PREFIXES.items():
         if raw.startswith(prefix):
-            ref = raw[len(prefix):]
+            vault_id, ref = _parse_ref(raw, backend)
             now = time.monotonic()
+            cache_key = (raw, vault_id, workgroup)
             with _ext_cache_lock:
-                cached = _ext_cache.get(raw)
+                cached = _ext_cache.get(cache_key)
                 if cached and cached[1] > now:
                     return cached[0]
             try:
                 from .secrets_backend_service import read_sync
-                value = read_sync(backend, ref)
+                value = read_sync(backend, ref, vault_id=vault_id)
                 with _ext_cache_lock:
-                    _ext_cache[raw] = (value, now + EXT_CACHE_TTL)
+                    _ext_cache[cache_key] = (value, now + EXT_CACHE_TTL)
                 return value
             except Exception as exc:
                 logger.error("Failed to resolve external secret %s: %s", raw[:60], exc)
@@ -138,16 +216,28 @@ def _resolve_external(raw: str) -> str:
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def get(key: str, default: str = "") -> str:
+def get(key: str, default: str = "", workgroup: str | None = None) -> str:
     """Return the stored plaintext value for key, or default if not set.
+
+    Lookup priority:
+      1. (key, workgroup) row when workgroup is given
+      2. (key, None) — the global row
+      3. default
 
     Transparently resolves external backend references (aws_sm://, azure_kv://,
     gcp_sm://, bt_safe://) — callers see only the actual secret value.
+
+    Community callers should pass workgroup=None (the default); the multi-
+    workgroup priority is a prod-multi-tenant feature.
     """
     _ensure_loaded()
     with _cache_lock:
-        raw = _cache.get(key, default)
-    return _resolve_external(raw)
+        raw = None
+        if workgroup is not None:
+            raw = _cache.get((key, workgroup))
+        if raw is None:
+            raw = _cache.get((key, None), default)
+    return _resolve_external(raw, workgroup=workgroup)
 
 
 def get_bool(key: str, default: bool = False) -> bool:
@@ -160,73 +250,95 @@ def get_bool(key: str, default: bool = False) -> bool:
     return bool(getattr(settings, key, default))
 
 
-def set(key: str, value: str) -> None:
-    """Encrypt and persist a single value; update in-memory cache."""
+def set(key: str, value: str, workgroup: str | None = None) -> None:
+    """Encrypt and persist a single value; update in-memory cache.
+
+    When workgroup is None, writes/updates the global row. When given,
+    writes/updates the workgroup-scoped row, leaving the global one alone.
+    """
     from ..database import SessionLocal, AppConfig
     db = SessionLocal()
     try:
         encrypted = _encrypt(value) if value else ""
-        existing = db.query(AppConfig).filter(AppConfig.key == key).first()
+        q = db.query(AppConfig).filter(AppConfig.key == key)
+        if workgroup is None:
+            existing = q.filter(AppConfig.workgroup.is_(None)).first()
+        else:
+            existing = q.filter(AppConfig.workgroup == workgroup).first()
         if existing:
             existing.value = encrypted
             existing.updated_at = datetime.utcnow()
         else:
-            db.add(AppConfig(key=key, value=encrypted, updated_at=datetime.utcnow()))
+            db.add(AppConfig(key=key, value=encrypted, workgroup=workgroup, updated_at=datetime.utcnow()))
         db.commit()
         with _cache_lock:
-            _cache[key] = value
+            _cache[(key, workgroup)] = value
     finally:
         db.close()
 
 
-def set_many(pairs: dict) -> None:
-    """Encrypt and persist multiple values in one transaction; update cache."""
+def set_many(pairs: dict, workgroup: str | None = None) -> None:
+    """Encrypt and persist multiple values in one transaction; update cache.
+
+    All pairs land in the same workgroup row-set; call repeatedly with
+    different workgroup args if you need to write across scopes.
+    """
     from ..database import SessionLocal, AppConfig
     db = SessionLocal()
     try:
         for key, value in pairs.items():
             encrypted = _encrypt(value) if value else ""
-            existing = db.query(AppConfig).filter(AppConfig.key == key).first()
+            q = db.query(AppConfig).filter(AppConfig.key == key)
+            if workgroup is None:
+                existing = q.filter(AppConfig.workgroup.is_(None)).first()
+            else:
+                existing = q.filter(AppConfig.workgroup == workgroup).first()
             if existing:
                 existing.value = encrypted
                 existing.updated_at = datetime.utcnow()
             else:
-                db.add(AppConfig(key=key, value=encrypted, updated_at=datetime.utcnow()))
+                db.add(AppConfig(key=key, value=encrypted, workgroup=workgroup, updated_at=datetime.utcnow()))
         db.commit()
         with _cache_lock:
-            _cache.update(pairs)
+            for k, v in pairs.items():
+                _cache[(k, workgroup)] = v
     finally:
         db.close()
 
 
-def delete(key: str) -> None:
+def delete(key: str, workgroup: str | None = None) -> None:
     """Remove a key from app_config (and the in-memory cache). No-op if the
-    key isn't present. Used by the Secrets page CRUD when the active backend
+    row isn't present. Used by the Secrets page CRUD when the active backend
     is `database`."""
     from ..database import SessionLocal, AppConfig
     db = SessionLocal()
     try:
-        existing = db.query(AppConfig).filter(AppConfig.key == key).first()
+        q = db.query(AppConfig).filter(AppConfig.key == key)
+        if workgroup is None:
+            existing = q.filter(AppConfig.workgroup.is_(None)).first()
+        else:
+            existing = q.filter(AppConfig.workgroup == workgroup).first()
         if existing:
             db.delete(existing)
             db.commit()
         with _cache_lock:
-            _cache.pop(key, None)
+            _cache.pop((key, workgroup), None)
     finally:
         db.close()
 
 
 def list_all() -> list[dict]:
-    """Return every app_config row as {key, updated_at}. Values are NOT
-    returned — call get(key) for individual decrypted reads. Used by the
-    Secrets page to enumerate database-backed secrets."""
+    """Return every app_config row as {key, workgroup, updated_at}. Values
+    are NOT returned — call get(key, workgroup=...) for individual decrypted
+    reads. Used by the Secrets page to enumerate database-backed secrets."""
     from ..database import SessionLocal, AppConfig
     db = SessionLocal()
     try:
-        rows = db.query(AppConfig).order_by(AppConfig.key).all()
+        rows = db.query(AppConfig).order_by(AppConfig.key, AppConfig.workgroup).all()
         return [
             {
                 "key":        row.key,
+                "workgroup":  getattr(row, "workgroup", None),
                 "updated_at": row.updated_at.isoformat() if row.updated_at else "",
             }
             for row in rows
@@ -238,13 +350,14 @@ def list_all() -> list[dict]:
 # ── Setup state ───────────────────────────────────────────────────────────────
 
 def is_setup_complete() -> bool:
-    """True once the setup wizard has been completed."""
+    """True once the setup wizard has been completed. Setup is global —
+    workgroup-scoped rows are never consulted here."""
     global _setup_complete
     if _setup_complete is True:
         return True
     _ensure_loaded()
     with _cache_lock:
-        result = _cache.get("setup_complete") == "1"
+        result = _cache.get(("setup_complete", None)) == "1"
     if result:
         _setup_complete = True
     return result
@@ -267,11 +380,14 @@ _SECRET_KEYS = frozenset({
 
 
 def get_all_public() -> dict:
-    """Return all config key-value pairs with secrets replaced by bullets."""
+    """Return all GLOBAL config key-value pairs with secrets replaced by
+    bullets. Workgroup-scoped rows are intentionally excluded — this helper
+    serves the legacy settings UI which is global-only.
+    """
     _ensure_loaded()
     with _cache_lock:
         return {
-            k: ("••••••••" if k in _SECRET_KEYS and v else v)
-            for k, v in _cache.items()
-            if k != "setup_complete"
+            key: ("••••••••" if key in _SECRET_KEYS and v else v)
+            for (key, wg), v in _cache.items()
+            if wg is None and key != "setup_complete"
         }
