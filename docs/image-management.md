@@ -197,6 +197,43 @@ stream the VHD from same-cloud staging into the hub, then deletes the
 staging copy so you don't pay for two. See `_land_on_hub()` in
 [`api/packer.py`](../web_dashboard/api/packer.py).
 
+#### Manual export (recovery path)
+
+The auto-export above is part of every successful Packer build, but
+sometimes it gets skipped — no S3 bucket configured, no Azure storage
+account on the `/storage` page, the export task timed out mid-build,
+etc. The Packer build still completes and the cloud-native image (AMI
+/ Managed Image / Custom Image) is fine; it just isn't on the hub and
+isn't registered for cross-cloud promotion.
+
+To recover without rebuilding, every cloud Images tab has an
+**Export VHD** action on each existing image:
+
+- **AWS Private AMIs** — Export VHD button alongside Deploy / Delete.
+- **Azure Managed Images** — Export VHD action.
+- **GCP Custom Images** — Export VHD on each image card.
+
+Clicking it prompts for a registry name (defaults to a sanitized
+version of the image's native name), then runs the same export →
+land-on-hub → register flow that the Packer post-build path runs.
+You're redirected to `/jobs/<id>` for live progress. End-to-end this
+takes 15–60 minutes depending on image size and whether the build
+cloud is the hub cloud (no copy) or a different cloud (cross-backend
+copy).
+
+Endpoints behind the buttons:
+- `POST /api/aws/amis/{ami_id}/export`
+- `POST /api/azure/images/{image_name}/export` (optional
+  `resource_group` in body; defaults to `azure_resource_group`)
+- `POST /api/gcp/images/{image_name}/export`
+
+Each takes `{image_name: <registry name>}` and returns
+`{job_id, status, message}`. Same cloud-storage prerequisites apply
+as for the auto-export — AWS needs an S3 bucket, Azure needs a
+storage account, GCP needs a GCS bucket. The job log surfaces a
+clear "Export skipped: no S3 bucket configured" (or equivalent) if
+the prerequisite is missing.
+
 #### Pre-flight checks
 
 The **Promote** modal runs an advisory pre-flight check the moment
@@ -392,11 +429,15 @@ The base image's security group / NSG / firewall doesn't permit the
 build runner's source IP. Check the cloud-side network policy on the
 ephemeral build instance Packer creates.
 
-**Build succeeds but storage upload fails with "no active backend."**
-You haven't activated a backend on `/storage`. The artefact is still
-registered as a cloud-native image; you can deploy from it. Activate a
-backend and re-run the upload step from the build job's actions menu
-to enable promotion later.
+**Build succeeds but storage upload fails with "no active backend"
+or "Export skipped: no S3/Azure/GCS configured."**
+The Packer build itself succeeded; only the export-to-hub step was
+skipped. The cloud-native image is registered and deployable. To get
+it onto the hub (and enable cross-cloud promote), do one of:
+- Configure the missing storage prerequisite on `/storage` and click
+  **Export VHD** on the image in its per-cloud Images tab. Same flow
+  as the auto-export, just operator-triggered.
+- Or re-run the build (slower, full Packer cycle).
 
 **Promote to Azure fails with "VHD format unsupported."**
 Azure's VM import wants a fixed-size VHD, not a dynamic one (and not

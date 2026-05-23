@@ -213,6 +213,13 @@ build cloud = AWS, hub = S3), no extra hop. If it isn't (build cloud
 `storage_service.copy(build_backend, build_key, hub, hub_key)` to
 stream the VHD into the hub and deletes the build-side staging copy.
 
+The same export-and-land-on-hub path runs when an operator clicks
+**Export VHD** on a cloud-native image in the per-cloud Images tab
+(AWS Private AMIs / Azure Managed Images / GCP Custom Images). This
+is the recovery path for builds whose auto-export was skipped (e.g.
+the storage prerequisite was missing at build time). See
+[Image Management → Manual export](image-management.md#manual-export-recovery-path).
+
 **What it doesn't do.** The hub is not where the promote runner
 *uploads* to. Each target cloud has its own staging container the
 runner writes into (`promote_runner_aws_staging_bucket`,
