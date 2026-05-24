@@ -4,6 +4,7 @@ JWT-based login/logout with bcrypt password hashing.
 Supports FIDO2/WebAuthn MFA (second factor) and Azure AD OAuth login.
 """
 import hashlib
+import logging
 import uuid
 from datetime import datetime, timedelta
 from typing import Optional
@@ -36,6 +37,7 @@ from ..services.fido2_service import (
 )
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
+logger = logging.getLogger(__name__)
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
@@ -133,8 +135,14 @@ async def get_current_user(
 
 
 def require_admin(current_user: User = Depends(get_current_user)) -> User:
-    """FastAPI dependency: raises 403 if the current user is not an admin."""
-    if not current_user.is_admin:
+    """FastAPI dependency: raises 403 if the current user is not an admin.
+
+    Consults ``is_effective_admin`` so a session-scoped JIT grant from
+    the Entitle user-JIT flow (membership in the ``dashboard-admin``
+    Entra group) counts. Pre-Phase-0 admin-set users keep working —
+    their persistent ``is_admin`` flag wins regardless of group claim.
+    """
+    if not current_user.is_effective_admin:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
     return current_user
 
@@ -146,23 +154,30 @@ PERMISSION_LEVELS = ["read", "write", "delete"]
 
 
 def can_audit_jobs(user: User) -> bool:
-    """True if the user may view all jobs (admin or has jobs:read permission)."""
-    if user.is_admin:
+    """True if the user may view all jobs (admin or has jobs:read permission).
+
+    Consults effective permissions (admin baseline OR session-scoped
+    Entitle JIT grant)."""
+    if user.is_effective_admin:
         return True
-    perms = user.permissions_dict
+    perms = user.effective_permissions_dict
     return "read" in perms.get("jobs", [])
 
 
 def require_permission(scope: str, level: str):
     """
     Returns a FastAPI dependency that checks the user has the specified
-    permission (scope:level).  Admins always pass.  Users whose permissions
-    column is NULL are treated as having full access (backward compatible).
+    permission (scope:level).  Admins always pass.  Users whose effective
+    permissions are empty are treated as having full access (backward
+    compatible — pre-OIDC + pre-admin-set users).
+
+    Consults ``effective_permissions_dict`` so an Entitle JIT grant via
+    OIDC group membership counts. See docs/design/entitle-user-jit.md.
     """
     async def _check(current_user: User = Depends(get_current_user)) -> User:
-        if current_user.is_admin:
+        if current_user.is_effective_admin:
             return current_user
-        perms = current_user.permissions_dict  # {} if NULL → full access
+        perms = current_user.effective_permissions_dict  # {} if NULL → full access
         if not perms:
             return current_user  # NULL = unrestricted (existing users unaffected)
         if level not in perms.get(scope, []):
@@ -613,11 +628,38 @@ async def oauth_azure_callback(
         if not matched:
             return RedirectResponse(url="/login?error=not_authorized", status_code=302)
         matched_workgroups = [wg for wg, _ in matched]
-        # Use default_permissions from the first matched group that has them set
-        matched_default_permissions = next((dp for _, dp in matched if dp is not None), None)
+        # Entitle user-JIT Phase 0 (docs/design/entitle-user-jit.md):
+        # union every matched group's default_permissions, not just the
+        # first one's. The result becomes the user's session_permissions
+        # on every login, which is what the require_permission resolver
+        # consults via effective_permissions_dict.
+        # A user in `dashboard-aws-read` + `dashboard-vms-write` ends up
+        # with both — and when Entitle revokes one of those memberships,
+        # the next login drops the matching scope.
+        session_perms: dict = {}
+        for _, dp in matched:
+            if not dp:
+                continue
+            try:
+                parsed = _json.loads(dp)
+            except Exception:
+                logger.warning("Skipping malformed default_permissions JSON in oauth_group_mapping: %r", dp[:80])
+                continue
+            for key, val in parsed.items():
+                if key == "is_admin":
+                    session_perms[key] = session_perms.get(key, False) or bool(val)
+                elif isinstance(val, list):
+                    existing = session_perms.get(key)
+                    if isinstance(existing, list):
+                        session_perms[key] = sorted(set(existing) | set(val))
+                    else:
+                        session_perms[key] = sorted(set(val))
+                else:
+                    session_perms[key] = val
+        matched_session_permissions = session_perms if session_perms else None
     else:
         matched_workgroups = None  # no mappings configured — legacy path
-        matched_default_permissions = None
+        matched_session_permissions = None
 
     # ── Find or auto-create user ──────────────────────────────────────────────
     # Look up by stable oid first, then fall back to email
@@ -639,6 +681,14 @@ async def oauth_azure_callback(
         # Keep workgroups in sync with current Entra group membership
         if matched_workgroups is not None:
             user.workgroups_list = matched_workgroups
+        # Entitle user-JIT Phase 0: re-apply the group-derived permission
+        # union on every login. Overwriting the column with the latest
+        # union is the load-bearing change — Entitle removing a group
+        # membership now actually reduces this user's effective
+        # permissions on their next login. The admin-set baseline
+        # (user.permissions) is untouched, so admin-granted permissions
+        # survive even when no group claims them.
+        user.session_permissions_dict = matched_session_permissions or {}
         db.commit()
     elif matched_workgroups is not None:
         # Auto-create: derive a unique username from the email local-part
@@ -660,8 +710,13 @@ async def oauth_azure_callback(
             is_admin=False,
         )
         user.workgroups_list = matched_workgroups
-        if matched_default_permissions is not None:
-            user.permissions = matched_default_permissions  # already a JSON string from DB
+        # Entitle user-JIT Phase 0: write the union to session_permissions,
+        # NOT to permissions. The admin-baseline permissions column stays
+        # empty for auto-created users so an admin can later hand-grant
+        # something orthogonal to the group-derived set. effective_permissions
+        # = union(empty admin baseline, group-derived session_permissions)
+        # gives the same effective set as before for an auto-created user.
+        user.session_permissions_dict = matched_session_permissions or {}
         db.add(user)
         db.commit()
         db.refresh(user)
@@ -690,8 +745,16 @@ async def me(current_user: User = Depends(get_current_user)):
         email=current_user.email,
         workgroups=current_user.workgroups_list,
         is_active=current_user.is_active,
-        is_admin=current_user.is_admin or False,
+        # is_effective_admin folds in session_permissions["is_admin"] from
+        # a JIT-granted dashboard-admin group membership, so a user the
+        # admin checkmark wouldn't catch but Entitle has elevated still
+        # shows as admin in the UI.
+        is_admin=current_user.is_effective_admin,
         auth_provider=current_user.auth_provider,
         mfa_required=current_user.mfa_required,
-        permissions=current_user.permissions_dict or None,
+        # Return effective permissions (union of admin baseline + group-
+        # derived session_permissions). The frontend uses this to gate
+        # nav entries / action buttons, so it must reflect what
+        # require_permission would actually allow.
+        permissions=current_user.effective_permissions_dict or None,
     )

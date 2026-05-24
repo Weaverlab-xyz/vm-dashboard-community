@@ -55,8 +55,18 @@ class User(Base):
     mfa_required = Column(Boolean, default=False)  # True once first FIDO2 key is registered
     is_admin = Column(Boolean, default=False)       # Can manage users via /users page
     # Fine-grained permissions: JSON dict {"vms":["read","write"],"aws":["read"],...}
-    # NULL = all permissions granted (backward compatible default)
+    # NULL = all permissions granted (backward compatible default).
+    # This is the admin-set baseline (set via /users page or wizard).
     permissions = Column(Text, nullable=True)
+    # Session-scoped permissions derived from OAuth group membership.
+    # Re-computed on every OIDC login as the union of default_permissions
+    # across matched oauth_group_mappings. Enables the Entitle user-JIT
+    # flow (see docs/design/entitle-user-jit.md Phase 0): Entitle grants
+    # the user a time-bound Entra group membership; next login picks the
+    # union up here; effective_permissions_dict returns
+    # union(permissions, session_permissions). Group expiry → next login
+    # sees the group gone → matching permissions drop.
+    session_permissions = Column(Text, nullable=True)
 
     fido2_credentials = relationship("Fido2Credential", back_populates="user", cascade="all, delete-orphan")
     personal_access_tokens = relationship("PersonalAccessToken", back_populates="user", cascade="all, delete-orphan")
@@ -93,6 +103,61 @@ class User(Base):
     def permissions_dict(self, value: dict):
         """Set permissions from dict. Pass empty dict or None to restore full access."""
         self.permissions = json.dumps(value) if value else None
+
+    @property
+    def session_permissions_dict(self) -> dict:
+        """Parse the session-scoped permissions JSON. Empty when no OIDC
+        groups matched (or non-OIDC user). See effective_permissions_dict
+        for the union with the admin-baseline."""
+        if not self.session_permissions:
+            return {}
+        try:
+            return json.loads(self.session_permissions)
+        except Exception:
+            return {}
+
+    @session_permissions_dict.setter
+    def session_permissions_dict(self, value: dict):
+        self.session_permissions = json.dumps(value) if value else None
+
+    @property
+    def effective_permissions_dict(self) -> dict:
+        """Union of admin-baseline (permissions) and group-derived
+        (session_permissions). This is what require_permission()
+        consults. Special key ``is_admin`` (bool) is OR'd separately
+        in is_effective_admin; everything else is treated as a list
+        of levels per scope and union-merged.
+
+        Empty dict means "no explicit permissions" → require_permission
+        treats this as unrestricted (existing pre-OIDC users keep working
+        the same way they did pre-Phase-0).
+        """
+        baseline = self.permissions_dict
+        session = self.session_permissions_dict
+        if not baseline and not session:
+            return {}
+        out: dict = {}
+        for src in (baseline, session):
+            for key, val in src.items():
+                if key == "is_admin":
+                    out[key] = out.get(key, False) or bool(val)
+                elif isinstance(val, list):
+                    existing = out.get(key)
+                    if isinstance(existing, list):
+                        out[key] = sorted(set(existing) | set(val))
+                    else:
+                        out[key] = sorted(set(val))
+                else:
+                    out[key] = val
+        return out
+
+    @property
+    def is_effective_admin(self) -> bool:
+        """True if either the persistent is_admin flag OR a current
+        session_permissions row grants admin."""
+        if bool(self.is_admin):
+            return True
+        return bool(self.session_permissions_dict.get("is_admin", False))
 
 
 class Fido2Credential(Base):
@@ -501,6 +566,7 @@ def init_db():
         _migrations = [
             "ALTER TABLE users ADD COLUMN is_admin BOOLEAN DEFAULT 0",
             "ALTER TABLE users ADD COLUMN permissions TEXT",
+            "ALTER TABLE users ADD COLUMN session_permissions TEXT",
             "ALTER TABLE oauth_group_mappings ADD COLUMN default_permissions TEXT",
             "ALTER TABLE vm_state_cache ADD COLUMN os_type VARCHAR(50)",
             "ALTER TABLE vm_state_cache ADD COLUMN last_seen_running_at TIMESTAMP",
