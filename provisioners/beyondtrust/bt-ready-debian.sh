@@ -189,8 +189,14 @@ else
   log "cleaning ssh host keys, machine-id, cloud-init state, logs"
   rm -f /etc/ssh/ssh_host_*
   truncate -s 0 /etc/machine-id
-  rm -f /var/lib/dbus/machine-id
-  ln -sf /etc/machine-id /var/lib/dbus/machine-id
+  # Some distros (Amazon Linux 2023, minimal Ubuntu) don't have /var/lib/dbus
+  # populated — dbus-daemon reads /etc/machine-id directly. Only recreate
+  # the legacy symlink where the dir actually exists, otherwise `ln -sf`
+  # aborts the build under set -e.
+  if [ -d /var/lib/dbus ]; then
+    rm -f /var/lib/dbus/machine-id
+    ln -sf /etc/machine-id /var/lib/dbus/machine-id
+  fi
   rm -rf /var/lib/cloud/instances /var/lib/cloud/instance
   find /var/log -type f -name 'cloud-init*.log' -exec truncate -s 0 {} + 2>/dev/null || true
   find /var/log -type f -name '*.log' -exec truncate -s 0 {} + 2>/dev/null || true
