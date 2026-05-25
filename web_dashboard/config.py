@@ -479,6 +479,10 @@ class Settings(BaseSettings):
     # uses today's standing credentials.
     cloud_identity_gate_enabled: bool = False
     machine_ttl_ceiling_minutes: int = 60           # hard upper bound per elevation request
+    # Synthetic machine-identity submitted as `behalfOf` on Entitle access requests.
+    # Phase 1+ requires this to be set when the gate is on; empty fails closed.
+    entitle_machine_identity_email: str = ""
+    entitle_machine_poll_interval_ms: int = 400     # 250–500ms recommended by design
 
     class Config:
         env_file = os.path.join(os.path.dirname(__file__), ".env")
