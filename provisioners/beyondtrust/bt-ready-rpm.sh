@@ -1,7 +1,8 @@
 #!/bin/sh
 # bt-ready-rpm.sh — prepare an RPM-family cloud image for BeyondTrust management.
 #
-# Runs as root via the Packer shell provisioner across AWS / Azure / GCP. POSIX sh
+# Self-elevates to root via sudo -E (AWS/GCP Packer templates invoke the shell
+# provisioner as the cloud-default user, not root). POSIX sh
 # only — Azure's builder forces /bin/sh regardless of shebang, so no [[ ]], no
 # arrays, no <<<, no $'...'.
 #
@@ -18,6 +19,14 @@
 #   BT_SKIP_CLEANUP=1 skip image-reuse cleanup (keep host keys, machine-id, logs)
 #   BT_APPLY_CIS=1   run OpenSCAP remediation with a CIS/STIG profile
 #   BT_CIS_PROFILE   override the default profile id (defaults to CIS L1 Server)
+
+# Self-elevate. AWS and GCP Packer templates invoke the shell provisioner as
+# the cloud-default SSH user (ubuntu/ec2-user), not root. Azure's template
+# already wraps with `sudo -E sh`, so we end up re-exec'd-as-root there too.
+# Re-exec under sudo -E to preserve BT_* env overrides through the elevation.
+if [ "$(id -u)" -ne 0 ]; then
+  exec sudo -E sh "$0" "$@"
+fi
 
 set -eu
 
