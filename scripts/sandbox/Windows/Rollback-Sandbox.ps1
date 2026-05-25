@@ -159,7 +159,8 @@ function Invoke-AwsRollback {
     }
 
     # 5b. Dashboard IAM user — sandbox-tagged only. AWS refuses delete-user
-    # while access keys or inline policies still exist, so unwind in order.
+    # while access keys, managed-policy attachments, or inline policies
+    # still exist, so unwind in order.
     $dashboardUser = "$($Script:SandboxNamePrefix)-app"
     $userTagsJson  = aws iam list-user-tags --user-name $dashboardUser --output json 2>$null
     if ($LASTEXITCODE -eq 0 -and $userTagsJson) {
@@ -173,7 +174,12 @@ function Invoke-AwsRollback {
                 if ($LASTEXITCODE -eq 0) { Write-Ok "Deleted access key $($k.AccessKeyId)" }
                 else { Write-Warn "Could not delete access key $($k.AccessKeyId)" }
             }
-            # Inline policies next.
+            # Detach managed policies.
+            $attached = @((aws iam list-attached-user-policies --user-name $dashboardUser --output json 2>$null | ConvertFrom-Json).AttachedPolicies)
+            foreach ($a in $attached) {
+                & aws iam detach-user-policy --user-name $dashboardUser --policy-arn $a.PolicyArn *> $null
+            }
+            # Inline policies next (legacy / defensive).
             $policies = @((aws iam list-user-policies --user-name $dashboardUser --output json 2>$null | ConvertFrom-Json).PolicyNames)
             foreach ($p in $policies) {
                 & aws iam delete-user-policy --user-name $dashboardUser --policy-name $p *> $null
@@ -181,6 +187,30 @@ function Invoke-AwsRollback {
             & aws iam delete-user --user-name $dashboardUser *> $null
             if ($LASTEXITCODE -eq 0) { Write-Ok "Deleted IAM user $dashboardUser" }
             else { Write-Warn "Could not delete IAM user $dashboardUser" }
+        }
+    }
+
+    # 5c. Dashboard managed policy — only delete if we tagged it. Customer
+    # managed policies need all non-default versions deleted first.
+    $policiesJson = aws iam list-policies --scope Local --output json 2>$null
+    if ($LASTEXITCODE -eq 0 -and $policiesJson) {
+        $allPolicies = ($policiesJson | ConvertFrom-Json).Policies
+        $dashPolicy  = $allPolicies | Where-Object { $_.PolicyName -eq 'dashboard-app-policy' } | Select-Object -First 1
+        if ($dashPolicy) {
+            $tagsJson = aws iam list-policy-tags --policy-arn $dashPolicy.Arn --output json 2>$null
+            if ($LASTEXITCODE -eq 0 -and $tagsJson) {
+                $pTags = ($tagsJson | ConvertFrom-Json).Tags
+                $pMatch = $pTags | Where-Object { $_.Key -eq $Script:SandboxTagKey -and $_.Value -eq $Script:SandboxTagValue }
+                if ($pMatch) {
+                    $oldVids = @((aws iam list-policy-versions --policy-arn $dashPolicy.Arn --output json 2>$null | ConvertFrom-Json).Versions | Where-Object { -not $_.IsDefaultVersion })
+                    foreach ($v in $oldVids) {
+                        & aws iam delete-policy-version --policy-arn $dashPolicy.Arn --version-id $v.VersionId *> $null
+                    }
+                    & aws iam delete-policy --policy-arn $dashPolicy.Arn *> $null
+                    if ($LASTEXITCODE -eq 0) { Write-Ok "Deleted managed policy dashboard-app-policy" }
+                    else { Write-Warn "Could not delete dashboard-app-policy" }
+                }
+            }
         }
     }
 

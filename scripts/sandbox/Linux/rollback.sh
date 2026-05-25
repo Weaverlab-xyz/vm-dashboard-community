@@ -164,7 +164,8 @@ rollback_aws() {
   fi
 
   # 5b. Dashboard IAM user — sandbox-tagged only. AWS refuses delete-user
-  # while access keys or inline policies still exist, so unwind in order.
+  # while access keys, inline policies, or managed-policy attachments still
+  # exist, so unwind in order.
   local dashboard_user="${SANDBOX_NAME_PREFIX}-app"
   if aws iam list-user-tags --user-name "$dashboard_user" 2>/dev/null \
        | jq -e ".Tags[]? | select(.Key==\"$SANDBOX_TAG_KEY\" and .Value==\"$SANDBOX_TAG_VALUE\")" >/dev/null 2>&1; then
@@ -177,7 +178,14 @@ rollback_aws() {
         && ok "Deleted access key $k" \
         || warn "Could not delete access key $k"
     done
-    # Then any attached inline policies (we only put one, but be defensive).
+    # Detach managed policies (the dashboard-app-policy lives here now).
+    local attached_arns
+    attached_arns="$(aws iam list-attached-user-policies --user-name "$dashboard_user" \
+      --query 'AttachedPolicies[*].PolicyArn' --output text 2>/dev/null || true)"
+    for arn in $attached_arns; do
+      aws iam detach-user-policy --user-name "$dashboard_user" --policy-arn "$arn" >/dev/null 2>&1 || true
+    done
+    # Then any inline policies (legacy / defensive — current setup uses managed).
     local policy_names
     policy_names="$(aws iam list-user-policies --user-name "$dashboard_user" \
       --query 'PolicyNames[*]' --output text 2>/dev/null || true)"
@@ -187,6 +195,29 @@ rollback_aws() {
     aws iam delete-user --user-name "$dashboard_user" >/dev/null 2>&1 \
       && ok "Deleted IAM user $dashboard_user" \
       || warn "Could not delete IAM user $dashboard_user"
+  fi
+
+  # 5c. Dashboard managed policy — only delete if we tagged it. Customer
+  # managed policies can have up to 5 versions; AWS requires all
+  # non-default versions deleted before delete-policy.
+  local dashboard_policy_arn
+  dashboard_policy_arn="$(aws iam list-policies --scope Local --output json 2>/dev/null \
+    | jq -r --arg name "dashboard-app-policy" '.Policies[]? | select(.PolicyName==$name) | .Arn' \
+    | head -n1 || true)"
+  if [[ -n "$dashboard_policy_arn" ]] && \
+     aws iam list-policy-tags --policy-arn "$dashboard_policy_arn" 2>/dev/null \
+       | jq -e ".Tags[]? | select(.Key==\"$SANDBOX_TAG_KEY\" and .Value==\"$SANDBOX_TAG_VALUE\")" >/dev/null 2>&1; then
+    # Delete all non-default versions first.
+    local old_vids
+    old_vids="$(aws iam list-policy-versions --policy-arn "$dashboard_policy_arn" \
+      --query 'Versions[?!IsDefaultVersion].VersionId' --output text 2>/dev/null || true)"
+    for vid in $old_vids; do
+      aws iam delete-policy-version --policy-arn "$dashboard_policy_arn" \
+        --version-id "$vid" >/dev/null 2>&1 || true
+    done
+    aws iam delete-policy --policy-arn "$dashboard_policy_arn" >/dev/null 2>&1 \
+      && ok "Deleted managed policy dashboard-app-policy" \
+      || warn "Could not delete dashboard-app-policy"
   fi
 
   # 6. Storage / promote-staging S3 bucket — empty then delete.

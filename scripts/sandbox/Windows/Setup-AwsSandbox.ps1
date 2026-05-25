@@ -353,7 +353,11 @@ if ($LASTEXITCODE -eq 0) {
     Write-Ok "Created IAM user $DashboardUserName"
 }
 
-# Always (re)attach the policy so policy edits propagate on every run.
+# Inline user policies are capped at 2048 bytes; this policy is well over,
+# so it's a customer-managed policy (6144-byte quota + versioning). On
+# re-runs we create-policy-version --set-as-default so edits propagate
+# without rotating the access key.
+$DashboardPolicyArn = "arn:aws:iam::${AccountId}:policy/${DashboardPolicyName}"
 $DashboardPolicy = @"
 {
   "Version": "2012-10-17",
@@ -502,10 +506,34 @@ $DashboardPolicy = @"
   ]
 }
 "@
-aws iam put-user-policy --user-name $DashboardUserName `
-    --policy-name $DashboardPolicyName `
-    --policy-document $DashboardPolicy | Out-Null
-Write-Ok "Attached $DashboardPolicyName to $DashboardUserName (re-applied even on re-runs)"
+# Compact the policy JSON — AWS measures actual bytes, smaller is better.
+$DashboardPolicyCompact = ($DashboardPolicy | ConvertFrom-Json | ConvertTo-Json -Depth 20 -Compress)
+
+& aws iam get-policy --policy-arn $DashboardPolicyArn *> $null
+if ($LASTEXITCODE -eq 0) {
+    # Policy exists — push a new version. Managed policies cap at 5 versions
+    # total; if we're already at 5, prune the oldest non-default first.
+    $versionCount = [int](aws iam list-policy-versions --policy-arn $DashboardPolicyArn `
+        --query 'length(Versions)' --output text)
+    if ($versionCount -ge 5) {
+        $oldestVid = (aws iam list-policy-versions --policy-arn $DashboardPolicyArn `
+            --query 'Versions[?!IsDefaultVersion]|[-1].VersionId' --output text).Trim()
+        aws iam delete-policy-version --policy-arn $DashboardPolicyArn `
+            --version-id $oldestVid | Out-Null
+    }
+    aws iam create-policy-version --policy-arn $DashboardPolicyArn `
+        --policy-document $DashboardPolicyCompact --set-as-default | Out-Null
+    Write-Ok "Updated managed policy $DashboardPolicyName (new default version)"
+} else {
+    aws iam create-policy --policy-name $DashboardPolicyName `
+        --policy-document $DashboardPolicyCompact `
+        --tags "Key=$($Script:SandboxTagKey),Value=$($Script:SandboxTagValue)" | Out-Null
+    Write-Ok "Created managed policy $DashboardPolicyName"
+}
+
+aws iam attach-user-policy --user-name $DashboardUserName `
+    --policy-arn $DashboardPolicyArn | Out-Null
+Write-Ok "Attached $DashboardPolicyName to $DashboardUserName"
 
 # Access-key management. Cache the secret in the same state dir the rest of
 # the script uses so re-runs can re-print it.

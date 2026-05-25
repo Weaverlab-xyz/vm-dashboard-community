@@ -380,10 +380,12 @@ else
   DASHBOARD_USER_EXISTED=0
 fi
 
-# Always (re)attach the policy so policy edits propagate on every run.
-aws iam put-user-policy --user-name "$DASHBOARD_USER_NAME" \
-  --policy-name "$DASHBOARD_POLICY_NAME" \
-  --policy-document "$(cat <<JSON
+# Inline user policies are capped at 2048 bytes; this policy is well over,
+# so it's a customer-managed policy (6144-byte quota + versioning). On
+# re-runs we create-policy-version --set-as-default so edits propagate
+# without rotating the access key.
+DASHBOARD_POLICY_ARN="arn:aws:iam::${ACCOUNT_ID}:policy/${DASHBOARD_POLICY_NAME}"
+DASHBOARD_POLICY_DOC="$(jq -c . <<JSON
 {
   "Version": "2012-10-17",
   "Statement": [
@@ -531,8 +533,32 @@ aws iam put-user-policy --user-name "$DASHBOARD_USER_NAME" \
   ]
 }
 JSON
-)" >/dev/null
-ok "Attached $DASHBOARD_POLICY_NAME to $DASHBOARD_USER_NAME (re-applied even on re-runs)"
+)"
+
+if aws iam get-policy --policy-arn "$DASHBOARD_POLICY_ARN" >/dev/null 2>&1; then
+  # Policy exists — push a new version. Managed policies cap at 5 versions
+  # total; if we're already at 5, prune the oldest non-default first.
+  VERSION_COUNT="$(aws iam list-policy-versions --policy-arn "$DASHBOARD_POLICY_ARN" \
+    --query 'length(Versions)' --output text)"
+  if [[ "$VERSION_COUNT" -ge 5 ]]; then
+    OLDEST_VID="$(aws iam list-policy-versions --policy-arn "$DASHBOARD_POLICY_ARN" \
+      --query 'Versions[?!IsDefaultVersion]|[-1].VersionId' --output text)"
+    aws iam delete-policy-version --policy-arn "$DASHBOARD_POLICY_ARN" \
+      --version-id "$OLDEST_VID" >/dev/null
+  fi
+  aws iam create-policy-version --policy-arn "$DASHBOARD_POLICY_ARN" \
+    --policy-document "$DASHBOARD_POLICY_DOC" --set-as-default >/dev/null
+  ok "Updated managed policy $DASHBOARD_POLICY_NAME (new default version)"
+else
+  aws iam create-policy --policy-name "$DASHBOARD_POLICY_NAME" \
+    --policy-document "$DASHBOARD_POLICY_DOC" \
+    --tags "Key=$SANDBOX_TAG_KEY,Value=$SANDBOX_TAG_VALUE" >/dev/null
+  ok "Created managed policy $DASHBOARD_POLICY_NAME"
+fi
+
+aws iam attach-user-policy --user-name "$DASHBOARD_USER_NAME" \
+  --policy-arn "$DASHBOARD_POLICY_ARN" >/dev/null
+ok "Attached $DASHBOARD_POLICY_NAME to $DASHBOARD_USER_NAME"
 
 # Access-key management. Cache the secret in the same ~/.dashboard-sandbox
 # state dir the rest of the script uses so re-runs can re-print it.
