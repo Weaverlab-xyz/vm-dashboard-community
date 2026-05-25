@@ -63,6 +63,12 @@ Set these in the Packer build environment before launching the build. The dashbo
 
 Azure's Packer template invokes scripts as `sudo -E sh '{{ .Path }}'`, which forces `/bin/sh` (dash on Debian) **regardless of shebang**. AWS and GCP honor the shebang. To work across all three, both scripts are strict POSIX `sh` — no `[[ ]]`, no arrays, no `<<<` here-strings. If you fork them, run `dash -n yourscript.sh` to keep them honest.
 
+## Privilege model
+
+The scripts **self-elevate to root** via `sudo -E "$0" "$@"` at the very top, before `set -eu`. Azure's Packer template already wraps invocations with `sudo -E sh`; AWS and GCP templates run the shell provisioner as the cloud-default SSH user (`ubuntu` / `ec2-user`). The self-elevation makes the scripts indifferent to which template invoked them. `-E` preserves your `BT_*` env-var overrides through the elevation.
+
+Prerequisite: the cloud-default user has passwordless sudo (true on stock Ubuntu, Debian, Amazon Linux, RHEL, Rocky, Alma, CentOS Stream AMIs). If you've forked an image that requires a sudo password, set `BT_TARGET_USER=root` and invoke Packer with `ssh_username=root` so the script is already root when it starts and the self-elevation no-ops.
+
 ## Using the scripts in a Packer build
 
 1. **Upload to your active storage backend.** Open `/storage` in the dashboard. Pick a backend (S3 / Azure Blob / GCS / local) and upload `bt-ready-debian.sh` and/or `bt-ready-rpm.sh`. They land under the `config-mgmt/` prefix by default; the storage service tags `.sh` files as type `script`.
