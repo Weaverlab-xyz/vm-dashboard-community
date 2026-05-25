@@ -356,6 +356,215 @@ JSON
 )" >/dev/null
 ok "Granted $VMIMPORT_ROLE_NAME read on s3://$STORAGE_BUCKET/* + ec2 image-import perms"
 
+# ── 7c. Dashboard IAM user — programmatic creds for the app ───────────────────
+# The dashboard process needs an AWS access key to call EC2 / ECS / S3 /
+# Secrets Manager. Operators historically had to bring their own user; the
+# net effect was per-feature permission errors months after the sandbox came
+# up (e.g. ec2:ExportImage failing because the operator's user lacked it).
+# Create a sandbox-tagged user with a single inline policy covering every
+# code path in web_dashboard/services/aws_service.py. Re-runs reuse the
+# cached secret from $HOME/.dashboard-sandbox/aws/ rather than rotating
+# (AWS allows at most 2 access keys per user; rotation churn is unhelpful
+# for a developer sandbox).
+section "Dashboard IAM user"
+DASHBOARD_USER_NAME="${SANDBOX_NAME_PREFIX}-app"
+DASHBOARD_POLICY_NAME="dashboard-app-policy"
+
+if aws iam get-user --user-name "$DASHBOARD_USER_NAME" >/dev/null 2>&1; then
+  ok "Reusing IAM user $DASHBOARD_USER_NAME"
+  DASHBOARD_USER_EXISTED=1
+else
+  aws iam create-user --user-name "$DASHBOARD_USER_NAME" \
+    --tags "Key=$SANDBOX_TAG_KEY,Value=$SANDBOX_TAG_VALUE" >/dev/null
+  ok "Created IAM user $DASHBOARD_USER_NAME"
+  DASHBOARD_USER_EXISTED=0
+fi
+
+# Always (re)attach the policy so policy edits propagate on every run.
+aws iam put-user-policy --user-name "$DASHBOARD_USER_NAME" \
+  --policy-name "$DASHBOARD_POLICY_NAME" \
+  --policy-document "$(cat <<JSON
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DashboardEC2Manage",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:Describe*",
+        "ec2:RunInstances",
+        "ec2:StartInstances",
+        "ec2:StopInstances",
+        "ec2:TerminateInstances",
+        "ec2:RebootInstances",
+        "ec2:ModifyInstanceAttribute",
+        "ec2:CreateTags",
+        "ec2:DeleteTags",
+        "ec2:CopyImage",
+        "ec2:CreateImage",
+        "ec2:RegisterImage",
+        "ec2:DeregisterImage",
+        "ec2:DeleteSnapshot",
+        "ec2:ModifySnapshotAttribute",
+        "ec2:CopySnapshot",
+        "ec2:CreateSecurityGroup",
+        "ec2:DeleteSecurityGroup",
+        "ec2:AuthorizeSecurityGroupIngress",
+        "ec2:AuthorizeSecurityGroupEgress",
+        "ec2:RevokeSecurityGroupIngress",
+        "ec2:RevokeSecurityGroupEgress",
+        "ec2:CreateKeyPair",
+        "ec2:DeleteKeyPair",
+        "ec2:ImportKeyPair",
+        "ec2:GetPasswordData"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DashboardVMImportExport",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:ExportImage",
+        "ec2:DescribeExportImageTasks",
+        "ec2:CancelExportTask",
+        "ec2:ImportImage",
+        "ec2:DescribeImportImageTasks",
+        "ec2:CancelImportTask"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DashboardPassRoles",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": [
+        "arn:aws:iam::${ACCOUNT_ID}:role/${VMIMPORT_ROLE_NAME}",
+        "arn:aws:iam::${ACCOUNT_ID}:role/ecsTaskExecutionRole",
+        "arn:aws:iam::${ACCOUNT_ID}:role/${PROMOTE_TASK_ROLE_NAME}"
+      ]
+    },
+    {
+      "Sid": "DashboardECS",
+      "Effect": "Allow",
+      "Action": [
+        "ecs:CreateCluster",
+        "ecs:DescribeClusters",
+        "ecs:ListClusters",
+        "ecs:RegisterTaskDefinition",
+        "ecs:DeregisterTaskDefinition",
+        "ecs:DescribeTaskDefinition",
+        "ecs:ListTaskDefinitions",
+        "ecs:RunTask",
+        "ecs:StopTask",
+        "ecs:DescribeTasks",
+        "ecs:ListTasks"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DashboardServiceLinkedRole",
+      "Effect": "Allow",
+      "Action": "iam:CreateServiceLinkedRole",
+      "Resource": "arn:aws:iam::${ACCOUNT_ID}:role/aws-service-role/ecs.amazonaws.com/AWSServiceRoleForECS*",
+      "Condition": {
+        "StringLike": {"iam:AWSServiceName": "ecs.amazonaws.com"}
+      }
+    },
+    {
+      "Sid": "DashboardSecretsManager",
+      "Effect": "Allow",
+      "Action": [
+        "secretsmanager:GetSecretValue",
+        "secretsmanager:ListSecrets",
+        "secretsmanager:DescribeSecret",
+        "secretsmanager:CreateSecret",
+        "secretsmanager:PutSecretValue",
+        "secretsmanager:UpdateSecret",
+        "secretsmanager:DeleteSecret",
+        "secretsmanager:TagResource"
+      ],
+      "Resource": "arn:aws:secretsmanager:*:${ACCOUNT_ID}:secret:dashboard/*"
+    },
+    {
+      "Sid": "DashboardSecretsManagerListAll",
+      "Effect": "Allow",
+      "Action": "secretsmanager:ListSecrets",
+      "Resource": "*"
+    },
+    {
+      "Sid": "DashboardS3Storage",
+      "Effect": "Allow",
+      "Action": [
+        "s3:ListBucket",
+        "s3:GetBucketLocation",
+        "s3:GetObject",
+        "s3:GetObjectAcl",
+        "s3:PutObject",
+        "s3:DeleteObject",
+        "s3:AbortMultipartUpload",
+        "s3:ListBucketMultipartUploads",
+        "s3:ListMultipartUploadParts"
+      ],
+      "Resource": [
+        "arn:aws:s3:::${SANDBOX_NAME_PREFIX}-storage-*",
+        "arn:aws:s3:::${SANDBOX_NAME_PREFIX}-storage-*/*"
+      ]
+    },
+    {
+      "Sid": "DashboardLogs",
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogGroup",
+        "logs:DescribeLogGroups",
+        "logs:DescribeLogStreams",
+        "logs:GetLogEvents",
+        "logs:PutRetentionPolicy"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DashboardSTS",
+      "Effect": "Allow",
+      "Action": "sts:GetCallerIdentity",
+      "Resource": "*"
+    }
+  ]
+}
+JSON
+)" >/dev/null
+ok "Attached $DASHBOARD_POLICY_NAME to $DASHBOARD_USER_NAME (re-applied even on re-runs)"
+
+# Access-key management. Cache the secret in the same ~/.dashboard-sandbox
+# state dir the rest of the script uses so re-runs can re-print it.
+CACHED_ACCESS_KEY_ID="$(state_read aws access_key_id)"
+CACHED_SECRET_ACCESS_KEY="$(state_read aws secret_access_key)"
+EXISTING_KEYS_JSON="$(aws iam list-access-keys --user-name "$DASHBOARD_USER_NAME" --output json 2>/dev/null || echo '{"AccessKeyMetadata":[]}')"
+EXISTING_KEY_COUNT="$(echo "$EXISTING_KEYS_JSON" | jq '.AccessKeyMetadata | length')"
+
+if [[ -n "$CACHED_ACCESS_KEY_ID" && -n "$CACHED_SECRET_ACCESS_KEY" ]] && \
+   echo "$EXISTING_KEYS_JSON" | jq -e --arg id "$CACHED_ACCESS_KEY_ID" \
+     '.AccessKeyMetadata[] | select(.AccessKeyId==$id)' >/dev/null; then
+  AWS_ACCESS_KEY_ID="$CACHED_ACCESS_KEY_ID"
+  AWS_SECRET_ACCESS_KEY="$CACHED_SECRET_ACCESS_KEY"
+  ok "Reusing cached access key $AWS_ACCESS_KEY_ID (from $HOME/.dashboard-sandbox/aws/)"
+elif [[ "$EXISTING_KEY_COUNT" -eq 0 ]]; then
+  KEY_JSON="$(aws iam create-access-key --user-name "$DASHBOARD_USER_NAME" --output json)"
+  AWS_ACCESS_KEY_ID="$(echo "$KEY_JSON" | jq -r '.AccessKey.AccessKeyId')"
+  AWS_SECRET_ACCESS_KEY="$(echo "$KEY_JSON" | jq -r '.AccessKey.SecretAccessKey')"
+  state_write aws access_key_id "$AWS_ACCESS_KEY_ID"
+  state_write aws secret_access_key "$AWS_SECRET_ACCESS_KEY"
+  chmod 0600 "$(state_dir aws)/access_key_id" "$(state_dir aws)/secret_access_key" 2>/dev/null || true
+  chmod 0700 "$(state_dir aws)" 2>/dev/null || true
+  ok "Created access key $AWS_ACCESS_KEY_ID (secret cached at $(state_dir aws)/secret_access_key, mode 0600)"
+else
+  warn "IAM user $DASHBOARD_USER_NAME has $EXISTING_KEY_COUNT existing access key(s) but no cached secret on this host."
+  warn "AWS does not let us re-read the secret of an existing key. Two ways forward:"
+  warn "  1. Recover: aws iam list-access-keys --user-name $DASHBOARD_USER_NAME ; aws iam delete-access-key --user-name $DASHBOARD_USER_NAME --access-key-id <id> ; then re-run this script to mint a fresh key."
+  warn "  2. Clean restart: ./scripts/sandbox/Linux/rollback.sh --cloud aws ; then re-run this script."
+  AWS_ACCESS_KEY_ID="<existing-key-from-AWS-Console>"
+  AWS_SECRET_ACCESS_KEY="<rotate-or-rollback-see-warning-above>"
+fi
+
 # ── 8. Print config to paste into /setup ──────────────────────────────────────
 print_dashboard_config "AWS sandbox configuration" \
   "aws_region=$REGION" \
@@ -381,10 +590,10 @@ print_dashboard_config "AWS sandbox configuration" \
   "promote_runner_ecs_security_group_ids=$JUMPOINT_SG                         # Reuses Jumpoint SG (egress 443)" \
   "aws_vmimport_role_name=$VMIMPORT_ROLE_NAME                                 # Service role ec2:ImportImage assumes" \
   "" \
-  "# Plus your AWS credentials:" \
-  "aws_access_key_id=…" \
-  "aws_secret_access_key=…" \
-  "aws_ecs_docker_deploy_key=…   # BeyondTrust SRA Jumpoint deploy key"
+  "# Sandbox-provisioned AWS credentials for the dashboard IAM user ($DASHBOARD_USER_NAME):" \
+  "aws_access_key_id=$AWS_ACCESS_KEY_ID" \
+  "aws_secret_access_key=$AWS_SECRET_ACCESS_KEY" \
+  "aws_ecs_docker_deploy_key=…   # BeyondTrust SRA Jumpoint deploy key (paste manually)"
 
 cat <<EOF
 Sandbox topology summary

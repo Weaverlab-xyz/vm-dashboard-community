@@ -166,11 +166,24 @@ ECS:
 
 Secrets Manager:
   dashboard/sandbox/ssh-keypair   {public_key, private_key} JSON
+
+IAM (sandbox-tagged, deleted by rollback):
+  role ecsTaskExecutionRole                      ECS task pull + logs
+  role vmimport                                  vmie.amazonaws.com → S3 + EC2
+  role dashboard-sandbox-promote-runner-task     ECS task → S3 PutObject
+  user dashboard-sandbox-app                     Dashboard programmatic creds
+    inline policy dashboard-app-policy           EC2 / ECS / SM / S3 / Logs
+    access key cached at ~/.dashboard-sandbox/aws/secret_access_key (0600)
 ```
 
 **Idempotency**: re-running `setup-aws.sh` looks up resources by tag and
 reuses anything already present. The IGW, route tables, subnet associations,
-SG rules, IAM policy attachments are all conditional inserts.
+SG rules, IAM policy attachments are all conditional inserts. The dashboard
+IAM user is reused on re-runs and the inline policy is re-applied each time
+so policy edits in the script land without rotating the access key. AWS
+allows at most 2 access keys per user, so the script never rotates blindly;
+if the cached secret is missing but a key still exists in AWS, it warns
+with recovery paths rather than minting a third key.
 
 ### Azure
 

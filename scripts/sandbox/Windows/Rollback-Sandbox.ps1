@@ -158,6 +158,32 @@ function Invoke-AwsRollback {
         }
     }
 
+    # 5b. Dashboard IAM user — sandbox-tagged only. AWS refuses delete-user
+    # while access keys or inline policies still exist, so unwind in order.
+    $dashboardUser = "$($Script:SandboxNamePrefix)-app"
+    $userTagsJson  = aws iam list-user-tags --user-name $dashboardUser --output json 2>$null
+    if ($LASTEXITCODE -eq 0 -and $userTagsJson) {
+        $uTags = $userTagsJson | ConvertFrom-Json
+        $uMatch = $uTags.Tags | Where-Object { $_.Key -eq $Script:SandboxTagKey -and $_.Value -eq $Script:SandboxTagValue }
+        if ($uMatch) {
+            # Access keys first.
+            $keys = @((aws iam list-access-keys --user-name $dashboardUser --output json 2>$null | ConvertFrom-Json).AccessKeyMetadata)
+            foreach ($k in $keys) {
+                & aws iam delete-access-key --user-name $dashboardUser --access-key-id $k.AccessKeyId *> $null
+                if ($LASTEXITCODE -eq 0) { Write-Ok "Deleted access key $($k.AccessKeyId)" }
+                else { Write-Warn "Could not delete access key $($k.AccessKeyId)" }
+            }
+            # Inline policies next.
+            $policies = @((aws iam list-user-policies --user-name $dashboardUser --output json 2>$null | ConvertFrom-Json).PolicyNames)
+            foreach ($p in $policies) {
+                & aws iam delete-user-policy --user-name $dashboardUser --policy-name $p *> $null
+            }
+            & aws iam delete-user --user-name $dashboardUser *> $null
+            if ($LASTEXITCODE -eq 0) { Write-Ok "Deleted IAM user $dashboardUser" }
+            else { Write-Warn "Could not delete IAM user $dashboardUser" }
+        }
+    }
+
     # 6. Storage / promote-staging S3 bucket — empty then delete.
     $accountId = (aws sts get-caller-identity --query Account --output text 2>$null).Trim()
     $storageBucket = "$($Script:SandboxNamePrefix)-storage-$accountId"
