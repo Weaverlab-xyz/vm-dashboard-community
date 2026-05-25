@@ -620,19 +620,28 @@ async def export_ami(
         details={"ami_id": ami_id, "image_name": req.image_name},
     )
 
+    # Capture scalars before defining the background closure. FastAPI closes
+    # the request's DB session when this handler returns, so `current_user`
+    # would be a detached ORM instance by the time _run() executes and any
+    # attribute access (e.g. .username) would raise DetachedInstanceError.
+    job_id = job.id
+    image_name = req.image_name
+    region = _aws_region()
+    username = current_user.username
+
     async def _run():
         d = _get_db_session()
         try:
-            job_service.set_running(d, job.id)
+            job_service.set_running(d, job_id)
             result = await export_and_register_aws(
-                d, job.id, req.image_name, ami_id, _aws_region(), current_user.username,
+                d, job_id, image_name, ami_id, region, username,
             )
             if result.get("export_error") or result.get("export_skipped"):
-                job_service.set_failed(d, job.id, result.get("export_error") or result["export_skipped"])
+                job_service.set_failed(d, job_id, result.get("export_error") or result["export_skipped"])
             else:
-                job_service.set_completed(d, job.id, result)
+                job_service.set_completed(d, job_id, result)
         except Exception as e:
-            job_service.set_failed(d, job.id, f"Export failed: {e}")
+            job_service.set_failed(d, job_id, f"Export failed: {e}")
         finally:
             d.close()
 

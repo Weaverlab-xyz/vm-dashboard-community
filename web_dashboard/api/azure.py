@@ -719,19 +719,27 @@ async def export_managed_image(
         details={"image_name": image_name, "registry_name": req.image_name},
     )
 
+    # Capture scalars before defining the background closure. FastAPI closes
+    # the request's DB session when this handler returns, so `current_user`
+    # would be a detached ORM instance by the time _run() executes and any
+    # attribute access (e.g. .username) would raise DetachedInstanceError.
+    job_id = job.id
+    registry_name = req.image_name
+    username = current_user.username
+
     async def _run():
         d = _get_db_session()
         try:
-            job_service.set_running(d, job.id)
+            job_service.set_running(d, job_id)
             result = await export_and_register_azure(
-                d, job.id, req.image_name, image_name, rg, current_user.username,
+                d, job_id, registry_name, image_name, rg, username,
             )
             if result.get("export_error") or result.get("export_skipped"):
-                job_service.set_failed(d, job.id, result.get("export_error") or result["export_skipped"])
+                job_service.set_failed(d, job_id, result.get("export_error") or result["export_skipped"])
             else:
-                job_service.set_completed(d, job.id, result)
+                job_service.set_completed(d, job_id, result)
         except Exception as e:
-            job_service.set_failed(d, job.id, f"Export failed: {e}")
+            job_service.set_failed(d, job_id, f"Export failed: {e}")
         finally:
             d.close()
 
