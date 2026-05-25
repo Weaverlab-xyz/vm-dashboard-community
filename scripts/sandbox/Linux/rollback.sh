@@ -163,6 +163,32 @@ rollback_aws() {
       || warn "Could not delete vmimport"
   fi
 
+  # 5b. Dashboard IAM user — sandbox-tagged only. AWS refuses delete-user
+  # while access keys or inline policies still exist, so unwind in order.
+  local dashboard_user="${SANDBOX_NAME_PREFIX}-app"
+  if aws iam list-user-tags --user-name "$dashboard_user" 2>/dev/null \
+       | jq -e ".Tags[]? | select(.Key==\"$SANDBOX_TAG_KEY\" and .Value==\"$SANDBOX_TAG_VALUE\")" >/dev/null 2>&1; then
+    # Access keys first.
+    local key_ids
+    key_ids="$(aws iam list-access-keys --user-name "$dashboard_user" \
+      --query 'AccessKeyMetadata[*].AccessKeyId' --output text 2>/dev/null || true)"
+    for k in $key_ids; do
+      aws iam delete-access-key --user-name "$dashboard_user" --access-key-id "$k" >/dev/null 2>&1 \
+        && ok "Deleted access key $k" \
+        || warn "Could not delete access key $k"
+    done
+    # Then any attached inline policies (we only put one, but be defensive).
+    local policy_names
+    policy_names="$(aws iam list-user-policies --user-name "$dashboard_user" \
+      --query 'PolicyNames[*]' --output text 2>/dev/null || true)"
+    for p in $policy_names; do
+      aws iam delete-user-policy --user-name "$dashboard_user" --policy-name "$p" >/dev/null 2>&1 || true
+    done
+    aws iam delete-user --user-name "$dashboard_user" >/dev/null 2>&1 \
+      && ok "Deleted IAM user $dashboard_user" \
+      || warn "Could not delete IAM user $dashboard_user"
+  fi
+
   # 6. Storage / promote-staging S3 bucket — empty then delete.
   local storage_bucket="${SANDBOX_NAME_PREFIX}-storage-$(aws sts get-caller-identity --query Account --output text 2>/dev/null)"
   if aws s3api head-bucket --bucket "$storage_bucket" --region "$region" >/dev/null 2>&1; then

@@ -139,7 +139,28 @@ Each setup script writes a small per-cloud state directory to
 fast-path hint — rollback doesn't depend on it; tag-based discovery is
 authoritative.
 
-Sensitive files (Azure SP creds, GCP SA key) are written with mode 600.
+Sensitive files (Azure SP creds, GCP SA key, AWS dashboard-user access-key
+secret) are written with mode 600.
+
+### AWS dashboard IAM user
+
+The AWS setup script also provisions an IAM user `dashboard-sandbox-app`
+with an inline policy covering every AWS API the dashboard calls (EC2 /
+ECS / Secrets Manager / S3 / CloudWatch Logs / vmimport-related
+ec2:ExportImage etc.). Operators no longer paste their own access key
+into the `/setup` wizard — the script's output block carries the
+sandbox-provisioned key id and secret directly.
+
+The access-key secret is cached at `~/.dashboard-sandbox/aws/secret_access_key`
+(mode 0600). Re-runs of `setup-aws.sh` reuse the cached secret rather
+than rotating; if the cache is lost but the IAM key still exists in
+AWS, the script prints two recovery paths (rotate via AWS Console, or
+run `rollback.sh --cloud aws` and re-run setup for a clean key).
+
+Rollback deletes the user, its access keys, and the cached secret in
+one step — but only if the user carries the `managed-by=dashboard-sandbox`
+tag the setup script applied. Operator-created users with the same
+name are left alone.
 
 ## Customising
 
