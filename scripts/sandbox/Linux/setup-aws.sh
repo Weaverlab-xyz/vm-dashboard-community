@@ -331,9 +331,14 @@ aws iam put-role-policy --role-name "$VMIMPORT_ROLE_NAME" \
       "Effect": "Allow",
       "Action": [
         "s3:GetObject",
+        "s3:GetObjectAcl",
         "s3:GetBucketLocation",
         "s3:GetBucketAcl",
-        "s3:ListBucket"
+        "s3:ListBucket",
+        "s3:PutObject",
+        "s3:AbortMultipartUpload",
+        "s3:ListBucketMultipartUploads",
+        "s3:ListMultipartUploadParts"
       ],
       "Resource": [
         "arn:aws:s3:::${STORAGE_BUCKET}",
@@ -354,7 +359,7 @@ aws iam put-role-policy --role-name "$VMIMPORT_ROLE_NAME" \
 }
 JSON
 )" >/dev/null
-ok "Granted $VMIMPORT_ROLE_NAME read on s3://$STORAGE_BUCKET/* + ec2 image-import perms"
+ok "Granted $VMIMPORT_ROLE_NAME read+write on s3://$STORAGE_BUCKET/* + ec2 image-import perms"
 
 # ── 7c. Dashboard IAM user — programmatic creds for the app ───────────────────
 # The dashboard process needs an AWS access key to call EC2 / ECS / S3 /

@@ -99,11 +99,16 @@ better fit, but the IAM/role shapes below are the same either way.
   prefix. This is the role the runner container assumes via the task's
   metadata endpoint to do the dest upload.
 - **`vmimport` IAM service role** trusted by `vmie.amazonaws.com` with
-  read on the staging bucket and `ec2:CreateImage` /
+  read **and** write on the staging bucket (`s3:GetObject`,
+  `s3:PutObject`, `s3:AbortMultipartUpload`, plus the usual
+  bucket-level metadata reads) and `ec2:CreateImage` /
   `ec2:DescribeImportImageTasks`. AWS's image-import service assumes
-  this role when the dashboard calls `ec2:ImportImage`. Override the
-  role name with `aws_vmimport_role_name` if you've named yours
-  differently.
+  this role when the dashboard calls `ec2:ImportImage`, and the same
+  role is also used by `ec2:ExportImage` to write the resulting VHD
+  back to the bucket — so read-only access here is enough for import
+  but breaks export with a confusing "Insufficient permissions, please
+  verify bucket ownership" error. Override the role name with
+  `aws_vmimport_role_name` if you've named yours differently.
 - **Subnet + security group** reachable to the public internet (the
   runner pulls the presigned URL over HTTPS; SGs need egress on 443).
   Public IP assignment is enabled by default; switch to a NAT-routed
