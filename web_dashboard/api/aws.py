@@ -762,6 +762,27 @@ def _get_db_session():
     return SessionLocal()
 
 
+def _aws_deploy_payload_hash(**fields) -> str:
+    """Stable SHA-256 over the deploy parameters that determine blast radius.
+
+    Used as the elevation request's payload_hash so a granted Entitle
+    activation is bound to *this* deploy intent — an attacker who replays
+    the activation against a different AMI / subnet / SG list would compute
+    a different hash and the audit row no longer matches.
+    """
+    import hashlib
+    import json as _json
+    blob = _json.dumps(fields, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()
+
+
+def _aws_terminate_payload_hash(region: str, instance_id: str) -> str:
+    """Payload hash for the EC2 terminate elevation."""
+    import hashlib
+    blob = f"terminate:{region}:{instance_id}".encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()
+
+
 async def _run_deploy(
     job_id: str,
     ami_id: str,
@@ -827,22 +848,45 @@ async def _run_deploy(
 
         # ── Step 3: Launch EC2 instance ────────────────────────────────────────
         job_service.update_progress(db, job_id, 40, f"Launching EC2 instance ({os_type})…")
+        # Cloud-identity JIT Phase 2: bracket the EC2 write in elevate().
+        # When the gate is off (default) this is a no-op and the deploy
+        # proceeds on baseline creds. When on, Entitle's auto-approve
+        # policy decides whether to issue a short-lived grant; failure
+        # to grant aborts the deploy before AWS is touched.
+        from ..services.cloud_identity_service import elevate, CloudIdentityError
+        deploy_payload_hash = _aws_deploy_payload_hash(
+            region=_aws_region, ami_id=ami_id, instance_type=instance_type,
+            subnet_id=subnet_id, security_group_ids=security_group_ids,
+            workgroup=workgroup, instance_name=instance_name,
+        )
+        _job = job_service.get_job(db, job_id)
         try:
-            instance_result = await aws_service.launch_instance(
-                region=_aws_region,
-                ami_id=ami_id,
-                instance_name=instance_name,
-                instance_type=instance_type,
-                public_key=public_key,
-                subnet_id=subnet_id,
-                security_group_ids=security_group_ids,
-                iam_instance_profile=_cfg_svc.get("ec2_ssm_instance_profile") or "",
-                os_type=os_type,
-                workgroup=workgroup,
-            )
+            async with elevate(
+                "aws", "aws:ec2:deploy",
+                duration_minutes=15,
+                payload_hash=deploy_payload_hash,
+                requester_user_id=_job.created_by if _job else None,
+                workgroup=workgroup or None,
+            ) as _elev:
+                instance_result = await aws_service.launch_instance(
+                    region=_aws_region,
+                    ami_id=ami_id,
+                    instance_name=instance_name,
+                    instance_type=instance_type,
+                    public_key=public_key,
+                    subnet_id=subnet_id,
+                    security_group_ids=security_group_ids,
+                    iam_instance_profile=_cfg_svc.get("ec2_ssm_instance_profile") or "",
+                    os_type=os_type,
+                    workgroup=workgroup,
+                    correlation_tag=_elev.correlation_tag,
+                )
             result.update(instance_result)
             if instance_result.get("instance_id"):
                 job_service.set_cloud_resource_id(db, job_id, instance_result["instance_id"])
+        except CloudIdentityError as e:
+            job_service.set_failed(db, job_id, f"Cloud-identity elevation refused EC2 deploy: {e}")
+            return
         except AWSError as e:
             # EC2 failed — stop ECS task if it was started
             if result.get("ecs_task_arn"):
@@ -975,17 +1019,36 @@ async def _run_bulk_deploy(
                 )
                 ami_info = await aws_service.describe_ami(_aws_region, item.ami_id)
                 is_windows = "windows" in (ami_info.get("platform", "") or "").lower()
-                instance_result = await aws_service.launch_instance(
-                    region=_aws_region,
-                    ami_id=item.ami_id,
+                # Cloud-identity JIT Phase 2: per-instance elevation in
+                # the bulk batch. One Entitle activation per EC2 launch
+                # so a denial of one row doesn't poison the others.
+                from ..services.cloud_identity_service import elevate, CloudIdentityError
+                _bulk_job = job_service.get_job(db, job_id)
+                _bulk_payload = _aws_deploy_payload_hash(
+                    region=_aws_region, ami_id=item.ami_id,
+                    instance_type=instance_type, subnet_id=subnet_id,
+                    security_group_ids=security_group_ids, workgroup=workgroup,
                     instance_name=item.instance_name,
-                    instance_type=instance_type,
-                    public_key="" if is_windows else shared_public_key,
-                    subnet_id=subnet_id,
-                    security_group_ids=security_group_ids,
-                    iam_instance_profile=_cfg_svc.get("ec2_ssm_instance_profile") or "",
-                    workgroup=workgroup,
                 )
+                async with elevate(
+                    "aws", "aws:ec2:deploy",
+                    duration_minutes=15,
+                    payload_hash=_bulk_payload,
+                    requester_user_id=_bulk_job.created_by if _bulk_job else None,
+                    workgroup=workgroup or None,
+                ) as _bulk_elev:
+                    instance_result = await aws_service.launch_instance(
+                        region=_aws_region,
+                        ami_id=item.ami_id,
+                        instance_name=item.instance_name,
+                        instance_type=instance_type,
+                        public_key="" if is_windows else shared_public_key,
+                        subnet_id=subnet_id,
+                        security_group_ids=security_group_ids,
+                        iam_instance_profile=_cfg_svc.get("ec2_ssm_instance_profile") or "",
+                        workgroup=workgroup,
+                        correlation_tag=_bulk_elev.correlation_tag,
+                    )
                 result.update(instance_result)
                 if instance_result.get("instance_id"):
                     job_service.set_cloud_resource_id(db, job_id, instance_result["instance_id"])
@@ -1049,7 +1112,24 @@ async def _run_destroy(destroy_job_id: str, deploy_job_id: str, instance_id: str
         job_service.set_running(db, destroy_job_id)
         job_service.update_progress(db, destroy_job_id, 20, f"Terminating instance {instance_id}…")
 
-        result = await aws_service.terminate_instance(_aws_region(), instance_id)
+        # Cloud-identity JIT Phase 2: gate the terminate behind elevate().
+        # EC2 TerminateInstances doesn't accept tags, so cloud-side
+        # correlation has to come from the activation row (joined by
+        # instance_id) instead of an inline tag.
+        from ..services.cloud_identity_service import elevate, CloudIdentityError
+        _destroy_job = job_service.get_job(db, destroy_job_id)
+        _terminate_region = _aws_region()
+        try:
+            async with elevate(
+                "aws", "aws:ec2:terminate",
+                duration_minutes=10,
+                payload_hash=_aws_terminate_payload_hash(_terminate_region, instance_id),
+                requester_user_id=_destroy_job.created_by if _destroy_job else None,
+            ):
+                result = await aws_service.terminate_instance(_terminate_region, instance_id)
+        except CloudIdentityError as e:
+            job_service.set_failed(db, destroy_job_id, f"Cloud-identity elevation refused EC2 terminate: {e}")
+            return
 
         deploy_job = job_service.get_job(db, deploy_job_id)
         if deploy_job:

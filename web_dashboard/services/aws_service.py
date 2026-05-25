@@ -302,6 +302,7 @@ def _launch_instance_sync(
     iam_instance_profile: str = "",
     os_type: str = "",
     workgroup: str = "",
+    correlation_tag: str = "",
 ) -> dict:
     ec2 = _get_ec2(region)
     tags = [
@@ -310,6 +311,13 @@ def _launch_instance_sync(
     ]
     if workgroup:
         tags.append({"Key": "Workgroup", "Value": workgroup})
+    # Cloud-identity JIT Phase 2 correlation: when the elevation went
+    # through Entitle, the handle yields a non-empty correlation_tag
+    # like "entitle:req_abc". Attaching it as an EC2 tag means a future
+    # audit query can join the dashboard's entitle_activations row to
+    # the CloudTrail RunInstances event by tag value.
+    if correlation_tag:
+        tags.append({"Key": "EntitleRequestId", "Value": correlation_tag})
     kwargs: dict = dict(
         ImageId=ami_id,
         InstanceType=instance_type,
@@ -357,6 +365,7 @@ async def launch_instance(
     iam_instance_profile: str = "",
     os_type: str = "",
     workgroup: str = "",
+    correlation_tag: str = "",
 ) -> dict:
     """Launch a new EC2 instance and return its ID and initial state.
 
@@ -366,6 +375,9 @@ async def launch_instance(
     *os_type* controls OS-specific UserData (e.g. SSM agent install for Debian).
     *workgroup*, when non-empty, is written as a `Workgroup=<name>` tag so the
     instance is discoverable per-workgroup by the dashboard and external tools.
+    *correlation_tag*, when non-empty, is written as `EntitleRequestId=<tag>`
+    so audit can join to the dashboard's entitle_activations row
+    (cloud-identity JIT Phase 2).
     """
     try:
         return await asyncio.to_thread(
@@ -373,6 +385,7 @@ async def launch_instance(
             region, ami_id, instance_name, instance_type,
             public_key, subnet_id, security_group_ids,
             iam_instance_profile, os_type, workgroup,
+            correlation_tag,
         )
     except (ClientError, BotoCoreError) as e:
         raise AWSError(f"Failed to launch instance: {e}") from e
