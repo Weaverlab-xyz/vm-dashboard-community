@@ -15,11 +15,13 @@ After Phase 0 deploys, this confirms:
 5. Pre-Phase-0 admin-set users keep working when no group claim is
    present in the token.
 
-Takes ~20 minutes. Run on dev.
+Takes ~20 minutes. Run on the community edition
+(`c:\Scripts\VM_CLI\vm-dashboard-community\`).
 
 ## Prerequisites
 
-- Dev environment running on the post-Phase-0 image.
+- Community edition running on the post-Phase-0 image
+  (`docker compose up` from the community repo).
 - Azure OAuth configured (`AZURE_OAUTH_CLIENT_ID/SECRET/TENANT_ID/REDIRECT_URI`).
 - Three Entra security groups available for testing (any names — they
   will be wired to dashboard mappings via the `/groups` admin page):

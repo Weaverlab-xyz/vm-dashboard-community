@@ -10,23 +10,29 @@ Phase 2 (Entitle virtual application) then points Entitle at these
 group object ids.
 
 Takes ~15 minutes once the prerequisite app registration is in
-place. Run against a real Entra tenant (community / dev installs
-without Entra skip this phase entirely).
+place. Run on the community edition
+(`c:\Scripts\VM_CLI\vm-dashboard-community\`) against a real
+Entra tenant. Dev/prod installs use the same script with a
+`--tenant-prefix` (Phase 5).
 
 ## Prerequisites
 
+- Community edition running (`docker compose up` from the
+  community repo). The script imports
+  `web_dashboard.database.SessionLocal`, so it talks to the
+  community Postgres container automatically when run via
+  `docker compose exec app …`.
 - An **Entra app registration** dedicated to this bootstrap (do
   NOT reuse the OAuth-login app registration — that one only has
   user-login permissions). The bootstrap app needs:
   - **API permission**: `Microsoft Graph → Application → Group.ReadWrite.All`
   - **Admin consent granted** for the above
-  - A **client secret** (24h+ lifetime; store in Key Vault for prod)
-- The dashboard's PostgreSQL DB reachable from wherever you run
-  the script (the script imports `web_dashboard.database.SessionLocal`,
-  so it honours `DATABASE_URL` / `Start-DevEnvironment.ps1`
-  environment).
-- `settings.azure_oauth_tenant_id` populated (or pass `--tenant-id`
-  explicitly).
+  - A **client secret** (24h+ lifetime; store via the community
+    edition's `/secrets` admin page, or pass on the command line
+    for a one-shot run).
+- `settings.azure_oauth_tenant_id` populated in the community
+  config (set via the `/setup` wizard) or pass `--tenant-id`
+  explicitly.
 
 ## Step 1 — Dry-run plan against the target tenant
 

@@ -13,11 +13,13 @@ After Phase 0 deploys, this confirms:
    clear, operator-actionable error rather than silently doing the
    wrong thing.
 
-Takes ~10 minutes. Run on dev.
+Takes ~10 minutes. Run on the community edition
+(`c:\Scripts\VM_CLI\vm-dashboard-community\`).
 
 ## Prerequisites
 
-- Dev environment running on the post-Phase-0 image.
+- Community edition running on the post-Phase-0 image
+  (`docker compose up` from the community repo).
 - No new env vars or external dependencies — Phase 0 is local-only.
 
 ## Step 1 — Verify the schema migration ran
