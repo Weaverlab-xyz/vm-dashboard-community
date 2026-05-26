@@ -51,23 +51,31 @@ RUN set -e; \
             > /etc/apt/apt.conf.d/99-corp-proxy; \
     fi
 
-# Optional: drop trixie-updates and trixie-security stanzas for networks
-# where the corp proxy still blocks those specific mirror paths. Triggered
-# by --build-arg BUILD_SKIP_DEBIAN_UPDATES=1. Operates on both deb822
-# (.sources) and legacy (.list) formats so it works across base-image
-# versions.
+# Optional: drop -updates and -security mirrors for networks where the corp
+# proxy still blocks those specific mirror paths. Triggered by
+# --build-arg BUILD_SKIP_DEBIAN_UPDATES=1. Handles both layouts:
+#   - deb822 (.sources): a separate stanza per URI — drop the security stanza,
+#     strip the -updates token from the main stanza's Suites.
+#   - legacy (.list): one line per source — drop any line referencing
+#     -updates or -security.
+# Suite-name-agnostic (works for trixie, bookworm, etc.).
 RUN if [ "$BUILD_SKIP_DEBIAN_UPDATES" = "1" ]; then \
         for f in /etc/apt/sources.list.d/debian.sources; do \
             [ -e "$f" ] || continue; \
-            # deb822: strip "trixie-updates" and "trixie-security" tokens
-            # from the Suites: line in each stanza, leaving "trixie" intact.
-            sed -i 's/[[:space:]]*trixie-updates//g; s/[[:space:]]*trixie-security//g' "$f"; \
+            awk 'BEGIN { RS=""; ORS="\n\n" } \
+                 { if ($0 ~ /URIs:[^\n]*-security/) next; \
+                   gsub(/[[:space:]]+[a-z]+-updates/, ""); \
+                   gsub(/[[:space:]]+[a-z]+-security/, ""); \
+                   print }' "$f" > "$f.new" && mv "$f.new" "$f"; \
         done; \
         for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list; do \
             [ -e "$f" ] || continue; \
-            sed -i '/trixie-updates/d; /trixie-security/d' "$f"; \
+            sed -i '/-updates/d; /-security/d' "$f"; \
         done; \
-        echo "BUILD_SKIP_DEBIAN_UPDATES=1: trixie-updates and trixie-security dropped from apt sources"; \
+        echo "BUILD_SKIP_DEBIAN_UPDATES=1: -updates and -security dropped from apt sources"; \
+        echo "--- resulting apt sources ---"; \
+        cat /etc/apt/sources.list.d/debian.sources 2>/dev/null || true; \
+        echo "--- end ---"; \
     fi
 
 # Point Python TLS clients (pip, requests, etc.) at the system trust store
