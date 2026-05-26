@@ -120,6 +120,34 @@ def sweep_aws(db: Session) -> dict:
     return _sweep_one_cloud(db, cloud="aws")
 
 
+def sweep_azure(db: Session) -> dict:
+    """Reconcile Azure rows against Entitle's view — Phase 4b.
+
+    Azure's role assignments self-expire via ``endDateTime`` (set when
+    Entitle adds the binding), so cloud-side drift is rare — the
+    Entitle-side reconciliation handled by ``_sweep_one_cloud`` is the
+    load-bearing check. We mark the per-cloud summary with
+    ``self_expiry_trusted=True`` so the orphans endpoint can tell
+    operators that any Azure drift surfaced here is informational and
+    Azure is expected to have already cleaned up the role assignment
+    server-side.
+
+    Future enhancement: an optional cross-check via the ARM
+    ``role_assignments`` API to catch the rare case where Entitle
+    thinks a grant is active but Azure has revoked the role on its
+    own. Deferred — adds an azure-mgmt-authorization dependency for
+    marginal coverage over Entitle-side reconciliation.
+    """
+    summary = _sweep_one_cloud(db, cloud="azure")
+    summary["self_expiry_trusted"] = True
+    summary["note"] = (
+        "Azure role assignments self-expire via endDateTime; this sweep "
+        "reconciles dashboard rows against Entitle's view only. Drift "
+        "here is informational."
+    )
+    return summary
+
+
 def _sweep_one_cloud(db: Session, *, cloud: str) -> dict:
     """Shared per-cloud reconciliation. Phase 4b/4c plug into this
     by calling it with ``cloud='azure'`` or ``cloud='gcp'``."""
@@ -279,10 +307,10 @@ def sweep_once(db: Session) -> dict:
     by_cloud: dict[str, dict] = {}
     all_orphans: list[dict] = []
 
-    # Phase 4a — AWS only. Phases 4b / 4c flip the per-cloud enable check
-    # the same way Phase 3 does for elevate(): when the operator has
-    # promoted that cloud (cloud_identity_<cloud>_enabled=True), we
-    # sweep it.
+    # Per-cloud enable check matches the Phase 3 elevate() shape — when
+    # the operator has promoted a cloud (cloud_identity_<cloud>_enabled=True),
+    # the sweeper reconciles it. Each cloud's sweep_* is wrapped in try/
+    # except so one cloud's failure doesn't kill the other passes.
     if cs.get_bool("cloud_identity_aws_enabled", default=False):
         try:
             by_cloud["aws"] = sweep_aws(db)
@@ -291,10 +319,17 @@ def sweep_once(db: Session) -> dict:
             logger.exception("aws sweep failed")
             by_cloud["aws"] = {"error": str(exc)[:300]}
 
-    # Phase 4b/4c hook points — leave commented stubs so future deltas
-    # are localized. (Not executing them — service module attribute
-    # checks prevent surprises.)
-    # if cs.get_bool("cloud_identity_azure_enabled"): by_cloud["azure"] = sweep_azure(db)
+    # Phase 4b: Azure leg.
+    if cs.get_bool("cloud_identity_azure_enabled", default=False):
+        try:
+            by_cloud["azure"] = sweep_azure(db)
+            all_orphans.extend(by_cloud["azure"].get("orphans", []))
+        except Exception as exc:
+            logger.exception("azure sweep failed")
+            by_cloud["azure"] = {"error": str(exc)[:300]}
+
+    # Phase 4c hook point — GCP. Same shape as AWS (agent-driven revoke
+    # per design §5.3 / §6.7).
     # if cs.get_bool("cloud_identity_gcp_enabled"):   by_cloud["gcp"]   = sweep_gcp(db)
 
     ended_at = datetime.now(timezone.utc).replace(tzinfo=None)
