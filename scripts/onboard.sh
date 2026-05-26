@@ -193,6 +193,14 @@ fi
 # ── 4. Bring up the stack ───────────────────────────────────────────────
 step "Starting Docker Compose stack"
 
+# Forward the skip-debian-updates escape hatch so the compose file's build
+# arg picks it up. Useful when a TLS-inspecting corp proxy mangles the
+# trixie-updates / trixie-security Packages files but trixie/main is fine.
+if [[ "${ONBOARD_SKIP_DEBIAN_UPDATES:-0}" == "1" ]]; then
+    export BUILD_SKIP_DEBIAN_UPDATES=1
+    warn "ONBOARD_SKIP_DEBIAN_UPDATES=1 — dropping trixie-updates and trixie-security from apt sources for this build"
+fi
+
 compose_args=(-f "$COMPOSE_FILE" up -d)
 (( BUILD )) && compose_args+=(--build)
 

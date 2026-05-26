@@ -23,6 +23,13 @@ services:
   app:
     build:
       context: .
+      args:
+        # Escape hatch for corp networks where the proxy still mangles
+        # trixie-updates / trixie-security Packages files even with the
+        # corp CA installed. Set via:
+        #   BUILD_SKIP_DEBIAN_UPDATES=1 docker compose build
+        # or via scripts/onboard.sh's ONBOARD_SKIP_DEBIAN_UPDATES=1 env.
+        BUILD_SKIP_DEBIAN_UPDATES: ${BUILD_SKIP_DEBIAN_UPDATES:-0}
     restart: unless-stopped
     # Host port 8001 to coexist with another dashboard on 8000. Browse at
     # http://localhost:8001 . The container itself still listens on 8000.

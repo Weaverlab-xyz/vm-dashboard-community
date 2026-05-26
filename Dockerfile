@@ -5,6 +5,14 @@ FROM python:3.12-slim AS base
 
 ARG PACKER_VERSION=1.11.2
 
+# Escape hatch for networks whose proxy still mangles trixie-updates /
+# trixie-security Packages files even with the corp CA installed and apt
+# switched to HTTPS. Set to 1 via `--build-arg BUILD_SKIP_DEBIAN_UPDATES=1`
+# (or the ONBOARD_SKIP_DEBIAN_UPDATES=1 env var picked up by scripts/onboard.sh)
+# to drop those two repos for the build. The image loses point-in-time
+# security patches; rebuild after the proxy issue clears.
+ARG BUILD_SKIP_DEBIAN_UPDATES=0
+
 WORKDIR /app
 
 # Optional corporate proxy root CA(s). Drop .crt/.pem files into corp-ca/ at
@@ -29,6 +37,37 @@ RUN set -e; \
         find /etc/apt/sources.list /etc/apt/sources.list.d -type f \
             \( -name '*.sources' -o -name '*.list' \) 2>/dev/null \
             | xargs -r sed -i 's|http://deb.debian.org|https://deb.debian.org|g'; \
+        # Apt config tuned for TLS-inspecting proxies: \
+        #   - gzip only: some proxies decompress .xz/.zst for inspection and \
+        #     corrupt the response; .gz round-trips more reliably. \
+        #   - Pipeline-Depth 0: serialize requests so an intercepting proxy \
+        #     can't interleave/truncate parallel streams. \
+        #   - Retries 3: tolerate transient proxy hiccups (early TLS EOFs). \
+        printf '%s\n' \
+            'Acquire::CompressionTypes::Order:: "gz";' \
+            'Acquire::http::Pipeline-Depth "0";' \
+            'Acquire::https::Pipeline-Depth "0";' \
+            'Acquire::Retries "3";' \
+            > /etc/apt/apt.conf.d/99-corp-proxy; \
+    fi
+
+# Optional: drop trixie-updates and trixie-security stanzas for networks
+# where the corp proxy still blocks those specific mirror paths. Triggered
+# by --build-arg BUILD_SKIP_DEBIAN_UPDATES=1. Operates on both deb822
+# (.sources) and legacy (.list) formats so it works across base-image
+# versions.
+RUN if [ "$BUILD_SKIP_DEBIAN_UPDATES" = "1" ]; then \
+        for f in /etc/apt/sources.list.d/debian.sources; do \
+            [ -e "$f" ] || continue; \
+            # deb822: strip "trixie-updates" and "trixie-security" tokens
+            # from the Suites: line in each stanza, leaving "trixie" intact.
+            sed -i 's/[[:space:]]*trixie-updates//g; s/[[:space:]]*trixie-security//g' "$f"; \
+        done; \
+        for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list; do \
+            [ -e "$f" ] || continue; \
+            sed -i '/trixie-updates/d; /trixie-security/d' "$f"; \
+        done; \
+        echo "BUILD_SKIP_DEBIAN_UPDATES=1: trixie-updates and trixie-security dropped from apt sources"; \
     fi
 
 # Point Python TLS clients (pip, requests, etc.) at the system trust store
