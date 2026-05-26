@@ -50,6 +50,9 @@ logs/
 .DS_Store
 Thumbs.db
 sa-key.json
-Cloudflare_CA.crt
-Dockerfile
-Dockerfile
+
+# Corporate proxy root CA — drop .crt/.pem files into corp-ca/ for the
+# Dockerfile to pick up. Contents are local to each developer's network.
+corp-ca/*
+!corp-ca/.gitkeep
+!corp-ca/README.md

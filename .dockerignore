@@ -6,6 +6,12 @@
 *.p12
 *.pfx
 
+# Allow corp proxy root CA bundle into the build context. The Dockerfile
+# trusts any .crt/.pem files in corp-ca/ so builds work behind TLS-inspecting
+# proxies (Cloudflare Gateway, Zscaler, etc.). This must come after *.pem
+# so the exception takes effect.
+!corp-ca
+
 # Git history
 .git/
 

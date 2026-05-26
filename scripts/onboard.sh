@@ -78,15 +78,22 @@ for cmd in git docker curl; do
     ok "$cmd found"
 done
 
-if ! docker info --format '{{.ServerVersion}}' >/dev/null 2>&1; then
-    fail "Docker daemon is not responding."
-    if (( _is_wsl )); then
-        fail "Start the Docker daemon with one of:"
-        fail "  sudo service docker start        (WSL without systemd)"
-        fail "  sudo systemctl start docker      (WSL with systemd enabled)"
-        fail "Then rerun this script."
+_docker_info_err="$(docker info --format '{{.ServerVersion}}' 2>&1)"
+if [[ $? -ne 0 ]]; then
+    if echo "$_docker_info_err" | grep -qi "permission denied"; then
+        fail "Cannot connect to Docker — permission denied on the socket."
+        fail "Add your user to the docker group, then open a new shell:"
+        fail "  sudo usermod -aG docker \$USER && newgrp docker"
     else
-        fail "Is Docker Desktop running? Start it, wait for the whale icon to settle, then rerun."
+        fail "Docker daemon is not responding."
+        if (( _is_wsl )); then
+            fail "Start the Docker daemon with one of:"
+            fail "  sudo service docker start        (WSL without systemd)"
+            fail "  sudo systemctl start docker      (WSL with systemd enabled)"
+            fail "Then rerun this script."
+        else
+            fail "Is Docker Desktop running? Start it, wait for the whale icon to settle, then rerun."
+        fi
     fi
     exit 1
 fi

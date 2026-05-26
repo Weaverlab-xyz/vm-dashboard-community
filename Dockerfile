@@ -7,6 +7,28 @@ ARG PACKER_VERSION=1.11.2
 
 WORKDIR /app
 
+# Optional corporate proxy root CA(s). Drop .crt/.pem files into corp-ca/ at
+# the repo root if your network uses a TLS-inspecting proxy (Cloudflare
+# Gateway, Zscaler, etc.). Without this, apt/curl/pip inside the build fail
+# with "x509: certificate signed by unknown authority".
+COPY corp-ca/ /usr/local/share/ca-certificates/corp-ca/
+RUN set -e; \
+    found=0; \
+    for f in /usr/local/share/ca-certificates/corp-ca/*.pem; do \
+        [ -e "$f" ] || continue; \
+        mv "$f" "${f%.pem}.crt"; \
+    done; \
+    for f in /usr/local/share/ca-certificates/corp-ca/*.crt; do \
+        [ -e "$f" ] && found=1 && break; \
+    done; \
+    if [ "$found" = "1" ]; then update-ca-certificates; fi
+
+# Point Python TLS clients (pip, requests, etc.) at the system trust store
+# so they pick up any corp CA installed above.
+ENV PIP_CERT=/etc/ssl/certs/ca-certificates.crt \
+    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+
 # Install Python dependencies first so this layer caches when only app
 # code changes.
 COPY web_dashboard/requirements.txt ./requirements.txt

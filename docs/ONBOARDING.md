@@ -530,13 +530,27 @@ sudo cp /tmp/corp-root.pem /etc/docker/certs.d/registry-1.docker.io/ca.crt
 sudo service docker restart
 ```
 
-**Verify:**
+**Verify host-side pulls work:**
 
 ```bash
 docker pull hello-world
 ```
 
-If that succeeds, rerun `./scripts/onboard.sh`.
+**Step 4 — make the cert available inside the image build:**
+
+Steps 1–3 fix the host's connection to Docker Hub, but `apt-get update` and
+`pip install` *inside* the image build go through the same TLS-inspecting
+proxy and need the cert too. Drop a copy into `corp-ca/` at the repo root:
+
+```bash
+cp /tmp/corp-root.pem ./corp-ca/corp-root.crt
+```
+
+The Dockerfile copies any `.crt` / `.pem` file in `corp-ca/` into the image's
+system trust store and points `pip`, `requests`, and `curl` at it. Files in
+that directory are gitignored, so your cert stays local.
+
+Now rerun `./scripts/onboard.sh --build`.
 
 ### Stack starts but `/api/health` doesn't respond
 
