@@ -66,6 +66,14 @@ async def lifespan(app: FastAPI):
             asyncio.create_task(_warm_portainer_containers(), name="warm_portainer_containers")
         )
 
+    # Cloud-identity JIT sweeper (Phase 4a) — reconciles entitle_activations
+    # against Entitle's view. Loop always launched; sweeper no-ops cleanly
+    # when the master gate / sweep flag is off, so a runtime flag flip
+    # activates the next pass without an app restart.
+    warmers.append(
+        asyncio.create_task(_ci_sweeper_loop(), name="ci_sweeper_loop")
+    )
+
     yield
 
     for task in warmers:
@@ -108,6 +116,37 @@ def _bootstrap_first_run_admin() -> None:
         )
     except Exception as exc:
         logger.error("First-run admin bootstrap failed: %s", exc)
+
+
+# ── Cloud-identity JIT sweeper loop (Phase 4a) ───────────────────────────────
+
+async def _ci_sweeper_loop() -> None:
+    """Background reconciliation of entitle_activations against Entitle's view.
+
+    Sleep cadence comes from cloud_identity_sweep_interval_minutes (default
+    60). Sweeper short-circuits when the master gate or sweep-enabled flag
+    is off; loop is launched unconditionally so a runtime flag flip
+    activates the next pass without an app restart.
+    """
+    from .database import SessionLocal
+    from .services import cloud_identity_sweeper_service as ci_sweeper
+
+    while True:
+        try:
+            db = SessionLocal()
+            try:
+                await asyncio.to_thread(ci_sweeper.sweep_once, db)
+            finally:
+                db.close()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("cloud-identity sweeper iteration failed: %s", exc)
+        try:
+            interval = ci_sweeper.sweep_interval_seconds()
+        except Exception:
+            interval = 60 * 60
+        await asyncio.sleep(interval)
 
 
 # ── Background cache warmers ──────────────────────────────────────────────────

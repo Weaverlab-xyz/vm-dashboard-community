@@ -177,3 +177,44 @@ async def update_flags(
         current_user.username, list(changed.keys()),
     )
     return {"changed": changed, "count": len(changed)}
+
+
+# ── Sweeper surface (Phase 4a) ────────────────────────────────────────────────
+
+@router.get("/orphans")
+async def get_orphans(
+    current_user: User = Depends(require_admin),
+):
+    """Last sweep's summary + orphan list.
+
+    Cached; does not trigger a sweep. Hit ``POST /sweep`` for a fresh
+    run. Returns ``{"never_run": true}`` when the background loop hasn't
+    completed a pass yet (typical on a freshly started app).
+    """
+    from ..services import cloud_identity_sweeper_service as ci_sweeper
+    return ci_sweeper.get_last_sweep_result()
+
+
+@router.post("/sweep")
+async def force_sweep(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Force a sweep right now. Returns the full summary.
+
+    Useful right after an operator changes the matrix / flags or
+    investigates a suspected drift, instead of waiting for the next
+    scheduled loop tick (default 60min).
+    """
+    import asyncio
+    from ..services import cloud_identity_sweeper_service as ci_sweeper
+    # Sweeper does sync DB work; run off the event loop so the request
+    # doesn't block other admin calls during a long Entitle round-trip.
+    result = await asyncio.to_thread(ci_sweeper.sweep_once, db)
+    logger.info(
+        "cloud_identity manual sweep by %s: processed=%d orphans=%d",
+        current_user.username,
+        result.get("processed", 0),
+        len(result.get("orphans", [])),
+    )
+    return result
