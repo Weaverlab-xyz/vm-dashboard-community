@@ -120,6 +120,25 @@ def sweep_aws(db: Session) -> dict:
     return _sweep_one_cloud(db, cloud="aws")
 
 
+def sweep_gcp(db: Session) -> dict:
+    """Reconcile GCP rows against Entitle's view — Phase 4c.
+
+    GCP's grant mechanism is agent-driven ``setIamPolicy`` (per design
+    §5.3 / §6.7) so drift is actionable in the same way AWS drift is:
+    if Entitle says the grant was revoked but the dashboard's row still
+    reads ``granted``, an operator needs to know. Structurally
+    identical to :func:`sweep_aws` — they share ``_sweep_one_cloud``.
+
+    Future enhancement: an optional cross-check via the GCP IAM
+    ``getIamPolicy`` API at the project level, filtering bindings to
+    the synthetic machine identity's service-account email. Catches
+    the case where Entitle's view and the actual IAM policy disagree.
+    Deferred for the same reason as Azure ARM cross-check: marginal
+    coverage over Entitle-side reconciliation.
+    """
+    return _sweep_one_cloud(db, cloud="gcp")
+
+
 def sweep_azure(db: Session) -> dict:
     """Reconcile Azure rows against Entitle's view — Phase 4b.
 
@@ -328,9 +347,15 @@ def sweep_once(db: Session) -> dict:
             logger.exception("azure sweep failed")
             by_cloud["azure"] = {"error": str(exc)[:300]}
 
-    # Phase 4c hook point — GCP. Same shape as AWS (agent-driven revoke
-    # per design §5.3 / §6.7).
-    # if cs.get_bool("cloud_identity_gcp_enabled"):   by_cloud["gcp"]   = sweep_gcp(db)
+    # Phase 4c: GCP leg. Same shape as AWS (agent-driven revoke per
+    # design §5.3 / §6.7) — drift here is actionable, not informational.
+    if cs.get_bool("cloud_identity_gcp_enabled", default=False):
+        try:
+            by_cloud["gcp"] = sweep_gcp(db)
+            all_orphans.extend(by_cloud["gcp"].get("orphans", []))
+        except Exception as exc:
+            logger.exception("gcp sweep failed")
+            by_cloud["gcp"] = {"error": str(exc)[:300]}
 
     ended_at = datetime.now(timezone.utc).replace(tzinfo=None)
     processed = sum(c.get("processed", 0) for c in by_cloud.values())
