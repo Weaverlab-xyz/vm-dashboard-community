@@ -308,9 +308,14 @@ $vmiPolicy = @"
       "Effect": "Allow",
       "Action": [
         "s3:GetObject",
+        "s3:GetObjectAcl",
         "s3:GetBucketLocation",
         "s3:GetBucketAcl",
-        "s3:ListBucket"
+        "s3:ListBucket",
+        "s3:PutObject",
+        "s3:AbortMultipartUpload",
+        "s3:ListBucketMultipartUploads",
+        "s3:ListMultipartUploadParts"
       ],
       "Resource": [
         "arn:aws:s3:::$StorageBucket",
@@ -333,7 +338,7 @@ $vmiPolicy = @"
 aws iam put-role-policy --role-name $VmImportRoleName `
     --policy-name 'vmimport-s3-and-ec2' `
     --policy-document $vmiPolicy | Out-Null
-Write-Ok "Granted $VmImportRoleName read on s3://$StorageBucket/* + ec2 image-import perms"
+Write-Ok "Granted $VmImportRoleName read+write on s3://$StorageBucket/* + ec2 image-import perms"
 
 # ── 7c. Dashboard IAM user — programmatic creds for the app ───────────────────
 # Create a sandbox-tagged IAM user with a single inline policy covering every
