@@ -603,6 +603,76 @@
             </button>
             <span class="text-sm text-gray-700">Enable approval gates on sensitive actions</span>
           </div>
+
+          <!-- ── Machine identity (cloud-side JIT) — Phase 3 ─────────────── -->
+          <div class="mt-6 pt-5 border-t border-gray-200">
+            <h3 class="text-sm font-semibold text-gray-800 mb-1">Machine identity (cloud-side JIT)</h3>
+            <p class="text-xs text-gray-500 mb-4">
+              Routes cloud SDK writes (EC2 deploy / Azure VM / GCP compute) through
+              Entitle-issued short-lived grants instead of baseline credentials.
+              Per-cloud opt-in lets you promote one cloud at a time.
+            </p>
+
+            <div class="flex items-center gap-3 mb-3">
+              <button @click="ciMatrix.gate_enabled = !ciMatrix.gate_enabled"
+                      class="relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors"
+                      :class="ciMatrix.gate_enabled ? 'bg-blue-600' : 'bg-gray-300'">
+                <span class="inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform"
+                      :class="ciMatrix.gate_enabled ? 'translate-x-6' : 'translate-x-1'"></span>
+              </button>
+              <span class="text-sm text-gray-700">Master gate <span class="text-xs text-gray-400">(cloud_identity_gate_enabled)</span></span>
+            </div>
+
+            <div class="grid grid-cols-3 gap-3 mb-4" :class="ciMatrix.gate_enabled ? '' : 'opacity-50 pointer-events-none'">
+              <template x-for="c in ['aws','azure','gcp']" :key="c">
+                <label class="flex items-center gap-2 text-sm text-gray-700">
+                  <input type="checkbox" x-model="ciMatrix.flags[c]"
+                         class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+                  <span x-text="c.toUpperCase()"></span>
+                </label>
+              </template>
+            </div>
+
+            <div class="grid grid-cols-3 gap-3 mb-4">
+              <div class="col-span-2">
+                <label class="block text-xs font-semibold text-gray-600 mb-1">Machine-identity email (behalfOf)</label>
+                <input type="email" x-model="ciMatrix.machine.identity_email"
+                       placeholder="dashboard-machine@example.com"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-blue-200">
+              </div>
+              <div>
+                <label class="block text-xs font-semibold text-gray-600 mb-1">TTL ceiling (min)</label>
+                <input type="number" min="1" max="1440" x-model.number="ciMatrix.machine.ttl_ceiling_minutes"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-blue-200">
+              </div>
+            </div>
+
+            <div class="mb-3">
+              <div class="flex items-center justify-between mb-1">
+                <label class="block text-xs font-semibold text-gray-600">Operation matrix (JSON)</label>
+                <div class="flex items-center gap-3">
+                  <button @click="formatCiMatrix()"
+                          class="text-[11px] text-blue-600 hover:underline">Format JSON</button>
+                  <span class="text-[11px] text-gray-400" x-text="`${ciMatrix.count} entries`"></span>
+                </div>
+              </div>
+              <textarea x-model="ciMatrix.raw" rows="10" spellcheck="false"
+                        placeholder='{ "aws:ec2:deploy": { "bundle_id": "..." } }'
+                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-blue-200"></textarea>
+              <p x-show="ciMatrix.parseError" x-cloak class="text-xs text-red-600 mt-1" x-text="ciMatrix.parseError"></p>
+              <p class="text-[11px] text-gray-400 mt-1">
+                Each entry: <code class="bg-gray-100 px-1 rounded">"cloud:resource:verb"</code> &rarr; <code class="bg-gray-100 px-1 rounded">{"bundle_id": "..."}</code> or <code class="bg-gray-100 px-1 rounded">{"role_id": "..."}</code>. Anything outside the matrix is denied (fail closed).
+              </p>
+            </div>
+
+            <div class="flex items-center justify-end gap-2">
+              <button @click="saveCiMatrix()" :disabled="ciMatrix.saving"
+                      class="px-3 py-1.5 text-xs bg-blue-700 hover:bg-blue-800 text-white rounded-lg disabled:opacity-50">
+                <span x-show="!ciMatrix.saving">Save machine-identity config</span>
+                <span x-show="ciMatrix.saving" x-cloak>Saving&hellip;</span>
+              </button>
+            </div>
+          </div>
         </div>
       </template>
 
@@ -991,6 +1061,20 @@ function settingsPage() {
     panelError: '',
     panelCfg: {},
 
+    // Cloud-identity JIT matrix state (Phase 3) — lives alongside the
+    // Entitle integration panel since its config knobs share the same
+    // operator mental model.
+    ciMatrix: {
+      gate_enabled: false,
+      flags: { aws: false, azure: false, gcp: false },
+      machine: { identity_email: '', ttl_ceiling_minutes: 60, poll_interval_ms: 400 },
+      raw: '',
+      count: 0,
+      parseError: '',
+      saving: false,
+      loaded: false,
+    },
+
     // Storage backend prereq state — populated by GET /api/storage/backends
     // on page load (gates the Ansible enable toggle in the integrations
     // list) and refreshed when the Ansible panel opens (renders the
@@ -1177,10 +1261,83 @@ function settingsPage() {
         if (intg.key === 'ansible') {
           await this.loadStorageStatus();
         }
+        // Phase 3: lazy-load the cloud-identity matrix when the Entitle
+        // panel opens so the textarea + flag toggles are pre-populated.
+        if (intg.key === 'entitle' && !this.ciMatrix.loaded) {
+          await this.loadCiMatrix();
+        }
       } catch (e) {
         this.panelError = 'Failed to load configuration: ' + e.message;
       } finally {
         this.panelLoading = false;
+      }
+    },
+
+    // ── Cloud-identity matrix (Phase 3) ──────────────────────────────────
+    async loadCiMatrix() {
+      try {
+        const r = await API.get('/api/cloud-identity/matrix');
+        this.ciMatrix.gate_enabled = !!r.gate_enabled;
+        this.ciMatrix.flags = {
+          aws: !!(r.flags?.aws), azure: !!(r.flags?.azure), gcp: !!(r.flags?.gcp),
+        };
+        this.ciMatrix.machine = {
+          identity_email: r.machine?.identity_email || '',
+          ttl_ceiling_minutes: r.machine?.ttl_ceiling_minutes ?? 60,
+          poll_interval_ms: r.machine?.poll_interval_ms ?? 400,
+        };
+        this.ciMatrix.raw = r.matrix_raw && r.matrix_raw.trim()
+          ? r.matrix_raw
+          : JSON.stringify(r.matrix || {}, null, 2);
+        this.ciMatrix.count = Object.keys(r.matrix || {}).length;
+        this.ciMatrix.parseError = '';
+        this.ciMatrix.loaded = true;
+      } catch (e) {
+        this.ciMatrix.parseError = 'Failed to load: ' + (e.message || e);
+      }
+    },
+
+    formatCiMatrix() {
+      try {
+        const parsed = JSON.parse(this.ciMatrix.raw || '{}');
+        this.ciMatrix.raw = JSON.stringify(parsed, null, 2);
+        this.ciMatrix.count = Object.keys(parsed).length;
+        this.ciMatrix.parseError = '';
+      } catch (e) {
+        this.ciMatrix.parseError = 'Not valid JSON: ' + e.message;
+      }
+    },
+
+    async saveCiMatrix() {
+      let parsed = {};
+      const raw = (this.ciMatrix.raw || '').trim();
+      if (raw) {
+        try {
+          parsed = JSON.parse(raw);
+        } catch (e) {
+          this.ciMatrix.parseError = 'Value must be valid JSON: ' + e.message;
+          return;
+        }
+      }
+      this.ciMatrix.parseError = '';
+      this.ciMatrix.saving = true;
+      try {
+        const mres = await API.patch('/api/cloud-identity/matrix', { matrix: parsed });
+        this.ciMatrix.count = mres.count ?? Object.keys(parsed).length;
+        await API.patch('/api/cloud-identity/flags', {
+          gate_enabled: this.ciMatrix.gate_enabled,
+          aws_enabled: this.ciMatrix.flags.aws,
+          azure_enabled: this.ciMatrix.flags.azure,
+          gcp_enabled: this.ciMatrix.flags.gcp,
+          machine_identity_email: this.ciMatrix.machine.identity_email || '',
+          ttl_ceiling_minutes: this.ciMatrix.machine.ttl_ceiling_minutes,
+          poll_interval_ms: this.ciMatrix.machine.poll_interval_ms,
+        });
+        this.ciMatrix.raw = JSON.stringify(parsed, null, 2);
+      } catch (e) {
+        this.ciMatrix.parseError = 'Save failed: ' + (e.message || e);
+      } finally {
+        this.ciMatrix.saving = false;
       }
     },
 

@@ -110,9 +110,9 @@ def _is_gate_enabled() -> bool:
 def get_operation_matrix() -> dict:
     """Return the configured operation→role matrix as a dict.
 
-    Phase 0 returns an empty dict; Phase 5 populates it from the
-    ``cloud_identity_matrix`` config row (set via the Vaults / Machine
-    roles UI).
+    Phase 0 returns an empty dict; Phase 3 added an admin UI under
+    Settings → Integrations → Entitle → Machine identity that writes
+    here.
     """
     try:
         from . import config_service
@@ -123,6 +123,29 @@ def get_operation_matrix() -> dict:
         return {}
     except Exception:
         return {}
+
+
+def is_cloud_enabled(cloud: CloudName) -> bool:
+    """Return the per-cloud opt-in flag for cloud-identity JIT.
+
+    Phase 3 of the design (§8.2–8.4 — AWS first, then Azure, then GCP)
+    promotes one cloud at a time. Each cloud has its own enable flag:
+
+      cloud_identity_aws_enabled
+      cloud_identity_azure_enabled
+      cloud_identity_gcp_enabled
+
+    Defaults False so a freshly-flipped master gate (cloud_identity_-
+    gate_enabled=True) doesn't immediately route every cloud through
+    Entitle before the operator has confirmed each one. ``elevate()``
+    treats "cloud disabled" the same as "gate off": yields a no-op
+    handle so baseline creds are used for that operation.
+    """
+    try:
+        from . import config_service
+        return config_service.get_bool(f"cloud_identity_{cloud}_enabled", default=False)
+    except Exception:
+        return False
 
 
 @asynccontextmanager
@@ -185,6 +208,25 @@ async def elevate(
         )
         logger.debug(
             "cloud_identity.elevate(%s, %s) [gate off — no-op]",
+            cloud, operation,
+        )
+        yield handle
+        return
+
+    # Phase 3 per-cloud opt-in: even with the master gate on, a cloud
+    # whose flag is False still no-ops so the operator can promote one
+    # cloud at a time (AWS → Azure → GCP per §8.2–8.4 of the design).
+    if not is_cloud_enabled(cloud):
+        handle = ElevationHandle(
+            cloud=cloud,
+            operation=operation,
+            duration_minutes=duration_minutes,
+            payload_hash=payload_hash,
+            requester_user_id=requester_user_id,
+            is_noop=True,
+        )
+        logger.debug(
+            "cloud_identity.elevate(%s, %s) [cloud disabled — no-op]",
             cloud, operation,
         )
         yield handle

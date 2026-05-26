@@ -333,6 +333,7 @@ from fastapi import Depends  # noqa: E402
 from .api import auth, jobs, websocket, aws, azure, gcp, packer, mfa, tokens, users, groups, setup, secrets, storage, images  # noqa: E402
 from .api import workgroups as workgroups_api  # noqa: E402
 from .api import workgroup_overrides as workgroup_overrides_api  # noqa: E402
+from .api import cloud_identity as cloud_identity_api  # noqa: E402
 from .api.mcp_server import get_mcp_asgi_app  # noqa: E402
 
 
@@ -350,6 +351,7 @@ def _feature_gate(flag: str):
 
 app.include_router(setup.router)
 app.include_router(secrets.router)
+app.include_router(cloud_identity_api.router)
 app.include_router(storage.router)
 app.include_router(images.router)
 app.include_router(auth.router)
