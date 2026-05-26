@@ -21,7 +21,15 @@ RUN set -e; \
     for f in /usr/local/share/ca-certificates/corp-ca/*.crt; do \
         [ -e "$f" ] && found=1 && break; \
     done; \
-    if [ "$found" = "1" ]; then update-ca-certificates; fi
+    if [ "$found" = "1" ]; then \
+        update-ca-certificates; \
+        # Switch apt to HTTPS. TLS-inspecting proxies MITM cleanly with the \
+        # corp CA we just installed, but can mangle plaintext apt bodies \
+        # (truncated responses, HTML block pages substituted for Packages). \
+        find /etc/apt/sources.list /etc/apt/sources.list.d -type f \
+            \( -name '*.sources' -o -name '*.list' \) 2>/dev/null \
+            | xargs -r sed -i 's|http://deb.debian.org|https://deb.debian.org|g'; \
+    fi
 
 # Point Python TLS clients (pip, requests, etc.) at the system trust store
 # so they pick up any corp CA installed above.
