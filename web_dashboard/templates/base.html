@@ -110,6 +110,13 @@
           <a x-show="$store.auth.isAdmin" href="/workgroups"
              class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
              {% if request.url.path.startswith('/workgroups') %}{{ nav_active }}{% endif %}">Workgroups</a>
+          {% if entitle_user_jit_enabled and entitle_request_portal_url %}
+          <!-- Entitle user-JIT Phase 4: surface the Request access link only
+               when both the toggle is on and a portal URL is configured. -->
+          <a href="{{ entitle_request_portal_url }}" target="_blank" rel="noopener noreferrer"
+             class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}"
+             title="Request access via Entitle">Request access</a>
+          {% endif %}
         </div>
 
         <!-- User menu -->
@@ -172,10 +179,19 @@
        x-data="toastManager()"
        x-init="window._toast = $data">
     <template x-for="t in toasts" :key="t.id">
-      <div class="flex items-center gap-2 px-4 py-3 rounded-lg shadow-lg text-sm font-medium text-white max-w-xs"
+      <div class="flex items-start gap-2 px-4 py-3 rounded-lg shadow-lg text-sm font-medium text-white max-w-sm"
            :class="t.type === 'error' ? 'bg-red-600' : t.type === 'success' ? 'bg-green-600' : 'bg-blue-600'"
            x-transition>
-        <span x-text="t.message"></span>
+        <div class="flex-1">
+          <div x-text="t.message"></div>
+          <!-- Entitle user-JIT Phase 4: deep-link rendered when the API
+               helper attached requestAccessUrl to the error. -->
+          <a x-show="t.requestAccessUrl" :href="t.requestAccessUrl"
+             target="_blank" rel="noopener noreferrer"
+             class="inline-block mt-1 text-xs underline text-white/90 hover:text-white">
+            Request access &rarr;
+          </a>
+        </div>
       </div>
     </template>
   </div>
@@ -184,9 +200,9 @@
     function toastManager() {
       return {
         toasts: [],
-        show(message, type = 'info', duration = 4000) {
-          const id = Date.now();
-          this.toasts.push({ id, message, type });
+        show(message, type = 'info', duration = 4000, extra = {}) {
+          const id = Date.now() + Math.random();
+          this.toasts.push({ id, message, type, ...extra });
           setTimeout(() => {
             this.toasts = this.toasts.filter(t => t.id !== id);
           }, duration);
@@ -195,8 +211,18 @@
     }
 
     // Shortcut: window.toast('msg') or window.toast('msg', 'error')
-    function toast(msg, type = 'info') {
-      if (window._toast) window._toast.show(msg, type);
+    // Phase 4 Entitle user-JIT: accepts an Error with .requestAccessUrl and
+    // renders the deep link inline.
+    function toast(msg, type = 'info', opts = {}) {
+      if (!window._toast) return;
+      if (msg && typeof msg === 'object' && msg instanceof Error) {
+        const err = msg;
+        const extra = {};
+        if (err.requestAccessUrl) extra.requestAccessUrl = err.requestAccessUrl;
+        window._toast.show(err.message || 'Request failed', type === 'info' ? 'error' : type, 8000, extra);
+        return;
+      }
+      window._toast.show(msg, type, 4000, opts || {});
     }
 
     function approvalModal() {

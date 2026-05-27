@@ -356,6 +356,10 @@ def _feature_flags() -> dict:
         "hyperv_enabled":       config_service.get_bool("hyperv_enabled",        settings.hyperv_enabled),
         "nutanix_enabled":      config_service.get_bool("nutanix_enabled",       settings.nutanix_enabled),
         "xcpng_enabled":        config_service.get_bool("xcpng_enabled",         settings.xcpng_enabled),
+        # Entitle user-JIT Phase 4 UI affordances — surfaces the
+        # "Request access" nav link + portal URL when both are configured.
+        "entitle_user_jit_enabled":   config_service.get_bool("entitle_user_jit_enabled", settings.entitle_user_jit_enabled),
+        "entitle_request_portal_url": config_service.get("entitle_request_portal_url",   settings.entitle_request_portal_url),
     }
 
 

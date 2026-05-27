@@ -102,7 +102,15 @@ window.API = {
             const message = typeof detail === 'string'
                 ? detail
                 : (detail && detail.message) || `HTTP ${resp.status}`;
-            throw new Error(message);
+            const e = new Error(message);
+            // Entitle user-JIT Phase 4: expose request_access_url + missing
+            // scope/level on the Error so callers can render a deep link.
+            if (detail && typeof detail === 'object') {
+                if (detail.request_access_url) e.requestAccessUrl = detail.request_access_url;
+                if (detail.missing_scope)      e.missingScope     = detail.missing_scope;
+                if (detail.missing_level)      e.missingLevel     = detail.missing_level;
+            }
+            throw e;
         }
 
         return resp.json();

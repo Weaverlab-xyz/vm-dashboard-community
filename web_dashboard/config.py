@@ -484,6 +484,12 @@ class Settings(BaseSettings):
     entitle_machine_identity_email: str = ""
     entitle_machine_poll_interval_ms: int = 400     # 250–500ms recommended by design
 
+    # Entitle user-JIT (Phase 4 UI affordances) — surfaces a "Request access"
+    # nav link + 403-page deep links pointing at the matching Entitle resource.
+    entitle_user_jit_enabled: bool = False
+    entitle_request_portal_url: str = ""
+    entitle_resource_ids_json: str = "{}"
+
     class Config:
         env_file = os.path.join(os.path.dirname(__file__), ".env")
         env_file_encoding = "utf-8"

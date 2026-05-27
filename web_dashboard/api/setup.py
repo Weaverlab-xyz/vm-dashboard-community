@@ -367,6 +367,10 @@ class EntitleFeatureConfig(BaseModel):
     entitle_api_token: str = ""         # encrypted at rest
     entitle_webhook_secret: str = ""    # encrypted at rest
     approval_gate_enabled: bool = False
+    # User-JIT (Phase 4) — operator surfaces these via the Settings panel.
+    entitle_user_jit_enabled: bool = False
+    entitle_request_portal_url: str = ""
+    entitle_resource_ids_json: str = "{}"
 
 class ProxmoxFeatureConfig(BaseModel):
     enabled: bool = False

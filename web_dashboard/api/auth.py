@@ -181,12 +181,49 @@ def require_permission(scope: str, level: str):
         if not perms:
             return current_user  # NULL = unrestricted (existing users unaffected)
         if level not in perms.get(scope, []):
+            # Phase 4 UI affordances: attach a deep-link payload when
+            # user-JIT is on so the frontend can render a one-click
+            # request-access link.
+            detail: object = f"Requires '{scope}:{level}' permission."
+            try:
+                deep_link = _build_request_access_link(scope, level)
+            except Exception:
+                deep_link = None
+            if deep_link:
+                detail = {
+                    "message": f"Requires '{scope}:{level}' permission.",
+                    "missing_scope": scope,
+                    "missing_level": level,
+                    "request_access_url": deep_link,
+                }
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Requires '{scope}:{level}' permission.",
+                detail=detail,
             )
         return current_user
     return _check
+
+
+def _build_request_access_link(scope: str, level: str):
+    """Return the operator's Entitle URL for the missing permission, or None.
+
+    See docs/design/entitle-user-jit.md §Phase 4 for resolution shape.
+    """
+    if not config_service.get_bool("entitle_user_jit_enabled", default=False):
+        return None
+    portal = (config_service.get("entitle_request_portal_url", "") or "").rstrip("/")
+    if not portal:
+        return None
+    raw_map = config_service.get("entitle_resource_ids_json", "") or "{}"
+    try:
+        import json as _json
+        mapping = _json.loads(raw_map)
+    except Exception:
+        mapping = {}
+    resource_id = (mapping or {}).get(f"{scope}:{level}", "")
+    if resource_id:
+        return f"{portal}/resources/{resource_id}"
+    return portal
 
 
 def require_workgroup_access(workgroup: str):

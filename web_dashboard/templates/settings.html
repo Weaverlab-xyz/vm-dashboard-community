@@ -673,6 +673,75 @@
               </button>
             </div>
           </div>
+
+          <!-- ── User JIT — Phase 4 UI affordances ─────────────────────────── -->
+          <div class="mt-6 pt-5 border-t border-gray-200">
+            <h3 class="text-sm font-semibold text-gray-800 mb-1">User JIT (dashboard access)</h3>
+            <p class="text-xs text-gray-500 mb-4">
+              Surfaces a <strong>Request access</strong> link in the nav and deep-links from
+              the dashboard's 403 page to the matching Entitle resource so users can
+              self-serve missing permissions. Populate the resource map from the
+              <code>resource_ids</code> output of <code>terraform/entitle_user_jit/</code>.
+            </p>
+
+            <div class="flex items-center gap-3 mb-3">
+              <button @click="userJit.enabled = !userJit.enabled"
+                      class="relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors"
+                      :class="userJit.enabled ? 'bg-blue-600' : 'bg-gray-300'">
+                <span class="inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform"
+                      :class="userJit.enabled ? 'translate-x-6' : 'translate-x-1'"></span>
+              </button>
+              <span class="text-sm text-gray-700">User JIT enabled
+                <span class="text-xs text-gray-400">(entitle_user_jit_enabled)</span>
+              </span>
+            </div>
+
+            <div class="mb-3">
+              <label class="block text-xs font-semibold text-gray-600 mb-1">Request portal URL</label>
+              <input type="url" x-model="userJit.portal_url"
+                     placeholder="https://entitle.io/catalog/vm-dashboard"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-blue-200">
+              <p class="text-[11px] text-gray-400 mt-1">
+                Base URL of your Entitle portal's VM Dashboard bundle. The 403 page falls back
+                to this when a missing permission has no specific resource id in the map below.
+              </p>
+            </div>
+
+            <div class="mb-3">
+              <div class="flex items-center justify-between mb-1">
+                <label class="block text-xs font-semibold text-gray-600">Resource id map (JSON)</label>
+                <div class="flex items-center gap-3">
+                  <button @click="formatUserJitMap()" class="text-[11px] text-blue-600 hover:underline">Format JSON</button>
+                  <span class="text-[11px] text-gray-400" x-text="`${userJit.map_count} entries`"></span>
+                </div>
+              </div>
+              <textarea x-model="userJit.resource_ids_raw" rows="8" spellcheck="false"
+                        placeholder='{ "aws:read": "&lt;entitle-resource-id&gt;", "vms:write": "&lt;id&gt;" }'
+                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-blue-200"></textarea>
+              <p x-show="userJit.parseError" x-cloak class="text-xs text-red-600 mt-1" x-text="userJit.parseError"></p>
+              <p class="text-[11px] text-gray-400 mt-1">
+                Paste the <code class="bg-gray-100 px-1 rounded">resource_ids</code> output of
+                <code class="bg-gray-100 px-1 rounded">terraform/entitle_user_jit/</code> (Phase 2).
+                Keys are <code class="bg-gray-100 px-1 rounded">"scope:level"</code>; e.g.
+                <code class="bg-gray-100 px-1 rounded">"aws:write"</code>.
+              </p>
+            </div>
+
+            <div class="text-[11px] text-gray-500 bg-amber-50 border border-amber-200 rounded p-2 mb-3">
+              <strong>JWT TTL tuning:</strong> tighter <code class="bg-amber-100 px-1 rounded">access_token_expire_minutes</code>
+              means a revoked Entitle grant takes effect on the user's next request rather than at the
+              token's natural expiry. The design recommends <strong>&le;30 minutes</strong> for
+              high-sensitivity tenants.
+            </div>
+
+            <div class="flex items-center justify-end gap-2">
+              <button @click="saveUserJit()" :disabled="userJit.saving"
+                      class="px-3 py-1.5 text-xs bg-blue-700 hover:bg-blue-800 text-white rounded-lg disabled:opacity-50">
+                <span x-show="!userJit.saving">Save User JIT config</span>
+                <span x-show="userJit.saving" x-cloak>Saving&hellip;</span>
+              </button>
+            </div>
+          </div>
         </div>
       </template>
 
@@ -1075,6 +1144,17 @@ function settingsPage() {
       loaded: false,
     },
 
+    // User-JIT settings (Phase 4 of Entitle user-JIT plan)
+    userJit: {
+      enabled: false,
+      portal_url: '',
+      resource_ids_raw: '{}',
+      map_count: 0,
+      parseError: '',
+      saving: false,
+      loaded: false,
+    },
+
     // Storage backend prereq state — populated by GET /api/storage/backends
     // on page load (gates the Ansible enable toggle in the integrations
     // list) and refreshed when the Ansible panel opens (renders the
@@ -1266,6 +1346,10 @@ function settingsPage() {
         if (intg.key === 'entitle' && !this.ciMatrix.loaded) {
           await this.loadCiMatrix();
         }
+        // Phase 4: same lazy-load for the user-JIT subsection.
+        if (intg.key === 'entitle' && !this.userJit.loaded) {
+          await this.loadUserJit();
+        }
       } catch (e) {
         this.panelError = 'Failed to load configuration: ' + e.message;
       } finally {
@@ -1338,6 +1422,67 @@ function settingsPage() {
         this.ciMatrix.parseError = 'Save failed: ' + (e.message || e);
       } finally {
         this.ciMatrix.saving = false;
+      }
+    },
+
+    // ── User JIT (Phase 4 of Entitle user-JIT plan) ───────────────────────
+    async loadUserJit() {
+      try {
+        const r = await API.get('/api/setup/feature/entitle');
+        this.userJit.enabled = !!r.entitle_user_jit_enabled;
+        this.userJit.portal_url = r.entitle_request_portal_url || '';
+        const raw = r.entitle_resource_ids_json && r.entitle_resource_ids_json.trim()
+          ? r.entitle_resource_ids_json
+          : '{}';
+        this.userJit.resource_ids_raw = raw;
+        try {
+          this.userJit.map_count = Object.keys(JSON.parse(raw) || {}).length;
+        } catch (_) {
+          this.userJit.map_count = 0;
+        }
+        this.userJit.parseError = '';
+        this.userJit.loaded = true;
+      } catch (e) {
+        this.userJit.parseError = 'Failed to load: ' + (e.message || e);
+      }
+    },
+
+    formatUserJitMap() {
+      try {
+        const parsed = JSON.parse(this.userJit.resource_ids_raw || '{}');
+        this.userJit.resource_ids_raw = JSON.stringify(parsed, null, 2);
+        this.userJit.map_count = Object.keys(parsed).length;
+        this.userJit.parseError = '';
+      } catch (e) {
+        this.userJit.parseError = 'Not valid JSON: ' + e.message;
+      }
+    },
+
+    async saveUserJit() {
+      let parsed = {};
+      const raw = (this.userJit.resource_ids_raw || '').trim();
+      if (raw) {
+        try {
+          parsed = JSON.parse(raw);
+        } catch (e) {
+          this.userJit.parseError = 'Value must be valid JSON: ' + e.message;
+          return;
+        }
+      }
+      this.userJit.parseError = '';
+      this.userJit.saving = true;
+      try {
+        await API.patch('/api/setup/feature/entitle', {
+          entitle_user_jit_enabled: this.userJit.enabled,
+          entitle_request_portal_url: this.userJit.portal_url || '',
+          entitle_resource_ids_json: raw ? JSON.stringify(parsed) : '{}',
+        });
+        this.userJit.map_count = Object.keys(parsed).length;
+        this.userJit.resource_ids_raw = JSON.stringify(parsed, null, 2);
+      } catch (e) {
+        this.userJit.parseError = 'Save failed: ' + (e.message || e);
+      } finally {
+        this.userJit.saving = false;
       }
     },
 
