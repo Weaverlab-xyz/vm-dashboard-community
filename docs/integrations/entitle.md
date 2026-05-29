@@ -195,6 +195,79 @@ Cloud-Identity JIT execution plan).
 
 ---
 
+## User JIT — Entra-group-backed dashboard permissions via Entitle
+
+The approval gate governs **who can ask** for a privileged action.
+The machine-identity track above governs **what cloud credentials**
+that action runs with. The Entitle User-JIT track is the third leg:
+it governs **what permissions the user has at all** — granted
+just-in-time through Entitle instead of statically assigned by an
+admin.
+
+Today the dashboard's user permissions (e.g. `aws:write`,
+`images:delete`, `dashboard-admin`) are static — once granted, they
+persist until an admin revokes them. For enterprise audit, that
+leaves a long tail of standing privilege ("Alice last used
+`aws:write` six months ago and still has it"). The Entitle
+User-JIT track lets users **request** those permissions through
+the same Entitle workflow they already use for cloud-side access,
+and the dashboard recognises the time-bound grant on the next
+login or token refresh.
+
+### How it relates to the other two tracks
+
+| Axis | Approval gate | Machine identity | **User JIT** |
+|---|---|---|---|
+| Concern | Who can trigger an action | What creds the action runs with | **What permissions the user has at all** |
+| Subject | User performing an action | Dashboard process | **User session** |
+| Mechanism | Per-action Entitle approval | Per-call `elevate(...)` | **Entra group membership read at login** |
+| Grant duration | Single action | Single SDK call (~15 min) | **Time-bound; mirrors Entra group TTL** |
+| Revocation | Action denied | Cloud-side IAM revoked | **Group falls off → next login lacks scope** |
+| Default state | Off (`APPROVAL_GATE_ENABLED`) | Off (`cloud_identity_gate_enabled`) | **Off (`entitle_user_jit_enabled`)** |
+
+The three layers are independent and can be enabled in any combination.
+They share the same Entitle tenant + token + webhook — but the
+User-JIT track additionally requires **Entra ID** for group resolution
+(no Entra → fall back to static permissions only).
+
+### Setup additions (when enabling the User-JIT track)
+
+| Field | Where | Notes |
+|---|---|---|
+| `entitle_user_jit_enabled` | Settings → Integrations → Entitle → User JIT | Master toggle. Off by default. |
+| Entra tenant ID + admin SP | Same panel | Used by the bootstrap script for one-shot group provisioning. |
+| OAuth group mapping | Same panel + `/api/admin/oauth-group-mappings` | Maps `dashboard-aws-write` → scope `aws:write`. Bootstrap populates a default map for 24 scope×level + N workgroup groups. |
+| Resource ID map | Same panel (JSON) | Maps each scope to the corresponding Entitle resource ID, so `require_permission` can attach a one-click request-access URL to its 403 response. |
+| Entitle bundle | Entitle console | One **VM Dashboard** virtual application; per-resource policy (auto-approve vs human-reviewed) is per the operator's preference. |
+| Entra groups | Bootstrap script | `dashboard-admin` + `dashboard-baseline` + 24 `dashboard-<scope>-<level>` + N `dashboard-workgroup-<name>`. Idempotent. |
+
+The Terraform module under
+[`terraform/entitle_user_jit/`](../../terraform/entitle_user_jit) covers
+the Entitle side of provisioning (one application + workflows + resources +
+policies in a single `terraform apply`). The Entra bootstrap is a
+separate Python script — `python -m web_dashboard.scripts.bootstrap_entra_groups` —
+because Graph operations don't fit the Terraform workflow as cleanly.
+
+### Status
+
+| Phase | Implementation | E2E verification |
+|---|---|---|
+| Resolver | OAuth callback computes UNION across all matched groups every login; baseline preserved via `effective_permissions = union(baseline, session)` | Shipped scaffolding |
+| Bootstrap (Entra) | Idempotent Graph + DB provisioner for all 28 groups | Shipped scaffolding |
+| Bootstrap (Entitle) | Terraform module + `bootstrap_entitle_app.py` wrapper | Pending real Entitle tenant |
+| UI affordances | Settings panel + 403 deep links (toast → one-click request access in Entitle) | Shipped scaffolding |
+| E2E request flow | "Request → group → login → scope" round-trip | Not started — requires real Entitle + Entra |
+| Multi-tenancy hook | Per-tenant group resolution | Not started — depends on MT Phases 4 + 5 |
+
+### Further reading
+
+- [`docs/design/entitle-user-jit.md`](../design/entitle-user-jit.md) — full design, including the operation matrix and OAuth resolution flow.
+- `docs/runbooks/entitle-user-jit-phase-0-resolver.md` — resolver UNION behaviour smoke test.
+- `docs/runbooks/entitle-user-jit-phase-1-bootstrap-entra.md` — Entra group provisioner; **requires a configured Entra tenant**.
+- `docs/runbooks/entitle-user-jit-phase-2-bootstrap-entitle.md` — Entitle virtual-application provisioner; **requires a configured Entitle tenant**.
+
+---
+
 ## Advanced: per-resource approval routing
 
 Entitle supports routing approval requests to different reviewer groups based on
