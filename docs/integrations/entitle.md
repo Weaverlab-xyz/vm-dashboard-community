@@ -130,6 +130,71 @@ read-only operations, and job status queries.
 
 ---
 
+## Machine identity — JIT cloud credentials via Entitle
+
+The approval gate covers **who can ask** for a privileged action. There's
+a separate, complementary track that covers **what credentials get used**
+when the dashboard executes that action against AWS / Azure / GCP — the
+Cloud-Identity JIT design.
+
+Today the dashboard's three cloud identities (AWS IAM user, Azure Service
+Principal, GCP Service Account) carry broad standing privilege all the
+time. The machine-identity track replaces that with **per-request,
+short-TTL elevations** issued through the same Entitle tenant you've
+already set up for human approvals — so an `EC2 deploy` triggers a fresh
+IAM role grant scoped to that one action, valid for ~15 minutes, audited
+end-to-end in Entitle, and auto-revoked afterwards. No long-lived keys
+in the dashboard.
+
+### How it relates to the approval gate
+
+| Axis | Approval gate (this doc, above) | Machine identity (Cloud-Identity JIT) |
+|---|---|---|
+| Concern | **Who** is allowed to trigger the action | **What credentials** the action runs with |
+| Subject | The dashboard *user* | The dashboard *process* |
+| Surface | A modal in the UI; webhook callback | A cloud SDK call wrapped in `async with elevate(...)` |
+| Default state | Off (opt-in per environment) | Off — gated on `cloud_identity_gate_enabled` |
+| Approval flow | Reviewer in Entitle approves the request | Entitle auto-approves machine requests against a dedicated bundle |
+| Failure mode | Action blocked; user sees "denied" | Action raises `CloudIdentityError`; no silent fall-back to baseline creds |
+
+The two layers are orthogonal — you can run the approval gate on its own,
+the machine-identity track on its own, or both together (recommended for
+production). They share **the same Entitle tenant, API token, and webhook
+secret** — no additional credentials to manage.
+
+### Setup additions (when enabling the machine-identity track)
+
+| Field | Where | Notes |
+|---|---|---|
+| `cloud_identity_gate_enabled` | Settings → Integrations → Entitle → Machine identity | Master kill-switch. Off by default. |
+| `cloud_identity_<cloud>_enabled` | Same panel (3 checkboxes) | Per-cloud opt-in — promote AWS → Azure → GCP one at a time |
+| Operation matrix | Same panel (JSON textarea) | Maps dashboard operations (`aws:ec2:deploy`) → Entitle resource IDs + per-cloud IAM roles |
+| Entitle bundle | Entitle console | A dedicated **machine-identity** bundle with auto-approve enabled; do NOT route to a human reviewer |
+
+The Terraform module under
+[`terraform/entitle_user_jit/`](../../terraform/entitle_user_jit) covers
+the user-side workflows. A companion machine-identity module is shipped
+under `terraform/entitle_machine_identity/` (Phase 2 of the
+Cloud-Identity JIT execution plan).
+
+### Status
+
+| Cloud | Implementation | E2E verification |
+|---|---|---|
+| AWS  | EC2 deploy / bulk-deploy / terminate wrapped in `elevate(...)` | Pending real Entitle tenant + auto-approve bundle |
+| Azure | Service Principal swap path implemented | Same |
+| GCP  | Service Account impersonation path implemented | Same |
+| Sweeper | AWS reconciliation, Azure trust-self-expiry, GCP agent-driven revoke | Phase 4a/b/c shipped |
+
+### Further reading
+
+- [`docs/design/cloud-identity-jit.md`](../design/cloud-identity-jit.md) — full design, threat model, per-cloud trade-offs.
+- `docs/runbooks/cloud-identity-jit-phase-0-smoke-test.md` — scaffolding smoke test (no real Entitle calls).
+- `docs/runbooks/cloud-identity-jit-phase-1-entitle-submit.md` — first end-to-end Entitle submit-and-poll loop; **requires a configured Entitle tenant**.
+- `docs/runbooks/cloud-identity-jit-phase-4a-aws-sweeper.md` (and `4b`, `4c`) — orphan-row sweeper per cloud.
+
+---
+
 ## Advanced: per-resource approval routing
 
 Entitle supports routing approval requests to different reviewer groups based on
