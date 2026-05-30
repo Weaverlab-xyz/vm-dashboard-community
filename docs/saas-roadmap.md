@@ -7,8 +7,16 @@ labels.
 
 For the one piece of SaaS architecture that's already specified in
 detail (the JWT root-key bootstrap problem and its managed-identity
-solution), see [saas-comparison.md](saas-comparison.md). Everything
-in *this* doc is either planned, in design, or under research.
+solution), see [saas-comparison.md](saas-comparison.md).
+
+> **Maintenance note (2026-05-30):** several items below have moved off
+> `Planned`/`Researching` — the per-tenant isolation primitive
+> (multi-tenancy), tenant-scoped runner networking, the Temporal durable
+> promote, and the containerised Arc worker are all now in flight or
+> dev-verified behind feature flags. Status labels and the "Today's
+> reality" section reflect that. Per-feature design/execution plans are
+> tracked in the (non-public) engineering planning workspace; this doc
+> stays the high-level honest-status view.
 
 ---
 
@@ -16,9 +24,15 @@ in *this* doc is either planned, in design, or under research.
 
 Each feature carries two labels:
 
-- **Status** — `Built (prod)` (shipping in the prod deployment
-  topology today), `Planned` (specified, not built), `In design`
-  (sketched, not specified), or `Researching` (open question).
+- **Status** — one of:
+  - `Built (prod)` — shipping in the prod deployment topology today.
+  - `Built (dev)` — implemented and dev-verified on the docker-compose
+    rig, behind a feature flag; not yet through QA/prod cutover.
+  - `In progress` — actively under construction; some phases shipped as
+    scaffolding, more remain.
+  - `Planned` — specified, not built.
+  - `In design` — sketched, not specified.
+  - `Researching` — open question; feasibility or value not yet settled.
 - **Dev-testable?** — `Yes` if the feature can be stood up and
   exercised on the existing docker-compose dev rig; `Partial` if it
   needs extra cloud topology a developer might not have; `No` if it
@@ -28,6 +42,8 @@ Features marked `Built (prod)` exist in the single-tenant Azure-hosted
 prod deployment; community users running the open-source edition don't
 get them automatically because they depend on Azure infrastructure
 (Key Vault, Arc, etc.) the community deployment doesn't assume.
+`Built (dev)` features live in the dev branch behind flags and are the
+next things queued for QA.
 
 ---
 
@@ -52,15 +68,21 @@ get them automatically because they depend on Azure infrastructure
 
 - **What prod does:** system-assigned managed identity on a single
   Arc-enrolled host. Single-tenant.
-- **What SaaS adds:** per-tenant **workload identity** — each
-  Container Apps revision (or AKS pod) authenticates via an OIDC
-  federated token, scoped to that tenant's Key Vault. No
-  system-assigned identity is shared across tenants.
-- **Status:** Planned. Builds directly on the prod bootstrap above.
-- **Dev-testable?** Partial. Faithful to spec requires Container Apps
-  or AKS; the OIDC exchange can be approximated locally with
-  `DefaultAzureCredential` against an `az login` session, which
-  validates the code path but not the production hosting model.
+- **What SaaS adds:** per-tenant **workload identity** — each tenant
+  authenticates to its own Key Vault via a federated OIDC token rather
+  than a shared system-assigned identity.
+- **Status:** In design.
+- **Dev-testable?** Partial. The OIDC exchange can be approximated
+  locally with `DefaultAzureCredential` against an `az login` session,
+  which validates the code path but not the production hosting model.
+
+> **Feasibility flag (2026-05-30):** an earlier draft specified this as
+> per-tenant **Container Apps revisions / AKS pods**. That hosting model
+> was rejected on cost; the direction is to stay on docker-compose, not
+> migrate to managed containers. The *idea* (per-tenant federated
+> identity scoped to per-tenant vaults) is sound but has to be re-scoped
+> to the docker-compose topology before it gets an execution plan — the
+> AKS/Container-Apps framing is explicitly out.
 
 ### Public webhook endpoint per tenant
 
@@ -69,10 +91,10 @@ get them automatically because they depend on Azure infrastructure
   inbound webhooks (Entitle approvals, EPM-L event callbacks).
 - **What SaaS adds:** a stable public HTTPS endpoint per tenant out
   of the box, scoped to that tenant's routes.
-- **Status:** Planned.
+- **Status:** In design.
 - **Dev-testable?** Partial. The endpoint logic itself works in dev
-  via ngrok; the per-tenant scoping needs multi-tenancy (below) to
-  be meaningful.
+  via ngrok; the per-tenant scoping rides on multi-tenancy (now
+  Built (dev), below).
 
 ---
 
@@ -97,7 +119,10 @@ get them automatically because they depend on Azure infrastructure
   task and the cloud-side `ec2.ImportImage` / `images.create_or_update` /
   `images.insert` poll. A dashboard restart resumes the workflow at
   the last activity boundary; orphan tasks become impossible.
-- **Status:** Planned.
+- **Status:** In progress. A Temporal-in-docker dev rig + the
+  cloud-agnostic base activities (preflight/registry/audit) have shipped
+  as scaffolding. The load-bearing per-cloud import activities +
+  restart-resume are next.
 - **Dev-testable?** Yes. Temporal runs in docker-compose; the
   workflow + activities are plain Python wrapping the existing
   `promote_runner_service` + `image_registry_service.promote_to_*_automated`
@@ -113,18 +138,17 @@ get them automatically because they depend on Azure infrastructure
   dashboard triggers an **Azure Automation runbook** dispatched to
   that Arc worker, which promotes the local OVA to the chosen cloud
   provider — uploading the artefact, kicking off the cloud-native
-  image import, and reporting back. Promote-to-AWS and
-  promote-to-Azure are shipping today; promote-to-GCP is the next
-  prod increment.
+  image import, and reporting back.
 - **What SaaS adds beyond prod:** multi-tenant Arc-worker scoping —
   each tenant's Arc machine runs runbooks issued only by that
   tenant's dashboard view; the `/images` surface shows per-tenant
   OVAs and per-tenant promotion history.
 - **Status:** **Built (prod)** for on-prem OVA storage + promote to
-  AWS + promote to Azure. **Planned (next prod increment)** for
-  promote to GCP. **In design** for tenant scoping.
-- **Dev-testable?** Partial. Promotion to AWS/Azure can be exercised
-  in dev today (the cloud side is unchanged); the Arc-runbook
+  AWS + promote to Azure. Promote-to-GCP is now **dev-verified** (the
+  GCP Export VHD endpoint + Cloud Run promote runner). Tenant scoping
+  rides on multi-tenancy (Built (dev)).
+- **Dev-testable?** Partial. Promotion to AWS/Azure/GCP can be
+  exercised in dev today (the cloud side is unchanged); the Arc-runbook
   dispatch leg needs a real Arc-enrolled worker registered against
   the dev tenant's Azure Automation account.
 
@@ -134,42 +158,29 @@ get them automatically because they depend on Azure infrastructure
   no concept of a remote worker that performs cloud-side actions on
   the dashboard's behalf.
 - **What prod adds today:** the Arc-worker lives on a customer-owned
-  machine. The customer is responsible for: enrolling that machine in
-  Azure Arc, installing the Hybrid Worker extension, installing the
-  Automation runbook prerequisites (PowerShell modules, Az.* modules,
-  AWS Tools for PowerShell, GCP SDK, qemu-img, etc.), keeping those
-  prereqs current, and granting the worker the cloud-side IAM the
-  runbooks need to push artefacts.
+  machine the customer enrols in Azure Arc, installing the Hybrid
+  Worker extension + every runbook prereq (Az.* modules, AWS Tools for
+  PowerShell, GCP SDK, qemu-img, etc.) by hand.
 - **What SaaS adds beyond prod:** ship the Arc worker as a **single
   container image** the customer pulls and runs. The image bundles
   every runbook prereq pre-installed and pre-versioned; enrollment
   with the SaaS tenant happens via a short-lived registration token
-  the dashboard mints (similar to a GitLab runner token), so the
-  spoke comes online with a `docker run` and a paste-the-token step.
-  Cloud-side IAM still belongs to the customer (we don't ask for
-  their cloud creds), but the worker container surfaces a clear
-  "here are the IAM permissions I need" doc the operator hands to
-  their cloud team.
-
-  This gives SaaS a true **hub-and-spoke** topology: the hub is the
-  hosted dashboard; each customer runs N containerised spokes wherever
-  their on-prem image artefacts live (VMware host, Hyper-V host,
-  laptop, NAS — anywhere Docker runs). The spoke is the *only* piece
-  the customer hosts, and it's ~one command to install.
-
-- **Status:** Researching. Open questions: which runbook prereqs are
-  pinnable vs. drift-prone, whether the worker registers via Azure
-  Arc machine-enrollment or via a dashboard-native gRPC channel,
-  signed-image distribution (the worker holds cloud creds in memory
-  during a runbook run, so image provenance matters).
-- **Dev-testable?** Partial. The container can be built and run on
-  the docker-compose dev rig; the SaaS-side registration handshake
-  needs the hosted dashboard side to exist before end-to-end testing.
+  the dashboard mints, so the spoke comes online with a `docker run`
+  and a paste-the-token step. This gives SaaS a true
+  **hub-and-spoke** topology: the hub is the hosted dashboard; each
+  customer runs N containerised spokes wherever their on-prem image
+  artefacts live.
+- **Status:** In progress. The dashboard side is being built — table +
+  flag, a Hybrid Compute SDK wrapper, token mint + script templates,
+  the `/workers` UI, and the reconciliation polling loop have shipped as
+  scaffolding. Row actions + the dev validation gate remain, and the
+  container-image packaging itself is still to come.
+- **Dev-testable?** Partial. The dashboard onboarding flow + polling
+  run on the dev rig with a stubbed Arc list; the real registration
+  handshake + 1-hour token expiry need a QA Arc tenant.
 - **Why it matters for SaaS:** removes the highest-friction step in
-  the current Arc-worker onboarding. Most SaaS prospects bounce when
-  they read "Step 3: enroll your machine in Azure Arc and install
-  the following 7 PowerShell modules" — packaging the worker as
-  pull-and-run shortens onboarding from days to minutes.
+  Arc-worker onboarding — packaging the worker as pull-and-run
+  shortens onboarding from days to minutes.
 
 ### Continuous CVE scanning per image version
 
@@ -189,9 +200,14 @@ get them automatically because they depend on Azure infrastructure
 - **What SaaS adds:** suggestions like *"this image is missing CIS
   benchmark §5.2.3 — apply this provisioner snippet to your next
   rebuild"* generated against the stored bill-of-materials.
-- **Status:** Researching. Useful output quality depends on
-  manifest fidelity from the CVE-scanning feature above.
+- **Status:** Researching.
 - **Dev-testable?** Yes (call an LLM with a stored manifest).
+
+> **Feasibility flag (2026-05-30):** deferred — no execution plan yet.
+> Output quality depends entirely on manifest fidelity from the CVE-
+> scanning feature above, which isn't built. Building hardening advice
+> on top of a manifest store that doesn't exist would be speculative.
+> Revisit once a real bill-of-materials ships.
 
 ### Multi-tenant image catalog
 
@@ -199,8 +215,9 @@ get them automatically because they depend on Azure infrastructure
   dashboard deployment.
 - **What SaaS adds:** one catalog per tenant *and* a cross-tenant
   catalog for organisation-wide blessed base images.
-- **Status:** Planned. Hinges on the multi-tenancy primitive
-  (cross-cutting section below).
+- **Status:** Planned — now unblocked. The multi-tenancy primitive is
+  Built (dev) and the image registry exists; what remains is scoping the
+  registry per tenant + the org-scope catalog.
 - **Dev-testable?** Yes (DB schema partitioning + UI scoping).
 
 ### Per-tenant signed build manifests
@@ -223,11 +240,16 @@ get them automatically because they depend on Azure infrastructure
 - **What community does:** auto-wrap (shell script → playbook).
 - **What SaaS adds:** generator that reads the dashboard's asset
   schema *and* the tenant's live inventory; produces opinionated
-  YAML tuned to the tenant's environment. *"Install Docker on my
-  SUSE assets in AWS"* yields a playbook that already knows which
-  assets those are.
-- **Status:** In design.
+  YAML tuned to the tenant's environment.
+- **Status:** Researching.
 - **Dev-testable?** Yes.
+
+> **Feasibility flag (2026-05-30):** deferred — no execution plan yet.
+> Buildable (it's an LLM call over the asset schema), but the output is
+> a playbook that runs with privilege on real hosts. Auto-applying
+> generated config is a genuine safety risk; this needs a human-in-the-
+> loop review gate designed up front, and its value over the existing
+> auto-wrap is unproven. Keep researching before committing a plan.
 
 ### Drift-aware runs
 
@@ -236,7 +258,7 @@ get them automatically because they depend on Azure infrastructure
 - **What SaaS adds:** stores the per-target hash of the last
   successfully applied playbook; surfaces *"state of host X
   unverified since 2026-04-12"*.
-- **Status:** Planned.
+- **Status:** In design.
 - **Dev-testable?** Yes.
 
 ### Tenant-scoped runner networking
@@ -246,7 +268,9 @@ get them automatically because they depend on Azure infrastructure
 - **What SaaS adds:** each run scoped to the tenant's network
   namespace; tenant A's run can't reach tenant B's targets even
   under a shared cloud account.
-- **Status:** Planned. Hinges on multi-tenancy.
+- **Status:** **Built (dev).** Shipped as a `tenant_network_service` +
+  runner-spawn injection; the load-bearing cross-tenant ping test passes
+  by design (100% packet loss A→B).
 - **Dev-testable?** Yes (per-tenant Docker network).
 
 ### Tenant-scoped asset libraries
@@ -254,7 +278,10 @@ get them automatically because they depend on Azure infrastructure
 - **What community does:** single-tenant storage.
 - **What SaaS adds:** each tenant gets its own storage namespace,
   inventory, and credential set without per-instance deployment.
-- **Status:** Planned. Hinges on multi-tenancy.
+- **Status:** Partial. The multi-tenancy service-scoping sweep already
+  scopes config, secrets, and JIT per tenant; the per-tenant **storage
+  namespace** for assets/images is the remaining piece and lands with
+  the multi-tenant image catalog work.
 - **Dev-testable?** Yes.
 
 ---
@@ -268,7 +295,7 @@ get them automatically because they depend on Azure infrastructure
   operators running `apply` concurrently can corrupt state.
 - **What SaaS adds:** remote backend (S3 + DynamoDB lock, or the
   Azure / GCP equivalent) serialising concurrent operations.
-- **Status:** Planned.
+- **Status:** In design.
 - **Dev-testable?** Yes. Drop in any remote backend; locking is
   a backend-config change, not a code rewrite.
 
@@ -279,7 +306,7 @@ get them automatically because they depend on Azure infrastructure
 - **What SaaS adds:** scheduled reconciler that runs `terraform
   plan` against live cloud state and flags differences in the
   dashboard.
-- **Status:** Planned.
+- **Status:** In design.
 - **Dev-testable?** Yes.
 
 ### AI-assisted module refactoring
@@ -291,6 +318,13 @@ get them automatically because they depend on Azure infrastructure
   history.
 - **Status:** Researching.
 - **Dev-testable?** Yes.
+
+> **Feasibility flag (2026-05-30):** deferred — no execution plan yet.
+> Lowest-value of the three AI items and the riskiest: auto-refactoring
+> Terraform modules touches infrastructure-defining code, and a wrong
+> suggestion silently applied could destroy resources. Needs the IaC
+> hardening work (state + drift) as a foundation and a strict
+> human-in-the-loop. Keep researching.
 
 ### Compliance-as-code
 
@@ -313,11 +347,16 @@ and network scoping**.
 
 ### Per-tenant isolation primitive
 
-- **Status:** Planned. This is the load-bearing change for most of
-  the SaaS-distinct features; until it's built, those features are
-  blocked.
-- **Dev-testable?** Yes. Multi-tenancy can be exercised in dev with
-  two synthetic tenants on the same docker-compose stack.
+- **Status:** **Built (dev).** This was the load-bearing change for
+  most SaaS-distinct features, and it's now implemented and dev-gated:
+  schema-per-tenant SQLAlchemy wiring, the service-layer scoping sweep,
+  per-tenant Docker network isolation, auth + tenant memberships + a
+  JWT tenant claim, and tenant CRUD admin endpoints all shipped. The
+  dev validation suite (10 tests) **passed the QA gate 2026-05-30**.
+  Next is QA cutover with a single tenant, then onboarding a real
+  second tenant.
+- **Dev-testable?** Yes. Exercised in dev with two synthetic tenants
+  on the same docker-compose stack.
 
 ### Centralised audit pane
 
@@ -328,40 +367,57 @@ and network scoping**.
   signed build manifests (image promotion), Temporal workflow
   history (promote jobs), and Terraform state-lock history
   (concurrent apply serialisation).
-- **Status:** In design. Depends on the underlying features being
-  built first (most of which are themselves not built).
-- **Dev-testable?** Yes, once the underlying features exist.
+- **Status:** In design. Aggregates several feeds that are themselves
+  not built yet (signed manifests, TF state-lock history), so it lands
+  *after* those, not before.
+- **Dev-testable?** Yes, once the underlying feeds exist.
 
 ### Cross-tenant catalog
 
-- **Status:** Planned. Image-registry and asset-library entries can
+- **What SaaS adds:** image-registry and asset-library entries can
   be promoted from tenant-scope to org-scope.
+- **Status:** Planned — unblocked by the multi-tenancy primitive.
 - **Dev-testable?** Yes.
 
 ---
 
 ## Today's reality
 
-Two SaaS-shaped features ship in the prod deployment topology today:
+**Built (prod)** — two SaaS-shaped features ship in the prod
+deployment topology today:
 
 - **Root-key bootstrap via managed identity + Key Vault.** The
   bootstrap loop is solved; remaining SaaS work on this axis is
-  per-tenant scoping via workload identity (OIDC federation per
-  Container Apps revision).
+  per-tenant scoping via federated identity.
 - **On-prem image promotion via Azure Arc** for AWS and Azure
-  targets. Customers store OVAs locally on an Arc-enrolled machine;
-  the cloud-hosted dashboard triggers Azure Automation runbooks
-  there to promote the OVA to the chosen cloud provider. Promote-
-  to-GCP is the named next prod increment; multi-tenant scoping is
-  the SaaS-side increment after that.
+  targets. Promote-to-GCP is now dev-verified and queued behind it.
 
-Everything else here is paper specification, not running code. The
-community edition is the only edition the open-source repository
-ships; community users don't get the prod-topology features above
-automatically because those depend on Azure infrastructure (Key
-Vault, Automation, Arc) the community deployment doesn't assume.
+**Built (dev)** — implemented behind flags on the docker-compose rig,
+queued for QA:
 
-When a feature flips to **Built (prod)**, this doc updates. When it
-flips into the community open-source surface, the relevant lifecycle
-doc gets the inline tease the way [image-management.md](image-management.md)
-already teases SaaS cross-cloud promote.
+- **Per-tenant isolation primitive** (multi-tenancy) — dev validation
+  gate passed 2026-05-30; QA cutover is the next step.
+- **Tenant-scoped runner networking** — per-tenant Docker network,
+  cross-tenant traffic blocked by design.
+
+**In progress** — actively under construction:
+
+- **Durable cross-cloud promote** (Temporal) — dev rig + base
+  activities scaffolded; per-cloud import + restart-resume next.
+- **Containerised Arc-worker** — dashboard onboarding + polling
+  scaffolded; container packaging + QA token-expiry test remain.
+
+**In design** — CVE scanning + signed manifests, config drift-aware
+runs, TF state-locking + drift detection + compliance-as-code, the
+audit pane + cross-tenant catalog, and re-scoped tenant identity (OIDC)
++ per-tenant webhook.
+
+**Researching (deferred — no plan yet)** — the three AI-assisted
+features (image hardening, playbook generation, module refactoring).
+Each is buildable but flagged above: value unproven and/or output runs
+with privilege, so they wait behind their non-AI foundations.
+
+When a feature flips status, this doc updates. When it flips into the
+community open-source surface, the relevant lifecycle doc gets the
+inline tease the way [image-management.md](image-management.md) already
+teases SaaS cross-cloud promote.
