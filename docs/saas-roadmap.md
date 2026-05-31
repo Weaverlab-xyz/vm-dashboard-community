@@ -96,6 +96,36 @@ next things queued for QA.
   via ngrok; the per-tenant scoping rides on multi-tenancy (now
   Built (dev), below).
 
+### Approval / change-control gate for destructive automation
+
+- **What community does:** destructive operations (decommission VM,
+  `terraform destroy`, image/registry deletes, tenant hard-delete)
+  execute immediately on the actor's authority. RBAC gates *who* can
+  run them, but nothing requires a second approver.
+- **What SaaS adds:** a configurable approval gate (two-person rule)
+  on a defined set of high-blast-radius actions — the action enters a
+  pending-approval queue, a second authorised user signs off, and only
+  then does it execute, with the approval recorded in the audit trail.
+  Distinct from JIT elevation (which *grants permission*); this gates
+  *the act itself*.
+- **Status:** In design. *(Backlog — sketched 2026-05-30; not yet
+  specified.)*
+- **Dev-testable?** Yes. Pure app-layer queue + approval state machine.
+
+### Secret lifecycle — rotation, expiry, and scanning
+
+- **What community does:** secrets are stored and resolved, but nothing
+  rotates them, alerts on staleness, or scans the playbooks / Terraform
+  / manifests the platform runs for embedded secrets.
+- **What SaaS adds:** scheduled rotation for supported backends,
+  expiry/staleness alerting on credentials, and secret-scanning of the
+  artefacts the platform executes — the lifecycle half that "store
+  secrets" leaves out.
+- **Status:** In design. *(Backlog — sketched 2026-05-30; not yet
+  specified.)*
+- **Dev-testable?** Partial. Staleness detection + secret-scanning run
+  locally; live rotation needs real backend credentials.
+
 ---
 
 ## Image lifecycle
@@ -231,6 +261,22 @@ next things queued for QA.
 - **Dev-testable?** Yes (any KMS — cloud or self-hosted — can sign
   manifests in dev).
 
+### Self-supply-chain for the platform's own privileged containers
+
+- **What community does:** the ephemeral runner containers — and, in
+  prod, the Arc-worker prereqs — run as-built. The platform signs
+  *customer* image manifests (above) but does not sign, SBOM, or pin
+  its *own* privileged execution images.
+- **What SaaS adds:** sign + SBOM + pin the runner and Arc-worker
+  container images (cosign / syft), and verify provenance before a
+  privileged container runs. Matters because these containers hold
+  cloud credentials in memory during a run.
+- **Status:** In design. *(Backlog — sketched 2026-05-30; not yet
+  specified.)* The containerised Arc-worker entry already flags
+  signed-image distribution as an open question; this promotes it to
+  scoped work.
+- **Dev-testable?** Yes. cosign / syft run locally.
+
 ---
 
 ## Config management
@@ -335,6 +381,21 @@ next things queued for QA.
 - **Status:** In design.
 - **Dev-testable?** Yes (OPA runs locally).
 
+### Action-level policy guardrails (pre-action admission control)
+
+- **What community does:** nothing pre-empts an operation. RBAC gates
+  who can act; compliance-as-code (above) evaluates infrastructure
+  *after* apply.
+- **What SaaS adds:** pre-action admission control over dashboard
+  operations — allowed regions, allowed base images, instance-size
+  caps, prod-window restrictions — evaluated by the same OPA engine as
+  compliance-as-code but at the *pre-action* decision point, so a
+  disallowed deploy never starts.
+- **Status:** In design. *(Backlog — sketched 2026-05-30; not yet
+  specified.)* Sibling of compliance-as-code; shares the OPA engine,
+  differs in decision point (pre-action vs post-deploy).
+- **Dev-testable?** Yes (OPA runs locally).
+
 ---
 
 ## Multi-tenancy & audit (cross-cutting)
@@ -379,6 +440,33 @@ and network scoping**.
 - **Status:** Planned — unblocked by the multi-tenancy primitive.
 - **Dev-testable?** Yes.
 
+### Tamper-evident audit trail
+
+- **What community does:** each subsystem logs to its own store;
+  records are mutable like any other DB row, and nothing guarantees the
+  trail wasn't altered or truncated.
+- **What SaaS adds:** an append-only, hash-chained audit log (and/or
+  continuous export to a customer-owned WORM bucket / SIEM) so the
+  trail is *evidence*, not just convenience. This is the integrity
+  foundation the centralised audit pane sits on — the pane aggregates;
+  this guarantees the records can be trusted.
+- **Status:** In design. *(Backlog — sketched 2026-05-30; not yet
+  specified.)*
+- **Dev-testable?** Yes. Hash-chaining is local; external WORM / SIEM
+  export needs a target.
+
+### Compliance evidence reporting
+
+- **What community does:** nothing — operators assemble audit evidence
+  by hand.
+- **What SaaS adds:** auto-generated, auditor-ready evidence per tenant
+  (SOC 2 / CIS / change-history) built from the tamper-evident audit
+  log + compliance-as-code results.
+- **Status:** In design. *(Backlog — sketched 2026-05-30; not yet
+  specified.)* Depends on the tamper-evident audit trail +
+  compliance-as-code, so it lands after both.
+- **Dev-testable?** Yes, once the underlying feeds exist.
+
 ---
 
 ## Today's reality
@@ -416,6 +504,15 @@ audit pane + cross-tenant catalog, and re-scoped tenant identity (OIDC)
 features (image hardening, playbook generation, module refactoring).
 Each is buildable but flagged above: value unproven and/or output runs
 with privilege, so they wait behind their non-AI foundations.
+
+**Backlog (In design — sketched 2026-05-30, not yet specified)** — six
+governance/assurance items added to harden the "secure and auditable"
+story: approval / change-control gate for destructive automation,
+secret lifecycle (rotation + expiry + scanning), self-supply-chain for
+the platform's own privileged containers, action-level policy
+guardrails (pre-action admission control), tamper-evident audit trail,
+and compliance evidence reporting. Accepted into scope but not yet
+specified.
 
 When a feature flips status, this doc updates. When it flips into the
 community open-source surface, the relevant lifecycle doc gets the
