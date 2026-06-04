@@ -15,8 +15,10 @@
 # Git history
 .git/
 
-# Terraform (not needed inside the container)
-terraform/
+# Terraform (not needed inside the container) — except the static cloud-database
+# modules, which cloud_database_service drives with `terraform apply`.
+terraform/*
+!terraform/db_postgres
 *.tfstate
 *.tfstate.*
 *.tfvars

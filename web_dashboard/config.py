@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     hyperv_enabled: bool = False        # Hyper-V router + /hyperv page (WinRM to Windows host)
     nutanix_enabled: bool = False       # Nutanix AHV router + /nutanix page (Prism Central REST API)
     xcpng_enabled: bool = False         # XCP-ng/XenServer router + /xcpng page (XAPI XML-RPC)
+    cloud_database_enabled: bool = False  # /api/databases router — private managed DBs brokered via a PRA tunnel
 
     # Proxmox VE connection
     proxmox_host: str = ""              # hostname or IP of the Proxmox node/cluster
