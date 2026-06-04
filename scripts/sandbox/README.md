@@ -88,11 +88,17 @@ wizard or **Settings → Integrations** panels. It looks like:
 aws_region=us-east-2
 aws_default_subnet_id=subnet-…
 aws_default_security_group_id=sg-…
+aws_db_subnet_group_name=dashboard-sandbox-db   # managed-DB deploys (private RDS, 2 AZs)
+aws_db_security_group_id=sg-…                    # managed-DB deploys (VM-tier SG)
 ec2_ssh_key_secret=dashboard/sandbox/ssh-keypair
 …
 ```
 
-The values point at the sandbox-tagged resources the script just created.
+The values point at the sandbox-tagged resources the script just created. The
+AWS setup also grants the dashboard IAM user **RDS** permissions (create/delete/
+modify DB instances + subnet groups) and creates a private **DB subnet group**
+spanning two AZs, so the managed-database feature can deploy a private Postgres
+into the sandbox.
 
 ## Cost
 

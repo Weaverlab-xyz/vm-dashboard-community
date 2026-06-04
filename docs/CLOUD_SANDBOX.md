@@ -149,7 +149,14 @@ re-run after a partial failure or a network blip.
 ```
 VPC dashboard-sandbox-vpc (10.99.0.0/16)
   ├─ public subnet  10.99.1.0/24  → IGW → internet      [ECS Jumpoint task]
-  └─ private subnet 10.99.2.0/24  → local VPC only      [user EC2 instances]
+  ├─ private subnet 10.99.2.0/24  → local VPC only      [user EC2 instances]
+  ├─ db subnet a    10.99.3.0/24  (AZ a) → local only   [managed databases]
+  └─ db subnet b    10.99.4.0/24  (AZ b) → local only   [managed databases]
+
+RDS:
+  db subnet group dashboard-sandbox-db (spans db subnet a + b — RDS needs >= 2 AZs)
+    private Postgres/MySQL/SQL-Server instances deploy here (no public endpoint;
+    reached only through the PRA tunnel)
 
 Security groups:
   dashboard-sandbox-jumpoint-sg
@@ -172,7 +179,7 @@ IAM (sandbox-tagged, deleted by rollback):
   role vmimport                                  vmie.amazonaws.com → S3 + EC2
   role dashboard-sandbox-promote-runner-task     ECS task → S3 PutObject
   user dashboard-sandbox-app                     Dashboard programmatic creds
-    inline policy dashboard-app-policy           EC2 / ECS / SM / S3 / Logs
+    inline policy dashboard-app-policy           EC2 / ECS / SM / S3 / Logs / RDS
     access key cached at ~/.dashboard-sandbox/aws/secret_access_key (0600)
 ```
 

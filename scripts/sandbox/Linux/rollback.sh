@@ -77,6 +77,18 @@ rollback_aws() {
       return 0
     fi
 
+    # 2a-rds. RDS DB subnet groups in this VPC — RDS holds the subnets, so these
+    # must go before the subnet sweep below or delete-subnet fails.
+    local dbgs
+    dbgs="$(aws rds describe-db-subnet-groups --region "$region" \
+      --query "DBSubnetGroups[?VpcId=='$vpc_id'].DBSubnetGroupName" --output text 2>/dev/null || true)"
+    for g in $dbgs; do
+      [[ -z "$g" || "$g" == "None" ]] && continue
+      aws rds delete-db-subnet-group --region "$region" --db-subnet-group-name "$g" >/dev/null 2>&1 \
+        && ok "Deleted DB subnet group $g" \
+        || warn "Could not delete DB subnet group $g (a DB may still be provisioned — decommission it first)"
+    done
+
     # 2b. Security groups (delete sandbox-tagged, but skip the default SG).
     local sgs
     sgs="$(aws ec2 describe-security-groups --region "$region" \
