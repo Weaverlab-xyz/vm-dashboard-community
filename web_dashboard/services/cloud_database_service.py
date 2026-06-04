@@ -155,12 +155,59 @@ def provision(
     return {"ok": True, "db_id": row.id, "job_id": job.id, "tf_variables": tf_variables}
 
 
+def _cfg(key: str) -> str:
+    val = config_service.get(key)
+    if val:
+        return val
+    return getattr(settings, key, "") or ""
+
+
+def _pra_configured() -> bool:
+    """True when a PRA/SRA appliance + Jumpoint + Jump Group are configured —
+    the prerequisites for brokering a tunnel. When false, a DB is still
+    provisioned/recorded; it just isn't reachable until PRA is set up."""
+    return all(_cfg(k) for k in ("bt_api_host", "bt_jumpoint_name", "bt_jump_group_name"))
+
+
+async def _broker_tunnel(db: Session, *, row: CloudDatabase, job_id: str,
+                         engine: str, tf_variables: dict) -> None:
+    """Phase 2: provision a PRA protocol-tunnel jump to the private DB via the
+    beyondtrust/sra provider, record ``jump_item_id`` on the row, and stash the
+    tunnel's Terraform state in the provisioning job's metadata for teardown.
+    Non-fatal: a failure leaves the DB up with no tunnel (retryable)."""
+    from . import terraform_pra_service as pra
+    try:
+        tun = await pra.provision_db_tunnel(
+            engine=engine,
+            name=tf_variables.get("identifier") or f"clouddb-{row.id[:8]}",
+            hostname=row.private_host,
+            jump_group_name=_cfg("bt_jump_group_name"),
+            jumpoint_name=_cfg("bt_jumpoint_name"),
+            username=tf_variables.get("master_username", ""),
+            database=tf_variables.get("db_name", ""),
+            tag="clouddb",
+        )
+        row.jump_item_id = tun.get("tunnel_jump_id") or None
+        db.commit()
+        job = db.query(Job).filter(Job.id == job_id).first()
+        if job is not None:
+            meta = job.metadata_dict or {}
+            meta["tunnel_tf_state"] = tun.get("tf_state_json")
+            job.metadata_dict = meta
+            db.commit()
+        logger.info("clouddb tunnel brokered db_id=%s jump_item_id=%s", row.id, row.jump_item_id)
+    except Exception as exc:
+        logger.warning("clouddb tunnel brokering failed db_id=%s (DB is up, no tunnel): %s",
+                       row.id, exc)
+
+
 async def run_provision_apply(
     db: Session, *, db_id: str, job_id: str, engine: str, tf_variables: dict,
 ) -> None:
-    """Background task: drive ``terraform apply`` for the engine module and fill
-    the live fields on the ``CloudDatabase`` row. Marks the job + row failed on
-    error. Mocked in dev."""
+    """Background task: drive ``terraform apply`` for the engine module, fill the
+    live fields on the ``CloudDatabase`` row, then broker the PRA tunnel so the
+    private DB is reachable (Phase 2). Marks the job + row failed on apply error.
+    Mocked in dev."""
     row = db.query(CloudDatabase).filter(CloudDatabase.id == db_id).first()
     if not row:
         logger.warning("clouddb apply: row %s vanished", db_id)
@@ -176,8 +223,14 @@ async def run_provision_apply(
             row.port = int(outputs["port"])
         row.status = "available"
         db.commit()
+
+        # Phase 2: broker the PRA tunnel (only when PRA is configured + we have a host).
+        if row.private_host and _pra_configured():
+            await _broker_tunnel(db, row=row, job_id=job_id, engine=engine, tf_variables=tf_variables)
+
         job_service.set_completed(db, job_id)
-        logger.info("clouddb apply complete db_id=%s host=%s", db_id, row.private_host)
+        logger.info("clouddb apply complete db_id=%s host=%s tunnel=%s",
+                    db_id, row.private_host, row.jump_item_id)
     except Exception as exc:
         row.status = "failed"
         db.commit()
@@ -186,8 +239,8 @@ async def run_provision_apply(
 
 
 def decommission(db: Session, db_id: str) -> dict:
-    """Tear down a managed database: flip status, ``terraform destroy`` the job
-    dir, mark decommissioned. (PRA tunnel removal is Phase 2.)"""
+    """Tear down a managed database: flip status, remove the PRA tunnel, then
+    ``terraform destroy`` the DB, mark decommissioned."""
     import asyncio
 
     row = db.query(CloudDatabase).filter(CloudDatabase.id == db_id).first()
@@ -201,11 +254,24 @@ def decommission(db: Session, db_id: str) -> dict:
               .filter(Job.job_type == "clouddb_provision")
               .order_by(Job.created_at.desc()).all())
     deploy_job = next((j for j in jobs if (j.metadata_dict or {}).get("db_id") == db_id), None)
+
+    # Phase 2: remove the PRA tunnel first (best-effort), so we don't orphan a
+    # jump item pointing at a host we're about to destroy.
+    if deploy_job:
+        tun_state = (deploy_job.metadata_dict or {}).get("tunnel_tf_state")
+        if tun_state:
+            try:
+                from . import terraform_pra_service as pra
+                asyncio.run(pra.remove_db_tunnel(tun_state))
+                logger.info("clouddb tunnel removed db_id=%s", db_id)
+            except Exception as exc:
+                logger.warning("clouddb tunnel removal for %s failed (non-fatal): %s", db_id, exc)
+
     if deploy_job and os.path.isdir(_deploy_dir(deploy_job.id)):
         try:
             asyncio.run(terraform.destroy(_deploy_dir(deploy_job.id)))
         except Exception as exc:
-            logger.warning("clouddb destroy for %s failed (non-fatal in P1): %s", db_id, exc)
+            logger.warning("clouddb destroy for %s failed (non-fatal): %s", db_id, exc)
 
     row.status = "decommissioned"
     db.commit()
@@ -222,7 +288,8 @@ def connection_info(db: Session, db_id: str) -> dict:
     row = db.query(CloudDatabase).filter(CloudDatabase.id == db_id).first()
     if not row:
         raise CloudDatabaseError(f"cloud database {db_id} not found")
-    # Phase 1 returns host/port/status; the PRA jump a user opens is Phase 2.
+    # jump_item_id is the PRA protocol-tunnel jump a user opens to reach the
+    # private DB (populated once the tunnel is brokered; null if PRA is unset).
     return {
         "db_id": row.id, "engine": row.engine, "cloud": row.cloud,
         "status": row.status, "private_host": row.private_host, "port": row.port,

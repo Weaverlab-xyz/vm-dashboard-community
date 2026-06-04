@@ -294,3 +294,195 @@ async def remove_jump(tf_state_json: str) -> None:
     Pass the tf_state_json value returned by provision_jump (stored in job extra_data).
     """
     await asyncio.to_thread(_remove_sync, tf_state_json)
+
+
+# ── Database protocol-tunnel jumps (managed-database feature) ─────────────────
+#
+# The managed-database feature provisions a private DB and reaches it only
+# through a PRA protocol-tunnel jump. Same shape as the Shell Jump pair above —
+# look up the pre-existing Jump Group + Jumpoint, manage one tunnel resource —
+# but the resource is the engine-specific tunnel jump. Resource names confirmed
+# against the cached provider schema (`terraform providers schema -json`).
+
+_DB_TUNNEL_RESOURCE = {
+    "postgres": "sra_postgresql_tunnel_jump",
+    # Confirmed present in the provider; wire up with their engines later:
+    # "mysql":     "sra_my_sql_tunnel_jump",
+    # "sqlserver": "sra_protocol_tunnel_jump",   # tunnel_type = mssql
+}
+_DB_RESOURCE_ENGINE = {v: k for k, v in _DB_TUNNEL_RESOURCE.items()}
+
+
+def _generate_db_tunnel_hcl(
+    engine: str,
+    name: str,
+    hostname: str,
+    jump_group_name: str,
+    jumpoint_name: str,
+    username: str,
+    database: str,
+    tag: str,
+) -> str:
+    """Return the Terraform HCL for one DB protocol-tunnel jump.
+
+    Required resource fields: name, hostname, jump_group_id, jumpoint_id.
+    username / database are optional and emitted only when provided.
+    """
+    resource_type = _DB_TUNNEL_RESOURCE.get(engine)
+    if not resource_type:
+        raise TerraformPRAError(
+            f"DB tunnel for engine {engine!r} not implemented "
+            f"(supported: {', '.join(sorted(_DB_TUNNEL_RESOURCE))})"
+        )
+    safe_name = re.sub(r"[^a-z0-9_]", "_", name.lower())
+    extra = ""
+    if username:
+        extra += f"  username      = {json.dumps(username)}\n"
+    if database:
+        extra += f"  database      = {json.dumps(database)}\n"
+
+    return f"""\
+terraform {{
+  required_providers {{
+    sra = {{
+      source  = "beyondtrust/sra"
+      version = "~> 1.0"
+    }}
+  }}
+}}
+
+variable "bt_host"          {{ sensitive = false }}
+variable "bt_client_id"     {{ sensitive = true }}
+variable "bt_client_secret" {{ sensitive = true }}
+
+provider "sra" {{
+  host          = var.bt_host
+  client_id     = var.bt_client_id
+  client_secret = var.bt_client_secret
+}}
+
+data "sra_jump_group_list" "jg" {{
+  name = {json.dumps(jump_group_name)}
+}}
+
+data "sra_jumpoint_list" "jp" {{
+  name = {json.dumps(jumpoint_name)}
+}}
+
+resource {json.dumps(resource_type)} {json.dumps(safe_name)} {{
+  name          = {json.dumps(name)}
+  hostname      = {json.dumps(hostname)}
+  jump_group_id = tonumber(data.sra_jump_group_list.jg.items[0].id)
+  jumpoint_id   = tonumber(data.sra_jumpoint_list.jp.items[0].id)
+{extra}  tag           = {json.dumps(tag)}
+  comments      = "Auto-provisioned by Infrastructure Management Dashboard (managed database)"
+}}
+
+output "tunnel_jump_id" {{
+  value = {resource_type}.{safe_name}.id
+}}
+"""
+
+
+def _provision_db_tunnel_sync(
+    engine, name, hostname, jump_group_name, jumpoint_name, username, database, tag
+) -> dict:
+    with tempfile.TemporaryDirectory(prefix="pra_db_tf_") as work_dir:
+        Path(work_dir, "main.tf").write_text(
+            _generate_db_tunnel_hcl(engine, name, hostname, jump_group_name,
+                                    jumpoint_name, username, database, tag)
+        )
+        init = _run_tf(["init", "-upgrade=false"], work_dir, timeout=60)
+        if init.returncode != 0:
+            raise TerraformPRAError(
+                f"terraform init failed: {init.stderr.strip() or init.stdout.strip()}")
+        apply = _run_tf(["apply", "-auto-approve"], work_dir, timeout=120)
+        if apply.returncode != 0:
+            raise TerraformPRAError(
+                f"terraform apply failed: {apply.stderr.strip() or apply.stdout.strip()}")
+
+        out = _run_tf(["output", "-json"], work_dir, timeout=30)
+        tunnel_jump_id: Optional[str] = None
+        if out.returncode == 0 and out.stdout.strip():
+            try:
+                outputs = json.loads(out.stdout)
+                tunnel_jump_id = str(outputs.get("tunnel_jump_id", {}).get("value", ""))
+            except (json.JSONDecodeError, AttributeError):
+                pass
+
+        state_path = Path(work_dir, "terraform.tfstate")
+        tf_state_json = state_path.read_text() if state_path.exists() else None
+        return {
+            "tunnel_jump_id": tunnel_jump_id,
+            "jump_group_name": jump_group_name,
+            "tf_state_json": tf_state_json,
+        }
+
+
+def _remove_db_tunnel_sync(tf_state_json: str) -> None:
+    try:
+        state = json.loads(tf_state_json)
+    except json.JSONDecodeError as e:
+        raise TerraformPRAError(f"tf_state_json is not valid JSON: {e}") from e
+
+    res = next((r for r in state.get("resources", [])
+                if r.get("type") in _DB_RESOURCE_ENGINE), None)
+    if res is None:
+        logger.warning("No sra DB tunnel resource in Terraform state — nothing to destroy")
+        return
+    engine = _DB_RESOURCE_ENGINE[res["type"]]
+    instances = res.get("instances", [])
+    if not instances:
+        logger.warning("DB tunnel resource has no instances in state — nothing to destroy")
+        return
+    attrs = instances[0].get("attributes", {})
+    name     = attrs.get("name", "unknown")
+    hostname = attrs.get("hostname", "")
+    username = attrs.get("username", "") or ""
+    database = attrs.get("database", "") or ""
+    tag      = attrs.get("tag", "") or ""
+    jump_group_name = _cfg("bt_jump_group_name")
+    jumpoint_name   = _cfg("bt_jumpoint_name")
+
+    with tempfile.TemporaryDirectory(prefix="pra_db_tf_destroy_") as work_dir:
+        Path(work_dir, "main.tf").write_text(
+            _generate_db_tunnel_hcl(engine, name, hostname, jump_group_name,
+                                    jumpoint_name, username, database, tag)
+        )
+        Path(work_dir, "terraform.tfstate").write_text(tf_state_json)
+        init = _run_tf(["init", "-upgrade=false"], work_dir, timeout=60)
+        if init.returncode != 0:
+            raise TerraformPRAError(
+                f"terraform init (destroy) failed: {init.stderr.strip() or init.stdout.strip()}")
+        destroy = _run_tf(["destroy", "-auto-approve"], work_dir, timeout=120)
+        if destroy.returncode != 0:
+            raise TerraformPRAError(
+                f"terraform destroy failed: {destroy.stderr.strip() or destroy.stdout.strip()}")
+
+
+async def provision_db_tunnel(
+    engine: str,
+    name: str,
+    hostname: str,
+    jump_group_name: str,
+    jumpoint_name: str,
+    username: str = "",
+    database: str = "",
+    tag: str = "DB",
+) -> dict:
+    """Provision a BeyondTrust PRA protocol-tunnel jump for a managed database.
+
+    The Jump Group and Jumpoint must already exist in PRA. Returns
+    ``{tunnel_jump_id, jump_group_name, tf_state_json}`` — store ``tf_state_json``
+    (e.g. in the provisioning job's extra_data) so ``remove_db_tunnel`` can
+    destroy it later.
+    """
+    return await asyncio.to_thread(
+        _provision_db_tunnel_sync, engine, name, hostname, jump_group_name,
+        jumpoint_name, username, database, tag,
+    )
+
+
+async def remove_db_tunnel(tf_state_json: str) -> None:
+    """Destroy a previously provisioned DB tunnel jump using its stored state."""
+    await asyncio.to_thread(_remove_db_tunnel_sync, tf_state_json)
