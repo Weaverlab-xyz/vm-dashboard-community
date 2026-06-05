@@ -244,7 +244,7 @@ Write-DashboardConfig 'GCP sandbox configuration' @(
     "storage_gcs_bucket=$StorageBucket                       # Image hub + promote staging",
     'storage_active_backend=gcs                                # Active asset backend',
     'storage_hub_backend=gcs                                   # Image hub (defaults to active if unset)',
-    'promote_runner_image=weaverlab-xyz/dashboard-promote-runner:latest   # Build + push to Artifact Registry until public tag exists',
+    'promote_runner_image=chrweav/dashboard-promote-runner:latest   # Public multi-arch image; override to Artifact Registry for a private/air-gapped registry',
     "promote_runner_gcp_region=$Region                         # Cloud Run Job lands here",
     "promote_runner_gcp_service_account=$SaEmail              # Workload-identity SA for the runner",
     "promote_runner_gcp_staging_bucket=$StorageBucket",

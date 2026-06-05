@@ -669,7 +669,7 @@ print_dashboard_config "AWS sandbox configuration" \
   "storage_s3_bucket=$STORAGE_BUCKET                                       # Image hub + promote staging" \
   "storage_active_backend=s3                                                  # Active asset backend" \
   "storage_hub_backend=s3                                                     # Image hub (defaults to active if unset)" \
-  "promote_runner_image=weaverlab-xyz/dashboard-promote-runner:latest         # Build + push to your ECR until public tag exists" \
+  "promote_runner_image=chrweav/dashboard-promote-runner:latest         # Public multi-arch image; override to your ECR for a private/air-gapped registry" \
   "promote_runner_ecs_cluster=$ECS_CLUSTER                                    # Reuses Jumpoint cluster" \
   "promote_runner_ecs_execution_role_arn=$ROLE_ARN                            # Image pull + CloudWatch logs" \
   "promote_runner_ecs_task_role_arn=$PROMOTE_TASK_ROLE_ARN                    # S3 PutObject on the staging bucket" \

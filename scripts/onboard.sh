@@ -6,7 +6,8 @@
 # bootstrap, secret auto-gen, `docker compose up`, health poll, browser open.
 #
 # Usage:
-#   ./scripts/onboard.sh            # normal run
+#   ./scripts/onboard.sh            # normal run (build from source)
+#   ./scripts/onboard.sh --hub      # pull the prebuilt image from Docker Hub (no build)
 #   ./scripts/onboard.sh --build    # force image rebuild
 #   ./scripts/onboard.sh --no-open  # skip opening the browser
 
@@ -14,24 +15,35 @@ set -euo pipefail
 
 BUILD=0
 NO_OPEN=0
+HUB=0
 for arg in "$@"; do
     case "$arg" in
+        --hub|--pull) HUB=1 ;;
         --build) BUILD=1 ;;
         --no-open) NO_OPEN=1 ;;
         -h|--help)
-            sed -n '2,12p' "$0"
+            sed -n '2,13p' "$0"
             exit 0
             ;;
         *) echo "unknown arg: $arg" >&2; exit 2 ;;
     esac
 done
 
+if (( HUB && BUILD )); then
+    echo "error: --hub (run the prebuilt Docker Hub image) and --build (build from source) are mutually exclusive." >&2
+    exit 2
+fi
+
 # Repo root is the parent of the directory holding this script.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 ENV_FILE="$REPO_ROOT/.env"
 ENV_EXAMPLE="$REPO_ROOT/.env.example"
-COMPOSE_FILE="$REPO_ROOT/docker-compose.yml"
+if (( HUB )); then
+    COMPOSE_FILE="$REPO_ROOT/docker-compose.hub.yml"
+else
+    COMPOSE_FILE="$REPO_ROOT/docker-compose.yml"
+fi
 HEALTH_URL="http://localhost:8001/api/health"
 DASHBOARD_URL="http://localhost:8001"
 
@@ -116,7 +128,7 @@ fi
 ok "Compose: $_compose_cmd"
 
 if [[ ! -f "$COMPOSE_FILE" ]]; then
-    fail "docker-compose.yml not found at $COMPOSE_FILE."
+    fail "$(basename "$COMPOSE_FILE") not found at $COMPOSE_FILE."
     fail "Run this script from a clone of the dashboard repository."
     exit 1
 fi
@@ -191,14 +203,28 @@ fi
 (( changed )) || ok "Bootstrap secrets already set"
 
 # ── 4. Bring up the stack ───────────────────────────────────────────────
-step "Starting Docker Compose stack"
+if (( HUB )); then
+    step "Pulling prebuilt image and starting Docker Compose stack"
+else
+    step "Starting Docker Compose stack"
+fi
 
 # Forward the skip-debian-updates escape hatch so the compose file's build
-# arg picks it up. Useful when a TLS-inspecting corp proxy mangles the
-# trixie-updates / trixie-security Packages files but trixie/main is fine.
-if [[ "${ONBOARD_SKIP_DEBIAN_UPDATES:-0}" == "1" ]]; then
+# arg picks it up. Build-only — irrelevant when --hub pulls a prebuilt image.
+if (( ! HUB )) && [[ "${ONBOARD_SKIP_DEBIAN_UPDATES:-0}" == "1" ]]; then
     export BUILD_SKIP_DEBIAN_UPDATES=1
     warn "ONBOARD_SKIP_DEBIAN_UPDATES=1 — dropping trixie-updates and trixie-security from apt sources for this build"
+fi
+
+# In --hub mode, pull the latest published image first so reruns pick up new
+# releases (compose only auto-pulls when the image is absent locally).
+if (( HUB )); then
+    if ! $_compose_cmd -f "$COMPOSE_FILE" pull; then
+        fail "$_compose_cmd pull failed — could not fetch the prebuilt image."
+        fail "Behind a TLS-inspecting proxy, ensure Docker trusts your corp CA for Docker Hub"
+        fail "(see docs/ONBOARDING.md: 'WSL: docker pull fails with a certificate error')."
+        exit 1
+    fi
 fi
 
 compose_args=(-f "$COMPOSE_FILE" up -d)
@@ -262,4 +288,4 @@ printf "%sNext steps:%s\n" "$C_STEP" "$C_RESET"
 echo "  - The browser setup wizard will open automatically on first launch."
 echo "    Complete it to create your admin account and enter cloud credentials."
 echo "  - See docs/ONBOARDING.md for the full feature-test checklist."
-echo "  - Stop the stack with:  $_compose_cmd -f docker-compose.yml down"
+echo "  - Stop the stack with:  $_compose_cmd -f $(basename "$COMPOSE_FILE") down"

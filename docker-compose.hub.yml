@@ -1,0 +1,80 @@
+# Pull-based stack: runs the PUBLISHED multi-arch image from Docker Hub
+# (chrweav/infra-dashboard) instead of building it locally. Use this when you
+# just want to run the dashboard without a local image build -- ideal behind a
+# TLS-inspecting corp proxy, where the build-from-source path needs the
+# corp-ca/ cert dance and the BUILD_SKIP_DEBIAN_UPDATES escape hatch.
+#
+#   ./scripts/onboard.sh --hub            # generates secrets, pulls, starts
+#
+# or manually (e.g. without cloning the whole repo -- just grab this file and
+# .env.example):
+#
+#   docker compose -f docker-compose.hub.yml pull
+#   docker compose -f docker-compose.hub.yml up -d
+#
+# Pin a specific version instead of :latest with INFRA_DASHBOARD_TAG:
+#   INFRA_DASHBOARD_TAG=v0.1.0 docker compose -f docker-compose.hub.yml up -d
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: dashboardadmin
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-devpassword}
+      POSTGRES_DB: vmclidashboard
+    # Host port 5433 (not the Postgres default 5432) so this stack can run
+    # alongside another local Postgres / dev dashboard. Inside the compose
+    # network the app still talks to db:5432 -- only the host binding changes.
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dashboardadmin -d vmclidashboard"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  app:
+    # Prebuilt multi-arch image from Docker Hub (linux/amd64 + linux/arm64).
+    # docker pull auto-selects the right architecture for your machine
+    # (Intel/AMD, Apple Silicon, AWS Graviton, Raspberry Pi 5).
+    # Override the tag with INFRA_DASHBOARD_TAG (defaults to :latest).
+    image: chrweav/infra-dashboard:${INFRA_DASHBOARD_TAG:-latest}
+    restart: unless-stopped
+    # Host port 8001 to coexist with another dashboard on 8000. Browse at
+    # http://localhost:8001 . The container itself still listens on 8000.
+    ports:
+      - "8001:8000"
+    # All settings come from .env at the repo root (populated by the onboard
+    # script on first run). DATABASE_URL is the one exception -- it's assembled
+    # here so POSTGRES_PASSWORD interpolation stays in a single place.
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=postgresql://dashboardadmin:${POSTGRES_PASSWORD:-devpassword}@db:5432/vmclidashboard
+      - JWT_SECRET_KEY_FILE=/run/secrets/jwt_key
+    secrets:
+      - jwt_key
+    depends_on:
+      db:
+        condition: service_healthy
+    # NOTE: unlike docker-compose.yml there is deliberately NO ./web_dashboard
+    # bind mount -- the published image already ships the app code. Mounting
+    # host source here would shadow the image and break repo-less users.
+    #
+    # The Docker socket below is only needed for the optional Ansible
+    # integration (lets the app launch sibling config-mgmt containers for local
+    # runs). Remove this mount if you do not use the Ansible integration.
+    volumes:
+      - type: bind
+        source: /var/run/docker.sock
+        target: /var/run/docker.sock
+
+volumes:
+  pgdata:
+
+secrets:
+  jwt_key:
+    file: .jwt_secret_key

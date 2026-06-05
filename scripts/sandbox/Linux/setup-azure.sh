@@ -233,7 +233,7 @@ print_dashboard_config "Azure sandbox configuration" \
   "storage_azure_container=hub                              # Container for hub artefacts" \
   "storage_active_backend=azure_blob                        # Active asset backend" \
   "storage_hub_backend=azure_blob                           # Image hub (defaults to active if unset)" \
-  "promote_runner_image=weaverlab-xyz/dashboard-promote-runner:latest   # Build + push to your ACR until public tag exists" \
+  "promote_runner_image=chrweav/dashboard-promote-runner:latest   # Public multi-arch image; override to your ACR for a private/air-gapped registry" \
   "promote_runner_azure_resource_group=$RG                  # ACI lands here" \
   "promote_runner_azure_location=$LOCATION" \
   "promote_runner_azure_subnet_id=$ACI_SUBNET_ID            # Reuses the Jumpoint ACI subnet" \

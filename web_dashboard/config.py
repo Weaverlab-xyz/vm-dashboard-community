@@ -347,10 +347,10 @@ class Settings(BaseSettings):
     # ── Promote runner ───────────────────────────────────────────────────────
     # Transient container launched in the target cloud to convert + upload a
     # VM image artefact during cross-cloud promotion. Same image (defaulting
-    # to a public build under weaverlab-xyz) serves AWS / Azure / GCP targets;
+    # to a public build under chrweav) serves AWS / Azure / GCP targets;
     # the target's own runner orchestration (ECS task / ACI / Cloud Run job)
     # is configured separately per cloud — only AWS-target is wired today.
-    promote_runner_image: str = "weaverlab-xyz/dashboard-promote-runner:latest"
+    promote_runner_image: str = "chrweav/dashboard-promote-runner:latest"
     promote_runner_ecs_cluster: str = ""                 # fallback: ansible_ecs_cluster
     promote_runner_ecs_task_family: str = "promote-runner"
     promote_runner_ecs_cpu: str = "1024"                 # qemu-img wants headroom

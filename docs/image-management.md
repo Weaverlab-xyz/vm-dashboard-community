@@ -275,13 +275,13 @@ staged blob, polls until the resulting image is `Available` /
 `Succeeded` / `READY`, then deletes the staged copy and records the
 final identifier on `RegisteredImage.promotions[<target>]`.
 
-The runner image is `weaverlab-xyz/dashboard-promote-runner:latest`
+The runner image is `chrweav/dashboard-promote-runner:latest`
 by default; override via `promote_runner_image` if you maintain a
 hardened private build. See
 [`runners/promote/README.md`](../runners/promote/README.md) for the
 operator prerequisites (IAM, quotas, networking) per target cloud,
-the full list of `promote_runner_*` config keys, and the build
-instructions until the public image is published.
+the full list of `promote_runner_*` config keys, and local build
+instructions for maintaining a custom or hardened build.
 
 If your dashboard credentials can't reach the target — e.g. cross-
 account promotes or air-gapped tenants — pass `?manual=1` on the

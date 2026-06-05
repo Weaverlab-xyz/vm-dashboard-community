@@ -1,0 +1,75 @@
+name: Publish images
+
+# Build and push the multi-arch (linux/amd64 + linux/arm64) Docker images to
+# Docker Hub. Fires on a version tag (e.g. v0.1.0) or a manual dispatch.
+#
+# Requires two repository secrets:
+#   DOCKERHUB_USERNAME  - Docker Hub account / namespace (chrweav)
+#   DOCKERHUB_TOKEN     - a Docker Hub access token with Read/Write scope
+#
+# Images built (each from a clean checkout, so corp-ca/ is empty and no
+# BUILD_SKIP_DEBIAN_UPDATES is passed -> the public images carry no corp CA
+# and retain full Debian security updates):
+#   chrweav/infra-dashboard            (context: .)
+#   chrweav/dashboard-promote-runner   (context: runners/promote)
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: chrweav/infra-dashboard
+            context: .
+            dockerfile: Dockerfile
+          - image: chrweav/dashboard-promote-runner
+            context: runners/promote
+            dockerfile: runners/promote/Dockerfile
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Derive tags and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ matrix.image }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ github.ref_type == 'tag' && !contains(github.ref_name, '-') }}
+            type=sha,enable=${{ github.event_name == 'workflow_dispatch' }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}

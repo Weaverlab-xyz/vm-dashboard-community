@@ -36,24 +36,39 @@ README make sense in that frame.
 
 ## Quick start
 
+The fastest way to run the dashboard is to **pull the prebuilt image** from
+Docker Hub — no local image build required. The image is multi-arch, so
+`docker pull` automatically selects the right build for your machine
+(Intel/AMD, Apple Silicon, AWS Graviton, Raspberry Pi 5).
+
 **Windows** (PowerShell 7):
 
 ```powershell
-.\scripts\Onboard-Dashboard.ps1
+.\scripts\Onboard-Dashboard.ps1 -Hub
 ```
 
 **macOS / Linux / WSL / Raspberry Pi** (bash):
 
 ```bash
-./scripts/onboard.sh
+./scripts/onboard.sh --hub
 ```
 
-The script checks prerequisites, generates bootstrap secrets (JWT signing
-key + Postgres password), and brings up the Docker Compose stack. Your
-browser opens automatically to a **setup wizard** where you create the
-admin account and enter your cloud credentials. Credentials are encrypted
-with AES-256 and stored in the database — nothing sensitive stays in any
-file on disk.
+This pulls `chrweav/infra-dashboard` and starts it alongside Postgres using
+`docker-compose.hub.yml`. Drop the `--hub` / `-Hub` flag to **build the image
+from source** instead (for contributors, or to customize the build).
+
+Either way the script checks prerequisites, generates bootstrap secrets (JWT
+signing key + Postgres password), and brings up the Docker Compose stack. Your
+browser opens automatically to a **setup wizard** where you create the admin
+account and enter your cloud credentials. Credentials are encrypted with
+AES-256 and stored in the database — nothing sensitive stays in any file on
+disk.
+
+> **Just want to kick the tyres without cloning the repo?** Drop
+> `docker-compose.hub.yml` and `.env.example` into an empty folder, copy
+> `.env.example` to `.env` and set `POSTGRES_PASSWORD`, generate a stable key
+> with `openssl rand -hex 32 > .jwt_secret_key`, then
+> `docker compose -f docker-compose.hub.yml up -d`.
 
 > **WSL users:** Docker Desktop is not required. Install Docker Engine
 > directly in your WSL distro (`sudo apt install docker.io` or follow the

@@ -286,16 +286,21 @@ secret only), bring up Compose, poll `/api/health`, open the browser.
 
 ### 1. Run the onboard script (one command)
 
+By default the onboarder **builds the image from source**. Add `--hub` (bash)
+/ `-Hub` (PowerShell) to **pull the prebuilt multi-arch image** from Docker Hub
+(`chrweav/infra-dashboard`) instead — no local build, and it runs on both
+AMD64 and ARM64 (Apple Silicon, AWS Graviton, Raspberry Pi 5).
+
 **Windows** (PowerShell 7):
 
 ```powershell
-.\scripts\Onboard-Dashboard.ps1
+.\scripts\Onboard-Dashboard.ps1 -Hub      # pull prebuilt image (drop -Hub to build from source)
 ```
 
 **macOS / Linux / WSL / Raspberry Pi** (bash):
 
 ```bash
-./scripts/onboard.sh
+./scripts/onboard.sh --hub                # pull prebuilt image (drop --hub to build from source)
 ```
 
 The script:
@@ -307,9 +312,18 @@ The script:
   and from the Docker build context; it is mounted into the container at runtime via
   Docker Secrets and is never written to `.env`.
 - Auto-generates `POSTGRES_PASSWORD` in `.env` if it's still at the placeholder value.
-- Brings up the Compose stack (`db` + `app`).
+- Brings up the Compose stack (`db` + `app`) — with `--hub`, from `docker-compose.hub.yml`
+  using the published image (a `docker compose pull` runs first so reruns pick up new
+  releases); otherwise it builds the `app` image locally.
 - Waits for `http://localhost:8001/api/health` to respond.
 - Opens your browser.
+
+> **Behind a TLS-inspecting corporate proxy?** The `--hub` path skips the image
+> build entirely, so the corp-CA build steps and the `ONBOARD_SKIP_DEBIAN_UPDATES`
+> escape hatch are **not needed**. You do still need Docker to trust your corporate
+> root CA for the `docker pull` itself — see
+> [WSL: `docker pull` fails with a certificate error](#wsl-docker-pull-fails-with-a-certificate-error)
+> below.
 
 ### 2. Complete the setup wizard
 
@@ -335,9 +349,12 @@ you created in wizard Step 1.
 ### 4. Stopping and restarting
 
 ```bash
-docker compose down              # stop the stack
+docker compose down              # stop the stack (add -f docker-compose.hub.yml if you used --hub)
 ./scripts/onboard.sh             # bring it back up (Windows: .\scripts\Onboard-Dashboard.ps1)
 ```
+
+If you started the stack with `--hub` / `-Hub`, keep that flag when you bring it
+back up (`./scripts/onboard.sh --hub`) so it targets the published image.
 
 Postgres data persists in the `pgdata` Docker volume across restarts. The
 wizard won't appear again — your credentials are already in the database.

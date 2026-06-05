@@ -14,11 +14,19 @@
 .PARAMETER Build
     Force a Docker image rebuild before starting.
 
+.PARAMETER Hub
+    Run the prebuilt image from Docker Hub (chrweav/infra-dashboard) using
+    docker-compose.hub.yml instead of building from source. Mutually
+    exclusive with -Build.
+
 .PARAMETER NoBrowser
     Skip opening the browser when the stack comes up.
 
 .EXAMPLE
     .\scripts\Onboard-Dashboard.ps1
+
+.EXAMPLE
+    .\scripts\Onboard-Dashboard.ps1 -Hub
 
 .EXAMPLE
     .\scripts\Onboard-Dashboard.ps1 -Build
@@ -32,17 +40,23 @@
 [CmdletBinding()]
 param(
     [switch]$Build,
+    [switch]$Hub,
     [switch]$NoBrowser
 )
 
 $ErrorActionPreference = "Stop"
 $PSNativeCommandUseErrorActionPreference = $true
 
+if ($Hub -and $Build) {
+    [Console]::Error.WriteLine("error: -Hub (run the prebuilt Docker Hub image) and -Build (build from source) are mutually exclusive.")
+    exit 2
+}
+
 # Resolve the repo root as the parent of the scripts\ directory this file lives in.
 $repoRoot    = Split-Path -Parent $PSScriptRoot
 $envFile     = Join-Path $repoRoot ".env"
 $envExample  = Join-Path $repoRoot ".env.example"
-$composeFile = Join-Path $repoRoot "docker-compose.yml"
+$composeFile = if ($Hub) { Join-Path $repoRoot "docker-compose.hub.yml" } else { Join-Path $repoRoot "docker-compose.yml" }
 $healthUrl   = "http://localhost:8001/api/health"
 $dashboardUrl = "http://localhost:8001"
 
@@ -91,7 +105,7 @@ try {
 Write-Ok "Docker daemon responding"
 
 if (-not (Test-Path $composeFile)) {
-    Write-Fail "docker-compose.yml not found at $composeFile."
+    Write-Fail "$(Split-Path -Leaf $composeFile) not found at $composeFile."
     Write-Fail "Run this script from a clone of the dashboard repository."
     exit 1
 }
@@ -235,7 +249,20 @@ if ($placeholders.Count -gt 0) {
 Write-Ok "No REPLACE_ME placeholders remain"
 
 # ── 5. Bring up the stack ──────────────────────────────────────────────
-Write-Step "Starting Docker Compose stack"
+if ($Hub) {
+    Write-Step "Pulling prebuilt image and starting Docker Compose stack"
+    # Pull the latest published image first so reruns pick up new releases
+    # (compose only auto-pulls when the image is absent locally).
+    & docker compose -f $composeFile pull
+    if ($LASTEXITCODE -ne 0) {
+        Write-Fail "docker compose pull failed - could not fetch the prebuilt image."
+        Write-Fail "Behind a TLS-inspecting proxy, ensure Docker trusts your corp CA for Docker Hub"
+        Write-Fail "(see docs/ONBOARDING.md: 'docker pull fails with a certificate error')."
+        exit $LASTEXITCODE
+    }
+} else {
+    Write-Step "Starting Docker Compose stack"
+}
 
 $composeArgs = @("compose", "-f", $composeFile, "up", "-d")
 if ($Build) { $composeArgs += "--build" }
@@ -292,4 +319,4 @@ if (-not $adminUser) { $adminUser = "admin" }
 Write-Host "  - Log in with username '$adminUser' — password is in .env as FIRST_RUN_ADMIN_PASSWORD"
 Write-Host "    (Change it via Settings after first login; the env var is ignored once users exist.)"
 Write-Host "  - See docs/ONBOARDING.md for the feature-test checklist"
-Write-Host "  - Stop the stack with:  docker compose -f docker-compose.yml down"
+Write-Host "  - Stop the stack with:  docker compose -f $(Split-Path -Leaf $composeFile) down"
