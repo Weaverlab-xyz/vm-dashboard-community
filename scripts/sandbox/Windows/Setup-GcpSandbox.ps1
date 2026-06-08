@@ -227,7 +227,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 # ── 7. Print config to paste into /setup ────────────────────────────────────
-Write-DashboardConfig 'GCP sandbox configuration' @(
+$cfg = @(
     "gcp_project_id=$ProjectId",
     "gcp_region=$Region",
     "gcp_zone=$Zone",
@@ -252,6 +252,16 @@ Write-DashboardConfig 'GCP sandbox configuration' @(
     '# BeyondTrust deploy key — set in /setup or /secrets:',
     'gcp_cloud_run_docker_deploy_key=…'
 )
+Write-DashboardConfig 'GCP sandbox configuration' $cfg
+Export-ConfigJson -Cloud gcp -Lines $cfg   # machine-readable twin for Onboard-Sandbox.ps1
+# The printed block shows a "$(Get-Content …)" placeholder so the SA private key
+# never hits the terminal; the machine-readable config.json needs real contents.
+if (Test-Path $SaKeyPath) {
+    $gcpCfg = Join-Path (Get-StateDir gcp) 'config.json'
+    $obj = Get-Content $gcpCfg -Raw | ConvertFrom-Json
+    $obj.gcp_service_account_json = (Get-Content $SaKeyPath -Raw).Trim()
+    ($obj | ConvertTo-Json -Compress -Depth 10) | Set-Content -LiteralPath $gcpCfg -Encoding utf8 -NoNewline
+}
 
 @"
 Sandbox topology summary

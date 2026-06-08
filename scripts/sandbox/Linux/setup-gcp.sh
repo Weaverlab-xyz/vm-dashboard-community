@@ -255,30 +255,40 @@ else
 fi
 
 # ── 7. Print config to paste into /setup ────────────────────────────────────
-print_dashboard_config "GCP sandbox configuration" \
-  "gcp_project_id=$PROJECT_ID" \
-  "gcp_region=$REGION" \
-  "gcp_zone=$ZONE" \
-  "gcp_network=$VPC" \
-  "gcp_subnetwork=$VM_SUBNET                                # User VMs land here (no NAT, no internet)" \
-  "gcp_jumpoint_subnetwork=$JP_SUBNET                       # Jumpoint COS lands here (Cloud NAT)" \
-  "gcp_ssh_key_secret_name=$SSH_SECRET                      # JSON {public_key, private_key}" \
-  "gcp_jumpoint_image=beyondtrust/sra-jumpoint:latest" \
-  "gcp_jumpoint_machine_type=e2-micro" \
-  "gcp_default_network_tag=$NETWORK_TAG_VM                  # Auto-attached to every dashboard-deployed VM so the sandbox firewall rules apply" \
-  "gcp_service_account_json=\$(cat $SA_KEY_PATH | jq -c .)   # paste the JSON contents" \
-  "" \
-  "# Image-registry hub + automated cross-cloud promote:" \
-  "storage_gcs_bucket=$STORAGE_BUCKET                       # Image hub + promote staging" \
-  "storage_active_backend=gcs                                # Active asset backend" \
-  "storage_hub_backend=gcs                                   # Image hub (defaults to active if unset)" \
-  "promote_runner_image=chrweav/dashboard-promote-runner:latest   # Public multi-arch image; override to Artifact Registry for a private/air-gapped registry" \
-  "promote_runner_gcp_region=$REGION                         # Cloud Run Job lands here" \
-  "promote_runner_gcp_service_account=$SA_EMAIL              # Workload-identity SA for the runner" \
-  "promote_runner_gcp_staging_bucket=$STORAGE_BUCKET" \
-  "" \
-  "# BeyondTrust deploy key — set in /setup or /secrets:" \
+_cfg=(
+  "gcp_project_id=$PROJECT_ID"
+  "gcp_region=$REGION"
+  "gcp_zone=$ZONE"
+  "gcp_network=$VPC"
+  "gcp_subnetwork=$VM_SUBNET                                # User VMs land here (no NAT, no internet)"
+  "gcp_jumpoint_subnetwork=$JP_SUBNET                       # Jumpoint COS lands here (Cloud NAT)"
+  "gcp_ssh_key_secret_name=$SSH_SECRET                      # JSON {public_key, private_key}"
+  "gcp_jumpoint_image=beyondtrust/sra-jumpoint:latest"
+  "gcp_jumpoint_machine_type=e2-micro"
+  "gcp_default_network_tag=$NETWORK_TAG_VM                  # Auto-attached to every dashboard-deployed VM so the sandbox firewall rules apply"
+  "gcp_service_account_json=\$(cat $SA_KEY_PATH | jq -c .)   # paste the JSON contents"
+  ""
+  "# Image-registry hub + automated cross-cloud promote:"
+  "storage_gcs_bucket=$STORAGE_BUCKET                       # Image hub + promote staging"
+  "storage_active_backend=gcs                                # Active asset backend"
+  "storage_hub_backend=gcs                                   # Image hub (defaults to active if unset)"
+  "promote_runner_image=chrweav/dashboard-promote-runner:latest   # Public multi-arch image; override to Artifact Registry for a private/air-gapped registry"
+  "promote_runner_gcp_region=$REGION                         # Cloud Run Job lands here"
+  "promote_runner_gcp_service_account=$SA_EMAIL              # Workload-identity SA for the runner"
+  "promote_runner_gcp_staging_bucket=$STORAGE_BUCKET"
+  ""
+  "# BeyondTrust deploy key — set in /setup or /secrets:"
   "gcp_cloud_run_docker_deploy_key=…"
+)
+print_dashboard_config "GCP sandbox configuration" "${_cfg[@]}"
+write_config_json gcp "${_cfg[@]}"   # machine-readable twin for onboard-sandbox.sh
+# The printed block shows a "$(cat …)" placeholder so the SA private key never
+# hits the terminal; the machine-readable config.json needs the real contents.
+if command -v jq >/dev/null 2>&1 && [[ -f "$SA_KEY_PATH" ]]; then
+  _gcp_cfg="$(state_dir gcp)/config.json"
+  jq -c --arg sa "$(jq -c . "$SA_KEY_PATH")" '.gcp_service_account_json = $sa' "$_gcp_cfg" > "$_gcp_cfg.tmp" \
+    && mv "$_gcp_cfg.tmp" "$_gcp_cfg"
+fi
 
 cat <<EOF
 Sandbox topology summary

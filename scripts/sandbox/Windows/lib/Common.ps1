@@ -64,6 +64,30 @@ function Write-DashboardConfig {
     Write-Host ""
 }
 
+# Machine-readable twin of Write-DashboardConfig: write the same key=value pairs
+# to (Get-StateDir <cloud>)/config.json so Onboard-Sandbox.ps1 can merge them
+# and POST to /api/setup/import. Splits each line on the FIRST '='.
+function Export-ConfigJson {
+    param(
+        [string]   $Cloud,
+        [string[]] $Lines
+    )
+    $obj = [ordered]@{}
+    foreach ($line in $Lines) {
+        $idx = $line.IndexOf('=')
+        if ($idx -lt 1) { continue }
+        $key = $line.Substring(0, $idx).Trim()
+        $val = $line.Substring($idx + 1)
+        $val = [regex]::Replace($val, '\s+#.*$', '').Trim()   # strip trailing "  # comment"
+        if (-not $key) { continue }
+        if ($val -eq [char]0x2026) { continue }                # skip "…" paste-manually placeholders
+        $obj[$key] = $val
+    }
+    $path = Join-Path (Get-StateDir $Cloud) 'config.json'
+    ($obj | ConvertTo-Json -Compress -Depth 5) | Set-Content -LiteralPath $path -Encoding utf8 -NoNewline
+    Write-Info "Wrote $path ($($obj.Count) keys)"
+}
+
 # ── State directory (optional cache) ───────────────────────────────────────────
 # Tag-based rollback is the source of truth, but we also drop a state directory
 # as a hint to users who want to know what was created.

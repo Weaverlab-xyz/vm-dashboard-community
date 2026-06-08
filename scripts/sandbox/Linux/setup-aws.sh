@@ -651,36 +651,39 @@ else
 fi
 
 # ── 8. Print config to paste into /setup ──────────────────────────────────────
-print_dashboard_config "AWS sandbox configuration" \
-  "aws_region=$REGION" \
-  "aws_default_subnet_id=$PRIVATE_SUBNET_ID            # Deploy form's default subnet for new EC2 instances" \
-  "aws_default_security_group_id=$VM_SG               # Deploy form's default SG (VM-tier, no internet egress)" \
-  "aws_db_subnet_group_name=$DB_SUBNET_GROUP_NAME      # Managed-DB deploys: private RDS subnet group (2 AZs)" \
-  "aws_db_security_group_id=$VM_SG                     # Managed-DB deploys: reuse the VM-tier SG (no internet egress)" \
-  "ec2_ssh_key_secret=$SSH_SECRET_NAME                 # JSON {public_key,private_key} for EC2 cloud-init + Ansible" \
-  "bt_ecs_cluster=$ECS_CLUSTER                          # ECS cluster the Jumpoint Fargate task runs in" \
-  "bt_ecs_task_family=bt-jumpoint" \
-  "bt_ecs_image=beyondtrust/sra-jumpoint                # or your ECR mirror" \
-  "bt_ecs_execution_role_arn=$ROLE_ARN" \
-  "bt_ecs_jumpoint_subnet_id=$PUBLIC_SUBNET_ID         # Jumpoint task lands here (public, IGW-routed)" \
-  "bt_ecs_jumpoint_security_group_id=$JUMPOINT_SG      # SG for the Jumpoint task" \
-  "" \
-  "# Image-registry hub + automated cross-cloud promote:" \
-  "storage_s3_bucket=$STORAGE_BUCKET                                       # Image hub + promote staging" \
-  "storage_active_backend=s3                                                  # Active asset backend" \
-  "storage_hub_backend=s3                                                     # Image hub (defaults to active if unset)" \
-  "promote_runner_image=chrweav/dashboard-promote-runner:latest         # Public multi-arch image; override to your ECR for a private/air-gapped registry" \
-  "promote_runner_ecs_cluster=$ECS_CLUSTER                                    # Reuses Jumpoint cluster" \
-  "promote_runner_ecs_execution_role_arn=$ROLE_ARN                            # Image pull + CloudWatch logs" \
-  "promote_runner_ecs_task_role_arn=$PROMOTE_TASK_ROLE_ARN                    # S3 PutObject on the staging bucket" \
-  "promote_runner_ecs_subnet_id=$PUBLIC_SUBNET_ID                             # Runner needs egress to the presigned source URL" \
-  "promote_runner_ecs_security_group_ids=$JUMPOINT_SG                         # Reuses Jumpoint SG (egress 443)" \
-  "aws_vmimport_role_name=$VMIMPORT_ROLE_NAME                                 # Service role ec2:ImportImage assumes" \
-  "" \
-  "# Sandbox-provisioned AWS credentials for the dashboard IAM user ($DASHBOARD_USER_NAME):" \
-  "aws_access_key_id=$AWS_ACCESS_KEY_ID" \
-  "aws_secret_access_key=$AWS_SECRET_ACCESS_KEY" \
+_cfg=(
+  "aws_region=$REGION"
+  "aws_default_subnet_id=$PRIVATE_SUBNET_ID            # Deploy form's default subnet for new EC2 instances"
+  "aws_default_security_group_id=$VM_SG               # Deploy form's default SG (VM-tier, no internet egress)"
+  "aws_db_subnet_group_name=$DB_SUBNET_GROUP_NAME      # Managed-DB deploys: private RDS subnet group (2 AZs)"
+  "aws_db_security_group_id=$VM_SG                     # Managed-DB deploys: reuse the VM-tier SG (no internet egress)"
+  "ec2_ssh_key_secret=$SSH_SECRET_NAME                 # JSON {public_key,private_key} for EC2 cloud-init + Ansible"
+  "bt_ecs_cluster=$ECS_CLUSTER                          # ECS cluster the Jumpoint Fargate task runs in"
+  "bt_ecs_task_family=bt-jumpoint"
+  "bt_ecs_image=beyondtrust/sra-jumpoint                # or your ECR mirror"
+  "bt_ecs_execution_role_arn=$ROLE_ARN"
+  "bt_ecs_jumpoint_subnet_id=$PUBLIC_SUBNET_ID         # Jumpoint task lands here (public, IGW-routed)"
+  "bt_ecs_jumpoint_security_group_id=$JUMPOINT_SG      # SG for the Jumpoint task"
+  ""
+  "# Image-registry hub + automated cross-cloud promote:"
+  "storage_s3_bucket=$STORAGE_BUCKET                                       # Image hub + promote staging"
+  "storage_active_backend=s3                                                  # Active asset backend"
+  "storage_hub_backend=s3                                                     # Image hub (defaults to active if unset)"
+  "promote_runner_image=chrweav/dashboard-promote-runner:latest         # Public multi-arch image; override to your ECR for a private/air-gapped registry"
+  "promote_runner_ecs_cluster=$ECS_CLUSTER                                    # Reuses Jumpoint cluster"
+  "promote_runner_ecs_execution_role_arn=$ROLE_ARN                            # Image pull + CloudWatch logs"
+  "promote_runner_ecs_task_role_arn=$PROMOTE_TASK_ROLE_ARN                    # S3 PutObject on the staging bucket"
+  "promote_runner_ecs_subnet_id=$PUBLIC_SUBNET_ID                             # Runner needs egress to the presigned source URL"
+  "promote_runner_ecs_security_group_ids=$JUMPOINT_SG                         # Reuses Jumpoint SG (egress 443)"
+  "aws_vmimport_role_name=$VMIMPORT_ROLE_NAME                                 # Service role ec2:ImportImage assumes"
+  ""
+  "# Sandbox-provisioned AWS credentials for the dashboard IAM user ($DASHBOARD_USER_NAME):"
+  "aws_access_key_id=$AWS_ACCESS_KEY_ID"
+  "aws_secret_access_key=$AWS_SECRET_ACCESS_KEY"
   "aws_ecs_docker_deploy_key=…   # BeyondTrust SRA Jumpoint deploy key (paste manually)"
+)
+print_dashboard_config "AWS sandbox configuration" "${_cfg[@]}"
+write_config_json aws "${_cfg[@]}"   # machine-readable twin for onboard-sandbox.sh
 
 cat <<EOF
 Sandbox topology summary

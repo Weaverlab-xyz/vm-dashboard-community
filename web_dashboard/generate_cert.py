@@ -16,7 +16,7 @@ accept it for all access paths.
 NOTE: Browsers will still show a "not trusted" warning because the cert is
 self-signed.  To eliminate warnings on your local machines use mkcert:
     https://github.com/FiloSottile/mkcert
-    mkcert WeaverPC localhost 127.0.0.1
+    mkcert myhost localhost 127.0.0.1
 """
 import datetime
 import ipaddress

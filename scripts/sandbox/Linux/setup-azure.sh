@@ -211,38 +211,41 @@ else
 fi
 
 # ── 7. Print config to paste into /setup ─────────────────────────────────────
-print_dashboard_config "Azure sandbox configuration" \
-  "azure_subscription_id=$SUBSCRIPTION_ID" \
-  "azure_tenant_id=$TENANT_ID" \
-  "azure_client_id=$SP_APP_ID" \
-  "azure_client_secret=$SP_PASSWORD" \
-  "azure_resource_group=$RG" \
-  "azure_location=$LOCATION" \
-  "azure_vnet_resource_group=$RG" \
-  "azure_aci_resource_group=$RG" \
-  "azure_aci_subnet_id=$ACI_SUBNET_ID                      # ACI lands here, has internet egress" \
-  "azure_default_subnet_id=$VM_SUBNET_ID                   # VMs land here, NSG-restricted to VNet" \
-  "azure_aci_storage_account=$SA_NAME                      # /jpt persistent volume" \
-  "azure_aci_storage_account_rg=$RG" \
-  "azure_aci_file_share=jpt" \
-  "azure_key_vault_url=$KV_URL" \
-  "azure_ssh_keypair_secret_name=$SSH_SECRET               # JSON {public_key, private_key}" \
-  "" \
-  "# Image-registry hub + automated cross-cloud promote:" \
-  "storage_azure_account=$SA_NAME                          # Image hub + promote staging" \
-  "storage_azure_container=hub                              # Container for hub artefacts" \
-  "storage_active_backend=azure_blob                        # Active asset backend" \
-  "storage_hub_backend=azure_blob                           # Image hub (defaults to active if unset)" \
-  "promote_runner_image=chrweav/dashboard-promote-runner:latest   # Public multi-arch image; override to your ACR for a private/air-gapped registry" \
-  "promote_runner_azure_resource_group=$RG                  # ACI lands here" \
-  "promote_runner_azure_location=$LOCATION" \
-  "promote_runner_azure_subnet_id=$ACI_SUBNET_ID            # Reuses the Jumpoint ACI subnet" \
-  "promote_runner_azure_staging_account=$SA_NAME            # Same account as hub by default" \
-  "promote_runner_azure_staging_container=hub" \
-  "promote_runner_azure_target_resource_group=$RG           # Resulting managed image lands here" \
-  "" \
-  "# BeyondTrust deploy key — set in /setup or /secrets:" \
+_cfg=(
+  "azure_subscription_id=$SUBSCRIPTION_ID"
+  "azure_tenant_id=$TENANT_ID"
+  "azure_client_id=$SP_APP_ID"
+  "azure_client_secret=$SP_PASSWORD"
+  "azure_resource_group=$RG"
+  "azure_location=$LOCATION"
+  "azure_vnet_resource_group=$RG"
+  "azure_aci_resource_group=$RG"
+  "azure_aci_subnet_id=$ACI_SUBNET_ID                      # ACI lands here, has internet egress"
+  "azure_default_subnet_id=$VM_SUBNET_ID                   # VMs land here, NSG-restricted to VNet"
+  "azure_aci_storage_account=$SA_NAME                      # /jpt persistent volume"
+  "azure_aci_storage_account_rg=$RG"
+  "azure_aci_file_share=jpt"
+  "azure_key_vault_url=$KV_URL"
+  "azure_ssh_keypair_secret_name=$SSH_SECRET               # JSON {public_key, private_key}"
+  ""
+  "# Image-registry hub + automated cross-cloud promote:"
+  "storage_azure_account=$SA_NAME                          # Image hub + promote staging"
+  "storage_azure_container=hub                              # Container for hub artefacts"
+  "storage_active_backend=azure_blob                        # Active asset backend"
+  "storage_hub_backend=azure_blob                           # Image hub (defaults to active if unset)"
+  "promote_runner_image=chrweav/dashboard-promote-runner:latest   # Public multi-arch image; override to your ACR for a private/air-gapped registry"
+  "promote_runner_azure_resource_group=$RG                  # ACI lands here"
+  "promote_runner_azure_location=$LOCATION"
+  "promote_runner_azure_subnet_id=$ACI_SUBNET_ID            # Reuses the Jumpoint ACI subnet"
+  "promote_runner_azure_staging_account=$SA_NAME            # Same account as hub by default"
+  "promote_runner_azure_staging_container=hub"
+  "promote_runner_azure_target_resource_group=$RG           # Resulting managed image lands here"
+  ""
+  "# BeyondTrust deploy key — set in /setup or /secrets:"
   "azure_aci_docker_deploy_key=…"
+)
+print_dashboard_config "Azure sandbox configuration" "${_cfg[@]}"
+write_config_json azure "${_cfg[@]}"   # machine-readable twin for onboard-sandbox.sh
 
 cat <<EOF
 Sandbox topology summary

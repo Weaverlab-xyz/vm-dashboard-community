@@ -628,7 +628,7 @@ if ($cachedStillValid) {
 }
 
 # ── 8. Print config to paste into /setup ──────────────────────────────────────
-Write-DashboardConfig 'AWS sandbox configuration' @(
+$cfg = @(
     "aws_region=$Region",
     "aws_default_subnet_id=$PrivateSubnetId            # Deploy form's default subnet for new EC2 instances",
     "aws_default_security_group_id=$VmSg               # Deploy form's default SG (VM-tier, no internet egress)",
@@ -659,6 +659,8 @@ Write-DashboardConfig 'AWS sandbox configuration' @(
     "aws_secret_access_key=$AwsSecretAccessKey",
     'aws_ecs_docker_deploy_key=…   # BeyondTrust SRA Jumpoint deploy key (paste manually)'
 )
+Write-DashboardConfig 'AWS sandbox configuration' $cfg
+Export-ConfigJson -Cloud aws -Lines $cfg   # machine-readable twin for Onboard-Sandbox.ps1
 
 @"
 Sandbox topology summary

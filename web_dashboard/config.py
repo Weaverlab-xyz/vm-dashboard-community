@@ -118,7 +118,7 @@ class Settings(BaseSettings):
     # SSH execution mode (POWERSHELL_EXECUTION_MODE=ssh): container SSHes to the
     # Windows host and runs pwsh there — mirrors the Hybrid Worker pattern for dev.
     ssh_host: str = "host.docker.internal"   # Docker's name for the Windows host
-    ssh_user: str = ""                        # Windows username, e.g. "chrwe"
+    ssh_user: str = ""                        # Windows username the container SSHes in as
     ssh_key_file: str = "/root/.ssh/dev_dashboard_key"  # path inside the container
 
     # Logging
@@ -158,10 +158,12 @@ class Settings(BaseSettings):
     bt_ps_deploy_key_title: str = "Docker Deploy Key"  # Password Safe secret title
 
     # Image Management (OVA / ISO / AMI building)
-    ova_search_path: str = r"V:\packer\Weaverlab"
-    iso_source_path: str = r"\\10.0.0.74\Public\VMWare\ASUSTOR\WEAVERPC@chrwe\Drive#V\ISO"
-    packer_work_root: str = r"C:\Users\chrwe\AppData\Local\Temp\packer-iso-builds"
-    vmx_output_path: str = r"V:\packer\VMX"
+    # Environment-specific paths — override in .env (or the settings panel) to
+    # match where your ISOs/OVAs live and where Packer should stage builds.
+    ova_search_path: str = r"C:\packer\ova"
+    iso_source_path: str = r"\\nas\ISO"
+    packer_work_root: str = r"C:\packer\work"
+    vmx_output_path: str = r"C:\packer\vmx"
     s3_bucket_prefix: str = "vm-import-ova"
     aws_iam_instance_profile: str = ""  # IAM instance profile for Packer surrogate EC2 (needs S3 read access)
     ec2_ssm_instance_profile: str = ""  # IAM instance profile to attach to dashboard-deployed EC2 instances (SSM access)

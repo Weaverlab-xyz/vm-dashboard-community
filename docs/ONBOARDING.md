@@ -78,7 +78,17 @@ labbing this up — testing, demoing, or running training environments — these
 scripts provision a disposable, **fully isolated** sandbox in AWS, Azure, and
 GCP and print a credential block you paste into the wizard (Part D), letting you
 skip the manual Parts A–C. The repo ships bash scripts (WSL / Linux / macOS) and
-PowerShell equivalents (Windows), one command each:
+PowerShell equivalents (Windows).
+
+**Fastest — skip the wizard too:** `onboard-sandbox` provisions *and* pushes the
+config into the dashboard for you (creating your admin), so you never open `/setup`:
+
+```bash
+./scripts/sandbox/Linux/onboard-sandbox.sh --cloud all
+# Windows:  .\scripts\sandbox\Windows\Onboard-Sandbox.ps1 -Cloud all
+```
+
+Or run the per-cloud scripts and paste their printed config into the wizard:
 
 ```bash
 # Bash (WSL / Linux / macOS)

@@ -35,7 +35,7 @@ Tools needed regardless of which variant you run:
 - `az` CLI
 - `gcloud` SDK
 - `docker` + `docker compose v2` (for running the dashboard itself)
-- `jq`, `ssh-keygen`
+- `jq`, `curl`, `ssh-keygen`
 
 The prereq script verifies them and prints install hints for anything
 missing:
@@ -99,6 +99,48 @@ AWS setup also grants the dashboard IAM user **RDS** permissions (create/delete/
 modify DB instances + subnet groups) and creates a private **DB subnet group**
 spanning two AZs, so the managed-database feature can deploy a private Postgres
 into the sandbox.
+
+## One-shot: provision and auto-configure (skip the wizard)
+
+Instead of running each `setup-*.sh` and pasting the printed block into the
+wizard, `onboard-sandbox` runs the chosen clouds, collects what each one
+produces, and **POSTs it straight to the dashboard's setup API** — creating the
+admin and marking setup complete, so you log in directly with no `/setup` wizard.
+
+```bash
+# Bash (WSL / Linux / macOS)
+./scripts/sandbox/Linux/onboard-sandbox.sh --cloud all --dashboard-url http://localhost:8001
+```
+
+```powershell
+# PowerShell (Windows)
+.\scripts\sandbox\Windows\Onboard-Sandbox.ps1 -Cloud all -DashboardUrl http://localhost:8001
+```
+
+It prompts for a new admin username/password (or pass them as flags). Options:
+
+| Flag (bash / PowerShell) | Purpose |
+|---|---|
+| `--cloud` / `-Cloud` | `aws,azure,gcp` or `all` (prompted if omitted) |
+| `--dashboard-url` / `-DashboardUrl` | dashboard base URL (default `http://localhost:8001`) |
+| `--admin-user`/`--admin-pass` / `-AdminUser`/`-AdminPass` | admin to create (prompted if omitted) |
+| `--token` / `-Token` | admin JWT, for **re-runs** when the dashboard is already set up (adds a cloud) |
+| `--push-only` / `-PushOnly` | skip provisioning; just push the cached `config.json` files |
+| `--no-push` / `-NoPush` | provision and write `config.json`, but don't call the API |
+
+**How it works:** provisioning still runs **on your machine** with your existing
+cloud SSO (the dashboard container never sees high-privilege credentials). Each
+`setup-*.sh` writes a machine-readable `~/.dashboard-sandbox/<cloud>/config.json`
+(the same key=value pairs it prints, minus the human comments); the wrapper merges
+them and sends them to `POST /api/setup/import`, which accepts the **full** key set
+(including `bt_ecs_*`, `storage_*`, `promote_runner_*`) that the typed wizard form
+doesn't expose. On a fresh stack the call is unauthenticated (same as the wizard's
+first-run submit); once setup is complete it requires an admin token, so the
+wrapper logs in for you (or pass `--token`).
+
+> Multi-cloud note: the few keys every cloud sets (`storage_active_backend`,
+> `storage_hub_backend`) take the **last** provisioned cloud's value; adjust the
+> active backend afterward on **Settings → Storage** if needed.
 
 ## Cost
 

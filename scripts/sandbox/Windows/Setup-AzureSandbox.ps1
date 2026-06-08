@@ -210,7 +210,7 @@ if ($AciState -ne 'Registered') {
 }
 
 # ── 7. Print config to paste into /setup ─────────────────────────────────────
-Write-DashboardConfig 'Azure sandbox configuration' @(
+$cfg = @(
     "azure_subscription_id=$SubscriptionId",
     "azure_tenant_id=$TenantId",
     "azure_client_id=$SpAppId",
@@ -243,6 +243,8 @@ Write-DashboardConfig 'Azure sandbox configuration' @(
     '# BeyondTrust deploy key — set in /setup or /secrets:',
     'azure_aci_docker_deploy_key=…'
 )
+Write-DashboardConfig 'Azure sandbox configuration' $cfg
+Export-ConfigJson -Cloud azure -Lines $cfg   # machine-readable twin for Onboard-Sandbox.ps1
 
 @"
 Sandbox topology summary
