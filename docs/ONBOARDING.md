@@ -8,6 +8,13 @@ Supported hosts: **Windows** (PowerShell 7), **macOS**, **Linux**, and
 **WSL** (Windows Subsystem for Linux — Docker Engine in WSL, no Docker
 Desktop required).
 
+> **How configuration works:** all cloud setup happens in the dashboard's
+> first-boot **setup wizard** (Part D) — you either paste your own cloud
+> credentials or skip a cloud to explore. Parts A–C below are just *how to
+> obtain* those credentials manually; the **Quick path: cloud sandbox** is an
+> optional way to spin up throwaway lab creds. None are required if you already
+> have credentials or only want to explore the UI.
+
 - [Quick path: cloud sandbox](#quick-path-cloud-sandbox) — automated, isolated lab infra in any/all of AWS/Azure/GCP
 - [Part A — AWS setup](#part-a--aws-setup)
 - [Part B — Azure setup](#part-b--azure-setup)
@@ -66,11 +73,12 @@ cd vm-dashboard-community
 
 ## Quick path: cloud sandbox
 
-If you're labbing this up — testing the dashboard, demoing it, or running
-training environments — there's a faster alternative to Parts A, B, and C
-below. The repo ships bash scripts (WSL / Linux / macOS) and PowerShell
-equivalents (Windows) that provision **fully isolated** sandbox
-infrastructure in AWS, Azure, and GCP with a single command each:
+**Optional — only if you don't already have cloud credentials.** If you're
+labbing this up — testing, demoing, or running training environments — these
+scripts provision a disposable, **fully isolated** sandbox in AWS, Azure, and
+GCP and print a credential block you paste into the wizard (Part D), letting you
+skip the manual Parts A–C. The repo ships bash scripts (WSL / Linux / macOS) and
+PowerShell equivalents (Windows), one command each:
 
 ```bash
 # Bash (WSL / Linux / macOS)

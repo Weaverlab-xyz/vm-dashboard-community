@@ -59,10 +59,13 @@ from source** instead (for contributors, or to customize the build).
 
 Either way the script checks prerequisites, generates bootstrap secrets (JWT
 signing key + Postgres password), and brings up the Docker Compose stack. Your
-browser opens automatically to a **setup wizard** where you create the admin
-account and enter your cloud credentials. Credentials are encrypted with
-AES-256 and stored in the database — nothing sensitive stays in any file on
-disk.
+browser opens automatically to a **setup wizard** — the single place you
+configure clouds. Create your admin account, then either bring your own cloud
+credentials (paste an access key / service principal / service-account JSON) or
+skip a cloud to just explore the UI. No creds handy? each cloud step has an
+optional panel to spin up a throwaway lab sandbox. Credentials are encrypted
+with AES-256 and stored in the database — nothing sensitive stays in any file
+on disk.
 
 > **Just want to kick the tyres without cloning the repo?** Drop
 > `docker-compose.hub.yml` and `.env.example` into an empty folder, copy
