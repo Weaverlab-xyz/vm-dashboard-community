@@ -59,13 +59,24 @@ from source** instead (for contributors, or to customize the build).
 
 Either way the script checks prerequisites, generates bootstrap secrets (JWT
 signing key + Postgres password), and brings up the Docker Compose stack. Your
-browser opens automatically to a **setup wizard** — the single place you
-configure clouds. Create your admin account, then either bring your own cloud
+browser opens automatically to a **setup wizard**. Create your admin account, then either bring your own cloud
 credentials (paste an access key / service principal / service-account JSON) or
 skip a cloud to just explore the UI. No creds handy? each cloud step has an
 optional panel to spin up a throwaway lab sandbox. Credentials are encrypted
 with AES-256 and stored in the database — nothing sensitive stays in any file
 on disk.
+
+**Prefer not to click through the wizard?** For a throwaway lab, the all-in-one
+sandbox onboarder provisions infra in your chosen cloud(s) *on your machine* and
+pushes the result straight into the dashboard's setup API — no wizard:
+
+```bash
+./scripts/sandbox/Linux/onboard-sandbox.sh --cloud all
+# Windows:  .\scripts\sandbox\Windows\Onboard-Sandbox.ps1 -Cloud all
+```
+
+It prompts for an admin login, provisions, configures, then you log in — see
+[`scripts/sandbox/README.md`](scripts/sandbox/README.md) for flags and teardown.
 
 > **Just want to kick the tyres without cloning the repo?** Drop
 > `docker-compose.hub.yml` and `.env.example` into an empty folder, copy

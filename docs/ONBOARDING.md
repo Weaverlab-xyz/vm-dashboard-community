@@ -8,12 +8,13 @@ Supported hosts: **Windows** (PowerShell 7), **macOS**, **Linux**, and
 **WSL** (Windows Subsystem for Linux — Docker Engine in WSL, no Docker
 Desktop required).
 
-> **How configuration works:** all cloud setup happens in the dashboard's
-> first-boot **setup wizard** (Part D) — you either paste your own cloud
-> credentials or skip a cloud to explore. Parts A–C below are just *how to
-> obtain* those credentials manually; the **Quick path: cloud sandbox** is an
-> optional way to spin up throwaway lab creds. None are required if you already
-> have credentials or only want to explore the UI.
+> **Two ways to configure** (once the container is up — Part D):
+> **Path A — the setup wizard:** paste your own cloud credentials and click
+> through `/setup` (Parts A–C show how to obtain them; or skip a cloud to
+> explore). **Path B — one script, no wizard:** the [Quick path: cloud
+> sandbox](#quick-path-cloud-sandbox) `onboard-sandbox` script provisions a
+> throwaway lab *and* pushes the config straight into the dashboard, so you never
+> open `/setup`. Neither is required if you only want to explore the UI.
 
 - [Quick path: cloud sandbox](#quick-path-cloud-sandbox) — automated, isolated lab infra in any/all of AWS/Azure/GCP
 - [Part A — AWS setup](#part-a--aws-setup)
@@ -301,6 +302,12 @@ When you run the onboard script, the wizard Step 4 (GCP) asks for:
 Pick the onboarder that matches your host OS. Both do the same thing:
 preflight checks, generate the JWT key file and bootstrap `.env` (DB
 secret only), bring up Compose, poll `/api/health`, open the browser.
+
+> **Wizard or script?** Step 1 starts the container — **both** paths need it.
+> Step 2 is **Path A** (walk the wizard). For **Path B** (no wizard), do Step 1,
+> then run the [Quick path: cloud sandbox](#quick-path-cloud-sandbox)
+> `onboard-sandbox` script — it provisions a lab and configures the dashboard for
+> you, and you log in directly.
 
 ### 1. Run the onboard script (one command)
 
