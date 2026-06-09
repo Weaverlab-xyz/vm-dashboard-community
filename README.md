@@ -78,7 +78,7 @@ pushes the result straight into the dashboard's setup API — no wizard:
 It prompts for an admin login, provisions, configures, then you log in — see
 [`scripts/sandbox/README.md`](scripts/sandbox/README.md) for flags and teardown.
 
-> **Just want to kick the tyres without cloning the repo?** Everything you need is
+> **Just want to kick the tires without cloning the repo?** Everything you need is
 > on the image's Docker Hub page. Copy the `docker-compose.yml` from
 > **[hub.docker.com/r/chrweav/infra-dashboard](https://hub.docker.com/r/chrweav/infra-dashboard)**
 > into an empty folder, generate a stable key with
