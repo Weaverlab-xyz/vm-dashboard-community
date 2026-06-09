@@ -391,30 +391,37 @@ To update credentials or toggle feature flags after setup, navigate to
 reconfigure mode: existing values are pre-filled, and leaving a secret
 field blank keeps the stored value unchanged.
 
-### Migrate the JWT key to a cloud secrets manager (strongly recommended)
+### Protect and back up the JWT key
 
 `.jwt_secret_key` is the root of trust for the entire application — every
 integration credential stored in the database is encrypted with a key derived
-from it. While the onboard script protects it with owner-only filesystem
-permissions, it remains a plaintext file on disk, which is not appropriate for
-long-lived or shared deployments.
+from it. The onboard script protects it with owner-only filesystem permissions
+and mounts it into the container as a Docker secret.
 
-**After completing the setup wizard, migrate the key to your secrets manager:**
+**In the community edition this key cannot be migrated to a cloud vault.** It's
+the bootstrap key that decrypts the encrypted database — *including* the
+credentials the dashboard would need to reach any vault — so there's no startup
+ordering that lets it live in a vault (see
+[Why the JWT root key cannot be migrated](secrets-management.md#why-the-jwt-root-key-cannot-be-migrated)).
+At startup the dashboard reads it from `JWT_SECRET_KEY_FILE` → the
+`/run/secrets/jwt_key` Docker secret → the `JWT_SECRET_KEY` env var, in that order.
 
-1. Log in as admin and go to **Settings → Secrets Backend** (`/secrets`).
-2. Choose your provider and enter the target secret name:
-   - **AWS Secrets Manager** — requires AWS credentials configured in the wizard
-   - **Azure Key Vault** — requires the Azure SP and Key Vault URL configured in the wizard
-   - **GCP Secret Manager** — requires GCP service account configured in the wizard
-   - **BeyondTrust Secrets Safe** — requires BeyondTrust configured under feature flags
-3. Click **Migrate** — the dashboard uploads the key to your vault, updates its
-   internal reference, and on all future startups reads the key from the cloud
-   rather than the local file.
-4. Once migration is confirmed, delete `.jwt_secret_key` from the repo directory.
+So, for the community edition:
 
-After migration the local file is no longer needed. Your vault's access controls,
-audit logging, and key rotation capabilities become the security boundary instead
-of filesystem permissions.
+- **Back it up** somewhere safe (password manager, encrypted drive). Lose it and
+  every stored credential is unrecoverable and the app won't start — see
+  [JWT key file: backup and loss recovery](#jwt-key-file-backup-and-loss-recovery) below.
+- **Don't commit it** — it's gitignored and excluded from the image build context.
+- On shared or long-lived hosts, restrict OS access to the file; the host's
+  filesystem permissions (or the Docker secret mount) are the security boundary.
+
+> *Integration credentials* (your AWS/Azure/GCP keys) **can** be moved into an
+> external vault — AWS Secrets Manager, Azure Key Vault, GCP Secret Manager, or
+> BeyondTrust Secrets Safe — from **Settings → Secrets Backend** (`/secrets`).
+> That's a separate feature from the root key; see
+> [`docs/secrets-management.md`](secrets-management.md). Removing the on-disk root
+> key entirely (fetched at boot via cloud workload identity) is on the
+> **SaaS-edition roadmap** — see [`docs/saas-comparison.md`](saas-comparison.md).
 
 ### Platform notes
 
@@ -626,13 +633,15 @@ Common causes:
 you store through the setup wizard. The app uses it to encrypt every integration
 secret (AWS keys, Azure SP credentials, etc.) in the database.
 
-**Migrate it as soon as possible** — see [Migrate the JWT key to a cloud secrets
-manager](#migrate-the-jwt-key-to-a-cloud-secrets-manager-strongly-recommended)
-above. Once migrated, the local file can be deleted and the cloud vault becomes
-the security boundary.
+**It cannot be migrated to a vault** in the community edition — it's the bootstrap
+key that decrypts everything (including any vault credentials), so it must be
+present at startup from the host. See [Protect and back up the JWT
+key](#protect-and-back-up-the-jwt-key) above and
+[why](secrets-management.md#why-the-jwt-root-key-cannot-be-migrated). (Removing the
+on-disk key via cloud workload identity is a SaaS-edition feature.)
 
-**Until you migrate:** back it up somewhere safe (password manager, encrypted
-drive). Do not commit it to git (it's in `.gitignore`).
+**Protect it:** back it up somewhere safe (password manager, encrypted drive), and
+don't commit it to git (it's in `.gitignore`).
 
 **If you lose it**, every stored credential is unrecoverable and the app will
 refuse to start (the key file is required). Recovery procedure:

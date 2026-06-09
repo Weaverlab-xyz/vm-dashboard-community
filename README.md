@@ -78,11 +78,12 @@ pushes the result straight into the dashboard's setup API — no wizard:
 It prompts for an admin login, provisions, configures, then you log in — see
 [`scripts/sandbox/README.md`](scripts/sandbox/README.md) for flags and teardown.
 
-> **Just want to kick the tyres without cloning the repo?** Drop
-> `docker-compose.hub.yml` and `.env.example` into an empty folder, copy
-> `.env.example` to `.env` and set `POSTGRES_PASSWORD`, generate a stable key
-> with `openssl rand -hex 32 > .jwt_secret_key`, then
-> `docker compose -f docker-compose.hub.yml up -d`.
+> **Just want to kick the tyres without cloning the repo?** Everything you need is
+> on the image's Docker Hub page. Copy the `docker-compose.yml` from
+> **[hub.docker.com/r/chrweav/infra-dashboard](https://hub.docker.com/r/chrweav/infra-dashboard)**
+> into an empty folder, generate a stable key with
+> `openssl rand -hex 32 > .jwt_secret_key`, then `docker compose up -d`
+> (set `POSTGRES_PASSWORD` first for anything beyond a quick trial).
 
 > **WSL users:** Docker Desktop is not required. Install Docker Engine
 > directly in your WSL distro (`sudo apt install docker.io` or follow the
