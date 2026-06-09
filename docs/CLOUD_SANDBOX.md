@@ -109,34 +109,43 @@ fast with a "not authenticated" message.
 
 ## Quick start
 
-```bash
-# Bash
-./scripts/sandbox/Linux/00-prereqs.sh
+Stand up the dashboard, then configure it one of two ways — **Path B: one script,
+no wizard**, or **Path A: per-cloud scripts + the `/setup` wizard**.
 
-# Provision whichever clouds you want — order doesn't matter, run any subset
+```bash
+# Bash — check prereqs, then bring up the dashboard
+./scripts/sandbox/Linux/00-prereqs.sh
+./scripts/onboard.sh                       # see the README for the pull-based run
+
+# Path B — one script: provision your cloud(s) AND configure the dashboard (no wizard)
+./scripts/sandbox/Linux/onboard-sandbox.sh --cloud all
+
+# — or — Path A: provision per-cloud, then paste each printed block into /setup
 ./scripts/sandbox/Linux/setup-aws.sh
 ./scripts/sandbox/Linux/setup-azure.sh
 ./scripts/sandbox/Linux/setup-gcp.sh
-
-# Bring up the dashboard
-./scripts/onboard.sh
 ```
 
 ```powershell
-# PowerShell
+# PowerShell — check prereqs, then bring up the dashboard
 .\scripts\sandbox\Windows\Test-SandboxPrereqs.ps1
+.\scripts\Onboard-Dashboard.ps1
 
-# Provision whichever clouds you want — order doesn't matter, run any subset
+# Path B — one script (provision + configure, no wizard):
+.\scripts\sandbox\Windows\Onboard-Sandbox.ps1 -Cloud all
+
+# — or — Path A: provision per-cloud, then paste each printed block into /setup
 .\scripts\sandbox\Windows\Setup-AwsSandbox.ps1
 .\scripts\sandbox\Windows\Setup-AzureSandbox.ps1
 .\scripts\sandbox\Windows\Setup-GcpSandbox.ps1
-
-# Bring up the dashboard
-.\scripts\Onboard-Dashboard.ps1
 ```
 
-Then open `http://localhost:8001` (the community edition's default port) and
-paste the printed config blocks into the `/setup` wizard.
+Open `http://localhost:8001` (the community edition's default port). With **Path B**
+you just log in — `onboard-sandbox` already pushed the config to the dashboard's
+setup API. With **Path A** you paste each script's printed block into the `/setup`
+wizard (see [Wire the sandbox into the dashboard](#wire-the-sandbox-into-the-dashboard)).
+`onboard-sandbox` runs the per-cloud `setup-*.sh` for you, so use one path or the
+other — not both.
 
 Each setup script is **idempotent** — re-running picks up where it left
 off and reuses anything tagged `managed-by=dashboard-sandbox`. Safe to
@@ -287,16 +296,22 @@ gcp_service_account_json=$(cat …/sa-key.json | jq -c .)
 gcp_cloud_run_docker_deploy_key=…
 ```
 
-Two ways to apply these to a running dashboard:
+Three ways to apply these to a running dashboard:
 
-**Setup wizard (first run).** Open the dashboard, walk through `/setup`,
-and paste the matching values into Step 2 (AWS), Step 3 (Azure), or Step 4
-(GCP). Some keys are exposed under **Advanced** within each step.
+**Automatic — `onboard-sandbox` (Path B, no wizard).** `onboard-sandbox.sh --cloud all`
+(PowerShell `Onboard-Sandbox.ps1 -Cloud all`) provisions the cloud(s) **and** reads
+what each `setup-*.sh` produced, then POSTs it to the dashboard's setup API
+(`POST /api/setup/import`) — creating your admin and marking setup complete. You
+never open `/setup`; you just log in.
 
-**Settings panel (after first run).** Open `/settings`, expand the
-relevant cloud panel, paste the values, and **Save**. Each cloud panel
-patches the same encrypted config DB the wizard writes to. Restarts are
-not needed — config is read per-request.
+**Setup wizard (Path A, first run, manual paste).** Open the dashboard, walk
+through `/setup`, and paste the matching values into Step 2 (AWS), Step 3 (Azure),
+or Step 4 (GCP). Some keys are exposed under **Advanced** within each step.
+
+**Settings panel (after first run, manual paste).** Open `/settings`, expand the
+relevant cloud panel, paste the values, and **Save**. Each cloud panel patches the
+same encrypted config DB the wizard writes to. Restarts are not needed — config is
+read per-request.
 
 For the sandbox specifically, you'll want to also paste the BeyondTrust
 deploy key in `/setup` Step 5 (or `/secrets` if you're using an external
