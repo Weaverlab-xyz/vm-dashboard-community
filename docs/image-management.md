@@ -445,6 +445,31 @@ RAW). The dashboard's converter produces fixed-size by default; if
 you've replaced it with a custom converter, double-check the output
 format with `qemu-img info`.
 
+**Azure browse/promote fails with `AuthorizationFailed` on
+`Microsoft.Compute/galleries/images/read` or
+`Microsoft.Compute/images/read`.**
+The Shared Image Gallery lives in a resource group *outside* the one
+the dashboard service principal was granted on, so it has no rights
+there. `Reader` on that RG fixes browsing; promoting *into* the
+gallery also needs managed-image and gallery-image-version writes, so
+grant `Contributor` or the least-privilege `Dashboard Image Promoter`
+custom role (read galleries/images + write managed images and gallery
+image versions). The sandbox bootstrap automates the grant — re-run
+with the gallery RG exported:
+
+```bash
+AZURE_IMAGE_GALLERY_RG=myGalleryRG AZURE_IMAGE_GALLERY_NAME=corpImageGallery \
+  ./scripts/sandbox/Linux/setup-azure.sh
+```
+
+It creates the custom role (if missing) and assigns it to the SP
+scoped to that RG; override with `AZURE_IMAGE_GALLERY_ROLE=Contributor`,
+or set `AZURE_IMAGE_GALLERY_SUBSCRIPTION_ID` for a cross-subscription
+gallery. On a non-sandbox install, grant the same role by hand with
+`az role assignment create … --scope /subscriptions/<sub>/resourceGroups/<rg>`.
+RBAC is eventually consistent — wait a minute or two and refresh the
+dashboard's credentials after granting.
+
 **Promote to GCP fails with "image source URI access denied."**
 The GCP service account configured in Setup → GCP doesn't have
 `storage.objects.get` on the GCS bucket you're promoting from. Grant

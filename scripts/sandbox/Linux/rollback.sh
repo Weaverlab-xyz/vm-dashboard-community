@@ -270,6 +270,24 @@ rollback_azure() {
   local sp_name="${SANDBOX_NAME_PREFIX}-sp"
   local sp_id
   sp_id="$(az ad sp list --display-name "$sp_name" --query '[0].appId' -o tsv 2>/dev/null || true)"
+
+  # Drop any external image-gallery role assignment we added (setup-azure.sh's
+  # optional AZURE_IMAGE_GALLERY_RG step). Do this BEFORE deleting the SP so the
+  # assignee still resolves. The corp gallery RG itself is NEVER deleted here —
+  # only the assignment. The custom role definition is left in place (it may be
+  # shared / assignable to other RGs); remove it manually if desired with
+  #   az role definition delete --name "Dashboard Image Promoter"
+  local gallery_rg gallery_sub
+  gallery_rg="$(state_read azure image_gallery_rg)"
+  if [[ -n "$gallery_rg" && -n "$sp_id" && "$sp_id" != "null" ]]; then
+    gallery_sub="$(state_read azure image_gallery_sub)"
+    [[ -n "$gallery_sub" ]] || gallery_sub="$(az account show --query id -o tsv 2>/dev/null || true)"
+    az role assignment delete --assignee "$sp_id" \
+      --scope "/subscriptions/$gallery_sub/resourceGroups/$gallery_rg" >/dev/null 2>&1 \
+      && ok "Removed SP role assignment on external gallery RG $gallery_rg" \
+      || warn "Could not remove gallery role assignment on $gallery_rg (already gone or insufficient perms)"
+  fi
+
   if [[ -n "$sp_id" && "$sp_id" != "null" ]]; then
     az ad sp delete --id "$sp_id" >/dev/null 2>&1 \
       && ok "Deleted service principal $sp_name ($sp_id)" \
