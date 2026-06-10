@@ -1,0 +1,195 @@
+{% extends "base.html" %}
+{% block title %}Desktops – Infrastructure Management{% endblock %}
+
+{# Virtual Desktops — Phase 0 scaffold. Lists desktop pools + offers
+   create/scale/delete over the virtual_desktops table. Provisioning of the
+   backing VMs (Phase 1), PRA registration + brokered "Open session" (Phase 2),
+   and the full governance-folded UI (Phase 3) land later — this page
+   deliberately shows pool records only. #}
+
+{% block content %}
+<div class="max-w-6xl mx-auto py-8 px-4" x-data="desktopsPage()" x-init="init()">
+
+  <div class="flex items-center justify-between mb-1">
+    <h1 class="text-2xl font-bold text-gray-800">Virtual Desktops</h1>
+    <button @click="openCreate()"
+            class="bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-3 py-1.5 rounded-lg">
+      New pool
+    </button>
+  </div>
+  <p class="text-sm text-gray-500 mb-6">
+    A desktop pool is <em>N</em> VMs from a desktop image, registered as jump
+    targets on the BeyondTrust PRA Jumpoint and brokered as privileged sessions.
+    <strong>Phase 0</strong> manages pool records only — VM provisioning and
+    brokered "Open session" land in later phases.
+  </p>
+
+  <!-- Toast -->
+  <div x-show="toast" x-cloak x-transition
+       :class="toastType === 'error' ? 'bg-red-50 border-red-200 text-red-700' : 'bg-green-50 border-green-200 text-green-700'"
+       class="mb-6 border rounded-lg px-4 py-3 text-sm" x-text="toast"></div>
+
+  <!-- Pools -->
+  <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden mb-6">
+    <div x-show="loading" x-cloak class="p-6 text-center text-sm text-gray-400">Loading…</div>
+    <div x-show="!loading && pools.length === 0" x-cloak class="p-10 text-center text-sm text-gray-400">
+      No desktop pools yet. Click <strong>New pool</strong> to create one.
+    </div>
+    <table x-show="!loading && pools.length > 0" x-cloak class="min-w-full text-sm">
+      <thead>
+        <tr class="text-left text-xs uppercase text-gray-500 bg-gray-50 border-b border-gray-200">
+          <th class="px-4 py-3">Pool</th>
+          <th class="px-4 py-3">Cloud</th>
+          <th class="px-4 py-3">Kind</th>
+          <th class="px-4 py-3">Seats</th>
+          <th class="px-4 py-3">Status</th>
+          <th class="px-4 py-3 text-right">Actions</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-gray-100">
+        <template x-for="p in pools" :key="p.pool_name">
+          <tr class="hover:bg-gray-50">
+            <td class="px-4 py-3 font-medium text-gray-900" x-text="p.pool_name"></td>
+            <td class="px-4 py-3">
+              <span class="text-[10px] uppercase font-semibold px-1.5 py-0.5 rounded bg-gray-100 text-gray-600" x-text="p.cloud"></span>
+            </td>
+            <td class="px-4 py-3 text-gray-500" x-text="p.kind"></td>
+            <td class="px-4 py-3 text-gray-700" x-text="p.count"></td>
+            <td class="px-4 py-3 text-xs text-gray-500" x-text="statusText(p.statuses)"></td>
+            <td class="px-4 py-3 text-right whitespace-nowrap">
+              <button @click="scale(p)" class="text-xs px-2 py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded font-medium">Scale</button>
+              <button @click="del(p)" class="text-xs px-2 py-1 text-red-600 hover:underline ml-1">Delete</button>
+            </td>
+          </tr>
+        </template>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Create modal -->
+  <div x-show="showCreate" x-cloak
+       class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+       @click.self="showCreate = false">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-lg">
+      <div class="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+        <h3 class="text-lg font-semibold">New desktop pool</h3>
+        <button @click="showCreate = false" class="text-gray-400 hover:text-gray-600 text-xl">&times;</button>
+      </div>
+      <div class="px-6 py-5 space-y-4">
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Cloud *</label>
+            <select x-model="form.cloud" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              <option value="aws">AWS</option>
+              <option value="azure">Azure</option>
+              <option value="gcp">GCP</option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Seats *</label>
+            <input type="number" min="1" x-model.number="form.count"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+          </div>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Pool name *</label>
+          <input type="text" x-model="form.name"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="eng-desktops">
+        </div>
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Desktop image</label>
+            <input type="text" x-model="form.image"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="(Phase 1)">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Instance size</label>
+            <input type="text" x-model="form.size"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="(Phase 1)">
+          </div>
+        </div>
+        <p class="text-xs text-gray-400">Phase 0 records the pool; image + size are used when Phase 1 provisions the VMs.</p>
+      </div>
+      <div class="px-6 py-4 border-t border-gray-100 flex justify-end gap-3">
+        <button @click="showCreate = false" class="px-4 py-2 text-sm border border-gray-300 rounded-lg">Cancel</button>
+        <button @click="submitCreate()" :disabled="!form.name || !form.count || saving"
+                class="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-medium rounded-lg">
+          <span x-show="!saving">Create</span>
+          <span x-show="saving" x-cloak>Saving…</span>
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function desktopsPage() {
+  return {
+    pools: [], loading: true, toast: '', toastType: 'success',
+    showCreate: false, saving: false,
+    form: { cloud: 'aws', name: '', image: '', size: '', count: 1 },
+
+    async init() { requireAuth(); await this.refresh(); },
+
+    async refresh() {
+      this.loading = true;
+      try {
+        const d = await API.get('/api/desktops/pools');
+        this.pools = d.pools || [];
+      } catch (e) {
+        this.flash(e.message || 'Failed to load pools.', 'error');
+      } finally {
+        this.loading = false;
+      }
+    },
+
+    openCreate() {
+      this.form = { cloud: 'aws', name: '', image: '', size: '', count: 1 };
+      this.showCreate = true;
+    },
+
+    async submitCreate() {
+      this.saving = true;
+      try {
+        await API.post('/api/desktops/pools', this.form);
+        this.showCreate = false;
+        this.flash('Pool created.');
+        await this.refresh();
+      } catch (e) {
+        this.flash(e.message || 'Create failed.', 'error');
+      } finally {
+        this.saving = false;
+      }
+    },
+
+    async scale(p) {
+      const n = window.prompt(`Seats for "${p.pool_name}":`, p.count);
+      if (n === null) return;
+      try {
+        await API.post(`/api/desktops/pools/${encodeURIComponent(p.pool_name)}/scale`, { count: parseInt(n, 10) });
+        this.flash('Pool scaled.');
+        await this.refresh();
+      } catch (e) {
+        this.flash(e.message || 'Scale failed.', 'error');
+      }
+    },
+
+    async del(p) {
+      if (!confirm(`Delete pool "${p.pool_name}"? This removes its records.`)) return;
+      try {
+        await API.del(`/api/desktops/pools/${encodeURIComponent(p.pool_name)}`);
+        this.flash('Pool deleted.');
+        await this.refresh();
+      } catch (e) {
+        this.flash(e.message || 'Delete failed.', 'error');
+      }
+    },
+
+    statusText(s) { return Object.entries(s || {}).map(([k, v]) => `${v} ${k}`).join(', '); },
+    flash(m, t) { this.toast = m; this.toastType = t || 'success'; setTimeout(() => { this.toast = ''; }, 4000); },
+  };
+}
+</script>
+{% endblock %}
