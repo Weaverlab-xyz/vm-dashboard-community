@@ -9,9 +9,8 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from ..database import get_db
-from ..auth import get_current_user
-from ..models.user import User
+from ..database import User, get_db
+from .auth import get_current_user
 from ..services import job_service, workgroup_override_service
 from ..services import vsphere_service
 from ..services.vsphere_service import VSphereError

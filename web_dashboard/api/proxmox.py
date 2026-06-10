@@ -9,9 +9,8 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from ..database import Job, get_db
-from ..auth import get_current_user
-from ..models.user import User
+from ..database import Job, User, get_db
+from .auth import get_current_user
 from ..services import job_service, workgroup_service, workgroup_override_service
 from ..services import proxmox_service
 from ..services.proxmox_service import ProxmoxError

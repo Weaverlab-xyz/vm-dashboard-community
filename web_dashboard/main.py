@@ -420,8 +420,8 @@ app.mount("/mcp", get_mcp_asgi_app())
 try:
     from .api import vms  # noqa: E402
     app.include_router(vms.router, dependencies=[_feature_gate("vmware_enabled")])
-except ImportError:
-    pass
+except ImportError as exc:
+    logger.warning("API router 'vms' not loaded: %s", exc)
 
 try:
     # Containers router exposes Portainer (gated per-call by the page UI when
@@ -429,63 +429,63 @@ try:
     # independent of Portainer — so don't gate the whole router on portainer.
     from .api import containers  # noqa: E402
     app.include_router(containers.router)
-except ImportError:
-    pass
+except ImportError as exc:
+    logger.warning("API router 'containers' not loaded: %s", exc)
 
 try:
     from .api import config_mgmt  # noqa: E402
     app.include_router(config_mgmt.router, dependencies=[_feature_gate("ansible_enabled")])
-except ImportError:
-    pass
+except ImportError as exc:
+    logger.warning("API router 'config_mgmt' not loaded: %s", exc)
 
 try:
     from .api import approvals  # noqa: E402
     app.include_router(approvals.router, dependencies=[_feature_gate("entitle_enabled")])
-except ImportError:
-    pass
+except ImportError as exc:
+    logger.warning("API router 'approvals' not loaded: %s", exc)
 
 try:
     from .api import proxmox  # noqa: E402
     app.include_router(proxmox.router, dependencies=[_feature_gate("proxmox_enabled")])
-except ImportError:
-    pass
+except ImportError as exc:
+    logger.warning("API router 'proxmox' not loaded: %s", exc)
 
 try:
     from .api import vsphere  # noqa: E402
     app.include_router(vsphere.router, dependencies=[_feature_gate("vsphere_enabled")])
-except ImportError:
-    pass
+except ImportError as exc:
+    logger.warning("API router 'vsphere' not loaded: %s", exc)
 
 try:
     from .api import hyperv  # noqa: E402
     app.include_router(hyperv.router, dependencies=[_feature_gate("hyperv_enabled")])
-except ImportError:
-    pass
+except ImportError as exc:
+    logger.warning("API router 'hyperv' not loaded: %s", exc)
 
 try:
     from .api import nutanix  # noqa: E402
     app.include_router(nutanix.router, dependencies=[_feature_gate("nutanix_enabled")])
-except ImportError:
-    pass
+except ImportError as exc:
+    logger.warning("API router 'nutanix' not loaded: %s", exc)
 
 try:
     from .api import xcpng  # noqa: E402
     app.include_router(xcpng.router, dependencies=[_feature_gate("xcpng_enabled")])
-except ImportError:
-    pass
+except ImportError as exc:
+    logger.warning("API router 'xcpng' not loaded: %s", exc)
 
 try:
     from .api import epml  # noqa: E402
     app.include_router(epml.router, dependencies=[_feature_gate("beyondtrust_enabled")])
-except ImportError:
-    pass
+except ImportError as exc:
+    logger.warning("API router 'epml' not loaded: %s", exc)
 
 try:
     # Virtual desktop management — Phase 0 scaffold. Gated on vdesktops_enabled.
     from .api import desktops  # noqa: E402
     app.include_router(desktops.router, dependencies=[_feature_gate("vdesktops_enabled")])
-except ImportError:
-    pass
+except ImportError as exc:
+    logger.warning("API router 'desktops' not loaded: %s", exc)
 
 
 # ── HTML pages ────────────────────────────────────────────────────────────────
