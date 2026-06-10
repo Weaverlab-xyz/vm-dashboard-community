@@ -357,6 +357,7 @@ def _feature_flags() -> dict:
         "nutanix_enabled":      config_service.get_bool("nutanix_enabled",       settings.nutanix_enabled),
         "xcpng_enabled":        config_service.get_bool("xcpng_enabled",         settings.xcpng_enabled),
         "vdesktops_enabled":    config_service.get_bool("vdesktops_enabled",     settings.vdesktops_enabled),
+        "cloud_database_enabled": config_service.get_bool("cloud_database_enabled", settings.cloud_database_enabled),
         # Entitle user-JIT Phase 4 UI affordances — surfaces the
         # "Request access" nav link + portal URL when both are configured.
         "entitle_user_jit_enabled":   config_service.get_bool("entitle_user_jit_enabled", settings.entitle_user_jit_enabled),
@@ -630,6 +631,14 @@ async def desktops_page(request: Request):
     """Virtual-desktop management page — Phase 0 scaffold. Nav-gated on
     vdesktops_enabled; the /api/desktops router is feature-gated."""
     return templates.TemplateResponse("desktops/index.html", {"request": request, **_feature_flags()})
+
+
+@app.get("/databases", response_class=HTMLResponse, include_in_schema=False)
+async def databases_page(request: Request):
+    """Cloud database infrastructure page. Nav-gated on cloud_database_enabled;
+    the /api/databases router self-gates per call. PostgreSQL/AWS is live;
+    other engines/clouds are 'coming soon' (Phase 3)."""
+    return templates.TemplateResponse("databases/index.html", {"request": request, **_feature_flags()})
 
 
 @app.get("/users", response_class=HTMLResponse, include_in_schema=False)

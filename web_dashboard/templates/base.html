@@ -95,6 +95,11 @@
              class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
              {% if request.url.path.startswith('/desktops') %}{{ nav_active }}{% endif %}">Desktops</a>
           {% endif %}
+          {% if cloud_database_enabled %}
+          <a x-show="$store.auth.isAdmin" href="/databases"
+             class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
+             {% if request.url.path.startswith('/databases') %}{{ nav_active }}{% endif %}">Databases</a>
+          {% endif %}
           {% if ansible_enabled %}
           <a href="/config-mgmt" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
              {% if request.url.path == '/config-mgmt' %}{{ nav_active }}{% endif %}">Configuration</a>

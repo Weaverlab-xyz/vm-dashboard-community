@@ -1,0 +1,279 @@
+{% extends "base.html" %}
+{% block title %}Databases – Infrastructure Management{% endblock %}
+
+{# Cloud database infrastructure page. PostgreSQL on AWS is the live engine/cloud
+   (provision → private RDS → BeyondTrust PRA tunnel → decommission); other
+   engines/clouds are "coming soon" (Phase 3) and the API returns 501 for them.
+   Backed by /api/databases (gated by cloud_database_enabled). #}
+
+{% block content %}
+<div class="max-w-6xl mx-auto py-8 px-4" x-data="databasesPage()" x-init="init()">
+
+  <div class="flex items-center justify-between mb-1">
+    <h1 class="text-2xl font-bold text-gray-800">Cloud Databases</h1>
+    <button @click="openProvision()" x-show="activeTab === 'aws'"
+            class="bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-3 py-1.5 rounded-lg">
+      Provision database
+    </button>
+  </div>
+  <p class="text-sm text-gray-500 mb-6">
+    Managed databases are provisioned <strong>private</strong> (no public endpoint) and
+    reached only through a BeyondTrust PRA protocol-tunnel jump. <strong>PostgreSQL on
+    AWS</strong> is live; other engines and clouds are coming in a later phase.
+  </p>
+
+  <!-- Toast -->
+  <div x-show="toast" x-cloak x-transition
+       :class="toastType === 'error' ? 'bg-red-50 border-red-200 text-red-700' : 'bg-green-50 border-green-200 text-green-700'"
+       class="mb-6 border rounded-lg px-4 py-3 text-sm" x-text="toast"></div>
+
+  <!-- Cloud tabs -->
+  <div class="flex gap-1 border-b border-gray-200 mb-6">
+    <template x-for="c in ['aws','azure','gcp']" :key="c">
+      <button @click="activeTab = c"
+              class="px-4 py-2 text-sm font-medium border-b-2 -mb-px transition uppercase"
+              :class="activeTab === c ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700'"
+              x-text="c"></button>
+    </template>
+  </div>
+
+  <!-- AWS tab (live) -->
+  <div x-show="activeTab === 'aws'" x-cloak>
+    <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+      <div x-show="loading" x-cloak class="p-6 text-center text-sm text-gray-400">Loading…</div>
+      <div x-show="!loading && awsDatabases.length === 0" x-cloak class="p-10 text-center text-sm text-gray-400">
+        No databases yet. Click <strong>Provision database</strong> to create a private PostgreSQL instance.
+      </div>
+      <table x-show="!loading && awsDatabases.length > 0" x-cloak class="min-w-full text-sm">
+        <thead>
+          <tr class="text-left text-xs uppercase text-gray-500 bg-gray-50 border-b border-gray-200">
+            <th class="px-4 py-3">Engine</th>
+            <th class="px-4 py-3">Region</th>
+            <th class="px-4 py-3">Status</th>
+            <th class="px-4 py-3">Endpoint (private)</th>
+            <th class="px-4 py-3">PRA tunnel</th>
+            <th class="px-4 py-3 text-right">Actions</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-100">
+          <template x-for="d in awsDatabases" :key="d.id">
+            <tr class="hover:bg-gray-50 align-top">
+              <td class="px-4 py-3">
+                <div class="font-medium text-gray-900" x-text="d.engine"></div>
+                <div class="text-xs text-gray-400" x-text="d.provider"></div>
+              </td>
+              <td class="px-4 py-3 text-gray-500" x-text="d.region"></td>
+              <td class="px-4 py-3">
+                <span class="text-[10px] uppercase font-semibold px-1.5 py-0.5 rounded" :class="statusBadge(d.status)" x-text="d.status"></span>
+              </td>
+              <td class="px-4 py-3 text-xs text-gray-700 font-mono">
+                <span x-show="d.private_host" x-text="d.private_host + (d.port ? ':' + d.port : '')"></span>
+                <span x-show="!d.private_host" class="text-gray-300">(pending)</span>
+              </td>
+              <td class="px-4 py-3 text-xs">
+                <span x-show="d.jump_item_id" class="text-emerald-700" title="PRA tunnel brokered">brokered</span>
+                <span x-show="!d.jump_item_id" class="text-gray-400">none</span>
+              </td>
+              <td class="px-4 py-3 text-right whitespace-nowrap">
+                <button @click="showConnection(d)" class="text-xs px-2 py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded font-medium">Connection</button>
+                <button @click="decommission(d)" x-show="d.status !== 'decommissioned' && d.status !== 'decommissioning'"
+                        class="text-xs px-2 py-1 text-red-600 hover:underline ml-1">Decommission</button>
+              </td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Azure / GCP tabs (coming soon) -->
+  <template x-for="c in ['azure','gcp']" :key="'cs-'+c">
+    <div x-show="activeTab === c" x-cloak class="bg-white rounded-xl border border-gray-200 p-10 text-center text-sm text-gray-400">
+      <span class="uppercase font-semibold" x-text="c"></span> managed databases are coming soon (Phase 3).
+      Today the dashboard provisions <strong>PostgreSQL on AWS</strong>; MySQL / SQL Server and Azure / GCP land with the per-engine, per-cloud fan-out.
+    </div>
+  </template>
+
+  <!-- Provision modal -->
+  <div x-show="showForm" x-cloak
+       class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+       @click.self="showForm = false">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
+      <div class="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+        <h3 class="text-lg font-semibold">Provision database — AWS</h3>
+        <button @click="showForm = false" class="text-gray-400 hover:text-gray-600 text-xl">&times;</button>
+      </div>
+      <div class="px-6 py-5 space-y-4">
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Engine *</label>
+            <select x-model="form.engine" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              <option value="postgres">PostgreSQL</option>
+              <option value="mysql" disabled>MySQL (Phase 3)</option>
+              <option value="sqlserver" disabled>SQL Server (Phase 3)</option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Region *</label>
+            <input type="text" x-model="form.region" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="us-east-2">
+          </div>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Name *</label>
+          <input type="text" x-model="form.name" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="app-db">
+        </div>
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Admin username</label>
+            <input type="text" x-model="form.master_username" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="dbadmin">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Instance class</label>
+            <input type="text" x-model="form.instance_class" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="db.t3.micro">
+          </div>
+        </div>
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Storage (GB)</label>
+            <input type="number" min="20" x-model.number="form.allocated_storage" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" placeholder="20">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">DB subnet group</label>
+            <input type="text" x-model="form.db_subnet_group_name" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="(from your sandbox)">
+          </div>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">VPC security group IDs</label>
+          <input type="text" x-model="form.vpc_security_group_ids" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="sg-aaa, sg-bbb (comma-separated)">
+        </div>
+        <p class="text-xs text-gray-400">
+          The instance is created private-only and onboarded to a PRA tunnel (when PRA is configured).
+          The admin password is generated and stored encrypted — never shown.
+        </p>
+      </div>
+      <div class="px-6 py-4 border-t border-gray-100 flex justify-end gap-3">
+        <button @click="showForm = false" class="px-4 py-2 text-sm border border-gray-300 rounded-lg">Cancel</button>
+        <button @click="submitProvision()" :disabled="!form.region || !form.name || saving"
+                class="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-medium rounded-lg">
+          <span x-show="!saving">Provision</span>
+          <span x-show="saving" x-cloak>Submitting…</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Connection modal -->
+  <div x-show="conn" x-cloak
+       class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+       @click.self="conn = null">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md">
+      <div class="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+        <h3 class="text-lg font-semibold">Connection</h3>
+        <button @click="conn = null" class="text-gray-400 hover:text-gray-600 text-xl">&times;</button>
+      </div>
+      <div class="px-6 py-5 space-y-2 text-sm">
+        <p>This database has <strong>no public endpoint</strong>. Reach it by opening its
+           BeyondTrust PRA protocol-tunnel jump.</p>
+        <div class="font-mono text-xs bg-gray-50 border border-gray-200 rounded-lg p-3 space-y-1">
+          <div>engine: <span x-text="conn?.engine"></span></div>
+          <div>private host: <span x-text="(conn?.private_host || '—') + (conn?.port ? ':' + conn.port : '')"></span></div>
+          <div>PRA jump id: <span x-text="conn?.jump_item_id || '(no tunnel — PRA not configured)'"></span></div>
+          <div>status: <span x-text="conn?.status"></span></div>
+        </div>
+      </div>
+      <div class="px-6 py-4 border-t border-gray-100 flex justify-end">
+        <button @click="conn = null" class="px-4 py-2 text-sm border border-gray-300 rounded-lg">Close</button>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function databasesPage() {
+  return {
+    databases: [], loading: true, activeTab: 'aws',
+    toast: '', toastType: 'success',
+    showForm: false, saving: false, conn: null,
+    form: { engine: 'postgres', region: '', name: '', master_username: 'dbadmin',
+            instance_class: '', allocated_storage: null, db_subnet_group_name: '', vpc_security_group_ids: '' },
+
+    get awsDatabases() { return this.databases.filter(d => d.cloud === 'aws'); },
+
+    async init() { requireAuth(); await this.refresh(); },
+
+    async refresh() {
+      this.loading = true;
+      try {
+        const data = await API.get('/api/databases');
+        this.databases = data.databases || [];
+      } catch (e) {
+        this.flash(e.message || 'Failed to load databases.', 'error');
+      } finally {
+        this.loading = false;
+      }
+    },
+
+    openProvision() {
+      this.form = { engine: 'postgres', region: '', name: '', master_username: 'dbadmin',
+                    instance_class: '', allocated_storage: null, db_subnet_group_name: '', vpc_security_group_ids: '' };
+      this.showForm = true;
+    },
+
+    async submitProvision() {
+      this.saving = true;
+      try {
+        const sgs = (this.form.vpc_security_group_ids || '').split(',').map(s => s.trim()).filter(Boolean);
+        const body = {
+          engine: this.form.engine, cloud: 'aws', region: this.form.region, name: this.form.name,
+          master_username: this.form.master_username || 'dbadmin',
+        };
+        if (this.form.instance_class) body.instance_class = this.form.instance_class;
+        if (this.form.allocated_storage) body.allocated_storage = this.form.allocated_storage;
+        if (this.form.db_subnet_group_name) body.db_subnet_group_name = this.form.db_subnet_group_name;
+        if (sgs.length) body.vpc_security_group_ids = sgs;
+        await API.post('/api/databases', body);
+        this.showForm = false;
+        this.flash('Provisioning started — watch the row status.');
+        await this.refresh();
+      } catch (e) {
+        this.flash(e.message || 'Provision failed.', 'error');
+      } finally {
+        this.saving = false;
+      }
+    },
+
+    async showConnection(d) {
+      try {
+        this.conn = await API.get(`/api/databases/${d.id}/connection`);
+      } catch (e) {
+        this.flash(e.message || 'Failed to load connection info.', 'error');
+      }
+    },
+
+    async decommission(d) {
+      if (!confirm(`Decommission "${d.engine}" database in ${d.region}?\n\nThis removes the PRA tunnel and destroys the instance.`)) return;
+      try {
+        await API.del(`/api/databases/${d.id}`);
+        this.flash('Decommission started.');
+        await this.refresh();
+      } catch (e) {
+        this.flash(e.message || 'Decommission failed.', 'error');
+      }
+    },
+
+    statusBadge(s) {
+      return ({
+        available:        'bg-emerald-100 text-emerald-700',
+        provisioning:     'bg-amber-100 text-amber-700',
+        decommissioning:  'bg-amber-100 text-amber-700',
+        failed:           'bg-red-100 text-red-700',
+        decommissioned:   'bg-gray-100 text-gray-500',
+      })[s] || 'bg-gray-100 text-gray-600';
+    },
+    flash(m, t) { this.toast = m; this.toastType = t || 'success'; setTimeout(() => { this.toast = ''; }, 4500); },
+  };
+}
+</script>
+{% endblock %}
