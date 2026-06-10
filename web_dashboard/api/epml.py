@@ -10,9 +10,8 @@ GET  /api/epml/token           — fetch a fresh installation token
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from ..auth import get_current_user
-from ..database import get_db
-from ..models.user import User
+from .auth import get_current_user
+from ..database import User, get_db
 from ..services import job_service
 from ..services import epml_service
 from ..services.epml_service import EpmlError
