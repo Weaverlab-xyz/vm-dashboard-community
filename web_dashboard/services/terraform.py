@@ -23,8 +23,14 @@ _TEMPLATE_DIR = os.path.normpath(
 )
 
 
-def _run(cmd: list, cwd: str, timeout: int = 600) -> subprocess.CompletedProcess:
-    """Run a terraform command synchronously."""
+def _run(cmd: list, cwd: str, timeout: int = 600,
+         env: Optional[dict] = None) -> subprocess.CompletedProcess:
+    """Run a terraform command synchronously.
+
+    ``env`` entries are merged OVER os.environ rather than replacing it —
+    terraform still needs PATH/HOME and, behind a TLS-inspecting proxy,
+    SSL_CERT_FILE from the image env.
+    """
     full_cmd = [settings.terraform_executable] + cmd
     return subprocess.run(
         full_cmd,
@@ -32,23 +38,24 @@ def _run(cmd: list, cwd: str, timeout: int = 600) -> subprocess.CompletedProcess
         capture_output=True,
         text=True,
         timeout=timeout,
+        env={**os.environ, **env} if env else None,
     )
 
 
-def _init_sync(deploy_dir: str) -> None:
+def _init_sync(deploy_dir: str, env: Optional[dict] = None) -> None:
     # If the provider is already cached in deploy_dir/.terraform/providers, use
     # -upgrade=false so Terraform doesn't contact the registry at all.
     provider_cache = os.path.join(deploy_dir, ".terraform", "providers")
     upgrade_flag = "-upgrade=false" if os.path.isdir(provider_cache) else "-upgrade=false"
-    r = _run(["init", "-no-color", "-input=false", upgrade_flag], deploy_dir, timeout=300)
+    r = _run(["init", "-no-color", "-input=false", upgrade_flag], deploy_dir, timeout=300, env=env)
     if r.returncode != 0:
         raise TerraformError(f"terraform init failed:\n{r.stderr}")
 
 
-def _apply_sync(deploy_dir: str, var_args: list) -> dict:
+def _apply_sync(deploy_dir: str, var_args: list, env: Optional[dict] = None) -> dict:
     """Run terraform apply and return parsed outputs."""
     apply_args = ["apply", "-auto-approve", "-no-color", "-input=false"] + var_args
-    r = _run(apply_args, deploy_dir, timeout=600)
+    r = _run(apply_args, deploy_dir, timeout=600, env=env)
     if r.returncode != 0:
         raise TerraformError(f"terraform apply failed:\n{r.stderr}\n{r.stdout}")
 
@@ -60,8 +67,8 @@ def _apply_sync(deploy_dir: str, var_args: list) -> dict:
     return {k: v["value"] for k, v in raw.items()}
 
 
-def _destroy_sync(deploy_dir: str) -> None:
-    r = _run(["destroy", "-auto-approve", "-no-color", "-input=false"], deploy_dir, timeout=600)
+def _destroy_sync(deploy_dir: str, env: Optional[dict] = None) -> None:
+    r = _run(["destroy", "-auto-approve", "-no-color", "-input=false"], deploy_dir, timeout=600, env=env)
     if r.returncode != 0:
         raise TerraformError(f"terraform destroy failed:\n{r.stderr}\n{r.stdout}")
 
@@ -70,8 +77,12 @@ def _build_var_args(variables: dict) -> list:
     """Convert a variables dict to a list of -var flags for the CLI."""
     args = []
     for k, v in variables.items():
-        if isinstance(v, list):
-            # Terraform list: -var 'security_group_ids=["sg-xxx","sg-yyy"]'
+        if isinstance(v, (list, dict, bool)) or v is None:
+            # Non-string values must be HCL expressions, and JSON is valid HCL:
+            #   -var 'security_group_ids=["sg-xxx"]'  -var 'tags={"team":"se"}'
+            #   -var 'multi_az=true'
+            # str(dict)/str(bool) would produce Python syntax ({'k': 'v'}, True),
+            # which terraform rejects ("Single quotes are not valid").
             encoded = json.dumps(v)
             args += ["-var", f"{k}={encoded}"]
         else:
@@ -81,13 +92,17 @@ def _build_var_args(variables: dict) -> list:
 
 # ── Public async API ──────────────────────────────────────────────────────────
 
-async def apply(deploy_dir: str, variables: dict, template_dir: Optional[str] = None) -> dict:
+async def apply(deploy_dir: str, variables: dict, template_dir: Optional[str] = None,
+                env: Optional[dict] = None) -> dict:
     """
     Copy a Terraform template into deploy_dir, init, and apply. Returns a dict
     of the module's Terraform outputs.
 
     ``template_dir`` selects the module (defaults to the EC2 instance template
     for back-compat); the cloud-database service passes ``terraform/db_<engine>``.
+    ``env`` is merged over the process environment for the terraform subprocess —
+    callers use it to inject provider credentials (e.g. AWS_ACCESS_KEY_ID) the
+    same way the packer flow does.
     deploy_dir should be unique per deployment (e.g. based on job_id).
 
     The template directory is expected to have been pre-initialized once via
@@ -109,15 +124,16 @@ async def apply(deploy_dir: str, variables: dict, template_dir: Optional[str] = 
 
     var_args = _build_var_args(variables)
 
-    await asyncio.to_thread(_init_sync, deploy_dir)
-    outputs = await asyncio.to_thread(_apply_sync, deploy_dir, var_args)
+    await asyncio.to_thread(_init_sync, deploy_dir, env)
+    outputs = await asyncio.to_thread(_apply_sync, deploy_dir, var_args, env)
     return outputs
 
 
-async def destroy(deploy_dir: str) -> None:
+async def destroy(deploy_dir: str, env: Optional[dict] = None) -> None:
     """
     Run terraform destroy in the given deployment directory.
     The state must still be present in that directory.
+    ``env`` carries provider credentials, same as :func:`apply`.
     """
     if not os.path.isdir(deploy_dir):
         raise TerraformError(f"Deployment directory not found: {deploy_dir}")
@@ -126,4 +142,4 @@ async def destroy(deploy_dir: str) -> None:
             f"No Terraform state found in {deploy_dir}. "
             "Cannot destroy — the instance may need to be terminated manually via AWS console."
         )
-    await asyncio.to_thread(_destroy_sync, deploy_dir)
+    await asyncio.to_thread(_destroy_sync, deploy_dir, env)

@@ -162,6 +162,19 @@ def _cfg(key: str) -> str:
     return getattr(settings, key, "") or ""
 
 
+def _aws_env() -> Optional[dict]:
+    """Provider credentials for the terraform subprocess, mirroring the packer
+    flow's env injection: the wizard-stored (encrypted) keys win; when unset,
+    return None so terraform falls back to whatever the container environment
+    provides (env vars / shared config). Phase 1 is aws-only — provision()
+    already rejects other clouds before any apply runs."""
+    key_id = _cfg("aws_access_key_id")
+    secret = _cfg("aws_secret_access_key")
+    if key_id and secret:
+        return {"AWS_ACCESS_KEY_ID": key_id, "AWS_SECRET_ACCESS_KEY": secret}
+    return None
+
+
 def _pra_configured() -> bool:
     """True when a PRA/SRA appliance + Jumpoint + Jump Group are configured —
     the prerequisites for brokering a tunnel. When false, a DB is still
@@ -216,6 +229,7 @@ async def run_provision_apply(
     try:
         outputs = await terraform.apply(
             _deploy_dir(job_id), tf_variables, template_dir=template_dir(engine),
+            env=_aws_env(),
         )
         row.instance_id = str(outputs.get("instance_id") or "")
         row.private_host = str(outputs.get("private_host") or "")
@@ -269,7 +283,7 @@ def decommission(db: Session, db_id: str) -> dict:
 
     if deploy_job and os.path.isdir(_deploy_dir(deploy_job.id)):
         try:
-            asyncio.run(terraform.destroy(_deploy_dir(deploy_job.id)))
+            asyncio.run(terraform.destroy(_deploy_dir(deploy_job.id), env=_aws_env()))
         except Exception as exc:
             logger.warning("clouddb destroy for %s failed (non-fatal): %s", db_id, exc)
 

@@ -174,6 +174,21 @@ else
 fi
 state_write aws db_subnet_group_name "$DB_SUBNET_GROUP_NAME"
 
+# RDS also needs its service-linked role before the FIRST CreateDBInstance in
+# an account. RDS normally auto-creates it, but that requires
+# iam:CreateServiceLinkedRole — which the scoped dashboard user (7c) doesn't
+# get. Pre-create it here with the operator's privileged login; otherwise the
+# first provision fails with "Verify that you have permission to create
+# service linked role".
+SLR_EXISTS="$(aws iam get-role --role-name AWSServiceRoleForRDS \
+  --query 'Role.RoleName' --output text 2>/dev/null || true)"
+if [[ -n "$SLR_EXISTS" && "$SLR_EXISTS" != "None" ]]; then
+  ok "Reusing RDS service-linked role AWSServiceRoleForRDS"
+else
+  aws iam create-service-linked-role --aws-service-name rds.amazonaws.com >/dev/null
+  ok "Created RDS service-linked role AWSServiceRoleForRDS"
+fi
+
 # ── 5. Security groups ────────────────────────────────────────────────────────
 section "Security groups"
 make_sg() {
