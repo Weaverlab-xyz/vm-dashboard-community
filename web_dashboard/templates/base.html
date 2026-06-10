@@ -15,7 +15,7 @@
 <body class="bg-gray-50 min-h-screen font-sans text-gray-800">
 
   <!-- Navigation -->
-  <nav class="{{ 'bg-blue-900' if app_env == 'production' else 'bg-emerald-700' }} text-white shadow-lg" x-data x-cloak x-show="$store.auth.isLoggedIn">
+  <nav class="{{ 'bg-blue-900' if app_env == 'production' else 'bg-emerald-700' }} text-white shadow-lg relative" x-data="{ mobileNav: false }" x-cloak x-show="$store.auth.isLoggedIn">
     <div class="max-w-screen-2xl mx-auto px-4 sm:px-6 lg:px-8">
       <div class="flex items-center justify-between h-16">
         <!-- Brand -->
@@ -30,10 +30,14 @@
           {% endif %}
         </div>
 
-        <!-- Nav links -->
+        <!-- Nav links — inline on lg+, a hamburger dropdown below lg (single source). -->
         {% set nav_hover = 'hover:bg-blue-800' if app_env == 'production' else 'hover:bg-emerald-600' %}
         {% set nav_active = 'bg-blue-800' if app_env == 'production' else 'bg-emerald-600' %}
-        <div class="hidden md:flex items-center space-x-1">
+        <div class="lg:flex lg:items-center lg:space-x-1"
+             @click="mobileNav = false"
+             :class="mobileNav
+               ? 'flex flex-col items-stretch space-y-1 absolute left-0 right-0 top-16 {{ 'bg-blue-900' if app_env == 'production' else 'bg-emerald-700' }} px-4 pb-4 shadow-lg z-40'
+               : 'hidden lg:flex'">
           {# Order per issue #17:
              Dashboard → on-prem hypervisors (Workstation, Proxmox, vSphere, Hyper-V,
              Nutanix, XCP-ng) → AWS → Azure → GCP → Containers → Storage →
@@ -133,6 +137,14 @@
         {% set user_text = 'text-blue-200' if app_env == 'production' else 'text-emerald-200' %}
         {% set logout_btn = 'bg-blue-700 hover:bg-blue-600' if app_env == 'production' else 'bg-emerald-600 hover:bg-emerald-500' %}
         <div class="flex items-center space-x-3">
+          <button @click="mobileNav = !mobileNav"
+                  class="lg:hidden p-2 -ml-1 rounded-md {{ nav_hover }}"
+                  :aria-expanded="mobileNav" aria-label="Toggle navigation menu">
+            <svg class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path x-show="!mobileNav" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/>
+              <path x-show="mobileNav" x-cloak stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+            </svg>
+          </button>
           <span class="text-sm {{ user_text }}" x-text="$store.auth.username"></span>
           <a href="/settings"
              class="text-sm {{ user_text }} hover:text-white transition" title="Security settings">
