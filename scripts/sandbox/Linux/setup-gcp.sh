@@ -179,12 +179,17 @@ else
   ok "Reusing SA $SA_EMAIL"
 fi
 
+# A just-created service account is eventually consistent: for a few seconds IAM
+# can't resolve it as a policy member yet, so add-iam-policy-binding fails with
+# "Service account … does not exist" (the "binding with condition" line gcloud
+# prints above it is generic noise — we pass --condition=None). Retry each
+# binding until the SA has propagated; bindings are idempotent, so this is safe.
 for role in roles/compute.admin roles/secretmanager.secretAccessor \
              roles/iam.serviceAccountUser roles/run.admin roles/run.developer \
              roles/run.invoker; do
-  gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  retry 8 5 gcloud projects add-iam-policy-binding "$PROJECT_ID" \
     --member "serviceAccount:$SA_EMAIL" --role "$role" \
-    --condition=None --quiet >/dev/null
+    --condition=None --quiet
 done
 ok "Granted compute.admin, secretmanager.secretAccessor, iam.serviceAccountUser, run.{admin,developer,invoker}"
 
@@ -230,9 +235,9 @@ state_write gcp storage_bucket "$STORAGE_BUCKET"
 
 # Grant the dashboard SA objectAdmin on the bucket — covers upload (runner)
 # + read (dashboard mints signed URLs) + delete (cleanup after promote).
-gcloud storage buckets add-iam-policy-binding "gs://$STORAGE_BUCKET" \
+retry 8 5 gcloud storage buckets add-iam-policy-binding "gs://$STORAGE_BUCKET" \
   --member "serviceAccount:$SA_EMAIL" --role "roles/storage.objectAdmin" \
-  --quiet >/dev/null
+  --quiet
 ok "Granted $SA_EMAIL storage.objectAdmin on gs://$STORAGE_BUCKET"
 
 # ── 6. Secret Manager: SSH keypair JSON ─────────────────────────────────────

@@ -22,6 +22,32 @@ section(){ printf "\n\033[1;35m── %s\033[0m\n"      "$*" >&2; }
 
 die() { err "$*"; exit 1; }
 
+# ── Retry with backoff ──────────────────────────────────────────────────────────
+# Re-run a command that fails transiently. Cloud control planes are eventually
+# consistent: a resource a create call just returned can be briefly invisible to
+# the next call. The case this guards: a freshly created GCP service account is
+# not yet resolvable as an IAM policy member for a few seconds, so
+# add-iam-policy-binding fails with "Service account … does not exist". These ops
+# are idempotent, so retrying is the robust fix. Command output is swallowed on
+# success; the real error is surfaced only if every attempt fails.
+#   retry <attempts> <delay_seconds> <command> [args…]
+retry() {
+  local attempts="$1" delay="$2"; shift 2
+  local n=1 out
+  while :; do
+    if out="$("$@" 2>&1)"; then
+      return 0
+    fi
+    if (( n >= attempts )); then
+      [[ -n "$out" ]] && printf '%s\n' "$out" >&2
+      return 1
+    fi
+    warn "$1: attempt $n/$attempts failed; retrying in ${delay}s…"
+    sleep "$delay"
+    n=$((n + 1))
+  done
+}
+
 # ── Prereq checks ──────────────────────────────────────────────────────────────
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "$1 not found on PATH. Run scripts/sandbox/00-prereqs.sh first."
