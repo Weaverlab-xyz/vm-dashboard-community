@@ -297,6 +297,85 @@ def reconfigure(payload: SetupPayload, request: Request, background_tasks: Backg
     return {"ok": True}
 
 
+class HeadlessImport(BaseModel):
+    """Admin credentials + a flat key→value config map for headless onboarding.
+
+    Used by scripts/sandbox/onboard-sandbox.* to push the full sandbox output
+    (including non-wizard keys) without going through the /setup UI.
+    """
+    admin_username: str = ""
+    admin_password: str = ""
+    config: dict = {}
+
+
+@router.post("/import")
+def import_config(payload: HeadlessImport, request: Request, background_tasks: BackgroundTasks):
+    """
+    Headless setup/import for the consolidated onboarding script.
+
+    Unlike POST /complete (which filters the payload through the typed wizard
+    models), this persists the raw `config` map verbatim via
+    config_service.set_many — so it carries the FULL sandbox output
+    (aws_default_subnet_id, bt_ecs_*, storage_*, promote_runner_*, …) that the
+    wizard models don't declare.
+
+    - First run (setup NOT complete): admin_username/admin_password are required;
+      creates the admin, writes config, marks setup complete. No auth — same
+      trust model as POST /complete (a fresh stack stood up by the same operator).
+    - Already complete: admin JWT required (Authorization: Bearer). Merges the
+      config map only (admin + setup-complete flag untouched), so you can re-run
+      to add another cloud.
+    """
+    from ..services import config_service
+
+    already = config_service.is_setup_complete()
+    if already:
+        _require_admin(request)
+    elif not payload.admin_username or not payload.admin_password:
+        raise HTTPException(
+            status_code=400,
+            detail="admin_username and admin_password are required for first-run import.",
+        )
+
+    if not isinstance(payload.config, dict) or not payload.config:
+        raise HTTPException(status_code=400, detail="config must be a non-empty object.")
+
+    # The config store is text. Coerce booleans (e.g. feature flags) to "1"/"0";
+    # stringify numbers; drop nulls. Strings (incl. embedded JSON like
+    # gcp_service_account_json) pass through unchanged.
+    pairs: dict = {}
+    for key, value in payload.config.items():
+        if value is None:
+            continue
+        if isinstance(value, bool):
+            pairs[key] = "1" if value else "0"
+        else:
+            pairs[key] = value if isinstance(value, str) else str(value)
+
+    if not already:
+        _upsert_admin(payload.admin_username, payload.admin_password)
+
+    config_service.set_many(pairs)
+    config_service.invalidate()
+    try:
+        from ..services import azure_service
+        azure_service.invalidate_credentials()
+    except Exception:
+        pass
+
+    if not already:
+        config_service.mark_setup_complete()
+
+    background_tasks.add_task(_invalidate_data_caches)
+    logger.info(
+        "Headless import: %d config keys written [%s]%s.",
+        len(pairs),
+        ", ".join(sorted(pairs.keys())),
+        "" if already else "; admin created + setup marked complete",
+    )
+    return {"ok": True, "keys_written": len(pairs)}
+
+
 # ── Per-feature configuration ─────────────────────────────────────────────────
 #
 # Each feature has its own typed model so the UI can GET current values and

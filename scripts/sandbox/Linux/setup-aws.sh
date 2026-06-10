@@ -76,9 +76,12 @@ state_write aws igw_id "$IGW_ID"
 section "Subnets"
 AZ="$(aws ec2 describe-availability-zones --region "$REGION" \
   --query 'AvailabilityZones[0].ZoneName' --output text)"
+# A second AZ is required for the RDS DB subnet group (RDS spans >= 2 AZs).
+AZ2="$(aws ec2 describe-availability-zones --region "$REGION" \
+  --query 'AvailabilityZones[1].ZoneName' --output text)"
 
 create_subnet() {
-  local cidr="$1" name="$2"
+  local cidr="$1" name="$2" subnet_az="${3:-$AZ}"
   local existing
   existing="$(aws ec2 describe-subnets --region "$REGION" \
     --filters "Name=vpc-id,Values=$VPC_ID" "Name=tag:Name,Values=$name" \
@@ -87,17 +90,25 @@ create_subnet() {
     printf '%s' "$existing"; return
   fi
   aws ec2 create-subnet --region "$REGION" \
-    --vpc-id "$VPC_ID" --cidr-block "$cidr" --availability-zone "$AZ" \
+    --vpc-id "$VPC_ID" --cidr-block "$cidr" --availability-zone "$subnet_az" \
     --tag-specifications "$(tag_spec subnet "$name")" \
     --query 'Subnet.SubnetId' --output text
 }
 
 PUBLIC_SUBNET_ID="$(create_subnet 10.99.1.0/24 "${NAME}-public")"
 PRIVATE_SUBNET_ID="$(create_subnet 10.99.2.0/24 "${NAME}-private")"
+# Two private DB subnets in distinct AZs — the RDS DB subnet group needs >= 2 AZs.
+# Dedicated to managed databases; the VM subnets above are left untouched.
+DB_SUBNET_A_ID="$(create_subnet 10.99.3.0/24 "${NAME}-db-a" "$AZ")"
+DB_SUBNET_B_ID="$(create_subnet 10.99.4.0/24 "${NAME}-db-b" "$AZ2")"
 ok "Public subnet (Jumpoint) $PUBLIC_SUBNET_ID"
 ok "Private subnet (VMs)    $PRIVATE_SUBNET_ID"
+ok "DB subnet A ($AZ)        $DB_SUBNET_A_ID"
+ok "DB subnet B ($AZ2)        $DB_SUBNET_B_ID"
 state_write aws public_subnet_id  "$PUBLIC_SUBNET_ID"
 state_write aws private_subnet_id "$PRIVATE_SUBNET_ID"
+state_write aws db_subnet_a_id    "$DB_SUBNET_A_ID"
+state_write aws db_subnet_b_id    "$DB_SUBNET_B_ID"
 
 # ── 4. Route tables ───────────────────────────────────────────────────────────
 section "Route tables"
@@ -138,8 +149,30 @@ associate_rt() {
 }
 associate_rt "$PUBLIC_RT_ID"  "$PUBLIC_SUBNET_ID"
 associate_rt "$PRIVATE_RT_ID" "$PRIVATE_SUBNET_ID"
+associate_rt "$PRIVATE_RT_ID" "$DB_SUBNET_A_ID"
+associate_rt "$PRIVATE_RT_ID" "$DB_SUBNET_B_ID"
 ok "Public  RT $PUBLIC_RT_ID  → IGW (0.0.0.0/0)"
-ok "Private RT $PRIVATE_RT_ID → local VPC only"
+ok "Private RT $PRIVATE_RT_ID → local VPC only (VMs + DBs)"
+
+# ── 4b. RDS DB subnet group ───────────────────────────────────────────────────
+# The managed-database feature deploys private RDS instances (no public
+# endpoint) into this group; access is brokered only through the PRA tunnel.
+section "RDS DB subnet group"
+DB_SUBNET_GROUP_NAME="${NAME}-db"
+DBG_EXISTS="$(aws rds describe-db-subnet-groups --region "$REGION" \
+  --db-subnet-group-name "$DB_SUBNET_GROUP_NAME" \
+  --query 'DBSubnetGroups[0].DBSubnetGroupName' --output text 2>/dev/null || true)"
+if [[ -n "$DBG_EXISTS" && "$DBG_EXISTS" != "None" ]]; then
+  ok "Reusing DB subnet group $DB_SUBNET_GROUP_NAME"
+else
+  aws rds create-db-subnet-group --region "$REGION" \
+    --db-subnet-group-name "$DB_SUBNET_GROUP_NAME" \
+    --db-subnet-group-description "Private subnet group for dashboard-managed databases ($NAME)" \
+    --subnet-ids "$DB_SUBNET_A_ID" "$DB_SUBNET_B_ID" \
+    --tags "Key=Name,Value=$DB_SUBNET_GROUP_NAME" "Key=$SANDBOX_TAG_KEY,Value=$SANDBOX_TAG_VALUE" >/dev/null
+  ok "Created DB subnet group $DB_SUBNET_GROUP_NAME ($AZ, $AZ2)"
+fi
+state_write aws db_subnet_group_name "$DB_SUBNET_GROUP_NAME"
 
 # ── 5. Security groups ────────────────────────────────────────────────────────
 section "Security groups"
@@ -441,6 +474,27 @@ DASHBOARD_POLICY_DOC="$(jq -c . <<JSON
       "Resource": "*"
     },
     {
+      "Sid": "DashboardRDS",
+      "Effect": "Allow",
+      "Action": [
+        "rds:CreateDBInstance",
+        "rds:DeleteDBInstance",
+        "rds:ModifyDBInstance",
+        "rds:RebootDBInstance",
+        "rds:DescribeDBInstances",
+        "rds:CreateDBSubnetGroup",
+        "rds:DeleteDBSubnetGroup",
+        "rds:ModifyDBSubnetGroup",
+        "rds:DescribeDBSubnetGroups",
+        "rds:DescribeDBEngineVersions",
+        "rds:DescribeOrderableDBInstanceOptions",
+        "rds:AddTagsToResource",
+        "rds:RemoveTagsFromResource",
+        "rds:ListTagsForResource"
+      ],
+      "Resource": "*"
+    },
+    {
       "Sid": "DashboardPassRoles",
       "Effect": "Allow",
       "Action": "iam:PassRole",
@@ -597,34 +651,39 @@ else
 fi
 
 # ── 8. Print config to paste into /setup ──────────────────────────────────────
-print_dashboard_config "AWS sandbox configuration" \
-  "aws_region=$REGION" \
-  "aws_default_subnet_id=$PRIVATE_SUBNET_ID            # Deploy form's default subnet for new EC2 instances" \
-  "aws_default_security_group_id=$VM_SG               # Deploy form's default SG (VM-tier, no internet egress)" \
-  "ec2_ssh_key_secret=$SSH_SECRET_NAME                 # JSON {public_key,private_key} for EC2 cloud-init + Ansible" \
-  "bt_ecs_cluster=$ECS_CLUSTER                          # ECS cluster the Jumpoint Fargate task runs in" \
-  "bt_ecs_task_family=bt-jumpoint" \
-  "bt_ecs_image=beyondtrust/sra-jumpoint                # or your ECR mirror" \
-  "bt_ecs_execution_role_arn=$ROLE_ARN" \
-  "bt_ecs_jumpoint_subnet_id=$PUBLIC_SUBNET_ID         # Jumpoint task lands here (public, IGW-routed)" \
-  "bt_ecs_jumpoint_security_group_id=$JUMPOINT_SG      # SG for the Jumpoint task" \
-  "" \
-  "# Image-registry hub + automated cross-cloud promote:" \
-  "storage_s3_bucket=$STORAGE_BUCKET                                       # Image hub + promote staging" \
-  "storage_active_backend=s3                                                  # Active asset backend" \
-  "storage_hub_backend=s3                                                     # Image hub (defaults to active if unset)" \
-  "promote_runner_image=weaverlab-xyz/dashboard-promote-runner:latest         # Build + push to your ECR until public tag exists" \
-  "promote_runner_ecs_cluster=$ECS_CLUSTER                                    # Reuses Jumpoint cluster" \
-  "promote_runner_ecs_execution_role_arn=$ROLE_ARN                            # Image pull + CloudWatch logs" \
-  "promote_runner_ecs_task_role_arn=$PROMOTE_TASK_ROLE_ARN                    # S3 PutObject on the staging bucket" \
-  "promote_runner_ecs_subnet_id=$PUBLIC_SUBNET_ID                             # Runner needs egress to the presigned source URL" \
-  "promote_runner_ecs_security_group_ids=$JUMPOINT_SG                         # Reuses Jumpoint SG (egress 443)" \
-  "aws_vmimport_role_name=$VMIMPORT_ROLE_NAME                                 # Service role ec2:ImportImage assumes" \
-  "" \
-  "# Sandbox-provisioned AWS credentials for the dashboard IAM user ($DASHBOARD_USER_NAME):" \
-  "aws_access_key_id=$AWS_ACCESS_KEY_ID" \
-  "aws_secret_access_key=$AWS_SECRET_ACCESS_KEY" \
+_cfg=(
+  "aws_region=$REGION"
+  "aws_default_subnet_id=$PRIVATE_SUBNET_ID            # Deploy form's default subnet for new EC2 instances"
+  "aws_default_security_group_id=$VM_SG               # Deploy form's default SG (VM-tier, no internet egress)"
+  "aws_db_subnet_group_name=$DB_SUBNET_GROUP_NAME      # Managed-DB deploys: private RDS subnet group (2 AZs)"
+  "aws_db_security_group_id=$VM_SG                     # Managed-DB deploys: reuse the VM-tier SG (no internet egress)"
+  "ec2_ssh_key_secret=$SSH_SECRET_NAME                 # JSON {public_key,private_key} for EC2 cloud-init + Ansible"
+  "bt_ecs_cluster=$ECS_CLUSTER                          # ECS cluster the Jumpoint Fargate task runs in"
+  "bt_ecs_task_family=bt-jumpoint"
+  "bt_ecs_image=beyondtrust/sra-jumpoint                # or your ECR mirror"
+  "bt_ecs_execution_role_arn=$ROLE_ARN"
+  "bt_ecs_jumpoint_subnet_id=$PUBLIC_SUBNET_ID         # Jumpoint task lands here (public, IGW-routed)"
+  "bt_ecs_jumpoint_security_group_id=$JUMPOINT_SG      # SG for the Jumpoint task"
+  ""
+  "# Image-registry hub + automated cross-cloud promote:"
+  "storage_s3_bucket=$STORAGE_BUCKET                                       # Image hub + promote staging"
+  "storage_active_backend=s3                                                  # Active asset backend"
+  "storage_hub_backend=s3                                                     # Image hub (defaults to active if unset)"
+  "promote_runner_image=chrweav/dashboard-promote-runner:latest         # Public multi-arch image; override to your ECR for a private/air-gapped registry"
+  "promote_runner_ecs_cluster=$ECS_CLUSTER                                    # Reuses Jumpoint cluster"
+  "promote_runner_ecs_execution_role_arn=$ROLE_ARN                            # Image pull + CloudWatch logs"
+  "promote_runner_ecs_task_role_arn=$PROMOTE_TASK_ROLE_ARN                    # S3 PutObject on the staging bucket"
+  "promote_runner_ecs_subnet_id=$PUBLIC_SUBNET_ID                             # Runner needs egress to the presigned source URL"
+  "promote_runner_ecs_security_group_ids=$JUMPOINT_SG                         # Reuses Jumpoint SG (egress 443)"
+  "aws_vmimport_role_name=$VMIMPORT_ROLE_NAME                                 # Service role ec2:ImportImage assumes"
+  ""
+  "# Sandbox-provisioned AWS credentials for the dashboard IAM user ($DASHBOARD_USER_NAME):"
+  "aws_access_key_id=$AWS_ACCESS_KEY_ID"
+  "aws_secret_access_key=$AWS_SECRET_ACCESS_KEY"
   "aws_ecs_docker_deploy_key=…   # BeyondTrust SRA Jumpoint deploy key (paste manually)"
+)
+print_dashboard_config "AWS sandbox configuration" "${_cfg[@]}"
+write_config_json aws "${_cfg[@]}"   # machine-readable twin for onboard-sandbox.sh
 
 cat <<EOF
 Sandbox topology summary

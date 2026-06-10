@@ -12,7 +12,7 @@ Runners by target cloud:
   - Azure: ACI container group  (TODO, PR 4)
   - GCP:   Cloud Run job        (TODO, PR 5)
 
-Each runner uses the same public image (`weaverlab-xyz/dashboard-promote-runner`
+Each runner uses the same public image (`chrweav/dashboard-promote-runner`
 by default; operator override via `promote_runner_image`). The runner reads
 the hub artefact via a short-lived presigned URL the dashboard mints at
 task-launch time — no source-side credentials live in the container.
@@ -48,7 +48,7 @@ def _resolve_aws_runner_config() -> dict:
     boto3 later."""
     cluster = _cfg("promote_runner_ecs_cluster") or _cfg("ansible_ecs_cluster") or "bt-jumpoint"
     task_family = _cfg("promote_runner_ecs_task_family") or "promote-runner"
-    image = _cfg("promote_runner_image") or "weaverlab-xyz/dashboard-promote-runner:latest"
+    image = _cfg("promote_runner_image") or "chrweav/dashboard-promote-runner:latest"
     cpu = _cfg("promote_runner_ecs_cpu") or "1024"
     memory = _cfg("promote_runner_ecs_memory") or "4096"
     subnet_id = _cfg("promote_runner_ecs_subnet_id") or _cfg("ansible_ecs_subnet_id")
@@ -173,7 +173,7 @@ def _resolve_azure_runner_config() -> dict:
     rg = _cfg("promote_runner_azure_resource_group") or _cfg("azure_resource_group")
     location = _cfg("promote_runner_azure_location") or _cfg("azure_location") or "centralus"
     subnet_id = _cfg("promote_runner_azure_subnet_id")
-    image = _cfg("promote_runner_image") or "weaverlab-xyz/dashboard-promote-runner:latest"
+    image = _cfg("promote_runner_image") or "chrweav/dashboard-promote-runner:latest"
     try:
         cpu = float(_cfg("promote_runner_azure_cpu") or "2")
         memory_gb = float(_cfg("promote_runner_azure_memory_gb") or "4")
@@ -312,7 +312,7 @@ def _resolve_gcp_runner_config() -> dict:
     don't have to set anything beyond enabling a runner-capable SA."""
     project_id = _cfg("gcp_project_id")
     region = _cfg("promote_runner_gcp_region") or _cfg("gcp_region")
-    image = _cfg("promote_runner_image") or "weaverlab-xyz/dashboard-promote-runner:latest"
+    image = _cfg("promote_runner_image") or "chrweav/dashboard-promote-runner:latest"
     cpu = _cfg("promote_runner_gcp_cpu") or "2000m"
     memory = _cfg("promote_runner_gcp_memory") or "4Gi"
     vpc_connector = _cfg("promote_runner_gcp_vpc_connector")

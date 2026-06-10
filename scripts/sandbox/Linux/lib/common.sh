@@ -61,6 +61,35 @@ print_dashboard_config() {
   printf "\n"
 }
 
+# Machine-readable twin of print_dashboard_config: write the same key=value
+# pairs to $(state_dir <cloud>)/config.json so the consolidated onboarder
+# (onboard-sandbox.sh) can merge them and POST to /api/setup/import. JSON (not
+# a .env) keeps values that contain '=' or embedded JSON
+# (gcp_service_account_json) intact. Splits each pair on the FIRST '='.
+write_config_json() {
+  local cloud="$1"; shift
+  command -v jq >/dev/null 2>&1 || { warn "jq not found — skipping config.json for $cloud"; return 0; }
+  local d obj kv key val
+  d="$(state_dir "$cloud")"
+  obj='{}'
+  for kv in "$@"; do
+    [[ "$kv" == *"="* ]] || continue            # skip blank / comment-only lines
+    key="${kv%%=*}"
+    val="${kv#*=}"
+    # Strip a trailing "   # human comment" (only when whitespace precedes '#').
+    if [[ "$val" =~ ^(.*[^[:space:]])[[:space:]]+#.*$ ]]; then val="${BASH_REMATCH[1]}"; fi
+    # Trim whitespace from key (config keys never contain spaces) and value.
+    key="$(printf '%s' "$key" | tr -d '[:space:]')"
+    val="${val#"${val%%[![:space:]]*}"}"; val="${val%"${val##*[![:space:]]}"}"
+    [[ -n "$key" ]] || continue
+    [[ "$val" == "…" ]] && continue             # skip "paste manually" placeholders
+    obj="$(jq -c --arg k "$key" --arg v "$val" '. + {($k): $v}' <<<"$obj")"
+  done
+  printf '%s\n' "$obj" > "$d/config.json"
+  chmod 600 "$d/config.json" 2>/dev/null || true
+  info "Wrote $d/config.json ($(jq 'length' <<<"$obj") keys)"
+}
+
 # ── State file (optional cache) ────────────────────────────────────────────────
 # Tag-based rollback is the source of truth, but we also drop a state file as
 # a fast-path hint for users who want to know what was created.

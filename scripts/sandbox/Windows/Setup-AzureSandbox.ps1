@@ -210,7 +210,7 @@ if ($AciState -ne 'Registered') {
 }
 
 # ── 7. Print config to paste into /setup ─────────────────────────────────────
-Write-DashboardConfig 'Azure sandbox configuration' @(
+$cfg = @(
     "azure_subscription_id=$SubscriptionId",
     "azure_tenant_id=$TenantId",
     "azure_client_id=$SpAppId",
@@ -232,7 +232,7 @@ Write-DashboardConfig 'Azure sandbox configuration' @(
     'storage_azure_container=hub                              # Container for hub artefacts',
     'storage_active_backend=azure_blob                        # Active asset backend',
     'storage_hub_backend=azure_blob                           # Image hub (defaults to active if unset)',
-    'promote_runner_image=weaverlab-xyz/dashboard-promote-runner:latest   # Build + push to your ACR until public tag exists',
+    'promote_runner_image=chrweav/dashboard-promote-runner:latest   # Public multi-arch image; override to your ACR for a private/air-gapped registry',
     "promote_runner_azure_resource_group=$Rg                  # ACI lands here",
     "promote_runner_azure_location=$Location",
     "promote_runner_azure_subnet_id=$AciSubnetId            # Reuses the Jumpoint ACI subnet",
@@ -243,6 +243,8 @@ Write-DashboardConfig 'Azure sandbox configuration' @(
     '# BeyondTrust deploy key — set in /setup or /secrets:',
     'azure_aci_docker_deploy_key=…'
 )
+Write-DashboardConfig 'Azure sandbox configuration' $cfg
+Export-ConfigJson -Cloud azure -Lines $cfg   # machine-readable twin for Onboard-Sandbox.ps1
 
 @"
 Sandbox topology summary

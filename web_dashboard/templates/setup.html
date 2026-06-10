@@ -161,6 +161,24 @@
         </div>
       </div>
 
+      <!-- Optional: provision a throwaway lab sandbox (runs on the operator's machine) -->
+      <div class="border border-gray-200 rounded-lg overflow-hidden">
+        <button type="button" @click="showAwsSandbox = !showAwsSandbox"
+          class="w-full flex items-center justify-between px-4 py-3 text-sm font-medium text-gray-700 bg-gray-50 hover:bg-gray-100 transition-colors">
+          <span>No credentials yet? Provision a throwaway lab sandbox (optional)</span>
+          <svg class="w-4 h-4 transition-transform duration-200" :class="showAwsSandbox ? 'rotate-180' : ''" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+          </svg>
+        </button>
+        <div x-show="showAwsSandbox" x-transition class="px-4 py-4 space-y-3 border-t border-gray-200 text-sm text-gray-600">
+          <p>Spin up an isolated, disposable AWS lab tenant on <strong>your own machine</strong> — where your <code class="bg-gray-100 px-1 rounded">aws</code> login already works — then paste the values it prints into the fields above. It runs on your laptop, not in this container, so it uses your existing cloud login.</p>
+          <p>From a clone of the dashboard repo, with the AWS CLI logged in:</p>
+          <pre class="bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 text-xs font-mono text-gray-700 whitespace-pre-wrap">aws login                                   # or: aws configure
+./scripts/sandbox/Linux/setup-aws.sh        # Windows: .\scripts\sandbox\Windows\Setup-AwsSandbox.ps1</pre>
+          <p class="text-xs text-gray-500">Provisions an isolated VPC, a scoped IAM user, and an SSH-key secret, then prints an <code class="bg-gray-100 px-1 rounded">aws_*</code> config block to paste here. Tear it down later with <code class="bg-gray-100 px-1 rounded">rollback.sh --cloud aws</code>. Full walkthrough in <code class="bg-gray-100 px-1 rounded">docs/ONBOARDING.md</code> (Quick path: cloud sandbox).</p>
+        </div>
+      </div>
+
       <p class="text-xs text-gray-400">See <a href="https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_access-keys.html" target="_blank" class="underline">IAM access keys docs</a> for setup instructions.</p>
     </div>
 
@@ -386,6 +404,24 @@
           </div>
         </div>
       </div>
+
+      <!-- Optional: provision a throwaway lab sandbox (runs on the operator's machine) -->
+      <div class="border border-gray-200 rounded-lg overflow-hidden">
+        <button type="button" @click="showAzureSandbox = !showAzureSandbox"
+          class="w-full flex items-center justify-between px-4 py-3 text-sm font-medium text-gray-700 bg-gray-50 hover:bg-gray-100 transition-colors">
+          <span>No credentials yet? Provision a throwaway lab sandbox (optional)</span>
+          <svg class="w-4 h-4 transition-transform duration-200" :class="showAzureSandbox ? 'rotate-180' : ''" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+          </svg>
+        </button>
+        <div x-show="showAzureSandbox" x-transition class="px-4 py-4 space-y-3 border-t border-gray-200 text-sm text-gray-600">
+          <p>Spin up an isolated, disposable Azure lab tenant on <strong>your own machine</strong> — where your <code class="bg-gray-100 px-1 rounded">az</code> login already works — then paste the values it prints into the fields above. It runs on your laptop, not in this container, so it uses your existing cloud login.</p>
+          <p>From a clone of the dashboard repo, with the Azure CLI logged in:</p>
+          <pre class="bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 text-xs font-mono text-gray-700 whitespace-pre-wrap">az login
+./scripts/sandbox/Linux/setup-azure.sh      # Windows: .\scripts\sandbox\Windows\Setup-AzureSandbox.ps1</pre>
+          <p class="text-xs text-gray-500">Provisions a resource group, VNet, a scoped service principal, and a Key Vault, then prints an <code class="bg-gray-100 px-1 rounded">azure_*</code> config block to paste here. Tear it down later with <code class="bg-gray-100 px-1 rounded">rollback.sh --cloud azure</code>. Full walkthrough in <code class="bg-gray-100 px-1 rounded">docs/ONBOARDING.md</code> (Quick path: cloud sandbox).</p>
+        </div>
+      </div>
     </div>
 
     <!-- ── Step 4: GCP ── -->
@@ -497,6 +533,24 @@ gcloud iam service-accounts keys create sa-key.json \
           </div>
         </div>
       </div>
+
+      <!-- Optional: provision a throwaway lab sandbox (runs on the operator's machine) -->
+      <div class="border border-gray-200 rounded-lg overflow-hidden">
+        <button type="button" @click="showGcpSandbox = !showGcpSandbox"
+          class="w-full flex items-center justify-between px-4 py-3 text-sm font-medium text-gray-700 bg-gray-50 hover:bg-gray-100 transition-colors">
+          <span>No credentials yet? Provision a throwaway lab sandbox (optional)</span>
+          <svg class="w-4 h-4 transition-transform duration-200" :class="showGcpSandbox ? 'rotate-180' : ''" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+          </svg>
+        </button>
+        <div x-show="showGcpSandbox" x-transition class="px-4 py-4 space-y-3 border-t border-gray-200 text-sm text-gray-600">
+          <p>Spin up an isolated, disposable GCP lab project on <strong>your own machine</strong> — where your <code class="bg-gray-100 px-1 rounded">gcloud</code> login already works — then paste the values it prints into the fields above. It runs on your laptop, not in this container, so it uses your existing cloud login.</p>
+          <p>From a clone of the dashboard repo, with gcloud logged in:</p>
+          <pre class="bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 text-xs font-mono text-gray-700 whitespace-pre-wrap">gcloud auth login
+./scripts/sandbox/Linux/setup-gcp.sh        # Windows: .\scripts\sandbox\Windows\Setup-GcpSandbox.ps1</pre>
+          <p class="text-xs text-gray-500">Provisions a VPC, a scoped service account, and a Secret Manager secret, then prints a <code class="bg-gray-100 px-1 rounded">gcp_*</code> config block to paste here. Tear it down later with <code class="bg-gray-100 px-1 rounded">rollback.sh --cloud gcp</code>. Full walkthrough in <code class="bg-gray-100 px-1 rounded">docs/ONBOARDING.md</code> (Quick path: cloud sandbox).</p>
+        </div>
+      </div>
     </div>
 
     <!-- ── Step 5: Feature Flags ── -->
@@ -593,6 +647,9 @@ function wizard() {
     showAzureAdvanced: false,
     showAwsAdvanced: false,
     showGcpAdvanced: false,
+    showAwsSandbox: false,
+    showAzureSandbox: false,
+    showGcpSandbox: false,
     authToken: localStorage.getItem('vm_cli_token') || '',
 
     steps: ['Admin', 'AWS', 'Azure', 'GCP', 'Features'],

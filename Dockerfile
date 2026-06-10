@@ -92,6 +92,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy the application.
 COPY web_dashboard/ ./web_dashboard/
 
+# Cloud-database Terraform modules (driven by cloud_database_service). The rest
+# of terraform/ is generated at runtime / cached at build, so only the static
+# DB modules are copied in.
+COPY terraform/db_postgres/ ./terraform/db_postgres/
+
 # Container-sane defaults; .env overrides these at runtime.
 ENV LOG_DIR=/tmp/logs \
     WEBAUTHN_RP_ID=localhost \

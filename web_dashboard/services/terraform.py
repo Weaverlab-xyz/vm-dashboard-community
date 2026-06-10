@@ -81,23 +81,26 @@ def _build_var_args(variables: dict) -> list:
 
 # ── Public async API ──────────────────────────────────────────────────────────
 
-async def apply(deploy_dir: str, variables: dict) -> dict:
+async def apply(deploy_dir: str, variables: dict, template_dir: Optional[str] = None) -> dict:
     """
-    Copy the EC2 instance template into deploy_dir, init, and apply.
-    Returns a dict of Terraform outputs: instance_id, public_ip, private_ip.
+    Copy a Terraform template into deploy_dir, init, and apply. Returns a dict
+    of the module's Terraform outputs.
 
+    ``template_dir`` selects the module (defaults to the EC2 instance template
+    for back-compat); the cloud-database service passes ``terraform/db_<engine>``.
     deploy_dir should be unique per deployment (e.g. based on job_id).
 
     The template directory is expected to have been pre-initialized once via
     `terraform init` so the provider cache (.terraform/) can be copied and
     re-used without requiring internet access on every deployment.
     """
+    src_template = template_dir or _TEMPLATE_DIR
     # Copy the full template directory including the pre-cached .terraform/
     # providers directory (populated by running `terraform init` in the
     # template directory once).  shutil.copytree handles subdirectories.
     os.makedirs(deploy_dir, exist_ok=True)
-    for item in os.listdir(_TEMPLATE_DIR):
-        src = os.path.join(_TEMPLATE_DIR, item)
+    for item in os.listdir(src_template):
+        src = os.path.join(src_template, item)
         dst = os.path.join(deploy_dir, item)
         if os.path.isdir(src):
             shutil.copytree(src, dst, dirs_exist_ok=True)

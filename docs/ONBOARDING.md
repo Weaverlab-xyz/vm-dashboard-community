@@ -8,6 +8,14 @@ Supported hosts: **Windows** (PowerShell 7), **macOS**, **Linux**, and
 **WSL** (Windows Subsystem for Linux — Docker Engine in WSL, no Docker
 Desktop required).
 
+> **Two ways to configure** (once the container is up — Part D):
+> **Path A — the setup wizard:** paste your own cloud credentials and click
+> through `/setup` (Parts A–C show how to obtain them; or skip a cloud to
+> explore). **Path B — one script, no wizard:** the [Quick path: cloud
+> sandbox](#quick-path-cloud-sandbox) `onboard-sandbox` script provisions a
+> throwaway lab *and* pushes the config straight into the dashboard, so you never
+> open `/setup`. Neither is required if you only want to explore the UI.
+
 - [Quick path: cloud sandbox](#quick-path-cloud-sandbox) — automated, isolated lab infra in any/all of AWS/Azure/GCP
 - [Part A — AWS setup](#part-a--aws-setup)
 - [Part B — Azure setup](#part-b--azure-setup)
@@ -66,11 +74,22 @@ cd vm-dashboard-community
 
 ## Quick path: cloud sandbox
 
-If you're labbing this up — testing the dashboard, demoing it, or running
-training environments — there's a faster alternative to Parts A, B, and C
-below. The repo ships bash scripts (WSL / Linux / macOS) and PowerShell
-equivalents (Windows) that provision **fully isolated** sandbox
-infrastructure in AWS, Azure, and GCP with a single command each:
+**Optional — only if you don't already have cloud credentials.** If you're
+labbing this up — testing, demoing, or running training environments — these
+scripts provision a disposable, **fully isolated** sandbox in AWS, Azure, and
+GCP and print a credential block you paste into the wizard (Part D), letting you
+skip the manual Parts A–C. The repo ships bash scripts (WSL / Linux / macOS) and
+PowerShell equivalents (Windows).
+
+**Fastest — skip the wizard too:** `onboard-sandbox` provisions *and* pushes the
+config into the dashboard for you (creating your admin), so you never open `/setup`:
+
+```bash
+./scripts/sandbox/Linux/onboard-sandbox.sh --cloud all
+# Windows:  .\scripts\sandbox\Windows\Onboard-Sandbox.ps1 -Cloud all
+```
+
+Or run the per-cloud scripts and paste their printed config into the wizard:
 
 ```bash
 # Bash (WSL / Linux / macOS)
@@ -284,18 +303,29 @@ Pick the onboarder that matches your host OS. Both do the same thing:
 preflight checks, generate the JWT key file and bootstrap `.env` (DB
 secret only), bring up Compose, poll `/api/health`, open the browser.
 
+> **Wizard or script?** Step 1 starts the container — **both** paths need it.
+> Step 2 is **Path A** (walk the wizard). For **Path B** (no wizard), do Step 1,
+> then run the [Quick path: cloud sandbox](#quick-path-cloud-sandbox)
+> `onboard-sandbox` script — it provisions a lab and configures the dashboard for
+> you, and you log in directly.
+
 ### 1. Run the onboard script (one command)
+
+By default the onboarder **builds the image from source**. Add `--hub` (bash)
+/ `-Hub` (PowerShell) to **pull the prebuilt multi-arch image** from Docker Hub
+(`chrweav/infra-dashboard`) instead — no local build, and it runs on both
+AMD64 and ARM64 (Apple Silicon, AWS Graviton, Raspberry Pi 5).
 
 **Windows** (PowerShell 7):
 
 ```powershell
-.\scripts\Onboard-Dashboard.ps1
+.\scripts\Onboard-Dashboard.ps1 -Hub      # pull prebuilt image (drop -Hub to build from source)
 ```
 
 **macOS / Linux / WSL / Raspberry Pi** (bash):
 
 ```bash
-./scripts/onboard.sh
+./scripts/onboard.sh --hub                # pull prebuilt image (drop --hub to build from source)
 ```
 
 The script:
@@ -307,9 +337,18 @@ The script:
   and from the Docker build context; it is mounted into the container at runtime via
   Docker Secrets and is never written to `.env`.
 - Auto-generates `POSTGRES_PASSWORD` in `.env` if it's still at the placeholder value.
-- Brings up the Compose stack (`db` + `app`).
+- Brings up the Compose stack (`db` + `app`) — with `--hub`, from `docker-compose.hub.yml`
+  using the published image (a `docker compose pull` runs first so reruns pick up new
+  releases); otherwise it builds the `app` image locally.
 - Waits for `http://localhost:8001/api/health` to respond.
 - Opens your browser.
+
+> **Behind a TLS-inspecting corporate proxy?** The `--hub` path skips the image
+> build entirely, so the corp-CA build steps and the `ONBOARD_SKIP_DEBIAN_UPDATES`
+> escape hatch are **not needed**. You do still need Docker to trust your corporate
+> root CA for the `docker pull` itself — see
+> [WSL: `docker pull` fails with a certificate error](#wsl-docker-pull-fails-with-a-certificate-error)
+> below.
 
 ### 2. Complete the setup wizard
 
@@ -335,9 +374,12 @@ you created in wizard Step 1.
 ### 4. Stopping and restarting
 
 ```bash
-docker compose down              # stop the stack
+docker compose down              # stop the stack (add -f docker-compose.hub.yml if you used --hub)
 ./scripts/onboard.sh             # bring it back up (Windows: .\scripts\Onboard-Dashboard.ps1)
 ```
+
+If you started the stack with `--hub` / `-Hub`, keep that flag when you bring it
+back up (`./scripts/onboard.sh --hub`) so it targets the published image.
 
 Postgres data persists in the `pgdata` Docker volume across restarts. The
 wizard won't appear again — your credentials are already in the database.
@@ -349,30 +391,37 @@ To update credentials or toggle feature flags after setup, navigate to
 reconfigure mode: existing values are pre-filled, and leaving a secret
 field blank keeps the stored value unchanged.
 
-### Migrate the JWT key to a cloud secrets manager (strongly recommended)
+### Protect and back up the JWT key
 
 `.jwt_secret_key` is the root of trust for the entire application — every
 integration credential stored in the database is encrypted with a key derived
-from it. While the onboard script protects it with owner-only filesystem
-permissions, it remains a plaintext file on disk, which is not appropriate for
-long-lived or shared deployments.
+from it. The onboard script protects it with owner-only filesystem permissions
+and mounts it into the container as a Docker secret.
 
-**After completing the setup wizard, migrate the key to your secrets manager:**
+**In the community edition this key cannot be migrated to a cloud vault.** It's
+the bootstrap key that decrypts the encrypted database — *including* the
+credentials the dashboard would need to reach any vault — so there's no startup
+ordering that lets it live in a vault (see
+[Why the JWT root key cannot be migrated](secrets-management.md#why-the-jwt-root-key-cannot-be-migrated)).
+At startup the dashboard reads it from `JWT_SECRET_KEY_FILE` → the
+`/run/secrets/jwt_key` Docker secret → the `JWT_SECRET_KEY` env var, in that order.
 
-1. Log in as admin and go to **Settings → Secrets Backend** (`/secrets`).
-2. Choose your provider and enter the target secret name:
-   - **AWS Secrets Manager** — requires AWS credentials configured in the wizard
-   - **Azure Key Vault** — requires the Azure SP and Key Vault URL configured in the wizard
-   - **GCP Secret Manager** — requires GCP service account configured in the wizard
-   - **BeyondTrust Secrets Safe** — requires BeyondTrust configured under feature flags
-3. Click **Migrate** — the dashboard uploads the key to your vault, updates its
-   internal reference, and on all future startups reads the key from the cloud
-   rather than the local file.
-4. Once migration is confirmed, delete `.jwt_secret_key` from the repo directory.
+So, for the community edition:
 
-After migration the local file is no longer needed. Your vault's access controls,
-audit logging, and key rotation capabilities become the security boundary instead
-of filesystem permissions.
+- **Back it up** somewhere safe (password manager, encrypted drive). Lose it and
+  every stored credential is unrecoverable and the app won't start — see
+  [JWT key file: backup and loss recovery](#jwt-key-file-backup-and-loss-recovery) below.
+- **Don't commit it** — it's gitignored and excluded from the image build context.
+- On shared or long-lived hosts, restrict OS access to the file; the host's
+  filesystem permissions (or the Docker secret mount) are the security boundary.
+
+> *Integration credentials* (your AWS/Azure/GCP keys) **can** be moved into an
+> external vault — AWS Secrets Manager, Azure Key Vault, GCP Secret Manager, or
+> BeyondTrust Secrets Safe — from **Settings → Secrets Backend** (`/secrets`).
+> That's a separate feature from the root key; see
+> [`docs/secrets-management.md`](secrets-management.md). Removing the on-disk root
+> key entirely (fetched at boot via cloud workload identity) is on the
+> **SaaS-edition roadmap** — see [`docs/saas-comparison.md`](saas-comparison.md).
 
 ### Platform notes
 
@@ -584,13 +633,15 @@ Common causes:
 you store through the setup wizard. The app uses it to encrypt every integration
 secret (AWS keys, Azure SP credentials, etc.) in the database.
 
-**Migrate it as soon as possible** — see [Migrate the JWT key to a cloud secrets
-manager](#migrate-the-jwt-key-to-a-cloud-secrets-manager-strongly-recommended)
-above. Once migrated, the local file can be deleted and the cloud vault becomes
-the security boundary.
+**It cannot be migrated to a vault** in the community edition — it's the bootstrap
+key that decrypts everything (including any vault credentials), so it must be
+present at startup from the host. See [Protect and back up the JWT
+key](#protect-and-back-up-the-jwt-key) above and
+[why](secrets-management.md#why-the-jwt-root-key-cannot-be-migrated). (Removing the
+on-disk key via cloud workload identity is a SaaS-edition feature.)
 
-**Until you migrate:** back it up somewhere safe (password manager, encrypted
-drive). Do not commit it to git (it's in `.gitignore`).
+**Protect it:** back it up somewhere safe (password manager, encrypted drive), and
+don't commit it to git (it's in `.gitignore`).
 
 **If you lose it**, every stored credential is unrecoverable and the app will
 refuse to start (the key file is required). Recovery procedure:

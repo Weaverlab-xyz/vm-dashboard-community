@@ -1,0 +1,120 @@
+"""
+Cloud database infrastructure API — Phase 1 (gated by ``cloud_database_enabled``).
+
+  POST   /api/databases                 — provision a managed DB (record + schedule apply)
+  GET    /api/databases                 — list dashboard-provisioned databases
+  GET    /api/databases/{id}/connection — connection info (the PRA jump is Phase 2)
+  DELETE /api/databases/{id}            — decommission
+
+Admin-only. The real Terraform apply and the PRA tunnel (Phase 2, via the
+``beyondtrust/sra`` provider) are later work; Phase 1 records and (with cloud
+creds) drives the apply as a background task.
+"""
+import logging
+from typing import Optional
+
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from pydantic import BaseModel
+from sqlalchemy.orm import Session
+
+from ..config import settings
+from ..database import User, get_db
+from ..services import cloud_database_service, config_service
+from .auth import require_admin
+
+logger = logging.getLogger(__name__)
+router = APIRouter(prefix="/api/databases", tags=["cloud-databases"])
+
+
+def _require_enabled() -> None:
+    if not config_service.get_bool("cloud_database_enabled", settings.cloud_database_enabled):
+        raise HTTPException(status_code=403, detail="cloud database infrastructure is disabled")
+
+
+class ProvisionRequest(BaseModel):
+    engine: str
+    cloud: str
+    region: str
+    name: str
+    master_username: str = "dbadmin"
+    instance_class: Optional[str] = None
+    allocated_storage: Optional[int] = None
+    db_subnet_group_name: Optional[str] = None
+    vpc_security_group_ids: Optional[list[str]] = None
+
+
+def _apply_task(db_id: str, job_id: str, engine: str, tf_variables: dict) -> None:
+    """Background worker: open a fresh session and drive the Terraform apply."""
+    import asyncio
+    from ..database import SessionLocal
+    s = SessionLocal()
+    try:
+        asyncio.run(cloud_database_service.run_provision_apply(
+            s, db_id=db_id, job_id=job_id, engine=engine, tf_variables=tf_variables))
+    finally:
+        s.close()
+
+
+@router.post("")
+async def provision_database(
+    payload: ProvisionRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    _require_enabled()
+    opts = {k: v for k, v in {
+        "instance_class": payload.instance_class,
+        "allocated_storage": payload.allocated_storage,
+        "db_subnet_group_name": payload.db_subnet_group_name,
+        "vpc_security_group_ids": payload.vpc_security_group_ids,
+    }.items() if v is not None}
+    try:
+        result = cloud_database_service.provision(
+            db, engine=payload.engine, cloud=payload.cloud, region=payload.region,
+            name=payload.name, created_by=current_user.username,
+            master_username=payload.master_username, **opts,
+        )
+    except cloud_database_service.CloudDatabaseError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except NotImplementedError as exc:
+        raise HTTPException(status_code=501, detail=str(exc)) from exc
+
+    background_tasks.add_task(
+        _apply_task, result["db_id"], result["job_id"], payload.engine, result["tf_variables"])
+    return {"ok": True, "db_id": result["db_id"], "job_id": result["job_id"]}
+
+
+@router.get("")
+async def list_databases(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    _require_enabled()
+    return {"databases": cloud_database_service.list_databases(db)}
+
+
+@router.get("/{db_id}/connection")
+async def connection(
+    db_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    _require_enabled()
+    try:
+        return cloud_database_service.connection_info(db, db_id)
+    except cloud_database_service.CloudDatabaseError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.delete("/{db_id}")
+async def decommission_database(
+    db_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    _require_enabled()
+    try:
+        return cloud_database_service.decommission(db, db_id)
+    except cloud_database_service.CloudDatabaseError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc

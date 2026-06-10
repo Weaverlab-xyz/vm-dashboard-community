@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     nutanix_enabled: bool = False       # Nutanix AHV router + /nutanix page (Prism Central REST API)
     xcpng_enabled: bool = False         # XCP-ng/XenServer router + /xcpng page (XAPI XML-RPC)
     vdesktops_enabled: bool = False     # Virtual desktops router + /desktops page (Phase 0 scaffold)
+    cloud_database_enabled: bool = False  # /api/databases router — private managed DBs brokered via a PRA tunnel
 
     # Proxmox VE connection
     proxmox_host: str = ""              # hostname or IP of the Proxmox node/cluster
@@ -118,7 +119,7 @@ class Settings(BaseSettings):
     # SSH execution mode (POWERSHELL_EXECUTION_MODE=ssh): container SSHes to the
     # Windows host and runs pwsh there — mirrors the Hybrid Worker pattern for dev.
     ssh_host: str = "host.docker.internal"   # Docker's name for the Windows host
-    ssh_user: str = ""                        # Windows username, e.g. "chrwe"
+    ssh_user: str = ""                        # Windows username the container SSHes in as
     ssh_key_file: str = "/root/.ssh/dev_dashboard_key"  # path inside the container
 
     # Logging
@@ -158,10 +159,12 @@ class Settings(BaseSettings):
     bt_ps_deploy_key_title: str = "Docker Deploy Key"  # Password Safe secret title
 
     # Image Management (OVA / ISO / AMI building)
-    ova_search_path: str = r"V:\packer\Weaverlab"
-    iso_source_path: str = r"\\10.0.0.74\Public\VMWare\ASUSTOR\WEAVERPC@chrwe\Drive#V\ISO"
-    packer_work_root: str = r"C:\Users\chrwe\AppData\Local\Temp\packer-iso-builds"
-    vmx_output_path: str = r"V:\packer\VMX"
+    # Environment-specific paths — override in .env (or the settings panel) to
+    # match where your ISOs/OVAs live and where Packer should stage builds.
+    ova_search_path: str = r"C:\packer\ova"
+    iso_source_path: str = r"\\nas\ISO"
+    packer_work_root: str = r"C:\packer\work"
+    vmx_output_path: str = r"C:\packer\vmx"
     s3_bucket_prefix: str = "vm-import-ova"
     aws_iam_instance_profile: str = ""  # IAM instance profile for Packer surrogate EC2 (needs S3 read access)
     ec2_ssm_instance_profile: str = ""  # IAM instance profile to attach to dashboard-deployed EC2 instances (SSM access)
@@ -347,10 +350,10 @@ class Settings(BaseSettings):
     # ── Promote runner ───────────────────────────────────────────────────────
     # Transient container launched in the target cloud to convert + upload a
     # VM image artefact during cross-cloud promotion. Same image (defaulting
-    # to a public build under weaverlab-xyz) serves AWS / Azure / GCP targets;
+    # to a public build under chrweav) serves AWS / Azure / GCP targets;
     # the target's own runner orchestration (ECS task / ACI / Cloud Run job)
     # is configured separately per cloud — only AWS-target is wired today.
-    promote_runner_image: str = "weaverlab-xyz/dashboard-promote-runner:latest"
+    promote_runner_image: str = "chrweav/dashboard-promote-runner:latest"
     promote_runner_ecs_cluster: str = ""                 # fallback: ansible_ecs_cluster
     promote_runner_ecs_task_family: str = "promote-runner"
     promote_runner_ecs_cpu: str = "1024"                 # qemu-img wants headroom

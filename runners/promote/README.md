@@ -48,17 +48,16 @@ zero.
 ## Public image
 
 The dashboard defaults to pulling
-`weaverlab-xyz/dashboard-promote-runner:latest`.
-
-> **Heads up:** that public tag isn't published yet. Until it is,
-> operators need to build this image themselves and either push it to
-> a registry the runner can reach (ECR / ACR / Artifact Registry) or
-> override `promote_runner_image` on `/storage` to point at the build
-> they pushed.
+`chrweav/dashboard-promote-runner:latest` — a multi-arch image
+(linux/amd64 + linux/arm64) published from this repo by
+`.github/workflows/publish-images.yml` on each tagged release.
 
 Operators who want to pin a hardened build can override via
-`promote_runner_image` anyway — the default is a convenience, not a
-requirement.
+`promote_runner_image` on `/storage` — the default is a convenience,
+not a requirement. The cloud-native runner (ECS / ACI / Cloud Run)
+pulls from a registry it can reach, so air-gapped or private-registry
+deployments should push a copy to ECR / ACR / Artifact Registry and
+point `promote_runner_image` at it.
 
 ## Build locally
 
@@ -165,7 +164,7 @@ generic `PATCH /api/storage/config` form) or via env var override.
 
 | Key | Default | Purpose |
 |---|---|---|
-| `promote_runner_image` | `weaverlab-xyz/dashboard-promote-runner:latest` | Container image to launch for the runner task. Override to a private registry path. |
+| `promote_runner_image` | `chrweav/dashboard-promote-runner:latest` | Container image to launch for the runner task. Override to a private registry path. |
 
 ### AWS-target
 

@@ -36,24 +36,54 @@ README make sense in that frame.
 
 ## Quick start
 
+The fastest way to run the dashboard is to **pull the prebuilt image** from
+Docker Hub — no local image build required. The image is multi-arch, so
+`docker pull` automatically selects the right build for your machine
+(Intel/AMD, Apple Silicon, AWS Graviton, Raspberry Pi 5).
+
 **Windows** (PowerShell 7):
 
 ```powershell
-.\scripts\Onboard-Dashboard.ps1
+.\scripts\Onboard-Dashboard.ps1 -Hub
 ```
 
 **macOS / Linux / WSL / Raspberry Pi** (bash):
 
 ```bash
-./scripts/onboard.sh
+./scripts/onboard.sh --hub
 ```
 
-The script checks prerequisites, generates bootstrap secrets (JWT signing
-key + Postgres password), and brings up the Docker Compose stack. Your
-browser opens automatically to a **setup wizard** where you create the
-admin account and enter your cloud credentials. Credentials are encrypted
-with AES-256 and stored in the database — nothing sensitive stays in any
-file on disk.
+This pulls `chrweav/infra-dashboard` and starts it alongside Postgres using
+`docker-compose.hub.yml`. Drop the `--hub` / `-Hub` flag to **build the image
+from source** instead (for contributors, or to customize the build).
+
+Either way the script checks prerequisites, generates bootstrap secrets (JWT
+signing key + Postgres password), and brings up the Docker Compose stack. Your
+browser opens automatically to a **setup wizard**. Create your admin account, then either bring your own cloud
+credentials (paste an access key / service principal / service-account JSON) or
+skip a cloud to just explore the UI. No creds handy? each cloud step has an
+optional panel to spin up a throwaway lab sandbox. Credentials are encrypted
+with AES-256 and stored in the database — nothing sensitive stays in any file
+on disk.
+
+**Prefer not to click through the wizard?** For a throwaway lab, the all-in-one
+sandbox onboarder provisions infra in your chosen cloud(s) *on your machine* and
+pushes the result straight into the dashboard's setup API — no wizard:
+
+```bash
+./scripts/sandbox/Linux/onboard-sandbox.sh --cloud all
+# Windows:  .\scripts\sandbox\Windows\Onboard-Sandbox.ps1 -Cloud all
+```
+
+It prompts for an admin login, provisions, configures, then you log in — see
+[`scripts/sandbox/README.md`](scripts/sandbox/README.md) for flags and teardown.
+
+> **Just want to kick the tires without cloning the repo?** Everything you need is
+> on the image's Docker Hub page. Copy the `docker-compose.yml` from
+> **[hub.docker.com/r/chrweav/infra-dashboard](https://hub.docker.com/r/chrweav/infra-dashboard)**
+> into an empty folder, generate a stable key with
+> `openssl rand -hex 32 > .jwt_secret_key`, then `docker compose up -d`
+> (set `POSTGRES_PASSWORD` first for anything beyond a quick trial).
 
 > **WSL users:** Docker Desktop is not required. Install Docker Engine
 > directly in your WSL distro (`sudo apt install docker.io` or follow the
