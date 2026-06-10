@@ -90,6 +90,11 @@
           <a x-show="$store.auth.isAdmin" href="/storage"
              class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
              {% if request.url.path.startswith('/storage') %}{{ nav_active }}{% endif %}">Storage</a>
+          {% if vdesktops_enabled %}
+          <a x-show="$store.auth.isAdmin" href="/desktops"
+             class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
+             {% if request.url.path.startswith('/desktops') %}{{ nav_active }}{% endif %}">Desktops</a>
+          {% endif %}
           {% if ansible_enabled %}
           <a href="/config-mgmt" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
              {% if request.url.path == '/config-mgmt' %}{{ nav_active }}{% endif %}">Configuration</a>

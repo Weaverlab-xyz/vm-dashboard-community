@@ -356,6 +356,7 @@ def _feature_flags() -> dict:
         "hyperv_enabled":       config_service.get_bool("hyperv_enabled",        settings.hyperv_enabled),
         "nutanix_enabled":      config_service.get_bool("nutanix_enabled",       settings.nutanix_enabled),
         "xcpng_enabled":        config_service.get_bool("xcpng_enabled",         settings.xcpng_enabled),
+        "vdesktops_enabled":    config_service.get_bool("vdesktops_enabled",     settings.vdesktops_enabled),
         # Entitle user-JIT Phase 4 UI affordances — surfaces the
         # "Request access" nav link + portal URL when both are configured.
         "entitle_user_jit_enabled":   config_service.get_bool("entitle_user_jit_enabled", settings.entitle_user_jit_enabled),
@@ -476,6 +477,13 @@ except ImportError:
 try:
     from .api import epml  # noqa: E402
     app.include_router(epml.router, dependencies=[_feature_gate("beyondtrust_enabled")])
+except ImportError:
+    pass
+
+try:
+    # Virtual desktop management — Phase 0 scaffold. Gated on vdesktops_enabled.
+    from .api import desktops  # noqa: E402
+    app.include_router(desktops.router, dependencies=[_feature_gate("vdesktops_enabled")])
 except ImportError:
     pass
 
@@ -615,6 +623,13 @@ async def storage_page(request: Request):
 @app.get("/images", response_class=HTMLResponse, include_in_schema=False)
 async def images_page(request: Request):
     return templates.TemplateResponse("images/index.html", {"request": request, **_feature_flags()})
+
+
+@app.get("/desktops", response_class=HTMLResponse, include_in_schema=False)
+async def desktops_page(request: Request):
+    """Virtual-desktop management page — Phase 0 scaffold. Nav-gated on
+    vdesktops_enabled; the /api/desktops router is feature-gated."""
+    return templates.TemplateResponse("desktops/index.html", {"request": request, **_feature_flags()})
 
 
 @app.get("/users", response_class=HTMLResponse, include_in_schema=False)

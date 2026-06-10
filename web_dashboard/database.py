@@ -527,6 +527,30 @@ class RegisteredImage(Base):
             return {}
 
 
+class VirtualDesktop(Base):
+    """A single virtual-desktop seat in a dashboard-managed desktop pool.
+
+    Phase 0 of the virtual-desktop plan ships this table empty; the
+    vdesktop_service scaffold writes/reads rows but does no cloud provisioning
+    yet. Phase 1 fans pool creation out to the existing VM provisioning path
+    (one VM per seat, tagged dashboard:desktop_pool=<name>) and fills
+    vm_resource_id; Phase 2 registers each seat on the PRA Jumpoint and fills
+    pra_jump_id. One row per desktop (seat), not per pool.
+    """
+    __tablename__ = "virtual_desktops"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    cloud = Column(String(20), nullable=False)              # aws | azure | gcp
+    pool_name = Column(String(200), nullable=False, index=True)
+    # Backing kind: vm_pool (Phase 1) | avd | workspaces (Phase 4).
+    kind = Column(String(20), nullable=False, default="vm_pool")
+    # Cloud-native id of the backing VM once provisioned (Phase 1). Null until then.
+    vm_resource_id = Column(String(500), nullable=True)
+    # pending | running | stopped | deprovisioning
+    status = Column(String(20), nullable=False, default="pending", index=True)
+    assigned_user = Column(String(200), nullable=True)
+    # PRA Jumpoint registration id once the seat is brokered (Phase 2).
+    pra_jump_id = Column(String(200), nullable=True)
 class CloudDatabase(Base):
     """Inventory of dashboard-provisioned managed databases — cloud-database
     infrastructure, Phase 1.
@@ -634,7 +658,7 @@ def init_db():
             conn.commit()
         # Advisory lock released automatically when conn closes.
 
-    # Seed workgroups table on first boot. Imported here (not at module top)
+# Seed workgroups table on first boot. Imported here (not at module top)
     # to avoid a circular import: workgroup_service imports from database.
     from .services import workgroup_service
     with SessionLocal() as _seed_db:
