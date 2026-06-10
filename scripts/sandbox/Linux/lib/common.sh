@@ -25,22 +25,42 @@ die() { err "$*"; exit 1; }
 # ── Retry with backoff ──────────────────────────────────────────────────────────
 # Re-run a command that fails transiently. Cloud control planes are eventually
 # consistent: a resource a create call just returned can be briefly invisible to
-# the next call. The case this guards: a freshly created GCP service account is
-# not yet resolvable as an IAM policy member for a few seconds, so
-# add-iam-policy-binding fails with "Service account … does not exist". These ops
-# are idempotent, so retrying is the robust fix. Command output is swallowed on
-# success; the real error is surfaced only if every attempt fails.
+# the next call. Cases this guards, one per provider:
+#   • GCP   — a fresh service account isn't resolvable as an IAM policy member,
+#             so `add-iam-policy-binding` fails "Service account … does not exist".
+#   • AWS   — a fresh IAM user/role isn't ready, so `attach-*-policy` /
+#             `put-role-policy` fails "NoSuchEntity".
+#   • Azure — a fresh service principal isn't visible to ARM RBAC, so
+#             `role assignment create` fails "PrincipalNotFound".
+#
+# ONLY wrap idempotent ops — attach/put/binding/assignment grants and read-only
+# lookups, where a re-run is a harmless no-op. NEVER wrap a non-idempotent create
+# (create-access-key, create-for-rbac, …): a retry after a lost response would
+# mint a duplicate. Such creates are instead gated by a wrapped op that touches
+# the same principal first (e.g. attach-user-policy gates create-access-key).
+#
+# stdout streams through untouched, so `VALUE="$(retry … cmd)"` still captures it
+# (callers that don't want it redirect with >/dev/null as usual). The command's
+# stderr is buffered and printed only if every attempt fails, so the transient
+# errors don't scare anyone — but a genuinely fatal final error is preserved.
 #   retry <attempts> <delay_seconds> <command> [args…]
 retry() {
   local attempts="$1" delay="$2"; shift 2
-  local n=1 out
+  local n=1 rc errfile
+  errfile="$(mktemp)"
   while :; do
-    if out="$("$@" 2>&1)"; then
+    # `|| rc=$?` captures the real exit code under set -e (reading $? after an
+    # `if cmd; then…fi` would see 0, since a no-branch-taken if exits 0).
+    rc=0
+    "$@" 2>"$errfile" || rc=$?
+    if (( rc == 0 )); then
+      rm -f "$errfile"
       return 0
     fi
     if (( n >= attempts )); then
-      [[ -n "$out" ]] && printf '%s\n' "$out" >&2
-      return 1
+      cat "$errfile" >&2
+      rm -f "$errfile"
+      return "$rc"
     fi
     warn "$1: attempt $n/$attempts failed; retrying in ${delay}s…"
     sleep "$delay"

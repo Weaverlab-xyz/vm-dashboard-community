@@ -160,8 +160,11 @@ else
   ok "Created SP $SP_NAME (creds at $SP_JSON_PATH, mode 600)"
 
   # Grant the SP read access to the Key Vault for runtime SSH key fetches.
-  SP_OBJECT_ID="$(az ad sp list --display-name "$SP_NAME" --query '[0].id' -o tsv)"
-  az keyvault set-policy -n "$KV_NAME" --object-id "$SP_OBJECT_ID" \
+  # A just-created SP lags in AAD: `az ad sp show` 404s until it replicates, so
+  # retry the lookup (by appId from the create output — `az ad sp list` would
+  # instead return an empty string with exit 0, which no retry could catch).
+  SP_OBJECT_ID="$(retry 8 5 az ad sp show --id "$(jq -r '.appId' "$SP_JSON_PATH")" --query id -o tsv)"
+  retry 8 5 az keyvault set-policy -n "$KV_NAME" --object-id "$SP_OBJECT_ID" \
     --secret-permissions get list >/dev/null
   ok "Granted SP read on Key Vault $KV_NAME"
 fi
@@ -187,13 +190,16 @@ az storage container-rm create -g "$RG" --storage-account "$SA_NAME" -n "hub" \
   >/dev/null 2>&1 || true
 ok "Blob container 'hub' on storage account $SA_NAME"
 
-SP_OBJECT_ID="$(az ad sp list --display-name "$SP_NAME" --query '[0].id' -o tsv)"
+SP_OBJECT_ID="$(retry 8 5 az ad sp show --id "$SP_APP_ID" --query id -o tsv)"
 SA_SCOPE="/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RG/providers/Microsoft.Storage/storageAccounts/$SA_NAME"
 if az role assignment list --assignee "$SP_OBJECT_ID" --scope "$SA_SCOPE" \
      --role "Storage Blob Data Contributor" --query '[0].id' -o tsv 2>/dev/null | grep -q .; then
   ok "SP already has Storage Blob Data Contributor on $SA_NAME"
 else
-  az role assignment create --assignee-object-id "$SP_OBJECT_ID" \
+  # ARM RBAC is eventually consistent w.r.t. AAD: a freshly created principal
+  # isn't visible yet, so role assignment create fails "PrincipalNotFound".
+  # Retry until ARM sees it — the assignment is idempotent.
+  retry 8 5 az role assignment create --assignee-object-id "$SP_OBJECT_ID" \
     --assignee-principal-type ServicePrincipal \
     --role "Storage Blob Data Contributor" --scope "$SA_SCOPE" >/dev/null
   ok "Granted SP Storage Blob Data Contributor on $SA_NAME"

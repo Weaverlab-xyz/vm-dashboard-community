@@ -189,7 +189,7 @@ for role in roles/compute.admin roles/secretmanager.secretAccessor \
              roles/run.invoker; do
   retry 8 5 gcloud projects add-iam-policy-binding "$PROJECT_ID" \
     --member "serviceAccount:$SA_EMAIL" --role "$role" \
-    --condition=None --quiet
+    --condition=None --quiet >/dev/null
 done
 ok "Granted compute.admin, secretmanager.secretAccessor, iam.serviceAccountUser, run.{admin,developer,invoker}"
 
@@ -237,7 +237,7 @@ state_write gcp storage_bucket "$STORAGE_BUCKET"
 # + read (dashboard mints signed URLs) + delete (cleanup after promote).
 retry 8 5 gcloud storage buckets add-iam-policy-binding "gs://$STORAGE_BUCKET" \
   --member "serviceAccount:$SA_EMAIL" --role "roles/storage.objectAdmin" \
-  --quiet
+  --quiet >/dev/null
 ok "Granted $SA_EMAIL storage.objectAdmin on gs://$STORAGE_BUCKET"
 
 # ── 6. Secret Manager: SSH keypair JSON ─────────────────────────────────────

@@ -250,8 +250,11 @@ else
       "Statement":[{"Effect":"Allow","Principal":{"Service":"ecs-tasks.amazonaws.com"},"Action":"sts:AssumeRole"}]
     }' \
     --tags "Key=$SANDBOX_TAG_KEY,Value=$SANDBOX_TAG_VALUE" >/dev/null
-  aws iam attach-role-policy --role-name "$ROLE_NAME" \
-    --policy-arn arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy >/dev/null
+  # A just-created IAM role can briefly 404 ("NoSuchEntity") on attach — retry
+  # until it has propagated. Once this succeeds the role is consistent, so the
+  # unconditional get-role below it needs no retry of its own.
+  retry 8 5 aws iam attach-role-policy --role-name "$ROLE_NAME" \
+    --policy-arn arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
   ok "Created IAM role $ROLE_NAME"
 fi
 ROLE_ARN="$(aws iam get-role --role-name "$ROLE_NAME" --query 'Role.Arn' --output text)"
@@ -305,7 +308,9 @@ else
     --tags "Key=$SANDBOX_TAG_KEY,Value=$SANDBOX_TAG_VALUE" >/dev/null
   ok "Created IAM role $PROMOTE_TASK_ROLE_NAME"
 fi
-aws iam put-role-policy --role-name "$PROMOTE_TASK_ROLE_NAME" \
+# Retry the inline-policy put: on the fresh-create path above, the role may not
+# have propagated yet ("NoSuchEntity"). Success here also gates the get-role.
+retry 8 5 aws iam put-role-policy --role-name "$PROMOTE_TASK_ROLE_NAME" \
   --policy-name "promote-runner-s3-write" \
   --policy-document "$(cat <<JSON
 {
@@ -324,7 +329,7 @@ aws iam put-role-policy --role-name "$PROMOTE_TASK_ROLE_NAME" \
   ]
 }
 JSON
-)" >/dev/null
+)"
 PROMOTE_TASK_ROLE_ARN="$(aws iam get-role --role-name "$PROMOTE_TASK_ROLE_NAME" --query 'Role.Arn' --output text)"
 ok "Granted promote-runner task role S3 write on s3://$STORAGE_BUCKET/promote-staging/*"
 state_write aws promote_task_role_arn "$PROMOTE_TASK_ROLE_ARN"
@@ -354,7 +359,7 @@ JSON
     --tags "Key=$SANDBOX_TAG_KEY,Value=$SANDBOX_TAG_VALUE" >/dev/null
   ok "Created IAM role $VMIMPORT_ROLE_NAME"
 fi
-aws iam put-role-policy --role-name "$VMIMPORT_ROLE_NAME" \
+retry 8 5 aws iam put-role-policy --role-name "$VMIMPORT_ROLE_NAME" \
   --policy-name "vmimport-s3-and-ec2" \
   --policy-document "$(cat <<JSON
 {
@@ -391,7 +396,7 @@ aws iam put-role-policy --role-name "$VMIMPORT_ROLE_NAME" \
   ]
 }
 JSON
-)" >/dev/null
+)"
 ok "Granted $VMIMPORT_ROLE_NAME read+write on s3://$STORAGE_BUCKET/* + ec2 image-import perms"
 
 # ── 7c. Dashboard IAM user — programmatic creds for the app ───────────────────
@@ -615,8 +620,12 @@ else
   ok "Created managed policy $DASHBOARD_POLICY_NAME"
 fi
 
-aws iam attach-user-policy --user-name "$DASHBOARD_USER_NAME" \
-  --policy-arn "$DASHBOARD_POLICY_ARN" >/dev/null
+# References both a possibly-just-created user and a possibly-just-created
+# managed policy ARN — either can lag. Retry until both have propagated; this
+# also gates the create-access-key below (once attach succeeds the user is
+# consistent), so that non-idempotent create needs no retry of its own.
+retry 8 5 aws iam attach-user-policy --user-name "$DASHBOARD_USER_NAME" \
+  --policy-arn "$DASHBOARD_POLICY_ARN"
 ok "Attached $DASHBOARD_POLICY_NAME to $DASHBOARD_USER_NAME"
 
 # Access-key management. Cache the secret in the same ~/.dashboard-sandbox
