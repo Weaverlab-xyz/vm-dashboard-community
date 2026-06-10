@@ -8,6 +8,7 @@
 # Usage:
 #   ./scripts/onboard.sh            # normal run (build from source)
 #   ./scripts/onboard.sh --hub      # pull the prebuilt image from Docker Hub (no build)
+#   ./scripts/onboard.sh --hub --corp-ca  # + trust the host's corp CA inside the container
 #   ./scripts/onboard.sh --build    # force image rebuild
 #   ./scripts/onboard.sh --no-open  # skip opening the browser
 
@@ -16,13 +17,15 @@ set -euo pipefail
 BUILD=0
 NO_OPEN=0
 HUB=0
+CORP_CA=0
 for arg in "$@"; do
     case "$arg" in
         --hub|--pull) HUB=1 ;;
+        --corp-ca) CORP_CA=1 ;;
         --build) BUILD=1 ;;
         --no-open) NO_OPEN=1 ;;
         -h|--help)
-            sed -n '2,13p' "$0"
+            sed -n '2,14p' "$0"
             exit 0
             ;;
         *) echo "unknown arg: $arg" >&2; exit 2 ;;
@@ -31,6 +34,11 @@ done
 
 if (( HUB && BUILD )); then
     echo "error: --hub (run the prebuilt Docker Hub image) and --build (build from source) are mutually exclusive." >&2
+    exit 2
+fi
+
+if (( CORP_CA && ! HUB )); then
+    echo "error: --corp-ca only applies to --hub. The build-from-source path bakes corp-ca/ certs into the image at build time instead (see corp-ca/README.md)." >&2
     exit 2
 fi
 
@@ -43,6 +51,20 @@ if (( HUB )); then
     COMPOSE_FILE="$REPO_ROOT/docker-compose.hub.yml"
 else
     COMPOSE_FILE="$REPO_ROOT/docker-compose.yml"
+fi
+# All compose invocations go through this array so the corp-CA overlay (which
+# mounts the host's CA bundle into the published image — terraform and other
+# in-container callers need it behind a TLS-inspecting proxy) stacks on top.
+COMPOSE_FILE_ARGS=(-f "$COMPOSE_FILE")
+if (( CORP_CA )); then
+    _corp_bundle="${CORP_CA_BUNDLE:-/etc/ssl/certs/ca-certificates.crt}"
+    if [[ ! -f "$_corp_bundle" ]]; then
+        echo "error: --corp-ca: CA bundle not found at $_corp_bundle." >&2
+        echo "Install your corp CA into the host trust store first (docs/ONBOARDING.md:" >&2
+        echo "'WSL: docker pull fails with a certificate error'), or set CORP_CA_BUNDLE." >&2
+        exit 2
+    fi
+    COMPOSE_FILE_ARGS+=(-f "$REPO_ROOT/docker-compose.corp-ca.yml")
 fi
 HEALTH_URL="http://localhost:8001/api/health"
 DASHBOARD_URL="http://localhost:8001"
@@ -219,7 +241,7 @@ fi
 # In --hub mode, pull the latest published image first so reruns pick up new
 # releases (compose only auto-pulls when the image is absent locally).
 if (( HUB )); then
-    if ! $_compose_cmd -f "$COMPOSE_FILE" pull; then
+    if ! $_compose_cmd "${COMPOSE_FILE_ARGS[@]}" pull; then
         fail "$_compose_cmd pull failed — could not fetch the prebuilt image."
         fail "Behind a TLS-inspecting proxy, ensure Docker trusts your corp CA for Docker Hub"
         fail "(see docs/ONBOARDING.md: 'WSL: docker pull fails with a certificate error')."
@@ -227,13 +249,13 @@ if (( HUB )); then
     fi
 fi
 
-compose_args=(-f "$COMPOSE_FILE" up -d)
+compose_args=("${COMPOSE_FILE_ARGS[@]}" up -d)
 (( BUILD )) && compose_args+=(--build)
 
 if ! $_compose_cmd "${compose_args[@]}"; then
     fail "$_compose_cmd up failed."
     fail "Recent logs:"
-    $_compose_cmd -f "$COMPOSE_FILE" logs --tail 50 app || true
+    $_compose_cmd "${COMPOSE_FILE_ARGS[@]}" logs --tail 50 app || true
     exit 1
 fi
 ok "Containers started"
@@ -254,7 +276,7 @@ done
 if ! (( ready )); then
     fail "Health endpoint did not respond within 90 seconds."
     fail "Recent app logs:"
-    $_compose_cmd -f "$COMPOSE_FILE" logs --tail 50 app || true
+    $_compose_cmd "${COMPOSE_FILE_ARGS[@]}" logs --tail 50 app || true
     echo
     warn "Common causes:"
     warn "  - Invalid AWS or Azure credentials (app crashes at startup)"

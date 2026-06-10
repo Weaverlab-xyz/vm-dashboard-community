@@ -348,7 +348,10 @@ The script:
 > escape hatch are **not needed**. You do still need Docker to trust your corporate
 > root CA for the `docker pull` itself — see
 > [WSL: `docker pull` fails with a certificate error](#wsl-docker-pull-fails-with-a-certificate-error)
-> below.
+> below. And if you use features that make outbound TLS calls *from inside the
+> container* (Terraform-backed provisioning, e.g. cloud databases), add
+> `--corp-ca` so the published image trusts your proxy's CA at runtime —
+> step 5 of the same section.
 
 ### 2. Complete the setup wizard
 
@@ -600,6 +603,32 @@ system trust store and points `pip`, `requests`, and `curl` at it. Files in
 that directory are gitignored, so your cert stays local.
 
 Now rerun `./scripts/onboard.sh --build`.
+
+**Step 5 — (`--hub` only) trust the cert *inside the published container*:**
+
+The published image is built by CI on a clean network, so it carries no corp
+CA — and unlike the build path, there's no image build to inject it into.
+That's fine until a feature makes outbound TLS calls *from inside the
+container*: Terraform-backed provisioning (cloud databases) runs
+`terraform init`, which fetches providers from `registry.terraform.io` and
+fails with:
+
+```
+terraform init failed: ... x509: certificate signed by unknown authority
+```
+
+Fix: start the hub stack with the corp-CA overlay, which bind-mounts the
+host's system CA bundle (updated in step 2 above) read-only over the
+container's, and sets `AWS_CA_BUNDLE` for boto3:
+
+```bash
+./scripts/onboard.sh --hub --corp-ca
+# or manually:
+docker compose -f docker-compose.hub.yml -f docker-compose.corp-ca.yml up -d
+```
+
+On a non-Linux host (no `/etc/ssl/certs/ca-certificates.crt`), point
+`CORP_CA_BUNDLE` at a PEM file containing the public roots plus your corp CA.
 
 ### Stack starts but `/api/health` doesn't respond
 

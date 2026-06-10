@@ -1,0 +1,35 @@
+# Corp-proxy overlay for the PUBLISHED image (docker-compose.hub.yml).
+#
+# The hub image is built by CI on a clean network, so it carries no corporate
+# CA. That's fine until a feature inside the container dials out itself —
+# e.g. cloud database provisioning runs `terraform init`, which fetches
+# providers from registry.terraform.io and fails behind a TLS-inspecting
+# proxy (Cloudflare Gateway, Zscaler, ...) with:
+#
+#   x509: certificate signed by unknown authority
+#
+# This overlay bind-mounts the HOST's system CA bundle over the container's.
+# The host bundle already contains your corp CA if you followed the WSL trust
+# setup in docs/ONBOARDING.md (update-ca-certificates). The image's
+# SSL_CERT_FILE / REQUESTS_CA_BUNDLE / PIP_CERT already point at this path,
+# and terraform (Go) honors SSL_CERT_FILE — so the mount alone fixes Go,
+# Python/requests, and pip. AWS_CA_BUNDLE is added for boto3, which reads
+# neither of those.
+#
+# Usage (only with the hub stack — the build-from-source stack bakes corp-ca/
+# certs into the image instead):
+#
+#   ./scripts/onboard.sh --hub --corp-ca
+#   # or manually:
+#   docker compose -f docker-compose.hub.yml -f docker-compose.corp-ca.yml up -d
+#
+# Non-Linux hosts (no /etc/ssl/certs/ca-certificates.crt): point
+# CORP_CA_BUNDLE at any PEM bundle that contains the public roots PLUS your
+# corp CA.
+
+services:
+  app:
+    volumes:
+      - ${CORP_CA_BUNDLE:-/etc/ssl/certs/ca-certificates.crt}:/etc/ssl/certs/ca-certificates.crt:ro
+    environment:
+      - AWS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
