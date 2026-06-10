@@ -108,7 +108,7 @@ class Settings(BaseSettings):
     api_host: str = "0.0.0.0"
     api_port: int = 8000
     api_title: str = "Infrastructure Management API"
-    api_version: str = "0.1.0"
+    api_version: str = "0.2.2"
 
     # CORS
     cors_origins: List[str] = ["http://localhost:8001", "http://localhost:3000"]
