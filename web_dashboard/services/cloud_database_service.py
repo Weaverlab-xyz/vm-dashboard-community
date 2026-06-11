@@ -103,7 +103,8 @@ def _build_tf_variables(
 
 def provision(
     db: Session, *, engine: str, cloud: str, region: str, name: str,
-    created_by: str, master_username: str = "dbadmin", **opts,
+    created_by: str, master_username: str = "dbadmin",
+    vault_account_group_id: Optional[int] = None, **opts,
 ) -> dict:
     """Record a new managed database: validate, mint the admin credential, write
     the ``CloudDatabase`` row + a provisioning ``Job``, and return the Terraform
@@ -142,9 +143,14 @@ def provision(
     row.credentials_ref = f"config://clouddb/{row.id}/admin"
     db.commit()
 
+    job_meta = {"db_id": row.id, "engine": engine, "cloud": cloud, "name": name}
+    if vault_account_group_id:
+        # Carried via job metadata (not tf_variables — those map 1:1 to the
+        # cloud module's declared variables) for _broker_tunnel to pick up.
+        job_meta["vault_account_group_id"] = int(vault_account_group_id)
     job = job_service.create_job(
         db, job_type="clouddb_provision", created_by=created_by,
-        metadata={"db_id": row.id, "engine": engine, "cloud": cloud, "name": name},
+        metadata=job_meta,
     )
 
     tf_variables = _build_tf_variables(
@@ -272,6 +278,9 @@ async def _broker_tunnel(db: Session, *, row: CloudDatabase, job_id: str,
     await _ensure_jumpoint_node(_cfg("aws_region") or row.region)
     try:
         jump_name = tf_variables.get("identifier") or f"clouddb-{row.id[:8]}"
+        job = db.query(Job).filter(Job.id == job_id).first()
+        vault_group_id = ((job.metadata_dict or {}).get("vault_account_group_id")
+                          if job is not None else None)
         tun = await pra.provision_db_tunnel(
             engine=engine,
             name=jump_name,
@@ -282,9 +291,11 @@ async def _broker_tunnel(db: Session, *, row: CloudDatabase, job_id: str,
             database=tf_variables.get("db_name", ""),
             tag="clouddb",
             # Vault account for credential injection at tunnel launch; rides in
-            # the same workspace/state so decommission destroys it too.
+            # the same workspace/state so decommission destroys it too. The
+            # account group makes it visible to users via group policies.
             admin_password=tf_variables.get("master_password", ""),
             vault_account_name=f"{jump_name}-admin",
+            vault_account_group_id=vault_group_id,
         )
         row.jump_item_id = tun.get("tunnel_jump_id") or None
         db.commit()

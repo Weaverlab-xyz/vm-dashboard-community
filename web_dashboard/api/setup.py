@@ -402,7 +402,8 @@ class BeyondTrustFeatureConfig(BaseModel):
     # GCP-specific overrides (leave blank to fall back to the AWS values above)
     gcp_bt_jump_group_name: str = ""
     gcp_jumpoint_name: str = ""
-    # EPM for Linux (EPM-L) — SaaS API at app.beyondtrust.io
+    # EPM for Linux (EPM-L) — Pathfinder public API gateway at api.beyondtrust.io
+    epml_site_id: str = ""          # Pathfinder site UUID; PATs are bound to the site active at creation
     epml_pat: str = ""              # encrypted at rest; Bearer token for EPML API
 
 class PortainerFeatureConfig(BaseModel):
