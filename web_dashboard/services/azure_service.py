@@ -807,6 +807,28 @@ async def set_workgroup_tag(rg: str, vm_name: str, workgroup: str) -> None:
         raise AzureError(f"Failed to set workgroup tag on {vm_name}: {e}") from e
 
 
+def _set_tag_sync(cred, sub_id: str, rg: str, vm_name: str, key: str, value: str) -> None:
+    """Merge a single tag into the VM's existing tags (preserves others)."""
+    compute = _get_compute(cred, sub_id)
+    vm = compute.virtual_machines.get(rg, vm_name)
+    tags = dict(vm.tags or {})
+    tags[key] = value
+    compute.virtual_machines.begin_update(rg, vm_name, {"tags": tags}).result()
+
+
+async def set_desktop_pool_tag(rg: str, vm_name: str, pool_name: str) -> None:
+    """Tag an Azure VM as a member of a virtual-desktop pool (VDI Phase 1) so the
+    pool's live state is recoverable from the cloud. Tag key is
+    ``dashboard:desktop_pool``; preserves other tags."""
+    try:
+        cred, sub_id = await _ensure_creds()
+        await asyncio.to_thread(_set_tag_sync, cred, sub_id, rg, vm_name, "dashboard:desktop_pool", pool_name)
+    except AzureError:
+        raise
+    except Exception as e:
+        raise AzureError(f"Failed to set desktop_pool tag on {vm_name}: {e}") from e
+
+
 def _describe_vms_sync(cred, sub_id: str, rg: str) -> list:
     compute = _get_compute(cred, sub_id)
     network = _get_network(cred, sub_id)

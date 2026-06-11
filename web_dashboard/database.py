@@ -551,6 +551,10 @@ class VirtualDesktop(Base):
     assigned_user = Column(String(200), nullable=True)
     # PRA Jumpoint registration id once the seat is brokered (Phase 2).
     pra_jump_id = Column(String(200), nullable=True)
+    created_by = Column(String(100), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 class CloudDatabase(Base):
     """Inventory of dashboard-provisioned managed databases — cloud-database
     infrastructure, Phase 1.
@@ -635,6 +639,9 @@ def init_db():
             "CREATE INDEX ix_app_config_key_workgroup ON app_config(key, workgroup)",
             "ALTER TABLE approvals ADD COLUMN principal_kind VARCHAR(16) DEFAULT 'user' NOT NULL",
             "CREATE INDEX ix_approvals_principal_kind ON approvals(principal_kind)",
+            # VDI Phase 1: seats track who/when for newest-first scale-down + listing.
+            "ALTER TABLE virtual_desktops ADD COLUMN created_by VARCHAR(100)",
+            "ALTER TABLE virtual_desktops ADD COLUMN created_at TIMESTAMP",
         ]
         for stmt in _migrations:
             if _is_sqlite:

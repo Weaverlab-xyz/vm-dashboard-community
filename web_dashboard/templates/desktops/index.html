@@ -1,11 +1,10 @@
 {% extends "base.html" %}
 {% block title %}Desktops – Infrastructure Management{% endblock %}
 
-{# Virtual Desktops — Phase 0 scaffold. Lists desktop pools + offers
-   create/scale/delete over the virtual_desktops table. Provisioning of the
-   backing VMs (Phase 1), PRA registration + brokered "Open session" (Phase 2),
-   and the full governance-folded UI (Phase 3) land later — this page
-   deliberately shows pool records only. #}
+{# Virtual Desktops — Phase 1 (Azure). A pool is N private VMs from a desktop
+   image; Azure provisions them via the existing deploy path (tagged for the
+   pool). AWS/GCP create records only until their Phase 1. PRA-brokered
+   "Open session" is Phase 2. #}
 
 {% block content %}
 <div class="max-w-6xl mx-auto py-8 px-4" x-data="desktopsPage()" x-init="init()">
@@ -18,10 +17,9 @@
     </button>
   </div>
   <p class="text-sm text-gray-500 mb-6">
-    A desktop pool is <em>N</em> VMs from a desktop image, registered as jump
-    targets on the BeyondTrust PRA Jumpoint and brokered as privileged sessions.
-    <strong>Phase 0</strong> manages pool records only — VM provisioning and
-    brokered "Open session" land in later phases.
+    A desktop pool is <em>N</em> private VMs from a desktop image. <strong>Azure</strong>
+    provisions them now; AWS/GCP create records only (coming next). Brokered
+    "Open session" through the BeyondTrust PRA Jumpoint lands in Phase 2.
   </p>
 
   <!-- Toast -->
@@ -31,6 +29,10 @@
 
   <!-- Pools -->
   <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden mb-6">
+    <div class="flex items-center justify-between px-4 py-2 border-b border-gray-100">
+      <span class="text-xs text-gray-400">Seats flip pending → running as VMs come up.</span>
+      <button @click="refresh()" class="text-xs text-blue-600 hover:underline">Refresh</button>
+    </div>
     <div x-show="loading" x-cloak class="p-6 text-center text-sm text-gray-400">Loading…</div>
     <div x-show="!loading && pools.length === 0" x-cloak class="p-10 text-center text-sm text-gray-400">
       No desktop pools yet. Click <strong>New pool</strong> to create one.
@@ -40,7 +42,6 @@
         <tr class="text-left text-xs uppercase text-gray-500 bg-gray-50 border-b border-gray-200">
           <th class="px-4 py-3">Pool</th>
           <th class="px-4 py-3">Cloud</th>
-          <th class="px-4 py-3">Kind</th>
           <th class="px-4 py-3">Seats</th>
           <th class="px-4 py-3">Status</th>
           <th class="px-4 py-3 text-right">Actions</th>
@@ -53,7 +54,6 @@
             <td class="px-4 py-3">
               <span class="text-[10px] uppercase font-semibold px-1.5 py-0.5 rounded bg-gray-100 text-gray-600" x-text="p.cloud"></span>
             </td>
-            <td class="px-4 py-3 text-gray-500" x-text="p.kind"></td>
             <td class="px-4 py-3 text-gray-700" x-text="p.count"></td>
             <td class="px-4 py-3 text-xs text-gray-500" x-text="statusText(p.statuses)"></td>
             <td class="px-4 py-3 text-right whitespace-nowrap">
@@ -70,7 +70,7 @@
   <div x-show="showCreate" x-cloak
        class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
        @click.self="showCreate = false">
-    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-lg">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
       <div class="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
         <h3 class="text-lg font-semibold">New desktop pool</h3>
         <button @click="showCreate = false" class="text-gray-400 hover:text-gray-600 text-xl">&times;</button>
@@ -79,10 +79,10 @@
         <div class="grid grid-cols-2 gap-3">
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">Cloud *</label>
-            <select x-model="form.cloud" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
-              <option value="aws">AWS</option>
+            <select x-model="form.cloud" @change="onCloudChange()" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
               <option value="azure">Azure</option>
-              <option value="gcp">GCP</option>
+              <option value="aws">AWS (records only)</option>
+              <option value="gcp">GCP (records only)</option>
             </select>
           </div>
           <div>
@@ -96,26 +96,84 @@
           <input type="text" x-model="form.name"
                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="eng-desktops">
         </div>
-        <div class="grid grid-cols-2 gap-3">
-          <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">Desktop image</label>
-            <input type="text" x-model="form.image"
-                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="(Phase 1)">
+
+        <!-- Azure picker -->
+        <template x-if="form.cloud === 'azure'">
+          <div class="space-y-4 border-t border-gray-100 pt-4">
+            <div x-show="azure.loading" x-cloak class="text-xs text-gray-400">Loading Azure options…</div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Desktop image *</label>
+              <select x-model="form.image_id" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                <option value="">— select a private image —</option>
+                <template x-for="im in azure.images" :key="im.id || im.name">
+                  <option :value="im.id || im.image_id" x-text="im.name || im.id"></option>
+                </template>
+              </select>
+              <p class="text-xs text-gray-400 mt-1">Gallery / managed images. Paste a full ARM image id below if it's not listed.</p>
+              <input type="text" x-model="form.image_id" class="mt-1 w-full border border-gray-200 rounded-lg px-3 py-1.5 text-xs font-mono" placeholder="/subscriptions/…/images/…">
+            </div>
+            <div class="grid grid-cols-2 gap-3">
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Location</label>
+                <select x-model="form.location" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                  <template x-for="loc in azure.locations" :key="loc"><option :value="loc" x-text="loc"></option></template>
+                </select>
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">VM size *</label>
+                <select x-model="form.vm_size" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                  <template x-for="sz in azure.vm_sizes" :key="sz"><option :value="sz" x-text="sz"></option></template>
+                </select>
+              </div>
+            </div>
+            <div class="grid grid-cols-2 gap-3">
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Subnet *</label>
+                <select x-model="form.subnet_id" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                  <option value="">— select —</option>
+                  <template x-for="s in azure.subnets" :key="s.id"><option :value="s.id" x-text="s.name || s.id"></option></template>
+                </select>
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Network security group</label>
+                <select x-model="form.nsg_id" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                  <option value="">— none —</option>
+                  <template x-for="n in azure.nsgs" :key="n.id"><option :value="n.id" x-text="n.name || n.id"></option></template>
+                </select>
+              </div>
+            </div>
+            <div class="grid grid-cols-2 gap-3">
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Resource group</label>
+                <input type="text" x-model="form.resource_group" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="(default)">
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">SSH username</label>
+                <input type="text" x-model="form.ssh_username" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="azureuser">
+              </div>
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">SSH public key *</label>
+              <textarea x-model="form.ssh_public_key" rows="2" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-xs font-mono" placeholder="ssh-rsa AAAA…"></textarea>
+            </div>
+            <label class="flex items-center gap-2 text-sm text-gray-700">
+              <input type="checkbox" x-model="form.create_public_ip"> Give each desktop a public IP
+              <span class="text-xs text-gray-400">(default off — desktops are private + brokered)</span>
+            </label>
           </div>
-          <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">Instance size</label>
-            <input type="text" x-model="form.size"
-                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="(Phase 1)">
-          </div>
+        </template>
+
+        <div x-show="form.cloud !== 'azure'" x-cloak class="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-3">
+          AWS/GCP create pool <strong>records only</strong> in this phase — no VMs are provisioned.
+          Azure is the live provider for Phase 1.
         </div>
-        <p class="text-xs text-gray-400">Phase 0 records the pool; image + size are used when Phase 1 provisions the VMs.</p>
       </div>
       <div class="px-6 py-4 border-t border-gray-100 flex justify-end gap-3">
         <button @click="showCreate = false" class="px-4 py-2 text-sm border border-gray-300 rounded-lg">Cancel</button>
-        <button @click="submitCreate()" :disabled="!form.name || !form.count || saving"
+        <button @click="submitCreate()" :disabled="!canSubmit() || saving"
                 class="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-medium rounded-lg">
-          <span x-show="!saving">Create</span>
-          <span x-show="saving" x-cloak>Saving…</span>
+          <span x-show="!saving">Create pool</span>
+          <span x-show="saving" x-cloak>Submitting…</span>
         </button>
       </div>
     </div>
@@ -129,9 +187,18 @@ function desktopsPage() {
   return {
     pools: [], loading: true, toast: '', toastType: 'success',
     showCreate: false, saving: false,
-    form: { cloud: 'aws', name: '', image: '', size: '', count: 1 },
+    azure: { loaded: false, loading: false, locations: [], vm_sizes: [], subnets: [], nsgs: [], images: [] },
+    form: {},
 
-    async init() { requireAuth(); await this.refresh(); },
+    _blankForm() {
+      return {
+        cloud: 'azure', name: '', count: 1,
+        image_id: '', location: '', vm_size: '', subnet_id: '', nsg_id: '',
+        resource_group: '', ssh_username: 'azureuser', ssh_public_key: '', create_public_ip: false,
+      };
+    },
+
+    async init() { requireAuth(); this.form = this._blankForm(); await this.refresh(); },
 
     async refresh() {
       this.loading = true;
@@ -146,16 +213,53 @@ function desktopsPage() {
     },
 
     openCreate() {
-      this.form = { cloud: 'aws', name: '', image: '', size: '', count: 1 };
+      this.form = this._blankForm();
       this.showCreate = true;
+      this.onCloudChange();
+    },
+
+    onCloudChange() { if (this.form.cloud === 'azure') this.loadAzure(); },
+
+    async loadAzure() {
+      if (this.azure.loaded || this.azure.loading) return;
+      this.azure.loading = true;
+      try {
+        const net = await API.get('/api/azure/network-options');
+        this.azure.locations = net.locations || [];
+        this.azure.vm_sizes = net.vm_sizes || [];
+        this.azure.subnets = net.subnets || [];
+        this.azure.nsgs = net.nsgs || [];
+        if (!this.form.location && this.azure.locations.length) this.form.location = this.azure.locations[0];
+        if (!this.form.vm_size && this.azure.vm_sizes.length) this.form.vm_size = this.azure.vm_sizes[0];
+        if (!this.form.subnet_id && this.azure.subnets.length) this.form.subnet_id = this.azure.subnets[0].id;
+      } catch (e) { /* network options unavailable — fields still accept manual values */ }
+      try { const im = await API.get('/api/azure/images'); this.azure.images = im.images || (Array.isArray(im) ? im : []); } catch (e) {}
+      try { const k = await API.get('/api/azure/keyvault-ssh-key'); if (k && k.ssh_public_key && !this.form.ssh_public_key) this.form.ssh_public_key = k.ssh_public_key; } catch (e) {}
+      this.azure.loaded = true; this.azure.loading = false;
+    },
+
+    canSubmit() {
+      if (!this.form.name || !this.form.count) return false;
+      if (this.form.cloud === 'azure') return !!(this.form.image_id && this.form.vm_size && this.form.subnet_id && this.form.ssh_public_key);
+      return true;
     },
 
     async submitCreate() {
       this.saving = true;
       try {
-        await API.post('/api/desktops/pools', this.form);
+        const f = this.form;
+        const body = { cloud: f.cloud, name: f.name, count: f.count };
+        if (f.cloud === 'azure') {
+          Object.assign(body, {
+            image_id: f.image_id, location: f.location, vm_size: f.vm_size,
+            subnet_id: f.subnet_id, nsg_ids: f.nsg_id ? [f.nsg_id] : [],
+            resource_group: f.resource_group, ssh_username: f.ssh_username || 'azureuser',
+            ssh_public_key: f.ssh_public_key, create_public_ip: !!f.create_public_ip,
+          });
+        }
+        await API.post('/api/desktops/pools', body);
         this.showCreate = false;
-        this.flash('Pool created.');
+        this.flash(f.cloud === 'azure' ? 'Pool created — provisioning VMs…' : 'Pool created.');
         await this.refresh();
       } catch (e) {
         this.flash(e.message || 'Create failed.', 'error');
@@ -169,7 +273,7 @@ function desktopsPage() {
       if (n === null) return;
       try {
         await API.post(`/api/desktops/pools/${encodeURIComponent(p.pool_name)}/scale`, { count: parseInt(n, 10) });
-        this.flash('Pool scaled.');
+        this.flash('Pool scaling…');
         await this.refresh();
       } catch (e) {
         this.flash(e.message || 'Scale failed.', 'error');
@@ -177,10 +281,10 @@ function desktopsPage() {
     },
 
     async del(p) {
-      if (!confirm(`Delete pool "${p.pool_name}"? This removes its records.`)) return;
+      if (!confirm(`Delete pool "${p.pool_name}"?\n\nAzure pools terminate their VMs first.`)) return;
       try {
         await API.del(`/api/desktops/pools/${encodeURIComponent(p.pool_name)}`);
-        this.flash('Pool deleted.');
+        this.flash('Pool deleting…');
         await this.refresh();
       } catch (e) {
         this.flash(e.message || 'Delete failed.', 'error');
@@ -188,7 +292,7 @@ function desktopsPage() {
     },
 
     statusText(s) { return Object.entries(s || {}).map(([k, v]) => `${v} ${k}`).join(', '); },
-    flash(m, t) { this.toast = m; this.toastType = t || 'success'; setTimeout(() => { this.toast = ''; }, 4000); },
+    flash(m, t) { this.toast = m; this.toastType = t || 'success'; setTimeout(() => { this.toast = ''; }, 4500); },
   };
 }
 </script>

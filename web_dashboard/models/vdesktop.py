@@ -10,9 +10,25 @@ from pydantic import BaseModel
 class PoolCreateRequest(BaseModel):
     cloud: str                       # aws | azure | gcp
     name: str                        # pool name (unique)
-    image: str                       # desktop image id/name (provisioned in Phase 1)
-    size: str                        # instance size/type (used in Phase 1)
     count: int = 1                   # number of seats
+    # Generic (record-only clouds); optional.
+    image: Optional[str] = None
+    size: Optional[str] = None
+
+    # ── Azure deploy spec (Phase 1; required when cloud == "azure") ──
+    location: Optional[str] = None
+    resource_group: Optional[str] = None
+    vm_size: Optional[str] = None
+    image_id: Optional[str] = None          # full ARM id of a gallery/managed image
+    image_publisher: Optional[str] = None   # OR a marketplace image
+    image_offer: Optional[str] = None
+    image_sku: Optional[str] = None
+    image_version: Optional[str] = None
+    subnet_id: Optional[str] = None
+    nsg_ids: list[str] = []
+    create_public_ip: bool = False          # desktops are private + brokered
+    ssh_username: str = "azureuser"
+    ssh_public_key: Optional[str] = None     # client-provided (as the Azure deploy form does)
 
 
 class PoolScaleRequest(BaseModel):
