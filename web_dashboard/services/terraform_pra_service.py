@@ -141,14 +141,18 @@ output "shell_jump_id" {{
 """
 
 
-def _run_tf(args: list, work_dir: str, timeout: int = 120) -> subprocess.CompletedProcess:
+def _run_tf(args: list, work_dir: str, timeout: int = 120,
+            extra_env: Optional[dict] = None) -> subprocess.CompletedProcess:
+    env = _tf_env()
+    if extra_env:
+        env.update(extra_env)
     result = subprocess.run(
         [_TERRAFORM] + args,
         cwd=work_dir,
         capture_output=True,
         text=True,
         timeout=timeout,
-        env=_tf_env(),
+        env=env,
     )
     return result
 
@@ -312,6 +316,12 @@ _DB_TUNNEL_RESOURCE = {
 }
 _DB_RESOURCE_ENGINE = {v: k for k, v in _DB_TUNNEL_RESOURCE.items()}
 
+# jump_item_association `jump_items[].type` enum value per engine — confirmed
+# against the cached provider schema, like the resource names above.
+_DB_JUMP_ITEM_TYPE = {
+    "postgres": "postgresql_tunnel_jump",
+}
+
 
 def _generate_db_tunnel_hcl(
     engine: str,
@@ -322,11 +332,20 @@ def _generate_db_tunnel_hcl(
     username: str,
     database: str,
     tag: str,
+    vault_account_name: str = "",
+    vault_username: str = "",
 ) -> str:
     """Return the Terraform HCL for one DB protocol-tunnel jump.
 
     Required resource fields: name, hostname, jump_group_id, jumpoint_id.
     username / database are optional and emitted only when provided.
+
+    When ``vault_account_name`` is set, a Vault username/password account is
+    also emitted, associated to the tunnel jump for credential injection. The
+    password is NEVER in the HCL — it arrives as ``TF_VAR_db_password``
+    (sensitive variable), mirroring the bt_* credentials. With
+    ``vault_account_name=""`` the output is byte-identical to the pre-vault
+    template, which the state-driven destroy path relies on.
     """
     resource_type = _DB_TUNNEL_RESOURCE.get(engine)
     if not resource_type:
@@ -341,6 +360,33 @@ def _generate_db_tunnel_hcl(
     if database:
         extra += f"  database      = {json.dumps(database)}\n"
 
+    var_block = ""
+    vault_block = ""
+    if vault_account_name:
+        jump_item_type = _DB_JUMP_ITEM_TYPE[engine]
+        var_block = 'variable "db_password"      { sensitive = true }\n'
+        # Schema (provider v1.3.0): jump_item_association is a SINGLE nested
+        # attribute (`= { ... }` syntax); jump_items is a set of {id, type}.
+        vault_block = f"""
+resource "sra_vault_username_password_account" "db_admin" {{
+  name        = {json.dumps(vault_account_name)}
+  username    = {json.dumps(vault_username)}
+  password    = var.db_password
+  description = "Auto-provisioned by Infrastructure Management Dashboard (managed database)"
+  jump_item_association = {{
+    filter_type = "criteria"
+    jump_items = [{{
+      id   = tonumber({resource_type}.{safe_name}.id)
+      type = {json.dumps(jump_item_type)}
+    }}]
+  }}
+}}
+
+output "vault_account_id" {{
+  value = sra_vault_username_password_account.db_admin.id
+}}
+"""
+
     return f"""\
 terraform {{
   required_providers {{
@@ -354,7 +400,7 @@ terraform {{
 variable "bt_host"          {{ sensitive = false }}
 variable "bt_client_id"     {{ sensitive = true }}
 variable "bt_client_secret" {{ sensitive = true }}
-
+{var_block}
 provider "sra" {{
   host          = var.bt_host
   client_id     = var.bt_client_id
@@ -381,32 +427,83 @@ resource {json.dumps(resource_type)} {json.dumps(safe_name)} {{
 output "tunnel_jump_id" {{
   value = {resource_type}.{safe_name}.id
 }}
-"""
+{vault_block}"""
+
+
+_REDACTED = "**REDACTED-BY-DASHBOARD**"
+
+
+def _scrub_tf_state(tf_state_json: str) -> Optional[str]:
+    """Redact secret attribute values from a Terraform state document before
+    it is stashed in the jobs table (jobs.extra_data is served by the jobs API
+    and the MCP get_job tool). The state-driven destroy deletes resources by
+    id and does not need the live values. Fails CLOSED: on any parse error
+    return None so the caller stashes nothing rather than a plaintext secret."""
+    try:
+        state = json.loads(tf_state_json)
+        for res in state.get("resources", []):
+            for inst in res.get("instances", []):
+                attrs = inst.get("attributes") or {}
+                if attrs.get("password"):
+                    attrs["password"] = _REDACTED
+        return json.dumps(state)
+    except Exception as exc:
+        logger.error(
+            "failed to scrub Terraform state before stashing — dropping it; the "
+            "PRA tunnel/vault account may need manual cleanup at decommission: %s", exc)
+        return None
 
 
 def _provision_db_tunnel_sync(
-    engine, name, hostname, jump_group_name, jumpoint_name, username, database, tag
+    engine, name, hostname, jump_group_name, jumpoint_name, username, database, tag,
+    admin_password="", vault_account_name="",
 ) -> dict:
+    want_vault = bool(vault_account_name and admin_password)
     with tempfile.TemporaryDirectory(prefix="pra_db_tf_") as work_dir:
         Path(work_dir, "main.tf").write_text(
             _generate_db_tunnel_hcl(engine, name, hostname, jump_group_name,
-                                    jumpoint_name, username, database, tag)
+                                    jumpoint_name, username, database, tag,
+                                    vault_account_name=vault_account_name if want_vault else "",
+                                    vault_username=username)
         )
         init = _run_tf(["init", "-upgrade=false"], work_dir, timeout=60)
         if init.returncode != 0:
             raise TerraformPRAError(
                 f"terraform init failed: {init.stderr.strip() or init.stdout.strip()}")
-        apply = _run_tf(["apply", "-auto-approve"], work_dir, timeout=120)
+
+        extra_env = {"TF_VAR_db_password": admin_password} if want_vault else None
+        apply = _run_tf(["apply", "-auto-approve"], work_dir, timeout=120, extra_env=extra_env)
+        if apply.returncode != 0 and want_vault:
+            # The vault account must not cost the user a tunnel that worked
+            # before this feature existed: retry tunnel-only. Terraform then
+            # auto-destroys any partially created vault account (still in
+            # state, absent from config) and the tunnel survives.
+            first_err = (apply.stderr.strip() or apply.stdout.strip())[:400]
+            logger.warning(
+                "PRA vault account apply failed — retrying tunnel-only (check the PRA "
+                "OAuth client's Vault account-management permission): %s", first_err)
+            want_vault = False
+            Path(work_dir, "main.tf").write_text(
+                _generate_db_tunnel_hcl(engine, name, hostname, jump_group_name,
+                                        jumpoint_name, username, database, tag)
+            )
+            apply = _run_tf(["apply", "-auto-approve"], work_dir, timeout=120)
         if apply.returncode != 0:
+            # Total failure: leave nothing behind in PRA (config on disk is
+            # tunnel-only at this point, so no extra env is needed).
+            _run_tf(["destroy", "-auto-approve"], work_dir, timeout=120)
             raise TerraformPRAError(
                 f"terraform apply failed: {apply.stderr.strip() or apply.stdout.strip()}")
 
         out = _run_tf(["output", "-json"], work_dir, timeout=30)
         tunnel_jump_id: Optional[str] = None
+        vault_account_id: Optional[str] = None
         if out.returncode == 0 and out.stdout.strip():
             try:
                 outputs = json.loads(out.stdout)
                 tunnel_jump_id = str(outputs.get("tunnel_jump_id", {}).get("value", ""))
+                vault_raw = outputs.get("vault_account_id", {}).get("value", "")
+                vault_account_id = str(vault_raw) if vault_raw else None
             except (json.JSONDecodeError, AttributeError):
                 pass
 
@@ -414,9 +511,49 @@ def _provision_db_tunnel_sync(
         tf_state_json = state_path.read_text() if state_path.exists() else None
         return {
             "tunnel_jump_id": tunnel_jump_id,
+            "vault_account_id": vault_account_id,
             "jump_group_name": jump_group_name,
-            "tf_state_json": tf_state_json,
+            "tf_state_json": _scrub_tf_state(tf_state_json) if tf_state_json else None,
         }
+
+
+# Provider-only config: enough for `terraform destroy` to authenticate and
+# remove whatever a stored state holds, without re-declaring any resources.
+_PROVIDER_PREAMBLE_HCL = """\
+terraform {
+  required_providers {
+    sra = {
+      source  = "beyondtrust/sra"
+      version = "~> 1.0"
+    }
+  }
+}
+
+variable "bt_host"          { sensitive = false }
+variable "bt_client_id"     { sensitive = true }
+variable "bt_client_secret" { sensitive = true }
+
+provider "sra" {
+  host          = var.bt_host
+  client_id     = var.bt_client_id
+  client_secret = var.bt_client_secret
+}
+"""
+
+
+def _destroy_state_only_sync(tf_state_json: str) -> None:
+    """Destroy every resource in a stored state with a provider-only config."""
+    with tempfile.TemporaryDirectory(prefix="pra_db_tf_destroy_") as work_dir:
+        Path(work_dir, "main.tf").write_text(_PROVIDER_PREAMBLE_HCL)
+        Path(work_dir, "terraform.tfstate").write_text(tf_state_json)
+        init = _run_tf(["init", "-upgrade=false"], work_dir, timeout=60)
+        if init.returncode != 0:
+            raise TerraformPRAError(
+                f"terraform init (destroy) failed: {init.stderr.strip() or init.stdout.strip()}")
+        destroy = _run_tf(["destroy", "-auto-approve"], work_dir, timeout=120)
+        if destroy.returncode != 0:
+            raise TerraformPRAError(
+                f"terraform destroy failed: {destroy.stderr.strip() or destroy.stdout.strip()}")
 
 
 def _remove_db_tunnel_sync(tf_state_json: str) -> None:
@@ -427,14 +564,21 @@ def _remove_db_tunnel_sync(tf_state_json: str) -> None:
 
     res = next((r for r in state.get("resources", [])
                 if r.get("type") in _DB_RESOURCE_ENGINE), None)
-    if res is None:
-        logger.warning("No sra DB tunnel resource in Terraform state — nothing to destroy")
+    if res is None or not res.get("instances"):
+        # No tunnel in state — but other sra resources (e.g. the vault account
+        # after a partial cleanup) may remain. Destroy whatever the state holds
+        # using a provider-only config; `terraform destroy` removes state-only
+        # resources as long as the provider is configured.
+        if any(str(r.get("type", "")).startswith("sra_") and r.get("instances")
+               for r in state.get("resources", [])):
+            logger.info("No DB tunnel in state but other sra resources remain — "
+                        "destroying state contents with a provider-only config")
+            _destroy_state_only_sync(tf_state_json)
+        else:
+            logger.warning("No sra DB tunnel resource in Terraform state — nothing to destroy")
         return
     engine = _DB_RESOURCE_ENGINE[res["type"]]
     instances = res.get("instances", [])
-    if not instances:
-        logger.warning("DB tunnel resource has no instances in state — nothing to destroy")
-        return
     attrs = instances[0].get("attributes", {})
     name     = attrs.get("name", "unknown")
     hostname = attrs.get("hostname", "")
@@ -469,17 +613,28 @@ async def provision_db_tunnel(
     username: str = "",
     database: str = "",
     tag: str = "DB",
+    admin_password: str = "",
+    vault_account_name: str = "",
 ) -> dict:
     """Provision a BeyondTrust PRA protocol-tunnel jump for a managed database.
 
-    The Jump Group and Jumpoint must already exist in PRA. Returns
-    ``{tunnel_jump_id, jump_group_name, tf_state_json}`` — store ``tf_state_json``
-    (e.g. in the provisioning job's extra_data) so ``remove_db_tunnel`` can
-    destroy it later.
+    The Jump Group and Jumpoint must already exist in PRA. When both
+    ``admin_password`` and ``vault_account_name`` are given, a Vault
+    username/password account is created in the same workspace and associated
+    to the tunnel jump for credential injection (the password travels as a
+    sensitive TF_VAR, never in HCL; the PRA OAuth client needs Vault
+    account-management permission — on failure the tunnel is kept and the
+    vault account is skipped with a warning).
+
+    Returns ``{tunnel_jump_id, vault_account_id, jump_group_name,
+    tf_state_json}`` — ``tf_state_json`` is SCRUBBED of secret values (safe to
+    stash in the provisioning job's extra_data) and still drives
+    ``remove_db_tunnel``'s destroy later.
     """
     return await asyncio.to_thread(
         _provision_db_tunnel_sync, engine, name, hostname, jump_group_name,
         jumpoint_name, username, database, tag,
+        admin_password, vault_account_name,
     )
 
 

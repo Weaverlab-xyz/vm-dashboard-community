@@ -115,13 +115,19 @@
           </div>
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">Region *</label>
-            <input type="text" x-model="form.region" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="us-east-2">
+            <input type="text" x-model="form.region" @change="onRegionChange()" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="us-east-2">
           </div>
         </div>
         <div>
           <label class="block text-sm font-medium text-gray-700 mb-1">Name *</label>
           <input type="text" x-model="form.name" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="app-db">
         </div>
+        <div x-show="loadingOptions" x-cloak class="text-center text-gray-400 text-sm py-1">
+          Loading AWS options…
+        </div>
+        <div x-show="optionsError" x-cloak
+             class="bg-red-50 border border-red-200 rounded-lg px-3 py-2 text-sm text-red-700"
+             x-text="optionsError"></div>
         <div class="grid grid-cols-2 gap-3">
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">Admin username</label>
@@ -129,7 +135,12 @@
           </div>
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">Instance class</label>
-            <input type="text" x-model="form.instance_class" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="db.t3.micro">
+            <select x-model="form.instance_class" :disabled="loadingOptions"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500">
+              <template x-for="c in options.instance_classes || []" :key="c">
+                <option :value="c" x-text="c"></option>
+              </template>
+            </select>
           </div>
         </div>
         <div class="grid grid-cols-2 gap-3">
@@ -139,12 +150,36 @@
           </div>
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">DB subnet group</label>
-            <input type="text" x-model="form.db_subnet_group_name" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="(from your sandbox)">
+            <select x-model="form.db_subnet_group_name" :disabled="loadingOptions"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+              <option value="">Select subnet group…</option>
+              <template x-for="g in options.db_subnet_groups || []" :key="g.name">
+                <option :value="g.name" x-text="g.label"></option>
+              </template>
+            </select>
+            <p x-show="!loadingOptions && (options.db_subnet_groups || []).length === 0" x-cloak
+               class="text-xs text-amber-600 mt-1">
+              No DB subnet groups in this region — the VPC default group will be used (if any).
+            </p>
           </div>
         </div>
         <div>
-          <label class="block text-sm font-medium text-gray-700 mb-1">VPC security group IDs</label>
-          <input type="text" x-model="form.vpc_security_group_ids" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="sg-aaa, sg-bbb (comma-separated)">
+          <label class="block text-sm font-medium text-gray-700 mb-1">VPC security groups</label>
+          <div class="border border-gray-300 rounded-lg max-h-36 overflow-y-auto p-2 space-y-1">
+            <p x-show="(options.security_groups || []).length === 0"
+               class="text-xs text-gray-400 p-1">No security groups found.</p>
+            <template x-for="sg in options.security_groups || []" :key="sg.id">
+              <label class="flex items-center gap-2 p-1 rounded hover:bg-gray-50 cursor-pointer">
+                <input type="checkbox" :value="sg.id"
+                       @change="toggleSG($event, sg.id)"
+                       :checked="form.vpc_security_group_ids.includes(sg.id)"
+                       class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+                <span class="text-xs text-gray-700" x-text="sg.name"></span>
+              </label>
+            </template>
+          </div>
+          <p x-show="form.vpc_security_group_ids.length === 0"
+             class="text-xs text-gray-400 mt-1">None selected — the VPC default security group will be attached.</p>
         </div>
         <p class="text-xs text-gray-400">
           The instance is created private-only and onboarded to a PRA tunnel (when PRA is configured).
@@ -196,8 +231,10 @@ function databasesPage() {
     databases: [], loading: true, activeTab: 'aws',
     toast: '', toastType: 'success',
     showForm: false, saving: false, conn: null,
+    options: { region: '', instance_classes: [], db_subnet_groups: [], security_groups: [] },
+    loadingOptions: false, optionsError: '',
     form: { engine: 'postgres', region: '', name: '', master_username: 'dbadmin',
-            instance_class: '', allocated_storage: null, db_subnet_group_name: '', vpc_security_group_ids: '' },
+            instance_class: 'db.t3.micro', allocated_storage: null, db_subnet_group_name: '', vpc_security_group_ids: [] },
 
     get awsDatabases() { return this.databases.filter(d => d.cloud === 'aws'); },
 
@@ -216,15 +253,53 @@ function databasesPage() {
     },
 
     openProvision() {
-      this.form = { engine: 'postgres', region: '', name: '', master_username: 'dbadmin',
-                    instance_class: '', allocated_storage: null, db_subnet_group_name: '', vpc_security_group_ids: '' };
+      this.form = { engine: 'postgres', region: this.options.region || '', name: '', master_username: 'dbadmin',
+                    instance_class: 'db.t3.micro', allocated_storage: null, db_subnet_group_name: '', vpc_security_group_ids: [] };
+      this.optionsError = '';
       this.showForm = true;
+      this.loadOptions();   // fire-and-forget — the modal opens immediately, EC2-style
+    },
+
+    async loadOptions(region) {
+      // Client-side skip (mirrors the EC2 deploy modal): refetch only when
+      // nothing is loaded yet or the requested region differs.
+      const want = (region || '').trim();
+      if (this.options.instance_classes.length && (!want || want === this.options.region)) return;
+      this.loadingOptions = true; this.optionsError = '';
+      try {
+        const o = await API.get('/api/databases/options' + (want ? `?region=${encodeURIComponent(want)}` : ''));
+        if (!o) return;   // 401 → API helper redirected to login
+        this.options = o;
+        if (!this.form.region) this.form.region = o.region;
+        // Typical sandbox: exactly one DB subnet group — preselect it.
+        const groups = o.db_subnet_groups || [];
+        if (groups.length === 1 && !this.form.db_subnet_group_name) this.form.db_subnet_group_name = groups[0].name;
+      } catch (e) {
+        this.optionsError = 'Failed to load AWS options: ' + (e.message || e);
+      } finally {
+        this.loadingOptions = false;
+      }
+    },
+
+    onRegionChange() {
+      const r = (this.form.region || '').trim();
+      if (!r || r === this.options.region) return;
+      this.form.db_subnet_group_name = '';   // region-scoped — clear on switch
+      this.form.vpc_security_group_ids = [];
+      this.loadOptions(r);
+    },
+
+    toggleSG(event, sgId) {
+      if (event.target.checked) {
+        this.form.vpc_security_group_ids = [...this.form.vpc_security_group_ids, sgId];
+      } else {
+        this.form.vpc_security_group_ids = this.form.vpc_security_group_ids.filter(id => id !== sgId);
+      }
     },
 
     async submitProvision() {
       this.saving = true;
       try {
-        const sgs = (this.form.vpc_security_group_ids || '').split(',').map(s => s.trim()).filter(Boolean);
         const body = {
           engine: this.form.engine, cloud: 'aws', region: this.form.region, name: this.form.name,
           master_username: this.form.master_username || 'dbadmin',
@@ -232,7 +307,7 @@ function databasesPage() {
         if (this.form.instance_class) body.instance_class = this.form.instance_class;
         if (this.form.allocated_storage) body.allocated_storage = this.form.allocated_storage;
         if (this.form.db_subnet_group_name) body.db_subnet_group_name = this.form.db_subnet_group_name;
-        if (sgs.length) body.vpc_security_group_ids = sgs;
+        if (this.form.vpc_security_group_ids.length) body.vpc_security_group_ids = this.form.vpc_security_group_ids;
         await API.post('/api/databases', body);
         this.showForm = false;
         this.flash('Provisioning started — watch the row status.');

@@ -30,6 +30,7 @@ TTL = {
     "aws_instances":        60,   # 1 min
     "aws_community":       900,   # 15 min
     "aws_ssh_key_secrets": 300,   # 5 min
+    "aws_db_options":      600,   # 10 min — RDS subnet groups + SGs for the DB provision form
     # Config management
     "cfgmgmt_instances":    60,   # 1 min
     "cfgmgmt_s3status":    120,   # 2 min

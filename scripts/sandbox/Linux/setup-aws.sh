@@ -220,10 +220,24 @@ aws ec2 authorize-security-group-egress --region "$REGION" --group-id "$VM_SG" \
 aws ec2 authorize-security-group-ingress --region "$REGION" --group-id "$VM_SG" \
   --ip-permissions "[{\"IpProtocol\":\"tcp\",\"FromPort\":22,\"ToPort\":22,\"UserIdGroupPairs\":[{\"GroupId\":\"$JUMPOINT_SG\"}]}]" >/dev/null 2>&1 || true
 
+# DB SG: attached to dashboard-managed RDS instances (the /databases feature).
+# The PRA protocol tunnel terminates on the Jumpoint, which then dials the
+# private DB endpoint — so ingress is the three engine ports from the Jumpoint
+# SG only. Default egress wiped: RDS initiates no outbound connections.
+DB_SG="$(make_sg "${NAME}-db-sg" "Managed databases - ingress DB ports from Jumpoint SG only, no egress")"
+aws ec2 revoke-security-group-egress --region "$REGION" --group-id "$DB_SG" \
+  --ip-permissions '[{"IpProtocol":"-1","IpRanges":[{"CidrIp":"0.0.0.0/0"}]}]' >/dev/null 2>&1 || true
+for _db_port in 5432 3306 1433; do   # postgres (live), mysql / sqlserver (Phase 3)
+  aws ec2 authorize-security-group-ingress --region "$REGION" --group-id "$DB_SG" \
+    --ip-permissions "[{\"IpProtocol\":\"tcp\",\"FromPort\":$_db_port,\"ToPort\":$_db_port,\"UserIdGroupPairs\":[{\"GroupId\":\"$JUMPOINT_SG\"}]}]" >/dev/null 2>&1 || true
+done
+
 ok "Jumpoint SG $JUMPOINT_SG (default egress 0.0.0.0/0)"
 ok "VM SG       $VM_SG (egress: VPC only; ingress 22/tcp from Jumpoint SG)"
+ok "DB SG       $DB_SG (ingress 5432/3306/1433 from Jumpoint SG; no egress)"
 state_write aws jumpoint_sg "$JUMPOINT_SG"
 state_write aws vm_sg "$VM_SG"
+state_write aws db_sg "$DB_SG"
 
 # ── 6. SSH keypair JSON in Secrets Manager ────────────────────────────────────
 section "SSH keypair (Secrets Manager)"
@@ -680,7 +694,7 @@ _cfg=(
   "aws_default_subnet_id=$PRIVATE_SUBNET_ID            # Deploy form's default subnet for new EC2 instances"
   "aws_default_security_group_id=$VM_SG               # Deploy form's default SG (VM-tier, no internet egress)"
   "aws_db_subnet_group_name=$DB_SUBNET_GROUP_NAME      # Managed-DB deploys: private RDS subnet group (2 AZs)"
-  "aws_db_security_group_id=$VM_SG                     # Managed-DB deploys: reuse the VM-tier SG (no internet egress)"
+  "aws_db_security_group_id=$DB_SG                     # Managed-DB deploys: DB-tier SG (engine ports from Jumpoint SG only)"
   "ec2_ssh_key_secret=$SSH_SECRET_NAME                 # JSON {public_key,private_key} for EC2 cloud-init + Ansible"
   "bt_ecs_cluster=$ECS_CLUSTER                          # ECS cluster the Jumpoint Fargate task runs in"
   "bt_ecs_task_family=bt-jumpoint"

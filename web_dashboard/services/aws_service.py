@@ -479,6 +479,87 @@ async def get_network_options(region: str) -> dict:
         raise AWSError("AWS credentials not configured.")
 
 
+# ── RDS options (for the cloud-databases provision form) ──────────────────────
+
+# Static curated list, mirroring instance_types above — current-generation
+# classes that support PostgreSQL in all commercial regions. Avoids the slow,
+# paginated DescribeOrderableDBInstanceOptions call.
+DB_INSTANCE_CLASSES = [
+    "db.t3.micro", "db.t3.small", "db.t3.medium", "db.t3.large",
+    "db.t4g.micro", "db.t4g.small", "db.t4g.medium", "db.t4g.large",
+    "db.m5.large", "db.m5.xlarge", "db.m5.2xlarge",
+    "db.m6g.large", "db.m6g.xlarge",
+    "db.r5.large", "db.r5.xlarge",
+    "db.r6g.large", "db.r6g.xlarge",
+]
+
+
+def _aws_kwargs_pinned(region: str) -> dict:
+    """_aws_kwargs, but the caller's region wins over the wizard default.
+
+    _aws_kwargs lets the configured aws_region override its region argument —
+    right for pages that always target the default region, wrong for the DB
+    provision form, where the user may type a different region.
+    """
+    kwargs = _aws_kwargs(region)
+    if region:
+        kwargs["region_name"] = region
+    return kwargs
+
+
+def _get_db_options_sync(region: str) -> dict:
+    _require_boto3()
+    rds = boto3.client("rds", **_aws_kwargs_pinned(region))
+
+    groups, marker = [], None
+    while True:  # DescribeDBSubnetGroups paginates via Marker
+        resp = rds.describe_db_subnet_groups(**({"Marker": marker} if marker else {}))
+        for g in resp.get("DBSubnetGroups", []):
+            subnets = g.get("Subnets", [])
+            azs = sorted({s["SubnetAvailabilityZone"]["Name"] for s in subnets})
+            groups.append({
+                "name": g["DBSubnetGroupName"],
+                "label": f"{g['DBSubnetGroupName']} – {g.get('VpcId', '')} – "
+                         f"{len(subnets)} subnets ({', '.join(azs)})",
+                "description": g.get("DBSubnetGroupDescription", ""),
+                "vpc_id": g.get("VpcId", ""),
+            })
+        marker = resp.get("Marker")
+        if not marker:
+            break
+
+    # Same dict shape as the EC2 deploy form's list so the picker markup matches.
+    ec2 = boto3.client("ec2", **_aws_kwargs_pinned(region))
+    raw_sgs = ec2.describe_security_groups().get("SecurityGroups", [])
+    security_groups = [
+        {
+            "id": sg["GroupId"],
+            "name": f"{sg['GroupName']} ({sg['GroupId']})",
+            "description": sg.get("Description", ""),
+            "vpc_id": sg.get("VpcId", ""),
+        }
+        for sg in raw_sgs
+    ]
+
+    return {
+        "region": region,
+        "instance_classes": DB_INSTANCE_CLASSES,
+        "db_subnet_groups": groups,
+        "security_groups": security_groups,
+    }
+
+
+async def get_db_options(region: str) -> dict:
+    """Pickers for the database provision form: instance classes, DB subnet
+    groups, and security groups in the given region."""
+    try:
+        return await asyncio.to_thread(_get_db_options_sync, region)
+    except (ClientError, BotoCoreError) as e:
+        raise AWSError(f"Failed to fetch database options: {e}") from e
+    except NoCredentialsError:
+        raise AWSError("AWS credentials not configured.")
+
+
 # ── Community AMI search ──────────────────────────────────────────────────────
 
 # Well-known free-tier-compatible AMI owners and name patterns.

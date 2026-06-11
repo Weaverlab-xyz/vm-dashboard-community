@@ -3,6 +3,7 @@ Cloud database infrastructure API — Phase 1 (gated by ``cloud_database_enabled
 
   POST   /api/databases                 — provision a managed DB (record + schedule apply)
   GET    /api/databases                 — list dashboard-provisioned databases
+  GET    /api/databases/options         — pickers for the provision form (region-scoped)
   GET    /api/databases/{id}/connection — connection info (the PRA jump is Phase 2)
   DELETE /api/databases/{id}            — decommission
 
@@ -11,6 +12,7 @@ Admin-only. The real Terraform apply and the PRA tunnel (Phase 2, via the
 creds) drives the apply as a background task.
 """
 import logging
+import re
 from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
@@ -19,7 +21,8 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..database import User, get_db
-from ..services import cloud_database_service, config_service
+from ..services import aws_service, cache_service, cloud_database_service, config_service
+from ..services.aws_service import AWSError
 from .auth import require_admin
 
 logger = logging.getLogger(__name__)
@@ -41,6 +44,23 @@ class ProvisionRequest(BaseModel):
     allocated_storage: Optional[int] = None
     db_subnet_group_name: Optional[str] = None
     vpc_security_group_ids: Optional[list[str]] = None
+
+
+class DatabaseOptions(BaseModel):
+    region: str
+    instance_classes: list[str]
+    db_subnet_groups: list[dict]
+    security_groups: list[dict]
+    cached_at: Optional[str] = None
+
+
+# us-east-2, ap-southeast-3, us-gov-west-1 — checked before boto/caching so junk
+# input can't create unbounded cache keys or hang on a nonexistent endpoint.
+_REGION_RE = re.compile(r"^[a-z]{2}(-[a-z]+)+-\d$")
+
+
+def _default_region() -> str:
+    return config_service.get("aws_region") or settings.aws_region or "us-east-2"
 
 
 def _apply_task(db_id: str, job_id: str, engine: str, tf_variables: dict) -> None:
@@ -94,6 +114,31 @@ async def list_databases(
     return {"databases": cloud_database_service.list_databases(db)}
 
 
+@router.get("/options", response_model=DatabaseOptions)
+async def database_options(
+    region: Optional[str] = None,
+    current_user: User = Depends(require_admin),
+):
+    """Pickers for the provision form: instance classes (static), DB subnet
+    groups, and security groups. Cached per region (10 min TTL)."""
+    _require_enabled()
+    region = (region or "").strip() or _default_region()
+    if not _REGION_RE.fullmatch(region):
+        raise HTTPException(status_code=400, detail=f"invalid AWS region {region!r}")
+
+    cache_key = cache_service.key_param("aws_db_options", region=region)
+    ttl = cache_service.TTL["aws_db_options"]
+
+    async def _fetch():
+        return await aws_service.get_db_options(region)
+
+    try:
+        opts, cached_at = await cache_service.get_or_refresh(cache_key, ttl, _fetch)
+        return DatabaseOptions(**opts, cached_at=cached_at)
+    except AWSError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
 @router.get("/{db_id}/connection")
 async def connection(
     db_id: str,
@@ -115,6 +160,6 @@ async def decommission_database(
 ):
     _require_enabled()
     try:
-        return cloud_database_service.decommission(db, db_id)
+        return await cloud_database_service.decommission(db, db_id)
     except cloud_database_service.CloudDatabaseError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
