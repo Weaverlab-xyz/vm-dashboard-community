@@ -586,3 +586,47 @@ def patch_feature_config(feature_name: str, payload: dict, request: Request):
     _write_feature(feature_name, filtered)
     logger.info("Feature '%s' configuration updated.", feature_name)
     return {"ok": True}
+
+
+# ── Preview feature flags ─────────────────────────────────────────────────────
+#
+# Simple on/off toggles for features that gate a router + nav but carry NO
+# connection config, so they don't fit the _FEATURE_MODELS panel above. Stored
+# in config_service as "1"/"0" (same app_config table); the routers/nav read
+# them live via config_service.get_bool, so toggling here takes effect with no
+# restart.
+_PREVIEW_FLAGS = {
+    "vdesktops_enabled": (
+        "Virtual Desktops", "Desktop pools brokered as PRA sessions (Phase 1: Azure)."),
+    "cloud_database_enabled": (
+        "Cloud Databases", "Private managed databases reached through a PRA tunnel."),
+}
+
+
+@router.get("/flags")
+def get_preview_flags(request: Request):
+    """Current on/off state for each preview feature flag. Admin JWT required."""
+    _require_admin(request)
+    from ..config import settings
+    from ..services import config_service
+    return {
+        key: {
+            "label": label,
+            "description": desc,
+            "enabled": config_service.get_bool(key, getattr(settings, key, False)),
+        }
+        for key, (label, desc) in _PREVIEW_FLAGS.items()
+    }
+
+
+@router.patch("/flag/{key}")
+def patch_preview_flag(key: str, payload: dict, request: Request):
+    """Toggle a single preview feature flag on/off. Admin JWT required."""
+    _require_admin(request)
+    if key not in _PREVIEW_FLAGS:
+        raise HTTPException(status_code=404, detail=f"Unknown preview flag: {key}")
+    from ..services import config_service
+    enabled = bool(payload.get("enabled"))
+    config_service.set(key, "1" if enabled else "0")
+    logger.info("Preview flag '%s' set to %s.", key, enabled)
+    return {"ok": True, "key": key, "enabled": enabled}
