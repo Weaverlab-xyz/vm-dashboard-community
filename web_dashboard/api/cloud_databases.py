@@ -44,6 +44,9 @@ class ProvisionRequest(BaseModel):
     allocated_storage: Optional[int] = None
     db_subnet_group_name: Optional[str] = None
     vpc_security_group_ids: Optional[list[str]] = None
+    # PRA Vault account group the injected credential lands in — an unassigned
+    # vault account is injectable by nobody, so the form offers a picker.
+    vault_account_group_id: Optional[int] = None
 
 
 class DatabaseOptions(BaseModel):
@@ -51,6 +54,7 @@ class DatabaseOptions(BaseModel):
     instance_classes: list[str]
     db_subnet_groups: list[dict]
     security_groups: list[dict]
+    vault_account_groups: list[dict] = []
     cached_at: Optional[str] = None
 
 
@@ -93,7 +97,8 @@ async def provision_database(
         result = cloud_database_service.provision(
             db, engine=payload.engine, cloud=payload.cloud, region=payload.region,
             name=payload.name, created_by=current_user.username,
-            master_username=payload.master_username, **opts,
+            master_username=payload.master_username,
+            vault_account_group_id=payload.vault_account_group_id, **opts,
         )
     except cloud_database_service.CloudDatabaseError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -134,9 +139,20 @@ async def database_options(
 
     try:
         opts, cached_at = await cache_service.get_or_refresh(cache_key, ttl, _fetch)
-        return DatabaseOptions(**opts, cached_at=cached_at)
     except AWSError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    # PRA Vault account groups for the credential-injection picker —
+    # best-effort: an empty list just hides the dropdown's options.
+    vault_groups: list = []
+    try:
+        from ..services import pra_api_service
+        if pra_api_service.configured():
+            vault_groups = await pra_api_service.list_vault_account_groups()
+    except Exception as exc:
+        logger.warning("vault account-group listing failed (non-fatal): %s", exc)
+
+    return DatabaseOptions(**opts, vault_account_groups=vault_groups, cached_at=cached_at)
 
 
 @router.get("/{db_id}/connection")
