@@ -158,6 +158,17 @@ class Settings(BaseSettings):
     bt_jumpoint_name: str = ""    # name of the pre-existing Jumpoint in PRA (required for Terraform path)
     bt_ps_deploy_key_title: str = "Docker Deploy Key"  # Password Safe secret title
 
+    # EPM for Linux (EPM-L) — Pathfinder public API gateway.
+    # The gateway base is api.beyondtrust.io (NOT app.beyondtrust.io — that host
+    # only accepts browser session cookies and 401s every Bearer request). The
+    # service appends /site/<epml_site_id>/epm/linux to this host; endpoint
+    # paths from the EPM-L OpenAPI spec have their /api prefix replaced by that
+    # base. Find your site id at https://app.beyondtrust.io/api/platform/currentSite
+    # (signed in) — copy the `site_id` field.
+    epml_base_url: str = "https://api.beyondtrust.io"
+    epml_site_id: str = ""       # Pathfinder site UUID; PATs are bound to the site active at creation
+    epml_pat: str = ""           # Personal Access Token (PAT_ prefix); encrypted at rest when set via the UI
+
     # Image Management (OVA / ISO / AMI building)
     # Environment-specific paths — override in .env (or the settings panel) to
     # match where your ISOs/OVAs live and where Packer should stage builds.
