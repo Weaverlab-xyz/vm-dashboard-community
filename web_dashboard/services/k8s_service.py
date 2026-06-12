@@ -269,3 +269,31 @@ async def launch_management_plane(cluster_id: str, mgmt_kind: str = "portainer")
             logger.warning("management-plane launch failed cluster=%s: %s", cluster_id, exc)
     finally:
         db.close()
+
+
+# ── Phase 3: brokered access ───────────────────────────────────────────────────
+
+def console_url(db: Session, cluster_id: str) -> dict:
+    """A link to the cluster's management console (Phase 3a). For **Portainer-k8s**
+    the cluster was registered as a Portainer endpoint at launch (Phase 2), so the
+    console is that endpoint's view on the Portainer server the dashboard already
+    brokers — built from the configured server URL + the endpoint id stored in
+    ``mgmt_endpoint``. For a plane whose ``mgmt_endpoint`` is already a URL
+    (Rancher / Argo ingress), return it directly. (The native PRA
+    ``tunnel_type=k8s`` jump + a true short-lived brokered session are Phase 3b.)"""
+    row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
+    if row is None:
+        raise K8sError(f"cluster {cluster_id} not found")
+    if not row.mgmt_kind or not row.mgmt_endpoint:
+        raise K8sError("no management plane launched yet — launch one first")
+    ep = row.mgmt_endpoint
+    if ep.startswith(("http://", "https://")):
+        return {"url": ep, "kind": row.mgmt_kind}
+    if row.mgmt_kind == "portainer":
+        from ..config import settings
+        from . import config_service
+        base = (config_service.get("portainer_url") or getattr(settings, "portainer_url", "")).rstrip("/")
+        if not base:
+            raise K8sError("Portainer server URL is not configured (set portainer_url)")
+        return {"url": f"{base}/#!/{ep}/kubernetes/dashboard", "kind": "portainer", "endpoint_id": ep}
+    raise K8sError(f"no console URL builder for mgmt_kind={row.mgmt_kind!r}")
