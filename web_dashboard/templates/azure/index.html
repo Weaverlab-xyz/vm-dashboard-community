@@ -76,7 +76,7 @@
     <!-- OS filter -->
     <div class="flex items-center gap-2 mb-4">
       <span class="text-sm text-gray-600 font-medium">Filter:</span>
-      <template x-for="os in ['all','ubuntu','rhel','debian']" :key="os">
+      <template x-for="os in ['all','ubuntu','rhel','debian','windows']" :key="os">
         <button @click="marketplaceFilter = os; loadMarketplace()"
                 :class="marketplaceFilter === os ? 'bg-blue-600 text-white' : 'bg-white text-gray-700 border border-gray-300 hover:bg-gray-50'"
                 class="text-xs font-medium px-3 py-1.5 rounded-md capitalize transition"
@@ -255,8 +255,10 @@
               <td class="px-4 py-3 flex items-center gap-3 text-sm">
                 <a x-show="vm.job_id" :href="'/jobs/' + vm.job_id"
                    class="text-blue-600 hover:text-blue-800 font-medium text-xs">Job</a>
-                <button @click="openSshKeyModal(vm)"
+                <button x-show="vm.os_type !== 'Windows'" @click="openSshKeyModal(vm)"
                         class="text-indigo-600 hover:text-indigo-800 font-medium text-xs">SSH Key</button>
+                <button x-show="vm.os_type === 'Windows'" x-cloak @click="openAdminPasswordModal(vm)"
+                        class="text-indigo-600 hover:text-indigo-800 font-medium text-xs">Password</button>
                 <button @click="openCreateImageModal(vm)"
                         class="text-green-600 hover:text-green-800 font-medium text-xs">Save Image</button>
                 <button @click="confirmDestroyVM(vm)"
@@ -285,12 +287,21 @@
             Image URN or Resource ID <span class="text-red-500">*</span>
           </label>
           <input x-model="deployModal.imageRef" type="text"
+                 @input="if (deployModal.imageRef.toLowerCase().includes('windows')) deployModal.osType = 'Windows'"
                  placeholder="Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest    or    /subscriptions/…/images/…"
                  class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm font-mono focus:ring-blue-500 focus:border-blue-500">
           <p class="text-xs text-gray-400 mt-1">
             Marketplace URN <span class="font-mono">publisher:offer:sku:version</span> or full ARM resource ID
             (managed image / Shared Image Gallery version).
           </p>
+          <div class="mt-2 flex items-center gap-2">
+            <label class="text-xs font-medium text-gray-700">Guest OS:</label>
+            <select x-model="deployModal.osType" @change="if (deployModal.osType !== 'Windows' && !deployModal.sshPublicKey) fetchKeyvaultKey()"
+                    class="text-xs border border-gray-300 rounded px-2 py-1">
+              <option>Linux</option>
+              <option>Windows</option>
+            </select>
+          </div>
         </div>
         <div>
           <label class="block text-xs font-medium text-gray-700 mb-1">Workgroup <span class="text-red-500">*</span></label>
@@ -360,7 +371,8 @@
         </div>
         <div class="grid grid-cols-2 gap-3">
           <div>
-            <label class="block text-xs font-medium text-gray-700 mb-1">SSH Username</label>
+            <label class="block text-xs font-medium text-gray-700 mb-1"
+                   x-text="deployModal.osType === 'Windows' ? 'Admin Username' : 'SSH Username'"></label>
             <input x-model="deployModal.sshUsername" type="text" placeholder="azureuser"
                    class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm">
           </div>
@@ -371,7 +383,7 @@
             </label>
           </div>
         </div>
-        <div>
+        <div x-show="deployModal.osType !== 'Windows'">
           <label class="block text-xs font-medium text-gray-700 mb-2">SSH Public Key <span class="text-red-500">*</span></label>
           <div x-show="deployModal.keyvaultLoading" class="text-xs text-gray-400 py-2">Fetching key from Key Vault…</div>
           <div x-show="!deployModal.keyvaultLoading && deployModal.keyvaultError"
@@ -381,6 +393,12 @@
             <textarea x-model="deployModal.sshPublicKey" rows="2" readonly
                       class="w-full border border-gray-200 bg-gray-50 rounded-md px-3 py-2 text-xs font-mono resize-none text-gray-600 cursor-default"></textarea>
           </div>
+        </div>
+        <div x-show="deployModal.osType === 'Windows'" x-cloak
+             class="p-3 bg-blue-50 border border-blue-200 rounded-lg text-xs text-blue-800">
+          A strong local-admin password is generated automatically and stored in the
+          secrets backend — retrieve it after deploy via <strong>VMs → Password</strong>.
+          No SSH key is injected on Windows.
         </div>
       </div>
 
@@ -472,7 +490,7 @@
             </template>
           </select>
         </div>
-        <div>
+        <div x-show="bulkModal.osType !== 'Windows'">
           <label class="block text-xs font-medium text-gray-700 mb-2">SSH Public Key</label>
           <div x-show="bulkModal.keyvaultLoading" class="text-xs text-gray-400 py-2">Fetching key from Key Vault…</div>
           <div x-show="!bulkModal.keyvaultLoading && bulkModal.keyvaultError"
@@ -482,6 +500,11 @@
             <textarea x-model="bulkModal.sshPublicKey" rows="2" readonly
                       class="w-full border border-gray-200 bg-gray-50 rounded-md px-3 py-2 text-xs font-mono resize-none text-gray-600 cursor-default"></textarea>
           </div>
+        </div>
+        <div x-show="bulkModal.osType === 'Windows'" x-cloak
+             class="p-3 bg-blue-50 border border-blue-200 rounded-lg text-xs text-blue-800">
+          Windows images: each VM gets its own generated admin password, stored in the
+          secrets backend — retrieve via <strong>VMs → Password</strong>.
         </div>
       </div>
 
@@ -609,12 +632,64 @@
     </div>
   </div>
 
+  <!-- ── Admin password modal — generated local-admin creds for Windows VMs ── -->
+  <div x-show="adminPasswordModal.open" x-cloak
+       class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+       @click.self="adminPasswordModal.open = false">
+    <div class="bg-white rounded-xl shadow-xl w-full max-w-lg p-6">
+      <h3 class="text-base font-semibold text-gray-800 mb-1">Admin password for
+        <span class="font-mono text-blue-700" x-text="adminPasswordModal.vmName"></span>
+      </h3>
+      <p class="text-xs text-gray-500 mb-4">
+        Generated at deploy time and stored in the secrets backend
+        <code class="bg-gray-100 px-1 py-0.5 rounded" x-text="adminPasswordModal.data?.backend || '—'"></code>.
+      </p>
+
+      <div x-show="adminPasswordModal.loading" class="py-6 text-center text-sm text-gray-400">Loading…</div>
+      <div x-show="adminPasswordModal.error" x-cloak
+           class="bg-red-50 border border-red-200 rounded-lg px-3 py-2 text-sm text-red-700 mb-4"
+           x-text="adminPasswordModal.error"></div>
+
+      <div x-show="!adminPasswordModal.loading && adminPasswordModal.data" x-cloak class="space-y-3">
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1">Username</label>
+            <code class="block bg-gray-50 border border-gray-200 rounded px-3 py-2 text-xs font-mono"
+                  x-text="adminPasswordModal.data?.username"></code>
+          </div>
+          <div x-show="adminPasswordModal.data?.ip">
+            <label class="block text-xs font-semibold text-gray-600 mb-1">IP</label>
+            <code class="block bg-gray-50 border border-gray-200 rounded px-3 py-2 text-xs font-mono"
+                  x-text="adminPasswordModal.data?.ip"></code>
+          </div>
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">Password</label>
+          <code class="block bg-gray-50 border border-gray-200 rounded px-3 py-2 text-xs font-mono select-all"
+                x-text="adminPasswordModal.data?.password"></code>
+        </div>
+        <div class="flex items-center gap-2">
+          <button @click="copyAdminPassword()"
+                  class="text-xs px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg">
+            Copy to clipboard
+          </button>
+          <span x-show="adminPasswordModal.copied" x-cloak class="text-xs text-green-600">Copied.</span>
+        </div>
+      </div>
+
+      <div class="mt-5 flex justify-end">
+        <button @click="adminPasswordModal.open = false"
+                class="px-4 py-2 text-sm text-gray-600 hover:text-gray-800">Close</button>
+      </div>
+    </div>
+  </div>
+
   <!-- ── Tab 5: Build Image (Packer) ──────────────────────────────────────── -->
   <div x-show="activeTab === 'build'">
     <div class="max-w-2xl">
       <div class="mb-4">
         <h2 class="text-lg font-semibold text-gray-800">Build Azure Image with Packer</h2>
-        <p class="text-xs text-gray-400 mt-0.5">Provision a marketplace image with a shell script and register the result as a new Azure Managed Image. Runs as a tracked background job (typically 10–20 min).</p>
+        <p class="text-xs text-gray-400 mt-0.5">Provision a marketplace image with a shell or PowerShell script and register the result as a new Azure Managed Image. Runs as a tracked background job (typically 10–20 min; Windows builds run longer).</p>
       </div>
 
       <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 space-y-5">
@@ -673,13 +748,13 @@
         <div>
           <div class="flex items-center justify-between mb-1">
             <label class="block text-sm font-medium text-gray-700">Provisioner Script</label>
-            <div class="flex items-center gap-2" x-show="storedScripts.length > 0">
+            <div class="flex items-center gap-2" x-show="azurePackerScripts().length > 0">
               <label class="text-xs text-gray-500">Load from storage:</label>
               <select @change="loadProvisionerScript('azurePackerForm', $event.target.value); $event.target.value = ''"
                       :disabled="loadingScript"
                       class="text-xs border border-gray-300 rounded px-2 py-1 focus:ring-blue-500 focus:border-blue-500 disabled:opacity-50">
-                <option value="">— pick a .sh script —</option>
-                <template x-for="s in storedScripts" :key="s.backend + '|' + s.name">
+                <option value="" x-text="azurePackerForm.os_type === 'Windows' ? '— pick a .ps1 script —' : '— pick a .sh script —'"></option>
+                <template x-for="s in azurePackerScripts()" :key="s.backend + '|' + s.name">
                   <option :value="s.backend + '|' + s.name"
                           x-text="s.name + ' (' + backendLabelShort(s.backend) + ')'"></option>
                 </template>
@@ -687,10 +762,13 @@
             </div>
           </div>
           <textarea x-model="azurePackerForm.provisioner_script" rows="8"
-                    placeholder="#!/bin/sh&#10;# Install and configure your software here&#10;apt-get update -y&#10;apt-get install -y nginx"
+                    :placeholder="azurePackerForm.os_type === 'Windows'
+                      ? '# Install and configure your software here\nInstall-WindowsFeature -Name Web-Server\nSet-NetFirewallRule -DisplayGroup \'Remote Desktop\' -Enabled True'
+                      : '#!/bin/sh\n# Install and configure your software here\napt-get update -y\napt-get install -y nginx'"
                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:ring-blue-500 focus:border-blue-500 resize-y"></textarea>
           <p class="text-xs text-gray-400 mt-1">
-            Shell script run before the Azure waagent deprovision step (which Packer always runs to generalize the image).
+            <span x-show="azurePackerForm.os_type !== 'Windows'">Shell script run before the Azure waagent deprovision step (which Packer always runs to generalize the image).</span>
+            <span x-show="azurePackerForm.os_type === 'Windows'" x-cloak>PowerShell script run (then a restart) before the Sysprep generalize step, which the build always runs last.</span>
             <span x-show="azurePackerForm.loaded_from" x-cloak class="text-blue-600">
               Loaded from <code x-text="azurePackerForm.loaded_from.replace('|', ' — ')"></code>.
             </span>
@@ -772,6 +850,10 @@ function azureDashboard() {
       open: false, vmName: '', secretName: '',
       loading: false, error: '', data: null, copied: false,
     },
+    adminPasswordModal: {
+      open: false, vmName: '',
+      loading: false, error: '', data: null, copied: false,
+    },
 
     // Packer image builder
     azurePackerForm: {
@@ -780,6 +862,7 @@ function azureDashboard() {
       image_offer: '0001-com-ubuntu-server-jammy',
       image_sku: '22_04-lts',
       vm_size: 'Standard_B2s',
+      os_type: 'Linux',
       provisioner_script: '',
       archive_template: false,
       loaded_from: '',
@@ -793,10 +876,12 @@ function azureDashboard() {
     storedScripts: [],
     loadingScript: false,
     azureImagePresets: [
-      { id: 'ubuntu22', label: 'Ubuntu 22.04 LTS', publisher: 'Canonical',   offer: '0001-com-ubuntu-server-jammy', sku: '22_04-lts' },
-      { id: 'ubuntu24', label: 'Ubuntu 24.04 LTS', publisher: 'Canonical',   offer: 'ubuntu-24_04-lts',             sku: 'server'   },
-      { id: 'debian12', label: 'Debian 12',         publisher: 'Debian',      offer: 'debian-12',                    sku: '12'       },
-      { id: 'rhel9',    label: 'RHEL 9',            publisher: 'RedHat',      offer: 'RHEL',                         sku: '9-lvm'    },
+      { id: 'ubuntu22', label: 'Ubuntu 22.04 LTS', publisher: 'Canonical',   offer: '0001-com-ubuntu-server-jammy', sku: '22_04-lts', os: 'Linux' },
+      { id: 'ubuntu24', label: 'Ubuntu 24.04 LTS', publisher: 'Canonical',   offer: 'ubuntu-24_04-lts',             sku: 'server',    os: 'Linux' },
+      { id: 'debian12', label: 'Debian 12',         publisher: 'Debian',      offer: 'debian-12',                    sku: '12',        os: 'Linux' },
+      { id: 'rhel9',    label: 'RHEL 9',            publisher: 'RedHat',      offer: 'RHEL',                         sku: '9-lvm',     os: 'Linux' },
+      { id: 'win2022',  label: 'Windows Server 2022',      publisher: 'MicrosoftWindowsServer', offer: 'WindowsServer', sku: '2022-datacenter-azure-edition',      os: 'Windows' },
+      { id: 'win2022c', label: 'Windows Server 2022 Core', publisher: 'MicrosoftWindowsServer', offer: 'WindowsServer', sku: '2022-datacenter-azure-edition-core', os: 'Windows' },
     ],
 
     async init() {
@@ -822,7 +907,7 @@ function azureDashboard() {
       try {
         const data = await API.get('/api/storage/list-all');
         this.storedScripts = (data.items || []).filter(a =>
-          a.type === 'script' || a.name.endsWith('.sh') || a.name.endsWith('.bash')
+          a.type === 'script' || a.name.endsWith('.sh') || a.name.endsWith('.bash') || a.name.endsWith('.ps1')
         );
       } catch (e) {
         this.storedScripts = [];
@@ -961,6 +1046,7 @@ function azureDashboard() {
       this.deployModal = {
         open: false, image: img,
         imageRef: '',
+        osType: img?.os_type || 'Linux',
         vmName: img?.name ? img.name.replace(/-image$/i, '') : '',
         vmSize: this.networkOpts.vm_sizes[0] || 'Standard_B2s',
         location: this.location, subnetId: '', nsgIds: [], sshUsername: 'azureuser',
@@ -970,7 +1056,7 @@ function azureDashboard() {
       };
       await this.loadNetworkOpts();
       this.deployModal.open = true;
-      this.fetchKeyvaultKey();
+      if (this.deployModal.osType !== 'Windows') this.fetchKeyvaultKey();
     },
 
     // Parse a free-text image reference into the (image_id, marketplace fields)
@@ -1011,8 +1097,9 @@ function azureDashboard() {
       if (!m.vmName) return toast('VM Name is required', 'error');
       if (!m.subnetId) return toast('Please select a subnet', 'error');
 
-      const sshPublicKey = m.sshPublicKey.trim();
-      if (!sshPublicKey) return toast('SSH key not loaded — check Key Vault configuration.', 'error');
+      const isWindows = m.osType === 'Windows';
+      const sshPublicKey = isWindows ? '' : m.sshPublicKey.trim();
+      if (!isWindows && !sshPublicKey) return toast('SSH key not loaded — check Key Vault configuration.', 'error');
 
       // Resolve image reference: list-row image takes precedence, else parse imageRef.
       let imageFields;
@@ -1043,6 +1130,7 @@ function azureDashboard() {
           subnet_id: m.subnetId,
           nsg_ids: m.nsgIds,
           create_public_ip: m.createPublicIp,
+          os_type: m.osType,
           ssh_username: m.sshUsername || 'azureuser',
           ssh_public_key: sshPublicKey,
           workgroup: m.workgroup,
@@ -1062,6 +1150,8 @@ function azureDashboard() {
       this.bulkModal = {
         open: true,
         items: selected,
+        // Bulk deploys use the first image for every VM, so its OS decides.
+        osType: selected[0]?.os_type || 'Linux',
         vmNames: selected.map(img => img.name ? img.name.replace(/-image$/i, '') : ''),
         vmSize: this.networkOpts.vm_sizes[0] || 'Standard_B2s',
         location: this.location,
@@ -1074,7 +1164,7 @@ function azureDashboard() {
         submitting: false,
         workgroup: this._defaultWorkgroup(),
       };
-      this.fetchBulkKeyvaultKey();
+      if (this.bulkModal.osType !== 'Windows') this.fetchBulkKeyvaultKey();
     },
 
     async fetchBulkKeyvaultKey() {
@@ -1097,8 +1187,9 @@ function azureDashboard() {
       const m = this.bulkModal;
       if (!m.subnetId) return toast('Please select a subnet', 'error');
 
-      const sshPublicKey = m.sshPublicKey.trim();
-      if (!sshPublicKey) return toast('SSH key not loaded — check Key Vault configuration.', 'error');
+      const isWindows = m.osType === 'Windows';
+      const sshPublicKey = isWindows ? '' : m.sshPublicKey.trim();
+      if (!isWindows && !sshPublicKey) return toast('SSH key not loaded — check Key Vault configuration.', 'error');
 
       const items = m.items.map((img, idx) => ({
         vm_name: m.vmNames[idx] || `vm-${idx + 1}`,
@@ -1117,6 +1208,7 @@ function azureDashboard() {
           subnet_id: m.subnetId,
           nsg_ids: [],
           create_public_ip: false,
+          os_type: m.osType,
           ssh_username: 'azureuser',
           ssh_public_key: sshPublicKey,
           workgroup: m.workgroup,
@@ -1174,6 +1266,32 @@ function azureDashboard() {
       }
     },
 
+    async openAdminPasswordModal(vm) {
+      this.adminPasswordModal = {
+        open: true, vmName: vm.name,
+        loading: true, error: '', data: null, copied: false,
+      };
+      try {
+        const data = await API.get(`/api/azure/vms/${encodeURIComponent(vm.name)}/admin-password`);
+        this.adminPasswordModal.data = data;
+      } catch (e) {
+        this.adminPasswordModal.error = e.message || 'Failed to retrieve admin password';
+      } finally {
+        this.adminPasswordModal.loading = false;
+      }
+    },
+
+    async copyAdminPassword() {
+      if (!this.adminPasswordModal.data?.password) return;
+      try {
+        await navigator.clipboard.writeText(this.adminPasswordModal.data.password);
+        this.adminPasswordModal.copied = true;
+        setTimeout(() => { this.adminPasswordModal.copied = false; }, 2000);
+      } catch (e) {
+        toast('Clipboard copy failed — select the text manually', 'error');
+      }
+    },
+
     async submitCreateImage() {
       const m = this.createImageModal;
       if (!m.name) return toast('Image name is required', 'error');
@@ -1217,7 +1335,7 @@ function azureDashboard() {
       if (!imageName) return;
       this.exportingImages = new Set([...this.exportingImages, img.resource_id]);
       try {
-        const body = { image_name: imageName.trim() };
+        const body = { image_name: imageName.trim(), os_type: img.os_type || 'Linux' };
         if (img.resource_group) body.resource_group = img.resource_group;
         const resp = await API.post(`/api/azure/images/${encodeURIComponent(img.name)}/export`, body);
         toast(`Export job queued. Redirecting to job detail…`, 'success');
@@ -1247,6 +1365,18 @@ function azureDashboard() {
       this.azurePackerForm.image_publisher = preset.publisher;
       this.azurePackerForm.image_offer     = preset.offer;
       this.azurePackerForm.image_sku       = preset.sku;
+      this.azurePackerForm.os_type         = preset.os || 'Linux';
+      // Windows builds crawl on 4 GB burstable sizes — nudge up once.
+      if (preset.os === 'Windows' && ['Standard_B1s', 'Standard_B2s'].includes(this.azurePackerForm.vm_size)) {
+        this.azurePackerForm.vm_size = 'Standard_D2s_v3';
+      }
+    },
+
+    azurePackerScripts() {
+      const win = this.azurePackerForm.os_type === 'Windows';
+      return this.storedScripts.filter(s => win
+        ? s.name.endsWith('.ps1')
+        : (s.type === 'script' || s.name.endsWith('.sh') || s.name.endsWith('.bash')));
     },
 
     async submitAzurePackerBuild() {

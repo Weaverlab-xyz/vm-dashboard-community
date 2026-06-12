@@ -116,6 +116,42 @@ the dropdown for every build instead of copy-pasting. Useful when
 the same script is reused across cloud providers — store it once on
 a cloud backend and load it for all three builds.
 
+#### Windows builds (Azure)
+
+The Azure Packer form builds **Windows** managed images too — pick a
+Windows preset (Windows Server 2022 / 2022 Core) or set
+`os_type: "Windows"` on `POST /api/packer/azure/build`. Differences
+from the Linux path:
+
+- **WinRM, not SSH.** Packer connects over WinRM HTTPS (5986) to the
+  temp build VM and provisions a *transient Azure Key Vault* to hold
+  the WinRM certificate — the dashboard's service principal needs Key
+  Vault create rights in the build resource group and the
+  `Microsoft.KeyVault` provider registered on the subscription.
+- **PowerShell provisioner.** The provisioner script is a `.ps1`
+  (the storage dropdown filters to `.ps1` assets when Windows is
+  selected) and runs before a `windows-restart`, so feature installs
+  settle before generalization.
+- **Sysprep, not waagent.** The build always ends with the canonical
+  Azure finisher: wait for `RdAgent` + `WindowsAzureGuestAgent`,
+  `Sysprep /oobe /generalize`, then poll `ImageState` until the
+  reseal completes. Without it the captured image is specialized and
+  undeployable.
+- **Sizing.** Windows builds crawl on 4 GB burstable sizes; the form
+  nudges Windows presets to `Standard_D2s_v3`. Expect 30–60+ min.
+
+Deploying a Windows image (deploy form, bulk deploy, or a Desktops
+pool) generates a strong local-admin password per VM, stores it in
+the configured [secrets backend](secrets-management.md) (the
+`database` backend works out of the box), and records only the
+`(backend, ref)` pair in job metadata. Retrieve it per VM via
+**Azure → VMs → Password** (`GET /api/azure/vms/{name}/admin-password`).
+No SSH key is injected on Windows, and the BeyondTrust Shell Jump
+(SSH) step is skipped — broker access with an RDP jump item instead.
+The image registry records `os_type` per image so cross-cloud
+promotes import Windows VHDs as Windows (registry rows predating the
+column default to Linux).
+
 ### Capture from a running instance
 
 The "I have a VM I've been hand-tuning, snapshot it as an image" path.
@@ -427,7 +463,18 @@ job log), and the cross-tenant catalog.
 **Packer build hangs at "Waiting for SSH/WinRM."**
 The base image's security group / NSG / firewall doesn't permit the
 build runner's source IP. Check the cloud-side network policy on the
-ephemeral build instance Packer creates.
+ephemeral build instance Packer creates. For **Windows builds behind
+a TLS-inspecting corp proxy**, also verify WinRM egress: from the
+app container, `timeout 5 bash -c "</dev/tcp/<build-vm-ip>/5986"` —
+if 5986 is blocked while 22 works, the proxy is eating WinRM; build
+from an unproxied network or switch the template to a private-VNet
+build (`virtual_network_name` / `virtual_network_subnet_name`).
+
+**Windows build fails creating the temp Key Vault.**
+Packer provisions a transient Key Vault for the WinRM certificate.
+Grant the service principal Key Vault create rights in the build RG
+and register the `Microsoft.KeyVault` resource provider on the
+subscription (`az provider register --namespace Microsoft.KeyVault`).
 
 **Build succeeds but storage upload fails with "no active backend"
 or "Export skipped: no S3/Azure/GCS configured."**

@@ -11,6 +11,7 @@ Azure API endpoints:
   POST   /api/azure/vms/{vm_name}/create-image - Capture an image from a VM
   DELETE /api/azure/images/{image_name} - Delete a managed image
 """
+import asyncio
 import logging
 from typing import List, Optional
 
@@ -337,6 +338,78 @@ async def get_vm_ssh_key(
     }
 
 
+@router.get("/vms/{vm_name}/admin-password")
+async def get_vm_admin_password(
+    vm_name: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("azure", "read")),
+):
+    """Return the generated local-admin password for a Windows VM deployed via
+    this dashboard.
+
+    Windows deploys store the password in the configured secrets backend and
+    keep only the (backend, ref) pair in job metadata, so this resolves the
+    VM's deploy job (single/bulk via cloud_resource_id, desktop-pool seats via
+    the pool job's seat_passwords map) and reads the secret back. Permission
+    parity with /vms/{vm_name}/ssh-key, which returns Linux private keys."""
+    from ..services import secrets_backend_service
+
+    backend = ref = username = ip = None
+
+    job = db.query(Job).filter(Job.cloud_resource_id == vm_name).first()
+    if job is None:
+        for j in db.query(Job).filter(Job.job_type == "azure_deploy").all():
+            if j.metadata_dict.get("vm_name") == vm_name:
+                job = j
+                break
+    if job is not None:
+        meta = job.metadata_dict
+        if meta.get("admin_password_ref"):
+            backend = meta.get("admin_password_backend") or "database"
+            ref = meta["admin_password_ref"]
+            username = meta.get("admin_username") or meta.get("ssh_username")
+            ip = meta.get("public_ip") or meta.get("private_ip")
+
+    if ref is None:
+        # Desktop-pool seats: the pool provision job records per-seat refs.
+        for j in db.query(Job).filter(Job.job_type == "vdesktop_pool_provision").all():
+            entry = (j.metadata_dict.get("seat_passwords") or {}).get(vm_name)
+            if entry:
+                backend = entry.get("backend") or "database"
+                ref = entry.get("ref")
+                username = entry.get("username")
+                break
+
+    if not ref:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No stored admin password for '{vm_name}' — Linux VM, or deployed outside this dashboard.",
+        )
+
+    try:
+        password = await asyncio.to_thread(secrets_backend_service.read_sync, backend, ref)
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Secrets backend read failed: {e}")
+    if not password:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Secret '{ref}' is empty or missing in backend '{backend}'.",
+        )
+
+    job_service.log_audit(
+        db, current_user.username, "azure_vm_admin_password_read",
+        details={"vm_name": vm_name, "backend": backend},
+    )
+    return {
+        "vm_name": vm_name,
+        "username": username or "azureuser",
+        "password": password,
+        "ip": ip,
+        "backend": backend,
+        "secret_ref": ref,
+    }
+
+
 # ── VM listing ────────────────────────────────────────────────────────────────
 
 @router.get("/vms")
@@ -439,6 +512,8 @@ async def deploy_vm(
     Deploy an Azure VM from a private image (gallery, managed, or marketplace).
     Returns a job_id trackable at /api/jobs/{job_id} or /ws/jobs/{job_id}.
     """
+    if req.os_type.lower() != "windows" and not req.ssh_public_key.strip():
+        raise HTTPException(status_code=400, detail="ssh_public_key is required for Linux deploys.")
     rg = req.resource_group or _rg()
     loc = req.location or _loc()
     workgroup = _validate_workgroup(db, current_user, req.workgroup)
@@ -462,7 +537,8 @@ async def deploy_vm(
             "subnet_id": req.subnet_id,
             "nsg_ids": req.nsg_ids,
             "create_public_ip": req.create_public_ip,
-            "ssh_username": req.ssh_username,  # so /vms/{name}/ssh-key can echo the right user
+            "os_type": req.os_type,
+            "ssh_username": req.ssh_username,  # so /vms/{name}/ssh-key + /admin-password can echo the right user
             "workgroup": workgroup,
         },
     )
@@ -497,6 +573,8 @@ async def bulk_deploy_vms(
     """
     if not req.items:
         raise HTTPException(status_code=400, detail="At least one VM item is required.")
+    if req.os_type.lower() != "windows" and not req.ssh_public_key.strip():
+        raise HTTPException(status_code=400, detail="ssh_public_key is required for Linux deploys.")
 
     rg = req.resource_group or _rg()
     loc = req.location or _loc()
@@ -519,6 +597,7 @@ async def bulk_deploy_vms(
                 "subnet_id": req.subnet_id,
                 "nsg_ids": req.nsg_ids,
                 "create_public_ip": req.create_public_ip,
+                "os_type": req.os_type,
                 "ssh_username": req.ssh_username,
                 "workgroup": workgroup,
                 "bulk": True,
@@ -686,6 +765,7 @@ async def create_image_from_vm(
 class ExportImageRequest(BaseModel):
     image_name: str  # Registry name to record the exported image under
     resource_group: Optional[str] = None  # Defaults to the configured azure_resource_group
+    os_type: str = "Linux"  # Guest OS recorded on the registry row ("Linux" | "Windows")
 
 
 class ExportImageResponse(BaseModel):
@@ -726,6 +806,7 @@ async def export_managed_image(
     job_id = job.id
     registry_name = req.image_name
     username = current_user.username
+    os_type = req.os_type
 
     async def _run():
         d = _get_db_session()
@@ -733,6 +814,7 @@ async def export_managed_image(
             job_service.set_running(d, job_id)
             result = await export_and_register_azure(
                 d, job_id, registry_name, image_name, rg, username,
+                os_type=os_type,
             )
             if result.get("export_error") or result.get("export_skipped"):
                 job_service.set_failed(d, job_id, result.get("export_error") or result["export_skipped"])
@@ -783,8 +865,23 @@ def _get_db_session():
 async def _run_deploy(job_id: str, req: AzureDeployRequest, rg: str, loc: str):
     db = _get_db_session()
     result = {}
+    is_windows = req.os_type.lower() == "windows"
     try:
         job_service.set_running(db, job_id)
+
+        # Windows: generate + vault the admin password before any cloud
+        # resources exist — a VM whose password can't be retrieved is useless.
+        admin_password = ""
+        if is_windows:
+            job_service.update_progress(db, job_id, 5, "Generating Windows admin password…")
+            admin_password = azure_service.generate_windows_admin_password()
+            backend, ref = await asyncio.to_thread(
+                azure_service.store_windows_admin_password, req.vm_name, job_id[:8], admin_password,
+            )
+            # Reference only — job metadata is visible via the jobs API.
+            result["admin_username"] = req.ssh_username
+            result["admin_password_backend"] = backend
+            result["admin_password_ref"] = ref
 
         # Step 0: Quota check — fail fast before any resources are created
         job_service.update_progress(db, job_id, 10, f"Checking Azure quota in {loc}…")
@@ -852,6 +949,8 @@ async def _run_deploy(job_id: str, req: AzureDeployRequest, rg: str, loc: str):
                 image_sku=req.image_sku,
                 image_version=req.image_version,
                 workgroup=getattr(req, "workgroup", "") or "",
+                os_type=req.os_type,
+                admin_password=admin_password,
             )
             result.update(vm_result)
         except AzureError as e:
@@ -865,11 +964,18 @@ async def _run_deploy(job_id: str, req: AzureDeployRequest, rg: str, loc: str):
         hostname = result.get("private_ip") or result.get("public_ip") or req.vm_name
         job_service.update_progress(
             db, job_id, 70,
-            f"VM '{req.vm_name}' created ({hostname}), provisioning Shell Jump…"
+            f"VM '{req.vm_name}' created ({hostname})"
+            + ("…" if is_windows else ", provisioning Shell Jump…")
         )
 
-        # Step 3: BeyondTrust PRA — Shell Jump (optional)
-        if settings.beyondtrust_enabled:
+        # Step 3: BeyondTrust PRA — Shell Jump (optional; SSH, so Linux only)
+        if settings.beyondtrust_enabled and is_windows:
+            job_service.update_progress(
+                db, job_id, 90,
+                "Windows VM deployed — Shell Jump (SSH) skipped; broker access with an "
+                "RDP jump item on the Jumpoint. Password: Azure → VMs → Password."
+            )
+        elif settings.beyondtrust_enabled:
             from ..services import terraform_pra_service
             # Resolve from config_service (wizard/DB) first, then env-var defaults.
             # Azure-specific keys override the shared bt_* keys.
@@ -918,6 +1024,7 @@ async def _run_bulk_deploy(job_items: list, req: AzureBulkDeployRequest, rg: str
     """Start ONE ACI Jumpoint for the batch, then deploy each VM sequentially."""
     db = _get_db_session()
     aci_group_name = None
+    is_windows = req.os_type.lower() == "windows"
     try:
         for job_id, _ in job_items:
             job_service.set_running(db, job_id)
@@ -977,6 +1084,18 @@ async def _run_bulk_deploy(job_items: list, req: AzureBulkDeployRequest, rg: str
                 result["aci_error"] = aci_error
 
             try:
+                # Windows: per-VM password, vaulted before that VM is created.
+                admin_password = ""
+                if is_windows:
+                    job_service.update_progress(db, job_id, 30, "Generating Windows admin password…")
+                    admin_password = azure_service.generate_windows_admin_password()
+                    backend, ref = await asyncio.to_thread(
+                        azure_service.store_windows_admin_password, vm_name, job_id[:8], admin_password,
+                    )
+                    result["admin_username"] = req.ssh_username
+                    result["admin_password_backend"] = backend
+                    result["admin_password_ref"] = ref
+
                 job_service.update_progress(db, job_id, 35, f"Creating Azure VM '{vm_name}'…")
                 vm_result = await azure_service.deploy_vm(
                     rg=rg,
@@ -994,16 +1113,25 @@ async def _run_bulk_deploy(job_items: list, req: AzureBulkDeployRequest, rg: str
                     image_sku=req.image_sku,
                     image_version=req.image_version,
                     workgroup=getattr(req, "workgroup", "") or "",
+                    os_type=req.os_type,
+                    admin_password=admin_password,
                 )
                 result.update(vm_result)
 
                 hostname = result.get("private_ip") or result.get("public_ip") or vm_name
                 job_service.update_progress(
                     db, job_id, 70,
-                    f"VM '{vm_name}' created ({hostname}), provisioning Shell Jump…"
+                    f"VM '{vm_name}' created ({hostname})"
+                    + ("…" if is_windows else ", provisioning Shell Jump…")
                 )
 
-                if settings.beyondtrust_enabled:
+                if settings.beyondtrust_enabled and is_windows:
+                    job_service.update_progress(
+                        db, job_id, 90,
+                        "Windows VM deployed — Shell Jump (SSH) skipped; broker access with an "
+                        "RDP jump item on the Jumpoint. Password: Azure → VMs → Password."
+                    )
+                elif settings.beyondtrust_enabled:
                     from ..services import terraform_pra_service
                     jump_group = _cfg("azure_bt_jump_group_name") or _cfg("bt_jump_group_name")
                     jumpoint_name = _cfg("azure_jumpoint_name") or _cfg("bt_jumpoint_name")

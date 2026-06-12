@@ -81,8 +81,9 @@ class AzureDeployRequest(BaseModel):
     subnet_id: str
     nsg_ids: List[str] = []
     create_public_ip: bool = False
-    ssh_username: str = "azureuser"
-    ssh_public_key: str        # RSA public key text
+    os_type: str = "Linux"     # "Linux" | "Windows" — Windows gets a generated admin password
+    ssh_username: str = "azureuser"  # admin username on Windows
+    ssh_public_key: str = ""   # RSA public key text; required for Linux (endpoint enforces)
     workgroup: str             # written as `workgroup` resource tag
     # Marketplace image metadata (optional, used if present)
     image_publisher: Optional[str] = None
@@ -104,8 +105,9 @@ class AzureBulkDeployRequest(BaseModel):
     subnet_id: str
     nsg_ids: List[str] = []
     create_public_ip: bool = False
-    ssh_username: str = "azureuser"
-    ssh_public_key: str
+    os_type: str = "Linux"     # "Linux" | "Windows" — Windows gets a generated password per VM
+    ssh_username: str = "azureuser"  # admin username on Windows
+    ssh_public_key: str = ""   # required for Linux (endpoint enforces)
     workgroup: str             # written as `workgroup` resource tag on all VMs
     # Marketplace image metadata (optional, used if present)
     image_publisher: Optional[str] = None
