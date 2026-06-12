@@ -97,6 +97,10 @@ def _build_tf_variables(
         "allocated_storage": opts.get("allocated_storage", 20),
         "db_subnet_group_name": opts.get("db_subnet_group_name", ""),
         "vpc_security_group_ids": opts.get("vpc_security_group_ids", []),
+        # Attach the force_ssl=0 parameter group the sandbox pre-created, so the
+        # PRA protocol tunnel's cleartext jumpoint→RDS connection isn't rejected.
+        # Empty config → "" → module falls back to the RDS default group.
+        "parameter_group_name": _cfg("aws_db_parameter_group_name"),
         "tags": {"managed-by": "vm-dashboard", "clouddb-id": db_id},
     }
 

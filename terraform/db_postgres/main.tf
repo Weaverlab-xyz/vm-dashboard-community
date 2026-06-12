@@ -75,6 +75,22 @@ variable "tags" {
   description = "Resource tags (workgroup, managed-by)"
 }
 
+variable "parameter_group_name" {
+  type    = string
+  default = ""
+  # Existing DB parameter group to attach. The managed DB is reached ONLY
+  # through a BeyondTrust PRA *protocol* tunnel, which proxies the cleartext
+  # PostgreSQL wire protocol (that is how it injects the Vault credential and
+  # records the session) — the sra_postgresql_tunnel_jump has no backend-TLS
+  # option. RDS PostgreSQL 15+ defaults to rds.force_ssl=1, which rejects the
+  # tunnel's plaintext jumpoint→RDS connection ("server closed the connection
+  # unexpectedly"). The sandbox pre-creates a group with rds.force_ssl=0 and
+  # passes its name here. We REFERENCE (not create) it on purpose: the scoped
+  # dashboard IAM user can't create parameter groups. Empty = RDS default
+  # group (force_ssl on) — fine for non-PRA access models.
+  description = "Existing DB parameter group (e.g. rds.force_ssl=0 for the PRA tunnel). Empty = RDS default."
+}
+
 # ── Resource — always private (no public endpoint) ──────────────────────────
 # publicly_accessible = false is load-bearing: the only path in is the PRA
 # protocol-tunnel jump (Phase 2, via the beyondtrust/sra provider). Never
@@ -94,6 +110,7 @@ resource "aws_db_instance" "this" {
   publicly_accessible    = false
   db_subnet_group_name   = var.db_subnet_group_name
   vpc_security_group_ids  = var.vpc_security_group_ids
+  parameter_group_name    = var.parameter_group_name != "" ? var.parameter_group_name : null
 
   skip_final_snapshot = true
   apply_immediately   = true

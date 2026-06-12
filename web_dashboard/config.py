@@ -140,6 +140,10 @@ class Settings(BaseSettings):
     # AWS / Terraform
     aws_region: str = "us-east-2"
     terraform_executable: str = "terraform"  # assumes terraform is in PATH
+    # Existing RDS parameter group attached to dashboard-provisioned databases.
+    # The sandbox creates one with rds.force_ssl=0 (the PRA protocol tunnel needs
+    # a cleartext backend) and writes its name here; empty = RDS default group.
+    aws_db_parameter_group_name: str = ""
 
     # BeyondTrust integration. Two distinct API surfaces:
     #   • PRA (Privileged Remote Access)  — Shell Jump provisioning via the
