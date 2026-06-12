@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     xcpng_enabled: bool = False         # XCP-ng/XenServer router + /xcpng page (XAPI XML-RPC)
     vdesktops_enabled: bool = False     # Virtual desktops router + /desktops page (Phase 0 scaffold)
     cloud_database_enabled: bool = False  # /api/databases router — private managed DBs brokered via a PRA tunnel
+    k8s_management_enabled: bool = False  # /api/k8s router — register/manage Kubernetes clusters (Phase 1)
 
     # Proxmox VE connection
     proxmox_host: str = ""              # hostname or IP of the Proxmox node/cluster

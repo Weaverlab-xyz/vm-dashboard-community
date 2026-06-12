@@ -363,6 +363,7 @@ def _feature_flags() -> dict:
         "xcpng_enabled":        config_service.get_bool("xcpng_enabled",         settings.xcpng_enabled),
         "vdesktops_enabled":    config_service.get_bool("vdesktops_enabled",     settings.vdesktops_enabled),
         "cloud_database_enabled": config_service.get_bool("cloud_database_enabled", settings.cloud_database_enabled),
+        "k8s_management_enabled": config_service.get_bool("k8s_management_enabled", settings.k8s_management_enabled),
         # Entitle user-JIT Phase 4 UI affordances — surfaces the
         # "Request access" nav link + portal URL when both are configured.
         "entitle_user_jit_enabled":   config_service.get_bool("entitle_user_jit_enabled", settings.entitle_user_jit_enabled),
@@ -492,6 +493,13 @@ try:
     app.include_router(desktops.router, dependencies=[_feature_gate("vdesktops_enabled")])
 except ImportError as exc:
     logger.warning("API router 'desktops' not loaded: %s", exc)
+
+try:
+    # Kubernetes management — Phase 1. Gated on k8s_management_enabled.
+    from .api import k8s as k8s_api  # noqa: E402
+    app.include_router(k8s_api.router, dependencies=[_feature_gate("k8s_management_enabled")])
+except ImportError as exc:
+    logger.warning("API router 'k8s' not loaded: %s", exc)
 
 
 # ── HTML pages ────────────────────────────────────────────────────────────────

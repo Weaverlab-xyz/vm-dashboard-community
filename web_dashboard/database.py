@@ -588,6 +588,39 @@ class CloudDatabase(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
+class K8sCluster(Base):
+    """Inventory of dashboard-managed Kubernetes clusters — Kubernetes
+    management (docs/saas-kubernetes-management-plan.md).
+
+    One row per managed cluster. **Phase 1** records a cluster the dashboard
+    can reach (provisioned out-of-band or registered from an existing
+    kubeconfig) — lifecycle + kubeconfig-as-reference only, no kubectl
+    wrapping. The kubeconfig is **cluster-admin**, so it's written to a
+    secrets backend and only ``kubeconfig_ref`` is stored — resolved by
+    ``config_service.get()``. Later phases fill ``mgmt_kind`` /
+    ``mgmt_endpoint`` (management-plane launch, Phase 2), ``pra_jump_id`` (the
+    native ``tunnel_type=k8s`` PRA jump, Phase 3) and ``secrets_delivery_kind``
+    (in-cluster Password Safe ESO / Secrets-Agent, Phase 4).
+    """
+    __tablename__ = "k8s_clusters"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    cloud = Column(String(20), nullable=False)             # aws | azure | gcp | local
+    name = Column(String(200), nullable=False, index=True)
+    status = Column(String(32), nullable=False, default="registered", index=True)
+
+    api_server = Column(String(255), nullable=True)        # cluster API URL (parsed from kubeconfig)
+    kubeconfig_ref = Column(Text, nullable=True)           # backend-agnostic ref (resolved via config_service)
+
+    mgmt_kind = Column(String(20), nullable=True)          # portainer | rancher | argocd | headlamp (Phase 2)
+    mgmt_endpoint = Column(String(255), nullable=True)     # management-plane URL (Phase 2)
+    pra_jump_id = Column(String(64), nullable=True)        # native tunnel_type=k8s PRA jump (Phase 3)
+    secrets_delivery_kind = Column(String(20), nullable=True)  # eso | secrets_agent (Phase 4)
+
+    created_by = Column(String(100), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 # ========== DATABASE UTILITIES ==========
 
 def get_db() -> Session:
