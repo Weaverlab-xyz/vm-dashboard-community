@@ -654,6 +654,13 @@ async def databases_page(request: Request):
     return templates.TemplateResponse("databases/index.html", {"request": request, **_feature_flags()})
 
 
+@app.get("/k8s", response_class=HTMLResponse, include_in_schema=False)
+async def k8s_page(request: Request):
+    """Kubernetes management page — Phase 3a. Nav-gated on k8s_management_enabled;
+    the /api/k8s router is feature-gated."""
+    return templates.TemplateResponse("k8s/index.html", {"request": request, **_feature_flags()})
+
+
 @app.get("/users", response_class=HTMLResponse, include_in_schema=False)
 async def users_page(request: Request):
     return templates.TemplateResponse(

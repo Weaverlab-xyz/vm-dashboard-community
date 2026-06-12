@@ -96,6 +96,20 @@ async def delete_cluster(
         raise HTTPException(status_code=404, detail=str(e))
 
 
+@router.get("/clusters/{cluster_id}/console")
+async def cluster_console(
+    cluster_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """A link to the cluster's management console (Phase 3a). For Portainer-k8s,
+    the brokered Portainer endpoint view; for Rancher/Argo, the management URL."""
+    try:
+        return k8s_service.console_url(db, cluster_id)
+    except K8sError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @router.post("/clusters/{cluster_id}/management", status_code=202)
 async def launch_management(
     cluster_id: str,

@@ -1,0 +1,226 @@
+{% extends "base.html" %}
+{% block title %}Kubernetes – Infrastructure Management{% endblock %}
+
+{# Kubernetes management — Phase 3a (docs/saas-kubernetes-management-plan.md).
+   Register reachable clusters, launch a Portainer-k8s management plane, and open
+   the brokered console. The native PRA tunnel_type=k8s jump + Entitle-Rancher JIT
+   land in Phase 3b. #}
+
+{% block content %}
+<div class="max-w-6xl mx-auto py-8 px-4" x-data="k8sPage()" x-init="init()">
+
+  <div class="flex items-center justify-between mb-1">
+    <h1 class="text-2xl font-bold text-gray-800">Kubernetes Clusters</h1>
+    <button @click="openRegister()"
+            class="bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-3 py-1.5 rounded-lg">
+      Register cluster
+    </button>
+  </div>
+  <p class="text-sm text-gray-500 mb-6">
+    Register a reachable cluster from its kubeconfig, launch a management plane
+    (<strong>Portainer-k8s</strong>), and open the brokered console. The kubeconfig
+    is stored as a secrets-backend reference, never shown back.
+  </p>
+
+  <div x-show="toast" x-cloak x-transition
+       :class="toastType === 'error' ? 'bg-red-50 border-red-200 text-red-700' : 'bg-green-50 border-green-200 text-green-700'"
+       class="mb-6 border rounded-lg px-4 py-3 text-sm" x-text="toast"></div>
+
+  <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden mb-6">
+    <div class="flex items-center justify-between px-4 py-2 border-b border-gray-100">
+      <span class="text-xs text-gray-400">Status flips registered → deploying → managed as the plane comes up.</span>
+      <button @click="refresh()" class="text-xs text-blue-600 hover:underline">Refresh</button>
+    </div>
+    <div x-show="loading" x-cloak class="p-6 text-center text-sm text-gray-400">Loading…</div>
+    <div x-show="!loading && clusters.length === 0" x-cloak class="p-10 text-center text-sm text-gray-400">
+      No clusters yet. Click <strong>Register cluster</strong> to add one.
+    </div>
+    <table x-show="!loading && clusters.length > 0" x-cloak class="min-w-full text-sm">
+      <thead>
+        <tr class="text-left text-xs uppercase text-gray-500 bg-gray-50 border-b border-gray-200">
+          <th class="px-4 py-3">Name</th>
+          <th class="px-4 py-3">Cloud</th>
+          <th class="px-4 py-3">Status</th>
+          <th class="px-4 py-3">Management</th>
+          <th class="px-4 py-3">API server</th>
+          <th class="px-4 py-3 text-right">Actions</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-gray-100">
+        <template x-for="c in clusters" :key="c.id">
+          <tr class="hover:bg-gray-50">
+            <td class="px-4 py-3 font-medium text-gray-900" x-text="c.name"></td>
+            <td class="px-4 py-3">
+              <span class="text-[10px] uppercase font-semibold px-1.5 py-0.5 rounded bg-gray-100 text-gray-600" x-text="c.cloud"></span>
+            </td>
+            <td class="px-4 py-3">
+              <span class="text-xs font-medium px-1.5 py-0.5 rounded"
+                    :class="{
+                      'bg-gray-100 text-gray-600': c.status === 'registered',
+                      'bg-amber-100 text-amber-700': c.status === 'deploying',
+                      'bg-green-100 text-green-700': c.status === 'managed',
+                      'bg-red-100 text-red-700': c.status === 'failed'
+                    }" x-text="c.status"></span>
+            </td>
+            <td class="px-4 py-3 text-gray-500" x-text="c.mgmt_kind || '—'"></td>
+            <td class="px-4 py-3 text-xs text-gray-400 font-mono truncate max-w-[14rem]" x-text="c.api_server"></td>
+            <td class="px-4 py-3 text-right whitespace-nowrap">
+              <button x-show="c.status === 'registered'" @click="launch(c)"
+                      class="text-xs px-2 py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded font-medium">Launch mgmt</button>
+              <button x-show="c.status === 'managed'" @click="openConsole(c)"
+                      class="text-xs px-2 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded font-medium">Open console</button>
+              <button @click="del(c)" class="text-xs px-2 py-1 text-red-600 hover:underline ml-1">Delete</button>
+            </td>
+          </tr>
+        </template>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Register modal -->
+  <div x-show="showRegister" x-cloak
+       class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+       @click.self="showRegister = false">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
+      <div class="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+        <h3 class="text-lg font-semibold">Register Kubernetes cluster</h3>
+        <button @click="showRegister = false" class="text-gray-400 hover:text-gray-600 text-xl">&times;</button>
+      </div>
+      <div class="px-6 py-5 space-y-4">
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Name *</label>
+            <input type="text" x-model="form.name"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="docker-desktop">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Cloud</label>
+            <select x-model="form.cloud" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              <option value="local">local</option>
+              <option value="aws">aws</option>
+              <option value="azure">azure</option>
+              <option value="gcp">gcp</option>
+            </select>
+          </div>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Kubeconfig *</label>
+          <textarea x-model="form.kubeconfig" rows="8"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-xs font-mono"
+                    placeholder="apiVersion: v1&#10;kind: Config&#10;…"></textarea>
+          <p class="text-xs text-gray-400 mt-1">Stored as a secrets-backend reference; the API server is parsed from it.</p>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Management plane (optional)</label>
+          <select x-model="form.mgmt_kind" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            <option value="">— set later —</option>
+            <option value="portainer">portainer</option>
+            <option value="rancher">rancher</option>
+            <option value="argocd">argocd</option>
+            <option value="headlamp">headlamp</option>
+          </select>
+        </div>
+      </div>
+      <div class="px-6 py-4 border-t border-gray-100 flex justify-end gap-3">
+        <button @click="showRegister = false" class="px-4 py-2 text-sm border border-gray-300 rounded-lg">Cancel</button>
+        <button @click="submitRegister()" :disabled="!form.name || !form.kubeconfig || saving"
+                class="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-medium rounded-lg">
+          <span x-show="!saving">Register</span>
+          <span x-show="saving" x-cloak>Registering…</span>
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function k8sPage() {
+  return {
+    clusters: [], loading: true, toast: '', toastType: 'success',
+    showRegister: false, saving: false,
+    form: { name: '', cloud: 'local', kubeconfig: '', mgmt_kind: '' },
+
+    async init() { requireAuth(); await this.refresh(); },
+
+    async refresh() {
+      this.loading = true;
+      try {
+        const d = await API.get('/api/k8s/clusters');
+        this.clusters = d.clusters || [];
+      } catch (e) {
+        this.flash(e.message || 'Failed to load clusters.', 'error');
+      } finally {
+        this.loading = false;
+      }
+    },
+
+    openRegister() {
+      this.form = { name: '', cloud: 'local', kubeconfig: '', mgmt_kind: '' };
+      this.showRegister = true;
+    },
+
+    async submitRegister() {
+      this.saving = true;
+      try {
+        const body = { name: this.form.name, cloud: this.form.cloud, kubeconfig: this.form.kubeconfig };
+        if (this.form.mgmt_kind) body.mgmt_kind = this.form.mgmt_kind;
+        await API.post('/api/k8s/clusters', body);
+        this.showRegister = false;
+        this.flash('Cluster registered.');
+        await this.refresh();
+      } catch (e) {
+        this.flash(e.message || 'Register failed.', 'error');
+      } finally {
+        this.saving = false;
+      }
+    },
+
+    async launch(c) {
+      if (!confirm(`Launch a Portainer management plane on "${c.name}"?\n\nDeploys the Portainer Agent into the cluster and registers it in the brokered Portainer server.`)) return;
+      try {
+        await API.post(`/api/k8s/clusters/${c.id}/management`, { mgmt_kind: 'portainer' });
+        this.flash('Launching management plane…');
+        await this.refresh();
+        this._pollUntilManaged(c.id);
+      } catch (e) {
+        this.flash(e.message || 'Launch failed.', 'error');
+      }
+    },
+
+    _pollUntilManaged(id, tries = 0) {
+      if (tries > 20) return;
+      setTimeout(async () => {
+        await this.refresh();
+        const c = this.clusters.find(x => x.id === id);
+        if (c && (c.status === 'deploying')) this._pollUntilManaged(id, tries + 1);
+      }, 3000);
+    },
+
+    async openConsole(c) {
+      try {
+        const r = await API.get(`/api/k8s/clusters/${c.id}/console`);
+        if (r && r.url) window.open(r.url, '_blank', 'noopener');
+        else this.flash('No console URL available.', 'error');
+      } catch (e) {
+        this.flash(e.message || 'Could not open console.', 'error');
+      }
+    },
+
+    async del(c) {
+      if (!confirm(`Deregister cluster "${c.name}"? This drops the record + stored kubeconfig (it does not tear down the cluster).`)) return;
+      try {
+        await API.del(`/api/k8s/clusters/${c.id}`);
+        this.flash('Cluster deregistered.');
+        await this.refresh();
+      } catch (e) {
+        this.flash(e.message || 'Delete failed.', 'error');
+      }
+    },
+
+    flash(m, t) { this.toast = m; this.toastType = t || 'success'; setTimeout(() => { this.toast = ''; }, 4500); },
+  };
+}
+</script>
+{% endblock %}
