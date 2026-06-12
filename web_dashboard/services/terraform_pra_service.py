@@ -345,12 +345,11 @@ def _generate_db_tunnel_hcl(
     also emitted, associated to the tunnel jump for credential injection. The
     password is NEVER in the HCL — it arrives as ``TF_VAR_db_password``
     (sensitive variable), mirroring the bt_* credentials. The PRA API requires
-    the ``criteria`` arrays to be present (even empty) when
-    ``filter_type = "criteria"`` — omitting them serializes to null and the
-    API rejects with "This value must be an array". ``vault_account_group_id``
-    places the account in a Vault account group so group policies grant it to
-    users (an unassigned account is injectable by nobody). With
-    ``vault_account_name=""`` the output is byte-identical to the pre-vault
+    the ``criteria`` arrays present (even empty) when ``filter_type=criteria``
+    or it 4xxes ("This value must be an array"). ``vault_account_group_id``
+    places the account in a Vault account group so a group policy grants it to
+    users — without it the provider's computed default lands it in Default.
+    With ``vault_account_name=""`` the output is byte-identical to the pre-vault
     template, which the state-driven destroy path relies on.
     """
     resource_type = _DB_TUNNEL_RESOURCE.get(engine)
@@ -493,17 +492,14 @@ def _provision_db_tunnel_sync(
         if apply.returncode != 0 and want_vault:
             # The vault account must not cost the user a tunnel that worked
             # before this feature existed: retry tunnel-only. The provider
-            # errors (rather than deleting from state) when refresh hits a 404
-            # on a half-created item, so drop the vault account from local
-            # state first (state rm is local-only) and re-apply without
-            # refresh. If the account does exist tenant-side it is orphaned —
-            # the warning says so.
+            # errors (rather than removing from state) when refresh hits a 404
+            # on a half-created item, so drop the vault account from local state
+            # first and re-apply without refresh.
             first_err = (apply.stderr.strip() or apply.stdout.strip())[:400]
             logger.warning(
-                "PRA vault account apply failed — retrying tunnel-only; if the vault "
-                "account was partially created it may need manual cleanup in PRA "
-                "(check the PRA OAuth client's Vault account-management permission): %s",
-                first_err)
+                "PRA vault account apply failed — retrying tunnel-only; if it was partially "
+                "created it may need manual cleanup in PRA (check the PRA OAuth client's Vault "
+                "account-management permission): %s", first_err)
             want_vault = False
             _run_tf(["state", "rm", "sra_vault_username_password_account.db_admin"],
                     work_dir, timeout=30)
@@ -566,9 +562,7 @@ provider "sra" {
 
 
 def _destroy_state_only_sync(tf_state_json: str) -> None:
-    """Destroy every resource in a stored state with a provider-only config.
-    -refresh=false: the provider errors on refresh when an item already 404s
-    (e.g. deleted manually in the console), which would block the teardown."""
+    """Destroy every resource in a stored state with a provider-only config."""
     with tempfile.TemporaryDirectory(prefix="pra_db_tf_destroy_") as work_dir:
         Path(work_dir, "main.tf").write_text(_PROVIDER_PREAMBLE_HCL)
         Path(work_dir, "terraform.tfstate").write_text(tf_state_json)
@@ -576,6 +570,8 @@ def _destroy_state_only_sync(tf_state_json: str) -> None:
         if init.returncode != 0:
             raise TerraformPRAError(
                 f"terraform init (destroy) failed: {init.stderr.strip() or init.stdout.strip()}")
+        # -refresh=false: the provider errors on refresh when an item already
+        # 404s (e.g. deleted in the console), which would block teardown.
         destroy = _run_tf(["destroy", "-auto-approve", "-refresh=false"], work_dir, timeout=120)
         if destroy.returncode != 0:
             raise TerraformPRAError(
@@ -624,6 +620,8 @@ def _remove_db_tunnel_sync(tf_state_json: str) -> None:
         if init.returncode != 0:
             raise TerraformPRAError(
                 f"terraform init (destroy) failed: {init.stderr.strip() or init.stdout.strip()}")
+        # -refresh=false: the provider errors on refresh when an item already
+        # 404s (e.g. deleted in the console), which would block teardown.
         destroy = _run_tf(["destroy", "-auto-approve", "-refresh=false"], work_dir, timeout=120)
         if destroy.returncode != 0:
             raise TerraformPRAError(

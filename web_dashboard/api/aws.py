@@ -802,32 +802,18 @@ async def _run_deploy(
         _aws_region = _aws_cfg("aws_region") or "us-east-2"
         ssh_secret_name = _cfg_svc.get("ec2_ssh_key_secret") or ""
         if _cfg_svc.get_bool("beyondtrust_enabled"):
-            from ..services import btapi_service
-            job_service.update_progress(db, job_id, 15, "Starting BeyondTrust Jumpoint container…")
+            job_service.update_progress(db, job_id, 15, "Ensuring the shared BeyondTrust Jumpoint host…")
             try:
-                deploy_key = await _resolve_aws_ecs_deploy_key()
-                ecs_task_arn = await aws_service.run_ecs_jumpoint_task(
-                    region=_aws_region,
-                    cluster=settings.bt_ecs_cluster,
-                    task_family=settings.bt_ecs_task_family,
-                    subnet_id=subnet_id,
-                    security_group_ids=security_group_ids,
-                    deploy_key=deploy_key,
-                    cpu=settings.bt_ecs_cpu,
-                    memory=settings.bt_ecs_memory,
-                    execution_role_arn=settings.bt_ecs_execution_role_arn,
-                    image=settings.bt_ecs_image,
-                )
-                result["ecs_task_arn"] = ecs_task_arn
-                job_service.update_progress(
-                    db, job_id, 35,
-                    f"Jumpoint container started ({ecs_task_arn.split('/')[-1]}), launching EC2 instance…"
-                )
+                from ..services import jumpoint_host_service
+                host_id = await jumpoint_host_service.ensure_jumpoint_host(_aws_region)
+                if host_id:
+                    result["jumpoint_host_id"] = host_id
+                job_service.update_progress(db, job_id, 35, "Jumpoint host ready, launching EC2 instance…")
             except Exception as e:
                 result["ecs_error"] = str(e)
                 job_service.update_progress(
                     db, job_id, 35,
-                    f"Jumpoint ECS task failed (non-fatal): {e} — continuing with EC2 launch…"
+                    f"Jumpoint host ensure failed (non-fatal): {e} — continuing with EC2 launch…"
                 )
         else:
             job_service.update_progress(db, job_id, 35, "Preparing EC2 launch…")
@@ -888,14 +874,9 @@ async def _run_deploy(
             job_service.set_failed(db, job_id, f"Cloud-identity elevation refused EC2 deploy: {e}")
             return
         except AWSError as e:
-            # EC2 failed — stop ECS task if it was started
-            if result.get("ecs_task_arn"):
-                try:
-                    await aws_service.stop_ecs_jumpoint_task(
-                        _aws_region, settings.bt_ecs_cluster, result["ecs_task_arn"]
-                    )
-                except Exception:
-                    pass
+            # EC2 failed. The shared Jumpoint host is ref-counted and may serve
+            # other resources, so we don't tear it down here — an idle host is
+            # reclaimed on the next destroy/decommission.
             raise
 
         instance_id = result["instance_id"]
@@ -954,12 +935,11 @@ async def _run_bulk_deploy(
 ):
     """
     Background task for bulk EC2 deployment.
-    Starts ONE ECS Jumpoint container for the entire batch, then deploys each
-    instance sequentially. All instance jobs share the same ecs_task_arn so
-    the container stays alive until the last instance in the batch is terminated.
+    Ensures the shared Jumpoint host is up once for the whole batch, then deploys
+    each instance sequentially. The host is ref-counted across all EC2 instances
+    and databases and reclaimed when the last one is removed.
     """
     db = _get_db_session()
-    ecs_task_arn = None
     try:
         # Mark all jobs running
         for job_id, _ in job_items:
@@ -971,29 +951,17 @@ async def _run_bulk_deploy(
         ssh_secret_name = _cfg_svc.get("ec2_ssh_key_secret") or ""
         first_job_id = job_items[0][0]
         ecs_error = None
+        jumpoint_host_id = None
         if _cfg_svc.get_bool("beyondtrust_enabled"):
-            from ..services import btapi_service
             job_service.update_progress(
                 db, first_job_id, 10,
-                f"Starting BeyondTrust Jumpoint container for {len(job_items)}-instance batch…"
+                f"Ensuring the shared BeyondTrust Jumpoint host for {len(job_items)}-instance batch…"
             )
             try:
-                deploy_key = await _resolve_aws_ecs_deploy_key()
-                ecs_task_arn = await aws_service.run_ecs_jumpoint_task(
-                    region=_aws_region,
-                    cluster=settings.bt_ecs_cluster,
-                    task_family=settings.bt_ecs_task_family,
-                    subnet_id=subnet_id,
-                    security_group_ids=security_group_ids,
-                    deploy_key=deploy_key,
-                    cpu=settings.bt_ecs_cpu,
-                    memory=settings.bt_ecs_memory,
-                    execution_role_arn=settings.bt_ecs_execution_role_arn,
-                    image=settings.bt_ecs_image,
-                )
+                from ..services import jumpoint_host_service
+                jumpoint_host_id = await jumpoint_host_service.ensure_jumpoint_host(_aws_region)
             except Exception as e:
                 ecs_error = str(e)
-                ecs_task_arn = None
         else:
             job_service.update_progress(
                 db, first_job_id, 10,
@@ -1008,8 +976,8 @@ async def _run_bulk_deploy(
         # Step 3: Deploy each instance, all sharing the same ECS task ARN
         for job_id, item in job_items:
             result: dict = {"ssh_secret_name": ssh_secret_name}
-            if ecs_task_arn:
-                result["ecs_task_arn"] = ecs_task_arn
+            if jumpoint_host_id:
+                result["jumpoint_host_id"] = jumpoint_host_id
             elif ecs_error:
                 result["ecs_error"] = ecs_error
 
@@ -1135,36 +1103,6 @@ async def _run_destroy(destroy_job_id: str, deploy_job_id: str, instance_id: str
         if deploy_job:
             meta = deploy_job.metadata_dict
 
-            # Stop ECS Jumpoint task — only if no other active instances share it
-            ecs_task_arn = meta.get("ecs_task_arn")
-            if ecs_task_arn:
-                sibling_count = sum(
-                    1 for j in db.query(Job)
-                    .filter(Job.job_type == "ec2_deploy", Job.status == "completed")
-                    .all()
-                    if j.id != deploy_job_id
-                    and j.metadata_dict.get("ecs_task_arn") == ecs_task_arn
-                    and not j.metadata_dict.get("destroyed")
-                )
-                if sibling_count == 0:
-                    job_service.update_progress(
-                        db, destroy_job_id, 40,
-                        "Instance terminating, stopping Jumpoint ECS task…"
-                    )
-                    try:
-                        await aws_service.stop_ecs_jumpoint_task(
-                            _aws_region(), settings.bt_ecs_cluster, ecs_task_arn
-                        )
-                        result["ecs_task_stopped"] = ecs_task_arn
-                    except AWSError as e:
-                        result["ecs_error"] = f"ECS task stop failed: {e}"
-                else:
-                    job_service.update_progress(
-                        db, destroy_job_id, 40,
-                        f"Jumpoint ECS task shared with {sibling_count} other active instance(s) — leaving running…"
-                    )
-                    result["ecs_task_shared"] = ecs_task_arn
-
             # Remove BeyondTrust Shell Jump if this deploy provisioned one.
             # Check bt_shell_jump_id — not settings.beyondtrust_enabled — so
             # the cleanup still runs even if the feature flag was toggled off
@@ -1204,6 +1142,14 @@ async def _run_destroy(destroy_job_id: str, deploy_job_id: str, instance_id: str
             # Mark original deploy job as destroyed
             meta["destroyed"] = True
             job_service.set_completed(db, deploy_job_id, meta)
+
+        # Terminate the shared Jumpoint host if nothing is left using it (this
+        # deploy job is now marked destroyed, so it's excluded from the count).
+        try:
+            from ..services import jumpoint_host_service
+            await jumpoint_host_service.teardown_jumpoint_host_if_idle(db, _aws_region())
+        except Exception as e:
+            result["jumpoint_host_teardown_error"] = str(e)
 
         job_service.set_completed(db, destroy_job_id, result)
         await cache_service.invalidate(cache_service.key_global("aws_instances"))

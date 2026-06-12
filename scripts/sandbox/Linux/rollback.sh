@@ -151,6 +151,24 @@ rollback_aws() {
       || warn "Could not delete ecsTaskExecutionRole"
   fi
 
+  # 3b. IAM: ecsInstanceRole + instance profile — the EC2 capacity for the
+  # tunnel-capable Jumpoint. The EC2 host itself is swept by the tag-based
+  # instance termination above; here we unwind the role/profile (only if we
+  # tagged it). A role must be removed from its instance profile before either
+  # can be deleted.
+  if aws iam list-role-tags --role-name ecsInstanceRole 2>/dev/null \
+       | jq -e ".Tags[]? | select(.Key==\"$SANDBOX_TAG_KEY\" and .Value==\"$SANDBOX_TAG_VALUE\")" >/dev/null 2>&1; then
+    aws iam remove-role-from-instance-profile --instance-profile-name ecsInstanceRole \
+      --role-name ecsInstanceRole >/dev/null 2>&1 || true
+    aws iam delete-instance-profile --instance-profile-name ecsInstanceRole >/dev/null 2>&1 \
+      && ok "Deleted instance profile ecsInstanceRole" || true
+    aws iam detach-role-policy --role-name ecsInstanceRole \
+      --policy-arn arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role >/dev/null 2>&1 || true
+    aws iam delete-role --role-name ecsInstanceRole >/dev/null 2>&1 \
+      && ok "Deleted IAM role ecsInstanceRole" \
+      || warn "Could not delete ecsInstanceRole"
+  fi
+
   # 4. Promote-runner task role — same pattern, only delete if we created it.
   local promote_role="${SANDBOX_NAME_PREFIX}-promote-runner-task"
   if aws iam list-role-tags --role-name "$promote_role" 2>/dev/null \

@@ -193,8 +193,22 @@ class Settings(BaseSettings):
     bt_ecs_cluster: str = "bt-jumpoint"
     bt_ecs_task_family: str = "bt-jumpoint"
     bt_ecs_image: str = "beyondtrust/sra-jumpoint"  # Override to use ECR mirror
-    bt_ecs_cpu: str = "256"    # 0.25 vCPU
+    # "EC2" (default) runs the jumpoint on EC2 capacity so it can do PROTOCOL
+    # TUNNELING — Fargate forbids the NET_ADMIN/NET_RAW/ipc_lock caps + /dev/net/tun
+    # device the BeyondTrust Jumpoint needs for tunnels, so a Fargate jumpoint
+    # registers as a node but tunnel connections time out. "FARGATE" is the legacy,
+    # tunnel-incapable escape hatch. The sandbox script provisions the EC2 capacity.
+    bt_ecs_launch_type: str = "EC2"
+    bt_ecs_cpu: str = "256"    # 0.25 vCPU (Fargate task-size; ignored on EC2 host networking)
     bt_ecs_memory: str = "512"  # MB
+    # Shared Jumpoint HOST (EC2 capacity) — the dashboard creates it on demand
+    # when an EC2 instance or cloud database is provisioned, and terminates it
+    # when nothing is left using it. The instance profile + role are pre-created
+    # by scripts/sandbox/Linux/setup-aws.sh; bt_ecs_jumpoint_subnet_id /
+    # bt_ecs_jumpoint_security_group_id below are the host's subnet + SG.
+    bt_ecs_host_instance_type: str = "t3.small"
+    bt_ecs_host_instance_profile: str = "ecsInstanceRole"
+    bt_ecs_host_name: str = "dashboard-sandbox-jumpoint-host"  # EC2 Name tag (find-or-create key)
     bt_ecs_execution_role_arn: str = ""  # Set to your ecsTaskExecutionRole ARN if required
     # BeyondTrust Jumpoint Docker registry deploy key for AWS ECS launches.
     # Stored encrypted via config_service; transparently resolved through whichever
