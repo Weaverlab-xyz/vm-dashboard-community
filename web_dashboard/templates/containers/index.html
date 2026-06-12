@@ -25,9 +25,16 @@
     </div>
   </div>
 
-  <!-- ── Top-level tabs: On-Premises | Cloud | GCP ─────────────────────── -->
+  <!-- ── Top-level tabs: Cloud | On-Premises ───────────────────────────── -->
   <div class="mb-6 border-b border-gray-200">
     <nav class="flex gap-1 -mb-px">
+      <button @click="activeTab = 'cloud'"
+              :class="activeTab === 'cloud'
+                ? 'border-b-2 border-blue-600 text-blue-600 font-semibold'
+                : 'border-b-2 border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'"
+              class="px-4 py-2 text-sm transition whitespace-nowrap">
+        Cloud
+      </button>
       {% if portainer_enabled %}
       <button @click="activeTab = 'onprem'"
               :class="activeTab === 'onprem'
@@ -37,13 +44,6 @@
         On-Premises
       </button>
       {% endif %}
-      <button @click="activeTab = 'cloud'"
-              :class="activeTab === 'cloud'
-                ? 'border-b-2 border-blue-600 text-blue-600 font-semibold'
-                : 'border-b-2 border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'"
-              class="px-4 py-2 text-sm transition whitespace-nowrap">
-        Cloud
-      </button>
     </nav>
   </div>
 
@@ -60,30 +60,10 @@
   <!-- ══════════════════════════════════════════════════════════════════════ -->
   <div x-show="activeTab === 'onprem'">
 
-    <!-- ── Workgroup sub-tabs: Weaverlab | Hydra ──────────────────────── -->
-    <div class="mb-5 border-b border-gray-100">
-      <nav class="flex gap-1 -mb-px">
-        <button @click="switchPortainerWg('weaverlab')"
-                :class="activePortainerWg === 'weaverlab'
-                  ? 'border-b-2 border-indigo-500 text-indigo-600 font-semibold bg-indigo-50'
-                  : 'border-b-2 border-transparent text-gray-500 hover:text-gray-700 hover:bg-gray-50'"
-                class="px-4 py-2 text-sm transition whitespace-nowrap rounded-t-lg">
-          Weaverlab
-        </button>
-        <button @click="switchPortainerWg('hydra')"
-                :class="activePortainerWg === 'hydra'
-                  ? 'border-b-2 border-indigo-500 text-indigo-600 font-semibold bg-indigo-50'
-                  : 'border-b-2 border-transparent text-gray-500 hover:text-gray-700 hover:bg-gray-50'"
-                class="px-4 py-2 text-sm transition whitespace-nowrap rounded-t-lg">
-          Hydra
-        </button>
-      </nav>
-    </div>
-
     <!-- ── Portainer Endpoint Tabs ─────────────────────────────────────── -->
     <div class="mb-6 border-b border-gray-200">
       <!-- skeleton while loading endpoints -->
-      <div x-show="endpoints.length === 0 && !portainerError" class="flex gap-2 pb-2">
+      <div x-show="endpoints.length === 0 && !portainerError && !portainerNotConfigured" class="flex gap-2 pb-2">
         <template x-for="i in [1,2]">
           <div class="h-8 w-24 bg-gray-100 rounded animate-pulse"></div>
         </template>
@@ -110,27 +90,39 @@
       </nav>
     </div>
 
+    <!-- ── Not-configured setup card ─────────────────────────────────────── -->
+    <div x-show="portainerNotConfigured" x-cloak
+         class="mb-6 bg-white border border-gray-200 rounded-xl p-6 text-center shadow-sm">
+      <svg class="mx-auto h-10 w-10 text-blue-400 mb-3" xmlns="http://www.w3.org/2000/svg"
+           fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+        <path stroke-linecap="round" stroke-linejoin="round"
+              d="M5.25 14.25h13.5m-13.5 0a3 3 0 01-3-3m3 3a3 3 0 100 6h13.5a3 3 0 100-6m-16.5-3a3 3 0 013-3h13.5a3 3 0 013 3m-19.5 0a4.5 4.5 0 01.9-2.7L5.737 5.1a3.375 3.375 0 012.7-1.35h7.126c1.062 0 2.062.5 2.7 1.35l2.587 3.45a4.5 4.5 0 01.9 2.7m0 0a3 3 0 01-3 3m0 3h.008v.008h-.008v-.008zm0-6h.008v.008h-.008v-.008zm-3 6h.008v.008h-.008v-.008zm0-6h.008v.008h-.008v-.008z" />
+      </svg>
+      <p class="text-base font-semibold text-gray-800 mb-1">Portainer is not configured</p>
+      <p class="text-sm text-gray-500 max-w-md mx-auto mb-4">
+        Connect a Portainer CE instance to manage on-prem Docker containers from this page.
+        Set the Portainer URL and API token in
+        <span class="font-medium text-gray-700">Settings → Integrations → Portainer CE</span>.
+      </p>
+      <a href="/settings"
+         class="inline-block text-sm bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-medium transition shadow-sm">
+        Open Settings
+      </a>
+    </div>
+
     <!-- ── Error banner ──────────────────────────────────────────────────── -->
     <div x-show="portainerError" x-cloak
          class="mb-6 bg-amber-50 border border-amber-200 rounded-xl p-4 text-sm text-amber-800">
       <p class="font-semibold mb-1">Portainer connection error</p>
       <p x-text="portainerError"></p>
-      <p class="mt-1 text-xs" x-show="activePortainerWg === 'weaverlab'">
-        Check that <code class="bg-amber-100 px-1 rounded">PORTAINER_URL</code> is set in
-        <code class="bg-amber-100 px-1 rounded">.env</code> and the
-        <code class="bg-amber-100 px-1 rounded">Portainer_PAT</code>
-        secret exists in BeyondTrust Password Safe.
-      </p>
-      <p class="mt-1 text-xs" x-show="activePortainerWg === 'hydra'">
-        Check that <code class="bg-amber-100 px-1 rounded">PORTAINER_URL_HYDRA</code> is set in
-        <code class="bg-amber-100 px-1 rounded">.env</code> and the
-        <code class="bg-amber-100 px-1 rounded">Portainer_PAT_Hydra</code>
-        secret exists in BeyondTrust Password Safe.
+      <p class="mt-1 text-xs">
+        Check the Portainer URL, API token, and SSL settings in
+        <span class="font-medium">Settings → Integrations → Portainer CE</span>.
       </p>
     </div>
 
     <!-- ── Containers Table ───────────────────────────────────────────────── -->
-    <div class="mb-4">
+    <div class="mb-4" x-show="!portainerNotConfigured">
       <div class="flex items-center justify-between mb-3">
         <h2 class="text-lg font-semibold text-gray-800">
           Containers
@@ -467,67 +459,66 @@
       </div>
     </div>
 
-    <!-- ── GCP Cloud Run section ──────────────────────────────────────────── -->
+    <!-- ── GCP Jumpoint container instances (COS on GCE) ──────────────────── -->
     <div class="mb-8">
       <div class="flex items-center justify-between mb-3">
         <h2 class="text-lg font-semibold text-gray-800">
-          Cloud Run Services
+          GCE Container Instances
           <span class="ml-2 text-sm font-normal text-gray-500"
-                x-text="cloudRunProject ? cloudRunServices.length + ' services · ' + cloudRunProject + ' / ' + cloudRunRegion : ''"></span>
+                x-text="gceProject ? gceJumpoints.length + ' instances · ' + gceProject : ''"></span>
         </h2>
-        <button @click="loadCloudRunServices()"
-                :disabled="cloudRunLoading"
+        <button @click="loadGceJumpoints()"
+                :disabled="gceLoading"
                 class="px-3 py-1.5 text-sm rounded-lg border border-gray-300 hover:bg-gray-50 disabled:opacity-50">
-          <span x-text="cloudRunLoading ? 'Loading…' : 'Refresh'"></span>
+          <span x-text="gceLoading ? 'Loading…' : 'Refresh'"></span>
         </button>
       </div>
 
-      <div x-show="cloudRunLoading" class="text-sm text-gray-500 py-6 text-center">
-        Loading Cloud Run services…
+      <div x-show="gceLoading" class="text-sm text-gray-500 py-6 text-center">
+        Loading GCE container instances…
       </div>
 
-      <div x-show="!cloudRunLoading && cloudRunError"
+      <div x-show="!gceLoading && gceError"
            class="mb-3 px-3 py-2 rounded-lg bg-red-50 border border-red-200 text-sm text-red-700"
-           x-text="cloudRunError"></div>
+           x-text="gceError"></div>
 
-      <div x-show="!cloudRunLoading && !cloudRunError && cloudRunServices.length === 0"
-           class="text-sm text-gray-500 py-6 text-center">
-        No Cloud Run services in <span x-text="cloudRunProject + ' / ' + cloudRunRegion"></span>.
+      <div x-show="!gceLoading && !gceError && gceJumpoints.length === 0"
+           class="text-sm text-gray-500 py-6 text-center bg-white rounded-xl border border-gray-200">
+        No GCE container instances.
       </div>
 
-      <div x-show="!cloudRunLoading && cloudRunServices.length > 0"
+      <div x-show="!gceLoading && gceJumpoints.length > 0"
            class="bg-white rounded-xl shadow-sm overflow-hidden border border-gray-200">
         <table class="min-w-full divide-y divide-gray-200">
           <thead class="bg-gray-50">
             <tr>
               <th class="px-4 py-3 text-left text-xs font-semibold uppercase text-gray-500">Name</th>
-              <th class="px-4 py-3 text-left text-xs font-semibold uppercase text-gray-500">Image</th>
-              <th class="px-4 py-3 text-left text-xs font-semibold uppercase text-gray-500">URI</th>
+              <th class="px-4 py-3 text-left text-xs font-semibold uppercase text-gray-500">Zone</th>
+              <th class="px-4 py-3 text-left text-xs font-semibold uppercase text-gray-500">Machine</th>
+              <th class="px-4 py-3 text-left text-xs font-semibold uppercase text-gray-500">Container Image</th>
               <th class="px-4 py-3 text-left text-xs font-semibold uppercase text-gray-500">Status</th>
               <th class="px-4 py-3 text-right text-xs font-semibold uppercase text-gray-500">Actions</th>
             </tr>
           </thead>
           <tbody class="divide-y divide-gray-100">
-            <template x-for="s in cloudRunServices" :key="s.name">
+            <template x-for="i in gceJumpoints" :key="i.name">
               <tr class="hover:bg-gray-50">
-                <td class="px-4 py-3 text-sm font-medium text-gray-900" x-text="s.name"></td>
-                <td class="px-4 py-3 text-sm text-gray-600 font-mono break-all" x-text="s.image"></td>
+                <td class="px-4 py-3 text-sm font-medium text-gray-900 font-mono" x-text="i.name"></td>
+                <td class="px-4 py-3 text-sm text-gray-600" x-text="i.zone"></td>
+                <td class="px-4 py-3 text-sm text-gray-600" x-text="i.machine_type || '—'"></td>
+                <td class="px-4 py-3 text-sm text-gray-600 font-mono break-all" x-text="i.image || '—'"></td>
                 <td class="px-4 py-3 text-sm">
-                  <a x-show="s.uri" :href="s.uri" target="_blank"
-                     class="text-blue-600 hover:underline break-all" x-text="s.uri"></a>
-                  <span x-show="!s.uri" class="text-gray-400">—</span>
-                </td>
-                <td class="px-4 py-3 text-sm">
-                  <span :class="s.ready
+                  <span :class="i.status === 'RUNNING'
                     ? 'bg-green-100 text-green-700 ring-1 ring-green-200'
                     : 'bg-gray-100 text-gray-700 ring-1 ring-gray-200'"
                         class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium">
-                    <span x-text="s.ready ? 'Ready' : 'Not ready'"></span>
+                    <span x-text="i.status"></span>
                   </span>
                 </td>
                 <td class="px-4 py-3 text-sm text-right">
-                  <button @click="deleteCloudRunService(s)"
-                          class="text-red-600 hover:underline">Delete</button>
+                  <button @click="stopGceJumpoint(i)"
+                          :disabled="gceActionPending === i.name"
+                          class="text-red-600 hover:underline disabled:opacity-40">Stop</button>
                 </td>
               </tr>
             </template>
@@ -536,8 +527,8 @@
       </div>
 
       <p class="mt-2 text-xs text-gray-400">
-        Cloud Run services scale to zero on idle automatically — there is no separate "stop" action.
-        Delete removes the service permanently.
+        GCP Jumpoints run as containers on Container-Optimised OS GCE instances.
+        Stop deletes the instance — it is recreated automatically on the next VM deploy.
       </p>
     </div>
 
@@ -729,11 +720,8 @@
 <script>
 function containersDashboard() {
   return {
-    // Top-level tab
-    activeTab: '{% if portainer_enabled %}onprem{% else %}cloud{% endif %}',  // 'onprem' | 'cloud' | 'gcp'
-
-    // On-premises workgroup sub-tab
-    activePortainerWg: 'weaverlab', // 'weaverlab' | 'hydra'
+    // Top-level tab — Cloud is the primary view; On-Premises needs Portainer
+    activeTab: 'cloud',  // 'cloud' | 'onprem'
 
     // Portainer state
     endpoints: [],
@@ -744,6 +732,7 @@ function containersDashboard() {
     endpointsLoading: false,
     showAll: true,
     portainerError: null,
+    portainerNotConfigured: false,
     actionPending: null,
 
     // Deploy container modal
@@ -781,12 +770,12 @@ function containersDashboard() {
     aciLoading: false,
     aciError: null,
 
-    // GCP Cloud Run
-    cloudRunServices: [],
-    cloudRunProject: '',
-    cloudRunRegion: '',
-    cloudRunLoading: false,
-    cloudRunError: null,
+    // GCP Jumpoint container instances (COS on GCE)
+    gceJumpoints: [],
+    gceProject: '',
+    gceLoading: false,
+    gceError: null,
+    gceActionPending: null,
     aciActionPending: null,
 
     // ── Lifecycle ──────────────────────────────────────────────────────────
@@ -799,7 +788,7 @@ function containersDashboard() {
       const tasks = [
         this.loadEcsTasks(),
         this.loadAciContainers(),
-        this.loadCloudRunServices(),
+        this.loadGceJumpoints(),
       ];
       {% if portainer_enabled %}
       tasks.push(this.loadEndpoints());
@@ -817,28 +806,17 @@ function containersDashboard() {
         await Promise.all([
           this.loadEcsTasks(),
           this.loadAciContainers(),
-          this.loadCloudRunServices(),
+          this.loadGceJumpoints(),
         ]);
       }
-    },
-
-    // ── Workgroup switching ─────────────────────────────────────────────────
-    async switchPortainerWg(wg) {
-      if (this.activePortainerWg === wg) return;
-      this.activePortainerWg = wg;
-      this.endpoints = [];
-      this.selectedEndpointId = '';
-      this.containers = [];
-      this.stacks = [];
-      this.portainerError = null;
-      await this.loadEndpoints();
     },
 
     // ── Data fetching ──────────────────────────────────────────────────────
     async loadEndpoints() {
       this.endpointsLoading = true;
+      this.portainerNotConfigured = false;
       try {
-        const data = await API.get(`/api/containers/endpoints?workgroup=${this.activePortainerWg}`);
+        const data = await API.get('/api/containers/endpoints');
         this.endpoints = data.endpoints || [];
         this.portainerError = null;
         if (!this.selectedEndpointId && this.endpoints.length > 0) {
@@ -846,7 +824,12 @@ function containersDashboard() {
           await Promise.all([this.loadContainers(), this.loadStacks()]);
         }
       } catch (e) {
-        this.portainerError = e.message;
+        if (e.code === 'portainer_not_configured') {
+          this.portainerNotConfigured = true;
+          this.portainerError = null;
+        } else {
+          this.portainerError = e.message;
+        }
       } finally {
         this.endpointsLoading = false;
       }
@@ -858,7 +841,7 @@ function containersDashboard() {
       this.portainerError = null;
       try {
         const data = await API.get(
-          `/api/containers?endpoint_id=${this.selectedEndpointId}&all_containers=${this.showAll}&workgroup=${this.activePortainerWg}`
+          `/api/containers?endpoint_id=${this.selectedEndpointId}&all_containers=${this.showAll}`
         );
         this.containers = data.containers || [];
       } catch (e) {
@@ -873,7 +856,7 @@ function containersDashboard() {
       if (!this.selectedEndpointId) return;
       try {
         const data = await API.get(
-          `/api/containers/stacks?endpoint_id=${this.selectedEndpointId}&workgroup=${this.activePortainerWg}`
+          `/api/containers/stacks?endpoint_id=${this.selectedEndpointId}`
         );
         this.stacks = data.stacks || [];
       } catch (e) {
@@ -885,7 +868,7 @@ function containersDashboard() {
     async startContainer(c) {
       this.actionPending = c.id;
       try {
-        await API.post(`/api/containers/${c.id}/start?endpoint_id=${this.selectedEndpointId}&workgroup=${this.activePortainerWg}`);
+        await API.post(`/api/containers/${c.id}/start?endpoint_id=${this.selectedEndpointId}`);
         toast(`Started ${c.names[0] || c.short_id}`, 'success');
         await this.loadContainers();
       } catch (e) {
@@ -898,7 +881,7 @@ function containersDashboard() {
     async stopContainer(c) {
       this.actionPending = c.id;
       try {
-        await API.post(`/api/containers/${c.id}/stop?endpoint_id=${this.selectedEndpointId}&workgroup=${this.activePortainerWg}`);
+        await API.post(`/api/containers/${c.id}/stop?endpoint_id=${this.selectedEndpointId}`);
         toast(`Stopped ${c.names[0] || c.short_id}`, 'success');
         await this.loadContainers();
       } catch (e) {
@@ -913,7 +896,7 @@ function containersDashboard() {
       if (!confirm(`Delete container "${name}"? This cannot be undone.`)) return;
       this.actionPending = c.id;
       try {
-        await API.del(`/api/containers/${c.id}?endpoint_id=${this.selectedEndpointId}&force=true&workgroup=${this.activePortainerWg}`);
+        await API.del(`/api/containers/${c.id}?endpoint_id=${this.selectedEndpointId}&force=true`);
         toast(`Deleted ${name}`, 'success');
         this.containers = this.containers.filter(x => x.id !== c.id);
       } catch (e) {
@@ -937,7 +920,7 @@ function containersDashboard() {
           env: this.deployForm.env.filter(e => e.key),
           restart_policy: this.deployForm.restart_policy,
         };
-        const resp = await API.post(`/api/containers/deploy?workgroup=${this.activePortainerWg}`, payload);
+        const resp = await API.post('/api/containers/deploy', payload);
         this.showDeployModal = false;
         this._resetDeployForm();
         window.location.href = `/jobs/${resp.job_id}`;
@@ -962,7 +945,7 @@ function containersDashboard() {
           compose_content: this.stackForm.compose_content,
           env: this.stackForm.env.filter(e => e.key),
         };
-        const resp = await API.post(`/api/containers/stacks?workgroup=${this.activePortainerWg}`, payload);
+        const resp = await API.post('/api/containers/stacks', payload);
         this.showStackModal = false;
         this._resetStackForm();
         window.location.href = `/jobs/${resp.job_id}`;
@@ -1052,31 +1035,33 @@ function containersDashboard() {
       }
     },
 
-    // ── GCP Cloud Run ──────────────────────────────────────────────────────
-    async loadCloudRunServices() {
-      this.cloudRunLoading = true;
-      this.cloudRunError = null;
+    // ── GCP Jumpoint container instances (COS on GCE) ──────────────────────
+    async loadGceJumpoints() {
+      this.gceLoading = true;
+      this.gceError = null;
       try {
-        const data = await API.get('/api/containers/cloud-run-services');
-        this.cloudRunServices = data.services || [];
-        this.cloudRunProject = data.project_id || '';
-        this.cloudRunRegion = data.region || '';
+        const data = await API.get('/api/containers/gce-jumpoints');
+        this.gceJumpoints = data.instances || [];
+        this.gceProject = data.project_id || '';
       } catch (e) {
-        this.cloudRunError = e.message;
-        this.cloudRunServices = [];
+        this.gceError = e.message;
+        this.gceJumpoints = [];
       } finally {
-        this.cloudRunLoading = false;
+        this.gceLoading = false;
       }
     },
 
-    async deleteCloudRunService(s) {
-      if (!confirm(`Delete Cloud Run service "${s.name}"? This is permanent.`)) return;
+    async stopGceJumpoint(i) {
+      if (!confirm(`Stop Jumpoint instance "${i.name}"? The instance is deleted and recreated on the next VM deploy.`)) return;
+      this.gceActionPending = i.name;
       try {
-        await API.post(`/api/containers/cloud-run-services/${encodeURIComponent(s.name)}/stop`);
-        toast(`Deleted ${s.name}`, 'success');
-        await this.loadCloudRunServices();
+        await API.post(`/api/containers/gce-jumpoints/${encodeURIComponent(i.name)}/stop?zone=${encodeURIComponent(i.zone)}`);
+        toast(`Stopped ${i.name}`, 'success');
+        await this.loadGceJumpoints();
       } catch (e) {
         toast(e.message, 'error');
+      } finally {
+        this.gceActionPending = null;
       }
     },
 

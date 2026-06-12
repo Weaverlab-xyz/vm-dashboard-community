@@ -129,22 +129,20 @@ class ACIContainerListResponse(BaseModel):
     count: int
 
 
-# ── GCP Cloud Run ────────────────────────────────────────────────────────────
+# ── GCP Jumpoint container instances (COS on GCE) ───────────────────────────
 
-class CloudRunServiceInfo(BaseModel):
+class GCEJumpointInfo(BaseModel):
     name: str
-    region: str
+    zone: str
+    status: str  # RUNNING | TERMINATED | STOPPING | PROVISIONING | ...
+    machine_type: str = ""
     image: str = ""
-    uri: str = ""
-    ready: bool = False
-    traffic_percent: int = 0
-    create_time: Optional[str] = None
-    update_time: Optional[str] = None
-    last_modifier: str = ""
+    internal_ip: str = ""
+    external_ip: str = ""
+    created_at: Optional[str] = None
 
 
-class CloudRunServiceListResponse(BaseModel):
-    services: list[CloudRunServiceInfo]
+class GCEJumpointListResponse(BaseModel):
+    instances: list[GCEJumpointInfo]
     project_id: str
-    region: str
     count: int

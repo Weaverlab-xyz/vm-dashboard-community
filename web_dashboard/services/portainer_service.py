@@ -1,9 +1,11 @@
 """
-Portainer CE REST API wrapper.
+Portainer CE REST API wrapper — a single Portainer connection (community edition).
 
-Authentication: Personal Access Token retrieved from BeyondTrust Password Safe
-at call time via btapi_service.get_ps_secret(). The PAT is never stored on disk
-or in the database.
+Connection settings resolve config_service-first (Settings → Integrations →
+Portainer CE; encrypted in the DB, vault refs like bt_safe:// resolved
+transparently), then fall back to env vars (PORTAINER_URL / PORTAINER_PAT).
+Installs that predate the Settings PAT field can still hold the token in
+BeyondTrust Password Safe under `portainer_pat_secret_title`.
 
 Auth header: X-API-Key: <pat>
 
@@ -22,6 +24,7 @@ Key API paths:
   POST /api/stacks/create/standalone/string               — deploy compose stack
 """
 import base64
+import functools
 import json
 import logging
 import os
@@ -45,22 +48,63 @@ class PortainerError(Exception):
     pass
 
 
+class PortainerNotConfigured(PortainerError):
+    """URL or API token missing — an expected state, not a connection failure."""
+
+
+def _wrap_transport_errors(fn):
+    """Convert httpx transport failures (unreachable host, TLS, timeout) into
+    PortainerError so every caller sees one error contract instead of raw 500s."""
+    @functools.wraps(fn)
+    async def wrapper(*args, **kwargs):
+        try:
+            return await fn(*args, **kwargs)
+        except httpx.HTTPError as exc:
+            raise PortainerError(f"Cannot reach Portainer: {exc}") from exc
+    return wrapper
+
+
 # ── Shared helpers ────────────────────────────────────────────────────────────
 
-async def _portainer_url_and_headers(workgroup: str) -> tuple[str, dict]:
-    """Return (base_url, headers_dict) for the given workgroup."""
-    if workgroup.lower() == "hydra":
-        url = settings.portainer_url_hydra
-        pat_title = settings.portainer_pat_secret_title_hydra
-        if not url:
-            raise PortainerError("PORTAINER_URL_HYDRA is not configured. Add it to your .env file.")
-    else:
-        url = settings.portainer_url
-        pat_title = settings.portainer_pat_secret_title
-        if not url:
-            raise PortainerError("PORTAINER_URL is not configured. Add it to your .env file.")
-    pat = await get_ps_secret(pat_title)
-    return url.rstrip("/"), {"X-API-Key": pat}
+_NOT_CONFIGURED_URL = (
+    "Portainer URL is not configured. Add it in Settings → Integrations → Portainer CE."
+)
+_NOT_CONFIGURED_PAT = (
+    "Portainer API token is not configured. Add it in Settings → Integrations → Portainer CE."
+)
+
+
+async def _resolve_connection() -> tuple[str, str, bool]:
+    """Return (base_url, pat, verify_ssl) from config_service with env fallback."""
+    from . import config_service
+
+    url = config_service.get("portainer_url") or settings.portainer_url
+    if not url:
+        raise PortainerNotConfigured(_NOT_CONFIGURED_URL)
+    verify = config_service.get_bool("portainer_verify_ssl", settings.portainer_verify_ssl)
+
+    # config_service.get resolves vault refs (bt_safe://, aws_sm://, …) transparently
+    pat = config_service.get("portainer_pat") or settings.portainer_pat
+    if not pat:
+        # Legacy fallback: PAT held in BeyondTrust Password Safe under a secret
+        # title — only attempted when ps-cli credentials are actually configured.
+        pscli_ready = bool(config_service.get("pscli_api_url") or settings.pscli_api_url)
+        if pscli_ready and settings.portainer_pat_secret_title:
+            try:
+                pat = await get_ps_secret(settings.portainer_pat_secret_title)
+            except Exception as exc:
+                raise PortainerError(
+                    f"Portainer API token lookup from Password Safe failed: {exc}"
+                ) from exc
+    if not pat:
+        raise PortainerNotConfigured(_NOT_CONFIGURED_PAT)
+    return url.rstrip("/"), pat, verify
+
+
+async def _portainer_url_and_headers() -> tuple[str, dict]:
+    """Return (base_url, headers_dict) for the configured Portainer instance."""
+    url, pat, _ = await _resolve_connection()
+    return url, {"X-API-Key": pat}
 
 
 # ── Automation mode: proxy through Hybrid Worker ─────────────────────────────
@@ -106,23 +150,11 @@ async def _proxy_request(
 
 # ── Local mode: direct httpx client ──────────────────────────────────────────
 
-async def _client(workgroup: str = "weaverlab") -> httpx.AsyncClient:
+async def _client() -> httpx.AsyncClient:
     """Build an authenticated async httpx client for the Portainer API."""
-    if workgroup.lower() == "hydra":
-        url = settings.portainer_url_hydra
-        pat_title = settings.portainer_pat_secret_title_hydra
-        verify = settings.portainer_verify_ssl_hydra
-        if not url:
-            raise PortainerError("PORTAINER_URL_HYDRA is not configured. Add it to your .env file.")
-    else:
-        url = settings.portainer_url
-        pat_title = settings.portainer_pat_secret_title
-        verify = settings.portainer_verify_ssl
-        if not url:
-            raise PortainerError("PORTAINER_URL is not configured. Add it to your .env file.")
-    pat = await get_ps_secret(pat_title)
+    url, pat, verify = await _resolve_connection()
     return httpx.AsyncClient(
-        base_url=url.rstrip("/"),
+        base_url=url,
         headers={"X-API-Key": pat},
         timeout=30.0,
         verify=verify,
@@ -141,14 +173,15 @@ def _raise(resp: httpx.Response, context: str) -> None:
 
 # ── Environments ──────────────────────────────────────────────────────────────
 
-async def list_endpoints(workgroup: str = "weaverlab") -> list[dict]:
+@_wrap_transport_errors
+async def list_endpoints() -> list[dict]:
     """Return all Portainer environments (GET /api/endpoints)."""
     if _EXECUTION_MODE == "automation":
-        cache_key = cache_service.key_param("portainer_endpoints", workgroup=workgroup)
+        cache_key = cache_service.key_param("portainer_endpoints")
         ttl = cache_service.TTL["portainer_endpoints"]
 
         async def _fetch():
-            url, headers = await _portainer_url_and_headers(workgroup)
+            url, headers = await _portainer_url_and_headers()
             result = await _proxy_request("GET", f"{url}/api/endpoints", headers)
             data = result["body"]
             return data if isinstance(data, list) else data.get("results", data) if isinstance(data, dict) else []
@@ -156,7 +189,7 @@ async def list_endpoints(workgroup: str = "weaverlab") -> list[dict]:
         data, _ = await cache_service.get_or_refresh(cache_key, ttl, _fetch)
         return data
 
-    async with await _client(workgroup) as client:
+    async with await _client() as client:
         resp = await client.get("/api/endpoints")
         if not resp.is_success:
             _raise(resp, "list_endpoints")
@@ -168,19 +201,20 @@ async def list_endpoints(workgroup: str = "weaverlab") -> list[dict]:
 
 # ── Containers ────────────────────────────────────────────────────────────────
 
-async def list_containers(endpoint_id: int, all_containers: bool = True, workgroup: str = "weaverlab") -> list[dict]:
+@_wrap_transport_errors
+async def list_containers(endpoint_id: int, all_containers: bool = True) -> list[dict]:
     """
     List containers on a Docker endpoint (GET /api/endpoints/{id}/docker/containers/json).
     all_containers=True includes stopped containers.
     """
     if _EXECUTION_MODE == "automation":
         cache_key = cache_service.key_param(
-            "portainer_containers", workgroup=workgroup, endpoint_id=str(endpoint_id), all=str(all_containers),
+            "portainer_containers", endpoint_id=str(endpoint_id), all=str(all_containers),
         )
         ttl = cache_service.TTL["portainer_containers"]
 
         async def _fetch():
-            url, headers = await _portainer_url_and_headers(workgroup)
+            url, headers = await _portainer_url_and_headers()
             all_param = "1" if all_containers else "0"
             result = await _proxy_request(
                 "GET", f"{url}/api/endpoints/{endpoint_id}/docker/containers/json?all={all_param}", headers,
@@ -209,7 +243,7 @@ async def list_containers(endpoint_id: int, all_containers: bool = True, workgro
         data, _ = await cache_service.get_or_refresh(cache_key, ttl, _fetch)
         return data
 
-    async with await _client(workgroup) as client:
+    async with await _client() as client:
         resp = await client.get(
             f"/api/endpoints/{endpoint_id}/docker/containers/json",
             params={"all": 1 if all_containers else 0},
@@ -219,10 +253,11 @@ async def list_containers(endpoint_id: int, all_containers: bool = True, workgro
         return resp.json()
 
 
-async def start_container(endpoint_id: int, container_id: str, workgroup: str = "weaverlab") -> None:
+@_wrap_transport_errors
+async def start_container(endpoint_id: int, container_id: str) -> None:
     """Start a container (POST .../start). 204=started, 304=already running — both ok."""
     if _EXECUTION_MODE == "automation":
-        url, headers = await _portainer_url_and_headers(workgroup)
+        url, headers = await _portainer_url_and_headers()
         result = await _proxy_request(
             "POST", f"{url}/api/endpoints/{endpoint_id}/docker/containers/{container_id}/start", headers,
         )
@@ -232,7 +267,7 @@ async def start_container(endpoint_id: int, container_id: str, workgroup: str = 
         await cache_service.invalidate_prefix("portainer_containers")
         return
 
-    async with await _client(workgroup) as client:
+    async with await _client() as client:
         resp = await client.post(
             f"/api/endpoints/{endpoint_id}/docker/containers/{container_id}/start"
         )
@@ -240,10 +275,11 @@ async def start_container(endpoint_id: int, container_id: str, workgroup: str = 
             _raise(resp, f"start_container({container_id[:12]})")
 
 
-async def stop_container(endpoint_id: int, container_id: str, workgroup: str = "weaverlab") -> None:
+@_wrap_transport_errors
+async def stop_container(endpoint_id: int, container_id: str) -> None:
     """Stop a container (POST .../stop). 204=stopped, 304=already stopped — both ok."""
     if _EXECUTION_MODE == "automation":
-        url, headers = await _portainer_url_and_headers(workgroup)
+        url, headers = await _portainer_url_and_headers()
         result = await _proxy_request(
             "POST", f"{url}/api/endpoints/{endpoint_id}/docker/containers/{container_id}/stop", headers,
         )
@@ -253,7 +289,7 @@ async def stop_container(endpoint_id: int, container_id: str, workgroup: str = "
         await cache_service.invalidate_prefix("portainer_containers")
         return
 
-    async with await _client(workgroup) as client:
+    async with await _client() as client:
         resp = await client.post(
             f"/api/endpoints/{endpoint_id}/docker/containers/{container_id}/stop"
         )
@@ -261,12 +297,11 @@ async def stop_container(endpoint_id: int, container_id: str, workgroup: str = "
             _raise(resp, f"stop_container({container_id[:12]})")
 
 
-async def remove_container(
-    endpoint_id: int, container_id: str, force: bool = True, workgroup: str = "weaverlab"
-) -> None:
+@_wrap_transport_errors
+async def remove_container(endpoint_id: int, container_id: str, force: bool = True) -> None:
     """Remove a container (DELETE .../containers/{id}?force=true)."""
     if _EXECUTION_MODE == "automation":
-        url, headers = await _portainer_url_and_headers(workgroup)
+        url, headers = await _portainer_url_and_headers()
         force_param = "true" if force else "false"
         result = await _proxy_request(
             "DELETE",
@@ -279,7 +314,7 @@ async def remove_container(
         await cache_service.invalidate_prefix("portainer_containers")
         return
 
-    async with await _client(workgroup) as client:
+    async with await _client() as client:
         resp = await client.delete(
             f"/api/endpoints/{endpoint_id}/docker/containers/{container_id}",
             params={"force": "true" if force else "false"},
@@ -288,6 +323,7 @@ async def remove_container(
             _raise(resp, f"remove_container({container_id[:12]})")
 
 
+@_wrap_transport_errors
 async def deploy_container(
     endpoint_id: int,
     name: str,
@@ -295,7 +331,6 @@ async def deploy_container(
     ports: list[dict],      # [{"host": 8080, "container": 80, "protocol": "tcp"}]
     env: list[dict],        # [{"key": "K", "value": "V"}]
     restart_policy: str,    # "unless-stopped" | "always" | "no" | "on-failure"
-    workgroup: str = "weaverlab",
 ) -> dict:
     """
     Create then immediately start a container.
@@ -321,7 +356,7 @@ async def deploy_container(
     }
 
     if _EXECUTION_MODE == "automation":
-        url, headers = await _portainer_url_and_headers(workgroup)
+        url, headers = await _portainer_url_and_headers()
         # Step 1: Create
         create_result = await _proxy_request(
             "POST", f"{url}/api/endpoints/{endpoint_id}/docker/containers/create?name={name}",
@@ -337,7 +372,7 @@ async def deploy_container(
         logger.info("Deployed container %s (%s) on endpoint %d via proxy", name, container_id[:12], endpoint_id)
         return {"container_id": container_id, "name": name}
 
-    async with await _client(workgroup) as client:
+    async with await _client() as client:
         # Step 1: Create
         create_resp = await client.post(
             f"/api/endpoints/{endpoint_id}/docker/containers/create",
@@ -362,14 +397,15 @@ async def deploy_container(
 
 # ── Stacks ────────────────────────────────────────────────────────────────────
 
-async def list_stacks(endpoint_id: int, workgroup: str = "weaverlab") -> list[dict]:
+@_wrap_transport_errors
+async def list_stacks(endpoint_id: int) -> list[dict]:
     """List stacks filtered to a specific endpoint (GET /api/stacks?filters=...)."""
     if _EXECUTION_MODE == "automation":
-        cache_key = cache_service.key_param("portainer_stacks", workgroup=workgroup, endpoint_id=str(endpoint_id))
+        cache_key = cache_service.key_param("portainer_stacks", endpoint_id=str(endpoint_id))
         ttl = cache_service.TTL["portainer_stacks"]
 
         async def _fetch():
-            url, headers = await _portainer_url_and_headers(workgroup)
+            url, headers = await _portainer_url_and_headers()
             filters = json.dumps({"EndpointID": endpoint_id})
             result = await _proxy_request(
                 "GET", f"{url}/api/stacks?filters={filters}", headers,
@@ -379,7 +415,7 @@ async def list_stacks(endpoint_id: int, workgroup: str = "weaverlab") -> list[di
         data, _ = await cache_service.get_or_refresh(cache_key, ttl, _fetch)
         return data
 
-    async with await _client(workgroup) as client:
+    async with await _client() as client:
         resp = await client.get(
             "/api/stacks",
             params={"filters": json.dumps({"EndpointID": endpoint_id})},
@@ -437,7 +473,8 @@ async def check_agent_health(ip: str, port: int = 9001, timeout_secs: int = 30) 
     )
 
 
-async def add_agent_endpoint(name: str, ip: str, port: int = 9001, workgroup: str = "weaverlab") -> dict:
+@_wrap_transport_errors
+async def add_agent_endpoint(name: str, ip: str, port: int = 9001) -> dict:
     """
     Register a Portainer Agent endpoint (EndpointCreationType=2).
     The agent must already be running on the target VM at https://<ip>:<port>.
@@ -460,7 +497,7 @@ async def add_agent_endpoint(name: str, ip: str, port: int = 9001, workgroup: st
     }
 
     if _EXECUTION_MODE == "automation":
-        url, headers = await _portainer_url_and_headers(workgroup)
+        url, headers = await _portainer_url_and_headers()
         result = await _proxy_request(
             "POST", f"{url}/api/endpoints", headers,
             form_data=json.dumps(form_fields),
@@ -469,7 +506,7 @@ async def add_agent_endpoint(name: str, ip: str, port: int = 9001, workgroup: st
         logger.info("Registered Portainer agent endpoint %s at %s via proxy", name, agent_url)
         return result["body"]
 
-    async with await _client(workgroup) as client:
+    async with await _client() as client:
         logger.debug("Creating Portainer agent endpoint: %s with form: %s", name, form_fields)
         resp = await client.post("/api/endpoints", data=form_fields)
         if not resp.is_success:
@@ -478,12 +515,12 @@ async def add_agent_endpoint(name: str, ip: str, port: int = 9001, workgroup: st
     return resp.json()
 
 
+@_wrap_transport_errors
 async def deploy_stack(
     endpoint_id: int,
     name: str,
     compose_content: str,
     env: list[dict] | None = None,  # [{"key": "K", "value": "V"}]
-    workgroup: str = "weaverlab",
 ) -> dict:
     """
     Deploy a new standalone Docker Compose stack.
@@ -496,7 +533,7 @@ async def deploy_stack(
     }
 
     if _EXECUTION_MODE == "automation":
-        url, headers = await _portainer_url_and_headers(workgroup)
+        url, headers = await _portainer_url_and_headers()
         result = await _proxy_request(
             "POST", f"{url}/api/stacks/create/standalone/string?endpointId={endpoint_id}",
             headers, body=json.dumps(body),
@@ -505,7 +542,7 @@ async def deploy_stack(
         logger.info("Deployed stack %s on endpoint %d via proxy", name, endpoint_id)
         return result["body"]
 
-    async with await _client(workgroup) as client:
+    async with await _client() as client:
         resp = await client.post(
             "/api/stacks/create/standalone/string",
             params={"endpointId": endpoint_id},
