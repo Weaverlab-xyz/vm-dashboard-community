@@ -601,6 +601,8 @@ _PREVIEW_FLAGS = {
         "Virtual Desktops", "Desktop pools brokered as PRA sessions (Phase 1: Azure)."),
     "cloud_database_enabled": (
         "Cloud Databases", "Private managed databases reached through a PRA tunnel."),
+    "k8s_management_enabled": (
+        "Kubernetes Management", "Register + manage Kubernetes clusters (Phase 1)."),
 }
 
 
