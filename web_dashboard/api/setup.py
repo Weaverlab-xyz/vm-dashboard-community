@@ -408,6 +408,7 @@ class BeyondTrustFeatureConfig(BaseModel):
 class PortainerFeatureConfig(BaseModel):
     enabled: bool = False
     portainer_url: str = ""
+    portainer_pat: str = ""             # encrypted at rest; token or vault ref (bt_safe:// etc.)
     portainer_verify_ssl: bool = True
 
 class AnsibleFeatureConfig(BaseModel):
@@ -511,6 +512,7 @@ _FEATURE_MODELS = {
 
 _SECRET_FEATURE_KEYS = frozenset({
     "pscli_client_secret", "bt_client_secret", "epml_pat",
+    "portainer_pat",
     "entitle_api_token", "entitle_webhook_secret",
     "proxmox_token_secret", "proxmox_password",
     "vsphere_password",
@@ -530,8 +532,13 @@ def _read_feature(feature: str, model_cls) -> dict:
     from ..services import config_service
     enabled_key = _feature_to_cfg_key(feature)
     data = {"enabled": config_service.get_bool(enabled_key)}
-    for field in model_cls.model_fields:
+    for field, info in model_cls.model_fields.items():
         if field == "enabled":
+            continue
+        # Bool fields must round-trip as real booleans: a raw "" would render
+        # the toggle wrong AND fail pydantic validation when PATCHed back.
+        if info.annotation is bool:
+            data[field] = config_service.get_bool(field, bool(info.default))
             continue
         val = config_service.get(field)
         # Redact secrets for display
@@ -550,7 +557,10 @@ def _write_feature(feature: str, payload_dict: dict) -> None:
         # Skip placeholder values (user left secret field as bullets)
         if isinstance(value, str) and value.startswith("••"):
             continue
-        pairs[key] = str(value) if not isinstance(value, str) else value
+        if isinstance(value, bool):
+            pairs[key] = "1" if value else "0"   # get_bool's canonical form
+        else:
+            pairs[key] = value if isinstance(value, str) else str(value)
     config_service.set_many(pairs)
 
     if feature == "azure":

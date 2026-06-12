@@ -61,10 +61,12 @@ async def lifespan(app: FastAPI):
             asyncio.create_task(_warm_azure_images(),       name="warm_azure_images"),
             asyncio.create_task(_warm_azure_network_opts(), name="warm_azure_network_opts"),
         ]
-    if settings.portainer_enabled:
-        warmers.append(
-            asyncio.create_task(_warm_portainer_containers(), name="warm_portainer_containers")
-        )
+    # Portainer warmer — always launched; each pass no-ops cleanly while the
+    # feature is disabled or unconfigured, so enabling Portainer in Settings
+    # starts the sweeps without an app restart.
+    warmers.append(
+        asyncio.create_task(_warm_portainer_containers(), name="warm_portainer_containers")
+    )
 
     # Cloud-identity JIT sweeper (Phase 4a) — reconciles entitle_activations
     # against Entitle's view. Loop always launched; sweeper no-ops cleanly
@@ -262,21 +264,24 @@ async def _warm_azure_network_opts() -> None:
 
 
 async def _warm_portainer_containers() -> None:
-    """Periodically refresh all Portainer container state into the DB cache."""
+    """Periodically refresh Portainer container state into the DB cache."""
     from .database import SessionLocal
     from .services import container_inventory_service
 
     interval = 60  # seconds — matches portainer_service in-memory cache TTL
     while True:
-        db = SessionLocal()
-        try:
-            await container_inventory_service.populate_all_workgroups(
-                db, list(settings.workgroups.keys())
-            )
-        except Exception as exc:
-            logger.warning("container warmer failed: %s", exc)
-        finally:
-            db.close()
+        # Gate each pass on the live flag + a configured URL so the loop stays
+        # quiet until Portainer is set up, and honors Settings changes live.
+        enabled = config_service.get_bool("portainer_enabled", settings.portainer_enabled)
+        configured = bool(config_service.get("portainer_url") or settings.portainer_url)
+        if enabled and configured:
+            db = SessionLocal()
+            try:
+                await container_inventory_service.populate_all(db)
+            except Exception as exc:
+                logger.warning("container warmer failed: %s", exc)
+            finally:
+                db.close()
         await asyncio.sleep(interval)
 
 

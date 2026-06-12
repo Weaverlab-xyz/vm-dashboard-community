@@ -190,13 +190,13 @@ class Settings(BaseSettings):
     # remains as a Password-Safe-only fallback.
     aws_ecs_docker_deploy_key: str = ""
 
-    # Portainer CE integration
-    portainer_url: str = ""                          # e.g. "http://portainer.local:9000"  (Weaverlab)
-    portainer_pat_secret_title: str = "Portainer_PAT"  # BeyondTrust Password Safe secret title (Weaverlab)
-    portainer_verify_ssl: bool = True                # Set False for self-signed certs (Weaverlab)
-    portainer_url_hydra: str = ""                    # Hydra workgroup Portainer CE URL
-    portainer_pat_secret_title_hydra: str = "Portainer_PAT_Hydra"  # Password Safe secret title (Hydra)
-    portainer_verify_ssl_hydra: bool = True          # Set False for self-signed certs (Hydra)
+    # Portainer CE integration — a single connection, configured via
+    # Settings → Integrations → Portainer CE (config_service); these env vars
+    # are the fallback for compose-file-driven installs.
+    portainer_url: str = ""                          # e.g. "http://portainer.local:9000"
+    portainer_pat: str = ""                          # API token; Settings stores it encrypted in the DB
+    portainer_pat_secret_title: str = "Portainer_PAT"  # legacy fallback: BeyondTrust Password Safe secret title
+    portainer_verify_ssl: bool = True                # Set False for self-signed certs
     portainer_agent_image: str = "portainer/agent:latest"
     portainer_agent_port: int = 9001
     ansible_local_image: str = "willhallonline/ansible:latest"

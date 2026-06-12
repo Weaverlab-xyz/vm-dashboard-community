@@ -241,10 +241,11 @@ def get(key: str, default: str = "", workgroup: str | None = None) -> str:
 
 
 def get_bool(key: str, default: bool = False) -> bool:
-    """Return a config flag as bool. Stored as '1'/'0'; env-var fallback via settings."""
+    """Return a config flag as bool. Stored as '1'/'0' (legacy rows may hold
+    'True'/'False' from pre-normalization _write_feature); env-var fallback via settings."""
     val = get(key)
     if val:
-        return val == "1"
+        return val.strip().lower() in ("1", "true", "yes", "on")
     # Fall back to settings (env var)
     from ..config import settings
     return bool(getattr(settings, key, default))

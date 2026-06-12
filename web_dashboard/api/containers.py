@@ -20,8 +20,6 @@ from ..database import ContainerStateCache, User, get_db  # noqa: F401
 from ..models.containers import (
     ACIContainerInstanceInfo,
     ACIContainerListResponse,
-    CloudRunServiceInfo,
-    CloudRunServiceListResponse,
     ContainerActionResponse,
     ContainerInfo,
     ContainerListResponse,
@@ -31,6 +29,8 @@ from ..models.containers import (
     DeployStackResponse,
     ECSTaskInfo,
     ECSTaskListResponse,
+    GCEJumpointInfo,
+    GCEJumpointListResponse,
     PortainerEndpoint,
     PortainerEndpointList,
     StackInfo,
@@ -39,7 +39,7 @@ from ..models.containers import (
 from ..services import aws_service, azure_service, container_inventory_service, job_service, portainer_service
 from ..services.aws_service import AWSError
 from ..services.azure_service import AzureError
-from ..services.portainer_service import PortainerError
+from ..services.portainer_service import PortainerError, PortainerNotConfigured
 from .auth import get_current_user, require_permission
 
 logger = logging.getLogger(__name__)
@@ -138,13 +138,18 @@ def _map_stack(raw: dict) -> StackInfo:
 
 @router.get("/endpoints", response_model=PortainerEndpointList)
 async def list_endpoints(
-    workgroup: str = Query("weaverlab"),
     current_user: User = Depends(require_permission("containers", "read")),
 ):
     """Return all Portainer environments/endpoints."""
     try:
-        raw = await portainer_service.list_endpoints(workgroup=workgroup)
+        raw = await portainer_service.list_endpoints()
         return PortainerEndpointList(endpoints=[_map_endpoint(e) for e in raw])
+    except PortainerNotConfigured as exc:
+        # Structured detail so the page can render a setup card instead of an error
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "portainer_not_configured", "message": str(exc)},
+        )
     except PortainerError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
 
@@ -156,7 +161,6 @@ async def list_containers(
     background_tasks: BackgroundTasks,
     endpoint_id: int = Query(..., description="Portainer endpoint/environment ID"),
     all_containers: bool = Query(True, description="Include stopped containers"),
-    workgroup: str = Query("weaverlab"),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("containers", "read")),
 ):
@@ -165,25 +169,25 @@ async def list_containers(
     Cold start (empty DB for this endpoint): blocks and populates from Portainer.
     Warm path: returns DB rows instantly, queues a background Portainer sync.
     """
-    count = container_inventory_service.count_containers_in_db(db, workgroup, endpoint_id)
+    count = container_inventory_service.count_containers_in_db(db, endpoint_id)
     if count == 0:
         # Cold start — block until DB is populated
-        await container_inventory_service.sync_from_portainer(db, workgroup, endpoint_id)
+        await container_inventory_service.sync_from_portainer(db, endpoint_id)
     else:
         # Warm path — return immediately, sync in background
-        background_tasks.add_task(_bg_sync_containers, workgroup, endpoint_id)
+        background_tasks.add_task(_bg_sync_containers, endpoint_id)
 
-    items = container_inventory_service.get_containers_from_db(db, workgroup, endpoint_id, all_containers)
+    items = container_inventory_service.get_containers_from_db(db, endpoint_id, all_containers)
     return ContainerListResponse(containers=items, count=len(items))
 
 
-async def _bg_sync_containers(workgroup: str, endpoint_id: int) -> None:
+async def _bg_sync_containers(endpoint_id: int) -> None:
     """Background task: refresh container state for one endpoint from Portainer."""
     db = container_inventory_service.get_fresh_db()
     try:
-        await container_inventory_service.sync_from_portainer(db, workgroup, endpoint_id)
+        await container_inventory_service.sync_from_portainer(db, endpoint_id)
     except Exception as exc:
-        logger.warning("bg container sync failed (wg=%s ep=%d): %s", workgroup, endpoint_id, exc)
+        logger.warning("bg container sync failed (ep=%d): %s", endpoint_id, exc)
     finally:
         db.close()
 
@@ -192,12 +196,11 @@ async def _bg_sync_containers(workgroup: str, endpoint_id: int) -> None:
 async def start_container(
     container_id: str,
     endpoint_id: int = Query(...),
-    workgroup: str = Query("weaverlab"),
     current_user: User = Depends(require_permission("containers", "write")),
 ):
     """Start a container. Fast operation — returns immediately."""
     try:
-        await portainer_service.start_container(endpoint_id, container_id, workgroup=workgroup)
+        await portainer_service.start_container(endpoint_id, container_id)
         return ContainerActionResponse(ok=True, message="Container started")
     except PortainerError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
@@ -207,12 +210,11 @@ async def start_container(
 async def stop_container(
     container_id: str,
     endpoint_id: int = Query(...),
-    workgroup: str = Query("weaverlab"),
     current_user: User = Depends(require_permission("containers", "write")),
 ):
     """Stop a container. Fast operation — returns immediately."""
     try:
-        await portainer_service.stop_container(endpoint_id, container_id, workgroup=workgroup)
+        await portainer_service.stop_container(endpoint_id, container_id)
         return ContainerActionResponse(ok=True, message="Container stopped")
     except PortainerError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
@@ -223,12 +225,11 @@ async def remove_container(
     container_id: str,
     endpoint_id: int = Query(...),
     force: bool = Query(True),
-    workgroup: str = Query("weaverlab"),
     current_user: User = Depends(require_permission("containers", "delete")),
 ):
     """Remove a container."""
     try:
-        await portainer_service.remove_container(endpoint_id, container_id, force, workgroup=workgroup)
+        await portainer_service.remove_container(endpoint_id, container_id, force)
         return ContainerActionResponse(ok=True, message="Container removed")
     except PortainerError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
@@ -240,7 +241,6 @@ async def remove_container(
 async def deploy_container(
     req: DeployContainerRequest,
     background_tasks: BackgroundTasks,
-    workgroup: str = Query("weaverlab"),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("containers", "write")),
 ):
@@ -267,7 +267,6 @@ async def deploy_container(
         [p.model_dump() for p in req.ports],
         [e.model_dump() for e in req.env],
         req.restart_policy,
-        workgroup,
     )
     return DeployContainerResponse(
         job_id=job.id,
@@ -284,7 +283,6 @@ async def _run_deploy_container(
     ports: list[dict],
     env: list[dict],
     restart_policy: str,
-    workgroup: str = "weaverlab",
 ):
     db = _get_db_session()
     try:
@@ -298,7 +296,6 @@ async def _run_deploy_container(
             ports=ports,
             env=env,
             restart_policy=restart_policy,
-            workgroup=workgroup,
         )
 
         job_service.update_progress(db, job_id, 90, f"Container created ({result['container_id'][:12]}), starting…")
@@ -321,12 +318,11 @@ async def _run_deploy_container(
 @router.get("/stacks", response_model=StackListResponse)
 async def list_stacks(
     endpoint_id: int = Query(...),
-    workgroup: str = Query("weaverlab"),
     current_user: User = Depends(require_permission("containers", "read")),
 ):
     """List Portainer stacks on the given endpoint."""
     try:
-        raw = await portainer_service.list_stacks(endpoint_id, workgroup=workgroup)
+        raw = await portainer_service.list_stacks(endpoint_id)
         items = [_map_stack(s) for s in raw]
         return StackListResponse(stacks=items, count=len(items))
     except PortainerError as exc:
@@ -337,7 +333,6 @@ async def list_stacks(
 async def deploy_stack(
     req: DeployStackRequest,
     background_tasks: BackgroundTasks,
-    workgroup: str = Query("weaverlab"),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("containers", "write")),
 ):
@@ -360,7 +355,6 @@ async def deploy_stack(
         req.name,
         req.compose_content,
         [e.model_dump() for e in req.env],
-        workgroup,
     )
     return DeployStackResponse(
         job_id=job.id,
@@ -375,7 +369,6 @@ async def _run_deploy_stack(
     name: str,
     compose_content: str,
     env: list[dict],
-    workgroup: str = "weaverlab",
 ):
     db = _get_db_session()
     try:
@@ -387,7 +380,6 @@ async def _run_deploy_stack(
             name=name,
             compose_content=compose_content,
             env=env,
-            workgroup=workgroup,
         )
 
         stack_id = stack.get("Id", "?")
@@ -495,70 +487,67 @@ async def stop_aci_container(
         raise HTTPException(status_code=503, detail=str(exc))
 
 
-# ── GCP Cloud Run services ────────────────────────────────────────────────────
+# ── GCP Jumpoint container instances (COS on GCE) ────────────────────────────
+# The BT SRA Jumpoint is an outbound-only daemon, so it runs as a container on
+# a Container-Optimised-OS GCE instance — not Cloud Run (which requires an HTTP
+# server on $PORT). See gcp_service.run_gce_jumpoint.
 
-@router.get("/cloud-run-services", response_model=CloudRunServiceListResponse)
-async def list_cloud_run_services_endpoint(
+def _gcp_project_id() -> str:
+    """GCP project, wizard/Settings (config_service) first, env fallback."""
+    from ..services import config_service
+    return config_service.get("gcp_project_id") or settings.gcp_project_id
+
+
+@router.get("/gce-jumpoints", response_model=GCEJumpointListResponse)
+async def list_gce_jumpoints_endpoint(
     current_user: User = Depends(require_permission("containers", "read")),
 ):
-    """List GCP Cloud Run services in the configured project + region."""
+    """List BT Jumpoint container instances (labels.purpose=bt-jumpoint) across zones."""
     from ..services import gcp_service
     from ..services.gcp_service import GCPError
 
-    project_id = settings.gcp_project_id
+    project_id = _gcp_project_id()
     if not project_id:
         raise HTTPException(status_code=503, detail="GCP project not configured.")
-    region = (
-        getattr(settings, "gcp_ansible_cloud_run_region", "")
-        or settings.gcp_region
-        or "us-central1"
-    )
     try:
-        raw = await gcp_service.list_cloud_run_services(project_id, region)
-        services = [
-            CloudRunServiceInfo(
-                name=s.get("name", ""),
-                region=s.get("region", region),
-                image=s.get("image", ""),
-                uri=s.get("uri", ""),
-                ready=bool(s.get("ready", False)),
-                traffic_percent=int(s.get("traffic_percent", 0)),
-                create_time=s.get("create_time"),
-                update_time=s.get("update_time"),
-                last_modifier=s.get("last_modifier", ""),
+        raw = await gcp_service.list_gce_jumpoints(project_id)
+        instances = [
+            GCEJumpointInfo(
+                name=i.get("name", ""),
+                zone=i.get("zone", ""),
+                status=i.get("status", "UNKNOWN"),
+                machine_type=i.get("machine_type", ""),
+                image=i.get("image", ""),
+                internal_ip=i.get("internal_ip", ""),
+                external_ip=i.get("external_ip", ""),
+                created_at=i.get("created_at"),
             )
-            for s in raw
+            for i in raw
         ]
-        return CloudRunServiceListResponse(
-            services=services,
+        return GCEJumpointListResponse(
+            instances=instances,
             project_id=project_id,
-            region=region,
-            count=len(services),
+            count=len(instances),
         )
     except GCPError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
 
 
-@router.post("/cloud-run-services/{name}/stop", response_model=ContainerActionResponse)
-async def delete_cloud_run_service_endpoint(
+@router.post("/gce-jumpoints/{name}/stop", response_model=ContainerActionResponse)
+async def stop_gce_jumpoint_endpoint(
     name: str,
+    zone: str = Query(..., description="GCE zone the instance lives in"),
     current_user: User = Depends(require_permission("containers", "delete")),
 ):
-    """Delete a Cloud Run service. (Cloud Run already scales to zero on idle —
-    delete is the actionable lifecycle operation for a service you don't want.)"""
+    """Stop (delete) a Jumpoint instance. It is recreated on the next VM deploy."""
     from ..services import gcp_service
     from ..services.gcp_service import GCPError
 
-    project_id = settings.gcp_project_id
+    project_id = _gcp_project_id()
     if not project_id:
         raise HTTPException(status_code=503, detail="GCP project not configured.")
-    region = (
-        getattr(settings, "gcp_ansible_cloud_run_region", "")
-        or settings.gcp_region
-        or "us-central1"
-    )
     try:
-        await gcp_service.delete_cloud_run_service(project_id, region, name)
-        return ContainerActionResponse(ok=True, message="Cloud Run service deleted")
+        await gcp_service.stop_gce_jumpoint(project_id, zone, name)
+        return ContainerActionResponse(ok=True, message="Jumpoint instance deleted")
     except GCPError as exc:
         raise HTTPException(status_code=503, detail=str(exc))

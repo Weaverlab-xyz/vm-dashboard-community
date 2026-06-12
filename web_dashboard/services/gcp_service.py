@@ -719,6 +719,69 @@ async def stop_gce_jumpoint(project_id: str, zone: str, name: str) -> None:
         raise GCPError(f"Failed to stop GCE Jumpoint '{name}': {e}") from e
 
 
+def _container_image_from_metadata(info) -> str:
+    """Best-effort: pull the container image out of the gce-container-declaration
+    metadata COS boots from. Returns "" on any parse failure."""
+    try:
+        import yaml
+        for item in info.metadata.items:
+            if item.key == "gce-container-declaration":
+                spec = yaml.safe_load(item.value)
+                return spec["spec"]["containers"][0]["image"]
+    except Exception:
+        pass
+    return ""
+
+
+def _list_gce_jumpoints_sync(project_id: str) -> list[dict]:
+    """List Jumpoint COS instances across all zones (labels.purpose=bt-jumpoint).
+    Aggregated list because each Jumpoint follows its paired VM's deploy zone."""
+    _require_compute()
+    from google.cloud import compute_v1
+
+    creds = _gcp_creds()
+    client = compute_v1.InstancesClient(credentials=creds)
+    request = compute_v1.AggregatedListInstancesRequest(
+        project=project_id,
+        filter=f'labels.purpose = "{_JUMPOINT_LABEL}"',
+    )
+
+    results = []
+    for zone_path, scoped in client.aggregated_list(request=request):
+        for inst in (scoped.instances or []):
+            labels = dict(inst.labels) if inst.labels else {}
+            if labels.get("purpose") != _JUMPOINT_LABEL:
+                continue
+            internal_ip = ""
+            external_ip = ""
+            for nic in inst.network_interfaces:
+                internal_ip = nic.network_i_p or internal_ip
+                for ac in nic.access_configs:
+                    if ac.nat_i_p:
+                        external_ip = ac.nat_i_p
+            results.append({
+                "name":         inst.name,
+                "zone":         zone_path.split("/")[-1],
+                "status":       inst.status,
+                "machine_type": inst.machine_type.split("/")[-1] if inst.machine_type else "",
+                "image":        _container_image_from_metadata(inst),
+                "internal_ip":  internal_ip,
+                "external_ip":  external_ip,
+                "created_at":   inst.creation_timestamp or "",
+            })
+    return results
+
+
+async def list_gce_jumpoints(project_id: str) -> list[dict]:
+    """List the BT Jumpoint container instances (COS on GCE) in the project."""
+    try:
+        return await asyncio.to_thread(_list_gce_jumpoints_sync, project_id)
+    except GCPError:
+        raise
+    except Exception as e:
+        raise GCPError(f"Failed to list GCE Jumpoint instances: {e}") from e
+
+
 # ── Cloud Run Jobs Ansible runner (mirrors ACI runner in azure_service.py) ───
 
 _ANSIBLE_RUNNER_PREFIX = "ansible-runner"
@@ -889,69 +952,6 @@ async def run_cloud_run_ansible_task(
         raise
     except Exception as e:
         raise GCPError(f"Failed to run Cloud Run Ansible task: {e}") from e
-
-
-# ── Cloud Run Services (long-running container instances) ─────────────────────
-
-def _list_cloud_run_services_sync(project_id: str, region: str) -> list[dict]:
-    """List Cloud Run services in a region. Each entry summarises the service."""
-    from google.cloud import run_v2
-    creds = _gcp_creds()
-    client = run_v2.ServicesClient(credentials=creds)
-    parent = f"projects/{project_id}/locations/{region}"
-    out: list[dict] = []
-    for svc in client.list_services(parent=parent):
-        image = ""
-        if svc.template and svc.template.containers:
-            image = svc.template.containers[0].image or ""
-        ready = False
-        for cond in (svc.terminal_condition,) if svc.terminal_condition else ():
-            if cond.type_ == "Ready":
-                ready = (cond.state == run_v2.Condition.State.CONDITION_SUCCEEDED)
-        traffic_pct = sum((t.percent or 0) for t in (svc.traffic_statuses or [])) or 100
-        last_modifier = svc.last_modifier or ""
-        out.append({
-            "name": svc.name.split("/")[-1],
-            "full_name": svc.name,
-            "region": region,
-            "image": image,
-            "uri": svc.uri or "",
-            "ready": ready,
-            "traffic_percent": traffic_pct,
-            "create_time": svc.create_time.isoformat() if svc.create_time else None,
-            "update_time": svc.update_time.isoformat() if svc.update_time else None,
-            "last_modifier": last_modifier,
-        })
-    return out
-
-
-async def list_cloud_run_services(project_id: str, region: str) -> list[dict]:
-    """List Cloud Run services in a region (async wrapper)."""
-    try:
-        return await asyncio.to_thread(_list_cloud_run_services_sync, project_id, region)
-    except GCPError:
-        raise
-    except Exception as e:
-        raise GCPError(f"Failed to list Cloud Run services in {region}: {e}") from e
-
-
-def _delete_cloud_run_service_sync(project_id: str, region: str, name: str) -> None:
-    from google.cloud import run_v2
-    creds = _gcp_creds()
-    client = run_v2.ServicesClient(credentials=creds)
-    full = f"projects/{project_id}/locations/{region}/services/{name}"
-    op = client.delete_service(name=full)
-    op.result(timeout=120)
-
-
-async def delete_cloud_run_service(project_id: str, region: str, name: str) -> None:
-    """Delete a Cloud Run service (async wrapper)."""
-    try:
-        await asyncio.to_thread(_delete_cloud_run_service_sync, project_id, region, name)
-    except GCPError:
-        raise
-    except Exception as e:
-        raise GCPError(f"Failed to delete Cloud Run service '{name}': {e}") from e
 
 
 # ── Export custom image to VHD on GCS (portable artefact) ─────────────────────
