@@ -25,6 +25,7 @@ try:
         VirtualMachine, HardwareProfile, StorageProfile, ImageReference,
         OSDisk, DiskCreateOptionTypes, OSProfile, LinuxConfiguration,
         SshConfiguration, SshPublicKey, NetworkProfile, NetworkInterfaceReference,
+        WindowsConfiguration,
     )
     from azure.mgmt.network import NetworkManagementClient
     from azure.mgmt.network.models import (
@@ -404,6 +405,10 @@ _MARKETPLACE_SOURCES = {
         {"publisher": "Debian", "offer": "debian-12", "sku": "12-gen2"},
         {"publisher": "Debian", "offer": "debian-11", "sku": "11-gen2"},
     ],
+    "windows": [
+        {"publisher": "MicrosoftWindowsServer", "offer": "WindowsServer", "sku": "2022-datacenter-azure-edition"},
+        {"publisher": "MicrosoftWindowsServer", "offer": "WindowsServer", "sku": "2022-datacenter-azure-edition-core"},
+    ],
 }
 
 
@@ -633,6 +638,46 @@ async def check_vm_quota(location: str, vm_size: str) -> None:
 
 # ── VM operations ─────────────────────────────────────────────────────────────
 
+_PASSWORD_SYMBOLS = "!@#$%^&*()-_=+"
+
+
+def generate_windows_admin_password(length: int = 20) -> str:
+    """Random password satisfying Azure's Windows rules (12–123 chars, 3 of 4
+    character classes) — always includes all four classes for margin."""
+    import random
+    import secrets
+    import string
+    length = max(length, 12)
+    chars = [
+        secrets.choice(string.ascii_uppercase),
+        secrets.choice(string.ascii_lowercase),
+        secrets.choice(string.digits),
+        secrets.choice(_PASSWORD_SYMBOLS),
+    ]
+    alphabet = string.ascii_letters + string.digits + _PASSWORD_SYMBOLS
+    chars += [secrets.choice(alphabet) for _ in range(length - len(chars))]
+    random.SystemRandom().shuffle(chars)
+    return "".join(chars)
+
+
+def store_windows_admin_password(vm_name: str, key_suffix: str, password: str) -> tuple[str, str]:
+    """Store a generated Windows admin password in the configured secrets
+    backend. Returns ``(backend, ref)`` for job metadata — job records carry
+    the reference, never the plaintext. Raises AzureError when the write
+    fails: a Windows VM whose password can't be retrieved later is useless,
+    so callers must store before deploying."""
+    from . import config_service, secrets_backend_service
+    backend = config_service.get("secrets_backend") or "database"
+    key = f"windows-admin-{vm_name}-{key_suffix}"
+    try:
+        ref = secrets_backend_service.write_sync(backend, key, password)
+    except Exception as e:
+        raise AzureError(
+            f"Failed to store Windows admin password for {vm_name} in secrets backend '{backend}': {e}"
+        ) from e
+    return backend, ref
+
+
 def _deploy_vm_sync(
     cred, sub_id: str, rg: str, location: str, vm_name: str, vm_size: str,
     image_id: str, subnet_id: str, nsg_ids: list, create_public_ip: bool,
@@ -640,16 +685,23 @@ def _deploy_vm_sync(
     image_publisher: str = None, image_offer: str = None,
     image_sku: str = None, image_version: str = None,
     workgroup: str = "",
+    os_type: str = "Linux", admin_password: str = "",
 ) -> dict:
-    # Sanitize the public key as a defence-in-depth — callers should already
-    # be passing a single-line OpenSSH entry, but a stray CR/LF here will
-    # cause waagent to reject the key and SSH auth to silently fail.
-    ssh_public_key = _clean_ssh_public_key(ssh_public_key)
-    crumbs = _ssh_key_breadcrumbs(ssh_public_key)
-    logger.info(
-        "Azure deploy %s: injecting SSH key algo=%s len=%d sha256_12=%s comment=%r as user=%s",
-        vm_name, crumbs["algo"], crumbs["len"], crumbs["sha256_12"], crumbs["comment"], ssh_username,
-    )
+    is_windows = (os_type or "Linux").lower() == "windows"
+    if is_windows:
+        if not admin_password:
+            raise AzureError(f"Windows deploy {vm_name}: admin_password is required.")
+        logger.info("Azure deploy %s: Windows VM, admin user=%s (password auth)", vm_name, ssh_username)
+    else:
+        # Sanitize the public key as a defence-in-depth — callers should already
+        # be passing a single-line OpenSSH entry, but a stray CR/LF here will
+        # cause waagent to reject the key and SSH auth to silently fail.
+        ssh_public_key = _clean_ssh_public_key(ssh_public_key)
+        crumbs = _ssh_key_breadcrumbs(ssh_public_key)
+        logger.info(
+            "Azure deploy %s: injecting SSH key algo=%s len=%d sha256_12=%s comment=%r as user=%s",
+            vm_name, crumbs["algo"], crumbs["len"], crumbs["sha256_12"], crumbs["comment"], ssh_username,
+        )
     compute = _get_compute(cred, sub_id)
     network = _get_network(cred, sub_id)
     tags = {"ManagedBy": "vm-cli-dashboard"}
@@ -707,18 +759,18 @@ def _deploy_vm_sync(
         logger.info("Deploy: using managed image %s", image_id)
 
     # Step 4: Create VM
-    vm_params = VirtualMachine(
-        location=location,
-        tags=tags,
-        hardware_profile=HardwareProfile(vm_size=vm_size),
-        storage_profile=StorageProfile(
-            image_reference=image_ref,
-            os_disk=OSDisk(
-                create_option=DiskCreateOptionTypes.FROM_IMAGE,
-                delete_option="Delete",
+    if is_windows:
+        os_profile = OSProfile(
+            computer_name=vm_name[:15],
+            admin_username=ssh_username,
+            admin_password=admin_password,
+            windows_configuration=WindowsConfiguration(
+                provision_vm_agent=True,
+                enable_automatic_updates=True,
             ),
-        ),
-        os_profile=OSProfile(
+        )
+    else:
+        os_profile = OSProfile(
             computer_name=vm_name[:15],
             admin_username=ssh_username,
             linux_configuration=LinuxConfiguration(
@@ -732,7 +784,19 @@ def _deploy_vm_sync(
                     ]
                 ),
             ),
+        )
+    vm_params = VirtualMachine(
+        location=location,
+        tags=tags,
+        hardware_profile=HardwareProfile(vm_size=vm_size),
+        storage_profile=StorageProfile(
+            image_reference=image_ref,
+            os_disk=OSDisk(
+                create_option=DiskCreateOptionTypes.FROM_IMAGE,
+                delete_option="Delete",
+            ),
         ),
+        os_profile=os_profile,
         network_profile=NetworkProfile(
             network_interfaces=[NetworkInterfaceReference(id=nic.id, primary=True)]
         ),
@@ -769,6 +833,7 @@ async def deploy_vm(
     image_publisher: str = None, image_offer: str = None,
     image_sku: str = None, image_version: str = None,
     workgroup: str = "",
+    os_type: str = "Linux", admin_password: str = "",
 ) -> dict:
     try:
         cred, sub_id = await _ensure_creds()
@@ -779,6 +844,7 @@ async def deploy_vm(
             ssh_username, ssh_public_key,
             image_publisher, image_offer, image_sku, image_version,
             workgroup,
+            os_type=os_type, admin_password=admin_password,
         )
     except AzureError:
         raise

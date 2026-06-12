@@ -103,14 +103,22 @@
             <div x-show="azure.loading" x-cloak class="text-xs text-gray-400">Loading Azure options…</div>
             <div>
               <label class="block text-sm font-medium text-gray-700 mb-1">Desktop image *</label>
-              <select x-model="form.image_id" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              <select x-model="form.image_id" @change="syncOsTypeFromImage()" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
                 <option value="">— select a private image —</option>
-                <template x-for="im in azure.images" :key="im.id || im.name">
-                  <option :value="im.id || im.image_id" x-text="im.name || im.id"></option>
+                <template x-for="im in azure.images" :key="im.resource_id || im.name">
+                  <option :value="im.resource_id" x-text="im.name || im.resource_id"></option>
                 </template>
               </select>
               <p class="text-xs text-gray-400 mt-1">Gallery / managed images. Paste a full ARM image id below if it's not listed.</p>
               <input type="text" x-model="form.image_id" class="mt-1 w-full border border-gray-200 rounded-lg px-3 py-1.5 text-xs font-mono" placeholder="/subscriptions/…/images/…">
+              <div class="mt-2 flex items-center gap-2">
+                <label class="text-xs font-medium text-gray-700">Guest OS:</label>
+                <select x-model="form.os_type" class="border border-gray-300 rounded-lg px-2 py-1 text-xs">
+                  <option>Linux</option>
+                  <option>Windows</option>
+                </select>
+                <span class="text-xs text-gray-400">auto-set from the selected image; override for pasted ids</span>
+              </div>
             </div>
             <div class="grid grid-cols-2 gap-3">
               <div>
@@ -148,13 +156,19 @@
                 <input type="text" x-model="form.resource_group" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="(default)">
               </div>
               <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">SSH username</label>
+                <label class="block text-sm font-medium text-gray-700 mb-1"
+                       x-text="form.os_type === 'Windows' ? 'Admin username' : 'SSH username'"></label>
                 <input type="text" x-model="form.ssh_username" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="azureuser">
               </div>
             </div>
-            <div>
+            <div x-show="form.os_type !== 'Windows'">
               <label class="block text-sm font-medium text-gray-700 mb-1">SSH public key *</label>
               <textarea x-model="form.ssh_public_key" rows="2" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-xs font-mono" placeholder="ssh-rsa AAAA…"></textarea>
+            </div>
+            <div x-show="form.os_type === 'Windows'" x-cloak
+                 class="text-xs text-blue-800 bg-blue-50 border border-blue-200 rounded-lg p-3">
+              Each Windows seat gets its own generated admin password, stored in the secrets
+              backend — retrieve per VM via <strong>Azure → VMs → Password</strong>.
             </div>
             <label class="flex items-center gap-2 text-sm text-gray-700">
               <input type="checkbox" x-model="form.create_public_ip"> Give each desktop a public IP
@@ -194,8 +208,14 @@ function desktopsPage() {
       return {
         cloud: 'azure', name: '', count: 1,
         image_id: '', location: '', vm_size: '', subnet_id: '', nsg_id: '',
-        resource_group: '', ssh_username: 'azureuser', ssh_public_key: '', create_public_ip: false,
+        resource_group: '', os_type: 'Linux', ssh_username: 'azureuser',
+        ssh_public_key: '', create_public_ip: false,
       };
+    },
+
+    syncOsTypeFromImage() {
+      const im = (this.azure.images || []).find(i => i.resource_id === this.form.image_id);
+      if (im && im.os_type) this.form.os_type = im.os_type;
     },
 
     async init() { requireAuth(); this.form = this._blankForm(); await this.refresh(); },
@@ -240,7 +260,11 @@ function desktopsPage() {
 
     canSubmit() {
       if (!this.form.name || !this.form.count) return false;
-      if (this.form.cloud === 'azure') return !!(this.form.image_id && this.form.vm_size && this.form.subnet_id && this.form.ssh_public_key);
+      if (this.form.cloud === 'azure') {
+        const common = this.form.image_id && this.form.vm_size && this.form.subnet_id;
+        if (this.form.os_type === 'Windows') return !!common;
+        return !!(common && this.form.ssh_public_key);
+      }
       return true;
     },
 
@@ -253,7 +277,8 @@ function desktopsPage() {
           Object.assign(body, {
             image_id: f.image_id, location: f.location, vm_size: f.vm_size,
             subnet_id: f.subnet_id, nsg_ids: f.nsg_id ? [f.nsg_id] : [],
-            resource_group: f.resource_group, ssh_username: f.ssh_username || 'azureuser',
+            resource_group: f.resource_group, os_type: f.os_type || 'Linux',
+            ssh_username: f.ssh_username || 'azureuser',
             ssh_public_key: f.ssh_public_key, create_public_ip: !!f.create_public_ip,
           });
         }

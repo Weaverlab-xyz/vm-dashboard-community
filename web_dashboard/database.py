@@ -506,6 +506,9 @@ class RegisteredImage(Base):
     # promote flow re-import without re-running Packer.
     artefact_url = Column(String(1000), nullable=True)
     artefact_format = Column(String(20), nullable=True)      # "vhd" | "raw" | "vmdk" | "ova"
+    # Guest OS of the artefact ("Linux" | "Windows"). Promote targets need it —
+    # Azure managed-image import rejects/boots wrong with a mismatched os_type.
+    os_type = Column(String(20), nullable=True)
 
     # Per-target promotion records. Shape:
     #   { "aws":   {"image_id": "ami-…", "region": "us-east-2", "status": "completed"|"manual"|"failed", "notes": "..."},
@@ -675,6 +678,9 @@ def init_db():
             # VDI Phase 1: seats track who/when for newest-first scale-down + listing.
             "ALTER TABLE virtual_desktops ADD COLUMN created_by VARCHAR(100)",
             "ALTER TABLE virtual_desktops ADD COLUMN created_at TIMESTAMP",
+            # Windows image builds: registry rows carry the guest OS so promotes
+            # don't default Windows VHDs to Linux managed images.
+            "ALTER TABLE registered_images ADD COLUMN os_type VARCHAR(20)",
         ]
         for stmt in _migrations:
             if _is_sqlite:

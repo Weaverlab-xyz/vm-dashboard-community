@@ -27,8 +27,9 @@ class PoolCreateRequest(BaseModel):
     subnet_id: Optional[str] = None
     nsg_ids: list[str] = []
     create_public_ip: bool = False          # desktops are private + brokered
-    ssh_username: str = "azureuser"
-    ssh_public_key: Optional[str] = None     # client-provided (as the Azure deploy form does)
+    os_type: str = "Linux"                  # "Linux" | "Windows" — Windows seats get generated passwords
+    ssh_username: str = "azureuser"         # admin username on Windows
+    ssh_public_key: Optional[str] = None     # client-provided (as the Azure deploy form does); Linux only
 
 
 class PoolScaleRequest(BaseModel):

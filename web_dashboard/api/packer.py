@@ -108,6 +108,7 @@ async def build_azure_image(
             "image_publisher": req.image_publisher,
             "image_offer": req.image_offer,
             "image_sku": req.image_sku,
+            "os_type": req.os_type,
         },
     )
     job_service.log_audit(
@@ -249,8 +250,11 @@ async def _run_azure_build(job_id: str, req: AzurePackerBuildRequest, created_by
         env["PKR_VAR_resource_group"] = resource_group
         env["PKR_VAR_location"] = location
 
+        is_windows = req.os_type.lower() == "windows"
         job_service.update_progress(db, job_id, 5, "Generating Packer template…")
-        template = packer_service.generate_azure_template(
+        generate = (packer_service.generate_azure_windows_template if is_windows
+                    else packer_service.generate_azure_template)
+        template = generate(
             image_publisher=req.image_publisher,
             image_offer=req.image_offer,
             image_sku=req.image_sku,
@@ -259,7 +263,16 @@ async def _run_azure_build(job_id: str, req: AzurePackerBuildRequest, created_by
             has_provisioner=bool(req.provisioner_script.strip()),
         )
         (build_dir / "build.pkr.hcl").write_text(template)
-        _write_provisioner(build_dir, req.provisioner_script)
+        if is_windows:
+            _write_ps_provisioner(build_dir, req.provisioner_script)
+            if req.vm_size in ("Standard_B1s", "Standard_B2s"):
+                job_service.update_progress(
+                    db, job_id, 5,
+                    f"Note: {req.vm_size} (≤4 GB RAM) makes Windows builds very slow — "
+                    "Standard_D2s_v3 or larger is recommended.",
+                )
+        else:
+            _write_provisioner(build_dir, req.provisioner_script)
 
         def on_progress(pct, msg):
             job_service.update_progress(db, job_id, pct, msg)
@@ -286,6 +299,7 @@ async def _run_azure_build(job_id: str, req: AzurePackerBuildRequest, created_by
         # Export to portable VHD + auto-register (Phase 2)
         export_result = await export_and_register_azure(
             db, job_id, req.image_name, result.get("artifact_id") or "", resource_group, created_by,
+            os_type=req.os_type,
         )
         result.update(export_result)
 
@@ -396,6 +410,12 @@ def _write_provisioner(build_dir: Path, script: str) -> None:
     path = build_dir / "provision.sh"
     path.write_text(content)
     path.chmod(0o755)
+
+
+def _write_ps_provisioner(build_dir: Path, script: str) -> None:
+    """Write provision.ps1 for Windows builds. Always creates the file."""
+    content = script.strip() or "Write-Output 'Build complete.'"
+    (build_dir / "provision.ps1").write_text(content)
 
 
 # ── Export + auto-register helpers (Phase 2/3 — build-once, promote-many) ────
@@ -560,7 +580,7 @@ async def export_and_register_aws(
 
 async def export_and_register_azure(
     db, job_id: str, image_name: str, artefact_id: str,
-    resource_group: str, created_by: str,
+    resource_group: str, created_by: str, os_type: str = "Linux",
 ) -> dict:
     """Export an Azure managed image to VHD on the hub and register.
 
@@ -620,6 +640,7 @@ async def export_and_register_azure(
             source_region=_cfg("azure_location") or "centralus",
             artefact_url=artefact_url,
             artefact_format="vhd",
+            os_type=os_type,
         )
         result["registered_image_id"] = registered["id"]
         result["artefact_backend"] = final_backend

@@ -38,6 +38,7 @@ def _row_to_dict(row: RegisteredImage) -> dict:
         "source_region":   row.source_region,
         "artefact_url":    row.artefact_url,
         "artefact_format": row.artefact_format,
+        "os_type":         row.os_type or "Linux",
         "promotions":      row.promotions_dict,
         "created_at":      row.created_at.isoformat() if row.created_at else "",
         "created_by":      row.created_by,
@@ -70,6 +71,7 @@ def register_image(
     source_region: Optional[str] = None,
     artefact_url: Optional[str] = None,
     artefact_format: Optional[str] = None,
+    os_type: str = "Linux",
 ) -> dict:
     if source_cloud not in VALID_CLOUDS:
         raise ImageRegistryError(
@@ -87,6 +89,7 @@ def register_image(
         source_region=(source_region or "").strip() or None,
         artefact_url=(artefact_url or "").strip() or None,
         artefact_format=(artefact_format or "").strip() or None,
+        os_type=(os_type or "").strip() or None,
         promotions=None,
         created_by=created_by,
     )
@@ -569,7 +572,7 @@ async def promote_to_azure_automated(
     *,
     target_resource_group: Optional[str] = None,
     target_location: Optional[str] = None,
-    os_type: str = "Linux",
+    os_type: Optional[str] = None,
     hyper_v_generation: str = "V2",
     progress_cb=None,
 ) -> dict:
@@ -586,8 +589,8 @@ async def promote_to_azure_automated(
         instead of an AMI id.
 
     target_resource_group / target_location default to the operator's
-    Azure RG / location config; os_type defaults to Linux + V2 which
-    matches the Phase-1 manual-steps walkthrough.
+    Azure RG / location config; os_type defaults to the registry record
+    (then Linux) + V2, matching the Phase-1 manual-steps walkthrough.
     """
     from . import promote_runner_service, azure_service, config_service
 
@@ -603,6 +606,7 @@ async def promote_to_azure_automated(
     hub_backend, hub_key = _parse_hub_url(image["artefact_url"])
     source_format = (image.get("artefact_format") or "vhd").lower()
     target_format = "vhd"  # Azure managed image only accepts VHD.
+    os_type = os_type or image.get("os_type") or "Linux"
 
     target_rg = target_resource_group or config_service.get(
         "promote_runner_azure_target_resource_group"

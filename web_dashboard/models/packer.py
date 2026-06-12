@@ -18,6 +18,7 @@ class AzurePackerBuildRequest(BaseModel):
     image_offer: str = "0001-com-ubuntu-server-jammy"
     image_sku: str = "22_04-lts"
     vm_size: str = "Standard_B2s"
+    os_type: str = "Linux"  # "Linux" | "Windows" — picks the template generator
     provisioner_script: str = ""
     archive_template: bool = False
 

@@ -140,6 +140,73 @@ def generate_azure_template(
     )
 
 
+def generate_azure_windows_template(
+    image_publisher: str,
+    image_offer: str,
+    image_sku: str,
+    vm_size: str,
+    image_name: str,
+    has_provisioner: bool,
+) -> str:
+    safe = _safe_azure_name(image_name)
+    # Operator script first, then a restart so feature installs settle before
+    # the generalize step.
+    prov = (
+        '\n  provisioner "powershell" {\n'
+        '    script = "provision.ps1"\n'
+        '  }\n'
+        '\n  provisioner "windows-restart" {}\n'
+    ) if has_provisioner else ""
+    # Canonical Azure Windows finisher: wait for the guest agents, sysprep
+    # /generalize, then poll ImageState until the reseal completes. Without it
+    # the captured image is specialized and can't be deployed.
+    sysprep = (
+        '\n  provisioner "powershell" {\n'
+        '    inline = [\n'
+        '      "while ((Get-Service RdAgent).Status -ne \'Running\') { Start-Sleep -s 5 }",\n'
+        '      "while ((Get-Service WindowsAzureGuestAgent).Status -ne \'Running\') { Start-Sleep -s 5 }",\n'
+        '      "& $env:SystemRoot\\\\System32\\\\Sysprep\\\\Sysprep.exe /oobe /generalize /quiet /quit /mode:vm",\n'
+        '      "while ($true) { $imageState = (Get-ItemProperty HKLM:\\\\SOFTWARE\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\Setup\\\\State).ImageState; Write-Output $imageState; if ($imageState -eq \'IMAGE_STATE_GENERALIZE_RESEAL_TO_OOBE\') { break }; Start-Sleep -s 10 }"\n'
+        '    ]\n'
+        '  }\n'
+    )
+    return (
+        'packer {\n'
+        '  required_plugins {\n'
+        '    azure = {\n'
+        '      version = ">= 1.4.0"\n'
+        '      source  = "github.com/hashicorp/azure"\n'
+        '    }\n'
+        '  }\n'
+        '}\n\n'
+        '# ARM_CLIENT_ID, ARM_CLIENT_SECRET, ARM_TENANT_ID, ARM_SUBSCRIPTION_ID\n'
+        '# are read from environment variables automatically.\n\n'
+        'variable "resource_group" { default = "" }\n'
+        'variable "location"       { default = "centralus" }\n\n'
+        'source "azure-arm" "build" {\n'
+        '  managed_image_name                = "' + safe + '-{{timestamp}}"\n'
+        '  managed_image_resource_group_name = var.resource_group\n\n'
+        '  os_type         = "Windows"\n'
+        '  image_publisher = "' + image_publisher + '"\n'
+        '  image_offer     = "' + image_offer + '"\n'
+        '  image_sku       = "' + image_sku + '"\n\n'
+        # Packer provisions a temp key vault + self-signed cert for WinRM HTTPS.
+        '  communicator   = "winrm"\n'
+        '  winrm_use_ssl  = true\n'
+        '  winrm_insecure = true\n'
+        '  winrm_timeout  = "30m"\n'
+        '  winrm_username = "packer"\n\n'
+        '  location = var.location\n'
+        '  vm_size  = "' + vm_size + '"\n'
+        '}\n\n'
+        'build {\n'
+        '  name    = "vm-dashboard"\n'
+        '  sources = ["source.azure-arm.build"]\n'
+        + prov + sysprep +
+        '}\n'
+    )
+
+
 def generate_gcp_template(
     source_image: str,
     machine_type: str,

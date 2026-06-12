@@ -27,7 +27,7 @@ VALID_CLOUDS = ("aws", "azure", "gcp")
 # Clouds that actually provision VMs in Phase 1 (others create records only).
 PROVISIONING_CLOUDS = ("azure",)
 
-_AZURE_REQUIRED = ("location", "resource_group", "subnet_id", "ssh_public_key", "vm_size")
+_AZURE_REQUIRED = ("location", "resource_group", "subnet_id", "vm_size")
 
 
 class VDesktopError(Exception):
@@ -80,6 +80,9 @@ def list_pools(db: Session) -> list[dict]:
 def _validate_azure_spec(spec: dict) -> dict:
     spec = dict(spec or {})
     missing = [k for k in _AZURE_REQUIRED if not spec.get(k)]
+    # Windows seats authenticate with generated per-seat passwords, not SSH keys.
+    if (spec.get("os_type") or "Linux").lower() != "windows" and not spec.get("ssh_public_key"):
+        missing.append("ssh_public_key")
     if missing:
         raise VDesktopError(f"Azure pool requires: {', '.join(missing)}.")
     has_image = spec.get("image_id") or (
@@ -231,10 +234,20 @@ def delete_pool(db: Session, name: str) -> dict:
 
 async def provision_seats(pool_name: str, job_id: str, seat_ids: list, spec: dict) -> None:
     """Provision an Azure VM per seat via ``azure_service.deploy_vm`` (private),
-    fill ``vm_resource_id`` + ``running``, and tag the VM with ``POOL_TAG``."""
+    fill ``vm_resource_id`` + ``running``, and tag the VM with ``POOL_TAG``.
+
+    Windows pools get a generated per-seat admin password, vaulted via the
+    secrets backend before the seat's VM is created; the (backend, ref) pairs
+    are merged into the pool provision job's ``seat_passwords`` map so
+    ``GET /api/azure/vms/{name}/admin-password`` can resolve them. The spec
+    itself stays credential-free (it is persisted in job metadata for
+    scale-up; see ``_pool_spec``)."""
+    import asyncio
     from ..database import SessionLocal
     from . import azure_service, job_service
     db = SessionLocal()
+    is_windows = (spec.get("os_type") or "Linux").lower() == "windows"
+    seat_passwords: dict = {}
     try:
         if job_id:
             job_service.set_running(db, job_id)
@@ -245,19 +258,32 @@ async def provision_seats(pool_name: str, job_id: str, seat_ids: list, spec: dic
                 continue
             vm_name = _vm_name_for(pool_name, sid)
             try:
+                admin_password = ""
+                if is_windows:
+                    admin_password = azure_service.generate_windows_admin_password()
+                    backend, ref = await asyncio.to_thread(
+                        azure_service.store_windows_admin_password, vm_name, sid[:8], admin_password,
+                    )
                 res = await azure_service.deploy_vm(
                     rg=spec["resource_group"], location=spec["location"], vm_name=vm_name,
                     vm_size=spec["vm_size"], image_id=spec.get("image_id", "") or "",
                     subnet_id=spec["subnet_id"], nsg_ids=spec.get("nsg_ids") or [],
                     create_public_ip=bool(spec.get("create_public_ip", False)),
                     ssh_username=spec.get("ssh_username") or "azureuser",
-                    ssh_public_key=spec["ssh_public_key"],
+                    ssh_public_key=spec.get("ssh_public_key") or "",
                     image_publisher=spec.get("image_publisher"), image_offer=spec.get("image_offer"),
                     image_sku=spec.get("image_sku"), image_version=spec.get("image_version"),
+                    os_type=spec.get("os_type") or "Linux",
+                    admin_password=admin_password,
                 )
                 row.vm_resource_id = res.get("vm_id") or vm_name
                 row.status = "running"
                 db.commit()
+                if is_windows:
+                    seat_passwords[vm_name] = {
+                        "backend": backend, "ref": ref,
+                        "username": spec.get("ssh_username") or "azureuser",
+                    }
                 try:
                     await azure_service.set_desktop_pool_tag(spec["resource_group"], vm_name, pool_name)
                 except Exception as tag_err:
@@ -267,6 +293,19 @@ async def provision_seats(pool_name: str, job_id: str, seat_ids: list, spec: dic
                 row.status = "failed"
                 db.commit()
                 logger.warning("desktop seat provision failed pool=%s seat=%s: %s", pool_name, sid, exc)
+        if seat_passwords:
+            # Merge into the pool's provision job (scale-ups run with job_id=None,
+            # so fall back to the create-time job that _pool_spec resolves).
+            from ..database import Job
+            pool_job_id = job_id or _pool_spec(db, pool_name)[1]
+            j = db.get(Job, pool_job_id) if pool_job_id else None
+            if j is not None:
+                md = j.metadata_dict
+                merged = dict(md.get("seat_passwords") or {})
+                merged.update(seat_passwords)
+                md["seat_passwords"] = merged
+                j.metadata_dict = md
+                db.commit()
         if job_id:
             job_service.set_completed(db, job_id, {"provisioned": ok, "requested": len(seat_ids)})
         logger.info("desktop pool %s provisioned %d/%d seats", pool_name, ok, len(seat_ids))
