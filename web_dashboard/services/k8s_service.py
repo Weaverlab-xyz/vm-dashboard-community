@@ -12,8 +12,15 @@ Safe delivery (Phase 4) build on this.
 Cloud-provisioned clusters (a ``terraform/k8s_cluster/*`` module) are a later
 sub-phase; ``create_cluster`` raises until then — register an existing cluster.
 """
+import asyncio
 import logging
+import os
+import shlex
+import shutil
+import subprocess
+import tempfile
 import uuid
+from urllib.parse import urlparse
 
 import yaml
 from sqlalchemy.orm import Session
@@ -28,6 +35,15 @@ VALID_MGMT_KINDS = ("portainer", "rancher", "argocd", "headlamp")
 # config_service key that holds a cluster's kubeconfig; the row stores this
 # string as kubeconfig_ref and config_service.get() resolves it.
 _KUBECONFIG_KEY = "k8s_kubeconfig_{cluster_id}"
+
+# Phase 2 — management-plane launch. The apply runs in a transient kubectl
+# container (mirrors ansible_local_service's local-docker runner) so the app
+# process never holds cluster-admin. Phase 2's first plane is Portainer-k8s:
+# deploy the Portainer Agent into the cluster, then register it in the Portainer
+# server the dashboard already brokers (portainer_service.add_agent_endpoint).
+_KUBECTL_IMAGE = "bitnami/kubectl:latest"
+_PORTAINER_AGENT_MANIFEST_URL = "https://downloads.portainer.io/ce-lts/portainer-agent-k8s-nodeport.yaml"
+_PORTAINER_AGENT_NODEPORT = 30778
 
 
 class K8sError(Exception):
@@ -163,3 +179,93 @@ def delete_cluster(db: Session, cluster_id: str) -> dict:
     db.commit()
     logger.info("Deregistered k8s cluster %s", name)
     return {"ok": True, "deregistered": name}
+
+
+# ── Phase 2: management-plane launch ───────────────────────────────────────────
+
+def _api_host(api_server: str) -> str:
+    """The hostname/IP from a cluster API URL (where the agent NodePort is
+    reachable). Best-effort — the live test confirms the agent's actual
+    reachable address for the operator's network."""
+    try:
+        return urlparse(api_server).hostname or ""
+    except Exception:
+        return ""
+
+
+def _run_sync(cmd: list) -> str:
+    """Run a command, returning stdout; raise K8sError with stderr on failure.
+    asyncio's subprocess support is unreliable under uvicorn's SelectorEventLoop
+    on Windows, so callers wrap this in asyncio.to_thread (same as the rest of
+    the codebase)."""
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise K8sError(f"command failed ({proc.returncode}): {proc.stderr.strip() or proc.stdout.strip()}")
+    return proc.stdout
+
+
+async def _apply_manifest_via_runner(kubeconfig: str, manifest_ref: str) -> str:
+    """Apply a manifest into a cluster with a **transient kubectl container**
+    (mirrors ansible_local_service's local-docker runner over the mounted
+    docker.sock). ``manifest_ref`` is a URL (``kubectl apply -f <url>``) or
+    inline YAML. The kubeconfig + manifest live in a tmpdir mounted into the
+    one-shot container, which holds cluster-admin only for the apply."""
+    tmpdir = tempfile.mkdtemp(prefix="k8s_apply_")
+    try:
+        with open(os.path.join(tmpdir, "kubeconfig"), "w") as fh:
+            fh.write(kubeconfig)
+        if manifest_ref.startswith(("http://", "https://")):
+            apply_target = manifest_ref
+        else:
+            with open(os.path.join(tmpdir, "manifest.yaml"), "w") as fh:
+                fh.write(manifest_ref)
+            apply_target = "/work/manifest.yaml"
+        shell_cmd = f"kubectl --kubeconfig /work/kubeconfig apply -f {shlex.quote(apply_target)}"
+        cmd = ["docker", "run", "--rm", "-v", f"{tmpdir}:/work", _KUBECTL_IMAGE, "sh", "-c", shell_cmd]
+        logger.info("k8s apply: image=%s target=%s", _KUBECTL_IMAGE, apply_target)
+        return await asyncio.to_thread(_run_sync, cmd)
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+async def launch_management_plane(cluster_id: str, mgmt_kind: str = "portainer") -> None:
+    """**Phase 2** — launch a management plane into a registered cluster, then
+    register it in the brokered Portainer server. Scheduled as a background task
+    by the API (the apply is slow).
+
+    Phase 2's first plane is **Portainer-k8s** (operator's chosen model: agent +
+    brokered server): apply the Portainer Agent into the cluster, then
+    ``portainer_service.add_agent_endpoint`` registers it as an endpoint in the
+    Portainer server the dashboard already brokers. Other ``mgmt_kind`` values
+    are accepted by Phase 1 registration but not yet launched here."""
+    from ..database import SessionLocal
+    from . import portainer_service
+    db = SessionLocal()
+    try:
+        row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
+        if row is None:
+            return
+        if mgmt_kind != "portainer":
+            row.status = "failed"
+            db.commit()
+            logger.warning("management-plane launch: only 'portainer' is wired in Phase 2 (got %r)", mgmt_kind)
+            return
+        row.status = "deploying"
+        db.commit()
+        try:
+            kubeconfig = resolve_kubeconfig(db, cluster_id)
+            await _apply_manifest_via_runner(kubeconfig, _PORTAINER_AGENT_MANIFEST_URL)
+            host = _api_host(row.api_server)
+            endpoint = await portainer_service.add_agent_endpoint(
+                name=row.name, ip=host, port=_PORTAINER_AGENT_NODEPORT)
+            row.mgmt_kind = "portainer"
+            row.mgmt_endpoint = str(endpoint.get("Id") or endpoint.get("Name") or host)
+            row.status = "managed"
+            db.commit()
+            logger.info("Cluster %s management plane up (portainer endpoint %s)", row.name, row.mgmt_endpoint)
+        except Exception as exc:
+            row.status = "failed"
+            db.commit()
+            logger.warning("management-plane launch failed cluster=%s: %s", cluster_id, exc)
+    finally:
+        db.close()

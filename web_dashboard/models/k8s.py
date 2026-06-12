@@ -23,6 +23,15 @@ class ClusterRegisterRequest(BaseModel):
     mgmt_kind: Optional[str] = None        # portainer | rancher | argocd | headlamp (optional; set when known)
 
 
+class ManagementRequest(BaseModel):
+    """Launch a management plane into a registered cluster (Phase 2).
+
+    Phase 2 wires ``portainer`` (agent + brokered Portainer server); other kinds
+    are accepted but not yet launched.
+    """
+    mgmt_kind: str = "portainer"           # portainer | rancher | argocd | headlamp
+
+
 class ClusterInfo(BaseModel):
     id: str
     cloud: str

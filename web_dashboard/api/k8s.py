@@ -1,23 +1,24 @@
-"""Kubernetes management API — Phase 1.
+"""Kubernetes management API — Phases 1–2.
 
 Gated on ``k8s_management_enabled`` (feature-gate dependency). Phase 1
 registers/lists managed clusters via ``k8s_service`` and stores the kubeconfig
-as a backend reference — no provisioning, no kubectl, no brokering yet. See
-docs/saas-kubernetes-management-plan.md.
+as a backend reference; Phase 2 launches a management plane (Portainer-k8s) into
+a registered cluster. See docs/saas-kubernetes-management-plan.md.
 
-  GET    /api/k8s/__phase1__          — health check (router-mounted probe)
-  GET    /api/k8s/clusters            — list managed clusters
-  POST   /api/k8s/clusters            — register an existing cluster (kubeconfig)
-  GET    /api/k8s/clusters/{id}       — one cluster
-  DELETE /api/k8s/clusters/{id}       — deregister a cluster
+  GET    /api/k8s/__phase1__               — health check (router-mounted probe)
+  GET    /api/k8s/clusters                 — list managed clusters
+  POST   /api/k8s/clusters                 — register an existing cluster (kubeconfig)
+  GET    /api/k8s/clusters/{id}            — one cluster
+  DELETE /api/k8s/clusters/{id}            — deregister a cluster
+  POST   /api/k8s/clusters/{id}/management — launch a management plane (Phase 2)
 """
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from ..database import User, get_db
-from ..models.k8s import ClusterRegisterRequest
+from ..models.k8s import ClusterRegisterRequest, ManagementRequest
 from ..services import k8s_service
 from ..services.k8s_service import K8sError
 from .auth import require_admin
@@ -93,3 +94,23 @@ async def delete_cluster(
         return k8s_service.delete_cluster(db, cluster_id)
     except K8sError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.post("/clusters/{cluster_id}/management", status_code=202)
+async def launch_management(
+    cluster_id: str,
+    payload: ManagementRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Launch a management plane into the cluster (Phase 2). Async — applies the
+    Portainer Agent via a transient kubectl container, then registers it in the
+    brokered Portainer server. Returns 202; poll the cluster for status
+    (deploying → managed / failed)."""
+    try:
+        k8s_service.get_cluster(db, cluster_id)   # 404 if unknown
+    except K8sError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    background_tasks.add_task(k8s_service.launch_management_plane, cluster_id, payload.mgmt_kind)
+    return {"ok": True, "status": "deploying", "cluster_id": cluster_id, "mgmt_kind": payload.mgmt_kind}
