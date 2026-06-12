@@ -192,7 +192,7 @@
           </select>
           <p class="text-xs text-gray-400 mt-1">
             The injected DB credential is placed in this Vault account group; a group policy then grants it to users.
-            Leave unset to create the account ungrouped (assign it later in PRA).
+            Leave unset to create the account ungrouped (lands in Default — assign it later in PRA).
           </p>
         </div>
         <p class="text-xs text-gray-400">
@@ -252,17 +252,34 @@ function databasesPage() {
 
     get awsDatabases() { return this.databases.filter(d => d.cloud === 'aws'); },
 
+    _pollTimer: null,
+
     async init() { requireAuth(); await this.refresh(); },
 
-    async refresh() {
-      this.loading = true;
+    async refresh(quiet = false) {
+      if (!quiet) this.loading = true;
       try {
         const data = await API.get('/api/databases');
         this.databases = data.databases || [];
+        this._schedulePoll();
       } catch (e) {
-        this.flash(e.message || 'Failed to load databases.', 'error');
+        if (!quiet) this.flash(e.message || 'Failed to load databases.', 'error');
       } finally {
-        this.loading = false;
+        if (!quiet) this.loading = false;
+      }
+    },
+
+    // Auto-refresh while any row is transitional (provisioning/decommissioning)
+    // so status changes — and decommissioned rows dropping off — appear live.
+    // The page is otherwise manual-refresh only.
+    _schedulePoll() {
+      const transitional = this.databases.some(
+        d => d.status === 'provisioning' || d.status === 'decommissioning');
+      if (transitional && !this._pollTimer) {
+        this._pollTimer = setInterval(() => this.refresh(true), 5000);
+      } else if (!transitional && this._pollTimer) {
+        clearInterval(this._pollTimer);
+        this._pollTimer = null;
       }
     },
 
@@ -346,7 +363,7 @@ function databasesPage() {
       if (!confirm(`Decommission "${d.engine}" database in ${d.region}?\n\nThis removes the PRA tunnel and destroys the instance.`)) return;
       try {
         await API.del(`/api/databases/${d.id}`);
-        this.flash('Decommission started.');
+        this.flash('Decommission started — watch the row status (tracked in Jobs).');
         await this.refresh();
       } catch (e) {
         this.flash(e.message || 'Decommission failed.', 'error');

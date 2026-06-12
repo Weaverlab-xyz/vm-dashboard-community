@@ -289,6 +289,41 @@ fi
 ROLE_ARN="$(aws iam get-role --role-name "$ROLE_NAME" --query 'Role.Arn' --output text)"
 state_write aws ecs_role_arn "$ROLE_ARN"
 
+# ── 7a. ECS instance role for the on-demand Jumpoint host ──────────────────────
+# The tunnel-capable Jumpoint runs on an EC2 ECS container instance (Fargate
+# forbids the NET_ADMIN/NET_RAW/IPC_LOCK caps + /dev/net/tun it needs). The
+# DASHBOARD creates and terminates that host on demand (when an EC2 instance or
+# database is provisioned / the last one is removed), so we DON'T stand up an
+# instance here — we only pre-create the role + instance profile the dashboard
+# attaches to it (the dashboard's scoped user can't create IAM roles itself).
+section "ECS instance role for the Jumpoint host"
+
+ECS_INSTANCE_ROLE="ecsInstanceRole"
+if aws iam get-role --role-name "$ECS_INSTANCE_ROLE" >/dev/null 2>&1; then
+  ok "Reusing IAM role $ECS_INSTANCE_ROLE"
+else
+  aws iam create-role --role-name "$ECS_INSTANCE_ROLE" \
+    --assume-role-policy-document '{
+      "Version":"2012-10-17",
+      "Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]
+    }' \
+    --tags "Key=$SANDBOX_TAG_KEY,Value=$SANDBOX_TAG_VALUE" >/dev/null
+  retry 8 5 aws iam attach-role-policy --role-name "$ECS_INSTANCE_ROLE" \
+    --policy-arn arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+  ok "Created IAM role $ECS_INSTANCE_ROLE"
+fi
+# Instance profile wraps the role for EC2 attachment (idempotent).
+if ! aws iam get-instance-profile --instance-profile-name "$ECS_INSTANCE_ROLE" >/dev/null 2>&1; then
+  aws iam create-instance-profile --instance-profile-name "$ECS_INSTANCE_ROLE" \
+    --tags "Key=$SANDBOX_TAG_KEY,Value=$SANDBOX_TAG_VALUE" >/dev/null
+  aws iam add-role-to-instance-profile --instance-profile-name "$ECS_INSTANCE_ROLE" \
+    --role-name "$ECS_INSTANCE_ROLE" >/dev/null
+  ok "Created instance profile $ECS_INSTANCE_ROLE"
+else
+  ok "Reusing instance profile $ECS_INSTANCE_ROLE"
+fi
+ECS_INSTANCE_ROLE_ARN="$(aws iam get-role --role-name "$ECS_INSTANCE_ROLE" --query 'Role.Arn' --output text)"
+
 # ── 7b. Image-hub S3 bucket + promote-runner IAM ─────────────────────────────
 # Provisions the prerequisites the dashboard's automated cross-cloud image
 # promote runner needs (see docs/image-management.md, runners/promote/README.md):
@@ -535,8 +570,15 @@ DASHBOARD_POLICY_DOC="$(jq -c . <<JSON
       "Resource": [
         "arn:aws:iam::${ACCOUNT_ID}:role/${VMIMPORT_ROLE_NAME}",
         "arn:aws:iam::${ACCOUNT_ID}:role/ecsTaskExecutionRole",
+        "arn:aws:iam::${ACCOUNT_ID}:role/ecsInstanceRole",
         "arn:aws:iam::${ACCOUNT_ID}:role/${PROMOTE_TASK_ROLE_NAME}"
       ]
+    },
+    {
+      "Sid": "DashboardECSOptimizedAMI",
+      "Effect": "Allow",
+      "Action": ["ssm:GetParameter", "ssm:GetParameters"],
+      "Resource": "arn:aws:ssm:*::parameter/aws/service/ecs/optimized-ami/*"
     },
     {
       "Sid": "DashboardECS",
@@ -552,7 +594,9 @@ DASHBOARD_POLICY_DOC="$(jq -c . <<JSON
         "ecs:RunTask",
         "ecs:StopTask",
         "ecs:DescribeTasks",
-        "ecs:ListTasks"
+        "ecs:ListTasks",
+        "ecs:ListContainerInstances",
+        "ecs:DescribeContainerInstances"
       ],
       "Resource": "*"
     },
@@ -700,8 +744,10 @@ _cfg=(
   "bt_ecs_task_family=bt-jumpoint"
   "bt_ecs_image=beyondtrust/sra-jumpoint                # or your ECR mirror"
   "bt_ecs_execution_role_arn=$ROLE_ARN"
-  "bt_ecs_jumpoint_subnet_id=$PUBLIC_SUBNET_ID         # Jumpoint task lands here (public, IGW-routed)"
-  "bt_ecs_jumpoint_security_group_id=$JUMPOINT_SG      # SG for the Jumpoint task"
+  "bt_ecs_launch_type=EC2                               # Jumpoint runs on EC2 capacity — Fargate cannot do protocol tunneling"
+  "bt_ecs_host_instance_profile=$ECS_INSTANCE_ROLE     # instance profile the dashboard attaches to the on-demand Jumpoint host"
+  "bt_ecs_jumpoint_subnet_id=$PUBLIC_SUBNET_ID         # subnet the dashboard launches the Jumpoint host into (public, IGW-routed)"
+  "bt_ecs_jumpoint_security_group_id=$JUMPOINT_SG      # SG for the Jumpoint host"
   ""
   "# Image-registry hub + automated cross-cloud promote:"
   "storage_s3_bucket=$STORAGE_BUCKET                                       # Image hub + promote staging"
@@ -727,8 +773,14 @@ cat <<EOF
 Sandbox topology summary
 
   VPC ${VPC_ID} (10.99.0.0/16)
-    ├─ public  ${PUBLIC_SUBNET_ID}  (10.99.1.0/24) → IGW → internet  [Jumpoint ECS]
+    ├─ public  ${PUBLIC_SUBNET_ID}  (10.99.1.0/24) → IGW → internet  [on-demand Jumpoint host]
     └─ private ${PRIVATE_SUBNET_ID}  (10.99.2.0/24) → no internet     [user EC2s]
+
+Note: the tunnel-capable Jumpoint runs on an EC2 ECS container instance
+(t3.small) that the DASHBOARD creates on demand when you provision an EC2
+instance or database, and terminates when the last one is removed — so there is
+no standing jumpoint cost. (Fargate can't do protocol tunneling.) This script
+only pre-creates the ecsInstanceRole it attaches.
 
 To tear it down:
   ./scripts/sandbox/Linux/rollback.sh --cloud aws

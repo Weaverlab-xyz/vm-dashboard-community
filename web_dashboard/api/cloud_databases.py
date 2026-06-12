@@ -79,6 +79,17 @@ def _apply_task(db_id: str, job_id: str, engine: str, tf_variables: dict) -> Non
         s.close()
 
 
+def _decommission_task(db_id: str, job_id: str) -> None:
+    """Background worker: open a fresh session and drive the teardown."""
+    import asyncio
+    from ..database import SessionLocal
+    s = SessionLocal()
+    try:
+        asyncio.run(cloud_database_service.run_decommission(s, db_id=db_id, job_id=job_id))
+    finally:
+        s.close()
+
+
 @router.post("")
 async def provision_database(
     payload: ProvisionRequest,
@@ -171,11 +182,14 @@ async def connection(
 @router.delete("/{db_id}")
 async def decommission_database(
     db_id: str,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
     _require_enabled()
     try:
-        return await cloud_database_service.decommission(db, db_id)
+        result = cloud_database_service.start_decommission(db, db_id, created_by=current_user.username)
+        background_tasks.add_task(_decommission_task, result["db_id"], result["job_id"])
+        return result
     except cloud_database_service.CloudDatabaseError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

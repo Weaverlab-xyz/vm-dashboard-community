@@ -403,6 +403,98 @@ async def terminate_instance(region: str, instance_id: str) -> dict:
         raise AWSError("AWS credentials not configured.")
 
 
+# ── Jumpoint host (ECS container instance) primitives ──────────────────────────
+
+def _get_ssm_parameter_sync(region: str, name: str) -> str:
+    _require_boto3()
+    ssm = boto3.client("ssm", **_aws_kwargs(region))
+    return ssm.get_parameter(Name=name)["Parameter"]["Value"]
+
+
+async def get_ssm_parameter(region: str, name: str) -> str:
+    """Read an SSM parameter value (used to resolve the ECS-optimized AMI id)."""
+    try:
+        return await asyncio.to_thread(_get_ssm_parameter_sync, region, name)
+    except (ClientError, BotoCoreError) as e:
+        raise AWSError(f"Failed to read SSM parameter {name}: {e}") from e
+    except NoCredentialsError:
+        raise AWSError("AWS credentials not configured.")
+
+
+def _run_container_instance_sync(
+    region: str, ami_id: str, instance_type: str, subnet_id: str,
+    security_group_ids: list, instance_profile: str, user_data: str, name_tag: str,
+) -> dict:
+    ec2 = _get_ec2(region)
+    resp = ec2.run_instances(
+        ImageId=ami_id,
+        InstanceType=instance_type,
+        MinCount=1,
+        MaxCount=1,
+        # NetworkInterfaces (not top-level SubnetId/SecurityGroupIds) so we can
+        # force a public IP regardless of the subnet's auto-assign setting.
+        NetworkInterfaces=[{
+            "DeviceIndex": 0,
+            "SubnetId": subnet_id,
+            "Groups": security_group_ids,
+            "AssociatePublicIpAddress": True,
+        }],
+        IamInstanceProfile={"Name": instance_profile},
+        UserData=user_data,  # boto3 base64-encodes for run_instances
+        TagSpecifications=[{
+            "ResourceType": "instance",
+            "Tags": [
+                {"Key": "Name", "Value": name_tag},
+                # ManagedBy matches dashboard EC2 instances so the sandbox VPC
+                # sweep / rollback cleans the host up too.
+                {"Key": "ManagedBy", "Value": "vm-cli-dashboard"},
+            ],
+        }],
+    )
+    inst = resp["Instances"][0]
+    return {"instance_id": inst["InstanceId"], "state": inst["State"]["Name"]}
+
+
+async def run_container_instance(
+    region: str, *, ami_id: str, instance_type: str, subnet_id: str,
+    security_group_ids: list, instance_profile: str, user_data: str, name_tag: str,
+) -> dict:
+    """Launch an ECS container instance (the EC2 capacity for the Jumpoint)."""
+    try:
+        return await asyncio.to_thread(
+            _run_container_instance_sync, region, ami_id, instance_type, subnet_id,
+            security_group_ids, instance_profile, user_data, name_tag,
+        )
+    except (ClientError, BotoCoreError) as e:
+        raise AWSError(f"Failed to launch container instance: {e}") from e
+    except NoCredentialsError:
+        raise AWSError("AWS credentials not configured.")
+
+
+def _find_instances_by_tag_sync(region: str, name_tag: str, states: list) -> list:
+    ec2 = _get_ec2(region)
+    resp = ec2.describe_instances(Filters=[
+        {"Name": "tag:Name", "Values": [name_tag]},
+        {"Name": "instance-state-name", "Values": states},
+    ])
+    out = []
+    for r in resp.get("Reservations", []):
+        for i in r.get("Instances", []):
+            out.append({"instance_id": i["InstanceId"], "state": i["State"]["Name"]})
+    return out
+
+
+async def find_instances_by_tag(region: str, *, name_tag: str, states: list) -> list:
+    """Return [{instance_id, state}] for instances with Name=name_tag in the
+    given states. Used to find-or-create the shared Jumpoint host."""
+    try:
+        return await asyncio.to_thread(_find_instances_by_tag_sync, region, name_tag, states)
+    except (ClientError, BotoCoreError) as e:
+        raise AWSError(f"Failed to list instances by tag: {e}") from e
+    except NoCredentialsError:
+        raise AWSError("AWS credentials not configured.")
+
+
 def _set_workgroup_tag_sync(region: str, instance_id: str, workgroup: str) -> None:
     """Overwrite the `Workgroup` tag on an existing instance."""
     ec2 = _get_ec2(region)
@@ -714,32 +806,65 @@ def _ensure_task_definition_sync(
     memory: str,
     execution_role_arn: str,
     image: str = "beyondtrust/sra-jumpoint",
+    launch_type: str = "EC2",
 ) -> str:
-    """Register the bt-jumpoint task definition if it doesn't already exist."""
+    """Register the bt-jumpoint task definition if a matching one doesn't exist.
+
+    The jumpoint needs PROTOCOL-TUNNEL capabilities (NET_ADMIN/NET_RAW/IPC_LOCK +
+    /dev/net/tun) which only the EC2 launch type can grant — Fargate forbids them.
+    A task-def family may already exist from a prior FARGATE run, so we re-register
+    a new revision when the existing one's compatibility doesn't match.
+    """
+    ec2 = launch_type.upper() == "EC2"
     ecs = _get_ecs(region)
     try:
         resp = ecs.describe_task_definition(taskDefinition=family)
-        return resp["taskDefinition"]["taskDefinitionArn"]
+        td = resp["taskDefinition"]
+        compat = set(td.get("requiresCompatibilities") or td.get("compatibilities") or [])
+        # Reuse only when the existing revision already targets the launch type
+        # we want — otherwise fall through and register a fresh revision.
+        if (("EC2" in compat) if ec2 else ("FARGATE" in compat)):
+            return td["taskDefinitionArn"]
     except ClientError as e:
         if e.response["Error"]["Code"] not in ("ClientException", "InvalidParameterException"):
             raise
 
-    # Register a new task definition
-    kwargs = {
-        "family": family,
-        "networkMode": "awsvpc",
-        "requiresCompatibilities": ["FARGATE"],
-        "cpu": cpu,
-        "memory": memory,
-        "containerDefinitions": [
-            {
-                "name": "jumpoint",
-                "image": image,
-                "essential": True,
-                "environment": [],  # DEPLOY_KEY passed as run-time override
-            }
-        ],
+    container = {
+        "name": "jumpoint",
+        "image": image,
+        "essential": True,
+        "environment": [],  # DEPLOY_KEY passed as run-time override
     }
+    if ec2:
+        # EC2 launch type: host networking (uses the instance's ENI/SG) + the
+        # Linux caps and TUN device the jumpoint needs to build tunnels.
+        kwargs = {
+            "family": family,
+            "networkMode": "host",
+            "requiresCompatibilities": ["EC2"],
+            "containerDefinitions": [{
+                **container,
+                "memory": int(memory) if str(memory).isdigit() else 512,
+                "linuxParameters": {
+                    "capabilities": {"add": ["NET_ADMIN", "NET_RAW", "IPC_LOCK"]},
+                    "devices": [{
+                        "hostPath": "/dev/net/tun",
+                        "containerPath": "/dev/net/tun",
+                        "permissions": ["read", "write"],
+                    }],
+                    "initProcessEnabled": True,
+                },
+            }],
+        }
+    else:
+        kwargs = {
+            "family": family,
+            "networkMode": "awsvpc",
+            "requiresCompatibilities": ["FARGATE"],
+            "cpu": cpu,
+            "memory": memory,
+            "containerDefinitions": [container],
+        }
     if execution_role_arn:
         kwargs["executionRoleArn"] = execution_role_arn
 
@@ -758,9 +883,16 @@ def _run_ecs_task_sync(
     memory: str,
     execution_role_arn: str,
     image: str = "beyondtrust/sra-jumpoint",
+    launch_type: str = "EC2",
 ) -> str:
     """Ensure the ECS cluster exists, register the task definition if needed,
-    then launch one Fargate task. Returns the task ARN."""
+    then launch one jumpoint task. Returns the task ARN.
+
+    launch_type "EC2" (default) places the task on EC2 capacity with host
+    networking so it can do protocol tunneling; "FARGATE" is the legacy,
+    tunnel-incapable path. EC2 capacity is provisioned by the sandbox script.
+    """
+    ec2 = launch_type.upper() == "EC2"
     ecs = _get_ecs(region)
 
     # Ensure the ECS service-linked role exists (required before first ECS use in an account)
@@ -776,21 +908,14 @@ def _run_ecs_task_sync(
     ecs.create_cluster(clusterName=cluster)
 
     task_def_arn = _ensure_task_definition_sync(
-        region, task_family, cpu, memory, execution_role_arn, image
+        region, task_family, cpu, memory, execution_role_arn, image, launch_type
     )
 
-    resp = ecs.run_task(
-        cluster=cluster,
-        taskDefinition=task_def_arn,
-        launchType="FARGATE",
-        networkConfiguration={
-            "awsvpcConfiguration": {
-                "subnets": [subnet_id],
-                "securityGroups": security_group_ids,
-                "assignPublicIp": "ENABLED",
-            }
-        },
-        overrides={
+    run_kwargs = {
+        "cluster": cluster,
+        "taskDefinition": task_def_arn,
+        "launchType": "EC2" if ec2 else "FARGATE",
+        "overrides": {
             "containerOverrides": [
                 {
                     "name": "jumpoint",
@@ -798,8 +923,20 @@ def _run_ecs_task_sync(
                 }
             ]
         },
-        count=1,
-    )
+        "count": 1,
+    }
+    if not ec2:
+        # awsvpc networking is Fargate-only here; the EC2 task uses host
+        # networking (the container instance's ENI/SG), so no networkConfiguration.
+        run_kwargs["networkConfiguration"] = {
+            "awsvpcConfiguration": {
+                "subnets": [subnet_id],
+                "securityGroups": security_group_ids,
+                "assignPublicIp": "ENABLED",
+            }
+        }
+
+    resp = ecs.run_task(**run_kwargs)
 
     tasks = resp.get("tasks", [])
     if not tasks:
@@ -828,14 +965,15 @@ async def run_ecs_jumpoint_task(
     memory: str = "512",
     execution_role_arn: str = "",
     image: str = "beyondtrust/sra-jumpoint",
+    launch_type: str = "EC2",
 ) -> str:
-    """Start an ECS Fargate task running the BeyondTrust Jumpoint container.
-    Returns the task ARN."""
+    """Start an ECS task running the BeyondTrust Jumpoint container. Returns the
+    task ARN. launch_type "EC2" (default) is tunnel-capable; "FARGATE" is legacy."""
     try:
         return await asyncio.to_thread(
             _run_ecs_task_sync,
             region, cluster, task_family, subnet_id, security_group_ids,
-            deploy_key, cpu, memory, execution_role_arn, image,
+            deploy_key, cpu, memory, execution_role_arn, image, launch_type,
         )
     except (ClientError, BotoCoreError) as e:
         raise AWSError(f"Failed to start ECS Jumpoint task: {e}") from e
@@ -849,6 +987,28 @@ async def stop_ecs_jumpoint_task(region: str, cluster: str, task_arn: str) -> No
         await asyncio.to_thread(_stop_ecs_task_sync, region, cluster, task_arn)
     except (ClientError, BotoCoreError) as e:
         raise AWSError(f"Failed to stop ECS task {task_arn}: {e}") from e
+    except NoCredentialsError:
+        raise AWSError("AWS credentials not configured.")
+
+
+def _list_container_instances_sync(region: str, cluster: str) -> list:
+    ecs = _get_ecs(region)
+    arns = ecs.list_container_instances(cluster=cluster).get("containerInstanceArns", [])
+    if not arns:
+        return []
+    resp = ecs.describe_container_instances(cluster=cluster, containerInstances=arns)
+    return [{"arn": c["containerInstanceArn"], "status": c.get("status"),
+             "ec2_instance_id": c.get("ec2InstanceId")}
+            for c in resp.get("containerInstances", [])]
+
+
+async def list_container_instances(region: str, cluster: str) -> list:
+    """Return registered ECS container instances (the EC2 capacity) with status —
+    used to poll for the Jumpoint host coming online before running the task."""
+    try:
+        return await asyncio.to_thread(_list_container_instances_sync, region, cluster)
+    except (ClientError, BotoCoreError) as e:
+        raise AWSError(f"Failed to list container instances: {e}") from e
     except NoCredentialsError:
         raise AWSError("AWS credentials not configured.")
 

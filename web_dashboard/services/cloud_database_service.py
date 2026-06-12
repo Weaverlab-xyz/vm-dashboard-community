@@ -237,15 +237,22 @@ async def _ensure_jumpoint_node(region: str) -> None:
                     len(live), cluster)
         return
 
+    launch_type = (_cfg("bt_ecs_launch_type") or "EC2").upper()
     subnet_id = _cfg("bt_ecs_jumpoint_subnet_id")
     sg_ids = [s.strip() for s in _cfg("bt_ecs_jumpoint_security_group_id").split(",") if s.strip()]
     deploy_key = await _resolve_ecs_deploy_key()
-    if not (subnet_id and sg_ids and deploy_key):
+    # EC2/host-networking takes its network from the container instance (the
+    # sandbox provisions it), so only the deploy key is required here; the
+    # legacy FARGATE path still needs a task subnet + SG.
+    missing_net = (launch_type != "EC2") and not (subnet_id and sg_ids)
+    if not deploy_key or missing_net:
+        need = "aws_ecs_docker_deploy_key"
+        if missing_net:
+            need += ", bt_ecs_jumpoint_subnet_id, bt_ecs_jumpoint_security_group_id"
         logger.warning(
-            "clouddb: no live Jumpoint node and cannot auto-start one — set "
-            "bt_ecs_jumpoint_subnet_id, bt_ecs_jumpoint_security_group_id and "
-            "aws_ecs_docker_deploy_key. The tunnel will show Unavailable in PRA "
-            "until a Jumpoint node is online.")
+            "clouddb: no live Jumpoint node and cannot auto-start one — set %s. "
+            "The tunnel will show Unavailable in PRA until a Jumpoint node is online.",
+            need)
         return
     try:
         arn = await aws_service.run_ecs_jumpoint_task(
@@ -259,9 +266,10 @@ async def _ensure_jumpoint_node(region: str) -> None:
             memory=_cfg("bt_ecs_memory"),
             execution_role_arn=_cfg("bt_ecs_execution_role_arn"),
             image=_cfg("bt_ecs_image"),
+            launch_type=launch_type,
         )
-        logger.info("clouddb: started Jumpoint ECS node %s — registers with PRA in ~1-2 min",
-                    arn.split("/")[-1])
+        logger.info("clouddb: started Jumpoint ECS node %s (launch_type=%s) — "
+                    "registers with PRA in ~1-2 min", arn.split("/")[-1], launch_type)
     except Exception as exc:
         logger.warning("clouddb: Jumpoint ECS node launch failed (non-fatal): %s", exc)
 
@@ -273,9 +281,15 @@ async def _broker_tunnel(db: Session, *, row: CloudDatabase, job_id: str,
     tunnel's Terraform state in the provisioning job's metadata for teardown.
     Non-fatal: a failure leaves the DB up with no tunnel (retryable)."""
     from . import terraform_pra_service as pra
-    # The tunnel is only usable through a live Jumpoint node — when the
-    # ECS-hosted gateway has none, start one (mirrors the EC2 deploy flow).
-    await _ensure_jumpoint_node(_cfg("aws_region") or row.region)
+    # The shared Jumpoint host was ensured at the start of run_provision_apply
+    # (so its ~2-min boot overlaps the RDS apply); ensure again here — idempotent
+    # and cheap when the host is already up — so the task is running before we
+    # broker the tunnel.
+    from . import jumpoint_host_service
+    try:
+        await jumpoint_host_service.ensure_jumpoint_host(_cfg("aws_region") or row.region)
+    except Exception as exc:
+        logger.warning("clouddb: ensure jumpoint host (broker) failed (non-fatal): %s", exc)
     try:
         jump_name = tf_variables.get("identifier") or f"clouddb-{row.id[:8]}"
         job = db.query(Job).filter(Job.id == job_id).first()
@@ -393,6 +407,15 @@ async def run_provision_apply(
         return
     job_service.set_running(db, job_id)
     try:
+        # Kick the shared Jumpoint host EARLY (only when PRA is configured) so its
+        # ~2-min boot overlaps the 5-10-min RDS apply instead of stacking after it.
+        if _pra_configured():
+            try:
+                from . import jumpoint_host_service
+                await jumpoint_host_service.ensure_jumpoint_host(_cfg("aws_region") or row.region)
+            except Exception as exc:
+                logger.warning("clouddb: ensure jumpoint host (pre-apply) failed (non-fatal): %s", exc)
+
         outputs = await terraform.apply(
             _deploy_dir(job_id), tf_variables, template_dir=template_dir(engine),
             env=_aws_env(),
@@ -426,74 +449,141 @@ async def run_provision_apply(
         logger.exception("clouddb apply failed db_id=%s: %s", db_id, exc)
 
 
-async def decommission(db: Session, db_id: str) -> dict:
-    """Tear down a managed database: flip status, remove the PRA tunnel, then
-    ``terraform destroy`` the DB, mark decommissioned. Async because it awaits
-    the terraform/PRA coroutines directly — asyncio.run() blows up inside the
-    server's running event loop and silently orphans the cloud resource."""
+def start_decommission(db: Session, db_id: str, created_by: str = "") -> dict:
+    """Synchronously record the intent to decommission and schedule the work:
+    flip the row to ``decommissioning`` and create a ``clouddb_decommission``
+    Job. The actual teardown (PRA tunnel+vault, Password Safe, RDS
+    ``terraform destroy``) runs in :func:`run_decommission` as a background task
+    — it's minutes long and must not block the HTTP request (doing so timed out
+    the browser mid-destroy and silently orphaned the Vault account). Returns
+    ``{ok, db_id, job_id}``; mirrors :func:`provision`."""
     row = db.query(CloudDatabase).filter(CloudDatabase.id == db_id).first()
     if not row:
         raise CloudDatabaseError(f"cloud database {db_id} not found")
 
+    # Already in flight — return the existing job rather than starting a second.
+    if row.status == "decommissioning":
+        existing = (db.query(Job)
+                      .filter(Job.job_type == "clouddb_decommission")
+                      .order_by(Job.created_at.desc()).all())
+        job = next((j for j in existing if (j.metadata_dict or {}).get("db_id") == db_id), None)
+        if job:
+            return {"ok": True, "db_id": db_id, "job_id": job.id}
+
     row.status = "decommissioning"
     db.commit()
+    job = job_service.create_job(
+        db, job_type="clouddb_decommission", created_by=created_by or row.created_by or "system",
+        metadata={"db_id": db_id, "engine": row.engine, "cloud": row.cloud},
+    )
+    return {"ok": True, "db_id": db_id, "job_id": job.id}
+
+
+async def run_decommission(db: Session, *, db_id: str, job_id: str) -> None:
+    """Background teardown for a managed database. Removes the PRA tunnel + its
+    Vault account, the staged Password Safe artifacts, and the RDS instance.
+    Each step's failure is ACCUMULATED (not swallowed): any real teardown error
+    leaves the row ``failed`` and the job ``failed`` with the details, so an
+    orphaned Vault account / tunnel / instance is visible rather than hidden
+    behind a false ``decommissioned``. Steps that simply didn't apply (PRA/PS
+    never configured) are skips, not failures."""
+    row = db.query(CloudDatabase).filter(CloudDatabase.id == db_id).first()
+    if not row:
+        job_service.set_failed(db, job_id, f"cloud database {db_id} not found")
+        return
+    job_service.set_running(db, job_id)
+    errors: list[str] = []
+    warnings: list[str] = []
 
     jobs = (db.query(Job)
               .filter(Job.job_type == "clouddb_provision")
               .order_by(Job.created_at.desc()).all())
     deploy_job = next((j for j in jobs if (j.metadata_dict or {}).get("db_id") == db_id), None)
-
-    # Phase 2: remove the PRA tunnel first (best-effort), so we don't orphan a
-    # jump item pointing at a host we're about to destroy. The vault account
-    # rides in the same Terraform state and is destroyed with it.
     meta = (deploy_job.metadata_dict or {}) if deploy_job else {}
-    if deploy_job:
-        tun_state = meta.get("tunnel_tf_state")
-        if tun_state:
-            try:
-                from . import terraform_pra_service as pra
-                await pra.remove_db_tunnel(tun_state)
-                logger.info("clouddb tunnel removed db_id=%s", db_id)
-            except Exception as exc:
-                logger.warning("clouddb tunnel removal for %s failed (non-fatal): %s", db_id, exc)
 
-    # Retire the staged Password Safe artifacts (best-effort; keys absent on
-    # pre-upgrade jobs or when staging was skipped/failed).
+    # 1. PRA tunnel + Vault account (the vault account rides in the tunnel's
+    #    Terraform state and is destroyed with it).
+    job_service.update_progress(db, job_id, 10, "Removing PRA tunnel + Vault account…")
+    tun_state = meta.get("tunnel_tf_state")
+    if tun_state:
+        try:
+            from . import terraform_pra_service as pra
+            await pra.remove_db_tunnel(tun_state)
+            logger.info("clouddb tunnel + vault removed db_id=%s", db_id)
+        except Exception as exc:
+            errors.append(f"PRA tunnel/Vault removal: {exc}")
+            logger.warning("clouddb tunnel removal for %s failed: %s", db_id, exc)
+
+    # 2. Password Safe functional account.
     fa_id = meta.get("ps_functional_account_id")
     if fa_id:
+        job_service.update_progress(db, job_id, 35, "Removing Password Safe functional account…")
         try:
             from . import ps_api_service
             await ps_api_service.delete_functional_account(int(fa_id))
             logger.info("clouddb functional account %s deleted db_id=%s", fa_id, db_id)
         except Exception as exc:
-            logger.warning("clouddb functional-account delete for %s failed (non-fatal): %s",
-                           db_id, exc)
+            errors.append(f"Password Safe functional account: {exc}")
+            logger.warning("clouddb functional-account delete for %s failed: %s", db_id, exc)
+
+    # 3. Secrets Safe secret.
     secret_ref = meta.get("bt_secret_ref")
     if secret_ref:
+        job_service.update_progress(db, job_id, 45, "Removing Secrets Safe secret…")
         try:
             from . import secrets_backend_service
             await asyncio.to_thread(secrets_backend_service.delete_bt_secrets_safe, secret_ref)
             logger.info("clouddb Secrets Safe secret %r deleted db_id=%s", secret_ref, db_id)
         except Exception as exc:
-            logger.warning("clouddb secrets-safe delete for %s failed (non-fatal): %s",
-                           db_id, exc)
+            errors.append(f"Secrets Safe secret: {exc}")
+            logger.warning("clouddb secrets-safe delete for %s failed: %s", db_id, exc)
 
+    # 4. The RDS instance itself (the long step).
+    job_service.update_progress(db, job_id, 60, "Destroying the database instance…")
     if deploy_job and os.path.isdir(_deploy_dir(deploy_job.id)):
         try:
             await terraform.destroy(_deploy_dir(deploy_job.id), env=_aws_env())
+            logger.info("clouddb RDS instance destroyed db_id=%s", db_id)
         except Exception as exc:
-            logger.warning("clouddb destroy for %s failed (non-fatal): %s", db_id, exc)
+            errors.append(f"RDS destroy: {exc}")
+            logger.warning("clouddb destroy for %s failed: %s", db_id, exc)
+    else:
+        errors.append("no Terraform state for this database — the RDS instance may "
+                      "need manual termination in AWS (state lost with the container)")
+
+    if errors:
+        row.status = "failed"
+        db.commit()
+        job_service.set_failed(db, job_id, "; ".join(errors + warnings))
+        logger.error("clouddb decommission db_id=%s ended with errors: %s", db_id, errors)
+        return
 
     row.status = "decommissioned"
     db.commit()
     # Retire the minted admin credential from the encrypted config store too.
     config_service.delete(f"clouddb/{db_id}/admin")
+
+    # Terminate the shared Jumpoint host if nothing is left using it (best-effort;
+    # the row is no longer active, so it's excluded from the count).
+    job_service.update_progress(db, job_id, 90, "Reclaiming idle Jumpoint host…")
+    try:
+        from . import jumpoint_host_service
+        await jumpoint_host_service.teardown_jumpoint_host_if_idle(db, _cfg("aws_region") or row.region)
+    except Exception as exc:
+        warnings.append(f"Jumpoint host teardown: {exc}")
+        logger.warning("clouddb: jumpoint host idle-teardown failed (non-fatal): %s", exc)
+
+    job_service.set_completed(db, job_id, {"db_id": db_id, **({"warnings": warnings} if warnings else {})})
     logger.info("clouddb decommissioned db_id=%s", db_id)
-    return {"ok": True, "db_id": db_id, "status": row.status}
 
 
 def list_databases(db: Session) -> list[dict]:
-    rows = db.query(CloudDatabase).order_by(CloudDatabase.created_at.desc()).all()
+    # Hide cleanly-decommissioned rows so old endpoints don't linger; keep
+    # available/provisioning/decommissioning and `failed` (a failed decommission
+    # is an orphan the operator still needs to see).
+    rows = (db.query(CloudDatabase)
+              .filter(CloudDatabase.status != "decommissioned")
+              .order_by(CloudDatabase.created_at.desc()).all())
     return [_serialize(r) for r in rows]
 
 
