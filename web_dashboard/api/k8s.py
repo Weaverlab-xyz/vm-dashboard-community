@@ -18,7 +18,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from ..database import User, get_db
-from ..models.k8s import ClusterRegisterRequest, ManagementRequest
+from ..models.k8s import BrokerAccessRequest, ClusterRegisterRequest, ManagementRequest
 from ..services import k8s_service
 from ..services.k8s_service import K8sError
 from .auth import require_admin
@@ -89,7 +89,12 @@ async def delete_cluster(
     current_user: User = Depends(require_admin),
 ):
     """Deregister a cluster + clear its stored kubeconfig (Phase 1 does not tear
-    down a cloud-provisioned cluster)."""
+    down a cloud-provisioned cluster). Best-effort destroys the PRA tunnel jump
+    first so a deregister doesn't orphan a Jump Item."""
+    try:
+        await k8s_service.deregister_pra_tunnel(db, cluster_id)
+    except Exception as e:
+        logger.warning("tunnel cleanup during delete of %s failed: %s", cluster_id, e)
     try:
         return k8s_service.delete_cluster(db, cluster_id)
     except K8sError as e:
@@ -106,6 +111,63 @@ async def cluster_console(
     the brokered Portainer endpoint view; for Rancher/Argo, the management URL."""
     try:
         return k8s_service.console_url(db, cluster_id)
+    except K8sError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/clusters/{cluster_id}/access")
+async def broker_access(
+    cluster_id: str,
+    payload: BrokerAccessRequest = BrokerAccessRequest(),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Broker access (Phase 3b). When PRA is configured, ensures the sra
+    ``tunnel_type=k8s`` jump exists and returns a tunnel descriptor (connect via
+    the PRA representative console — no public ingress); otherwise returns the
+    Phase-3a ingress link. For a Rancher plane with Entitle enabled it also opens
+    a time-boxed RBAC grant. Optional per-cluster overrides (jump group, jumpoint
+    name, PRA credential) fall back to config."""
+    try:
+        return await k8s_service.open_console(
+            db, cluster_id, current_user.username,
+            jump_group=payload.jump_group,
+            jumpoint_name=payload.jumpoint_name,
+            pra_credential_ref=payload.pra_credential_ref,
+        )
+    except K8sError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/clusters/{cluster_id}/tunnel", status_code=201)
+async def register_tunnel(
+    cluster_id: str,
+    payload: BrokerAccessRequest = BrokerAccessRequest(),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Provision the cluster's sra ``tunnel_type=k8s`` jump (Phase 3b). Idempotent.
+    Optional jump-group / jumpoint-name / PRA-credential overrides fall back to config."""
+    try:
+        return await k8s_service.register_pra_tunnel(
+            db, cluster_id,
+            jump_group=payload.jump_group,
+            jumpoint_name=payload.jumpoint_name,
+            pra_credential_ref=payload.pra_credential_ref,
+        )
+    except K8sError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.delete("/clusters/{cluster_id}/tunnel")
+async def remove_tunnel(
+    cluster_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Destroy the cluster's PRA tunnel jump and clear its state (Phase 3b)."""
+    try:
+        return await k8s_service.deregister_pra_tunnel(db, cluster_id)
     except K8sError as e:
         raise HTTPException(status_code=400, detail=str(e))
 

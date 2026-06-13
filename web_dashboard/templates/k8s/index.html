@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "partials/secret_picker.html" import secret_picker %}
 {% block title %}Kubernetes – Infrastructure Management{% endblock %}
 
 {# Kubernetes management — Phase 3a (docs/saas-kubernetes-management-plan.md).
@@ -69,6 +70,9 @@
                       class="text-xs px-2 py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded font-medium">Launch mgmt</button>
               <button x-show="c.status === 'managed'" @click="openConsole(c)"
                       class="text-xs px-2 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded font-medium">Open console</button>
+              <button x-show="c.status === 'managed'" @click="openBroker(c)"
+                      title="Broker access via the native PRA tunnel_type=k8s jump + Entitle-Rancher JIT (Phase 3b)"
+                      class="text-xs px-2 py-1 bg-sky-600 hover:bg-sky-700 text-white rounded font-medium">Broker access</button>
               <button @click="del(c)" class="text-xs px-2 py-1 text-red-600 hover:underline ml-1">Delete</button>
             </td>
           </tr>
@@ -131,6 +135,44 @@
       </div>
     </div>
   </div>
+
+  <!-- Broker access modal (Phase 3b) -->
+  <div x-show="showBroker" x-cloak class="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
+       @click.self="showBroker = false">
+    <div class="bg-white rounded-xl shadow-xl w-full max-w-lg">
+      <div class="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+        <h3 class="font-semibold text-gray-800">Broker access<span x-show="brokerTarget" class="text-gray-400 font-normal"> — <span x-text="brokerTarget && brokerTarget.name"></span></span></h3>
+        <button @click="showBroker = false" class="text-gray-400 hover:text-gray-600 text-xl">&times;</button>
+      </div>
+      <div class="px-6 py-4 space-y-4">
+        <p class="text-xs text-gray-500">
+          When PRA is configured this provisions a native <code>tunnel_type=k8s</code> jump (via the beyondtrust/sra provider)
+          and brokers a session with no public ingress. These per-cluster overrides fall back to the configured defaults.
+        </p>
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Jump group <span class="text-gray-400">(name override)</span></label>
+          <input type="text" x-model="brokerForm.jump_group" placeholder="(configured default)"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Jumpoint <span class="text-gray-400">(name override — the "separate jumpoint")</span></label>
+          <input type="text" x-model="brokerForm.jumpoint_name" placeholder="(configured default)"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
+        </div>
+        {{ secret_picker("brokerForm", "praCredBackend", "pra_credential_ref",
+                         "PRA credential",
+                         "Resolved to a bt_client_secret override for this cluster's tunnel provisioning.") }}
+      </div>
+      <div class="px-6 py-4 border-t border-gray-100 flex justify-end gap-3">
+        <button @click="showBroker = false" class="px-4 py-2 text-sm border border-gray-300 rounded-lg">Cancel</button>
+        <button @click="submitBroker()" :disabled="brokering"
+                class="px-4 py-2 bg-sky-600 hover:bg-sky-700 disabled:opacity-50 text-white text-sm font-medium rounded-lg">
+          <span x-show="!brokering">Broker access</span>
+          <span x-show="brokering" x-cloak>Brokering…</span>
+        </button>
+      </div>
+    </div>
+  </div>
 </div>
 {% endblock %}
 
@@ -138,11 +180,14 @@
 <script>
 function k8sPage() {
   return {
+    ...secretPickerState(),
     clusters: [], loading: true, toast: '', toastType: 'success',
     showRegister: false, saving: false,
     form: { name: '', cloud: 'local', kubeconfig: '', mgmt_kind: '' },
+    showBroker: false, brokering: false, brokerTarget: null,
+    brokerForm: { jump_group: '', jumpoint_name: '', praCredBackend: '', pra_credential_ref: '' },
 
-    async init() { requireAuth(); await this.refresh(); },
+    async init() { requireAuth(); this.loadSecretBackends(); await this.refresh(); },
 
     async refresh() {
       this.loading = true;
@@ -205,6 +250,49 @@ function k8sPage() {
         else this.flash('No console URL available.', 'error');
       } catch (e) {
         this.flash(e.message || 'Could not open console.', 'error');
+      }
+    },
+
+    openBroker(c) {
+      this.brokerTarget = c;
+      this.brokerForm = {
+        jump_group: c.jump_group || '',
+        jumpoint_name: c.jumpoint_name || '',
+        praCredBackend: '', pra_credential_ref: c.pra_credential_ref || '',
+      };
+      this.showBroker = true;
+    },
+
+    async submitBroker() {
+      this.brokering = true;
+      try {
+        const body = {
+          jump_group: this.brokerForm.jump_group || null,
+          jumpoint_name: this.brokerForm.jumpoint_name || null,
+          pra_credential_ref: this.brokerForm.pra_credential_ref || null,
+        };
+        const r = await API.post(`/api/k8s/clusters/${this.brokerTarget.id}/access`, body);
+        let msg;
+        if (r.access === 'pra_tunnel') {
+          msg = `PRA tunnel ready (jump ${r.pra && r.pra.tunnel_jump_id || '—'}, jumpoint ${r.pra && r.pra.jumpoint || '—'}) — connect via the BeyondTrust representative console.`;
+        } else if (r.access === 'ingress' && r.url) {
+          window.open(r.url, '_blank', 'noopener');
+          msg = 'Opened the brokered management ingress.';
+        } else {
+          msg = 'Access brokered.';
+        }
+        let pending = false;
+        if (r.entitle) {
+          pending = r.entitle.status === 'pending';
+          msg += ` Entitle Rancher RBAC: ${r.entitle.status}${r.entitle.reason ? ' — ' + r.entitle.reason : ''}.`;
+        }
+        this.showBroker = false;
+        this.flash(msg, pending ? 'error' : 'success');
+        await this.refresh();
+      } catch (e) {
+        this.flash(e.message || 'Broker access failed.', 'error');
+      } finally {
+        this.brokering = false;
       }
     },
 

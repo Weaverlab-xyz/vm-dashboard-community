@@ -33,6 +33,11 @@ class Settings(BaseSettings):
     vdesktops_enabled: bool = False     # Virtual desktops router + /desktops page (Phase 0 scaffold)
     cloud_database_enabled: bool = False  # /api/databases router — private managed DBs brokered via a PRA tunnel
     k8s_management_enabled: bool = False  # /api/k8s router — register/manage Kubernetes clusters (Phase 1)
+    # K8s Phase 3b broker (community = beyondtrust/sra Terraform path). The tunnel
+    # uses bt_jump_group_name + bt_jumpoint_name (per-cluster overrides fall back
+    # to these). Read live via config_service.
+    k8s_rancher_entitle_bundle: str = ""    # Entitle bundle/role id for time-boxed Rancher RBAC (mgmt_kind=rancher)
+    k8s_entitle_duration_minutes: int = 60  # default grant window for the Rancher JIT request
 
     # Proxmox VE connection
     proxmox_host: str = ""              # hostname or IP of the Proxmox node/cluster

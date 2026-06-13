@@ -617,7 +617,12 @@ class K8sCluster(Base):
 
     mgmt_kind = Column(String(20), nullable=True)          # portainer | rancher | argocd | headlamp (Phase 2)
     mgmt_endpoint = Column(String(255), nullable=True)     # management-plane URL (Phase 2)
-    pra_jump_id = Column(String(64), nullable=True)        # native tunnel_type=k8s PRA jump (Phase 3)
+    pra_jump_id = Column(String(64), nullable=True)        # sra_protocol_tunnel_jump id (tunnel_type=k8s, Phase 3b)
+    pra_tunnel_state = Column(Text, nullable=True)         # scrubbed Terraform state for the tunnel (drives teardown)
+    # Per-cluster broker overrides — config defaults are the fallback (Phase 3b).
+    jump_group = Column(String(128), nullable=True)        # PRA Jump Group name override (else bt_jump_group_name)
+    jumpoint_name = Column(String(128), nullable=True)     # PRA Jumpoint name override (else bt_jumpoint_name) — the "separate jumpoint"
+    pra_credential_ref = Column(String(256), nullable=True)  # secret ref → bt_client_secret override (else config)
     secrets_delivery_kind = Column(String(20), nullable=True)  # eso | secrets_agent (Phase 4)
 
     created_by = Column(String(100), nullable=True)
@@ -681,6 +686,12 @@ def init_db():
             # Windows image builds: registry rows carry the guest OS so promotes
             # don't default Windows VHDs to Linux managed images.
             "ALTER TABLE registered_images ADD COLUMN os_type VARCHAR(20)",
+            # K8s management Phase 3b — sra tunnel_type=k8s jump + per-cluster
+            # broker overrides (config defaults as fallback).
+            "ALTER TABLE k8s_clusters ADD COLUMN pra_tunnel_state TEXT",
+            "ALTER TABLE k8s_clusters ADD COLUMN jump_group VARCHAR(128)",
+            "ALTER TABLE k8s_clusters ADD COLUMN jumpoint_name VARCHAR(128)",
+            "ALTER TABLE k8s_clusters ADD COLUMN pra_credential_ref VARCHAR(256)",
         ]
         for stmt in _migrations:
             if _is_sqlite:
