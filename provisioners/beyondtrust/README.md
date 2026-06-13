@@ -39,11 +39,36 @@ Caveats worth knowing before enabling:
 - **First-boot reboot may be required** for certain remediations (e.g. unloading kernel modules). Cloud images that boot from this AMI/image will pick them up cleanly.
 - **Precedence**: CIS writes to `/etc/ssh/sshd_config.d/00-complianceascode-hardening.conf`. Our drop-in `/etc/ssh/sshd_config.d/00-bt-ready.conf` is alphabetically earlier so its directives win (sshd uses first-occurrence-wins semantics). If you see auth failures from PRA, inspect both files and confirm the BT one is being loaded first.
 
+## adminuser + Entitle SSH + EPM-L
+
+Beyond the PRA Shell Jump prereqs, the scripts also prepare the image for
+**Password Safe management**, **Entitle SSH ephemeral accounts**, and **EPM-L**:
+
+- **`adminuser`** (override with `BT_ADMIN_USER`) — a dedicated account created to
+  be **Password-Safe-managed** (onboarded out-of-band) *and* to serve as the
+  **Entitle "SSH ephemeral accounts"** bootstrap user. Entitle SSHes in as this
+  account and runs `useradd`/`userdel` to create + remove the temporary per-grant
+  users ([Entitle docs](https://docs.beyondtrust.com/entitle/docs/entitle-integration-ssh_ephemeral_accounts)).
+- **Scoped sudo.** `adminuser` gets NOPASSWD sudo limited to exactly the commands
+  Entitle needs — `cat chmod chown mkdir mv rm sed tee useradd userdel` — written
+  to `/etc/sudoers.d/91-bt-adminuser` and validated with `visudo -c`. Not blanket
+  `ALL`.
+- **Entitle public key.** When `BT_ENTITLE_PUBKEY` is set, that **public** key is
+  installed into `adminuser`'s `authorized_keys` (Entitle holds the matching
+  private key in its Connection JSON).
+- **EPM-L package install (opt-in).** When `BT_EPML_URL` is set — a presigned URL
+  to the OS-appropriate package, obtained from the dashboard's EPM-L integration
+  (which syncs the latest RPM/DEB to storage) — the script downloads + installs the
+  package. **Install only:** EPM-L *activation* (`pbactivate -t <token>`) stays in
+  the post-deploy **Ansible** playbook, because registration tokens are short-lived
+  and must not be baked into an image.
+
 ## What the scripts deliberately do *not* do
 
-- **No new accounts.** Sudoers grants are wired to whatever user the source image already ships with.
-- **No Password Safe onboarding.** Password Safe Managed Accounts must be registered out-of-band; the image just needs a sudo-capable SSH-keyed user, which step 5 provides.
-- **No EPM-L agent install.** Registration tokens last 8 hours, so baking them at build time is hostile; a first-boot hook reading the token from cloud user-data is the right approach and is a separate effort.
+- **No Password Safe onboarding.** The scripts *create* `adminuser`; registering it
+  as a PS Managed Account (Smart Rule / rotation) is an out-of-band step.
+- **No EPM-L activation.** Package install only; `pbactivate` is the Ansible
+  playbook's job (token freshness — see above).
 - **No host firewall.** Cloud security groups / NSGs / GCP firewall rules are the source of truth; layering `ufw` / `firewalld` on top of them is redundant and risks lockouts.
 
 ## Operator-overridable env vars
@@ -53,6 +78,9 @@ Set these in the Packer build environment before launching the build. The dashbo
 | Var | Default | Effect |
 |---|---|---|
 | `BT_TARGET_USER` | autodetect | Force the sudoers-target username instead of the cloud-default detection. |
+| `BT_ADMIN_USER` | `adminuser` | Name of the Password-Safe / Entitle bootstrap account the script creates. |
+| `BT_ENTITLE_PUBKEY` | (unset) | Entitle integration SSH **public** key → `adminuser` `authorized_keys`. Unset = account created but Entitle can't connect until its key is installed. |
+| `BT_EPML_URL` | (unset) | Presigned URL to the OS-appropriate EPM-L package (`.deb` for Debian, `.rpm` for RPM). Set = download + install at build; unset = skip. **Activation stays in the Ansible playbook.** |
 | `BT_AUTOPATCH` | `0` | When `1`, enable `unattended-upgrades` (Debian) / `dnf-automatic` (RPM) for ongoing security updates. |
 | `BT_SKIP_UPDATES` | `0` | When `1`, skip the dist-upgrade in step 3. Useful for iteration. |
 | `BT_SKIP_CLEANUP` | `0` | When `1`, skip the image-reuse cleanup in step 8. Useful when SSHing into the build VM to debug. |

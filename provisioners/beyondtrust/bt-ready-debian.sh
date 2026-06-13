@@ -6,17 +6,22 @@
 # only — Azure's builder forces /bin/sh (dash on Debian) regardless of shebang, so
 # no [[ ]], no arrays, no <<<, no $'...'.
 #
-# Scope: PRA Shell Jump connectivity prereqs + conservative baseline hygiene. No
-# Password Safe account creation (sudoers wired to the cloud-default user), no
-# EPM-L install, no host firewall. See provisioners/beyondtrust/README.md.
+# Scope: PRA Shell Jump connectivity prereqs + a Password-Safe / Entitle SSH
+# bootstrap account (adminuser) + optional EPM-L package install + conservative
+# baseline hygiene. EPM-L *activation* (pbactivate) stays in the post-deploy
+# Ansible playbook — registration tokens are short-lived, so baking them at build
+# time is wrong. No host firewall. See provisioners/beyondtrust/README.md.
 #
 # Operator-overridable via Packer build env:
-#   BT_TARGET_USER   force sudoers-target user (default: autodetect ubuntu/debian/admin)
-#   BT_AUTOPATCH=1   enable unattended-upgrades on the built image
-#   BT_SKIP_UPDATES=1 skip dist-upgrade (faster iteration builds)
-#   BT_SKIP_CLEANUP=1 skip image-reuse cleanup (keep host keys, machine-id, logs)
-#   BT_APPLY_CIS=1   run OpenSCAP remediation with a CIS profile (Ubuntu only)
-#   BT_CIS_PROFILE   override the default profile id (default: cis_level1_server)
+#   BT_TARGET_USER     force sudoers-target user (default: autodetect ubuntu/debian/admin)
+#   BT_ADMIN_USER      Entitle/Password-Safe bootstrap account name (default: adminuser)
+#   BT_ENTITLE_PUBKEY  Entitle integration SSH public key → adminuser authorized_keys
+#   BT_EPML_URL        presigned URL to the EPM-L .deb; set to install (activation is Ansible's job)
+#   BT_AUTOPATCH=1     enable unattended-upgrades on the built image
+#   BT_SKIP_UPDATES=1  skip dist-upgrade (faster iteration builds)
+#   BT_SKIP_CLEANUP=1  skip image-reuse cleanup (keep host keys, machine-id, logs)
+#   BT_APPLY_CIS=1     run OpenSCAP remediation with a CIS profile (Ubuntu only)
+#   BT_CIS_PROFILE     override the default profile id (default: cis_level1_server)
 
 # Self-elevate. AWS and GCP Packer templates invoke the shell provisioner as
 # the cloud-default SSH user (ubuntu/ec2-user), not root. Azure's template
@@ -154,6 +159,79 @@ chmod 0440 "$SUDOERS"
 if ! visudo -c -f "$SUDOERS" >/dev/null; then
   rm -f "$SUDOERS"
   die "visudo rejected 90-bt-ready — sudoers not installed"
+fi
+
+# ── adminuser — Password Safe / Entitle SSH bootstrap account ─────────────────
+# A dedicated account Password Safe manages (onboarded out-of-band) and that
+# serves as the Entitle "SSH ephemeral accounts" bootstrap user: Entitle SSHes in
+# as this user (with its private key) and runs useradd/userdel to create + remove
+# the temporary per-grant users. See:
+#   https://docs.beyondtrust.com/entitle/docs/entitle-integration-ssh_ephemeral_accounts
+BT_ADMIN_USER="${BT_ADMIN_USER:-adminuser}"
+log "creating Password-Safe / Entitle bootstrap user: $BT_ADMIN_USER"
+if ! id -u "$BT_ADMIN_USER" >/dev/null 2>&1; then
+  useradd -m -s /bin/bash "$BT_ADMIN_USER"
+fi
+
+# Scoped NOPASSWD sudo — exactly the commands Entitle ephemeral-accounts needs,
+# nothing more. Resolve absolute paths (visudo wants real paths; locations differ
+# across distros) via command -v.
+ENT_CMDS="cat chmod chown mkdir mv rm sed tee useradd userdel"
+CMNDLIST=""
+for c in $ENT_CMDS; do
+  p="$(command -v "$c" 2>/dev/null || true)"
+  if [ -z "$p" ]; then
+    log "warn: command '$c' not found on PATH — Entitle ephemeral accounts may need it"
+    continue
+  fi
+  if [ -z "$CMNDLIST" ]; then CMNDLIST="$p"; else CMNDLIST="$CMNDLIST, $p"; fi
+done
+[ -n "$CMNDLIST" ] || die "could not resolve any Entitle sudo commands — refusing to write an empty sudoers"
+ADMIN_SUDOERS=/etc/sudoers.d/91-bt-adminuser
+log "writing $ADMIN_SUDOERS (scoped NOPASSWD for Entitle ephemeral accounts)"
+cat > "$ADMIN_SUDOERS" <<EOF
+# Managed by bt-ready provisioner. Scoped NOPASSWD sudo for Entitle SSH
+# ephemeral accounts — least privilege, only the commands Entitle runs.
+$BT_ADMIN_USER ALL=(root) NOPASSWD: $CMNDLIST
+EOF
+chmod 0440 "$ADMIN_SUDOERS"
+if ! visudo -c -f "$ADMIN_SUDOERS" >/dev/null; then
+  rm -f "$ADMIN_SUDOERS"
+  die "visudo rejected 91-bt-adminuser — sudoers not installed"
+fi
+
+# Entitle's integration SSH PUBLIC key → adminuser authorized_keys. Entitle holds
+# the matching private key in its Connection JSON. (Password Safe onboards +
+# rotates this account out-of-band — not done here.)
+if [ -n "${BT_ENTITLE_PUBKEY:-}" ]; then
+  log "installing Entitle public key into $BT_ADMIN_USER authorized_keys"
+  ADMIN_HOME="$(getent passwd "$BT_ADMIN_USER" | cut -d: -f6)"
+  [ -n "$ADMIN_HOME" ] || ADMIN_HOME="/home/$BT_ADMIN_USER"
+  install -d -m 0700 -o "$BT_ADMIN_USER" -g "$BT_ADMIN_USER" "$ADMIN_HOME/.ssh"
+  printf '%s\n' "$BT_ENTITLE_PUBKEY" > "$ADMIN_HOME/.ssh/authorized_keys"
+  chown "$BT_ADMIN_USER:$BT_ADMIN_USER" "$ADMIN_HOME/.ssh/authorized_keys"
+  chmod 0600 "$ADMIN_HOME/.ssh/authorized_keys"
+else
+  log "warn: BT_ENTITLE_PUBKEY unset — $BT_ADMIN_USER created but Entitle SSH cannot connect until its public key is installed"
+fi
+
+# ── EPM-L package install (opt-in via BT_EPML_URL) ───────────────────────────
+# Install ONLY. EPM-L activation (pbactivate -t <token>) is performed post-deploy
+# by the Ansible playbook; short-lived registration tokens must not be baked into
+# the image.
+if [ -n "${BT_EPML_URL:-}" ]; then
+  log "downloading + installing EPM-L package (Debian) from BT_EPML_URL"
+  if ! command -v curl >/dev/null 2>&1; then
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -q && apt-get -y -q install curl
+  fi
+  curl -fsSL -o /tmp/epml.deb "$BT_EPML_URL" || die "EPM-L package download failed from BT_EPML_URL"
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get -y -q install /tmp/epml.deb || { dpkg -i /tmp/epml.deb || true; apt-get -y -q -f install; }
+  rm -f /tmp/epml.deb
+  log "EPM-L installed (NOT activated) — run the Ansible activation playbook post-deploy"
+else
+  log "BT_EPML_URL unset — skipping EPM-L install (activation playbook handles enrolled hosts separately)"
 fi
 
 # ── 6. Time sync ─────────────────────────────────────────────────────────────
