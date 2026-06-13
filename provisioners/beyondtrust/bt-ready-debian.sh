@@ -8,9 +8,9 @@
 #
 # Scope: PRA Shell Jump connectivity prereqs + a Password-Safe / Entitle SSH
 # bootstrap account (adminuser) + optional EPM-L package install + conservative
-# baseline hygiene. EPM-L *activation* (pbactivate) stays in the post-deploy
-# Ansible playbook — registration tokens are short-lived, so baking them at build
-# time is wrong. No host firewall. See provisioners/beyondtrust/README.md.
+# baseline hygiene. EPM-L *activation* (pbactivate) is done post-deploy with a
+# short-lived installation token from the dashboard's EPM-L integration — not
+# baked into the image. No host firewall. See provisioners/beyondtrust/README.md.
 #
 # Operator-overridable via Packer build env:
 #   BT_TARGET_USER     force sudoers-target user (default: autodetect ubuntu/debian/admin)
@@ -217,8 +217,8 @@ fi
 
 # ── EPM-L package install (opt-in via BT_EPML_URL) ───────────────────────────
 # Install ONLY. EPM-L activation (pbactivate -t <token>) is performed post-deploy
-# by the Ansible playbook; short-lived registration tokens must not be baked into
-# the image.
+# using a short-lived installation token from the dashboard's EPM-L integration
+# (/api/epml/token); tokens must not be baked into the image.
 if [ -n "${BT_EPML_URL:-}" ]; then
   log "downloading + installing EPM-L package (Debian) from BT_EPML_URL"
   if ! command -v curl >/dev/null 2>&1; then
@@ -229,9 +229,9 @@ if [ -n "${BT_EPML_URL:-}" ]; then
   export DEBIAN_FRONTEND=noninteractive
   apt-get -y -q install /tmp/epml.deb || { dpkg -i /tmp/epml.deb || true; apt-get -y -q -f install; }
   rm -f /tmp/epml.deb
-  log "EPM-L installed (NOT activated) — run the Ansible activation playbook post-deploy"
+  log "EPM-L installed (NOT activated) — activate post-deploy with a token from the EPM-L integration"
 else
-  log "BT_EPML_URL unset — skipping EPM-L install (activation playbook handles enrolled hosts separately)"
+  log "BT_EPML_URL unset — skipping EPM-L install (the EPM-L integration handles activation separately)"
 fi
 
 # ── 6. Time sync ─────────────────────────────────────────────────────────────

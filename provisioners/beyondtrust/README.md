@@ -59,16 +59,16 @@ Beyond the PRA Shell Jump prereqs, the scripts also prepare the image for
 - **EPM-L package install (opt-in).** When `BT_EPML_URL` is set — a presigned URL
   to the OS-appropriate package, obtained from the dashboard's EPM-L integration
   (which syncs the latest RPM/DEB to storage) — the script downloads + installs the
-  package. **Install only:** EPM-L *activation* (`pbactivate -t <token>`) stays in
-  the post-deploy **Ansible** playbook, because registration tokens are short-lived
-  and must not be baked into an image.
+  package. **Install only:** EPM-L *activation* (`pbactivate -t <token>`) happens
+  post-deploy using a short-lived installation token from the dashboard's **EPM-L
+  integration** (`/api/epml/token`) — tokens must not be baked into an image.
 
 ## What the scripts deliberately do *not* do
 
 - **No Password Safe onboarding.** The scripts *create* `adminuser`; registering it
   as a PS Managed Account (Smart Rule / rotation) is an out-of-band step.
-- **No EPM-L activation.** Package install only; `pbactivate` is the Ansible
-  playbook's job (token freshness — see above).
+- **No EPM-L activation.** Package install only; `pbactivate` runs post-deploy
+  with a short-lived token from the EPM-L integration (token freshness — see above).
 - **No host firewall.** Cloud security groups / NSGs / GCP firewall rules are the source of truth; layering `ufw` / `firewalld` on top of them is redundant and risks lockouts.
 
 ## Operator-overridable env vars
