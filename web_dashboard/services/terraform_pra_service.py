@@ -666,3 +666,142 @@ async def provision_db_tunnel(
 async def remove_db_tunnel(tf_state_json: str) -> None:
     """Destroy a previously provisioned DB tunnel jump using its stored state."""
     await asyncio.to_thread(_remove_db_tunnel_sync, tf_state_json)
+
+
+# ── Kubernetes protocol-tunnel jump (K8s management feature) ──────────────────
+#
+# A managed cluster's API is reached through a native PRA `tunnel_type=k8s`
+# protocol-tunnel jump — the community edition provisions it with the
+# `beyondtrust/sra` provider's `sra_protocol_tunnel_jump` resource (never btapi,
+# matching the DB-tunnel path above). Field names confirmed against the provider
+# docs (registry.terraform.io/providers/BeyondTrust/sra → protocol_tunnel_jump):
+# tunnel_type ∈ {tcp, mssql, k8s}; `url` + `ca_certificates` are required when
+# tunnel_type=k8s; `hostname` is required by the provider even for k8s, so we
+# pass the API host. Routed through a configurable Jumpoint (the "separate
+# Jumpoint") looked up by name, same as the DB tunnel.
+
+def _generate_k8s_tunnel_hcl(
+    name: str,
+    hostname: str,
+    api_url: str,
+    ca_certificates: str,
+    jump_group_name: str,
+    jumpoint_name: str,
+    tag: str = "Kubernetes",
+) -> str:
+    """HCL for one k8s protocol-tunnel jump (sra_protocol_tunnel_jump,
+    tunnel_type=k8s). ``ca_certificates`` is the cluster CA in PEM — json.dumps
+    emits it as a valid quoted multi-line string for Terraform."""
+    safe_name = re.sub(r"[^a-z0-9_]", "_", name.lower())
+    return f"""\
+terraform {{
+  required_providers {{
+    sra = {{
+      source  = "beyondtrust/sra"
+      version = "~> 1.0"
+    }}
+  }}
+}}
+
+variable "bt_host"          {{ sensitive = false }}
+variable "bt_client_id"     {{ sensitive = true }}
+variable "bt_client_secret" {{ sensitive = true }}
+
+provider "sra" {{
+  host          = var.bt_host
+  client_id     = var.bt_client_id
+  client_secret = var.bt_client_secret
+}}
+
+data "sra_jump_group_list" "jg" {{
+  name = {json.dumps(jump_group_name)}
+}}
+
+data "sra_jumpoint_list" "jp" {{
+  name = {json.dumps(jumpoint_name)}
+}}
+
+resource "sra_protocol_tunnel_jump" {json.dumps(safe_name)} {{
+  name            = {json.dumps(name)}
+  hostname        = {json.dumps(hostname)}
+  jump_group_id   = tonumber(data.sra_jump_group_list.jg.items[0].id)
+  jumpoint_id     = tonumber(data.sra_jumpoint_list.jp.items[0].id)
+  tunnel_type     = "k8s"
+  url             = {json.dumps(api_url)}
+  ca_certificates = {json.dumps(ca_certificates)}
+  tag             = {json.dumps(tag)}
+  comments        = "Auto-provisioned by Infrastructure Management Dashboard (k8s tunnel)"
+}}
+
+output "tunnel_jump_id" {{
+  value = sra_protocol_tunnel_jump.{safe_name}.id
+}}
+"""
+
+
+def _provision_k8s_tunnel_sync(
+    name, hostname, api_url, ca_certificates, jump_group_name, jumpoint_name, tag,
+    client_secret="",
+) -> dict:
+    # A per-cluster PRA credential overrides the configured bt_client_secret for
+    # this apply only (passed as the sensitive TF_VAR the provider block reads).
+    extra_env = {"TF_VAR_bt_client_secret": client_secret} if client_secret else None
+    with tempfile.TemporaryDirectory(prefix="pra_k8s_tf_") as work_dir:
+        Path(work_dir, "main.tf").write_text(
+            _generate_k8s_tunnel_hcl(name, hostname, api_url, ca_certificates,
+                                     jump_group_name, jumpoint_name, tag)
+        )
+        init = _run_tf(["init", "-upgrade=false"], work_dir, timeout=60)
+        if init.returncode != 0:
+            raise TerraformPRAError(
+                f"terraform init failed: {init.stderr.strip() or init.stdout.strip()}")
+        apply = _run_tf(["apply", "-auto-approve"], work_dir, timeout=120, extra_env=extra_env)
+        if apply.returncode != 0:
+            _run_tf(["destroy", "-auto-approve", "-refresh=false"], work_dir, timeout=120)
+            raise TerraformPRAError(
+                f"terraform apply failed: {apply.stderr.strip() or apply.stdout.strip()}")
+
+        out = _run_tf(["output", "-json"], work_dir, timeout=30)
+        tunnel_jump_id: Optional[str] = None
+        if out.returncode == 0 and out.stdout.strip():
+            try:
+                tunnel_jump_id = str(json.loads(out.stdout).get("tunnel_jump_id", {}).get("value", ""))
+            except (json.JSONDecodeError, AttributeError):
+                pass
+        state_path = Path(work_dir, "terraform.tfstate")
+        tf_state_json = state_path.read_text() if state_path.exists() else None
+        return {
+            "tunnel_jump_id": tunnel_jump_id,
+            "jump_group_name": jump_group_name,
+            # No secrets in a k8s tunnel (CA is public), but scrub for consistency.
+            "tf_state_json": _scrub_tf_state(tf_state_json) if tf_state_json else None,
+        }
+
+
+async def provision_k8s_tunnel(
+    name: str,
+    hostname: str,
+    api_url: str,
+    ca_certificates: str,
+    jump_group_name: str,
+    jumpoint_name: str,
+    tag: str = "Kubernetes",
+    client_secret: str = "",
+) -> dict:
+    """Provision a PRA tunnel_type=k8s protocol-tunnel jump to a managed cluster's
+    API via the beyondtrust/sra provider. The Jump Group and Jumpoint must already
+    exist in PRA. ``client_secret`` optionally overrides the configured
+    bt_client_secret for this apply (a per-cluster PRA credential). Returns
+    ``{tunnel_jump_id, jump_group_name, tf_state_json}`` — tf_state_json drives
+    ``remove_k8s_tunnel`` later."""
+    return await asyncio.to_thread(
+        _provision_k8s_tunnel_sync, name, hostname, api_url, ca_certificates,
+        jump_group_name, jumpoint_name, tag, client_secret,
+    )
+
+
+async def remove_k8s_tunnel(tf_state_json: str) -> None:
+    """Destroy a previously provisioned k8s tunnel jump using its stored state.
+    A k8s tunnel has no vault account / re-declarable secrets, so the
+    provider-only state destroy is sufficient."""
+    await asyncio.to_thread(_destroy_state_only_sync, tf_state_json)

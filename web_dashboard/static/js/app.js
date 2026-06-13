@@ -125,6 +125,52 @@ window.API = {
     delete: (path)        => API.request('DELETE', path),  // alias — some templates use API.delete
 };
 
+// ── Reusable secret picker ────────────────────────────────────────────────────
+// Spread into any Alpine page component (`...secretPickerState()`), call
+// `loadSecretBackends()` once (e.g. in init), and render the picker with the
+// `secret_picker` Jinja macro (templates/partials/secret_picker.html). The macro
+// stores a transient backend id on `<obj>.<backend_field>` and the composed
+// reference string (e.g. `aws_sm://dashboard/foo`) on `<obj>.<ref_field>`, which
+// the deploy request sends; the backend resolves it via
+// config_service.resolve_reference() with the per-cloud config as the fallback.
+window.secretPickerState = function () {
+    return {
+        // Only the external backends produce resolvable references; the
+        // database backend stores the value inline (not a ref), so it's omitted.
+        secretPrefix: { aws_sm: 'aws_sm://', azure_kv: 'azure_kv://', gcp_sm: 'gcp_sm://', bt_secrets_safe: 'bt_safe://' },
+        secretBackends: [],
+        secretItems: {},        // backend id → [{name, ref, description}]
+        secretItemsLoading: {}, // backend id → bool
+
+        async loadSecretBackends() {
+            try {
+                const all = await API.get('/api/secrets/backends');
+                this.secretBackends = (all || []).filter(b => this.secretPrefix[b.id]);
+            } catch (e) {
+                this.secretBackends = [];
+            }
+        },
+
+        async loadSecretItems(backend) {
+            if (!backend || !this.secretPrefix[backend]) return;
+            this.secretItemsLoading[backend] = true;
+            try {
+                const r = await API.get(`/api/secrets/items?backend=${encodeURIComponent(backend)}`);
+                this.secretItems[backend] = (r && r.items) || [];
+            } catch (e) {
+                this.secretItems[backend] = [];
+            } finally {
+                this.secretItemsLoading[backend] = false;
+            }
+        },
+
+        composeSecretRef(backend, ref) {
+            if (!backend || !ref) return '';
+            return (this.secretPrefix[backend] || '') + ref;
+        },
+    };
+};
+
 // ── WebSocket job tracker ─────────────────────────────────────────────────────
 class JobTracker {
     constructor(jobId, callbacks = {}) {

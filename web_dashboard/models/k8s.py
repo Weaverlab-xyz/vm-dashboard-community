@@ -32,6 +32,15 @@ class ManagementRequest(BaseModel):
     mgmt_kind: str = "portainer"           # portainer | rancher | argocd | headlamp
 
 
+class BrokerAccessRequest(BaseModel):
+    """Per-cluster broker overrides (Phase 3b). All optional — omitted fields fall
+    back to the configured defaults. ``pra_credential_ref`` is a secrets-backend
+    *reference* (e.g. ``aws_sm://…``), not a raw secret."""
+    jump_group: Optional[str] = None          # PRA Jump Group name override (else bt_jump_group_name)
+    jumpoint_name: Optional[str] = None       # PRA Jumpoint name override (else bt_jumpoint_name)
+    pra_credential_ref: Optional[str] = None  # secret ref → bt_client_secret override for the apply
+
+
 class ClusterInfo(BaseModel):
     id: str
     cloud: str
@@ -41,6 +50,9 @@ class ClusterInfo(BaseModel):
     mgmt_kind: Optional[str] = None
     mgmt_endpoint: Optional[str] = None
     pra_jump_id: Optional[str] = None
+    jump_group: Optional[str] = None
+    jumpoint_name: Optional[str] = None
+    pra_credential_ref: Optional[str] = None
     secrets_delivery_kind: Optional[str] = None
     created_by: Optional[str] = None
     created_at: str
