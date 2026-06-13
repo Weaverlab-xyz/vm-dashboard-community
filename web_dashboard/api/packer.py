@@ -49,6 +49,26 @@ def _get_db_session():
     return SessionLocal()
 
 
+async def _bt_provisioner_env(req) -> dict:
+    """BeyondTrust provisioner env (BT_*) built from a build request, injected into
+    the shell provisioner's ``environment_vars``. For ``bt_epml`` in ('deb','rpm')
+    a fresh EPM-L package download URL is resolved from the EPM-L integration
+    (BeyondTrust presigned, ~30-min expiry) → ``BT_EPML_URL``. Raises ``EpmlError``
+    if the package can't be resolved."""
+    env: dict = {}
+    admin = (getattr(req, "bt_admin_user", None) or "").strip()
+    if admin:
+        env["BT_ADMIN_USER"] = admin
+    pubkey = (getattr(req, "bt_entitle_pubkey", None) or "").strip()
+    if pubkey:
+        env["BT_ENTITLE_PUBKEY"] = pubkey
+    fam = (getattr(req, "bt_epml", None) or "").strip().lower()
+    if fam in ("deb", "rpm"):
+        from ..services import epml_service
+        env["BT_EPML_URL"] = await epml_service.package_download_url(fam)
+    return env
+
+
 # ── AWS build ─────────────────────────────────────────────────────────────────
 
 @router.post("/aws/build", response_model=PackerBuildResponse)
@@ -179,12 +199,14 @@ async def _run_aws_build(job_id: str, req: AWSPackerBuildRequest, created_by: st
 
         # Generate template
         job_service.update_progress(db, job_id, 5, "Generating Packer template…")
+        prov_env = await _bt_provisioner_env(req) if req.provisioner_script.strip() else {}
         template = packer_service.generate_aws_template(
             source_ami=req.source_ami,
             instance_type=req.instance_type,
             ssh_username=req.ssh_username,
             image_name=req.image_name,
             has_provisioner=bool(req.provisioner_script.strip()),
+            provisioner_env=prov_env,
         )
         (build_dir / "build.pkr.hcl").write_text(template)
         _write_provisioner(build_dir, req.provisioner_script)
@@ -254,7 +276,7 @@ async def _run_azure_build(job_id: str, req: AzurePackerBuildRequest, created_by
         job_service.update_progress(db, job_id, 5, "Generating Packer template…")
         generate = (packer_service.generate_azure_windows_template if is_windows
                     else packer_service.generate_azure_template)
-        template = generate(
+        gen_kwargs = dict(
             image_publisher=req.image_publisher,
             image_offer=req.image_offer,
             image_sku=req.image_sku,
@@ -262,6 +284,11 @@ async def _run_azure_build(job_id: str, req: AzurePackerBuildRequest, created_by
             image_name=req.image_name,
             has_provisioner=bool(req.provisioner_script.strip()),
         )
+        # BT_* env applies to the Linux (shell) provisioner only — Windows uses
+        # a PowerShell provisioner, which the bt-ready scripts don't target.
+        if not is_windows and req.provisioner_script.strip():
+            gen_kwargs["provisioner_env"] = await _bt_provisioner_env(req)
+        template = generate(**gen_kwargs)
         (build_dir / "build.pkr.hcl").write_text(template)
         if is_windows:
             _write_ps_provisioner(build_dir, req.provisioner_script)
@@ -339,6 +366,7 @@ async def _run_gcp_build(job_id: str, req: GCPPackerBuildRequest, created_by: st
             env["GOOGLE_APPLICATION_CREDENTIALS"] = str(creds_file)
 
         job_service.update_progress(db, job_id, 5, "Generating Packer template…")
+        prov_env = await _bt_provisioner_env(req) if req.provisioner_script.strip() else {}
         template = packer_service.generate_gcp_template(
             source_image=req.source_image,
             machine_type=req.machine_type,
@@ -347,6 +375,7 @@ async def _run_gcp_build(job_id: str, req: GCPPackerBuildRequest, created_by: st
             project_id=project_id,
             zone=zone,
             has_provisioner=bool(req.provisioner_script.strip()),
+            provisioner_env=prov_env,
         )
         (build_dir / "build.pkr.hcl").write_text(template)
         _write_provisioner(build_dir, req.provisioner_script)

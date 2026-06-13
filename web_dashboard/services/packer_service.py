@@ -49,15 +49,44 @@ def _safe_azure_name(name: str) -> str:
 
 # ── HCL2 template generators ──────────────────────────────────────────────────
 
+def _hcl_escape(value: str) -> str:
+    """Escape a string for an HCL double-quoted literal."""
+    return (
+        value.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("${", "$${")
+        .replace("%{", "%%{")
+        .replace("\n", "\\n")
+    )
+
+
+def _provisioner_env_block(env: dict, indent: str = "    ") -> str:
+    """An ``environment_vars = [...]`` line for a shell provisioner, or "" when
+    there's nothing to set. Each (k, v) becomes a "KEY=VALUE" array element;
+    empty/None values are dropped."""
+    if not env:
+        return ""
+    items = [
+        '"%s=%s"' % (k, _hcl_escape(str(v)))
+        for k, v in env.items()
+        if v is not None and str(v) != ""
+    ]
+    if not items:
+        return ""
+    return indent + "environment_vars = [" + ", ".join(items) + "]\n"
+
+
 def generate_aws_template(
     source_ami: str,
     instance_type: str,
     ssh_username: str,
     image_name: str,
     has_provisioner: bool,
+    provisioner_env: dict = None,
 ) -> str:
     safe = _safe_ami_name(image_name)
-    prov = '\n  provisioner "shell" {\n    script = "provision.sh"\n  }\n' if has_provisioner else ""
+    envb = _provisioner_env_block(provisioner_env)
+    prov = ('\n  provisioner "shell" {\n    script = "provision.sh"\n' + envb + '  }\n') if has_provisioner else ""
     return (
         'packer {\n'
         '  required_plugins {\n'
@@ -94,13 +123,16 @@ def generate_azure_template(
     vm_size: str,
     image_name: str,
     has_provisioner: bool,
+    provisioner_env: dict = None,
 ) -> str:
     safe = _safe_azure_name(image_name)
+    envb = _provisioner_env_block(provisioner_env)
     # Azure requires waagent deprovision to generalize the image
     prov = (
         '\n  provisioner "shell" {\n'
         '    execute_command = "chmod +x {{ .Path }}; {{ .Vars }} sudo -E sh \'{{ .Path }}\'"\n'
         '    script          = "provision.sh"\n'
+        + envb +
         '  }\n'
     ) if has_provisioner else ""
     deprovision = (
@@ -215,9 +247,11 @@ def generate_gcp_template(
     project_id: str,
     zone: str,
     has_provisioner: bool,
+    provisioner_env: dict = None,
 ) -> str:
     safe = _safe_gcp_name(image_name)
-    prov = '\n  provisioner "shell" {\n    script = "provision.sh"\n  }\n' if has_provisioner else ""
+    envb = _provisioner_env_block(provisioner_env)
+    prov = ('\n  provisioner "shell" {\n    script = "provision.sh"\n' + envb + '  }\n') if has_provisioner else ""
     return (
         'packer {\n'
         '  required_plugins {\n'

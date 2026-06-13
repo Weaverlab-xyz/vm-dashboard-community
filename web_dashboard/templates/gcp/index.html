@@ -543,6 +543,36 @@
           </p>
         </div>
 
+        <!-- BeyondTrust provisioner options -->
+        <div x-show="gcpPackerForm.provisioner_script.trim()" x-cloak
+             class="space-y-3 p-3 bg-gray-50 rounded-lg border border-gray-200">
+          <p class="text-xs font-semibold text-gray-600">BeyondTrust provisioner options
+            <span class="font-normal text-gray-400">— used by the bt-ready scripts; ignored by other provisioners.</span>
+          </p>
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="block text-xs font-medium text-gray-600 mb-1">Admin user (Password Safe / Entitle)</label>
+              <input type="text" x-model="gcpPackerForm.bt_admin_user" placeholder="adminuser"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm font-mono">
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-gray-600 mb-1">Install EPM-L</label>
+              <select x-model="gcpPackerForm.bt_epml" class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
+                <option value="">Off</option>
+                <option value="deb">Debian (.deb)</option>
+                <option value="rpm">RPM (.rpm)</option>
+              </select>
+            </div>
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-gray-600 mb-1">Entitle SSH public key</label>
+            <textarea x-model="gcpPackerForm.bt_entitle_pubkey" rows="2"
+                      placeholder="ssh-ed25519 AAAA… (Entitle integration public key → adminuser authorized_keys)"
+                      class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-xs font-mono resize-y"></textarea>
+            <p class="text-[11px] text-gray-400 mt-1">EPM-L is installed at build; activation runs post-deploy via the EPM-L integration.</p>
+          </div>
+        </div>
+
         <!-- Archive to GCS -->
         <div x-show="packerArchiveBucketGcs" x-cloak
              class="flex items-start gap-3 p-3 bg-gray-50 rounded-lg border border-gray-200">
@@ -639,6 +669,9 @@ function gcpDashboard() {
       provisioner_script: '',
       archive_template:  false,
       loaded_from:       '',
+      bt_admin_user:     '',  // → BT_ADMIN_USER (bt-ready provisioner)
+      bt_entitle_pubkey: '',  // → BT_ENTITLE_PUBKEY (Entitle SSH)
+      bt_epml:           '',  // '' | 'deb' | 'rpm' → BT_EPML_URL (EPM-L install)
     },
     gcpPackerBuilding:    false,
     gcpPackerError:       '',

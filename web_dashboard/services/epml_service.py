@@ -330,3 +330,27 @@ async def sync_packages_to_storage() -> dict:
             uploaded_deb = True
 
     return {"rpm_uploaded": uploaded_rpm, "deb_uploaded": uploaded_deb, "packages": pkgs}
+
+
+async def package_download_url(family: str) -> str:
+    """A fresh BeyondTrust **presigned** download URL for the EPM-L package of the
+    given family (``deb`` or ``rpm``). Used to hand a Packer build a download URL
+    via ``BT_EPML_URL`` so the bt-ready provisioner can install the package at
+    build time.
+
+    Note: BeyondTrust presigned links expire ~30 minutes after listing, so this
+    is resolved at build-launch time (close to when the provisioner runs)."""
+    family = (family or "").lower()
+    if family not in ("deb", "rpm"):
+        raise EpmlError(f"unknown EPM-L package family {family!r} (expected 'deb' or 'rpm')")
+    suffix = "." + family
+    for pkg in await ensure_packages():
+        filename = _get_package_filename(pkg)
+        if filename and filename.lower().endswith(suffix):
+            url = _get_package_download_url(pkg)
+            if url:
+                return url
+            raise EpmlError(f"EPM-L {family} package found but has no download URL")
+    raise EpmlError(
+        f"no EPM-L {family} package available from BeyondTrust — build/sync packages first"
+    )

@@ -10,6 +10,10 @@ class AWSPackerBuildRequest(BaseModel):
     ssh_username: str = "ec2-user"
     provisioner_script: str = ""
     archive_template: bool = False
+    # BeyondTrust provisioner knobs — passed to the bt-ready provisioner as env vars.
+    bt_admin_user: Optional[str] = None        # → BT_ADMIN_USER (Entitle/Password-Safe bootstrap account)
+    bt_entitle_pubkey: Optional[str] = None    # → BT_ENTITLE_PUBKEY (Entitle SSH integration public key)
+    bt_epml: Optional[str] = None              # "deb" | "rpm" — install EPM-L package of this family (else skip)
 
 
 class AzurePackerBuildRequest(BaseModel):
@@ -21,6 +25,10 @@ class AzurePackerBuildRequest(BaseModel):
     os_type: str = "Linux"  # "Linux" | "Windows" — picks the template generator
     provisioner_script: str = ""
     archive_template: bool = False
+    # BeyondTrust provisioner knobs — passed to the bt-ready provisioner as env vars.
+    bt_admin_user: Optional[str] = None        # → BT_ADMIN_USER (Entitle/Password-Safe bootstrap account)
+    bt_entitle_pubkey: Optional[str] = None    # → BT_ENTITLE_PUBKEY (Entitle SSH integration public key)
+    bt_epml: Optional[str] = None              # "deb" | "rpm" — install EPM-L package of this family (else skip)
 
 
 class GCPPackerBuildRequest(BaseModel):
@@ -30,6 +38,10 @@ class GCPPackerBuildRequest(BaseModel):
     ssh_username: str = "packer"
     provisioner_script: str = ""
     archive_template: bool = False
+    # BeyondTrust provisioner knobs — passed to the bt-ready provisioner as env vars.
+    bt_admin_user: Optional[str] = None        # → BT_ADMIN_USER (Entitle/Password-Safe bootstrap account)
+    bt_entitle_pubkey: Optional[str] = None    # → BT_ENTITLE_PUBKEY (Entitle SSH integration public key)
+    bt_epml: Optional[str] = None              # "deb" | "rpm" — install EPM-L package of this family (else skip)
 
 
 class PackerBuildResponse(BaseModel):
