@@ -49,6 +49,67 @@ def _get_db_session():
     return SessionLocal()
 
 
+async def _bt_provisioner_env(req) -> dict:
+    """BeyondTrust provisioner env (BT_*) built from a build request, injected into
+    the shell provisioner's ``environment_vars``. For ``bt_epml`` in ('deb','rpm')
+    a fresh EPM-L package download URL is resolved from the EPM-L integration
+    (BeyondTrust presigned, ~30-min expiry) → ``BT_EPML_URL``. Raises ``EpmlError``
+    if the package can't be resolved."""
+    env: dict = {}
+    admin = (getattr(req, "bt_admin_user", None) or "").strip()
+    if admin:
+        env["BT_ADMIN_USER"] = admin
+    pubkey = (getattr(req, "bt_entitle_pubkey", None) or "").strip()
+    if pubkey:
+        env["BT_ENTITLE_PUBKEY"] = pubkey
+    fam = (getattr(req, "bt_epml", None) or "").strip().lower()
+    if fam in ("deb", "rpm"):
+        from ..services import epml_service
+        env["BT_EPML_URL"] = await epml_service.package_download_url(fam)
+    return env
+
+
+async def _provisioner_env(req) -> tuple[dict, dict, dict]:
+    """Resolve the full provisioner environment for a build request.
+
+    Returns ``(plain_env, secret_vars, pkr_env)``:
+      * ``plain_env``   — name→literal value, inlined into the template's
+        ``environment_vars`` (includes the BT_* convenience knobs).
+      * ``secret_vars`` — name→Packer sensitive-variable name; declared in the
+        template, value NOT written to it.
+      * ``pkr_env``     — ``PKR_VAR_<var>``→resolved secret value, injected into
+        the packer build subprocess so the sensitive variables get their values
+        without ever touching the template or the archived copy.
+
+    Generic env vars flagged ``is_secret_ref`` are resolved at build-launch via
+    config_service (aws_sm://, azure_kv://, gcp_sm://, bt_safe:// …)."""
+    from ..services import config_service
+
+    plain = await _bt_provisioner_env(req)
+    secret_vars: dict = {}
+    pkr_env: dict = {}
+    idx = 0
+    for ev in (getattr(req, "provisioner_env_vars", None) or []):
+        name = (getattr(ev, "name", "") or "").strip()
+        if not name:
+            continue
+        raw = getattr(ev, "value", "") or ""
+        if getattr(ev, "is_secret_ref", False):
+            value = config_service.resolve_reference(raw.strip())
+            if not value:
+                raise PackerError(
+                    f"Could not resolve secret reference for {name!r} "
+                    f"({raw[:40]}…) — check the reference and that the backend is configured."
+                )
+            var = f"penv_{idx}"
+            idx += 1
+            secret_vars[name] = var
+            pkr_env[f"PKR_VAR_{var}"] = value
+        else:
+            plain[name] = raw
+    return plain, secret_vars, pkr_env
+
+
 # ── AWS build ─────────────────────────────────────────────────────────────────
 
 @router.post("/aws/build", response_model=PackerBuildResponse)
@@ -179,12 +240,19 @@ async def _run_aws_build(job_id: str, req: AWSPackerBuildRequest, created_by: st
 
         # Generate template
         job_service.update_progress(db, job_id, 5, "Generating Packer template…")
+        if req.provisioner_script.strip():
+            plain_env, secret_vars, pkr_env = await _provisioner_env(req)
+        else:
+            plain_env, secret_vars, pkr_env = {}, {}, {}
+        env.update(pkr_env)
         template = packer_service.generate_aws_template(
             source_ami=req.source_ami,
             instance_type=req.instance_type,
             ssh_username=req.ssh_username,
             image_name=req.image_name,
             has_provisioner=bool(req.provisioner_script.strip()),
+            provisioner_env=plain_env,
+            provisioner_secret_vars=secret_vars,
         )
         (build_dir / "build.pkr.hcl").write_text(template)
         _write_provisioner(build_dir, req.provisioner_script)
@@ -254,7 +322,7 @@ async def _run_azure_build(job_id: str, req: AzurePackerBuildRequest, created_by
         job_service.update_progress(db, job_id, 5, "Generating Packer template…")
         generate = (packer_service.generate_azure_windows_template if is_windows
                     else packer_service.generate_azure_template)
-        template = generate(
+        gen_kwargs = dict(
             image_publisher=req.image_publisher,
             image_offer=req.image_offer,
             image_sku=req.image_sku,
@@ -262,6 +330,15 @@ async def _run_azure_build(job_id: str, req: AzurePackerBuildRequest, created_by
             image_name=req.image_name,
             has_provisioner=bool(req.provisioner_script.strip()),
         )
+        # Provisioner env (BT_* + generic) applies to the Linux (shell)
+        # provisioner only — Windows uses a PowerShell provisioner, which the
+        # shell environment_vars mechanism doesn't target.
+        if not is_windows and req.provisioner_script.strip():
+            plain_env, secret_vars, pkr_env = await _provisioner_env(req)
+            env.update(pkr_env)
+            gen_kwargs["provisioner_env"] = plain_env
+            gen_kwargs["provisioner_secret_vars"] = secret_vars
+        template = generate(**gen_kwargs)
         (build_dir / "build.pkr.hcl").write_text(template)
         if is_windows:
             _write_ps_provisioner(build_dir, req.provisioner_script)
@@ -339,6 +416,11 @@ async def _run_gcp_build(job_id: str, req: GCPPackerBuildRequest, created_by: st
             env["GOOGLE_APPLICATION_CREDENTIALS"] = str(creds_file)
 
         job_service.update_progress(db, job_id, 5, "Generating Packer template…")
+        if req.provisioner_script.strip():
+            plain_env, secret_vars, pkr_env = await _provisioner_env(req)
+        else:
+            plain_env, secret_vars, pkr_env = {}, {}, {}
+        env.update(pkr_env)
         template = packer_service.generate_gcp_template(
             source_image=req.source_image,
             machine_type=req.machine_type,
@@ -347,6 +429,8 @@ async def _run_gcp_build(job_id: str, req: GCPPackerBuildRequest, created_by: st
             project_id=project_id,
             zone=zone,
             has_provisioner=bool(req.provisioner_script.strip()),
+            provisioner_env=plain_env,
+            provisioner_secret_vars=secret_vars,
         )
         (build_dir / "build.pkr.hcl").write_text(template)
         _write_provisioner(build_dir, req.provisioner_script)

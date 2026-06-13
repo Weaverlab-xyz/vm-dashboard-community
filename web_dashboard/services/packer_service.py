@@ -49,15 +49,72 @@ def _safe_azure_name(name: str) -> str:
 
 # ── HCL2 template generators ──────────────────────────────────────────────────
 
+def _hcl_escape(value: str) -> str:
+    """Escape a string for an HCL double-quoted literal."""
+    return (
+        value.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("${", "$${")
+        .replace("%{", "%%{")
+        .replace("\n", "\\n")
+    )
+
+
+def _provisioner_env_block(env: dict, secret_vars: dict = None, indent: str = "    ") -> str:
+    """An ``environment_vars = [...]`` line for a shell provisioner, or "" when
+    there's nothing to set.
+
+    ``env`` holds literal values, each inlined as a "KEY=VALUE" array element
+    (empty/None dropped, HCL-escaped). ``secret_vars`` maps an env-var name to a
+    Packer *sensitive* variable name; each becomes "KEY=${var.<name>}" so the
+    actual secret value — supplied at runtime via PKR_VAR_<name> — never appears
+    in the template or the archived copy."""
+    items = [
+        '"%s=%s"' % (k, _hcl_escape(str(v)))
+        for k, v in (env or {}).items()
+        if v is not None and str(v) != ""
+    ]
+    items += [
+        '"%s=${var.%s}"' % (name, var)
+        for name, var in (secret_vars or {}).items()
+    ]
+    if not items:
+        return ""
+    return indent + "environment_vars = [" + ", ".join(items) + "]\n"
+
+
+def _secret_var_decls(secret_vars: dict = None) -> str:
+    """HCL ``variable`` declarations (marked ``sensitive``) for each secret env
+    var, or "" when there are none. Values are supplied at build time via
+    PKR_VAR_<name> in the subprocess env, so only the declarations — never the
+    secret values — are written to the template."""
+    if not secret_vars:
+        return ""
+    out = ""
+    for var in secret_vars.values():
+        out += (
+            'variable "%s" {\n'
+            '  type      = string\n'
+            '  sensitive = true\n'
+            '  default   = ""\n'
+            '}\n' % var
+        )
+    return out + "\n"
+
+
 def generate_aws_template(
     source_ami: str,
     instance_type: str,
     ssh_username: str,
     image_name: str,
     has_provisioner: bool,
+    provisioner_env: dict = None,
+    provisioner_secret_vars: dict = None,
 ) -> str:
     safe = _safe_ami_name(image_name)
-    prov = '\n  provisioner "shell" {\n    script = "provision.sh"\n  }\n' if has_provisioner else ""
+    envb = _provisioner_env_block(provisioner_env, provisioner_secret_vars)
+    decls = _secret_var_decls(provisioner_secret_vars)
+    prov = ('\n  provisioner "shell" {\n    script = "provision.sh"\n' + envb + '  }\n') if has_provisioner else ""
     return (
         'packer {\n'
         '  required_plugins {\n'
@@ -68,6 +125,7 @@ def generate_aws_template(
         '  }\n'
         '}\n\n'
         'variable "region" { default = "us-east-2" }\n\n'
+        + decls +
         'source "amazon-ebs" "build" {\n'
         '  region        = var.region\n'
         '  source_ami    = "' + source_ami + '"\n'
@@ -94,13 +152,18 @@ def generate_azure_template(
     vm_size: str,
     image_name: str,
     has_provisioner: bool,
+    provisioner_env: dict = None,
+    provisioner_secret_vars: dict = None,
 ) -> str:
     safe = _safe_azure_name(image_name)
+    envb = _provisioner_env_block(provisioner_env, provisioner_secret_vars)
+    decls = _secret_var_decls(provisioner_secret_vars)
     # Azure requires waagent deprovision to generalize the image
     prov = (
         '\n  provisioner "shell" {\n'
         '    execute_command = "chmod +x {{ .Path }}; {{ .Vars }} sudo -E sh \'{{ .Path }}\'"\n'
         '    script          = "provision.sh"\n'
+        + envb +
         '  }\n'
     ) if has_provisioner else ""
     deprovision = (
@@ -122,6 +185,7 @@ def generate_azure_template(
         '# are read from environment variables automatically.\n\n'
         'variable "resource_group" { default = "" }\n'
         'variable "location"       { default = "centralus" }\n\n'
+        + decls +
         'source "azure-arm" "build" {\n'
         '  managed_image_name                = "' + safe + '-{{timestamp}}"\n'
         '  managed_image_resource_group_name = var.resource_group\n\n'
@@ -215,9 +279,13 @@ def generate_gcp_template(
     project_id: str,
     zone: str,
     has_provisioner: bool,
+    provisioner_env: dict = None,
+    provisioner_secret_vars: dict = None,
 ) -> str:
     safe = _safe_gcp_name(image_name)
-    prov = '\n  provisioner "shell" {\n    script = "provision.sh"\n  }\n' if has_provisioner else ""
+    envb = _provisioner_env_block(provisioner_env, provisioner_secret_vars)
+    decls = _secret_var_decls(provisioner_secret_vars)
+    prov = ('\n  provisioner "shell" {\n    script = "provision.sh"\n' + envb + '  }\n') if has_provisioner else ""
     return (
         'packer {\n'
         '  required_plugins {\n'
@@ -228,6 +296,7 @@ def generate_gcp_template(
         '  }\n'
         '}\n\n'
         '# GOOGLE_APPLICATION_CREDENTIALS points to the service account key file.\n\n'
+        + decls +
         'source "googlecompute" "build" {\n'
         '  project_id   = "' + project_id + '"\n'
         '  zone         = "' + zone + '"\n'

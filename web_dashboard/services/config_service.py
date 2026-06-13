@@ -240,6 +240,21 @@ def get(key: str, default: str = "", workgroup: str | None = None) -> str:
     return _resolve_external(raw, workgroup=workgroup)
 
 
+def is_reference(raw: str) -> bool:
+    """True if raw is an external secret-backend reference (aws_sm://, azure_kv://,
+    gcp_sm://, …) rather than a literal value."""
+    return any((raw or "").startswith(p) for p in _EXT_PREFIXES)
+
+
+def resolve_reference(raw: str, workgroup: str | None = None) -> str:
+    """Resolve a raw external-backend reference string to its secret value.
+
+    Unlike get(), which takes a stored config key, this resolves a reference the
+    caller already holds (e.g. one a user typed into a form). Non-reference
+    strings are returned unchanged. Returns "" if resolution fails."""
+    return _resolve_external(raw, workgroup=workgroup)
+
+
 def get_bool(key: str, default: bool = False) -> bool:
     """Return a config flag as bool. Stored as '1'/'0' (legacy rows may hold
     'True'/'False' from pre-normalization _write_feature); env-var fallback via settings."""
