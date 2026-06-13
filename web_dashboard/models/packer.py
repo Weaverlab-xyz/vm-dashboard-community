@@ -1,6 +1,36 @@
 """Pydantic models for the Packer image-builder endpoints."""
+import re
 from typing import Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
+
+# Shell environment-variable names: a letter or underscore, then letters/digits/
+# underscores. Enforced so a user-supplied name can't break out of the HCL
+# environment_vars array or the PKR_VAR_ mapping.
+_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+class ProvisionerEnvVar(BaseModel):
+    """One environment variable handed to the shell provisioner.
+
+    When ``is_secret_ref`` is true, ``value`` is a configured-secret-manager
+    reference (e.g. ``aws_sm://dashboard/foo``, ``azure_kv://foo``,
+    ``gcp_sm://foo``, ``bt_safe://...``) resolved at build-launch via
+    config_service; the resolved value is injected through a Packer *sensitive*
+    variable so it never lands in the generated/archived template or the logs.
+    Otherwise ``value`` is a literal inlined into the template."""
+    name: str
+    value: str = ""
+    is_secret_ref: bool = False
+
+    @field_validator("name")
+    @classmethod
+    def _valid_name(cls, v: str) -> str:
+        v = (v or "").strip()
+        if not _ENV_NAME_RE.match(v):
+            raise ValueError(
+                f"invalid environment variable name {v!r} — must match [A-Za-z_][A-Za-z0-9_]*"
+            )
+        return v
 
 
 class AWSPackerBuildRequest(BaseModel):
@@ -10,6 +40,8 @@ class AWSPackerBuildRequest(BaseModel):
     ssh_username: str = "ec2-user"
     provisioner_script: str = ""
     archive_template: bool = False
+    # Generic provisioner environment variables (literals + secret-manager refs).
+    provisioner_env_vars: list[ProvisionerEnvVar] = []
     # BeyondTrust provisioner knobs — passed to the bt-ready provisioner as env vars.
     bt_admin_user: Optional[str] = None        # → BT_ADMIN_USER (Entitle/Password-Safe bootstrap account)
     bt_entitle_pubkey: Optional[str] = None    # → BT_ENTITLE_PUBKEY (Entitle SSH integration public key)
@@ -25,6 +57,8 @@ class AzurePackerBuildRequest(BaseModel):
     os_type: str = "Linux"  # "Linux" | "Windows" — picks the template generator
     provisioner_script: str = ""
     archive_template: bool = False
+    # Generic provisioner environment variables (literals + secret-manager refs).
+    provisioner_env_vars: list[ProvisionerEnvVar] = []
     # BeyondTrust provisioner knobs — passed to the bt-ready provisioner as env vars.
     bt_admin_user: Optional[str] = None        # → BT_ADMIN_USER (Entitle/Password-Safe bootstrap account)
     bt_entitle_pubkey: Optional[str] = None    # → BT_ENTITLE_PUBKEY (Entitle SSH integration public key)
@@ -38,6 +72,8 @@ class GCPPackerBuildRequest(BaseModel):
     ssh_username: str = "packer"
     provisioner_script: str = ""
     archive_template: bool = False
+    # Generic provisioner environment variables (literals + secret-manager refs).
+    provisioner_env_vars: list[ProvisionerEnvVar] = []
     # BeyondTrust provisioner knobs — passed to the bt-ready provisioner as env vars.
     bt_admin_user: Optional[str] = None        # → BT_ADMIN_USER (Entitle/Password-Safe bootstrap account)
     bt_entitle_pubkey: Optional[str] = None    # → BT_ENTITLE_PUBKEY (Entitle SSH integration public key)
