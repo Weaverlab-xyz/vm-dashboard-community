@@ -73,14 +73,21 @@ Beyond the PRA Shell Jump prereqs, the scripts also prepare the image for
 
 ## Operator-overridable env vars
 
-Set these in the Packer build environment before launching the build. The dashboard does not currently wire them through the build form — they're consumed directly by Packer's shell provisioner.
+These are consumed directly by Packer's shell provisioner. The dashboard build
+form surfaces the common ones for you — a **BeyondTrust provisioner options**
+panel (Admin user → `BT_ADMIN_USER`, Install EPM-L → `BT_EPML_URL`, Entitle SSH
+public key → `BT_ENTITLE_PUBKEY`) plus a generic **Environment variables** table
+for the rest (`BT_APPLY_CIS`, `BT_SKIP_UPDATES`, …); see
+[Image Management → Passing environment variables to the provisioner](../../docs/image-management.md#passing-environment-variables-to-the-provisioner).
+You can still set any of them directly in the build environment when scripting
+Packer outside the dashboard.
 
 | Var | Default | Effect |
 |---|---|---|
 | `BT_TARGET_USER` | autodetect | Force the sudoers-target username instead of the cloud-default detection. |
 | `BT_ADMIN_USER` | `adminuser` | Name of the Password-Safe / Entitle bootstrap account the script creates. |
 | `BT_ENTITLE_PUBKEY` | (unset) | Entitle integration SSH **public** key → `adminuser` `authorized_keys`. Unset = account created but Entitle can't connect until its key is installed. |
-| `BT_EPML_URL` | (unset) | Presigned URL to the OS-appropriate EPM-L package (`.deb` for Debian, `.rpm` for RPM). Set = download + install at build; unset = skip. **Activation stays in the Ansible playbook.** |
+| `BT_EPML_URL` | (unset) | Presigned URL to the OS-appropriate EPM-L package (`.deb` for Debian, `.rpm` for RPM). Set = download + install at build; unset = skip. **Activation runs post-deploy via the EPM-L integration**, not at build. The dashboard's Install EPM-L dropdown fills this in for you. |
 | `BT_AUTOPATCH` | `0` | When `1`, enable `unattended-upgrades` (Debian) / `dnf-automatic` (RPM) for ongoing security updates. |
 | `BT_SKIP_UPDATES` | `0` | When `1`, skip the dist-upgrade in step 3. Useful for iteration. |
 | `BT_SKIP_CLEANUP` | `0` | When `1`, skip the image-reuse cleanup in step 8. Useful when SSHing into the build VM to debug. |
@@ -102,7 +109,8 @@ Prerequisite: the cloud-default user has passwordless sudo (true on stock Ubuntu
 1. **Upload to your active storage backend.** Open `/storage` in the dashboard. Pick a backend (S3 / Azure Blob / GCS / local) and upload `bt-ready-debian.sh` and/or `bt-ready-rpm.sh`. They land under the `config-mgmt/` prefix by default; the storage service tags `.sh` files as type `script`.
 2. **Start a Packer build.** Navigate to `/images/aws`, `/images/azure`, or `/images/gcp`. Fill in the usual source-image / instance-type / SSH-username fields.
 3. **Load the script.** Click the **Load from storage** dropdown above the Provisioner Script textarea, pick the appropriate `bt-ready-*.sh`. The textarea populates; the blue subtitle confirms which backend the script came from.
-4. **Submit the build.** Watch the job stream for `[bt-ready]` log lines — every step prints one.
+4. **Set the BeyondTrust options.** With a script loaded, the **BeyondTrust provisioner options** panel appears: set the **Admin user** (`adminuser`), choose **Install EPM-L** (deb/rpm — the dashboard resolves the presigned `BT_EPML_URL` for you at launch), and paste the **Entitle SSH public key**. Add any other knobs (`BT_APPLY_CIS=1`, `BT_SKIP_UPDATES=1`, …) as rows in the **Environment variables** table below it; flip **secret ref** on a row to pull its value from your secrets backend instead of inlining it.
+5. **Submit the build.** Watch the job stream for `[bt-ready]` log lines — every step prints one.
 
 ## AWS smoke-test recipe (first ship)
 

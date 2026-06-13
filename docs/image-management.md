@@ -116,6 +116,50 @@ the dropdown for every build instead of copy-pasting. Useful when
 the same script is reused across cloud providers — store it once on
 a cloud backend and load it for all three builds.
 
+#### Passing environment variables to the provisioner
+
+Once a provisioner script is loaded, every Packer form (AWS / Azure /
+GCP) shows an **Environment variables** panel — a repeatable
+name/value table whose entries are handed to the shell provisioner as
+`environment_vars`. Use it to parameterise a reused script (package
+versions, feature flags, registration endpoints) instead of forking
+the script per build.
+
+Each row has a **secret ref** toggle:
+
+- **Off (literal).** The value is inlined into the generated Packer
+  template verbatim.
+- **On (secret reference).** The value is a reference into your
+  configured [secrets backend](./secrets-management.md) —
+  `aws_sm://dashboard/db_password`, `azure_kv://db-password`,
+  `gcp_sm://db-password`, or `bt_safe://…`. It's resolved at
+  build-launch (close to when the provisioner runs) via
+  `config_service`, the same resolver the rest of the dashboard uses.
+
+Secret values are deliberately kept **out of the template**: a
+resolved secret is passed through a Packer **sensitive variable**
+(`PKR_VAR_*` injected into the build subprocess), and the template
+only ever contains the declaration plus a `${var.…}` reference. So a
+secret never lands in the **archived** template (when "Archive
+template" is on, the `.pkr.hcl` is uploaded to your storage backend)
+and Packer redacts it from the build log. Literal values, having no
+such protection, should not be used for secrets.
+
+Environment-variable names are validated (`[A-Za-z_][A-Za-z0-9_]*`)
+so a name can't break out of the `environment_vars` array.
+
+> **BeyondTrust provisioner options.** Above the generic table sits a
+> dedicated **BeyondTrust provisioner options** block (admin user,
+> Install EPM-L deb/rpm, Entitle SSH public key) — a convenience layer
+> over the same mechanism that drives the
+> [`bt-ready-*` scripts](../provisioners/beyondtrust/README.md). It
+> sets `BT_ADMIN_USER` / `BT_ENTITLE_PUBKEY` and, for EPM-L, resolves a
+> fresh BeyondTrust presigned package URL into `BT_EPML_URL` via the
+> [EPM-L integration](./integrations/beyondtrust.md) at build-launch
+> (those links expire ~30 min). On Azure the panel shows only for
+> Linux builds — the Windows path uses a PowerShell provisioner, not
+> the shell `environment_vars` mechanism.
+
 #### Windows builds (Azure)
 
 The Azure Packer form builds **Windows** managed images too — pick a
