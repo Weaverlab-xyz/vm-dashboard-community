@@ -29,7 +29,7 @@ _ALLOWED_TOP_KEYS = {"version", "name", "services"}
 # Per-service keys we understand. `container_name` is accepted and ignored
 # (the service name is used). `deploy` is accepted but only for resource limits.
 _ALLOWED_SERVICE_KEYS = {
-    "image", "command", "environment", "ports", "restart", "deploy",
+    "image", "entrypoint", "command", "environment", "ports", "restart", "deploy",
     "container_name",
 }
 
@@ -41,7 +41,8 @@ _VALID_RESTART = {"no", "always", "on-failure", "unless-stopped"}
 class ComposeService:
     name: str
     image: str
-    command: Optional[list[str]] = None
+    entrypoint: Optional[list[str]] = None  # overrides image ENTRYPOINT
+    command: Optional[list[str]] = None      # overrides image CMD
     env: list[tuple[str, str]] = field(default_factory=list)
     # (host_port, container_port, protocol)
     ports: list[tuple[int, int, str]] = field(default_factory=list)
@@ -118,6 +119,7 @@ def _parse_service(name: str, body: dict) -> ComposeService:
     return ComposeService(
         name=str(name),
         image=image,
+        entrypoint=_parse_command(name, body.get("entrypoint"), "entrypoint"),
         command=_parse_command(name, body.get("command")),
         env=_parse_env(name, body.get("environment")),
         ports=_parse_ports(name, body.get("ports")),
@@ -127,14 +129,14 @@ def _parse_service(name: str, body: dict) -> ComposeService:
     )
 
 
-def _parse_command(name: str, command) -> Optional[list[str]]:
+def _parse_command(name: str, command, field: str = "command") -> Optional[list[str]]:
     if command is None:
         return None
     if isinstance(command, str):
         return shlex.split(command)
     if isinstance(command, list):
         return [str(c) for c in command]
-    raise ComposeError(f"Service '{name}' has an invalid 'command' (expected string or list).")
+    raise ComposeError(f"Service '{name}' has an invalid '{field}' (expected string or list).")
 
 
 def _parse_env(name: str, environment) -> list[tuple[str, str]]:

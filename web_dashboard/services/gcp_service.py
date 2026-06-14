@@ -803,13 +803,15 @@ def _compose_container_spec_yaml(services: list) -> str:
 
     COS containers share the VM's host network, so compose port mappings aren't
     expressed here — reachability is governed by the instance's firewall tags.
-    Compose `command` maps to konlet `args` (it overrides the image CMD, not the
-    entrypoint)."""
+    konlet maps `command` → image ENTRYPOINT and `args` → image CMD, so compose
+    `entrypoint` becomes konlet `command` and compose `command` becomes `args`."""
     import yaml
     containers = []
     restart_policy = "Always"
     for svc in services:
         c: dict = {"name": svc.name, "image": svc.image, "stdin": False, "tty": False}
+        if svc.entrypoint:
+            c["command"] = list(svc.entrypoint)
         if svc.command:
             c["args"] = list(svc.command)
         if svc.env:

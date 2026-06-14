@@ -16,11 +16,12 @@
 #      "--certificate-oidc-issuer", "https://token.actions.githubusercontent.com",
 #      "ghcr.io/you/app:tag"]
 #
-# ACI note: on Azure ACI `command` replaces the image entrypoint — deploy this to
-# ECS/GCE, or prefix the binary: ["cosign", "version"]. See README.md.
+# `entrypoint` is set so this deploys identically on ECS, ACI, and GCE. If ACI
+# reports "executable file not found", adjust entrypoint to the image's binary path.
 services:
   cosign:
     image: gcr.io/projectsigstore/cosign:v2.4.1
+    entrypoint: ["/ko-app/cosign"]
     command: ["version"]
     restart: "no"
     deploy:

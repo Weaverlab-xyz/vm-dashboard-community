@@ -10,11 +10,12 @@
 #
 # ADAPT BEFORE USE: replace nginx:latest with the image you want to scan.
 #
-# ACI note: on Azure ACI `command` replaces the image entrypoint — deploy this to
-# ECS/GCE, or prefix the binary: ["trivy", "image", ...]. See README.md.
+# `entrypoint` is set so this deploys identically on ECS, ACI, and GCE. If ACI
+# reports "executable file not found", adjust entrypoint to the image's binary path.
 services:
   trivy:
     image: aquasec/trivy:0.55.0
+    entrypoint: ["trivy"]
     command: ["image", "--quiet", "--severity", "HIGH,CRITICAL", "nginx:latest"]
     restart: "no"
     deploy:

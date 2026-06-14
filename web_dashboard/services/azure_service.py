@@ -1530,13 +1530,17 @@ def _deploy_compose_aci_sync(
         for _host, container_p, proto in svc.ports:
             container_ports.append(ContainerPort(port=container_p, protocol=proto.upper()))
             group_ports.append(Port(port=container_p, protocol=proto.upper()))
+        # ACI's `command` is the full exec form (it replaces the image
+        # entrypoint+cmd), so concatenate compose entrypoint + command. Supplying
+        # both makes ACI behave identically to ECS/GCE for entrypoint images.
+        aci_command = (svc.entrypoint or []) + (svc.command or [])
         containers.append(Container(
             name=svc.name,
             image=svc.image,
             resources=ResourceRequirements(
                 requests=ResourceRequests(cpu=cpu, memory_in_gb=round(mem_gb, 2))
             ),
-            command=svc.command or None,
+            command=aci_command or None,
             environment_variables=env_vars or None,
             ports=container_ports or None,
         ))

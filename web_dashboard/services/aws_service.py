@@ -1822,6 +1822,8 @@ def _deploy_compose_ecs_sync(
                 },
             },
         }
+        if svc.entrypoint:
+            cdef["entryPoint"] = svc.entrypoint
         if svc.command:
             cdef["command"] = svc.command
         if svc.ports:

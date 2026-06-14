@@ -8,11 +8,12 @@
 # ADAPT BEFORE USE: replace nginx:latest with your image. Add "--fail-on high" to
 # make the job exit non-zero when High+ vulnerabilities are found.
 #
-# ACI note: on Azure ACI `command` replaces the image entrypoint — deploy this to
-# ECS/GCE, or prefix the binary: ["grype", "nginx:latest"]. See README.md.
+# `entrypoint` is set so this deploys identically on ECS, ACI, and GCE. If ACI
+# reports "executable file not found", adjust entrypoint to the image's binary path.
 services:
   grype:
     image: anchore/grype:v0.82.0
+    entrypoint: ["/grype"]
     command: ["nginx:latest"]
     restart: "no"
     deploy:

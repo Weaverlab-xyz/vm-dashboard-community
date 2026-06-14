@@ -12,11 +12,12 @@
 #     then:  command: ["-d", "/iac", "--compact"]
 #   - alternatives:  aquasec/tfsec ["/iac"]   |   tenable/terrascan ["scan", "-d", "/iac"]
 #
-# ACI note: on Azure ACI `command` REPLACES the image entrypoint, so prefix the
-# binary — e.g. ["checkov", "--version"]. On ECS/GCE use the form below.
+# `entrypoint` is set so this deploys identically on ECS, ACI, and GCE. If ACI
+# reports "executable file not found", adjust entrypoint to the image's binary path.
 services:
   checkov:
     image: bridgecrew/checkov:3.2.0
+    entrypoint: ["checkov"]
     command: ["--version"]
     restart: "no"
     deploy:

@@ -11,11 +11,12 @@
 #   "--set=bundles.main.resource=https://your-host/bundle.tar.gz"
 # to the command, or POST policies to /v1/policies after it starts.
 #
-# ACI note: on Azure ACI `command` replaces the image entrypoint — deploy this to
-# ECS/GCE, or prefix the binary: ["opa", "run", "--server", ...]. See README.md.
+# `entrypoint` is set so this deploys identically on ECS, ACI, and GCE. If ACI
+# reports "executable file not found", adjust entrypoint to the image's binary path.
 services:
   opa:
     image: openpolicyagent/opa:0.69.0
+    entrypoint: ["/opa"]
     command: ["run", "--server", "--addr=:8181", "--log-level=info"]
     restart: unless-stopped
     ports:
