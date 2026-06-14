@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "partials/secret_picker.html" import secret_picker %}
 {% block title %}Databases – Infrastructure Management{% endblock %}
 
 {# Cloud database infrastructure page. PostgreSQL on AWS is the live engine/cloud
@@ -199,6 +200,27 @@
           The instance is created private-only and onboarded to a PRA tunnel (when PRA is configured).
           The admin password is generated and stored encrypted — never shown.
         </p>
+
+        <!-- BeyondTrust PRA options (optional per-DB overrides) -->
+        <div class="space-y-3 p-3 bg-gray-50 rounded-lg border border-gray-200">
+          <p class="text-xs font-semibold text-gray-600">BeyondTrust PRA options
+            <span class="font-normal text-gray-400">— optional; fall back to the configured defaults.</span>
+          </p>
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="block text-xs font-medium text-gray-600 mb-1">Jump group <span class="text-gray-400">(name)</span></label>
+              <input type="text" x-model="form.jump_group" placeholder="(configured default)"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-gray-600 mb-1">Jumpoint <span class="text-gray-400">(name)</span></label>
+              <input type="text" x-model="form.jumpoint_name" placeholder="(configured default)"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
+            </div>
+          </div>
+          {{ secret_picker("form", "praCredBackend", "pra_credential_ref",
+                           "PRA credential", "Resolved to a bt_client_secret override for this DB's tunnel provisioning.") }}
+        </div>
       </div>
       <div class="px-6 py-4 border-t border-gray-100 flex justify-end gap-3">
         <button @click="showForm = false" class="px-4 py-2 text-sm border border-gray-300 rounded-lg">Cancel</button>
@@ -242,19 +264,21 @@
 <script>
 function databasesPage() {
   return {
+    ...secretPickerState(),
     databases: [], loading: true, activeTab: 'aws',
     toast: '', toastType: 'success',
     showForm: false, saving: false, conn: null,
     options: { region: '', instance_classes: [], db_subnet_groups: [], security_groups: [], vault_account_groups: [] },
     loadingOptions: false, optionsError: '',
     form: { engine: 'postgres', region: '', name: '', master_username: 'dbadmin',
-            instance_class: 'db.t3.micro', allocated_storage: null, db_subnet_group_name: '', vpc_security_group_ids: [], vault_account_group_id: null },
+            instance_class: 'db.t3.micro', allocated_storage: null, db_subnet_group_name: '', vpc_security_group_ids: [], vault_account_group_id: null,
+            jump_group: '', jumpoint_name: '', praCredBackend: '', pra_credential_ref: '' },
 
     get awsDatabases() { return this.databases.filter(d => d.cloud === 'aws'); },
 
     _pollTimer: null,
 
-    async init() { requireAuth(); await this.refresh(); },
+    async init() { requireAuth(); this.loadSecretBackends(); await this.refresh(); },
 
     async refresh(quiet = false) {
       if (!quiet) this.loading = true;
@@ -340,6 +364,9 @@ function databasesPage() {
         if (this.form.db_subnet_group_name) body.db_subnet_group_name = this.form.db_subnet_group_name;
         if (this.form.vpc_security_group_ids.length) body.vpc_security_group_ids = this.form.vpc_security_group_ids;
         if (this.form.vault_account_group_id) body.vault_account_group_id = this.form.vault_account_group_id;
+        if (this.form.jump_group) body.jump_group = this.form.jump_group;
+        if (this.form.jumpoint_name) body.jumpoint_name = this.form.jumpoint_name;
+        if (this.form.pra_credential_ref) body.pra_credential_ref = this.form.pra_credential_ref;
         await API.post('/api/databases', body);
         this.showForm = false;
         this.flash('Provisioning started — watch the row status.');

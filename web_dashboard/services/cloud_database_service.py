@@ -108,7 +108,9 @@ def _build_tf_variables(
 def provision(
     db: Session, *, engine: str, cloud: str, region: str, name: str,
     created_by: str, master_username: str = "dbadmin",
-    vault_account_group_id: Optional[int] = None, **opts,
+    vault_account_group_id: Optional[int] = None,
+    jump_group: Optional[str] = None, jumpoint_name: Optional[str] = None,
+    pra_credential_ref: Optional[str] = None, **opts,
 ) -> dict:
     """Record a new managed database: validate, mint the admin credential, write
     the ``CloudDatabase`` row + a provisioning ``Job``, and return the Terraform
@@ -135,6 +137,9 @@ def provision(
         status="provisioning",
         created_by=created_by,
         created_at=datetime.utcnow(),
+        jump_group=(jump_group or "").strip() or None,
+        jumpoint_name=(jumpoint_name or "").strip() or None,
+        pra_credential_ref=(pra_credential_ref or "").strip() or None,
     )
     db.add(row)
     db.commit()
@@ -299,12 +304,16 @@ async def _broker_tunnel(db: Session, *, row: CloudDatabase, job_id: str,
         job = db.query(Job).filter(Job.id == job_id).first()
         vault_group_id = ((job.metadata_dict or {}).get("vault_account_group_id")
                           if job is not None else None)
+        # Per-DB PRA overrides win over the configured defaults.
+        cred_ref = row.pra_credential_ref
+        client_secret = config_service.resolve_reference(cred_ref) if cred_ref else ""
         tun = await pra.provision_db_tunnel(
             engine=engine,
             name=jump_name,
             hostname=row.private_host,
-            jump_group_name=_cfg("bt_jump_group_name"),
-            jumpoint_name=_cfg("bt_jumpoint_name"),
+            jump_group_name=row.jump_group or _cfg("bt_jump_group_name"),
+            jumpoint_name=row.jumpoint_name or _cfg("bt_jumpoint_name"),
+            client_secret=client_secret,
             username=tf_variables.get("master_username", ""),
             database=tf_variables.get("db_name", ""),
             tag="clouddb",
