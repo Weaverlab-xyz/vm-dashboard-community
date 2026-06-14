@@ -8,11 +8,12 @@
 # ADAPT BEFORE USE: replace nginx:latest with your image; change "-o table" to
 # "-o spdx-json" or "-o cyclonedx-json" to emit a machine-readable SBOM.
 #
-# ACI note: on Azure ACI `command` replaces the image entrypoint — deploy this to
-# ECS/GCE, or prefix the binary: ["syft", "nginx:latest", ...]. See README.md.
+# `entrypoint` is set so this deploys identically on ECS, ACI, and GCE. If ACI
+# reports "executable file not found", adjust entrypoint to the image's binary path.
 services:
   syft:
     image: anchore/syft:v1.14.0
+    entrypoint: ["/syft"]
     command: ["nginx:latest", "-o", "table"]
     restart: "no"
     deploy:

@@ -32,14 +32,20 @@ guide; each conforms to the supported subset below.
 
 ## Supported compose subset
 
-Per service: `image` (required), `command`, `environment`, `ports`, `restart`,
-and CPU/memory limits (`deploy.resources.limits.cpus` / `memory`, or the
-`cpus` / `mem_limit` shorthands).
+Per service: `image` (required), `entrypoint`, `command`, `environment`, `ports`,
+`restart`, and CPU/memory limits (`deploy.resources.limits.cpus` / `memory`, or
+the `cpus` / `mem_limit` shorthands).
 
 Unsupported keys — `build`, `volumes`, top-level `networks` / `volumes` /
 `secrets` / `configs`, `depends_on`, `profiles`, `extends`, `env_file`, and
 host-passthrough env vars (`- KEY` with no value) — are **rejected** with a
 clear error so a partial workload is never deployed.
+
+`entrypoint` overrides the image ENTRYPOINT and `command` overrides its CMD, the
+same as Docker Compose. The three runtimes apply them consistently (ECS
+`entryPoint`+`command`; GCE konlet `command`+`args`; ACI concatenates them into
+its single exec list — set both for entrypoint-based images so ACI matches
+ECS/GCE).
 
 ## Target settings
 

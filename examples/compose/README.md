@@ -55,12 +55,19 @@ ranges. Two consequences worth calling out:
   derived image. This is the "little more work" the community edition trades for
   not having a catalog.
 
-### ACI `command` caveat
+### `entrypoint` + `command` and cross-provider parity
 
-On **Azure ACI**, a container's `command` **replaces the image entrypoint**
-(Azure semantics), whereas on **ECS** and **GCE** it overrides only the image's
-default arguments (the entrypoint is kept — standard compose behavior). For the
-one-shot tool images here (Trivy, Syft, OPA, …) the shipped `command` is the
-compose-correct form, so **deploy those to ECS or GCE**. To run them on ACI,
-prefix the tool binary in the command (e.g. `["trivy", "image", "nginx:latest"]`
-instead of `["image", "nginx:latest"]`). Each affected file notes this inline.
+Compose's split between `entrypoint` (overrides the image ENTRYPOINT) and
+`command` (overrides the image CMD) is honored, and the three runtimes treat them
+consistently:
+
+- **ECS** → `entryPoint` + `command` on the container definition.
+- **GCE** → konlet `command` (= ENTRYPOINT) + `args` (= CMD).
+- **ACI** → a single exec list; the deploy concatenates `entrypoint + command`.
+
+ACI has no separate args field — its `command` **replaces** the image entrypoint.
+So for entrypoint-based tool images (Trivy, Syft, OPA, …), set **both** an
+`entrypoint` (the image's binary) and a `command` (its args). The tool samples
+here do this, so they deploy identically on ECS, ACI, and GCE. If ACI reports
+`executable file not found`, the image's binary lives at a different path — set
+`entrypoint` to that absolute path (e.g. `/usr/local/bin/<tool>`).

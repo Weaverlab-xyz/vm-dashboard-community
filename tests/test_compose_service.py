@@ -96,6 +96,25 @@ def test_parses_core_subset():
     assert sidecar.env == [("A", "1")]
 
 
+def test_entrypoint_parsing():
+    spec = parse_and_validate(
+        "services:\n"
+        "  a:\n"
+        "    image: aquasec/trivy:latest\n"
+        "    entrypoint: [\"trivy\"]\n"
+        "    command: [\"image\", \"nginx:latest\"]\n"
+        "  b:\n"
+        "    image: x\n"
+        "    entrypoint: /bin/sh -c 'echo hi'\n"
+    )
+    assert spec.services[0].entrypoint == ["trivy"]
+    assert spec.services[0].command == ["image", "nginx:latest"]
+    # string entrypoint is shlex-split like command
+    assert spec.services[1].entrypoint == ["/bin/sh", "-c", "echo hi"]
+    # default when omitted
+    assert parse_and_validate("services:\n  a:\n    image: x\n").services[0].entrypoint is None
+
+
 def test_port_shorthand_and_ip_form():
     spec = parse_and_validate(
         "services:\n  a:\n    image: x\n    ports:\n      - \"80\"\n      - \"127.0.0.1:9000:9000\"\n"

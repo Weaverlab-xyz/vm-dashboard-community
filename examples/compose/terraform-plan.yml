@@ -18,11 +18,12 @@
 #       command: ["scan", "--from", "tfstate+s3://your-bucket/path/terraform.tfstate"]
 #     with AWS_* creds in environment.
 #
-# ACI note: on Azure ACI `command` REPLACES the image entrypoint, so prefix the
-# binary — e.g. ["terraform", "version"]. On ECS/GCE use the form below.
+# `entrypoint` is set so this deploys identically on ECS, ACI, and GCE. If ACI
+# reports "executable file not found", adjust entrypoint to the image's binary path.
 services:
   terraform:
     image: hashicorp/terraform:1.9.8
+    entrypoint: ["terraform"]
     command: ["version"]
     restart: "no"
     environment:

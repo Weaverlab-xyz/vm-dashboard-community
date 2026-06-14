@@ -12,11 +12,12 @@
 #   - or build a small derived image that bakes in your policies + input and run
 #       command: ["test", "policy/", "input/"]
 #
-# ACI note: on Azure ACI `command` REPLACES the image entrypoint, so prefix the
-# binary — e.g. ["conftest", "--version"]. On ECS/GCE use the form below.
+# `entrypoint` is set so this deploys identically on ECS, ACI, and GCE. If ACI
+# reports "executable file not found", adjust entrypoint to the image's binary path.
 services:
   conftest:
     image: openpolicyagent/conftest:v0.56.0
+    entrypoint: ["conftest"]
     command: ["--version"]
     restart: "no"
     deploy:
