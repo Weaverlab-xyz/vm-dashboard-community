@@ -73,6 +73,11 @@
               <button x-show="c.status === 'managed'" @click="openBroker(c)"
                       title="Broker access via the native PRA tunnel_type=k8s jump + Entitle-Rancher JIT (Phase 3b)"
                       class="text-xs px-2 py-1 bg-sky-600 hover:bg-sky-700 text-white rounded font-medium">Broker access</button>
+              <button @click="openSecrets(c)"
+                      title="In-cluster Password Safe secret delivery (External Secrets Operator, Phase 4)"
+                      class="text-xs px-2 py-1 bg-violet-600 hover:bg-violet-700 text-white rounded font-medium">
+                <span x-text="c.secrets_delivery_kind === 'eso' ? 'Secrets ✓' : 'Secrets'"></span>
+              </button>
               <button @click="del(c)" class="text-xs px-2 py-1 text-red-600 hover:underline ml-1">Delete</button>
             </td>
           </tr>
@@ -173,6 +178,43 @@
       </div>
     </div>
   </div>
+
+  <!-- Secret delivery modal (Phase 4 — Feature D) -->
+  <div x-show="showSecrets" x-cloak class="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
+       @click.self="showSecrets = false">
+    <div class="bg-white rounded-xl shadow-xl w-full max-w-lg">
+      <div class="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+        <h3 class="font-semibold text-gray-800">In-cluster secret delivery<span x-show="secretsTarget" class="text-gray-400 font-normal"> — <span x-text="secretsTarget && secretsTarget.name"></span></span></h3>
+        <button @click="showSecrets = false" class="text-gray-400 hover:text-gray-600 text-xl">&times;</button>
+      </div>
+      <div class="px-6 py-4 space-y-4">
+        <p class="text-xs text-gray-500">
+          Choose where in-cluster workloads get their secrets. The dashboard installs BeyondTrust's own integration —
+          it never proxies the secrets. Current:
+          <span class="font-mono" x-text="secretsTarget && (secretsTarget.secrets_delivery_kind || 'none')"></span>.
+        </p>
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Secret source / delivery</label>
+          <select x-model="secretsKind" class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
+            <option value="eso">External Secrets Operator → Password Safe</option>
+            <option value="none">None (remove)</option>
+          </select>
+          <p class="text-[11px] text-gray-400 mt-1">
+            ESO installs as a Helm release + a BeyondTrust ClusterSecretStore authenticated with the configured
+            Password Safe OAuth client (pscli_*). Secrets-Agent is a later option. Enable etcd encryption-at-rest where ESO runs.
+          </p>
+        </div>
+      </div>
+      <div class="px-6 py-4 border-t border-gray-100 flex justify-end gap-3">
+        <button @click="showSecrets = false" class="px-4 py-2 text-sm border border-gray-300 rounded-lg">Cancel</button>
+        <button @click="submitSecrets()" :disabled="secretsBusy"
+                class="px-4 py-2 bg-violet-600 hover:bg-violet-700 disabled:opacity-50 text-white text-sm font-medium rounded-lg">
+          <span x-show="!secretsBusy" x-text="secretsKind === 'none' ? 'Remove' : 'Install'"></span>
+          <span x-show="secretsBusy" x-cloak>Working…</span>
+        </button>
+      </div>
+    </div>
+  </div>
 </div>
 {% endblock %}
 
@@ -186,6 +228,7 @@ function k8sPage() {
     form: { name: '', cloud: 'local', kubeconfig: '', mgmt_kind: '' },
     showBroker: false, brokering: false, brokerTarget: null,
     brokerForm: { jump_group: '', jumpoint_name: '', praCredBackend: '', pra_credential_ref: '' },
+    showSecrets: false, secretsBusy: false, secretsTarget: null, secretsKind: 'eso',
 
     async init() { requireAuth(); this.loadSecretBackends(); await this.refresh(); },
 
@@ -293,6 +336,28 @@ function k8sPage() {
         this.flash(e.message || 'Broker access failed.', 'error');
       } finally {
         this.brokering = false;
+      }
+    },
+
+    openSecrets(c) {
+      this.secretsTarget = c;
+      this.secretsKind = c.secrets_delivery_kind === 'eso' ? 'eso' : 'eso';
+      this.showSecrets = true;
+    },
+
+    async submitSecrets() {
+      this.secretsBusy = true;
+      try {
+        await API.post(`/api/k8s/clusters/${this.secretsTarget.id}/secret-delivery`, { kind: this.secretsKind });
+        this.showSecrets = false;
+        this.flash(this.secretsKind === 'none'
+          ? 'Removing in-cluster secret delivery…'
+          : 'Installing ESO + Password Safe secret delivery… (watch the status)');
+        await this.refresh();
+      } catch (e) {
+        this.flash(e.message || 'Secret-delivery setup failed.', 'error');
+      } finally {
+        this.secretsBusy = false;
       }
     },
 

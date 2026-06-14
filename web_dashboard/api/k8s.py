@@ -18,7 +18,12 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from ..database import User, get_db
-from ..models.k8s import BrokerAccessRequest, ClusterRegisterRequest, ManagementRequest
+from ..models.k8s import (
+    BrokerAccessRequest,
+    ClusterRegisterRequest,
+    ManagementRequest,
+    SecretDeliveryRequest,
+)
 from ..services import k8s_service
 from ..services.k8s_service import K8sError
 from .auth import require_admin
@@ -190,3 +195,29 @@ async def launch_management(
         raise HTTPException(status_code=404, detail=str(e))
     background_tasks.add_task(k8s_service.launch_management_plane, cluster_id, payload.mgmt_kind)
     return {"ok": True, "status": "deploying", "cluster_id": cluster_id, "mgmt_kind": payload.mgmt_kind}
+
+
+@router.post("/clusters/{cluster_id}/secret-delivery", status_code=202)
+async def setup_secret_delivery(
+    cluster_id: str,
+    payload: SecretDeliveryRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Install (or remove) in-cluster Password Safe secret delivery (Phase 4 /
+    Feature D). ``kind=eso`` Helm-installs the External Secrets Operator + a
+    BeyondTrust ClusterSecretStore (Password Safe → K8s Secrets); ``kind=none``
+    removes it. Async — poll the cluster's ``secrets_delivery_kind``
+    (installing → eso / failed)."""
+    if payload.kind not in k8s_service.VALID_DELIVERY_KINDS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown kind {payload.kind!r} (expected one of {', '.join(k8s_service.VALID_DELIVERY_KINDS)})",
+        )
+    try:
+        k8s_service.get_cluster(db, cluster_id)   # 404 if unknown
+    except K8sError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    background_tasks.add_task(k8s_service.setup_secret_delivery, cluster_id, payload.kind)
+    return {"ok": True, "status": "installing", "cluster_id": cluster_id, "kind": payload.kind}

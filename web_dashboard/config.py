@@ -38,6 +38,17 @@ class Settings(BaseSettings):
     # to these). Read live via config_service.
     k8s_rancher_entitle_bundle: str = ""    # Entitle bundle/role id for time-boxed Rancher RBAC (mgmt_kind=rancher)
     k8s_entitle_duration_minutes: int = 60  # default grant window for the Rancher JIT request
+    # K8s Phase 4 (Feature D) — in-cluster Password Safe secret delivery via the
+    # External Secrets Operator. The BeyondTrust ClusterSecretStore authenticates
+    # with the configured Password Safe OAuth client (pscli_api_url / pscli_client_id
+    # / pscli_client_secret). Read live via config_service.
+    eso_namespace: str = "external-secrets"             # namespace ESO + the credentials Secret land in
+    eso_helm_version: str = ""                          # pin the external-secrets chart version ("" = latest)
+    eso_bt_credentials_secret: str = "beyondtrust-credentials"  # K8s Secret holding the BT OAuth client id/secret
+    eso_bt_clustersecretstore: str = "beyondtrust-store"        # ClusterSecretStore name
+    eso_bt_api_url: str = ""                            # BeyondTrust public API URL ("" = derive from pscli_api_url)
+    eso_bt_retrieval_type: str = "SECRET"              # SECRET | MANAGED_ACCOUNT
+    eso_bt_api_version: str = "3.1"                     # BeyondTrust API version ("3.0" | "3.1")
 
     # Proxmox VE connection
     proxmox_host: str = ""              # hostname or IP of the Proxmox node/cluster

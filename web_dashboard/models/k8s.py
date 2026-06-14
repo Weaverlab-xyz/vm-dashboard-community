@@ -41,6 +41,12 @@ class BrokerAccessRequest(BaseModel):
     pra_credential_ref: Optional[str] = None  # secret ref → bt_client_secret override for the apply
 
 
+class SecretDeliveryRequest(BaseModel):
+    """Choose the in-cluster Password Safe secret-delivery mechanism (Phase 4).
+    v1: ``eso`` (External Secrets Operator → Password Safe) or ``none`` (remove)."""
+    kind: str = "eso"                         # eso | none  (secrets_agent is a later kind)
+
+
 class ClusterInfo(BaseModel):
     id: str
     cloud: str
