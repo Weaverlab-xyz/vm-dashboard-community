@@ -782,6 +782,186 @@ async def list_gce_jumpoints(project_id: str) -> list[dict]:
         raise GCPError(f"Failed to list GCE Jumpoint instances: {e}") from e
 
 
+# ── Generic Docker Compose → GCE Container-Optimized OS instance ──────────────
+# Cloud Run Jobs are single-container, so multi-service compose runs on a COS
+# GCE instance via the gce-container-declaration konlet spec (same mechanism as
+# the Jumpoint, generalized to N containers).
+
+_COMPOSE_LABEL = "compose"
+
+# konlet exposes a single instance-level restart policy.
+_GCE_RESTART_MAP = {
+    "always": "Always",
+    "unless-stopped": "Always",
+    "on-failure": "OnFailure",
+    "no": "Never",
+}
+
+
+def _compose_container_spec_yaml(services: list) -> str:
+    """Build the gce-container-declaration YAML for a parsed compose spec.
+
+    COS containers share the VM's host network, so compose port mappings aren't
+    expressed here — reachability is governed by the instance's firewall tags.
+    Compose `command` maps to konlet `args` (it overrides the image CMD, not the
+    entrypoint)."""
+    import yaml
+    containers = []
+    restart_policy = "Always"
+    for svc in services:
+        c: dict = {"name": svc.name, "image": svc.image, "stdin": False, "tty": False}
+        if svc.command:
+            c["args"] = list(svc.command)
+        if svc.env:
+            c["env"] = [{"name": k, "value": v} for k, v in svc.env]
+        containers.append(c)
+        if svc.restart:
+            restart_policy = _GCE_RESTART_MAP.get(svc.restart, restart_policy)
+    spec = {"spec": {"containers": containers, "restartPolicy": restart_policy}}
+    return yaml.safe_dump(spec, default_flow_style=False)
+
+
+def _deploy_compose_gce_sync(
+    project_id: str,
+    zone: str,
+    name: str,
+    services: list,
+    machine_type: str = "e2-small",
+    network: str = "",
+    subnetwork: str = "",
+    create_external_ip: bool = False,
+    cos_image_family: str = "cos-stable",
+) -> dict:
+    """Launch a COS GCE instance running all compose services as containers."""
+    _require_compute()
+    from google.cloud import compute_v1
+    from google.api_core.exceptions import NotFound
+
+    creds = _gcp_creds()
+    client = compute_v1.InstancesClient(credentials=creds)
+
+    try:
+        client.get(project=project_id, zone=zone, instance=name)
+        raise GCPError(f"A GCE instance named '{name}' already exists in {zone}.")
+    except NotFound:
+        pass
+
+    instance = compute_v1.Instance()
+    instance.name = name
+    instance.machine_type = f"zones/{zone}/machineTypes/{machine_type}"
+
+    disk = compute_v1.AttachedDisk()
+    disk.boot = True
+    disk.auto_delete = True
+    disk.initialize_params = compute_v1.AttachedDiskInitializeParams()
+    disk.initialize_params.source_image = (
+        f"projects/cos-cloud/global/images/family/{cos_image_family}"
+    )
+    disk.initialize_params.disk_size_gb = 10
+    instance.disks = [disk]
+
+    nic = compute_v1.NetworkInterface()
+    if subnetwork:
+        nic.subnetwork = subnetwork
+    elif network:
+        nic.network = network
+    if create_external_ip:
+        nic.access_configs = [compute_v1.AccessConfig(
+            name="External NAT", type_="ONE_TO_ONE_NAT",
+        )]
+    instance.network_interfaces = [nic]
+
+    container_yaml = _compose_container_spec_yaml(services)
+    instance.metadata = compute_v1.Metadata(items=[
+        compute_v1.Items(key="gce-container-declaration", value=container_yaml),
+        compute_v1.Items(key="google-logging-enabled", value="true"),
+    ])
+    instance.labels = {"managed-by": "vm-dashboard", "purpose": _COMPOSE_LABEL}
+
+    logger.info(
+        "GCE compose: creating COS instance '%s' in %s (%d services, machine=%s)",
+        name, zone, len(services), machine_type,
+    )
+    op = client.insert(project=project_id, zone=zone, instance_resource=instance)
+    op.result(timeout=300)
+
+    info = client.get(project=project_id, zone=zone, instance=name)
+    return {
+        "name": name, "zone": zone, "self_link": info.self_link,
+        "status": info.status, "containers": [s.name for s in services],
+    }
+
+
+async def deploy_compose_gce(
+    project_id: str,
+    zone: str,
+    name: str,
+    services: list,
+    machine_type: str = "e2-small",
+    network: str = "",
+    subnetwork: str = "",
+    create_external_ip: bool = False,
+) -> dict:
+    """Deploy a parsed compose spec to a new COS GCE instance."""
+    try:
+        return await asyncio.to_thread(
+            _deploy_compose_gce_sync,
+            project_id, zone, name, services, machine_type,
+            network, subnetwork, create_external_ip, "cos-stable",
+        )
+    except GCPError:
+        raise
+    except Exception as e:
+        raise GCPError(f"Failed to deploy compose to GCE: {e}") from e
+
+
+def _list_gce_compose_sync(project_id: str) -> list[dict]:
+    """List compose COS instances across all zones (labels.purpose=compose)."""
+    _require_compute()
+    from google.cloud import compute_v1
+
+    creds = _gcp_creds()
+    client = compute_v1.InstancesClient(credentials=creds)
+    request = compute_v1.AggregatedListInstancesRequest(
+        project=project_id,
+        filter=f'labels.purpose = "{_COMPOSE_LABEL}"',
+    )
+    results = []
+    for zone_path, scoped in client.aggregated_list(request=request):
+        for inst in (scoped.instances or []):
+            labels = dict(inst.labels) if inst.labels else {}
+            if labels.get("purpose") != _COMPOSE_LABEL:
+                continue
+            internal_ip = ""
+            external_ip = ""
+            for nic in inst.network_interfaces:
+                internal_ip = nic.network_i_p or internal_ip
+                for ac in nic.access_configs:
+                    if ac.nat_i_p:
+                        external_ip = ac.nat_i_p
+            results.append({
+                "name":         inst.name,
+                "zone":         zone_path.split("/")[-1],
+                "status":       inst.status,
+                "machine_type": inst.machine_type.split("/")[-1] if inst.machine_type else "",
+                "image":        _container_image_from_metadata(inst),
+                "internal_ip":  internal_ip,
+                "external_ip":  external_ip,
+                "created_at":   inst.creation_timestamp or "",
+            })
+    return results
+
+
+async def list_gce_compose(project_id: str) -> list[dict]:
+    """List the compose container instances (COS on GCE) in the project."""
+    try:
+        return await asyncio.to_thread(_list_gce_compose_sync, project_id)
+    except GCPError:
+        raise
+    except Exception as e:
+        raise GCPError(f"Failed to list GCE compose instances: {e}") from e
+
+
 # ── Cloud Run Jobs Ansible runner (mirrors ACI runner in azure_service.py) ───
 
 _ANSIBLE_RUNNER_PREFIX = "ansible-runner"

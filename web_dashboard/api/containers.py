@@ -9,6 +9,10 @@ Portainer CE container management endpoints.
   POST /api/containers/deploy            — create + start container via job
   GET  /api/containers/stacks            — list stacks on an endpoint
   POST /api/containers/stacks            — deploy a compose stack via job
+  POST /api/containers/deploy-compose    — deploy a stored compose file to
+                                           ECS / ACI / GCE via job
+  GET  /api/containers/gce-compose       — list GCE compose COS instances
+  POST /api/containers/gce-compose/{name}/stop — delete a GCE compose instance
 """
 import logging
 
@@ -23,6 +27,7 @@ from ..models.containers import (
     ContainerActionResponse,
     ContainerInfo,
     ContainerListResponse,
+    DeployComposeRequest,
     DeployContainerRequest,
     DeployContainerResponse,
     DeployStackRequest,
@@ -36,10 +41,20 @@ from ..models.containers import (
     StackInfo,
     StackListResponse,
 )
-from ..services import aws_service, azure_service, container_inventory_service, job_service, portainer_service
+from ..services import (
+    aws_service,
+    azure_service,
+    compose_service,
+    container_inventory_service,
+    job_service,
+    portainer_service,
+    storage_service,
+)
 from ..services.aws_service import AWSError
 from ..services.azure_service import AzureError
+from ..services.compose_service import ComposeError
 from ..services.portainer_service import PortainerError, PortainerNotConfigured
+from ..services.storage_service import StorageError
 from .auth import get_current_user, require_permission
 
 logger = logging.getLogger(__name__)
@@ -397,6 +412,125 @@ async def _run_deploy_stack(
         db.close()
 
 
+# ── Generic Compose → cloud (ECS / ACI / GCE) ───────────────────────────────
+
+@router.post("/deploy-compose", response_model=DeployStackResponse)
+async def deploy_compose(
+    req: DeployComposeRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("containers", "write")),
+):
+    """Deploy a Docker Compose file from the storage backend to ECS, ACI, or GCE.
+
+    The compose file is fetched and translated to the chosen provider's native
+    multi-container unit in a background job (see _run_deploy_compose)."""
+    provider = (req.provider or "").lower()
+    if provider not in ("ecs", "aci", "gce"):
+        raise HTTPException(status_code=400, detail="provider must be one of: ecs, aci, gce")
+    if not req.compose_backend or not req.compose_file:
+        raise HTTPException(status_code=400, detail="compose_backend and compose_file are required")
+
+    job = job_service.create_job(
+        db,
+        job_type="compose_deploy",
+        created_by=current_user.username,
+        metadata={
+            "provider": provider,
+            "name": req.name,
+            "compose_backend": req.compose_backend,
+            "compose_file": req.compose_file,
+        },
+    )
+    background_tasks.add_task(_run_deploy_compose, job.id, req.model_dump())
+    return DeployStackResponse(
+        job_id=job.id,
+        status="pending",
+        message=f"Deploying compose '{req.compose_file}' to {provider.upper()}…",
+    )
+
+
+def _split_csv(value: str) -> list[str]:
+    return [v.strip() for v in (value or "").split(",") if v.strip()]
+
+
+async def _run_deploy_compose(job_id: str, req: dict):
+    from ..services import config_service, gcp_service
+    from ..services.gcp_service import GCPError
+
+    db = _get_db_session()
+    try:
+        job_service.set_running(db, job_id)
+        provider = req["provider"].lower()
+        name = req["name"]
+        overrides = req.get("overrides") or {}
+
+        job_service.update_progress(db, job_id, 10, f"Fetching '{req['compose_file']}'…")
+        raw = await storage_service.fetch_asset_in(req["compose_backend"], req["compose_file"])
+        spec = compose_service.parse_and_validate(raw.decode("utf-8", errors="replace"))
+
+        job_service.update_progress(db, job_id, 40, f"Deploying {len(spec.services)} service(s) to {provider.upper()}…")
+
+        if provider == "ecs":
+            cpu = str(req.get("cpu") and int(req["cpu"] * 1024) or settings.ansible_ecs_cpu)
+            memory = str(req.get("memory_mb") or settings.ansible_ecs_memory)
+            result = await aws_service.deploy_compose_ecs(
+                region=config_service.get("aws_region") or settings.aws_region,
+                cluster=overrides.get("cluster") or settings.bt_ecs_cluster,
+                family=name,
+                services=spec.services,
+                cpu=cpu,
+                memory=memory,
+                subnet_id=overrides.get("subnet_id") or settings.ansible_ecs_subnet_id,
+                security_group_ids=overrides.get("security_group_ids")
+                    or _split_csv(settings.ansible_ecs_security_group_ids),
+                execution_role_arn=overrides.get("execution_role_arn")
+                    or settings.ansible_ecs_execution_role_arn,
+                assign_public_ip=overrides.get("assign_public_ip", True),
+            )
+        elif provider == "aci":
+            rg = (overrides.get("resource_group")
+                  or settings.azure_aci_resource_group or settings.azure_resource_group)
+            result = await azure_service.deploy_compose_aci(
+                rg=rg,
+                location=overrides.get("location") or settings.azure_location,
+                name=name,
+                services=spec.services,
+                subnet_id=overrides.get("subnet_id") or settings.azure_aci_subnet_id,
+                acr_server=settings.azure_acr_server,
+                acr_username=settings.azure_acr_username,
+                acr_password=settings.azure_acr_password,
+                default_cpu=req.get("cpu") or settings.azure_aci_cpu,
+                default_memory_gb=(req["memory_mb"] / 1024.0) if req.get("memory_mb") else settings.azure_aci_memory,
+            )
+        else:  # gce
+            project_id = config_service.get("gcp_project_id") or settings.gcp_project_id
+            if not project_id:
+                job_service.set_failed(db, job_id, "GCP project not configured.")
+                return
+            result = await gcp_service.deploy_compose_gce(
+                project_id=project_id,
+                zone=overrides.get("zone") or config_service.get("gcp_zone") or settings.gcp_zone,
+                name=name,
+                services=spec.services,
+                machine_type=overrides.get("machine_type") or "e2-small",
+                subnetwork=overrides.get("subnetwork") or settings.gcp_subnetwork,
+                create_external_ip=overrides.get("create_external_ip", False),
+            )
+
+        job_service.update_progress(db, job_id, 95, "Deployed, finalizing…")
+        job_service.set_completed(db, job_id, {"provider": provider, **result})
+    except (StorageError, ComposeError) as exc:
+        job_service.set_failed(db, job_id, str(exc))
+    except (AWSError, AzureError, GCPError) as exc:
+        job_service.set_failed(db, job_id, str(exc))
+    except Exception as exc:
+        logger.exception("Unexpected error deploying compose %s", req.get("name"))
+        job_service.set_failed(db, job_id, f"Unexpected error: {exc}")
+    finally:
+        db.close()
+
+
 # ── ECS Tasks ─────────────────────────────────────────────────────────────────
 
 @router.get("/ecs-tasks", response_model=ECSTaskListResponse)
@@ -549,5 +683,60 @@ async def stop_gce_jumpoint_endpoint(
     try:
         await gcp_service.stop_gce_jumpoint(project_id, zone, name)
         return ContainerActionResponse(ok=True, message="Jumpoint instance deleted")
+    except GCPError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
+
+@router.get("/gce-compose", response_model=GCEJumpointListResponse)
+async def list_gce_compose_endpoint(
+    current_user: User = Depends(require_permission("containers", "read")),
+):
+    """List compose container instances (labels.purpose=compose) across zones."""
+    from ..services import gcp_service
+    from ..services.gcp_service import GCPError
+
+    project_id = _gcp_project_id()
+    if not project_id:
+        raise HTTPException(status_code=503, detail="GCP project not configured.")
+    try:
+        raw = await gcp_service.list_gce_compose(project_id)
+        instances = [
+            GCEJumpointInfo(
+                name=i.get("name", ""),
+                zone=i.get("zone", ""),
+                status=i.get("status", "UNKNOWN"),
+                machine_type=i.get("machine_type", ""),
+                image=i.get("image", ""),
+                internal_ip=i.get("internal_ip", ""),
+                external_ip=i.get("external_ip", ""),
+                created_at=i.get("created_at"),
+            )
+            for i in raw
+        ]
+        return GCEJumpointListResponse(
+            instances=instances,
+            project_id=project_id,
+            count=len(instances),
+        )
+    except GCPError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
+
+@router.post("/gce-compose/{name}/stop", response_model=ContainerActionResponse)
+async def stop_gce_compose_endpoint(
+    name: str,
+    zone: str = Query(..., description="GCE zone the instance lives in"),
+    current_user: User = Depends(require_permission("containers", "delete")),
+):
+    """Delete a compose COS instance (reuses the instance-delete path)."""
+    from ..services import gcp_service
+    from ..services.gcp_service import GCPError
+
+    project_id = _gcp_project_id()
+    if not project_id:
+        raise HTTPException(status_code=503, detail="GCP project not configured.")
+    try:
+        await gcp_service.stop_gce_jumpoint(project_id, zone, name)
+        return ContainerActionResponse(ok=True, message="Compose instance deleted")
     except GCPError as exc:
         raise HTTPException(status_code=503, detail=str(exc))

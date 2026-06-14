@@ -1775,3 +1775,128 @@ async def run_promote_runner_ecs(
         raise AWSError(f"Failed to launch promote-runner ECS task: {e}") from e
     except NoCredentialsError:
         raise AWSError("AWS credentials not configured.")
+
+
+# ── Generic Docker Compose → ECS Fargate task ────────────────────────────────
+
+def _deploy_compose_ecs_sync(
+    region: str,
+    cluster: str,
+    family: str,
+    services: list,
+    cpu: str,
+    memory: str,
+    subnet_id: str,
+    security_group_ids: list,
+    execution_role_arn: str,
+    assign_public_ip: bool = True,
+) -> dict:
+    """Register a Fargate task definition with one containerDefinition per
+    compose service and launch a single task. Returns task info.
+
+    Fargate sizing is task-level (`cpu`/`memory`); compose per-service limits map
+    to per-container `memoryReservation` when present. awslogs is configured so
+    container output is reachable from CloudWatch like the other runners."""
+    ecs = _get_ecs(region)
+    logs_client = boto3.client("logs", **_aws_kwargs(region))
+    log_group = "/ecs/compose"
+    try:
+        logs_client.create_log_group(logGroupName=log_group)
+    except ClientError as e:
+        if e.response["Error"]["Code"] != "ResourceAlreadyExistsException":
+            raise
+
+    container_defs = []
+    for svc in services:
+        cdef: dict = {
+            "name": svc.name,
+            "image": svc.image,
+            "essential": True,
+            "environment": [{"name": k, "value": v} for k, v in svc.env],
+            "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                    "awslogs-group": log_group,
+                    "awslogs-region": region,
+                    "awslogs-stream-prefix": family,
+                },
+            },
+        }
+        if svc.command:
+            cdef["command"] = svc.command
+        if svc.ports:
+            cdef["portMappings"] = [
+                {"containerPort": cport, "hostPort": cport, "protocol": proto}
+                for _host, cport, proto in svc.ports
+            ]
+        if svc.memory_mb:
+            cdef["memoryReservation"] = int(svc.memory_mb)
+        container_defs.append(cdef)
+
+    td_kwargs: dict = dict(
+        family=family,
+        networkMode="awsvpc",
+        requiresCompatibilities=["FARGATE"],
+        cpu=str(cpu),
+        memory=str(memory),
+        containerDefinitions=container_defs,
+    )
+    if execution_role_arn:
+        td_kwargs["executionRoleArn"] = execution_role_arn
+
+    td_resp = ecs.register_task_definition(**td_kwargs)
+    task_def_arn = td_resp["taskDefinition"]["taskDefinitionArn"]
+
+    ecs.create_cluster(clusterName=cluster)
+
+    run_resp = ecs.run_task(
+        cluster=cluster,
+        taskDefinition=task_def_arn,
+        launchType="FARGATE",
+        networkConfiguration={"awsvpcConfiguration": {
+            "subnets": [subnet_id] if subnet_id else [],
+            "securityGroups": security_group_ids or [],
+            "assignPublicIp": "ENABLED" if assign_public_ip else "DISABLED",
+        }},
+        count=1,
+        startedBy="vm-dashboard-compose",
+    )
+
+    tasks = run_resp.get("tasks", [])
+    if not tasks:
+        raise AWSError(f"ECS compose task failed to start: {run_resp.get('failures', [])}")
+    task_arn = tasks[0]["taskArn"]
+    return {
+        "task_arn": task_arn,
+        "task_id": task_arn.split("/")[-1],
+        "cluster": cluster,
+        "task_definition": task_def_arn.split("/")[-1],
+        "containers": [c["name"] for c in container_defs],
+    }
+
+
+async def deploy_compose_ecs(
+    region: str,
+    cluster: str,
+    family: str,
+    services: list,
+    cpu: str,
+    memory: str,
+    subnet_id: str,
+    security_group_ids: list,
+    execution_role_arn: str,
+    assign_public_ip: bool = True,
+) -> dict:
+    """Deploy a parsed compose spec to a new ECS Fargate task."""
+    try:
+        return await asyncio.to_thread(
+            _deploy_compose_ecs_sync,
+            region, cluster, family, services, cpu, memory,
+            subnet_id, security_group_ids, execution_role_arn, assign_public_ip,
+        )
+    except AWSError:
+        raise
+    except (ClientError, BotoCoreError) as e:
+        raise AWSError(f"Failed to deploy compose to ECS: {e}") from e
+    except NoCredentialsError:
+        raise AWSError("AWS credentials not configured.")
