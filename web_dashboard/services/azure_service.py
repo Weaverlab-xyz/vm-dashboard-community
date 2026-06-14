@@ -1494,6 +1494,112 @@ async def run_aci_ansible_task(
         raise AzureError(f"Failed to run ACI Ansible task: {e}") from e
 
 
+# ── Generic Docker Compose → ACI container group ─────────────────────────────
+
+# Map compose restart policies onto the single group-level ACI policy.
+_ACI_RESTART_MAP = {
+    "always": "Always",
+    "unless-stopped": "Always",
+    "on-failure": "OnFailure",
+    "no": "Never",
+}
+
+
+def _deploy_compose_aci_sync(
+    cred, sub_id: str, rg: str, location: str, name: str, services: list,
+    subnet_id: str = "", acr_server: str = "", acr_username: str = "",
+    acr_password: str = "", default_cpu: float = 1.0, default_memory_gb: float = 1.0,
+) -> dict:
+    """Create an ACI container group from a parsed compose spec — one Container
+    per compose service. Returns the created group's info. Unlike the runner
+    groups this is a user workload, so it is left running (not deleted)."""
+    from azure.mgmt.containerinstance.models import (
+        ContainerPort, Port, IpAddress,
+    )
+
+    aci = _get_aci(cred, sub_id)
+
+    containers = []
+    group_ports = []
+    restart_policy = "Always"
+    for svc in services:
+        cpu = svc.cpu if svc.cpu else default_cpu
+        mem_gb = (svc.memory_mb / 1024.0) if svc.memory_mb else default_memory_gb
+        env_vars = [EnvironmentVariable(name=k, value=v) for k, v in svc.env]
+        container_ports = []
+        for _host, container_p, proto in svc.ports:
+            container_ports.append(ContainerPort(port=container_p, protocol=proto.upper()))
+            group_ports.append(Port(port=container_p, protocol=proto.upper()))
+        containers.append(Container(
+            name=svc.name,
+            image=svc.image,
+            resources=ResourceRequirements(
+                requests=ResourceRequests(cpu=cpu, memory_in_gb=round(mem_gb, 2))
+            ),
+            command=svc.command or None,
+            environment_variables=env_vars or None,
+            ports=container_ports or None,
+        ))
+        if svc.restart:
+            restart_policy = _ACI_RESTART_MAP.get(svc.restart, restart_policy)
+
+    group_params = ContainerGroup(
+        location=location,
+        containers=containers,
+        os_type=OperatingSystemTypes.LINUX,
+        restart_policy=restart_policy,
+        tags={"ManagedBy": "vm-cli-dashboard", "Purpose": "compose"},
+    )
+
+    if group_ports:
+        # VNet-injected groups get a Private frontend; otherwise expose publicly.
+        group_params.ip_address = IpAddress(
+            ports=group_ports,
+            type="Private" if subnet_id else "Public",
+        )
+
+    if subnet_id:
+        from azure.mgmt.containerinstance.models import ContainerGroupSubnetId
+        group_params.subnet_ids = [ContainerGroupSubnetId(id=subnet_id)]
+
+    if acr_server and acr_username and acr_password:
+        from azure.mgmt.containerinstance.models import ImageRegistryCredential
+        group_params.image_registry_credentials = [
+            ImageRegistryCredential(server=acr_server, username=acr_username, password=acr_password)
+        ]
+
+    logger.info("ACI compose: creating container group %s (%d services) in %s", name, len(containers), rg)
+    cg = aci.container_groups.begin_create_or_update(rg, name, group_params).result()
+    ip = cg.ip_address.ip if cg.ip_address else ""
+    return {
+        "container_group_name": name,
+        "resource_group": rg,
+        "state": (cg.instance_view.state if cg.instance_view else "") or "Pending",
+        "ip_address": ip,
+        "containers": [c.name for c in (cg.containers or [])],
+    }
+
+
+async def deploy_compose_aci(
+    rg: str, location: str, name: str, services: list,
+    subnet_id: str = "", acr_server: str = "", acr_username: str = "",
+    acr_password: str = "", default_cpu: float = 1.0, default_memory_gb: float = 1.0,
+) -> dict:
+    """Deploy a parsed compose spec to a new ACI container group."""
+    try:
+        cred, sub_id = await _ensure_creds()
+        return await asyncio.to_thread(
+            _deploy_compose_aci_sync,
+            cred, sub_id, rg, location, name, services,
+            subnet_id, acr_server, acr_username, acr_password,
+            default_cpu, default_memory_gb,
+        )
+    except AzureError:
+        raise
+    except Exception as e:
+        raise AzureError(f"Failed to deploy compose to ACI: {e}") from e
+
+
 def _list_aci_container_instances_sync(cred, sub_id: str, rg: str) -> list:
     """List all ACI container instances (not filtered by tag/prefix)."""
     aci = _get_aci(cred, sub_id)

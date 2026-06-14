@@ -280,6 +280,14 @@
   <!-- ══════════════════════════════════════════════════════════════════════ -->
   <div x-show="activeTab === 'cloud'">
 
+    <!-- ── Deploy a compose file from storage to a cloud runtime ───────────── -->
+    <div class="flex justify-end mb-4">
+      <button @click="openComposeModal()"
+              class="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium rounded-lg transition">
+        + Deploy Compose
+      </button>
+    </div>
+
     <!-- ── ECS Tasks section ──────────────────────────────────────────────── -->
     <div class="mb-8">
       <div class="flex items-center justify-between mb-3">
@@ -532,6 +540,57 @@
       </p>
     </div>
 
+    <!-- ── GCE compose deployments (COS instances, labels.purpose=compose) ── -->
+    <div class="mb-8">
+      <div class="flex items-center justify-between mb-3">
+        <h2 class="text-lg font-semibold text-gray-800">
+          GCE Compose Deployments
+          <span class="ml-2 text-sm font-normal text-gray-400"
+                x-text="gceCompose.length ? gceCompose.length + ' instances' : ''"></span>
+        </h2>
+        <button @click="loadGceCompose()" :disabled="gceComposeLoading"
+                class="px-2.5 py-1 text-xs font-medium text-gray-600 border border-gray-300 hover:bg-gray-50 rounded-lg transition">
+          <span x-text="gceComposeLoading ? 'Loading…' : 'Refresh'"></span>
+        </button>
+      </div>
+
+      <div x-show="!gceComposeLoading && gceComposeError"
+           class="p-4 bg-red-50 border border-red-200 rounded-lg text-red-600 text-sm" x-text="gceComposeError"></div>
+
+      <div x-show="!gceComposeLoading && !gceComposeError && gceCompose.length === 0"
+           class="text-sm text-gray-400 py-4">No compose deployments on GCE.</div>
+
+      <div x-show="!gceComposeLoading && gceCompose.length > 0"
+           class="bg-white rounded-xl border border-gray-200 overflow-hidden">
+        <table class="w-full text-sm">
+          <thead class="bg-gray-50 text-left text-xs uppercase text-gray-500">
+            <tr>
+              <th class="px-4 py-3 font-medium">Name</th>
+              <th class="px-4 py-3 font-medium">Zone</th>
+              <th class="px-4 py-3 font-medium">Machine</th>
+              <th class="px-4 py-3 font-medium">Status</th>
+              <th class="px-4 py-3 font-medium text-right">Actions</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-gray-100">
+            <template x-for="i in gceCompose" :key="i.name">
+              <tr>
+                <td class="px-4 py-3 font-medium text-gray-800" x-text="i.name"></td>
+                <td class="px-4 py-3 text-gray-600" x-text="i.zone"></td>
+                <td class="px-4 py-3 text-gray-600" x-text="i.machine_type"></td>
+                <td class="px-4 py-3 text-gray-600" x-text="i.status"></td>
+                <td class="px-4 py-3 text-sm text-right">
+                  <button @click="stopGceCompose(i)"
+                          :disabled="gceComposeActionPending === i.name"
+                          class="text-red-600 hover:underline disabled:opacity-40">Delete</button>
+                </td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
   </div><!-- /Cloud panel -->
 
 
@@ -705,6 +764,127 @@
     </div>
   </div>
 
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <!-- Deploy Compose to Cloud Modal (ECS / ACI / GCE)                        -->
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <div x-show="showComposeModal" x-cloak
+       class="fixed inset-0 bg-black bg-opacity-40 flex items-center justify-center z-50 p-4"
+       @keydown.escape.window="showComposeModal = false">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto" @click.stop>
+      <div class="flex items-center justify-between px-6 pt-5 pb-4 border-b border-gray-200">
+        <h3 class="text-lg font-bold text-gray-900">Deploy Compose to Cloud</h3>
+        <button @click="showComposeModal = false" class="text-gray-400 hover:text-gray-600 text-xl leading-none">&times;</button>
+      </div>
+
+      <form @submit.prevent="submitCompose()" class="px-6 py-5 space-y-4">
+        <!-- Provider -->
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Target runtime</label>
+          <div class="flex gap-2">
+            <template x-for="p in [{v:'ecs',l:'AWS ECS (Fargate)'},{v:'aci',l:'Azure ACI'},{v:'gce',l:'GCE (COS)'}]" :key="p.v">
+              <button type="button" @click="composeForm.provider = p.v"
+                      :class="composeForm.provider === p.v ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'"
+                      class="flex-1 border rounded-lg px-3 py-2 text-sm font-medium transition" x-text="p.l"></button>
+            </template>
+          </div>
+        </div>
+
+        <!-- Deployment name -->
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Deployment Name</label>
+          <input type="text" x-model="composeForm.name" required placeholder="my-app"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none">
+        </div>
+
+        <!-- Compose file from storage -->
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Compose file (from storage)</label>
+          <select x-model="composeForm.compose_ref" required
+                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none">
+            <option value="" x-text="composeFilesLoading ? 'Loading…' : '— select a .yml/.yaml file —'"></option>
+            <template x-for="f in composeFiles" :key="f.backend + '|' + f.name">
+              <option :value="f.backend + '|' + f.name" x-text="f.name + '  (' + f.backend + ')'"></option>
+            </template>
+          </select>
+          <p x-show="!composeFilesLoading && composeFiles.length === 0" class="mt-1 text-xs text-gray-400">
+            No .yml/.yaml files in storage. Upload one on the Storage page first.
+          </p>
+        </div>
+
+        <!-- Optional CPU / memory -->
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">CPU (vCPU, optional)</label>
+            <input type="number" step="0.25" min="0" x-model="composeForm.cpu" placeholder="default"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Memory (MiB, optional)</label>
+            <input type="number" step="128" min="0" x-model="composeForm.memory_mb" placeholder="default"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none">
+          </div>
+        </div>
+
+        <!-- Advanced target overrides -->
+        <div>
+          <button type="button" @click="composeForm.showAdvanced = !composeForm.showAdvanced"
+                  class="text-xs text-indigo-600 hover:text-indigo-800 font-medium">
+            <span x-text="composeForm.showAdvanced ? '− Hide' : '+ Show'"></span> advanced target settings
+          </button>
+          <div x-show="composeForm.showAdvanced" x-cloak class="mt-2 space-y-2 border border-gray-100 rounded-lg p-3 bg-gray-50">
+            <p class="text-xs text-gray-500">Leave blank to use the values configured in Setup.</p>
+            <template x-if="composeForm.provider === 'ecs'">
+              <div class="space-y-2">
+                <input type="text" x-model="composeForm.overrides.cluster" placeholder="ECS cluster"
+                       class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
+                <input type="text" x-model="composeForm.overrides.subnet_id" placeholder="Subnet ID"
+                       class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
+              </div>
+            </template>
+            <template x-if="composeForm.provider === 'aci'">
+              <div class="space-y-2">
+                <input type="text" x-model="composeForm.overrides.resource_group" placeholder="Resource group"
+                       class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
+                <input type="text" x-model="composeForm.overrides.location" placeholder="Location (e.g. centralus)"
+                       class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
+              </div>
+            </template>
+            <template x-if="composeForm.provider === 'gce'">
+              <div class="space-y-2">
+                <input type="text" x-model="composeForm.overrides.zone" placeholder="Zone (e.g. us-central1-a)"
+                       class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
+                <input type="text" x-model="composeForm.overrides.machine_type" placeholder="Machine type (default e2-small)"
+                       class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
+                <label class="flex items-center gap-2 text-sm text-gray-600">
+                  <input type="checkbox" x-model="composeForm.overrides.create_external_ip" class="rounded text-indigo-600">
+                  Assign external IP
+                </label>
+              </div>
+            </template>
+          </div>
+        </div>
+
+        <p class="text-xs text-gray-400">
+          Supported compose: image, command, environment, ports, restart, and CPU/memory limits.
+          Other keys (build, volumes, networks, depends_on) are rejected.
+        </p>
+
+        <!-- Buttons -->
+        <div class="flex gap-3 pt-2">
+          <button type="button" @click="showComposeModal = false"
+                  class="flex-1 border border-gray-300 text-gray-700 hover:bg-gray-50 px-4 py-2 rounded-xl text-sm font-medium transition">
+            Cancel
+          </button>
+          <button type="submit" :disabled="composeDeploying"
+                  class="flex-1 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white px-4 py-2 rounded-xl text-sm font-semibold transition">
+            <span x-show="!composeDeploying">Deploy</span>
+            <span x-show="composeDeploying">Deploying…</span>
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+
 </div>
 {% endblock %}
 
@@ -755,6 +935,24 @@ function containersDashboard() {
       env: [],
     },
 
+    // Deploy compose to cloud (ECS / ACI / GCE)
+    showComposeModal: false,
+    composeDeploying: false,
+    composeFiles: [],
+    composeFilesLoading: false,
+    composeForm: {
+      provider: 'ecs',
+      name: '',
+      compose_ref: '',          // "backend|name"
+      cpu: '',
+      memory_mb: '',
+      showAdvanced: false,
+      overrides: {
+        cluster: '', subnet_id: '', resource_group: '', location: '',
+        zone: '', machine_type: '', create_external_ip: false,
+      },
+    },
+
     // ECS Tasks
     ecsTasks: [],
     ecsCluster: '',
@@ -778,6 +976,12 @@ function containersDashboard() {
     gceActionPending: null,
     aciActionPending: null,
 
+    // GCE compose deployments (COS instances, labels.purpose=compose)
+    gceCompose: [],
+    gceComposeLoading: false,
+    gceComposeError: null,
+    gceComposeActionPending: null,
+
     // ── Lifecycle ──────────────────────────────────────────────────────────
     async init() {
       requireAuth();
@@ -789,6 +993,7 @@ function containersDashboard() {
         this.loadEcsTasks(),
         this.loadAciContainers(),
         this.loadGceJumpoints(),
+        this.loadGceCompose(),
       ];
       {% if portainer_enabled %}
       tasks.push(this.loadEndpoints());
@@ -807,6 +1012,7 @@ function containersDashboard() {
           this.loadEcsTasks(),
           this.loadAciContainers(),
           this.loadGceJumpoints(),
+          this.loadGceCompose(),
         ]);
       }
     },
@@ -960,6 +1166,70 @@ function containersDashboard() {
       this.stackForm = { name: '', compose_content: '', env: [] };
     },
 
+    // ── Deploy compose to cloud (ECS / ACI / GCE) ──────────────────────────
+    async openComposeModal() {
+      this.showComposeModal = true;
+      if (this.composeFiles.length === 0) await this.loadComposeFiles();
+    },
+
+    async loadComposeFiles() {
+      this.composeFilesLoading = true;
+      try {
+        const data = await API.get('/api/storage/list-all');
+        this.composeFiles = (data.items || []).filter(f => /\.ya?ml$/i.test(f.name));
+      } catch (e) {
+        toast(e.message, 'error');
+        this.composeFiles = [];
+      } finally {
+        this.composeFilesLoading = false;
+      }
+    },
+
+    async submitCompose() {
+      const ref = this.composeForm.compose_ref;
+      if (!ref) { toast('Choose a compose file', 'error'); return; }
+      const sep = ref.indexOf('|');
+      const backend = ref.slice(0, sep);
+      const fileName = ref.slice(sep + 1);
+      this.composeDeploying = true;
+      try {
+        const o = this.composeForm.overrides;
+        const ov = {};
+        for (const k of ['cluster', 'subnet_id', 'resource_group', 'location', 'zone', 'machine_type']) {
+          if (o[k]) ov[k] = o[k];
+        }
+        if (o.create_external_ip) ov.create_external_ip = true;
+        const payload = {
+          provider: this.composeForm.provider,
+          name: this.composeForm.name,
+          compose_backend: backend,
+          compose_file: fileName,
+          cpu: this.composeForm.cpu ? parseFloat(this.composeForm.cpu) : null,
+          memory_mb: this.composeForm.memory_mb ? parseInt(this.composeForm.memory_mb) : null,
+          overrides: ov,
+        };
+        const resp = await API.post('/api/containers/deploy-compose', payload);
+        this.showComposeModal = false;
+        this._resetComposeForm();
+        window.location.href = `/jobs/${resp.job_id}`;
+      } catch (e) {
+        toast(e.message, 'error');
+      } finally {
+        this.composeDeploying = false;
+      }
+    },
+
+    _resetComposeForm() {
+      this.composeForm = {
+        provider: 'ecs', name: '', compose_ref: '', cpu: '', memory_mb: '',
+        showAdvanced: false,
+        overrides: {
+          cluster: '', subnet_id: '', resource_group: '', location: '',
+          zone: '', machine_type: '', create_external_ip: false,
+        },
+      };
+    },
+
     // ── ECS Tasks ──────────────────────────────────────────────────────────
     async loadEcsTasks() {
       this.ecsLoading = true;
@@ -1062,6 +1332,35 @@ function containersDashboard() {
         toast(e.message, 'error');
       } finally {
         this.gceActionPending = null;
+      }
+    },
+
+    // ── GCE compose deployments ────────────────────────────────────────────
+    async loadGceCompose() {
+      this.gceComposeLoading = true;
+      this.gceComposeError = null;
+      try {
+        const data = await API.get('/api/containers/gce-compose');
+        this.gceCompose = data.instances || [];
+      } catch (e) {
+        this.gceComposeError = e.message;
+        this.gceCompose = [];
+      } finally {
+        this.gceComposeLoading = false;
+      }
+    },
+
+    async stopGceCompose(i) {
+      if (!confirm(`Delete compose instance "${i.name}"? This deletes the COS instance and its containers.`)) return;
+      this.gceComposeActionPending = i.name;
+      try {
+        await API.post(`/api/containers/gce-compose/${encodeURIComponent(i.name)}/stop?zone=${encodeURIComponent(i.zone)}`);
+        toast(`Deleted ${i.name}`, 'success');
+        await this.loadGceCompose();
+      } catch (e) {
+        toast(e.message, 'error');
+      } finally {
+        this.gceComposeActionPending = null;
       }
     },
 

@@ -84,6 +84,18 @@ class DeployStackResponse(BaseModel):
     message: str
 
 
+class DeployComposeRequest(BaseModel):
+    """Deploy a Docker Compose file (referenced from the storage backend) to a
+    cloud container runtime — ECS Fargate, ACI container group, or GCE COS."""
+    provider: str                       # "ecs" | "aci" | "gce"
+    name: str                           # deployment name (task family / group / instance)
+    compose_backend: str                # storage backend the compose file lives in
+    compose_file: str                   # filename within that backend (.yml/.yaml)
+    cpu: Optional[float] = None         # optional task/container CPU override (vCPU)
+    memory_mb: Optional[int] = None     # optional task/container memory override (MiB)
+    overrides: dict = {}                # optional target overrides (cluster/subnet/zone/…)
+
+
 class ContainerActionResponse(BaseModel):
     ok: bool
     message: str
