@@ -30,6 +30,7 @@ RG="${NAME}-rg"
 VNET="${NAME}-vnet"
 ACI_SUBNET="aci-subnet"
 VM_SUBNET="vm-subnet"
+K8S_SUBNET="k8s-subnet"
 NSG="${NAME}-vm-nsg"
 
 ensure_logged_in "az" "az account show" "Run: az login"
@@ -63,10 +64,18 @@ az network vnet subnet create -g "$RG" --vnet-name "$VNET" -n "$VM_SUBNET" \
   --address-prefix 10.99.2.0/24 >/dev/null
 ok "VM subnet $VM_SUBNET (10.99.2.0/24)"
 
+# Dedicated subnet for managed Kubernetes (AKS) — separate from the ACI and VM
+# subnets above.
+az network vnet subnet create -g "$RG" --vnet-name "$VNET" -n "$K8S_SUBNET" \
+  --address-prefix 10.99.3.0/24 >/dev/null
+ok "K8s subnet $K8S_SUBNET (10.99.3.0/24)"
+
 ACI_SUBNET_ID="$(az network vnet subnet show -g "$RG" --vnet-name "$VNET" -n "$ACI_SUBNET" --query id -o tsv)"
 VM_SUBNET_ID="$(az network vnet subnet show  -g "$RG" --vnet-name "$VNET" -n "$VM_SUBNET"  --query id -o tsv)"
+K8S_SUBNET_ID="$(az network vnet subnet show -g "$RG" --vnet-name "$VNET" -n "$K8S_SUBNET" --query id -o tsv)"
 state_write azure aci_subnet_id "$ACI_SUBNET_ID"
 state_write azure vm_subnet_id  "$VM_SUBNET_ID"
+state_write azure k8s_subnet_id "$K8S_SUBNET_ID"
 
 # ── 3. NSG: deny VM internet egress, allow VNet ──────────────────────────────
 section "NSG (block VM internet egress)"

@@ -88,14 +88,23 @@ $PrivateSubnetId = _MakeSubnet '10.99.2.0/24' "$Name-private"
 # Dedicated to managed databases; the VM subnets above are left untouched.
 $DbSubnetAId = _MakeSubnet '10.99.3.0/24' "$Name-db-a" $Az
 $DbSubnetBId = _MakeSubnet '10.99.4.0/24' "$Name-db-b" $Az2
+# Two private K8s subnets in distinct AZs — managed Kubernetes (EKS) requires
+# subnets in >= 2 AZs, like RDS. Dedicated to clusters; separate from the VM and
+# DB subnets above.
+$K8sSubnetAId = _MakeSubnet '10.99.5.0/24' "$Name-k8s-a" $Az
+$K8sSubnetBId = _MakeSubnet '10.99.6.0/24' "$Name-k8s-b" $Az2
 Write-Ok "Public subnet (Jumpoint) $PublicSubnetId"
 Write-Ok "Private subnet (VMs)    $PrivateSubnetId"
 Write-Ok "DB subnet A ($Az)        $DbSubnetAId"
 Write-Ok "DB subnet B ($Az2)        $DbSubnetBId"
+Write-Ok "K8s subnet A ($Az)       $K8sSubnetAId"
+Write-Ok "K8s subnet B ($Az2)       $K8sSubnetBId"
 Set-StateValue aws public_subnet_id  $PublicSubnetId
 Set-StateValue aws private_subnet_id $PrivateSubnetId
 Set-StateValue aws db_subnet_a_id    $DbSubnetAId
 Set-StateValue aws db_subnet_b_id    $DbSubnetBId
+Set-StateValue aws k8s_subnet_a_id   $K8sSubnetAId
+Set-StateValue aws k8s_subnet_b_id   $K8sSubnetBId
 
 # ── 4. Route tables ───────────────────────────────────────────────────────────
 Write-Section 'Route tables'
@@ -129,8 +138,10 @@ _AssociateRT $PublicRtId  $PublicSubnetId
 _AssociateRT $PrivateRtId $PrivateSubnetId
 _AssociateRT $PrivateRtId $DbSubnetAId
 _AssociateRT $PrivateRtId $DbSubnetBId
+_AssociateRT $PrivateRtId $K8sSubnetAId
+_AssociateRT $PrivateRtId $K8sSubnetBId
 Write-Ok "Public  RT $PublicRtId  → IGW (0.0.0.0/0)"
-Write-Ok "Private RT $PrivateRtId → local VPC only (VMs + DBs)"
+Write-Ok "Private RT $PrivateRtId → local VPC only (VMs + DBs + K8s)"
 
 # ── 4b. RDS DB subnet group ───────────────────────────────────────────────────
 # The managed-database feature deploys private RDS instances (no public

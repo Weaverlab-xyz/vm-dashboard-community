@@ -101,14 +101,23 @@ PRIVATE_SUBNET_ID="$(create_subnet 10.99.2.0/24 "${NAME}-private")"
 # Dedicated to managed databases; the VM subnets above are left untouched.
 DB_SUBNET_A_ID="$(create_subnet 10.99.3.0/24 "${NAME}-db-a" "$AZ")"
 DB_SUBNET_B_ID="$(create_subnet 10.99.4.0/24 "${NAME}-db-b" "$AZ2")"
+# Two private K8s subnets in distinct AZs — managed Kubernetes (EKS) requires
+# subnets in >= 2 AZs, like RDS. Dedicated to clusters; separate from the VM and
+# DB subnets above.
+K8S_SUBNET_A_ID="$(create_subnet 10.99.5.0/24 "${NAME}-k8s-a" "$AZ")"
+K8S_SUBNET_B_ID="$(create_subnet 10.99.6.0/24 "${NAME}-k8s-b" "$AZ2")"
 ok "Public subnet (Jumpoint) $PUBLIC_SUBNET_ID"
 ok "Private subnet (VMs)    $PRIVATE_SUBNET_ID"
 ok "DB subnet A ($AZ)        $DB_SUBNET_A_ID"
 ok "DB subnet B ($AZ2)        $DB_SUBNET_B_ID"
+ok "K8s subnet A ($AZ)       $K8S_SUBNET_A_ID"
+ok "K8s subnet B ($AZ2)       $K8S_SUBNET_B_ID"
 state_write aws public_subnet_id  "$PUBLIC_SUBNET_ID"
 state_write aws private_subnet_id "$PRIVATE_SUBNET_ID"
 state_write aws db_subnet_a_id    "$DB_SUBNET_A_ID"
 state_write aws db_subnet_b_id    "$DB_SUBNET_B_ID"
+state_write aws k8s_subnet_a_id   "$K8S_SUBNET_A_ID"
+state_write aws k8s_subnet_b_id   "$K8S_SUBNET_B_ID"
 
 # ── 4. Route tables ───────────────────────────────────────────────────────────
 section "Route tables"
@@ -151,8 +160,10 @@ associate_rt "$PUBLIC_RT_ID"  "$PUBLIC_SUBNET_ID"
 associate_rt "$PRIVATE_RT_ID" "$PRIVATE_SUBNET_ID"
 associate_rt "$PRIVATE_RT_ID" "$DB_SUBNET_A_ID"
 associate_rt "$PRIVATE_RT_ID" "$DB_SUBNET_B_ID"
+associate_rt "$PRIVATE_RT_ID" "$K8S_SUBNET_A_ID"
+associate_rt "$PRIVATE_RT_ID" "$K8S_SUBNET_B_ID"
 ok "Public  RT $PUBLIC_RT_ID  → IGW (0.0.0.0/0)"
-ok "Private RT $PRIVATE_RT_ID → local VPC only (VMs + DBs)"
+ok "Private RT $PRIVATE_RT_ID → local VPC only (VMs + DBs + K8s)"
 
 # ── 4b. RDS DB subnet group ───────────────────────────────────────────────────
 # The managed-database feature deploys private RDS instances (no public
@@ -805,7 +816,9 @@ Sandbox topology summary
 
   VPC ${VPC_ID} (10.99.0.0/16)
     ├─ public  ${PUBLIC_SUBNET_ID}  (10.99.1.0/24) → IGW → internet  [on-demand Jumpoint host]
-    └─ private ${PRIVATE_SUBNET_ID}  (10.99.2.0/24) → no internet     [user EC2s]
+    ├─ private ${PRIVATE_SUBNET_ID}  (10.99.2.0/24) → no internet     [user EC2s]
+    ├─ db      ${DB_SUBNET_A_ID} / ${DB_SUBNET_B_ID}  (10.99.3-4.0/24, 2 AZs) → no internet  [managed RDS]
+    └─ k8s     ${K8S_SUBNET_A_ID} / ${K8S_SUBNET_B_ID}  (10.99.5-6.0/24, 2 AZs) → no internet  [managed clusters]
 
 Note: the tunnel-capable Jumpoint runs on an EC2 ECS container instance
 (t3.small) that the DASHBOARD creates on demand when you provision an EC2
