@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "partials/secret_picker.html" import secret_picker %}
 {% block title %}AWS – Infrastructure Management{% endblock %}
 
 {% block content %}
@@ -774,6 +775,27 @@
                class="text-xs text-red-500 mt-1">Select at least one security group.</p>
           </div>
 
+          <!-- BeyondTrust PRA options (optional per-deploy overrides) -->
+          <div class="mb-4 space-y-3 p-3 bg-gray-50 rounded-lg border border-gray-200">
+            <p class="text-xs font-semibold text-gray-600">BeyondTrust PRA options
+              <span class="font-normal text-gray-400">— optional; fall back to the configured defaults.</span>
+            </p>
+            <div class="grid grid-cols-2 gap-3">
+              <div>
+                <label class="block text-xs font-medium text-gray-600 mb-1">Jump group <span class="text-gray-400">(name)</span></label>
+                <input type="text" x-model="deployForm.jump_group" placeholder="(configured default)"
+                       class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-gray-600 mb-1">Jumpoint <span class="text-gray-400">(name)</span></label>
+                <input type="text" x-model="deployForm.jumpoint_name" placeholder="(configured default)"
+                       class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
+              </div>
+            </div>
+            {{ secret_picker("deployForm", "praCredBackend", "pra_credential_ref",
+                             "PRA credential", "Overrides bt_client_secret for this deploy's shell jump.") }}
+          </div>
+
           <!-- Error -->
           <div x-show="deployError" class="mb-4 bg-red-50 border border-red-200 rounded-lg px-3 py-2 text-sm text-red-700"
                x-text="deployError"></div>
@@ -1136,6 +1158,7 @@
 <script>
   function awsDashboard() {
     return {
+      ...secretPickerState(),
       region: 'us-east-2',
       activeTab: 'community',
 
@@ -1195,6 +1218,8 @@
         subnet_id: '',
         security_group_ids: [],
         workgroup: '',
+        jump_group: '', jumpoint_name: '',
+        praCredBackend: '', pra_credential_ref: '',
       },
       availableWorkgroups: [],
       deploying: false,
@@ -1244,6 +1269,7 @@
 
       async init() {
         requireAuth();
+        this.loadSecretBackends();
         const hash = window.location.hash.slice(1);
         if (['community', 'amis', 'instances', 'build'].includes(hash)) {
           this.activeTab = hash;
@@ -1534,6 +1560,9 @@
             subnet_id: this.deployForm.subnet_id,
             security_group_ids: this.deployForm.security_group_ids,
             workgroup: this.deployForm.workgroup,
+            jump_group: this.deployForm.jump_group || null,
+            jumpoint_name: this.deployForm.jumpoint_name || null,
+            pra_credential_ref: this.deployForm.pra_credential_ref || null,
           };
 
           const resp = await API.post('/api/aws/deploy', body);

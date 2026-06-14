@@ -90,6 +90,12 @@ class AzureDeployRequest(BaseModel):
     image_offer: Optional[str] = None
     image_sku: Optional[str] = None
     image_version: Optional[str] = None
+    # PRA/jumpoint per-deploy overrides — config defaults are the fallback. Values
+    # are secrets-backend references (e.g. azure_kv://…), not raw secrets.
+    jump_group: Optional[str] = None             # PRA Jump Group name override (else azure_bt_jump_group_name)
+    jumpoint_name: Optional[str] = None          # PRA Jumpoint name override (else bt_jumpoint_name)
+    pra_credential_ref: Optional[str] = None     # secret ref → bt_client_secret override for the shell jump
+    docker_deploy_key_ref: Optional[str] = None  # secret ref → ACI Jumpoint deploy key (else azure_aci_docker_deploy_key)
 
 
 class AzureBulkDeployItem(BaseModel):

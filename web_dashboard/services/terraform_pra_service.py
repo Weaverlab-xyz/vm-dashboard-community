@@ -164,8 +164,12 @@ def _provision_sync(
     jumpoint_name: str,
     port: int,
     tag: str,
+    client_secret: str = "",
 ) -> dict:
     """Synchronous worker — run in asyncio.to_thread."""
+    # A per-deploy PRA credential overrides the configured bt_client_secret for
+    # this apply only (the sensitive TF_VAR the provider block reads).
+    extra_env = {"TF_VAR_bt_client_secret": client_secret} if client_secret else None
     with tempfile.TemporaryDirectory(prefix="pra_tf_") as work_dir:
         # Write HCL
         Path(work_dir, "main.tf").write_text(
@@ -180,7 +184,7 @@ def _provision_sync(
             )
 
         # terraform apply
-        apply = _run_tf(["apply", "-auto-approve"], work_dir, timeout=120)
+        apply = _run_tf(["apply", "-auto-approve"], work_dir, timeout=120, extra_env=extra_env)
         if apply.returncode != 0:
             raise TerraformPRAError(
                 f"terraform apply failed: {apply.stderr.strip() or apply.stdout.strip()}"
@@ -276,6 +280,7 @@ async def provision_jump(
     jumpoint_name: str,
     port: int = 22,
     tag: str = "AWS",
+    client_secret: str = "",
 ) -> dict:
     """Provision a BeyondTrust PRA Shell Jump via Terraform.
 
@@ -288,7 +293,7 @@ async def provision_jump(
       tf_state_json  - full Terraform state JSON (store in job extra_data for destroy)
     """
     return await asyncio.to_thread(
-        _provision_sync, vm_name, hostname, jump_group_name, jumpoint_name, port, tag
+        _provision_sync, vm_name, hostname, jump_group_name, jumpoint_name, port, tag, client_secret
     )
 
 

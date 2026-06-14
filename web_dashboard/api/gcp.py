@@ -372,7 +372,10 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
             jumpoint_zone = _cfg_svc.get("gcp_jumpoint_zone") or zone
             job_service.update_progress(db, job_id, 5, f"Starting BeyondTrust Jumpoint {jumpoint_name}…")
             try:
-                deploy_key = await _resolve_gcp_jumpoint_deploy_key()
+                if getattr(payload, "docker_deploy_key_ref", None):
+                    deploy_key = _cfg_svc.resolve_reference(payload.docker_deploy_key_ref.strip())
+                else:
+                    deploy_key = await _resolve_gcp_jumpoint_deploy_key()
                 if not deploy_key:
                     raise RuntimeError(
                         "Jumpoint deploy key not configured "
