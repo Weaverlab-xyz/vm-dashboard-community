@@ -1,0 +1,25 @@
+# Kasm single-container streamed desktop
+# App-catalog entry: "Access / brokered entry" (Notion stream: saas-virtual-desktop)
+# Shape: long-running SERVICE, single container, HTTPS UI on port 6901.
+#
+# Deploy to: ACI or ECS (published port). Open https://<address>:6901 and log in
+# as user "kasm_user" with the VNC_PW set below.
+#
+# ADAPT BEFORE USE:
+#  - Change VNC_PW. Swap the image for any kasmweb/* workspace
+#    (e.g. kasmweb/chrome, kasmweb/firefox, kasmweb/ubuntu-jammy-desktop).
+#  - These images run non-privileged; some workloads inside them benefit from a
+#    larger /dev/shm, which isn't configurable in the cloud compose subset.
+services:
+  desktop:
+    image: kasmweb/desktop:1.16.0
+    restart: unless-stopped
+    ports:
+      - "6901:6901"
+    environment:
+      VNC_PW: change-me
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 2G

@@ -20,6 +20,16 @@ progress on the Jobs page.
 > deferred to the hosted SaaS edition — the community edition ships the generic
 > "bring your own compose file" capability.
 
+## Sample compose files
+
+Ready-to-adapt starters for common apps live in
+[`examples/compose/`](../../examples/compose/) — Apache Guacamole, Kasm, Trivy,
+Syft, Grype, Cosign, OPA, Conftest, Checkov, Terraform/driftctl, and a Temporal
+worker. They are the community-edition stand-in for an app catalog: upload one,
+edit the placeholders, and deploy. See
+[examples/compose/README.md](../../examples/compose/README.md) for the per-file
+guide; each conforms to the supported subset below.
+
 ## Supported compose subset
 
 Per service: `image` (required), `command`, `environment`, `ports`, `restart`,

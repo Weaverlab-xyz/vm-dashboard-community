@@ -1,0 +1,27 @@
+# Open Policy Agent (OPA) — REST decision service
+# App-catalog entry: "Policy / admission" (Notion stream: saas-action-admission,
+# saas-iac-hardening). The cloud-runtime equivalent of the in-cluster
+# Gatekeeper/Kyverno entry — the same OPA policy intent the dashboard evaluates.
+# Shape: long-running SERVICE, REST API on port 8181.
+#
+# Deploy to: ACI or ECS (published port). Health check: GET http://<address>:8181/health
+#
+# ADAPT BEFORE USE: load your policies. Options that fit the cloud compose subset
+# (no volumes): serve a policy bundle over HTTP and add
+#   "--set=bundles.main.resource=https://your-host/bundle.tar.gz"
+# to the command, or POST policies to /v1/policies after it starts.
+#
+# ACI note: on Azure ACI `command` replaces the image entrypoint — deploy this to
+# ECS/GCE, or prefix the binary: ["opa", "run", "--server", ...]. See README.md.
+services:
+  opa:
+    image: openpolicyagent/opa:0.69.0
+    command: ["run", "--server", "--addr=:8181", "--log-level=info"]
+    restart: unless-stopped
+    ports:
+      - "8181:8181"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M

@@ -1,0 +1,44 @@
+# Apache Guacamole — clientless RDP/SSH/VNC gateway
+# App-catalog entry: "Access / brokered entry" (Notion stream: saas-virtual-desktop)
+# Shape: long-running SERVICE, 2 containers (guacd + web), web on port 8080.
+#
+# Deploy to: ACI or ECS (ports are published there). On GCE/COS containers share
+# the host network, so the web UI is reachable on the instance's port 8080.
+#
+# Containers in one deployment share localhost, so the web app reaches guacd at
+# localhost:4822 — no service-name DNS needed.
+#
+# ADAPT BEFORE USE:
+#  - Guacamole needs an auth backend. This sample points at an EXTERNAL managed
+#    Postgres (set POSTGRES_* below to your DB). Volumes/local DB aren't supported
+#    in the cloud compose subset, so the database lives outside the deployment.
+#  - Values are literal — the deploy does not expand ${VARS}. Edit them directly.
+services:
+  guacd:
+    image: guacamole/guacd:1.5.5
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+
+  guacamole:
+    image: guacamole/guacamole:1.5.5
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      GUACD_HOSTNAME: localhost
+      GUACD_PORT: "4822"
+      # External managed Postgres holding Guacamole's auth schema:
+      POSTGRES_HOSTNAME: your-db.example.com
+      POSTGRES_PORT: "5432"
+      POSTGRES_DATABASE: guacamole_db
+      POSTGRES_USER: guacamole_user
+      POSTGRES_PASSWORD: change-me
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1G

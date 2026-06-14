@@ -1,0 +1,26 @@
+# Conftest (OPA) — one-shot policy test of config / IaC
+# App-catalog entry: "Policy / admission" (Notion stream: saas-iac-hardening, compliance-as-code)
+# Shape: ONE-SHOT job (restart: "no"). Best on ECS or GCE (see ACI note below).
+#
+# As shipped it runs `conftest --version` so you can confirm the container deploys
+# and runs end-to-end. Conftest tests files, and the cloud compose subset has no
+# volume mounts — so wiring real input is the "little more work" step.
+#
+# ADAPT BEFORE USE — replace command with a real test, supplying input one of:
+#   - pull policies from a registry, then test files fetched in the same step:
+#       command: ["test", "--policy", "oci://<registry>/<policy>:tag", "your.json"]
+#   - or build a small derived image that bakes in your policies + input and run
+#       command: ["test", "policy/", "input/"]
+#
+# ACI note: on Azure ACI `command` REPLACES the image entrypoint, so prefix the
+# binary — e.g. ["conftest", "--version"]. On ECS/GCE use the form below.
+services:
+  conftest:
+    image: openpolicyagent/conftest:v0.56.0
+    command: ["--version"]
+    restart: "no"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
