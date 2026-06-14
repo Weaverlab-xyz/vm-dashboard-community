@@ -46,6 +46,8 @@ A consistent topology across all three clouds:
 |---|---|---|
 | **Jumpoint segment** | Hosts the BeyondTrust SRA Jumpoint container so it can phone home to PRA's relay. | ✅ Yes |
 | **VM segment** | Hosts the lab VMs you deploy via the dashboard. | ❌ No — only the Jumpoint can reach them, and they cannot reach the internet directly. |
+| **DB segment** (AWS only) | Dedicated private subnets for managed RDS databases (2 AZs — RDS spans ≥2). | ❌ No — brokered only through the PRA tunnel. |
+| **K8s segment** | Dedicated private subnet(s) for managed Kubernetes clusters, separate from the VM and DB segments. AWS uses 2 AZs (`10.99.5/6.0/24`) since EKS spans ≥2; Azure/GCP use one (`10.99.3.0/24`). | ❌ No — clusters are private; brokered through the PRA tunnel. |
 
 Per-cloud isolation mechanism:
 

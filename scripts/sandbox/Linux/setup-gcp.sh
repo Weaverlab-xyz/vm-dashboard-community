@@ -54,6 +54,7 @@ LABELS="${SANDBOX_TAG_KEY//-/_}=${SANDBOX_TAG_VALUE//-/_}"
 VPC="${NAME}-vpc"
 JP_SUBNET="${NAME}-jumpoint-subnet"
 VM_SUBNET="${NAME}-vm-subnet"
+K8S_SUBNET="${NAME}-k8s-subnet"
 ROUTER="${NAME}-router"
 NAT="${NAME}-nat"
 
@@ -94,9 +95,21 @@ else
   ok "Reusing VM subnet $VM_SUBNET"
 fi
 
+# Dedicated subnet for managed Kubernetes (GKE) — separate from the jumpoint and
+# VM subnets above. No Cloud NAT mapping (like vm-subnet); private by default.
+if ! gcloud compute networks subnets describe "$K8S_SUBNET" --project "$PROJECT_ID" --region "$REGION" >/dev/null 2>&1; then
+  gcloud compute networks subnets create "$K8S_SUBNET" \
+    --project "$PROJECT_ID" --network "$VPC" --region "$REGION" \
+    --range 10.99.3.0/24 --quiet >/dev/null
+  ok "Created K8s subnet $K8S_SUBNET (10.99.3.0/24)"
+else
+  ok "Reusing K8s subnet $K8S_SUBNET"
+fi
+
 state_write gcp vpc "$VPC"
 state_write gcp jp_subnet "$JP_SUBNET"
 state_write gcp vm_subnet "$VM_SUBNET"
+state_write gcp k8s_subnet "$K8S_SUBNET"
 
 # ── 3. Cloud Router + Cloud NAT (only the jumpoint subnet) ───────────────────
 section "Cloud Router + Cloud NAT (jumpoint subnet only)"

@@ -33,6 +33,7 @@ $Labels = "$($Script:SandboxTagKey -replace '-','_')=$($Script:SandboxTagValue -
 $Vpc       = "$Name-vpc"
 $JpSubnet  = "$Name-jumpoint-subnet"
 $VmSubnet  = "$Name-vm-subnet"
+$K8sSubnet = "$Name-k8s-subnet"
 $Router    = "$Name-router"
 $Nat       = "$Name-nat"
 
@@ -79,9 +80,22 @@ if ($LASTEXITCODE -ne 0) {
     Write-Ok "Reusing VM subnet $VmSubnet"
 }
 
-Set-StateValue gcp vpc       $Vpc
-Set-StateValue gcp jp_subnet $JpSubnet
-Set-StateValue gcp vm_subnet $VmSubnet
+# Dedicated subnet for managed Kubernetes (GKE) — separate from the jumpoint and
+# VM subnets above.
+& gcloud compute networks subnets describe $K8sSubnet --project $ProjectId --region $Region *> $null
+if ($LASTEXITCODE -ne 0) {
+    gcloud compute networks subnets create $K8sSubnet `
+        --project $ProjectId --network $Vpc --region $Region `
+        --range 10.99.3.0/24 --quiet | Out-Null
+    Write-Ok "Created K8s subnet $K8sSubnet (10.99.3.0/24)"
+} else {
+    Write-Ok "Reusing K8s subnet $K8sSubnet"
+}
+
+Set-StateValue gcp vpc        $Vpc
+Set-StateValue gcp jp_subnet  $JpSubnet
+Set-StateValue gcp vm_subnet  $VmSubnet
+Set-StateValue gcp k8s_subnet $K8sSubnet
 
 # ── 3. Cloud Router + Cloud NAT (only the jumpoint subnet) ───────────────────
 Write-Section 'Cloud Router + Cloud NAT (jumpoint subnet only)'
