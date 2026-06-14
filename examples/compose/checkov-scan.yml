@@ -1,0 +1,26 @@
+# Checkov — one-shot IaC static analysis (Terraform / CloudFormation / k8s / …)
+# App-catalog entry: "IaC & config-drift" (Notion stream: saas-iac-hardening, compliance-as-code)
+# Shape: ONE-SHOT job (restart: "no"). Best on ECS or GCE (see ACI note below).
+# tfsec and Terrascan are drop-in alternatives — swap the image + command.
+#
+# As shipped it runs `checkov --version` to confirm the container deploys and runs.
+# Checkov scans a directory of IaC; the cloud compose subset has no volume mounts,
+# so supplying that directory is the "little more work" step.
+#
+# ADAPT BEFORE USE — supply IaC to scan, e.g.:
+#   - build a small derived image FROM bridgecrew/checkov that COPYs your IaC in,
+#     then:  command: ["-d", "/iac", "--compact"]
+#   - alternatives:  aquasec/tfsec ["/iac"]   |   tenable/terrascan ["scan", "-d", "/iac"]
+#
+# ACI note: on Azure ACI `command` REPLACES the image entrypoint, so prefix the
+# binary — e.g. ["checkov", "--version"]. On ECS/GCE use the form below.
+services:
+  checkov:
+    image: bridgecrew/checkov:3.2.0
+    command: ["--version"]
+    restart: "no"
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1G

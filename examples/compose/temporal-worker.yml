@@ -1,0 +1,27 @@
+# Temporal worker — durable workflow worker
+# App-catalog entry: "Durable workflows" (Notion stream: image-promote-saas)
+# Shape: long-running SERVICE that connects OUT to a Temporal server.
+#
+# A Temporal *worker* runs YOUR application code (workflow + activity definitions),
+# so the image below is a PLACEHOLDER — replace it with your worker image. The
+# Temporal *server* is not deployed here: it needs a managed database, so point
+# this worker at an existing Temporal Cloud namespace or a server you run
+# elsewhere (workers fit serverless runtimes; the stateful server does not).
+#
+# Deploy to: ECS / ACI / GCE. No published ports — the worker dials out to Temporal.
+#
+# ADAPT BEFORE USE: set the image to your worker, and the connection env to your
+# Temporal endpoint + namespace (and add TEMPORAL_API_KEY / mTLS env as needed).
+services:
+  worker:
+    image: ghcr.io/your-org/your-temporal-worker:latest
+    restart: unless-stopped
+    environment:
+      TEMPORAL_ADDRESS: your-namespace.tmprl.cloud:7233
+      TEMPORAL_NAMESPACE: your-namespace
+      TEMPORAL_TASK_QUEUE: default
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M

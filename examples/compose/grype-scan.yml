@@ -1,0 +1,22 @@
+# Grype (Anchore) — one-shot vulnerability scan of a container image
+# App-catalog entry: "Image supply-chain / scanning" (Notion stream: saas-image-supplychain)
+# Shape: ONE-SHOT job (restart: "no") — scans a remote image and exits.
+#
+# Deploy to: ECS / ACI / GCE. Findings print to the container logs.
+# Runs out of the box against nginx:latest (no volumes needed).
+#
+# ADAPT BEFORE USE: replace nginx:latest with your image. Add "--fail-on high" to
+# make the job exit non-zero when High+ vulnerabilities are found.
+#
+# ACI note: on Azure ACI `command` replaces the image entrypoint — deploy this to
+# ECS/GCE, or prefix the binary: ["grype", "nginx:latest"]. See README.md.
+services:
+  grype:
+    image: anchore/grype:v0.82.0
+    command: ["nginx:latest"]
+    restart: "no"
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1G

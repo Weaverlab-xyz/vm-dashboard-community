@@ -1,0 +1,24 @@
+# Trivy — one-shot container image CVE scan
+# App-catalog entry: "Image supply-chain / scanning" (Notion stream: saas-image-supplychain)
+# Shape: ONE-SHOT job (restart: "no") — the container scans a registry image and exits.
+#
+# Deploy to: ECS / ACI / GCE. Watch the job on the Jobs page; read findings in the
+# container logs (CloudWatch for ECS, container logs for ACI, Cloud Logging for GCE).
+#
+# Runs a real scan out of the box (scans nginx:latest). No volumes needed —
+# Trivy pulls and scans a remote image.
+#
+# ADAPT BEFORE USE: replace nginx:latest with the image you want to scan.
+#
+# ACI note: on Azure ACI `command` replaces the image entrypoint — deploy this to
+# ECS/GCE, or prefix the binary: ["trivy", "image", ...]. See README.md.
+services:
+  trivy:
+    image: aquasec/trivy:0.55.0
+    command: ["image", "--quiet", "--severity", "HIGH,CRITICAL", "nginx:latest"]
+    restart: "no"
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1G

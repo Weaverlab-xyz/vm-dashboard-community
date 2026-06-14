@@ -1,0 +1,37 @@
+# Terraform plan / driftctl — one-shot drift detection
+# App-catalog entry: "IaC & config-drift"
+# (Notion streams: saas-iac-hardening drift detection, saas-config-drift)
+# Shape: ONE-SHOT job (restart: "no"). Best on ECS or GCE (see ACI note below).
+#
+# As shipped it runs `terraform version` to confirm the container deploys and runs.
+# A real `plan`/drift check needs your Terraform config + state + provider creds;
+# the cloud compose subset has no volume mounts, so wiring those is the "little
+# more work" step.
+#
+# ADAPT BEFORE USE — pick one:
+#   - terraform plan: build a derived image FROM hashicorp/terraform that COPYs your
+#     config in and configures a remote backend, then:
+#       command: ["plan", "-no-color"]
+#     pass backend/provider creds as environment values below.
+#   - driftctl (scans live cloud vs state, no local config needed beyond state):
+#       image: ghcr.io/snyk/driftctl:latest
+#       command: ["scan", "--from", "tfstate+s3://your-bucket/path/terraform.tfstate"]
+#     with AWS_* creds in environment.
+#
+# ACI note: on Azure ACI `command` REPLACES the image entrypoint, so prefix the
+# binary — e.g. ["terraform", "version"]. On ECS/GCE use the form below.
+services:
+  terraform:
+    image: hashicorp/terraform:1.9.8
+    command: ["version"]
+    restart: "no"
+    environment:
+      # Provider/backend credentials for a real plan (edit or remove):
+      AWS_ACCESS_KEY_ID: change-me
+      AWS_SECRET_ACCESS_KEY: change-me
+      AWS_REGION: us-east-1
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1G

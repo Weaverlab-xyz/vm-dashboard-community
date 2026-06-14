@@ -1,0 +1,30 @@
+# Cosign (sigstore) — one-shot image signature verification
+# App-catalog entry: "Image supply-chain / scanning" (Notion stream: saas-self-supplychain)
+# Shape: ONE-SHOT job (restart: "no").
+#
+# Deploy to: ECS / ACI / GCE. As shipped it runs `cosign version` so you can
+# confirm the container deploys and runs end-to-end; the real verify command is
+# below — uncomment and edit it (cosign verify needs either a public key or the
+# keyless identity flags, which are specific to how your images were signed).
+#
+# ADAPT BEFORE USE — replace the command with one of:
+#   Key-based:
+#     ["verify", "--key", "https://your-kms/key", "ghcr.io/you/app:tag"]
+#   Keyless (Fulcio/Rekor):
+#     ["verify",
+#      "--certificate-identity-regexp", "https://github.com/you/.*",
+#      "--certificate-oidc-issuer", "https://token.actions.githubusercontent.com",
+#      "ghcr.io/you/app:tag"]
+#
+# ACI note: on Azure ACI `command` replaces the image entrypoint — deploy this to
+# ECS/GCE, or prefix the binary: ["cosign", "version"]. See README.md.
+services:
+  cosign:
+    image: gcr.io/projectsigstore/cosign:v2.4.1
+    command: ["version"]
+    restart: "no"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
