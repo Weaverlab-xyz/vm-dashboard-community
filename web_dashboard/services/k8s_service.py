@@ -47,6 +47,16 @@ _KUBECTL_IMAGE = "bitnami/kubectl:latest"
 _PORTAINER_AGENT_MANIFEST_URL = "https://downloads.portainer.io/ce-lts/portainer-agent-k8s-nodeport.yaml"
 _PORTAINER_AGENT_NODEPORT = 30778
 
+# Phase 4 (Feature D) — in-cluster Password Safe secret delivery. The dashboard
+# installs BeyondTrust's own integration rather than proxying secrets itself.
+# v1 ships the External Secrets Operator path: ESO (Helm) + a BeyondTrust
+# ClusterSecretStore that syncs Password Safe → native K8s Secrets. Helm runs in
+# a transient container (same throwaway-runner pattern as the kubectl apply).
+_HELM_IMAGE = "alpine/helm:latest"
+_ESO_HELM_REPO_NAME = "external-secrets"
+_ESO_HELM_REPO_URL = "https://charts.external-secrets.io"
+_ESO_HELM_CHART = "external-secrets/external-secrets"
+
 
 class K8sError(Exception):
     pass
@@ -231,6 +241,191 @@ async def _apply_manifest_via_runner(kubeconfig: str, manifest_ref: str) -> str:
         return await asyncio.to_thread(_run_sync, cmd)
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+async def _delete_manifest_via_runner(kubeconfig: str, manifest: str) -> str:
+    """``kubectl delete -f`` an inline manifest (best-effort teardown)."""
+    tmpdir = tempfile.mkdtemp(prefix="k8s_del_")
+    try:
+        with open(os.path.join(tmpdir, "kubeconfig"), "w") as fh:
+            fh.write(kubeconfig)
+        with open(os.path.join(tmpdir, "manifest.yaml"), "w") as fh:
+            fh.write(manifest)
+        shell_cmd = "kubectl --kubeconfig /work/kubeconfig delete --ignore-not-found -f /work/manifest.yaml"
+        cmd = ["docker", "run", "--rm", "-v", f"{tmpdir}:/work", _KUBECTL_IMAGE, "sh", "-c", shell_cmd]
+        return await asyncio.to_thread(_run_sync, cmd)
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+async def _helm_via_runner(kubeconfig: str, helm_args: list, add_eso_repo: bool = True) -> str:
+    """Run a helm command against the cluster in a transient helm container
+    (KUBECONFIG mounted, same throwaway pattern as the kubectl runner)."""
+    tmpdir = tempfile.mkdtemp(prefix="k8s_helm_")
+    try:
+        with open(os.path.join(tmpdir, "kubeconfig"), "w") as fh:
+            fh.write(kubeconfig)
+        parts = []
+        if add_eso_repo:
+            parts.append(f"helm repo add {_ESO_HELM_REPO_NAME} {_ESO_HELM_REPO_URL}")
+            parts.append("helm repo update")
+        parts.append("helm " + " ".join(shlex.quote(a) for a in helm_args))
+        shell_cmd = " && ".join(parts)
+        cmd = ["docker", "run", "--rm", "--entrypoint", "/bin/sh",
+               "-e", "KUBECONFIG=/work/kubeconfig", "-v", f"{tmpdir}:/work",
+               _HELM_IMAGE, "-c", shell_cmd]
+        logger.info("k8s helm: %s", " ".join(helm_args[:3]))
+        return await asyncio.to_thread(_run_sync, cmd)
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def _yaml_quote(value: str) -> str:
+    """Double-quoted YAML scalar, safe for arbitrary strings."""
+    return '"' + (value or "").replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _eso_credentials_secret_manifest(namespace: str, secret_name: str,
+                                     client_id: str, client_secret: str) -> str:
+    """Namespace + the K8s Secret the ESO BeyondTrust ClusterSecretStore reads its
+    Password Safe OAuth client id/secret from (keys ClientId / ClientSecret)."""
+    return (
+        "apiVersion: v1\n"
+        "kind: Namespace\n"
+        "metadata:\n"
+        f"  name: {namespace}\n"
+        "---\n"
+        "apiVersion: v1\n"
+        "kind: Secret\n"
+        "metadata:\n"
+        f"  name: {secret_name}\n"
+        f"  namespace: {namespace}\n"
+        "type: Opaque\n"
+        "stringData:\n"
+        f"  ClientId: {_yaml_quote(client_id)}\n"
+        f"  ClientSecret: {_yaml_quote(client_secret)}\n"
+    )
+
+
+def _eso_clustersecretstore_manifest(name: str, api_url: str, retrieval_type: str,
+                                     secret_namespace: str, secret_name: str,
+                                     bt_api_version: str = "3.1") -> str:
+    """A BeyondTrust ClusterSecretStore (external-secrets.io/v1) that syncs Password
+    Safe → K8s Secrets. Schema confirmed against the ESO BeyondTrust provider docs;
+    OAuth client id/secret come from the ``secret_name`` Secret (ClusterSecretStore
+    is cluster-scoped, so the secretRef carries an explicit namespace)."""
+    return (
+        "apiVersion: external-secrets.io/v1\n"
+        "kind: ClusterSecretStore\n"
+        "metadata:\n"
+        f"  name: {name}\n"
+        "spec:\n"
+        "  provider:\n"
+        "    beyondtrust:\n"
+        "      server:\n"
+        f"        apiUrl: {_yaml_quote(api_url)}\n"
+        f"        retrievalType: {retrieval_type}\n"
+        "        verifyCA: true\n"
+        "        clientTimeOutSeconds: 45\n"
+        f"        apiVersion: {_yaml_quote(bt_api_version)}\n"
+        "      auth:\n"
+        "        clientId:\n"
+        "          secretRef:\n"
+        f"            name: {secret_name}\n"
+        f"            namespace: {secret_namespace}\n"
+        "            key: ClientId\n"
+        "        clientSecret:\n"
+        "          secretRef:\n"
+        f"            name: {secret_name}\n"
+        f"            namespace: {secret_namespace}\n"
+        "            key: ClientSecret\n"
+    )
+
+
+def _eso_bt_api_url() -> str:
+    """The BeyondTrust public API URL for the ESO provider. Explicit override
+    (eso_bt_api_url) wins; otherwise derive from the Password Safe URL."""
+    override = _cfg("eso_bt_api_url")
+    if override:
+        return override
+    base = (_cfg("pscli_api_url") or "").rstrip("/")
+    return f"{base}/BeyondTrust/api/public/v3/" if base else ""
+
+
+VALID_DELIVERY_KINDS = ("eso", "none")
+
+
+async def setup_secret_delivery(cluster_id: str, kind: str) -> None:
+    """**Phase 4 (Feature D)** — install BeyondTrust's in-cluster Password Safe
+    secret delivery into a managed cluster. Background task. v1 supports the
+    External Secrets Operator path:
+
+      * ``kind=eso``  → Helm-install ESO, write the BeyondTrust OAuth credentials
+        Secret, and apply a BeyondTrust ClusterSecretStore (Password Safe →
+        native K8s Secrets). Records ``secrets_delivery_kind=eso``.
+      * ``kind=none`` → remove the ClusterSecretStore + credentials and uninstall
+        ESO (best-effort); clears ``secrets_delivery_kind``.
+
+    The dashboard installs + configures only — ESO owns the sync; secrets are
+    never proxied through the dashboard. (Secrets-Agent is a later kind.)"""
+    from ..database import SessionLocal
+    db = SessionLocal()
+    try:
+        row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
+        if row is None:
+            return
+        kubeconfig = resolve_kubeconfig(db, cluster_id)
+        namespace = _cfg("eso_namespace", "external-secrets")
+        secret_name = _cfg("eso_bt_credentials_secret", "beyondtrust-credentials")
+        css_name = _cfg("eso_bt_clustersecretstore", "beyondtrust-store")
+
+        if kind == "none":
+            try:
+                await _delete_manifest_via_runner(kubeconfig, _eso_clustersecretstore_manifest(
+                    css_name, _eso_bt_api_url() or "https://x/", _cfg("eso_bt_retrieval_type", "SECRET"),
+                    namespace, secret_name))
+                await _helm_via_runner(kubeconfig, ["uninstall", "external-secrets", "-n", namespace],
+                                       add_eso_repo=False)
+            except Exception as exc:
+                logger.warning("ESO teardown for %s partially failed: %s", cluster_id, exc)
+            row.secrets_delivery_kind = None
+            db.commit()
+            return
+
+        # kind == "eso"
+        from . import config_service
+        client_id = config_service.get("pscli_client_id")
+        client_secret = config_service.get("pscli_client_secret")
+        api_url = _eso_bt_api_url()
+        if not (client_id and client_secret and api_url):
+            raise K8sError(
+                "ESO secret delivery needs the Password Safe API URL + OAuth client "
+                "(pscli_api_url, pscli_client_id, pscli_client_secret) configured"
+            )
+        row.secrets_delivery_kind = "installing"
+        db.commit()
+        try:
+            ver = _cfg("eso_helm_version")
+            helm_args = ["upgrade", "--install", "external-secrets", _ESO_HELM_CHART,
+                         "--namespace", namespace, "--create-namespace", "--wait",
+                         "--set", "installCRDs=true"]
+            if ver:
+                helm_args += ["--version", ver]
+            await _helm_via_runner(kubeconfig, helm_args)
+            await _apply_manifest_via_runner(kubeconfig, _eso_credentials_secret_manifest(
+                namespace, secret_name, client_id, client_secret))
+            await _apply_manifest_via_runner(kubeconfig, _eso_clustersecretstore_manifest(
+                css_name, api_url, _cfg("eso_bt_retrieval_type", "SECRET"),
+                namespace, secret_name, _cfg("eso_bt_api_version", "3.1")))
+            row.secrets_delivery_kind = "eso"
+            db.commit()
+            logger.info("ESO + Password Safe secret delivery installed on cluster %s", row.name)
+        except Exception as exc:
+            row.secrets_delivery_kind = "failed"
+            db.commit()
+            logger.warning("ESO secret delivery install failed cluster=%s: %s", cluster_id, exc)
+    finally:
+        db.close()
 
 
 async def launch_management_plane(cluster_id: str, mgmt_kind: str = "portainer") -> None:
