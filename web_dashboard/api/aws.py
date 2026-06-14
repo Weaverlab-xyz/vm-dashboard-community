@@ -355,6 +355,9 @@ async def deploy_ami(
         req.subnet_id,
         req.security_group_ids,
         workgroup,
+        req.jump_group,
+        req.jumpoint_name,
+        req.pra_credential_ref,
     )
 
     return DeployResponse(
@@ -791,6 +794,9 @@ async def _run_deploy(
     subnet_id: str,
     security_group_ids: list,
     workgroup: str = "",
+    jump_group: str = None,
+    jumpoint_name: str = None,
+    pra_credential_ref: str = None,
 ):
     db = _get_db_session()
     result = {}
@@ -890,12 +896,14 @@ async def _run_deploy(
         if _cfg_svc.get_bool("beyondtrust_enabled"):
             from ..services import terraform_pra_service
             try:
+                _client_secret = _cfg_svc.resolve_reference(pra_credential_ref.strip()) if pra_credential_ref else ""
                 bt_result = await terraform_pra_service.provision_jump(
                     vm_name=instance_name,
                     hostname=hostname,
-                    jump_group_name=_cfg_svc.get("bt_jump_group_name") or settings.bt_jump_group_name,
-                    jumpoint_name=_cfg_svc.get("bt_jumpoint_name") or settings.bt_jumpoint_name,
+                    jump_group_name=(jump_group or "").strip() or _cfg_svc.get("bt_jump_group_name") or settings.bt_jump_group_name,
+                    jumpoint_name=(jumpoint_name or "").strip() or _cfg_svc.get("bt_jumpoint_name") or settings.bt_jumpoint_name,
                     tag="AWS",
+                    client_secret=_client_secret,
                 )
                 result["bt_shell_jump_id"] = bt_result.get("shell_jump_id")
                 result["bt_jump_group_name"] = bt_result.get("jump_group_name")

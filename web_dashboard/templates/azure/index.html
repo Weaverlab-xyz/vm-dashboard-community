@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "partials/secret_picker.html" import secret_picker %}
 {% block title %}Azure — Infrastructure Management{% endblock %}
 
 {% block content %}
@@ -400,6 +401,29 @@
           secrets backend — retrieve it after deploy via <strong>VMs → Password</strong>.
           No SSH key is injected on Windows.
         </div>
+      </div>
+
+      <!-- BeyondTrust PRA options (optional per-deploy overrides) -->
+      <div class="mt-4 space-y-3 p-3 bg-gray-50 rounded-lg border border-gray-200">
+        <p class="text-xs font-semibold text-gray-600">BeyondTrust PRA options
+          <span class="font-normal text-gray-400">— optional; fall back to the configured defaults.</span>
+        </p>
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-xs font-medium text-gray-600 mb-1">Jump group <span class="text-gray-400">(name)</span></label>
+            <input type="text" x-model="deployModal.jump_group" placeholder="(configured default)"
+                   class="w-full border border-gray-300 rounded-md px-3 py-1.5 text-sm">
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-gray-600 mb-1">Jumpoint <span class="text-gray-400">(name)</span></label>
+            <input type="text" x-model="deployModal.jumpoint_name" placeholder="(configured default)"
+                   class="w-full border border-gray-300 rounded-md px-3 py-1.5 text-sm">
+          </div>
+        </div>
+        {{ secret_picker("deployModal", "praCredBackend", "pra_credential_ref",
+                         "PRA credential", "Overrides bt_client_secret for this deploy's shell jump.") }}
+        {{ secret_picker("deployModal", "dockerKeyBackend", "docker_deploy_key_ref",
+                         "Jumpoint deploy key", "Overrides the ACI Jumpoint deploy key for this deploy.") }}
       </div>
 
       <div class="flex justify-end gap-3 mt-5">
@@ -866,6 +890,7 @@
 <script>
 function azureDashboard() {
   return {
+    ...secretPickerState(),
     // State
     loading: false,
     credError: false,
@@ -894,6 +919,7 @@ function azureDashboard() {
       sshPublicKey: '', sshKeyMode: 'keyvault', createPublicIp: false, submitting: false,
       keyvaultLoading: false, keyvaultError: '', keyvaultSecretName: '',
       workgroup: '',
+      jump_group: '', jumpoint_name: '', praCredBackend: '', pra_credential_ref: '', dockerKeyBackend: '', docker_deploy_key_ref: '',
     },
     bulkModal: {
       open: false, items: [], vmNames: [], vmSize: 'Standard_B2s',
@@ -949,6 +975,7 @@ function azureDashboard() {
 
     async init() {
       requireAuth();
+      this.loadSecretBackends();
       const hash = window.location.hash.slice(1);
       if (['marketplace', 'private', 'vms', 'build'].includes(hash)) {
         this.activeTab = hash;
@@ -1197,6 +1224,10 @@ function azureDashboard() {
           ssh_username: m.sshUsername || 'azureuser',
           ssh_public_key: sshPublicKey,
           workgroup: m.workgroup,
+          jump_group: m.jump_group || null,
+          jumpoint_name: m.jumpoint_name || null,
+          pra_credential_ref: m.pra_credential_ref || null,
+          docker_deploy_key_ref: m.docker_deploy_key_ref || null,
         });
         m.open = false;
         toast(`Azure VM deployment queued: ${m.vmName}`, 'success');

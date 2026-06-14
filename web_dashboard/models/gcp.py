@@ -58,6 +58,10 @@ class GCPDeployRequest(BaseModel):
     disk_size_gb: int = 20
     network_tags: List[str] = []
     workgroup: str              # written as `workgroup` GCE label
+    # Per-deploy override — config default is the fallback. A secrets-backend
+    # reference (e.g. gcp_sm://…) for the GCE Jumpoint deploy key. (GCP uses a
+    # per-VM Jumpoint container, not a shell-jump, so there's no jump_group here.)
+    docker_deploy_key_ref: Optional[str] = None  # else gcp_cloud_run_docker_deploy_key
 
 
 class GCPDeployResponse(BaseModel):

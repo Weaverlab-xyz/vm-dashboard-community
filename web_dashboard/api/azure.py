@@ -894,7 +894,11 @@ async def _run_deploy(job_id: str, req: AzureDeployRequest, rg: str, loc: str):
             job_service.update_progress(db, job_id, 15, "Starting BeyondTrust ACI Jumpoint container…")
             try:
                 try:
-                    deploy_key = await _resolve_azure_aci_deploy_key()
+                    if getattr(req, "docker_deploy_key_ref", None):
+                        from ..services import config_service as _cs
+                        deploy_key = _cs.resolve_reference(req.docker_deploy_key_ref.strip())
+                    else:
+                        deploy_key = await _resolve_azure_aci_deploy_key()
                 except Exception as key_err:
                     logger.warning("ACI deploy key fetch failed (%s) — creating ACI without deploy key", key_err)
                     deploy_key = ""
@@ -979,8 +983,11 @@ async def _run_deploy(job_id: str, req: AzureDeployRequest, rg: str, loc: str):
             from ..services import terraform_pra_service
             # Resolve from config_service (wizard/DB) first, then env-var defaults.
             # Azure-specific keys override the shared bt_* keys.
-            jump_group = _cfg("azure_bt_jump_group_name") or _cfg("bt_jump_group_name")
-            jumpoint_name = _cfg("azure_jumpoint_name") or _cfg("bt_jumpoint_name")
+            from ..services import config_service as _cs
+            jump_group = (getattr(req, "jump_group", None) or "").strip() or _cfg("azure_bt_jump_group_name") or _cfg("bt_jump_group_name")
+            jumpoint_name = (getattr(req, "jumpoint_name", None) or "").strip() or _cfg("azure_jumpoint_name") or _cfg("bt_jumpoint_name")
+            _cred = getattr(req, "pra_credential_ref", None)
+            _client_secret = _cs.resolve_reference(_cred.strip()) if _cred else ""
             aci_note = f" (ACI: {result['aci_group_name']})" if result.get("aci_group_name") else (
                 f" (ACI failed: {result['aci_error']})" if result.get("aci_error") else " (no ACI)"
             )
@@ -991,6 +998,7 @@ async def _run_deploy(job_id: str, req: AzureDeployRequest, rg: str, loc: str):
                     jump_group_name=jump_group,
                     jumpoint_name=jumpoint_name,
                     tag="Azure",
+                    client_secret=_client_secret,
                 )
                 result["bt_shell_jump_id"] = bt_result.get("shell_jump_id")
                 result["bt_jump_group_name"] = bt_result.get("jump_group_name")

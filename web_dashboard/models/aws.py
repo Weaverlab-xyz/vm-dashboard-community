@@ -68,6 +68,13 @@ class DeployRequest(BaseModel):
     subnet_id: str = Field(..., description="VPC subnet ID")
     security_group_ids: List[str] = Field(..., description="Security group IDs")
     workgroup: str = Field(..., description="Workgroup the instance belongs to (written as Workgroup tag)")
+    # PRA/jumpoint per-deploy overrides — config defaults are the fallback. Values
+    # are secrets-backend references (e.g. aws_sm://…), not raw secrets.
+    jump_group: Optional[str] = None             # PRA Jump Group name override (else bt_jump_group_name)
+    jumpoint_name: Optional[str] = None          # PRA Jumpoint name override (else bt_jumpoint_name)
+    pra_credential_ref: Optional[str] = None     # secret ref → bt_client_secret override for the shell jump
+    # (No per-deploy ECS deploy-key override: community uses a SHARED jumpoint
+    # host via jumpoint_host_service, so aws_ecs_docker_deploy_key is global.)
 
 
 class DeployResponse(BaseModel):
