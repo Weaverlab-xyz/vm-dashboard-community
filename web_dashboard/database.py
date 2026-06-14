@@ -586,6 +586,10 @@ class CloudDatabase(Base):
 
     credentials_ref = Column(Text, nullable=True)          # backend-agnostic ref (resolved via config_service)
     jump_item_id = Column(String(64), nullable=True)       # PRA protocol-tunnel jump (Phase 2)
+    # Per-DB PRA broker overrides — config defaults are the fallback.
+    jump_group = Column(String(128), nullable=True)        # PRA Jump Group name override (else bt_jump_group_name)
+    jumpoint_name = Column(String(128), nullable=True)     # PRA Jumpoint name override (else bt_jumpoint_name)
+    pra_credential_ref = Column(String(256), nullable=True)  # secret ref → bt_client_secret override
 
     created_by = Column(String(100), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
@@ -692,6 +696,10 @@ def init_db():
             "ALTER TABLE k8s_clusters ADD COLUMN jump_group VARCHAR(128)",
             "ALTER TABLE k8s_clusters ADD COLUMN jumpoint_name VARCHAR(128)",
             "ALTER TABLE k8s_clusters ADD COLUMN pra_credential_ref VARCHAR(256)",
+            # Cloud-db per-DB PRA broker overrides (config defaults as fallback).
+            "ALTER TABLE cloud_databases ADD COLUMN jump_group VARCHAR(128)",
+            "ALTER TABLE cloud_databases ADD COLUMN jumpoint_name VARCHAR(128)",
+            "ALTER TABLE cloud_databases ADD COLUMN pra_credential_ref VARCHAR(256)",
         ]
         for stmt in _migrations:
             if _is_sqlite:

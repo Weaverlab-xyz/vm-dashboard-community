@@ -47,6 +47,11 @@ class ProvisionRequest(BaseModel):
     # PRA Vault account group the injected credential lands in — an unassigned
     # vault account is injectable by nobody, so the form offers a picker.
     vault_account_group_id: Optional[int] = None
+    # Per-DB PRA broker overrides — config defaults are the fallback. Values are
+    # secrets-backend references (e.g. aws_sm://…), not raw secrets.
+    jump_group: Optional[str] = None          # PRA Jump Group name override (else bt_jump_group_name)
+    jumpoint_name: Optional[str] = None       # PRA Jumpoint name override (else bt_jumpoint_name)
+    pra_credential_ref: Optional[str] = None  # secret ref → bt_client_secret override
 
 
 class DatabaseOptions(BaseModel):
@@ -109,7 +114,9 @@ async def provision_database(
             db, engine=payload.engine, cloud=payload.cloud, region=payload.region,
             name=payload.name, created_by=current_user.username,
             master_username=payload.master_username,
-            vault_account_group_id=payload.vault_account_group_id, **opts,
+            vault_account_group_id=payload.vault_account_group_id,
+            jump_group=payload.jump_group, jumpoint_name=payload.jumpoint_name,
+            pra_credential_ref=payload.pra_credential_ref, **opts,
         )
     except cloud_database_service.CloudDatabaseError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

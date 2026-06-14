@@ -472,8 +472,12 @@ def _scrub_tf_state(tf_state_json: str) -> Optional[str]:
 def _provision_db_tunnel_sync(
     engine, name, hostname, jump_group_name, jumpoint_name, username, database, tag,
     admin_password="", vault_account_name="", vault_account_group_id=None,
+    client_secret="",
 ) -> dict:
     want_vault = bool(vault_account_name and admin_password)
+    # A per-DB PRA credential overrides the configured bt_client_secret for this
+    # apply only (the sensitive TF_VAR the provider block reads).
+    _cred_env = {"TF_VAR_bt_client_secret": client_secret} if client_secret else {}
     with tempfile.TemporaryDirectory(prefix="pra_db_tf_") as work_dir:
         Path(work_dir, "main.tf").write_text(
             _generate_db_tunnel_hcl(engine, name, hostname, jump_group_name,
@@ -487,8 +491,10 @@ def _provision_db_tunnel_sync(
             raise TerraformPRAError(
                 f"terraform init failed: {init.stderr.strip() or init.stdout.strip()}")
 
-        extra_env = {"TF_VAR_db_password": admin_password} if want_vault else None
-        apply = _run_tf(["apply", "-auto-approve"], work_dir, timeout=120, extra_env=extra_env)
+        extra_env = dict(_cred_env)
+        if want_vault:
+            extra_env["TF_VAR_db_password"] = admin_password
+        apply = _run_tf(["apply", "-auto-approve"], work_dir, timeout=120, extra_env=extra_env or None)
         if apply.returncode != 0 and want_vault:
             # The vault account must not cost the user a tunnel that worked
             # before this feature existed: retry tunnel-only. The provider
@@ -507,7 +513,8 @@ def _provision_db_tunnel_sync(
                 _generate_db_tunnel_hcl(engine, name, hostname, jump_group_name,
                                         jumpoint_name, username, database, tag)
             )
-            apply = _run_tf(["apply", "-auto-approve", "-refresh=false"], work_dir, timeout=120)
+            apply = _run_tf(["apply", "-auto-approve", "-refresh=false"], work_dir,
+                            timeout=120, extra_env=_cred_env or None)
         if apply.returncode != 0:
             # Total failure: leave nothing behind in PRA (config on disk is
             # tunnel-only at this point, so no extra env is needed).
@@ -640,6 +647,7 @@ async def provision_db_tunnel(
     admin_password: str = "",
     vault_account_name: str = "",
     vault_account_group_id: Optional[int] = None,
+    client_secret: str = "",
 ) -> dict:
     """Provision a BeyondTrust PRA protocol-tunnel jump for a managed database.
 
@@ -659,7 +667,7 @@ async def provision_db_tunnel(
     return await asyncio.to_thread(
         _provision_db_tunnel_sync, engine, name, hostname, jump_group_name,
         jumpoint_name, username, database, tag,
-        admin_password, vault_account_name, vault_account_group_id,
+        admin_password, vault_account_name, vault_account_group_id, client_secret,
     )
 
 
