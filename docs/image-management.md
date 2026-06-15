@@ -184,14 +184,26 @@ from the Linux path:
 - **Sizing.** Windows builds crawl on 4 GB burstable sizes; the form
   nudges Windows presets to `Standard_D2s_v3`. Expect 30–60+ min.
 
+A ready-made starter provisioner ships at
+[`provisioners/beyondtrust/bt-ready-windows.ps1`](../provisioners/beyondtrust/bt-ready-windows.ps1):
+it installs **OpenSSH Server**, enables **RDP + NLA**, sets the SSH
+default shell to PowerShell, and (optionally) authorizes an SSH public
+key — turning a Windows Server Core image into one you can reach by
+`ssh` like a Linux VM, plus agentless RDP through the Jumpoint. Upload
+it to `/storage` (the layer tags `.ps1` as `powershell`) and Load it,
+or paste it in. See
+[provisioners/beyondtrust/README.md](../provisioners/beyondtrust/README.md#windows-bt-ready-windowsps1).
+
 Deploying a Windows image (deploy form, bulk deploy, or a Desktops
 pool) generates a strong local-admin password per VM, stores it in
 the configured [secrets backend](secrets-management.md) (the
 `database` backend works out of the box), and records only the
 `(backend, ref)` pair in job metadata. Retrieve it per VM via
 **Azure → VMs → Password** (`GET /api/azure/vms/{name}/admin-password`).
-No SSH key is injected on Windows, and the BeyondTrust Shell Jump
-(SSH) step is skipped — broker access with an RDP jump item instead.
+Azure can't inject an SSH key into a Windows VM at deploy time (that's
+Linux-only), so the BeyondTrust Shell Jump (SSH) step is skipped at
+deploy — but if the image baked OpenSSH + your key (above), you can SSH
+in directly, and otherwise broker access with an RDP jump item.
 The image registry records `os_type` per image so cross-cloud
 promotes import Windows VHDs as Windows (registry rows predating the
 column default to Linux).

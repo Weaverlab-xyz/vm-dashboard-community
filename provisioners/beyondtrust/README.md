@@ -1,11 +1,14 @@
 # BeyondTrust-ready Packer provisioner scripts
 
-Two POSIX `/bin/sh` scripts that prepare a freshly-built cloud image so it can be picked up by **BeyondTrust PRA Shell Jump** and live as a managed asset with a conservative baseline of hygiene. Designed to be loaded into a Packer build via the dashboard's `/storage` → "Load from storage" flow on the AWS / Azure / GCP build pages.
+Scripts that prepare a freshly-built cloud image so it can be picked up by **BeyondTrust PRA** and live as a managed asset with a conservative baseline of hygiene. Designed to be loaded into a Packer build via the dashboard's `/storage` → "Load from storage" flow on the AWS / Azure / GCP build pages.
 
 | Script | Targets |
 |---|---|
 | [`bt-ready-debian.sh`](bt-ready-debian.sh) | Debian, Ubuntu |
 | [`bt-ready-rpm.sh`](bt-ready-rpm.sh) | RHEL, Rocky, CentOS Stream, AlmaLinux, Amazon Linux 2 / 2023 |
+| [`bt-ready-windows.ps1`](bt-ready-windows.ps1) | Windows Server 2022 (incl. Server Core) — Azure |
+
+The two `*.sh` scripts are POSIX `/bin/sh`; the Windows one is PowerShell (see [its own section](#windows-bt-ready-windowsps1) — it behaves differently enough to warrant separate notes).
 
 ## What the scripts do
 
@@ -62,6 +65,19 @@ Beyond the PRA Shell Jump prereqs, the scripts also prepare the image for
   package. **Install only:** EPM-L *activation* (`pbactivate -t <token>`) happens
   post-deploy using a short-lived installation token from the dashboard's **EPM-L
   integration** (`/api/epml/token`) — tokens must not be baked into an image.
+
+## Windows (`bt-ready-windows.ps1`)
+
+The Windows script prepares a **Windows Server 2022** image (including **Server Core**) for PRA access. It's the Windows analogue of the `*.sh` scripts but differs in important ways:
+
+- **PowerShell, not sh**, and **Azure-only** for now (the dashboard's Windows Packer builder is Azure; AWS/GCP Windows builds are a later follow-up). Select a **Windows Server 2022** or **2022 Core** preset on the Build Image tab (`os_type=Windows`); the build runs the script as Packer's `powershell` provisioner before the `windows-restart` + Sysprep `/generalize` finisher.
+- **Build connects over WinRM; the image is reached over SSH.** Marketplace Windows base images have no SSH at first boot, so Packer uses WinRM during the build. The script installs **OpenSSH Server** (in-box Feature-on-Demand, with a Win32-OpenSSH MSI fallback) into the *output* image, so VMs deployed from it are reachable with `ssh` — "not all that different than how Linux cloud VMs are accessed today" — plus **agentless RDP** through the PRA Jumpoint (RDP + NLA + firewall are enabled).
+- **The SSH key is baked into the image, by necessity.** Azure cannot inject SSH public keys into Windows VMs at deploy time (that's Linux-only — `WindowsConfiguration` has no SSH field). So set `$AuthorizedKey` at the top of the script to the **public** half of the keypair the dashboard keeps in Key Vault (`azure_ssh_keypair_secret_name`); the matching private key is then retrievable from the VMs tab / `ssh-key` endpoint exactly like Linux. Leave it blank and password-auth SSH still works using the admin password the deploy generates and vaults (**Azure → VMs → Password**). The `$env:BT_*` reads in the script are for CLI/Packer use — the dashboard's PowerShell provisioner does not forward `environment_vars` yet, so when driving it through the GUI, edit the inline values.
+- **Access model after deploy:** retrieve the vaulted admin password (**Azure → VMs → Password**) → `ssh azureuser@<ip>` (password), or use your Key Vault private key if you baked the public key → or RDP via the Jumpoint. The OpenSSH default shell is set to PowerShell so `ssh` lands in a familiar prompt.
+- **No image-reuse cleanup step.** On Windows, Sysprep `/generalize` (the build template's finisher) owns generalization — the script deliberately does *not* strip host keys / SIDs / logs the way the `*.sh` cleanup step does.
+- **Optional toggles** (set as `$env:BT_*` for CLI builds, or edit inline): `BT_AUTHORIZED_KEY`, `BT_ADMIN_USER` (default `azureuser`), `BT_SSH_KEY_ONLY=1` (harden sshd to key-only), `BT_ENABLE_RDP=0` (skip RDP).
+
+The Linux-centric sections below (`adminuser` / Entitle / EPM-L, CIS via OpenSCAP, the cross-cloud `/bin/sh` constraint, the self-elevation privilege model) **do not apply** to the Windows script.
 
 ## What the scripts deliberately do *not* do
 
