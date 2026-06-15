@@ -1,0 +1,41 @@
+# Create a local administrator account
+# Target: Windows cloud VMs (Azure today) over WinRM.
+# Creates a local user and adds it to the Administrators group. Idempotent.
+#
+# HOW TO RUN — via the LOCAL runner; supply credentials as extra_vars:
+#   ansible_user: azureuser
+#   ansible_password: <existing Windows admin password>
+# Plus the new account's details:
+#   new_admin_username: opsadmin
+#   new_admin_password: <strong password for the new account>
+- name: Create a local administrator
+  hosts: all
+  gather_facts: false
+  vars:
+    ansible_connection: winrm
+    ansible_winrm_transport: ntlm
+    ansible_port: 5986
+    ansible_winrm_server_cert_validation: ignore
+    new_admin_username: ""
+    new_admin_password: ""
+  tasks:
+    - name: Fail early if required vars are missing
+      ansible.builtin.assert:
+        that:
+          - new_admin_username | length > 0
+          - new_admin_password | length >= 12
+        fail_msg: "Set new_admin_username and a new_admin_password (>= 12 chars)."
+
+    - name: Create the local user
+      ansible.windows.win_user:
+        name: "{{ new_admin_username }}"
+        password: "{{ new_admin_password }}"
+        password_never_expires: true
+        state: present
+
+    - name: Add the user to Administrators
+      ansible.windows.win_group_membership:
+        name: Administrators
+        members:
+          - "{{ new_admin_username }}"
+        state: present

@@ -1,0 +1,31 @@
+# Baseline SSH hardening
+# Target: Linux cloud VMs (any cloud).
+# Disables root login and password auth, tightens the login grace/auth settings,
+# then validates and reloads sshd. Idempotent; sshd config is validated before reload.
+#
+# CAUTION: disables SSH password auth — make sure key-based access works first
+# (the dashboard injects your SSH key at deploy, so the runner already uses keys).
+- name: Harden OpenSSH server
+  hosts: all
+  become: true
+  handlers:
+    - name: Reload sshd
+      ansible.builtin.service:
+        name: "{{ 'ssh' if ansible_facts['os_family'] == 'Debian' else 'sshd' }}"
+        state: reloaded
+
+  tasks:
+    - name: Apply sshd_config hardening settings
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+        validate: "/usr/sbin/sshd -t -f %s"
+      loop:
+        - { regexp: '^#?PermitRootLogin', line: 'PermitRootLogin no' }
+        - { regexp: '^#?PasswordAuthentication', line: 'PasswordAuthentication no' }
+        - { regexp: '^#?ChallengeResponseAuthentication', line: 'ChallengeResponseAuthentication no' }
+        - { regexp: '^#?X11Forwarding', line: 'X11Forwarding no' }
+        - { regexp: '^#?LoginGraceTime', line: 'LoginGraceTime 30' }
+        - { regexp: '^#?MaxAuthTries', line: 'MaxAuthTries 4' }
+      notify: Reload sshd

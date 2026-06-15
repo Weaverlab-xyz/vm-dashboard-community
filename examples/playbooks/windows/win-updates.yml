@@ -1,0 +1,31 @@
+# Install Windows security updates and reboot if needed
+# Target: Windows cloud VMs (Azure today) over WinRM.
+#
+# HOW TO RUN — via the LOCAL runner (the cloud runner is SSH-only and does not
+# forward extra_vars). Connection vars are set below; supply the credentials as
+# extra_vars on the Config Management run:
+#   ansible_user: azureuser
+#   ansible_password: <the Windows admin password stored at deploy time>
+# WinRM must be reachable (ports 5985/5986; open it in the NSG).
+- name: Apply Windows updates
+  hosts: all
+  gather_facts: false
+  vars:
+    ansible_connection: winrm
+    ansible_winrm_transport: ntlm
+    ansible_port: 5986
+    ansible_winrm_server_cert_validation: ignore
+    # ansible_user / ansible_password supplied via extra_vars (see header).
+  tasks:
+    - name: Install security and critical updates
+      ansible.windows.win_updates:
+        category_names:
+          - SecurityUpdates
+          - CriticalUpdates
+        reboot: true
+        reboot_timeout: 1800
+      register: update_result
+
+    - name: Show how many updates were installed
+      ansible.builtin.debug:
+        msg: "Installed {{ update_result.installed_update_count | default(0) }} update(s)."

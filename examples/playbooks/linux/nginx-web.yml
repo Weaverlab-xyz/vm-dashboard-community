@@ -1,0 +1,46 @@
+# Install nginx and serve a simple page
+# Target: Linux cloud VMs (any cloud). A minimal "it works" web server.
+# Idempotent; uses the generic package module so it works across distros.
+#
+# Make sure your security group / NSG / firewall allows :80.
+#
+# extra_vars (optional): site_message: "Hello from Ansible"
+- name: Install and configure nginx
+  hosts: all
+  become: true
+  vars:
+    site_message: "Deployed by the VM dashboard via Ansible"
+    web_root: "{{ '/usr/share/nginx/html' if ansible_facts['os_family'] == 'RedHat' else '/var/www/html' }}"
+  handlers:
+    - name: Restart nginx
+      ansible.builtin.service:
+        name: nginx
+        state: restarted
+
+  tasks:
+    - name: Install nginx
+      ansible.builtin.package:
+        name: nginx
+        state: present
+
+    - name: Ensure the web root exists
+      ansible.builtin.file:
+        path: "{{ web_root }}"
+        state: directory
+        mode: "0755"
+
+    - name: Write the landing page
+      ansible.builtin.copy:
+        dest: "{{ web_root }}/index.html"
+        mode: "0644"
+        content: |
+          <!doctype html>
+          <html><body><h1>{{ site_message }}</h1>
+          <p>Host: {{ ansible_facts['hostname'] }}</p></body></html>
+      notify: Restart nginx
+
+    - name: Enable and start nginx
+      ansible.builtin.service:
+        name: nginx
+        state: started
+        enabled: true

@@ -116,6 +116,9 @@ substitute for proper playbook authoring. If you find yourself writing
 the same `.sh` script three times with different targets, that's a
 signal to write a real `.yml` playbook with `vars` and `when` clauses.
 
+Need a starting point? Ready-to-adapt Linux and Windows playbooks live in
+[`examples/playbooks/`](../examples/playbooks/).
+
 ---
 
 ## Runners

@@ -1,0 +1,33 @@
+# Install the IIS web server role
+# Target: Windows Server cloud VMs (Azure today) over WinRM.
+# Installs IIS (+ management tools) and serves a simple page. Idempotent.
+#
+# HOW TO RUN — via the LOCAL runner; supply credentials as extra_vars:
+#   ansible_user: azureuser
+#   ansible_password: <Windows admin password>
+# Make sure the NSG allows :80 if you want to reach the page.
+- name: Install IIS
+  hosts: all
+  gather_facts: false
+  vars:
+    ansible_connection: winrm
+    ansible_winrm_transport: ntlm
+    ansible_port: 5986
+    ansible_winrm_server_cert_validation: ignore
+    site_message: "Deployed by the VM dashboard via Ansible"
+  tasks:
+    - name: Install the Web-Server role
+      ansible.windows.win_feature:
+        name: Web-Server
+        include_management_tools: true
+        state: present
+      register: iis_feature
+
+    - name: Reboot if the feature install requested it
+      ansible.windows.win_reboot:
+      when: iis_feature.reboot_required
+
+    - name: Write the landing page
+      ansible.windows.win_copy:
+        dest: C:\inetpub\wwwroot\index.html
+        content: "<html><body><h1>{{ site_message }}</h1></body></html>"

@@ -1,0 +1,75 @@
+# Install Docker Engine
+# Target: Linux cloud VMs (any cloud). Debian/Ubuntu and RHEL/Rocky/Alma families.
+# Installs from Docker's official repo, enables the service, and (optionally) adds
+# a user to the docker group.
+#
+# extra_vars (optional, via local runner):
+#   docker_user: ec2-user   # add this user to the 'docker' group
+- name: Install Docker Engine
+  hosts: all
+  become: true
+  vars:
+    docker_user: ""
+  tasks:
+    # ── Debian / Ubuntu ──────────────────────────────────────────────────────
+    - name: Install prerequisites (Debian family)
+      ansible.builtin.apt:
+        name: [ca-certificates, curl, gnupg]
+        state: present
+        update_cache: true
+      when: ansible_facts['os_family'] == "Debian"
+
+    - name: Add Docker APT key (Debian family)
+      ansible.builtin.get_url:
+        url: "https://download.docker.com/linux/{{ ansible_facts['distribution'] | lower }}/gpg"
+        dest: /etc/apt/keyrings/docker.asc
+        mode: "0644"
+      when: ansible_facts['os_family'] == "Debian"
+
+    - name: Add Docker APT repository (Debian family)
+      ansible.builtin.apt_repository:
+        repo: >-
+          deb [arch={{ ansible_facts['architecture'] | replace('x86_64','amd64') }}
+          signed-by=/etc/apt/keyrings/docker.asc]
+          https://download.docker.com/linux/{{ ansible_facts['distribution'] | lower }}
+          {{ ansible_facts['distribution_release'] }} stable
+        state: present
+        filename: docker
+      when: ansible_facts['os_family'] == "Debian"
+
+    - name: Install Docker packages (Debian family)
+      ansible.builtin.apt:
+        name: [docker-ce, docker-ce-cli, containerd.io, docker-compose-plugin]
+        state: present
+        update_cache: true
+      when: ansible_facts['os_family'] == "Debian"
+
+    # ── RHEL / Rocky / Alma ──────────────────────────────────────────────────
+    - name: Add Docker YUM repository (RedHat family)
+      ansible.builtin.yum_repository:
+        name: docker-ce
+        description: Docker CE Stable
+        baseurl: "https://download.docker.com/linux/centos/{{ ansible_facts['distribution_major_version'] }}/$basearch/stable"
+        gpgcheck: true
+        gpgkey: https://download.docker.com/linux/centos/gpg
+      when: ansible_facts['os_family'] == "RedHat"
+
+    - name: Install Docker packages (RedHat family)
+      ansible.builtin.dnf:
+        name: [docker-ce, docker-ce-cli, containerd.io, docker-compose-plugin]
+        state: present
+      when: ansible_facts['os_family'] == "RedHat"
+
+    # ── Common ───────────────────────────────────────────────────────────────
+    - name: Enable and start Docker
+      ansible.builtin.service:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Add user to the docker group
+      ansible.builtin.user:
+        name: "{{ docker_user }}"
+        groups: docker
+        append: true
+      when: docker_user | length > 0
