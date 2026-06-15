@@ -95,6 +95,8 @@ async def ensure_jumpoint_host(cloud: str, region: str) -> Optional[str]:
     GCP uses a privileged container on a COS GCE VM. Best-effort for callers."""
     if cloud == "gcp":
         return await _ensure_jumpoint_host_gcp(region)
+    if cloud == "azure":
+        return await _ensure_jumpoint_host_azure(region)
     return await _ensure_jumpoint_host_aws(region)
 
 
@@ -187,6 +189,8 @@ async def teardown_jumpoint_host_if_idle(db, cloud: str, region: str) -> None:
     it. Dispatches per cloud. Best-effort; logs and returns on error."""
     if cloud == "gcp":
         return await _teardown_jumpoint_host_if_idle_gcp(db, region)
+    if cloud == "azure":
+        return await _teardown_jumpoint_host_if_idle_azure(db, region)
     return await _teardown_jumpoint_host_if_idle_aws(db, region)
 
 
@@ -301,3 +305,87 @@ async def _teardown_jumpoint_host_if_idle_gcp(db, region: str) -> None:
         logger.info("jumpoint-host(gcp): deleted idle jumpoint %s", _gcp_jumpoint_name())
     except Exception as exc:
         logger.warning("jumpoint-host(gcp): idle teardown failed (non-fatal): %s", exc)
+
+
+# ── Azure: privileged BeyondTrust Jumpoint on an Azure VM ─────────────────────
+# ACI (run_aci_jumpoint_task) is serverless and can't grant NET_ADMIN/NET_RAW/
+# IPC_LOCK + /dev/net/tun, so the tunnel host is a real Azure VM running the
+# jumpoint container privileged (azure_service.run_vm_jumpoint). One shared,
+# ref-counted VM, mirroring the AWS/GCP host lifecycle.
+
+_AZURE_JUMPOINT_VM_NAME = "clouddb-jumpoint"
+
+
+async def _resolve_azure_deploy_key() -> str:
+    """BeyondTrust Jumpoint deploy key for Azure launches — resolved through
+    whichever secrets backend the user picked on /secrets (same keys the ACI
+    jumpoint path uses)."""
+    from . import config_service
+    return (config_service.get("azure_aci_deploy_key")
+            or config_service.get("azure_aci_docker_deploy_key")
+            or "")
+
+
+def _azure_compliant_password() -> str:
+    """A random password meeting Azure's VM complexity rules (3 of 4 categories).
+    The jumpoint VM has no public IP and accepts no inbound SSH — this just
+    satisfies the API; it is never used to log in."""
+    import secrets
+    import string
+    symbols = "!@#%^*-_"
+    alphabet = string.ascii_letters + string.digits + symbols
+    while True:
+        pw = "".join(secrets.choice(alphabet) for _ in range(24))
+        if (any(c.islower() for c in pw) and any(c.isupper() for c in pw)
+                and any(c.isdigit() for c in pw) and any(c in symbols for c in pw)):
+            return pw
+
+
+async def _ensure_jumpoint_host_azure(region: str) -> Optional[str]:
+    """Ensure the shared Azure VM Jumpoint is up (idempotent on name); return its
+    name. Best-effort — logs and returns None when prerequisites are missing."""
+    from . import azure_service
+    rg = _cfg("azure_resource_group")
+    location = _cfg("azure_location") or region
+    subnet = _cfg("azure_jumpoint_subnet_id") or _cfg("azure_aci_subnet_id")
+    if not (rg and location and subnet):
+        logger.warning("jumpoint-host(azure): azure_resource_group / azure_location / "
+                       "azure_jumpoint_subnet_id not set — cannot start a jumpoint.")
+        return None
+    deploy_key = await _resolve_azure_deploy_key()
+    if not deploy_key:
+        logger.warning("jumpoint-host(azure): jumpoint deploy key not set "
+                       "(azure_aci_deploy_key) — tunnels unavailable until configured.")
+        return None
+    try:
+        meta = await azure_service.run_vm_jumpoint(
+            rg=rg, location=location, subnet_id=subnet, name=_AZURE_JUMPOINT_VM_NAME,
+            container_image=_cfg("azure_aci_jumpoint_image") or "beyondtrust/sra-jumpoint:latest",
+            deploy_key=deploy_key,
+            vm_size=_cfg("azure_jumpoint_vm_size") or "Standard_B1s",
+            admin_password=_azure_compliant_password(),
+        )
+        logger.info("jumpoint-host(azure): jumpoint VM %s %s in %s",
+                    _AZURE_JUMPOINT_VM_NAME, "reused" if meta.get("reused") else "started", location)
+        return _AZURE_JUMPOINT_VM_NAME
+    except Exception as exc:
+        logger.warning("jumpoint-host(azure): ensure failed (non-fatal): %s", exc)
+        return None
+
+
+async def _teardown_jumpoint_host_if_idle_azure(db, region: str) -> None:
+    """Delete the shared Azure Jumpoint VM iff no active Azure cloud database is
+    left using it. Best-effort; logs and returns on error."""
+    from . import azure_service
+    try:
+        active = _active_db_count(db, "azure")
+        if active > 0:
+            logger.info("jumpoint-host(azure): keeping jumpoint (%d active DB(s))", active)
+            return
+        rg = _cfg("azure_resource_group")
+        if not rg:
+            return
+        await azure_service.stop_vm_jumpoint(rg, _AZURE_JUMPOINT_VM_NAME)
+        logger.info("jumpoint-host(azure): deleted idle jumpoint %s", _AZURE_JUMPOINT_VM_NAME)
+    except Exception as exc:
+        logger.warning("jumpoint-host(azure): idle teardown failed (non-fatal): %s", exc)
