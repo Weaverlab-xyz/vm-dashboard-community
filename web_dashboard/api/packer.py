@@ -310,11 +310,29 @@ async def _run_azure_build(job_id: str, req: AzurePackerBuildRequest, created_by
         resource_group = _cfg("azure_resource_group") or "dashboard-rg"
         location = _cfg("azure_location") or "centralus"
 
+        # The azure-arm builder needs the service principal wired into the
+        # template (it does NOT read ARM_* env vars) — fail fast with a clear
+        # message instead of letting Packer fall back to Managed Identity and
+        # time out against IMDS (169.254.169.254) after 30s on this non-Azure host.
+        if not all([client_id, client_secret, tenant_id, subscription_id]):
+            raise PackerError(
+                "Azure service-principal credentials not found in the config store or .env "
+                "(azure_client_id / azure_client_secret / azure_tenant_id / azure_subscription_id). "
+                "Packer needs them explicitly. (Creds sourced only from BeyondTrust Password Safe "
+                "are not yet wired into the Packer build path.)"
+            )
+
         env = _base_env()
+        # ARM_* kept for any subprocess that honors them; the azure-arm builder
+        # itself reads the credentials from the source block via these PKR_VAR_*.
         env["ARM_CLIENT_ID"] = client_id
         env["ARM_CLIENT_SECRET"] = client_secret
         env["ARM_TENANT_ID"] = tenant_id
         env["ARM_SUBSCRIPTION_ID"] = subscription_id
+        env["PKR_VAR_client_id"] = client_id
+        env["PKR_VAR_client_secret"] = client_secret
+        env["PKR_VAR_tenant_id"] = tenant_id
+        env["PKR_VAR_subscription_id"] = subscription_id
         env["PKR_VAR_resource_group"] = resource_group
         env["PKR_VAR_location"] = location
 
