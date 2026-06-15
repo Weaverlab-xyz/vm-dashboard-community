@@ -49,6 +49,10 @@ class ProvisionRequest(BaseModel):
     tier: Optional[str] = None
     disk_size: Optional[int] = None
     private_network: Optional[str] = None
+    # Azure (Flexible Server) — SKU + storage; the delegated subnet, private DNS
+    # zone and resource group fall back to the sandbox-emitted azure_db_* config.
+    sku_name: Optional[str] = None
+    storage_mb: Optional[int] = None
     # PRA Vault account group the injected credential lands in — an unassigned
     # vault account is injectable by nobody, so the form offers a picker.
     vault_account_group_id: Optional[int] = None
@@ -76,6 +80,11 @@ _GCP_REGION_RE = re.compile(r"^[a-z]+-[a-z]+\d$")
 # Cloud SQL machine tiers offered in the GCP provision form (shared-core first).
 _GCP_TIERS = ["db-f1-micro", "db-g1-small", "db-custom-1-3840",
               "db-custom-2-7680", "db-custom-4-15360"]
+# Azure regions: eastus, westus2, centralus, northeurope, australiaeast …
+_AZURE_REGION_RE = re.compile(r"^[a-z]{3,}\d?$")
+# Flexible Server SKUs offered in the Azure provision form (burstable first).
+_AZURE_SKUS = ["B_Standard_B1ms", "B_Standard_B2s",
+               "GP_Standard_D2s_v3", "GP_Standard_D4s_v3"]
 
 
 async def _vault_account_groups() -> list:
@@ -133,6 +142,8 @@ async def provision_database(
         "tier": payload.tier,
         "disk_size": payload.disk_size,
         "private_network": payload.private_network,
+        "sku_name": payload.sku_name,
+        "storage_mb": payload.storage_mb,
     }.items() if v is not None}
     try:
         result = cloud_database_service.provision(
@@ -181,6 +192,16 @@ async def database_options(
             raise HTTPException(status_code=400, detail=f"invalid GCP region {region!r}")
         return DatabaseOptions(
             region=region, instance_classes=_GCP_TIERS,
+            db_subnet_groups=[], security_groups=[],
+            vault_account_groups=await _vault_account_groups(), cached_at=None,
+        )
+
+    if cloud == "azure":
+        region = (region or "").strip() or (config_service.get("azure_location") or "eastus")
+        if not _AZURE_REGION_RE.fullmatch(region):
+            raise HTTPException(status_code=400, detail=f"invalid Azure location {region!r}")
+        return DatabaseOptions(
+            region=region, instance_classes=_AZURE_SKUS,
             db_subnet_groups=[], security_groups=[],
             vault_account_groups=await _vault_account_groups(), cached_at=None,
         )
