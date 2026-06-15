@@ -141,6 +141,16 @@ RUN ARCH=$(dpkg --print-architecture) \
 # Install Terraform (architecture-aware) and pre-cache the BeyondTrust SRA
 # provider so containers have no outbound dependency at run time.
 # The plugin cache directory is set via TF_PLUGIN_CACHE_DIR in terraform_pra_service.py.
+#
+# The `terraform init` below is wrapped in a retry loop: during the multi-arch
+# build the arm64 leg runs the emulated (QEMU) terraform binary, whose registry
+# HTTP client has a short, non-configurable header timeout. Talking to
+# registry.terraform.io under emulation intermittently exceeds it ("request
+# canceled (Client.Timeout exceeded while awaiting headers)"), even though the
+# arm64 provider package exists and the native amd64 leg succeeds. Terraform's
+# own message for this is "please try again later", so we do — each attempt is a
+# fresh TLS handshake. We still hard-fail after 5 tries so a genuinely
+# unreachable registry never ships an image missing its cached provider.
 ENV TF_PLUGIN_CACHE_DIR=/root/.terraform.d/plugin-cache
 RUN ARCH=$(dpkg --print-architecture) \
     && curl -fsSL "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_${ARCH}.zip" \
@@ -151,7 +161,15 @@ RUN ARCH=$(dpkg --print-architecture) \
     && mkdir -p /tmp/tf_provider_init \
     && printf 'terraform {\n  required_providers {\n    sra = { source = "beyondtrust/sra", version = "~> 1.0" }\n  }\n}\n' \
        > /tmp/tf_provider_init/main.tf \
-    && terraform -chdir=/tmp/tf_provider_init init \
+    && for attempt in 1 2 3 4 5; do \
+           terraform -chdir=/tmp/tf_provider_init init && break; \
+           if [ "$attempt" = 5 ]; then \
+               echo "terraform init failed to cache beyondtrust/sra after 5 attempts" >&2; \
+               exit 1; \
+           fi; \
+           echo "terraform init attempt $attempt failed (transient registry error); retrying in $((attempt * 5))s..." >&2; \
+           sleep $((attempt * 5)); \
+       done \
     && rm -rf /tmp/tf_provider_init
 
 # Entrypoint fixes SSH key permissions when the Windows override
