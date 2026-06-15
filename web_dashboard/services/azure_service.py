@@ -1067,6 +1067,115 @@ async def terminate_vm(rg: str, vm_name: str) -> None:
         raise AzureError(f"Failed to terminate VM {vm_name}: {e}") from e
 
 
+# ── Tunnel-capable BeyondTrust Jumpoint on an Azure VM ────────────────────────
+# Azure Container Instances (the run_aci_jumpoint_task path) is serverless and
+# CANNOT do protocol tunneling — a BT Jumpoint needs NET_ADMIN + NET_RAW +
+# IPC_LOCK and /dev/net/tun, which ACI forbids. So for the cloud-database tunnel
+# the Jumpoint runs as a PRIVILEGED container on a real Azure VM (cloud-init runs
+# `docker run --privileged --device /dev/net/tun …`). One shared, ref-counted VM.
+
+def _vm_jumpoint_cloud_init(container_image: str, deploy_key: str) -> str:
+    """Base64 cloud-init: install Docker, then run the BT Jumpoint container
+    privileged with /dev/net/tun (the caps a protocol tunnel needs). The deploy
+    key is an opaque token, single-quoted for the shell."""
+    import base64
+    cloud_init = (
+        "#cloud-config\n"
+        "package_update: true\n"
+        "packages:\n"
+        "  - docker.io\n"
+        "runcmd:\n"
+        "  - modprobe tun || true\n"
+        "  - systemctl enable --now docker\n"
+        "  - [ sh, -c, \"docker run -d --restart always --name jumpoint "
+        "--privileged --device /dev/net/tun --cap-add NET_ADMIN --cap-add NET_RAW "
+        f"-e DEPLOY_KEY='{deploy_key}' {container_image}\" ]\n"
+    )
+    return base64.b64encode(cloud_init.encode()).decode()
+
+
+def _run_vm_jumpoint_sync(
+    cred, sub_id: str, rg: str, location: str, subnet_id: str, name: str,
+    container_image: str, deploy_key: str, vm_size: str,
+    admin_username: str, admin_password: str,
+) -> dict:
+    """Find-or-create a private Azure VM (no public IP) running the BT Jumpoint
+    container. Idempotent on name: returns ``reused=True`` when it already exists."""
+    compute = _get_compute(cred, sub_id)
+    network = _get_network(cred, sub_id)
+    try:
+        existing = compute.virtual_machines.get(rg, name)
+        return {"vm_id": existing.id, "vm_name": name, "resource_group": rg, "reused": True}
+    except Exception:
+        pass
+
+    tags = {"ManagedBy": "vm-cli-dashboard", "purpose": "clouddb-jumpoint"}
+    nic_name = f"{name}-nic"
+    ip_config = NetworkInterfaceIPConfiguration(
+        name="ipconfig1", subnet={"id": subnet_id},
+        private_ip_address_allocation="Dynamic",
+    )
+    nic = network.network_interfaces.begin_create_or_update(
+        rg, nic_name, NetworkInterface(location=location, ip_configurations=[ip_config], tags=tags)
+    ).result()
+
+    image_ref = ImageReference(
+        publisher="Canonical", offer="0001-com-ubuntu-server-jammy",
+        sku="22_04-lts", version="latest",
+    )
+    os_profile = OSProfile(
+        computer_name=name[:15],
+        admin_username=admin_username,
+        admin_password=admin_password,
+        linux_configuration=LinuxConfiguration(disable_password_authentication=False),
+        custom_data=_vm_jumpoint_cloud_init(container_image, deploy_key),
+    )
+    vm_params = VirtualMachine(
+        location=location, tags=tags,
+        hardware_profile=HardwareProfile(vm_size=vm_size),
+        storage_profile=StorageProfile(
+            image_reference=image_ref,
+            os_disk=OSDisk(create_option=DiskCreateOptionTypes.FROM_IMAGE, delete_option="Delete"),
+        ),
+        os_profile=os_profile,
+        network_profile=NetworkProfile(
+            network_interfaces=[NetworkInterfaceReference(id=nic.id, primary=True)]
+        ),
+    )
+    vm = compute.virtual_machines.begin_create_or_update(rg, name, vm_params).result()
+    return {"vm_id": vm.id, "vm_name": name, "resource_group": rg, "reused": False}
+
+
+async def run_vm_jumpoint(
+    rg: str, location: str, subnet_id: str, name: str,
+    container_image: str, deploy_key: str, vm_size: str = "Standard_B1s",
+    admin_username: str = "jpadmin", admin_password: str = "",
+) -> dict:
+    """Ensure a private Azure VM Jumpoint (idempotent on name). The VM has no
+    public IP; it egresses via the subnet and phones home to PRA."""
+    try:
+        cred, sub_id = await _ensure_creds()
+        return await asyncio.to_thread(
+            _run_vm_jumpoint_sync, cred, sub_id, rg, location, subnet_id, name,
+            container_image, deploy_key, vm_size, admin_username, admin_password,
+        )
+    except AzureError:
+        raise
+    except Exception as e:
+        raise AzureError(f"Failed to start Azure VM Jumpoint {name}: {e}") from e
+
+
+async def stop_vm_jumpoint(rg: str, name: str) -> None:
+    """Delete the Jumpoint VM (+ its NIC). Best-effort."""
+    try:
+        cred, sub_id = await _ensure_creds()
+        await asyncio.to_thread(_terminate_vm_sync, cred, sub_id, rg, name)
+    except AzureError:
+        raise
+    except Exception as e:
+        raise AzureError(f"Failed to stop Azure VM Jumpoint {name}: {e}") from e
+
+
 def _create_image_from_vm_sync(cred, sub_id: str, rg: str, vm_name: str, image_name: str, generalize: bool) -> dict:
     compute = _get_compute(cred, sub_id)
 
