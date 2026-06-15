@@ -42,12 +42,15 @@ logger = logging.getLogger(__name__)
 # (no MongoDB resource yet). Phase 1 wires postgres/aws; the rest fan out later.
 VALID_ENGINES = {"postgres", "mysql", "sqlserver"}
 VALID_CLOUDS = {"aws", "azure", "gcp"}
-_IMPLEMENTED = {("postgres", "aws")}
-_PROVIDER = {("postgres", "aws"): "rds"}
+_IMPLEMENTED = {("postgres", "aws"), ("postgres", "gcp")}
+_PROVIDER = {("postgres", "aws"): "rds", ("postgres", "gcp"): "cloudsql"}
 
-# terraform/<dir> module per engine (relative to repo root → parents[2] of this file).
+# terraform/<dir> module per (engine, cloud) — relative to repo root (parents[2]).
 _REPO_ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))
-_TEMPLATE_DIRS = {"postgres": os.path.join(_REPO_ROOT, "terraform", "db_postgres")}
+_TEMPLATE_DIRS = {
+    ("postgres", "aws"): os.path.join(_REPO_ROOT, "terraform", "db_postgres"),
+    ("postgres", "gcp"): os.path.join(_REPO_ROOT, "terraform", "db_gcp_postgres"),
+}
 _DEPLOYMENTS_DIR = os.path.join(_REPO_ROOT, "terraform", "deployments")
 
 _DEFAULT_PORTS = {"postgres": 5432, "mysql": 3306, "sqlserver": 1433}
@@ -61,8 +64,8 @@ def terraform_available() -> bool:
     return shutil.which(settings.terraform_executable) is not None
 
 
-def template_dir(engine: str) -> str:
-    return _TEMPLATE_DIRS[engine]
+def template_dir(engine: str, cloud: str) -> str:
+    return _TEMPLATE_DIRS[(engine, cloud)]
 
 
 def _deploy_dir(job_id: str) -> str:
@@ -85,24 +88,43 @@ def _build_tf_variables(
     The module itself hardcodes ``publicly_accessible = false`` — the private-only
     guarantee lives in the .tf, not in a toggle-able variable.
     """
-    if (engine, cloud) != ("postgres", "aws"):
-        raise NotImplementedError(f"{engine}/{cloud} Terraform variables not implemented")
-    return {
-        "region": region,
-        "identifier": f"clouddb-{db_id[:8]}",
-        "db_name": db_name,
-        "master_username": master_username,
-        "master_password": master_password,
-        "instance_class": opts.get("instance_class", "db.t3.micro"),
-        "allocated_storage": opts.get("allocated_storage", 20),
-        "db_subnet_group_name": opts.get("db_subnet_group_name", ""),
-        "vpc_security_group_ids": opts.get("vpc_security_group_ids", []),
-        # Attach the force_ssl=0 parameter group the sandbox pre-created, so the
-        # PRA protocol tunnel's cleartext jumpoint→RDS connection isn't rejected.
-        # Empty config → "" → module falls back to the RDS default group.
-        "parameter_group_name": _cfg("aws_db_parameter_group_name"),
-        "tags": {"managed-by": "vm-dashboard", "clouddb-id": db_id},
-    }
+    if (engine, cloud) == ("postgres", "aws"):
+        return {
+            "region": region,
+            "identifier": f"clouddb-{db_id[:8]}",
+            "db_name": db_name,
+            "master_username": master_username,
+            "master_password": master_password,
+            "instance_class": opts.get("instance_class", "db.t3.micro"),
+            "allocated_storage": opts.get("allocated_storage", 20),
+            "db_subnet_group_name": opts.get("db_subnet_group_name", ""),
+            "vpc_security_group_ids": opts.get("vpc_security_group_ids", []),
+            # Attach the force_ssl=0 parameter group the sandbox pre-created, so the
+            # PRA protocol tunnel's cleartext jumpoint→RDS connection isn't rejected.
+            # Empty config → "" → module falls back to the RDS default group.
+            "parameter_group_name": _cfg("aws_db_parameter_group_name"),
+            "tags": {"managed-by": "vm-dashboard", "clouddb-id": db_id},
+        }
+
+    if (engine, cloud) == ("postgres", "gcp"):
+        # The private_network the instance gets its private IP on; the sandbox
+        # configures private-services-access on it. ssl_mode defaults inside the
+        # module to ALLOW_UNENCRYPTED_AND_ENCRYPTED so the PRA tunnel's cleartext
+        # jumpoint→DB connection is accepted (mirrors AWS's force_ssl=0).
+        return {
+            "project": _cfg("gcp_project") or _cfg("gcp_project_id"),
+            "region": region,
+            "identifier": f"clouddb-{db_id[:8]}",
+            "db_name": db_name,
+            "master_username": master_username,
+            "master_password": master_password,
+            "tier": opts.get("tier", "db-f1-micro"),
+            "disk_size": opts.get("disk_size", 20),
+            "private_network": opts.get("private_network") or _cfg("gcp_db_network") or _cfg("gcp_network"),
+            "labels": {"managed-by": "vm-dashboard", "clouddb-id": db_id},
+        }
+
+    raise NotImplementedError(f"{engine}/{cloud} Terraform variables not implemented")
 
 
 def provision(
@@ -185,6 +207,28 @@ def _aws_env() -> Optional[dict]:
     if key_id and secret:
         return {"AWS_ACCESS_KEY_ID": key_id, "AWS_SECRET_ACCESS_KEY": secret}
     return None
+
+
+def _gcp_env() -> Optional[dict]:
+    """Provider credentials for the terraform subprocess (GCP). The wizard stores
+    the service-account JSON; pass it to the google provider via GOOGLE_CREDENTIALS
+    (inline JSON) + GOOGLE_PROJECT. When unset, return None so terraform falls back
+    to whatever the container environment / ADC provides."""
+    creds = _cfg("gcp_service_account_json") or _cfg("gcp_credentials_json")
+    project = _cfg("gcp_project") or _cfg("gcp_project_id")
+    env: dict = {}
+    if creds:
+        env["GOOGLE_CREDENTIALS"] = creds
+    if project:
+        env["GOOGLE_PROJECT"] = project
+    return env or None
+
+
+def _provider_env(cloud: str) -> Optional[dict]:
+    """Dispatch the terraform-subprocess provider credentials by cloud."""
+    if cloud == "gcp":
+        return _gcp_env()
+    return _aws_env()
 
 
 def _pra_configured() -> bool:
@@ -291,7 +335,7 @@ async def _broker_tunnel(db: Session, *, row: CloudDatabase, job_id: str,
     # broker the tunnel.
     from . import jumpoint_host_service
     try:
-        await jumpoint_host_service.ensure_jumpoint_host(_cfg("aws_region") or row.region)
+        await jumpoint_host_service.ensure_jumpoint_host(row.cloud, _cfg(row.cloud + "_region") or row.region)
     except Exception as exc:
         logger.warning("clouddb: ensure jumpoint host (broker) failed (non-fatal): %s", exc)
     try:
@@ -416,13 +460,13 @@ async def run_provision_apply(
         if _pra_configured():
             try:
                 from . import jumpoint_host_service
-                await jumpoint_host_service.ensure_jumpoint_host(_cfg("aws_region") or row.region)
+                await jumpoint_host_service.ensure_jumpoint_host(row.cloud, _cfg(row.cloud + "_region") or row.region)
             except Exception as exc:
                 logger.warning("clouddb: ensure jumpoint host (pre-apply) failed (non-fatal): %s", exc)
 
         outputs = await terraform.apply(
-            _deploy_dir(job_id), tf_variables, template_dir=template_dir(engine),
-            env=_aws_env(),
+            _deploy_dir(job_id), tf_variables, template_dir=template_dir(engine, row.cloud),
+            env=_provider_env(row.cloud),
         )
         row.instance_id = str(outputs.get("instance_id") or "")
         row.private_host = str(outputs.get("private_host") or "")
@@ -546,8 +590,8 @@ async def run_decommission(db: Session, *, db_id: str, job_id: str) -> None:
     job_service.update_progress(db, job_id, 60, "Destroying the database instance…")
     if deploy_job and os.path.isdir(_deploy_dir(deploy_job.id)):
         try:
-            await terraform.destroy(_deploy_dir(deploy_job.id), env=_aws_env())
-            logger.info("clouddb RDS instance destroyed db_id=%s", db_id)
+            await terraform.destroy(_deploy_dir(deploy_job.id), env=_provider_env(row.cloud))
+            logger.info("clouddb instance destroyed db_id=%s cloud=%s", db_id, row.cloud)
         except Exception as exc:
             errors.append(f"RDS destroy: {exc}")
             logger.warning("clouddb destroy for %s failed: %s", db_id, exc)
@@ -572,7 +616,7 @@ async def run_decommission(db: Session, *, db_id: str, job_id: str) -> None:
     job_service.update_progress(db, job_id, 90, "Reclaiming idle Jumpoint host…")
     try:
         from . import jumpoint_host_service
-        await jumpoint_host_service.teardown_jumpoint_host_if_idle(db, _cfg("aws_region") or row.region)
+        await jumpoint_host_service.teardown_jumpoint_host_if_idle(db, row.cloud, _cfg(row.cloud + "_region") or row.region)
     except Exception as exc:
         warnings.append(f"Jumpoint host teardown: {exc}")
         logger.warning("clouddb: jumpoint host idle-teardown failed (non-fatal): %s", exc)
