@@ -94,8 +94,12 @@ COPY web_dashboard/ ./web_dashboard/
 
 # Cloud-database Terraform modules (driven by cloud_database_service). The rest
 # of terraform/ is generated at runtime / cached at build, so only the static
-# DB modules are copied in.
+# DB modules are copied in. One COPY per cloud — adding a cloud means adding its
+# module here AND its provider to the pre-cache init below, or the published
+# image is missing it at runtime.
 COPY terraform/db_postgres/ ./terraform/db_postgres/
+COPY terraform/db_azure_postgres/ ./terraform/db_azure_postgres/
+COPY terraform/db_gcp_postgres/ ./terraform/db_gcp_postgres/
 
 # Container-sane defaults; .env overrides these at runtime.
 ENV LOG_DIR=/tmp/logs \
@@ -138,8 +142,13 @@ RUN ARCH=$(dpkg --print-architecture) \
     && packer plugins install github.com/hashicorp/azure \
     && packer plugins install github.com/hashicorp/googlecompute
 
-# Install Terraform (architecture-aware) and pre-cache the BeyondTrust SRA
-# provider so containers have no outbound dependency at run time.
+# Install Terraform (architecture-aware) and pre-cache every provider the
+# dashboard uses at run time — the BeyondTrust SRA provider (PRA tunnels/shell
+# jumps) AND the cloud-database providers (aws/azurerm/google). Baking them in
+# at build (on CI's clean network) means a pulled image has NO outbound provider
+# download at run time — so cloud-DB provisioning works behind a TLS-inspecting
+# proxy without the corp-CA dance, and isn't subject to flaky registry pulls.
+# Keep these in sync with the version constraints in terraform/db_*/main.tf.
 # The plugin cache directory is set via TF_PLUGIN_CACHE_DIR in terraform_pra_service.py.
 #
 # The `terraform init` below is wrapped in a retry loop: during the multi-arch
@@ -159,12 +168,12 @@ RUN ARCH=$(dpkg --print-architecture) \
     && rm /tmp/terraform.zip \
     && mkdir -p "${TF_PLUGIN_CACHE_DIR}" \
     && mkdir -p /tmp/tf_provider_init \
-    && printf 'terraform {\n  required_providers {\n    sra = { source = "beyondtrust/sra", version = "~> 1.0" }\n  }\n}\n' \
+    && printf 'terraform {\n  required_providers {\n    sra = { source = "beyondtrust/sra", version = "~> 1.0" }\n    aws = { source = "hashicorp/aws", version = "~> 5.0" }\n    azurerm = { source = "hashicorp/azurerm", version = "~> 3.0" }\n    google = { source = "hashicorp/google", version = "~> 5.0" }\n  }\n}\n' \
        > /tmp/tf_provider_init/main.tf \
     && for attempt in 1 2 3 4 5; do \
            terraform -chdir=/tmp/tf_provider_init init && break; \
            if [ "$attempt" = 5 ]; then \
-               echo "terraform init failed to cache beyondtrust/sra after 5 attempts" >&2; \
+               echo "terraform init failed to cache providers (sra/aws/azurerm/google) after 5 attempts" >&2; \
                exit 1; \
            fi; \
            echo "terraform init attempt $attempt failed (transient registry error); retrying in $((attempt * 5))s..." >&2; \

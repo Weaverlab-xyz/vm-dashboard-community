@@ -145,6 +145,29 @@ def generate_aws_template(
     )
 
 
+# Service-principal auth for the azure-arm builder. The plugin does NOT read
+# ARM_* env vars (unlike Terraform's azurerm provider), so the credentials must
+# be wired into the source block or Packer falls back to Managed Identity and
+# times out hitting IMDS (169.254.169.254) on any non-Azure host. They arrive as
+# sensitive Packer vars (PKR_VAR_* on the build subprocess) so the secret never
+# lands in the template file — including the archived copy.
+_AZURE_SP_VAR_DECLS = (
+    'variable "client_id"       { default = "" }\n'
+    'variable "client_secret" {\n'
+    '  default   = ""\n'
+    '  sensitive = true\n'
+    '}\n'
+    'variable "tenant_id"       { default = "" }\n'
+    'variable "subscription_id" { default = "" }\n'
+)
+_AZURE_SP_SOURCE_FIELDS = (
+    '  client_id       = var.client_id\n'
+    '  client_secret   = var.client_secret\n'
+    '  tenant_id       = var.tenant_id\n'
+    '  subscription_id = var.subscription_id\n\n'
+)
+
+
 def generate_azure_template(
     image_publisher: str,
     image_offer: str,
@@ -181,12 +204,14 @@ def generate_azure_template(
         '    }\n'
         '  }\n'
         '}\n\n'
-        '# ARM_CLIENT_ID, ARM_CLIENT_SECRET, ARM_TENANT_ID, ARM_SUBSCRIPTION_ID\n'
-        '# are read from environment variables automatically.\n\n'
+        '# Service-principal credentials are wired into the source block below via\n'
+        '# sensitive PKR_VAR_* vars — the azure-arm builder does NOT read ARM_* env vars.\n\n'
+        + _AZURE_SP_VAR_DECLS +
         'variable "resource_group" { default = "" }\n'
         'variable "location"       { default = "centralus" }\n\n'
         + decls +
         'source "azure-arm" "build" {\n'
+        + _AZURE_SP_SOURCE_FIELDS +
         '  managed_image_name                = "' + safe + '-{{timestamp}}"\n'
         '  managed_image_resource_group_name = var.resource_group\n\n'
         '  os_type         = "Linux"\n'
@@ -243,11 +268,13 @@ def generate_azure_windows_template(
         '    }\n'
         '  }\n'
         '}\n\n'
-        '# ARM_CLIENT_ID, ARM_CLIENT_SECRET, ARM_TENANT_ID, ARM_SUBSCRIPTION_ID\n'
-        '# are read from environment variables automatically.\n\n'
+        '# Service-principal credentials are wired into the source block below via\n'
+        '# sensitive PKR_VAR_* vars — the azure-arm builder does NOT read ARM_* env vars.\n\n'
+        + _AZURE_SP_VAR_DECLS +
         'variable "resource_group" { default = "" }\n'
         'variable "location"       { default = "centralus" }\n\n'
         'source "azure-arm" "build" {\n'
+        + _AZURE_SP_SOURCE_FIELDS +
         '  managed_image_name                = "' + safe + '-{{timestamp}}"\n'
         '  managed_image_resource_group_name = var.resource_group\n\n'
         '  os_type         = "Windows"\n'
