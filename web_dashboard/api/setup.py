@@ -498,6 +498,22 @@ class XcpNgFeatureConfig(BaseModel):
     xcpng_verify_ssl: bool = False
 
 
+class CloudDatabaseFeatureConfig(BaseModel):
+    """Config-only panel (no `enabled`) for the Cloud Databases PREVIEW feature.
+    The preview toggle owns `cloud_database_enabled`; this panel only holds the
+    per-cloud Managed-DB network IDs the sandbox emits (normally pushed via
+    /api/setup/import). See _CONFIG_ONLY_FEATURES."""
+    # AWS RDS
+    aws_db_subnet_group_name: str = ""
+    aws_db_parameter_group_name: str = ""
+    aws_db_security_group_id: str = ""
+    # Azure Flexible Server
+    azure_db_subnet_id: str = ""
+    azure_db_private_dns_zone_id: str = ""
+    # GCP Cloud SQL
+    gcp_db_network: str = ""
+
+
 _FEATURE_MODELS = {
     "vmware":       VMwareFeatureConfig,
     "beyondtrust":  BeyondTrustFeatureConfig,
@@ -509,7 +525,13 @@ _FEATURE_MODELS = {
     "hyperv":       HyperVFeatureConfig,
     "nutanix":      NutanixFeatureConfig,
     "xcpng":        XcpNgFeatureConfig,
+    "cloud_database": CloudDatabaseFeatureConfig,
 }
+
+# Features whose panel carries config but NOT an enable toggle — their on/off
+# lives elsewhere (e.g. a preview flag). _read/_write_feature skip the enabled
+# key for these, so saving config can't flip the feature's flag.
+_CONFIG_ONLY_FEATURES = {"cloud_database"}
 
 _SECRET_FEATURE_KEYS = frozenset({
     "pscli_client_secret", "bt_client_secret", "epml_pat",
@@ -532,7 +554,7 @@ def _read_feature(feature: str, model_cls) -> dict:
     """Build a response dict for a feature by reading config_service."""
     from ..services import config_service
     enabled_key = _feature_to_cfg_key(feature)
-    data = {"enabled": config_service.get_bool(enabled_key)}
+    data = {} if feature in _CONFIG_ONLY_FEATURES else {"enabled": config_service.get_bool(enabled_key)}
     for field, info in model_cls.model_fields.items():
         if field == "enabled":
             continue
@@ -551,9 +573,12 @@ def _write_feature(feature: str, payload_dict: dict) -> None:
     """Persist a feature's config to config_service."""
     from ..services import config_service
     pairs: dict = {}
-    enabled_key = _feature_to_cfg_key(feature)
-    enabled = payload_dict.pop("enabled", False)
-    pairs[enabled_key] = "1" if enabled else "0"
+    if feature in _CONFIG_ONLY_FEATURES:
+        payload_dict.pop("enabled", None)  # the feature's flag is owned elsewhere
+    else:
+        enabled_key = _feature_to_cfg_key(feature)
+        enabled = payload_dict.pop("enabled", False)
+        pairs[enabled_key] = "1" if enabled else "0"
     for key, value in payload_dict.items():
         # Skip placeholder values (user left secret field as bullets)
         if isinstance(value, str) and value.startswith("••"):
@@ -615,6 +640,13 @@ _PREVIEW_FLAGS = {
         "Kubernetes Management", "Register + manage Kubernetes clusters (Phase 1)."),
 }
 
+# Preview flags that ALSO have a config panel — maps the flag key to the
+# _FEATURE_MODELS key its "Configure" link opens. The flag stays the on/off;
+# the panel is config-only (see _CONFIG_ONLY_FEATURES).
+_PREVIEW_FLAG_CONFIG = {
+    "cloud_database_enabled": "cloud_database",
+}
+
 
 @router.get("/flags")
 def get_preview_flags(request: Request):
@@ -627,6 +659,7 @@ def get_preview_flags(request: Request):
             "label": label,
             "description": desc,
             "enabled": config_service.get_bool(key, getattr(settings, key, False)),
+            "config_feature": _PREVIEW_FLAG_CONFIG.get(key),
         }
         for key, (label, desc) in _PREVIEW_FLAGS.items()
     }
