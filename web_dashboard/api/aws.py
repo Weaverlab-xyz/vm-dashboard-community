@@ -811,7 +811,7 @@ async def _run_deploy(
             job_service.update_progress(db, job_id, 15, "Ensuring the shared BeyondTrust Jumpoint host…")
             try:
                 from ..services import jumpoint_host_service
-                host_id = await jumpoint_host_service.ensure_jumpoint_host(_aws_region)
+                host_id = await jumpoint_host_service.ensure_jumpoint_host("aws", _aws_region)
                 if host_id:
                     result["jumpoint_host_id"] = host_id
                 job_service.update_progress(db, job_id, 35, "Jumpoint host ready, launching EC2 instance…")
@@ -967,7 +967,7 @@ async def _run_bulk_deploy(
             )
             try:
                 from ..services import jumpoint_host_service
-                jumpoint_host_id = await jumpoint_host_service.ensure_jumpoint_host(_aws_region)
+                jumpoint_host_id = await jumpoint_host_service.ensure_jumpoint_host("aws", _aws_region)
             except Exception as e:
                 ecs_error = str(e)
         else:
@@ -1155,7 +1155,7 @@ async def _run_destroy(destroy_job_id: str, deploy_job_id: str, instance_id: str
         # deploy job is now marked destroyed, so it's excluded from the count).
         try:
             from ..services import jumpoint_host_service
-            await jumpoint_host_service.teardown_jumpoint_host_if_idle(db, _aws_region())
+            await jumpoint_host_service.teardown_jumpoint_host_if_idle(db, "aws", _aws_region())
         except Exception as e:
             result["jumpoint_host_teardown_error"] = str(e)
 

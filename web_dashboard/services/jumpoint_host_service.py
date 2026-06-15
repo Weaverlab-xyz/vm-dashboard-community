@@ -89,10 +89,19 @@ async def _ensure_task(region: str, deploy_key: str) -> None:
                 arn.split("/")[-1])
 
 
-async def ensure_jumpoint_host(region: str) -> Optional[str]:
-    """Ensure the shared Jumpoint host (and its task) is up; return its instance
-    id (or None on the FARGATE escape hatch / when nothing was created). Raises
-    AWSError on failure — callers treat this as best-effort."""
+async def ensure_jumpoint_host(cloud: str, region: str) -> Optional[str]:
+    """Ensure the shared tunnel-capable Jumpoint host is up for ``cloud``; return
+    its instance/host id (or None). Dispatches per cloud — AWS uses ECS-on-EC2,
+    GCP uses a privileged container on a COS GCE VM. Best-effort for callers."""
+    if cloud == "gcp":
+        return await _ensure_jumpoint_host_gcp(region)
+    return await _ensure_jumpoint_host_aws(region)
+
+
+async def _ensure_jumpoint_host_aws(region: str) -> Optional[str]:
+    """Ensure the shared AWS Jumpoint host (and its task) is up; return its
+    instance id (or None on the FARGATE escape hatch / when nothing was created).
+    Raises AWSError on failure — callers treat this as best-effort."""
     from . import aws_service
     deploy_key = await _resolve_deploy_key()
     if not deploy_key:
@@ -156,11 +165,13 @@ async def ensure_jumpoint_host(region: str) -> Optional[str]:
     return host_id
 
 
-def _active_db_count(db) -> int:
+def _active_db_count(db, cloud: Optional[str] = None) -> int:
     from ..database import CloudDatabase
-    return (db.query(CloudDatabase)
-              .filter(CloudDatabase.status.in_(["available", "provisioning"]))
-              .count())
+    q = (db.query(CloudDatabase)
+           .filter(CloudDatabase.status.in_(["available", "provisioning"])))
+    if cloud:
+        q = q.filter(CloudDatabase.cloud == cloud)
+    return q.count()
 
 
 def _active_ec2_count(db) -> int:
@@ -171,12 +182,20 @@ def _active_ec2_count(db) -> int:
     return sum(1 for j in jobs if not (j.metadata_dict or {}).get("destroyed"))
 
 
-async def teardown_jumpoint_host_if_idle(db, region: str) -> None:
-    """Terminate the shared host iff nothing is left using it (no managed EC2
-    instance, no active cloud database). Best-effort; logs and returns on error."""
+async def teardown_jumpoint_host_if_idle(db, cloud: str, region: str) -> None:
+    """Terminate the shared Jumpoint host for ``cloud`` iff nothing is left using
+    it. Dispatches per cloud. Best-effort; logs and returns on error."""
+    if cloud == "gcp":
+        return await _teardown_jumpoint_host_if_idle_gcp(db, region)
+    return await _teardown_jumpoint_host_if_idle_aws(db, region)
+
+
+async def _teardown_jumpoint_host_if_idle_aws(db, region: str) -> None:
+    """Terminate the shared AWS host iff nothing is left using it (no managed EC2
+    instance, no active AWS cloud database). Best-effort; logs and returns on error."""
     from . import aws_service
     try:
-        active = _active_db_count(db) + _active_ec2_count(db)
+        active = _active_db_count(db, "aws") + _active_ec2_count(db)
         if active > 0:
             logger.info("jumpoint-host: keeping host (%d active resource(s))", active)
             return
@@ -199,3 +218,86 @@ async def teardown_jumpoint_host_if_idle(db, region: str) -> None:
             logger.info("jumpoint-host: terminated idle host %s", h["instance_id"])
     except Exception as exc:
         logger.warning("jumpoint-host: idle teardown failed (non-fatal): %s", exc)
+
+
+# ── GCP: privileged BeyondTrust Jumpoint container on a COS GCE VM ─────────────
+# Cloud Run / serverless can't grant NET_ADMIN/NET_RAW/IPC_LOCK + /dev/net/tun,
+# so the tunnel host is a Container-Optimised-OS GCE instance running the
+# jumpoint container PRIVILEGED (gcp_service sets securityContext.privileged).
+# One shared, ref-counted instance, mirroring the AWS host lifecycle.
+
+def _gcp_jumpoint_name() -> str:
+    return _cfg("gcp_jumpoint_name") or "clouddb-shared-jumpoint"
+
+
+def _gcp_project() -> str:
+    return _cfg("gcp_project") or _cfg("gcp_project_id")
+
+
+def _gcp_jumpoint_zone(region: str) -> str:
+    # Explicit jumpoint zone wins; else the generic gcp_zone; else derive a
+    # conventional zone from the region (region-b) as a last resort.
+    return _cfg("gcp_jumpoint_zone") or _cfg("gcp_zone") or (f"{region}-b" if region else "")
+
+
+async def _resolve_gcp_deploy_key() -> str:
+    """BeyondTrust Jumpoint deploy key for GCP launches — resolved through whichever
+    secrets backend the user picked on /secrets (same keys the GCP deploy flow uses)."""
+    from . import config_service
+    return (config_service.get("gcp_cloud_run_docker_deploy_key")
+            or config_service.get("gcp_jumpoint_docker_deploy_key")
+            or config_service.get("gcp_jumpoint_deploy_key")
+            or "")
+
+
+async def _ensure_jumpoint_host_gcp(region: str) -> Optional[str]:
+    """Ensure the shared COS GCE Jumpoint VM is up (idempotent on name); return its
+    name. Best-effort — logs and returns None when prerequisites are missing."""
+    from . import gcp_service
+    project = _gcp_project()
+    if not project:
+        logger.warning("jumpoint-host(gcp): gcp_project not set — cannot start a jumpoint.")
+        return None
+    deploy_key = await _resolve_gcp_deploy_key()
+    if not deploy_key:
+        logger.warning("jumpoint-host(gcp): jumpoint deploy key not set "
+                       "(gcp_cloud_run_docker_deploy_key) — tunnels unavailable until configured.")
+        return None
+    name = _gcp_jumpoint_name()
+    zone = _gcp_jumpoint_zone(region)
+    try:
+        meta = await gcp_service.run_gce_jumpoint(
+            project_id=project,
+            zone=zone,
+            name=name,
+            container_image=_cfg("gcp_jumpoint_image") or "beyondtrust/sra-jumpoint:latest",
+            deploy_key=deploy_key,
+            network=_cfg("gcp_db_network") or _cfg("gcp_network") or "",
+            subnetwork=_cfg("gcp_subnetwork") or "",
+            machine_type=_cfg("gcp_jumpoint_machine_type") or "e2-micro",
+            create_external_ip=True,
+        )
+        logger.info("jumpoint-host(gcp): jumpoint %s %s in %s",
+                    name, "reused" if meta.get("reused") else "started", zone)
+        return name
+    except Exception as exc:
+        logger.warning("jumpoint-host(gcp): ensure failed (non-fatal): %s", exc)
+        return None
+
+
+async def _teardown_jumpoint_host_if_idle_gcp(db, region: str) -> None:
+    """Delete the shared GCE Jumpoint VM iff no active GCP cloud database is left
+    using it. Best-effort; logs and returns on error."""
+    from . import gcp_service
+    try:
+        active = _active_db_count(db, "gcp")
+        if active > 0:
+            logger.info("jumpoint-host(gcp): keeping jumpoint (%d active DB(s))", active)
+            return
+        project = _gcp_project()
+        if not project:
+            return
+        await gcp_service.stop_gce_jumpoint(project, _gcp_jumpoint_zone(region), _gcp_jumpoint_name())
+        logger.info("jumpoint-host(gcp): deleted idle jumpoint %s", _gcp_jumpoint_name())
+    except Exception as exc:
+        logger.warning("jumpoint-host(gcp): idle teardown failed (non-fatal): %s", exc)

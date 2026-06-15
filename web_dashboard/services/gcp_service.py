@@ -580,7 +580,15 @@ _JUMPOINT_LABEL = "bt-jumpoint"
 
 def _jumpoint_container_spec_yaml(container_image: str, deploy_key: str) -> str:
     """Generate the gce-container-declaration metadata YAML.
-    COS reads this on first boot and runs the container under containerd."""
+    COS reads this on first boot and runs the container under containerd.
+
+    ``securityContext.privileged: true`` is load-bearing for **protocol tunneling**:
+    a BeyondTrust Jumpoint needs NET_ADMIN + NET_RAW + IPC_LOCK and access to
+    /dev/net/tun. konlet only exposes the all-or-nothing ``privileged`` flag (no
+    granular caps/devices), and privileged grants all of those plus host /dev
+    (COS ships the tun module). Without it the jumpoint registers online but
+    tunnel data times out — the same serverless limitation that rules out Cloud
+    Run. A GCE COS VM is a real VM, so privileged IS permitted here."""
     import yaml
     spec = {
         "spec": {
@@ -588,6 +596,7 @@ def _jumpoint_container_spec_yaml(container_image: str, deploy_key: str) -> str:
                 "name": "jumpoint",
                 "image": container_image,
                 "env": [{"name": "DEPLOY_KEY", "value": deploy_key}],
+                "securityContext": {"privileged": True},
                 "stdin": False,
                 "tty": False,
             }],
