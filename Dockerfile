@@ -151,15 +151,16 @@ RUN ARCH=$(dpkg --print-architecture) \
 # Keep these in sync with the version constraints in terraform/db_*/main.tf.
 # The plugin cache directory is set via TF_PLUGIN_CACHE_DIR in terraform_pra_service.py.
 #
-# The `terraform init` below is wrapped in a retry loop: during the multi-arch
-# build the arm64 leg runs the emulated (QEMU) terraform binary, whose registry
-# HTTP client has a short, non-configurable header timeout. Talking to
-# registry.terraform.io under emulation intermittently exceeds it ("request
-# canceled (Client.Timeout exceeded while awaiting headers)"), even though the
-# arm64 provider package exists and the native amd64 leg succeeds. Terraform's
-# own message for this is "please try again later", so we do — each attempt is a
-# fresh TLS handshake. We still hard-fail after 5 tries so a genuinely
-# unreachable registry never ships an image missing its cached provider.
+# `terraform init` here talks to registry.terraform.io, whose client enforces a
+# 10s default timeout (TF_REGISTRY_CLIENT_TIMEOUT). When the registry is briefly
+# slow — observed on BOTH the native amd64 leg and the emulated (QEMU) arm64 leg
+# of the multi-arch build — that 10s is exceeded ("request canceled
+# (Client.Timeout exceeded while awaiting headers)") and init fails even though
+# the provider exists. Resolving four providers (sra/aws/azurerm/google) in one
+# init multiplies the registry round-trips, so a single slow response is enough.
+# Fix: raise the registry client timeout to 30s AND keep a retry loop (fresh
+# attempt each time), hard-failing after 5 tries so a genuinely unreachable
+# registry never ships an image missing a cached provider.
 ENV TF_PLUGIN_CACHE_DIR=/root/.terraform.d/plugin-cache
 RUN ARCH=$(dpkg --print-architecture) \
     && curl -fsSL "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_${ARCH}.zip" \
@@ -171,7 +172,7 @@ RUN ARCH=$(dpkg --print-architecture) \
     && printf 'terraform {\n  required_providers {\n    sra = { source = "beyondtrust/sra", version = "~> 1.0" }\n    aws = { source = "hashicorp/aws", version = "~> 5.0" }\n    azurerm = { source = "hashicorp/azurerm", version = "~> 3.0" }\n    google = { source = "hashicorp/google", version = "~> 5.0" }\n  }\n}\n' \
        > /tmp/tf_provider_init/main.tf \
     && for attempt in 1 2 3 4 5; do \
-           terraform -chdir=/tmp/tf_provider_init init && break; \
+           TF_REGISTRY_CLIENT_TIMEOUT=30 terraform -chdir=/tmp/tf_provider_init init && break; \
            if [ "$attempt" = 5 ]; then \
                echo "terraform init failed to cache providers (sra/aws/azurerm/google) after 5 attempts" >&2; \
                exit 1; \
