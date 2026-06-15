@@ -3,12 +3,19 @@
 #
 # Creates:
 #   • Resource group
-#   • VNet with two subnets:
+#   • VNet with subnets:
 #     - aci-subnet  (delegated to Microsoft.ContainerInstance) → has internet
 #       egress so the BT Jumpoint ACI container can reach PRA's relay.
 #     - vm-subnet   (NSG denies outbound to Internet, allows VirtualNetwork)
 #       so deployed VMs can only egress within the VNet — i.e. to the ACI
 #       Jumpoint, never directly to the internet.
+#     - k8s-subnet  (managed Kubernetes / AKS)
+#     - db-subnet   (delegated to Microsoft.DBforPostgreSQL/flexibleServers —
+#       private VNet-integrated managed databases)
+#     - jumpoint-subnet (internet egress; the tunnel-capable VM Jumpoint lands
+#       here, since ACI can't protocol-tunnel)
+#   • Private DNS zone (.private.postgres.database.azure.com) linked to the VNet
+#     so the Flexible Server's private FQDN resolves inside it.
 #   • Key Vault with an SSH keypair stored as JSON {public_key, private_key}
 #   • Service principal with Contributor on the RG
 #
@@ -76,6 +83,41 @@ K8S_SUBNET_ID="$(az network vnet subnet show -g "$RG" --vnet-name "$VNET" -n "$K
 state_write azure aci_subnet_id "$ACI_SUBNET_ID"
 state_write azure vm_subnet_id  "$VM_SUBNET_ID"
 state_write azure k8s_subnet_id "$K8S_SUBNET_ID"
+
+# ── 2b. Managed-database subnets + private DNS zone (Flexible Server) ─────────
+# A private VNet-integrated PostgreSQL Flexible Server needs a subnet DELEGATED
+# to Microsoft.DBforPostgreSQL/flexibleServers + a private DNS zone linked to the
+# VNet (the Azure analog of the AWS private DB subnet group / GCP private-services
+# access). The tunnel-capable jumpoint runs on a VM (ACI can't protocol-tunnel),
+# so it gets its OWN subnet with internet egress (to phone home to PRA) — separate
+# from the NSG-restricted vm-subnet.
+section "Managed-database subnets + private DNS zone"
+DB_SUBNET="db-subnet"
+az network vnet subnet create -g "$RG" --vnet-name "$VNET" -n "$DB_SUBNET" \
+  --address-prefix 10.99.4.0/24 \
+  --delegations Microsoft.DBforPostgreSQL/flexibleServers >/dev/null
+ok "DB subnet $DB_SUBNET (10.99.4.0/24, delegated to flexibleServers)"
+
+JP_SUBNET="jumpoint-subnet"
+az network vnet subnet create -g "$RG" --vnet-name "$VNET" -n "$JP_SUBNET" \
+  --address-prefix 10.99.5.0/24 >/dev/null
+ok "Jumpoint subnet $JP_SUBNET (10.99.5.0/24, internet egress for the VM jumpoint)"
+
+DB_SUBNET_ID="$(az network vnet subnet show -g "$RG" --vnet-name "$VNET" -n "$DB_SUBNET" --query id -o tsv)"
+JP_SUBNET_ID="$(az network vnet subnet show -g "$RG" --vnet-name "$VNET" -n "$JP_SUBNET" --query id -o tsv)"
+
+# Private DNS zone — name MUST end in .private.postgres.database.azure.com.
+DB_DNS_ZONE="${NAME}.private.postgres.database.azure.com"
+az network private-dns zone create -g "$RG" -n "$DB_DNS_ZONE" >/dev/null 2>&1 || true
+az network private-dns link vnet create -g "$RG" -n "${NAME}-db-dns-link" \
+  --zone-name "$DB_DNS_ZONE" --virtual-network "$VNET" \
+  --registration-enabled false >/dev/null 2>&1 || true
+DB_DNS_ZONE_ID="$(az network private-dns zone show -g "$RG" -n "$DB_DNS_ZONE" --query id -o tsv 2>/dev/null)"
+ok "Private DNS zone $DB_DNS_ZONE linked to $VNET"
+
+state_write azure db_subnet_id           "$DB_SUBNET_ID"
+state_write azure jumpoint_subnet_id     "$JP_SUBNET_ID"
+state_write azure db_private_dns_zone_id  "$DB_DNS_ZONE_ID"
 
 # ── 3. NSG: deny VM internet egress, allow VNet ──────────────────────────────
 section "NSG (block VM internet egress)"
@@ -312,6 +354,9 @@ _cfg=(
   "azure_aci_resource_group=$RG"
   "azure_aci_subnet_id=$ACI_SUBNET_ID                      # ACI lands here, has internet egress"
   "azure_default_subnet_id=$VM_SUBNET_ID                   # VMs land here, NSG-restricted to VNet"
+  "azure_db_subnet_id=$DB_SUBNET_ID                        # Flexible Server delegated subnet (private)"
+  "azure_db_private_dns_zone_id=$DB_DNS_ZONE_ID            # Private DNS zone for the DB FQDN"
+  "azure_jumpoint_subnet_id=$JP_SUBNET_ID                  # Tunnel-capable VM jumpoint lands here (internet egress)"
   "azure_aci_storage_account=$SA_NAME                      # /jpt persistent volume"
   "azure_aci_storage_account_rg=$RG"
   "azure_aci_file_share=jpt"

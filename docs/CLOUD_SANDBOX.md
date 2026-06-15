@@ -210,12 +210,23 @@ Resource group dashboard-sandbox-rg
   └─ VNet dashboard-sandbox-vnet (10.99.0.0/16)
        ├─ aci-subnet 10.99.1.0/24 (delegated to Microsoft.ContainerInstance)
        │    → internet egress (default)            [ACI Jumpoint]
-       └─ vm-subnet  10.99.2.0/24
-            NSG dashboard-sandbox-vm-nsg:
-              outbound: allow VirtualNetwork (priority 100)
-                        deny  Internet (priority 200)
-              inbound:  allow VirtualNetwork
-            → no internet egress                   [user Azure VMs]
+       ├─ vm-subnet  10.99.2.0/24
+       │    NSG dashboard-sandbox-vm-nsg:
+       │      outbound: allow VirtualNetwork (priority 100)
+       │                deny  Internet (priority 200)
+       │      inbound:  allow VirtualNetwork
+       │    → no internet egress                   [user Azure VMs]
+       ├─ k8s-subnet 10.99.3.0/24                   [managed Kubernetes / AKS]
+       ├─ db-subnet  10.99.4.0/24                   [managed databases]
+       │    (delegated to Microsoft.DBforPostgreSQL/flexibleServers)
+       │    → private VNet-integrated Flexible Server
+       └─ jumpoint-subnet 10.99.5.0/24              [tunnel-capable VM Jumpoint]
+            → internet egress (no deny NSG; phones home to PRA)
+
+Private DNS zone dashboard-sandbox.private.postgres.database.azure.com
+  linked to the VNet → the Flexible Server's private FQDN resolves inside it.
+  (The Azure analog of the AWS private DB subnet group / GCP private-services
+  access. The DB is private-only; only the jumpoint VM reaches it.)
 
 Storage account dashboard-sandbox-…  (Standard_LRS, file share `jpt`)
   for the ACI Jumpoint /jpt persistence volume

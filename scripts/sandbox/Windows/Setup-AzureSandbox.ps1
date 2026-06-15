@@ -61,6 +61,38 @@ Set-StateValue azure aci_subnet_id $AciSubnetId
 Set-StateValue azure vm_subnet_id  $VmSubnetId
 Set-StateValue azure k8s_subnet_id $K8sSubnetId
 
+# ── 2b. Managed-database subnets + private DNS zone (Flexible Server) ─────────
+# Private VNet-integrated Flexible Server needs a subnet delegated to
+# Microsoft.DBforPostgreSQL/flexibleServers + a private DNS zone linked to the
+# VNet. The tunnel-capable jumpoint runs on a VM (ACI can't tunnel), so it gets
+# its own subnet with internet egress.
+Write-Section 'Managed-database subnets + private DNS zone'
+$DbSubnet = 'db-subnet'
+az network vnet subnet create -g $Rg --vnet-name $VnetName -n $DbSubnet `
+    --address-prefix 10.99.4.0/24 `
+    --delegations Microsoft.DBforPostgreSQL/flexibleServers | Out-Null
+Write-Ok "DB subnet $DbSubnet (10.99.4.0/24, delegated to flexibleServers)"
+
+$JpSubnet = 'jumpoint-subnet'
+az network vnet subnet create -g $Rg --vnet-name $VnetName -n $JpSubnet `
+    --address-prefix 10.99.5.0/24 | Out-Null
+Write-Ok "Jumpoint subnet $JpSubnet (10.99.5.0/24, internet egress for the VM jumpoint)"
+
+$DbSubnetId = (az network vnet subnet show -g $Rg --vnet-name $VnetName -n $DbSubnet --query id -o tsv).Trim()
+$JpSubnetId = (az network vnet subnet show -g $Rg --vnet-name $VnetName -n $JpSubnet --query id -o tsv).Trim()
+
+$DbDnsZone = "$Name.private.postgres.database.azure.com"
+az network private-dns zone create -g $Rg -n $DbDnsZone 2>$null | Out-Null
+az network private-dns link vnet create -g $Rg -n "$Name-db-dns-link" `
+    --zone-name $DbDnsZone --virtual-network $VnetName --registration-enabled false 2>$null | Out-Null
+$DbDnsZoneId = (az network private-dns zone show -g $Rg -n $DbDnsZone --query id -o tsv 2>$null)
+if ($DbDnsZoneId) { $DbDnsZoneId = $DbDnsZoneId.Trim() }
+Write-Ok "Private DNS zone $DbDnsZone linked to $VnetName"
+
+Set-StateValue azure db_subnet_id           $DbSubnetId
+Set-StateValue azure jumpoint_subnet_id     $JpSubnetId
+Set-StateValue azure db_private_dns_zone_id $DbDnsZoneId
+
 # ── 3. NSG: deny VM internet egress, allow VNet ──────────────────────────────
 Write-Section 'NSG (block VM internet egress)'
 az network nsg create -g $Rg -n $NsgName --tags $Tags | Out-Null
@@ -230,6 +262,9 @@ $cfg = @(
     "azure_aci_resource_group=$Rg",
     "azure_aci_subnet_id=$AciSubnetId                      # ACI lands here, has internet egress",
     "azure_default_subnet_id=$VmSubnetId                   # VMs land here, NSG-restricted to VNet",
+    "azure_db_subnet_id=$DbSubnetId                        # Flexible Server delegated subnet (private)",
+    "azure_db_private_dns_zone_id=$DbDnsZoneId             # Private DNS zone for the DB FQDN",
+    "azure_jumpoint_subnet_id=$JpSubnetId                  # Tunnel-capable VM jumpoint lands here (internet egress)",
     "azure_aci_storage_account=$SaName                      # /jpt persistent volume",
     "azure_aci_storage_account_rg=$Rg",
     "azure_aci_file_share=jpt",
