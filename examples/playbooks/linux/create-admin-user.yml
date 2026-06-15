@@ -1,0 +1,48 @@
+# Create a sudo admin user with an authorized SSH key
+# Target: Linux cloud VMs (any cloud).
+# Parameterized — pass values as extra_vars. Because the CLOUD runner does not
+# forward extra_vars, run this via the LOCAL runner (Config Management forwards
+# extra_vars there), or edit the defaults below before uploading.
+#
+# extra_vars:
+#   admin_username: jdoe
+#   admin_pubkey: "ssh-ed25519 AAAA... user@host"
+- name: Create an administrative user
+  hosts: all
+  become: true
+  vars:
+    admin_username: ""
+    admin_pubkey: ""
+  tasks:
+    - name: Fail early if required vars are missing
+      ansible.builtin.assert:
+        that:
+          - admin_username | length > 0
+          - admin_pubkey | length > 0
+        fail_msg: "Set admin_username and admin_pubkey (extra_vars)."
+
+    - name: Ensure the admin group exists
+      ansible.builtin.group:
+        name: "{{ admin_username }}"
+        state: present
+
+    - name: Create the user
+      ansible.builtin.user:
+        name: "{{ admin_username }}"
+        group: "{{ admin_username }}"
+        shell: /bin/bash
+        create_home: true
+        state: present
+
+    - name: Grant passwordless sudo
+      ansible.builtin.copy:
+        dest: "/etc/sudoers.d/{{ admin_username }}"
+        content: "{{ admin_username }} ALL=(ALL) NOPASSWD:ALL\n"
+        mode: "0440"
+        validate: "/usr/sbin/visudo -cf %s"
+
+    - name: Install the authorized key
+      ansible.posix.authorized_key:
+        user: "{{ admin_username }}"
+        key: "{{ admin_pubkey }}"
+        state: present

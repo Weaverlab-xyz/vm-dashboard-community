@@ -393,6 +393,18 @@ generates:
         disable_gpg_check: true
 ```
 
+### Sample playbooks
+
+Ready-to-adapt starters for Linux and Windows cloud VMs live in
+[`examples/playbooks/`](../../examples/playbooks/) — patching, SSH hardening,
+admin-user creation, Docker, node_exporter, nginx (Linux); Windows updates,
+firewall, Chocolatey, local admin, and IIS (Windows). See
+[examples/playbooks/README.md](../../examples/playbooks/README.md) for how to run
+each. **Linux** samples run via the cloud or local runner; **Windows** (WinRM)
+samples run via the **local runner**, which forwards the `ansible_password` extra
+var the WinRM connection needs (the cloud runner is SSH-only and doesn't forward
+extra vars).
+
 ---
 
 ## Troubleshooting

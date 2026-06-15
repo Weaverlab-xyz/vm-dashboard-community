@@ -1,0 +1,42 @@
+# Patch all packages and reboot if required
+# Target: Linux cloud VMs (any cloud) — runs via the cloud runner (SSH) or local runner.
+# Idempotent: only reboots when the OS signals a pending restart.
+#
+# Works across Debian/Ubuntu and RHEL/Rocky/Alma families via per-family tasks.
+- name: Apply OS package updates
+  hosts: all
+  become: true
+  tasks:
+    - name: Update apt cache and upgrade all packages (Debian family)
+      ansible.builtin.apt:
+        update_cache: true
+        upgrade: dist
+        cache_valid_time: 3600
+      when: ansible_facts['os_family'] == "Debian"
+
+    - name: Upgrade all packages (RedHat family)
+      ansible.builtin.dnf:
+        name: "*"
+        state: latest
+      when: ansible_facts['os_family'] == "RedHat"
+
+    - name: Check whether a reboot is required (Debian family)
+      ansible.builtin.stat:
+        path: /var/run/reboot-required
+      register: deb_reboot
+      when: ansible_facts['os_family'] == "Debian"
+
+    - name: Check whether a reboot is required (RedHat family)
+      ansible.builtin.command: needs-restarting -r
+      register: rhel_reboot
+      failed_when: false
+      changed_when: false
+      when: ansible_facts['os_family'] == "RedHat"
+
+    - name: Reboot if needed
+      ansible.builtin.reboot:
+        msg: "Rebooting after package updates"
+        reboot_timeout: 600
+      when: >
+        (ansible_facts['os_family'] == "Debian" and deb_reboot.stat.exists) or
+        (ansible_facts['os_family'] == "RedHat" and rhel_reboot.rc == 1)

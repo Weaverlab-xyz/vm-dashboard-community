@@ -1,0 +1,34 @@
+# Windows firewall baseline
+# Target: Windows cloud VMs (Azure today) over WinRM.
+# Ensures all firewall profiles are enabled and adds a sample inbound allow rule.
+#
+# HOW TO RUN — via the LOCAL runner; supply credentials as extra_vars:
+#   ansible_user: azureuser
+#   ansible_password: <Windows admin password>
+# (The cloud runner is SSH-only and does not forward extra_vars.)
+- name: Configure Windows firewall baseline
+  hosts: all
+  gather_facts: false
+  vars:
+    ansible_connection: winrm
+    ansible_winrm_transport: ntlm
+    ansible_port: 5986
+    ansible_winrm_server_cert_validation: ignore
+  tasks:
+    - name: Ensure all firewall profiles are enabled
+      community.windows.win_firewall:
+        state: enabled
+        profiles:
+          - Domain
+          - Private
+          - Public
+
+    - name: Allow inbound HTTPS (example rule)
+      community.windows.win_firewall_rule:
+        name: Allow HTTPS Inbound
+        localport: 443
+        action: allow
+        direction: in
+        protocol: tcp
+        state: present
+        enabled: true
