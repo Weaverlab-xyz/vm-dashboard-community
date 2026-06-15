@@ -42,14 +42,19 @@ logger = logging.getLogger(__name__)
 # (no MongoDB resource yet). Phase 1 wires postgres/aws; the rest fan out later.
 VALID_ENGINES = {"postgres", "mysql", "sqlserver"}
 VALID_CLOUDS = {"aws", "azure", "gcp"}
-_IMPLEMENTED = {("postgres", "aws"), ("postgres", "gcp")}
-_PROVIDER = {("postgres", "aws"): "rds", ("postgres", "gcp"): "cloudsql"}
+_IMPLEMENTED = {("postgres", "aws"), ("postgres", "gcp"), ("postgres", "azure")}
+_PROVIDER = {
+    ("postgres", "aws"): "rds",
+    ("postgres", "gcp"): "cloudsql",
+    ("postgres", "azure"): "flexibleserver",
+}
 
 # terraform/<dir> module per (engine, cloud) — relative to repo root (parents[2]).
 _REPO_ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))
 _TEMPLATE_DIRS = {
     ("postgres", "aws"): os.path.join(_REPO_ROOT, "terraform", "db_postgres"),
     ("postgres", "gcp"): os.path.join(_REPO_ROOT, "terraform", "db_gcp_postgres"),
+    ("postgres", "azure"): os.path.join(_REPO_ROOT, "terraform", "db_azure_postgres"),
 }
 _DEPLOYMENTS_DIR = os.path.join(_REPO_ROOT, "terraform", "deployments")
 
@@ -122,6 +127,24 @@ def _build_tf_variables(
             "disk_size": opts.get("disk_size", 20),
             "private_network": opts.get("private_network") or _cfg("gcp_db_network") or _cfg("gcp_network"),
             "labels": {"managed-by": "vm-dashboard", "clouddb-id": db_id},
+        }
+
+    if (engine, cloud) == ("postgres", "azure"):
+        # VNet-integrated private Flexible Server. The delegated subnet + private
+        # DNS zone are sandbox-created; the module references them. require_secure_
+        # transport=OFF (set in the module) is the force_ssl=0 analog for the tunnel.
+        return {
+            "resource_group_name": opts.get("resource_group_name") or _cfg("azure_resource_group"),
+            "location": region,
+            "identifier": f"clouddb-{db_id[:8]}",
+            "administrator_login": master_username,
+            "administrator_password": master_password,
+            "sku_name": opts.get("sku_name", "B_Standard_B1ms"),
+            "storage_mb": opts.get("storage_mb", 32768),
+            "db_name": db_name,
+            "delegated_subnet_id": opts.get("delegated_subnet_id") or _cfg("azure_db_subnet_id"),
+            "private_dns_zone_id": opts.get("private_dns_zone_id") or _cfg("azure_db_private_dns_zone_id"),
+            "tags": {"managed-by": "vm-dashboard", "clouddb-id": db_id},
         }
 
     raise NotImplementedError(f"{engine}/{cloud} Terraform variables not implemented")
@@ -229,10 +252,30 @@ def _gcp_env() -> Optional[dict]:
     return env or None
 
 
+def _azure_env() -> Optional[dict]:
+    """Provider credentials for the terraform subprocess (Azure). The wizard stores
+    the service-principal fields; pass them to the azurerm provider via the ARM_*
+    env vars (mirrors the packer Azure flow). When unset, return None so terraform
+    falls back to the container environment / az CLI auth."""
+    env: dict = {}
+    for cfg_key, arm_key in (
+        ("azure_client_id", "ARM_CLIENT_ID"),
+        ("azure_client_secret", "ARM_CLIENT_SECRET"),
+        ("azure_tenant_id", "ARM_TENANT_ID"),
+        ("azure_subscription_id", "ARM_SUBSCRIPTION_ID"),
+    ):
+        val = _cfg(cfg_key)
+        if val:
+            env[arm_key] = val
+    return env or None
+
+
 def _provider_env(cloud: str) -> Optional[dict]:
     """Dispatch the terraform-subprocess provider credentials by cloud."""
     if cloud == "gcp":
         return _gcp_env()
+    if cloud == "azure":
+        return _azure_env()
     return _aws_env()
 
 
