@@ -146,6 +146,52 @@ gcloud compute firewall-rules create "$Name-allow-vm-egress-vpc" `
 
 Write-Ok 'Firewall rules: allow-internal, allow-ssh-from-jumpoint, deny-vm-egress, allow-vm-egress-vpc'
 
+# ── 4b. Private Services Access + Cloud SQL reachability (managed databases) ──
+# Private-IP Cloud SQL needs a reserved IP range + a servicenetworking VPC
+# peering (the GCP analog of the AWS private DB subnet group). The instance's
+# private IP lands in this peered range — outside 10.99.0.0/16 — so deny-vm-egress
+# already blocks user VMs from it; only the jumpoint can reach it. An explicit
+# egress ALLOW makes that auditable.
+Write-Section 'Private Services Access + Cloud SQL (managed databases)'
+gcloud services enable servicenetworking.googleapis.com sqladmin.googleapis.com `
+    --project $ProjectId --quiet 2>$null | Out-Null
+
+$PsaRange = "$Name-psa-range"
+& gcloud compute addresses describe $PsaRange --global --project $ProjectId *> $null
+if ($LASTEXITCODE -ne 0) {
+    gcloud compute addresses create $PsaRange `
+        --global --purpose VPC_PEERING --prefix-length 20 `
+        --network $Vpc --project $ProjectId --quiet 2>$null | Out-Null
+    Write-Ok "Allocated private-services-access range $PsaRange (/20)"
+} else {
+    Write-Ok "Reusing private-services-access range $PsaRange"
+}
+
+# Connect (or update) the servicenetworking peering. 'connect' fails if it
+# already exists, so fall back to 'update --force'.
+gcloud services vpc-peerings connect `
+    --service servicenetworking.googleapis.com `
+    --ranges $PsaRange --network $Vpc --project $ProjectId --quiet 2>$null | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    gcloud services vpc-peerings update `
+        --service servicenetworking.googleapis.com `
+        --ranges $PsaRange --network $Vpc --project $ProjectId --force --quiet 2>$null | Out-Null
+}
+Write-Ok "servicenetworking peering on $Vpc (Cloud SQL private IP path)"
+
+# Explicit, auditable egress ALLOW: jumpoint → the peered PSA range on 5432.
+$PsaCidr = (gcloud compute addresses describe $PsaRange --global --project $ProjectId `
+    --format 'value(address,prefixLength)' 2>$null) -replace '\s+', '/'
+if ($PsaCidr -match '^\d') {
+    gcloud compute firewall-rules create "$Name-allow-db-from-jumpoint" `
+        --project $ProjectId --network $Vpc --direction EGRESS --priority 998 `
+        --action ALLOW --rules tcp:5432 `
+        --target-tags $NetTagJp --destination-ranges $PsaCidr --quiet 2>$null | Out-Null
+    Write-Ok "Firewall: allow-db-from-jumpoint (tcp:5432 -> $PsaCidr)"
+} else {
+    Write-Ok 'PSA CIDR not resolvable yet — skipping explicit DB egress rule (jumpoint default egress still reaches the DB)'
+}
+
 # ── 5. Service account ──────────────────────────────────────────────────────
 Write-Section 'Service account'
 $SaId    = "$Name-sa"
@@ -162,11 +208,11 @@ if ($LASTEXITCODE -ne 0) {
 
 foreach ($role in @('roles/compute.admin','roles/secretmanager.secretAccessor',
                     'roles/iam.serviceAccountUser','roles/run.admin','roles/run.developer',
-                    'roles/run.invoker')) {
+                    'roles/run.invoker','roles/cloudsql.admin','roles/servicenetworking.networksAdmin')) {
     gcloud projects add-iam-policy-binding $ProjectId `
         --member "serviceAccount:$SaEmail" --role $role --condition=None --quiet | Out-Null
 }
-Write-Ok 'Granted compute.admin, secretmanager.secretAccessor, iam.serviceAccountUser, run.{admin,developer,invoker}'
+Write-Ok 'Granted compute.admin, secretmanager.secretAccessor, iam.serviceAccountUser, run.{admin,developer,invoker}, cloudsql.admin, servicenetworking.networksAdmin'
 
 $SaKeyPath = Join-Path (Get-StateDir gcp) 'sa-key.json'
 if (-not (Test-Path $SaKeyPath) -or (Get-Item $SaKeyPath).Length -eq 0) {
@@ -253,6 +299,9 @@ $cfg = @(
     'gcp_jumpoint_machine_type=e2-micro',
     "gcp_default_network_tag=$NetTagVm                       # Auto-attached to every dashboard-deployed VM so the sandbox firewall rules apply",
     "gcp_service_account_json=`$(Get-Content $SaKeyPath -Raw)",
+    '',
+    '# Managed databases (Cloud SQL private IP via the PRA tunnel):',
+    "gcp_db_network=projects/$ProjectId/global/networks/$Vpc   # Cloud SQL private_network (private-services-access peered on it)",
     '',
     '# Image-registry hub + automated cross-cloud promote:',
     "storage_gcs_bucket=$StorageBucket                       # Image hub + promote staging",
