@@ -12,7 +12,7 @@
 
   <div class="flex items-center justify-between mb-1">
     <h1 class="text-2xl font-bold text-gray-800">Cloud Databases</h1>
-    <button @click="openProvision()" x-show="activeTab === 'aws'"
+    <button @click="openProvision()" x-show="activeTab === 'aws' || activeTab === 'gcp'"
             class="bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-3 py-1.5 rounded-lg">
       Provision database
     </button>
@@ -20,7 +20,7 @@
   <p class="text-sm text-gray-500 mb-6">
     Managed databases are provisioned <strong>private</strong> (no public endpoint) and
     reached only through a BeyondTrust PRA protocol-tunnel jump. <strong>PostgreSQL on
-    AWS</strong> is live; other engines and clouds are coming in a later phase.
+    AWS and GCP</strong> is live; Azure and the other engines are coming in a later phase.
   </p>
 
   <!-- Toast -->
@@ -87,13 +87,60 @@
     </div>
   </div>
 
-  <!-- Azure / GCP tabs (coming soon) -->
-  <template x-for="c in ['azure','gcp']" :key="'cs-'+c">
-    <div x-show="activeTab === c" x-cloak class="bg-white rounded-xl border border-gray-200 p-10 text-center text-sm text-gray-400">
-      <span class="uppercase font-semibold" x-text="c"></span> managed databases are coming soon (Phase 3).
-      Today the dashboard provisions <strong>PostgreSQL on AWS</strong>; MySQL / SQL Server and Azure / GCP land with the per-engine, per-cloud fan-out.
+  <!-- GCP tab (live) -->
+  <div x-show="activeTab === 'gcp'" x-cloak>
+    <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+      <div x-show="loading" x-cloak class="p-6 text-center text-sm text-gray-400">Loading…</div>
+      <div x-show="!loading && gcpDatabases.length === 0" x-cloak class="p-10 text-center text-sm text-gray-400">
+        No GCP databases yet. Click <strong>Provision database</strong> to create a private Cloud SQL PostgreSQL instance.
+      </div>
+      <table x-show="!loading && gcpDatabases.length > 0" x-cloak class="min-w-full text-sm">
+        <thead>
+          <tr class="text-left text-xs uppercase text-gray-500 bg-gray-50 border-b border-gray-200">
+            <th class="px-4 py-3">Engine</th>
+            <th class="px-4 py-3">Region</th>
+            <th class="px-4 py-3">Status</th>
+            <th class="px-4 py-3">Endpoint (private)</th>
+            <th class="px-4 py-3">PRA tunnel</th>
+            <th class="px-4 py-3 text-right">Actions</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-100">
+          <template x-for="d in gcpDatabases" :key="d.id">
+            <tr class="hover:bg-gray-50 align-top">
+              <td class="px-4 py-3">
+                <div class="font-medium text-gray-900" x-text="d.engine"></div>
+                <div class="text-xs text-gray-400" x-text="d.provider"></div>
+              </td>
+              <td class="px-4 py-3 text-gray-500" x-text="d.region"></td>
+              <td class="px-4 py-3">
+                <span class="text-[10px] uppercase font-semibold px-1.5 py-0.5 rounded" :class="statusBadge(d.status)" x-text="d.status"></span>
+              </td>
+              <td class="px-4 py-3 text-xs text-gray-700 font-mono">
+                <span x-show="d.private_host" x-text="d.private_host + (d.port ? ':' + d.port : '')"></span>
+                <span x-show="!d.private_host" class="text-gray-300">(pending)</span>
+              </td>
+              <td class="px-4 py-3 text-xs">
+                <span x-show="d.jump_item_id" class="text-emerald-700" title="PRA tunnel brokered">brokered</span>
+                <span x-show="!d.jump_item_id" class="text-gray-400">none</span>
+              </td>
+              <td class="px-4 py-3 text-right whitespace-nowrap">
+                <button @click="showConnection(d)" class="text-xs px-2 py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded font-medium">Connection</button>
+                <button @click="decommission(d)" x-show="d.status !== 'decommissioned' && d.status !== 'decommissioning'"
+                        class="text-xs px-2 py-1 text-red-600 hover:underline ml-1">Decommission</button>
+              </td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
     </div>
-  </template>
+  </div>
+
+  <!-- Azure tab (coming soon) -->
+  <div x-show="activeTab === 'azure'" x-cloak class="bg-white rounded-xl border border-gray-200 p-10 text-center text-sm text-gray-400">
+    <span class="uppercase font-semibold">Azure</span> managed databases are coming soon.
+    Today the dashboard provisions <strong>PostgreSQL on AWS and GCP</strong>; Azure (and MySQL / SQL Server) land with the per-engine, per-cloud fan-out.
+  </div>
 
   <!-- Provision modal -->
   <div x-show="showForm" x-cloak
@@ -101,7 +148,7 @@
        @click.self="showForm = false">
     <div class="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
       <div class="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
-        <h3 class="text-lg font-semibold">Provision database — AWS</h3>
+        <h3 class="text-lg font-semibold">Provision database — <span x-text="(form.cloud || 'aws').toUpperCase()"></span></h3>
         <button @click="showForm = false" class="text-gray-400 hover:text-gray-600 text-xl">&times;</button>
       </div>
       <div class="px-6 py-5 space-y-4">
@@ -124,7 +171,7 @@
           <input type="text" x-model="form.name" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="app-db">
         </div>
         <div x-show="loadingOptions" x-cloak class="text-center text-gray-400 text-sm py-1">
-          Loading AWS options…
+          Loading <span x-text="(form.cloud || 'aws').toUpperCase()"></span> options…
         </div>
         <div x-show="optionsError" x-cloak
              class="bg-red-50 border border-red-200 rounded-lg px-3 py-2 text-sm text-red-700"
@@ -134,7 +181,8 @@
             <label class="block text-sm font-medium text-gray-700 mb-1">Admin username</label>
             <input type="text" x-model="form.master_username" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="dbadmin">
           </div>
-          <div>
+          <!-- AWS instance class -->
+          <div x-show="form.cloud === 'aws'">
             <label class="block text-sm font-medium text-gray-700 mb-1">Instance class</label>
             <select x-model="form.instance_class" :disabled="loadingOptions"
                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500">
@@ -143,8 +191,19 @@
               </template>
             </select>
           </div>
+          <!-- GCP Cloud SQL tier -->
+          <div x-show="form.cloud === 'gcp'" x-cloak>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Machine tier</label>
+            <select x-model="form.tier" :disabled="loadingOptions"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500">
+              <template x-for="c in options.instance_classes || []" :key="c">
+                <option :value="c" x-text="c"></option>
+              </template>
+            </select>
+          </div>
         </div>
-        <div class="grid grid-cols-2 gap-3">
+        <!-- AWS: storage + DB subnet group -->
+        <div class="grid grid-cols-2 gap-3" x-show="form.cloud === 'aws'">
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">Storage (GB)</label>
             <input type="number" min="20" x-model.number="form.allocated_storage" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" placeholder="20">
@@ -164,7 +223,8 @@
             </p>
           </div>
         </div>
-        <div>
+        <!-- AWS: VPC security groups -->
+        <div x-show="form.cloud === 'aws'">
           <label class="block text-sm font-medium text-gray-700 mb-1">VPC security groups</label>
           <div class="border border-gray-300 rounded-lg max-h-36 overflow-y-auto p-2 space-y-1">
             <p x-show="(options.security_groups || []).length === 0"
@@ -181,6 +241,18 @@
           </div>
           <p x-show="form.vpc_security_group_ids.length === 0"
              class="text-xs text-gray-400 mt-1">None selected — the VPC default security group will be attached.</p>
+        </div>
+        <!-- GCP: storage + private network -->
+        <div class="grid grid-cols-2 gap-3" x-show="form.cloud === 'gcp'" x-cloak>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Disk size (GB)</label>
+            <input type="number" min="10" x-model.number="form.disk_size" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" placeholder="20">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Private network <span class="text-gray-400">(optional)</span></label>
+            <input type="text" x-model="form.private_network" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="(gcp_db_network default)">
+            <p class="text-xs text-gray-400 mt-1">VPC the private IP lands on. Blank uses the configured <code>gcp_db_network</code>.</p>
+          </div>
         </div>
         <div x-show="(options.vault_account_groups || []).length > 0" x-cloak>
           <label class="block text-sm font-medium text-gray-700 mb-1">PRA Vault account group</label>
@@ -268,13 +340,15 @@ function databasesPage() {
     databases: [], loading: true, activeTab: 'aws',
     toast: '', toastType: 'success',
     showForm: false, saving: false, conn: null,
-    options: { region: '', instance_classes: [], db_subnet_groups: [], security_groups: [], vault_account_groups: [] },
+    options: { cloud: '', region: '', instance_classes: [], db_subnet_groups: [], security_groups: [], vault_account_groups: [] },
     loadingOptions: false, optionsError: '',
-    form: { engine: 'postgres', region: '', name: '', master_username: 'dbadmin',
+    form: { engine: 'postgres', cloud: 'aws', region: '', name: '', master_username: 'dbadmin',
             instance_class: 'db.t3.micro', allocated_storage: null, db_subnet_group_name: '', vpc_security_group_ids: [], vault_account_group_id: null,
+            tier: 'db-f1-micro', disk_size: null, private_network: '',
             jump_group: '', jumpoint_name: '', praCredBackend: '', pra_credential_ref: '' },
 
     get awsDatabases() { return this.databases.filter(d => d.cloud === 'aws'); },
+    get gcpDatabases() { return this.databases.filter(d => d.cloud === 'gcp'); },
 
     _pollTimer: null,
 
@@ -308,8 +382,12 @@ function databasesPage() {
     },
 
     openProvision() {
-      this.form = { engine: 'postgres', region: this.options.region || '', name: '', master_username: 'dbadmin',
-                    instance_class: 'db.t3.micro', allocated_storage: null, db_subnet_group_name: '', vpc_security_group_ids: [], vault_account_group_id: null };
+      const cloud = (this.activeTab === 'gcp') ? 'gcp' : 'aws';
+      this.form = { engine: 'postgres', cloud, region: '', name: '', master_username: 'dbadmin',
+                    instance_class: 'db.t3.micro', allocated_storage: null, db_subnet_group_name: '', vpc_security_group_ids: [], vault_account_group_id: null,
+                    tier: 'db-f1-micro', disk_size: null, private_network: '',
+                    jump_group: '', jumpoint_name: '', praCredBackend: '', pra_credential_ref: '' };
+      this.options = { cloud: '', region: '', instance_classes: [], db_subnet_groups: [], security_groups: [], vault_account_groups: [] };
       this.optionsError = '';
       this.showForm = true;
       this.loadOptions();   // fire-and-forget — the modal opens immediately, EC2-style
@@ -317,20 +395,24 @@ function databasesPage() {
 
     async loadOptions(region) {
       // Client-side skip (mirrors the EC2 deploy modal): refetch only when
-      // nothing is loaded yet or the requested region differs.
+      // nothing is loaded for this cloud yet or the requested region differs.
       const want = (region || '').trim();
-      if (this.options.instance_classes.length && (!want || want === this.options.region)) return;
+      if (this.options.instance_classes.length && this.options.cloud === this.form.cloud
+          && (!want || want === this.options.region)) return;
       this.loadingOptions = true; this.optionsError = '';
       try {
-        const o = await API.get('/api/databases/options' + (want ? `?region=${encodeURIComponent(want)}` : ''));
+        const qs = new URLSearchParams({ cloud: this.form.cloud });
+        if (want) qs.set('region', want);
+        const o = await API.get('/api/databases/options?' + qs.toString());
         if (!o) return;   // 401 → API helper redirected to login
+        o.cloud = this.form.cloud;
         this.options = o;
         if (!this.form.region) this.form.region = o.region;
-        // Typical sandbox: exactly one DB subnet group — preselect it.
+        // Typical AWS sandbox: exactly one DB subnet group — preselect it.
         const groups = o.db_subnet_groups || [];
         if (groups.length === 1 && !this.form.db_subnet_group_name) this.form.db_subnet_group_name = groups[0].name;
       } catch (e) {
-        this.optionsError = 'Failed to load AWS options: ' + (e.message || e);
+        this.optionsError = `Failed to load ${this.form.cloud.toUpperCase()} options: ` + (e.message || e);
       } finally {
         this.loadingOptions = false;
       }
@@ -339,8 +421,10 @@ function databasesPage() {
     onRegionChange() {
       const r = (this.form.region || '').trim();
       if (!r || r === this.options.region) return;
-      this.form.db_subnet_group_name = '';   // region-scoped — clear on switch
-      this.form.vpc_security_group_ids = [];
+      if (this.form.cloud === 'aws') {
+        this.form.db_subnet_group_name = '';   // region-scoped — clear on switch
+        this.form.vpc_security_group_ids = [];
+      }
       this.loadOptions(r);
     },
 
@@ -356,13 +440,19 @@ function databasesPage() {
       this.saving = true;
       try {
         const body = {
-          engine: this.form.engine, cloud: 'aws', region: this.form.region, name: this.form.name,
+          engine: this.form.engine, cloud: this.form.cloud, region: this.form.region, name: this.form.name,
           master_username: this.form.master_username || 'dbadmin',
         };
-        if (this.form.instance_class) body.instance_class = this.form.instance_class;
-        if (this.form.allocated_storage) body.allocated_storage = this.form.allocated_storage;
-        if (this.form.db_subnet_group_name) body.db_subnet_group_name = this.form.db_subnet_group_name;
-        if (this.form.vpc_security_group_ids.length) body.vpc_security_group_ids = this.form.vpc_security_group_ids;
+        if (this.form.cloud === 'gcp') {
+          if (this.form.tier) body.tier = this.form.tier;
+          if (this.form.disk_size) body.disk_size = this.form.disk_size;
+          if (this.form.private_network) body.private_network = this.form.private_network;
+        } else {
+          if (this.form.instance_class) body.instance_class = this.form.instance_class;
+          if (this.form.allocated_storage) body.allocated_storage = this.form.allocated_storage;
+          if (this.form.db_subnet_group_name) body.db_subnet_group_name = this.form.db_subnet_group_name;
+          if (this.form.vpc_security_group_ids.length) body.vpc_security_group_ids = this.form.vpc_security_group_ids;
+        }
         if (this.form.vault_account_group_id) body.vault_account_group_id = this.form.vault_account_group_id;
         if (this.form.jump_group) body.jump_group = this.form.jump_group;
         if (this.form.jumpoint_name) body.jumpoint_name = this.form.jumpoint_name;
