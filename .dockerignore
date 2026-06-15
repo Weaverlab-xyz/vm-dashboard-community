@@ -16,9 +16,13 @@
 .git/
 
 # Terraform (not needed inside the container) — except the static cloud-database
-# modules, which cloud_database_service drives with `terraform apply`.
+# modules, which cloud_database_service drives with `terraform apply`. Each
+# module the Dockerfile COPYs must be re-included here, or the COPY resolves to
+# an empty source and the build fails.
 terraform/*
 !terraform/db_postgres
+!terraform/db_azure_postgres
+!terraform/db_gcp_postgres
 *.tfstate
 *.tfstate.*
 *.tfvars
