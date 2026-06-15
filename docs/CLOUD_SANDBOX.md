@@ -257,10 +257,20 @@ Firewall rules:
     egress, all protos, target-tag dashboard-sandbox-vm, dest 0.0.0.0/0
   dashboard-sandbox-allow-vm-egress-vpc
     egress, all protos, target-tag dashboard-sandbox-vm, dest 10.99.0.0/16
+  dashboard-sandbox-allow-db-from-jumpoint              [managed databases]
+    egress tcp/5432, target-tag bt-jumpoint, dest = PSA range
+
+Private Services Access (managed databases):
+  dashboard-sandbox-psa-range  (/20 VPC_PEERING address)
+  servicenetworking peering on the VPC → Cloud SQL private IP path.
+  The instance is private-IP-only; its IP lands in the peered range
+  (outside 10.99.0.0/16), so deny-vm-egress already blocks user VMs —
+  only the jumpoint reaches it (GCP analog of the AWS private DB subnets).
 
 Service account dashboard-sandbox-sa@<project>.iam.gserviceaccount.com
   Roles: compute.admin, secretmanager.secretAccessor,
-         iam.serviceAccountUser, run.admin
+         iam.serviceAccountUser, run.admin, cloudsql.admin,
+         servicenetworking.networksAdmin
   Key cached at ~/.dashboard-sandbox/gcp/sa-key.json (mode 600)
 
 Secret Manager:
@@ -293,6 +303,9 @@ gcp_jumpoint_image=beyondtrust/sra-jumpoint:latest
 gcp_jumpoint_machine_type=e2-micro
 gcp_default_network_tag=dashboard-sandbox-vm
 gcp_service_account_json=$(cat …/sa-key.json | jq -c .)
+
+# Managed databases (Cloud SQL private IP via the PRA tunnel):
+gcp_db_network=projects/my-lab-project/global/networks/dashboard-sandbox-vpc
 
 # BeyondTrust deploy key — set in /setup or /secrets:
 gcp_cloud_run_docker_deploy_key=…
