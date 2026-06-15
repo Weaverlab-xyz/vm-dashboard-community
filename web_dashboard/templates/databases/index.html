@@ -12,7 +12,7 @@
 
   <div class="flex items-center justify-between mb-1">
     <h1 class="text-2xl font-bold text-gray-800">Cloud Databases</h1>
-    <button @click="openProvision()" x-show="activeTab === 'aws' || activeTab === 'gcp'"
+    <button @click="openProvision()" x-show="activeTab === 'aws' || activeTab === 'gcp' || activeTab === 'azure'"
             class="bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-3 py-1.5 rounded-lg">
       Provision database
     </button>
@@ -20,7 +20,7 @@
   <p class="text-sm text-gray-500 mb-6">
     Managed databases are provisioned <strong>private</strong> (no public endpoint) and
     reached only through a BeyondTrust PRA protocol-tunnel jump. <strong>PostgreSQL on
-    AWS and GCP</strong> is live; Azure and the other engines are coming in a later phase.
+    AWS, GCP, and Azure</strong> is live; MySQL and SQL Server are coming in a later phase.
   </p>
 
   <!-- Toast -->
@@ -136,10 +136,53 @@
     </div>
   </div>
 
-  <!-- Azure tab (coming soon) -->
-  <div x-show="activeTab === 'azure'" x-cloak class="bg-white rounded-xl border border-gray-200 p-10 text-center text-sm text-gray-400">
-    <span class="uppercase font-semibold">Azure</span> managed databases are coming soon.
-    Today the dashboard provisions <strong>PostgreSQL on AWS and GCP</strong>; Azure (and MySQL / SQL Server) land with the per-engine, per-cloud fan-out.
+  <!-- Azure tab (live) -->
+  <div x-show="activeTab === 'azure'" x-cloak>
+    <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+      <div x-show="loading" x-cloak class="p-6 text-center text-sm text-gray-400">Loading…</div>
+      <div x-show="!loading && azureDatabases.length === 0" x-cloak class="p-10 text-center text-sm text-gray-400">
+        No Azure databases yet. Click <strong>Provision database</strong> to create a private PostgreSQL Flexible Server.
+      </div>
+      <table x-show="!loading && azureDatabases.length > 0" x-cloak class="min-w-full text-sm">
+        <thead>
+          <tr class="text-left text-xs uppercase text-gray-500 bg-gray-50 border-b border-gray-200">
+            <th class="px-4 py-3">Engine</th>
+            <th class="px-4 py-3">Region</th>
+            <th class="px-4 py-3">Status</th>
+            <th class="px-4 py-3">Endpoint (private)</th>
+            <th class="px-4 py-3">PRA tunnel</th>
+            <th class="px-4 py-3 text-right">Actions</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-100">
+          <template x-for="d in azureDatabases" :key="d.id">
+            <tr class="hover:bg-gray-50 align-top">
+              <td class="px-4 py-3">
+                <div class="font-medium text-gray-900" x-text="d.engine"></div>
+                <div class="text-xs text-gray-400" x-text="d.provider"></div>
+              </td>
+              <td class="px-4 py-3 text-gray-500" x-text="d.region"></td>
+              <td class="px-4 py-3">
+                <span class="text-[10px] uppercase font-semibold px-1.5 py-0.5 rounded" :class="statusBadge(d.status)" x-text="d.status"></span>
+              </td>
+              <td class="px-4 py-3 text-xs text-gray-700 font-mono">
+                <span x-show="d.private_host" x-text="d.private_host + (d.port ? ':' + d.port : '')"></span>
+                <span x-show="!d.private_host" class="text-gray-300">(pending)</span>
+              </td>
+              <td class="px-4 py-3 text-xs">
+                <span x-show="d.jump_item_id" class="text-emerald-700" title="PRA tunnel brokered">brokered</span>
+                <span x-show="!d.jump_item_id" class="text-gray-400">none</span>
+              </td>
+              <td class="px-4 py-3 text-right whitespace-nowrap">
+                <button @click="showConnection(d)" class="text-xs px-2 py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded font-medium">Connection</button>
+                <button @click="decommission(d)" x-show="d.status !== 'decommissioned' && d.status !== 'decommissioning'"
+                        class="text-xs px-2 py-1 text-red-600 hover:underline ml-1">Decommission</button>
+              </td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </div>
   </div>
 
   <!-- Provision modal -->
@@ -201,6 +244,16 @@
               </template>
             </select>
           </div>
+          <!-- Azure Flexible Server SKU -->
+          <div x-show="form.cloud === 'azure'" x-cloak>
+            <label class="block text-sm font-medium text-gray-700 mb-1">SKU</label>
+            <select x-model="form.sku_name" :disabled="loadingOptions"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500">
+              <template x-for="c in options.instance_classes || []" :key="c">
+                <option :value="c" x-text="c"></option>
+              </template>
+            </select>
+          </div>
         </div>
         <!-- AWS: storage + DB subnet group -->
         <div class="grid grid-cols-2 gap-3" x-show="form.cloud === 'aws'">
@@ -252,6 +305,17 @@
             <label class="block text-sm font-medium text-gray-700 mb-1">Private network <span class="text-gray-400">(optional)</span></label>
             <input type="text" x-model="form.private_network" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="(gcp_db_network default)">
             <p class="text-xs text-gray-400 mt-1">VPC the private IP lands on. Blank uses the configured <code>gcp_db_network</code>.</p>
+          </div>
+        </div>
+        <!-- Azure: storage -->
+        <div class="grid grid-cols-2 gap-3" x-show="form.cloud === 'azure'" x-cloak>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Storage (GB)</label>
+            <input type="number" min="32" step="32" x-model.number="form.storage_gb" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" placeholder="32">
+            <p class="text-xs text-gray-400 mt-1">Minimum 32&nbsp;GB.</p>
+          </div>
+          <div class="flex items-end">
+            <p class="text-xs text-gray-400 pb-2">The delegated subnet + private DNS zone come from the configured <code>azure_db_*</code> sandbox settings.</p>
           </div>
         </div>
         <div x-show="(options.vault_account_groups || []).length > 0" x-cloak>
@@ -345,10 +409,12 @@ function databasesPage() {
     form: { engine: 'postgres', cloud: 'aws', region: '', name: '', master_username: 'dbadmin',
             instance_class: 'db.t3.micro', allocated_storage: null, db_subnet_group_name: '', vpc_security_group_ids: [], vault_account_group_id: null,
             tier: 'db-f1-micro', disk_size: null, private_network: '',
+            sku_name: 'B_Standard_B1ms', storage_gb: 32,
             jump_group: '', jumpoint_name: '', praCredBackend: '', pra_credential_ref: '' },
 
     get awsDatabases() { return this.databases.filter(d => d.cloud === 'aws'); },
     get gcpDatabases() { return this.databases.filter(d => d.cloud === 'gcp'); },
+    get azureDatabases() { return this.databases.filter(d => d.cloud === 'azure'); },
 
     _pollTimer: null,
 
@@ -382,10 +448,11 @@ function databasesPage() {
     },
 
     openProvision() {
-      const cloud = (this.activeTab === 'gcp') ? 'gcp' : 'aws';
+      const cloud = ['gcp', 'azure'].includes(this.activeTab) ? this.activeTab : 'aws';
       this.form = { engine: 'postgres', cloud, region: '', name: '', master_username: 'dbadmin',
                     instance_class: 'db.t3.micro', allocated_storage: null, db_subnet_group_name: '', vpc_security_group_ids: [], vault_account_group_id: null,
                     tier: 'db-f1-micro', disk_size: null, private_network: '',
+                    sku_name: 'B_Standard_B1ms', storage_gb: 32,
                     jump_group: '', jumpoint_name: '', praCredBackend: '', pra_credential_ref: '' };
       this.options = { cloud: '', region: '', instance_classes: [], db_subnet_groups: [], security_groups: [], vault_account_groups: [] };
       this.optionsError = '';
@@ -447,6 +514,9 @@ function databasesPage() {
           if (this.form.tier) body.tier = this.form.tier;
           if (this.form.disk_size) body.disk_size = this.form.disk_size;
           if (this.form.private_network) body.private_network = this.form.private_network;
+        } else if (this.form.cloud === 'azure') {
+          if (this.form.sku_name) body.sku_name = this.form.sku_name;
+          if (this.form.storage_gb) body.storage_mb = this.form.storage_gb * 1024;
         } else {
           if (this.form.instance_class) body.instance_class = this.form.instance_class;
           if (this.form.allocated_storage) body.allocated_storage = this.form.allocated_storage;
