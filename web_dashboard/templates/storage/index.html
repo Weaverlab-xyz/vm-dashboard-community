@@ -594,7 +594,24 @@ function storagePage() {
         this.showToast('Saved.');
         await Promise.all([this.loadBackends(), this.loadAssets()]);
       } catch (e) {
-        this.showToast(e.message || 'Save failed', 'error');
+        const msg = e.message || 'Save failed';
+        // Backend swap blocked because live Terraform state lives in the current
+        // backend — offer to migrate it first (the API keeps the source as backup).
+        if (/Terraform state/i.test(msg) && /migrate_terraform_state=true/.test(msg)) {
+          if (confirm(msg + '\n\nMigrate the Terraform state to the new backend now? The current copy is kept as a backup.')) {
+            try {
+              const r = await API.patch('/api/storage/config', { ...this.cfg, migrate_terraform_state: true });
+              this.showToast(`Saved. Migrated ${(r && r.terraform_state_migrated) || 0} Terraform state object(s).`);
+              await Promise.all([this.loadBackends(), this.loadAssets()]);
+            } catch (e2) {
+              this.showToast(e2.message || 'State migration failed', 'error');
+            }
+          } else {
+            this.showToast('Backend switch cancelled — Terraform state not migrated.', 'error');
+          }
+        } else {
+          this.showToast(msg, 'error');
+        }
       } finally {
         this.saving = false;
       }

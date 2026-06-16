@@ -169,6 +169,10 @@ class StorageConfigPatch(BaseModel):
     storage_local_username: str | None = None
     storage_local_password: str | None = None
     storage_local_domain:   str | None = None
+    # Control flag (NOT persisted): when switching storage_active_backend while
+    # live Terraform state exists in the current backend, set this true to copy
+    # the state to the new backend first instead of being blocked.
+    migrate_terraform_state: bool = False
     # Promote-runner overrides — operators only set these when overriding the
     # public image or pinning the ECS task to specific network plumbing.
     promote_runner_image:                  str | None = None
@@ -212,6 +216,8 @@ async def patch_config(
     """Partial update — only fields explicitly supplied (non-None) are written.
     Validates that the active backend (if changed) is configured before flipping."""
     raw = payload.model_dump(exclude_unset=True, exclude_none=True)
+    # migrate_terraform_state is a control flag, never a stored config key.
+    do_migrate_state = bool(raw.pop("migrate_terraform_state", False))
     if "storage_active_backend" in raw:
         chosen = raw["storage_active_backend"]
         if chosen and chosen not in BACKENDS:
@@ -277,8 +283,39 @@ async def patch_config(
                             f"'{k}'. Configure that backend before pointing the hub at it."
                         ),
                     )
+    # ── Terraform state migration guard ──────────────────────────────────────
+    # Don't let the active storage backend change out from under live Terraform
+    # state (it would strand it — the new backend has no state, so destroy can't
+    # run). Block the swap, or migrate the state first when explicitly asked.
+    migrated_state = 0
+    if "storage_active_backend" in raw:
+        chosen = raw["storage_active_backend"]
+        current = storage_service.active_backend()
+        if chosen and current and chosen != current:
+            if await storage_service.has_terraform_state(current):
+                if not do_migrate_state:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            f"Live Terraform state exists in '{current}'. Switching the "
+                            f"active backend to '{chosen}' would strand it. Re-send with "
+                            f"migrate_terraform_state=true to copy the state to '{chosen}' "
+                            f"first (the '{current}' copy is kept as a backup)."
+                        ),
+                    )
+                try:
+                    migrated_state = await storage_service.migrate_terraform_state(current, chosen)
+                except StorageError as e:
+                    raise HTTPException(
+                        status_code=502,
+                        detail=f"Terraform state migration {current}→{chosen} failed: {e}. "
+                               f"Active backend NOT changed.",
+                    )
+                logger.info("Migrated %d Terraform state object(s) %s→%s before backend swap",
+                            migrated_state, current, chosen)
+
     _cfg_set_many(raw)
-    return {"ok": True, "updated": list(raw.keys())}
+    return {"ok": True, "updated": list(raw.keys()), "terraform_state_migrated": migrated_state}
 
 
 # ── POST /api/storage/test ────────────────────────────────────────────────────
