@@ -163,16 +163,22 @@ def _apply_sync(deploy_dir: str, var_args: list, env: Optional[dict] = None) -> 
     if r.returncode != 0:
         raise TerraformError(f"terraform apply failed:\n{r.stderr}\n{r.stdout}")
 
-    # Parse outputs
-    out_r = _run(["output", "-json"], deploy_dir, timeout=30)
+    # Parse outputs. Pass env here too: `terraform output` re-instantiates the
+    # providers, and azurerm rebuilds its ARM config at that point — without the
+    # ARM_* Service Principal vars it falls back to the `az` CLI (absent in the
+    # container) and fails. (AWS/GCP don't authenticate on output, so this only
+    # bit Azure.)
+    out_r = _run(["output", "-json"], deploy_dir, timeout=30, env=env)
     if out_r.returncode != 0:
         raise TerraformError(f"terraform output failed:\n{out_r.stderr}")
     raw = json.loads(out_r.stdout)
     return {k: v["value"] for k, v in raw.items()}
 
 
-def _destroy_sync(deploy_dir: str, env: Optional[dict] = None) -> None:
-    r = _run(["destroy", "-auto-approve", "-no-color", "-input=false"], deploy_dir, timeout=600, env=env)
+def _destroy_sync(deploy_dir: str, env: Optional[dict] = None,
+                  var_args: Optional[list] = None) -> None:
+    cmd = ["destroy", "-auto-approve", "-no-color", "-input=false"] + (var_args or [])
+    r = _run(cmd, deploy_dir, timeout=600, env=env)
     if r.returncode != 0:
         raise TerraformError(f"terraform destroy failed:\n{r.stderr}\n{r.stdout}")
 
@@ -233,16 +239,25 @@ async def apply(deploy_dir: str, variables: dict, template_dir: Optional[str] = 
 
 
 async def destroy(deploy_dir: str, env: Optional[dict] = None,
-                  template_dir: Optional[str] = None) -> None:
+                  template_dir: Optional[str] = None,
+                  variables: Optional[dict] = None) -> None:
     """
     Run terraform destroy for a deployment. State lives in the user's active
     storage backend (remote), so destroy works even if the local deploy dir was
     lost to a container recreate: pass ``template_dir`` and the module is rebuilt
     from it, the remote backend re-init pulls the state, and destroy proceeds.
     ``env`` carries provider credentials, same as :func:`apply`.
+
+    ``variables`` must be the same -var set apply used: ``terraform destroy``
+    evaluates the module config and errors on any required variable that isn't
+    set ("No value for required variable"). The values don't change *what* is
+    destroyed (resources come from state), but provider-config vars (e.g. the
+    google provider's project/region) must be correct, so callers reconstruct
+    the full set rather than passing placeholders.
     """
     backend_type, backend_config, backend_env = _backend_settings(deploy_dir)
     merged_env = {**backend_env, **(env or {})}
+    var_args = _build_var_args(variables) if variables else []
 
     # Rebuild the module if the deploy dir was lost (only possible with a remote
     # backend — a local backend's state lived in that dir and is gone with it).
@@ -258,4 +273,4 @@ async def destroy(deploy_dir: str, env: Optional[dict] = None,
             )
 
     await asyncio.to_thread(_init_sync, deploy_dir, merged_env, backend_type, backend_config)
-    await asyncio.to_thread(_destroy_sync, deploy_dir, merged_env)
+    await asyncio.to_thread(_destroy_sync, deploy_dir, merged_env, var_args)

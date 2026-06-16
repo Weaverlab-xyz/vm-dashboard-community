@@ -97,6 +97,13 @@ resource "azurerm_postgresql_flexible_server" "this" {
   delegated_subnet_id    = var.delegated_subnet_id
   private_dns_zone_id    = var.private_dns_zone_id
 
+  # VNet integration (delegated_subnet_id) is mutually exclusive with public
+  # network access: Azure rejects the create with
+  # ConflictingPublicNetworkAccessAndVirtualNetworkConfiguration otherwise. The
+  # provider defaults this to true, so the private (VNet-integrated) server this
+  # module always builds must set it false explicitly.
+  public_network_access_enabled = false
+
   tags = var.tags
 }
 
