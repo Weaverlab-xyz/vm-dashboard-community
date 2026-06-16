@@ -99,6 +99,30 @@ function Invoke-AwsRollback {
             if ($LASTEXITCODE -eq 0) { Write-Ok "Deleted RT $rt" } else { Write-Warn "Could not delete RT $rt" }
         }
 
+        # NAT gateway + its Elastic IP (the k8s node-egress NAT). The NAT must be
+        # deleted BEFORE the subnets (it holds an ENI in the public subnet), and the
+        # EIP released or it keeps billing while unattached.
+        $nats = (aws ec2 describe-nat-gateways --region $region `
+            --filter "Name=vpc-id,Values=$vpcId" $filter `
+            --query "NatGateways[?State=='available' || State=='pending'].NatGatewayId" --output text 2>$null).Trim()
+        foreach ($nat in $nats.Split()) {
+            if (-not $nat -or $nat -eq 'None') { continue }
+            & aws ec2 delete-nat-gateway --region $region --nat-gateway-id $nat *> $null
+            if ($LASTEXITCODE -eq 0) { Write-Ok "Deleting NAT gateway $nat (waiting for it to drain…)" }
+            else { Write-Warn "Could not delete NAT $nat" }
+            & aws ec2 wait nat-gateway-deleted --region $region --nat-gateway-ids $nat *> $null
+            if ($LASTEXITCODE -ne 0) { Write-Warn "NAT $nat still deleting — if subnet teardown fails, re-run rollback shortly" }
+        }
+        # Release sandbox-tagged Elastic IPs (detached once the NAT is gone).
+        $eips = (aws ec2 describe-addresses --region $region --filters $filter `
+            --query 'Addresses[].AllocationId' --output text 2>$null).Trim()
+        foreach ($eip in $eips.Split()) {
+            if (-not $eip -or $eip -eq 'None') { continue }
+            & aws ec2 release-address --region $region --allocation-id $eip *> $null
+            if ($LASTEXITCODE -eq 0) { Write-Ok "Released Elastic IP $eip" }
+            else { Write-Warn "Could not release EIP $eip (may still be attached)" }
+        }
+
         # Subnets.
         $subnets = (aws ec2 describe-subnets --region $region --filters $filter `
             --query 'Subnets[].SubnetId' --output text).Trim()

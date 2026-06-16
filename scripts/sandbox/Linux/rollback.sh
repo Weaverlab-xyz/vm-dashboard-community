@@ -115,6 +115,30 @@ rollback_aws() {
         && ok "Deleted RT $rt" || warn "Could not delete RT $rt"
     done
 
+    # 2c-nat. NAT gateway + its Elastic IP (the k8s node-egress NAT). The NAT must
+    # be deleted BEFORE the subnets (it holds an ENI in the public subnet), and the
+    # EIP released or it keeps billing while unattached.
+    local nats
+    nats="$(aws ec2 describe-nat-gateways --region "$region" \
+      --filter "Name=vpc-id,Values=$vpc_id" "$filter" \
+      --query "NatGateways[?State=='available' || State=='pending'].NatGatewayId" --output text 2>/dev/null || true)"
+    for nat in $nats; do
+      [[ -z "$nat" || "$nat" == "None" ]] && continue
+      aws ec2 delete-nat-gateway --region "$region" --nat-gateway-id "$nat" >/dev/null 2>&1 \
+        && ok "Deleting NAT gateway $nat (waiting for it to drain…)" || warn "Could not delete NAT $nat"
+      aws ec2 wait nat-gateway-deleted --region "$region" --nat-gateway-ids "$nat" 2>/dev/null \
+        || warn "NAT $nat still deleting — if subnet teardown fails, re-run rollback shortly"
+    done
+    # Release sandbox-tagged Elastic IPs (detached once the NAT is gone).
+    local eips
+    eips="$(aws ec2 describe-addresses --region "$region" --filters "$filter" \
+      --query 'Addresses[].AllocationId' --output text 2>/dev/null || true)"
+    for eip in $eips; do
+      [[ -z "$eip" || "$eip" == "None" ]] && continue
+      aws ec2 release-address --region "$region" --allocation-id "$eip" >/dev/null 2>&1 \
+        && ok "Released Elastic IP $eip" || warn "Could not release EIP $eip (may still be attached)"
+    done
+
     # 2d. Subnets.
     local subnets
     subnets="$(aws ec2 describe-subnets --region "$region" --filters "$filter" \

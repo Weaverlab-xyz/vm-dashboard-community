@@ -281,9 +281,10 @@ def _assemble_eks_kubeconfig(*, cluster_name: str, endpoint: str, ca_b64: str,
                              region: str) -> str:
     """An exec-based kubeconfig for an EKS cluster: API server + inline CA + an
     ``aws eks get-token`` exec block. The CA is inline so the PRA tunnel's
-    ``_parse_ca_cert`` works; auth is via the exec plugin, which needs the ``aws``
-    CLI + AWS creds wherever the kubeconfig is *used* (see the §1.1a follow-on:
-    the transient kubectl/helm runner is not yet EKS-aware)."""
+    ``_parse_ca_cert`` works; auth is via the exec plugin. The transient
+    kubectl/helm runner can't run the ``aws`` plugin, so ``_runner_kubeconfig``
+    swaps in a server-minted bearer token (``aws_service.eks_get_token``) for
+    runner use."""
     cfg = {
         "apiVersion": "v1",
         "kind": "Config",
@@ -481,12 +482,55 @@ def _run_sync(cmd: list) -> str:
     return proc.stdout
 
 
+def _runner_kubeconfig(kubeconfig: str) -> str:
+    """Prepare a kubeconfig for a transient kubectl/helm runner. A provisioned EKS
+    cluster's kubeconfig authenticates with an ``aws eks get-token`` **exec** block
+    (see :func:`_assemble_eks_kubeconfig`), but the throwaway container has no
+    ``aws`` CLI or AWS creds — so for that case mint a short-lived bearer token
+    server-side (``aws_service.eks_get_token``) and swap the exec block for a static
+    ``token``. Any other kubeconfig (registered clusters using token / client-cert /
+    non-aws exec auth) is returned **unchanged**. Best-effort: on any parse/mint
+    error, return the original so non-EKS paths are unaffected."""
+    try:
+        cfg = yaml.safe_load(kubeconfig) or {}
+        users = cfg.get("users") or []
+        # The current-context's user (fall back to the only/first user).
+        user_name = None
+        current = cfg.get("current-context")
+        if current:
+            for ctx in cfg.get("contexts", []):
+                if ctx.get("name") == current:
+                    user_name = ctx.get("context", {}).get("user")
+                    break
+        entry = next((u for u in users if u.get("name") == user_name), None) or (users[0] if users else None)
+        if not entry:
+            return kubeconfig
+        exec_blk = (entry.get("user") or {}).get("exec") or {}
+        args = exec_blk.get("args") or []
+        if exec_blk.get("command") != "aws" or "get-token" not in args:
+            return kubeconfig  # not an `aws eks get-token` kubeconfig — leave as-is
+
+        def _arg(flag: str) -> str:
+            return args[args.index(flag) + 1] if (flag in args and args.index(flag) + 1 < len(args)) else ""
+        cluster_name = _arg("--cluster-name")
+        region = _arg("--region")
+        if not cluster_name:
+            return kubeconfig
+        from . import aws_service
+        entry["user"] = {"token": aws_service.eks_get_token(cluster_name, region)}
+        return yaml.safe_dump(cfg, default_flow_style=False, sort_keys=False)
+    except Exception as exc:
+        logger.warning("runner kubeconfig token-prep failed (using exec kubeconfig as-is): %s", exc)
+        return kubeconfig
+
+
 async def _apply_manifest_via_runner(kubeconfig: str, manifest_ref: str) -> str:
     """Apply a manifest into a cluster with a **transient kubectl container**
     (mirrors ansible_local_service's local-docker runner over the mounted
     docker.sock). ``manifest_ref`` is a URL (``kubectl apply -f <url>``) or
     inline YAML. The kubeconfig + manifest live in a tmpdir mounted into the
     one-shot container, which holds cluster-admin only for the apply."""
+    kubeconfig = _runner_kubeconfig(kubeconfig)
     tmpdir = tempfile.mkdtemp(prefix="k8s_apply_")
     try:
         with open(os.path.join(tmpdir, "kubeconfig"), "w") as fh:
@@ -507,6 +551,7 @@ async def _apply_manifest_via_runner(kubeconfig: str, manifest_ref: str) -> str:
 
 async def _delete_manifest_via_runner(kubeconfig: str, manifest: str) -> str:
     """``kubectl delete -f`` an inline manifest (best-effort teardown)."""
+    kubeconfig = _runner_kubeconfig(kubeconfig)
     tmpdir = tempfile.mkdtemp(prefix="k8s_del_")
     try:
         with open(os.path.join(tmpdir, "kubeconfig"), "w") as fh:
@@ -523,6 +568,7 @@ async def _delete_manifest_via_runner(kubeconfig: str, manifest: str) -> str:
 async def _helm_via_runner(kubeconfig: str, helm_args: list, add_eso_repo: bool = True) -> str:
     """Run a helm command against the cluster in a transient helm container
     (KUBECONFIG mounted, same throwaway pattern as the kubectl runner)."""
+    kubeconfig = _runner_kubeconfig(kubeconfig)
     tmpdir = tempfile.mkdtemp(prefix="k8s_helm_")
     try:
         with open(os.path.join(tmpdir, "kubeconfig"), "w") as fh:
