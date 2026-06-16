@@ -156,6 +156,30 @@ associate_rt() {
       --route-table-id "$rt_id" --subnet-id "$subnet_id" >/dev/null
   fi
 }
+
+# Move a subnet onto a route table, REPLACING any existing association (a subnet
+# can have only one). associate_rt above can't do this — associate-route-table
+# errors Resource.AlreadyAssociated when the subnet already belongs to another RT
+# (e.g. an older sandbox put the k8s subnets on the private RT before egress
+# existed). Idempotent: no-op when the subnet is already on the target RT.
+move_subnet_to_rt() {
+  local rt_id="$1" subnet_id="$2"
+  local cur_rt assoc
+  cur_rt="$(aws ec2 describe-route-tables --region "$REGION" \
+    --filters "Name=association.subnet-id,Values=$subnet_id" \
+    --query 'RouteTables[0].RouteTableId' --output text 2>/dev/null || true)"
+  if [[ -z "$cur_rt" || "$cur_rt" == "None" ]]; then
+    aws ec2 associate-route-table --region "$REGION" \
+      --route-table-id "$rt_id" --subnet-id "$subnet_id" >/dev/null
+  elif [[ "$cur_rt" != "$rt_id" ]]; then
+    assoc="$(aws ec2 describe-route-tables --region "$REGION" \
+      --filters "Name=association.subnet-id,Values=$subnet_id" \
+      --query "RouteTables[0].Associations[?SubnetId=='$subnet_id'].RouteTableAssociationId | [0]" \
+      --output text)"
+    aws ec2 replace-route-table-association --region "$REGION" \
+      --association-id "$assoc" --route-table-id "$rt_id" >/dev/null
+  fi
+}
 associate_rt "$PUBLIC_RT_ID"  "$PUBLIC_SUBNET_ID"
 associate_rt "$PRIVATE_RT_ID" "$PRIVATE_SUBNET_ID"
 associate_rt "$PRIVATE_RT_ID" "$DB_SUBNET_A_ID"
@@ -198,8 +222,8 @@ fi
 K8S_RT_ID="$(make_rt "${NAME}-k8s-rt")"
 aws ec2 create-route --region "$REGION" --route-table-id "$K8S_RT_ID" \
   --destination-cidr-block 0.0.0.0/0 --nat-gateway-id "$NAT_GW_ID" >/dev/null 2>&1 || true
-associate_rt "$K8S_RT_ID" "$K8S_SUBNET_A_ID"
-associate_rt "$K8S_RT_ID" "$K8S_SUBNET_B_ID"
+move_subnet_to_rt "$K8S_RT_ID" "$K8S_SUBNET_A_ID"
+move_subnet_to_rt "$K8S_RT_ID" "$K8S_SUBNET_B_ID"
 
 state_write aws nat_gateway_id   "$NAT_GW_ID"
 state_write aws nat_eip_alloc_id "$NAT_EIP_ALLOC_ID"
@@ -767,6 +791,7 @@ DASHBOARD_POLICY_DOC="$(jq -c . <<JSON
         "iam:DetachRolePolicy",
         "iam:ListAttachedRolePolicies",
         "iam:ListRolePolicies",
+        "iam:ListInstanceProfilesForRole",
         "iam:TagRole",
         "iam:UntagRole"
       ],
@@ -780,6 +805,12 @@ DASHBOARD_POLICY_DOC="$(jq -c . <<JSON
       "Condition": {
         "StringLike": {"iam:AWSServiceName": ["eks.amazonaws.com", "eks-nodegroup.amazonaws.com"]}
       }
+    },
+    {
+      "Sid": "DashboardEKSGetRole",
+      "Effect": "Allow",
+      "Action": "iam:GetRole",
+      "Resource": "*"
     }
   ]
 }
