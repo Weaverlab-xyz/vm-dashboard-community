@@ -592,11 +592,26 @@ async def run_decommission(db: Session, *, db_id: str, job_id: str) -> None:
     job_service.update_progress(db, job_id, 60, "Destroying the database instance…")
     if deploy_job:
         try:
+            # terraform destroy still evaluates the module config, so it needs the
+            # same -var set apply used (without it: "No value for required
+            # variable"). The values don't change what's destroyed — resources
+            # come from state — but every declared var must be set and provider
+            # vars (e.g. the google provider's project/region) must be right.
+            # Reconstruct from the row + config; the minted admin password is still
+            # in the config store (deleted only after a clean decommission, below).
+            destroy_vars = _build_tf_variables(
+                engine=row.engine, cloud=row.cloud, region=row.region, db_id=db_id,
+                db_name=_db_name_from(meta.get("name") or "appdb"),
+                master_username="dbadmin",
+                master_password=config_service.get(f"clouddb/{db_id}/admin") or "unused-on-destroy",
+                opts={},
+            )
             # State lives in the active storage backend, so destroy recovers even
             # if the deploy dir was lost to a container recreate — pass template_dir
             # so terraform.destroy rebuilds the module from it + the remote state.
             await terraform.destroy(
-                _deploy_dir(deploy_job.id), env=terraform_provider_env.provider_env(row.cloud),
+                _deploy_dir(deploy_job.id), variables=destroy_vars,
+                env=terraform_provider_env.provider_env(row.cloud),
                 template_dir=template_dir(row.engine, row.cloud),
             )
             logger.info("clouddb instance destroyed db_id=%s cloud=%s", db_id, row.cloud)
