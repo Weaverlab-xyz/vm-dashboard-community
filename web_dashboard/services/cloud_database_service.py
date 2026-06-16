@@ -344,6 +344,16 @@ async def _broker_tunnel(db: Session, *, row: CloudDatabase, job_id: str,
         # Per-DB PRA overrides win over the configured defaults.
         cred_ref = row.pra_credential_ref
         client_secret = config_service.resolve_reference(cred_ref) if cred_ref else ""
+        # The admin credential's variable name differs per cloud (aws/gcp use
+        # master_username/master_password; azure's Flexible Server module uses
+        # administrator_login/administrator_password). Normalize so the Vault
+        # account is minted for every cloud — otherwise on Azure both resolve
+        # empty, want_vault is False, and the tunnel comes up with no credential
+        # to inject (no warning, since the vault account is never attempted).
+        admin_username = (tf_variables.get("master_username")
+                          or tf_variables.get("administrator_login") or "")
+        admin_password = (tf_variables.get("master_password")
+                          or tf_variables.get("administrator_password") or "")
         tun = await pra.provision_db_tunnel(
             engine=engine,
             name=jump_name,
@@ -351,13 +361,13 @@ async def _broker_tunnel(db: Session, *, row: CloudDatabase, job_id: str,
             jump_group_name=row.jump_group or _cfg("bt_jump_group_name"),
             jumpoint_name=row.jumpoint_name or _cfg("bt_jumpoint_name"),
             client_secret=client_secret,
-            username=tf_variables.get("master_username", ""),
+            username=admin_username,
             database=tf_variables.get("db_name", ""),
             tag="clouddb",
             # Vault account for credential injection at tunnel launch; rides in
             # the same workspace/state so decommission destroys it too. The
             # account group makes it visible to users via group policies.
-            admin_password=tf_variables.get("master_password", ""),
+            admin_password=admin_password,
             vault_account_name=f"{jump_name}-admin",
             vault_account_group_id=vault_group_id,
         )
@@ -395,14 +405,20 @@ async def _store_ps_credentials(db: Session, *, row: CloudDatabase, job_id: str,
         return
     name = f"{tf_variables.get('identifier') or f'clouddb-{row.id[:8]}'}-admin"
     stash: dict = {}
+    # Per-cloud credential key normalization (see _broker_tunnel): aws/gcp use
+    # master_*, azure's Flexible Server module uses administrator_*.
+    admin_username = (tf_variables.get("master_username")
+                      or tf_variables.get("administrator_login") or "dbadmin")
+    admin_password = (tf_variables.get("master_password")
+                      or tf_variables.get("administrator_password") or "")
 
     try:
         from . import ps_api_service
         fa_id = await ps_api_service.create_functional_account(
             engine=row.engine,
-            account_name=tf_variables.get("master_username", "dbadmin"),
+            account_name=admin_username,
             display_name=name,
-            password=tf_variables.get("master_password", ""),
+            password=admin_password,
             description=(
                 f"Admin credential for dashboard-provisioned database "
                 f"{tf_variables.get('identifier', '')} (db_id={row.id}); used as the "
@@ -424,8 +440,8 @@ async def _store_ps_credentials(db: Session, *, row: CloudDatabase, job_id: str,
             "host": row.private_host,
             "port": row.port,
             "database": tf_variables.get("db_name", ""),
-            "username": tf_variables.get("master_username", "dbadmin"),
-            "password": tf_variables.get("master_password", ""),
+            "username": admin_username,
+            "password": admin_password,
         })
         ref = await asyncio.to_thread(
             secrets_backend_service.write_bt_secrets_safe, name, secret_doc)

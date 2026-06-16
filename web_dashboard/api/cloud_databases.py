@@ -69,6 +69,10 @@ class DatabaseOptions(BaseModel):
     db_subnet_groups: list[dict]
     security_groups: list[dict]
     vault_account_groups: list[dict] = []
+    # PRA Jump Groups / Jumpoints for the per-DB tunnel pickers (cloud-agnostic —
+    # PRA objects aren't region/cloud-scoped). Empty when PRA isn't configured.
+    jump_groups: list[dict] = []
+    jumpoints: list[dict] = []
     cached_at: Optional[str] = None
 
 
@@ -87,16 +91,39 @@ _AZURE_SKUS = ["B_Standard_B1ms", "B_Standard_B2s",
                "GP_Standard_D2s_v3", "GP_Standard_D4s_v3"]
 
 
-async def _vault_account_groups() -> list:
-    """PRA Vault account groups for the credential-injection picker (best-effort;
-    an empty list just hides the dropdown's options). Cloud-agnostic."""
+async def _pra_pickers() -> dict:
+    """PRA-sourced provision-form pickers — Vault account groups, Jump Groups and
+    Jumpoints — fetched concurrently. Cloud-agnostic (PRA objects aren't
+    region/cloud-scoped). Best-effort: any individual failure yields an empty
+    list for that picker (the dropdown just falls back to the configured default
+    at broker time)."""
+    empty = {"vault_account_groups": [], "jump_groups": [], "jumpoints": []}
     try:
+        import asyncio
         from ..services import pra_api_service
-        if pra_api_service.configured():
-            return await pra_api_service.list_vault_account_groups()
+        if not pra_api_service.configured():
+            return empty
+        vg, jg, jp = await asyncio.gather(
+            pra_api_service.list_vault_account_groups(),
+            pra_api_service.list_jump_groups(),
+            pra_api_service.list_jumpoints(),
+            return_exceptions=True,
+        )
+
+        def _ok(x, what):
+            if isinstance(x, Exception):
+                logger.warning("PRA %s listing failed (non-fatal): %s", what, x)
+                return []
+            return x
+
+        return {
+            "vault_account_groups": _ok(vg, "vault account-group"),
+            "jump_groups": _ok(jg, "jump-group"),
+            "jumpoints": _ok(jp, "jumpoint"),
+        }
     except Exception as exc:
-        logger.warning("vault account-group listing failed (non-fatal): %s", exc)
-    return []
+        logger.warning("PRA pickers fetch failed (non-fatal): %s", exc)
+        return empty
 
 
 def _default_region() -> str:
@@ -193,7 +220,7 @@ async def database_options(
         return DatabaseOptions(
             region=region, instance_classes=_GCP_TIERS,
             db_subnet_groups=[], security_groups=[],
-            vault_account_groups=await _vault_account_groups(), cached_at=None,
+            cached_at=None, **(await _pra_pickers()),
         )
 
     if cloud == "azure":
@@ -203,7 +230,7 @@ async def database_options(
         return DatabaseOptions(
             region=region, instance_classes=_AZURE_SKUS,
             db_subnet_groups=[], security_groups=[],
-            vault_account_groups=await _vault_account_groups(), cached_at=None,
+            cached_at=None, **(await _pra_pickers()),
         )
 
     region = (region or "").strip() or _default_region()
@@ -222,7 +249,7 @@ async def database_options(
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     return DatabaseOptions(
-        **opts, vault_account_groups=await _vault_account_groups(), cached_at=cached_at)
+        **opts, cached_at=cached_at, **(await _pra_pickers()))
 
 
 @router.get("/{db_id}/connection")
