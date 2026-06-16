@@ -640,16 +640,22 @@ async def run_decommission(db: Session, *, db_id: str, job_id: str) -> None:
 
     # 4. The RDS instance itself (the long step).
     job_service.update_progress(db, job_id, 60, "Destroying the database instance…")
-    if deploy_job and os.path.isdir(_deploy_dir(deploy_job.id)):
+    if deploy_job:
         try:
-            await terraform.destroy(_deploy_dir(deploy_job.id), env=_provider_env(row.cloud))
+            # State lives in the active storage backend, so destroy recovers even
+            # if the deploy dir was lost to a container recreate — pass template_dir
+            # so terraform.destroy rebuilds the module from it + the remote state.
+            await terraform.destroy(
+                _deploy_dir(deploy_job.id), env=_provider_env(row.cloud),
+                template_dir=template_dir(row.engine, row.cloud),
+            )
             logger.info("clouddb instance destroyed db_id=%s cloud=%s", db_id, row.cloud)
         except Exception as exc:
-            errors.append(f"RDS destroy: {exc}")
+            errors.append(f"DB destroy: {exc}")
             logger.warning("clouddb destroy for %s failed: %s", db_id, exc)
     else:
-        errors.append("no Terraform state for this database — the RDS instance may "
-                      "need manual termination in AWS (state lost with the container)")
+        errors.append("no provisioning job recorded for this database — the instance "
+                      "may need manual termination in the cloud console")
 
     if errors:
         row.status = "failed"
