@@ -26,8 +26,8 @@ variable "cluster_name" {
 
 variable "k8s_version" {
   type        = string
-  default     = "1.30"
-  description = "Kubernetes minor version for the control plane + node group"
+  default     = "1.31"
+  description = "Kubernetes minor version for the control plane + node group. Keep on a version in EKS standard support (1.30 drops to extended support in 2026); bump the default as EKS adds versions."
 }
 
 variable "subnet_ids" {
