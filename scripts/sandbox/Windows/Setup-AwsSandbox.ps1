@@ -134,6 +134,25 @@ function _AssociateRT {
         aws ec2 associate-route-table --region $Region --route-table-id $RtId --subnet-id $SubnetId | Out-Null
     }
 }
+
+# Move a subnet onto a route table, REPLACING any existing association (a subnet
+# can have only one). _AssociateRT can't — associate-route-table errors
+# Resource.AlreadyAssociated when the subnet already belongs to another RT (e.g. an
+# older sandbox put the k8s subnets on the private RT). Idempotent on the target RT.
+function _MoveSubnetToRt {
+    param([string]$RtId, [string]$SubnetId)
+    $curRt = (aws ec2 describe-route-tables --region $Region `
+        --filters "Name=association.subnet-id,Values=$SubnetId" `
+        --query 'RouteTables[0].RouteTableId' --output text 2>$null)
+    if (-not $curRt -or $curRt -eq 'None') {
+        aws ec2 associate-route-table --region $Region --route-table-id $RtId --subnet-id $SubnetId | Out-Null
+    } elseif ($curRt -ne $RtId) {
+        $assoc = (aws ec2 describe-route-tables --region $Region `
+            --filters "Name=association.subnet-id,Values=$SubnetId" `
+            --query "RouteTables[0].Associations[?SubnetId=='$SubnetId'].RouteTableAssociationId | [0]" --output text)
+        aws ec2 replace-route-table-association --region $Region --association-id $assoc --route-table-id $RtId | Out-Null
+    }
+}
 _AssociateRT $PublicRtId  $PublicSubnetId
 _AssociateRT $PrivateRtId $PrivateSubnetId
 _AssociateRT $PrivateRtId $DbSubnetAId
@@ -176,8 +195,8 @@ if (-not $NatGwId -or $NatGwId -eq 'None') {
 $K8sRtId = _MakeRouteTable "$Name-k8s-rt"
 aws ec2 create-route --region $Region --route-table-id $K8sRtId `
     --destination-cidr-block 0.0.0.0/0 --nat-gateway-id $NatGwId 2>$null | Out-Null
-_AssociateRT $K8sRtId $K8sSubnetAId
-_AssociateRT $K8sRtId $K8sSubnetBId
+_MoveSubnetToRt $K8sRtId $K8sSubnetAId
+_MoveSubnetToRt $K8sRtId $K8sSubnetBId
 
 Set-StateValue aws nat_gateway_id   $NatGwId
 Set-StateValue aws nat_eip_alloc_id $NatEipAllocId
@@ -632,6 +651,7 @@ $DashboardPolicy = @"
         "iam:DetachRolePolicy",
         "iam:ListAttachedRolePolicies",
         "iam:ListRolePolicies",
+        "iam:ListInstanceProfilesForRole",
         "iam:TagRole",
         "iam:UntagRole"
       ],
@@ -645,6 +665,12 @@ $DashboardPolicy = @"
       "Condition": {
         "StringLike": {"iam:AWSServiceName": ["eks.amazonaws.com", "eks-nodegroup.amazonaws.com"]}
       }
+    },
+    {
+      "Sid": "DashboardEKSGetRole",
+      "Effect": "Allow",
+      "Action": "iam:GetRole",
+      "Resource": "*"
     }
   ]
 }

@@ -407,10 +407,18 @@ async def run_decommission(db: Session, *, cluster_id: str, job_id: str) -> None
     job_service.update_progress(db, job_id, 40, "Destroying the cluster…")
     if row.deploy_job_id:
         try:
+            # terraform destroy evaluates the module config, so it needs the same
+            # -var set apply used (else "No value for required variable"). The values
+            # don't change what's destroyed (resources come from state), but the
+            # provider's region must be correct — reconstruct from the row.
+            destroy_vars = _build_cluster_tf_variables(
+                cloud=row.cloud, cluster_id=row.id, name=row.name,
+                region=row.region or "", opts={})
             await terraform.destroy(
                 _deploy_dir(row.deploy_job_id),
                 env=terraform_provider_env.provider_env(row.cloud),
                 template_dir=_cluster_template_dir(row.cloud),
+                variables=destroy_vars,
             )
             logger.info("k8s cluster destroyed cluster_id=%s cloud=%s", cluster_id, row.cloud)
         except Exception as exc:
