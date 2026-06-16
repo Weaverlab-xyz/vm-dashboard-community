@@ -627,6 +627,144 @@ async def test_backend(backend: str) -> dict:
         return {"ok": False, "error": str(e)}
 
 
+# ── Terraform state — backend-swap migration guard ────────────────────────────
+# Terraform state lives under this prefix on cloud backends (see
+# services/terraform.py); for `local` it's terraform/deployments/<job>/terraform.tfstate.
+# Backends name the state object slightly differently (gcs uses <prefix>/<workspace>.
+# tfstate), so migration normalises per-backend rather than raw-copying keys.
+import os as _os  # noqa: E402
+
+_TF_STATE_PREFIX = "terraform-state"
+_LOCAL_STATE_ROOT = _os.path.normpath(
+    _os.path.join(_os.path.dirname(__file__), "..", "..", "terraform", "deployments")
+)
+
+
+def _tf_state_object_key(backend: str, job_id: str) -> str:
+    """The state object key Terraform writes for ``job_id`` on ``backend``."""
+    if backend == "gcs":
+        return f"{_TF_STATE_PREFIX}/{job_id}/default.tfstate"
+    return f"{_TF_STATE_PREFIX}/{job_id}/terraform.tfstate"
+
+
+def _job_from_state_key(key: str) -> str:
+    parts = key.strip("/").split("/")
+    return parts[1] if len(parts) >= 2 and parts[0] == _TF_STATE_PREFIX else ""
+
+
+def _s3_state_keys_sync() -> list:
+    client, bucket = _s3_client(), _cfg("storage_s3_bucket")
+    keys = []
+    for page in client.get_paginator("list_objects_v2").paginate(
+            Bucket=bucket, Prefix=_TF_STATE_PREFIX + "/"):
+        keys += [o["Key"] for o in page.get("Contents", [])]
+    return keys
+
+
+def _s3_state_get_sync(key: str) -> bytes:
+    return _s3_client().get_object(Bucket=_cfg("storage_s3_bucket"), Key=key)["Body"].read()
+
+
+def _s3_state_put_sync(key: str, data: bytes) -> None:
+    _s3_client().put_object(Bucket=_cfg("storage_s3_bucket"), Key=key, Body=data)
+
+
+def _azure_state_keys_sync() -> list:
+    cc = _azure_blob_client().get_container_client(_azure_container())
+    return [b.name for b in cc.list_blobs(name_starts_with=_TF_STATE_PREFIX + "/")]
+
+
+def _azure_state_get_sync(key: str) -> bytes:
+    return _azure_blob_client().get_blob_client(
+        container=_azure_container(), blob=key).download_blob().readall()
+
+
+def _azure_state_put_sync(key: str, data: bytes) -> None:
+    _azure_blob_client().get_blob_client(
+        container=_azure_container(), blob=key).upload_blob(data, overwrite=True)
+
+
+def _gcs_state_keys_sync() -> list:
+    client = _gcs_client()
+    return [b.name for b in client.list_blobs(
+        _cfg("storage_gcs_bucket"), prefix=_TF_STATE_PREFIX + "/")]
+
+
+def _gcs_state_get_sync(key: str) -> bytes:
+    return _gcs_client().bucket(_cfg("storage_gcs_bucket")).blob(key).download_as_bytes()
+
+
+def _gcs_state_put_sync(key: str, data: bytes) -> None:
+    _gcs_client().bucket(_cfg("storage_gcs_bucket")).blob(key).upload_from_string(data)
+
+
+_STATE_KEYS = {"s3": _s3_state_keys_sync, "azure_blob": _azure_state_keys_sync, "gcs": _gcs_state_keys_sync}
+_STATE_GET = {"s3": _s3_state_get_sync, "azure_blob": _azure_state_get_sync, "gcs": _gcs_state_get_sync}
+_STATE_PUT = {"s3": _s3_state_put_sync, "azure_blob": _azure_state_put_sync, "gcs": _gcs_state_put_sync}
+
+
+def _local_state_jobs() -> list:
+    if not _os.path.isdir(_LOCAL_STATE_ROOT):
+        return []
+    return [d for d in _os.listdir(_LOCAL_STATE_ROOT)
+            if _os.path.exists(_os.path.join(_LOCAL_STATE_ROOT, d, "terraform.tfstate"))]
+
+
+def _local_state_get(job: str) -> bytes:
+    with open(_os.path.join(_LOCAL_STATE_ROOT, job, "terraform.tfstate"), "rb") as fh:
+        return fh.read()
+
+
+def _local_state_put(job: str, data: bytes) -> None:
+    d = _os.path.join(_LOCAL_STATE_ROOT, job)
+    _os.makedirs(d, exist_ok=True)
+    with open(_os.path.join(d, "terraform.tfstate"), "wb") as fh:
+        fh.write(data)
+
+
+async def has_terraform_state(backend: str) -> bool:
+    """True if ``backend`` holds any live Terraform state. Used to guard a
+    storage-backend swap so state isn't stranded."""
+    if backend == "local":
+        return bool(await asyncio.to_thread(_local_state_jobs))
+    fn = _STATE_KEYS.get(backend)
+    if not fn:
+        return False
+    try:
+        return bool(await asyncio.to_thread(fn))
+    except Exception as e:
+        # If we can't tell, be conservative and report "yes" so the swap is
+        # blocked rather than silently stranding state.
+        raise StorageError(f"Could not check Terraform state on {backend}: {e}") from e
+
+
+async def migrate_terraform_state(from_backend: str, to_backend: str) -> int:
+    """Copy every Terraform state object from one backend to another, normalising
+    the object name per backend. The SOURCE is left intact as a backup. Returns
+    the number of state objects migrated."""
+    _validate_backend(from_backend)
+    _validate_backend(to_backend)
+    if from_backend == to_backend:
+        return 0
+
+    items = []  # (job_id, bytes)
+    if from_backend == "local":
+        for job in await asyncio.to_thread(_local_state_jobs):
+            items.append((job, await asyncio.to_thread(_local_state_get, job)))
+    else:
+        for key in await asyncio.to_thread(_STATE_KEYS[from_backend]):
+            job = _job_from_state_key(key)
+            if job:
+                items.append((job, await asyncio.to_thread(_STATE_GET[from_backend], key)))
+
+    for job, data in items:
+        if to_backend == "local":
+            await asyncio.to_thread(_local_state_put, job, data)
+        else:
+            await asyncio.to_thread(_STATE_PUT[to_backend], _tf_state_object_key(to_backend, job), data)
+    return len(items)
+
+
 # ── Image-path I/O ───────────────────────────────────────────────────────────
 #
 # Distinct from the asset functions above for three reasons:
