@@ -27,7 +27,7 @@ from urllib.parse import urlparse
 import yaml
 from sqlalchemy.orm import Session
 
-from ..database import K8sCluster
+from ..database import Job, K8sCluster
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +86,8 @@ def _serialize(r: K8sCluster) -> dict:
         "cloud":                 r.cloud,
         "name":                  r.name,
         "status":                r.status,
+        "source":                r.source,
+        "region":                r.region,
         "api_server":            r.api_server,
         "mgmt_kind":             r.mgmt_kind,
         "mgmt_endpoint":         r.mgmt_endpoint,
@@ -167,14 +169,274 @@ def register_cluster(db: Session, *, name: str, cloud: str, kubeconfig: str,
     return _serialize(row)
 
 
-def create_cluster(db: Session, **kwargs) -> dict:
-    """Provision a new cluster via Terraform (a ``terraform/k8s_cluster/*``
-    module). Not in Phase 1 — provision the cluster out-of-band and call
-    ``register_cluster``."""
-    raise K8sError(
-        "cluster provisioning (the terraform/k8s_cluster module) lands in a later "
-        "sub-phase; register an existing cluster with register_cluster() instead"
+# ── §1.1a: cluster provisioning (Terraform) ───────────────────────────────────
+# A per-cloud terraform/k8s_cluster/<dir> module driven by the terraform.py
+# subprocess wrapper with a per-job_id deploy dir — the exact shape
+# cloud_database_service proved. AWS EKS first; GCP/Azure fan out later. The
+# generated kubeconfig is stored via the same secrets-backend path
+# register_cluster uses, and the row flips to ``registered`` so every downstream
+# flow (manage / broker / secrets / delete) applies unchanged.
+
+_REPO_ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))
+_CLUSTER_TEMPLATE_DIRS = {
+    "aws": os.path.join(_REPO_ROOT, "terraform", "k8s_cluster", "aws_eks"),
+}
+_DEPLOYMENTS_DIR = os.path.join(_REPO_ROOT, "terraform", "deployments")
+_PROVISION_IMPLEMENTED = ("aws",)
+
+
+def _deploy_dir(job_id: str) -> str:
+    return os.path.join(_DEPLOYMENTS_DIR, job_id)
+
+
+def _cluster_template_dir(cloud: str) -> str:
+    return _CLUSTER_TEMPLATE_DIRS[cloud]
+
+
+def _eks_name(name: str) -> str:
+    """A valid EKS cluster name from the dashboard cluster name: keep alnum + '-',
+    ensure it starts alphanumeric, cap length."""
+    slug = "".join(c if (c.isalnum() or c == "-") else "-" for c in (name or "")).strip("-")
+    if not slug or not slug[0].isalnum():
+        slug = "k8s-" + slug
+    return slug[:100]
+
+
+def create_cluster(db: Session, *, cloud: str, name: str, region: str,
+                   created_by: str, **opts) -> dict:
+    """Provision a new cluster with Terraform (the ``terraform/k8s_cluster/<cloud>``
+    module), then store its kubeconfig and flip to ``registered`` (§1.1a).
+
+    Synchronous record-keeping only — validate, insert a ``provisioning`` row + a
+    ``k8s_provision`` Job, and return the Terraform variables the apply will use.
+    Does **not** run Terraform — the API schedules :func:`run_provision_apply` as a
+    background task. Mirrors ``cloud_database_service.provision``."""
+    name = (name or "").strip()
+    if not name:
+        raise K8sError("cluster name is required")
+    if cloud not in VALID_CLOUDS:
+        raise K8sError(f"unknown cloud {cloud!r} (expected one of {', '.join(VALID_CLOUDS)})")
+    if cloud not in _PROVISION_IMPLEMENTED:
+        raise NotImplementedError(
+            f"cluster provisioning for {cloud!r} is not wired yet — §1.1a implements aws (EKS) first"
+        )
+    if not (region or "").strip():
+        raise K8sError("region is required")
+    if db.query(K8sCluster).filter(K8sCluster.name == name).first():
+        raise K8sError(f"a cluster named {name!r} is already registered")
+
+    cluster_id = str(uuid.uuid4())
+    row = K8sCluster(
+        id=cluster_id, cloud=cloud, name=name, status="provisioning",
+        source="provisioned", region=region, created_by=created_by,
     )
+    db.add(row)
+    db.commit()
+
+    from . import job_service
+    job = job_service.create_job(
+        db, job_type="k8s_provision", created_by=created_by,
+        metadata={"cluster_id": cluster_id, "cloud": cloud, "name": name, "region": region},
+    )
+    row.deploy_job_id = job.id
+    db.commit()
+
+    tf_variables = _build_cluster_tf_variables(
+        cloud=cloud, cluster_id=cluster_id, name=name, region=region, opts=opts)
+    logger.info("k8s provision record cluster_id=%s cloud=%s name=%s job_id=%s",
+                cluster_id, cloud, name, job.id)
+    return {"ok": True, "cluster_id": cluster_id, "job_id": job.id, "tf_variables": tf_variables}
+
+
+def _build_cluster_tf_variables(*, cloud: str, cluster_id: str, name: str,
+                                region: str, opts: dict) -> dict:
+    """The Terraform ``-var`` set for the cluster module. §1.1a: aws (EKS).
+
+    Subnet ids default to the two private k8s subnets the sandbox emits
+    (``aws_k8s_subnet_a_id`` / ``aws_k8s_subnet_b_id``); k8s version + node size
+    fall back to config then the module defaults."""
+    if cloud == "aws":
+        subnets = opts.get("subnet_ids") or [
+            s for s in (_cfg("aws_k8s_subnet_a_id"), _cfg("aws_k8s_subnet_b_id")) if s
+        ]
+        tf = {
+            "region": region,
+            "cluster_name": _eks_name(f"k8s-{name}"),
+            "subnet_ids": subnets,
+            "tags": {"managed-by": "vm-dashboard", "k8s-cluster-id": cluster_id},
+        }
+        version = opts.get("k8s_version") or _cfg("aws_eks_k8s_version")
+        if version:
+            tf["k8s_version"] = version
+        node_type = opts.get("node_instance_type") or _cfg("aws_eks_node_instance_type")
+        if node_type:
+            tf["node_instance_type"] = node_type
+        if opts.get("node_count"):
+            tf["node_desired"] = int(opts["node_count"])
+        return tf
+    raise NotImplementedError(f"{cloud} cluster Terraform variables not implemented")
+
+
+def _assemble_eks_kubeconfig(*, cluster_name: str, endpoint: str, ca_b64: str,
+                             region: str) -> str:
+    """An exec-based kubeconfig for an EKS cluster: API server + inline CA + an
+    ``aws eks get-token`` exec block. The CA is inline so the PRA tunnel's
+    ``_parse_ca_cert`` works; auth is via the exec plugin, which needs the ``aws``
+    CLI + AWS creds wherever the kubeconfig is *used* (see the §1.1a follow-on:
+    the transient kubectl/helm runner is not yet EKS-aware)."""
+    cfg = {
+        "apiVersion": "v1",
+        "kind": "Config",
+        "clusters": [{
+            "name": cluster_name,
+            "cluster": {"server": endpoint, "certificate-authority-data": ca_b64},
+        }],
+        "contexts": [{
+            "name": cluster_name,
+            "context": {"cluster": cluster_name, "user": cluster_name},
+        }],
+        "current-context": cluster_name,
+        "users": [{
+            "name": cluster_name,
+            "user": {"exec": {
+                "apiVersion": "client.authentication.k8s.io/v1beta1",
+                "command": "aws",
+                "args": ["eks", "get-token", "--cluster-name", cluster_name,
+                         "--region", region],
+            }},
+        }],
+    }
+    return yaml.safe_dump(cfg, default_flow_style=False, sort_keys=False)
+
+
+async def run_provision_apply(db: Session, *, cluster_id: str, job_id: str,
+                              cloud: str, tf_variables: dict) -> None:
+    """**§1.1a** background task: ``terraform apply`` the cluster module, assemble a
+    kubeconfig from its outputs, store it as a secrets-backend reference (the same
+    path :func:`register_cluster` uses), and flip the row to ``registered`` — after
+    which the Phase 2-4 flows treat it like any registered cluster. Marks the row +
+    job failed on apply error. Mirrors ``cloud_database_service.run_provision_apply``."""
+    from . import config_service, job_service, terraform, terraform_provider_env
+    row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
+    if not row:
+        logger.warning("k8s provision: row %s vanished", cluster_id)
+        return
+    job_service.set_running(db, job_id)
+    try:
+        outputs = await terraform.apply(
+            _deploy_dir(job_id), tf_variables,
+            template_dir=_cluster_template_dir(cloud),
+            env=terraform_provider_env.provider_env(cloud),
+        )
+        endpoint = str(outputs.get("endpoint") or "")
+        ca_b64 = str(outputs.get("ca_certificate") or "")
+        eks_name = str(outputs.get("cluster_name") or tf_variables.get("cluster_name") or row.name)
+        if not (endpoint and ca_b64):
+            raise K8sError("cluster apply did not return endpoint + ca_certificate outputs")
+
+        kubeconfig = _assemble_eks_kubeconfig(
+            cluster_name=eks_name, endpoint=endpoint, ca_b64=ca_b64, region=row.region or "")
+        ref = _KUBECONFIG_KEY.format(cluster_id=cluster_id)
+        config_service.set(ref, kubeconfig)
+        row.kubeconfig_ref = ref
+        row.api_server = endpoint
+        row.status = "registered"
+        db.commit()
+        job_service.set_completed(db, job_id)
+        logger.info("k8s provision complete cluster_id=%s eks=%s endpoint=%s",
+                    cluster_id, eks_name, endpoint)
+    except Exception as exc:
+        row.status = "failed"
+        db.commit()
+        job_service.set_failed(db, job_id, str(exc))
+        logger.exception("k8s provision failed cluster_id=%s: %s", cluster_id, exc)
+
+
+def start_decommission(db: Session, cluster_id: str, created_by: str = "") -> dict:
+    """Record intent to decommission a **provisioned** cluster + schedule teardown:
+    flip to ``decommissioning`` and create a ``k8s_decommission`` Job. The teardown
+    (PRA tunnel → ``terraform destroy`` → drop the record) runs in
+    :func:`run_decommission` as a background task — it's many minutes long and must
+    not block the request. Mirrors ``cloud_database_service.start_decommission``."""
+    from . import job_service
+    row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
+    if row is None:
+        raise K8sError(f"cluster {cluster_id} not found")
+    if row.status == "decommissioning":
+        existing = (db.query(Job)
+                      .filter(Job.job_type == "k8s_decommission")
+                      .order_by(Job.created_at.desc()).all())
+        job = next((j for j in existing if (j.metadata_dict or {}).get("cluster_id") == cluster_id), None)
+        if job:
+            return {"ok": True, "cluster_id": cluster_id, "job_id": job.id}
+    row.status = "decommissioning"
+    db.commit()
+    job = job_service.create_job(
+        db, job_type="k8s_decommission", created_by=created_by or row.created_by or "system",
+        metadata={"cluster_id": cluster_id, "cloud": row.cloud, "name": row.name},
+    )
+    return {"ok": True, "cluster_id": cluster_id, "job_id": job.id}
+
+
+async def run_decommission(db: Session, *, cluster_id: str, job_id: str) -> None:
+    """Background teardown for a **provisioned** cluster: best-effort remove the PRA
+    tunnel, then ``terraform destroy`` the cluster, then drop the record + stored
+    kubeconfig. Errors are ACCUMULATED → the row/job end ``failed`` (an orphaned
+    cluster stays visible) rather than a false ``decommissioned``. Mirrors
+    ``cloud_database_service.run_decommission``."""
+    from . import config_service, job_service, terraform, terraform_provider_env
+    row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
+    if not row:
+        job_service.set_failed(db, job_id, f"cluster {cluster_id} not found")
+        return
+    job_service.set_running(db, job_id)
+    errors: list = []
+
+    # 1. PRA tunnel (best-effort; clears pra_jump_id / pra_tunnel_state on the row).
+    job_service.update_progress(db, job_id, 15, "Removing PRA tunnel…")
+    try:
+        await deregister_pra_tunnel(db, cluster_id)
+    except Exception as exc:
+        errors.append(f"PRA tunnel removal: {exc}")
+        logger.warning("k8s decommission: tunnel removal for %s failed: %s", cluster_id, exc)
+
+    # 2. terraform destroy (the long step). State lives in the active storage
+    #    backend, so destroy recovers a deploy dir lost to a container recreate —
+    #    pass template_dir so the module is rebuilt from it + the remote state.
+    job_service.update_progress(db, job_id, 40, "Destroying the cluster…")
+    if row.deploy_job_id:
+        try:
+            await terraform.destroy(
+                _deploy_dir(row.deploy_job_id),
+                env=terraform_provider_env.provider_env(row.cloud),
+                template_dir=_cluster_template_dir(row.cloud),
+            )
+            logger.info("k8s cluster destroyed cluster_id=%s cloud=%s", cluster_id, row.cloud)
+        except Exception as exc:
+            errors.append(f"cluster destroy: {exc}")
+            logger.warning("k8s destroy for %s failed: %s", cluster_id, exc)
+    else:
+        errors.append("no provisioning job recorded — the cluster may need manual "
+                      "teardown in the cloud console")
+
+    if errors:
+        row.status = "failed"
+        db.commit()
+        job_service.set_failed(db, job_id, "; ".join(errors))
+        logger.error("k8s decommission cluster_id=%s ended with errors: %s", cluster_id, errors)
+        return
+
+    # 3. Drop the record + stored kubeconfig (same as the register-delete path).
+    name = row.name
+    if row.kubeconfig_ref:
+        try:
+            config_service.set(row.kubeconfig_ref, "")
+        except Exception as exc:
+            logger.warning("k8s decommission: clearing kubeconfig for %s failed: %s", cluster_id, exc)
+    db.delete(row)
+    db.commit()
+    job_service.set_completed(db, job_id, {"cluster_id": cluster_id, "deregistered": name})
+    logger.info("k8s decommissioned cluster_id=%s", cluster_id)
 
 
 def delete_cluster(db: Session, cluster_id: str) -> dict:

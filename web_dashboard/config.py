@@ -160,6 +160,14 @@ class Settings(BaseSettings):
     # The sandbox creates one with rds.force_ssl=0 (the PRA protocol tunnel needs
     # a cleartext backend) and writes its name here; empty = RDS default group.
     aws_db_parameter_group_name: str = ""
+    # Managed-Kubernetes (EKS) provisioning (§1.1a). The sandbox emits the two
+    # private k8s subnet ids (2 AZs) and they're pushed via /api/setup/import; the
+    # provision form can also override per-cluster. Empty version / node type →
+    # the terraform/k8s_cluster/aws_eks module defaults.
+    aws_k8s_subnet_a_id: str = ""
+    aws_k8s_subnet_b_id: str = ""
+    aws_eks_k8s_version: str = ""
+    aws_eks_node_instance_type: str = ""
 
     # BeyondTrust integration. Two distinct API surfaces:
     #   • PRA (Privileged Remote Access)  — Shell Jump provisioning via the

@@ -34,7 +34,7 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..database import CloudDatabase, Job
-from . import config_service, job_service, terraform
+from . import config_service, job_service, terraform, terraform_provider_env
 
 logger = logging.getLogger(__name__)
 
@@ -224,59 +224,9 @@ def _cfg(key: str) -> str:
     return getattr(settings, key, "") or ""
 
 
-def _aws_env() -> Optional[dict]:
-    """Provider credentials for the terraform subprocess, mirroring the packer
-    flow's env injection: the wizard-stored (encrypted) keys win; when unset,
-    return None so terraform falls back to whatever the container environment
-    provides (env vars / shared config). Phase 1 is aws-only — provision()
-    already rejects other clouds before any apply runs."""
-    key_id = _cfg("aws_access_key_id")
-    secret = _cfg("aws_secret_access_key")
-    if key_id and secret:
-        return {"AWS_ACCESS_KEY_ID": key_id, "AWS_SECRET_ACCESS_KEY": secret}
-    return None
-
-
-def _gcp_env() -> Optional[dict]:
-    """Provider credentials for the terraform subprocess (GCP). The wizard stores
-    the service-account JSON; pass it to the google provider via GOOGLE_CREDENTIALS
-    (inline JSON) + GOOGLE_PROJECT. When unset, return None so terraform falls back
-    to whatever the container environment / ADC provides."""
-    creds = _cfg("gcp_service_account_json") or _cfg("gcp_credentials_json")
-    project = _cfg("gcp_project") or _cfg("gcp_project_id")
-    env: dict = {}
-    if creds:
-        env["GOOGLE_CREDENTIALS"] = creds
-    if project:
-        env["GOOGLE_PROJECT"] = project
-    return env or None
-
-
-def _azure_env() -> Optional[dict]:
-    """Provider credentials for the terraform subprocess (Azure). The wizard stores
-    the service-principal fields; pass them to the azurerm provider via the ARM_*
-    env vars (mirrors the packer Azure flow). When unset, return None so terraform
-    falls back to the container environment / az CLI auth."""
-    env: dict = {}
-    for cfg_key, arm_key in (
-        ("azure_client_id", "ARM_CLIENT_ID"),
-        ("azure_client_secret", "ARM_CLIENT_SECRET"),
-        ("azure_tenant_id", "ARM_TENANT_ID"),
-        ("azure_subscription_id", "ARM_SUBSCRIPTION_ID"),
-    ):
-        val = _cfg(cfg_key)
-        if val:
-            env[arm_key] = val
-    return env or None
-
-
-def _provider_env(cloud: str) -> Optional[dict]:
-    """Dispatch the terraform-subprocess provider credentials by cloud."""
-    if cloud == "gcp":
-        return _gcp_env()
-    if cloud == "azure":
-        return _azure_env()
-    return _aws_env()
+# Provider credentials for the terraform subprocess moved to the shared
+# services/terraform_provider_env module (reused by k8s_service); call sites use
+# terraform_provider_env.provider_env(cloud).
 
 
 def _pra_configured() -> bool:
@@ -518,7 +468,7 @@ async def run_provision_apply(
 
         outputs = await terraform.apply(
             _deploy_dir(job_id), tf_variables, template_dir=template_dir(engine, row.cloud),
-            env=_provider_env(row.cloud),
+            env=terraform_provider_env.provider_env(row.cloud),
         )
         row.instance_id = str(outputs.get("instance_id") or "")
         row.private_host = str(outputs.get("private_host") or "")
@@ -646,7 +596,7 @@ async def run_decommission(db: Session, *, db_id: str, job_id: str) -> None:
             # if the deploy dir was lost to a container recreate — pass template_dir
             # so terraform.destroy rebuilds the module from it + the remote state.
             await terraform.destroy(
-                _deploy_dir(deploy_job.id), env=_provider_env(row.cloud),
+                _deploy_dir(deploy_job.id), env=terraform_provider_env.provider_env(row.cloud),
                 template_dir=template_dir(row.engine, row.cloud),
             )
             logger.info("clouddb instance destroyed db_id=%s cloud=%s", db_id, row.cloud)

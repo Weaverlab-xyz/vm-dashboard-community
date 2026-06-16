@@ -23,6 +23,21 @@ class ClusterRegisterRequest(BaseModel):
     mgmt_kind: Optional[str] = None        # portainer | rancher | argocd | headlamp (optional; set when known)
 
 
+class ClusterProvisionRequest(BaseModel):
+    """Provision a new cluster with Terraform (§1.1a). The dashboard provisions the
+    cluster, stores the generated kubeconfig as a reference, and flips the record to
+    ``registered`` so the manage / broker / secrets / delete flows apply unchanged.
+    §1.1a implements ``aws`` (EKS); other clouds are rejected until their module lands.
+    """
+    name: str                                 # dashboard-unique cluster name
+    cloud: str = "aws"                        # aws (EKS) — §1.1a; gcp/azure later
+    region: str                               # cloud region (e.g. us-east-2)
+    k8s_version: Optional[str] = None         # control-plane version (else config / module default)
+    node_instance_type: Optional[str] = None  # node EC2 instance type (else config / module default)
+    node_count: Optional[int] = None          # desired node count (else module default)
+    subnet_ids: Optional[list[str]] = None    # override the sandbox-emitted private k8s subnets
+
+
 class ManagementRequest(BaseModel):
     """Launch a management plane into a registered cluster (Phase 2).
 
@@ -52,6 +67,8 @@ class ClusterInfo(BaseModel):
     cloud: str
     name: str
     status: str
+    source: Optional[str] = None              # registered | provisioned (§1.1a)
+    region: Optional[str] = None
     api_server: Optional[str] = None
     mgmt_kind: Optional[str] = None
     mgmt_endpoint: Optional[str] = None

@@ -8,8 +8,9 @@ a registered cluster. See docs/saas-kubernetes-management-plan.md.
   GET    /api/k8s/__phase1__               — health check (router-mounted probe)
   GET    /api/k8s/clusters                 — list managed clusters
   POST   /api/k8s/clusters                 — register an existing cluster (kubeconfig)
+  POST   /api/k8s/clusters/provision       — provision a new cluster with Terraform (§1.1a)
   GET    /api/k8s/clusters/{id}            — one cluster
-  DELETE /api/k8s/clusters/{id}            — deregister a cluster
+  DELETE /api/k8s/clusters/{id}            — deregister (registered) / decommission+destroy (provisioned)
   POST   /api/k8s/clusters/{id}/management — launch a management plane (Phase 2)
 """
 import logging
@@ -20,6 +21,7 @@ from sqlalchemy.orm import Session
 from ..database import User, get_db
 from ..models.k8s import (
     BrokerAccessRequest,
+    ClusterProvisionRequest,
     ClusterRegisterRequest,
     ManagementRequest,
     SecretDeliveryRequest,
@@ -74,6 +76,64 @@ async def register_cluster(
         raise HTTPException(status_code=400, detail=str(e))
 
 
+def _provision_task(cluster_id: str, job_id: str, cloud: str, tf_variables: dict) -> None:
+    """Background worker: open a fresh session and drive the cluster Terraform
+    apply + kubeconfig store (mirrors cloud_databases._apply_task)."""
+    import asyncio
+
+    from ..database import SessionLocal
+    s = SessionLocal()
+    try:
+        asyncio.run(k8s_service.run_provision_apply(
+            s, cluster_id=cluster_id, job_id=job_id, cloud=cloud, tf_variables=tf_variables))
+    finally:
+        s.close()
+
+
+def _decommission_task(cluster_id: str, job_id: str) -> None:
+    """Background worker: open a fresh session and drive the cluster teardown."""
+    import asyncio
+
+    from ..database import SessionLocal
+    s = SessionLocal()
+    try:
+        asyncio.run(k8s_service.run_decommission(s, cluster_id=cluster_id, job_id=job_id))
+    finally:
+        s.close()
+
+
+@router.post("/clusters/provision", status_code=202)
+async def provision_cluster(
+    payload: ClusterProvisionRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Provision a new cluster with Terraform (§1.1a). Async — records a
+    ``provisioning`` row + schedules the apply, which stores the generated
+    kubeconfig and flips the cluster to ``registered``. Returns 202; poll the
+    cluster status (provisioning → registered / failed). §1.1a implements
+    aws (EKS); other clouds 501 until their module lands."""
+    opts = {k: v for k, v in {
+        "k8s_version": payload.k8s_version,
+        "node_instance_type": payload.node_instance_type,
+        "node_count": payload.node_count,
+        "subnet_ids": payload.subnet_ids,
+    }.items() if v is not None}
+    try:
+        result = k8s_service.create_cluster(
+            db, cloud=payload.cloud, name=payload.name, region=payload.region,
+            created_by=current_user.username, **opts,
+        )
+    except K8sError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except NotImplementedError as e:
+        raise HTTPException(status_code=501, detail=str(e))
+    background_tasks.add_task(
+        _provision_task, result["cluster_id"], result["job_id"], payload.cloud, result["tf_variables"])
+    return {"ok": True, "cluster_id": result["cluster_id"], "job_id": result["job_id"]}
+
+
 @router.get("/clusters/{cluster_id}")
 async def get_cluster(
     cluster_id: str,
@@ -90,12 +150,26 @@ async def get_cluster(
 @router.delete("/clusters/{cluster_id}")
 async def delete_cluster(
     cluster_id: str,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
-    """Deregister a cluster + clear its stored kubeconfig (Phase 1 does not tear
-    down a cloud-provisioned cluster). Best-effort destroys the PRA tunnel jump
-    first so a deregister doesn't orphan a Jump Item."""
+    """Delete a cluster. A **provisioned** cluster (``source=provisioned``) is torn
+    down asynchronously — PRA tunnel, then ``terraform destroy``, then the record
+    (poll status decommissioning → gone / failed). A **registered** cluster is
+    deregistered synchronously (best-effort PRA tunnel cleanup first so a deregister
+    doesn't orphan a Jump Item, then drop the record + kubeconfig); it does not tear
+    down the underlying cluster."""
+    try:
+        info = k8s_service.get_cluster(db, cluster_id)
+    except K8sError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    if info.get("source") == "provisioned":
+        result = k8s_service.start_decommission(db, cluster_id, created_by=current_user.username)
+        background_tasks.add_task(_decommission_task, result["cluster_id"], result["job_id"])
+        return {"status": "decommissioning", **result}
+
     try:
         await k8s_service.deregister_pra_tunnel(db, cluster_id)
     except Exception as e:

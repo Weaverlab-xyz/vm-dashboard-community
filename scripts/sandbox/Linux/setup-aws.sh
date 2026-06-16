@@ -165,6 +165,18 @@ associate_rt "$PRIVATE_RT_ID" "$K8S_SUBNET_B_ID"
 ok "Public  RT $PUBLIC_RT_ID  → IGW (0.0.0.0/0)"
 ok "Private RT $PRIVATE_RT_ID → local VPC only (VMs + DBs + K8s)"
 
+# NOTE (§1.1a EKS): the k8s subnets are VPC-only (no internet) — fine for the EKS
+# *control plane*, but managed *nodes* must reach the EKS API + pull images from
+# ECR/S3/STS to join. Before provisioning a cluster with real nodes, give ONLY the
+# k8s subnets egress (keeping the VM/DB subnets isolated): either (a) a NAT gateway
+# in the public subnet + a DEDICATED k8s route table (0.0.0.0/0 → NAT) the k8s
+# subnets associate to instead of the private RT, or (b) interface/gateway VPC
+# endpoints (ecr.api, ecr.dkr, s3, sts, eks, ec2, logs). This sandbox does not yet
+# create either — add it together with matching teardown in rollback.sh (a NAT
+# gateway + EIP incur standing cost if leaked). Tracked as the remaining real-cloud
+# step for cluster provisioning; the dashboard side (provision → kubeconfig →
+# registered → terraform destroy) is complete.
+
 # ── 4b. RDS DB subnet group ───────────────────────────────────────────────────
 # The managed-database feature deploys private RDS instances (no public
 # endpoint) into this group; access is brokered only through the PRA tunnel.
@@ -612,7 +624,8 @@ DASHBOARD_POLICY_DOC="$(jq -c . <<JSON
         "arn:aws:iam::${ACCOUNT_ID}:role/${VMIMPORT_ROLE_NAME}",
         "arn:aws:iam::${ACCOUNT_ID}:role/ecsTaskExecutionRole",
         "arn:aws:iam::${ACCOUNT_ID}:role/ecsInstanceRole",
-        "arn:aws:iam::${ACCOUNT_ID}:role/${PROMOTE_TASK_ROLE_NAME}"
+        "arn:aws:iam::${ACCOUNT_ID}:role/${PROMOTE_TASK_ROLE_NAME}",
+        "arn:aws:iam::${ACCOUNT_ID}:role/k8s-*"
       ]
     },
     {
@@ -707,6 +720,37 @@ DASHBOARD_POLICY_DOC="$(jq -c . <<JSON
       "Effect": "Allow",
       "Action": "sts:GetCallerIdentity",
       "Resource": "*"
+    },
+    {
+      "Sid": "DashboardEKS",
+      "Effect": "Allow",
+      "Action": "eks:*",
+      "Resource": "*"
+    },
+    {
+      "Sid": "DashboardEKSRoles",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole",
+        "iam:DeleteRole",
+        "iam:GetRole",
+        "iam:AttachRolePolicy",
+        "iam:DetachRolePolicy",
+        "iam:ListAttachedRolePolicies",
+        "iam:ListRolePolicies",
+        "iam:TagRole",
+        "iam:UntagRole"
+      ],
+      "Resource": "arn:aws:iam::${ACCOUNT_ID}:role/k8s-*"
+    },
+    {
+      "Sid": "DashboardEKSServiceLinkedRole",
+      "Effect": "Allow",
+      "Action": "iam:CreateServiceLinkedRole",
+      "Resource": "arn:aws:iam::${ACCOUNT_ID}:role/aws-service-role/eks*.amazonaws.com/*",
+      "Condition": {
+        "StringLike": {"iam:AWSServiceName": ["eks.amazonaws.com", "eks-nodegroup.amazonaws.com"]}
+      }
     }
   ]
 }
@@ -781,6 +825,8 @@ _cfg=(
   "aws_db_subnet_group_name=$DB_SUBNET_GROUP_NAME      # Managed-DB deploys: private RDS subnet group (2 AZs)"
   "aws_db_parameter_group_name=$DB_PARAM_GROUP_NAME    # Managed-DB deploys: force_ssl=0 group (PRA protocol tunnel needs a cleartext backend)"
   "aws_db_security_group_id=$DB_SG                     # Managed-DB deploys: DB-tier SG (engine ports from Jumpoint SG only)"
+  "aws_k8s_subnet_a_id=$K8S_SUBNET_A_ID                # Managed-K8s (EKS) provisioning: private cluster subnet AZ-a"
+  "aws_k8s_subnet_b_id=$K8S_SUBNET_B_ID                # Managed-K8s (EKS) provisioning: private cluster subnet AZ-b"
   "ec2_ssh_key_secret=$SSH_SECRET_NAME                 # JSON {public_key,private_key} for EC2 cloud-init + Ansible"
   "bt_ecs_cluster=$ECS_CLUSTER                          # ECS cluster the Jumpoint Fargate task runs in"
   "bt_ecs_task_family=bt-jumpoint"
@@ -818,7 +864,7 @@ Sandbox topology summary
     ├─ public  ${PUBLIC_SUBNET_ID}  (10.99.1.0/24) → IGW → internet  [on-demand Jumpoint host]
     ├─ private ${PRIVATE_SUBNET_ID}  (10.99.2.0/24) → no internet     [user EC2s]
     ├─ db      ${DB_SUBNET_A_ID} / ${DB_SUBNET_B_ID}  (10.99.3-4.0/24, 2 AZs) → no internet  [managed RDS]
-    └─ k8s     ${K8S_SUBNET_A_ID} / ${K8S_SUBNET_B_ID}  (10.99.5-6.0/24, 2 AZs) → no internet  [managed clusters]
+    └─ k8s     ${K8S_SUBNET_A_ID} / ${K8S_SUBNET_B_ID}  (10.99.5-6.0/24, 2 AZs) → no internet  [managed clusters — EKS nodes need egress added (NAT or VPC endpoints); see note in §4]
 
 Note: the tunnel-capable Jumpoint runs on an EC2 ECS container instance
 (t3.small) that the DASHBOARD creates on demand when you provision an EC2
