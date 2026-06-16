@@ -615,9 +615,15 @@ class K8sCluster(Base):
     cloud = Column(String(20), nullable=False)             # aws | azure | gcp | local
     name = Column(String(200), nullable=False, index=True)
     status = Column(String(32), nullable=False, default="registered", index=True)
+    # §1.1a provisioning: source distinguishes a registered cluster (kubeconfig
+    # only — deregister on delete) from a dashboard-provisioned one (terraform
+    # destroy on delete); deploy_job_id locates its terraform/deployments/<id> state.
+    source = Column(String(16), nullable=False, default="registered")  # registered | provisioned
+    region = Column(String(40), nullable=True)             # cloud region (provisioned clusters)
 
     api_server = Column(String(255), nullable=True)        # cluster API URL (parsed from kubeconfig)
     kubeconfig_ref = Column(Text, nullable=True)           # backend-agnostic ref (resolved via config_service)
+    deploy_job_id = Column(String(36), nullable=True)      # provisioning Job id → deploy/state dir (§1.1a destroy)
 
     mgmt_kind = Column(String(20), nullable=True)          # portainer | rancher | argocd | headlamp (Phase 2)
     mgmt_endpoint = Column(String(255), nullable=True)     # management-plane URL (Phase 2)
@@ -696,6 +702,12 @@ def init_db():
             "ALTER TABLE k8s_clusters ADD COLUMN jump_group VARCHAR(128)",
             "ALTER TABLE k8s_clusters ADD COLUMN jumpoint_name VARCHAR(128)",
             "ALTER TABLE k8s_clusters ADD COLUMN pra_credential_ref VARCHAR(256)",
+            # K8s management §1.1a — cluster provisioning: source (registered|
+            # provisioned) + region + the deploy job id that locates the Terraform
+            # state dir, so delete knows whether to destroy or just drop the record.
+            "ALTER TABLE k8s_clusters ADD COLUMN source VARCHAR(16) DEFAULT 'registered'",
+            "ALTER TABLE k8s_clusters ADD COLUMN deploy_job_id VARCHAR(36)",
+            "ALTER TABLE k8s_clusters ADD COLUMN region VARCHAR(40)",
             # Cloud-db per-DB PRA broker overrides (config defaults as fallback).
             "ALTER TABLE cloud_databases ADD COLUMN jump_group VARCHAR(128)",
             "ALTER TABLE cloud_databases ADD COLUMN jumpoint_name VARCHAR(128)",

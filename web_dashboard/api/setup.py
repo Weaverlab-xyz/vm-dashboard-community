@@ -514,6 +514,22 @@ class CloudDatabaseFeatureConfig(BaseModel):
     gcp_db_network: str = ""
 
 
+class K8sManagementFeatureConfig(BaseModel):
+    """Config-only panel (no `enabled`) for the Kubernetes Management PREVIEW
+    feature. The preview toggle owns `k8s_management_enabled`; this panel holds the
+    AWS EKS cluster-provisioning defaults the sandbox emits (the two private k8s
+    subnet ids) plus optional version / node-size defaults. Normally pushed via
+    /api/setup/import. See _CONFIG_ONLY_FEATURES. Registering an existing cluster
+    needs none of this — it's only for §1.1a provisioning."""
+    # AWS EKS provisioning (§1.1a) — the two private k8s subnets (2 AZs) the
+    # cluster + node group land in.
+    aws_k8s_subnet_a_id: str = ""
+    aws_k8s_subnet_b_id: str = ""
+    # Optional defaults (blank → the terraform/k8s_cluster/aws_eks module defaults).
+    aws_eks_k8s_version: str = ""
+    aws_eks_node_instance_type: str = ""
+
+
 _FEATURE_MODELS = {
     "vmware":       VMwareFeatureConfig,
     "beyondtrust":  BeyondTrustFeatureConfig,
@@ -526,12 +542,13 @@ _FEATURE_MODELS = {
     "nutanix":      NutanixFeatureConfig,
     "xcpng":        XcpNgFeatureConfig,
     "cloud_database": CloudDatabaseFeatureConfig,
+    "k8s_management": K8sManagementFeatureConfig,
 }
 
 # Features whose panel carries config but NOT an enable toggle — their on/off
 # lives elsewhere (e.g. a preview flag). _read/_write_feature skip the enabled
 # key for these, so saving config can't flip the feature's flag.
-_CONFIG_ONLY_FEATURES = {"cloud_database"}
+_CONFIG_ONLY_FEATURES = {"cloud_database", "k8s_management"}
 
 _SECRET_FEATURE_KEYS = frozenset({
     "pscli_client_secret", "bt_client_secret", "epml_pat",
@@ -637,7 +654,7 @@ _PREVIEW_FLAGS = {
     "cloud_database_enabled": (
         "Cloud Databases", "Private managed databases reached through a PRA tunnel."),
     "k8s_management_enabled": (
-        "Kubernetes Management", "Register + manage Kubernetes clusters (Phase 1)."),
+        "Kubernetes Management", "Provision (AWS EKS), register, and broker Kubernetes clusters."),
 }
 
 # Preview flags that ALSO have a config panel — maps the flag key to the
@@ -645,6 +662,7 @@ _PREVIEW_FLAGS = {
 # the panel is config-only (see _CONFIG_ONLY_FEATURES).
 _PREVIEW_FLAG_CONFIG = {
     "cloud_database_enabled": "cloud_database",
+    "k8s_management_enabled": "k8s_management",
 }
 
 

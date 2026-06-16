@@ -143,6 +143,17 @@ _AssociateRT $PrivateRtId $K8sSubnetBId
 Write-Ok "Public  RT $PublicRtId  → IGW (0.0.0.0/0)"
 Write-Ok "Private RT $PrivateRtId → local VPC only (VMs + DBs + K8s)"
 
+# NOTE (§1.1a EKS): the k8s subnets are VPC-only (no internet) — fine for the EKS
+# control plane, but managed nodes must reach the EKS API + pull images from
+# ECR/S3/STS to join. Before provisioning a cluster with real nodes, give ONLY the
+# k8s subnets egress (keeping VM/DB subnets isolated): either a NAT gateway in the
+# public subnet + a DEDICATED k8s route table (0.0.0.0/0 -> NAT) the k8s subnets
+# associate to instead of the private RT, or interface/gateway VPC endpoints
+# (ecr.api, ecr.dkr, s3, sts, eks, ec2, logs). This sandbox does not yet create
+# either — add it together with matching teardown in Rollback-Sandbox.ps1 (a NAT
+# gateway + EIP incur standing cost if leaked). Remaining real-cloud step for
+# cluster provisioning; the dashboard side is complete.
+
 # ── 4b. RDS DB subnet group ───────────────────────────────────────────────────
 # The managed-database feature deploys private RDS instances (no public
 # endpoint) into this group; access is brokered only through the PRA tunnel.
@@ -485,7 +496,8 @@ $DashboardPolicy = @"
       "Resource": [
         "arn:aws:iam::${AccountId}:role/${VmImportRoleName}",
         "arn:aws:iam::${AccountId}:role/ecsTaskExecutionRole",
-        "arn:aws:iam::${AccountId}:role/${PromoteTaskRoleName}"
+        "arn:aws:iam::${AccountId}:role/${PromoteTaskRoleName}",
+        "arn:aws:iam::${AccountId}:role/k8s-*"
       ]
     },
     {
@@ -572,6 +584,37 @@ $DashboardPolicy = @"
       "Effect": "Allow",
       "Action": "sts:GetCallerIdentity",
       "Resource": "*"
+    },
+    {
+      "Sid": "DashboardEKS",
+      "Effect": "Allow",
+      "Action": "eks:*",
+      "Resource": "*"
+    },
+    {
+      "Sid": "DashboardEKSRoles",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole",
+        "iam:DeleteRole",
+        "iam:GetRole",
+        "iam:AttachRolePolicy",
+        "iam:DetachRolePolicy",
+        "iam:ListAttachedRolePolicies",
+        "iam:ListRolePolicies",
+        "iam:TagRole",
+        "iam:UntagRole"
+      ],
+      "Resource": "arn:aws:iam::${AccountId}:role/k8s-*"
+    },
+    {
+      "Sid": "DashboardEKSServiceLinkedRole",
+      "Effect": "Allow",
+      "Action": "iam:CreateServiceLinkedRole",
+      "Resource": "arn:aws:iam::${AccountId}:role/aws-service-role/eks*.amazonaws.com/*",
+      "Condition": {
+        "StringLike": {"iam:AWSServiceName": ["eks.amazonaws.com", "eks-nodegroup.amazonaws.com"]}
+      }
     }
   ]
 }
@@ -645,6 +688,8 @@ $cfg = @(
     "aws_default_security_group_id=$VmSg               # Deploy form's default SG (VM-tier, no internet egress)",
     "aws_db_subnet_group_name=$DbSubnetGroupName       # Managed-DB deploys: private RDS subnet group (2 AZs)",
     "aws_db_security_group_id=$VmSg                     # Managed-DB deploys: reuse the VM-tier SG (no internet egress)",
+    "aws_k8s_subnet_a_id=$K8sSubnetAId                  # Managed-K8s (EKS) provisioning: private cluster subnet AZ-a",
+    "aws_k8s_subnet_b_id=$K8sSubnetBId                  # Managed-K8s (EKS) provisioning: private cluster subnet AZ-b",
     "ec2_ssh_key_secret=$SshSecretName                 # JSON {public_key,private_key} for EC2 cloud-init + Ansible",
     "bt_ecs_cluster=$EcsCluster                          # ECS cluster the Jumpoint Fargate task runs in",
     "bt_ecs_task_family=bt-jumpoint",
