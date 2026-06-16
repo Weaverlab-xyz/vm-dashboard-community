@@ -132,7 +132,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Install Packer (architecture-aware) and pre-cache all three cloud plugins
 # so packer init does not require internet access at build time.
-ARG TERRAFORM_VERSION=1.9.5
+# 1.10+ required for S3-native state locking (use_lockfile) — no DynamoDB needed.
+# See services/terraform.py + docs/terraform-state-backend-plan.md.
+ARG TERRAFORM_VERSION=1.10.5
 RUN ARCH=$(dpkg --print-architecture) \
     && curl -fsSL "https://releases.hashicorp.com/packer/${PACKER_VERSION}/packer_${PACKER_VERSION}_linux_${ARCH}.zip" \
         -o /tmp/packer.zip \
