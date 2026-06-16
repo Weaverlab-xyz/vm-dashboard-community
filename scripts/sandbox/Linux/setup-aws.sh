@@ -160,22 +160,51 @@ associate_rt "$PUBLIC_RT_ID"  "$PUBLIC_SUBNET_ID"
 associate_rt "$PRIVATE_RT_ID" "$PRIVATE_SUBNET_ID"
 associate_rt "$PRIVATE_RT_ID" "$DB_SUBNET_A_ID"
 associate_rt "$PRIVATE_RT_ID" "$DB_SUBNET_B_ID"
-associate_rt "$PRIVATE_RT_ID" "$K8S_SUBNET_A_ID"
-associate_rt "$PRIVATE_RT_ID" "$K8S_SUBNET_B_ID"
 ok "Public  RT $PUBLIC_RT_ID  → IGW (0.0.0.0/0)"
-ok "Private RT $PRIVATE_RT_ID → local VPC only (VMs + DBs + K8s)"
+ok "Private RT $PRIVATE_RT_ID → local VPC only (VMs + DBs)"
 
-# NOTE (§1.1a EKS): the k8s subnets are VPC-only (no internet) — fine for the EKS
-# *control plane*, but managed *nodes* must reach the EKS API + pull images from
-# ECR/S3/STS to join. Before provisioning a cluster with real nodes, give ONLY the
-# k8s subnets egress (keeping the VM/DB subnets isolated): either (a) a NAT gateway
-# in the public subnet + a DEDICATED k8s route table (0.0.0.0/0 → NAT) the k8s
-# subnets associate to instead of the private RT, or (b) interface/gateway VPC
-# endpoints (ecr.api, ecr.dkr, s3, sts, eks, ec2, logs). This sandbox does not yet
-# create either — add it together with matching teardown in rollback.sh (a NAT
-# gateway + EIP incur standing cost if leaked). Tracked as the remaining real-cloud
-# step for cluster provisioning; the dashboard side (provision → kubeconfig →
-# registered → terraform destroy) is complete.
+# ── 4a. K8s node egress — NAT gateway + dedicated k8s route table ─────────────
+# Managed EKS *nodes* must reach the EKS API + pull images from ECR/S3/STS to
+# join, which the VPC-only private RT can't provide. Give ONLY the k8s subnets
+# egress via a NAT gateway in the public subnet + a dedicated k8s route table, so
+# the VM + DB subnets stay isolated (no internet). The NAT + its Elastic IP carry
+# standing cost — rollback.sh deletes the NAT and releases the EIP (both tagged).
+section "K8s node egress (NAT)"
+
+# Elastic IP for the NAT (idempotent: reuse the sandbox-tagged one if present).
+NAT_EIP_ALLOC_ID="$(aws ec2 describe-addresses --region "$REGION" \
+  --filters "Name=tag:$SANDBOX_TAG_KEY,Values=$SANDBOX_TAG_VALUE" "Name=tag:Name,Values=${NAME}-k8s-nat-eip" \
+  --query 'Addresses[0].AllocationId' --output text 2>/dev/null || true)"
+if [[ -z "$NAT_EIP_ALLOC_ID" || "$NAT_EIP_ALLOC_ID" == "None" ]]; then
+  NAT_EIP_ALLOC_ID="$(aws ec2 allocate-address --region "$REGION" --domain vpc \
+    --tag-specifications "$(tag_spec elastic-ip "${NAME}-k8s-nat-eip")" \
+    --query 'AllocationId' --output text)"
+fi
+
+# NAT gateway in the public subnet (idempotent: reuse a live one in this VPC).
+NAT_GW_ID="$(aws ec2 describe-nat-gateways --region "$REGION" \
+  --filter "Name=vpc-id,Values=$VPC_ID" "Name=tag:$SANDBOX_TAG_KEY,Values=$SANDBOX_TAG_VALUE" \
+  --query "NatGateways[?State=='available' || State=='pending'].NatGatewayId | [0]" --output text 2>/dev/null || true)"
+if [[ -z "$NAT_GW_ID" || "$NAT_GW_ID" == "None" ]]; then
+  NAT_GW_ID="$(aws ec2 create-nat-gateway --region "$REGION" \
+    --subnet-id "$PUBLIC_SUBNET_ID" --allocation-id "$NAT_EIP_ALLOC_ID" \
+    --tag-specifications "$(tag_spec natgateway "${NAME}-k8s-nat")" \
+    --query 'NatGateway.NatGatewayId' --output text)"
+  ok "Creating NAT gateway $NAT_GW_ID (waiting for it to become available…)"
+  aws ec2 wait nat-gateway-available --region "$REGION" --nat-gateway-ids "$NAT_GW_ID"
+fi
+
+# Dedicated k8s route table: 0.0.0.0/0 → NAT; k8s subnets only (VM/DB stay private).
+K8S_RT_ID="$(make_rt "${NAME}-k8s-rt")"
+aws ec2 create-route --region "$REGION" --route-table-id "$K8S_RT_ID" \
+  --destination-cidr-block 0.0.0.0/0 --nat-gateway-id "$NAT_GW_ID" >/dev/null 2>&1 || true
+associate_rt "$K8S_RT_ID" "$K8S_SUBNET_A_ID"
+associate_rt "$K8S_RT_ID" "$K8S_SUBNET_B_ID"
+
+state_write aws nat_gateway_id   "$NAT_GW_ID"
+state_write aws nat_eip_alloc_id "$NAT_EIP_ALLOC_ID"
+state_write aws k8s_rt_id        "$K8S_RT_ID"
+ok "K8s RT $K8S_RT_ID → NAT $NAT_GW_ID → internet  [EKS nodes; VM/DB subnets stay isolated]"
 
 # ── 4b. RDS DB subnet group ───────────────────────────────────────────────────
 # The managed-database feature deploys private RDS instances (no public
@@ -864,7 +893,7 @@ Sandbox topology summary
     ├─ public  ${PUBLIC_SUBNET_ID}  (10.99.1.0/24) → IGW → internet  [on-demand Jumpoint host]
     ├─ private ${PRIVATE_SUBNET_ID}  (10.99.2.0/24) → no internet     [user EC2s]
     ├─ db      ${DB_SUBNET_A_ID} / ${DB_SUBNET_B_ID}  (10.99.3-4.0/24, 2 AZs) → no internet  [managed RDS]
-    └─ k8s     ${K8S_SUBNET_A_ID} / ${K8S_SUBNET_B_ID}  (10.99.5-6.0/24, 2 AZs) → no internet  [managed clusters — EKS nodes need egress added (NAT or VPC endpoints); see note in §4]
+    └─ k8s     ${K8S_SUBNET_A_ID} / ${K8S_SUBNET_B_ID}  (10.99.5-6.0/24, 2 AZs) → NAT ${NAT_GW_ID} → internet  [managed EKS clusters + nodes]
 
 Note: the tunnel-capable Jumpoint runs on an EC2 ECS container instance
 (t3.small) that the DASHBOARD creates on demand when you provision an EC2

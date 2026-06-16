@@ -138,21 +138,51 @@ _AssociateRT $PublicRtId  $PublicSubnetId
 _AssociateRT $PrivateRtId $PrivateSubnetId
 _AssociateRT $PrivateRtId $DbSubnetAId
 _AssociateRT $PrivateRtId $DbSubnetBId
-_AssociateRT $PrivateRtId $K8sSubnetAId
-_AssociateRT $PrivateRtId $K8sSubnetBId
 Write-Ok "Public  RT $PublicRtId  → IGW (0.0.0.0/0)"
-Write-Ok "Private RT $PrivateRtId → local VPC only (VMs + DBs + K8s)"
+Write-Ok "Private RT $PrivateRtId → local VPC only (VMs + DBs)"
 
-# NOTE (§1.1a EKS): the k8s subnets are VPC-only (no internet) — fine for the EKS
-# control plane, but managed nodes must reach the EKS API + pull images from
-# ECR/S3/STS to join. Before provisioning a cluster with real nodes, give ONLY the
-# k8s subnets egress (keeping VM/DB subnets isolated): either a NAT gateway in the
-# public subnet + a DEDICATED k8s route table (0.0.0.0/0 -> NAT) the k8s subnets
-# associate to instead of the private RT, or interface/gateway VPC endpoints
-# (ecr.api, ecr.dkr, s3, sts, eks, ec2, logs). This sandbox does not yet create
-# either — add it together with matching teardown in Rollback-Sandbox.ps1 (a NAT
-# gateway + EIP incur standing cost if leaked). Remaining real-cloud step for
-# cluster provisioning; the dashboard side is complete.
+# ── 4a. K8s node egress — NAT gateway + dedicated k8s route table ─────────────
+# Managed EKS nodes must reach the EKS API + pull images (ECR/S3/STS) to join,
+# which the VPC-only private RT can't provide. Give ONLY the k8s subnets egress
+# via a NAT gateway in the public subnet + a dedicated k8s route table, so the
+# VM + DB subnets stay isolated. The NAT + Elastic IP carry standing cost —
+# Rollback-Sandbox.ps1 deletes the NAT and releases the EIP (both tagged).
+Write-Section 'K8s node egress (NAT)'
+
+# Elastic IP for the NAT (idempotent: reuse the sandbox-tagged one if present).
+$NatEipAllocId = (aws ec2 describe-addresses --region $Region `
+    --filters "Name=tag:$($Script:SandboxTagKey),Values=$($Script:SandboxTagValue)" "Name=tag:Name,Values=$Name-k8s-nat-eip" `
+    --query 'Addresses[0].AllocationId' --output text 2>$null)
+if (-not $NatEipAllocId -or $NatEipAllocId -eq 'None') {
+    $NatEipAllocId = (aws ec2 allocate-address --region $Region --domain vpc `
+        --tag-specifications (_TagSpec 'elastic-ip' "$Name-k8s-nat-eip") `
+        --query 'AllocationId' --output text).Trim()
+}
+
+# NAT gateway in the public subnet (idempotent: reuse a live one in this VPC).
+$NatGwId = (aws ec2 describe-nat-gateways --region $Region `
+    --filter "Name=vpc-id,Values=$VpcId" "Name=tag:$($Script:SandboxTagKey),Values=$($Script:SandboxTagValue)" `
+    --query "NatGateways[?State=='available' || State=='pending'].NatGatewayId | [0]" --output text 2>$null)
+if (-not $NatGwId -or $NatGwId -eq 'None') {
+    $NatGwId = (aws ec2 create-nat-gateway --region $Region `
+        --subnet-id $PublicSubnetId --allocation-id $NatEipAllocId `
+        --tag-specifications (_TagSpec 'natgateway' "$Name-k8s-nat") `
+        --query 'NatGateway.NatGatewayId' --output text).Trim()
+    Write-Ok "Creating NAT gateway $NatGwId (waiting for it to become available…)"
+    aws ec2 wait nat-gateway-available --region $Region --nat-gateway-ids $NatGwId
+}
+
+# Dedicated k8s route table: 0.0.0.0/0 → NAT; k8s subnets only (VM/DB stay private).
+$K8sRtId = _MakeRouteTable "$Name-k8s-rt"
+aws ec2 create-route --region $Region --route-table-id $K8sRtId `
+    --destination-cidr-block 0.0.0.0/0 --nat-gateway-id $NatGwId 2>$null | Out-Null
+_AssociateRT $K8sRtId $K8sSubnetAId
+_AssociateRT $K8sRtId $K8sSubnetBId
+
+Set-StateValue aws nat_gateway_id   $NatGwId
+Set-StateValue aws nat_eip_alloc_id $NatEipAllocId
+Set-StateValue aws k8s_rt_id        $K8sRtId
+Write-Ok "K8s RT $K8sRtId → NAT $NatGwId → internet  [EKS nodes; VM/DB subnets stay isolated]"
 
 # ── 4b. RDS DB subnet group ───────────────────────────────────────────────────
 # The managed-database feature deploys private RDS instances (no public

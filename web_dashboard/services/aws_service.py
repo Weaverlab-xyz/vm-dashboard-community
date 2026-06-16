@@ -49,6 +49,26 @@ def _aws_kwargs(region: str) -> dict:
     return kwargs
 
 
+def eks_get_token(cluster_name: str, region: str) -> str:
+    """Mint a short-lived EKS bearer token — the ``aws eks get-token`` algorithm,
+    server-side and offline (no API call): a presigned STS ``GetCallerIdentity``
+    URL carrying the ``x-k8s-aws-id: <cluster>`` header, base64url-encoded with a
+    ``k8s-aws-v1.`` prefix. Lets a transient kubectl/helm container authenticate to
+    a provisioned EKS cluster without the ``aws`` CLI or AWS creds in the container.
+    The token is valid ~15 min — ample for a one-shot apply/helm. Reuses the same
+    credential resolution as every other AWS call (:func:`_aws_kwargs`)."""
+    _require_boto3()
+    sts = boto3.client("sts", **_aws_kwargs(region))
+    # EKS binds the token to a specific cluster via this signed header.
+    sts.meta.events.register(
+        "before-sign.sts.GetCallerIdentity",
+        lambda request, **kwargs: request.headers.add_header("x-k8s-aws-id", cluster_name),
+    )
+    url = sts.generate_presigned_url(
+        "get_caller_identity", Params={}, ExpiresIn=60, HttpMethod="GET")
+    return "k8s-aws-v1." + base64.urlsafe_b64encode(url.encode("utf-8")).decode("utf-8").rstrip("=")
+
+
 def _get_ec2(region: str):
     _require_boto3()
     return boto3.client("ec2", **_aws_kwargs(region))
