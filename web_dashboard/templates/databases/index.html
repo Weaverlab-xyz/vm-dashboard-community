@@ -344,16 +344,28 @@
           </p>
           <div class="grid grid-cols-2 gap-3">
             <div>
-              <label class="block text-xs font-medium text-gray-600 mb-1">Jump group <span class="text-gray-400">(name)</span></label>
-              <input type="text" x-model="form.jump_group" placeholder="(configured default)"
-                     class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
+              <label class="block text-xs font-medium text-gray-600 mb-1">Jump group</label>
+              <select x-model="form.jump_group" :disabled="loadingOptions"
+                      class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
+                <option value="">(configured default)</option>
+                <template x-for="g in options.jump_groups || []" :key="g.id">
+                  <option :value="g.name" x-text="g.name"></option>
+                </template>
+              </select>
             </div>
             <div>
-              <label class="block text-xs font-medium text-gray-600 mb-1">Jumpoint <span class="text-gray-400">(name)</span></label>
-              <input type="text" x-model="form.jumpoint_name" placeholder="(configured default)"
-                     class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
+              <label class="block text-xs font-medium text-gray-600 mb-1">Jumpoint</label>
+              <select x-model="form.jumpoint_name" :disabled="loadingOptions"
+                      class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
+                <option value="">(configured default)</option>
+                <template x-for="j in options.jumpoints || []" :key="j.id">
+                  <option :value="j.name" x-text="j.name"></option>
+                </template>
+              </select>
             </div>
           </div>
+          <p x-show="!loadingOptions && (options.jump_groups || []).length === 0 && (options.jumpoints || []).length === 0" x-cloak
+             class="text-xs text-gray-400">No PRA jump groups/jumpoints returned — the tunnel falls back to the configured defaults (check PRA config to pick per-DB).</p>
           {{ secret_picker("form", "praCredBackend", "pra_credential_ref",
                            "PRA credential", "Resolved to a bt_client_secret override for this DB's tunnel provisioning.") }}
         </div>
@@ -404,7 +416,7 @@ function databasesPage() {
     databases: [], loading: true, activeTab: 'aws',
     toast: '', toastType: 'success',
     showForm: false, saving: false, conn: null,
-    options: { cloud: '', region: '', instance_classes: [], db_subnet_groups: [], security_groups: [], vault_account_groups: [] },
+    options: { cloud: '', region: '', instance_classes: [], db_subnet_groups: [], security_groups: [], vault_account_groups: [], jump_groups: [], jumpoints: [] },
     loadingOptions: false, optionsError: '',
     form: { engine: 'postgres', cloud: 'aws', region: '', name: '', master_username: 'dbadmin',
             instance_class: 'db.t3.micro', allocated_storage: null, db_subnet_group_name: '', vpc_security_group_ids: [], vault_account_group_id: null,
@@ -454,7 +466,7 @@ function databasesPage() {
                     tier: 'db-f1-micro', disk_size: null, private_network: '',
                     sku_name: 'B_Standard_B1ms', storage_gb: 32,
                     jump_group: '', jumpoint_name: '', praCredBackend: '', pra_credential_ref: '' };
-      this.options = { cloud: '', region: '', instance_classes: [], db_subnet_groups: [], security_groups: [], vault_account_groups: [] };
+      this.options = { cloud: '', region: '', instance_classes: [], db_subnet_groups: [], security_groups: [], vault_account_groups: [], jump_groups: [], jumpoints: [] };
       this.optionsError = '';
       this.showForm = true;
       this.loadOptions();   // fire-and-forget — the modal opens immediately, EC2-style

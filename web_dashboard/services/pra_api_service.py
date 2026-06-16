@@ -12,6 +12,8 @@ Uses the same OAuth client-credentials pair as terraform_pra_service:
 Endpoints (the same surface the sra terraform provider calls):
   POST /oauth2/token                       (client credentials, Basic auth)
   GET  /api/config/v1/vault/account-group
+  GET  /api/config/v1/jump-group           (jump-group picker)
+  GET  /api/config/v1/jumpoint             (jumpoint picker)
 """
 import logging
 
@@ -63,24 +65,36 @@ async def _token(client: httpx.AsyncClient, host: str) -> str:
     return token
 
 
-async def list_vault_account_groups() -> list[dict]:
-    """Return Vault account groups as ``[{id, name}]`` (for the provision
-    form's account-group picker). Raises PRAApiError on any failure — callers
-    treat this as best-effort."""
+async def _list_config(path: str, label: str) -> list[dict]:
+    """GET a PRA config-API collection and normalize to ``[{id, name}]``.
+    Raises PRAApiError on any failure — callers treat listing as best-effort."""
     host = _host()
     async with httpx.AsyncClient(timeout=20.0, headers={"Accept": "application/json"}) as client:
         token = await _token(client, host)
-        resp = await client.get(
-            f"{host}/api/config/v1/vault/account-group",
-            headers={"Authorization": f"Bearer {token}"},
-        )
+        resp = await client.get(f"{host}{path}", headers={"Authorization": f"Bearer {token}"})
         if resp.status_code != 200:
-            raise PRAApiError(
-                f"GET vault/account-group failed ({resp.status_code}): {resp.text[:400]}")
-        groups = resp.json()
-        if not isinstance(groups, list):
-            raise PRAApiError(f"unexpected vault/account-group response: {str(groups)[:400]}")
+            raise PRAApiError(f"GET {path} failed ({resp.status_code}): {resp.text[:400]}")
+        items = resp.json()
+        if not isinstance(items, list):
+            raise PRAApiError(f"unexpected {path} response: {str(items)[:400]}")
         return [
-            {"id": g.get("id"), "name": str(g.get("name") or f"group {g.get('id')}")}
-            for g in groups if g.get("id") is not None
+            {"id": it.get("id"), "name": str(it.get("name") or f"{label} {it.get('id')}")}
+            for it in items if it.get("id") is not None
         ]
+
+
+async def list_vault_account_groups() -> list[dict]:
+    """Vault account groups for the credential-injection picker — ``[{id, name}]``."""
+    return await _list_config("/api/config/v1/vault/account-group", "group")
+
+
+async def list_jump_groups() -> list[dict]:
+    """PRA Jump Groups for the provision form's jump-group picker — ``[{id, name}]``.
+    The tunnel HCL filters by name (sra_jump_group_list), so callers submit the name."""
+    return await _list_config("/api/config/v1/jump-group", "jump group")
+
+
+async def list_jumpoints() -> list[dict]:
+    """PRA Jumpoints for the provision form's jumpoint picker — ``[{id, name}]``.
+    The tunnel HCL filters by name (sra_jumpoint_list), so callers submit the name."""
+    return await _list_config("/api/config/v1/jumpoint", "jumpoint")
