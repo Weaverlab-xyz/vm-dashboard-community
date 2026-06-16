@@ -253,6 +253,12 @@ async def list_instances(
             data = json.loads(job.extra_data)
         except Exception:
             continue
+        # Skip instances already terminated via the dashboard — the terminate
+        # flow marks the deploy job destroyed=True. Without this, the (now-deleted)
+        # instance is re-queried and lingers in the list showing TERMINATED, as
+        # GCE briefly returns it post-delete. Mirrors api/aws.py + api/azure.py.
+        if data.get("destroyed"):
+            continue
         name = data.get("instance_name")
         zone = data.get("zone") or _gcp_zone()
         if name:
