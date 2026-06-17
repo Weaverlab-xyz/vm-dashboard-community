@@ -46,6 +46,22 @@ async def lifespan(app: FastAPI):
     init_db()
     logger.info("Database initialised.")
 
+    # Reconcile jobs orphaned by a prior restart (their in-process background task
+    # died with the worker) so they don't linger as zombie 'running' rows and leave
+    # their cluster/DB resource row stuck on 'provisioning'. Non-fatal.
+    try:
+        from .database import SessionLocal
+        from .services import job_service
+        _rdb = SessionLocal()
+        try:
+            n = job_service.reconcile_stale_jobs(_rdb)
+            if n:
+                logger.warning("Reconciled %d stale job(s) orphaned by a prior restart.", n)
+        finally:
+            _rdb.close()
+    except Exception as exc:
+        logger.warning("Stale-job reconcile failed (non-fatal): %s", exc)
+
     _bootstrap_first_run_admin()
 
     warmers = [

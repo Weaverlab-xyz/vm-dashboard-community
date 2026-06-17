@@ -8,7 +8,7 @@ import json
 import os
 import shutil
 import subprocess
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 
 from ..config import settings
 
@@ -140,18 +140,23 @@ def _run(cmd: list, cwd: str, timeout: int = 600,
     )
 
 
+def _init_args(backend_type: str, backend_config: Optional[dict]) -> list:
+    """`terraform init` args; remote backends get -reconfigure + -backend-config."""
+    args = ["init", "-no-color", "-input=false", "-upgrade=false"]
+    if backend_type != "local":
+        args.append("-reconfigure")
+        for k, v in (backend_config or {}).items():
+            args.append(f"-backend-config={k}={v}")
+    return args
+
+
 def _init_sync(deploy_dir: str, env: Optional[dict] = None,
                backend_type: str = "local", backend_config: Optional[dict] = None) -> None:
     # Providers are pre-cached in deploy_dir/.terraform/providers (copied from the
     # template), so -upgrade=false keeps provider fetch offline; the remote backend
     # init still reaches the state store (that is the point).
     _write_backend_tf(deploy_dir, backend_type)
-    cmd = ["init", "-no-color", "-input=false", "-upgrade=false"]
-    if backend_type != "local":
-        cmd.append("-reconfigure")
-        for k, v in (backend_config or {}).items():
-            cmd.append(f"-backend-config={k}={v}")
-    r = _run(cmd, deploy_dir, timeout=300, env=env)
+    r = _run(_init_args(backend_type, backend_config), deploy_dir, timeout=300, env=env)
     if r.returncode != 0:
         raise TerraformError(f"terraform init failed:\n{r.stderr}")
 
@@ -200,10 +205,39 @@ def _build_var_args(variables: dict) -> list:
     return args
 
 
+async def _stream(tf_args: list, cwd: str, env: Optional[dict],
+                  on_line: Callable[[str], Awaitable[None]]) -> tuple[int, str]:
+    """Run a terraform subcommand, streaming each stdout line to the async
+    ``on_line`` callback (stderr merged into stdout). Returns (returncode,
+    full_output). Mirrors packer_service._stream_command; merges env OVER
+    os.environ like :func:`_run` so PATH / SSL_CERT_FILE survive."""
+    proc = await asyncio.create_subprocess_exec(
+        settings.terraform_executable, *tf_args,
+        cwd=cwd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+        env={**os.environ, **env} if env else None,
+    )
+    lines: list = []
+    while True:
+        raw = await proc.stdout.readline()
+        if not raw:
+            break
+        line = raw.decode(errors="replace").rstrip()
+        lines.append(line)
+        try:
+            await on_line(line)
+        except Exception:
+            pass  # a UI-broadcast hiccup must never abort the terraform run
+    await proc.wait()
+    return proc.returncode, "\n".join(lines)
+
+
 # ── Public async API ──────────────────────────────────────────────────────────
 
 async def apply(deploy_dir: str, variables: dict, template_dir: Optional[str] = None,
-                env: Optional[dict] = None) -> dict:
+                env: Optional[dict] = None,
+                on_line: Optional[Callable[[str], Awaitable[None]]] = None) -> dict:
     """
     Copy a Terraform template into deploy_dir, init, and apply. Returns a dict
     of the module's Terraform outputs.
@@ -233,14 +267,33 @@ async def apply(deploy_dir: str, variables: dict, template_dir: Optional[str] = 
     backend_type, backend_config, backend_env = _backend_settings(deploy_dir)
     merged_env = {**backend_env, **(env or {})}
 
-    await asyncio.to_thread(_init_sync, deploy_dir, merged_env, backend_type, backend_config)
-    outputs = await asyncio.to_thread(_apply_sync, deploy_dir, var_args, merged_env)
-    return outputs
+    # No streaming callback → preserve the exact existing (non-streamed) path.
+    if on_line is None:
+        await asyncio.to_thread(_init_sync, deploy_dir, merged_env, backend_type, backend_config)
+        return await asyncio.to_thread(_apply_sync, deploy_dir, var_args, merged_env)
+
+    # Streaming path: run init + apply through _stream so every line reaches
+    # on_line (e.g. the job's Live Output). Outputs are still captured via the
+    # post-apply `output -json` (parsing them out of the live stream is fragile).
+    _write_backend_tf(deploy_dir, backend_type)
+    rc, out = await _stream(_init_args(backend_type, backend_config), deploy_dir, merged_env, on_line)
+    if rc != 0:
+        raise TerraformError(f"terraform init failed:\n{out}")
+    rc, out = await _stream(
+        ["apply", "-auto-approve", "-no-color", "-input=false"] + var_args,
+        deploy_dir, merged_env, on_line)
+    if rc != 0:
+        raise TerraformError(f"terraform apply failed:\n{out}")
+    out_r = await asyncio.to_thread(_run, ["output", "-json"], deploy_dir, 30, merged_env)
+    if out_r.returncode != 0:
+        raise TerraformError(f"terraform output failed:\n{out_r.stderr}")
+    return {k: v["value"] for k, v in json.loads(out_r.stdout).items()}
 
 
 async def destroy(deploy_dir: str, env: Optional[dict] = None,
                   template_dir: Optional[str] = None,
-                  variables: Optional[dict] = None) -> None:
+                  variables: Optional[dict] = None,
+                  on_line: Optional[Callable[[str], Awaitable[None]]] = None) -> None:
     """
     Run terraform destroy for a deployment. State lives in the user's active
     storage backend (remote), so destroy works even if the local deploy dir was
@@ -272,5 +325,18 @@ async def destroy(deploy_dir: str, env: Optional[dict] = None,
                 "cannot destroy; the resource may need manual termination."
             )
 
-    await asyncio.to_thread(_init_sync, deploy_dir, merged_env, backend_type, backend_config)
-    await asyncio.to_thread(_destroy_sync, deploy_dir, merged_env, var_args)
+    if on_line is None:
+        await asyncio.to_thread(_init_sync, deploy_dir, merged_env, backend_type, backend_config)
+        await asyncio.to_thread(_destroy_sync, deploy_dir, merged_env, var_args)
+        return
+
+    # Streaming path (mirrors apply): init + destroy through _stream.
+    _write_backend_tf(deploy_dir, backend_type)
+    rc, out = await _stream(_init_args(backend_type, backend_config), deploy_dir, merged_env, on_line)
+    if rc != 0:
+        raise TerraformError(f"terraform init failed:\n{out}")
+    rc, out = await _stream(
+        ["destroy", "-auto-approve", "-no-color", "-input=false"] + var_args,
+        deploy_dir, merged_env, on_line)
+    if rc != 0:
+        raise TerraformError(f"terraform destroy failed:\n{out}")

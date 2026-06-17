@@ -130,25 +130,24 @@ def _default_region() -> str:
     return config_service.get("aws_region") or settings.aws_region or "us-east-2"
 
 
-def _apply_task(db_id: str, job_id: str, engine: str, tf_variables: dict) -> None:
-    """Background worker: open a fresh session and drive the Terraform apply."""
-    import asyncio
+async def _apply_task(db_id: str, job_id: str, engine: str, tf_variables: dict) -> None:
+    """Background worker — **async, on the main event loop** so terraform's streamed
+    output reaches the job's WebSocket. Opens a fresh session, drives the apply."""
     from ..database import SessionLocal
     s = SessionLocal()
     try:
-        asyncio.run(cloud_database_service.run_provision_apply(
-            s, db_id=db_id, job_id=job_id, engine=engine, tf_variables=tf_variables))
+        await cloud_database_service.run_provision_apply(
+            s, db_id=db_id, job_id=job_id, engine=engine, tf_variables=tf_variables)
     finally:
         s.close()
 
 
-def _decommission_task(db_id: str, job_id: str) -> None:
-    """Background worker: open a fresh session and drive the teardown."""
-    import asyncio
+async def _decommission_task(db_id: str, job_id: str) -> None:
+    """Background worker (async, main loop) — drives the teardown."""
     from ..database import SessionLocal
     s = SessionLocal()
     try:
-        asyncio.run(cloud_database_service.run_decommission(s, db_id=db_id, job_id=job_id))
+        await cloud_database_service.run_decommission(s, db_id=db_id, job_id=job_id)
     finally:
         s.close()
 

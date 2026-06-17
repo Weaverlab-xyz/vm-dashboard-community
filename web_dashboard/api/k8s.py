@@ -76,28 +76,25 @@ async def register_cluster(
         raise HTTPException(status_code=400, detail=str(e))
 
 
-def _provision_task(cluster_id: str, job_id: str, cloud: str, tf_variables: dict) -> None:
-    """Background worker: open a fresh session and drive the cluster Terraform
-    apply + kubeconfig store (mirrors cloud_databases._apply_task)."""
-    import asyncio
-
+async def _provision_task(cluster_id: str, job_id: str, cloud: str, tf_variables: dict) -> None:
+    """Background worker — **async, on the main event loop** so terraform's streamed
+    output reaches the job's WebSocket (manager.broadcast is loop-bound). Opens a
+    fresh session and drives the cluster apply + kubeconfig store."""
     from ..database import SessionLocal
     s = SessionLocal()
     try:
-        asyncio.run(k8s_service.run_provision_apply(
-            s, cluster_id=cluster_id, job_id=job_id, cloud=cloud, tf_variables=tf_variables))
+        await k8s_service.run_provision_apply(
+            s, cluster_id=cluster_id, job_id=job_id, cloud=cloud, tf_variables=tf_variables)
     finally:
         s.close()
 
 
-def _decommission_task(cluster_id: str, job_id: str) -> None:
-    """Background worker: open a fresh session and drive the cluster teardown."""
-    import asyncio
-
+async def _decommission_task(cluster_id: str, job_id: str) -> None:
+    """Background worker (async, main loop) — drives the cluster teardown."""
     from ..database import SessionLocal
     s = SessionLocal()
     try:
-        asyncio.run(k8s_service.run_decommission(s, cluster_id=cluster_id, job_id=job_id))
+        await k8s_service.run_decommission(s, cluster_id=cluster_id, job_id=job_id)
     finally:
         s.close()
 
