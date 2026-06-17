@@ -80,11 +80,17 @@ class GCPSetup(BaseModel):
     gcp_service_account_json: str = ""   # Full SA JSON key — stored encrypted
     gcp_network: str = "default"
     gcp_subnetwork: str = ""
+    # Cloud-NAT subnet the BeyondTrust Jumpoint COS instance lands in — it needs
+    # egress to reach PRA, unlike the user-VM subnet (gcp_subnetwork) above. Falls
+    # back to gcp_subnetwork when blank. Emitted by setup-gcp.sh as
+    # gcp_jumpoint_subnetwork.
+    gcp_jumpoint_subnetwork: str = ""
     gcp_ssh_key_secret_name: str = ""
     gcp_ssh_username: str = "gcp-user"
-    # BeyondTrust Jumpoint Docker deploy key — pre-staged for upcoming GCP
-    # Cloud Run / GKE Jumpoint provisioning. Stored encrypted; resolved through
-    # whichever secrets backend the user picks. No consumer wires it today.
+    # BeyondTrust Jumpoint Docker deploy key — the deploy key the GCE COS Jumpoint
+    # container registers with. Stored encrypted; resolved through whichever
+    # secrets backend the user picks. Consumed by jumpoint_host_service when
+    # provisioning the GCP cloud-database tunnel jumpoint.
     gcp_cloud_run_docker_deploy_key: str = ""
     # Packer template archive (optional)
     packer_gcs_bucket: str = ""
