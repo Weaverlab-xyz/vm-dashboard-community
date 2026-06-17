@@ -4,7 +4,7 @@ Creates, updates, and queries background job records.
 """
 import json
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, List
 from sqlalchemy.orm import Session
 
@@ -55,6 +55,7 @@ def set_running(db: Session, job_id: str) -> Optional[Job]:
     if job:
         job.status = "running"
         job.started_at = datetime.utcnow()
+        job.updated_at = datetime.utcnow()
         db.commit()
         db.refresh(job)
     return job
@@ -66,6 +67,7 @@ def update_progress(db: Session, job_id: str, pct: int, message: str) -> Optiona
     if job:
         job.progress_pct = pct
         job.progress_message = message
+        job.updated_at = datetime.utcnow()
         db.commit()
     return job
 
@@ -77,6 +79,7 @@ def set_completed(db: Session, job_id: str, result: Optional[dict] = None) -> Op
         job.status = "completed"
         job.progress_pct = 100
         job.completed_at = datetime.utcnow()
+        job.updated_at = datetime.utcnow()
         if result:
             existing = job.metadata_dict
             existing.update(result)
@@ -92,6 +95,7 @@ def set_failed(db: Session, job_id: str, error: str) -> Optional[Job]:
     if job:
         job.status = "failed"
         job.completed_at = datetime.utcnow()
+        job.updated_at = datetime.utcnow()
         job.error_message = error
         db.commit()
         db.refresh(job)
@@ -188,3 +192,52 @@ def log_audit(
         entry.details_dict = details
     db.add(entry)
     db.commit()
+
+
+def _flip_resource_row(db: Session, job: Job) -> None:
+    """Flip the cloud resource a stale provision/decommission job owned to
+    ``failed`` so the operator can Delete it to clean up the orphan. Best-effort —
+    the job is already marked failed regardless."""
+    meta = job.metadata_dict or {}
+    try:
+        if job.job_type in ("k8s_provision", "k8s_decommission"):
+            from ..database import K8sCluster
+            cid = meta.get("cluster_id")
+            row = db.query(K8sCluster).filter(K8sCluster.id == cid).first() if cid else None
+            if row and row.status in ("provisioning", "deploying", "decommissioning"):
+                row.status = "failed"
+        elif job.job_type in ("clouddb_provision", "clouddb_decommission"):
+            from ..database import CloudDatabase
+            did = meta.get("db_id")
+            row = db.query(CloudDatabase).filter(CloudDatabase.id == did).first() if did else None
+            if row and row.status in ("provisioning", "decommissioning"):
+                row.status = "failed"
+    except Exception:
+        pass
+
+
+def reconcile_stale_jobs(db: Session, stale_after_minutes: int = 10) -> int:
+    """Mark jobs left ``running``/``pending`` by a prior app restart as ``failed``,
+    and flip their k8s/cloud-DB resource row to ``failed`` so the orphan is visible
+    and Delete-able. Run once at startup.
+
+    "Stale" = no heartbeat (``updated_at``, else ``started_at``/``created_at``) within
+    ``stale_after_minutes``. Long-running provisions stream terraform output, which
+    heartbeats the row every few seconds, so a *live* job is never falsely failed;
+    a job whose worker died stops heartbeating and is reconciled. Idempotent — a
+    second worker (gunicorn -w 2) finds nothing left to do. Returns the count."""
+    cutoff = datetime.utcnow() - timedelta(minutes=stale_after_minutes)
+    n = 0
+    for job in db.query(Job).filter(Job.status.in_(("running", "pending"))).all():
+        last = job.updated_at or job.started_at or job.created_at
+        if last and last > cutoff:
+            continue  # recent heartbeat → still live, leave it
+        job.status = "failed"
+        job.completed_at = datetime.utcnow()
+        job.updated_at = datetime.utcnow()
+        job.error_message = "Interrupted by an app restart (no heartbeat) — re-run if needed."
+        _flip_resource_row(db, job)
+        n += 1
+    if n:
+        db.commit()
+    return n

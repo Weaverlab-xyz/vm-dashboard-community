@@ -460,6 +460,38 @@ async def _store_ps_credentials(db: Session, *, row: CloudDatabase, job_id: str,
             db.commit()
 
 
+# Generic terraform line → (pct, message) milestones for the DB job's progress bar
+# (engine-agnostic phrases, since the resource type varies by cloud).
+_DB_MILESTONES = [
+    ("plan:",                20, "Planning…"),
+    ("creating...",          40, "Creating the database…"),
+    ("still creating",       55, "Creating the database (this can take several minutes)…"),
+    ("creation complete",    85, "Database created; brokering access…"),
+    ("destroying...",        40, "Destroying the database…"),
+    ("still destroying",     60, "Destroying the database…"),
+    ("destruction complete", 90, "Cleaning up…"),
+]
+
+
+def _job_stream(job_id: str, start_pct: int, start_msg: str):
+    """Build an async ``on_line`` callback for ``terraform.apply``/``destroy`` that
+    streams each line to the job's Live Output + advances a coarse progress bar.
+    The per-line ``broadcast_progress`` also heartbeats the job row, which the
+    startup reconcile uses to distinguish a live job from a dead one."""
+    from ..api.websocket import broadcast_progress
+    state = {"pct": start_pct, "msg": start_msg}
+
+    async def on_line(line: str) -> None:
+        low = line.lower()
+        for needle, pct, msg in _DB_MILESTONES:
+            if needle in low:
+                state["pct"], state["msg"] = max(state["pct"], pct), msg
+                break
+        await broadcast_progress(job_id, state["pct"], state["msg"], log_line=line)
+
+    return on_line
+
+
 async def run_provision_apply(
     db: Session, *, db_id: str, job_id: str, engine: str, tf_variables: dict,
 ) -> None:
@@ -485,6 +517,7 @@ async def run_provision_apply(
         outputs = await terraform.apply(
             _deploy_dir(job_id), tf_variables, template_dir=template_dir(engine, row.cloud),
             env=terraform_provider_env.provider_env(row.cloud),
+            on_line=_job_stream(job_id, 5, "Provisioning the database…"),
         )
         row.instance_id = str(outputs.get("instance_id") or "")
         row.private_host = str(outputs.get("private_host") or "")
@@ -629,6 +662,7 @@ async def run_decommission(db: Session, *, db_id: str, job_id: str) -> None:
                 _deploy_dir(deploy_job.id), variables=destroy_vars,
                 env=terraform_provider_env.provider_env(row.cloud),
                 template_dir=template_dir(row.engine, row.cloud),
+                on_line=_job_stream(job_id, 60, "Destroying the database…"),
             )
             logger.info("clouddb instance destroyed db_id=%s cloud=%s", db_id, row.cloud)
         except Exception as exc:

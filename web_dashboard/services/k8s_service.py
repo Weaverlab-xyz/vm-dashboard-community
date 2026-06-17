@@ -310,6 +310,39 @@ def _assemble_eks_kubeconfig(*, cluster_name: str, endpoint: str, ca_b64: str,
     return yaml.safe_dump(cfg, default_flow_style=False, sort_keys=False)
 
 
+# Terraform line → (progress_pct, message) milestones for the job's progress bar.
+# Needles are full ``resource: action`` phrases so a provision stream and a
+# decommission stream never cross-match. pct is applied with max() so progress is
+# monotonic; unmatched (plain) lines keep the current pct/msg.
+_MILESTONES = [
+    ("initializing the backend",                  10, "Initializing Terraform…"),
+    ("terraform has been successfully initialized", 12, "Initialized; planning…"),
+    ("plan:",                                     18, "Planning…"),
+    # provision — the EKS control plane is the long pole (~10 min)
+    ("aws_eks_cluster.this: creating",            35, "Creating the EKS control plane (~10 min)…"),
+    ("aws_eks_cluster.this: still creating",      45, "Creating the EKS control plane (~10 min)…"),
+    ("aws_eks_cluster.this: creation complete",   78, "Control plane ready; creating the node group…"),
+    ("aws_eks_node_group.this: creating",         85, "Creating the node group…"),
+    ("aws_eks_node_group.this: still creating",   88, "Creating the node group…"),
+    ("aws_eks_node_group.this: creation complete", 95, "Node group ready; finalizing…"),
+    # decommission
+    ("aws_eks_node_group.this: destroying",       25, "Destroying the node group…"),
+    ("aws_eks_node_group.this: still destroying", 35, "Destroying the node group…"),
+    ("aws_eks_cluster.this: destroying",          45, "Destroying the EKS control plane…"),
+    ("aws_eks_cluster.this: still destroying",    60, "Destroying the EKS control plane…"),
+    ("aws_eks_cluster.this: destruction complete", 90, "Cleaning up IAM roles…"),
+]
+
+
+def _tf_milestone(line: str, cur_pct: int, cur_msg: str) -> tuple:
+    """Map a terraform line to (pct, message); plain lines keep the current pair."""
+    low = line.lower()
+    for needle, pct, msg in _MILESTONES:
+        if needle in low:
+            return max(cur_pct, pct), msg
+    return cur_pct, cur_msg
+
+
 async def run_provision_apply(db: Session, *, cluster_id: str, job_id: str,
                               cloud: str, tf_variables: dict) -> None:
     """**§1.1a** background task: ``terraform apply`` the cluster module, assemble a
@@ -318,16 +351,24 @@ async def run_provision_apply(db: Session, *, cluster_id: str, job_id: str,
     which the Phase 2-4 flows treat it like any registered cluster. Marks the row +
     job failed on apply error. Mirrors ``cloud_database_service.run_provision_apply``."""
     from . import config_service, job_service, terraform, terraform_provider_env
+    from ..api.websocket import broadcast_progress
     row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
     if not row:
         logger.warning("k8s provision: row %s vanished", cluster_id)
         return
     job_service.set_running(db, job_id)
+    _p = {"pct": 5, "msg": "Starting provision…"}
+
+    async def on_line(line: str) -> None:
+        _p["pct"], _p["msg"] = _tf_milestone(line, _p["pct"], _p["msg"])
+        await broadcast_progress(job_id, _p["pct"], _p["msg"], log_line=line)
+
     try:
         outputs = await terraform.apply(
             _deploy_dir(job_id), tf_variables,
             template_dir=_cluster_template_dir(cloud),
             env=terraform_provider_env.provider_env(cloud),
+            on_line=on_line,
         )
         endpoint = str(outputs.get("endpoint") or "")
         ca_b64 = str(outputs.get("ca_certificate") or "")
@@ -386,11 +427,18 @@ async def run_decommission(db: Session, *, cluster_id: str, job_id: str) -> None
     cluster stays visible) rather than a false ``decommissioned``. Mirrors
     ``cloud_database_service.run_decommission``."""
     from . import config_service, job_service, terraform, terraform_provider_env
+    from ..api.websocket import broadcast_progress
     row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
     if not row:
         job_service.set_failed(db, job_id, f"cluster {cluster_id} not found")
         return
     job_service.set_running(db, job_id)
+    _p = {"pct": 40, "msg": "Destroying the cluster…"}
+
+    async def on_line(line: str) -> None:
+        _p["pct"], _p["msg"] = _tf_milestone(line, _p["pct"], _p["msg"])
+        await broadcast_progress(job_id, _p["pct"], _p["msg"], log_line=line)
+
     errors: list = []
 
     # 1. PRA tunnel (best-effort; clears pra_jump_id / pra_tunnel_state on the row).
@@ -419,6 +467,7 @@ async def run_decommission(db: Session, *, cluster_id: str, job_id: str) -> None
                 env=terraform_provider_env.provider_env(row.cloud),
                 template_dir=_cluster_template_dir(row.cloud),
                 variables=destroy_vars,
+                on_line=on_line,
             )
             logger.info("k8s cluster destroyed cluster_id=%s cloud=%s", cluster_id, row.cloud)
         except Exception as exc:

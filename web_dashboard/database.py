@@ -212,6 +212,10 @@ class Job(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     started_at = Column(DateTime)
     completed_at = Column(DateTime)
+    # Heartbeat — bumped on every status/progress write (incl. streamed terraform
+    # output); the startup reconcile uses it to tell a live job from one orphaned
+    # by an app restart.
+    updated_at = Column(DateTime)
     created_by = Column(String(100), index=True)  # Username
     error_message = Column(Text)
     extra_data = Column(Text)  # JSON string for flexible storage
@@ -708,6 +712,8 @@ def init_db():
             "ALTER TABLE k8s_clusters ADD COLUMN source VARCHAR(16) DEFAULT 'registered'",
             "ALTER TABLE k8s_clusters ADD COLUMN deploy_job_id VARCHAR(36)",
             "ALTER TABLE k8s_clusters ADD COLUMN region VARCHAR(40)",
+            # Job heartbeat — drives the startup reconcile of restart-orphaned jobs.
+            "ALTER TABLE jobs ADD COLUMN updated_at TIMESTAMP",
             # Cloud-db per-DB PRA broker overrides (config defaults as fallback).
             "ALTER TABLE cloud_databases ADD COLUMN jump_group VARCHAR(128)",
             "ALTER TABLE cloud_databases ADD COLUMN jumpoint_name VARCHAR(128)",
