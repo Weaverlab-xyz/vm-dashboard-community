@@ -8,6 +8,11 @@ import json
 import os
 import shutil
 import subprocess
+import contextlib
+try:
+    import fcntl  # POSIX-only; the app runs in Linux containers (absent on Windows dev hosts → locking is a no-op there).
+except ImportError:  # pragma: no cover
+    fcntl = None
 from typing import Awaitable, Callable, Optional
 
 from ..config import settings
@@ -140,6 +145,43 @@ def _run(cmd: list, cwd: str, timeout: int = 600,
     )
 
 
+def _init_lock_path() -> str:
+    cache = os.environ.get("TF_PLUGIN_CACHE_DIR") or os.path.join(
+        os.path.expanduser("~"), ".terraform.d", "plugin-cache")
+    try:
+        os.makedirs(cache, exist_ok=True)
+    except OSError:
+        cache = "/tmp"
+    return os.path.join(cache, ".tf-init.lock")
+
+
+@contextlib.contextmanager
+def _plugin_cache_lock():
+    """Serialize ``terraform init`` across processes/jobs.
+
+    Terraform's shared plugin cache (``TF_PLUGIN_CACHE_DIR``, populated once at
+    image build) is explicitly NOT concurrency-safe: parallel inits race to
+    (re)place the same provider binary and fail with "text file busy" (ETXTBSY) —
+    exactly what happens when several provisions/decommissions are kicked off at
+    once. A coarse exclusive file lock around init only (apply/destroy don't touch
+    the cache, so those still run in parallel) serializes provider placement
+    across gunicorn workers and concurrent jobs. ``flock`` is advisory and
+    auto-released if a worker dies. No-op where ``fcntl`` is absent (Windows dev).
+    """
+    if fcntl is None:
+        yield
+        return
+    fd = open(_init_lock_path(), "w")
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            fd.close()
+
+
 def _init_args(backend_type: str, backend_config: Optional[dict]) -> list:
     """`terraform init` args; remote backends get -reconfigure + -backend-config."""
     args = ["init", "-no-color", "-input=false", "-upgrade=false"]
@@ -156,7 +198,8 @@ def _init_sync(deploy_dir: str, env: Optional[dict] = None,
     # template), so -upgrade=false keeps provider fetch offline; the remote backend
     # init still reaches the state store (that is the point).
     _write_backend_tf(deploy_dir, backend_type)
-    r = _run(_init_args(backend_type, backend_config), deploy_dir, timeout=300, env=env)
+    with _plugin_cache_lock():
+        r = _run(_init_args(backend_type, backend_config), deploy_dir, timeout=300, env=env)
     if r.returncode != 0:
         raise TerraformError(f"terraform init failed:\n{r.stderr}")
 
@@ -272,13 +315,12 @@ async def apply(deploy_dir: str, variables: dict, template_dir: Optional[str] = 
         await asyncio.to_thread(_init_sync, deploy_dir, merged_env, backend_type, backend_config)
         return await asyncio.to_thread(_apply_sync, deploy_dir, var_args, merged_env)
 
-    # Streaming path: run init + apply through _stream so every line reaches
-    # on_line (e.g. the job's Live Output). Outputs are still captured via the
-    # post-apply `output -json` (parsing them out of the live stream is fragile).
-    _write_backend_tf(deploy_dir, backend_type)
-    rc, out = await _stream(_init_args(backend_type, backend_config), deploy_dir, merged_env, on_line)
-    if rc != 0:
-        raise TerraformError(f"terraform init failed:\n{out}")
+    # Streaming path: stream the apply (the long, interesting part) line-by-line to
+    # on_line (e.g. the job's Live Output). Init runs first via the serialized,
+    # non-streamed _init_sync — the shared plugin cache isn't concurrency-safe
+    # (see _plugin_cache_lock) and init output is brief. Outputs are still captured
+    # via the post-apply `output -json` (parsing them out of the live stream is fragile).
+    await asyncio.to_thread(_init_sync, deploy_dir, merged_env, backend_type, backend_config)
     rc, out = await _stream(
         ["apply", "-auto-approve", "-no-color", "-input=false"] + var_args,
         deploy_dir, merged_env, on_line)
@@ -330,11 +372,8 @@ async def destroy(deploy_dir: str, env: Optional[dict] = None,
         await asyncio.to_thread(_destroy_sync, deploy_dir, merged_env, var_args)
         return
 
-    # Streaming path (mirrors apply): init + destroy through _stream.
-    _write_backend_tf(deploy_dir, backend_type)
-    rc, out = await _stream(_init_args(backend_type, backend_config), deploy_dir, merged_env, on_line)
-    if rc != 0:
-        raise TerraformError(f"terraform init failed:\n{out}")
+    # Streaming path (mirrors apply): serialized non-streamed init, then stream destroy.
+    await asyncio.to_thread(_init_sync, deploy_dir, merged_env, backend_type, backend_config)
     rc, out = await _stream(
         ["destroy", "-auto-approve", "-no-color", "-input=false"] + var_args,
         deploy_dir, merged_env, on_line)
