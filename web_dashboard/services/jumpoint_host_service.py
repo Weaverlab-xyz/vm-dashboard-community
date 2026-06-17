@@ -24,6 +24,7 @@ DB/EC2 resource intact (the tunnel/jump is just unavailable until fixed).
 """
 import asyncio
 import logging
+import re
 import time
 from typing import Optional
 
@@ -231,7 +232,17 @@ async def _teardown_jumpoint_host_if_idle_aws(db, region: str) -> None:
 # One shared, ref-counted instance, mirroring the AWS host lifecycle.
 
 def _gcp_jumpoint_name() -> str:
-    return _cfg("gcp_jumpoint_name") or "clouddb-shared-jumpoint"
+    """GCE *instance* name for the shared jumpoint VM — must be a valid GCE
+    resource name (RFC1035: lowercase, leading letter, hyphens). This is NOT the
+    PRA Jumpoint the tunnel binds to: that comes from the form's jumpoint picker,
+    and which PRA Jumpoint the container joins is set by its deploy key. So
+    sanitize any configured value — a PRA display name like 'GCP Run' (space +
+    uppercase) otherwise 400s the Compute API as an invalid instance name."""
+    raw = (_cfg("gcp_jumpoint_name") or "clouddb-shared-jumpoint").strip().lower()
+    name = re.sub(r"[^a-z0-9-]+", "-", raw).strip("-")
+    if not name or not name[0].isalpha():
+        name = f"clouddb-{name}".strip("-")
+    return name[:63].rstrip("-") or "clouddb-shared-jumpoint"
 
 
 def _gcp_project() -> str:
@@ -242,6 +253,20 @@ def _gcp_jumpoint_zone(region: str) -> str:
     # Explicit jumpoint zone wins; else the generic gcp_zone; else derive a
     # conventional zone from the region (region-b) as a last resort.
     return _cfg("gcp_jumpoint_zone") or _cfg("gcp_zone") or (f"{region}-b" if region else "")
+
+
+def _gcp_jumpoint_subnetwork(project: str, zone: str) -> str:
+    """Regional self-link for the jumpoint's subnet. Prefer gcp_jumpoint_subnetwork
+    (the sandbox's Cloud-NAT subnet) over gcp_subnetwork (the user-VM subnet, which
+    the sandbox leaves without internet egress — a jumpoint there can't reach PRA to
+    register). The sandbox emits a bare name, but GCE's networkInterfaces.subnetwork
+    needs projects/<p>/regions/<r>/subnetworks/<name>; a value already containing "/"
+    is passed through unchanged."""
+    sub = _cfg("gcp_jumpoint_subnetwork") or _cfg("gcp_subnetwork") or ""
+    if not sub or "/" in sub:
+        return sub
+    region = _cfg("gcp_region") or (zone.rsplit("-", 1)[0] if zone else "")
+    return f"projects/{project}/regions/{region}/subnetworks/{sub}" if region else sub
 
 
 async def _resolve_gcp_deploy_key() -> str:
@@ -277,7 +302,7 @@ async def _ensure_jumpoint_host_gcp(region: str) -> Optional[str]:
             container_image=_cfg("gcp_jumpoint_image") or "beyondtrust/sra-jumpoint:latest",
             deploy_key=deploy_key,
             network=_cfg("gcp_db_network") or _cfg("gcp_network") or "",
-            subnetwork=_cfg("gcp_subnetwork") or "",
+            subnetwork=_gcp_jumpoint_subnetwork(project, zone),
             machine_type=_cfg("gcp_jumpoint_machine_type") or "e2-micro",
             create_external_ip=True,
         )

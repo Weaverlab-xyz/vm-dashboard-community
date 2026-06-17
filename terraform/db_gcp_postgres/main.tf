@@ -66,7 +66,7 @@ variable "master_password" {
 
 variable "private_network" {
   type        = string
-  description = "Self-link or id of the VPC the instance gets its private IP on (private services access must already be configured on it — the sandbox does this)"
+  description = "VPC the instance gets its private IP on — a bare network name (e.g. my-vpc) or a full self-link/path. Private services access must already be configured on it (the sandbox does this)."
 }
 
 variable "ssl_mode" {
@@ -88,6 +88,14 @@ variable "labels" {
   description = "Resource labels (managed-by, clouddb-id). Keys/values must be lowercase."
 }
 
+locals {
+  # google_sql_database_instance.private_network needs a fully-qualified network
+  # self-link (projects/<project>/global/networks/<name>), not a bare name. If
+  # the caller already passed a path/URL (contains "/"), use it as-is; otherwise
+  # qualify the bare name (the common sandbox config) with this module's project.
+  private_network_id = can(regex("/", var.private_network)) ? var.private_network : "projects/${var.project}/global/networks/${var.private_network}"
+}
+
 # ── Resource — always private (no public IP) ─────────────────────────────────
 # ipv4_enabled = false is load-bearing: the only path in is the PRA protocol-
 # tunnel jump (via the beyondtrust/sra provider). Never enable a public IP.
@@ -107,7 +115,7 @@ resource "google_sql_database_instance" "this" {
 
     ip_configuration {
       ipv4_enabled    = false
-      private_network = var.private_network
+      private_network = local.private_network_id
       ssl_mode        = var.ssl_mode
     }
 

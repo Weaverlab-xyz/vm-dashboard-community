@@ -520,6 +520,15 @@ gcloud iam service-accounts keys create sa-key.json \
                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
                 placeholder="projects/…/regions/us-central1/subnetworks/default">
             </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Jumpoint Subnetwork (optional)</label>
+              <input type="text" x-model="form.gcp.gcp_jumpoint_subnetwork"
+                class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                placeholder="projects/…/regions/us-central1/subnetworks/…-jumpoint-subnet">
+              <p class="mt-1 text-xs text-gray-500">
+                Cloud-NAT subnet the cloud-database tunnel Jumpoint lands in (it needs egress to reach PRA, unlike the default VM subnet). Emitted by <code class="bg-gray-100 px-1 rounded">setup-gcp.sh</code> as <code class="bg-gray-100 px-1 rounded">gcp_jumpoint_subnetwork</code>; falls back to the default subnetwork if blank.
+              </p>
+            </div>
             <div class="sm:col-span-2">
               <label class="block text-sm font-medium text-gray-700 mb-1">BeyondTrust Jumpoint Docker Deploy Key (optional)</label>
               <input type="password" x-model="form.gcp.gcp_cloud_run_docker_deploy_key"
@@ -527,7 +536,7 @@ gcloud iam service-accounts keys create sa-key.json \
                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
                 :placeholder="isReconfig ? '••••••••  (leave blank to keep current)' : 'paste deploy key from BeyondTrust'">
               <p class="mt-1 text-xs text-gray-500">
-                Pre-staged for the upcoming GCP Cloud Run / GKE Jumpoint provisioning. Stored encrypted in the dashboard DB and resolved through whichever secrets backend you select on the <code class="bg-gray-100 px-1 rounded">/secrets</code> page. Not consumed by any code today.
+                The deploy key the GCE COS Jumpoint container registers with. Stored encrypted in the dashboard DB and resolved through whichever secrets backend you select on the <code class="bg-gray-100 px-1 rounded">/secrets</code> page. Consumed when provisioning the GCP cloud-database tunnel Jumpoint.
               </p>
             </div>
           </div>
@@ -673,6 +682,7 @@ function wizard() {
                   azure_oauth_client_id: '', azure_oauth_client_secret: '', azure_oauth_tenant_id: '' },
       gcp:      { gcp_project_id: '', gcp_region: 'us-central1', gcp_zone: 'us-central1-a',
                   gcp_service_account_json: '', gcp_network: 'default', gcp_subnetwork: '',
+                  gcp_jumpoint_subnetwork: '',
                   gcp_ssh_key_secret_name: '', gcp_ssh_username: 'gcp-user',
                   gcp_cloud_run_docker_deploy_key: '' },
       features: { vmware_enabled: false, beyondtrust_enabled: false,
@@ -861,7 +871,7 @@ function wizard() {
             if (cfg.gcp_network)            this.form.gcp.gcp_network            = cfg.gcp_network;
             // GCP advanced — expand if previously configured
             const gcpAdv = ['gcp_ssh_key_secret_name', 'gcp_ssh_username', 'gcp_subnetwork',
-                            'gcp_cloud_run_docker_deploy_key'];
+                            'gcp_jumpoint_subnetwork', 'gcp_cloud_run_docker_deploy_key'];
             for (const f of gcpAdv) {
               if (cfg[f]) { this.form.gcp[f] = cfg[f]; this.showGcpAdvanced = true; }
             }
