@@ -218,7 +218,10 @@ def generate_azure_template(
         '  image_publisher = "' + image_publisher + '"\n'
         '  image_offer     = "' + image_offer + '"\n'
         '  image_sku       = "' + image_sku + '"\n\n'
-        '  location = var.location\n'
+        # Build in an existing RG the SP already controls — avoids needing
+        # subscription-level rights to create a temp pkr-Resource-Group-* (a
+        # default Packer behavior that fails for an RG-scoped service principal).
+        '  build_resource_group_name = var.resource_group\n'
         '  vm_size  = "' + vm_size + '"\n'
         '}\n\n'
         'build {\n'
@@ -287,7 +290,10 @@ def generate_azure_windows_template(
         '  winrm_insecure = true\n'
         '  winrm_timeout  = "30m"\n'
         '  winrm_username = "packer"\n\n'
-        '  location = var.location\n'
+        # Build in an existing RG the SP already controls — avoids needing
+        # subscription-level rights to create a temp pkr-Resource-Group-* (a
+        # default Packer behavior that fails for an RG-scoped service principal).
+        '  build_resource_group_name = var.resource_group\n'
         '  vm_size  = "' + vm_size + '"\n'
         '}\n\n'
         'build {\n'
@@ -345,6 +351,7 @@ def generate_azure_windows_client_template(
         '# sensitive PKR_VAR_* vars — the azure-arm builder does NOT read ARM_* env vars.\n\n'
         + _AZURE_SP_VAR_DECLS +
         'variable "location"               { default = "centralus" }\n'
+        'variable "resource_group"         { default = "" }\n'
         'variable "gallery_subscription"   { default = "" }\n'
         'variable "gallery_resource_group" { default = "" }\n'
         'variable "gallery_name"           { default = "" }\n'
@@ -375,7 +382,10 @@ def generate_azure_windows_client_template(
         '    image_version        = var.gallery_image_version\n'
         '    storage_account_type = "Standard_LRS"\n'
         '  }\n\n'
-        '  location = var.location\n'
+        # Build the temp VM in an existing RG the SP controls — avoids needing
+        # subscription-level rights to create a pkr-Resource-Group-* (fails for
+        # an RG-scoped service principal). Gallery output RG is separate (above).
+        '  build_resource_group_name = var.resource_group\n'
         '  vm_size  = "' + vm_size + '"\n'
         '}\n\n'
         'build {\n'
