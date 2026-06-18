@@ -194,6 +194,66 @@ def log_audit(
     db.commit()
 
 
+def append_job_log(db: Session, job_id: str, line: str) -> None:
+    """Append one Live Output line for a job with the next per-job seq. Best-effort:
+    a logging hiccup must never abort a terraform run (mirrors terraform._stream)."""
+    from ..database import JobLog
+    try:
+        last = (
+            db.query(JobLog.seq)
+            .filter(JobLog.job_id == job_id)
+            .order_by(JobLog.seq.desc())
+            .first()
+        )
+        nxt = (last[0] + 1) if last else 1
+        db.add(JobLog(job_id=job_id, seq=nxt, line=line, created_at=datetime.utcnow()))
+        db.commit()
+    except Exception:
+        db.rollback()
+
+
+def get_job_logs(db: Session, job_id: str, after_seq: int = 0) -> List[tuple]:
+    """Return ``[(seq, line), …]`` for a job with ``seq > after_seq``, oldest first —
+    the WS endpoint replays these and tails new ones so Live Output survives the
+    runner being a separate process (and survives client reconnects)."""
+    from ..database import JobLog
+    rows = (
+        db.query(JobLog.seq, JobLog.line)
+        .filter(JobLog.job_id == job_id, JobLog.seq > after_seq)
+        .order_by(JobLog.seq.asc())
+        .all()
+    )
+    return [(r[0], r[1]) for r in rows]
+
+
+def is_cancelled(db: Session, job_id: str) -> bool:
+    """True if the job's status was flipped to ``cancelled`` — the cooperative-cancel
+    signal an in-flight terraform stream polls for."""
+    row = db.query(Job.status).filter(Job.id == job_id).first()
+    return bool(row and row[0] == "cancelled")
+
+
+def cancel_check(job_id: str, state: dict, interval_s: float = 5.0) -> None:
+    """Raise ``terraform.JobCancelled`` if the job was cancelled, throttled to at most
+    once per ``interval_s`` (a cheap status-only query). Called from the per-line
+    ``on_line`` callbacks; ``state`` is the closure's mutable dict (it stores the last
+    check time). Lets the operator's Cancel button stop a long apply/destroy within
+    ~``interval_s`` without a DB hit on every streamed line."""
+    import time
+    now = time.monotonic()
+    if now - state.get("_cc", 0.0) < interval_s:
+        return
+    state["_cc"] = now
+    from ..database import SessionLocal
+    from . import terraform
+    s = SessionLocal()
+    try:
+        if is_cancelled(s, job_id):
+            raise terraform.JobCancelled(f"job {job_id} cancelled")
+    finally:
+        s.close()
+
+
 def _flip_resource_row(db: Session, job: Job) -> None:
     """Flip the cloud resource a stale provision/decommission job owned to
     ``failed`` so the operator can Delete it to clean up the orphan. Best-effort —
@@ -217,18 +277,23 @@ def _flip_resource_row(db: Session, job: Job) -> None:
 
 
 def reconcile_stale_jobs(db: Session, stale_after_minutes: int = 10) -> int:
-    """Mark jobs left ``running``/``pending`` by a prior app restart as ``failed``,
-    and flip their k8s/cloud-DB resource row to ``failed`` so the orphan is visible
-    and Delete-able. Run once at startup.
+    """Mark ``running`` jobs whose worker died (no heartbeat) as ``failed`` and flip
+    their k8s/cloud-DB resource row to ``failed`` so the orphan is visible and
+    Delete-able. Run at app + job-runner startup.
+
+    Only ``running`` jobs are reconciled — NOT ``pending``: with the dedicated job
+    runner the ``jobs`` table is a queue, so a job legitimately waits ``pending``
+    until claimed, and a brief runner outage must not fail queued work.
 
     "Stale" = no heartbeat (``updated_at``, else ``started_at``/``created_at``) within
     ``stale_after_minutes``. Long-running provisions stream terraform output, which
     heartbeats the row every few seconds, so a *live* job is never falsely failed;
     a job whose worker died stops heartbeating and is reconciled. Idempotent — a
-    second worker (gunicorn -w 2) finds nothing left to do. Returns the count."""
+    second caller (gunicorn -w 2 + the runner) finds nothing left to do. Returns
+    the count."""
     cutoff = datetime.utcnow() - timedelta(minutes=stale_after_minutes)
     n = 0
-    for job in db.query(Job).filter(Job.status.in_(("running", "pending"))).all():
+    for job in db.query(Job).filter(Job.status == "running").all():
         last = job.updated_at or job.started_at or job.created_at
         if last and last > cutoff:
             continue  # recent heartbeat → still live, leave it

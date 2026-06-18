@@ -15,13 +15,13 @@ import logging
 import re
 from typing import Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..database import User, get_db
-from ..services import aws_service, cache_service, cloud_database_service, config_service
+from ..services import aws_service, cache_service, cloud_database_service, config_service, job_service
 from ..services.aws_service import AWSError
 from .auth import require_admin
 
@@ -130,32 +130,9 @@ def _default_region() -> str:
     return config_service.get("aws_region") or settings.aws_region or "us-east-2"
 
 
-async def _apply_task(db_id: str, job_id: str, engine: str, tf_variables: dict) -> None:
-    """Background worker — **async, on the main event loop** so terraform's streamed
-    output reaches the job's WebSocket. Opens a fresh session, drives the apply."""
-    from ..database import SessionLocal
-    s = SessionLocal()
-    try:
-        await cloud_database_service.run_provision_apply(
-            s, db_id=db_id, job_id=job_id, engine=engine, tf_variables=tf_variables)
-    finally:
-        s.close()
-
-
-async def _decommission_task(db_id: str, job_id: str) -> None:
-    """Background worker (async, main loop) — drives the teardown."""
-    from ..database import SessionLocal
-    s = SessionLocal()
-    try:
-        await cloud_database_service.run_decommission(s, db_id=db_id, job_id=job_id)
-    finally:
-        s.close()
-
-
 @router.post("")
 async def provision_database(
     payload: ProvisionRequest,
-    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
@@ -185,8 +162,12 @@ async def provision_database(
     except NotImplementedError as exc:
         raise HTTPException(status_code=501, detail=str(exc)) from exc
 
-    background_tasks.add_task(
-        _apply_task, result["db_id"], result["job_id"], payload.engine, result["tf_variables"])
+    # Persist the Terraform vars on the job — MINUS the master password (never store
+    # a secret in jobs.extra_data; run_provision_apply re-injects it from the secrets
+    # backend). The dedicated job runner claims the pending job and runs the apply.
+    tf_vars = {k: v for k, v in result["tf_variables"].items()
+               if k not in ("master_password", "administrator_password")}
+    job_service.update_metadata(db, result["job_id"], {"tf_variables": tf_vars})
     return {"ok": True, "db_id": result["db_id"], "job_id": result["job_id"]}
 
 
@@ -267,14 +248,15 @@ async def connection(
 @router.delete("/{db_id}")
 async def decommission_database(
     db_id: str,
-    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
     _require_enabled()
     try:
+        # start_decommission creates the pending clouddb_decommission job; the job
+        # runner claims it and drives the teardown (no payload needed — the run fn
+        # rebuilds the destroy vars from the row + config).
         result = cloud_database_service.start_decommission(db, db_id, created_by=current_user.username)
-        background_tasks.add_task(_decommission_task, result["db_id"], result["job_id"])
         return result
     except cloud_database_service.CloudDatabaseError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

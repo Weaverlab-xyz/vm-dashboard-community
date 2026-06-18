@@ -196,10 +196,15 @@ RUN printf '#!/bin/sh\nif [ -f /root/.ssh/dev_dashboard_key ]; then\n    install
     > /usr/local/bin/entrypoint.sh && chmod +x /usr/local/bin/entrypoint.sh
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
+# Long-lived job-progress WebSockets must outlive a provision; the durable
+# Terraform jobs now run in the separate `worker` service (web_dashboard.jobs_worker),
+# so this generous request timeout only affects HTTP/WS, not job durability — it
+# just stops the WS-handling worker being recycled out from under an open job page.
 CMD ["gunicorn", \
      "-w", "2", \
      "-k", "uvicorn.workers.UvicornWorker", \
      "--bind", "0.0.0.0:8000", \
-     "--timeout", "300", \
+     "--timeout", "1800", \
+     "--graceful-timeout", "30", \
      "--access-logfile", "-", \
      "web_dashboard.main:app"]

@@ -245,6 +245,22 @@ class Job(Base):
         return None
 
 
+class JobLog(Base):
+    """Per-line Live Output for a job, persisted so a separate worker process's
+    terraform stream reaches WS clients connected to gunicorn (which poll the DB),
+    and so a reconnecting client can replay the full output. Append-only; the
+    dedicated job runner is the sole writer per job_id (one monotonic seq)."""
+    __tablename__ = "job_logs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    job_id = Column(String(36), index=True, nullable=False)
+    seq = Column(Integer, nullable=False)
+    line = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    __table_args__ = (UniqueConstraint("job_id", "seq", name="uq_job_log_seq"),)
+
+
 class AuditLog(Base):
     """Audit log for security-relevant operations"""
     __tablename__ = "audit_log"

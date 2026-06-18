@@ -360,6 +360,7 @@ async def run_provision_apply(db: Session, *, cluster_id: str, job_id: str,
     _p = {"pct": 5, "msg": "Starting provision…"}
 
     async def on_line(line: str) -> None:
+        job_service.cancel_check(job_id, _p)  # stop terraform if the job was cancelled
         _p["pct"], _p["msg"] = _tf_milestone(line, _p["pct"], _p["msg"])
         await broadcast_progress(job_id, _p["pct"], _p["msg"], log_line=line)
 
@@ -436,6 +437,7 @@ async def run_decommission(db: Session, *, cluster_id: str, job_id: str) -> None
     _p = {"pct": 40, "msg": "Destroying the cluster…"}
 
     async def on_line(line: str) -> None:
+        job_service.cancel_check(job_id, _p)  # stop terraform if the job was cancelled
         _p["pct"], _p["msg"] = _tf_milestone(line, _p["pct"], _p["msg"])
         await broadcast_progress(job_id, _p["pct"], _p["msg"], log_line=line)
 

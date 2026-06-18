@@ -505,6 +505,7 @@ def _job_stream(job_id: str, start_pct: int, start_msg: str):
     state = {"pct": start_pct, "msg": start_msg}
 
     async def on_line(line: str) -> None:
+        job_service.cancel_check(job_id, state)  # stop terraform if the job was cancelled
         low = line.lower()
         for needle, pct, msg in _DB_MILESTONES:
             if needle in low:
@@ -526,6 +527,13 @@ async def run_provision_apply(
     if not row:
         logger.warning("clouddb apply: row %s vanished", db_id)
         return
+    # The job's persisted tf_variables OMIT the master password — a secret is never
+    # written to jobs.extra_data. Re-inject it from the secrets backend into the key
+    # the engine module (and the downstream PRA tunnel + credential staging, which
+    # read it back out of tf_variables) expect.
+    _pw = config_service.get(f"clouddb/{db_id}/admin") or ""
+    if _pw:
+        tf_variables["administrator_password" if row.cloud == "azure" else "master_password"] = _pw
     job_service.set_running(db, job_id)
     try:
         # Kick the shared Jumpoint host EARLY (only when PRA is configured) so its
