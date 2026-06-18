@@ -25,7 +25,7 @@ try:
         VirtualMachine, HardwareProfile, StorageProfile, ImageReference,
         OSDisk, DiskCreateOptionTypes, OSProfile, LinuxConfiguration,
         SshConfiguration, SshPublicKey, NetworkProfile, NetworkInterfaceReference,
-        WindowsConfiguration,
+        WindowsConfiguration, SecurityProfile, UefiSettings,
     )
     from azure.mgmt.network import NetworkManagementClient
     from azure.mgmt.network.models import (
@@ -686,6 +686,7 @@ def _deploy_vm_sync(
     image_sku: str = None, image_version: str = None,
     workgroup: str = "",
     os_type: str = "Linux", admin_password: str = "",
+    trusted_launch: bool = False,
 ) -> dict:
     is_windows = (os_type or "Linux").lower() == "windows"
     if is_windows:
@@ -802,6 +803,19 @@ def _deploy_vm_sync(
         ),
     )
 
+    # Trusted Launch (Windows 11 / gallery trusted-launch images): the VM must
+    # declare the matching security profile, and Windows client images attest
+    # multi-tenant hosting eligibility via the Windows_Client license type.
+    if trusted_launch:
+        vm_params.security_profile = SecurityProfile(
+            security_type="TrustedLaunch",
+            uefi_settings=UefiSettings(secure_boot_enabled=True, v_tpm_enabled=True),
+        )
+        if is_windows:
+            vm_params.license_type = "Windows_Client"
+        logger.info("Azure deploy %s: Trusted Launch (secure boot + vTPM)%s", vm_name,
+                    ", Windows_Client license" if is_windows else "")
+
     vm = compute.virtual_machines.begin_create_or_update(rg, vm_name, vm_params).result()
 
     # Fetch IPs from NIC
@@ -834,6 +848,7 @@ async def deploy_vm(
     image_sku: str = None, image_version: str = None,
     workgroup: str = "",
     os_type: str = "Linux", admin_password: str = "",
+    trusted_launch: bool = False,
 ) -> dict:
     try:
         cred, sub_id = await _ensure_creds()
@@ -845,11 +860,64 @@ async def deploy_vm(
             image_publisher, image_offer, image_sku, image_version,
             workgroup,
             os_type=os_type, admin_password=admin_password,
+            trusted_launch=trusted_launch,
         )
     except AzureError:
         raise
     except Exception as e:
         raise AzureError(f"Failed to deploy VM {vm_name}: {e}") from e
+
+
+# ── Compute Gallery (Trusted Launch image publishing for Windows 11) ──────────
+# Win 11 requires Trusted Launch, and Azure cannot create a managed image from a
+# Trusted Launch VM — so Win-client Packer builds publish a gallery image VERSION
+# instead. Packer creates the version; the gallery + image DEFINITION must exist
+# first, so these idempotent helpers create-or-update them before the build.
+
+def _ensure_gallery_sync(cred, sub_id: str, rg: str, location: str, gallery_name: str):
+    from azure.mgmt.compute.models import Gallery
+    compute = _get_compute(cred, sub_id)
+    return compute.galleries.begin_create_or_update(
+        rg, gallery_name, Gallery(location=location)
+    ).result()
+
+
+async def ensure_gallery(rg: str, location: str, gallery_name: str):
+    """Create the Azure Compute Gallery if missing (idempotent)."""
+    cred, sub_id = await _ensure_creds()
+    return await asyncio.to_thread(_ensure_gallery_sync, cred, sub_id, rg, location, gallery_name)
+
+
+def _ensure_tl_image_def_sync(cred, sub_id: str, rg: str, gallery_name: str,
+                              image_def_name: str, location: str):
+    from azure.mgmt.compute.models import (
+        GalleryImage, GalleryImageIdentifier, GalleryImageFeature,
+    )
+    compute = _get_compute(cred, sub_id)
+    img_def = GalleryImage(
+        location=location,
+        os_type="Windows",
+        os_state="Generalized",          # Packer sysprep /generalize'd the source
+        hyper_v_generation="V2",         # Gen2 — required for Trusted Launch
+        identifier=GalleryImageIdentifier(
+            # Dashboard-owned label namespace — NOT the marketplace source.
+            publisher="vm-dashboard", offer="windows-client", sku=image_def_name,
+        ),
+        features=[GalleryImageFeature(name="SecurityType", value="TrustedLaunch")],
+    )
+    return compute.gallery_images.begin_create_or_update(
+        rg, gallery_name, image_def_name, img_def
+    ).result()
+
+
+async def ensure_trusted_launch_image_definition(rg: str, gallery_name: str,
+                                                 image_def_name: str, location: str):
+    """Create a Gen2 / TrustedLaunch / Generalized Windows image definition if
+    missing (idempotent). Packer publishes a version into it."""
+    cred, sub_id = await _ensure_creds()
+    return await asyncio.to_thread(
+        _ensure_tl_image_def_sync, cred, sub_id, rg, gallery_name, image_def_name, location,
+    )
 
 
 def _set_workgroup_tag_sync(cred, sub_id: str, rg: str, vm_name: str, workgroup: str) -> None:

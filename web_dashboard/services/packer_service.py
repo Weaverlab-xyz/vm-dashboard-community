@@ -298,6 +298,94 @@ def generate_azure_windows_template(
     )
 
 
+def generate_azure_windows_client_template(
+    image_publisher: str,
+    image_offer: str,
+    image_sku: str,
+    vm_size: str,
+    image_name: str,
+    has_provisioner: bool,
+) -> str:
+    """Windows *client* (e.g. Windows 11) build → Trusted Launch + Compute Gallery.
+
+    Win 11 requires Trusted Launch (Secure Boot + vTPM), and Azure cannot create a
+    managed image from a Trusted Launch VM — so this publishes a Shared Image
+    Gallery *version* instead of a managed image. The gallery + image definition
+    are ensured by azure_service before the build; their coordinates arrive as
+    sensitive-free PKR_VAR_gallery_* vars. Distinct from generate_azure_windows_
+    template (Server, managed-image), which stays unchanged.
+    """
+    # Same provisioner + sysprep finisher as the Server build (generalize is identical).
+    prov = (
+        '\n  provisioner "powershell" {\n'
+        '    script = "provision.ps1"\n'
+        '  }\n'
+        '\n  provisioner "windows-restart" {}\n'
+    ) if has_provisioner else ""
+    sysprep = (
+        '\n  provisioner "powershell" {\n'
+        '    inline = [\n'
+        '      "while ((Get-Service RdAgent).Status -ne \'Running\') { Start-Sleep -s 5 }",\n'
+        '      "while ((Get-Service WindowsAzureGuestAgent).Status -ne \'Running\') { Start-Sleep -s 5 }",\n'
+        '      "& $env:SystemRoot\\\\System32\\\\Sysprep\\\\Sysprep.exe /oobe /generalize /quiet /quit /mode:vm",\n'
+        '      "while ($true) { $imageState = (Get-ItemProperty HKLM:\\\\SOFTWARE\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\Setup\\\\State).ImageState; Write-Output $imageState; if ($imageState -eq \'IMAGE_STATE_GENERALIZE_RESEAL_TO_OOBE\') { break }; Start-Sleep -s 10 }"\n'
+        '    ]\n'
+        '  }\n'
+    )
+    return (
+        'packer {\n'
+        '  required_plugins {\n'
+        '    azure = {\n'
+        '      version = ">= 1.4.0"\n'
+        '      source  = "github.com/hashicorp/azure"\n'
+        '    }\n'
+        '  }\n'
+        '}\n\n'
+        '# Service-principal credentials are wired into the source block below via\n'
+        '# sensitive PKR_VAR_* vars — the azure-arm builder does NOT read ARM_* env vars.\n\n'
+        + _AZURE_SP_VAR_DECLS +
+        'variable "location"               { default = "centralus" }\n'
+        'variable "gallery_subscription"   { default = "" }\n'
+        'variable "gallery_resource_group" { default = "" }\n'
+        'variable "gallery_name"           { default = "" }\n'
+        'variable "gallery_image_name"     { default = "" }\n'
+        'variable "gallery_image_version"  { default = "" }\n\n'
+        'source "azure-arm" "build" {\n'
+        + _AZURE_SP_SOURCE_FIELDS +
+        '  os_type         = "Windows"\n'
+        '  image_publisher = "' + image_publisher + '"\n'
+        '  image_offer     = "' + image_offer + '"\n'
+        '  image_sku       = "' + image_sku + '"\n\n'
+        # Packer provisions a temp key vault + self-signed cert for WinRM HTTPS.
+        '  communicator   = "winrm"\n'
+        '  winrm_use_ssl  = true\n'
+        '  winrm_insecure = true\n'
+        '  winrm_timeout  = "30m"\n'
+        '  winrm_username = "packer"\n\n'
+        # Trusted Launch — required by Windows 11. Azure rejects managed-image
+        # creation for Trusted Launch VMs, so we publish a Compute Gallery version.
+        '  secure_boot_enabled = true\n'
+        '  vtpm_enabled        = true\n'
+        '  license_type        = "Windows_Client"\n\n'
+        '  shared_image_gallery_destination {\n'
+        '    subscription         = var.gallery_subscription\n'
+        '    resource_group       = var.gallery_resource_group\n'
+        '    gallery_name         = var.gallery_name\n'
+        '    image_name           = var.gallery_image_name\n'
+        '    image_version        = var.gallery_image_version\n'
+        '    storage_account_type = "Standard_LRS"\n'
+        '  }\n\n'
+        '  location = var.location\n'
+        '  vm_size  = "' + vm_size + '"\n'
+        '}\n\n'
+        'build {\n'
+        '  name    = "vm-dashboard"\n'
+        '  sources = ["source.azure-arm.build"]\n'
+        + prov + sysprep +
+        '}\n'
+    )
+
+
 def generate_gcp_template(
     source_image: str,
     machine_type: str,

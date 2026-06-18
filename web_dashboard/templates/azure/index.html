@@ -303,6 +303,10 @@
               <option>Windows</option>
             </select>
           </div>
+          <label x-show="deployModal.osType === 'Windows'" x-cloak class="mt-2 flex items-center gap-2 text-xs text-gray-700">
+            <input type="checkbox" x-model="deployModal.trustedLaunch" class="rounded text-blue-600">
+            Trusted Launch (Windows 11 / Compute Gallery image — sets Secure Boot + vTPM + Windows_Client)
+          </label>
         </div>
         <div>
           <label class="block text-xs font-medium text-gray-700 mb-1">Workgroup <span class="text-red-500">*</span></label>
@@ -948,6 +952,7 @@ function azureDashboard() {
       image_sku: '22_04-lts',
       vm_size: 'Standard_B2s',
       os_type: 'Linux',
+      trusted_launch: false,  // Win 11 (AVD) → Trusted Launch + Compute Gallery output
       provisioner_script: '',
       archive_template: false,
       loaded_from: '',
@@ -971,6 +976,7 @@ function azureDashboard() {
       { id: 'rhel9',    label: 'RHEL 9',            publisher: 'RedHat',      offer: 'RHEL',                         sku: '9-lvm',     os: 'Linux' },
       { id: 'win2022',  label: 'Windows Server 2022',      publisher: 'MicrosoftWindowsServer', offer: 'WindowsServer', sku: '2022-datacenter-azure-edition',      os: 'Windows' },
       { id: 'win2022c', label: 'Windows Server 2022 Core', publisher: 'MicrosoftWindowsServer', offer: 'WindowsServer', sku: '2022-datacenter-azure-edition-core', os: 'Windows' },
+      { id: 'win11avd', label: 'Windows 11 multi-session (24H2 AVD)', publisher: 'microsoftwindowsdesktop', offer: 'windows-11', sku: 'win11-24h2-avd', os: 'Windows', trusted_launch: true },
     ],
 
     async init() {
@@ -1129,6 +1135,12 @@ function azureDashboard() {
       }
     },
 
+    // A gallery-sourced Windows image is a Trusted Launch (Win 11) image — it
+    // must be deployed with the matching security profile + Windows_Client license.
+    _isTrustedLaunchImage(img) {
+      return !!(img && img.source === 'gallery' && img.os_type === 'Windows');
+    },
+
     async openDeployModal(img) {
       // img may be null when invoked from "Deploy from URN/ID…" — user pastes
       // a marketplace URN (publisher:offer:sku:version) or a full ARM resource
@@ -1137,6 +1149,7 @@ function azureDashboard() {
         open: false, image: img,
         imageRef: '',
         osType: img?.os_type || 'Linux',
+        trustedLaunch: this._isTrustedLaunchImage(img),
         vmName: img?.name ? img.name.replace(/-image$/i, '') : '',
         vmSize: this.networkOpts.vm_sizes[0] || 'Standard_B2s',
         location: this.location, subnetId: '', nsgIds: [], sshUsername: 'azureuser',
@@ -1221,6 +1234,7 @@ function azureDashboard() {
           nsg_ids: m.nsgIds,
           create_public_ip: m.createPublicIp,
           os_type: m.osType,
+          trusted_launch: !!m.trustedLaunch,
           ssh_username: m.sshUsername || 'azureuser',
           ssh_public_key: sshPublicKey,
           workgroup: m.workgroup,
@@ -1246,6 +1260,7 @@ function azureDashboard() {
         items: selected,
         // Bulk deploys use the first image for every VM, so its OS decides.
         osType: selected[0]?.os_type || 'Linux',
+        trustedLaunch: this._isTrustedLaunchImage(selected[0]),
         vmNames: selected.map(img => img.name ? img.name.replace(/-image$/i, '') : ''),
         vmSize: this.networkOpts.vm_sizes[0] || 'Standard_B2s',
         location: this.location,
@@ -1303,6 +1318,7 @@ function azureDashboard() {
           nsg_ids: [],
           create_public_ip: false,
           os_type: m.osType,
+          trusted_launch: !!m.trustedLaunch,
           ssh_username: 'azureuser',
           ssh_public_key: sshPublicKey,
           workgroup: m.workgroup,
@@ -1460,8 +1476,12 @@ function azureDashboard() {
       this.azurePackerForm.image_offer     = preset.offer;
       this.azurePackerForm.image_sku       = preset.sku;
       this.azurePackerForm.os_type         = preset.os || 'Linux';
-      // Windows builds crawl on 4 GB burstable sizes — nudge up once.
-      if (preset.os === 'Windows' && ['Standard_B1s', 'Standard_B2s'].includes(this.azurePackerForm.vm_size)) {
+      this.azurePackerForm.trusted_launch  = !!preset.trusted_launch;
+      // Windows builds crawl on small burstable sizes; Win 11 Trusted Launch
+      // additionally can't run on B-series at all — nudge to a Gen2 size.
+      if (preset.trusted_launch && this.azurePackerForm.vm_size.startsWith('Standard_B')) {
+        this.azurePackerForm.vm_size = 'Standard_D2s_v3';
+      } else if (preset.os === 'Windows' && ['Standard_B1s', 'Standard_B2s'].includes(this.azurePackerForm.vm_size)) {
         this.azurePackerForm.vm_size = 'Standard_D2s_v3';
       }
     },

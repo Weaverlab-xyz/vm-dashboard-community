@@ -82,6 +82,7 @@ class AzureDeployRequest(BaseModel):
     nsg_ids: List[str] = []
     create_public_ip: bool = False
     os_type: str = "Linux"     # "Linux" | "Windows" — Windows gets a generated admin password
+    trusted_launch: bool = False  # Win 11 / Trusted-Launch gallery images: set SecurityProfile + Windows_Client
     ssh_username: str = "azureuser"  # admin username on Windows
     ssh_public_key: str = ""   # RSA public key text; required for Linux (endpoint enforces)
     workgroup: str             # written as `workgroup` resource tag
@@ -112,6 +113,7 @@ class AzureBulkDeployRequest(BaseModel):
     nsg_ids: List[str] = []
     create_public_ip: bool = False
     os_type: str = "Linux"     # "Linux" | "Windows" — Windows gets a generated password per VM
+    trusted_launch: bool = False  # Win 11 / Trusted-Launch gallery images: set SecurityProfile + Windows_Client
     ssh_username: str = "azureuser"  # admin username on Windows
     ssh_public_key: str = ""   # required for Linux (endpoint enforces)
     workgroup: str             # written as `workgroup` resource tag on all VMs

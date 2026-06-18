@@ -28,6 +28,7 @@ class PoolCreateRequest(BaseModel):
     nsg_ids: list[str] = []
     create_public_ip: bool = False          # desktops are private + brokered
     os_type: str = "Linux"                  # "Linux" | "Windows" — Windows seats get generated passwords
+    trusted_launch: bool = False            # Win 11 / Trusted-Launch gallery images (SecurityProfile + Windows_Client)
     ssh_username: str = "azureuser"         # admin username on Windows
     ssh_public_key: Optional[str] = None     # client-provided (as the Azure deploy form does); Linux only
 

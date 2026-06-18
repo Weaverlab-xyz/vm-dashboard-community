@@ -80,6 +80,7 @@ def _azure_spec(payload: PoolCreateRequest) -> dict:
         "subnet_id": payload.subnet_id, "nsg_ids": payload.nsg_ids,
         "create_public_ip": payload.create_public_ip,
         "os_type": payload.os_type,
+        "trusted_launch": payload.trusted_launch,
         "ssh_username": payload.ssh_username, "ssh_public_key": payload.ssh_public_key,
     }
 

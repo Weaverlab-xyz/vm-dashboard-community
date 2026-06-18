@@ -55,6 +55,16 @@ class AzurePackerBuildRequest(BaseModel):
     image_sku: str = "22_04-lts"
     vm_size: str = "Standard_B2s"
     os_type: str = "Linux"  # "Linux" | "Windows" — picks the template generator
+    # Windows client (e.g. Win 11) needs Trusted Launch, which Azure can't output
+    # as a managed image — so trusted_launch=True switches the build to a Compute
+    # Gallery image version (secure boot + vTPM + Windows_Client license).
+    trusted_launch: bool = False
+    # Gallery destination for trusted_launch builds; auto-derived from config /
+    # image_name when blank (azure_shared_image_gallery / azure_gallery_resource_group).
+    gallery_name: Optional[str] = None
+    gallery_resource_group: Optional[str] = None
+    gallery_image_name: Optional[str] = None
+    gallery_image_version: Optional[str] = None
     provisioner_script: str = ""
     archive_template: bool = False
     # Generic provisioner environment variables (literals + secret-manager refs).
