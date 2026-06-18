@@ -100,6 +100,7 @@ COPY web_dashboard/ ./web_dashboard/
 COPY terraform/db_postgres/ ./terraform/db_postgres/
 COPY terraform/db_azure_postgres/ ./terraform/db_azure_postgres/
 COPY terraform/db_gcp_postgres/ ./terraform/db_gcp_postgres/
+COPY terraform/db_mysql/ ./terraform/db_mysql/
 # Managed-Kubernetes (EKS) provisioning module (driven by k8s_service, §1.1a).
 # Uses the hashicorp/aws provider, already in the pre-cache init below.
 COPY terraform/k8s_cluster/aws_eks/ ./terraform/k8s_cluster/aws_eks/

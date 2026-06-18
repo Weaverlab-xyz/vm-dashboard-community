@@ -20,7 +20,8 @@
   <p class="text-sm text-gray-500 mb-6">
     Managed databases are provisioned <strong>private</strong> (no public endpoint) and
     reached only through a BeyondTrust PRA protocol-tunnel jump. <strong>PostgreSQL on
-    AWS, GCP, and Azure</strong> is live; MySQL and SQL Server are coming in a later phase.
+    AWS, GCP, and Azure</strong> and <strong>MySQL on AWS</strong> are live; more MySQL clouds
+    and SQL Server are coming.
   </p>
 
   <!-- Toast -->
@@ -200,7 +201,7 @@
             <label class="block text-sm font-medium text-gray-700 mb-1">Engine *</label>
             <select x-model="form.engine" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
               <option value="postgres">PostgreSQL</option>
-              <option value="mysql" disabled>MySQL (Phase 3)</option>
+              <option value="mysql">MySQL</option>
               <option value="sqlserver" disabled>SQL Server (Phase 3)</option>
             </select>
           </div>

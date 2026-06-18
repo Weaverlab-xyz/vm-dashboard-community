@@ -42,11 +42,15 @@ logger = logging.getLogger(__name__)
 # (no MongoDB resource yet). Phase 1 wires postgres/aws; the rest fan out later.
 VALID_ENGINES = {"postgres", "mysql", "sqlserver"}
 VALID_CLOUDS = {"aws", "azure", "gcp"}
-_IMPLEMENTED = {("postgres", "aws"), ("postgres", "gcp"), ("postgres", "azure")}
+_IMPLEMENTED = {
+    ("postgres", "aws"), ("postgres", "gcp"), ("postgres", "azure"),
+    ("mysql", "aws"),
+}
 _PROVIDER = {
     ("postgres", "aws"): "rds",
     ("postgres", "gcp"): "cloudsql",
     ("postgres", "azure"): "flexibleserver",
+    ("mysql", "aws"): "rds",
 }
 
 # terraform/<dir> module per (engine, cloud) — relative to repo root (parents[2]).
@@ -55,6 +59,7 @@ _TEMPLATE_DIRS = {
     ("postgres", "aws"): os.path.join(_REPO_ROOT, "terraform", "db_postgres"),
     ("postgres", "gcp"): os.path.join(_REPO_ROOT, "terraform", "db_gcp_postgres"),
     ("postgres", "azure"): os.path.join(_REPO_ROOT, "terraform", "db_azure_postgres"),
+    ("mysql", "aws"): os.path.join(_REPO_ROOT, "terraform", "db_mysql"),
 }
 _DEPLOYMENTS_DIR = os.path.join(_REPO_ROOT, "terraform", "deployments")
 
@@ -108,6 +113,24 @@ def _build_tf_variables(
             # PRA protocol tunnel's cleartext jumpoint→RDS connection isn't rejected.
             # Empty config → "" → module falls back to the RDS default group.
             "parameter_group_name": _cfg("aws_db_parameter_group_name"),
+            "tags": {"managed-by": "vm-dashboard", "clouddb-id": db_id},
+        }
+
+    if (engine, cloud) == ("mysql", "aws"):
+        return {
+            "region": region,
+            "identifier": f"clouddb-{db_id[:8]}",
+            "db_name": db_name,
+            "master_username": master_username,
+            "master_password": master_password,
+            "instance_class": opts.get("instance_class", "db.t3.micro"),
+            "allocated_storage": opts.get("allocated_storage", 20),
+            "db_subnet_group_name": opts.get("db_subnet_group_name", ""),
+            "vpc_security_group_ids": opts.get("vpc_security_group_ids", []),
+            # MySQL's cleartext knob is require_secure_transport=0 (not
+            # rds.force_ssl) — its own mysql8.0-family group the sandbox
+            # pre-creates. Empty config → "" → module falls back to RDS default.
+            "parameter_group_name": _cfg("aws_db_mysql_parameter_group_name"),
             "tags": {"managed-by": "vm-dashboard", "clouddb-id": db_id},
         }
 
@@ -170,7 +193,7 @@ def provision(
         raise CloudDatabaseError("region is required")
     if (engine, cloud) not in _IMPLEMENTED:
         raise NotImplementedError(
-            f"{engine}/{cloud} is not wired yet — Phase 1 implements postgres/aws"
+            f"{engine} on {cloud} is not available yet"
         )
 
     row = CloudDatabase(
