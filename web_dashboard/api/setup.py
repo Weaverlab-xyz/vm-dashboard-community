@@ -552,6 +552,9 @@ class VirtualDesktopsFeatureConfig(BaseModel):
     # Default pool VM size (blank → the pool form's own default). Win 11 / Trusted
     # Launch needs a Gen2 size (e.g. Standard_D2s_v3) — NOT a B-series.
     azure_desktops_vm_size: str = ""
+    # PRA Vault account-group id (numeric) for RDP credential injection on Windows
+    # seats (Phase 2). Blank → the account lands in PRA's Default group.
+    azure_desktops_vault_account_group_id: str = ""
 
 
 _FEATURE_MODELS = {

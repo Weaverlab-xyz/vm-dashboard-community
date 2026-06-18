@@ -574,6 +574,10 @@ class VirtualDesktop(Base):
     assigned_user = Column(String(200), nullable=True)
     # PRA Jumpoint registration id once the seat is brokered (Phase 2).
     pra_jump_id = Column(String(200), nullable=True)
+    # Scrubbed Terraform state for the seat's PRA RDP jump item (+ vault account)
+    # so teardown can destroy them deterministically (Phase 2). Secret values are
+    # redacted before storage; never returned by the API.
+    pra_tunnel_state = Column(Text, nullable=True)
     created_by = Column(String(100), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
@@ -718,6 +722,8 @@ def init_db():
             # VDI Phase 1: seats track who/when for newest-first scale-down + listing.
             "ALTER TABLE virtual_desktops ADD COLUMN created_by VARCHAR(100)",
             "ALTER TABLE virtual_desktops ADD COLUMN created_at TIMESTAMP",
+            # VDI Phase 2: scrubbed TF state for the seat's PRA RDP jump + vault account.
+            "ALTER TABLE virtual_desktops ADD COLUMN pra_tunnel_state TEXT",
             # Windows image builds: registry rows carry the guest OS so promotes
             # don't default Windows VHDs to Linux managed images.
             "ALTER TABLE registered_images ADD COLUMN os_type VARCHAR(20)",

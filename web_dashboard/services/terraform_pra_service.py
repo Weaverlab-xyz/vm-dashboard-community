@@ -681,6 +681,233 @@ async def remove_db_tunnel(tf_state_json: str) -> None:
     await asyncio.to_thread(_remove_db_tunnel_sync, tf_state_json)
 
 
+# ── Remote RDP jump (VDI desktops, Phase 2) ──────────────────────────────────
+# A VDI seat is reached over PRA via an agentless Remote RDP jump item on the
+# Jumpoint. Mirrors the DB-tunnel template (resource + optional Vault account +
+# jump_item_association for credential injection); the only shapes that differ
+# are the sra_remote_rdp resource (no port/protocol/database; optional
+# rdp_username) and the association type "remote_rdp".
+
+def _generate_rdp_hcl(
+    name: str,
+    hostname: str,
+    jump_group_name: str,
+    jumpoint_name: str,
+    rdp_username: str = "",
+    tag: str = "RDP",
+    vault_account_name: str = "",
+    vault_account_group_id: Optional[int] = None,
+) -> str:
+    """Return the Terraform HCL for one Remote RDP jump item.
+
+    Required resource fields: name, hostname, jump_group_id, jumpoint_id.
+    rdp_username is optional and emitted only when provided.
+
+    When ``vault_account_name`` is set, a Vault username/password account is
+    also emitted, associated to the RDP jump for credential injection (mirrors
+    the DB-tunnel template). The password is NEVER in the HCL — it arrives as
+    ``TF_VAR_rdp_password`` (sensitive). ``vault_account_group_id`` places the
+    account in a Vault account group so a group policy grants it to users;
+    without it the provider's default lands it in Default. With
+    ``vault_account_name=""`` the output is byte-identical to the no-vault
+    template, which the state-driven destroy path relies on.
+    """
+    safe_name = re.sub(r"[^a-z0-9_]", "_", name.lower())
+    extra = ""
+    if rdp_username:
+        extra += f"  rdp_username  = {json.dumps(rdp_username)}\n"
+
+    var_block = ""
+    vault_block = ""
+    if vault_account_name:
+        var_block = 'variable "rdp_password"     { sensitive = true }\n'
+        group_line = (f"  account_group_id = {int(vault_account_group_id)}\n"
+                      if vault_account_group_id else "")
+        # Schema (provider v1.3.0): jump_item_association is a SINGLE nested
+        # attribute; jump_items is a set of {id, type}; the criteria arrays must
+        # be present (empty) or the PRA API 4xxes. The association `type` is the
+        # resource name minus the sra_ prefix (→ "remote_rdp").
+        vault_block = f"""
+resource "sra_vault_username_password_account" "rdp_admin" {{
+  name        = {json.dumps(vault_account_name)}
+  username    = {json.dumps(rdp_username)}
+  password    = var.rdp_password
+  description = "Auto-provisioned by Infrastructure Management Dashboard (VDI desktop)"
+{group_line}  jump_item_association = {{
+    filter_type = "criteria"
+    criteria = {{
+      shared_jump_groups = []
+      host               = []
+      name               = []
+      tag                = []
+      comment            = []
+    }}
+    jump_items = [{{
+      id   = tonumber(sra_remote_rdp.{safe_name}.id)
+      type = "remote_rdp"
+    }}]
+  }}
+}}
+
+output "vault_account_id" {{
+  value = sra_vault_username_password_account.rdp_admin.id
+}}
+"""
+
+    return f"""\
+terraform {{
+  required_providers {{
+    sra = {{
+      source  = "beyondtrust/sra"
+      version = "~> 1.0"
+    }}
+  }}
+}}
+
+variable "bt_host"          {{ sensitive = false }}
+variable "bt_client_id"     {{ sensitive = true }}
+variable "bt_client_secret" {{ sensitive = true }}
+{var_block}
+provider "sra" {{
+  host          = var.bt_host
+  client_id     = var.bt_client_id
+  client_secret = var.bt_client_secret
+}}
+
+data "sra_jump_group_list" "jg" {{
+  name = {json.dumps(jump_group_name)}
+}}
+
+data "sra_jumpoint_list" "jp" {{
+  name = {json.dumps(jumpoint_name)}
+}}
+
+resource "sra_remote_rdp" {json.dumps(safe_name)} {{
+  name          = {json.dumps(name)}
+  hostname      = {json.dumps(hostname)}
+  jump_group_id = tonumber(data.sra_jump_group_list.jg.items[0].id)
+  jumpoint_id   = tonumber(data.sra_jumpoint_list.jp.items[0].id)
+{extra}  tag           = {json.dumps(tag)}
+  comments      = "Auto-provisioned by Infrastructure Management Dashboard (VDI desktop)"
+}}
+
+output "rdp_jump_id" {{
+  value = sra_remote_rdp.{safe_name}.id
+}}
+{vault_block}"""
+
+
+def _provision_rdp_jump_sync(
+    name, hostname, jump_group_name, jumpoint_name, rdp_username, tag,
+    admin_password="", vault_account_name="", vault_account_group_id=None,
+    client_secret="",
+) -> dict:
+    want_vault = bool(vault_account_name and admin_password)
+    _cred_env = {"TF_VAR_bt_client_secret": client_secret} if client_secret else {}
+    with tempfile.TemporaryDirectory(prefix="pra_rdp_tf_") as work_dir:
+        Path(work_dir, "main.tf").write_text(
+            _generate_rdp_hcl(name, hostname, jump_group_name, jumpoint_name,
+                              rdp_username, tag,
+                              vault_account_name=vault_account_name if want_vault else "",
+                              vault_account_group_id=vault_account_group_id)
+        )
+        init = _run_tf(["init", "-upgrade=false"], work_dir, timeout=60)
+        if init.returncode != 0:
+            raise TerraformPRAError(
+                f"terraform init failed: {init.stderr.strip() or init.stdout.strip()}")
+
+        extra_env = dict(_cred_env)
+        if want_vault:
+            extra_env["TF_VAR_rdp_password"] = admin_password
+        apply = _run_tf(["apply", "-auto-approve"], work_dir, timeout=120, extra_env=extra_env or None)
+        if apply.returncode != 0 and want_vault:
+            # The vault account must not cost a seat its working jump item: retry
+            # jump-only. The provider errors (rather than removing from state) on a
+            # half-created item, so drop the vault account from local state first
+            # and re-apply without refresh.
+            first_err = (apply.stderr.strip() or apply.stdout.strip())[:400]
+            logger.warning(
+                "PRA vault account apply failed — retrying RDP-jump-only; if it was partially "
+                "created it may need manual cleanup in PRA (check the PRA OAuth client's Vault "
+                "account-management permission): %s", first_err)
+            want_vault = False
+            _run_tf(["state", "rm", "sra_vault_username_password_account.rdp_admin"],
+                    work_dir, timeout=30)
+            Path(work_dir, "main.tf").write_text(
+                _generate_rdp_hcl(name, hostname, jump_group_name, jumpoint_name,
+                                  rdp_username, tag)
+            )
+            apply = _run_tf(["apply", "-auto-approve", "-refresh=false"], work_dir,
+                            timeout=120, extra_env=_cred_env or None)
+        if apply.returncode != 0:
+            # Total failure: leave nothing behind in PRA (config on disk is
+            # jump-only at this point, so no extra env is needed).
+            _run_tf(["destroy", "-auto-approve", "-refresh=false"], work_dir, timeout=120)
+            raise TerraformPRAError(
+                f"terraform apply failed: {apply.stderr.strip() or apply.stdout.strip()}")
+
+        out = _run_tf(["output", "-json"], work_dir, timeout=30)
+        rdp_jump_id: Optional[str] = None
+        vault_account_id: Optional[str] = None
+        if out.returncode == 0 and out.stdout.strip():
+            try:
+                outputs = json.loads(out.stdout)
+                rdp_jump_id = str(outputs.get("rdp_jump_id", {}).get("value", ""))
+                vault_raw = outputs.get("vault_account_id", {}).get("value", "")
+                vault_account_id = str(vault_raw) if vault_raw else None
+            except (json.JSONDecodeError, AttributeError):
+                pass
+
+        state_path = Path(work_dir, "terraform.tfstate")
+        tf_state_json = state_path.read_text() if state_path.exists() else None
+        return {
+            "rdp_jump_id": rdp_jump_id,
+            "vault_account_id": vault_account_id,
+            "jump_group_name": jump_group_name,
+            "tf_state_json": _scrub_tf_state(tf_state_json) if tf_state_json else None,
+        }
+
+
+async def provision_rdp_jump(
+    name: str,
+    hostname: str,
+    jump_group_name: str,
+    jumpoint_name: str,
+    rdp_username: str = "",
+    tag: str = "RDP",
+    admin_password: str = "",
+    vault_account_name: str = "",
+    vault_account_group_id: Optional[int] = None,
+    client_secret: str = "",
+) -> dict:
+    """Provision a BeyondTrust PRA Remote RDP jump item for a VDI desktop seat.
+
+    The Jump Group and Jumpoint must already exist in PRA. When both
+    ``admin_password`` and ``vault_account_name`` are given, a Vault
+    username/password account is created and associated to the RDP jump for
+    credential injection (the password travels as a sensitive TF_VAR, never in
+    HCL; the PRA OAuth client needs Vault account-management permission — on
+    failure the jump item is kept and the vault account is skipped with a
+    warning).
+
+    Returns ``{rdp_jump_id, vault_account_id, jump_group_name, tf_state_json}``
+    — ``tf_state_json`` is SCRUBBED of secret values (safe to stash) and still
+    drives ``remove_rdp_jump``'s destroy later.
+    """
+    return await asyncio.to_thread(
+        _provision_rdp_jump_sync, name, hostname, jump_group_name, jumpoint_name,
+        rdp_username, tag, admin_password, vault_account_name,
+        vault_account_group_id, client_secret,
+    )
+
+
+async def remove_rdp_jump(tf_state_json: str) -> None:
+    """Destroy a previously provisioned RDP jump (and its vault account, if any)
+    using its stored state — state-driven, so it removes whatever sra resources
+    the state holds with a provider-only config."""
+    await asyncio.to_thread(_destroy_state_only_sync, tf_state_json)
+
+
 # ── Kubernetes protocol-tunnel jump (K8s management feature) ──────────────────
 #
 # A managed cluster's API is reached through a native PRA `tunnel_type=k8s`
