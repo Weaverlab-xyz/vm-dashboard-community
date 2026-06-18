@@ -583,6 +583,22 @@ def _runner_kubeconfig(kubeconfig: str) -> str:
         return kubeconfig
 
 
+def _runner_ca_args() -> list:
+    """Extra ``docker run`` args so a transient kubectl/helm runner trusts the corp
+    CA. The runners are sibling containers (launched over the mounted docker.sock),
+    so they don't inherit the app's ``--corp-ca`` CA mount; behind a TLS-inspecting
+    proxy their outbound HTTPS (``helm repo``, ``kubectl apply -f <url>``, the cluster
+    API) fails with "certificate signed by unknown authority". The corp-ca overlay
+    sets ``RUNNER_CA_BUNDLE`` to the HOST path of the CA bundle; mount it over the
+    runner's system bundle (+ ``SSL_CERT_FILE`` for the Go TLS stacks). No-op when
+    unset — non-corp installs use the image's default CAs."""
+    bundle = os.environ.get("RUNNER_CA_BUNDLE", "").strip()
+    if not bundle:
+        return []
+    return ["-v", f"{bundle}:/etc/ssl/certs/ca-certificates.crt:ro",
+            "-e", "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt"]
+
+
 async def _apply_manifest_via_runner(kubeconfig: str, manifest_ref: str) -> str:
     """Apply a manifest into a cluster with a **transient kubectl container**
     (mirrors ansible_local_service's local-docker runner over the mounted
@@ -601,7 +617,8 @@ async def _apply_manifest_via_runner(kubeconfig: str, manifest_ref: str) -> str:
                 fh.write(manifest_ref)
             apply_target = "/work/manifest.yaml"
         shell_cmd = f"kubectl --kubeconfig /work/kubeconfig apply -f {shlex.quote(apply_target)}"
-        cmd = ["docker", "run", "--rm", "-v", f"{tmpdir}:/work", _KUBECTL_IMAGE, "sh", "-c", shell_cmd]
+        cmd = ["docker", "run", "--rm", *_runner_ca_args(), "--entrypoint", "/bin/sh",
+               "-v", f"{tmpdir}:/work", _KUBECTL_IMAGE, "-c", shell_cmd]
         logger.info("k8s apply: image=%s target=%s", _KUBECTL_IMAGE, apply_target)
         return await asyncio.to_thread(_run_sync, cmd)
     finally:
@@ -618,7 +635,8 @@ async def _delete_manifest_via_runner(kubeconfig: str, manifest: str) -> str:
         with open(os.path.join(tmpdir, "manifest.yaml"), "w") as fh:
             fh.write(manifest)
         shell_cmd = "kubectl --kubeconfig /work/kubeconfig delete --ignore-not-found -f /work/manifest.yaml"
-        cmd = ["docker", "run", "--rm", "-v", f"{tmpdir}:/work", _KUBECTL_IMAGE, "sh", "-c", shell_cmd]
+        cmd = ["docker", "run", "--rm", *_runner_ca_args(), "--entrypoint", "/bin/sh",
+               "-v", f"{tmpdir}:/work", _KUBECTL_IMAGE, "-c", shell_cmd]
         return await asyncio.to_thread(_run_sync, cmd)
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
@@ -638,7 +656,7 @@ async def _helm_via_runner(kubeconfig: str, helm_args: list, add_eso_repo: bool 
             parts.append("helm repo update")
         parts.append("helm " + " ".join(shlex.quote(a) for a in helm_args))
         shell_cmd = " && ".join(parts)
-        cmd = ["docker", "run", "--rm", "--entrypoint", "/bin/sh",
+        cmd = ["docker", "run", "--rm", *_runner_ca_args(), "--entrypoint", "/bin/sh",
                "-e", "KUBECONFIG=/work/kubeconfig", "-v", f"{tmpdir}:/work",
                _HELM_IMAGE, "-c", shell_cmd]
         logger.info("k8s helm: %s", " ".join(helm_args[:3]))

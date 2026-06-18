@@ -33,6 +33,11 @@ services:
       - ${CORP_CA_BUNDLE:-/etc/ssl/certs/ca-certificates.crt}:/etc/ssl/certs/ca-certificates.crt:ro
     environment:
       - AWS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+      # HOST path of the CA bundle, passed through so the app can mount it into the
+      # transient kubectl/helm runner containers (siblings via docker.sock) — see
+      # k8s_service._runner_ca_args. Without it, `helm repo` / `kubectl apply -f <url>`
+      # / the cluster API call fail behind the proxy with "unknown authority".
+      - RUNNER_CA_BUNDLE=${CORP_CA_BUNDLE:-/etc/ssl/certs/ca-certificates.crt}
   # The job runner also runs `terraform init` (→ registry.terraform.io + the state
   # backend) behind the proxy, so it needs the same corp CA mount.
   worker:
