@@ -400,6 +400,14 @@
           <div>PRA jump id: <span x-text="conn?.jump_item_id || '(no tunnel — PRA not configured)'"></span></div>
           <div>status: <span x-text="conn?.status"></span></div>
         </div>
+        <p class="text-xs text-gray-400" x-show="conn?.engine === 'mysql'" x-cloak>
+          The PRA tunnel hands your client cleartext on 127.0.0.1, so disable client TLS:
+          <code>mysql --ssl-mode=DISABLED …</code>
+        </p>
+        <p class="text-xs text-gray-400" x-show="conn?.engine === 'postgres'" x-cloak>
+          The PRA tunnel hands your client cleartext on 127.0.0.1, so connect with
+          <code>?sslmode=disable</code>.
+        </p>
       </div>
       <div class="px-6 py-4 border-t border-gray-100 flex justify-end">
         <button @click="conn = null" class="px-4 py-2 text-sm border border-gray-300 rounded-lg">Close</button>
