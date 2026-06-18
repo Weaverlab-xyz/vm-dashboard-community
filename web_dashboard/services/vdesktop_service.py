@@ -275,6 +275,7 @@ async def provision_seats(pool_name: str, job_id: str, seat_ids: list, spec: dic
                     image_sku=spec.get("image_sku"), image_version=spec.get("image_version"),
                     os_type=spec.get("os_type") or "Linux",
                     admin_password=admin_password,
+                    trusted_launch=bool(spec.get("trusted_launch")),
                 )
                 row.vm_resource_id = res.get("vm_id") or vm_name
                 row.status = "running"

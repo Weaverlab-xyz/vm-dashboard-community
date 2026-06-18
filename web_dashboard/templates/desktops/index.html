@@ -208,7 +208,7 @@ function desktopsPage() {
       return {
         cloud: 'azure', name: '', count: 1,
         image_id: '', location: '', vm_size: '', subnet_id: '', nsg_id: '',
-        resource_group: '', os_type: 'Linux', ssh_username: 'azureuser',
+        resource_group: '', os_type: 'Linux', trusted_launch: false, ssh_username: 'azureuser',
         ssh_public_key: '', create_public_ip: false,
       };
     },
@@ -216,6 +216,9 @@ function desktopsPage() {
     syncOsTypeFromImage() {
       const im = (this.azure.images || []).find(i => i.resource_id === this.form.image_id);
       if (im && im.os_type) this.form.os_type = im.os_type;
+      // Gallery-sourced Windows images are Trusted Launch (Win 11) — the seat
+      // VMs must deploy with the matching security profile + Windows_Client license.
+      this.form.trusted_launch = !!(im && im.source === 'gallery' && im.os_type === 'Windows');
     },
 
     async init() { requireAuth(); this.form = this._blankForm(); await this.refresh(); },
@@ -278,6 +281,7 @@ function desktopsPage() {
             image_id: f.image_id, location: f.location, vm_size: f.vm_size,
             subnet_id: f.subnet_id, nsg_ids: f.nsg_id ? [f.nsg_id] : [],
             resource_group: f.resource_group, os_type: f.os_type || 'Linux',
+            trusted_launch: !!f.trusted_launch,
             ssh_username: f.ssh_username || 'azureuser',
             ssh_public_key: f.ssh_public_key, create_public_ip: !!f.create_public_ip,
           });

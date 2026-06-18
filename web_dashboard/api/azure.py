@@ -538,6 +538,7 @@ async def deploy_vm(
             "nsg_ids": req.nsg_ids,
             "create_public_ip": req.create_public_ip,
             "os_type": req.os_type,
+            "trusted_launch": req.trusted_launch,
             "ssh_username": req.ssh_username,  # so /vms/{name}/ssh-key + /admin-password can echo the right user
             "workgroup": workgroup,
         },
@@ -598,6 +599,7 @@ async def bulk_deploy_vms(
                 "nsg_ids": req.nsg_ids,
                 "create_public_ip": req.create_public_ip,
                 "os_type": req.os_type,
+                "trusted_launch": req.trusted_launch,
                 "ssh_username": req.ssh_username,
                 "workgroup": workgroup,
                 "bulk": True,
@@ -955,6 +957,7 @@ async def _run_deploy(job_id: str, req: AzureDeployRequest, rg: str, loc: str):
                 workgroup=getattr(req, "workgroup", "") or "",
                 os_type=req.os_type,
                 admin_password=admin_password,
+                trusted_launch=getattr(req, "trusted_launch", False),
             )
             result.update(vm_result)
         except AzureError as e:
@@ -1123,6 +1126,7 @@ async def _run_bulk_deploy(job_items: list, req: AzureBulkDeployRequest, rg: str
                     workgroup=getattr(req, "workgroup", "") or "",
                     os_type=req.os_type,
                     admin_password=admin_password,
+                    trusted_launch=getattr(req, "trusted_launch", False),
                 )
                 result.update(vm_result)
 

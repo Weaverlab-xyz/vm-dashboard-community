@@ -208,6 +208,43 @@ The image registry records `os_type` per image so cross-cloud
 promotes import Windows VHDs as Windows (registry rows predating the
 column default to Linux).
 
+#### Windows 11 (Trusted Launch + Compute Gallery)
+
+Windows 11 desktop images differ from the Windows **Server** path above.
+Win 11 requires **Trusted Launch** (Secure Boot + vTPM), and Azure
+**cannot create a managed image from a Trusted Launch VM** — so the
+builder publishes a **Compute Gallery image version** instead of a
+managed image. Pick the **Windows 11 multi-session (24H2 AVD)** preset
+(`microsoftwindowsdesktop / windows-11 / win11-24h2-avd`), which sets
+`trusted_launch`. What the build does differently:
+
+- **Auto-creates the gallery + image definition.** Before the build,
+  the dashboard ensures a Compute Gallery (`azure_shared_image_gallery`,
+  or `vmDashboardGallery` by default, in `azure_gallery_resource_group`)
+  and a **Gen2 / TrustedLaunch / Generalized** Windows image definition
+  exist (idempotent). Packer then publishes a version `1.<YYMMDD>.<HHMMSS>`
+  into it.
+- **No managed image, no VHD export.** The gallery version *is* the
+  artefact; the registry records its full resource id with
+  `os_type=Windows` (no hub VHD copy).
+- **Trusted Launch on deploy.** Deploying a gallery Windows image (deploy
+  form, bulk, or a Desktops pool) sets a `SecurityProfile`
+  (`TrustedLaunch` + Secure Boot + vTPM) and `license_type=Windows_Client`.
+  The pickers auto-detect this (`source=gallery` + `os_type=Windows`);
+  pasted ARM ids get a manual **Trusted Launch** checkbox.
+
+**Multi-session ≠ AVD here.** The 24H2 AVD SKU is a multi-session OS, but
+the dashboard does **not** install the AVD agent or register an AVD host
+pool — VMs stay PRA-RDP-brokered, one per seat; the multi-session
+capability is latent.
+
+**Prerequisites.** Windows 11 client images are only visible to **eligible
+offers** — Visual Studio / dev-test subscriptions, or AVD / Microsoft 365
+E3+ (multi-tenant hosting rights). On an ineligible subscription the build
+VM creation fails with an image-not-found error. The build **and** deploy
+sizes must be **Gen2 / Trusted-Launch capable** (e.g. `Standard_D2s_v3`) —
+**B-series do not support Trusted Launch.**
+
 ### Capture from a running instance
 
 The "I have a VM I've been hand-tuning, snapshot it as an image" path.
