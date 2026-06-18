@@ -15,7 +15,7 @@ a registered cluster. See docs/saas-kubernetes-management-plan.md.
 """
 import logging
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from ..database import User, get_db
@@ -230,35 +230,39 @@ async def remove_tunnel(
 async def launch_management(
     cluster_id: str,
     payload: ManagementRequest,
-    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
-    """Launch a management plane into the cluster (Phase 2). Async — applies the
-    Portainer Agent via a transient kubectl container, then registers it in the
-    brokered Portainer server. Returns 202; poll the cluster for status
-    (deploying → managed / failed)."""
+    """Launch a management plane into the cluster (Phase 2). Async — enqueues a
+    ``k8s_management`` job the dedicated worker runs (applies the Portainer Agent via
+    a transient kubectl container, then registers it in the brokered Portainer
+    server). Returns 202 + job_id; poll the cluster status (deploying → managed /
+    failed), or open the job to see the error if it fails."""
     try:
         k8s_service.get_cluster(db, cluster_id)   # 404 if unknown
     except K8sError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    background_tasks.add_task(k8s_service.launch_management_plane, cluster_id, payload.mgmt_kind)
-    return {"ok": True, "status": "deploying", "cluster_id": cluster_id, "mgmt_kind": payload.mgmt_kind}
+    job = job_service.create_job(
+        db, job_type="k8s_management", created_by=current_user.username,
+        metadata={"cluster_id": cluster_id, "mgmt_kind": payload.mgmt_kind},
+    )
+    return {"ok": True, "status": "deploying", "cluster_id": cluster_id,
+            "mgmt_kind": payload.mgmt_kind, "job_id": job.id}
 
 
 @router.post("/clusters/{cluster_id}/secret-delivery", status_code=202)
 async def setup_secret_delivery(
     cluster_id: str,
     payload: SecretDeliveryRequest,
-    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
     """Install (or remove) in-cluster Password Safe secret delivery (Phase 4 /
     Feature D). ``kind=eso`` Helm-installs the External Secrets Operator + a
     BeyondTrust ClusterSecretStore (Password Safe → K8s Secrets); ``kind=none``
-    removes it. Async — poll the cluster's ``secrets_delivery_kind``
-    (installing → eso / failed)."""
+    removes it. Async — enqueues a ``k8s_secret_delivery`` job the worker runs; poll
+    the cluster's ``secrets_delivery_kind`` (installing → eso / failed), or open the
+    job for the error."""
     if payload.kind not in k8s_service.VALID_DELIVERY_KINDS:
         raise HTTPException(
             status_code=400,
@@ -268,5 +272,9 @@ async def setup_secret_delivery(
         k8s_service.get_cluster(db, cluster_id)   # 404 if unknown
     except K8sError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    background_tasks.add_task(k8s_service.setup_secret_delivery, cluster_id, payload.kind)
-    return {"ok": True, "status": "installing", "cluster_id": cluster_id, "kind": payload.kind}
+    job = job_service.create_job(
+        db, job_type="k8s_secret_delivery", created_by=current_user.username,
+        metadata={"cluster_id": cluster_id, "kind": payload.kind},
+    )
+    return {"ok": True, "status": "installing", "cluster_id": cluster_id,
+            "kind": payload.kind, "job_id": job.id}

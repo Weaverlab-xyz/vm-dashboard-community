@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 # runner) — see the plan's "out of scope".
 HANDLED_TYPES = (
     "k8s_provision", "k8s_decommission",
+    "k8s_management", "k8s_secret_delivery",
     "clouddb_provision", "clouddb_decommission",
 )
 
@@ -87,6 +88,13 @@ async def _dispatch(job_id: str, job_type: str, meta: dict) -> None:
         elif job_type == "k8s_decommission":
             await k8s_service.run_decommission(
                 db, cluster_id=meta["cluster_id"], job_id=job_id)
+        elif job_type == "k8s_management":
+            await k8s_service.run_management_plane(
+                db, cluster_id=meta["cluster_id"], job_id=job_id,
+                mgmt_kind=meta.get("mgmt_kind", "portainer"))
+        elif job_type == "k8s_secret_delivery":
+            await k8s_service.run_secret_delivery(
+                db, cluster_id=meta["cluster_id"], job_id=job_id, kind=meta["kind"])
         elif job_type == "clouddb_provision":
             await cloud_database_service.run_provision_apply(
                 db, db_id=meta["db_id"], job_id=job_id,

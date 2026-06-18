@@ -791,6 +791,7 @@ async def setup_secret_delivery(cluster_id: str, kind: str) -> None:
             row.secrets_delivery_kind = "failed"
             db.commit()
             logger.warning("ESO secret delivery install failed cluster=%s: %s", cluster_id, exc)
+            raise  # surface to the job runner so the failure + reason land on the Job
     finally:
         db.close()
 
@@ -834,8 +835,53 @@ async def launch_management_plane(cluster_id: str, mgmt_kind: str = "portainer")
             row.status = "failed"
             db.commit()
             logger.warning("management-plane launch failed cluster=%s: %s", cluster_id, exc)
+            raise  # surface to the job runner so the failure + reason land on the Job
     finally:
         db.close()
+
+
+async def run_management_plane(db: Session, *, cluster_id: str, job_id: str,
+                               mgmt_kind: str = "portainer") -> None:
+    """Worker entry for a ``k8s_management`` job: drive :func:`launch_management_plane`
+    with Job tracking + a heartbeat, so the outcome and any error are visible in the
+    UI (it was a fire-and-forget background task with no Job). Mirrors the job
+    lifecycle of ``run_provision_apply``."""
+    from . import job_service
+    from ..api.websocket import broadcast_progress
+    job_service.set_running(db, job_id)
+    try:
+        await broadcast_progress(job_id, 20, f"Launching {mgmt_kind} management plane…")
+        await launch_management_plane(cluster_id, mgmt_kind)
+    except Exception as exc:
+        job_service.set_failed(db, job_id, str(exc))
+        logger.exception("management-plane job failed cluster=%s", cluster_id)
+        return
+    db.expire_all()
+    row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
+    if row and row.status == "managed":
+        job_service.set_completed(db, job_id)
+    else:
+        job_service.set_failed(
+            db, job_id,
+            f"management plane did not reach 'managed' (status={row.status if row else 'gone'})")
+
+
+async def run_secret_delivery(db: Session, *, cluster_id: str, job_id: str,
+                              kind: str) -> None:
+    """Worker entry for a ``k8s_secret_delivery`` job: drive
+    :func:`setup_secret_delivery` with Job tracking so an ESO install/removal
+    failure is visible + durable instead of log-only."""
+    from . import job_service
+    from ..api.websocket import broadcast_progress
+    job_service.set_running(db, job_id)
+    try:
+        await broadcast_progress(job_id, 20, f"Configuring secret delivery ({kind})…")
+        await setup_secret_delivery(cluster_id, kind)
+    except Exception as exc:
+        job_service.set_failed(db, job_id, str(exc))
+        logger.exception("secret-delivery job failed cluster=%s", cluster_id)
+        return
+    job_service.set_completed(db, job_id)
 
 
 # ── Phase 3: brokered access ───────────────────────────────────────────────────
