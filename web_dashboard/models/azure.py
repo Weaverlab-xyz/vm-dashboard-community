@@ -49,6 +49,10 @@ class AzureSubnetInfo(BaseModel):
     name: str
     address_prefix: str = ""
     vnet_name: str = ""
+    # Service names this subnet is delegated to (e.g.
+    # "Microsoft.ContainerInstance/containerGroups"). Non-empty → the subnet
+    # can't host plain VM NICs, so the Desktops pool picker greys it out.
+    delegations: List[str] = []
 
 class AzureNSGInfo(BaseModel):
     id: str

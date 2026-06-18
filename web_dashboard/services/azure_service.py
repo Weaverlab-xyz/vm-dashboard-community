@@ -1340,6 +1340,9 @@ def _get_network_options_sync(cred, sub_id: str, location: str, vnet_rg: str, rg
                     "name": subnet.name,
                     "address_prefix": subnet.address_prefix or "",
                     "vnet_name": vnet.name,
+                    # Delegated subnets (e.g. aci-subnet → ContainerInstance) can't
+                    # host VM NICs; surface this so the Desktops picker can guard.
+                    "delegations": [d.service_name for d in (subnet.delegations or [])],
                 })
     except Exception as e:
         logger.warning("Failed to list subnets from rg=%s: %s", search_rg, e, exc_info=True)
