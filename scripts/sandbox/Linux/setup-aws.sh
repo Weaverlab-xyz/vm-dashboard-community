@@ -282,18 +282,21 @@ state_write aws db_parameter_group_name "$DB_PARAM_GROUP_NAME"
 
 # ── 4d. RDS MySQL parameter group with require_secure_transport=0 ─────────────
 # MySQL's cleartext knob for the PRA tunnel — the analog of rds.force_ssl=0,
-# which doesn't exist for MySQL. A mysql8.0-family group with
+# which doesn't exist for MySQL. A mysql8.4-family group with
 # require_secure_transport=0 lets the tunnel's plaintext jumpoint→RDS connection
 # through. The db_mysql module references it via aws_db_mysql_parameter_group_name.
+# Engine is MySQL 8.4 so the master user defaults to caching_sha2_password, which
+# the BeyondTrust PRA MySQL tunnel requires — 8.0's mysql_native_password is
+# rejected and RDS won't let default_authentication_plugin be changed on 8.0.
 section "RDS MySQL parameter group (require_secure_transport off, for the PRA tunnel)"
-DB_MYSQL_PARAM_GROUP_NAME="clouddb-nossl-mysql8.0"
+DB_MYSQL_PARAM_GROUP_NAME="clouddb-nossl-mysql84"
 if aws rds describe-db-parameter-groups --region "$REGION" \
      --db-parameter-group-name "$DB_MYSQL_PARAM_GROUP_NAME" >/dev/null 2>&1; then
   ok "Reusing DB parameter group $DB_MYSQL_PARAM_GROUP_NAME"
 else
   aws rds create-db-parameter-group --region "$REGION" \
     --db-parameter-group-name "$DB_MYSQL_PARAM_GROUP_NAME" \
-    --db-parameter-group-family mysql8.0 \
+    --db-parameter-group-family mysql8.4 \
     --description "Dashboard managed DBs: require_secure_transport off (reached via PRA protocol tunnel)" \
     --tags "Key=Name,Value=$DB_MYSQL_PARAM_GROUP_NAME" "Key=$SANDBOX_TAG_KEY,Value=$SANDBOX_TAG_VALUE" >/dev/null
   ok "Created DB parameter group $DB_MYSQL_PARAM_GROUP_NAME"

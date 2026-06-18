@@ -38,8 +38,8 @@ variable "allocated_storage" {
 
 variable "engine_version" {
   type        = string
-  default     = "8.0"
-  description = "MySQL major (or major.minor) engine version. Keep aligned with the parameter group family (8.0 ↔ mysql8.0)."
+  default     = "8.4"
+  description = "MySQL major (or major.minor) engine version. 8.4's master user defaults to caching_sha2_password (required by the PRA MySQL tunnel; 8.0 defaults to the rejected mysql_native_password and RDS won't let it be changed). Keep aligned with the parameter group family (8.4 ↔ mysql8.4)."
 }
 
 variable "db_name" {
@@ -83,7 +83,7 @@ variable "parameter_group_name" {
   # MySQL wire protocol (that is how it injects the Vault credential and records
   # the session) — the sra_my_sql_tunnel_jump has no backend-TLS option. A server
   # with require_secure_transport=ON rejects the tunnel's plaintext jumpoint→RDS
-  # connection. The sandbox pre-creates a mysql8.0-family group with
+  # connection. The sandbox pre-creates a mysql8.4-family group with
   # require_secure_transport=0 and passes its name here. We REFERENCE (not create)
   # it on purpose: the scoped dashboard IAM user can't create parameter groups.
   # Empty = RDS default group — fine for non-PRA access models. (PostgreSQL analog:
