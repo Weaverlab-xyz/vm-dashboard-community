@@ -687,9 +687,14 @@ def init_db():
     """
     with engine.connect() as conn:
         if not _is_sqlite:
-            # Session-level lock: blocks concurrent callers until we exit this
-            # connection.  Released automatically when the connection closes.
-            conn.execute(text("SELECT pg_advisory_lock(20260101)"))
+            # Transaction-scoped lock: serializes concurrent init_db callers (the
+            # app's Gunicorn workers AND the jobs_worker container) and releases
+            # when this transaction commits below. A *session*-level
+            # pg_advisory_lock leaks here: QueuePool keeps the connection open
+            # after this block, so the lock would be held for the life of the
+            # process and wedge every other caller (seen as app workers blocked
+            # forever acquiring 20260101 once the jobs_worker held it).
+            conn.execute(text("SELECT pg_advisory_xact_lock(20260101)"))
 
         # Pass the connection so create_all runs inside the same transaction
         # (and the same advisory-lock session on PostgreSQL).
@@ -754,8 +759,7 @@ def init_db():
                     conn.execute(text("ROLLBACK TO SAVEPOINT _mig"))
 
         if not _is_sqlite:
-            conn.commit()
-        # Advisory lock released automatically when conn closes.
+            conn.commit()  # ends the txn → releases pg_advisory_xact_lock(20260101)
 
 # Seed workgroups table on first boot. Imported here (not at module top)
     # to avoid a circular import: workgroup_service imports from database.
