@@ -18,7 +18,9 @@ $VnetName  = "$Name-vnet"
 $AciSubnet = 'aci-subnet'
 $VmSubnet  = 'vm-subnet'
 $K8sSubnet = 'k8s-subnet'
+$DesktopsSubnet = 'desktops-subnet'
 $NsgName   = "$Name-vm-nsg"
+$DesktopsNsg = "$Name-desktops-nsg"
 
 Assert-LoggedIn 'az' { az account show --output json } 'Run: az login'
 
@@ -115,6 +117,49 @@ az network vnet subnet update -g $Rg --vnet-name $VnetName -n $VmSubnet `
     --network-security-group $NsgName | Out-Null
 Write-Ok "Attached NSG to $VmSubnet"
 Set-StateValue azure vm_nsg $NsgName
+
+# ── 3b. Desktops subnet + NSG (VDI pools) ────────────────────────────────────
+# VDI desktop pools land here. Unlike vm-subnet (all Internet egress denied),
+# desktops need outbound 443 so the BeyondTrust RS jump client can register with
+# the appliance at FIRST BOOT (it phones home directly, not via the Jumpoint).
+# NOT delegated — a delegated subnet (e.g. aci-subnet) can't host VM NICs.
+Write-Section 'Desktops subnet + NSG (VDI)'
+& az network vnet subnet show -g $Rg --vnet-name $VnetName -n $DesktopsSubnet *> $null
+if ($LASTEXITCODE -ne 0) {
+    az network vnet subnet create -g $Rg --vnet-name $VnetName -n $DesktopsSubnet `
+        --address-prefix 10.99.6.0/24 | Out-Null
+}
+Write-Ok "Desktops subnet $DesktopsSubnet (10.99.6.0/24, no delegation)"
+
+az network nsg create -g $Rg -n $DesktopsNsg --tags $Tags | Out-Null
+# Outbound: allow HTTPS to Internet (jump-client registration + Windows update/
+# activation) and VNet; deny other Internet egress.
+az network nsg rule create -g $Rg --nsg-name $DesktopsNsg -n allow-https-out `
+    --priority 100 --direction Outbound --access Allow --protocol Tcp `
+    --source-address-prefix "*" --source-port-range "*" `
+    --destination-address-prefix Internet --destination-port-range 443 | Out-Null
+az network nsg rule create -g $Rg --nsg-name $DesktopsNsg -n allow-vnet-out `
+    --priority 110 --direction Outbound --access Allow --protocol "*" `
+    --source-address-prefix VirtualNetwork --source-port-range "*" `
+    --destination-address-prefix VirtualNetwork --destination-port-range "*" | Out-Null
+az network nsg rule create -g $Rg --nsg-name $DesktopsNsg -n deny-internet-out `
+    --priority 200 --direction Outbound --access Deny --protocol "*" `
+    --source-address-prefix "*" --source-port-range "*" `
+    --destination-address-prefix Internet --destination-port-range "*" | Out-Null
+# Inbound: RDP from the VNet so the PRA Jumpoint can broker in.
+az network nsg rule create -g $Rg --nsg-name $DesktopsNsg -n allow-rdp-vnet-in `
+    --priority 100 --direction Inbound --access Allow --protocol Tcp `
+    --source-address-prefix VirtualNetwork --source-port-range "*" `
+    --destination-address-prefix VirtualNetwork --destination-port-range 3389 | Out-Null
+Write-Ok "NSG ${DesktopsNsg}: outbound 443 (jump client) + VNet; RDP in from VNet"
+
+az network vnet subnet update -g $Rg --vnet-name $VnetName -n $DesktopsSubnet `
+    --network-security-group $DesktopsNsg | Out-Null
+Write-Ok "Attached NSG to $DesktopsSubnet"
+
+$DesktopsSubnetId = (az network vnet subnet show -g $Rg --vnet-name $VnetName -n $DesktopsSubnet --query id -o tsv).Trim()
+Set-StateValue azure desktops_subnet_id $DesktopsSubnetId
+Set-StateValue azure desktops_nsg $DesktopsNsg
 
 # ── 4. Storage account + file share for ACI /jpt persistence ─────────────────
 Write-Section 'Storage account (ACI /jpt persistence)'
@@ -262,6 +307,7 @@ $cfg = @(
     "azure_aci_resource_group=$Rg",
     "azure_aci_subnet_id=$AciSubnetId                      # ACI lands here, has internet egress",
     "azure_default_subnet_id=$VmSubnetId                   # VMs land here, NSG-restricted to VNet",
+    "azure_desktops_subnet_id=$DesktopsSubnetId            # VDI desktop pools (no delegation, 443 egress for the jump client)",
     "azure_db_subnet_id=$DbSubnetId                        # Flexible Server delegated subnet (private)",
     "azure_db_private_dns_zone_id=$DbDnsZoneId             # Private DNS zone for the DB FQDN",
     "azure_jumpoint_subnet_id=$JpSubnetId                  # Tunnel-capable VM jumpoint lands here (internet egress)",
