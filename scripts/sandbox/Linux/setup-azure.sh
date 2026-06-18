@@ -125,6 +125,27 @@ state_write azure db_subnet_id           "$DB_SUBNET_ID"
 state_write azure jumpoint_subnet_id     "$JP_SUBNET_ID"
 state_write azure db_private_dns_zone_id  "$DB_DNS_ZONE_ID"
 
+# MySQL Flexible Server needs its OWN delegated subnet (delegated to
+# Microsoft.DBforMySQL/flexibleServers — a delegated subnet hosts only one
+# flexible-server type) + its own private DNS zone (…mysql.database.azure.com).
+DB_MYSQL_SUBNET="db-mysql-subnet"
+az network vnet subnet create -g "$RG" --vnet-name "$VNET" -n "$DB_MYSQL_SUBNET" \
+  --address-prefix 10.99.7.0/24 \
+  --delegations Microsoft.DBforMySQL/flexibleServers >/dev/null
+ok "MySQL DB subnet $DB_MYSQL_SUBNET (10.99.7.0/24, delegated to DBforMySQL/flexibleServers)"
+DB_MYSQL_SUBNET_ID="$(az network vnet subnet show -g "$RG" --vnet-name "$VNET" -n "$DB_MYSQL_SUBNET" --query id -o tsv)"
+
+DB_MYSQL_DNS_ZONE="${NAME}.private.mysql.database.azure.com"
+az network private-dns zone create -g "$RG" -n "$DB_MYSQL_DNS_ZONE" >/dev/null 2>&1 || true
+az network private-dns link vnet create -g "$RG" -n "${NAME}-db-mysql-dns-link" \
+  --zone-name "$DB_MYSQL_DNS_ZONE" --virtual-network "$VNET" \
+  --registration-enabled false >/dev/null 2>&1 || true
+DB_MYSQL_DNS_ZONE_ID="$(az network private-dns zone show -g "$RG" -n "$DB_MYSQL_DNS_ZONE" --query id -o tsv 2>/dev/null)"
+ok "Private DNS zone $DB_MYSQL_DNS_ZONE linked to $VNET"
+
+state_write azure db_mysql_subnet_id           "$DB_MYSQL_SUBNET_ID"
+state_write azure db_mysql_private_dns_zone_id  "$DB_MYSQL_DNS_ZONE_ID"
+
 # ── 3. NSG: deny VM internet egress, allow VNet ──────────────────────────────
 section "NSG (block VM internet egress)"
 az network nsg create -g "$RG" -n "$NSG" --tags "$TAGS" >/dev/null
@@ -406,6 +427,8 @@ _cfg=(
   "azure_desktops_subnet_id=$DESKTOPS_SUBNET_ID            # VDI desktop pools (no delegation, 443 egress for the jump client)"
   "azure_db_subnet_id=$DB_SUBNET_ID                        # Flexible Server delegated subnet (private)"
   "azure_db_private_dns_zone_id=$DB_DNS_ZONE_ID            # Private DNS zone for the DB FQDN"
+  "azure_db_mysql_subnet_id=$DB_MYSQL_SUBNET_ID            # MySQL Flexible Server delegated subnet (private)"
+  "azure_db_mysql_private_dns_zone_id=$DB_MYSQL_DNS_ZONE_ID  # Private DNS zone for the MySQL DB FQDN"
   "azure_jumpoint_subnet_id=$JP_SUBNET_ID                  # Tunnel-capable VM jumpoint lands here (internet egress)"
   "azure_aci_storage_account=$SA_NAME                      # /jpt persistent volume"
   "azure_aci_storage_account_rg=$RG"

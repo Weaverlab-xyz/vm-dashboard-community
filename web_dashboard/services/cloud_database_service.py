@@ -44,13 +44,14 @@ VALID_ENGINES = {"postgres", "mysql", "sqlserver"}
 VALID_CLOUDS = {"aws", "azure", "gcp"}
 _IMPLEMENTED = {
     ("postgres", "aws"), ("postgres", "gcp"), ("postgres", "azure"),
-    ("mysql", "aws"),
+    ("mysql", "aws"), ("mysql", "azure"),
 }
 _PROVIDER = {
     ("postgres", "aws"): "rds",
     ("postgres", "gcp"): "cloudsql",
     ("postgres", "azure"): "flexibleserver",
     ("mysql", "aws"): "rds",
+    ("mysql", "azure"): "flexibleserver",
 }
 
 # terraform/<dir> module per (engine, cloud) — relative to repo root (parents[2]).
@@ -60,6 +61,7 @@ _TEMPLATE_DIRS = {
     ("postgres", "gcp"): os.path.join(_REPO_ROOT, "terraform", "db_gcp_postgres"),
     ("postgres", "azure"): os.path.join(_REPO_ROOT, "terraform", "db_azure_postgres"),
     ("mysql", "aws"): os.path.join(_REPO_ROOT, "terraform", "db_mysql"),
+    ("mysql", "azure"): os.path.join(_REPO_ROOT, "terraform", "db_azure_mysql"),
 }
 _DEPLOYMENTS_DIR = os.path.join(_REPO_ROOT, "terraform", "deployments")
 
@@ -167,6 +169,26 @@ def _build_tf_variables(
             "db_name": db_name,
             "delegated_subnet_id": opts.get("delegated_subnet_id") or _cfg("azure_db_subnet_id"),
             "private_dns_zone_id": opts.get("private_dns_zone_id") or _cfg("azure_db_private_dns_zone_id"),
+            "tags": {"managed-by": "vm-dashboard", "clouddb-id": db_id},
+        }
+
+    if (engine, cloud) == ("mysql", "azure"):
+        # VNet-integrated private MySQL Flexible Server. Mirrors postgres/azure but
+        # reads the MySQL-specific delegated subnet + DNS zone (a delegated subnet
+        # hosts only one flexible-server type, so MySQL needs its own). The module's
+        # require_secure_transport=OFF is the cleartext-tunnel knob; MySQL 8.0's admin
+        # defaults to caching_sha2_password, which the PRA tunnel needs.
+        return {
+            "resource_group_name": opts.get("resource_group_name") or _cfg("azure_resource_group"),
+            "location": region,
+            "identifier": f"clouddb-{db_id[:8]}",
+            "administrator_login": master_username,
+            "administrator_password": master_password,
+            "sku_name": opts.get("sku_name", "B_Standard_B1ms"),
+            "storage_mb": opts.get("storage_mb", 32768),
+            "db_name": db_name,
+            "delegated_subnet_id": opts.get("delegated_subnet_id") or _cfg("azure_db_mysql_subnet_id"),
+            "private_dns_zone_id": opts.get("private_dns_zone_id") or _cfg("azure_db_mysql_private_dns_zone_id"),
             "tags": {"managed-by": "vm-dashboard", "clouddb-id": db_id},
         }
 

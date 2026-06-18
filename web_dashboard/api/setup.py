@@ -515,8 +515,10 @@ class CloudDatabaseFeatureConfig(BaseModel):
     aws_db_mysql_parameter_group_name: str = ""      # mysql: require_secure_transport=0 group
     aws_db_security_group_id: str = ""
     # Azure Flexible Server
-    azure_db_subnet_id: str = ""
-    azure_db_private_dns_zone_id: str = ""
+    azure_db_subnet_id: str = ""                      # postgres delegated subnet
+    azure_db_private_dns_zone_id: str = ""            # postgres DNS zone
+    azure_db_mysql_subnet_id: str = ""                # mysql delegated subnet (own)
+    azure_db_mysql_private_dns_zone_id: str = ""      # mysql DNS zone (own)
     # GCP Cloud SQL
     gcp_db_network: str = ""
 

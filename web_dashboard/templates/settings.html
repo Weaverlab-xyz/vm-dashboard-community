@@ -1179,6 +1179,18 @@
                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
                        placeholder="/subscriptions/…/privateDnsZones/…postgres.database.azure.com">
               </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">MySQL delegated subnet ID</label>
+                <input type="text" x-model="panelCfg.azure_db_mysql_subnet_id"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                       placeholder="/subscriptions/…/subnets/db-mysql-subnet">
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">MySQL private DNS zone ID</label>
+                <input type="text" x-model="panelCfg.azure_db_mysql_private_dns_zone_id"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                       placeholder="/subscriptions/…/privateDnsZones/…mysql.database.azure.com">
+              </div>
             </div>
           </div>
 
