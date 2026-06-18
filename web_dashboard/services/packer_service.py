@@ -371,6 +371,10 @@ def generate_azure_windows_client_template(
         '  winrm_username = "packer"\n\n'
         # Trusted Launch — required by Windows 11. Azure rejects managed-image
         # creation for Trusted Launch VMs, so we publish a Compute Gallery version.
+        # security_type is REQUIRED alongside the UEFI settings: Azure rejects
+        # secure_boot/vtpm with a NULL security type ("Use of UEFI settings is not
+        # supported when security type is '<NULL>'").
+        '  security_type       = "TrustedLaunch"\n'
         '  secure_boot_enabled = true\n'
         '  vtpm_enabled        = true\n'
         '  license_type        = "Windows_Client"\n\n'
