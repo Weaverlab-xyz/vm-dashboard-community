@@ -7,8 +7,9 @@ Scripts that prepare a freshly-built cloud image so it can be picked up by **Bey
 | [`bt-ready-debian.sh`](bt-ready-debian.sh) | Debian, Ubuntu |
 | [`bt-ready-rpm.sh`](bt-ready-rpm.sh) | RHEL, Rocky, CentOS Stream, AlmaLinux, Amazon Linux 2 / 2023 |
 | [`bt-ready-windows.ps1`](bt-ready-windows.ps1) | Windows Server 2022 (incl. Server Core) — Azure |
+| [`bt-ready-windows11-vdi.ps1`](bt-ready-windows11-vdi.ps1) | Windows 11 multi-session (24H2 AVD) VDI desktops — Azure |
 
-The two `*.sh` scripts are POSIX `/bin/sh`; the Windows one is PowerShell (see [its own section](#windows-bt-ready-windowsps1) — it behaves differently enough to warrant separate notes).
+The two `*.sh` scripts are POSIX `/bin/sh`; the Windows ones are PowerShell (see their own sections — they behave differently enough to warrant separate notes).
 
 ## What the scripts do
 
@@ -78,6 +79,16 @@ The Windows script prepares a **Windows Server 2022** image (including **Server 
 - **Optional toggles** (set as `$env:BT_*` for CLI builds, or edit inline): `BT_AUTHORIZED_KEY`, `BT_ADMIN_USER` (default `azureuser`), `BT_SSH_KEY_ONLY=1` (harden sshd to key-only), `BT_ENABLE_RDP=0` (skip RDP).
 
 The Linux-centric sections below (`adminuser` / Entitle / EPM-L, CIS via OpenSCAP, the cross-cloud `/bin/sh` constraint, the self-elevation privilege model) **do not apply** to the Windows script.
+
+## Windows 11 multi-session VDI (`bt-ready-windows11-vdi.ps1`)
+
+The VDI analogue of `bt-ready-windows.ps1`, for the **Windows 11 multi-session (24H2 AVD)** build preset (which publishes a Trusted Launch Compute Gallery image). A desktop, not a server — so it's **RDP-first**, multi-session-capable, lightly VDI-optimized, and stages the RS jump client for **first-boot** install:
+
+- **Multi-session + RDP.** Sets `fSingleSessionPerUser=0` (concurrent sessions), enables RDP + NLA + the Remote Desktop firewall group + time-zone redirection. Agentless **Remote RDP** jump items reach 3389 from the Jumpoint subnet; pool VMs are private + brokered. The multi-session SKU provides multi-*user* concurrency without an RDSH role — but the dashboard does **not** install the AVD agent or register an AVD host pool, so VMs are used **1-per-seat over PRA-RDP** and the multi-session capability is latent.
+- **Conservative VDI optimizations.** Disables hibernation, telemetry, Windows consumer features, and Store auto-update — a safe subset. For heavier tuning, run Microsoft's [Virtual Desktop Optimization Tool (VDOT)](https://github.com/The-Virtual-Desktop-Team/Virtual-Desktop-Optimization-Tool) as your provisioner instead.
+- **RS jump client at FIRST BOOT, never baked installed.** Set `$JumpClientUrl` (or `BT_JUMP_CLIENT_URL`) to the RS **mass-deployment installer** (`.msi`) URL. The script stages it into the image and writes `C:\Windows\Setup\Scripts\SetupComplete.cmd`, which runs `msiexec /i … /quiet` **once per clone** after Sysprep OOBE (as SYSTEM, before logon) — so each VDI VM registers a **distinct** jump client. Baking an *installed* client into a golden image makes every clone phone home with the same identity → a "confused entry in the rep console" (KB0017470). Optional `BT_JUMP_GROUP` / `BT_JUMP_TAG` map to `jc_jump_group` / `jc_tag`. **Caveats:** mass-deploy installers **expire** and are **invalidated by appliance upgrades** — rebuild the image after appliance updates; and the deployed (private) VM needs **outbound 443 to the appliance** to register at first boot.
+- **Optional OpenSSH.** Off by default (RDP is primary). `BT_INSTALL_OPENSSH=1` installs OpenSSH Server and authorizes `BT_AUTHORIZED_KEY` for admin SSH, the same as `bt-ready-windows.ps1`.
+- **No cleanup step** — Sysprep `/generalize` owns generalization.
 
 ## What the scripts deliberately do *not* do
 
