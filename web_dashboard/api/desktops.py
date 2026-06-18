@@ -69,15 +69,19 @@ def _azure_spec(payload: PoolCreateRequest) -> dict:
     Resource group + location fall back to the configured Azure defaults
     (``azure_resource_group`` / ``azure_location``) so the pool form can leave
     them blank — same resolution the Azure deploy path uses (``_rg``/``_loc``).
+    Subnet + VM size fall back to the Virtual Desktops panel defaults
+    (``azure_desktops_subnet_id`` / ``azure_desktops_vm_size``) so pools land on
+    the non-delegated desktops subnet by default instead of whatever the picker
+    lists.
     """
     return {
         "location": payload.location or _cfg("azure_location") or "centralus",
         "resource_group": payload.resource_group or _cfg("azure_resource_group") or "vm-cli-rg",
-        "vm_size": payload.vm_size or payload.size,
+        "vm_size": payload.vm_size or payload.size or _cfg("azure_desktops_vm_size"),
         "image_id": payload.image_id or payload.image,
         "image_publisher": payload.image_publisher, "image_offer": payload.image_offer,
         "image_sku": payload.image_sku, "image_version": payload.image_version,
-        "subnet_id": payload.subnet_id, "nsg_ids": payload.nsg_ids,
+        "subnet_id": payload.subnet_id or _cfg("azure_desktops_subnet_id"), "nsg_ids": payload.nsg_ids,
         "create_public_ip": payload.create_public_ip,
         "os_type": payload.os_type,
         "trusted_launch": payload.trusted_launch,

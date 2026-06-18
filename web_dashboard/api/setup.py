@@ -537,6 +537,21 @@ class K8sManagementFeatureConfig(BaseModel):
     aws_eks_node_instance_type: str = ""
 
 
+class VirtualDesktopsFeatureConfig(BaseModel):
+    """Config-only panel (no `enabled`) for the Virtual Desktops PREVIEW feature.
+    The preview toggle owns `vdesktops_enabled`; this panel holds the Azure VDI
+    pool defaults the sandbox emits. Normally pushed via /api/setup/import. See
+    _CONFIG_ONLY_FEATURES."""
+    # The dedicated non-delegated desktops subnet (sandbox: desktops-subnet,
+    # 10.99.6.0/24). Pools default here. Its NSG allows outbound 443 so the RS
+    # jump client can register at first boot. aci-subnet (ACI-delegated) can't
+    # host VM NICs — picking it is what broke the first Win 11 pool deploy.
+    azure_desktops_subnet_id: str = ""
+    # Default pool VM size (blank → the pool form's own default). Win 11 / Trusted
+    # Launch needs a Gen2 size (e.g. Standard_D2s_v3) — NOT a B-series.
+    azure_desktops_vm_size: str = ""
+
+
 _FEATURE_MODELS = {
     "vmware":       VMwareFeatureConfig,
     "beyondtrust":  BeyondTrustFeatureConfig,
@@ -550,12 +565,13 @@ _FEATURE_MODELS = {
     "xcpng":        XcpNgFeatureConfig,
     "cloud_database": CloudDatabaseFeatureConfig,
     "k8s_management": K8sManagementFeatureConfig,
+    "vdesktops":      VirtualDesktopsFeatureConfig,
 }
 
 # Features whose panel carries config but NOT an enable toggle — their on/off
 # lives elsewhere (e.g. a preview flag). _read/_write_feature skip the enabled
 # key for these, so saving config can't flip the feature's flag.
-_CONFIG_ONLY_FEATURES = {"cloud_database", "k8s_management"}
+_CONFIG_ONLY_FEATURES = {"cloud_database", "k8s_management", "vdesktops"}
 
 _SECRET_FEATURE_KEYS = frozenset({
     "pscli_client_secret", "bt_client_secret", "epml_pat",
@@ -668,6 +684,7 @@ _PREVIEW_FLAGS = {
 # _FEATURE_MODELS key its "Configure" link opens. The flag stays the on/off;
 # the panel is config-only (see _CONFIG_ONLY_FEATURES).
 _PREVIEW_FLAG_CONFIG = {
+    "vdesktops_enabled": "vdesktops",
     "cloud_database_enabled": "cloud_database",
     "k8s_management_enabled": "k8s_management",
 }

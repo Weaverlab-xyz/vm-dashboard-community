@@ -139,8 +139,12 @@
                 <label class="block text-sm font-medium text-gray-700 mb-1">Subnet *</label>
                 <select x-model="form.subnet_id" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
                   <option value="">— select —</option>
-                  <template x-for="s in azure.subnets" :key="s.id"><option :value="s.id" x-text="s.name || s.id"></option></template>
+                  <template x-for="s in azure.subnets" :key="s.id">
+                    <option :value="s.id" :disabled="s.delegations && s.delegations.length"
+                            x-text="(s.name || s.id) + (s.delegations && s.delegations.length ? ' — delegated to ' + s.delegations[0] + ' (can\'t host VMs)' : '')"></option>
+                  </template>
                 </select>
+                <p class="text-[11px] text-gray-400 mt-1">Defaults to the configured desktops subnet. Delegated subnets (e.g. <code>aci-subnet</code>) can't host VM NICs and are disabled.</p>
               </div>
               <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Network security group</label>
@@ -246,6 +250,10 @@ function desktopsPage() {
     async loadAzure() {
       if (this.azure.loaded || this.azure.loading) return;
       this.azure.loading = true;
+      // Virtual Desktops panel defaults: pools should land on the configured
+      // non-delegated desktops subnet (+ default VM size), not whatever's first.
+      let vd = {};
+      try { vd = (await API.get('/api/setup/feature/vdesktops')) || {}; } catch (e) {}
       try {
         const net = await API.get('/api/azure/network-options');
         this.azure.locations = net.locations || [];
@@ -253,8 +261,13 @@ function desktopsPage() {
         this.azure.subnets = net.subnets || [];
         this.azure.nsgs = net.nsgs || [];
         if (!this.form.location && this.azure.locations.length) this.form.location = this.azure.locations[0];
-        if (!this.form.vm_size && this.azure.vm_sizes.length) this.form.vm_size = this.azure.vm_sizes[0];
-        if (!this.form.subnet_id && this.azure.subnets.length) this.form.subnet_id = this.azure.subnets[0].id;
+        if (!this.form.vm_size) this.form.vm_size = vd.azure_desktops_vm_size || this.azure.vm_sizes[0] || '';
+        // Prefer the configured desktops subnet; else the first NON-delegated one
+        // (a delegated subnet like aci-subnet can't host VM NICs).
+        if (!this.form.subnet_id) {
+          const usable = this.azure.subnets.filter(s => !(s.delegations && s.delegations.length));
+          this.form.subnet_id = vd.azure_desktops_subnet_id || (usable[0] && usable[0].id) || '';
+        }
       } catch (e) { /* network options unavailable — fields still accept manual values */ }
       try { const im = await API.get('/api/azure/images'); this.azure.images = im.images || (Array.isArray(im) ? im : []); } catch (e) {}
       try { const k = await API.get('/api/azure/keyvault-ssh-key'); if (k && k.ssh_public_key && !this.form.ssh_public_key) this.form.ssh_public_key = k.ssh_public_key; } catch (e) {}
