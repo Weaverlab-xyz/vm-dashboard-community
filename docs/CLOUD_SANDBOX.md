@@ -48,6 +48,7 @@ A consistent topology across all three clouds:
 | **VM segment** | Hosts the lab VMs you deploy via the dashboard. | ❌ No — only the Jumpoint can reach them, and they cannot reach the internet directly. |
 | **DB segment** (AWS only) | Dedicated private subnets for managed RDS databases (2 AZs — RDS spans ≥2). | ❌ No — brokered only through the PRA tunnel. |
 | **K8s segment** | Dedicated private subnet(s) for managed Kubernetes clusters, separate from the VM and DB segments. AWS uses 2 AZs (`10.99.5/6.0/24`) since EKS spans ≥2; Azure/GCP use one (`10.99.3.0/24`). | ❌ No — clusters are private; brokered through the PRA tunnel. |
+| **Desktops segment** (Azure) | Dedicated **non-delegated** subnet (`10.99.6.0/24`) for VDI desktop pools, separate from the VM segment because the RS jump client must register with the appliance at first boot. | ⚠️ **443 only** — the NSG allows outbound HTTPS (jump-client registration + Windows activation/updates) but denies other Internet; RDP brokered in via the Jumpoint. |
 
 Per-cloud isolation mechanism:
 
@@ -220,8 +221,15 @@ Resource group dashboard-sandbox-rg
        ├─ db-subnet  10.99.4.0/24                   [managed databases]
        │    (delegated to Microsoft.DBforPostgreSQL/flexibleServers)
        │    → private VNet-integrated Flexible Server
-       └─ jumpoint-subnet 10.99.5.0/24              [tunnel-capable VM Jumpoint]
-            → internet egress (no deny NSG; phones home to PRA)
+       ├─ jumpoint-subnet 10.99.5.0/24              [tunnel-capable VM Jumpoint]
+       │    → internet egress (no deny NSG; phones home to PRA)
+       └─ desktops-subnet 10.99.6.0/24              [VDI desktop pools]
+            NSG dashboard-sandbox-desktops-nsg:
+              outbound: allow 443 → Internet  (priority 100)
+                        allow VirtualNetwork   (priority 110)
+                        deny  Internet         (priority 200)
+              inbound:  allow RDP 3389 from VirtualNetwork
+            → 443 egress only; for RS jump-client first-boot registration
 
 Private DNS zone dashboard-sandbox.private.postgres.database.azure.com
   linked to the VNet → the Flexible Server's private FQDN resolves inside it.

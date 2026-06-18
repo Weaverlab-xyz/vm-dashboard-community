@@ -10,6 +10,10 @@
 #       so deployed VMs can only egress within the VNet — i.e. to the ACI
 #       Jumpoint, never directly to the internet.
 #     - k8s-subnet  (managed Kubernetes / AKS)
+#     - desktops-subnet (NSG allows outbound 443 + VirtualNetwork; VDI desktop
+#       pools land here — they need 443 egress so the RS jump client can
+#       register with the appliance at first boot. NOT delegated, so VM NICs
+#       can attach — unlike aci-subnet, which can't host VMs.)
 #     - db-subnet   (delegated to Microsoft.DBforPostgreSQL/flexibleServers —
 #       private VNet-integrated managed databases)
 #     - jumpoint-subnet (internet egress; the tunnel-capable VM Jumpoint lands
@@ -38,7 +42,9 @@ VNET="${NAME}-vnet"
 ACI_SUBNET="aci-subnet"
 VM_SUBNET="vm-subnet"
 K8S_SUBNET="k8s-subnet"
+DESKTOPS_SUBNET="desktops-subnet"
 NSG="${NAME}-vm-nsg"
+DESKTOPS_NSG="${NAME}-desktops-nsg"
 
 ensure_logged_in "az" "az account show" "Run: az login"
 
@@ -146,6 +152,49 @@ az network vnet subnet update -g "$RG" --vnet-name "$VNET" -n "$VM_SUBNET" \
   --network-security-group "$NSG" >/dev/null
 ok "Attached NSG to $VM_SUBNET"
 state_write azure vm_nsg "$NSG"
+
+# ── 3b. Desktops subnet + NSG (VDI pools) ────────────────────────────────────
+# VDI desktop pools land here. Unlike vm-subnet (all Internet egress denied),
+# desktops need outbound 443 so the BeyondTrust RS jump client can register with
+# the appliance at FIRST BOOT (it phones home directly, not via the Jumpoint).
+# NOT delegated — a delegated subnet (e.g. aci-subnet) cannot host VM NICs, which
+# is what broke the first Win 11 pool deploy. Idempotent (show || create).
+section "Desktops subnet + NSG (VDI)"
+az network vnet subnet show -g "$RG" --vnet-name "$VNET" -n "$DESKTOPS_SUBNET" >/dev/null 2>&1 || \
+  az network vnet subnet create -g "$RG" --vnet-name "$VNET" -n "$DESKTOPS_SUBNET" \
+    --address-prefix 10.99.6.0/24 >/dev/null
+ok "Desktops subnet $DESKTOPS_SUBNET (10.99.6.0/24, no delegation)"
+
+az network nsg create -g "$RG" -n "$DESKTOPS_NSG" --tags "$TAGS" >/dev/null
+# Outbound: allow HTTPS to Internet (RS jump-client registration + Windows
+# update/activation) and VirtualNetwork; deny other Internet egress.
+az network nsg rule create -g "$RG" --nsg-name "$DESKTOPS_NSG" -n allow-https-out \
+  --priority 100 --direction Outbound --access Allow --protocol Tcp \
+  --source-address-prefix "*" --source-port-range "*" \
+  --destination-address-prefix Internet --destination-port-range 443 >/dev/null
+az network nsg rule create -g "$RG" --nsg-name "$DESKTOPS_NSG" -n allow-vnet-out \
+  --priority 110 --direction Outbound --access Allow --protocol "*" \
+  --source-address-prefix VirtualNetwork --source-port-range "*" \
+  --destination-address-prefix VirtualNetwork --destination-port-range "*" >/dev/null
+az network nsg rule create -g "$RG" --nsg-name "$DESKTOPS_NSG" -n deny-internet-out \
+  --priority 200 --direction Outbound --access Deny --protocol "*" \
+  --source-address-prefix "*" --source-port-range "*" \
+  --destination-address-prefix Internet --destination-port-range "*" >/dev/null
+# Inbound: RDP from the VNet so the PRA Jumpoint can broker in. (Azure's default
+# rules already allow VNet inbound + deny Internet inbound; this makes it explicit.)
+az network nsg rule create -g "$RG" --nsg-name "$DESKTOPS_NSG" -n allow-rdp-vnet-in \
+  --priority 100 --direction Inbound --access Allow --protocol Tcp \
+  --source-address-prefix VirtualNetwork --source-port-range "*" \
+  --destination-address-prefix VirtualNetwork --destination-port-range 3389 >/dev/null
+ok "NSG $DESKTOPS_NSG: outbound 443 (jump client) + VNet; RDP in from VNet"
+
+az network vnet subnet update -g "$RG" --vnet-name "$VNET" -n "$DESKTOPS_SUBNET" \
+  --network-security-group "$DESKTOPS_NSG" >/dev/null
+ok "Attached NSG to $DESKTOPS_SUBNET"
+
+DESKTOPS_SUBNET_ID="$(az network vnet subnet show -g "$RG" --vnet-name "$VNET" -n "$DESKTOPS_SUBNET" --query id -o tsv)"
+state_write azure desktops_subnet_id "$DESKTOPS_SUBNET_ID"
+state_write azure desktops_nsg "$DESKTOPS_NSG"
 
 # ── 4. Storage account + file share for ACI /jpt persistence (optional) ──────
 section "Storage account (ACI /jpt persistence)"
@@ -354,6 +403,7 @@ _cfg=(
   "azure_aci_resource_group=$RG"
   "azure_aci_subnet_id=$ACI_SUBNET_ID                      # ACI lands here, has internet egress"
   "azure_default_subnet_id=$VM_SUBNET_ID                   # VMs land here, NSG-restricted to VNet"
+  "azure_desktops_subnet_id=$DESKTOPS_SUBNET_ID            # VDI desktop pools (no delegation, 443 egress for the jump client)"
   "azure_db_subnet_id=$DB_SUBNET_ID                        # Flexible Server delegated subnet (private)"
   "azure_db_private_dns_zone_id=$DB_DNS_ZONE_ID            # Private DNS zone for the DB FQDN"
   "azure_jumpoint_subnet_id=$JP_SUBNET_ID                  # Tunnel-capable VM jumpoint lands here (internet egress)"
@@ -401,8 +451,9 @@ cat <<EOF
 Sandbox topology summary
 
   VNet $VNET (10.99.0.0/16)
-    ├─ aci-subnet (10.99.1.0/24, delegated to ACI) → internet egress  [Jumpoint]
-    └─ vm-subnet  (10.99.2.0/24, NSG-restricted)   → VirtualNetwork only  [user VMs]
+    ├─ aci-subnet      (10.99.1.0/24, delegated to ACI) → internet egress  [Jumpoint]
+    ├─ vm-subnet       (10.99.2.0/24, NSG-restricted)   → VirtualNetwork only  [user VMs]
+    └─ desktops-subnet (10.99.6.0/24, NSG: 443 + VNet)  → jump-client egress   [VDI pools]
 
 Service principal credentials cached at:
   $SP_JSON_PATH  (mode 600)
