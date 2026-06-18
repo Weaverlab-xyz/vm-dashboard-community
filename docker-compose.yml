@@ -61,6 +61,34 @@ services:
         source: /var/run/docker.sock
         target: /var/run/docker.sock
 
+  # Dedicated background job runner — executes long Terraform jobs (k8s + cloud-DB
+  # provision/decommission) OUT of the gunicorn request workers so they survive
+  # worker recycling/crashes/redeploys. Same image as `app`; shares DB + config +
+  # state backend. No HTTP port, no docker socket (these jobs are terraform-only).
+  worker:
+    build:
+      context: .
+      args:
+        BUILD_SKIP_DEBIAN_UPDATES: ${BUILD_SKIP_DEBIAN_UPDATES:-0}
+    command: ["python", "-m", "web_dashboard.jobs_worker"]
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=postgresql://dashboardadmin:${POSTGRES_PASSWORD:-devpassword}@db:5432/vmclidashboard
+      - JWT_SECRET_KEY_FILE=/run/secrets/jwt_key
+    secrets:
+      - jwt_key
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      # Live-reload source (matches app); restart the worker to pick up changes
+      # (it runs `python -m`, not gunicorn --reload).
+      - type: bind
+        source: ./web_dashboard
+        target: /app/web_dashboard
+
 volumes:
   pgdata:
 

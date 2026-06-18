@@ -22,6 +22,12 @@ class TerraformError(Exception):
     """Raised when a Terraform command fails."""
 
 
+class JobCancelled(Exception):
+    """Raised by an ``on_line`` callback to abort a streamed apply/destroy when the
+    job was flipped to ``cancelled``. ``_stream`` catches it, terminates the terraform
+    subprocess, and re-raises so the caller can finalize the job."""
+
+
 # Path to the ec2_instance template (relative to this file → ../../terraform/ec2_instance)
 _TEMPLATE_DIR = os.path.normpath(
     os.path.join(os.path.dirname(__file__), "..", "..", "terraform", "ec2_instance")
@@ -270,6 +276,15 @@ async def _stream(tf_args: list, cwd: str, env: Optional[dict],
         lines.append(line)
         try:
             await on_line(line)
+        except JobCancelled:
+            # Cooperative cancel: the job was flipped to 'cancelled'. Stop terraform
+            # and re-raise so the caller finalizes the job.
+            proc.terminate()
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=10)
+            except asyncio.TimeoutError:
+                proc.kill()
+            raise
         except Exception:
             pass  # a UI-broadcast hiccup must never abort the terraform run
     await proc.wait()

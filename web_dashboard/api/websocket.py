@@ -48,12 +48,16 @@ manager = ConnectionManager()
 
 async def broadcast_progress(job_id: str, pct: int, message: str, log_line: str = None):
     """
-    Called from background tasks to push progress to connected clients.
-    Also persists the progress to the database.
+    Push progress to connected clients AND persist it. The dedicated job runner is a
+    separate process, so its in-memory ``manager.broadcast`` reaches no clients — the
+    DB writes (progress + per-line ``JobLog``) are what the WS endpoint reads on its
+    2s poll. The in-memory broadcast still serves any in-process callers.
     """
     db: Session = SessionLocal()
     try:
         job_service.update_progress(db, job_id, pct, message)
+        if log_line:
+            job_service.append_job_log(db, job_id, log_line)
     finally:
         db.close()
 
@@ -78,11 +82,28 @@ async def job_progress_websocket(websocket: WebSocket, job_id: str):
     The client connects here immediately after receiving a job_id.
     The server:
       1. Sends the current job state immediately on connect.
-      2. Keeps the connection open and forwards broadcasts as they arrive.
-      3. Closes the connection once the job reaches a terminal state.
+      2. Replays any persisted Live Output lines (so opening or RECONNECTING to an
+         in-flight or already-finished job shows the full stream).
+      3. Polls the DB every 2s, pushing state changes and tailing new log lines.
+      4. Closes once the job reaches a terminal state.
+
+    Progress + logs are written to the DB by whoever runs the job (now the dedicated
+    job runner, a separate process), so this endpoint is driven entirely by the DB.
     """
     await manager.connect(job_id, websocket)
     db: Session = SessionLocal()
+    last_seq = 0
+
+    def _log_msg(line: str, job) -> dict:
+        return {
+            "job_id": job_id,
+            "type": "progress",
+            "progress_pct": job.progress_pct,
+            "progress_message": job.progress_message,
+            "log_line": line,
+            "timestamp": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+
     try:
         # Send current job state to the newly connected client
         job = job_service.get_job(db, job_id)
@@ -99,6 +120,12 @@ async def job_progress_websocket(websocket: WebSocket, job_id: str):
             "progress_message": job.progress_message,
             "timestamp": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
         })
+
+        # Replay persisted Live Output BEFORE any terminal close, so a client that
+        # opens a finished job (or reconnects mid-job) still sees the full output.
+        for seq, line in job_service.get_job_logs(db, job_id, after_seq=last_seq):
+            await websocket.send_json(_log_msg(line, job))
+            last_seq = seq
 
         # If already terminal, close immediately
         if job.status in ("completed", "failed", "cancelled"):
@@ -127,6 +154,11 @@ async def job_progress_websocket(websocket: WebSocket, job_id: str):
                 "progress_message": job.progress_message,
                 "timestamp": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
             })
+
+            # Tail any new Live Output lines persisted since the last poll.
+            for seq, line in job_service.get_job_logs(db, job_id, after_seq=last_seq):
+                await websocket.send_json(_log_msg(line, job))
+                last_seq = seq
 
             if job.status in ("completed", "failed", "cancelled"):
                 break

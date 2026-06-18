@@ -26,7 +26,7 @@ from ..models.k8s import (
     ManagementRequest,
     SecretDeliveryRequest,
 )
-from ..services import k8s_service
+from ..services import k8s_service, job_service
 from ..services.k8s_service import K8sError
 from .auth import require_admin
 
@@ -76,33 +76,9 @@ async def register_cluster(
         raise HTTPException(status_code=400, detail=str(e))
 
 
-async def _provision_task(cluster_id: str, job_id: str, cloud: str, tf_variables: dict) -> None:
-    """Background worker — **async, on the main event loop** so terraform's streamed
-    output reaches the job's WebSocket (manager.broadcast is loop-bound). Opens a
-    fresh session and drives the cluster apply + kubeconfig store."""
-    from ..database import SessionLocal
-    s = SessionLocal()
-    try:
-        await k8s_service.run_provision_apply(
-            s, cluster_id=cluster_id, job_id=job_id, cloud=cloud, tf_variables=tf_variables)
-    finally:
-        s.close()
-
-
-async def _decommission_task(cluster_id: str, job_id: str) -> None:
-    """Background worker (async, main loop) — drives the cluster teardown."""
-    from ..database import SessionLocal
-    s = SessionLocal()
-    try:
-        await k8s_service.run_decommission(s, cluster_id=cluster_id, job_id=job_id)
-    finally:
-        s.close()
-
-
 @router.post("/clusters/provision", status_code=202)
 async def provision_cluster(
     payload: ClusterProvisionRequest,
-    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
@@ -126,8 +102,10 @@ async def provision_cluster(
         raise HTTPException(status_code=400, detail=str(e))
     except NotImplementedError as e:
         raise HTTPException(status_code=501, detail=str(e))
-    background_tasks.add_task(
-        _provision_task, result["cluster_id"], result["job_id"], payload.cloud, result["tf_variables"])
+    # Persist the Terraform vars on the job; the dedicated job runner (a separate
+    # process, immune to gunicorn worker recycling) claims the pending job and runs
+    # the apply. cloud + cluster_id are already in the job metadata (create_cluster).
+    job_service.update_metadata(db, result["job_id"], {"tf_variables": result["tf_variables"]})
     return {"ok": True, "cluster_id": result["cluster_id"], "job_id": result["job_id"]}
 
 
@@ -147,7 +125,6 @@ async def get_cluster(
 @router.delete("/clusters/{cluster_id}")
 async def delete_cluster(
     cluster_id: str,
-    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
@@ -163,8 +140,9 @@ async def delete_cluster(
         raise HTTPException(status_code=404, detail=str(e))
 
     if info.get("source") == "provisioned":
+        # start_decommission flips the row to decommissioning + creates the pending
+        # k8s_decommission job; the job runner claims it and drives the teardown.
         result = k8s_service.start_decommission(db, cluster_id, created_by=current_user.username)
-        background_tasks.add_task(_decommission_task, result["cluster_id"], result["job_id"])
         return {"status": "decommissioning", **result}
 
     try:

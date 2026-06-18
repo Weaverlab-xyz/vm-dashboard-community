@@ -33,3 +33,10 @@ services:
       - ${CORP_CA_BUNDLE:-/etc/ssl/certs/ca-certificates.crt}:/etc/ssl/certs/ca-certificates.crt:ro
     environment:
       - AWS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+  # The job runner also runs `terraform init` (→ registry.terraform.io + the state
+  # backend) behind the proxy, so it needs the same corp CA mount.
+  worker:
+    volumes:
+      - ${CORP_CA_BUNDLE:-/etc/ssl/certs/ca-certificates.crt}:/etc/ssl/certs/ca-certificates.crt:ro
+    environment:
+      - AWS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
