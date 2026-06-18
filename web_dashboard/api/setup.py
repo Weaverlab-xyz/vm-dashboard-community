@@ -511,7 +511,8 @@ class CloudDatabaseFeatureConfig(BaseModel):
     /api/setup/import). See _CONFIG_ONLY_FEATURES."""
     # AWS RDS
     aws_db_subnet_group_name: str = ""
-    aws_db_parameter_group_name: str = ""
+    aws_db_parameter_group_name: str = ""            # postgres: rds.force_ssl=0 group
+    aws_db_mysql_parameter_group_name: str = ""      # mysql: require_secure_transport=0 group
     aws_db_security_group_id: str = ""
     # Azure Flexible Server
     azure_db_subnet_id: str = ""

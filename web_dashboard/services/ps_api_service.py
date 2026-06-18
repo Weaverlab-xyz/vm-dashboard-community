@@ -30,6 +30,7 @@ class PSApiError(Exception):
 # with the other engines later.
 _PLATFORM_BY_ENGINE = {
     "postgres": "PostgreSQL",
+    "mysql": "MySQL",
 }
 
 

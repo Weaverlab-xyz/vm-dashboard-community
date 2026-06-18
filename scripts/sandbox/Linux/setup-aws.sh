@@ -280,6 +280,31 @@ aws rds modify-db-parameter-group --region "$REGION" \
 ok "Set rds.force_ssl=0 on $DB_PARAM_GROUP_NAME"
 state_write aws db_parameter_group_name "$DB_PARAM_GROUP_NAME"
 
+# ── 4d. RDS MySQL parameter group with require_secure_transport=0 ─────────────
+# MySQL's cleartext knob for the PRA tunnel — the analog of rds.force_ssl=0,
+# which doesn't exist for MySQL. A mysql8.0-family group with
+# require_secure_transport=0 lets the tunnel's plaintext jumpoint→RDS connection
+# through. The db_mysql module references it via aws_db_mysql_parameter_group_name.
+section "RDS MySQL parameter group (require_secure_transport off, for the PRA tunnel)"
+DB_MYSQL_PARAM_GROUP_NAME="clouddb-nossl-mysql8.0"
+if aws rds describe-db-parameter-groups --region "$REGION" \
+     --db-parameter-group-name "$DB_MYSQL_PARAM_GROUP_NAME" >/dev/null 2>&1; then
+  ok "Reusing DB parameter group $DB_MYSQL_PARAM_GROUP_NAME"
+else
+  aws rds create-db-parameter-group --region "$REGION" \
+    --db-parameter-group-name "$DB_MYSQL_PARAM_GROUP_NAME" \
+    --db-parameter-group-family mysql8.0 \
+    --description "Dashboard managed DBs: require_secure_transport off (reached via PRA protocol tunnel)" \
+    --tags "Key=Name,Value=$DB_MYSQL_PARAM_GROUP_NAME" "Key=$SANDBOX_TAG_KEY,Value=$SANDBOX_TAG_VALUE" >/dev/null
+  ok "Created DB parameter group $DB_MYSQL_PARAM_GROUP_NAME"
+fi
+# require_secure_transport is a dynamic parameter — applies without a reboot.
+aws rds modify-db-parameter-group --region "$REGION" \
+  --db-parameter-group-name "$DB_MYSQL_PARAM_GROUP_NAME" \
+  --parameters "ParameterName=require_secure_transport,ParameterValue=0,ApplyMethod=immediate" >/dev/null
+ok "Set require_secure_transport=0 on $DB_MYSQL_PARAM_GROUP_NAME"
+state_write aws db_mysql_parameter_group_name "$DB_MYSQL_PARAM_GROUP_NAME"
+
 # RDS also needs its service-linked role before the FIRST CreateDBInstance in
 # an account. RDS normally auto-creates it, but that requires
 # iam:CreateServiceLinkedRole — which the scoped dashboard user (7c) doesn't
@@ -884,6 +909,7 @@ _cfg=(
   "aws_default_security_group_id=$VM_SG               # Deploy form's default SG (VM-tier, no internet egress)"
   "aws_db_subnet_group_name=$DB_SUBNET_GROUP_NAME      # Managed-DB deploys: private RDS subnet group (2 AZs)"
   "aws_db_parameter_group_name=$DB_PARAM_GROUP_NAME    # Managed-DB deploys: force_ssl=0 group (PRA protocol tunnel needs a cleartext backend)"
+  "aws_db_mysql_parameter_group_name=$DB_MYSQL_PARAM_GROUP_NAME    # Managed-DB MySQL deploys: require_secure_transport=0 group (PRA protocol tunnel needs a cleartext backend)"
   "aws_db_security_group_id=$DB_SG                     # Managed-DB deploys: DB-tier SG (engine ports from Jumpoint SG only)"
   "aws_k8s_subnet_a_id=$K8S_SUBNET_A_ID                # Managed-K8s (EKS) provisioning: private cluster subnet AZ-a"
   "aws_k8s_subnet_b_id=$K8S_SUBNET_B_ID                # Managed-K8s (EKS) provisioning: private cluster subnet AZ-b"

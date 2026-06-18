@@ -315,8 +315,7 @@ async def remove_jump(tf_state_json: str) -> None:
 
 _DB_TUNNEL_RESOURCE = {
     "postgres": "sra_postgresql_tunnel_jump",
-    # Confirmed present in the provider; wire up with their engines later:
-    # "mysql":     "sra_my_sql_tunnel_jump",
+    "mysql": "sra_my_sql_tunnel_jump",   # schema-identical to the postgres jump (verified vs cached provider)
     # "sqlserver": "sra_protocol_tunnel_jump",   # tunnel_type = mssql
 }
 _DB_RESOURCE_ENGINE = {v: k for k, v in _DB_TUNNEL_RESOURCE.items()}
@@ -325,6 +324,7 @@ _DB_RESOURCE_ENGINE = {v: k for k, v in _DB_TUNNEL_RESOURCE.items()}
 # against the cached provider schema, like the resource names above.
 _DB_JUMP_ITEM_TYPE = {
     "postgres": "postgresql_tunnel_jump",
+    "mysql": "my_sql_tunnel_jump",   # mirrors the resource (sra_my_sql_tunnel_jump) minus the sra_ prefix
 }
 
 
