@@ -1296,6 +1296,13 @@
                      placeholder="(pool default — Standard_D2s_v3)">
               <p class="text-[11px] text-gray-400 mt-1">Win 11 / Trusted Launch needs a Gen2 size (e.g. <code>Standard_D2s_v3</code>) — not a B-series.</p>
             </div>
+            <div class="mt-3">
+              <label class="block text-sm font-medium text-gray-700 mb-1">PRA Vault account-group id</label>
+              <input type="text" x-model="panelCfg.azure_desktops_vault_account_group_id"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     placeholder="(blank → PRA Default group)">
+              <p class="text-[11px] text-gray-400 mt-1">Numeric PRA Vault account-group id — the per-seat Windows admin credential is stored there and injected at RDP launch (Phase 2). Blank → the account lands in PRA's Default group.</p>
+            </div>
           </div>
         </div>
       </template>

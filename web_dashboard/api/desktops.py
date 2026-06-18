@@ -152,3 +152,49 @@ async def delete_pool(
     if result.get("to_teardown"):
         background_tasks.add_task(vdesktop_service.teardown_seats, result["to_teardown"])
     return {"ok": True, "deleted_seats": result["deleted_seats"]}
+
+
+@router.get("/pools/{name}/seats")
+async def list_pool_seats(
+    name: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Seats in one pool (id, vm_resource_id, status, pra_jump_id) — backs the
+    per-pool Seats view + the Open-session action."""
+    return {"seats": vdesktop_service.get_pool(db, name)}
+
+
+@router.get("/seats/{seat_id}/session")
+async def open_seat_session(
+    seat_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """PRA connection info for a seat: the auto-registered Remote RDP Jump Item +
+    a link to the PRA console. The web app can't drive the rep console directly —
+    the rep launches the Jump Item there (mirrors the k8s open_console pattern)."""
+    seat = vdesktop_service.get_seat(db, seat_id)
+    if seat is None:
+        raise HTTPException(status_code=404, detail=f"Seat '{seat_id}' not found.")
+    vm_name = (seat.get("vm_resource_id") or "").split("/")[-1]
+    if not seat.get("pra_jump_id"):
+        return {
+            "brokered": False, "vm_name": vm_name,
+            "note": ("Not brokered yet — PRA registration is pending/failed, or this seat "
+                     "predates Phase 2. Confirm PRA is configured, or recreate the seat."),
+        }
+    host = _cfg("bt_api_host")
+    return {
+        "brokered": True,
+        "vm_name": vm_name,
+        "pra": {
+            "jump_id": seat.get("pra_jump_id"),
+            "jump_group": _cfg("azure_bt_jump_group_name") or _cfg("bt_jump_group_name"),
+            "jumpoint": _cfg("azure_jumpoint_name") or _cfg("bt_jumpoint_name"),
+        },
+        "console_url": f"https://{host}/login" if host else "",
+        "note": ("Open the auto-registered Remote RDP Jump Item from your PRA representative "
+                 "console. Credentials inject from the PRA Vault when provisioned; otherwise use "
+                 "the seat's admin password (Azure → VMs → Password)."),
+    }

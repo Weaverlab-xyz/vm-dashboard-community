@@ -56,6 +56,11 @@ def list_desktops(db: Session) -> list[dict]:
     return [_row_to_dict(r) for r in rows]
 
 
+def get_seat(db: Session, seat_id: str) -> dict | None:
+    row = db.query(VirtualDesktop).filter(VirtualDesktop.id == seat_id).first()
+    return _row_to_dict(row) if row else None
+
+
 def get_pool(db: Session, name: str) -> list[dict]:
     rows = (db.query(VirtualDesktop).filter(VirtualDesktop.pool_name == name)
             .order_by(VirtualDesktop.created_at).all())
@@ -230,6 +235,35 @@ def delete_pool(db: Session, name: str) -> dict:
     return {"deleted_seats": n, "to_teardown": []}
 
 
+# ── PRA brokering helpers (Phase 2) ─────────────────────────────────────────
+
+def _cfg(key: str, fallback: str = "") -> str:
+    from ..config import settings
+    from . import config_service
+    return config_service.get(key) or getattr(settings, key, fallback)
+
+
+def _pra_configured() -> bool:
+    """True when the PRA API creds are present (mirror cloud_database_service)."""
+    return bool(_cfg("bt_api_host") and _cfg("bt_client_id") and _cfg("bt_client_secret"))
+
+
+def _resolve_pra_targets(spec: dict) -> dict:
+    """Jump Group / Jumpoint / Vault account-group for a pool's RDP jumps —
+    Azure-specific config wins over the shared defaults (mirrors the deploy path)."""
+    jump_group = (spec.get("jump_group") or "").strip() or \
+        _cfg("azure_bt_jump_group_name") or _cfg("bt_jump_group_name")
+    jumpoint = (spec.get("jumpoint_name") or "").strip() or \
+        _cfg("azure_jumpoint_name") or _cfg("bt_jumpoint_name")
+    raw_group = str(spec.get("vault_account_group_id")
+                    or _cfg("azure_desktops_vault_account_group_id") or "").strip()
+    try:
+        vault_group_id = int(raw_group) if raw_group else None
+    except ValueError:
+        vault_group_id = None
+    return {"jump_group": jump_group, "jumpoint": jumpoint, "vault_group_id": vault_group_id}
+
+
 # ── Async cloud work (scheduled by the API as background tasks) ─────────────────
 
 async def provision_seats(pool_name: str, job_id: str, seat_ids: list, spec: dict) -> None:
@@ -280,6 +314,33 @@ async def provision_seats(pool_name: str, job_id: str, seat_ids: list, spec: dic
                 row.vm_resource_id = res.get("vm_id") or vm_name
                 row.status = "running"
                 db.commit()
+                # Phase 2: broker the seat over PRA — register an agentless Remote
+                # RDP jump item at the VM's private IP, with a Vault account for
+                # credential injection. Best-effort: a running seat with no jump
+                # item is debuggable; never fail the seat over brokering.
+                private_ip = res.get("private_ip")
+                if is_windows and private_ip and not row.pra_jump_id and _pra_configured():
+                    try:
+                        from . import terraform_pra_service as pra, config_service
+                        tgt = _resolve_pra_targets(spec)
+                        cred_ref = spec.get("pra_credential_ref")
+                        client_secret = config_service.resolve_reference(cred_ref) if cred_ref else ""
+                        jump = await pra.provision_rdp_jump(
+                            name=vm_name, hostname=private_ip,
+                            jump_group_name=tgt["jump_group"], jumpoint_name=tgt["jumpoint"],
+                            rdp_username=spec.get("ssh_username") or "azureuser",
+                            tag="Azure VDI",
+                            admin_password=admin_password,
+                            vault_account_name=f"{vm_name}-admin",
+                            vault_account_group_id=tgt["vault_group_id"],
+                            client_secret=client_secret,
+                        )
+                        row.pra_jump_id = jump.get("rdp_jump_id") or None
+                        row.pra_tunnel_state = jump.get("tf_state_json")
+                        db.commit()
+                    except Exception as pra_err:
+                        logger.warning("desktop seat PRA RDP registration failed pool=%s seat=%s: %s",
+                                       pool_name, sid, pra_err)
                 if is_windows:
                     seat_passwords[vm_name] = {
                         "backend": backend, "ref": ref,
@@ -331,6 +392,13 @@ async def teardown_seats(seat_ids: list) -> None:
                         await azure_service.terminate_vm(rg, name)
                     except Exception as exc:
                         logger.warning("desktop seat terminate failed seat=%s vm=%s: %s", sid, name, exc)
+            # Phase 2: remove the seat's PRA RDP jump (+ vault account) — state-driven.
+            if row.pra_tunnel_state:
+                try:
+                    from . import terraform_pra_service as pra
+                    await pra.remove_rdp_jump(row.pra_tunnel_state)
+                except Exception as exc:
+                    logger.warning("desktop seat PRA jump removal failed seat=%s: %s", sid, exc)
             db.delete(row)
             db.commit()
     finally:
