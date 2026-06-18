@@ -94,6 +94,11 @@ window.API = {
                     'X-Entitle-Approval-Id': detail.approval_id,
                 });
             }
+            // Non-approval 202 ("accepted" — e.g. a provision/decommission that
+            // returns {ok, job_id, ...}). The body was already read above, so return
+            // it; falling through to `return resp.json()` would re-read the consumed
+            // stream and throw "body stream already read".
+            return data;
         }
 
         if (!resp.ok) {
