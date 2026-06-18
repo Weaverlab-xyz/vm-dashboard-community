@@ -286,7 +286,7 @@ state_write aws db_parameter_group_name "$DB_PARAM_GROUP_NAME"
 # require_secure_transport=0 lets the tunnel's plaintext jumpoint→RDS connection
 # through. The db_mysql module references it via aws_db_mysql_parameter_group_name.
 section "RDS MySQL parameter group (require_secure_transport off, for the PRA tunnel)"
-DB_MYSQL_PARAM_GROUP_NAME="clouddb-nossl-mysql8.0"
+DB_MYSQL_PARAM_GROUP_NAME="clouddb-nossl-mysql80"   # no dot — RDS param-group NAMES allow only letters/digits/hyphens (the family below keeps the 8.0)
 if aws rds describe-db-parameter-groups --region "$REGION" \
      --db-parameter-group-name "$DB_MYSQL_PARAM_GROUP_NAME" >/dev/null 2>&1; then
   ok "Reusing DB parameter group $DB_MYSQL_PARAM_GROUP_NAME"
