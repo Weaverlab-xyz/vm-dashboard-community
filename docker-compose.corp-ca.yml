@@ -45,3 +45,7 @@ services:
       - ${CORP_CA_BUNDLE:-/etc/ssl/certs/ca-certificates.crt}:/etc/ssl/certs/ca-certificates.crt:ro
     environment:
       - AWS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+      # The worker runs the k8s mgmt-plane / ESO jobs, which launch kubectl/helm
+      # runner containers — pass the host CA path so it can mount it into them
+      # (k8s_service._runner_ca_args).
+      - RUNNER_CA_BUNDLE=${CORP_CA_BUNDLE:-/etc/ssl/certs/ca-certificates.crt}

@@ -72,10 +72,11 @@ services:
         source: /var/run/docker.sock
         target: /var/run/docker.sock
 
-  # Dedicated background job runner — long Terraform jobs (k8s + cloud-DB provision/
-  # decommission) run here, OUT of the gunicorn request workers, so they survive
-  # worker recycling/crashes/redeploys. Same published image as `app`; shares the
-  # DB + config + state backend. No HTTP port, no bind mount, no docker socket.
+  # Dedicated background job runner — long jobs (k8s + cloud-DB provision/
+  # decommission, and the k8s management-plane / ESO installs) run here, OUT of the
+  # gunicorn request workers, so they survive worker recycling/crashes/redeploys.
+  # Same published image as `app`; shares the DB + config + state backend. No HTTP
+  # port, no bind mount.
   worker:
     image: chrweav/infra-dashboard:${INFRA_DASHBOARD_TAG:-latest}
     command: ["python", "-m", "web_dashboard.jobs_worker"]
@@ -90,6 +91,12 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    volumes:
+      # The k8s management-plane / ESO jobs launch transient kubectl/helm runner
+      # containers via the host docker daemon (same as the app).
+      - type: bind
+        source: /var/run/docker.sock
+        target: /var/run/docker.sock
 
 volumes:
   pgdata:
