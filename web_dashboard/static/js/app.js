@@ -44,26 +44,6 @@ document.addEventListener('alpine:init', () => {
 });
 
 // ── API helper ────────────────────────────────────────────────────────────────
-// Approval-gate flow: a 202 with {detail: {approval_id, ...}} pauses the call,
-// shows a blocking modal, polls /api/approvals/{id} every 5s, and on `approved`
-// retries the original request with the X-Entitle-Approval-Id header.
-async function _waitForApproval(approvalId, action) {
-    if (window._approvalModal) window._approvalModal.show(action, approvalId);
-    try {
-        while (true) {
-            await new Promise(r => setTimeout(r, 5000));
-            const status = await API.request('GET', `/api/approvals/${approvalId}`);
-            if (!status) throw new Error('Lost session while waiting for approval');
-            if (status.status === 'approved') return;
-            if (status.status === 'denied') throw new Error(status.denial_reason || 'Approval denied');
-            if (status.status === 'expired') throw new Error('Approval expired');
-            if (status.status === 'consumed') throw new Error('Approval already used');
-        }
-    } finally {
-        if (window._approvalModal) window._approvalModal.hide();
-    }
-}
-
 window.API = {
     async request(method, path, body = null, extraHeaders = {}) {
         const token = Alpine.store('auth').token;
@@ -85,20 +65,8 @@ window.API = {
         }
 
         if (resp.status === 202) {
-            const data = await resp.json().catch(() => ({}));
-            const detail = (data && data.detail) || data;
-            if (detail && detail.approval_id) {
-                await _waitForApproval(detail.approval_id, detail.action);
-                return API.request(method, path, body, {
-                    ...extraHeaders,
-                    'X-Entitle-Approval-Id': detail.approval_id,
-                });
-            }
-            // Non-approval 202 ("accepted" — e.g. a provision/decommission that
-            // returns {ok, job_id, ...}). The body was already read above, so return
-            // it; falling through to `return resp.json()` would re-read the consumed
-            // stream and throw "body stream already read".
-            return data;
+            // Accepted — e.g. a provision/decommission returning {ok, job_id, ...}.
+            return await resp.json().catch(() => ({}));
         }
 
         if (!resp.ok) {

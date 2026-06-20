@@ -338,6 +338,7 @@ async def deploy_ami(
             "subnet_id": req.subnet_id,
             "security_group_ids": req.security_group_ids,
             "workgroup": workgroup,
+            "register_in_entitle": req.register_in_entitle,
         },
     )
 
@@ -403,6 +404,7 @@ async def bulk_deploy_amis(
                 "security_group_ids": req.security_group_ids,
                 "workgroup": workgroup,
                 "bulk": True,
+                "register_in_entitle": req.register_in_entitle,
             },
         )
         job_service.log_audit(
@@ -786,6 +788,14 @@ def _aws_terminate_payload_hash(region: str, instance_id: str) -> str:
     return hashlib.sha256(blob).hexdigest()
 
 
+async def _register_vm_in_entitle(db, job_id: str, vm_name: str, hostname: str,
+                                  result: dict, private: bool = True) -> None:
+    """Thin wrapper around the shared VM registration hook (tag=AWS)."""
+    from ..services import entitle_vm_hook
+    await entitle_vm_hook.register(db, job_id, vm_name, hostname,
+                                   private=private, result=result, tag="AWS")
+
+
 async def _run_deploy(
     job_id: str,
     ami_id: str,
@@ -921,6 +931,15 @@ async def _run_deploy(
                 )
         else:
             job_service.update_progress(db, job_id, 90, "Instance deployed.")
+
+        # ── Step 4: Entitle — register as SSH ephemeral-accounts integration (optional)
+        # Gated by the global capability flag AND the per-build opt-in (job metadata).
+        from ..services import entitle_vm_hook
+        _job = db.query(Job).filter(Job.id == job_id).first()
+        _reg = bool((_job.metadata_dict or {}).get("register_in_entitle")) if _job else False
+        if _reg and entitle_vm_hook.registration_enabled():
+            await _register_vm_in_entitle(db, job_id, instance_name, hostname,
+                                          result, private=not bool(result.get("public_ip")))
 
         job_service.set_completed(db, job_id, result)
         await cache_service.invalidate(cache_service.key_global("aws_instances"))
@@ -1064,6 +1083,14 @@ async def _run_bulk_deploy(
                 else:
                     job_service.update_progress(db, job_id, 90, "Instance deployed.")
 
+                # Step 4: Entitle — register as SSH integration (per-build opt-in)
+                from ..services import entitle_vm_hook
+                _bjob = db.query(Job).filter(Job.id == job_id).first()
+                _breg = bool((_bjob.metadata_dict or {}).get("register_in_entitle")) if _bjob else False
+                if _breg and entitle_vm_hook.registration_enabled():
+                    await _register_vm_in_entitle(db, job_id, item.instance_name, hostname,
+                                                  result, private=not bool(result.get("public_ip")))
+
                 job_service.set_completed(db, job_id, result)
 
             except AWSError as e:
@@ -1146,6 +1173,12 @@ async def _run_destroy(destroy_job_id: str, deploy_job_id: str, instance_id: str
                     logger.error("bt_shell_jump_id=%s destroy error: %s", bt_shell_jump_id, e)
                     result["bt_error"] = err
                     job_service.update_progress(db, destroy_job_id, 85, err)
+
+            # Remove the Entitle SSH integration if this deploy registered one.
+            if meta.get("entitle_registration_tf_state"):
+                from ..services import entitle_vm_hook
+                await entitle_vm_hook.deregister(meta, result)
+                job_service.update_progress(db, destroy_job_id, 88, "Entitle integration removed.")
 
             # Mark original deploy job as destroyed
             meta["destroyed"] = True

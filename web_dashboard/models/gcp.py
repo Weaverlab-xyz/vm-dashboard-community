@@ -58,6 +58,7 @@ class GCPDeployRequest(BaseModel):
     disk_size_gb: int = 20
     network_tags: List[str] = []
     workgroup: str              # written as `workgroup` GCE label
+    register_in_entitle: bool = False  # opt in to registering this VM as an Entitle SSH integration
     # Per-deploy override — config default is the fallback. A secrets-backend
     # reference (e.g. gcp_sm://…) for the GCE Jumpoint deploy key. (GCP uses a
     # per-VM Jumpoint container, not a shell-jump, so there's no jump_group here.)

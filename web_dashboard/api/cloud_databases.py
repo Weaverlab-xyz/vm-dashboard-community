@@ -61,6 +61,7 @@ class ProvisionRequest(BaseModel):
     jump_group: Optional[str] = None          # PRA Jump Group name override (else bt_jump_group_name)
     jumpoint_name: Optional[str] = None       # PRA Jumpoint name override (else bt_jumpoint_name)
     pra_credential_ref: Optional[str] = None  # secret ref → bt_client_secret override
+    register_in_entitle: bool = False         # opt in to registering this DB as an Entitle integration
 
 
 class DatabaseOptions(BaseModel):
@@ -155,7 +156,8 @@ async def provision_database(
             master_username=payload.master_username,
             vault_account_group_id=payload.vault_account_group_id,
             jump_group=payload.jump_group, jumpoint_name=payload.jumpoint_name,
-            pra_credential_ref=payload.pra_credential_ref, **opts,
+            pra_credential_ref=payload.pra_credential_ref,
+            register_in_entitle=payload.register_in_entitle, **opts,
         )
     except cloud_database_service.CloudDatabaseError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

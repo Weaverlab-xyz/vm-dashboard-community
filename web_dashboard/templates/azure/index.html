@@ -399,6 +399,18 @@
                       class="w-full border border-gray-200 bg-gray-50 rounded-md px-3 py-2 text-xs font-mono resize-none text-gray-600 cursor-default"></textarea>
           </div>
         </div>
+        {% if entitle_enabled %}
+        <!-- Entitle registration opt-in (Linux only — SSH ephemeral accounts) -->
+        <div x-show="deployModal.osType !== 'Windows'">
+          <label class="flex items-center gap-2 text-sm text-gray-700">
+            <input type="checkbox" x-model="deployModal.register_in_entitle" class="rounded text-blue-600">
+            Register in Entitle for just-in-time SSH access
+          </label>
+          <p class="mt-1 text-xs text-gray-400 ml-6">
+            Requires Entitle registration enabled; private VMs also need a provisioned Entitle agent.
+          </p>
+        </div>
+        {% endif %}
         <div x-show="deployModal.osType === 'Windows'" x-cloak
              class="p-3 bg-blue-50 border border-blue-200 rounded-lg text-xs text-blue-800">
           A strong local-admin password is generated automatically and stored in the
@@ -923,7 +935,7 @@ function azureDashboard() {
       sshPublicKey: '', sshKeyMode: 'keyvault', createPublicIp: false, submitting: false,
       keyvaultLoading: false, keyvaultError: '', keyvaultSecretName: '',
       workgroup: '',
-      jump_group: '', jumpoint_name: '', praCredBackend: '', pra_credential_ref: '', dockerKeyBackend: '', docker_deploy_key_ref: '',
+      jump_group: '', jumpoint_name: '', praCredBackend: '', pra_credential_ref: '', dockerKeyBackend: '', docker_deploy_key_ref: '', register_in_entitle: false,
     },
     bulkModal: {
       open: false, items: [], vmNames: [], vmSize: 'Standard_B2s',
@@ -1156,6 +1168,7 @@ function azureDashboard() {
         sshPublicKey: '', sshKeyMode: 'keyvault', createPublicIp: false, submitting: false,
         keyvaultLoading: false, keyvaultError: '', keyvaultSecretName: '',
         workgroup: this._defaultWorkgroup(),
+        register_in_entitle: false,
       };
       await this.loadNetworkOpts();
       this.deployModal.open = true;
@@ -1242,6 +1255,7 @@ function azureDashboard() {
           jumpoint_name: m.jumpoint_name || null,
           pra_credential_ref: m.pra_credential_ref || null,
           docker_deploy_key_ref: m.docker_deploy_key_ref || null,
+          register_in_entitle: !!m.register_in_entitle,
         });
         m.open = false;
         toast(`Azure VM deployment queued: ${m.vmName}`, 'success');
@@ -1322,6 +1336,7 @@ function azureDashboard() {
           ssh_username: 'azureuser',
           ssh_public_key: sshPublicKey,
           workgroup: m.workgroup,
+          register_in_entitle: !!m.register_in_entitle,
           // Marketplace image metadata (optional)
           image_publisher: firstImage?.publisher || null,
           image_offer: firstImage?.offer || null,

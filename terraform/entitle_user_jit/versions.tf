@@ -3,10 +3,10 @@ terraform {
 
   required_providers {
     entitle = {
-      # Provider source per BeyondTrust's published registry name.
-      # See https://docs.beyondtrust.com/entitle/docs/entitle-terraform-provider
-      source  = "beyondtrust/entitle"
-      version = "~> 1.0"
+      # Published provider source on the Terraform Registry.
+      # https://registry.terraform.io/providers/entitleio/entitle/latest
+      source  = "entitleio/entitle"
+      version = "~> 3.0"
     }
   }
 }

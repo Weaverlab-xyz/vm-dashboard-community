@@ -614,6 +614,7 @@ class CloudDatabase(Base):
     jump_group = Column(String(128), nullable=True)        # PRA Jump Group name override (else bt_jump_group_name)
     jumpoint_name = Column(String(128), nullable=True)     # PRA Jumpoint name override (else bt_jumpoint_name)
     pra_credential_ref = Column(String(256), nullable=True)  # secret ref → bt_client_secret override
+    entitle_integration_id = Column(String(64), nullable=True)  # Entitle DB integration registered on apply
 
     created_by = Column(String(100), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
@@ -745,6 +746,7 @@ def init_db():
             "ALTER TABLE cloud_databases ADD COLUMN jump_group VARCHAR(128)",
             "ALTER TABLE cloud_databases ADD COLUMN jumpoint_name VARCHAR(128)",
             "ALTER TABLE cloud_databases ADD COLUMN pra_credential_ref VARCHAR(256)",
+            "ALTER TABLE cloud_databases ADD COLUMN entitle_integration_id VARCHAR(64)",
         ]
         for stmt in _migrations:
             if _is_sqlite:

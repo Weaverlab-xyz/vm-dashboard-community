@@ -200,7 +200,8 @@ def provision(
     created_by: str, master_username: str = "dbadmin",
     vault_account_group_id: Optional[int] = None,
     jump_group: Optional[str] = None, jumpoint_name: Optional[str] = None,
-    pra_credential_ref: Optional[str] = None, **opts,
+    pra_credential_ref: Optional[str] = None,
+    register_in_entitle: bool = False, **opts,
 ) -> dict:
     """Record a new managed database: validate, mint the admin credential, write
     the ``CloudDatabase`` row + a provisioning ``Job``, and return the Terraform
@@ -242,7 +243,8 @@ def provision(
     row.credentials_ref = f"config://clouddb/{row.id}/admin"
     db.commit()
 
-    job_meta = {"db_id": row.id, "engine": engine, "cloud": cloud, "name": name}
+    job_meta = {"db_id": row.id, "engine": engine, "cloud": cloud, "name": name,
+                "register_in_entitle": bool(register_in_entitle)}
     if vault_account_group_id:
         # Carried via job metadata (not tf_variables — those map 1:1 to the
         # cloud module's declared variables) for _broker_tunnel to pick up.
@@ -432,6 +434,51 @@ async def _broker_tunnel(db: Session, *, row: CloudDatabase, job_id: str,
                        row.id, exc)
 
 
+def _registration_enabled() -> bool:
+    """Global Entitle-registration capability flag (per-build choice is separate)."""
+    return config_service.get_bool("entitle_registration_enabled", False)
+
+
+async def _register_entitle(db: Session, *, row: CloudDatabase, job_id: str,
+                            engine: str, tf_variables: dict) -> None:
+    """Register the managed DB as an Entitle integration (PostgreSQL / MySQL /
+    SQL Server) so users can request JIT access. Records ``entitle_integration_id``
+    on the row and stashes the registration's Terraform state in the job metadata
+    for teardown. Private (PRA-only) DB → attaches the shared Entitle agent.
+    Non-fatal: a failure leaves the DB up, unregistered."""
+    from . import entitle_registration_service as ent
+    # Per-cloud admin credential key normalization (mirrors _broker_tunnel).
+    admin_username = (tf_variables.get("master_username")
+                      or tf_variables.get("administrator_login") or "")
+    admin_password = (tf_variables.get("master_password")
+                      or tf_variables.get("administrator_password") or "")
+    try:
+        result = await ent.register_database(
+            engine=engine,
+            name=tf_variables.get("identifier") or f"clouddb-{row.id[:8]}",
+            host=row.private_host,
+            port=row.port or 0,
+            username=admin_username,
+            password=admin_password,
+            database=tf_variables.get("db_name", ""),
+            private=True,   # dashboard-built DBs are private (publicly_accessible=false)
+            tag="clouddb",
+        )
+        row.entitle_integration_id = result.get("integration_id") or None
+        db.commit()
+        job = db.query(Job).filter(Job.id == job_id).first()
+        if job is not None:
+            meta = job.metadata_dict or {}
+            meta["entitle_registration_tf_state"] = result.get("tf_state_json")
+            job.metadata_dict = meta
+            db.commit()
+        logger.info("clouddb registered in Entitle db_id=%s integration_id=%s",
+                    row.id, row.entitle_integration_id)
+    except Exception as exc:
+        logger.warning("clouddb Entitle registration failed db_id=%s (DB is up): %s",
+                       row.id, exc)
+
+
 async def _store_ps_credentials(db: Session, *, row: CloudDatabase, job_id: str,
                                 tf_variables: dict) -> None:
     """Stage the admin credential in BeyondTrust Password Safe:
@@ -591,6 +638,13 @@ async def run_provision_apply(
             logger.warning("clouddb credential staging failed db_id=%s (non-fatal): %s",
                            db_id, exc)
 
+        # Register the DB as an Entitle integration (opt-in, non-fatal). Gated by
+        # the global capability flag AND the per-build choice (on the job metadata).
+        _job = db.query(Job).filter(Job.id == job_id).first()
+        _reg_choice = bool((_job.metadata_dict or {}).get("register_in_entitle")) if _job else False
+        if row.private_host and _reg_choice and _registration_enabled():
+            await _register_entitle(db, row=row, job_id=job_id, engine=engine, tf_variables=tf_variables)
+
         job_service.set_completed(db, job_id)
         logger.info("clouddb apply complete db_id=%s host=%s tunnel=%s",
                     db_id, row.private_host, row.jump_item_id)
@@ -665,6 +719,18 @@ async def run_decommission(db: Session, *, db_id: str, job_id: str) -> None:
         except Exception as exc:
             errors.append(f"PRA tunnel/Vault removal: {exc}")
             logger.warning("clouddb tunnel removal for %s failed: %s", db_id, exc)
+
+    # 1b. Entitle integration (if this DB was registered).
+    ent_state = meta.get("entitle_registration_tf_state")
+    if ent_state:
+        job_service.update_progress(db, job_id, 20, "Removing Entitle integration…")
+        try:
+            from . import entitle_registration_service as ent
+            await ent.deregister(ent_state)
+            logger.info("clouddb Entitle integration removed db_id=%s", db_id)
+        except Exception as exc:
+            warnings.append(f"Entitle integration removal: {exc}")
+            logger.warning("clouddb Entitle deregister for %s failed (non-fatal): %s", db_id, exc)
 
     # 2. Password Safe functional account.
     fa_id = meta.get("ps_functional_account_id")
@@ -779,6 +845,7 @@ def _serialize(r: CloudDatabase) -> dict:
         "id": r.id, "engine": r.engine, "provider": r.provider, "cloud": r.cloud,
         "region": r.region, "instance_id": r.instance_id, "private_host": r.private_host,
         "port": r.port, "status": r.status, "jump_item_id": r.jump_item_id,
+        "entitle_integration_id": r.entitle_integration_id,
         "created_by": r.created_by,
         "created_at": r.created_at.isoformat() if r.created_at else None,
     }

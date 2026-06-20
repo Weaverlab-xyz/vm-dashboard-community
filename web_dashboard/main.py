@@ -461,11 +461,6 @@ try:
 except ImportError as exc:
     logger.warning("API router 'config_mgmt' not loaded: %s", exc)
 
-try:
-    from .api import approvals  # noqa: E402
-    app.include_router(approvals.router, dependencies=[_feature_gate("entitle_enabled")])
-except ImportError as exc:
-    logger.warning("API router 'approvals' not loaded: %s", exc)
 
 try:
     from .api import proxmox  # noqa: E402

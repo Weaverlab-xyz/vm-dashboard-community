@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     beyondtrust_enabled: bool = True    # Password Safe secret lookups (btapi_service)
     portainer_enabled: bool = True      # Containers router + /containers page + portainer warmer
     ansible_enabled: bool = True        # Config-mgmt router + /config-mgmt page
-    entitle_enabled: bool = True        # Approvals router + approval modal in base.html
+    entitle_enabled: bool = True        # Entitle integration: Settings panel + user-JIT nav link
     proxmox_enabled: bool = False       # Proxmox VE router + /proxmox page
     vsphere_enabled: bool = False       # vSphere/ESXi router + /vsphere page
     hyperv_enabled: bool = False        # Hyper-V router + /hyperv page (WinRM to Windows host)
@@ -523,12 +523,25 @@ class Settings(BaseSettings):
     gcp_bt_jump_group_name: str = ""     # BT jump group for GCP Shell Jumps (falls back to bt_jump_group_name)
     gcp_jumpoint_name: str = ""          # Jumpoint name for GCP Shell Jumps (falls back to bt_jumpoint_name)
 
-    # Entitle approval workflows (per-endpoint gate via Depends(require_approval(...)))
+    # Entitle integration — shared API credentials (used by machine-identity
+    # JIT, user-JIT, and resource registration below).
     entitle_api_url: str = ""                       # e.g. "https://api.entitle.io/v1"
     entitle_api_token: str = ""                     # bearer token (Key Vault secret in prod)
-    entitle_webhook_secret: str = ""                # HMAC-SHA256 shared secret (Key Vault)
-    entitle_default_ttl_minutes: int = 15           # how long an approval is valid before auto-expiry
-    approval_gate_enabled: bool = False             # master kill-switch — set true to activate gates
+
+    # Entitle resource registration — as the dashboard builds Linux VMs and
+    # cloud databases it registers each as an Entitle integration (SSH ephemeral
+    # accounts / PostgreSQL / MySQL / SQL Server) via the entitleio/entitle
+    # Terraform provider. OFF by default = no registration calls.
+    entitle_registration_enabled: bool = False
+    entitle_api_key: str = ""                       # entitleio/entitle TF provider key (ENTITLE_API_KEY); falls back to entitle_api_token
+    entitle_endpoint: str = ""                       # API base; blank → provider default (https://api.entitle.io)
+    entitle_owner_id: str = ""                       # REQUIRED: UUID of the Entitle user owning created integrations
+    entitle_workflow_id: str = ""                    # REQUIRED: UUID of the default approval workflow for created integrations
+    entitle_agent_token_name: str = ""               # Entitle Agent token name for private/internal connectivity (VPC RDS / PRA-only VMs)
+    entitle_allowed_durations: str = "3600,43200,86400"  # JIT durations (seconds) offered on created integrations
+    entitle_ssh_sudo_user: str = ""                 # privileged sudo user Entitle drives to mint/delete ephemeral SSH accounts
+    entitle_ssh_private_key_ref: str = ""           # secrets ref to the SSH private key Entitle authenticates with
+    entitle_db_service_user_ref: str = ""           # optional override; default uses the DB's minted master credential
 
     # Cloud-identity JIT (machine-flow elevations via Entitle)
     # See docs/design/cloud-identity-jit.md for the design.
