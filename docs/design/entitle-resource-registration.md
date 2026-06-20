@@ -101,7 +101,7 @@ existing SSH keypair material:
 |---|---|---|---|
 | Azure | `azure_ssh_keypair_secret_name` (JSON `{public_key, private_key}`) | `azure_service.resolve_azure_ssh_private_key` | clean today |
 | AWS | `ec2_ssh_key_secret` | `aws_service.get_keypair_private_key` → `ec2/keypairs/<name>` convention | needs the `.pem` stored at the convention path |
-| GCP | `gcp_ssh_key_secret_name` | _(public-key resolver only today)_ | private-key retrieval to be added |
+| GCP | `gcp_ssh_key_secret_name` | `gcp_service.get_ssh_private_key` | clean when the secret is a JSON `{public_key, private_key}` keypair |
 
 `entitle_vm_hook.register` accepts a caller-resolved `private_key` + `sudo_user`; each
 deploy path passes the key resolved the same way its "get VM SSH key" endpoint does.
@@ -112,5 +112,5 @@ cloud-init set up with the injected key + passwordless sudo (the
 
 ## Open items
 - Confirm `entitle-agent` chart secret-based token support (ESO gate above).
-- Add GCP SSH private-key retrieval so GCP registration sources the VM key like Azure.
+- AWS: track the per-deploy keypair name so the private key resolves from `ec2/keypairs/<name>` instead of the optional override.
 - Wire EKS/AKS/GKE clusters as Entitle Kubernetes integrations (the agent cluster qualifies first).

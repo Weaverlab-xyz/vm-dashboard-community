@@ -356,6 +356,23 @@ async def get_ssh_public_key(project_id: str, secret_name: str) -> str:
     return pub
 
 
+async def get_ssh_private_key(project_id: str, secret_name: str) -> str:
+    """Retrieve the SSH **private** key (PEM) from Secret Manager.
+
+    Only available when the secret is a JSON keypair with a ``private_key`` field
+    (the same unified-keypair shape ``get_ssh_public_key`` reads ``public_key`` from).
+    Returns ``""`` when the secret holds only a raw/public key — i.e. no private key
+    is stored alongside. Never logs the key material.
+    """
+    raw = await get_secret(project_id, secret_name)
+    try:
+        data = json.loads(raw)
+        priv = data.get("private_key") or data.get("privateKey") or ""
+    except (json.JSONDecodeError, AttributeError):
+        priv = ""  # raw secret = public key only; no private key available
+    return priv.strip() if priv else ""
+
+
 # ── Instance operations ───────────────────────────────────────────────────────
 
 def _launch_instance_sync(
