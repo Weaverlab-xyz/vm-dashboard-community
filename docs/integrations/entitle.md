@@ -75,9 +75,17 @@ opt in.
 | Terraform Provider API Key | `entitleio/entitle` provider key (`ENTITLE_API_KEY`); falls back to the API Token. |
 | Registration enabled | Master capability switch for this track. |
 | `entitle_owner_id` / `entitle_workflow_id` | **Required** — Entitle user UUID that owns created integrations + the default approval workflow UUID. |
-| `entitle_agent_token_name` | Agent token name for **private** targets (blank is fine if you only register public resources). |
+| `entitle_agent_token_name` | Agent token name (identifier) for **private** targets (blank is fine if you only register public resources). The token *value* is supplied to the agent cluster separately — see [the design doc](../design/entitle-resource-registration.md#agent-token--pass-it-as-a-secret-via-external-secrets-operator). |
 | `entitle_allowed_durations` | JIT durations offered on created integrations (seconds). |
-| SSH sudo user / SSH private key ref | The privileged sudo account + key Entitle uses to mint/delete ephemeral SSH accounts (the `provisioners/beyondtrust/` bt-ready user). |
+| SSH sudo user | The privileged sudo account Entitle uses to mint/delete ephemeral SSH accounts — the cloud-default user cloud-init set up with passwordless sudo (the `provisioners/beyondtrust/` bt-ready user). |
+
+> **SSH private key — not a config field.** The key Entitle authenticates with is the
+> counterpart of the keypair **cloud-init injected into the VM at build time**, resolved
+> per-cloud from the dashboard's existing SSH keypair secret (Azure
+> `azure_ssh_keypair_secret_name`, AWS `ec2_ssh_key_secret` / `ec2/keypairs/<name>`, GCP
+> `gcp_ssh_key_secret_name`) — *not* a separately-configured Entitle key.
+> `entitle_ssh_private_key_ref` exists only as an optional global fallback/override. See
+> the [design doc](../design/entitle-resource-registration.md#ssh-key-sourcing--from-the-vms-own-keypair-not-config).
 
 > **Application slugs:** `application.name` is a lowercase catalog slug — `postgresql`
 > is confirmed; `mysql` / `mssql` / `ssh` are best-effort. Confirm against the

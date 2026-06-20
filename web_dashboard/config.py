@@ -537,10 +537,11 @@ class Settings(BaseSettings):
     entitle_endpoint: str = ""                       # API base; blank → provider default (https://api.entitle.io)
     entitle_owner_id: str = ""                       # REQUIRED: UUID of the Entitle user owning created integrations
     entitle_workflow_id: str = ""                    # REQUIRED: UUID of the default approval workflow for created integrations
-    entitle_agent_token_name: str = ""               # Entitle Agent token name for private/internal connectivity (VPC RDS / PRA-only VMs)
+    entitle_agent_token_name: str = ""               # Entitle Agent token NAME/identifier for private targets (the token VALUE is supplied to the agent cluster via ESO — see docs/design/entitle-resource-registration.md)
+    entitle_agent_token_ref: str = ""                # optional secrets-backend ref where the agent token VALUE is stored (for bootstrap/rotation; not the integration identifier above)
     entitle_allowed_durations: str = "3600,43200,86400"  # JIT durations (seconds) offered on created integrations
-    entitle_ssh_sudo_user: str = ""                 # privileged sudo user Entitle drives to mint/delete ephemeral SSH accounts
-    entitle_ssh_private_key_ref: str = ""           # secrets ref to the SSH private key Entitle authenticates with
+    entitle_ssh_sudo_user: str = ""                 # privileged sudo user Entitle drives to mint/delete ephemeral SSH accounts (defaults to the cloud-default ssh user if blank)
+    entitle_ssh_private_key_ref: str = ""           # OPTIONAL fallback/override only — the SSH private key is normally sourced from the VM's own per-cloud keypair (the key cloud-init injected). See docs/design/entitle-resource-registration.md
     entitle_db_service_user_ref: str = ""           # optional override; default uses the DB's minted master credential
 
     # Cloud-identity JIT (machine-flow elevations via Entitle)
