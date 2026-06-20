@@ -775,6 +775,20 @@
                class="text-xs text-red-500 mt-1">Select at least one security group.</p>
           </div>
 
+          {% if entitle_enabled %}
+          <!-- Entitle registration opt-in -->
+          <div class="mb-4">
+            <label class="flex items-center gap-2 text-sm text-gray-700">
+              <input type="checkbox" x-model="deployForm.register_in_entitle"
+                     class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+              Register in Entitle for just-in-time SSH access
+            </label>
+            <p class="mt-1 text-xs text-gray-400 ml-6">
+              Requires Entitle registration enabled; private instances also need a provisioned Entitle agent.
+            </p>
+          </div>
+          {% endif %}
+
           <!-- BeyondTrust PRA options (optional per-deploy overrides) -->
           <div class="mb-4 space-y-3 p-3 bg-gray-50 rounded-lg border border-gray-200">
             <p class="text-xs font-semibold text-gray-600">BeyondTrust PRA options
@@ -957,6 +971,20 @@
             <p x-show="deployForm.security_group_ids.length === 0"
                class="text-xs text-red-500 mt-1">Select at least one security group.</p>
           </div>
+
+          {% if entitle_enabled %}
+          <!-- Entitle registration opt-in (applies to every instance in the batch) -->
+          <div class="mb-1">
+            <label class="flex items-center gap-2 text-sm text-gray-700">
+              <input type="checkbox" x-model="deployForm.register_in_entitle"
+                     class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+              Register each instance in Entitle for just-in-time SSH access
+            </label>
+            <p class="mt-1 text-xs text-gray-400 ml-6">
+              Requires Entitle registration enabled; private instances also need a provisioned Entitle agent.
+            </p>
+          </div>
+          {% endif %}
 
           <!-- Error -->
           <div x-show="bulkDeployError"
@@ -1220,6 +1248,7 @@
         workgroup: '',
         jump_group: '', jumpoint_name: '',
         praCredBackend: '', pra_credential_ref: '',
+        register_in_entitle: false,
       },
       availableWorkgroups: [],
       deploying: false,
@@ -1469,6 +1498,7 @@
           security_group_ids: [],
           workgroup: this.availableWorkgroups.includes('default') ? 'default' :
                      (this.availableWorkgroups[0] || ''),
+          register_in_entitle: false,
         };
         this.deployError = '';
         this.showDeployModal = true;
@@ -1563,6 +1593,7 @@
             jump_group: this.deployForm.jump_group || null,
             jumpoint_name: this.deployForm.jumpoint_name || null,
             pra_credential_ref: this.deployForm.pra_credential_ref || null,
+            register_in_entitle: this.deployForm.register_in_entitle,
           };
 
           const resp = await API.post('/api/aws/deploy', body);
@@ -1676,6 +1707,7 @@
             subnet_id: this.deployForm.subnet_id,
             security_group_ids: this.deployForm.security_group_ids,
             workgroup: this.deployForm.workgroup,
+            register_in_entitle: this.deployForm.register_in_entitle,
           });
           this.bulkDeployResults = resp.jobs || [];
           toast(`${resp.count} deployment${resp.count !== 1 ? 's' : ''} queued!`, 'success');

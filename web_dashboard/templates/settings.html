@@ -634,8 +634,10 @@
       <template x-if="panel?.key === 'entitle' && !panelLoading">
         <div class="space-y-4">
           <p class="text-sm text-gray-500">
-            Entitle approval-workflow integration. Gates sensitive actions (like VM destroy) behind
-            a manager-approval step. Requires an Entitle tenant.
+            Entitle integration. As the dashboard builds Linux VMs and cloud databases it
+            registers each as an Entitle integration (SSH ephemeral accounts / PostgreSQL /
+            MySQL / SQL Server) so users can request just-in-time access in Entitle. Requires
+            an Entitle tenant.
           </p>
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">API URL</label>
@@ -650,19 +652,31 @@
                    placeholder="••••••••">
           </div>
           <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">Webhook Secret</label>
-            <input type="password" x-model="panelCfg.entitle_webhook_secret"
+            <label class="block text-sm font-medium text-gray-700 mb-1">Terraform Provider API Key</label>
+            <input type="password" x-model="panelCfg.entitle_api_key"
                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                   placeholder="••••••••">
+                   placeholder="•••••••• (falls back to API Token)">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">SSH sudo user</label>
+            <input type="text" x-model="panelCfg.entitle_ssh_sudo_user"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                   placeholder="adminuser">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">SSH private key ref</label>
+            <input type="text" x-model="panelCfg.entitle_ssh_private_key_ref"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                   placeholder="config://entitle/ssh-private-key">
           </div>
           <div class="flex items-center gap-3 pt-1">
-            <button @click="panelCfg.approval_gate_enabled = !panelCfg.approval_gate_enabled"
+            <button @click="panelCfg.entitle_registration_enabled = !panelCfg.entitle_registration_enabled"
                     class="relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors"
-                    :class="panelCfg.approval_gate_enabled ? 'bg-blue-600' : 'bg-gray-300'">
+                    :class="panelCfg.entitle_registration_enabled ? 'bg-blue-600' : 'bg-gray-300'">
               <span class="inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform"
-                    :class="panelCfg.approval_gate_enabled ? 'translate-x-6' : 'translate-x-1'"></span>
+                    :class="panelCfg.entitle_registration_enabled ? 'translate-x-6' : 'translate-x-1'"></span>
             </button>
-            <span class="text-sm text-gray-700">Enable approval gates on sensitive actions</span>
+            <span class="text-sm text-gray-700">Register built VMs &amp; databases in Entitle</span>
           </div>
 
           <!-- ── Machine identity (cloud-side JIT) — Phase 3 ─────────────── -->
@@ -1360,7 +1374,7 @@ function settingsPage() {
       { key: 'ansible',      label: 'Ansible',                 hasConfig: true,  enabled: false,
         desc: 'Config management via AWS ECS Fargate, Azure ACI, or GCP Cloud Run Jobs.' },
       { key: 'entitle',      label: 'Entitle',                 hasConfig: true,  enabled: false,
-        desc: 'Approval-gated actions via Entitle.' },
+        desc: 'Register built VMs & databases as Entitle integrations.' },
       { key: 'proxmox',      label: 'Proxmox VE',              hasConfig: true,  enabled: false,
         desc: 'On-premises VM and LXC container management via the Proxmox REST API.' },
       { key: 'vsphere',      label: 'VMware vSphere / ESXi',   hasConfig: true,  enabled: false,

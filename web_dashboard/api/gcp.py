@@ -497,6 +497,13 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
         else:
             job_service.update_progress(db, job_id, 95, "Instance launched.")
 
+        # Entitle — register as SSH ephemeral-accounts integration (per-build opt-in).
+        from ..services import entitle_vm_hook
+        if getattr(payload, "register_in_entitle", False) and entitle_vm_hook.registration_enabled():
+            await entitle_vm_hook.register(db, job_id, payload.instance_name, hostname,
+                                           private=not payload.create_external_ip,
+                                           result=final_meta, tag="GCP")
+
         job_service.set_completed(db, job_id, final_meta)
         await cache_service.invalidate(cache_service.key_global("gcp_instances"))
 
@@ -705,6 +712,11 @@ async def _run_destroy(
                 logger.error("bt_shell_jump_id=%s destroy error: %s", bt_shell_jump_id, e)
                 result["bt_error"] = err
                 job_service.update_progress(db, job_id, 35, err)
+
+        # Remove the Entitle SSH integration if this deploy registered one.
+        if deploy_meta.get("entitle_registration_tf_state"):
+            from ..services import entitle_vm_hook
+            await entitle_vm_hook.deregister(deploy_meta, result)
 
         job_service.update_progress(db, job_id, 50, f"Deleting instance {instance_name}…")
         await gcp_service.terminate_instance(project_id=project_id, zone=zone, instance_name=instance_name)

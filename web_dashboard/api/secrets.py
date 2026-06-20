@@ -63,7 +63,7 @@ _SECRET_REGISTRY: list[tuple[str, str]] = [
     ("bt_client_secret",          "BeyondTrust Privileged Remote Access Client Secret"),
     ("epml_pat",                  "BeyondTrust EPM-L Personal Access Token"),
     ("entitle_api_token",         "Entitle API Token"),
-    ("entitle_webhook_secret",    "Entitle Webhook Secret"),
+    ("entitle_api_key",           "Entitle Terraform Provider API Key"),
     ("proxmox_token_secret",      "Proxmox API Token Secret"),
     ("proxmox_password",          "Proxmox Password"),
     ("vsphere_password",          "vSphere Password"),
@@ -374,27 +374,12 @@ async def list_secret_items(request: Request, backend: str, folder: str = ""):
     return {"backend": backend, "items": items, "count": len(items)}
 
 
-# Approval-gated read/update/delete. `require_approval` is a no-op when
-# either `entitle_enabled` or `approval_gate_enabled` is false, so every
-# installation gets the un-gated zero-friction CRUD until they explicitly
-# turn Entitle on in Settings. Create is intentionally NOT gated: the
-# operator who creates a secret already knows the value they're setting.
-from .auth import require_approval as _require_approval
-
-_READ_GATE   = Depends(_require_approval("secret_read"))
-_UPDATE_GATE = Depends(_require_approval("secret_update"))
-_DELETE_GATE = Depends(_require_approval("secret_delete"))
-
-
-@router.get("/items/{backend}/{ref:path}", dependencies=[Depends(_require_admin_dep), _READ_GATE])
+# Secret read/update/delete are admin-only (`_require_admin_dep`). Create is
+# likewise admin-gated below via `_require_admin`. There is no approval gate.
+@router.get("/items/{backend}/{ref:path}", dependencies=[Depends(_require_admin_dep)])
 async def get_secret_item(backend: str, ref: str):
     """Return the value of one secret. Value is whatever string is stored —
-    the editor on the frontend treats it as JSON.
-
-    When Entitle approval gating is on, this returns 202 with an
-    `approval_id` on the first call; the frontend polls
-    `/api/approvals/{id}` and retries with `X-Entitle-Approval-Id` once
-    the approver approves."""
+    the editor on the frontend treats it as JSON."""
     from ..services import secrets_backend_service as sbs
     try:
         value = await asyncio.to_thread(sbs.read_sync, backend, ref)
@@ -405,12 +390,7 @@ async def get_secret_item(backend: str, ref: str):
 
 @router.post("/items", status_code=201)
 async def create_secret_item(payload: SecretCreateRequest, request: Request):
-    """Create a new secret. Value must parse as JSON.
-
-    Intentionally not approval-gated — the operator already knows the
-    value they're setting; the second-set-of-eyes control adds friction
-    without disclosure to protect against.
-    """
+    """Create a new secret. Value must parse as JSON. Admin-only."""
     _require_admin(request)
     from ..services import secrets_backend_service as sbs
     try:
@@ -422,7 +402,7 @@ async def create_secret_item(payload: SecretCreateRequest, request: Request):
     return {"backend": payload.backend, "key": payload.key, "ref": ref}
 
 
-@router.patch("/items/{backend}/{ref:path}", dependencies=[Depends(_require_admin_dep), _UPDATE_GATE])
+@router.patch("/items/{backend}/{ref:path}", dependencies=[Depends(_require_admin_dep)])
 async def update_secret_item(backend: str, ref: str, payload: SecretUpdateRequest):
     """Update the value of an existing secret. New value must parse as JSON.
     The path's `backend` and the body's `backend` must agree."""
@@ -438,7 +418,7 @@ async def update_secret_item(backend: str, ref: str, payload: SecretUpdateReques
     return {"backend": backend, "ref": new_ref}
 
 
-@router.delete("/items/{backend}/{ref:path}", dependencies=[Depends(_require_admin_dep), _DELETE_GATE])
+@router.delete("/items/{backend}/{ref:path}", dependencies=[Depends(_require_admin_dep)])
 async def delete_secret_item(backend: str, ref: str):
     """Delete a secret."""
     from ..services import secrets_backend_service as sbs

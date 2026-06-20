@@ -17,7 +17,7 @@ from jose import JWTError, jwt
 from sqlalchemy.orm import Session
 
 from ..config import settings
-from ..database import User, Fido2Credential, PersonalAccessToken, OAuthGroupMapping, Approval, get_db, verify_password
+from ..database import User, Fido2Credential, PersonalAccessToken, OAuthGroupMapping, get_db, verify_password
 from ..models.user import (
     TokenResponse,
     TokenData,
@@ -238,138 +238,6 @@ def require_workgroup_access(workgroup: str):
                 detail=f"Access denied to workgroup: {workgroup}",
             )
         return current_user
-    return _check
-
-
-def require_approval(action: str):
-    """
-    Returns a FastAPI dependency that gates the endpoint behind an Entitle
-    approval workflow.
-
-    First call (no ``X-Entitle-Approval-Id`` header) opens an Entitle
-    request, persists an :class:`~web_dashboard.database.Approval` row, and
-    raises ``202 Accepted`` with ``{approval_id, poll_url, expires_at}``.
-    The frontend polls ``GET /api/approvals/{id}`` and, once status is
-    ``approved``, retries the original call with the header.
-
-    Retry call: verifies ``(user_id, action, payload_hash, status==approved,
-    not expired, not consumed)`` then marks the row ``consumed`` so the
-    approval can't be replayed.
-
-    The master kill-switch ``settings.approval_gate_enabled`` makes this
-    dependency a no-op — used for emergency bypass during incidents.
-    """
-    from ..services import entitle_service  # local import: avoid load-time cycle
-
-    async def _check(
-        request: Request,
-        x_entitle_approval_id: Optional[str] = Header(default=None),
-        current_user: User = Depends(get_current_user),
-        db: Session = Depends(get_db),
-    ) -> User:
-        # Gate runs iff Entitle integration is on AND the master gate flag
-        # is on. Either off → bypass and let the endpoint proceed without
-        # an approval. This means installations that haven't configured a
-        # publicly routable host for Entitle webhooks (or simply don't want
-        # an approval workflow) keep their existing zero-friction CRUD.
-        from ..services import config_service
-        entitle_on = config_service.get_bool("entitle_enabled", settings.entitle_enabled)
-        gate_on    = config_service.get_bool("approval_gate_enabled", settings.approval_gate_enabled)
-        if not entitle_on or not gate_on:
-            return current_user
-
-        body = await request.body()
-        payload_hash = entitle_service.canonical_payload_hash(body)
-
-        if not x_entitle_approval_id:
-            try:
-                ticket = await entitle_service.create_request(
-                    action, current_user.username, payload_hash
-                )
-            except entitle_service.EntitleError as exc:
-                raise HTTPException(
-                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail=f"Approval service unavailable: {exc}",
-                )
-            row = Approval(
-                entitle_request_id=ticket.request_id,
-                action=action,
-                user_id=current_user.id,
-                payload_hash=payload_hash,
-                status="pending",
-                expires_at=ticket.expires_at,
-            )
-            db.add(row)
-            db.commit()
-            db.refresh(row)
-            raise HTTPException(
-                status_code=status.HTTP_202_ACCEPTED,
-                detail={
-                    "approval_id": row.id,
-                    "poll_url": f"/api/approvals/{row.id}",
-                    "expires_at": row.expires_at.isoformat(),
-                    "action": action,
-                },
-            )
-
-        approval = (
-            db.query(Approval).filter(Approval.id == x_entitle_approval_id).first()
-        )
-        if not approval:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail={"error_code": "unknown", "message": "Approval not found."},
-            )
-        if approval.user_id != current_user.id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail={"error_code": "wrong_user", "message": "Approval belongs to another user."},
-            )
-        if approval.action != action:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail={"error_code": "wrong_action", "message": "Approval is for a different action."},
-            )
-        if approval.payload_hash != payload_hash:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail={"error_code": "payload_mismatch", "message": "Request body changed since approval was granted."},
-            )
-        if approval.status == "consumed":
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail={"error_code": "consumed", "message": "Approval has already been used."},
-            )
-        if approval.status == "denied":
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail={"error_code": "denied", "message": approval.denial_reason or "Approval was denied."},
-            )
-        # Auto-expire if past TTL but the webhook hasn't fired yet.
-        if approval.status == "expired" or approval.expires_at < datetime.utcnow():
-            if approval.status != "expired":
-                approval.status = "expired"
-                db.commit()
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail={"error_code": "expired", "message": "Approval has expired."},
-            )
-        if approval.status == "pending":
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail={"error_code": "pending", "message": "Approval is still pending."},
-            )
-        if approval.status != "approved":
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail={"error_code": "unknown", "message": f"Unexpected approval status: {approval.status}"},
-            )
-
-        approval.status = "consumed"
-        approval.consumed_at = datetime.utcnow()
-        db.commit()
-        return current_user
-
     return _check
 
 

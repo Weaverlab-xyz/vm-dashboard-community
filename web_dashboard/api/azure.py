@@ -1020,6 +1020,15 @@ async def _run_deploy(job_id: str, req: AzureDeployRequest, rg: str, loc: str):
         else:
             job_service.update_progress(db, job_id, 90, "VM deployed.")
 
+        # Step 4: Entitle — register as SSH ephemeral-accounts integration (Linux
+        # only; per-build opt-in). Public VM → no agent; private → shared agent.
+        from ..services import entitle_vm_hook
+        if (getattr(req, "register_in_entitle", False) and not is_windows
+                and entitle_vm_hook.registration_enabled()):
+            await entitle_vm_hook.register(db, job_id, req.vm_name, hostname,
+                                           private=not req.create_public_ip,
+                                           result=result, tag="Azure")
+
         job_service.set_completed(db, job_id, result)
         await cache_service.invalidate(cache_service.key_global("azure_vms"))
 
@@ -1174,6 +1183,14 @@ async def _run_bulk_deploy(job_items: list, req: AzureBulkDeployRequest, rg: str
                 else:
                     job_service.update_progress(db, job_id, 90, "VM deployed.")
 
+                # Step 4: Entitle — register as SSH integration (Linux only; opt-in).
+                from ..services import entitle_vm_hook
+                if (getattr(req, "register_in_entitle", False) and not is_windows
+                        and entitle_vm_hook.registration_enabled()):
+                    await entitle_vm_hook.register(db, job_id, vm_name, hostname,
+                                                   private=not req.create_public_ip,
+                                                   result=result, tag="Azure")
+
                 job_service.set_completed(db, job_id, result)
 
             except AzureError as e:
@@ -1283,6 +1300,11 @@ async def _run_destroy(destroy_job_id: str, deploy_job_id: str, vm_name: str, rg
                     logger.error("bt_shell_jump_id=%s destroy error: %s", bt_shell_jump_id, e)
                     result["bt_error"] = err
                     job_service.update_progress(db, destroy_job_id, 85, err)
+
+            # Remove the Entitle SSH integration if this deploy registered one.
+            if meta.get("entitle_registration_tf_state"):
+                from ..services import entitle_vm_hook
+                await entitle_vm_hook.deregister(meta, result)
 
             # Mark original deploy job as destroyed (mirrors AWS pattern)
             meta["destroyed"] = True

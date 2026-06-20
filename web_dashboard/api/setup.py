@@ -452,8 +452,11 @@ class EntitleFeatureConfig(BaseModel):
     enabled: bool = False
     entitle_api_url: str = ""
     entitle_api_token: str = ""         # encrypted at rest
-    entitle_webhook_secret: str = ""    # encrypted at rest
-    approval_gate_enabled: bool = False
+    # Resource registration — register built VMs/DBs as Entitle integrations.
+    entitle_registration_enabled: bool = False
+    entitle_api_key: str = ""           # entitleio/entitle TF provider key; encrypted at rest
+    entitle_ssh_sudo_user: str = ""
+    entitle_ssh_private_key_ref: str = ""
     # User-JIT (Phase 4) — operator surfaces these via the Settings panel.
     entitle_user_jit_enabled: bool = False
     entitle_request_portal_url: str = ""
@@ -581,7 +584,7 @@ _CONFIG_ONLY_FEATURES = {"cloud_database", "k8s_management", "vdesktops"}
 _SECRET_FEATURE_KEYS = frozenset({
     "pscli_client_secret", "bt_client_secret", "epml_pat",
     "portainer_pat",
-    "entitle_api_token", "entitle_webhook_secret",
+    "entitle_api_token", "entitle_api_key",
     "proxmox_token_secret", "proxmox_password",
     "vsphere_password",
     "hyperv_password",

@@ -68,6 +68,7 @@ class DeployRequest(BaseModel):
     subnet_id: str = Field(..., description="VPC subnet ID")
     security_group_ids: List[str] = Field(..., description="Security group IDs")
     workgroup: str = Field(..., description="Workgroup the instance belongs to (written as Workgroup tag)")
+    register_in_entitle: bool = Field(default=False, description="Opt in to registering this VM as an Entitle SSH integration (requires entitle_registration_enabled + a provisioned agent)")
     # PRA/jumpoint per-deploy overrides — config defaults are the fallback. Values
     # are secrets-backend references (e.g. aws_sm://…), not raw secrets.
     jump_group: Optional[str] = None             # PRA Jump Group name override (else bt_jump_group_name)
@@ -128,6 +129,7 @@ class BulkDeployRequest(BaseModel):
     subnet_id: str = Field(..., description="VPC subnet ID (shared)")
     security_group_ids: List[str] = Field(..., description="Security group IDs (shared)")
     workgroup: str = Field(..., description="Workgroup all deployed instances belong to (written as Workgroup tag)")
+    register_in_entitle: bool = Field(default=False, description="Opt in to registering each VM as an Entitle SSH integration (requires entitle_registration_enabled + a provisioned agent)")
 
 
 class BulkDeployJobResult(BaseModel):
