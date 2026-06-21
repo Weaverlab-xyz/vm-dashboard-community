@@ -39,50 +39,69 @@ The VM hook derives public/private from the deploy (`public_ip` / `create_public
 / `create_external_ip`); RDS is private-only. Private registration raises a clear
 error (non-fatal) if no agent is configured.
 
-## Agent cluster bootstrap (deferred — reuses the EKS flow)
+## Agent cluster bootstrap (validated against the K8s feature)
 
-A one-time **admin prerequisite**, off the per-build critical path. Decisions:
+A one-time **admin prerequisite**, off the per-build critical path, built as
+**composition of existing `k8s_service` primitives** — not new infrastructure.
+Decisions (validated 2026-06-21):
 
-1. **Dashboard-provisioned** dedicated agent cluster via the in-progress EKS flow
-   (later AKS/GKE). The cluster also becomes an Entitle **Kubernetes integration**
-   (the future phase) — same artifact, double duty.
-2. **Explicit admin action** ("Provision Entitle agent"), decoupled long-running
-   job. The ~10-min spin-up happens once per environment; registration just checks
-   the agent exists.
-3. Per-build registration stays **opt-in (default off)** and is greyed out until
-   the capability + agent are ready.
+1. **Dedicated dashboard-provisioned EKS cluster** whose job is hosting the agent,
+   stood up via the existing `k8s_service.create_cluster` (`terraform/k8s_cluster/aws_eks`;
+   kubeconfig stored as a secrets-backend ref). One agent per VPC/network. The cluster
+   also becomes an Entitle **Kubernetes integration** later — coordinate with the
+   existing Entitle/K8s wiring (`_entitle_rancher_grant` Rancher-RBAC JIT + the PRA
+   `tunnel_type=k8s` jump), don't duplicate.
+2. **Install surface = a new management-plane kind**: `setup_entitle_agent(cluster_id)`
+   mirroring `setup_secret_delivery`, dispatched as `mgmt_kind="entitle_agent"` via the
+   existing management endpoint + `run_management_plane` worker job. The "Provision
+   Entitle agent" admin action is just that POST (decoupled; the ~10-min cluster
+   spin-up happens once).
+3. Per-build registration stays **opt-in (default off)** and is greyed out until the
+   capability + agent are ready.
 
-### Agent token — pass it as a secret (via External Secrets Operator)
+### Agent token — server-side Secret + Helm (reuses the runner primitives)
 
-The agent token is a sensitive credential, returned **only at creation**. The
-provider exposes it as a first-class resource:
+The agent token is sensitive and returned **only at creation**. Mint it with the
+`entitle_agent_token` Terraform resource (or the API) and stash it in the dashboard's
+secrets backend, recorded as `entitle_agent_token_ref`:
 
 ```hcl
 resource "entitle_agent_token" "agent" { name = var.agent_name }   # .token is sensitive
 ```
 
-**Recommended (ESO):** the cluster already runs External Secrets Operator. Keep the
-token out of Terraform state and Helm values entirely:
+`setup_entitle_agent` then, using the **same primitives** the ESO/management installs
+already use:
 
-1. Mint the token (`entitle_agent_token` or the API) and write it to the external
-   store the dashboard already integrates (`aws_sm://` / `azure_kv://` / `gcp_sm://`),
-   recorded as `entitle_agent_token_ref`.
-2. An `ExternalSecret` (via the existing `ClusterSecretStore`) materializes the
-   in-cluster `entitle-agent-token` Secret with key `ENTITLE_TOKEN` — the key the
-   provider's own Kubernetes example uses.
-3. The `entitle-agent` chart consumes that Secret.
+1. **Resolve** the token value server-side from `entitle_agent_token_ref`
+   (`config_service`), never persisting it on a row.
+2. **Apply** a K8s `Secret` (`ENTITLE_TOKEN`) via `_apply_manifest_via_runner` — the
+   token rides in a tmpdir manifest mounted into the one-shot kubectl container, gone
+   when it exits.
+3. **Install** the agent via `_helm_via_runner(["upgrade","--install","entitle-agent",
+   <chart>, …])` referencing that Secret.
 
-Net: the token lives only in the external store + the ESO-managed in-cluster Secret
-— never in TF state, Helm `--set`, or `helm get values`.
+Net: the token lives only in the secrets backend + the in-cluster Secret — never in
+Terraform state, Helm `--set`, or `helm get values`. (Both paths land a native K8s
+Secret in-cluster — the agent authenticates from it; the difference is how it gets
+there and who keeps it in sync.)
 
-**Fallback (no ESO / chart only takes plaintext):** drive the Helm release from
-Terraform with `set_sensitive { name = "agent.token", value = entitle_agent_token.agent.token }`
-so it stays out of plan output (lives in sensitive state + the Helm-managed secret).
+**Rotation:** re-run `setup_entitle_agent` to push a fresh token — it re-resolves from
+the backend, re-applies the `Secret`, and the agent picks up the new value. This is the
+manual/imperative path; the ESO alternative below rotates automatically (update the
+value in the external store → ESO reconciles the in-cluster Secret on its refresh
+interval). **Both are supported** — pick per environment; the server-side path is
+simpler, ESO is hands-off for rotation.
 
-> **Verification gate:** confirm the `entitle-agent` chart can read the token from an
-> existing Secret (`secretKeyRef`/`ENTITLE_TOKEN`) vs. only the documented
-> `--set agent.token=...`. The provider's `kubernetes_secret { ENTITLE_TOKEN }`
-> example implies the former.
+> **Verification gate (load-bearing for step 2/3):** confirm the `entitle-agent` chart
+> reads the token from an **existing Secret** (`secretKeyRef`/`ENTITLE_TOKEN`) rather
+> than only `--set agent.token=...`. The provider's `kubernetes_secret { ENTITLE_TOKEN }`
+> example implies it does. If it only accepts `--set`, resolve the token and pass it as
+> a `--set` arg from `_helm_via_runner` (still server-side-resolved, not persisted).
+
+**Alternative (GitOps/rotation):** a cloud-native ESO `SecretStore` (`aws_sm` /
+`azure_kv` / `gcp_sm`) + `ExternalSecret` syncing the token in. Note the feature's
+existing ESO `ClusterSecretStore` is **BeyondTrust/Password-Safe-specific**, so this is
+a *new* store manifest, not the existing one — hence not the default here.
 
 Distinguish three "token" concepts: **token value** (secret — above);
 `entitle_agent_token_name` (just the **identifier**, consumed by
