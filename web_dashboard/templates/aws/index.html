@@ -1117,11 +1117,7 @@
             </div>
           </div>
           <div>
-            <label class="block text-xs font-medium text-gray-600 mb-1">Entitle SSH public key</label>
-            <textarea x-model="packerForm.bt_entitle_pubkey" rows="2"
-                      placeholder="ssh-ed25519 AAAA… (Entitle integration public key → adminuser authorized_keys)"
-                      class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-xs font-mono resize-y"></textarea>
-            <p class="text-[11px] text-gray-400 mt-1">EPM-L is installed at build; activation runs post-deploy via the EPM-L integration.</p>
+            <p class="text-[11px] text-gray-400">EPM-L is installed at build; activation runs post-deploy via the EPM-L integration.</p>
           </div>
         </div>
 
@@ -1279,7 +1275,6 @@
         loaded_from: '',  // "backend|name" of the script just loaded; lets the user redo the load
         provisioner_env_vars: [],  // [{name, value, is_secret_ref}] → provisioner environment_vars
         bt_admin_user: '',      // → BT_ADMIN_USER (bt-ready provisioner)
-        bt_entitle_pubkey: '',  // → BT_ENTITLE_PUBKEY (Entitle SSH)
         bt_epml: '',            // '' | 'deb' | 'rpm' → BT_EPML_URL (EPM-L install)
       },
       packerBuilding: false,
