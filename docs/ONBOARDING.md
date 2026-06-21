@@ -31,7 +31,7 @@ Desktop required).
 - [Appendix F — XCP-ng / XenServer integration](#appendix-f--xcp-ng--xenserver-integration)
 - [Appendix G — Sign in with Microsoft (Entra OAuth)](#appendix-g--sign-in-with-microsoft-entra-oauth)
 - [Appendix H — BeyondTrust integration](#appendix-h--beyondtrust-integration)
-- [Appendix I — Entitle approval workflows](#appendix-i--entitle-approval-workflows)
+- [Appendix I — Entitle resource registration](#appendix-i--entitle-resource-registration)
 - [Appendix J — MCP server (AI client integration)](#appendix-j--mcp-server-ai-client-integration)
 - [Appendix K — Portainer CE integration](#appendix-k--portainer-ce-integration)
 - [Appendix L — Ansible config management](#appendix-l--ansible-config-management)
