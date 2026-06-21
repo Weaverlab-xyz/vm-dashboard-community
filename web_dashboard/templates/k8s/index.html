@@ -89,6 +89,9 @@
                       class="text-xs px-2 py-1 bg-violet-600 hover:bg-violet-700 text-white rounded font-medium">
                 <span x-text="c.secrets_delivery_kind === 'eso' ? 'Secrets ✓' : 'Secrets'"></span>
               </button>
+              <button @click="installEntitleAgent(c)"
+                      title="Install the Entitle agent into this cluster (agent-cluster bootstrap) so private resources registered in Entitle are reachable"
+                      class="text-xs px-2 py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded font-medium">Entitle agent</button>
               <button @click="del(c)" class="text-xs px-2 py-1 text-red-600 hover:underline ml-1">Delete</button>
             </td>
           </tr>
@@ -412,6 +415,17 @@ function k8sPage() {
         this._pollUntilManaged(c.id);
       } catch (e) {
         this.flash(e.message || 'Launch failed.', 'error');
+      }
+    },
+
+    async installEntitleAgent(c) {
+      if (!confirm(`Install the Entitle agent on "${c.name}"?\n\nResolves the agent token server-side and Helm-installs the entitle-agent chart. Requires entitle_agent_token_ref + entitle_agent_chart_repo configured. Track progress in Jobs.`)) return;
+      try {
+        await API.post(`/api/k8s/clusters/${c.id}/entitle-agent`, { action: 'install' });
+        this.flash('Installing Entitle agent — track progress in Jobs.');
+        await this.refresh();
+      } catch (e) {
+        this.flash(e.message || 'Entitle agent install failed.', 'error');
       }
     },
 

@@ -542,13 +542,20 @@ class Settings(BaseSettings):
     # Entitle agent cluster bootstrap (Task 7) — Helm-install the agent into a managed
     # K8s cluster via the k8s_service runner. See docs/design/entitle-resource-registration.md.
     entitle_agent_cluster_id: str = ""               # set on a successful install — the cluster currently hosting the shared agent
-    entitle_agent_chart_repo: str = ""               # REQUIRED for install: Helm repo URL for the entitle-agent chart (verify against the published chart)
+    entitle_agent_chart_repo: str = "https://anycred.github.io/entitle-charts/"  # Helm repo URL for the entitle-agent chart (BeyondTrust-published)
     entitle_agent_chart: str = "entitle-agent"       # chart name within the repo
     entitle_agent_chart_version: str = ""            # optional pinned chart version
     entitle_agent_namespace: str = "entitle"         # in-cluster namespace for the agent + its token Secret
-    entitle_agent_secret_name: str = "entitle-agent-token"  # K8s Secret (key ENTITLE_TOKEN) the agent reads the token from
-    entitle_agent_existing_secret_helm_key: str = "agent.existingSecret"  # Helm value pointing at the token Secret (verify vs the chart)
-    entitle_agent_token_plaintext_helm_key: str = ""  # if set, pass the token plaintext via this Helm value instead of an existing Secret (server-side resolved either way)
+    entitle_agent_secret_name: str = "entitle-agent-token"  # K8s Secret (key ENTITLE_TOKEN) used by the existing-Secret path
+    # The published chart takes the token as a plaintext --set value (agent.token); it
+    # has no existingSecret option, so the plaintext path is the default. The token is
+    # still resolved server-side (never on a row/TF state), but DOES land in the
+    # in-cluster Helm release Secret — a chart limitation. Clear the plaintext key +
+    # set the existing-secret key to switch to the apply-Secret path if a future chart
+    # version supports it.
+    entitle_agent_token_plaintext_helm_key: str = "agent.token"  # Helm value the token is passed to (plaintext, server-side resolved)
+    entitle_agent_existing_secret_helm_key: str = "agent.existingSecret"  # used only when the plaintext key is cleared (future chart)
+    entitle_agent_helm_extra_set: str = ""           # extra `--set key=value` args, comma-separated (e.g. datadog.datadog.apiKey=…); the chart bundles Datadog
     entitle_agent_kms_type: str = "kubernetes_secret_manager"  # where the running agent vaults integration creds
     entitle_allowed_durations: str = "3600,43200,86400"  # JIT durations (seconds) offered on created integrations
     entitle_ssh_sudo_user: str = ""                 # privileged sudo user Entitle drives to mint/delete ephemeral SSH accounts (defaults to the cloud-default ssh user if blank)

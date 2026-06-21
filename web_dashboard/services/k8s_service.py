@@ -994,15 +994,23 @@ async def setup_entitle_agent(cluster_id: str, action: str = "install") -> None:
 
         plaintext_key = _cfg("entitle_agent_token_plaintext_helm_key")
         if plaintext_key:
-            # Chart only takes a plaintext token value — still resolved server-side,
-            # never persisted; passed as a Helm --set-string for this one release.
+            # The published chart takes the token as a plaintext --set value (no
+            # existingSecret option). Still resolved server-side, never on a row/TF
+            # state; it does land in the in-cluster Helm release Secret (chart limit).
             helm_args += ["--set-string", f"{plaintext_key}={token}"]
         else:
-            # Default: apply the Secret + point the chart at it (token stays in-cluster).
+            # Existing-Secret path (for a future chart version): apply the Secret +
+            # point the chart at it so the token stays out of Helm values.
             await _apply_manifest_via_runner(
                 kubeconfig, _entitle_agent_secret_manifest(namespace, secret_name, token))
             helm_args += ["--set",
                           f"{_cfg('entitle_agent_existing_secret_helm_key', 'agent.existingSecret')}={secret_name}"]
+
+        # Operator-supplied extra --set args (the chart bundles Datadog, which may
+        # need datadog.datadog.apiKey etc.). Comma-separated key=value list.
+        for extra in (s.strip() for s in _cfg("entitle_agent_helm_extra_set").split(",")):
+            if extra:
+                helm_args += ["--set", extra]
 
         await _helm_via_runner(kubeconfig, helm_args, add_eso_repo=False)
         config_service.set("entitle_agent_cluster_id", cluster_id)

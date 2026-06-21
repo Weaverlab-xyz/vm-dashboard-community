@@ -95,22 +95,28 @@ value in the external store → ESO reconciles the in-cluster Secret on its refr
 interval). **Both are supported** — pick per environment; the server-side path is
 simpler, ESO is hands-off for rotation.
 
-> **Verification gate (load-bearing for step 2/3):** confirm the `entitle-agent` chart
-> reads the token from an **existing Secret** (`secretKeyRef`/`ENTITLE_TOKEN`) rather
-> than only `--set agent.token=...`. The provider's `kubernetes_secret { ENTITLE_TOKEN }`
-> example implies it does. If it only accepts `--set`, resolve the token and pass it as
-> a `--set` arg from `_helm_via_runner` (still server-side-resolved, not persisted).
+> **Chart token mechanism (confirmed):** the published `entitle/entitle-agent` chart
+> (`helm repo add entitle https://anycred.github.io/entitle-charts/`) takes the token
+> only as a plaintext `--set agent.token=…` — there is **no** `existingSecret`/secretKeyRef
+> option. So the default is the plaintext `--set-string` path (`entitle_agent_token_plaintext_helm_key=agent.token`):
+> still resolved server-side, but it does land in the in-cluster **Helm release Secret**.
+> The apply-Secret path is retained behind config for a future chart version. ESO doesn't
+> help here (nothing external to sync *from* — we hold the token).
 
-**Alternative (GitOps/rotation):** a cloud-native ESO `SecretStore` (`aws_sm` /
-`azure_kv` / `gcp_sm`) + `ExternalSecret` syncing the token in. Note the feature's
-existing ESO `ClusterSecretStore` is **BeyondTrust/Password-Safe-specific**, so this is
-a *new* store manifest, not the existing one — hence not the default here.
+**ESO does NOT fit the token, and not the agent's integration secrets either.** ESO is a
+*consumer-side pull* (external store → K8s Secret for a workload to mount). But the agent
+**produces and owns** its integration secrets (per-integration connection creds), writing
+them to whatever **`kmsType`** points at and reading them back directly — there's no
+external store for ESO to pull from. The lever for those secrets is `kmsType`
+(`entitle_agent_kms_type`): default `kubernetes_secret_manager` (native K8s Secrets in
+etcd), or `aws_secret_manager` / `azure_secret_manager` / `gcp_secret_manager` /
+`hashicorp_vault` to keep them outside the cluster. To harden etcd instead, use EKS
+envelope/KMS encryption of secrets-at-rest.
 
-Distinguish three "token" concepts: **token value** (secret — above);
-`entitle_agent_token_name` (just the **identifier**, consumed by
-`entitle_registration_service` as `agent_token = {name}`); and the chart's `kmsType`
-(where the running agent vaults *integration* creds — default `kubernetes_secret_manager`,
-in-cluster).
+Distinguish three concepts: **agent token value** (auth to Entitle's control plane —
+plaintext `--set`, above); `entitle_agent_token_name` (just the **identifier**, consumed by
+`entitle_registration_service` as `agent_token = {name}`); and **`kmsType`** (where the
+running agent vaults its **integration** creds — governed by `entitle_agent_kms_type`, not ESO).
 
 ## SSH key sourcing — from the VM's own keypair, not config
 
@@ -140,5 +146,9 @@ cloud-init set up with the injected key + passwordless sudo (the
   that points at the token Secret) against the published chart; set
   `entitle_agent_token_plaintext_helm_key` if the chart only takes a plaintext token.
 - UI: an "Install Entitle agent" action on the cluster page (mirrors secret-delivery) — TODO.
-- AWS: track the per-deploy keypair name so the private key resolves from `ec2/keypairs/<name>` instead of the optional override.
+- AWS private-key sourcing is **secret-based by design** — registration resolves it from
+  the chosen `ec2_ssh_key_secret` (a JSON `{public_key, private_key}` keypair) or the
+  optional override. The `ec2/keypairs/<name>` convention is a *separate manual path*
+  used by `get_instance_ssh_key` for EC2-KeyPair instances, not the userdata-injected
+  flow — so there's no per-deploy keypair name to track here (earlier open item retired).
 - Wire EKS/AKS/GKE clusters as Entitle Kubernetes integrations (the agent cluster qualifies first).
