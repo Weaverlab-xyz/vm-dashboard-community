@@ -23,6 +23,7 @@ from ..models.k8s import (
     BrokerAccessRequest,
     ClusterProvisionRequest,
     ClusterRegisterRequest,
+    EntitleAgentRequest,
     ManagementRequest,
     SecretDeliveryRequest,
 )
@@ -278,3 +279,32 @@ async def setup_secret_delivery(
     )
     return {"ok": True, "status": "installing", "cluster_id": cluster_id,
             "kind": payload.kind, "job_id": job.id}
+
+
+@router.post("/clusters/{cluster_id}/entitle-agent", status_code=202)
+async def setup_entitle_agent(
+    cluster_id: str,
+    payload: EntitleAgentRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Install (or remove) the **Entitle agent** in a managed cluster — the
+    agent-cluster bootstrap. ``action=install`` resolves the agent token server-side
+    from ``entitle_agent_token_ref``, applies the ``ENTITLE_TOKEN`` Secret, and
+    Helm-installs the chart referencing it; ``action=remove`` uninstalls it. Async —
+    enqueues a ``k8s_entitle_agent`` job the worker runs; open the job for status/error."""
+    if payload.action not in k8s_service.VALID_ENTITLE_AGENT_ACTIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown action {payload.action!r} (expected one of {', '.join(k8s_service.VALID_ENTITLE_AGENT_ACTIONS)})",
+        )
+    try:
+        k8s_service.get_cluster(db, cluster_id)   # 404 if unknown
+    except K8sError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    job = job_service.create_job(
+        db, job_type="k8s_entitle_agent", created_by=current_user.username,
+        metadata={"cluster_id": cluster_id, "action": payload.action},
+    )
+    return {"ok": True, "status": "installing" if payload.action == "install" else "removing",
+            "cluster_id": cluster_id, "action": payload.action, "job_id": job.id}

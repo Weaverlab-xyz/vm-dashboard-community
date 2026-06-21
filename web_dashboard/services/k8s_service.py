@@ -902,6 +902,132 @@ async def run_secret_delivery(db: Session, *, cluster_id: str, job_id: str,
     job_service.set_completed(db, job_id)
 
 
+# ── Entitle agent install (agent-cluster bootstrap, Task 7) ────────────────────
+# Helm-installs BeyondTrust's Entitle agent into a managed cluster so PRIVATE
+# resources (private RDS, PRA-only VMs) registered in Entitle are reachable. Shaped
+# like setup_secret_delivery — an in-cluster install run as a tracked Job — rather
+# than the Portainer-coupled management plane. The agent token is resolved
+# server-side from the secrets backend and applied as a K8s Secret; it never lands
+# on a row, in Terraform state, or in Helm values. See
+# docs/design/entitle-resource-registration.md.
+#
+# ⚠️ VERIFICATION GATE: confirm the entitle-agent chart repo URL
+# (entitle_agent_chart_repo) and the Helm value that points at the token Secret
+# (entitle_agent_existing_secret_helm_key) against the published chart. Defaults
+# follow BeyondTrust's documented `helm upgrade --install entitle-agent …`; if the
+# chart only accepts a plaintext token, set entitle_agent_token_plaintext_helm_key.
+
+VALID_ENTITLE_AGENT_ACTIONS = ("install", "remove")
+
+
+def _entitle_agent_secret_manifest(namespace: str, secret_name: str, token: str) -> str:
+    """Namespace + the K8s Secret the entitle-agent reads ``ENTITLE_TOKEN`` from
+    (the key the entitleio/entitle provider's own Kubernetes example uses)."""
+    return (
+        "apiVersion: v1\n"
+        "kind: Namespace\n"
+        "metadata:\n"
+        f"  name: {namespace}\n"
+        "---\n"
+        "apiVersion: v1\n"
+        "kind: Secret\n"
+        "metadata:\n"
+        f"  name: {secret_name}\n"
+        f"  namespace: {namespace}\n"
+        "type: Opaque\n"
+        "stringData:\n"
+        f"  ENTITLE_TOKEN: {_yaml_quote(token)}\n"
+    )
+
+
+async def setup_entitle_agent(cluster_id: str, action: str = "install") -> None:
+    """Install (or remove) the Entitle agent in a managed cluster. Background task.
+
+      * ``install`` → resolve the agent token server-side from
+        ``entitle_agent_token_ref``, apply the ``ENTITLE_TOKEN`` Secret via the
+        kubectl runner, then ``helm upgrade --install entitle-agent`` referencing it.
+        Records the hosting cluster in ``entitle_agent_cluster_id``.
+      * ``remove``  → ``helm uninstall`` + delete the Secret (best-effort); clears
+        ``entitle_agent_cluster_id`` when it pointed here.
+    """
+    from ..database import SessionLocal
+    from . import config_service
+    db = SessionLocal()
+    try:
+        row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
+        if row is None:
+            return
+        kubeconfig = resolve_kubeconfig(db, cluster_id)
+        namespace = _cfg("entitle_agent_namespace", "entitle")
+        secret_name = _cfg("entitle_agent_secret_name", "entitle-agent-token")
+
+        if action == "remove":
+            try:
+                await _helm_via_runner(kubeconfig, ["uninstall", "entitle-agent", "-n", namespace],
+                                       add_eso_repo=False)
+                await _delete_manifest_via_runner(
+                    kubeconfig, _entitle_agent_secret_manifest(namespace, secret_name, "x"))
+            except Exception as exc:
+                logger.warning("entitle-agent teardown for %s partially failed: %s", cluster_id, exc)
+            if config_service.get("entitle_agent_cluster_id") == cluster_id:
+                config_service.set("entitle_agent_cluster_id", "")
+            return
+
+        # action == "install"
+        repo = _cfg("entitle_agent_chart_repo")
+        if not repo:
+            raise K8sError(
+                "entitle_agent_chart_repo is not configured (Helm repo URL for the entitle-agent chart)")
+        token_ref = _cfg("entitle_agent_token_ref")
+        token = config_service.resolve_reference(token_ref) if token_ref else ""
+        if not token:
+            raise K8sError(
+                "entitle_agent_token_ref resolved empty — mint an Entitle agent token "
+                "(entitle_agent_token resource / API) and store it in the secrets backend")
+
+        helm_args = ["upgrade", "--install", "entitle-agent", _cfg("entitle_agent_chart", "entitle-agent"),
+                     "--repo", repo, "--namespace", namespace, "--create-namespace", "--wait",
+                     "--set", f"kmsType={_cfg('entitle_agent_kms_type', 'kubernetes_secret_manager')}"]
+        ver = _cfg("entitle_agent_chart_version")
+        if ver:
+            helm_args += ["--version", ver]
+
+        plaintext_key = _cfg("entitle_agent_token_plaintext_helm_key")
+        if plaintext_key:
+            # Chart only takes a plaintext token value — still resolved server-side,
+            # never persisted; passed as a Helm --set-string for this one release.
+            helm_args += ["--set-string", f"{plaintext_key}={token}"]
+        else:
+            # Default: apply the Secret + point the chart at it (token stays in-cluster).
+            await _apply_manifest_via_runner(
+                kubeconfig, _entitle_agent_secret_manifest(namespace, secret_name, token))
+            helm_args += ["--set",
+                          f"{_cfg('entitle_agent_existing_secret_helm_key', 'agent.existingSecret')}={secret_name}"]
+
+        await _helm_via_runner(kubeconfig, helm_args, add_eso_repo=False)
+        config_service.set("entitle_agent_cluster_id", cluster_id)
+        logger.info("Entitle agent installed on cluster %s (ns=%s)", row.name, namespace)
+    finally:
+        db.close()
+
+
+async def run_entitle_agent(db: Session, *, cluster_id: str, job_id: str,
+                            action: str = "install") -> None:
+    """Worker entry for a ``k8s_entitle_agent`` job: drive :func:`setup_entitle_agent`
+    with Job tracking so an install/remove failure is visible + durable."""
+    from . import job_service
+    from ..api.websocket import broadcast_progress
+    job_service.set_running(db, job_id)
+    try:
+        await broadcast_progress(job_id, 20, f"Entitle agent: {action}…")
+        await setup_entitle_agent(cluster_id, action)
+    except Exception as exc:
+        job_service.set_failed(db, job_id, str(exc))
+        logger.exception("entitle-agent job failed cluster=%s", cluster_id)
+        return
+    job_service.set_completed(db, job_id)
+
+
 # ── Phase 3: brokered access ───────────────────────────────────────────────────
 
 def console_url(db: Session, cluster_id: str) -> dict:

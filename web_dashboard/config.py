@@ -539,6 +539,17 @@ class Settings(BaseSettings):
     entitle_workflow_id: str = ""                    # REQUIRED: UUID of the default approval workflow for created integrations
     entitle_agent_token_name: str = ""               # Entitle Agent token NAME/identifier for private targets (the token VALUE is supplied to the agent cluster via ESO — see docs/design/entitle-resource-registration.md)
     entitle_agent_token_ref: str = ""                # optional secrets-backend ref where the agent token VALUE is stored (for bootstrap/rotation; not the integration identifier above)
+    # Entitle agent cluster bootstrap (Task 7) — Helm-install the agent into a managed
+    # K8s cluster via the k8s_service runner. See docs/design/entitle-resource-registration.md.
+    entitle_agent_cluster_id: str = ""               # set on a successful install — the cluster currently hosting the shared agent
+    entitle_agent_chart_repo: str = ""               # REQUIRED for install: Helm repo URL for the entitle-agent chart (verify against the published chart)
+    entitle_agent_chart: str = "entitle-agent"       # chart name within the repo
+    entitle_agent_chart_version: str = ""            # optional pinned chart version
+    entitle_agent_namespace: str = "entitle"         # in-cluster namespace for the agent + its token Secret
+    entitle_agent_secret_name: str = "entitle-agent-token"  # K8s Secret (key ENTITLE_TOKEN) the agent reads the token from
+    entitle_agent_existing_secret_helm_key: str = "agent.existingSecret"  # Helm value pointing at the token Secret (verify vs the chart)
+    entitle_agent_token_plaintext_helm_key: str = ""  # if set, pass the token plaintext via this Helm value instead of an existing Secret (server-side resolved either way)
+    entitle_agent_kms_type: str = "kubernetes_secret_manager"  # where the running agent vaults integration creds
     entitle_allowed_durations: str = "3600,43200,86400"  # JIT durations (seconds) offered on created integrations
     entitle_ssh_sudo_user: str = ""                 # privileged sudo user Entitle drives to mint/delete ephemeral SSH accounts (defaults to the cloud-default ssh user if blank)
     entitle_ssh_private_key_ref: str = ""           # OPTIONAL fallback/override only — the SSH private key is normally sourced from the VM's own per-cloud keypair (the key cloud-init injected). See docs/design/entitle-resource-registration.md
