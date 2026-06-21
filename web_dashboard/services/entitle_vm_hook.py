@@ -37,12 +37,13 @@ def resolve_ssh_private_key(ref: str) -> str:
     return config_service.get(key) or ""
 
 
-async def _resolve_vm_private_key(tag: str) -> str:
+async def _resolve_vm_private_key(tag: str, secret_name: str = "") -> str:
     """Resolve the SSH private key that pairs with the key cloud-init injected into
-    the VM — sourced from the dashboard's existing per-cloud keypair secret, NOT a
-    separate Entitle key. Azure is clean today; AWS/GCP private-key retrieval is not
-    wired yet, so they fall back to the optional ``entitle_ssh_private_key_ref``
-    override (see docs/design/entitle-resource-registration.md)."""
+    the VM — from the **same** per-cloud keypair secret the deploy used (``secret_name``
+    is the per-launch override when set, else the configured default), NOT a separate
+    Entitle key. Returns "" when the secret carries only a public key (the caller then
+    falls back to the optional ``entitle_ssh_private_key_ref`` override).
+    See docs/design/entitle-resource-registration.md."""
     t = (tag or "").lower()
     try:
         if t == "azure":
@@ -51,19 +52,24 @@ async def _resolve_vm_private_key(tag: str) -> str:
             if not kv:
                 return ""
             return await azure_service.resolve_azure_ssh_private_key(
-                kv, _cfg("azure_ssh_keypair_secret_name"),
+                kv, secret_name or _cfg("azure_ssh_keypair_secret_name"),
                 _cfg("azure_ssh_private_key_secret_name"),
             )
         if t == "gcp":
             from . import gcp_service
             project = _cfg("gcp_project_id") or _cfg("gcp_project")
-            secret = _cfg("gcp_ssh_key_secret_name")
+            secret = secret_name or _cfg("gcp_ssh_key_secret_name")
             if not project or not secret:
                 return ""
-            # Returns "" unless the keypair secret is a JSON {public_key, private_key}.
             return await gcp_service.get_ssh_private_key(project, secret)
-        # AWS: private key lives at the ec2/keypairs/<name> convention but the key
-        # name isn't tracked per-deploy yet — falls back to the optional override below.
+        if t == "aws":
+            from . import aws_service
+            secret = secret_name or _cfg("ec2_ssh_key_secret")
+            if not secret:
+                return ""
+            # Available only when the chosen secret is a JSON {public_key, private_key}.
+            return await aws_service.get_ssh_private_key_from_secret(
+                _cfg("aws_region") or "us-east-2", secret)
     except Exception as e:  # noqa: BLE001
         logger.warning("Entitle: VM private-key resolve (%s) failed: %s", t, e)
     return ""
@@ -71,17 +77,19 @@ async def _resolve_vm_private_key(tag: str) -> str:
 
 async def register(db, job_id: str, vm_name: str, hostname: str, *,
                    private: bool, result: dict, tag: str = "cloud",
-                   private_key: str = "", sudo_user: str = "") -> None:
+                   private_key: str = "", sudo_user: str = "", ssh_key_secret: str = "") -> None:
     """Register a built VM as an Entitle SSH ephemeral-accounts integration.
 
     ``private`` attaches the shared Entitle agent (unreachable hosts); a public VM
-    needs no agent. The SSH private key is the VM's own keypair (resolved per-cloud);
-    callers may pass a resolved ``private_key``/``sudo_user`` explicitly. Writes
-    ``entitle_integration_id`` + ``entitle_registration_tf_state`` onto ``result``
-    (the latter is stored in job metadata for teardown). Non-fatal."""
+    needs no agent. The SSH private key is the VM's own keypair, resolved from the
+    same per-cloud secret the deploy used (``ssh_key_secret`` = the per-launch override
+    when set, else the configured default); callers may also pass a resolved
+    ``private_key``/``sudo_user`` explicitly. Writes ``entitle_integration_id`` +
+    ``entitle_registration_tf_state`` onto ``result`` (the latter is stored in job
+    metadata for teardown). Non-fatal."""
     from . import entitle_registration_service as ent, job_service
     pk = (private_key
-          or await _resolve_vm_private_key(tag)
+          or await _resolve_vm_private_key(tag, ssh_key_secret)
           or resolve_ssh_private_key(_cfg("entitle_ssh_private_key_ref")))
     su = sudo_user or _cfg("entitle_ssh_sudo_user")
     try:
