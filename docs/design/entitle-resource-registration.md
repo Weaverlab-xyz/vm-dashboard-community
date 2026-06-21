@@ -51,11 +51,14 @@ Decisions (validated 2026-06-21):
    also becomes an Entitle **Kubernetes integration** later — coordinate with the
    existing Entitle/K8s wiring (`_entitle_rancher_grant` Rancher-RBAC JIT + the PRA
    `tunnel_type=k8s` jump), don't duplicate.
-2. **Install surface = a new management-plane kind**: `setup_entitle_agent(cluster_id)`
-   mirroring `setup_secret_delivery`, dispatched as `mgmt_kind="entitle_agent"` via the
-   existing management endpoint + `run_management_plane` worker job. The "Provision
-   Entitle agent" admin action is just that POST (decoupled; the ~10-min cluster
-   spin-up happens once).
+2. **Install surface = a secret-delivery-shaped action** (implemented):
+   `POST /api/k8s/clusters/{id}/entitle-agent` enqueues a `k8s_entitle_agent` Job that
+   `jobs_worker` dispatches to `k8s_service.run_entitle_agent` → `setup_entitle_agent`.
+   This mirrors `setup_secret_delivery` rather than the management plane — the
+   management-plane runner is coupled to Portainer endpoint registration (`status=managed`),
+   whereas installing the agent is a tracked in-cluster install. The "Provision Entitle
+   agent" admin action is just that POST (decoupled; the ~10-min cluster spin-up happens
+   once, via the existing `clusters/provision` flow).
 3. Per-build registration stays **opt-in (default off)** and is greyed out until the
    capability + agent are ready.
 
@@ -129,7 +132,13 @@ deploy path passes the key resolved the same way its "get VM SSH key" endpoint d
 cloud-init set up with the injected key + passwordless sudo (the
 `provisioners/beyondtrust/` bt-ready user); `entitle_ssh_sudo_user` overrides it.
 
-## Open items
-- Confirm `entitle-agent` chart secret-based token support (ESO gate above).
+## Status / open items
+- **Agent bootstrap implemented** — `setup_entitle_agent`/`run_entitle_agent` (k8s_service),
+  `POST /api/k8s/clusters/{id}/entitle-agent`, `k8s_entitle_agent` worker dispatch, config keys.
+- **Verification gate (before first real install):** confirm `entitle_agent_chart_repo`
+  (the chart's Helm repo URL) and `entitle_agent_existing_secret_helm_key` (the Helm value
+  that points at the token Secret) against the published chart; set
+  `entitle_agent_token_plaintext_helm_key` if the chart only takes a plaintext token.
+- UI: an "Install Entitle agent" action on the cluster page (mirrors secret-delivery) — TODO.
 - AWS: track the per-deploy keypair name so the private key resolves from `ec2/keypairs/<name>` instead of the optional override.
 - Wire EKS/AKS/GKE clusters as Entitle Kubernetes integrations (the agent cluster qualifies first).

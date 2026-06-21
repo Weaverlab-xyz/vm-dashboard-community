@@ -62,6 +62,12 @@ class SecretDeliveryRequest(BaseModel):
     kind: str = "eso"                         # eso | none  (secrets_agent is a later kind)
 
 
+class EntitleAgentRequest(BaseModel):
+    """Install or remove the Entitle agent in a managed cluster (agent-cluster
+    bootstrap). The token is resolved server-side from ``entitle_agent_token_ref``."""
+    action: str = "install"                   # install | remove
+
+
 class ClusterInfo(BaseModel):
     id: str
     cloud: str
