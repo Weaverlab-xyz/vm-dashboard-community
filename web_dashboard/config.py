@@ -557,6 +557,11 @@ class Settings(BaseSettings):
     entitle_agent_existing_secret_helm_key: str = "agent.existingSecret"  # used only when the plaintext key is cleared (future chart)
     entitle_agent_helm_extra_set: str = ""           # extra `--set key=value` args, comma-separated (e.g. datadog.datadog.apiKey=…); the chart bundles Datadog
     entitle_agent_kms_type: str = "kubernetes_secret_manager"  # where the running agent vaults integration creds
+    # Register managed clusters as Entitle Kubernetes integrations (generic "Kubernetes"
+    # app; EKS/AKS/GKE). External access mints a least-priv ServiceAccount; private API
+    # clusters use the agent's In-Cluster access.
+    entitle_k8s_user_prefix: str = "entitle"         # user_prefix Entitle uses for the ephemeral cluster identities
+    entitle_k8s_sa_name: str = "entitle-access"      # ServiceAccount minted in-cluster for External-Access registration
     entitle_allowed_durations: str = "3600,43200,86400"  # JIT durations (seconds) offered on created integrations
     entitle_ssh_sudo_user: str = ""                 # privileged sudo user Entitle drives to mint/delete ephemeral SSH accounts (defaults to the cloud-default ssh user if blank)
     entitle_ssh_private_key_ref: str = ""           # OPTIONAL fallback/override only — the SSH private key is normally sourced from the VM's own per-cloud keypair (the key cloud-init injected). See docs/design/entitle-resource-registration.md
