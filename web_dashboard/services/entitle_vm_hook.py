@@ -54,9 +54,16 @@ async def _resolve_vm_private_key(tag: str) -> str:
                 kv, _cfg("azure_ssh_keypair_secret_name"),
                 _cfg("azure_ssh_private_key_secret_name"),
             )
+        if t == "gcp":
+            from . import gcp_service
+            project = _cfg("gcp_project_id") or _cfg("gcp_project")
+            secret = _cfg("gcp_ssh_key_secret_name")
+            if not project or not secret:
+                return ""
+            # Returns "" unless the keypair secret is a JSON {public_key, private_key}.
+            return await gcp_service.get_ssh_private_key(project, secret)
         # AWS: private key lives at the ec2/keypairs/<name> convention but the key
-        # name isn't tracked per-deploy yet. GCP: only a public-key resolver exists.
-        # Both fall back to the optional override below until wired.
+        # name isn't tracked per-deploy yet — falls back to the optional override below.
     except Exception as e:  # noqa: BLE001
         logger.warning("Entitle: VM private-key resolve (%s) failed: %s", t, e)
     return ""
