@@ -740,6 +740,17 @@
               <a href="/setup" class="underline font-medium">Open setup wizard → AWS Advanced</a> to set a secret name.
               Deployments to Linux instances will fail without an SSH public key.
             </div>
+            <div class="mt-2">
+              <label class="block text-xs font-medium text-gray-600 mb-1">Override secret (optional)</label>
+              <select x-model="deployForm.ssh_key_secret_override"
+                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                <option value="">Use configured default</option>
+                <template x-for="s in deployForm.sshKeySecrets" :key="s">
+                  <option :value="s" x-text="s"></option>
+                </template>
+              </select>
+              <p class="mt-1 text-xs text-gray-400">Any Secrets Manager secret. Must be JSON with a <code>public_key</code> — validated on launch.</p>
+            </div>
           </div>
 
           <!-- Subnet -->
@@ -1249,6 +1260,8 @@
         jump_group: '', jumpoint_name: '',
         praCredBackend: '', pra_credential_ref: '',
         register_in_entitle: false,
+        ssh_key_secret_override: '',
+        sshKeySecrets: [],
       },
       availableWorkgroups: [],
       deploying: false,
@@ -1499,6 +1512,8 @@
           workgroup: this.availableWorkgroups.includes('default') ? 'default' :
                      (this.availableWorkgroups[0] || ''),
           register_in_entitle: false,
+          ssh_key_secret_override: '',
+          sshKeySecrets: [],
         };
         this.deployError = '';
         this.showDeployModal = true;
@@ -1515,6 +1530,11 @@
           }).catch(() => {
             this.deployForm.sshPublicKeyPreview = '';
           })
+        );
+        fetches.push(
+          API.get('/api/aws/secrets/ssh-keys').then(r => {
+            this.deployForm.sshKeySecrets = r?.secrets || [];
+          }).catch(() => { this.deployForm.sshKeySecrets = []; })
         );
         try {
           await Promise.all(fetches);
@@ -1594,6 +1614,7 @@
             jumpoint_name: this.deployForm.jumpoint_name || null,
             pra_credential_ref: this.deployForm.pra_credential_ref || null,
             register_in_entitle: this.deployForm.register_in_entitle,
+            ssh_key_secret_override: this.deployForm.ssh_key_secret_override || null,
           };
 
           const resp = await API.post('/api/aws/deploy', body);
@@ -1708,6 +1729,7 @@
             security_group_ids: this.deployForm.security_group_ids,
             workgroup: this.deployForm.workgroup,
             register_in_entitle: this.deployForm.register_in_entitle,
+            ssh_key_secret_override: this.deployForm.ssh_key_secret_override || null,
           });
           this.bulkDeployResults = resp.jobs || [];
           toast(`${resp.count} deployment${resp.count !== 1 ? 's' : ''} queued!`, 'success');

@@ -309,6 +309,21 @@ async def get_secret(project_id: str, secret_name: str) -> str:
     return await asyncio.to_thread(_get_secret_sync, project_id, secret_name)
 
 
+def _list_secret_names_sync(project_id: str) -> list:
+    _require_secretmanager()
+    from google.cloud import secretmanager_v1
+
+    client = secretmanager_v1.SecretManagerServiceClient(credentials=_gcp_creds())
+    parent = f"projects/{project_id}"
+    return sorted(s.name.split("/")[-1] for s in client.list_secrets(request={"parent": parent}))
+
+
+async def list_secret_names(project_id: str) -> list:
+    """Return every Secret Manager secret id — candidate set for the per-launch
+    SSH-key-secret override picker."""
+    return await asyncio.to_thread(_list_secret_names_sync, project_id)
+
+
 def _clean_public_key(value: str) -> str:
     """Sanitize an SSH public key for metadata injection.
 

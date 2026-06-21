@@ -223,6 +223,23 @@ async def get_ssh_key_from_vault(vault_url: str, secret_name: str) -> str:
         ) from e
 
 
+def _list_kv_secret_names_sync(cred, vault_url: str) -> list:
+    client = SecretClient(vault_url=vault_url, credential=cred)
+    return sorted(p.name for p in client.list_properties_of_secrets())
+
+
+async def list_kv_secret_names(vault_url: str) -> list:
+    """Return every Key Vault secret name — candidate set for the per-launch
+    SSH-key-secret override picker."""
+    try:
+        cred, _ = await _ensure_creds()
+        return await asyncio.to_thread(_list_kv_secret_names_sync, cred, vault_url)
+    except AzureError:
+        raise
+    except Exception as e:
+        raise AzureError(f"Failed to list Key Vault secrets: {e}") from e
+
+
 def _get_ssh_keypair_from_vault_sync(cred, vault_url: str, secret_name: str) -> dict:
     """Fetch a unified keypair secret expected to be JSON `{public_key, private_key}`.
 

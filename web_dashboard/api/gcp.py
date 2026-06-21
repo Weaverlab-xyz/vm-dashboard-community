@@ -317,6 +317,20 @@ async def get_configured_ssh_key(
     return GCPSSHKeyDetail(secret_name=secret_name, public_key_preview=pub_key[:80])
 
 
+@router.get("/secrets/ssh-keys")
+async def list_ssh_key_secret_names(
+    current_user: User = Depends(require_permission("gcp", "read")),
+):
+    """Candidate secrets for the per-launch SSH-key-secret override picker."""
+    project_id = _gcp_project()
+    if not project_id:
+        raise HTTPException(status_code=400, detail="GCP project ID not configured.")
+    try:
+        return {"secrets": await gcp_service.list_secret_names(project_id)}
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
 @router.post("/deploy", response_model=GCPDeployResponse)
 async def deploy_instance(
     payload: GCPDeployRequest,

@@ -148,6 +148,19 @@ async def _validate_ssh_key_override(override) -> None:
         raise HTTPException(status_code=400, detail=f"SSH key secret '{override}' is invalid: {e}")
 
 
+async def _effective_ssh_public_key(req) -> str:
+    """Public key to inject at launch: from the per-launch override secret when set,
+    else the key the form already resolved (``req.ssh_public_key``). Keeps the injected
+    key in sync with the secret Entitle registration reads the private key from."""
+    override = getattr(req, "ssh_key_secret_override", None)
+    if not override:
+        return req.ssh_public_key
+    try:
+        return await azure_service.resolve_azure_ssh_public_key(_cfg("azure_key_vault_url"), override, "")
+    except AzureError:
+        return req.ssh_public_key
+
+
 # ── Private images (gallery + managed) ───────────────────────────────────────
 
 @router.get("/images")
@@ -267,6 +280,20 @@ async def get_keyvault_ssh_key(
             "secret_name": unified_secret or legacy_secret,
             "ssh_public_key": key_text,
         }
+    except AzureError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+@router.get("/secrets/ssh-keys")
+async def list_ssh_key_secret_names(
+    current_user: User = Depends(require_permission("azure", "read")),
+):
+    """Candidate Key Vault secrets for the per-launch SSH-key-secret override picker."""
+    kv_url = _cfg("azure_key_vault_url")
+    if not kv_url:
+        raise HTTPException(status_code=503, detail="Key Vault not configured.")
+    try:
+        return {"secrets": await azure_service.list_kv_secret_names(kv_url)}
     except AzureError as e:
         raise HTTPException(status_code=503, detail=str(e))
 
@@ -964,7 +991,7 @@ async def _run_deploy(job_id: str, req: AzureDeployRequest, rg: str, loc: str):
                 nsg_ids=req.nsg_ids,
                 create_public_ip=req.create_public_ip,
                 ssh_username=req.ssh_username,
-                ssh_public_key=req.ssh_public_key,
+                ssh_public_key=await _effective_ssh_public_key(req),
                 image_publisher=req.image_publisher,
                 image_offer=req.image_offer,
                 image_sku=req.image_sku,
@@ -1143,7 +1170,7 @@ async def _run_bulk_deploy(job_items: list, req: AzureBulkDeployRequest, rg: str
                     nsg_ids=req.nsg_ids,
                     create_public_ip=req.create_public_ip,
                     ssh_username=req.ssh_username,
-                    ssh_public_key=req.ssh_public_key,
+                    ssh_public_key=await _effective_ssh_public_key(req),
                     image_publisher=req.image_publisher,
                     image_offer=req.image_offer,
                     image_sku=req.image_sku,
