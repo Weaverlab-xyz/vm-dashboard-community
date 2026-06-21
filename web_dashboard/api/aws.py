@@ -327,6 +327,17 @@ async def get_configured_ssh_key(
         raise HTTPException(status_code=404, detail=str(e))
 
 
+@router.get("/secrets/ssh-keys")
+async def list_ssh_key_secret_names(
+    current_user: User = Depends(require_permission("aws", "read")),
+):
+    """Candidate secrets for the per-launch SSH-key-secret override picker."""
+    try:
+        return {"secrets": await aws_service.list_secret_names(_aws_region())}
+    except AWSError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
 # ── Deploy ────────────────────────────────────────────────────────────────────
 
 @router.post("/deploy", response_model=DeployResponse)

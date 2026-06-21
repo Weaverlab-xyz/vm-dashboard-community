@@ -144,6 +144,32 @@ async def get_ssh_key_secrets(region: str, prefix: str) -> list:
         raise AWSError("AWS credentials not configured.")
 
 
+def _list_secret_names_sync(region: str) -> list:
+    """List all Secrets Manager secret names in the region (no name filter)."""
+    sm = _get_sm(region)
+    names: list[str] = []
+    kwargs: dict = {"MaxResults": 100}
+    while True:
+        resp = sm.list_secrets(**kwargs)
+        names.extend(s["Name"] for s in resp.get("SecretList", []))
+        token = resp.get("NextToken")
+        if not token:
+            break
+        kwargs["NextToken"] = token
+    return sorted(names)
+
+
+async def list_secret_names(region: str) -> list:
+    """Return every Secrets Manager secret name — the candidate set for the
+    per-launch SSH-key-secret override picker."""
+    try:
+        return await asyncio.to_thread(_list_secret_names_sync, region)
+    except (ClientError, BotoCoreError) as e:
+        raise AWSError(f"Failed to list secrets: {e}") from e
+    except NoCredentialsError:
+        raise AWSError("AWS credentials not configured.")
+
+
 def _get_ssh_public_key_from_secret_sync(region: str, secret_name: str) -> dict:
     """Retrieve the SSH public key stored in a Secrets Manager secret.
 
