@@ -81,7 +81,16 @@ already use:
    <chart>, …])` referencing that Secret.
 
 Net: the token lives only in the secrets backend + the in-cluster Secret — never in
-Terraform state, Helm `--set`, or `helm get values`.
+Terraform state, Helm `--set`, or `helm get values`. (Both paths land a native K8s
+Secret in-cluster — the agent authenticates from it; the difference is how it gets
+there and who keeps it in sync.)
+
+**Rotation:** re-run `setup_entitle_agent` to push a fresh token — it re-resolves from
+the backend, re-applies the `Secret`, and the agent picks up the new value. This is the
+manual/imperative path; the ESO alternative below rotates automatically (update the
+value in the external store → ESO reconciles the in-cluster Secret on its refresh
+interval). **Both are supported** — pick per environment; the server-side path is
+simpler, ESO is hands-off for rotation.
 
 > **Verification gate (load-bearing for step 2/3):** confirm the `entitle-agent` chart
 > reads the token from an **existing Secret** (`secretKeyRef`/`ENTITLE_TOKEN`) rather
