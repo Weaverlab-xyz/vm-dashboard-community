@@ -1036,6 +1036,160 @@ async def run_entitle_agent(db: Session, *, cluster_id: str, job_id: str,
     job_service.set_completed(db, job_id)
 
 
+# ── Register the cluster as an Entitle Kubernetes integration ──────────────────
+# The generic Entitle "Kubernetes" application (covers EKS/AKS/GKE via the K8s API),
+# registered through entitle_registration_service like VMs/DBs. Two modes:
+#   * In-Cluster — when the Entitle agent is installed on THIS cluster: register with
+#     just a user_prefix; the agent provides access (private API clusters).
+#   * External   — mint a least-privilege Entitle ServiceAccount + token in-cluster
+#     and register host + token + CA (public API clusters).
+# Integration id + Terraform state are stashed (encrypted) in config_service so the
+# deregister path can tear it down. ⚠️ The ServiceAccount is bound to cluster-admin
+# for v1 (Entitle manages native RBAC); scope down once the required ClusterRole is
+# confirmed against the Entitle Kubernetes integration docs.
+
+VALID_ENTITLE_CLUSTER_ACTIONS = ("register", "deregister")
+
+
+def _kubeconfig_host_ca(kubeconfig: str) -> tuple:
+    """(API server URL, CA PEM) for the current-context cluster — or ("",""). """
+    try:
+        cfg = yaml.safe_load(kubeconfig) or {}
+        cur = cfg.get("current-context")
+        cl_name = None
+        for ctx in cfg.get("contexts", []):
+            if ctx.get("name") == cur:
+                cl_name = (ctx.get("context") or {}).get("cluster")
+                break
+        clusters = cfg.get("clusters") or []
+        cluster = next((c for c in clusters if c.get("name") == cl_name), None) or (clusters[0] if clusters else {})
+        cdata = cluster.get("cluster") or {}
+        host = cdata.get("server", "") or ""
+        ca_b64 = cdata.get("certificate-authority-data", "") or ""
+        ca = base64.b64decode(ca_b64).decode("utf-8") if ca_b64 else ""
+        return host, ca
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("kubeconfig host/CA parse failed: %s", exc)
+        return "", ""
+
+
+def _entitle_k8s_rbac_manifest(namespace: str, sa: str, secret: str) -> str:
+    """Namespace + a ServiceAccount bound to cluster-admin + a long-lived SA token
+    Secret (K8s 1.24+ no longer auto-creates token Secrets) for Entitle's
+    External-Access connection."""
+    return (
+        "apiVersion: v1\nkind: Namespace\nmetadata:\n"
+        f"  name: {namespace}\n---\n"
+        "apiVersion: v1\nkind: ServiceAccount\nmetadata:\n"
+        f"  name: {sa}\n  namespace: {namespace}\n---\n"
+        "apiVersion: rbac.authorization.k8s.io/v1\nkind: ClusterRoleBinding\nmetadata:\n"
+        f"  name: {sa}-binding\n"
+        "roleRef:\n  apiGroup: rbac.authorization.k8s.io\n  kind: ClusterRole\n  name: cluster-admin\n"
+        "subjects:\n"
+        f"- kind: ServiceAccount\n  name: {sa}\n  namespace: {namespace}\n---\n"
+        "apiVersion: v1\nkind: Secret\nmetadata:\n"
+        f"  name: {secret}\n  namespace: {namespace}\n"
+        "  annotations:\n"
+        f"    kubernetes.io/service-account.name: {sa}\n"
+        "type: kubernetes.io/service-account-token\n"
+    )
+
+
+async def _get_secret_b64_via_runner(kubeconfig: str, namespace: str, secret: str, key: str) -> str:
+    """Return the **base64** value of ``.data[<key>]`` from a Secret (decode in Python —
+    the minimal kubectl image has no ``base64``)."""
+    kubeconfig = _runner_kubeconfig(kubeconfig)
+    tmpdir = tempfile.mkdtemp(prefix="k8s_get_")
+    try:
+        with open(os.path.join(tmpdir, "kubeconfig"), "w") as fh:
+            fh.write(kubeconfig)
+        jsonpath = "{.data." + key.replace(".", "\\.") + "}"
+        shell_cmd = (f"kubectl --kubeconfig /work/kubeconfig -n {shlex.quote(namespace)} "
+                     f"get secret {shlex.quote(secret)} -o jsonpath={shlex.quote(jsonpath)}")
+        cmd = ["docker", "run", "--rm", *_runner_ca_args(), "--entrypoint", "/bin/sh",
+               "-v", f"{tmpdir}:/work", _KUBECTL_IMAGE, "-c", shell_cmd]
+        try:
+            return (await asyncio.to_thread(_run_sync, cmd)).strip()
+        except K8sError:
+            return ""
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+async def register_cluster_in_entitle(cluster_id: str, action: str = "register") -> None:
+    """Register (or deregister) a managed cluster as an Entitle Kubernetes integration.
+    Background task. In-Cluster when the Entitle agent is installed on this cluster;
+    External (mint SA + token) otherwise."""
+    from ..database import SessionLocal
+    from . import config_service, entitle_registration_service as ent
+    db = SessionLocal()
+    try:
+        row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
+        if row is None:
+            return
+        user_prefix = _cfg("entitle_k8s_user_prefix", "entitle")
+
+        if action == "deregister":
+            state = config_service.get(f"entitle_k8s_tfstate_{cluster_id}")
+            if state:
+                try:
+                    await ent.deregister(state)
+                except Exception as exc:
+                    logger.warning("entitle k8s deregister %s failed (non-fatal): %s", cluster_id, exc)
+            config_service.set(f"entitle_k8s_tfstate_{cluster_id}", "")
+            config_service.set(f"entitle_k8s_integration_id_{cluster_id}", "")
+            return
+
+        kubeconfig = resolve_kubeconfig(db, cluster_id)
+        in_cluster = config_service.get("entitle_agent_cluster_id") == cluster_id
+        if in_cluster:
+            result = await ent.register_kubernetes(name=row.name, private=True, user_prefix=user_prefix)
+        else:
+            host, ca = _kubeconfig_host_ca(kubeconfig)
+            if not host:
+                raise K8sError("could not parse the API server host from the cluster kubeconfig")
+            ns = _cfg("entitle_agent_namespace", "entitle")
+            sa = _cfg("entitle_k8s_sa_name", "entitle-access")
+            secret = f"{sa}-token"
+            await _apply_manifest_via_runner(kubeconfig, _entitle_k8s_rbac_manifest(ns, sa, secret))
+            token = ""
+            for _ in range(6):  # the token controller populates .data.token async
+                b64 = await _get_secret_b64_via_runner(kubeconfig, ns, secret, "token")
+                if b64:
+                    token = base64.b64decode(b64).decode("utf-8")
+                    break
+                await asyncio.sleep(2)
+            if not token:
+                raise K8sError("the Entitle service-account token did not populate — retry")
+            result = await ent.register_kubernetes(
+                name=row.name, private=False, user_prefix=user_prefix,
+                host=host, token=token, ca_cert=ca)
+
+        config_service.set(f"entitle_k8s_integration_id_{cluster_id}", result.get("integration_id") or "")
+        config_service.set(f"entitle_k8s_tfstate_{cluster_id}", result.get("tf_state_json") or "")
+        logger.info("cluster %s registered as Entitle Kubernetes integration %s (%s)",
+                    row.name, result.get("integration_id"), "in-cluster" if in_cluster else "external")
+    finally:
+        db.close()
+
+
+async def run_entitle_register(db: Session, *, cluster_id: str, job_id: str,
+                               action: str = "register") -> None:
+    """Worker entry for a ``k8s_entitle_register`` job: drive
+    :func:`register_cluster_in_entitle` with Job tracking."""
+    from . import job_service
+    from ..api.websocket import broadcast_progress
+    job_service.set_running(db, job_id)
+    try:
+        await broadcast_progress(job_id, 20, f"Entitle Kubernetes integration: {action}…")
+        await register_cluster_in_entitle(cluster_id, action)
+    except Exception as exc:
+        job_service.set_failed(db, job_id, str(exc))
+        logger.exception("entitle k8s register job failed cluster=%s", cluster_id)
+        return
+    job_service.set_completed(db, job_id)
+
+
 # ── Phase 3: brokered access ───────────────────────────────────────────────────
 
 def console_url(db: Session, cluster_id: str) -> dict:

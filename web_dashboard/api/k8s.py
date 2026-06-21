@@ -24,6 +24,7 @@ from ..models.k8s import (
     ClusterProvisionRequest,
     ClusterRegisterRequest,
     EntitleAgentRequest,
+    EntitleClusterRegisterRequest,
     ManagementRequest,
     SecretDeliveryRequest,
 )
@@ -307,4 +308,33 @@ async def setup_entitle_agent(
         metadata={"cluster_id": cluster_id, "action": payload.action},
     )
     return {"ok": True, "status": "installing" if payload.action == "install" else "removing",
+            "cluster_id": cluster_id, "action": payload.action, "job_id": job.id}
+
+
+@router.post("/clusters/{cluster_id}/entitle-register", status_code=202)
+async def register_cluster_in_entitle(
+    cluster_id: str,
+    payload: EntitleClusterRegisterRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Register (or deregister) the cluster as a generic Entitle **Kubernetes**
+    integration (EKS/AKS/GKE) so users request JIT cluster RBAC in Entitle. Uses the
+    agent's In-Cluster access when the agent is installed here, else mints a
+    least-privilege ServiceAccount for External Access. Async — enqueues a
+    ``k8s_entitle_register`` job; open the job for status/error."""
+    if payload.action not in k8s_service.VALID_ENTITLE_CLUSTER_ACTIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown action {payload.action!r} (expected one of {', '.join(k8s_service.VALID_ENTITLE_CLUSTER_ACTIONS)})",
+        )
+    try:
+        k8s_service.get_cluster(db, cluster_id)   # 404 if unknown
+    except K8sError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    job = job_service.create_job(
+        db, job_type="k8s_entitle_register", created_by=current_user.username,
+        metadata={"cluster_id": cluster_id, "action": payload.action},
+    )
+    return {"ok": True, "status": "registering" if payload.action == "register" else "deregistering",
             "cluster_id": cluster_id, "action": payload.action, "job_id": job.id}

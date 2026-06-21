@@ -151,4 +151,9 @@ cloud-init set up with the injected key + passwordless sudo (the
   optional override. The `ec2/keypairs/<name>` convention is a *separate manual path*
   used by `get_instance_ssh_key` for EC2-KeyPair instances, not the userdata-injected
   flow — so there's no per-deploy keypair name to track here (earlier open item retired).
-- Wire EKS/AKS/GKE clusters as Entitle Kubernetes integrations (the agent cluster qualifies first).
+- **K8s cluster registration implemented** — `register_kubernetes` (entitle_registration_service) +
+  `register_cluster_in_entitle`/`run_entitle_register` (k8s_service), `POST /api/k8s/clusters/{id}/entitle-register`,
+  `k8s_entitle_register` worker, "Register in Entitle" cluster button. Generic **Kubernetes** app:
+  In-Cluster via the agent for private API clusters, else a minted least-priv ServiceAccount (External
+  Access). Open: scope the ServiceAccount ClusterRole down from cluster-admin once the required perms are
+  confirmed; the GKE-specific GCP-IAM integration is a separate optional path.

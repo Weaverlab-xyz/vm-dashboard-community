@@ -92,6 +92,9 @@
               <button @click="installEntitleAgent(c)"
                       title="Install the Entitle agent into this cluster (agent-cluster bootstrap) so private resources registered in Entitle are reachable"
                       class="text-xs px-2 py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded font-medium">Entitle agent</button>
+              <button @click="entitleRegister(c)"
+                      title="Register this cluster as an Entitle Kubernetes integration (JIT cluster RBAC)"
+                      class="text-xs px-2 py-1 bg-fuchsia-600 hover:bg-fuchsia-700 text-white rounded font-medium">Register in Entitle</button>
               <button @click="del(c)" class="text-xs px-2 py-1 text-red-600 hover:underline ml-1">Delete</button>
             </td>
           </tr>
@@ -426,6 +429,17 @@ function k8sPage() {
         await this.refresh();
       } catch (e) {
         this.flash(e.message || 'Entitle agent install failed.', 'error');
+      }
+    },
+
+    async entitleRegister(c) {
+      if (!confirm(`Register "${c.name}" as an Entitle Kubernetes integration?\n\nIn-cluster access if the Entitle agent is installed here, otherwise a least-privilege ServiceAccount is minted for external access. Track progress in Jobs.`)) return;
+      try {
+        await API.post(`/api/k8s/clusters/${c.id}/entitle-register`, { action: 'register' });
+        this.flash('Registering cluster in Entitle — track progress in Jobs.');
+        await this.refresh();
+      } catch (e) {
+        this.flash(e.message || 'Entitle registration failed.', 'error');
       }
     },
 

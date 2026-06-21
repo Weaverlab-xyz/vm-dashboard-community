@@ -68,6 +68,13 @@ class EntitleAgentRequest(BaseModel):
     action: str = "install"                   # install | remove
 
 
+class EntitleClusterRegisterRequest(BaseModel):
+    """Register (or deregister) a managed cluster as a generic Entitle **Kubernetes**
+    integration (EKS/AKS/GKE). In-Cluster when the agent is installed; External
+    (minted ServiceAccount + token) otherwise."""
+    action: str = "register"                  # register | deregister
+
+
 class ClusterInfo(BaseModel):
     id: str
     cloud: str

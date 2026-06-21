@@ -62,10 +62,11 @@ _PLUGIN_CACHE_DIR = os.environ.get("TF_PLUGIN_CACHE_DIR", "/root/.terraform.d/pl
 # confirmed from provider docs; the rest are best-effort — confirm via the
 # entitle_applications data source for your tenant.
 _APP_SLUG = {
-    "ssh":       "ssh",
-    "postgres":  "postgresql",
-    "mysql":     "mysql",
-    "sqlserver": "mssql",
+    "ssh":        "ssh",
+    "postgres":   "postgresql",
+    "mysql":      "mysql",
+    "sqlserver":  "mssql",
+    "kubernetes": "Kubernetes",
 }
 
 _DEFAULT_DURATIONS = "3600,43200,86400"  # 1h, 12h, 24h (all valid Entitle values)
@@ -232,6 +233,44 @@ output "integration_id" {{
 """
 
 
+def _generate_k8s_hcl(*, name: str, host: str, user_prefix: str, private: bool) -> str:
+    """The generic Entitle **Kubernetes** integration (covers EKS/AKS/GKE via the K8s
+    API). ``private`` = the API server isn't reachable from Entitle's cloud, so use
+    **In-Cluster** access via the agent (``connection_json`` is just ``user_prefix``);
+    otherwise **External Access** with host + a service-account token + CA."""
+    label = _safe_name(name)
+    slug = _APP_SLUG["kubernetes"]
+    if private:
+        header = _provider_header()
+        conn = (
+            "  connection_json = jsonencode({\n"
+            f"    user_prefix = {json.dumps(user_prefix)}\n"
+            "  })\n"
+        )
+    else:
+        header = _provider_header(
+            'variable "k8s_token" { sensitive = true }\n'
+            'variable "k8s_ca_cert" { sensitive = true }\n')
+        conn = (
+            "  connection_json = jsonencode({\n"
+            f"    host                = {json.dumps(host)}\n"
+            "    token               = var.k8s_token\n"
+            "    ssl_ca_cert_content = var.k8s_ca_cert\n"
+            f"    user_prefix         = {json.dumps(user_prefix)}\n"
+            "  })\n"
+        )
+    return header + f"""
+resource "entitle_integration" {json.dumps(label)} {{
+  name        = {json.dumps(name[:50])}
+  application = {{ name = {json.dumps(slug)} }}
+{conn}{_common_attrs_hcl(private)}}}
+
+output "integration_id" {{
+  value = entitle_integration.{label}.id
+}}
+"""
+
+
 # ── Terraform plumbing ────────────────────────────────────────────────────────
 
 def _run_tf(args: list, work_dir: str, env: dict, timeout: int = 120) -> subprocess.CompletedProcess:
@@ -335,16 +374,23 @@ async def register_database(
     return await asyncio.to_thread(_apply_hcl_sync, hcl, {"db_password": password})
 
 
-async def register_kubernetes(*, name: str, **kwargs) -> dict:
-    """Register an EKS/AKS/GKE cluster as an Entitle Kubernetes integration.
+async def register_kubernetes(*, name: str, private: bool = True,
+                              user_prefix: str = "entitle", host: str = "",
+                              token: str = "", ca_cert: str = "",
+                              tag: str = "k8s-cluster") -> dict:
+    """Register a managed cluster (EKS/AKS/GKE) as an Entitle **Kubernetes** integration.
 
-    Future phase — wired in when the cluster build flows ship (EKS first). The
-    seam mirrors ``cloud_database_service`` listing engines it doesn't yet
-    implement. See docs/design/entitle-resource-registration.md.
+    ``private`` → In-Cluster access via the agent (only ``user_prefix`` needed; the
+    agent must be installed). Otherwise External Access: ``host`` (API server) + a
+    service-account ``token`` + ``ca_cert`` (PEM). Returns ``{integration_id,
+    tf_state_json}`` — stash the state so ``deregister`` can remove it.
     """
-    raise NotImplementedError(
-        "Kubernetes (EKS/AKS/GKE) Entitle registration is not implemented yet"
-    )
+    if not private and not (host and token):
+        raise EntitleRegistrationError(
+            "External-access Kubernetes registration needs host + a service-account token")
+    hcl = _generate_k8s_hcl(name=name, host=host, user_prefix=user_prefix, private=private)
+    tf_vars = {} if private else {"k8s_token": token, "k8s_ca_cert": ca_cert}
+    return await asyncio.to_thread(_apply_hcl_sync, hcl, tf_vars)
 
 
 async def deregister(tf_state_json: str) -> None:
