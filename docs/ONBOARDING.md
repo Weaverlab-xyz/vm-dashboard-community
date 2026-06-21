@@ -31,7 +31,7 @@ Desktop required).
 - [Appendix F — XCP-ng / XenServer integration](#appendix-f--xcp-ng--xenserver-integration)
 - [Appendix G — Sign in with Microsoft (Entra OAuth)](#appendix-g--sign-in-with-microsoft-entra-oauth)
 - [Appendix H — BeyondTrust integration](#appendix-h--beyondtrust-integration)
-- [Appendix I — Entitle approval workflows](#appendix-i--entitle-approval-workflows)
+- [Appendix I — Entitle resource registration](#appendix-i--entitle-resource-registration)
 - [Appendix J — MCP server (AI client integration)](#appendix-j--mcp-server-ai-client-integration)
 - [Appendix K — Portainer CE integration](#appendix-k--portainer-ce-integration)
 - [Appendix L — Ansible config management](#appendix-l--ansible-config-management)
@@ -971,20 +971,25 @@ same appliance, the host and credentials may be the same as Part 1.
 
 ---
 
-## Appendix I — Entitle approval workflows
+## Appendix I — Entitle resource registration
 
 > **Full guide:** [docs/integrations/entitle.md](integrations/entitle.md)
 
-Optional. Gates sensitive dashboard actions (VM deploy, termination, etc.)
-behind an **Entitle** approval workflow. Entitle is a BeyondTrust company.
-Requires an active Entitle tenant.
+Optional. As the dashboard builds **Linux VMs** and **cloud databases**, it
+registers each as an **Entitle** integration (SSH ephemeral accounts /
+PostgreSQL / MySQL / SQL Server) so users request just-in-time access in Entitle.
+Entitle is a BeyondTrust company; requires an active Entitle tenant. (The former
+*approval-gate* integration has been removed.)
 
 ### Enable the integration
 
-1. **Settings → Integrations** → toggle **Entitle approval workflows** on.
-2. Fill in your Entitle API endpoint and API key from the Entitle admin
-   console.
-3. Click **Save**. No restart required.
+1. **Settings → Integrations → Entitle** → fill in the API URL/token, the
+   Terraform provider key, and `owner`/`workflow` IDs; toggle **Register built VMs
+   & databases in Entitle** on.
+2. Per build, check **Register in Entitle** on the VM/DB form (opt-in, default off).
+3. **Private** targets (private RDS, PRA-only VMs) need a shared **Entitle agent** —
+   install it into a managed cluster via `POST /api/k8s/clusters/{id}/entitle-agent`.
+   Public targets need no agent.
 
 ---
 
