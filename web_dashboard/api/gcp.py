@@ -333,6 +333,19 @@ async def deploy_instance(
     workgroup = _validate_workgroup(db, current_user, payload.workgroup)
     payload.workgroup = workgroup
 
+    # Validate an optional per-launch SSH-key-secret override: must be a JSON object
+    # carrying a public_key, else the VM would be unreachable.
+    if payload.ssh_key_secret_override:
+        from ..services import ssh_key_secret
+        try:
+            raw = await gcp_service.get_secret(project_id, payload.ssh_key_secret_override)
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(status_code=400, detail=f"SSH key secret '{payload.ssh_key_secret_override}' could not be read: {e}")
+        try:
+            ssh_key_secret.validate_public_key_secret(raw, secret_name=payload.ssh_key_secret_override)
+        except ssh_key_secret.SshKeySecretError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
     job = job_service.create_job(
         db,
         job_type="gce_deploy",
@@ -410,8 +423,8 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
                     f"Jumpoint provisioning failed (non-fatal): {e} — continuing with VM launch…"
                 )
 
-        # Retrieve SSH public key
-        secret_name = _cfg_svc.get("gcp_ssh_key_secret_name") or ""
+        # Retrieve SSH public key (per-launch override wins over the configured default)
+        secret_name = getattr(payload, "ssh_key_secret_override", None) or _cfg_svc.get("gcp_ssh_key_secret_name") or ""
         ssh_username = _cfg_svc.get("gcp_ssh_username") or payload.ssh_username or "gcp-user"
         ssh_public_key = ""
         if secret_name:
@@ -502,7 +515,8 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
         if getattr(payload, "register_in_entitle", False) and entitle_vm_hook.registration_enabled():
             await entitle_vm_hook.register(db, job_id, payload.instance_name, hostname,
                                            private=not payload.create_external_ip,
-                                           result=final_meta, tag="GCP")
+                                           result=final_meta, tag="GCP",
+                                           ssh_key_secret=secret_name)
 
         job_service.set_completed(db, job_id, final_meta)
         await cache_service.invalidate(cache_service.key_global("gcp_instances"))

@@ -174,6 +174,22 @@ async def get_ssh_public_key_from_secret(region: str, secret_name: str) -> dict:
         raise AWSError("AWS credentials not configured.")
 
 
+async def get_ssh_private_key_from_secret(region: str, secret_name: str) -> str:
+    """Return the SSH **private** key from a Secrets Manager secret when it's a JSON
+    keypair carrying a ``private_key`` field. Returns ``""`` when the secret holds
+    only a public key. Never logs key material."""
+    try:
+        raw = await get_secret(secret_name, region)
+    except Exception:  # noqa: BLE001 — caller treats absence as "no private key"
+        return ""
+    try:
+        data = json.loads(raw)
+        priv = data.get("private_key") or data.get("privateKey") or ""
+    except (json.JSONDecodeError, AttributeError):
+        priv = ""
+    return priv.strip() if priv else ""
+
+
 # ── AMI operations ─────────────────────────────────────────────────────────────
 
 def _list_amis_sync(region: str) -> list:

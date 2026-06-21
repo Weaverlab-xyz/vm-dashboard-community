@@ -81,6 +81,22 @@ def _ssm_instance_profile() -> str:
     return _aws_cfg("ec2_ssm_instance_profile") or ""
 
 
+async def _validate_ssh_key_override(override: Optional[str]) -> None:
+    """When the operator overrides the SSH key secret at launch, require it to be a
+    JSON object with a ``public_key`` (so the VM is reachable). Raises HTTP 400."""
+    if not override:
+        return
+    from ..services import ssh_key_secret
+    try:
+        raw = await aws_service.get_secret(override, _aws_region())
+    except AWSError as e:
+        raise HTTPException(status_code=400, detail=f"SSH key secret '{override}' could not be read: {e}")
+    try:
+        ssh_key_secret.validate_public_key_secret(raw, secret_name=override)
+    except ssh_key_secret.SshKeySecretError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 async def _resolve_aws_ecs_deploy_key() -> str:
     """Return the BeyondTrust Jumpoint Docker deploy key for AWS ECS launches.
 
@@ -325,6 +341,7 @@ async def deploy_ami(
     Returns a job_id trackable at /api/jobs/{job_id} or /api/ws/jobs/{job_id}.
     """
     workgroup = _validate_workgroup(db, current_user, req.workgroup)
+    await _validate_ssh_key_override(req.ssh_key_secret_override)
 
     job = job_service.create_job(
         db,
@@ -339,6 +356,7 @@ async def deploy_ami(
             "security_group_ids": req.security_group_ids,
             "workgroup": workgroup,
             "register_in_entitle": req.register_in_entitle,
+            "ssh_key_secret_override": req.ssh_key_secret_override,
         },
     )
 
@@ -387,6 +405,7 @@ async def bulk_deploy_amis(
         raise HTTPException(status_code=400, detail="At least one AMI item is required.")
 
     workgroup = _validate_workgroup(db, current_user, req.workgroup)
+    await _validate_ssh_key_override(req.ssh_key_secret_override)
 
     # Create one job per instance up front so callers get all job IDs immediately
     job_items: list[tuple[str, object]] = []
@@ -405,6 +424,7 @@ async def bulk_deploy_amis(
                 "workgroup": workgroup,
                 "bulk": True,
                 "register_in_entitle": req.register_in_entitle,
+                "ssh_key_secret_override": req.ssh_key_secret_override,
             },
         )
         job_service.log_audit(
@@ -790,10 +810,13 @@ def _aws_terminate_payload_hash(region: str, instance_id: str) -> str:
 
 async def _register_vm_in_entitle(db, job_id: str, vm_name: str, hostname: str,
                                   result: dict, private: bool = True) -> None:
-    """Thin wrapper around the shared VM registration hook (tag=AWS)."""
+    """Thin wrapper around the shared VM registration hook (tag=AWS). The chosen SSH
+    key secret (override or default, recorded on ``result``) drives the private-key
+    resolution so registration uses the VM's own keypair."""
     from ..services import entitle_vm_hook
     await entitle_vm_hook.register(db, job_id, vm_name, hostname,
-                                   private=private, result=result, tag="AWS")
+                                   private=private, result=result, tag="AWS",
+                                   ssh_key_secret=result.get("ssh_secret_name") or "")
 
 
 async def _run_deploy(
@@ -816,7 +839,8 @@ async def _run_deploy(
         # ── Step 1: Start ECS Jumpoint container first (BeyondTrust only) ─────
         from ..services import config_service as _cfg_svc
         _aws_region = _aws_cfg("aws_region") or "us-east-2"
-        ssh_secret_name = _cfg_svc.get("ec2_ssh_key_secret") or ""
+        _meta = (db.query(Job).filter(Job.id == job_id).first().metadata_dict or {})
+        ssh_secret_name = _meta.get("ssh_key_secret_override") or _cfg_svc.get("ec2_ssh_key_secret") or ""
         if _cfg_svc.get_bool("beyondtrust_enabled"):
             job_service.update_progress(db, job_id, 15, "Ensuring the shared BeyondTrust Jumpoint host…")
             try:
@@ -975,8 +999,9 @@ async def _run_bulk_deploy(
         # Step 1: Start ONE ECS Jumpoint container for the whole batch (BT only)
         from ..services import config_service as _cfg_svc
         _aws_region = _aws_cfg("aws_region") or "us-east-2"
-        ssh_secret_name = _cfg_svc.get("ec2_ssh_key_secret") or ""
         first_job_id = job_items[0][0]
+        _bmeta = (db.query(Job).filter(Job.id == first_job_id).first().metadata_dict or {})
+        ssh_secret_name = _bmeta.get("ssh_key_secret_override") or _cfg_svc.get("ec2_ssh_key_secret") or ""
         ecs_error = None
         jumpoint_host_id = None
         if _cfg_svc.get_bool("beyondtrust_enabled"):

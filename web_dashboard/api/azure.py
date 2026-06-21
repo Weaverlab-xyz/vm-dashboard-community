@@ -135,6 +135,19 @@ def _aci_rg():
     return _cfg("azure_aci_resource_group") or _rg()
 
 
+async def _validate_ssh_key_override(override) -> None:
+    """When the operator overrides the SSH key secret at launch, require it to be a
+    Key Vault keypair JSON with a ``public_key`` (resolve_azure_ssh_public_key raises
+    a detailed error otherwise). Raises HTTP 400."""
+    if not override:
+        return
+    kv_url = _cfg("azure_key_vault_url")
+    try:
+        await azure_service.resolve_azure_ssh_public_key(kv_url, override, "")
+    except AzureError as e:
+        raise HTTPException(status_code=400, detail=f"SSH key secret '{override}' is invalid: {e}")
+
+
 # ── Private images (gallery + managed) ───────────────────────────────────────
 
 @router.get("/images")
@@ -518,6 +531,7 @@ async def deploy_vm(
     loc = req.location or _loc()
     workgroup = _validate_workgroup(db, current_user, req.workgroup)
     req.workgroup = workgroup
+    await _validate_ssh_key_override(req.ssh_key_secret_override)
 
     job = job_service.create_job(
         db,
@@ -581,6 +595,7 @@ async def bulk_deploy_vms(
     loc = req.location or _loc()
     workgroup = _validate_workgroup(db, current_user, req.workgroup)
     req.workgroup = workgroup
+    await _validate_ssh_key_override(req.ssh_key_secret_override)
 
     job_items = []
     for item in req.items:
@@ -1027,7 +1042,8 @@ async def _run_deploy(job_id: str, req: AzureDeployRequest, rg: str, loc: str):
                 and entitle_vm_hook.registration_enabled()):
             await entitle_vm_hook.register(db, job_id, req.vm_name, hostname,
                                            private=not req.create_public_ip,
-                                           result=result, tag="Azure")
+                                           result=result, tag="Azure",
+                                           ssh_key_secret=req.ssh_key_secret_override or "")
 
         job_service.set_completed(db, job_id, result)
         await cache_service.invalidate(cache_service.key_global("azure_vms"))
@@ -1189,7 +1205,8 @@ async def _run_bulk_deploy(job_items: list, req: AzureBulkDeployRequest, rg: str
                         and entitle_vm_hook.registration_enabled()):
                     await entitle_vm_hook.register(db, job_id, vm_name, hostname,
                                                    private=not req.create_public_ip,
-                                                   result=result, tag="Azure")
+                                                   result=result, tag="Azure",
+                                                   ssh_key_secret=req.ssh_key_secret_override or "")
 
                 job_service.set_completed(db, job_id, result)
 
