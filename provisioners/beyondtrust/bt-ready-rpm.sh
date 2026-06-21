@@ -16,8 +16,7 @@
 #
 # Operator-overridable via Packer build env:
 #   BT_TARGET_USER     force sudoers-target user (default: autodetect ec2-user/rocky/centos/almalinux/cloud-user)
-#   BT_ADMIN_USER      Entitle/Password-Safe bootstrap account name (default: adminuser)
-#   BT_ENTITLE_PUBKEY  Entitle integration SSH public key → adminuser authorized_keys
+#   BT_ADMIN_USER      Password-Safe-managed bootstrap account name (default: adminuser)
 #   BT_EPML_URL        presigned URL to the EPM-L .rpm; set to install (activation is Ansible's job)
 #   BT_AUTOPATCH=1     enable dnf-automatic on the built image
 #   BT_SKIP_UPDATES=1  skip security upgrade (faster iteration builds)
@@ -192,14 +191,17 @@ if ! visudo -c -f "$SUDOERS" >/dev/null; then
   die "visudo rejected 90-bt-ready — sudoers not installed"
 fi
 
-# ── adminuser — Password Safe / Entitle SSH bootstrap account ─────────────────
-# A dedicated account Password Safe manages (onboarded out-of-band) and that
-# serves as the Entitle "SSH ephemeral accounts" bootstrap user: Entitle SSHes in
-# as this user (with its private key) and runs useradd/userdel to create + remove
-# the temporary per-grant users. See:
-#   https://docs.beyondtrust.com/entitle/docs/entitle-integration-ssh_ephemeral_accounts
+# ── adminuser — Password Safe bootstrap account ───────────────────────────────
+# A dedicated account Password Safe manages (onboarded + key/password rotated
+# out-of-band). The scoped NOPASSWD sudo below is the least-privilege command set
+# for SSH "ephemeral accounts" style management.
+#
+# NOTE: the dashboard's Entitle SSH-ephemeral-accounts integration no longer uses
+# this account. Entitle connects as the **cloud-default user** with the VM's own
+# launch keypair (the key cloud-init injects at boot), so no separate Entitle
+# public key is baked into the image. Point entitle_ssh_sudo_user at that user.
 BT_ADMIN_USER="${BT_ADMIN_USER:-adminuser}"
-log "creating Password-Safe / Entitle bootstrap user: $BT_ADMIN_USER"
+log "creating Password-Safe bootstrap user: $BT_ADMIN_USER"
 if ! id -u "$BT_ADMIN_USER" >/dev/null 2>&1; then
   useradd -m -s /bin/bash "$BT_ADMIN_USER"
 fi
@@ -231,20 +233,8 @@ if ! visudo -c -f "$ADMIN_SUDOERS" >/dev/null; then
   die "visudo rejected 91-bt-adminuser — sudoers not installed"
 fi
 
-# Entitle's integration SSH PUBLIC key → adminuser authorized_keys. Entitle holds
-# the matching private key in its Connection JSON. (Password Safe onboards +
-# rotates this account out-of-band — not done here.)
-if [ -n "${BT_ENTITLE_PUBKEY:-}" ]; then
-  log "installing Entitle public key into $BT_ADMIN_USER authorized_keys"
-  ADMIN_HOME="$(getent passwd "$BT_ADMIN_USER" | cut -d: -f6)"
-  [ -n "$ADMIN_HOME" ] || ADMIN_HOME="/home/$BT_ADMIN_USER"
-  install -d -m 0700 -o "$BT_ADMIN_USER" -g "$BT_ADMIN_USER" "$ADMIN_HOME/.ssh"
-  printf '%s\n' "$BT_ENTITLE_PUBKEY" > "$ADMIN_HOME/.ssh/authorized_keys"
-  chown "$BT_ADMIN_USER:$BT_ADMIN_USER" "$ADMIN_HOME/.ssh/authorized_keys"
-  chmod 0600 "$ADMIN_HOME/.ssh/authorized_keys"
-else
-  log "warn: BT_ENTITLE_PUBKEY unset — $BT_ADMIN_USER created but Entitle SSH cannot connect until its public key is installed"
-fi
+# Password Safe onboards this account and manages its key/password out-of-band —
+# the provisioner does not install any authorized_keys here.
 
 # ── EPM-L package install (opt-in via BT_EPML_URL) ───────────────────────────
 # Install ONLY. EPM-L activation (pbactivate -t <token>) is performed post-deploy

@@ -43,8 +43,7 @@ class AWSPackerBuildRequest(BaseModel):
     # Generic provisioner environment variables (literals + secret-manager refs).
     provisioner_env_vars: list[ProvisionerEnvVar] = []
     # BeyondTrust provisioner knobs — passed to the bt-ready provisioner as env vars.
-    bt_admin_user: Optional[str] = None        # → BT_ADMIN_USER (Entitle/Password-Safe bootstrap account)
-    bt_entitle_pubkey: Optional[str] = None    # → BT_ENTITLE_PUBKEY (Entitle SSH integration public key)
+    bt_admin_user: Optional[str] = None        # → BT_ADMIN_USER (Password-Safe-managed bootstrap account)
     bt_epml: Optional[str] = None              # "deb" | "rpm" — install EPM-L package of this family (else skip)
 
 
@@ -70,8 +69,7 @@ class AzurePackerBuildRequest(BaseModel):
     # Generic provisioner environment variables (literals + secret-manager refs).
     provisioner_env_vars: list[ProvisionerEnvVar] = []
     # BeyondTrust provisioner knobs — passed to the bt-ready provisioner as env vars.
-    bt_admin_user: Optional[str] = None        # → BT_ADMIN_USER (Entitle/Password-Safe bootstrap account)
-    bt_entitle_pubkey: Optional[str] = None    # → BT_ENTITLE_PUBKEY (Entitle SSH integration public key)
+    bt_admin_user: Optional[str] = None        # → BT_ADMIN_USER (Password-Safe-managed bootstrap account)
     bt_epml: Optional[str] = None              # "deb" | "rpm" — install EPM-L package of this family (else skip)
 
 
@@ -85,8 +83,7 @@ class GCPPackerBuildRequest(BaseModel):
     # Generic provisioner environment variables (literals + secret-manager refs).
     provisioner_env_vars: list[ProvisionerEnvVar] = []
     # BeyondTrust provisioner knobs — passed to the bt-ready provisioner as env vars.
-    bt_admin_user: Optional[str] = None        # → BT_ADMIN_USER (Entitle/Password-Safe bootstrap account)
-    bt_entitle_pubkey: Optional[str] = None    # → BT_ENTITLE_PUBKEY (Entitle SSH integration public key)
+    bt_admin_user: Optional[str] = None        # → BT_ADMIN_USER (Password-Safe-managed bootstrap account)
     bt_epml: Optional[str] = None              # "deb" | "rpm" — install EPM-L package of this family (else skip)
 
 

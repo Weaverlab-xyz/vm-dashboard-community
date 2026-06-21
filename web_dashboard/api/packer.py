@@ -59,9 +59,6 @@ async def _bt_provisioner_env(req) -> dict:
     admin = (getattr(req, "bt_admin_user", None) or "").strip()
     if admin:
         env["BT_ADMIN_USER"] = admin
-    pubkey = (getattr(req, "bt_entitle_pubkey", None) or "").strip()
-    if pubkey:
-        env["BT_ENTITLE_PUBKEY"] = pubkey
     fam = (getattr(req, "bt_epml", None) or "").strip().lower()
     if fam in ("deb", "rpm"):
         from ..services import epml_service

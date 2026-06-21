@@ -43,23 +43,24 @@ Caveats worth knowing before enabling:
 - **First-boot reboot may be required** for certain remediations (e.g. unloading kernel modules). Cloud images that boot from this AMI/image will pick them up cleanly.
 - **Precedence**: CIS writes to `/etc/ssh/sshd_config.d/00-complianceascode-hardening.conf`. Our drop-in `/etc/ssh/sshd_config.d/00-bt-ready.conf` is alphabetically earlier so its directives win (sshd uses first-occurrence-wins semantics). If you see auth failures from PRA, inspect both files and confirm the BT one is being loaded first.
 
-## adminuser + Entitle SSH + EPM-L
+## adminuser + EPM-L
 
 Beyond the PRA Shell Jump prereqs, the scripts also prepare the image for
-**Password Safe management**, **Entitle SSH ephemeral accounts**, and **EPM-L**:
+**Password Safe management** and **EPM-L**:
 
-- **`adminuser`** (override with `BT_ADMIN_USER`) — a dedicated account created to
-  be **Password-Safe-managed** (onboarded out-of-band) *and* to serve as the
-  **Entitle "SSH ephemeral accounts"** bootstrap user. Entitle SSHes in as this
-  account and runs `useradd`/`userdel` to create + remove the temporary per-grant
-  users ([Entitle docs](https://docs.beyondtrust.com/entitle/docs/entitle-integration-ssh_ephemeral_accounts)).
-- **Scoped sudo.** `adminuser` gets NOPASSWD sudo limited to exactly the commands
-  Entitle needs — `cat chmod chown mkdir mv rm sed tee useradd userdel` — written
-  to `/etc/sudoers.d/91-bt-adminuser` and validated with `visudo -c`. Not blanket
-  `ALL`.
-- **Entitle public key.** When `BT_ENTITLE_PUBKEY` is set, that **public** key is
-  installed into `adminuser`'s `authorized_keys` (Entitle holds the matching
-  private key in its Connection JSON).
+- **`adminuser`** (override with `BT_ADMIN_USER`) — a dedicated account created to be
+  **Password-Safe-managed** (onboarded + key/password rotated out-of-band).
+- **Scoped sudo.** `adminuser` gets NOPASSWD sudo limited to exactly the commands an
+  SSH "ephemeral accounts" workflow needs — `cat chmod chown mkdir mv rm sed tee
+  useradd userdel` — written to `/etc/sudoers.d/91-bt-adminuser` and validated with
+  `visudo -c`. Not blanket `ALL`.
+
+> **Entitle SSH integration — no key baked here.** The dashboard's Entitle
+> SSH-ephemeral-accounts registration connects as the **cloud-default user** with the
+> VM's **own launch keypair** (the key cloud-init injects at boot) — so the provisioner
+> no longer installs a separate Entitle public key. Point `entitle_ssh_sudo_user` at the
+> cloud-default user; see [`docs/integrations/entitle.md`](../../docs/integrations/entitle.md).
+
 - **EPM-L package install (opt-in).** When `BT_EPML_URL` is set — a presigned URL
   to the OS-appropriate package, obtained from the dashboard's EPM-L integration
   (which syncs the latest RPM/DEB to storage) — the script downloads + installs the
@@ -78,7 +79,7 @@ The Windows script prepares a **Windows Server 2022** image (including **Server 
 - **No image-reuse cleanup step.** On Windows, Sysprep `/generalize` (the build template's finisher) owns generalization — the script deliberately does *not* strip host keys / SIDs / logs the way the `*.sh` cleanup step does.
 - **Optional toggles** (set as `$env:BT_*` for CLI builds, or edit inline): `BT_AUTHORIZED_KEY`, `BT_ADMIN_USER` (default `azureuser`), `BT_SSH_KEY_ONLY=1` (harden sshd to key-only), `BT_ENABLE_RDP=0` (skip RDP).
 
-The Linux-centric sections below (`adminuser` / Entitle / EPM-L, CIS via OpenSCAP, the cross-cloud `/bin/sh` constraint, the self-elevation privilege model) **do not apply** to the Windows script.
+The Linux-centric sections below (`adminuser` / EPM-L, CIS via OpenSCAP, the cross-cloud `/bin/sh` constraint, the self-elevation privilege model) **do not apply** to the Windows script.
 
 ## Windows 11 multi-session VDI (`bt-ready-windows11-vdi.ps1`)
 
@@ -102,9 +103,8 @@ The VDI analogue of `bt-ready-windows.ps1`, for the **Windows 11 multi-session (
 
 These are consumed directly by Packer's shell provisioner. The dashboard build
 form surfaces the common ones for you — a **BeyondTrust provisioner options**
-panel (Admin user → `BT_ADMIN_USER`, Install EPM-L → `BT_EPML_URL`, Entitle SSH
-public key → `BT_ENTITLE_PUBKEY`) plus a generic **Environment variables** table
-for the rest (`BT_APPLY_CIS`, `BT_SKIP_UPDATES`, …); see
+panel (Admin user → `BT_ADMIN_USER`, Install EPM-L → `BT_EPML_URL`) plus a generic
+**Environment variables** table for the rest (`BT_APPLY_CIS`, `BT_SKIP_UPDATES`, …); see
 [Image Management → Passing environment variables to the provisioner](../../docs/image-management.md#passing-environment-variables-to-the-provisioner).
 You can still set any of them directly in the build environment when scripting
 Packer outside the dashboard.
@@ -112,8 +112,7 @@ Packer outside the dashboard.
 | Var | Default | Effect |
 |---|---|---|
 | `BT_TARGET_USER` | autodetect | Force the sudoers-target username instead of the cloud-default detection. |
-| `BT_ADMIN_USER` | `adminuser` | Name of the Password-Safe / Entitle bootstrap account the script creates. |
-| `BT_ENTITLE_PUBKEY` | (unset) | Entitle integration SSH **public** key → `adminuser` `authorized_keys`. Unset = account created but Entitle can't connect until its key is installed. |
+| `BT_ADMIN_USER` | `adminuser` | Name of the Password-Safe-managed bootstrap account the script creates. |
 | `BT_EPML_URL` | (unset) | Presigned URL to the OS-appropriate EPM-L package (`.deb` for Debian, `.rpm` for RPM). Set = download + install at build; unset = skip. **Activation runs post-deploy via the EPM-L integration**, not at build. The dashboard's Install EPM-L dropdown fills this in for you. |
 | `BT_AUTOPATCH` | `0` | When `1`, enable `unattended-upgrades` (Debian) / `dnf-automatic` (RPM) for ongoing security updates. |
 | `BT_SKIP_UPDATES` | `0` | When `1`, skip the dist-upgrade in step 3. Useful for iteration. |
@@ -136,7 +135,7 @@ Prerequisite: the cloud-default user has passwordless sudo (true on stock Ubuntu
 1. **Upload to your active storage backend.** Open `/storage` in the dashboard. Pick a backend (S3 / Azure Blob / GCS / local) and upload `bt-ready-debian.sh` and/or `bt-ready-rpm.sh`. They land under the `config-mgmt/` prefix by default; the storage service tags `.sh` files as type `script`.
 2. **Start a Packer build.** Navigate to `/images/aws`, `/images/azure`, or `/images/gcp`. Fill in the usual source-image / instance-type / SSH-username fields.
 3. **Load the script.** Click the **Load from storage** dropdown above the Provisioner Script textarea, pick the appropriate `bt-ready-*.sh`. The textarea populates; the blue subtitle confirms which backend the script came from.
-4. **Set the BeyondTrust options.** With a script loaded, the **BeyondTrust provisioner options** panel appears: set the **Admin user** (`adminuser`), choose **Install EPM-L** (deb/rpm — the dashboard resolves the presigned `BT_EPML_URL` for you at launch), and paste the **Entitle SSH public key**. Add any other knobs (`BT_APPLY_CIS=1`, `BT_SKIP_UPDATES=1`, …) as rows in the **Environment variables** table below it; flip **secret ref** on a row to pull its value from your secrets backend instead of inlining it.
+4. **Set the BeyondTrust options.** With a script loaded, the **BeyondTrust provisioner options** panel appears: set the **Admin user** (`adminuser`) and choose **Install EPM-L** (deb/rpm — the dashboard resolves the presigned `BT_EPML_URL` for you at launch). Add any other knobs (`BT_APPLY_CIS=1`, `BT_SKIP_UPDATES=1`, …) as rows in the **Environment variables** table below it; flip **secret ref** on a row to pull its value from your secrets backend instead of inlining it.
 5. **Submit the build.** Watch the job stream for `[bt-ready]` log lines — every step prints one.
 
 ## AWS smoke-test recipe (first ship)
