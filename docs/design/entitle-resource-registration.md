@@ -97,11 +97,13 @@ simpler, ESO is hands-off for rotation.
 
 > **Chart token mechanism (confirmed):** the published `entitle/entitle-agent` chart
 > (`helm repo add entitle https://anycred.github.io/entitle-charts/`) takes the token
-> only as a plaintext `--set agent.token=…` — there is **no** `existingSecret`/secretKeyRef
-> option. So the default is the plaintext `--set-string` path (`entitle_agent_token_plaintext_helm_key=agent.token`):
-> still resolved server-side, but it does land in the in-cluster **Helm release Secret**.
-> The apply-Secret path is retained behind config for a future chart version. ESO doesn't
-> help here (nothing external to sync *from* — we hold the token).
+> only as a plaintext Helm value (`agent.token`) — there is **no** `existingSecret`/secretKeyRef
+> option. So the default is the plaintext-value path (`entitle_agent_token_plaintext_helm_key=agent.token`):
+> still resolved server-side. The token is supplied as a Helm **values doc streamed over
+> stdin** (`helm … -f -`), **not** `--set-string`, so it never appears in the runner's
+> process args; it does still land in the in-cluster **Helm release Secret** (unavoidable
+> with this chart). The apply-Secret path is retained behind config for a future chart
+> version. ESO doesn't help here (nothing external to sync *from* — we hold the token).
 
 **ESO does NOT fit the token, and not the agent's integration secrets either.** ESO is a
 *consumer-side pull* (external store → K8s Secret for a workload to mount). But the agent
