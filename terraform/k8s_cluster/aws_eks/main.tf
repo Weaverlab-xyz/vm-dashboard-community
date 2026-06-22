@@ -26,8 +26,8 @@ variable "cluster_name" {
 
 variable "k8s_version" {
   type        = string
-  default     = "1.32"
-  description = "Kubernetes minor version for the control plane + node group. AWS recommends 1.32 for the longest EKS standard support (1.30/1.31 drop to extended support in 2026); bump the default as EKS adds versions."
+  default     = "1.35"
+  description = "Kubernetes minor version for the control plane + node group. Track a current EKS standard-support release (mid-2026 EKS supports 1.33–1.36); bump as EKS adds versions and older ones reach end of standard support."
 }
 
 variable "subnet_ids" {
