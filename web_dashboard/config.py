@@ -525,7 +525,7 @@ class Settings(BaseSettings):
 
     # Entitle integration — shared API credentials (used by machine-identity
     # JIT, user-JIT, and resource registration below).
-    entitle_api_url: str = ""                       # e.g. "https://api.entitle.io/v1"
+    entitle_api_url: str = "https://api.entitle.io/v1"  # canonical Entitle API base — multi-tenant, identical for every tenant. Drives machine-identity JIT and (normalized to scheme+host) the entitleio/entitle provider endpoint.
     entitle_api_token: str = ""                     # bearer token (Key Vault secret in prod)
 
     # Entitle resource registration — as the dashboard builds Linux VMs and
@@ -538,7 +538,8 @@ class Settings(BaseSettings):
     entitle_owner_id: str = ""                       # REQUIRED: UUID of the Entitle user owning created integrations
     entitle_workflow_id: str = ""                    # REQUIRED: UUID of the default approval workflow for created integrations
     entitle_agent_token_name: str = ""               # Entitle Agent token NAME/identifier for private targets (the token VALUE is supplied to the agent cluster via ESO — see docs/design/entitle-resource-registration.md)
-    entitle_agent_token_ref: str = ""                # optional secrets-backend ref where the agent token VALUE is stored (for bootstrap/rotation; not the integration identifier above)
+    entitle_agent_token_ref: str = ""                # optional secrets-backend ref where the agent token VALUE is stored (for bootstrap/rotation; not the integration identifier above). Auto-set to config://entitle/agent-token by ensure_agent_token when a token is minted.
+    entitle_agent_token_tf_state: str = ""           # terraform.tfstate of an auto-minted agent token (set by ensure_agent_token; enables later destroy/rotation via deregister). DB-only — never an env value.
     # Entitle agent cluster bootstrap (Task 7) — Helm-install the agent into a managed
     # K8s cluster via the k8s_service runner. See docs/design/entitle-resource-registration.md.
     entitle_agent_cluster_id: str = ""               # set on a successful install — the cluster currently hosting the shared agent
@@ -563,7 +564,7 @@ class Settings(BaseSettings):
     entitle_k8s_user_prefix: str = "entitle"         # user_prefix Entitle uses for the ephemeral cluster identities
     entitle_k8s_sa_name: str = "entitle-access"      # ServiceAccount minted in-cluster for External-Access registration
     entitle_allowed_durations: str = "3600,43200,86400"  # JIT durations (seconds) offered on created integrations
-    entitle_ssh_sudo_user: str = ""                 # privileged sudo user Entitle drives to mint/delete ephemeral SSH accounts (defaults to the cloud-default ssh user if blank)
+    entitle_ssh_sudo_user: str = ""                 # OPTIONAL override — each VM deploy passes its image's cloud-default login user (ubuntu/ec2-user/azureuser/gcp-user) automatically; set this only to force a different sudo user for ALL registrations
     entitle_ssh_private_key_ref: str = ""           # OPTIONAL fallback/override only — the SSH private key is normally sourced from the VM's own per-cloud keypair (the key cloud-init injected). See docs/design/entitle-resource-registration.md
     entitle_db_service_user_ref: str = ""           # optional override; default uses the DB's minted master credential
 

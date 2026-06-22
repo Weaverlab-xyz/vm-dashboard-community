@@ -64,9 +64,12 @@ Decisions (validated 2026-06-21):
 
 ### Agent token — server-side Secret + Helm (reuses the runner primitives)
 
-The agent token is sensitive and returned **only at creation**. Mint it with the
-`entitle_agent_token` Terraform resource (or the API) and stash it in the dashboard's
-secrets backend, recorded as `entitle_agent_token_ref`:
+The agent token is sensitive and returned **only at creation**. `setup_entitle_agent`
+**auto-mints** it on first install via `entitle_registration_service.ensure_agent_token`
+(the `entitle_agent_token` Terraform resource below, using the provider key), stashes the
+value in the dashboard's secrets backend, and records `entitle_agent_token_ref`
+(→ `config://entitle/agent-token`) + `entitle_agent_token_name`. Pre-set
+`entitle_agent_token_ref` yourself only to use an externally-minted token:
 
 ```hcl
 resource "entitle_agent_token" "agent" { name = var.agent_name }   # .token is sensitive
@@ -143,18 +146,12 @@ cloud-init set up with the injected key + passwordless sudo (the
 ## Status / open items
 - **Agent bootstrap implemented** — `setup_entitle_agent`/`run_entitle_agent` (k8s_service),
   `POST /api/k8s/clusters/{id}/entitle-agent`, `k8s_entitle_agent` worker dispatch, config keys.
-- **Verification gate (before first real install):** the published chart takes the token
-  only as a plaintext value (`agent.token`) — **confirmed**, no `existingSecret` option.
-  The token is delivered as a Helm **values doc over stdin** (`helm … -f -`), not `--set`,
-  so it stays out of the runner's process args (the apply-Secret path + `entitle_agent_existing_secret_helm_key`
-  are retained behind config for a future chart version). Still confirm `entitle_agent_chart_repo`
-  against your tenant's chart mirror before first install.
-- **Secret handling hardened (CodeQL):** in-cluster manifests (agent token Secret, ESO
-  Password-Safe creds) stream to `kubectl apply -f -` over stdin and never touch disk;
-  the agent token rides Helm stdin values. See PRs #142/#143.
-- **Cluster-page UI shipped** — "Entitle agent" (install) + "Register in Entitle" actions
-  on the K8s cluster page (`web_dashboard/templates/k8s/index.html`), enqueuing the
-  `k8s_entitle_agent` / `k8s_entitle_register` jobs.
+  The token is **auto-minted** on first install (`ensure_agent_token` → `mint_agent_token`) — no manual token step.
+- **Verification gate (before first real install):** confirm `entitle_agent_chart_repo`
+  (the chart's Helm repo URL) and `entitle_agent_existing_secret_helm_key` (the Helm value
+  that points at the token Secret) against the published chart; set
+  `entitle_agent_token_plaintext_helm_key` if the chart only takes a plaintext token.
+- UI: an "Install Entitle agent" action on the cluster page (mirrors secret-delivery) — TODO.
 - AWS private-key sourcing is **secret-based by design** — registration resolves it from
   the chosen `ec2_ssh_key_secret` (a JSON `{public_key, private_key}` keypair) or the
   optional override. The `ec2/keypairs/<name>` convention is a *separate manual path*

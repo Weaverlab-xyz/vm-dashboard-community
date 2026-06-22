@@ -823,10 +823,13 @@ async def _register_vm_in_entitle(db, job_id: str, vm_name: str, hostname: str,
                                   result: dict, private: bool = True) -> None:
     """Thin wrapper around the shared VM registration hook (tag=AWS). The chosen SSH
     key secret (override or default, recorded on ``result``) drives the private-key
-    resolution so registration uses the VM's own keypair."""
+    resolution so registration uses the VM's own keypair. The SSH ``sudo_user`` is the
+    image's cloud-default login user (``result['ssh_user']``, from ``detect_os_type``);
+    the hook falls back to the configured ``entitle_ssh_sudo_user`` override when blank."""
     from ..services import entitle_vm_hook
     await entitle_vm_hook.register(db, job_id, vm_name, hostname,
                                    private=private, result=result, tag="AWS",
+                                   sudo_user=result.get("ssh_user") or "",
                                    ssh_key_secret=result.get("ssh_secret_name") or "")
 
 
@@ -878,10 +881,11 @@ async def _run_deploy(
             os_type = "windows"
         else:
             from ..services.os_detection import detect_os_type
-            os_type, _ = detect_os_type(ami_info.get("name", ""))
+            os_type, ssh_user = detect_os_type(ami_info.get("name", ""))
             key_detail = await aws_service.get_ssh_public_key_from_secret(_aws_region, ssh_secret_name)
             public_key = key_detail["public_key"]
             result["ssh_secret_name"] = ssh_secret_name
+            result["ssh_user"] = ssh_user   # image's cloud-default login user → Entitle sudo_user
 
         # ── Step 3: Launch EC2 instance ────────────────────────────────────────
         job_service.update_progress(db, job_id, 40, f"Launching EC2 instance ({os_type})…")
@@ -972,7 +976,7 @@ async def _run_deploy(
         from ..services import entitle_vm_hook
         _job = db.query(Job).filter(Job.id == job_id).first()
         _reg = bool((_job.metadata_dict or {}).get("register_in_entitle")) if _job else False
-        if _reg and entitle_vm_hook.registration_enabled():
+        if _reg and not is_windows and entitle_vm_hook.registration_enabled():
             await _register_vm_in_entitle(db, job_id, instance_name, hostname,
                                           result, private=not bool(result.get("public_ip")))
 
@@ -1050,6 +1054,9 @@ async def _run_bulk_deploy(
                 )
                 ami_info = await aws_service.describe_ami(_aws_region, item.ami_id)
                 is_windows = "windows" in (ami_info.get("platform", "") or "").lower()
+                if not is_windows:
+                    from ..services.os_detection import detect_os_type
+                    _, result["ssh_user"] = detect_os_type(ami_info.get("name", ""))
                 # Cloud-identity JIT Phase 2: per-instance elevation in
                 # the bulk batch. One Entitle activation per EC2 launch
                 # so a denial of one row doesn't poison the others.
@@ -1123,7 +1130,7 @@ async def _run_bulk_deploy(
                 from ..services import entitle_vm_hook
                 _bjob = db.query(Job).filter(Job.id == job_id).first()
                 _breg = bool((_bjob.metadata_dict or {}).get("register_in_entitle")) if _bjob else False
-                if _breg and entitle_vm_hook.registration_enabled():
+                if _breg and not is_windows and entitle_vm_hook.registration_enabled():
                     await _register_vm_in_entitle(db, job_id, item.instance_name, hostname,
                                                   result, private=not bool(result.get("public_ip")))
 

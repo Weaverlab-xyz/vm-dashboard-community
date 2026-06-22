@@ -1070,6 +1070,7 @@ async def _run_deploy(job_id: str, req: AzureDeployRequest, rg: str, loc: str):
             await entitle_vm_hook.register(db, job_id, req.vm_name, hostname,
                                            private=not req.create_public_ip,
                                            result=result, tag="Azure",
+                                           sudo_user=req.ssh_username,
                                            ssh_key_secret=req.ssh_key_secret_override or "")
 
         job_service.set_completed(db, job_id, result)
@@ -1233,6 +1234,7 @@ async def _run_bulk_deploy(job_items: list, req: AzureBulkDeployRequest, rg: str
                     await entitle_vm_hook.register(db, job_id, vm_name, hostname,
                                                    private=not req.create_public_ip,
                                                    result=result, tag="Azure",
+                                                   sudo_user=req.ssh_username,
                                                    ssh_key_secret=req.ssh_key_secret_override or "")
 
                 job_service.set_completed(db, job_id, result)
