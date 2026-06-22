@@ -1,8 +1,13 @@
 terraform {
   required_providers {
     azurerm = {
-      source  = "hashicorp/azurerm"
-      version = "~> 3.0"
+      source = "hashicorp/azurerm"
+      # MySQL 8.4 — whose admin is born on caching_sha2_password (required by the PRA
+      # MySQL tunnel; 8.0.21's admin is mysql_native_password, which PRA rejects) — was
+      # added to azurerm_mysql_flexible_server only in provider v4.55.0 (#31099). 3.x
+      # caps the version enum at 5.7/8.0.21. Scoped to THIS module; db_azure_postgres
+      # and azure_vm stay on ~> 3.0 (separate root modules resolve their own provider).
+      version = ">= 4.55.0, < 5.0"
     }
   }
   required_version = ">= 1.3.0"
@@ -54,8 +59,8 @@ variable "storage_mb" {
 
 variable "mysql_version" {
   type        = string
-  default     = "8.0.21"
-  description = "MySQL Flexible Server version (5.7 or 8.0.21). 8.0 defaults the admin to caching_sha2_password, which the PRA MySQL tunnel requires."
+  default     = "8.4"
+  description = "MySQL Flexible Server version. Must be 8.4: Azure 8.0.21 defaults default_authentication_plugin to mysql_native_password, so the admin login is created on that legacy plugin — and the PRA MySQL tunnel rejects it ('Unsupported plugin offered from server: mysql_native_password -- reconfigure server for caching_sha2_password'). Flipping the server parameter doesn't help (it only affects newly-created users, not the existing admin). MySQL 8.4 drops mysql_native_password as a default, so the admin is born on caching_sha2_password. (AWS analog: RDS MySQL 8.4.)"
 }
 
 variable "db_name" {

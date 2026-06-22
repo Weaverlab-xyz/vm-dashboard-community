@@ -187,7 +187,19 @@ RUN ARCH=$(dpkg --print-architecture) \
            echo "terraform init attempt $attempt failed (transient registry error); retrying in $((attempt * 5))s..." >&2; \
            sleep $((attempt * 5)); \
        done \
-    && rm -rf /tmp/tf_provider_init
+    && mkdir -p /tmp/tf_provider_init_az4 \
+    && printf 'terraform {\n  required_providers {\n    azurerm = { source = "hashicorp/azurerm", version = ">= 4.55.0, < 5.0" }\n  }\n}\n' \
+       > /tmp/tf_provider_init_az4/main.tf \
+    && for attempt in 1 2 3 4 5; do \
+           TF_REGISTRY_CLIENT_TIMEOUT=30 terraform -chdir=/tmp/tf_provider_init_az4 init && break; \
+           if [ "$attempt" = 5 ]; then \
+               echo "failed to cache azurerm 4.x (db_azure_mysql needs >= 4.55 for MySQL 8.4) after 5 attempts" >&2; \
+               exit 1; \
+           fi; \
+           echo "azurerm 4.x init attempt $attempt failed (transient registry error); retrying in $((attempt * 5))s..." >&2; \
+           sleep $((attempt * 5)); \
+       done \
+    && rm -rf /tmp/tf_provider_init /tmp/tf_provider_init_az4
 
 # Entrypoint fixes SSH key permissions when the Windows override
 # bind-mounts a key from %USERPROFILE%. Docker Desktop surfaces Windows
