@@ -1,0 +1,26 @@
+# HorizontalPodAutoscaler for the `web` Deployment (nginx-deployment.yaml).
+# Scales 2→6 replicas to hold ~60% average CPU.
+# PREREQUISITE: metrics-server must be installed (it ships on GKE/AKS; on EKS you
+# install it yourself). Without it the HPA reports `<unknown>` for CPU and never
+# scales. The Deployment sets CPU requests, which the percentage target needs.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: web
+  namespace: sample-apps
+  labels:
+    app: web
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: web
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 60

@@ -143,11 +143,18 @@ cloud-init set up with the injected key + passwordless sudo (the
 ## Status / open items
 - **Agent bootstrap implemented** — `setup_entitle_agent`/`run_entitle_agent` (k8s_service),
   `POST /api/k8s/clusters/{id}/entitle-agent`, `k8s_entitle_agent` worker dispatch, config keys.
-- **Verification gate (before first real install):** confirm `entitle_agent_chart_repo`
-  (the chart's Helm repo URL) and `entitle_agent_existing_secret_helm_key` (the Helm value
-  that points at the token Secret) against the published chart; set
-  `entitle_agent_token_plaintext_helm_key` if the chart only takes a plaintext token.
-- UI: an "Install Entitle agent" action on the cluster page (mirrors secret-delivery) — TODO.
+- **Verification gate (before first real install):** the published chart takes the token
+  only as a plaintext value (`agent.token`) — **confirmed**, no `existingSecret` option.
+  The token is delivered as a Helm **values doc over stdin** (`helm … -f -`), not `--set`,
+  so it stays out of the runner's process args (the apply-Secret path + `entitle_agent_existing_secret_helm_key`
+  are retained behind config for a future chart version). Still confirm `entitle_agent_chart_repo`
+  against your tenant's chart mirror before first install.
+- **Secret handling hardened (CodeQL):** in-cluster manifests (agent token Secret, ESO
+  Password-Safe creds) stream to `kubectl apply -f -` over stdin and never touch disk;
+  the agent token rides Helm stdin values. See PRs #142/#143.
+- **Cluster-page UI shipped** — "Entitle agent" (install) + "Register in Entitle" actions
+  on the K8s cluster page (`web_dashboard/templates/k8s/index.html`), enqueuing the
+  `k8s_entitle_agent` / `k8s_entitle_register` jobs.
 - AWS private-key sourcing is **secret-based by design** — registration resolves it from
   the chosen `ec2_ssh_key_secret` (a JSON `{public_key, private_key}` keypair) or the
   optional override. The `ec2/keypairs/<name>` convention is a *separate manual path*
@@ -159,3 +166,7 @@ cloud-init set up with the injected key + passwordless sudo (the
   In-Cluster via the agent for private API clusters, else a minted least-priv ServiceAccount (External
   Access). Open: scope the ServiceAccount ClusterRole down from cluster-admin once the required perms are
   confirmed; the GKE-specific GCP-IAM integration is a separate optional path.
+- **Sample workloads** for managed clusters live in [`examples/k8s/`](../../examples/k8s/)
+  (the community counterpart to `examples/compose/` + `examples/playbooks/`): namespaced,
+  `restricted`-PSS-compliant Deployment/Service/Ingress/HPA/ConfigMap/Secret/StatefulSet/
+  CronJob/quota/NetworkPolicy starters, validated by `tests/test_k8s_samples.py`.

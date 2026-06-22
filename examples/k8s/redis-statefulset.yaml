@@ -1,0 +1,86 @@
+# Stateful workload with persistence — a single-node Redis StatefulSet whose data
+# survives pod restarts via a PersistentVolumeClaim. This is the capability the
+# community compose samples deliberately leave out (no volumes); on Kubernetes a
+# `volumeClaimTemplate` provisions a PV from the cluster's default StorageClass.
+#
+# Single replica + emptyDir-free: each pod gets its own 1Gi PVC. For real HA use
+# the Bitnami Redis chart; this is a minimal "persistence works" sample.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: sample-apps
+  labels:
+    app: redis
+spec:
+  clusterIP: None          # headless — StatefulSet stable network IDs
+  selector:
+    app: redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: redis
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis
+  namespace: sample-apps
+  labels:
+    app: redis
+spec:
+  serviceName: redis
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999       # the `redis` user in the official image
+        fsGroup: 999         # make the mounted PVC writable by that user
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          args:
+            - --save
+            - "60"
+            - "1"            # snapshot to /data if >=1 key changed in 60s
+          ports:
+            - name: redis
+              containerPort: 6379
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 1Gi
+        # storageClassName: gp3   # uncomment to pin a StorageClass; omit = cluster default
