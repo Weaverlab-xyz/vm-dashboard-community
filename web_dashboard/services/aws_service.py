@@ -65,7 +65,7 @@ def eks_get_token(cluster_name: str, region: str) -> str:
         lambda request, **kwargs: request.headers.add_header("x-k8s-aws-id", cluster_name),
     )
     url = sts.generate_presigned_url(
-        "get_caller_identity", Params={}, ExpiresIn=60, HttpMethod="GET")
+        "get_caller_identity", Params={}, ExpiresIn=900, HttpMethod="GET")
     return "k8s-aws-v1." + base64.urlsafe_b64encode(url.encode("utf-8")).decode("utf-8").rstrip("=")
 
 

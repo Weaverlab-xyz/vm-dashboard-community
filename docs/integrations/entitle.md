@@ -71,13 +71,13 @@ opt in.
 
 | Field | Notes |
 |---|---|
-| API URL / API Token | Shared Entitle tenant credentials (also used by the other two tracks). |
+| API URL / API Token | Shared Entitle tenant credentials (also used by the other two tracks). The **API URL** is pre-filled with the canonical `https://api.entitle.io/v1` (identical for every tenant) and drives both machine-identity JIT and — normalized to scheme+host — the Terraform provider endpoint. Leave it unless you're on a non-standard Entitle region. |
 | Terraform Provider API Key | `entitleio/entitle` provider key (`ENTITLE_API_KEY`); falls back to the API Token. |
 | Registration enabled | Master capability switch for this track. |
 | `entitle_owner_id` / `entitle_workflow_id` | **Required** — Entitle user UUID that owns created integrations + the default approval workflow UUID. |
-| `entitle_agent_token_name` | Agent token name (identifier) for **private** targets (blank is fine if you only register public resources). The token *value* is supplied to the agent cluster separately — see [the design doc](../design/entitle-resource-registration.md#agent-token--pass-it-as-a-secret-via-external-secrets-operator). |
+| `entitle_agent_token_name` | **Auto-minted** — installing the Entitle agent mints a token via the provider, stashes its value in the secrets backend, and records this name (used to attach **private**/PRA-only targets during registration). Shown read-only in the panel; you don't set it by hand. See [the design doc](../design/entitle-resource-registration.md#agent-token--server-side-secret--helm-reuses-the-runner-primitives). |
 | `entitle_allowed_durations` | JIT durations offered on created integrations (seconds). |
-| SSH sudo user | The privileged sudo account Entitle uses to mint/delete ephemeral SSH accounts — the cloud-default user cloud-init set up with passwordless sudo (the `provisioners/beyondtrust/` bt-ready user). |
+| SSH sudo user | **Optional override.** Each VM deploy automatically registers with its image's cloud-default login user (`ubuntu` / `ec2-user` / `azureuser` / `gcp-user` — the `provisioners/beyondtrust/` bt-ready user cloud-init set up with passwordless sudo). Set this only to force a different sudo user for **all** SSH registrations. |
 
 > **SSH private key — not a config field.** The key Entitle authenticates with is the
 > counterpart of the keypair **cloud-init injected into the VM at build time**, resolved

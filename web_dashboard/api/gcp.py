@@ -530,6 +530,7 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
             await entitle_vm_hook.register(db, job_id, payload.instance_name, hostname,
                                            private=not payload.create_external_ip,
                                            result=final_meta, tag="GCP",
+                                           sudo_user=payload.ssh_username,
                                            ssh_key_secret=secret_name)
 
         job_service.set_completed(db, job_id, final_meta)

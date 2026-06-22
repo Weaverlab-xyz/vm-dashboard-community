@@ -162,8 +162,25 @@ def _common_attrs_hcl(private: bool) -> str:
 # sensitive TF_VARs (ssh_private_key / db_password) interpolate without ever
 # being written to the HCL file on disk.
 
+def _provider_endpoint() -> str:
+    """Endpoint for the entitleio/entitle provider. Prefer an explicit ``entitle_endpoint``;
+    otherwise derive it from the shared ``entitle_api_url`` normalized to scheme+host (the
+    provider appends its own version paths, so a ``/v1`` base would double-version). Blank →
+    the provider's built-in default (https://api.entitle.io)."""
+    ep = _cfg("entitle_endpoint")
+    if ep:
+        return ep.rstrip("/")
+    api_url = _cfg("entitle_api_url")
+    if api_url:
+        from urllib.parse import urlsplit
+        parts = urlsplit(api_url)
+        if parts.scheme and parts.netloc:
+            return f"{parts.scheme}://{parts.netloc}"
+    return ""
+
+
 def _provider_header(extra_vars: str = "") -> str:
-    endpoint = _cfg("entitle_endpoint")
+    endpoint = _provider_endpoint()
     endpoint_line = f'  endpoint = {json.dumps(endpoint)}\n' if endpoint else ""
     return f"""\
 terraform {{
@@ -281,7 +298,10 @@ def _run_tf(args: list, work_dir: str, env: dict, timeout: int = 120) -> subproc
 
 
 def _apply_hcl_sync(hcl: str, tf_vars: dict) -> dict:
-    """Write HCL, init+apply, return ``{integration_id, tf_state_json}``."""
+    """Write HCL, init+apply, return ``{integration_id, outputs, tf_state_json}``.
+
+    ``outputs`` is the full ``terraform output`` map (values unwrapped); ``integration_id``
+    is kept as a convenience for the registration callers."""
     env = _tf_env(tf_vars)
     with tempfile.TemporaryDirectory(prefix="entitle_tf_") as work_dir:
         Path(work_dir, "main.tf").write_text(hcl)
@@ -297,17 +317,17 @@ def _apply_hcl_sync(hcl: str, tf_vars: dict) -> dict:
                 f"terraform apply failed: {apply.stderr.strip() or apply.stdout.strip()}")
 
         out = _run_tf(["output", "-json"], work_dir, env, timeout=30)
-        integration_id: Optional[str] = None
+        outputs: dict = {}
         if out.returncode == 0 and out.stdout.strip():
             try:
-                outputs = json.loads(out.stdout)
-                integration_id = str(outputs.get("integration_id", {}).get("value", "")) or None
+                outputs = {k: v.get("value") for k, v in json.loads(out.stdout).items()}
             except (json.JSONDecodeError, AttributeError):
                 pass
 
         state_path = Path(work_dir, "terraform.tfstate")
         tf_state_json = state_path.read_text() if state_path.exists() else None
-        return {"integration_id": integration_id, "tf_state_json": tf_state_json}
+        integration_id = str(outputs.get("integration_id") or "") or None
+        return {"integration_id": integration_id, "outputs": outputs, "tf_state_json": tf_state_json}
 
 
 def _destroy_sync(tf_state_json: str) -> None:
@@ -391,6 +411,83 @@ async def register_kubernetes(*, name: str, private: bool = True,
     hcl = _generate_k8s_hcl(name=name, host=host, user_prefix=user_prefix, private=private)
     tf_vars = {} if private else {"k8s_token": token, "k8s_ca_cert": ca_cert}
     return await asyncio.to_thread(_apply_hcl_sync, hcl, tf_vars)
+
+
+# ── Agent token (bootstrap for the k8s agent + private-target registration) ─────
+#
+# The Entitle Agent token is sensitive and returned only at creation. We mint it
+# with the entitleio/entitle ``entitle_agent_token`` resource (same provider/plumbing
+# as the integrations above), stash the value in the encrypted config store, and record
+# the ref + name so BOTH the k8s agent install (token VALUE) and private integrations
+# (token NAME) can use it. See docs/design/entitle-resource-registration.md.
+
+_AGENT_TOKEN_CONFIG_KEY = "entitle/agent-token"
+
+
+def _agent_token_hcl(name: str) -> str:
+    label = _safe_name(name)
+    return _provider_header() + f"""
+resource "entitle_agent_token" {json.dumps(label)} {{
+  name = {json.dumps(name)}
+}}
+
+output "token" {{
+  value     = entitle_agent_token.{label}.token
+  sensitive = true
+}}
+"""
+
+
+def _resolve_token_ref(ref: str) -> str:
+    """Resolve an agent-token ref to its value: external backend (``aws_sm://`` …),
+    ``config://<key>``, a bare config key, or an inline literal."""
+    from . import config_service
+    if not ref:
+        return ""
+    if config_service.is_reference(ref):
+        return config_service.resolve_reference(ref)
+    if ref.startswith("config://"):
+        return config_service.get(ref[len("config://"):])
+    return config_service.get(ref) or ref
+
+
+async def mint_agent_token(name: str) -> dict:
+    """Mint a fresh Entitle Agent token via the provider. Returns ``{token, tf_state_json}``.
+
+    The token value is returned only at creation — stash it immediately. Requires the
+    provider key (``entitle_api_key`` / ``entitle_api_token``). Stash ``tf_state_json`` so
+    the token can later be destroyed/rotated via :func:`deregister`."""
+    if not _api_key():
+        raise EntitleRegistrationError(
+            "entitle_api_key (or entitle_api_token) is not configured — cannot mint an agent token")
+    res = await asyncio.to_thread(_apply_hcl_sync, _agent_token_hcl(name), {})
+    token = (res.get("outputs") or {}).get("token")
+    if not token:
+        raise EntitleRegistrationError("agent-token mint returned no 'token' output")
+    return {"token": str(token), "tf_state_json": res.get("tf_state_json")}
+
+
+async def ensure_agent_token(name: str = "") -> str:
+    """Return the Entitle agent token value, minting + persisting one if none exists.
+
+    If ``entitle_agent_token_ref`` already resolves to a value, return it. Otherwise mint
+    a token, stash the value in the encrypted config store, and record the ref
+    (``entitle_agent_token_ref`` → ``config://entitle/agent-token``), the name
+    (``entitle_agent_token_name``, reused for private-target registration), and the mint's
+    ``terraform.tfstate`` (``entitle_agent_token_tf_state``) for later destroy/rotation."""
+    from . import config_service
+    existing = _resolve_token_ref(_cfg("entitle_agent_token_ref"))
+    if existing:
+        return existing
+    token_name = name or _cfg("entitle_agent_token_name") or "vm-dashboard-agent"
+    minted = await mint_agent_token(token_name)
+    config_service.set(_AGENT_TOKEN_CONFIG_KEY, minted["token"])
+    config_service.set("entitle_agent_token_ref", f"config://{_AGENT_TOKEN_CONFIG_KEY}")
+    config_service.set("entitle_agent_token_name", token_name)
+    if minted.get("tf_state_json"):
+        config_service.set("entitle_agent_token_tf_state", minted["tf_state_json"])
+    logger.info("Entitle agent token minted + stashed (name=%s)", token_name)
+    return minted["token"]
 
 
 async def deregister(tf_state_json: str) -> None:

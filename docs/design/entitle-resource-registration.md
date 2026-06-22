@@ -64,9 +64,12 @@ Decisions (validated 2026-06-21):
 
 ### Agent token — server-side Secret + Helm (reuses the runner primitives)
 
-The agent token is sensitive and returned **only at creation**. Mint it with the
-`entitle_agent_token` Terraform resource (or the API) and stash it in the dashboard's
-secrets backend, recorded as `entitle_agent_token_ref`:
+The agent token is sensitive and returned **only at creation**. `setup_entitle_agent`
+**auto-mints** it on first install via `entitle_registration_service.ensure_agent_token`
+(the `entitle_agent_token` Terraform resource below, using the provider key), stashes the
+value in the dashboard's secrets backend, and records `entitle_agent_token_ref`
+(→ `config://entitle/agent-token`) + `entitle_agent_token_name`. Pre-set
+`entitle_agent_token_ref` yourself only to use an externally-minted token:
 
 ```hcl
 resource "entitle_agent_token" "agent" { name = var.agent_name }   # .token is sensitive
@@ -143,6 +146,7 @@ cloud-init set up with the injected key + passwordless sudo (the
 ## Status / open items
 - **Agent bootstrap implemented** — `setup_entitle_agent`/`run_entitle_agent` (k8s_service),
   `POST /api/k8s/clusters/{id}/entitle-agent`, `k8s_entitle_agent` worker dispatch, config keys.
+  The token is **auto-minted** on first install (`ensure_agent_token` → `mint_agent_token`) — no manual token step.
 - **Verification gate (before first real install):** confirm `entitle_agent_chart_repo`
   (the chart's Helm repo URL) and `entitle_agent_existing_secret_helm_key` (the Helm value
   that points at the token Secret) against the published chart; set

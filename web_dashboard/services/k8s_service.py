@@ -973,10 +973,11 @@ def _entitle_agent_secret_manifest(namespace: str, secret_name: str, token: str)
 async def setup_entitle_agent(cluster_id: str, action: str = "install") -> None:
     """Install (or remove) the Entitle agent in a managed cluster. Background task.
 
-      * ``install`` → resolve the agent token server-side from
-        ``entitle_agent_token_ref``, apply the ``ENTITLE_TOKEN`` Secret via the
-        kubectl runner, then ``helm upgrade --install entitle-agent`` referencing it.
-        Records the hosting cluster in ``entitle_agent_cluster_id``.
+      * ``install`` → resolve the agent token server-side (auto-minting one via the
+        entitleio/entitle provider when ``entitle_agent_token_ref`` is unset), apply the
+        ``ENTITLE_TOKEN`` Secret via the kubectl runner, then
+        ``helm upgrade --install entitle-agent`` referencing it. Records the hosting
+        cluster in ``entitle_agent_cluster_id``.
       * ``remove``  → ``helm uninstall`` + delete the Secret (best-effort); clears
         ``entitle_agent_cluster_id`` when it pointed here.
     """
@@ -1008,12 +1009,16 @@ async def setup_entitle_agent(cluster_id: str, action: str = "install") -> None:
         if not repo:
             raise K8sError(
                 "entitle_agent_chart_repo is not configured (Helm repo URL for the entitle-agent chart)")
-        token_ref = _cfg("entitle_agent_token_ref")
-        token = config_service.resolve_reference(token_ref) if token_ref else ""
+        # Resolve the agent token, auto-minting one (via the entitleio/entitle provider)
+        # when none is configured yet — so the install stays one-click. Resolved
+        # server-side; never persisted on this install's row/TF state.
+        from . import entitle_registration_service
+        try:
+            token = await entitle_registration_service.ensure_agent_token()
+        except entitle_registration_service.EntitleRegistrationError as exc:
+            raise K8sError(f"Entitle agent token unavailable: {exc}") from exc
         if not token:
-            raise K8sError(
-                "entitle_agent_token_ref resolved empty — mint an Entitle agent token "
-                "(entitle_agent_token resource / API) and store it in the secrets backend")
+            raise K8sError("Entitle agent token resolved empty after mint")
 
         helm_args = ["upgrade", "--install", "entitle-agent", _cfg("entitle_agent_chart", "entitle-agent"),
                      "--repo", repo, "--namespace", namespace, "--create-namespace", "--wait",

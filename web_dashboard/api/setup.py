@@ -450,11 +450,15 @@ class AnsibleFeatureConfig(BaseModel):
 
 class EntitleFeatureConfig(BaseModel):
     enabled: bool = False
-    entitle_api_url: str = ""
+    entitle_api_url: str = "https://api.entitle.io/v1"
     entitle_api_token: str = ""         # encrypted at rest
     # Resource registration — register built VMs/DBs as Entitle integrations.
     entitle_registration_enabled: bool = False
     entitle_api_key: str = ""           # entitleio/entitle TF provider key; encrypted at rest
+    entitle_owner_id: str = ""          # REQUIRED for registration: Entitle user UUID owning created integrations
+    entitle_workflow_id: str = ""       # REQUIRED for registration: default approval workflow UUID
+    entitle_endpoint: str = ""          # optional provider endpoint override; blank → derived from the API URL host
+    entitle_agent_token_name: str = ""  # read-only display only; auto-set by ensure_agent_token (not edited here)
     entitle_ssh_sudo_user: str = ""
     entitle_ssh_private_key_ref: str = ""
     # User-JIT (Phase 4) — operator surfaces these via the Settings panel.
