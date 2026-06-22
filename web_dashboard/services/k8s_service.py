@@ -25,6 +25,8 @@ import uuid
 from urllib.parse import urlparse
 
 import yaml
+from typing import Optional
+
 from sqlalchemy.orm import Session
 
 from ..database import Job, K8sCluster
@@ -530,12 +532,13 @@ def _api_host(api_server: str) -> str:
         return ""
 
 
-def _run_sync(cmd: list) -> str:
+def _run_sync(cmd: list, stdin_data: Optional[str] = None) -> str:
     """Run a command, returning stdout; raise K8sError with stderr on failure.
     asyncio's subprocess support is unreliable under uvicorn's SelectorEventLoop
     on Windows, so callers wrap this in asyncio.to_thread (same as the rest of
-    the codebase)."""
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    the codebase). ``stdin_data`` is streamed to the process stdin (used to pipe
+    secret-bearing manifests to ``kubectl apply -f -`` without touching disk)."""
+    proc = subprocess.run(cmd, capture_output=True, text=True, input=stdin_data)
     if proc.returncode != 0:
         raise K8sError(f"command failed ({proc.returncode}): {proc.stderr.strip() or proc.stdout.strip()}")
     return proc.stdout
@@ -603,24 +606,30 @@ async def _apply_manifest_via_runner(kubeconfig: str, manifest_ref: str) -> str:
     """Apply a manifest into a cluster with a **transient kubectl container**
     (mirrors ansible_local_service's local-docker runner over the mounted
     docker.sock). ``manifest_ref`` is a URL (``kubectl apply -f <url>``) or
-    inline YAML. The kubeconfig + manifest live in a tmpdir mounted into the
+    inline YAML — the latter is streamed to ``kubectl apply -f -`` over the
+    container's **stdin**, so secret-bearing manifests (tokens, DB creds) are
+    never written to disk. The kubeconfig lives in a tmpdir mounted into the
     one-shot container, which holds cluster-admin only for the apply."""
     kubeconfig = _runner_kubeconfig(kubeconfig)
     tmpdir = tempfile.mkdtemp(prefix="k8s_apply_")
     try:
         with open(os.path.join(tmpdir, "kubeconfig"), "w") as fh:
             fh.write(kubeconfig)
-        if manifest_ref.startswith(("http://", "https://")):
-            apply_target = manifest_ref
+        is_url = manifest_ref.startswith(("http://", "https://"))
+        stdin_data = None
+        docker_flags = ["docker", "run", "--rm"]
+        if is_url:
+            shell_cmd = f"kubectl --kubeconfig /work/kubeconfig apply -f {shlex.quote(manifest_ref)}"
         else:
-            with open(os.path.join(tmpdir, "manifest.yaml"), "w") as fh:
-                fh.write(manifest_ref)
-            apply_target = "/work/manifest.yaml"
-        shell_cmd = f"kubectl --kubeconfig /work/kubeconfig apply -f {shlex.quote(apply_target)}"
-        cmd = ["docker", "run", "--rm", *_runner_ca_args(), "--entrypoint", "/bin/sh",
+            # Pipe inline YAML over stdin (`-f -`); keep it off disk so CodeQL's
+            # clear-text-storage sink never sees the secret manifest body.
+            shell_cmd = "kubectl --kubeconfig /work/kubeconfig apply -f -"
+            stdin_data = manifest_ref
+            docker_flags.append("-i")
+        cmd = [*docker_flags, *_runner_ca_args(), "--entrypoint", "/bin/sh",
                "-v", f"{tmpdir}:/work", _KUBECTL_IMAGE, "-c", shell_cmd]
-        logger.info("k8s apply: image=%s target=%s", _KUBECTL_IMAGE, apply_target)
-        return await asyncio.to_thread(_run_sync, cmd)
+        logger.info("k8s apply: image=%s source=%s", _KUBECTL_IMAGE, "url" if is_url else "inline")
+        return await asyncio.to_thread(_run_sync, cmd, stdin_data)
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
