@@ -651,9 +651,14 @@ async def _delete_manifest_via_runner(kubeconfig: str, manifest: str) -> str:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-async def _helm_via_runner(kubeconfig: str, helm_args: list, add_eso_repo: bool = True) -> str:
+async def _helm_via_runner(kubeconfig: str, helm_args: list, add_eso_repo: bool = True,
+                           values_stdin: Optional[str] = None) -> str:
     """Run a helm command against the cluster in a transient helm container
-    (KUBECONFIG mounted, same throwaway pattern as the kubectl runner)."""
+    (KUBECONFIG mounted, same throwaway pattern as the kubectl runner).
+
+    If ``values_stdin`` is given it is streamed to the helm process over stdin —
+    pass ``-f -`` in ``helm_args`` and the (secret) values ride stdin instead of
+    the command line, so they never appear in the runner's process args."""
     kubeconfig = _runner_kubeconfig(kubeconfig)
     tmpdir = tempfile.mkdtemp(prefix="k8s_helm_")
     try:
@@ -665,11 +670,14 @@ async def _helm_via_runner(kubeconfig: str, helm_args: list, add_eso_repo: bool 
             parts.append("helm repo update")
         parts.append("helm " + " ".join(shlex.quote(a) for a in helm_args))
         shell_cmd = " && ".join(parts)
-        cmd = ["docker", "run", "--rm", *_runner_ca_args(), "--entrypoint", "/bin/sh",
+        docker_flags = ["docker", "run", "--rm"]
+        if values_stdin is not None:
+            docker_flags.append("-i")  # forward stdin to `helm ... -f -`
+        cmd = [*docker_flags, *_runner_ca_args(), "--entrypoint", "/bin/sh",
                "-e", "KUBECONFIG=/work/kubeconfig", "-v", f"{tmpdir}:/work",
                _HELM_IMAGE, "-c", shell_cmd]
         logger.info("k8s helm: %s", " ".join(helm_args[:3]))
-        return await asyncio.to_thread(_run_sync, cmd)
+        return await asyncio.to_thread(_run_sync, cmd, values_stdin)
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -677,6 +685,19 @@ async def _helm_via_runner(kubeconfig: str, helm_args: list, add_eso_repo: bool 
 def _yaml_quote(value: str) -> str:
     """Double-quoted YAML scalar, safe for arbitrary strings."""
     return '"' + (value or "").replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _nested_from_dotted(dotted_key: str, value: str) -> dict:
+    """Turn ``a.b.c`` + value into ``{"a": {"b": {"c": value}}}`` so a secret can
+    ride a Helm ``-f -`` (stdin) values doc instead of a ``--set`` argument."""
+    parts = dotted_key.split(".")
+    root: dict = {}
+    node = root
+    for p in parts[:-1]:
+        node[p] = {}
+        node = node[p]
+    node[parts[-1]] = value
+    return root
 
 
 def _eso_credentials_secret_manifest(namespace: str, secret_name: str,
@@ -1002,11 +1023,17 @@ async def setup_entitle_agent(cluster_id: str, action: str = "install") -> None:
             helm_args += ["--version", ver]
 
         plaintext_key = _cfg("entitle_agent_token_plaintext_helm_key")
+        helm_values_stdin = None
         if plaintext_key:
-            # The published chart takes the token as a plaintext --set value (no
-            # existingSecret option). Still resolved server-side, never on a row/TF
-            # state; it does land in the in-cluster Helm release Secret (chart limit).
-            helm_args += ["--set-string", f"{plaintext_key}={token}"]
+            # The published chart takes the token as a plaintext value (no
+            # existingSecret option). Pass it as a Helm values doc over stdin
+            # (`-f -`) rather than `--set-string`, so the token never appears in
+            # the runner's process args. Resolved server-side, never on a row/TF
+            # state; it does still land in the in-cluster Helm release Secret
+            # (chart limitation — unavoidable with this chart).
+            helm_values_stdin = yaml.safe_dump(
+                _nested_from_dotted(plaintext_key, token), default_flow_style=False)
+            helm_args += ["-f", "-"]
         else:
             # Existing-Secret path (for a future chart version): apply the Secret +
             # point the chart at it so the token stays out of Helm values.
@@ -1021,7 +1048,8 @@ async def setup_entitle_agent(cluster_id: str, action: str = "install") -> None:
             if extra:
                 helm_args += ["--set", extra]
 
-        await _helm_via_runner(kubeconfig, helm_args, add_eso_repo=False)
+        await _helm_via_runner(kubeconfig, helm_args, add_eso_repo=False,
+                               values_stdin=helm_values_stdin)
         config_service.set("entitle_agent_cluster_id", cluster_id)
         logger.info("Entitle agent installed on cluster %s (ns=%s)", row.name, namespace)
     finally:
