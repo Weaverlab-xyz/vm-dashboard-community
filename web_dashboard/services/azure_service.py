@@ -13,6 +13,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import time
 import uuid
 from typing import Optional
 
@@ -695,6 +696,31 @@ def store_windows_admin_password(vm_name: str, key_suffix: str, password: str) -
     return backend, ref
 
 
+# Deploy bounded-wait timeout: a VM that never leaves "Creating" (e.g. an
+# unsupported size/image combo) must fail the job rather than hang it forever.
+_VM_DEPLOY_TIMEOUT_S = 1200  # 20 min — generous for any normal deploy
+
+
+def _best_effort_cleanup(compute, network, rg, vm_name, nic_name, pip_name=None) -> None:
+    """Remove a half-created VM + NIC (+ optional PIP) after a failed deploy so a
+    partial deployment doesn't leave billable orphans (the seat row may not yet
+    hold vm_resource_id for teardown to find). Best-effort + ordered: VM first
+    (frees the NIC; its OS disk has delete_option=Delete), then NIC, then PIP."""
+    try:
+        compute.virtual_machines.begin_delete(rg, vm_name).wait()
+    except Exception as e:
+        logger.warning("deploy cleanup: VM %s delete failed: %s", vm_name, e)
+    try:
+        network.network_interfaces.begin_delete(rg, nic_name).wait()
+    except Exception as e:
+        logger.warning("deploy cleanup: NIC %s delete failed: %s", nic_name, e)
+    if pip_name:
+        try:
+            network.public_ip_addresses.begin_delete(rg, pip_name).wait()
+        except Exception as e:
+            logger.warning("deploy cleanup: PIP %s delete failed: %s", pip_name, e)
+
+
 def _deploy_vm_sync(
     cred, sub_id: str, rg: str, location: str, vm_name: str, vm_size: str,
     image_id: str, subnet_id: str, nsg_ids: list, create_public_ip: bool,
@@ -706,6 +732,14 @@ def _deploy_vm_sync(
     trusted_launch: bool = False,
 ) -> dict:
     is_windows = (os_type or "Linux").lower() == "windows"
+    # Trusted Launch needs a Gen2-capable size; B-series (burstable) is Gen1-only,
+    # so Azure accepts the deploy but the VM hangs in "Creating" forever — fail fast.
+    if trusted_launch and (vm_size or "").lower().startswith("standard_b"):
+        raise AzureError(
+            f"VM size '{vm_size}' is a B-series (burstable) and does not support "
+            f"Trusted Launch — the VM would never finish provisioning. Use a Gen2 "
+            f"size such as Standard_D2s_v3."
+        )
     if is_windows:
         if not admin_password:
             raise AzureError(f"Windows deploy {vm_name}: admin_password is required.")
@@ -833,18 +867,37 @@ def _deploy_vm_sync(
         logger.info("Azure deploy %s: Trusted Launch (secure boot + vTPM)%s", vm_name,
                     ", Windows_Client license" if is_windows else "")
 
-    vm = compute.virtual_machines.begin_create_or_update(rg, vm_name, vm_params).result()
+    # Create the VM with a bounded wait: a stuck "Creating" must fail the job, not
+    # hang it forever. On any failure, best-effort remove the NIC/PIP/VM we created
+    # so a half-deploy doesn't orphan billable resources.
+    try:
+        poller = compute.virtual_machines.begin_create_or_update(rg, vm_name, vm_params)
+        deadline = time.monotonic() + _VM_DEPLOY_TIMEOUT_S
+        while not poller.done():
+            if time.monotonic() > deadline:
+                raise AzureError(
+                    f"VM {vm_name} did not finish provisioning within "
+                    f"{_VM_DEPLOY_TIMEOUT_S // 60} min — provisioning appears stuck "
+                    f"(check that the size supports the image; Trusted Launch needs a Gen2 size)."
+                )
+            poller.wait(15)
+        vm = poller.result()
 
-    # Fetch IPs from NIC
-    nic_detail = network.network_interfaces.get(rg, nic_name)
-    private_ip = None
-    public_ip_addr = None
-    if nic_detail.ip_configurations:
-        private_ip = nic_detail.ip_configurations[0].private_ip_address
-        pip_ref = nic_detail.ip_configurations[0].public_ip_address
-        if pip_ref:
-            pip_detail = network.public_ip_addresses.get(rg, pip_name)
-            public_ip_addr = pip_detail.ip_address
+        # Fetch IPs from NIC
+        nic_detail = network.network_interfaces.get(rg, nic_name)
+        private_ip = None
+        public_ip_addr = None
+        if nic_detail.ip_configurations:
+            private_ip = nic_detail.ip_configurations[0].private_ip_address
+            pip_ref = nic_detail.ip_configurations[0].public_ip_address
+            if pip_ref:
+                pip_detail = network.public_ip_addresses.get(rg, pip_name)
+                public_ip_addr = pip_detail.ip_address
+    except Exception as exc:
+        logger.warning("Azure deploy %s failed (%s) — cleaning up partial resources", vm_name, exc)
+        _best_effort_cleanup(compute, network, rg, vm_name, nic_name,
+                             pip_name if create_public_ip else None)
+        raise
 
     return {
         "vm_id": vm.id,
