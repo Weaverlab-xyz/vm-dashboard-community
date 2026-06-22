@@ -1,0 +1,74 @@
+# ConfigMap demo: a Deployment that takes config two ways from one ConfigMap —
+# an environment variable (APP_GREETING) and a mounted file (the served
+# index.html). Edit the ConfigMap and roll the Deployment to pick up changes
+# (`kubectl rollout restart deploy/web-config -n sample-apps`).
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: web-config
+  namespace: sample-apps
+data:
+  APP_GREETING: "Hello from a ConfigMap"
+  index.html: |
+    <!doctype html>
+    <title>sample-apps</title>
+    <h1>Served from a ConfigMap-mounted file.</h1>
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-config
+  namespace: sample-apps
+  labels:
+    app: web-config
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: web-config
+  template:
+    metadata:
+      labels:
+        app: web-config
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: nginx
+          image: nginxinc/nginx-unprivileged:1.27-alpine
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: APP_GREETING
+              valueFrom:
+                configMapKeyRef:
+                  name: web-config
+                  key: APP_GREETING
+          volumeMounts:
+            - name: content
+              mountPath: /usr/share/nginx/html/index.html
+              subPath: index.html
+              readOnly: true
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+      volumes:
+        - name: content
+          configMap:
+            name: web-config
+            items:
+              - key: index.html
+                path: index.html

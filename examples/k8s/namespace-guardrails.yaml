@@ -1,0 +1,36 @@
+# Namespace guardrails — a ResourceQuota caps total consumption for `sample-apps`
+# and a LimitRange supplies default + maximum container requests/limits so a pod
+# that omits them still gets sane values (and can't request the whole node).
+# Apply alongside 00-namespace.yaml. Tune the numbers to your cluster size.
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: sample-apps-quota
+  namespace: sample-apps
+spec:
+  hard:
+    requests.cpu: "2"
+    requests.memory: 2Gi
+    limits.cpu: "4"
+    limits.memory: 4Gi
+    pods: "20"
+    persistentvolumeclaims: "5"
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: sample-apps-limits
+  namespace: sample-apps
+spec:
+  limits:
+    - type: Container
+      default:           # applied as limits if a container sets none
+        cpu: 250m
+        memory: 128Mi
+      defaultRequest:    # applied as requests if a container sets none
+        cpu: 50m
+        memory: 64Mi
+      max:               # a single container may not exceed these
+        cpu: "1"
+        memory: 512Mi

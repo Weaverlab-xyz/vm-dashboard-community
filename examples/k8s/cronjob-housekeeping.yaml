@@ -1,0 +1,51 @@
+# Scheduled one-shot — the Kubernetes counterpart to the "one-shot" compose
+# samples (Trivy, Syft, …). Runs every 15 minutes, prints a timestamp, exits.
+# Swap the image + command for a real periodic task (backup, registry scan,
+# cleanup). `concurrencyPolicy: Forbid` skips a run if the previous one is still
+# going; history limits keep finished Jobs from piling up.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: housekeeping
+  namespace: sample-apps
+  labels:
+    app: housekeeping
+spec:
+  schedule: "*/15 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        metadata:
+          labels:
+            app: housekeeping
+        spec:
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: task
+              image: busybox:1.36
+              command:
+                - /bin/sh
+                - -c
+                - 'echo "housekeeping ran at $(date -u +%FT%TZ)"'
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 16Mi
+                limits:
+                  cpu: 50m
+                  memory: 32Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop:
+                    - ALL

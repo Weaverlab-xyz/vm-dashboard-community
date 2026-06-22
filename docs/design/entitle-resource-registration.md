@@ -163,3 +163,7 @@ cloud-init set up with the injected key + passwordless sudo (the
   In-Cluster via the agent for private API clusters, else a minted least-priv ServiceAccount (External
   Access). Open: scope the ServiceAccount ClusterRole down from cluster-admin once the required perms are
   confirmed; the GKE-specific GCP-IAM integration is a separate optional path.
+- **Sample workloads** for managed clusters live in [`examples/k8s/`](../../examples/k8s/)
+  (the community counterpart to `examples/compose/` + `examples/playbooks/`): namespaced,
+  `restricted`-PSS-compliant Deployment/Service/Ingress/HPA/ConfigMap/Secret/StatefulSet/
+  CronJob/quota/NetworkPolicy starters, validated by `tests/test_k8s_samples.py`.

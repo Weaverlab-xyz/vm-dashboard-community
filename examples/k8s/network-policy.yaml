@@ -1,0 +1,59 @@
+# Zero-trust networking for the namespace: default-deny all ingress, then allow
+# only what's needed. Models the "non-privileged / least-exposure" posture the
+# rest of the dashboard takes.
+#
+# PREREQUISITE: a CNI that enforces NetworkPolicy (Calico, Cilium, AWS VPC CNI
+# with policy enabled, Azure NPM, GKE Dataplane V2). On a CNI that ignores
+# NetworkPolicy these objects apply cleanly but have no effect.
+---
+# Deny every ingress flow into the namespace by default.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: sample-apps
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+---
+# Allow the `web` pods to receive traffic on 8080 from anywhere the ingress
+# controller sits (here: any namespace). Narrow `from` to your ingress
+# controller's namespace in production.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-web-http
+  namespace: sample-apps
+spec:
+  podSelector:
+    matchLabels:
+      app: web
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+# Allow same-namespace pods to reach Redis on 6379 (e.g. an app talking to the
+# StatefulSet) while the default-deny still blocks everything else.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-redis-internal
+  namespace: sample-apps
+spec:
+  podSelector:
+    matchLabels:
+      app: redis
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector: {}
+      ports:
+        - protocol: TCP
+          port: 6379

@@ -1,0 +1,16 @@
+# Namespace for the sample workloads. Apply this FIRST — every other sample in
+# this directory is scoped to `sample-apps`, so `kubectl delete ns sample-apps`
+# (or removing the Portainer stack) tears the whole set down in one shot.
+#
+# The namespace enforces the `restricted` Pod Security Standard, so every sample
+# here is written to comply (non-root, no privilege escalation, all capabilities
+# dropped, RuntimeDefault seccomp). Drop a non-compliant manifest in and the API
+# server will reject it — these samples double as a hardened-workload template.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sample-apps
+  labels:
+    app.kubernetes.io/managed-by: vm-dashboard
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
