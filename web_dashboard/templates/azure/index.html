@@ -334,7 +334,7 @@
           </div>
           <div>
             <label class="block text-xs font-medium text-gray-700 mb-1">Location</label>
-            <select x-model="deployModal.location" class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm">
+            <select x-model="deployModal.location" @change="loadNetworkOpts(true, deployModal.location)" class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm">
               <template x-for="loc in networkOpts.locations" :key="loc">
                 <option :value="loc" x-text="loc"></option>
               </template>
@@ -513,7 +513,7 @@
           </div>
           <div>
             <label class="block text-xs font-medium text-gray-700 mb-1">Location</label>
-            <select x-model="bulkModal.location" class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm">
+            <select x-model="bulkModal.location" @change="loadNetworkOpts(true, bulkModal.location)" class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm">
               <template x-for="loc in networkOpts.locations" :key="loc">
                 <option :value="loc" x-text="loc"></option>
               </template>
@@ -1087,15 +1087,18 @@ function azureDashboard() {
       }
     },
 
-    async loadNetworkOpts(bust = false) {
+    async loadNetworkOpts(bust = false, location = '') {
       try {
-        const data = await API.get('/api/azure/network-options' + (bust ? '?bust=true' : ''));
+        const loc = location || this.location || '';
+        const params = [];
+        if (loc) params.push('location=' + encodeURIComponent(loc));
+        if (bust) params.push('bust=true');
+        const data = await API.get('/api/azure/network-options' + (params.length ? '?' + params.join('&') : ''));
         this.networkOpts = data;
         this.networkOptsWarnings = data.warnings || [];
-        // Set default location
-        if (data.locations && data.locations.length && !data.locations.includes(this.location)) {
-          this.location = data.locations[0];
-        }
+        // Default the header region to the one the options were scoped to (the
+        // configured azure_location) when nothing is selected yet.
+        if (!this.location) this.location = data.location || (data.locations && data.locations[0]) || '';
       } catch (e) {
         if (e.status === 503) this.credError = true;
       }
