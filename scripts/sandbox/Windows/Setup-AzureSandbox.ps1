@@ -265,8 +265,10 @@ if ($reuse) {
     Write-Ok "Created SP $SpName (creds at $SpPath, owner-only)"
 
     $SpObjectId = (az ad sp list --display-name $SpName --query '[0].id' -o tsv).Trim()
-    az keyvault set-policy -n $KvName --object-id $SpObjectId --secret-permissions get list | Out-Null
-    Write-Ok "Granted SP read on Key Vault $KvName"
+    # read for runtime SSH-key fetches; set/delete so the azure_kv secrets backend
+    # can vault per-VM Windows admin passwords and clean them up on teardown.
+    az keyvault set-policy -n $KvName --object-id $SpObjectId --secret-permissions get list set delete | Out-Null
+    Write-Ok "Granted SP get/list/set/delete on Key Vault $KvName"
 }
 
 $sp = Get-Content $SpPath -Raw | ConvertFrom-Json

@@ -751,6 +751,80 @@ def _best_effort_cleanup(compute, network, rg, vm_name, nic_name, pip_name=None)
             logger.warning("deploy cleanup: PIP %s delete failed: %s", pip_name, e)
 
 
+def _normalize_region(r: str) -> str:
+    """Azure regions come back as 'centralus' or sometimes 'Central US' — fold to
+    a canonical comparable form."""
+    return (r or "").replace(" ", "").lower()
+
+
+def _resource_region_from_id(network, resource_id: str, kind: str):
+    """Region of a subnet's VNet (kind='subnet') or an NSG (kind='nsg') by ARM id.
+    Returns the region string, or None if it can't be determined (caller fails open)."""
+    try:
+        parts = resource_id.split("/")
+        rg = parts[parts.index("resourceGroups") + 1]
+        if kind == "subnet":
+            vnet = parts[parts.index("virtualNetworks") + 1]
+            return network.virtual_networks.get(rg, vnet).location
+        if kind == "nsg":
+            nsg = parts[parts.index("networkSecurityGroups") + 1]
+            return network.network_security_groups.get(rg, nsg).location
+    except Exception as e:
+        logger.warning("region lookup failed for %s (%s): %s", resource_id, kind, e)
+    return None
+
+
+def _sku_trusted_launch_capable(compute, location: str, vm_size: str):
+    """True/False when we can determine whether vm_size supports Trusted Launch in
+    location (Gen2 + vTPM/Secure Boot, TL not disabled); None when unknown (e.g. the
+    SKU list is unavailable or the size isn't listed) so the caller fails open."""
+    try:
+        for sku in compute.resource_skus.list(filter=f"location eq '{location}'"):
+            if sku.resource_type == "virtualMachines" and sku.name == vm_size:
+                caps = {c.name: c.value for c in (sku.capabilities or [])}
+                gens = caps.get("HyperVGenerations", "") or ""
+                tl_disabled = (caps.get("TrustedLaunchDisabled", "False") or "False")
+                return ("V2" in gens) and (tl_disabled.lower() != "true")
+        return None
+    except Exception as e:
+        logger.warning("SKU capability lookup failed for %s in %s: %s", vm_size, location, e)
+        return None
+
+
+def _validate_deploy_consistency(compute, network, location, subnet_id, nsg_ids,
+                                 vm_size, trusted_launch) -> None:
+    """Pre-deploy guards run BEFORE any resource is created: turn the cryptic Azure
+    failures (InvalidResourceReference on a cross-region NIC; a Trusted-Launch VM
+    stuck forever in 'Creating' on a Gen1 size) into clear, actionable errors. A
+    *confirmed* mismatch raises AzureError; a failed check (API hiccup, unknown
+    size) is logged and skipped so it never blocks an otherwise valid deploy."""
+    want = _normalize_region(location)
+    if subnet_id:
+        sr = _resource_region_from_id(network, subnet_id, "subnet")
+        if sr and _normalize_region(sr) != want:
+            raise AzureError(
+                f"The selected subnet is in region '{sr}', but the deploy region is "
+                f"'{location}'. They must match — pick a subnet in '{location}' or change "
+                f"the deploy region."
+            )
+    for nsg_id in (nsg_ids or []):
+        nr = _resource_region_from_id(network, nsg_id, "nsg")
+        if nr and _normalize_region(nr) != want:
+            raise AzureError(
+                f"The selected NSG is in region '{nr}', but the deploy region is "
+                f"'{location}'. They must match — pick an NSG in '{location}' or change "
+                f"the deploy region."
+            )
+    if trusted_launch and vm_size:
+        cap = _sku_trusted_launch_capable(compute, location, vm_size)
+        if cap is False:
+            raise AzureError(
+                f"VM size '{vm_size}' is not Trusted-Launch capable in '{location}' — it "
+                f"must be a Gen2 size with vTPM/Secure Boot (e.g. Standard_D2s_v3). A "
+                f"non-Gen2 size would hang in 'Creating' forever."
+            )
+
+
 def _deploy_vm_sync(
     cred, sub_id: str, rg: str, location: str, vm_name: str, vm_size: str,
     image_id: str, subnet_id: str, nsg_ids: list, create_public_ip: bool,
@@ -762,14 +836,6 @@ def _deploy_vm_sync(
     trusted_launch: bool = False,
 ) -> dict:
     is_windows = (os_type or "Linux").lower() == "windows"
-    # Trusted Launch needs a Gen2-capable size; B-series (burstable) is Gen1-only,
-    # so Azure accepts the deploy but the VM hangs in "Creating" forever — fail fast.
-    if trusted_launch and (vm_size or "").lower().startswith("standard_b"):
-        raise AzureError(
-            f"VM size '{vm_size}' is a B-series (burstable) and does not support "
-            f"Trusted Launch — the VM would never finish provisioning. Use a Gen2 "
-            f"size such as Standard_D2s_v3."
-        )
     if is_windows:
         if not admin_password:
             raise AzureError(f"Windows deploy {vm_name}: admin_password is required.")
@@ -786,6 +852,11 @@ def _deploy_vm_sync(
         )
     compute = _get_compute(cred, sub_id)
     network = _get_network(cred, sub_id)
+    # Fail fast on region/size mismatches BEFORE creating any resource — turns
+    # cryptic Azure errors (InvalidResourceReference, stuck "Creating") into clear
+    # messages and avoids orphaned half-deploys.
+    _validate_deploy_consistency(compute, network, location, subnet_id, nsg_ids,
+                                 vm_size, trusted_launch)
     tags = {"ManagedBy": "vm-cli-dashboard"}
     if workgroup:
         tags["workgroup"] = workgroup

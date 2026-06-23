@@ -280,14 +280,16 @@ else
   chmod 600 "$SP_JSON_PATH"
   ok "Created SP $SP_NAME (creds at $SP_JSON_PATH, mode 600)"
 
-  # Grant the SP read access to the Key Vault for runtime SSH key fetches.
+  # Grant the SP read+write on Key Vault secrets: read for runtime SSH-key fetches;
+  # write (set/delete) so the azure_kv secrets backend can vault per-VM Windows
+  # admin passwords and clean them up on teardown.
   # A just-created SP lags in AAD: `az ad sp show` 404s until it replicates, so
   # retry the lookup (by appId from the create output — `az ad sp list` would
   # instead return an empty string with exit 0, which no retry could catch).
   SP_OBJECT_ID="$(retry 8 5 az ad sp show --id "$(jq -r '.appId' "$SP_JSON_PATH")" --query id -o tsv)"
   retry 8 5 az keyvault set-policy -n "$KV_NAME" --object-id "$SP_OBJECT_ID" \
-    --secret-permissions get list >/dev/null
-  ok "Granted SP read on Key Vault $KV_NAME"
+    --secret-permissions get list set delete >/dev/null
+  ok "Granted SP get/list/set/delete on Key Vault $KV_NAME"
 fi
 SP_APP_ID="$(jq -r '.appId'    "$SP_JSON_PATH")"
 SP_PASSWORD="$(jq -r '.password' "$SP_JSON_PATH")"
