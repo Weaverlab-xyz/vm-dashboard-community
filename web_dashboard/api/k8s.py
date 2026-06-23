@@ -25,10 +25,12 @@ from ..models.k8s import (
     ClusterRegisterRequest,
     EntitleAgentRequest,
     EntitleClusterRegisterRequest,
+    K8sProvisionOptions,
     ManagementRequest,
     SecretDeliveryRequest,
 )
-from ..services import k8s_service, job_service
+from ..services import k8s_service, job_service, cache_service
+from ..services.aws_service import AWSError
 from ..services.k8s_service import K8sError
 from .auth import require_admin
 
@@ -111,6 +113,39 @@ async def provision_cluster(
     # the apply. cloud + cluster_id are already in the job metadata (create_cluster).
     job_service.update_metadata(db, result["job_id"], {"tf_variables": result["tf_variables"]})
     return {"ok": True, "cluster_id": result["cluster_id"], "job_id": result["job_id"]}
+
+
+@router.get("/clusters/provision-options", response_model=K8sProvisionOptions)
+async def provision_options(
+    cloud: str = "aws",
+    region: str = "",
+    current_user: User = Depends(require_admin),
+):
+    """Served pickers for the provision modal (region-scoped). Curated per-cloud
+    static lists (regions / node sizes / k8s versions, configured value always
+    included) + (AWS only) live VPC subnets for the EKS subnet override and the
+    configured sandbox subnet ids to pre-select. AWS subnet discovery is cached
+    (10 min); static lists are assembled per request.
+
+    Declared BEFORE GET /clusters/{cluster_id} so that path param doesn't capture
+    "provision-options"."""
+    cloud_l = (cloud or "aws").strip().lower()
+
+    async def _fetch():
+        return await k8s_service.provision_options(cloud_l, region)
+
+    try:
+        if cloud_l == "aws":
+            key = cache_service.key_param("k8s_provision_opts", cloud=cloud_l, region=(region or "").strip())
+            opts, cached_at = await cache_service.get_or_refresh(
+                key, cache_service.TTL["k8s_provision_opts"], _fetch)
+            return K8sProvisionOptions(**opts, cached_at=cached_at)
+        opts = await _fetch()   # azure / gcp — pure static assembly, no cache
+        return K8sProvisionOptions(**opts, cached_at=None)
+    except K8sError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except AWSError as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
 
 @router.get("/clusters/{cluster_id}")

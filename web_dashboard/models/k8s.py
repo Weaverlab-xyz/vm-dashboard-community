@@ -41,6 +41,23 @@ class ClusterProvisionRequest(BaseModel):
     zone: Optional[str] = None                # GCP only — zonal cluster zone (else <region>-a)
 
 
+class K8sProvisionOptions(BaseModel):
+    """Served pickers for the provision modal (region-scoped). Strict-select sources:
+    every list is curated and always includes the configured/sandbox value so the
+    form can't lock the operator out. AWS additionally serves the live VPC subnets
+    (the EKS subnet override) + the two configured sandbox subnet ids the frontend
+    pre-selects; AKS/GKE create their own network, so ``subnets`` /
+    ``configured_subnet_ids`` are empty."""
+    cloud: str
+    region: str
+    regions: list[str]
+    node_instance_types: list[str]
+    k8s_versions: list[str]
+    subnets: list[dict] = []               # AWS only: [{id, name, vpc_id, az, cidr}]
+    configured_subnet_ids: list[str] = []  # AWS only: aws_k8s_subnet_a_id / _b_id
+    cached_at: Optional[str] = None
+
+
 class ManagementRequest(BaseModel):
     """Launch a management plane into a registered cluster (Phase 2).
 

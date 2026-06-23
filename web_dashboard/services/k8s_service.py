@@ -263,6 +263,47 @@ def _cfg_list(key: str) -> list:
     return [s.strip() for s in _cfg(key).split(",") if s.strip()]
 
 
+# ── Provision-form pickers (§1.1a): curated per-cloud static lists ─────────────
+# Strict-select sources for the provision modal (mirrors aws_service's curated
+# DB_INSTANCE_CLASSES — there's no live EKS-version/instance-type discovery API).
+# provision_options() always merges the configured value in + first, so a strict
+# select can't exclude it.
+K8S_VERSIONS = {
+    "aws":   ["1.36", "1.35", "1.34", "1.33"],
+    "azure": ["1.36", "1.35", "1.34", "1.33"],
+    "gcp":   ["1.36", "1.35", "1.34", "1.33"],
+}
+K8S_NODE_TYPES = {
+    "aws":   ["t3.small", "t3.medium", "t3.large", "t3.xlarge",
+              "m5.large", "m5.xlarge", "c5.large", "c5.xlarge"],
+    "azure": ["Standard_B2s", "Standard_B2ms", "Standard_D2s_v3",
+              "Standard_D4s_v3", "Standard_DS2_v2"],
+    "gcp":   ["e2-small", "e2-medium", "e2-standard-2", "e2-standard-4",
+              "n2-standard-2", "n2-standard-4"],
+}
+K8S_REGIONS = {
+    "aws":   ["us-east-1", "us-east-2", "us-west-1", "us-west-2", "eu-west-1",
+              "eu-central-1", "ap-southeast-1", "ap-southeast-2", "ap-northeast-1"],
+    "azure": ["eastus", "eastus2", "westus2", "westus3", "centralus",
+              "northeurope", "westeurope", "uksouth", "australiaeast"],
+    "gcp":   ["us-central1", "us-east1", "us-west1", "europe-west1",
+              "europe-west4", "asia-southeast1", "asia-northeast1", "australia-southeast1"],
+}
+
+
+def _with_configured_first(values: list, configured: str) -> list:
+    """Return ``values`` with ``configured`` guaranteed present and first
+    (order-preserving, de-duplicated). Empty ``configured`` → ``values`` unchanged.
+    Keeps a strict ``<select>`` from ever excluding the configured/sandbox value."""
+    seen, out = set(), []
+    for v in [configured, *values]:
+        v = (v or "").strip()
+        if v and v not in seen:
+            seen.add(v)
+            out.append(v)
+    return out
+
+
 def _build_cluster_tf_variables(*, cloud: str, cluster_id: str, name: str,
                                 region: str, opts: dict) -> dict:
     """The Terraform ``-var`` set for the cluster module (aws EKS / azure AKS /
@@ -340,6 +381,48 @@ def _build_cluster_tf_variables(*, cloud: str, cluster_id: str, name: str,
         return tf
 
     raise NotImplementedError(f"{cloud} cluster Terraform variables not implemented")
+
+
+async def provision_options(cloud: str, region: str = "") -> dict:
+    """Assemble the provision-form pickers for one cloud (region-scoped). Curated
+    static lists for regions / node sizes / k8s versions (the configured value is
+    merged in + first); AWS additionally serves live VPC subnets for the EKS subnet
+    override + the two configured sandbox subnet ids to pre-select. AKS/GKE create
+    their own network → subnets / configured_subnet_ids empty. Raises K8sError on an
+    unknown cloud; AWS subnet discovery errors propagate as aws_service.AWSError."""
+    cloud = (cloud or "aws").strip().lower()
+    if cloud not in _PROVISION_IMPLEMENTED:
+        raise K8sError(f"unknown cloud {cloud!r} (expected one of {', '.join(_PROVISION_IMPLEMENTED)})")
+
+    cfg_region = {"aws": "aws_region", "azure": "azure_location", "gcp": "gcp_region"}[cloud]
+    cfg_node = {"aws": "aws_eks_node_instance_type", "azure": "azure_aks_node_vm_size",
+                "gcp": "gcp_gke_machine_type"}[cloud]
+    cfg_ver = {"aws": "aws_eks_k8s_version", "azure": "azure_aks_k8s_version",
+               "gcp": "gcp_gke_k8s_version"}[cloud]
+
+    configured_region = _cfg(cfg_region)
+    region = (region or "").strip() or configured_region
+    # configured region first, then the just-picked region, then the curated set.
+    regions = _with_configured_first(
+        _with_configured_first(K8S_REGIONS[cloud], region), configured_region)
+
+    out = {
+        "cloud": cloud,
+        "region": region,
+        "regions": regions,
+        "node_instance_types": _with_configured_first(K8S_NODE_TYPES[cloud], _cfg(cfg_node)),
+        "k8s_versions": _with_configured_first(K8S_VERSIONS[cloud], _cfg(cfg_ver)),
+        "subnets": [],
+        "configured_subnet_ids": [],
+    }
+    if cloud == "aws":
+        from . import aws_service
+        net = await aws_service.get_network_options(region)
+        out["subnets"] = net.get("subnets", [])
+        out["configured_subnet_ids"] = [
+            s for s in (_cfg("aws_k8s_subnet_a_id"), _cfg("aws_k8s_subnet_b_id")) if s
+        ]
+    return out
 
 
 def _assemble_eks_kubeconfig(*, cluster_name: str, endpoint: str, ca_b64: str,
