@@ -438,6 +438,17 @@ _cfg=(
   "azure_key_vault_url=$KV_URL"
   "azure_ssh_keypair_secret_name=$SSH_SECRET               # JSON {public_key, private_key}"
   ""
+  "# Per-region config set for $LOCATION (multi-region — PR3). /api/setup/import"
+  "# merges these into azure_region_configs[$LOCATION] without clobbering other"
+  "# regions, so re-running this script in a second region populates both. The"
+  "# flat azure_* keys above stay as the default region for backward-compat."
+  "azure_region.$LOCATION.resource_group=$RG"
+  "azure_region.$LOCATION.vnet_resource_group=$RG"
+  "azure_region.$LOCATION.desktops_subnet_id=$DESKTOPS_SUBNET_ID"
+  "azure_region.$LOCATION.db_subnet_id=$DB_SUBNET_ID"
+  "azure_region.$LOCATION.db_mysql_subnet_id=$DB_MYSQL_SUBNET_ID"
+  "azure_region.$LOCATION.db_private_dns_zone_id=$DB_DNS_ZONE_ID"
+  ""
   "# Image-registry hub + automated cross-cloud promote:"
   "storage_azure_account=$SA_NAME                          # Image hub + promote staging"
   "storage_azure_container=hub                              # Container for hub artefacts"
@@ -462,9 +473,13 @@ if [[ -n "${AZURE_IMAGE_GALLERY_RG:-}" ]]; then
     ""
     "# External Shared Image Gallery (SP granted access above):"
     "azure_gallery_resource_group=$AZURE_IMAGE_GALLERY_RG"
+    "azure_region.$LOCATION.gallery_resource_group=$AZURE_IMAGE_GALLERY_RG"
   )
   if [[ -n "${AZURE_IMAGE_GALLERY_NAME:-}" ]]; then
-    _cfg+=("azure_shared_image_gallery=$AZURE_IMAGE_GALLERY_NAME              # Compute Gallery name")
+    _cfg+=(
+      "azure_shared_image_gallery=$AZURE_IMAGE_GALLERY_NAME              # Compute Gallery name"
+      "azure_region.$LOCATION.gallery_name=$AZURE_IMAGE_GALLERY_NAME"
+    )
   fi
   _cfg+=("# Tip: point promote_runner_azure_target_resource_group at $AZURE_IMAGE_GALLERY_RG to land promoted images in the gallery RG")
 fi

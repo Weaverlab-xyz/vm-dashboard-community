@@ -73,15 +73,25 @@ def _azure_spec(payload: PoolCreateRequest) -> dict:
     (``azure_desktops_subnet_id`` / ``azure_desktops_vm_size``) so pools land on
     the non-delegated desktops subnet by default instead of whatever the picker
     lists.
+
+    Multi-region (PR3): subnet / VM size / resource group resolve through the
+    chosen region's config set (``resolve_azure_region(location)``), which falls
+    back per-field to the flat keys when a region isn't configured — so a pool in
+    westus2 gets the westus2 desktops subnet + size, while a single-region setup
+    behaves exactly as before.
     """
+    from ..services.region_config import resolve_azure_region
+
+    location = payload.location or _cfg("azure_location") or "centralus"
+    region = resolve_azure_region(location)
     return {
-        "location": payload.location or _cfg("azure_location") or "centralus",
-        "resource_group": payload.resource_group or _cfg("azure_resource_group") or "vm-cli-rg",
-        "vm_size": payload.vm_size or payload.size or _cfg("azure_desktops_vm_size"),
+        "location": location,
+        "resource_group": payload.resource_group or region["resource_group"] or "vm-cli-rg",
+        "vm_size": payload.vm_size or payload.size or region["default_vm_size"],
         "image_id": payload.image_id or payload.image,
         "image_publisher": payload.image_publisher, "image_offer": payload.image_offer,
         "image_sku": payload.image_sku, "image_version": payload.image_version,
-        "subnet_id": payload.subnet_id or _cfg("azure_desktops_subnet_id"), "nsg_ids": payload.nsg_ids,
+        "subnet_id": payload.subnet_id or region["desktops_subnet_id"], "nsg_ids": payload.nsg_ids,
         "create_public_ip": payload.create_public_ip,
         "os_type": payload.os_type,
         "trusted_launch": payload.trusted_launch,

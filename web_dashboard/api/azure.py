@@ -131,6 +131,15 @@ def _loc():
     return _cfg("azure_location") or "centralus"
 
 
+def _rg_for(location: str) -> str:
+    """Resource group for a given region, resolved through the per-region config
+    sets (PR3). Falls back per-field to the flat ``azure_resource_group`` when the
+    region isn't configured or is the default — so single-region setups are
+    unchanged."""
+    from ..services.region_config import resolve_azure_region
+    return resolve_azure_region(location)["resource_group"] or "vm-cli-rg"
+
+
 def _aci_rg():
     return _cfg("azure_aci_resource_group") or _rg()
 
@@ -171,11 +180,17 @@ async def list_images(
     cache_key = cache_service.key_global("azure_images")
     ttl = cache_service.TTL["azure_images"]
 
+    # Gallery defaults resolve through the per-region config sets (PR3). With no
+    # region map configured this returns the flat azure_shared_image_gallery /
+    # azure_gallery_resource_group / azure_resource_group values verbatim.
+    from ..services.region_config import resolve_azure_region
+    region = resolve_azure_region(_loc())
+
     async def _fetch():
         return await azure_service.list_private_images(
-            _cfg("azure_shared_image_gallery"),
-            _cfg("azure_gallery_resource_group"),
-            _rg(),
+            region["gallery_name"],
+            region["gallery_resource_group"],
+            region["resource_group"] or "vm-cli-rg",
         )
 
     try:
@@ -554,8 +569,11 @@ async def deploy_vm(
     """
     if req.os_type.lower() != "windows" and not req.ssh_public_key.strip():
         raise HTTPException(status_code=400, detail="ssh_public_key is required for Linux deploys.")
-    rg = req.resource_group or _rg()
     loc = req.location or _loc()
+    # Resource group resolves through the chosen region's config set (PR3) so a
+    # deploy in a non-default region lands in that region's RG; falls back to the
+    # flat azure_resource_group for single-region setups.
+    rg = req.resource_group or _rg_for(loc)
     workgroup = _validate_workgroup(db, current_user, req.workgroup)
     req.workgroup = workgroup
     await _validate_ssh_key_override(req.ssh_key_secret_override)
@@ -618,8 +636,9 @@ async def bulk_deploy_vms(
     if req.os_type.lower() != "windows" and not req.ssh_public_key.strip():
         raise HTTPException(status_code=400, detail="ssh_public_key is required for Linux deploys.")
 
-    rg = req.resource_group or _rg()
     loc = req.location or _loc()
+    # Region-aware RG resolution (PR3) — see deploy_vm above.
+    rg = req.resource_group or _rg_for(loc)
     workgroup = _validate_workgroup(db, current_user, req.workgroup)
     req.workgroup = workgroup
     await _validate_ssh_key_override(req.ssh_key_secret_override)
