@@ -20,6 +20,9 @@ class AzureImageInfo(BaseModel):
     sku: str = ""
     location: str = ""
     resource_group: str = ""  # RG the managed image lives in (empty for gallery rows)
+    # Regions the image is deployable in — gallery: the latest version's replicated
+    # target regions; managed: its single [location]. Drives the picker region filter.
+    regions: List[str] = []
     # Marketplace image fields (optional)
     publisher: Optional[str] = None
     offer: Optional[str] = None
@@ -66,6 +69,7 @@ class AzureSSHKeyInfo(BaseModel):
     resource_group: str = ""
 
 class AzureNetworkOptions(BaseModel):
+    location: str = ""        # the region these subnets/NSGs/sizes were scoped to
     locations: List[str] = []
     vm_sizes: List[str] = []
     subnets: List[AzureSubnetInfo] = []

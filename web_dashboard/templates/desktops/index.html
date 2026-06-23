@@ -107,7 +107,9 @@
               <select x-model="form.image_id" @change="syncOsTypeFromImage()" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
                 <option value="">— select a private image —</option>
                 <template x-for="im in azure.images" :key="im.resource_id || im.name">
-                  <option :value="im.resource_id" x-text="im.name || im.resource_id"></option>
+                  <option :value="im.resource_id"
+                          :disabled="im.regions && im.regions.length && form.location && !im.regions.includes(form.location)"
+                          x-text="(im.name || im.resource_id) + (im.regions && im.regions.length && form.location && !im.regions.includes(form.location) ? ' — not replicated to ' + form.location : '')"></option>
                 </template>
               </select>
               <p class="text-xs text-gray-400 mt-1">Gallery / managed images. Paste a full ARM image id below if it's not listed.</p>
@@ -124,7 +126,7 @@
             <div class="grid grid-cols-2 gap-3">
               <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Location</label>
-                <select x-model="form.location" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                <select x-model="form.location" @change="onAzureLocationChange()" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
                   <template x-for="loc in azure.locations" :key="loc"><option :value="loc" x-text="loc"></option></template>
                 </select>
               </div>
@@ -350,28 +352,48 @@ function desktopsPage() {
     async loadAzure() {
       if (this.azure.loaded || this.azure.loading) return;
       this.azure.loading = true;
-      // Virtual Desktops panel defaults: pools should land on the configured
-      // non-delegated desktops subnet (+ default VM size), not whatever's first.
-      let vd = {};
-      try { vd = (await API.get('/api/setup/feature/vdesktops')) || {}; } catch (e) {}
+      // VDI panel defaults (configured desktops subnet + size). Stashed so a region
+      // change can re-apply them when they belong to the newly selected region.
+      try { this._vd = (await API.get('/api/setup/feature/vdesktops')) || {}; } catch (e) { this._vd = {}; }
+      // Images + SSH key are region-agnostic (each image carries its own .regions).
+      try { const im = await API.get('/api/azure/images'); this.azure.images = im.images || (Array.isArray(im) ? im : []); } catch (e) {}
+      try { const k = await API.get('/api/azure/keyvault-ssh-key'); if (k && k.ssh_public_key && !this.form.ssh_public_key) this.form.ssh_public_key = k.ssh_public_key; } catch (e) {}
+      // Subnets/NSGs/sizes are region-scoped — load for the configured default region.
+      await this.loadAzureNetwork('');
+      this.azure.loaded = true; this.azure.loading = false;
+    },
+
+    // Fetch subnets/NSGs/VM-sizes scoped to one region (blank = the configured
+    // default), then (re)default size + subnet to that region's desktops defaults.
+    async loadAzureNetwork(location) {
+      const vd = this._vd || {};
       try {
-        const net = await API.get('/api/azure/network-options');
+        const q = location ? ('?location=' + encodeURIComponent(location)) : '';
+        const net = await API.get('/api/azure/network-options' + q);
         this.azure.locations = net.locations || [];
         this.azure.vm_sizes = net.vm_sizes || [];
         this.azure.subnets = net.subnets || [];
         this.azure.nsgs = net.nsgs || [];
-        if (!this.form.location && this.azure.locations.length) this.form.location = this.azure.locations[0];
-        if (!this.form.vm_size) this.form.vm_size = vd.azure_desktops_vm_size || this.azure.vm_sizes[0] || '';
-        // Prefer the configured desktops subnet; else the first NON-delegated one
-        // (a delegated subnet like aci-subnet can't host VM NICs).
-        if (!this.form.subnet_id) {
-          const usable = this.azure.subnets.filter(s => !(s.delegations && s.delegations.length));
-          this.form.subnet_id = vd.azure_desktops_subnet_id || (usable[0] && usable[0].id) || '';
+        if (!this.form.location) this.form.location = net.location || this.azure.locations[0] || '';
+        if (!this.form.vm_size || !this.azure.vm_sizes.includes(this.form.vm_size)) {
+          this.form.vm_size = (vd.azure_desktops_vm_size && this.azure.vm_sizes.includes(vd.azure_desktops_vm_size))
+            ? vd.azure_desktops_vm_size : (this.azure.vm_sizes[0] || '');
         }
-      } catch (e) { /* network options unavailable — fields still accept manual values */ }
-      try { const im = await API.get('/api/azure/images'); this.azure.images = im.images || (Array.isArray(im) ? im : []); } catch (e) {}
-      try { const k = await API.get('/api/azure/keyvault-ssh-key'); if (k && k.ssh_public_key && !this.form.ssh_public_key) this.form.ssh_public_key = k.ssh_public_key; } catch (e) {}
-      this.azure.loaded = true; this.azure.loading = false;
+        const usable = this.azure.subnets.filter(s => !(s.delegations && s.delegations.length));
+        if (!this.form.subnet_id || !usable.some(s => s.id === this.form.subnet_id)) {
+          const cfg = (vd.azure_desktops_subnet_id && usable.some(s => s.id === vd.azure_desktops_subnet_id))
+            ? vd.azure_desktops_subnet_id : '';
+          this.form.subnet_id = cfg || (usable[0] && usable[0].id) || '';
+        }
+      } catch (e) { /* options unavailable — fields still accept manual values */ }
+    },
+
+    // Region changed: the old subnet/NSG no longer apply — clear + re-fetch for the
+    // new region (subnets/NSGs/sizes refilter; the image picker flags out-of-region images).
+    onAzureLocationChange() {
+      this.form.subnet_id = '';
+      this.form.nsg_id = '';
+      this.loadAzureNetwork(this.form.location);
     },
 
     canSubmit() {

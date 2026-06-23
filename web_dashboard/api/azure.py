@@ -224,16 +224,20 @@ async def list_marketplace_images(
 
 @router.get("/network-options", response_model=AzureNetworkOptions)
 async def network_options(
+    location: Optional[str] = None,
     bust: bool = False,
     current_user: User = Depends(require_permission("azure", "read")),
 ):
-    """Return locations, VM sizes, subnets, NSGs. Served from cache (10 min). Pass ?bust=true to force a fresh fetch."""
-    cache_key = cache_service.key_global("azure_network_opts")
+    """Return locations, VM sizes, subnets, NSGs. Subnets/NSGs/sizes are scoped to
+    ``location`` (default: the configured ``azure_location``); pass ?location= to
+    target another region. Served from a per-region cache (10 min); ?bust=true forces a refresh."""
+    loc = location or _loc()
+    cache_key = cache_service.key_param("azure_network_opts", location=loc)
     ttl = cache_service.TTL["azure_network_opts"]
 
     async def _fetch():
         return await azure_service.get_network_options(
-            _loc(), _cfg("azure_vnet_resource_group"), _rg()
+            loc, _cfg("azure_vnet_resource_group"), _rg()
         )
 
     try:
@@ -241,6 +245,7 @@ async def network_options(
             await cache_service.invalidate(cache_key)
         opts, cached_at = await cache_service.get_or_refresh(cache_key, ttl, _fetch)
         return AzureNetworkOptions(
+            location=opts.get("location", ""),
             locations=opts["locations"],
             vm_sizes=opts["vm_sizes"],
             subnets=[AzureSubnetInfo(**s) for s in opts["subnets"]],

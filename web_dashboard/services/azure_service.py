@@ -477,12 +477,17 @@ def _list_private_images_sync(cred, sub_id: str, gallery: str, gallery_rg: str, 
                 versions.sort(key=lambda v: v.name, reverse=True)
                 latest = versions[0] if versions else None
                 published = None
+                regions: list[str] = []
                 if latest is not None:
                     pub_profile = getattr(latest, "publishing_profile", None)
                     published = getattr(pub_profile, "published_date", None) if pub_profile else None
                     if published is None:
                         # Some SDK versions expose this directly on the version
                         published = getattr(latest, "time_created", None)
+                    # Regions the latest version is replicated to — the image is only
+                    # deployable in these regions (drives the picker's region filter).
+                    tregions = getattr(pub_profile, "target_regions", None) if pub_profile else None
+                    regions = [_normalize_region(getattr(tr, "name", "")) for tr in (tregions or []) if getattr(tr, "name", "")]
                 results.append({
                     "resource_id": img_def.id,
                     "name": img_def.name,
@@ -494,6 +499,7 @@ def _list_private_images_sync(cred, sub_id: str, gallery: str, gallery_rg: str, 
                     "gallery_name": gallery,
                     "sku": img_def.identifier.sku if img_def.identifier else "",
                     "location": img_def.location or "",
+                    "regions": regions,
                 })
         except Exception as e:
             logger.warning("Failed to list gallery images from %s/%s: %s", gallery_rg, gallery, e)
@@ -540,6 +546,7 @@ def _list_private_images_sync(cred, sub_id: str, gallery: str, gallery_rg: str, 
                     "sku": "",
                     "location": img.location or "",
                     "resource_group": scan_rg,
+                    "regions": [_normalize_region(img.location)] if img.location else [],
                 })
         except Exception as e:
             logger.warning("Failed to list managed images from rg=%s (%s): %s", scan_rg, label, e)
@@ -1504,7 +1511,11 @@ def _get_network_options_sync(cred, sub_id: str, location: str, vnet_rg: str, rg
         vnets = list(network.virtual_networks.list(search_rg))
         logger.info("Network options: found %d VNets in RG=%s", len(vnets), search_rg)
         for vnet in vnets:
-            logger.info("Network options: VNet %s has %d subnets", vnet.name, len(vnet.subnets or []))
+            # Only surface subnets whose VNet is in the requested region — a NIC
+            # can't attach to a subnet in another region (the cross-region failure).
+            if location and _normalize_region(vnet.location) != _normalize_region(location):
+                continue
+            logger.info("Network options: VNet %s (%s) has %d subnets", vnet.name, vnet.location, len(vnet.subnets or []))
             for subnet in (vnet.subnets or []):
                 subnets.append({
                     "id": subnet.id,
@@ -1530,6 +1541,8 @@ def _get_network_options_sync(cred, sub_id: str, location: str, vnet_rg: str, rg
         nsgs_list = list(network.network_security_groups.list(search_rg))
         logger.info("Network options: found %d NSGs in RG=%s", len(nsgs_list), search_rg)
         for nsg in nsgs_list:
+            if location and _normalize_region(nsg.location) != _normalize_region(location):
+                continue
             nsgs.append({"id": nsg.id, "name": nsg.name, "resource_group": search_rg})
     except Exception as e:
         logger.warning("Failed to list NSGs from rg=%s: %s", search_rg, e, exc_info=True)
@@ -1546,6 +1559,7 @@ def _get_network_options_sync(cred, sub_id: str, location: str, vnet_rg: str, rg
     logger.info("Network options: returning subnets=%d, nsgs=%d, ssh_keys=%d, locations=%d, sizes=%d",
                 len(subnets), len(nsgs), len(ssh_keys), len(locations), len(sizes))
     return {
+        "location": location,
         "locations": locations,
         "vm_sizes": sizes[:50],
         "subnets": subnets,
