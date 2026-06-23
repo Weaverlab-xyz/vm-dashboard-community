@@ -192,6 +192,8 @@ async def broker_access(
             jump_group=payload.jump_group,
             jumpoint_name=payload.jumpoint_name,
             pra_credential_ref=payload.pra_credential_ref,
+            vault_inject=payload.vault_inject,
+            vault_account_group_id=payload.vault_account_group_id,
         )
     except K8sError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -212,6 +214,8 @@ async def register_tunnel(
             jump_group=payload.jump_group,
             jumpoint_name=payload.jumpoint_name,
             pra_credential_ref=payload.pra_credential_ref,
+            vault_inject=payload.vault_inject,
+            vault_account_group_id=payload.vault_account_group_id,
         )
     except K8sError as e:
         raise HTTPException(status_code=400, detail=str(e))

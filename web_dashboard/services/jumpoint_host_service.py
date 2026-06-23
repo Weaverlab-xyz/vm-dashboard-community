@@ -6,14 +6,16 @@ can't do protocol tunneling — see aws_service / config bt_ecs_launch_type). To
 avoid a standing ~$15/mo host, the dashboard manages ONE shared host's lifecycle
 by reference count:
 
-  * ensure_jumpoint_host(region)          — called when an AWS EC2 instance or a
-                                            cloud database is provisioned. Creates
-                                            the host (idempotent, tag find-or-create)
-                                            and the jumpoint task on it.
-  * teardown_jumpoint_host_if_idle(db, …) — called on EC2 destroy / DB decommission.
-                                            Terminates the host only when nothing
-                                            (no managed EC2 instance, no active DB)
-                                            is left using it.
+  * ensure_jumpoint_host(region)          — called when an AWS EC2 instance, a
+                                            cloud database, or a managed K8s cluster's
+                                            PRA tunnel is provisioned. Creates the host
+                                            (idempotent, tag find-or-create) and the
+                                            jumpoint task on it.
+  * teardown_jumpoint_host_if_idle(db, …) — called on EC2 destroy / DB decommission /
+                                            K8s tunnel removal. Terminates the host only
+                                            when nothing (no managed EC2 instance, no
+                                            active DB, no tunneled K8s cluster) is left
+                                            using it.
 
 Prereqs (one-time, created by scripts/sandbox/Linux/setup-aws.sh): the
 ``ecsInstanceRole`` + instance profile, the bt-jumpoint cluster, the public
@@ -185,6 +187,17 @@ def _active_ec2_count(db) -> int:
     return sum(1 for j in jobs if not (j.metadata_dict or {}).get("destroyed"))
 
 
+def _active_k8s_count(db, cloud: Optional[str] = None) -> int:
+    # A managed cluster needs the shared Jumpoint only while it has a live PRA
+    # k8s tunnel routing through it — i.e. pra_jump_id is set. (Registered local
+    # clusters carry cloud='local' and never match a real-cloud filter.)
+    from ..database import K8sCluster
+    q = db.query(K8sCluster).filter(K8sCluster.pra_jump_id.isnot(None))
+    if cloud:
+        q = q.filter(K8sCluster.cloud == cloud)
+    return q.count()
+
+
 async def teardown_jumpoint_host_if_idle(db, cloud: str, region: str) -> None:
     """Terminate the shared Jumpoint host for ``cloud`` iff nothing is left using
     it. Dispatches per cloud. Best-effort; logs and returns on error."""
@@ -200,7 +213,7 @@ async def _teardown_jumpoint_host_if_idle_aws(db, region: str) -> None:
     instance, no active AWS cloud database). Best-effort; logs and returns on error."""
     from . import aws_service
     try:
-        active = _active_db_count(db, "aws") + _active_ec2_count(db)
+        active = _active_db_count(db, "aws") + _active_ec2_count(db) + _active_k8s_count(db, "aws")
         if active > 0:
             logger.info("jumpoint-host: keeping host (%d active resource(s))", active)
             return
@@ -319,9 +332,9 @@ async def _teardown_jumpoint_host_if_idle_gcp(db, region: str) -> None:
     using it. Best-effort; logs and returns on error."""
     from . import gcp_service
     try:
-        active = _active_db_count(db, "gcp")
+        active = _active_db_count(db, "gcp") + _active_k8s_count(db, "gcp")
         if active > 0:
-            logger.info("jumpoint-host(gcp): keeping jumpoint (%d active DB(s))", active)
+            logger.info("jumpoint-host(gcp): keeping jumpoint (%d active resource(s))", active)
             return
         project = _gcp_project()
         if not project:
@@ -403,9 +416,9 @@ async def _teardown_jumpoint_host_if_idle_azure(db, region: str) -> None:
     left using it. Best-effort; logs and returns on error."""
     from . import azure_service
     try:
-        active = _active_db_count(db, "azure")
+        active = _active_db_count(db, "azure") + _active_k8s_count(db, "azure")
         if active > 0:
-            logger.info("jumpoint-host(azure): keeping jumpoint (%d active DB(s))", active)
+            logger.info("jumpoint-host(azure): keeping jumpoint (%d active resource(s))", active)
             return
         rg = _cfg("azure_resource_group")
         if not rg:
