@@ -171,7 +171,8 @@
         <p class="text-xs text-gray-500">
           Stands up a managed cluster with Terraform, stores its kubeconfig as a secrets-backend
           reference, and registers it — then launch a plane / broker access / install secrets as usual.
-          <strong>AWS EKS</strong> is wired today; GCP/Azure follow.
+          <strong>EKS</strong>, <strong>AKS</strong>, and <strong>GKE</strong> are supported. AKS/GKE
+          create their own network with internet egress; EKS uses the sandbox's private k8s subnets.
         </p>
         <div class="grid grid-cols-2 gap-3">
           <div>
@@ -183,14 +184,17 @@
             <label class="block text-sm font-medium text-gray-700 mb-1">Cloud</label>
             <select x-model="provForm.cloud" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
               <option value="aws">aws (EKS)</option>
+              <option value="azure">azure (AKS)</option>
+              <option value="gcp">gcp (GKE)</option>
             </select>
           </div>
         </div>
         <div class="grid grid-cols-2 gap-3">
           <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">Region *</label>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Region / location *</label>
             <input type="text" x-model="provForm.region"
-                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="us-east-2">
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                   :placeholder="provForm.cloud === 'azure' ? 'eastus' : (provForm.cloud === 'gcp' ? 'us-central1' : 'us-east-2')">
           </div>
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">Kubernetes version</label>
@@ -205,14 +209,11 @@
         </div>
         <div class="grid grid-cols-2 gap-3">
           <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">Node instance type</label>
-            <select x-model="provForm.node_instance_type" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
-              <option value="">(default — t3.small)</option>
-              <option value="t3.small">t3.small</option>
-              <option value="t3.medium">t3.medium</option>
-              <option value="t3.large">t3.large</option>
-              <option value="m5.large">m5.large</option>
-            </select>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Node size</label>
+            <input type="text" x-model="provForm.node_instance_type"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                   :placeholder="provForm.cloud === 'azure' ? 'Standard_B2s' : (provForm.cloud === 'gcp' ? 'e2-small' : 't3.small')">
+            <p class="text-[11px] text-gray-400 mt-1">EC2 type / AKS vm_size / GKE machine type. Blank = module default.</p>
           </div>
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">Node count</label>
@@ -220,7 +221,22 @@
                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" placeholder="2">
           </div>
         </div>
+        <!-- GCP only — zonal cluster zone -->
+        <div x-show="provForm.cloud === 'gcp'" x-cloak>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Zone <span class="text-gray-400">(optional)</span></label>
+          <input type="text" x-model="provForm.zone"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="(region)-a">
+          <p class="text-[11px] text-gray-400 mt-1">Zonal cluster (cheaper than regional). Blank uses <code>&lt;region&gt;-a</code>.</p>
+        </div>
+        <!-- API endpoint exposure (all clouds) -->
         <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">API endpoint authorized CIDRs <span class="text-gray-400">(comma-separated)</span></label>
+          <input type="text" x-model="provForm.authorized_cidrs"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="(blank = open to all)">
+          <p class="text-[11px] text-gray-400 mt-1">Restricts the <strong>public</strong> API endpoint. Blank = open (0.0.0.0/0). The dashboard runner must be able to reach it.</p>
+        </div>
+        <!-- AWS only — subnet override -->
+        <div x-show="provForm.cloud === 'aws'" x-cloak>
           <label class="block text-sm font-medium text-gray-700 mb-1">Subnet IDs <span class="text-gray-400">(override — comma-separated)</span></label>
           <input type="text" x-model="provForm.subnet_ids"
                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
@@ -228,8 +244,8 @@
           <p class="text-[11px] text-gray-400 mt-1">Blank uses the configured <code>aws_k8s_subnet_a_id</code> / <code>_b_id</code>. EKS needs ≥2 subnets in distinct AZs.</p>
         </div>
         <p class="text-[11px] text-gray-400">
-          Nodes land in the sandbox's private k8s subnets. Provisioning takes ~10–15 min; the row shows
-          <span class="font-mono">provisioning → registered</span>.
+          Provisioning takes ~5–15 min; the row shows <span class="font-mono">provisioning → registered</span>.
+          AKS/GKE nodes get internet egress (managed outbound / Cloud NAT) so an installed Entitle agent can reach its SaaS.
         </p>
       </div>
       <div class="px-6 py-4 border-t border-gray-100 flex justify-end gap-3">
@@ -329,7 +345,7 @@ function k8sPage() {
     showRegister: false, saving: false,
     form: { name: '', cloud: 'local', kubeconfig: '', mgmt_kind: '' },
     showProvision: false, provBusy: false,
-    provForm: { name: '', cloud: 'aws', region: '', k8s_version: '', node_instance_type: '', node_count: 2, subnet_ids: '' },
+    provForm: { name: '', cloud: 'aws', region: '', k8s_version: '', node_instance_type: '', node_count: 2, subnet_ids: '', authorized_cidrs: '', zone: '' },
     showBroker: false, brokering: false, brokerTarget: null,
     brokerForm: { jump_group: '', jumpoint_name: '', praCredBackend: '', pra_credential_ref: '' },
     showSecrets: false, secretsBusy: false, secretsTarget: null, secretsKind: 'eso',
@@ -370,7 +386,7 @@ function k8sPage() {
     },
 
     openProvision() {
-      this.provForm = { name: '', cloud: 'aws', region: '', k8s_version: '', node_instance_type: '', node_count: 2, subnet_ids: '' };
+      this.provForm = { name: '', cloud: 'aws', region: '', k8s_version: '', node_instance_type: '', node_count: 2, subnet_ids: '', authorized_cidrs: '', zone: '' };
       this.showProvision = true;
     },
 
@@ -382,9 +398,13 @@ function k8sPage() {
         if (f.k8s_version) body.k8s_version = f.k8s_version;
         if (f.node_instance_type) body.node_instance_type = f.node_instance_type;
         if (f.node_count) body.node_count = Number(f.node_count);
-        if (f.subnet_ids && f.subnet_ids.trim()) {
+        if (f.cloud === 'aws' && f.subnet_ids && f.subnet_ids.trim()) {
           body.subnet_ids = f.subnet_ids.split(',').map(s => s.trim()).filter(Boolean);
         }
+        if (f.authorized_cidrs && f.authorized_cidrs.trim()) {
+          body.authorized_cidrs = f.authorized_cidrs.split(',').map(s => s.trim()).filter(Boolean);
+        }
+        if (f.cloud === 'gcp' && f.zone && f.zone.trim()) body.zone = f.zone.trim();
         const r = await API.post('/api/k8s/clusters/provision', body);
         this.showProvision = false;
         this.flash('Provisioning cluster… (takes ~10–15 min; watch the status)');

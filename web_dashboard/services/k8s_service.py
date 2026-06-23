@@ -182,9 +182,11 @@ def register_cluster(db: Session, *, name: str, cloud: str, kubeconfig: str,
 _REPO_ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))
 _CLUSTER_TEMPLATE_DIRS = {
     "aws": os.path.join(_REPO_ROOT, "terraform", "k8s_cluster", "aws_eks"),
+    "azure": os.path.join(_REPO_ROOT, "terraform", "k8s_cluster", "azure_aks"),
+    "gcp": os.path.join(_REPO_ROOT, "terraform", "k8s_cluster", "gcp_gke"),
 }
 _DEPLOYMENTS_DIR = os.path.join(_REPO_ROOT, "terraform", "deployments")
-_PROVISION_IMPLEMENTED = ("aws",)
+_PROVISION_IMPLEMENTED = ("aws", "azure", "gcp")
 
 
 def _deploy_dir(job_id: str) -> str:
@@ -250,13 +252,29 @@ def create_cluster(db: Session, *, cloud: str, name: str, region: str,
     return {"ok": True, "cluster_id": cluster_id, "job_id": job.id, "tf_variables": tf_variables}
 
 
+def _gke_name(name: str) -> str:
+    """A valid GKE cluster name: lowercase alnum + '-', start alphanumeric, no
+    trailing '-', cap 40 (GKE's limit)."""
+    return _eks_name(name).lower()[:40].rstrip("-") or "k8s-cluster"
+
+
+def _cfg_list(key: str) -> list:
+    """A comma-separated config value as a trimmed list (empty when unset)."""
+    return [s.strip() for s in _cfg(key).split(",") if s.strip()]
+
+
 def _build_cluster_tf_variables(*, cloud: str, cluster_id: str, name: str,
                                 region: str, opts: dict) -> dict:
-    """The Terraform ``-var`` set for the cluster module. §1.1a: aws (EKS).
+    """The Terraform ``-var`` set for the cluster module (aws EKS / azure AKS /
+    gcp GKE).
 
-    Subnet ids default to the two private k8s subnets the sandbox emits
-    (``aws_k8s_subnet_a_id`` / ``aws_k8s_subnet_b_id``); k8s version + node size
-    fall back to config then the module defaults."""
+    AWS subnet ids default to the two private k8s subnets the sandbox emits
+    (``aws_k8s_subnet_a_id`` / ``aws_k8s_subnet_b_id``). AKS/GKE create their own
+    network (self-contained + egress) so they take none. k8s version + node size
+    fall back to config then the module defaults; ``node_instance_type`` maps to
+    the per-cloud node-size var (EKS instance type / AKS vm_size / GKE machine
+    type)."""
+    _tags = {"managed-by": "vm-dashboard", "k8s-cluster-id": cluster_id}
     if cloud == "aws":
         subnets = opts.get("subnet_ids") or [
             s for s in (_cfg("aws_k8s_subnet_a_id"), _cfg("aws_k8s_subnet_b_id")) if s
@@ -276,6 +294,51 @@ def _build_cluster_tf_variables(*, cloud: str, cluster_id: str, name: str,
         if opts.get("node_count"):
             tf["node_desired"] = int(opts["node_count"])
         return tf
+
+    if cloud == "azure":
+        tf = {
+            "location": region,
+            "cluster_name": _eks_name(f"k8s-{name}"),
+            "tags": _tags,
+        }
+        version = opts.get("k8s_version") or _cfg("azure_aks_k8s_version")
+        if version:
+            tf["k8s_version"] = version
+        vm_size = opts.get("node_instance_type") or _cfg("azure_aks_node_vm_size")
+        if vm_size:
+            tf["vm_size"] = vm_size
+        if opts.get("node_count"):
+            tf["node_count"] = int(opts["node_count"])
+        cidrs = opts.get("authorized_cidrs") or _cfg_list("azure_aks_authorized_cidrs")
+        if cidrs:
+            tf["authorized_ip_ranges"] = cidrs
+        return tf
+
+    if cloud == "gcp":
+        project = _cfg("gcp_project") or _cfg("gcp_project_id")
+        if not project:
+            raise K8sError("gcp_project is not configured — GKE provisioning needs a project id")
+        tf = {
+            "project": project,
+            "region": region,
+            "cluster_name": _gke_name(f"k8s-{name}"),
+            "tags": _tags,
+        }
+        if opts.get("zone"):
+            tf["zone"] = opts["zone"]
+        version = opts.get("k8s_version") or _cfg("gcp_gke_k8s_version")
+        if version:
+            tf["k8s_version"] = version
+        machine = opts.get("node_instance_type") or _cfg("gcp_gke_machine_type")
+        if machine:
+            tf["machine_type"] = machine
+        if opts.get("node_count"):
+            tf["node_count"] = int(opts["node_count"])
+        cidrs = opts.get("authorized_cidrs") or _cfg_list("gcp_gke_authorized_cidrs")
+        if cidrs:
+            tf["authorized_cidrs"] = cidrs
+        return tf
+
     raise NotImplementedError(f"{cloud} cluster Terraform variables not implemented")
 
 
@@ -312,6 +375,65 @@ def _assemble_eks_kubeconfig(*, cluster_name: str, endpoint: str, ca_b64: str,
     return yaml.safe_dump(cfg, default_flow_style=False, sort_keys=False)
 
 
+def _exec_kubeconfig(*, cluster_name: str, endpoint: str, ca_b64: str,
+                     command: str, args: list) -> str:
+    """A kubeconfig whose user auths via an exec plugin. The exec block is only a
+    marker for the runner — ``_runner_kubeconfig`` recognises ``command`` (aws /
+    kubelogin / gke-gcloud-auth-plugin) and swaps it for a server-minted bearer
+    token, so the plugin binary never has to exist in the throwaway container."""
+    cfg = {
+        "apiVersion": "v1",
+        "kind": "Config",
+        "clusters": [{
+            "name": cluster_name,
+            "cluster": {"server": endpoint, "certificate-authority-data": ca_b64},
+        }],
+        "contexts": [{
+            "name": cluster_name,
+            "context": {"cluster": cluster_name, "user": cluster_name},
+        }],
+        "current-context": cluster_name,
+        "users": [{
+            "name": cluster_name,
+            "user": {"exec": {
+                "apiVersion": "client.authentication.k8s.io/v1beta1",
+                "command": command,
+                "args": args,
+            }},
+        }],
+    }
+    return yaml.safe_dump(cfg, default_flow_style=False, sort_keys=False)
+
+
+def _assemble_aks_kubeconfig(*, cluster_name: str, endpoint: str, ca_b64: str) -> str:
+    """An exec (``kubelogin``) kubeconfig for an AKS cluster. The runner swaps the
+    exec for a server-minted AAD token (``azure_service.aks_get_token``)."""
+    from . import azure_service
+    return _exec_kubeconfig(
+        cluster_name=cluster_name, endpoint=endpoint, ca_b64=ca_b64,
+        command="kubelogin",
+        args=["get-token", "--server-id", azure_service.AKS_AAD_SERVER_APP_ID, "--login", "spn"])
+
+
+def _assemble_gke_kubeconfig(*, cluster_name: str, endpoint: str, ca_b64: str) -> str:
+    """An exec (``gke-gcloud-auth-plugin``) kubeconfig for a GKE cluster. The runner
+    swaps the exec for a server-minted OAuth token (``gcp_service.gke_get_token``)."""
+    return _exec_kubeconfig(
+        cluster_name=cluster_name, endpoint=endpoint, ca_b64=ca_b64,
+        command="gke-gcloud-auth-plugin", args=[])
+
+
+def _assemble_cluster_kubeconfig(*, cloud: str, cluster_name: str, endpoint: str,
+                                 ca_b64: str, region: str) -> str:
+    """Pick the per-cloud kubeconfig assembler for a freshly provisioned cluster."""
+    if cloud == "azure":
+        return _assemble_aks_kubeconfig(cluster_name=cluster_name, endpoint=endpoint, ca_b64=ca_b64)
+    if cloud == "gcp":
+        return _assemble_gke_kubeconfig(cluster_name=cluster_name, endpoint=endpoint, ca_b64=ca_b64)
+    return _assemble_eks_kubeconfig(
+        cluster_name=cluster_name, endpoint=endpoint, ca_b64=ca_b64, region=region)
+
+
 # Terraform line → (progress_pct, message) milestones for the job's progress bar.
 # Needles are full ``resource: action`` phrases so a provision stream and a
 # decommission stream never cross-match. pct is applied with max() so progress is
@@ -333,6 +455,24 @@ _MILESTONES = [
     ("aws_eks_cluster.this: destroying",          45, "Destroying the EKS control plane…"),
     ("aws_eks_cluster.this: still destroying",    60, "Destroying the EKS control plane…"),
     ("aws_eks_cluster.this: destruction complete", 90, "Cleaning up IAM roles…"),
+    # provision — Azure AKS (control plane is the long pole)
+    ("azurerm_kubernetes_cluster.this: creating",            35, "Creating the AKS cluster (~5-10 min)…"),
+    ("azurerm_kubernetes_cluster.this: still creating",      55, "Creating the AKS cluster (~5-10 min)…"),
+    ("azurerm_kubernetes_cluster.this: creation complete",   90, "AKS cluster ready; finalizing…"),
+    ("azurerm_kubernetes_cluster.this: destroying",          40, "Destroying the AKS cluster…"),
+    ("azurerm_kubernetes_cluster.this: still destroying",    60, "Destroying the AKS cluster…"),
+    ("azurerm_kubernetes_cluster.this: destruction complete", 88, "Cleaning up the resource group…"),
+    # provision — GCP GKE (cluster, then node pool)
+    ("google_container_cluster.this: creating",              30, "Creating the GKE cluster (~5-10 min)…"),
+    ("google_container_cluster.this: still creating",        45, "Creating the GKE cluster (~5-10 min)…"),
+    ("google_container_cluster.this: creation complete",     75, "Cluster ready; creating the node pool…"),
+    ("google_container_node_pool.this: creating",            82, "Creating the node pool…"),
+    ("google_container_node_pool.this: still creating",      88, "Creating the node pool…"),
+    ("google_container_node_pool.this: creation complete",   95, "Node pool ready; finalizing…"),
+    ("google_container_node_pool.this: destroying",          25, "Destroying the node pool…"),
+    ("google_container_cluster.this: destroying",            45, "Destroying the GKE cluster…"),
+    ("google_container_cluster.this: still destroying",      60, "Destroying the GKE cluster…"),
+    ("google_container_cluster.this: destruction complete",  88, "Cleaning up the VPC + NAT…"),
 ]
 
 
@@ -375,12 +515,13 @@ async def run_provision_apply(db: Session, *, cluster_id: str, job_id: str,
         )
         endpoint = str(outputs.get("endpoint") or "")
         ca_b64 = str(outputs.get("ca_certificate") or "")
-        eks_name = str(outputs.get("cluster_name") or tf_variables.get("cluster_name") or row.name)
+        cluster_out_name = str(outputs.get("cluster_name") or tf_variables.get("cluster_name") or row.name)
         if not (endpoint and ca_b64):
             raise K8sError("cluster apply did not return endpoint + ca_certificate outputs")
 
-        kubeconfig = _assemble_eks_kubeconfig(
-            cluster_name=eks_name, endpoint=endpoint, ca_b64=ca_b64, region=row.region or "")
+        kubeconfig = _assemble_cluster_kubeconfig(
+            cloud=cloud, cluster_name=cluster_out_name, endpoint=endpoint,
+            ca_b64=ca_b64, region=row.region or "")
         ref = _KUBECONFIG_KEY.format(cluster_id=cluster_id)
         config_service.set(ref, kubeconfig)
         row.kubeconfig_ref = ref
@@ -388,8 +529,8 @@ async def run_provision_apply(db: Session, *, cluster_id: str, job_id: str,
         row.status = "registered"
         db.commit()
         job_service.set_completed(db, job_id)
-        logger.info("k8s provision complete cluster_id=%s eks=%s endpoint=%s",
-                    cluster_id, eks_name, endpoint)
+        logger.info("k8s provision complete cluster_id=%s cluster=%s endpoint=%s",
+                    cluster_id, cluster_out_name, endpoint)
     except Exception as exc:
         row.status = "failed"
         db.commit()

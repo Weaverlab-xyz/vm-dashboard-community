@@ -114,6 +114,36 @@ def test_raw_token_left_unchanged():
     assert user["token"] == "already-a-token"
 
 
+# ── assembled-kubeconfig round trips (provisioning output → runner auth) ───────
+
+def test_assemble_aks_then_runner_mints_token():
+    kc = k8s_service._assemble_aks_kubeconfig(
+        cluster_name="aks-demo", endpoint="https://aks.example:443", ca_b64="Q0FBQQ==")
+    cfg = yaml.safe_load(kc)
+    assert cfg["clusters"][0]["cluster"]["server"] == "https://aks.example:443"
+    assert cfg["clusters"][0]["cluster"]["certificate-authority-data"] == "Q0FBQQ=="
+    assert cfg["users"][0]["user"]["exec"]["command"] == "kubelogin"
+    # The runner swaps the kubelogin exec for a minted AAD token.
+    user = _user_of(k8s_service._runner_kubeconfig(kc))
+    assert user["token"] == "aks-token::6dae42f8-4368-4678-94ff-3960e28e3630"
+    assert "exec" not in user
+
+
+def test_assemble_gke_then_runner_mints_token():
+    kc = k8s_service._assemble_gke_kubeconfig(
+        cluster_name="gke-demo", endpoint="https://gke.example", ca_b64="Q0FBQQ==")
+    cfg = yaml.safe_load(kc)
+    assert cfg["users"][0]["user"]["exec"]["command"] == "gke-gcloud-auth-plugin"
+    user = _user_of(k8s_service._runner_kubeconfig(kc))
+    assert user["token"] == "gke-token"
+    assert "exec" not in user
+
+
+def test_gke_name_slug_is_lowercase_and_bounded():
+    assert k8s_service._gke_name("k8s-SE_Lab Cluster!") == "k8s-se-lab-cluster"
+    assert len(k8s_service._gke_name("k8s-" + "x" * 80)) <= 40
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0
