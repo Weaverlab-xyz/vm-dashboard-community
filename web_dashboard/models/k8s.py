@@ -24,18 +24,21 @@ class ClusterRegisterRequest(BaseModel):
 
 
 class ClusterProvisionRequest(BaseModel):
-    """Provision a new cluster with Terraform (§1.1a). The dashboard provisions the
-    cluster, stores the generated kubeconfig as a reference, and flips the record to
+    """Provision a new cluster with Terraform. The dashboard provisions the cluster,
+    stores the generated kubeconfig as a reference, and flips the record to
     ``registered`` so the manage / broker / secrets / delete flows apply unchanged.
-    §1.1a implements ``aws`` (EKS); other clouds are rejected until their module lands.
+    Implemented for ``aws`` (EKS), ``azure`` (AKS), and ``gcp`` (GKE). AKS/GKE create
+    their own network + egress; EKS reuses the sandbox's private k8s subnets.
     """
     name: str                                 # dashboard-unique cluster name
-    cloud: str = "aws"                        # aws (EKS) — §1.1a; gcp/azure later
-    region: str                               # cloud region (e.g. us-east-2)
+    cloud: str = "aws"                        # aws (EKS) | azure (AKS) | gcp (GKE)
+    region: str                               # cloud region/location (e.g. us-east-2, eastus, us-central1)
     k8s_version: Optional[str] = None         # control-plane version (else config / module default)
-    node_instance_type: Optional[str] = None  # node EC2 instance type (else config / module default)
+    node_instance_type: Optional[str] = None  # node size: EC2 type / AKS vm_size / GKE machine type
     node_count: Optional[int] = None          # desired node count (else module default)
-    subnet_ids: Optional[list[str]] = None    # override the sandbox-emitted private k8s subnets
+    subnet_ids: Optional[list[str]] = None    # AWS only — override the sandbox-emitted private k8s subnets
+    authorized_cidrs: Optional[list[str]] = None  # restrict the public API endpoint (empty = open)
+    zone: Optional[str] = None                # GCP only — zonal cluster zone (else <region>-a)
 
 
 class ManagementRequest(BaseModel):

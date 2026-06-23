@@ -87,13 +87,15 @@ async def provision_cluster(
     """Provision a new cluster with Terraform (§1.1a). Async — records a
     ``provisioning`` row + schedules the apply, which stores the generated
     kubeconfig and flips the cluster to ``registered``. Returns 202; poll the
-    cluster status (provisioning → registered / failed). §1.1a implements
-    aws (EKS); other clouds 501 until their module lands."""
+    cluster status (provisioning → registered / failed). Implemented for aws (EKS),
+    azure (AKS), and gcp (GKE); an unwired cloud returns 501."""
     opts = {k: v for k, v in {
         "k8s_version": payload.k8s_version,
         "node_instance_type": payload.node_instance_type,
         "node_count": payload.node_count,
         "subnet_ids": payload.subnet_ids,
+        "authorized_cidrs": payload.authorized_cidrs,
+        "zone": payload.zone,
     }.items() if v is not None}
     try:
         result = k8s_service.create_cluster(

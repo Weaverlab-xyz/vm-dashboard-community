@@ -169,6 +169,17 @@ class Settings(BaseSettings):
     aws_eks_k8s_version: str = ""
     aws_eks_node_instance_type: str = ""
 
+    # Managed-Kubernetes (AKS / GKE) provisioning. These modules create their own
+    # network + egress (no sandbox subnets needed). Empty version / node size →
+    # the module defaults. *_authorized_cidrs (comma-separated) restrict the public
+    # API endpoint; empty = open to all (matches EKS's 0.0.0.0/0 default).
+    azure_aks_k8s_version: str = ""
+    azure_aks_node_vm_size: str = ""
+    azure_aks_authorized_cidrs: str = ""
+    gcp_gke_k8s_version: str = ""
+    gcp_gke_machine_type: str = ""
+    gcp_gke_authorized_cidrs: str = ""
+
     # BeyondTrust integration. Two distinct API surfaces:
     #   • PRA (Privileged Remote Access)  — Shell Jump provisioning via the
     #     Terraform sra provider in services/terraform_pra_service.py. Uses
