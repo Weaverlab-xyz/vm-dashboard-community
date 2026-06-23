@@ -103,9 +103,14 @@ COPY terraform/db_gcp_postgres/ ./terraform/db_gcp_postgres/
 COPY terraform/db_mysql/ ./terraform/db_mysql/
 COPY terraform/db_azure_mysql/ ./terraform/db_azure_mysql/
 COPY terraform/db_gcp_mysql/ ./terraform/db_gcp_mysql/
-# Managed-Kubernetes (EKS) provisioning module (driven by k8s_service, §1.1a).
-# Uses the hashicorp/aws provider, already in the pre-cache init below.
+# Managed-Kubernetes provisioning modules (driven by k8s_service, §1.1a): EKS
+# (hashicorp/aws), AKS (hashicorp/azurerm ~> 3.0), GKE (hashicorp/google ~> 5.0) —
+# all three providers are already in the pre-cache init below. Without the AKS/GKE
+# COPYs an azure/gcp provision fails at _materialize: "No such file or directory:
+# /app/terraform/k8s_cluster/azure_aks".
 COPY terraform/k8s_cluster/aws_eks/ ./terraform/k8s_cluster/aws_eks/
+COPY terraform/k8s_cluster/azure_aks/ ./terraform/k8s_cluster/azure_aks/
+COPY terraform/k8s_cluster/gcp_gke/ ./terraform/k8s_cluster/gcp_gke/
 
 # Container-sane defaults; .env overrides these at runtime.
 ENV LOG_DIR=/tmp/logs \
