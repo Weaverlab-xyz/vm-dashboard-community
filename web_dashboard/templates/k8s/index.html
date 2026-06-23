@@ -182,37 +182,49 @@
           </div>
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">Cloud</label>
-            <select x-model="provForm.cloud" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            <select x-model="provForm.cloud" @change="onProvCloudChange()" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
               <option value="aws">aws (EKS)</option>
               <option value="azure">azure (AKS)</option>
               <option value="gcp">gcp (GKE)</option>
             </select>
           </div>
         </div>
+        <div x-show="loadingProvOpts" x-cloak class="text-center text-gray-400 text-sm py-1">
+          Loading <span x-text="(provForm.cloud || 'aws').toUpperCase()"></span> options…
+        </div>
+        <div x-show="provOptsError" x-cloak
+             class="bg-red-50 border border-red-200 rounded-lg px-3 py-2 text-sm text-red-700" x-text="provOptsError"></div>
         <div class="grid grid-cols-2 gap-3">
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">Region / location *</label>
-            <input type="text" x-model="provForm.region"
-                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
-                   :placeholder="provForm.cloud === 'azure' ? 'eastus' : (provForm.cloud === 'gcp' ? 'us-central1' : 'us-east-2')">
+            <select x-model="provForm.region" @change="onProvRegionChange()" :disabled="loadingProvOpts"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+              <option value="">Select region…</option>
+              <template x-for="r in provOptions.regions || []" :key="r">
+                <option :value="r" x-text="r"></option>
+              </template>
+            </select>
           </div>
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">Kubernetes version</label>
-            <select x-model="provForm.k8s_version" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            <select x-model="provForm.k8s_version" :disabled="loadingProvOpts" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
               <option value="">(module default)</option>
-              <option value="1.36">1.36</option>
-              <option value="1.35">1.35</option>
-              <option value="1.34">1.34</option>
-              <option value="1.33">1.33</option>
+              <template x-for="v in provOptions.k8s_versions || []" :key="v">
+                <option :value="v" x-text="v"></option>
+              </template>
             </select>
           </div>
         </div>
         <div class="grid grid-cols-2 gap-3">
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">Node size</label>
-            <input type="text" x-model="provForm.node_instance_type"
-                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
-                   :placeholder="provForm.cloud === 'azure' ? 'Standard_B2s' : (provForm.cloud === 'gcp' ? 'e2-small' : 't3.small')">
+            <select x-model="provForm.node_instance_type" :disabled="loadingProvOpts"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+              <option value="">(module default)</option>
+              <template x-for="t in provOptions.node_instance_types || []" :key="t">
+                <option :value="t" x-text="t"></option>
+              </template>
+            </select>
             <p class="text-[11px] text-gray-400 mt-1">EC2 type / AKS vm_size / GKE machine type. Blank = module default.</p>
           </div>
           <div>
@@ -235,13 +247,23 @@
                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="(blank = open to all)">
           <p class="text-[11px] text-gray-400 mt-1">Restricts the <strong>public</strong> API endpoint. Blank = open (0.0.0.0/0). The dashboard runner must be able to reach it.</p>
         </div>
-        <!-- AWS only — subnet override -->
+        <!-- AWS only — subnet override (strict multi-select; pre-selected to the configured sandbox subnets) -->
         <div x-show="provForm.cloud === 'aws'" x-cloak>
-          <label class="block text-sm font-medium text-gray-700 mb-1">Subnet IDs <span class="text-gray-400">(override — comma-separated)</span></label>
-          <input type="text" x-model="provForm.subnet_ids"
-                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
-                 placeholder="(configured sandbox k8s subnets)">
-          <p class="text-[11px] text-gray-400 mt-1">Blank uses the configured <code>aws_k8s_subnet_a_id</code> / <code>_b_id</code>. EKS needs ≥2 subnets in distinct AZs.</p>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Subnet IDs <span class="text-gray-400">(EKS needs ≥2 in distinct AZs)</span></label>
+          <div class="border border-gray-300 rounded-lg max-h-36 overflow-y-auto p-2 space-y-1">
+            <p x-show="!loadingProvOpts && (provOptions.subnets || []).length === 0" x-cloak class="text-xs text-amber-600 p-1">
+              No VPC subnets discovered — the configured <code>aws_k8s_subnet_a_id</code> / <code>_b_id</code> sandbox defaults will be used.
+            </p>
+            <template x-for="s in provOptions.subnets || []" :key="s.id">
+              <label class="flex items-center gap-2 p-1 rounded hover:bg-gray-50 cursor-pointer">
+                <input type="checkbox" :value="s.id" @change="toggleProvSubnet($event, s.id)"
+                       :checked="provForm.subnet_ids.includes(s.id)"
+                       class="rounded border-gray-300 text-emerald-600 focus:ring-emerald-500">
+                <span class="text-xs text-gray-700" x-text="s.name"></span>
+              </label>
+            </template>
+          </div>
+          <p x-show="provForm.subnet_ids.length === 0" x-cloak class="text-[11px] text-gray-400 mt-1">None selected — the configured <code>aws_k8s_subnet_*_id</code> defaults apply.</p>
         </div>
         <p class="text-[11px] text-gray-400">
           Provisioning takes ~5–15 min; the row shows <span class="font-mono">provisioning → registered</span>.
@@ -363,7 +385,9 @@ function k8sPage() {
     showRegister: false, saving: false,
     form: { name: '', cloud: 'local', kubeconfig: '', mgmt_kind: '' },
     showProvision: false, provBusy: false,
-    provForm: { name: '', cloud: 'aws', region: '', k8s_version: '', node_instance_type: '', node_count: 2, subnet_ids: '', authorized_cidrs: '', zone: '' },
+    provForm: { name: '', cloud: 'aws', region: '', k8s_version: '', node_instance_type: '', node_count: 2, subnet_ids: [], authorized_cidrs: '', zone: '' },
+    provOptions: { cloud: '', region: '', regions: [], node_instance_types: [], k8s_versions: [], subnets: [], configured_subnet_ids: [] },
+    loadingProvOpts: false, provOptsError: '',
     showBroker: false, brokering: false, brokerTarget: null,
     brokerForm: { jump_group: '', jumpoint_name: '', praCredBackend: '', pra_credential_ref: '', vault_inject: false, vault_account_group_id: null },
     showSecrets: false, secretsBusy: false, secretsTarget: null, secretsKind: 'eso',
@@ -404,8 +428,60 @@ function k8sPage() {
     },
 
     openProvision() {
-      this.provForm = { name: '', cloud: 'aws', region: '', k8s_version: '', node_instance_type: '', node_count: 2, subnet_ids: '', authorized_cidrs: '', zone: '' };
+      this.provForm = { name: '', cloud: 'aws', region: '', k8s_version: '', node_instance_type: '', node_count: 2, subnet_ids: [], authorized_cidrs: '', zone: '' };
+      this.provOptions = { cloud: '', region: '', regions: [], node_instance_types: [], k8s_versions: [], subnets: [], configured_subnet_ids: [] };
+      this.provOptsError = '';
       this.showProvision = true;
+      this.loadProvOptions();   // fire-and-forget — modal opens immediately (DB/EC2 style)
+    },
+
+    async loadProvOptions(region) {
+      const want = (region || '').trim();
+      if (this.provOptions.regions.length && this.provOptions.cloud === this.provForm.cloud
+          && (!want || want === this.provOptions.region)) return;
+      this.loadingProvOpts = true; this.provOptsError = '';
+      try {
+        const qs = new URLSearchParams({ cloud: this.provForm.cloud });
+        if (want) qs.set('region', want);
+        const o = await API.get('/api/k8s/clusters/provision-options?' + qs.toString());
+        if (!o) return;   // 401 → API helper redirected to login
+        o.cloud = this.provForm.cloud;
+        this.provOptions = o;
+        if (!this.provForm.region) this.provForm.region = o.region;
+        if (this.provForm.cloud === 'aws') {
+          const ids = (o.subnets || []).map(s => s.id);
+          this.provForm.subnet_ids = (o.configured_subnet_ids || []).filter(id => ids.includes(id));
+        }
+      } catch (e) {
+        this.provOptsError = `Failed to load ${this.provForm.cloud.toUpperCase()} options: ` + (e.message || e);
+      } finally {
+        this.loadingProvOpts = false;
+      }
+    },
+
+    onProvCloudChange() {
+      this.provForm.region = '';
+      this.provForm.k8s_version = '';
+      this.provForm.node_instance_type = '';
+      this.provForm.subnet_ids = [];
+      this.provForm.zone = '';
+      this.provOptions = { cloud: '', region: '', regions: [], node_instance_types: [], k8s_versions: [], subnets: [], configured_subnet_ids: [] };
+      this.loadProvOptions();
+    },
+
+    onProvRegionChange() {
+      const r = (this.provForm.region || '').trim();
+      if (!r || r === this.provOptions.region) return;
+      if (this.provForm.cloud === 'aws') this.provForm.subnet_ids = [];
+      this.loadProvOptions(r);
+    },
+
+    toggleProvSubnet(event, id) {
+      if (event.target.checked) {
+        this.provForm.subnet_ids = [...this.provForm.subnet_ids, id];
+      } else {
+        this.provForm.subnet_ids = this.provForm.subnet_ids.filter(s => s !== id);
+      }
     },
 
     async submitProvision() {
@@ -416,8 +492,8 @@ function k8sPage() {
         if (f.k8s_version) body.k8s_version = f.k8s_version;
         if (f.node_instance_type) body.node_instance_type = f.node_instance_type;
         if (f.node_count) body.node_count = Number(f.node_count);
-        if (f.cloud === 'aws' && f.subnet_ids && f.subnet_ids.trim()) {
-          body.subnet_ids = f.subnet_ids.split(',').map(s => s.trim()).filter(Boolean);
+        if (f.cloud === 'aws' && Array.isArray(f.subnet_ids) && f.subnet_ids.length) {
+          body.subnet_ids = f.subnet_ids;   // already an array of subnet ids
         }
         if (f.authorized_cidrs && f.authorized_cidrs.trim()) {
           body.authorized_cidrs = f.authorized_cidrs.split(',').map(s => s.trim()).filter(Boolean);

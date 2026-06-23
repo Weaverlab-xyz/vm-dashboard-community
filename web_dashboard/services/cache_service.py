@@ -31,6 +31,7 @@ TTL = {
     "aws_community":       900,   # 15 min
     "aws_ssh_key_secrets": 300,   # 5 min
     "aws_db_options":      600,   # 10 min — RDS subnet groups + SGs for the DB provision form
+    "k8s_provision_opts":  600,   # 10 min — VPC subnets for the k8s provision form (AWS only)
     # Config management
     "cfgmgmt_instances":    60,   # 1 min
     "cfgmgmt_s3status":    120,   # 2 min
