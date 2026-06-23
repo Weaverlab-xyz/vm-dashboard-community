@@ -10,10 +10,18 @@ Uses the same OAuth client-credentials pair as terraform_pra_service:
   bt_client_secret
 
 Endpoints (the same surface the sra terraform provider calls):
-  POST /oauth2/token                       (client credentials, Basic auth)
-  GET  /api/config/v1/vault/account-group
-  GET  /api/config/v1/jump-group           (jump-group picker)
-  GET  /api/config/v1/jumpoint             (jumpoint picker)
+  POST   /oauth2/token                                 (client credentials, Basic auth)
+  GET    /api/config/v1/vault/account-group
+  GET    /api/config/v1/jump-group                     (jump-group picker)
+  GET    /api/config/v1/jumpoint                       (jumpoint picker)
+  POST   /api/config/v1/jump-item/protocol-tunnel-jump (create a k8s tunnel jump)
+  DELETE /api/config/v1/jump-item/protocol-tunnel-jump/{id}
+
+The protocol-tunnel-jump create is done over REST (not Terraform) because the
+beyondtrust/sra provider's ``tunnel_type`` schema validator omits ``"k8s"`` (it
+only allows ``tcp``/``mssql`` through v1.3.0), so ``terraform plan`` rejects a k8s
+tunnel client-side even though the PRA backend accepts it. See
+docs/notes/sra-provider-k8s-tunnel-bug.md.
 """
 import logging
 
@@ -81,6 +89,71 @@ async def _list_config(path: str, label: str) -> list[dict]:
             {"id": it.get("id"), "name": str(it.get("name") or f"{label} {it.get('id')}")}
             for it in items if it.get("id") is not None
         ]
+
+
+_TUNNEL_PATH = "/api/config/v1/jump-item/protocol-tunnel-jump"
+
+
+async def _resolve_id(items: list[dict], name: str, label: str) -> int:
+    match = next((it for it in items if str(it.get("name")) == name), None)
+    if match is None or match.get("id") is None:
+        raise PRAApiError(f"{label} named {name!r} not found in PRA")
+    return int(match["id"])
+
+
+async def create_k8s_tunnel_jump(*, name: str, hostname: str, url: str,
+                                 ca_certificates: str, jump_group_name: str,
+                                 jumpoint_name: str, tag: str = "Kubernetes") -> int:
+    """Create a ``tunnel_type=k8s`` protocol-tunnel jump via the PRA Config API and
+    return its numeric id. Resolves the Jump Group + Jumpoint names to ids first
+    (both must already exist). This is the REST replacement for the Terraform path,
+    which the sra provider blocks for k8s (see module docstring)."""
+    host = _host()
+    async with httpx.AsyncClient(timeout=30.0, headers={"Accept": "application/json"}) as client:
+        token = await _token(client, host)
+        auth = {"Authorization": f"Bearer {token}"}
+
+        async def _get_list(path: str, label: str) -> list[dict]:
+            r = await client.get(f"{host}{path}", headers=auth)
+            if r.status_code != 200:
+                raise PRAApiError(f"GET {path} failed ({r.status_code}): {r.text[:300]}")
+            return r.json() if isinstance(r.json(), list) else []
+
+        jg_id = await _resolve_id(await _get_list("/api/config/v1/jump-group", "jump group"),
+                                  jump_group_name, "jump group")
+        jp_id = await _resolve_id(await _get_list("/api/config/v1/jumpoint", "jumpoint"),
+                                  jumpoint_name, "jumpoint")
+        body = {
+            "name": name[:128],
+            "hostname": hostname,
+            "jump_group_id": jg_id,
+            "jump_group_type": "shared",
+            "jumpoint_id": jp_id,
+            "tunnel_type": "k8s",
+            "url": url,
+            "ca_certificates": ca_certificates,
+            "tag": tag,
+            "comments": "Auto-provisioned by Infrastructure Management Dashboard (k8s tunnel)",
+        }
+        resp = await client.post(f"{host}{_TUNNEL_PATH}", headers=auth, json=body)
+        if resp.status_code not in (200, 201):
+            raise PRAApiError(f"create k8s tunnel jump failed ({resp.status_code}): {resp.text[:400]}")
+        jump_id = (resp.json() or {}).get("id")
+        if jump_id is None:
+            raise PRAApiError(f"k8s tunnel create returned no id: {resp.text[:300]}")
+        return int(jump_id)
+
+
+async def delete_protocol_tunnel_jump(jump_id) -> None:
+    """Delete a protocol-tunnel jump by id (best-effort teardown). 404 is treated
+    as already-gone."""
+    host = _host()
+    async with httpx.AsyncClient(timeout=30.0, headers={"Accept": "application/json"}) as client:
+        token = await _token(client, host)
+        resp = await client.delete(f"{host}{_TUNNEL_PATH}/{jump_id}",
+                                   headers={"Authorization": f"Bearer {token}"})
+        if resp.status_code not in (200, 204, 404):
+            raise PRAApiError(f"delete tunnel jump {jump_id} failed ({resp.status_code}): {resp.text[:300]}")
 
 
 async def list_vault_account_groups() -> list[dict]:

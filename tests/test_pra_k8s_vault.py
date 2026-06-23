@@ -1,9 +1,12 @@
 """Unit tests for the PRA k8s-tunnel Vault token-account HCL + state scrubbing.
 
-Covers B (PRA-only K8s access via a Vault-injected ServiceAccount bearer token):
-- the k8s tunnel HCL emits a `sra_vault_token_account` (token via TF_VAR, never in
-  the HCL) associated to the jump only when a vault account name is given;
-- without it the HCL has no vault resource (the byte-identical pre-vault path);
+Covers B (PRA-only K8s access via a Vault-injected ServiceAccount bearer token).
+The tunnel *jump* itself is created over REST (the sra provider blocks
+tunnel_type=k8s — see docs/notes/sra-provider-k8s-tunnel-bug.md), so the Terraform
+HCL here is the Vault token account ALONE, associated to the REST-created jump via
+TF_VAR_k8s_jump_id:
+- the HCL emits a `sra_vault_token_account` with token via TF_VAR (never in HCL),
+  associated to the jump by id, and declares no `sra_protocol_tunnel_jump`;
 - `_scrub_tf_state` redacts the `token` attribute (not just `password`) so a SA
   token never lands in the stashed state.
 
@@ -24,36 +27,25 @@ sys.modules.setdefault("web_dashboard.config", _cfg_stub)
 
 from web_dashboard.services import terraform_pra_service as pra  # noqa: E402
 
-_COMMON = dict(name="k8s-demo", hostname="api.example", api_url="https://api.example:443",
-               ca_certificates="-----BEGIN CERTIFICATE-----\nAAA\n-----END CERTIFICATE-----",
-               jump_group_name="JG", jumpoint_name="JP")
 
-
-def test_no_vault_hcl_has_tunnel_only():
-    hcl = pra._generate_k8s_tunnel_hcl(**_COMMON)
-    assert 'tunnel_type     = "k8s"' in hcl
-    assert "sra_vault_token_account" not in hcl
-    assert "k8s_sa_token" not in hcl
-    assert 'output "vault_account_id"' not in hcl
-
-
-def test_vault_hcl_emits_token_account_associated_to_jump():
-    hcl = pra._generate_k8s_tunnel_hcl(vault_account_name="k8s-demo-sa", **_COMMON)
+def test_vault_hcl_emits_token_account_associated_to_rest_jump():
+    hcl = pra._generate_k8s_vault_account_hcl("k8s-demo-sa")
     assert 'resource "sra_vault_token_account" "k8s_access"' in hcl
-    # Token is supplied via the sensitive TF var, never written into the HCL.
-    assert 'variable "k8s_sa_token" { sensitive = true }' in hcl
+    # Token + jump id are supplied via TF vars, never written into the HCL.
+    assert 'variable "k8s_sa_token"' in hcl and "sensitive = true" in hcl
+    assert 'variable "k8s_jump_id"' in hcl
     assert "token       = var.k8s_sa_token" in hcl
-    # Associated to the protocol-tunnel jump for credential injection.
+    assert "tonumber(var.k8s_jump_id)" in hcl
     assert 'type = "protocol_tunnel_jump"' in hcl
-    assert "id   = tonumber(sra_protocol_tunnel_jump.k8s_demo.id)" in hcl
     assert 'output "vault_account_id"' in hcl
+    # The blocked tunnel resource is NOT in the Terraform (it's created via REST).
+    assert "sra_protocol_tunnel_jump" not in hcl
+    assert "tunnel_type" not in hcl
 
 
 def test_vault_hcl_account_group_optional():
-    without = pra._generate_k8s_tunnel_hcl(vault_account_name="x", **_COMMON)
-    assert "account_group_id" not in without
-    withgrp = pra._generate_k8s_tunnel_hcl(vault_account_name="x", vault_account_group_id=7, **_COMMON)
-    assert "account_group_id = 7" in withgrp
+    assert "account_group_id" not in pra._generate_k8s_vault_account_hcl("x")
+    assert "account_group_id = 7" in pra._generate_k8s_vault_account_hcl("x", vault_account_group_id=7)
 
 
 def test_scrub_redacts_token_and_password():
