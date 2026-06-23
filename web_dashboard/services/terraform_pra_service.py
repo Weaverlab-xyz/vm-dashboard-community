@@ -464,8 +464,9 @@ def _scrub_tf_state(tf_state_json: str) -> Optional[str]:
         for res in state.get("resources", []):
             for inst in res.get("instances", []):
                 attrs = inst.get("attributes") or {}
-                if attrs.get("password"):
-                    attrs["password"] = _REDACTED
+                for secret_attr in ("password", "token"):
+                    if attrs.get(secret_attr):
+                        attrs[secret_attr] = _REDACTED
         return json.dumps(state)
     except Exception as exc:
         logger.error(
@@ -920,6 +921,11 @@ async def remove_rdp_jump(tf_state_json: str) -> None:
 # pass the API host. Routed through a configurable Jumpoint (the "separate
 # Jumpoint") looked up by name, same as the DB tunnel.
 
+# jump_item_association `jump_items[].type` for a generic protocol tunnel jump
+# (the k8s tunnel is sra_protocol_tunnel_jump → type minus the sra_ prefix).
+_K8S_JUMP_ITEM_TYPE = "protocol_tunnel_jump"
+
+
 def _generate_k8s_tunnel_hcl(
     name: str,
     hostname: str,
@@ -928,11 +934,52 @@ def _generate_k8s_tunnel_hcl(
     jump_group_name: str,
     jumpoint_name: str,
     tag: str = "Kubernetes",
+    vault_account_name: str = "",
+    vault_account_group_id: Optional[int] = None,
 ) -> str:
     """HCL for one k8s protocol-tunnel jump (sra_protocol_tunnel_jump,
     tunnel_type=k8s). ``ca_certificates`` is the cluster CA in PEM — json.dumps
-    emits it as a valid quoted multi-line string for Terraform."""
+    emits it as a valid quoted multi-line string for Terraform.
+
+    When ``vault_account_name`` is set, a Vault **token** account is also emitted
+    (``sra_vault_token_account``) and associated to the tunnel jump for credential
+    injection — the cluster's ServiceAccount bearer token. The token is NEVER in
+    the HCL: it arrives as ``TF_VAR_k8s_sa_token`` (sensitive), mirroring the DB
+    tunnel's username/password Vault account. With ``vault_account_name=""`` the
+    output is byte-identical to the pre-vault template (the destroy path relies on
+    that)."""
     safe_name = re.sub(r"[^a-z0-9_]", "_", name.lower())
+    var_block = ""
+    vault_block = ""
+    if vault_account_name:
+        var_block = 'variable "k8s_sa_token" { sensitive = true }\n'
+        group_line = (f"  account_group_id = {int(vault_account_group_id)}\n"
+                      if vault_account_group_id else "")
+        vault_block = f"""
+resource "sra_vault_token_account" "k8s_access" {{
+  name        = {json.dumps(vault_account_name)}
+  token       = var.k8s_sa_token
+  description = "Auto-provisioned by Infrastructure Management Dashboard (k8s tunnel)"
+{group_line}  jump_item_association = {{
+    filter_type = "criteria"
+    criteria = {{
+      shared_jump_groups = []
+      host               = []
+      name               = []
+      tag                = []
+      comment            = []
+    }}
+    jump_items = [{{
+      id   = tonumber(sra_protocol_tunnel_jump.{safe_name}.id)
+      type = {json.dumps(_K8S_JUMP_ITEM_TYPE)}
+    }}]
+  }}
+}}
+
+output "vault_account_id" {{
+  value = sra_vault_token_account.k8s_access.id
+}}
+"""
     return f"""\
 terraform {{
   required_providers {{
@@ -946,7 +993,7 @@ terraform {{
 variable "bt_host"          {{ sensitive = false }}
 variable "bt_client_id"     {{ sensitive = true }}
 variable "bt_client_secret" {{ sensitive = true }}
-
+{var_block}
 provider "sra" {{
   host          = var.bt_host
   client_id     = var.bt_client_id
@@ -976,26 +1023,49 @@ resource "sra_protocol_tunnel_jump" {json.dumps(safe_name)} {{
 output "tunnel_jump_id" {{
   value = sra_protocol_tunnel_jump.{safe_name}.id
 }}
-"""
+{vault_block}"""
 
 
 def _provision_k8s_tunnel_sync(
     name, hostname, api_url, ca_certificates, jump_group_name, jumpoint_name, tag,
-    client_secret="",
+    client_secret="", vault_account_name="", sa_token="", vault_account_group_id=None,
 ) -> dict:
     # A per-cluster PRA credential overrides the configured bt_client_secret for
     # this apply only (passed as the sensitive TF_VAR the provider block reads).
-    extra_env = {"TF_VAR_bt_client_secret": client_secret} if client_secret else None
+    _cred_env = {"TF_VAR_bt_client_secret": client_secret} if client_secret else {}
+    want_vault = bool(vault_account_name and sa_token)
     with tempfile.TemporaryDirectory(prefix="pra_k8s_tf_") as work_dir:
         Path(work_dir, "main.tf").write_text(
-            _generate_k8s_tunnel_hcl(name, hostname, api_url, ca_certificates,
-                                     jump_group_name, jumpoint_name, tag)
+            _generate_k8s_tunnel_hcl(
+                name, hostname, api_url, ca_certificates, jump_group_name, jumpoint_name, tag,
+                vault_account_name=vault_account_name if want_vault else "",
+                vault_account_group_id=vault_account_group_id)
         )
         init = _run_tf(["init", "-upgrade=false"], work_dir, timeout=60)
         if init.returncode != 0:
             raise TerraformPRAError(
                 f"terraform init failed: {init.stderr.strip() or init.stdout.strip()}")
-        apply = _run_tf(["apply", "-auto-approve"], work_dir, timeout=120, extra_env=extra_env)
+
+        extra_env = dict(_cred_env)
+        if want_vault:
+            extra_env["TF_VAR_k8s_sa_token"] = sa_token
+        apply = _run_tf(["apply", "-auto-approve"], work_dir, timeout=120, extra_env=extra_env or None)
+        if apply.returncode != 0 and want_vault:
+            # The Vault token account must not cost a tunnel that would otherwise
+            # work — retry tunnel-only (mirrors the DB tunnel). Drop the vault
+            # resource from local state, then re-apply without refresh.
+            first_err = (apply.stderr.strip() or apply.stdout.strip())[:400]
+            logger.warning(
+                "PRA k8s vault token-account apply failed — retrying tunnel-only; if it was "
+                "partially created it may need manual cleanup in PRA (check the PRA OAuth "
+                "client's Vault account-management permission): %s", first_err)
+            want_vault = False
+            _run_tf(["state", "rm", "sra_vault_token_account.k8s_access"], work_dir, timeout=30)
+            Path(work_dir, "main.tf").write_text(
+                _generate_k8s_tunnel_hcl(name, hostname, api_url, ca_certificates,
+                                         jump_group_name, jumpoint_name, tag))
+            apply = _run_tf(["apply", "-auto-approve", "-refresh=false"], work_dir,
+                            timeout=120, extra_env=_cred_env or None)
         if apply.returncode != 0:
             _run_tf(["destroy", "-auto-approve", "-refresh=false"], work_dir, timeout=120)
             raise TerraformPRAError(
@@ -1003,17 +1073,22 @@ def _provision_k8s_tunnel_sync(
 
         out = _run_tf(["output", "-json"], work_dir, timeout=30)
         tunnel_jump_id: Optional[str] = None
+        vault_account_id: Optional[str] = None
         if out.returncode == 0 and out.stdout.strip():
             try:
-                tunnel_jump_id = str(json.loads(out.stdout).get("tunnel_jump_id", {}).get("value", ""))
+                outputs = json.loads(out.stdout)
+                tunnel_jump_id = str(outputs.get("tunnel_jump_id", {}).get("value", ""))
+                vault_raw = outputs.get("vault_account_id", {}).get("value", "")
+                vault_account_id = str(vault_raw) if vault_raw else None
             except (json.JSONDecodeError, AttributeError):
                 pass
         state_path = Path(work_dir, "terraform.tfstate")
         tf_state_json = state_path.read_text() if state_path.exists() else None
         return {
             "tunnel_jump_id": tunnel_jump_id,
+            "vault_account_id": vault_account_id,
             "jump_group_name": jump_group_name,
-            # No secrets in a k8s tunnel (CA is public), but scrub for consistency.
+            # Scrub the SA token out of the stashed state (the destroy is by id).
             "tf_state_json": _scrub_tf_state(tf_state_json) if tf_state_json else None,
         }
 
@@ -1027,21 +1102,30 @@ async def provision_k8s_tunnel(
     jumpoint_name: str,
     tag: str = "Kubernetes",
     client_secret: str = "",
+    vault_account_name: str = "",
+    sa_token: str = "",
+    vault_account_group_id: Optional[int] = None,
 ) -> dict:
     """Provision a PRA tunnel_type=k8s protocol-tunnel jump to a managed cluster's
     API via the beyondtrust/sra provider. The Jump Group and Jumpoint must already
     exist in PRA. ``client_secret`` optionally overrides the configured
-    bt_client_secret for this apply (a per-cluster PRA credential). Returns
-    ``{tunnel_jump_id, jump_group_name, tf_state_json}`` — tf_state_json drives
-    ``remove_k8s_tunnel`` later."""
+    bt_client_secret for this apply (a per-cluster PRA credential).
+
+    When ``vault_account_name`` + ``sa_token`` are given, a ``sra_vault_token_account``
+    holding the cluster's ServiceAccount bearer token is also created and associated
+    to the jump, so PRA injects the credential at session launch (PRA-only access,
+    no Entitle). Returns ``{tunnel_jump_id, vault_account_id, jump_group_name,
+    tf_state_json}`` — tf_state_json drives ``remove_k8s_tunnel`` later."""
     return await asyncio.to_thread(
         _provision_k8s_tunnel_sync, name, hostname, api_url, ca_certificates,
         jump_group_name, jumpoint_name, tag, client_secret,
+        vault_account_name, sa_token, vault_account_group_id,
     )
 
 
 async def remove_k8s_tunnel(tf_state_json: str) -> None:
-    """Destroy a previously provisioned k8s tunnel jump using its stored state.
-    A k8s tunnel has no vault account / re-declarable secrets, so the
-    provider-only state destroy is sufficient."""
+    """Destroy a previously provisioned k8s tunnel jump (and its Vault token account,
+    if any) using its stored state. The provider-only state destroy removes every
+    sra_ resource in the state by id — so it covers both the tunnel and an associated
+    ``sra_vault_token_account`` without re-declaring the (scrubbed) token."""
     await asyncio.to_thread(_destroy_state_only_sync, tf_state_json)

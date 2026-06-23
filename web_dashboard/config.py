@@ -574,6 +574,15 @@ class Settings(BaseSettings):
     # clusters use the agent's In-Cluster access.
     entitle_k8s_user_prefix: str = "entitle"         # user_prefix Entitle uses for the ephemeral cluster identities
     entitle_k8s_sa_name: str = "entitle-access"      # ServiceAccount minted in-cluster for External-Access registration
+
+    # PRA-only K8s access (no Entitle): a cluster-admin ServiceAccount whose
+    # long-lived bearer token is stored in the PRA Vault and injected at session
+    # launch. The dedicated namespace is safe to delete wholesale on tunnel removal
+    # (token revocation). bt_vault_account_group_id (numeric) places the Vault
+    # account in a group so a PRA group policy grants it to users.
+    pra_k8s_namespace: str = "pra-access"            # dedicated ns for the PRA ServiceAccount (deleted on revoke)
+    pra_k8s_sa_name: str = "pra-access"              # ServiceAccount minted in-cluster for PRA Vault token injection
+    bt_vault_account_group_id: str = ""              # OPTIONAL — PRA Vault account group id for injected k8s/DB credentials
     entitle_allowed_durations: str = "3600,43200,86400"  # JIT durations (seconds) offered on created integrations
     entitle_ssh_sudo_user: str = ""                 # OPTIONAL override — each VM deploy passes its image's cloud-default login user (ubuntu/ec2-user/azureuser/gcp-user) automatically; set this only to force a different sudo user for ALL registrations
     entitle_ssh_private_key_ref: str = ""           # OPTIONAL fallback/override only — the SSH private key is normally sourced from the VM's own per-cloud keypair (the key cloud-init injected). See docs/design/entitle-resource-registration.md

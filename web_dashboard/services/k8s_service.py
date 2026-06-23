@@ -1476,8 +1476,27 @@ def _apply_overrides(row, *, jump_group=None, jumpoint_name=None, pra_credential
         row.pra_credential_ref = pra_credential_ref.strip() or None
 
 
+async def _mint_pra_sa_token(kubeconfig: str) -> str:
+    """Mint a cluster-admin ServiceAccount bearer token for PRA Vault injection:
+    apply the SA + cluster-admin binding + token Secret (idempotent), then read the
+    token (the token controller populates ``.data.token`` asynchronously). Reuses
+    the same RBAC manifest + runner the Entitle External registration uses."""
+    ns = _cfg("pra_k8s_namespace", "kube-system")
+    sa = _cfg("pra_k8s_sa_name", "pra-access")
+    secret = f"{sa}-token"
+    await _apply_manifest_via_runner(kubeconfig, _entitle_k8s_rbac_manifest(ns, sa, secret))
+    for _ in range(6):
+        b64 = await _get_secret_b64_via_runner(kubeconfig, ns, secret, "token")
+        if b64:
+            return base64.b64decode(b64).decode("utf-8")
+        await asyncio.sleep(2)
+    raise K8sError("the PRA ServiceAccount token did not populate — retry")
+
+
 async def register_pra_tunnel(db: Session, cluster_id: str, *, jump_group: str = None,
-                              jumpoint_name: str = None, pra_credential_ref: str = None) -> dict:
+                              jumpoint_name: str = None, pra_credential_ref: str = None,
+                              vault_inject: bool = False,
+                              vault_account_group_id: Optional[int] = None) -> dict:
     """Provision the cluster's ``tunnel_type=k8s`` sra protocol-tunnel jump and
     record its id + Terraform state on the row. Idempotent: returns the existing
     ``pra_jump_id`` without recreating when one is already set.
@@ -1485,7 +1504,13 @@ async def register_pra_tunnel(db: Session, cluster_id: str, *, jump_group: str =
     Per-cluster overrides (persisted; config is the fallback): ``jump_group`` (else
     ``bt_jump_group_name``), ``jumpoint_name`` (else ``bt_jumpoint_name`` — the
     Jumpoint the tunnel routes through), ``pra_credential_ref`` (a secret ref
-    resolved to a bt_client_secret override for the apply)."""
+    resolved to a bt_client_secret override for the apply).
+
+    When ``vault_inject`` is set, a cluster-admin ServiceAccount bearer token is
+    minted in the cluster and stored as a PRA Vault token account associated to the
+    jump, so PRA injects the credential at session launch — PRA-only access with no
+    Entitle. ``vault_account_group_id`` (else ``bt_vault_account_group_id``) places
+    the Vault account in a group so a group policy grants it to users."""
     row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
     if row is None:
         raise K8sError(f"cluster {cluster_id} not found")
@@ -1496,6 +1521,18 @@ async def register_pra_tunnel(db: Session, cluster_id: str, *, jump_group: str =
         )
     _apply_overrides(row, jump_group=jump_group, jumpoint_name=jumpoint_name,
                      pra_credential_ref=pra_credential_ref)
+
+    # Bring up the shared on-demand Jumpoint host so the tunnel has something to
+    # route through (VM/DB deploys do the same). Best-effort; real clouds only —
+    # a registered 'local' cluster has no cloud host to manage.
+    if row.cloud in ("aws", "azure", "gcp"):
+        try:
+            from . import jumpoint_host_service
+            await jumpoint_host_service.ensure_jumpoint_host(
+                row.cloud, _cfg(row.cloud + "_region") or row.region or "")
+        except Exception as exc:
+            logger.warning("k8s tunnel: ensure jumpoint host failed (non-fatal): %s", exc)
+
     if row.pra_jump_id:
         db.commit()
         return {"pra_jump_id": row.pra_jump_id, "already_registered": True}
@@ -1514,6 +1551,19 @@ async def register_pra_tunnel(db: Session, cluster_id: str, *, jump_group: str =
     from . import config_service, terraform_pra_service as pra
     cred_ref = row.pra_credential_ref
     client_secret = config_service.resolve_reference(cred_ref) if cred_ref else ""
+
+    # Optional PRA-Vault credential injection: mint a cluster SA bearer token and
+    # hand it to the Vault token account associated with the jump.
+    vault_account_name = ""
+    sa_token = ""
+    group_id = vault_account_group_id
+    if vault_inject:
+        sa_token = await _mint_pra_sa_token(kubeconfig)
+        vault_account_name = f"k8s-{row.name}-sa"
+        if group_id is None:
+            cfg_group = _cfg("bt_vault_account_group_id")
+            group_id = int(cfg_group) if cfg_group.strip().isdigit() else None
+
     result = await pra.provision_k8s_tunnel(
         name=f"k8s-{row.name}",
         hostname=_api_host_from_url(api_url),
@@ -1522,12 +1572,17 @@ async def register_pra_tunnel(db: Session, cluster_id: str, *, jump_group: str =
         jump_group_name=row.jump_group or _cfg("bt_jump_group_name"),
         jumpoint_name=row.jumpoint_name or _cfg("bt_jumpoint_name"),
         client_secret=client_secret,
+        vault_account_name=vault_account_name,
+        sa_token=sa_token,
+        vault_account_group_id=group_id,
     )
     row.pra_jump_id = str(result.get("tunnel_jump_id") or "")
     row.pra_tunnel_state = result.get("tf_state_json")
     db.commit()
-    logger.info("Registered k8s PRA tunnel for cluster %s (jump id %s)", row.name, row.pra_jump_id)
-    return {"pra_jump_id": row.pra_jump_id, "jump_group_name": result.get("jump_group_name")}
+    logger.info("Registered k8s PRA tunnel for cluster %s (jump id %s, vault account %s)",
+                row.name, row.pra_jump_id, result.get("vault_account_id") or "none")
+    return {"pra_jump_id": row.pra_jump_id, "jump_group_name": result.get("jump_group_name"),
+            "vault_account_id": result.get("vault_account_id")}
 
 
 async def deregister_pra_tunnel(db: Session, cluster_id: str) -> dict:
@@ -1542,9 +1597,34 @@ async def deregister_pra_tunnel(db: Session, cluster_id: str) -> dict:
             await pra.remove_k8s_tunnel(row.pra_tunnel_state)
         except Exception as exc:
             logger.warning("removing k8s tunnel for %s failed: %s", cluster_id, exc)
+
+    # Revoke the in-cluster PRA ServiceAccount (the injected bearer token is
+    # long-lived and would otherwise stay valid in the cluster after the Vault
+    # account is gone). Deleting the dedicated namespace removes the SA + token
+    # Secret; the ClusterRoleBinding is deleted by name. Best-effort, idempotent.
+    try:
+        ns = _cfg("pra_k8s_namespace", "pra-access")
+        sa = _cfg("pra_k8s_sa_name", "pra-access")
+        await _delete_manifest_via_runner(
+            resolve_kubeconfig(db, cluster_id), _entitle_k8s_rbac_manifest(ns, sa, f"{sa}-token"))
+    except Exception as exc:
+        logger.warning("k8s tunnel: PRA ServiceAccount revoke for %s failed (non-fatal): %s",
+                       cluster_id, exc)
+
     row.pra_jump_id = None
     row.pra_tunnel_state = None
     db.commit()
+
+    # The cluster no longer needs the shared Jumpoint — tear it down if nothing
+    # else (VM / DB / another tunneled cluster) is using it. Best-effort.
+    if row.cloud in ("aws", "azure", "gcp"):
+        try:
+            from . import jumpoint_host_service
+            await jumpoint_host_service.teardown_jumpoint_host_if_idle(
+                db, row.cloud, _cfg(row.cloud + "_region") or row.region or "")
+        except Exception as exc:
+            logger.warning("k8s tunnel: jumpoint idle-teardown failed (non-fatal): %s", exc)
+
     return {"ok": True, "removed": True}
 
 
@@ -1579,7 +1659,8 @@ async def _entitle_rancher_grant(cluster_id: str, username: str) -> dict:
 
 async def open_console(db: Session, cluster_id: str, username: str = "system", *,
                        jump_group: str = None, jumpoint_name: str = None,
-                       pra_credential_ref: str = None) -> dict:
+                       pra_credential_ref: str = None, vault_inject: bool = False,
+                       vault_account_group_id: Optional[int] = None) -> dict:
     """**Phase 3b** — broker access. Layers the PRA tunnel (connection) + the
     Entitle-Rancher JIT (authorization) over the Phase-3a console link:
 
@@ -1606,7 +1687,8 @@ async def open_console(db: Session, cluster_id: str, username: str = "system", *
 
     if _pra_configured():
         if not row.pra_jump_id:
-            await register_pra_tunnel(db, cluster_id)
+            await register_pra_tunnel(db, cluster_id, vault_inject=vault_inject,
+                                      vault_account_group_id=vault_account_group_id)
             db.refresh(row)
         out["access"] = "pra_tunnel"
         out["pra"] = {
