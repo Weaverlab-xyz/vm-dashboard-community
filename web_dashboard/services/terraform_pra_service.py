@@ -926,36 +926,43 @@ async def remove_rdp_jump(tf_state_json: str) -> None:
 _K8S_JUMP_ITEM_TYPE = "protocol_tunnel_jump"
 
 
-def _generate_k8s_tunnel_hcl(
-    name: str,
-    hostname: str,
-    api_url: str,
-    ca_certificates: str,
-    jump_group_name: str,
-    jumpoint_name: str,
-    tag: str = "Kubernetes",
-    vault_account_name: str = "",
+def _generate_k8s_vault_account_hcl(
+    vault_account_name: str,
     vault_account_group_id: Optional[int] = None,
 ) -> str:
-    """HCL for one k8s protocol-tunnel jump (sra_protocol_tunnel_jump,
-    tunnel_type=k8s). ``ca_certificates`` is the cluster CA in PEM — json.dumps
-    emits it as a valid quoted multi-line string for Terraform.
+    """HCL for a PRA Vault **token** account (``sra_vault_token_account``) holding a
+    cluster's ServiceAccount bearer token, associated to an existing k8s tunnel jump
+    for credential injection.
 
-    When ``vault_account_name`` is set, a Vault **token** account is also emitted
-    (``sra_vault_token_account``) and associated to the tunnel jump for credential
-    injection — the cluster's ServiceAccount bearer token. The token is NEVER in
-    the HCL: it arrives as ``TF_VAR_k8s_sa_token`` (sensitive), mirroring the DB
-    tunnel's username/password Vault account. With ``vault_account_name=""`` the
-    output is byte-identical to the pre-vault template (the destroy path relies on
-    that)."""
-    safe_name = re.sub(r"[^a-z0-9_]", "_", name.lower())
-    var_block = ""
-    vault_block = ""
-    if vault_account_name:
-        var_block = 'variable "k8s_sa_token" { sensitive = true }\n'
-        group_line = (f"  account_group_id = {int(vault_account_group_id)}\n"
-                      if vault_account_group_id else "")
-        vault_block = f"""
+    The tunnel jump itself is created over the REST API (the sra provider's
+    ``tunnel_type`` validator blocks ``"k8s"``; see pra_api_service), so this HCL
+    references the jump by its REST-assigned id via ``TF_VAR_k8s_jump_id`` rather
+    than a resource reference. The token rides ``TF_VAR_k8s_sa_token`` (sensitive)
+    and never lands in the HCL."""
+    group_line = (f"  account_group_id = {int(vault_account_group_id)}\n"
+                  if vault_account_group_id else "")
+    return f"""\
+terraform {{
+  required_providers {{
+    sra = {{
+      source  = "beyondtrust/sra"
+      version = "~> 1.0"
+    }}
+  }}
+}}
+
+variable "bt_host"          {{ sensitive = false }}
+variable "bt_client_id"     {{ sensitive = true }}
+variable "bt_client_secret" {{ sensitive = true }}
+variable "k8s_sa_token"     {{ sensitive = true }}
+variable "k8s_jump_id"      {{ sensitive = false }}
+
+provider "sra" {{
+  host          = var.bt_host
+  client_id     = var.bt_client_id
+  client_secret = var.bt_client_secret
+}}
+
 resource "sra_vault_token_account" "k8s_access" {{
   name        = {json.dumps(vault_account_name)}
   token       = var.k8s_sa_token
@@ -970,7 +977,7 @@ resource "sra_vault_token_account" "k8s_access" {{
       comment            = []
     }}
     jump_items = [{{
-      id   = tonumber(sra_protocol_tunnel_jump.{safe_name}.id)
+      id   = tonumber(var.k8s_jump_id)
       type = {json.dumps(_K8S_JUMP_ITEM_TYPE)}
     }}]
   }}
@@ -980,115 +987,40 @@ output "vault_account_id" {{
   value = sra_vault_token_account.k8s_access.id
 }}
 """
-    return f"""\
-terraform {{
-  required_providers {{
-    sra = {{
-      source  = "beyondtrust/sra"
-      version = "~> 1.0"
-    }}
-  }}
-}}
-
-variable "bt_host"          {{ sensitive = false }}
-variable "bt_client_id"     {{ sensitive = true }}
-variable "bt_client_secret" {{ sensitive = true }}
-{var_block}
-provider "sra" {{
-  host          = var.bt_host
-  client_id     = var.bt_client_id
-  client_secret = var.bt_client_secret
-}}
-
-data "sra_jump_group_list" "jg" {{
-  name = {json.dumps(jump_group_name)}
-}}
-
-data "sra_jumpoint_list" "jp" {{
-  name = {json.dumps(jumpoint_name)}
-}}
-
-resource "sra_protocol_tunnel_jump" {json.dumps(safe_name)} {{
-  name            = {json.dumps(name)}
-  hostname        = {json.dumps(hostname)}
-  jump_group_id   = tonumber(data.sra_jump_group_list.jg.items[0].id)
-  jumpoint_id     = tonumber(data.sra_jumpoint_list.jp.items[0].id)
-  tunnel_type     = "k8s"
-  url             = {json.dumps(api_url)}
-  ca_certificates = {json.dumps(ca_certificates)}
-  tag             = {json.dumps(tag)}
-  comments        = "Auto-provisioned by Infrastructure Management Dashboard (k8s tunnel)"
-}}
-
-output "tunnel_jump_id" {{
-  value = sra_protocol_tunnel_jump.{safe_name}.id
-}}
-{vault_block}"""
 
 
-def _provision_k8s_tunnel_sync(
-    name, hostname, api_url, ca_certificates, jump_group_name, jumpoint_name, tag,
-    client_secret="", vault_account_name="", sa_token="", vault_account_group_id=None,
-) -> dict:
-    # A per-cluster PRA credential overrides the configured bt_client_secret for
-    # this apply only (passed as the sensitive TF_VAR the provider block reads).
-    _cred_env = {"TF_VAR_bt_client_secret": client_secret} if client_secret else {}
-    want_vault = bool(vault_account_name and sa_token)
-    with tempfile.TemporaryDirectory(prefix="pra_k8s_tf_") as work_dir:
+def _provision_k8s_vault_sync(jump_id, vault_account_name, sa_token,
+                              vault_account_group_id=None, client_secret="") -> dict:
+    """TF-apply a Vault token account associated to the (REST-created) k8s jump.
+    Returns ``{vault_account_id, tf_state_json}`` (state scrubbed of the token)."""
+    extra_env = {"TF_VAR_k8s_sa_token": sa_token, "TF_VAR_k8s_jump_id": str(jump_id)}
+    if client_secret:
+        extra_env["TF_VAR_bt_client_secret"] = client_secret
+    with tempfile.TemporaryDirectory(prefix="pra_k8s_vault_tf_") as work_dir:
         Path(work_dir, "main.tf").write_text(
-            _generate_k8s_tunnel_hcl(
-                name, hostname, api_url, ca_certificates, jump_group_name, jumpoint_name, tag,
-                vault_account_name=vault_account_name if want_vault else "",
-                vault_account_group_id=vault_account_group_id)
-        )
+            _generate_k8s_vault_account_hcl(vault_account_name, vault_account_group_id))
         init = _run_tf(["init", "-upgrade=false"], work_dir, timeout=60)
         if init.returncode != 0:
             raise TerraformPRAError(
                 f"terraform init failed: {init.stderr.strip() or init.stdout.strip()}")
-
-        extra_env = dict(_cred_env)
-        if want_vault:
-            extra_env["TF_VAR_k8s_sa_token"] = sa_token
-        apply = _run_tf(["apply", "-auto-approve"], work_dir, timeout=120, extra_env=extra_env or None)
-        if apply.returncode != 0 and want_vault:
-            # The Vault token account must not cost a tunnel that would otherwise
-            # work — retry tunnel-only (mirrors the DB tunnel). Drop the vault
-            # resource from local state, then re-apply without refresh.
-            first_err = (apply.stderr.strip() or apply.stdout.strip())[:400]
-            logger.warning(
-                "PRA k8s vault token-account apply failed — retrying tunnel-only; if it was "
-                "partially created it may need manual cleanup in PRA (check the PRA OAuth "
-                "client's Vault account-management permission): %s", first_err)
-            want_vault = False
-            _run_tf(["state", "rm", "sra_vault_token_account.k8s_access"], work_dir, timeout=30)
-            Path(work_dir, "main.tf").write_text(
-                _generate_k8s_tunnel_hcl(name, hostname, api_url, ca_certificates,
-                                         jump_group_name, jumpoint_name, tag))
-            apply = _run_tf(["apply", "-auto-approve", "-refresh=false"], work_dir,
-                            timeout=120, extra_env=_cred_env or None)
+        apply = _run_tf(["apply", "-auto-approve"], work_dir, timeout=120, extra_env=extra_env)
         if apply.returncode != 0:
-            _run_tf(["destroy", "-auto-approve", "-refresh=false"], work_dir, timeout=120)
+            _run_tf(["destroy", "-auto-approve", "-refresh=false"], work_dir, timeout=120,
+                    extra_env=extra_env)
             raise TerraformPRAError(
-                f"terraform apply failed: {apply.stderr.strip() or apply.stdout.strip()}")
-
+                f"vault account apply failed: {apply.stderr.strip() or apply.stdout.strip()}")
         out = _run_tf(["output", "-json"], work_dir, timeout=30)
-        tunnel_jump_id: Optional[str] = None
         vault_account_id: Optional[str] = None
         if out.returncode == 0 and out.stdout.strip():
             try:
-                outputs = json.loads(out.stdout)
-                tunnel_jump_id = str(outputs.get("tunnel_jump_id", {}).get("value", ""))
-                vault_raw = outputs.get("vault_account_id", {}).get("value", "")
+                vault_raw = json.loads(out.stdout).get("vault_account_id", {}).get("value", "")
                 vault_account_id = str(vault_raw) if vault_raw else None
             except (json.JSONDecodeError, AttributeError):
                 pass
         state_path = Path(work_dir, "terraform.tfstate")
         tf_state_json = state_path.read_text() if state_path.exists() else None
         return {
-            "tunnel_jump_id": tunnel_jump_id,
             "vault_account_id": vault_account_id,
-            "jump_group_name": jump_group_name,
-            # Scrub the SA token out of the stashed state (the destroy is by id).
             "tf_state_json": _scrub_tf_state(tf_state_json) if tf_state_json else None,
         }
 
@@ -1106,26 +1038,52 @@ async def provision_k8s_tunnel(
     sa_token: str = "",
     vault_account_group_id: Optional[int] = None,
 ) -> dict:
-    """Provision a PRA tunnel_type=k8s protocol-tunnel jump to a managed cluster's
-    API via the beyondtrust/sra provider. The Jump Group and Jumpoint must already
-    exist in PRA. ``client_secret`` optionally overrides the configured
-    bt_client_secret for this apply (a per-cluster PRA credential).
+    """Provision a PRA ``tunnel_type=k8s`` protocol-tunnel jump to a managed cluster's
+    API. The jump is created over the **REST API** (``pra_api_service``) because the
+    sra Terraform provider's ``tunnel_type`` validator rejects ``"k8s"`` client-side
+    (see docs/notes/sra-provider-k8s-tunnel-bug.md). The Jump Group + Jumpoint must
+    already exist in PRA.
 
     When ``vault_account_name`` + ``sa_token`` are given, a ``sra_vault_token_account``
-    holding the cluster's ServiceAccount bearer token is also created and associated
-    to the jump, so PRA injects the credential at session launch (PRA-only access,
-    no Entitle). Returns ``{tunnel_jump_id, vault_account_id, jump_group_name,
-    tf_state_json}`` — tf_state_json drives ``remove_k8s_tunnel`` later."""
-    return await asyncio.to_thread(
-        _provision_k8s_tunnel_sync, name, hostname, api_url, ca_certificates,
-        jump_group_name, jumpoint_name, tag, client_secret,
-        vault_account_name, sa_token, vault_account_group_id,
-    )
+    holding the cluster's ServiceAccount bearer token is created via Terraform and
+    associated to the REST-created jump, so PRA injects the credential at session
+    launch (PRA-only access, no Entitle). The Vault step is best-effort: a failure
+    leaves the working tunnel in place (no injection) rather than failing the broker.
+    Returns ``{tunnel_jump_id, vault_account_id, jump_group_name, tf_state_json}`` —
+    ``tunnel_jump_id`` + ``tf_state_json`` drive ``remove_k8s_tunnel`` later."""
+    from . import pra_api_service
+    jump_id = await pra_api_service.create_k8s_tunnel_jump(
+        name=name, hostname=hostname, url=api_url, ca_certificates=ca_certificates,
+        jump_group_name=jump_group_name, jumpoint_name=jumpoint_name, tag=tag)
+
+    vault_account_id: Optional[str] = None
+    tf_state_json: Optional[str] = None
+    if vault_account_name and sa_token:
+        try:
+            v = await asyncio.to_thread(
+                _provision_k8s_vault_sync, jump_id, vault_account_name, sa_token,
+                vault_account_group_id, client_secret)
+            vault_account_id = v.get("vault_account_id")
+            tf_state_json = v.get("tf_state_json")
+        except Exception as exc:  # noqa: BLE001 — vault is an enhancement, tunnel stands
+            logger.warning("PRA k8s Vault token-account failed (tunnel kept, no injection): %s", exc)
+
+    return {
+        "tunnel_jump_id": str(jump_id),
+        "vault_account_id": vault_account_id,
+        "jump_group_name": jump_group_name,
+        "tf_state_json": tf_state_json,
+    }
 
 
-async def remove_k8s_tunnel(tf_state_json: str) -> None:
-    """Destroy a previously provisioned k8s tunnel jump (and its Vault token account,
-    if any) using its stored state. The provider-only state destroy removes every
-    sra_ resource in the state by id — so it covers both the tunnel and an associated
-    ``sra_vault_token_account`` without re-declaring the (scrubbed) token."""
-    await asyncio.to_thread(_destroy_state_only_sync, tf_state_json)
+async def remove_k8s_tunnel(tf_state_json: Optional[str] = None, jump_id=None) -> None:
+    """Tear down a k8s tunnel: TF-destroy the Vault token account (if one was created)
+    from its stored state, then DELETE the protocol-tunnel jump over REST by id."""
+    if tf_state_json:
+        try:
+            await asyncio.to_thread(_destroy_state_only_sync, tf_state_json)
+        except Exception as exc:  # noqa: BLE001 — still try to drop the jump below
+            logger.warning("PRA k8s Vault account destroy failed (non-fatal): %s", exc)
+    if jump_id:
+        from . import pra_api_service
+        await pra_api_service.delete_protocol_tunnel_jump(jump_id)

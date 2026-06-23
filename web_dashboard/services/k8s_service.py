@@ -1586,17 +1586,17 @@ async def register_pra_tunnel(db: Session, cluster_id: str, *, jump_group: str =
 
 
 async def deregister_pra_tunnel(db: Session, cluster_id: str) -> dict:
-    """Destroy the cluster's k8s tunnel jump from its stored Terraform state and
-    clear ``pra_jump_id``/``pra_tunnel_state`` (best-effort)."""
+    """Tear down the cluster's k8s tunnel jump (REST DELETE by id) + its Vault token
+    account (TF destroy from stored state, if any) and clear ``pra_jump_id`` /
+    ``pra_tunnel_state`` (best-effort)."""
     row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
     if row is None or not row.pra_jump_id:
         return {"ok": True, "removed": False}
-    if row.pra_tunnel_state:
-        from . import terraform_pra_service as pra
-        try:
-            await pra.remove_k8s_tunnel(row.pra_tunnel_state)
-        except Exception as exc:
-            logger.warning("removing k8s tunnel for %s failed: %s", cluster_id, exc)
+    from . import terraform_pra_service as pra
+    try:
+        await pra.remove_k8s_tunnel(row.pra_tunnel_state, row.pra_jump_id)
+    except Exception as exc:
+        logger.warning("removing k8s tunnel for %s failed: %s", cluster_id, exc)
 
     # Revoke the in-cluster PRA ServiceAccount (the injected bearer token is
     # long-lived and would otherwise stay valid in the cluster after the Vault
