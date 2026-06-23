@@ -102,6 +102,7 @@ COPY terraform/db_azure_postgres/ ./terraform/db_azure_postgres/
 COPY terraform/db_gcp_postgres/ ./terraform/db_gcp_postgres/
 COPY terraform/db_mysql/ ./terraform/db_mysql/
 COPY terraform/db_azure_mysql/ ./terraform/db_azure_mysql/
+COPY terraform/db_gcp_mysql/ ./terraform/db_gcp_mysql/
 # Managed-Kubernetes (EKS) provisioning module (driven by k8s_service, §1.1a).
 # Uses the hashicorp/aws provider, already in the pre-cache init below.
 COPY terraform/k8s_cluster/aws_eks/ ./terraform/k8s_cluster/aws_eks/
@@ -199,7 +200,19 @@ RUN ARCH=$(dpkg --print-architecture) \
            echo "azurerm 4.x init attempt $attempt failed (transient registry error); retrying in $((attempt * 5))s..." >&2; \
            sleep $((attempt * 5)); \
        done \
-    && rm -rf /tmp/tf_provider_init /tmp/tf_provider_init_az4
+    && mkdir -p /tmp/tf_provider_init_g6 \
+    && printf 'terraform {\n  required_providers {\n    google = { source = "hashicorp/google", version = "~> 6.0" }\n  }\n}\n' \
+       > /tmp/tf_provider_init_g6/main.tf \
+    && for attempt in 1 2 3 4 5; do \
+           TF_REGISTRY_CLIENT_TIMEOUT=30 terraform -chdir=/tmp/tf_provider_init_g6 init && break; \
+           if [ "$attempt" = 5 ]; then \
+               echo "failed to cache google 6.x (db_gcp_mysql needs >= 6.x for MYSQL_8_4) after 5 attempts" >&2; \
+               exit 1; \
+           fi; \
+           echo "google 6.x init attempt $attempt failed (transient registry error); retrying in $((attempt * 5))s..." >&2; \
+           sleep $((attempt * 5)); \
+       done \
+    && rm -rf /tmp/tf_provider_init /tmp/tf_provider_init_az4 /tmp/tf_provider_init_g6
 
 # Entrypoint fixes SSH key permissions when the Windows override
 # bind-mounts a key from %USERPROFILE%. Docker Desktop surfaces Windows

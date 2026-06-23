@@ -44,7 +44,7 @@ VALID_ENGINES = {"postgres", "mysql", "sqlserver"}
 VALID_CLOUDS = {"aws", "azure", "gcp"}
 _IMPLEMENTED = {
     ("postgres", "aws"), ("postgres", "gcp"), ("postgres", "azure"),
-    ("mysql", "aws"), ("mysql", "azure"),
+    ("mysql", "aws"), ("mysql", "azure"), ("mysql", "gcp"),
 }
 _PROVIDER = {
     ("postgres", "aws"): "rds",
@@ -52,6 +52,7 @@ _PROVIDER = {
     ("postgres", "azure"): "flexibleserver",
     ("mysql", "aws"): "rds",
     ("mysql", "azure"): "flexibleserver",
+    ("mysql", "gcp"): "cloudsql",
 }
 
 # terraform/<dir> module per (engine, cloud) — relative to repo root (parents[2]).
@@ -62,6 +63,7 @@ _TEMPLATE_DIRS = {
     ("postgres", "azure"): os.path.join(_REPO_ROOT, "terraform", "db_azure_postgres"),
     ("mysql", "aws"): os.path.join(_REPO_ROOT, "terraform", "db_mysql"),
     ("mysql", "azure"): os.path.join(_REPO_ROOT, "terraform", "db_azure_mysql"),
+    ("mysql", "gcp"): os.path.join(_REPO_ROOT, "terraform", "db_gcp_mysql"),
 }
 _DEPLOYMENTS_DIR = os.path.join(_REPO_ROOT, "terraform", "deployments")
 
@@ -141,6 +143,24 @@ def _build_tf_variables(
         # configures private-services-access on it. ssl_mode defaults inside the
         # module to ALLOW_UNENCRYPTED_AND_ENCRYPTED so the PRA tunnel's cleartext
         # jumpoint→DB connection is accepted (mirrors AWS's force_ssl=0).
+        return {
+            "project": _cfg("gcp_project") or _cfg("gcp_project_id"),
+            "region": region,
+            "identifier": f"clouddb-{db_id[:8]}",
+            "db_name": db_name,
+            "master_username": master_username,
+            "master_password": master_password,
+            "tier": opts.get("tier", "db-f1-micro"),
+            "disk_size": opts.get("disk_size", 20),
+            "private_network": opts.get("private_network") or _cfg("gcp_db_network") or _cfg("gcp_network"),
+            "labels": {"managed-by": "vm-dashboard", "clouddb-id": db_id},
+        }
+
+    if (engine, cloud) == ("mysql", "gcp"):
+        # Cloud SQL MySQL — identical wiring to postgres/gcp (same private_network +
+        # ssl_mode knobs). The module pins database_version=MYSQL_8_4 so the admin is
+        # created on caching_sha2_password (Cloud SQL MySQL 8.0 uses mysql_native_password,
+        # which the PRA tunnel rejects) and edition=ENTERPRISE to keep db-f1-micro on 8.4.
         return {
             "project": _cfg("gcp_project") or _cfg("gcp_project_id"),
             "region": region,
