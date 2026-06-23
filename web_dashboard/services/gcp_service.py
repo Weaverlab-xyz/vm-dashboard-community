@@ -87,6 +87,28 @@ def _gcp_creds():
     )
 
 
+def gke_get_token() -> str:
+    """Mint a short-lived GCP OAuth access token for GKE API auth — the server-side
+    equivalent of the ``gke-gcloud-auth-plugin`` exec a GKE kubeconfig invokes. GKE
+    accepts a cloud-platform access token as a bearer token, so this lets a transient
+    kubectl/helm container authenticate to GKE without ``gcloud``/the auth plugin,
+    mirroring :func:`aws_service.eks_get_token`. Synchronous (called from the sync
+    runner kubeconfig prep)."""
+    from google.auth.transport.requests import Request
+    creds = _gcp_creds()
+    if creds is None:  # ADC
+        try:
+            import google.auth
+        except ImportError:
+            raise GCPError("google-auth is not installed — run: pip install google-auth")
+        creds, _ = google.auth.default(
+            scopes=["https://www.googleapis.com/auth/cloud-platform"])
+    creds.refresh(Request())
+    if not creds.token:
+        raise GCPError("GKE token mint returned an empty access token")
+    return creds.token
+
+
 def _require_compute():
     try:
         from google.cloud import compute_v1  # noqa: F401

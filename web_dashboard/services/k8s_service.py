@@ -545,14 +545,15 @@ def _run_sync(cmd: list, stdin_data: Optional[str] = None) -> str:
 
 
 def _runner_kubeconfig(kubeconfig: str) -> str:
-    """Prepare a kubeconfig for a transient kubectl/helm runner. A provisioned EKS
-    cluster's kubeconfig authenticates with an ``aws eks get-token`` **exec** block
-    (see :func:`_assemble_eks_kubeconfig`), but the throwaway container has no
-    ``aws`` CLI or AWS creds — so for that case mint a short-lived bearer token
-    server-side (``aws_service.eks_get_token``) and swap the exec block for a static
-    ``token``. Any other kubeconfig (registered clusters using token / client-cert /
-    non-aws exec auth) is returned **unchanged**. Best-effort: on any parse/mint
-    error, return the original so non-EKS paths are unaffected."""
+    """Prepare a kubeconfig for a transient kubectl/helm runner. A managed cluster's
+    kubeconfig authenticates with a cloud **exec** block — ``aws eks get-token``
+    (EKS), ``kubelogin get-token`` (AAD-integrated AKS), or ``gke-gcloud-auth-plugin``
+    (GKE) — but the throwaway container has none of those CLIs or cloud creds. So for
+    each, mint a short-lived bearer token server-side (``aws_service.eks_get_token`` /
+    ``azure_service.aks_get_token`` / ``gcp_service.gke_get_token``) and swap the exec
+    block for a static ``token``. Any other kubeconfig (registered clusters using a
+    raw token / client-cert / AKS ``--admin``) is returned **unchanged**. Best-effort:
+    on any parse/mint error, return the original so working paths are unaffected."""
     try:
         cfg = yaml.safe_load(kubeconfig) or {}
         users = cfg.get("users") or []
@@ -568,18 +569,28 @@ def _runner_kubeconfig(kubeconfig: str) -> str:
         if not entry:
             return kubeconfig
         exec_blk = (entry.get("user") or {}).get("exec") or {}
+        command = exec_blk.get("command") or ""
         args = exec_blk.get("args") or []
-        if exec_blk.get("command") != "aws" or "get-token" not in args:
-            return kubeconfig  # not an `aws eks get-token` kubeconfig — leave as-is
 
         def _arg(flag: str) -> str:
             return args[args.index(flag) + 1] if (flag in args and args.index(flag) + 1 < len(args)) else ""
-        cluster_name = _arg("--cluster-name")
-        region = _arg("--region")
-        if not cluster_name:
-            return kubeconfig
-        from . import aws_service
-        entry["user"] = {"token": aws_service.eks_get_token(cluster_name, region)}
+
+        if command == "aws" and "get-token" in args:
+            cluster_name = _arg("--cluster-name")
+            if not cluster_name:
+                return kubeconfig
+            from . import aws_service
+            token = aws_service.eks_get_token(cluster_name, _arg("--region"))
+        elif command in ("kubelogin", "kubelogin.exe"):
+            from . import azure_service
+            token = azure_service.aks_get_token(_arg("--server-id") or azure_service.AKS_AAD_SERVER_APP_ID)
+        elif command in ("gke-gcloud-auth-plugin", "gcloud"):
+            from . import gcp_service
+            token = gcp_service.gke_get_token()
+        else:
+            return kubeconfig  # not a cloud exec-auth kubeconfig we mint for — leave as-is
+
+        entry["user"] = {"token": token}
         return yaml.safe_dump(cfg, default_flow_style=False, sort_keys=False)
     except Exception as exc:
         logger.warning("runner kubeconfig token-prep failed (using exec kubeconfig as-is): %s", exc)

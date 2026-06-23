@@ -136,6 +136,36 @@ def invalidate_credentials() -> None:
     logger.info("Azure credential cache cleared.")
 
 
+# The well-known AAD server application that AKS AAD-integration tokens target;
+# kubelogin requests a token for `<server-id>/.default`. This is the default when
+# the kubeconfig's exec block doesn't carry an explicit --server-id.
+AKS_AAD_SERVER_APP_ID = "6dae42f8-4368-4678-94ff-3960e28e3630"
+
+
+def aks_get_token(server_id: str = AKS_AAD_SERVER_APP_ID) -> str:
+    """Mint a short-lived AAD bearer token for an AKS cluster — the server-side
+    equivalent of ``kubelogin get-token`` (which an AAD-integrated AKS kubeconfig
+    invokes via an exec block). Lets a transient kubectl/helm container authenticate
+    to AKS without ``kubelogin``/``az`` in the container, mirroring
+    :func:`aws_service.eks_get_token`. Synchronous (called from the sync runner
+    kubeconfig prep): builds the credential straight from config/env. Falls back to
+    the cached async-loaded credential if the config path is incomplete."""
+    _require_azure()
+    from ..config import settings
+    from . import config_service
+    client_id     = config_service.get("azure_client_id")     or settings.azure_client_id
+    client_secret = config_service.get("azure_client_secret") or settings.azure_client_secret
+    tenant_id     = config_service.get("azure_tenant_id")     or settings.azure_tenant_id
+    if client_id and client_secret and tenant_id:
+        cred = ClientSecretCredential(
+            tenant_id=tenant_id, client_id=client_id, client_secret=client_secret)
+    elif _cred_cache is not None:
+        cred = _cred_cache
+    else:
+        raise AzureError("Azure credentials not configured for AKS token minting")
+    return cred.get_token(f"{server_id}/.default").token
+
+
 def _get_compute(cred, sub_id):
     return ComputeManagementClient(cred, sub_id)
 
