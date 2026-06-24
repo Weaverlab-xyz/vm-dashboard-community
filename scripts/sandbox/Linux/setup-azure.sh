@@ -414,6 +414,82 @@ JSON
   state_write azure image_gallery_role "$GALLERY_ROLE"
 fi
 
+# ── 6d. Container Registry (ACR) — mirror public images to dodge Docker Hub limits ──
+# Azure rate-limits anonymous Docker Hub pulls, and every ACI runner (Shell-Jump
+# Jumpoint, config-mgmt Ansible, cross-cloud promote) pulls a public image at deploy
+# time. Stand up a small ACR, mirror the three images into it once (az acr import is
+# server-side — no local Docker), and grant the SP pull access. The dashboard then pulls
+# from ACR via the azure_acr_* / ansible_aci_acr_* keys emitted below. The ACI Jumpoint
+# image stays bare (the runner prepends azure_acr_server itself) — so the VM jumpoint,
+# which shares that key and docker-runs without a registry login, keeps working off
+# Docker Hub. One ACR serves every region (globally pullable); re-runs reuse it. Opt out
+# with SANDBOX_SKIP_ACR=1 (Basic SKU ≈ $5/mo).
+ACR_LOGIN_SERVER=""
+if [[ -z "${SANDBOX_SKIP_ACR:-}" ]]; then
+  section "Container Registry (ACR)"
+
+  # `az acr create` needs the provider registered (mirrors the ContainerInstance
+  # registration above; no-op if already registered).
+  ACR_PROV_STATE="$(az provider show --namespace Microsoft.ContainerRegistry \
+    --query registrationState -o tsv 2>/dev/null || echo NotRegistered)"
+  if [[ "$ACR_PROV_STATE" != "Registered" ]]; then
+    az provider register --namespace Microsoft.ContainerRegistry --wait >/dev/null
+    ok "Registered Microsoft.ContainerRegistry provider"
+  fi
+
+  # ACR names are globally unique and alphanumeric-only (5–50 chars) — mirror the storage
+  # account scheme (strip hyphens + subscription hash), not the hyphenated KV name. The
+  # name is region-independent, so a per-region re-run reuses the same ACR.
+  ACR_NAME="$(printf '%sacr%s' "${NAME//-/}" "$(printf '%s' "$SUBSCRIPTION_ID" | tr -d '-' | head -c8)" \
+    | tr 'A-Z' 'a-z' | head -c50)"
+  if az acr show -g "$RG" -n "$ACR_NAME" >/dev/null 2>&1; then
+    ok "Reusing ACR $ACR_NAME"
+  else
+    az acr create -g "$RG" -n "$ACR_NAME" -l "$LOCATION" --sku Basic --tags "$TAGS" >/dev/null
+    ok "Created ACR $ACR_NAME (Basic SKU)"
+  fi
+  ACR_LOGIN_SERVER="$(az acr show -g "$RG" -n "$ACR_NAME" --query loginServer -o tsv)"
+  ACR_ID="$(az acr show -g "$RG" -n "$ACR_NAME" --query id -o tsv)"
+
+  # Grant the SP AcrPull so the dashboard's ACI runners can pull. Idempotent; retry absorbs
+  # the ARM PrincipalNotFound race for a freshly created SP (same pattern as §6b).
+  if az role assignment list --assignee "$SP_OBJECT_ID" --scope "$ACR_ID" \
+       --role AcrPull --query '[0].id' -o tsv 2>/dev/null | grep -q .; then
+    ok "SP already has AcrPull on $ACR_NAME"
+  else
+    retry 8 5 az role assignment create --assignee-object-id "$SP_OBJECT_ID" \
+      --assignee-principal-type ServicePrincipal \
+      --role AcrPull --scope "$ACR_ID" >/dev/null
+    ok "Granted SP AcrPull on $ACR_NAME"
+  fi
+
+  # Mirror the public images server-side. --force makes re-runs refresh :latest. Optional
+  # Docker Hub creds (DOCKERHUB_USERNAME/DOCKERHUB_TOKEN) dodge the anonymous import limit.
+  for _img in \
+    beyondtrust/sra-jumpoint:latest \
+    willhallonline/ansible:latest \
+    chrweav/dashboard-promote-runner:latest; do
+    if [[ -n "${DOCKERHUB_USERNAME:-}" && -n "${DOCKERHUB_TOKEN:-}" ]]; then
+      retry 5 10 az acr import -n "$ACR_NAME" --source "docker.io/$_img" --image "$_img" \
+        --username "$DOCKERHUB_USERNAME" --password "$DOCKERHUB_TOKEN" --force >/dev/null
+    else
+      retry 5 10 az acr import -n "$ACR_NAME" --source "docker.io/$_img" --image "$_img" --force >/dev/null
+    fi
+    ok "Mirrored $_img → $ACR_LOGIN_SERVER/$_img"
+  done
+
+  state_write azure acr_name         "$ACR_NAME"
+  state_write azure acr_id           "$ACR_ID"
+  state_write azure acr_login_server "$ACR_LOGIN_SERVER"
+else
+  ok "Skipping ACR (SANDBOX_SKIP_ACR set) — ACI runners will pull from Docker Hub"
+fi
+
+# Promote-runner image: full ACR path when the registry exists, else the public image.
+# (The promote runner uses the image verbatim — no server prepend — and authenticates via
+# the azure_acr_* creds emitted below.)
+PROMOTE_IMAGE="${ACR_LOGIN_SERVER:+$ACR_LOGIN_SERVER/}chrweav/dashboard-promote-runner:latest"
+
 # ── 7. Print config to paste into /setup ─────────────────────────────────────
 _cfg=(
   "azure_subscription_id=$SUBSCRIPTION_ID"
@@ -454,7 +530,7 @@ _cfg=(
   "storage_azure_container=hub                              # Container for hub artefacts"
   "storage_active_backend=azure_blob                        # Active asset backend"
   "storage_hub_backend=azure_blob                           # Image hub (defaults to active if unset)"
-  "promote_runner_image=chrweav/dashboard-promote-runner:latest   # Public multi-arch image; override to your ACR for a private/air-gapped registry"
+  "promote_runner_image=$PROMOTE_IMAGE   # ACR mirror when present (else public Docker Hub image)"
   "promote_runner_azure_resource_group=$RG                  # ACI lands here"
   "promote_runner_azure_location=$LOCATION"
   "promote_runner_azure_subnet_id=$ACI_SUBNET_ID            # Reuses the Jumpoint ACI subnet"
@@ -465,6 +541,24 @@ _cfg=(
   "# BeyondTrust deploy key — set in /setup or /secrets:"
   "azure_aci_docker_deploy_key=…"
 )
+
+# Azure Container Registry — point the ACI runners at the private mirror so they don't hit
+# Docker Hub's anonymous pull limits. Jumpoint image stays bare (the runner prepends
+# azure_acr_server); ansible takes the full ACR path (it does not prepend). These are flat
+# global keys (one ACR serves all regions). Skipped when SANDBOX_SKIP_ACR was set.
+if [[ -n "$ACR_LOGIN_SERVER" ]]; then
+  _cfg+=(
+    ""
+    "# Azure Container Registry (mirrors 3 public images; dodges Docker Hub rate limits):"
+    "azure_acr_server=$ACR_LOGIN_SERVER"
+    "azure_acr_username=$SP_APP_ID                            # SP appId (granted AcrPull above)"
+    "azure_acr_password=$SP_PASSWORD"
+    "ansible_aci_image=$ACR_LOGIN_SERVER/willhallonline/ansible:latest   # full path: the ansible runner does not prepend the server"
+    "ansible_aci_acr_server=$ACR_LOGIN_SERVER"
+    "ansible_aci_acr_username=$SP_APP_ID"
+    "ansible_aci_acr_password=$SP_PASSWORD"
+  )
+fi
 
 # Surface the external gallery in the pasteable config when opted in. (Comment
 # lines must not contain '=' — write_config_json would mis-parse them as keys.)

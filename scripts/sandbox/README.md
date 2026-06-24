@@ -150,7 +150,7 @@ deployed):
 | Cloud | Idle cost / month | Why |
 |---|---|---|
 | AWS   | ~$0   | VPC, subnets, IGW, SGs, IAM are free; ECS cluster is free until a task runs. Secret in Secrets Manager: ~$0.40. |
-| Azure | ~$0   | Resource group, VNet, NSGs, Key Vault free at idle. Storage account ~$0.05. |
+| Azure | ~$5   | RG, VNet, NSGs, Key Vault free at idle. Storage account ~$0.05. Container registry (Basic, mirrors the Jumpoint/Ansible/promote images so deploy-time pulls skip Docker Hub rate limits): ~$5/mo — opt out with `SANDBOX_SKIP_ACR=1`. |
 | GCP   | ~$1.50 | Cloud NAT charges per-hour even when idle (~$1.50/mo). VPC, subnets, firewall rules, Secret Manager are free. |
 
 A running Jumpoint container/VM adds:
@@ -219,6 +219,7 @@ Common env-var overrides — both variants read the same env vars:
 AWS_REGION=us-west-2          ./scripts/sandbox/Linux/setup-aws.sh
 AZURE_LOCATION=westus2        ./scripts/sandbox/Linux/setup-azure.sh
 GCP_PROJECT_ID=my-proj GCP_REGION=us-east1 ./scripts/sandbox/Linux/setup-gcp.sh
+SANDBOX_SKIP_ACR=1            ./scripts/sandbox/Linux/setup-azure.sh   # skip the Azure ACR image mirror
 ```
 
 ```powershell
