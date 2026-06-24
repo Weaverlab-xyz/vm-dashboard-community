@@ -42,7 +42,12 @@ try:
         SecurityContextCapabilitiesDefinition as ContainerSecurityContextCapabilitiesDefinition,
     )
     from azure.mgmt.storage import StorageManagementClient
-    from azure.mgmt.resource import ResourceManagementClient
+    # Import from the .resources submodule, not the top-level namespace: azure-mgmt-resource
+    # 26.0.0 dropped the convenience re-export of ResourceManagementClient from
+    # `azure.mgmt.resource`, so the bare import fails (ImportError) on any build that floats
+    # to 26.x — which silently disabled the *entire* Azure SDK here. The .resources path has
+    # existed across all supported versions, so this works on old and new alike.
+    from azure.mgmt.resource.resources import ResourceManagementClient
     from azure.core.exceptions import ResourceNotFoundError
     from azure.keyvault.secrets import SecretClient
     _azure_available = True
