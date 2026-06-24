@@ -337,9 +337,20 @@ def _build_cluster_tf_variables(*, cloud: str, cluster_id: str, name: str,
         return tf
 
     if cloud == "azure":
+        # Deploy into the dashboard's configured resource group (region-resolved,
+        # exactly like VMs / containers / VDI desktops) instead of letting the
+        # module create a dedicated '<cluster>-rg'. The dashboard's service
+        # principal is typically scoped to that existing RG, not the whole
+        # subscription, so creating a fresh RG fails with
+        #   403 AuthorizationFailed on Microsoft.Resources/.../resourcegroups/read.
+        # Passing resource_group_name flips the module's RG count to 0 (uses the
+        # existing RG); the cluster's VNet/subnet are still self-contained inside it.
+        from .region_config import resolve_azure_region
+        rg = (resolve_azure_region(region) or {}).get("resource_group") or "vm-cli-rg"
         tf = {
             "location": region,
             "cluster_name": _eks_name(f"k8s-{name}"),
+            "resource_group_name": rg,
             "tags": _tags,
         }
         version = opts.get("k8s_version") or _cfg("azure_aks_k8s_version")
