@@ -179,9 +179,15 @@ output "cluster_name" {
 output "endpoint" {
   value       = azurerm_kubernetes_cluster.this.kube_config[0].host
   description = "API server URL (kubeconfig server / api_server)"
+  # kube_config is sensitive in the azurerm provider, so any output derived from
+  # it must be explicitly marked sensitive or `terraform apply` errors out. The
+  # value is still emitted by `terraform output -json` (flagged sensitive) for
+  # k8s_service._assemble_aks_kubeconfig to read.
+  sensitive = true
 }
 
 output "ca_certificate" {
   value       = azurerm_kubernetes_cluster.this.kube_config[0].cluster_ca_certificate
   description = "Cluster CA, base64 PEM (kubeconfig certificate-authority-data)"
+  sensitive   = true # see endpoint above — kube_config is sensitive
 }
