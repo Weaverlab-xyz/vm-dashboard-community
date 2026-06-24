@@ -245,12 +245,23 @@ Key Vault dashboard-sandbox-kv-…
 Service principal dashboard-sandbox-sp
   Contributor on the resource group
   Read on the Key Vault (so the dashboard can fetch the keypair at runtime)
+  AcrPull on the container registry (so the ACI runners can pull the mirrors)
   Credentials cached at ~/.dashboard-sandbox/azure/sp.json (mode 600)
+
+Container registry dashboardsandboxacr…  (Basic SKU)
+  Mirrors 3 public images so deploy-time pulls come from ACR, not Docker Hub
+  (which rate-limits anonymous pulls):
+    beyondtrust/sra-jumpoint:latest          [ACI Shell-Jump Jumpoint]
+    willhallonline/ansible:latest            [ACI config-mgmt runner]
+    chrweav/dashboard-promote-runner:latest  [ACI cross-cloud image promote]
+  One registry serves every region (globally pullable); per-region re-runs reuse it.
+  Opt out with SANDBOX_SKIP_ACR=1. The VM-based tunnel Jumpoint still pulls from
+  Docker Hub — its cloud-init docker-runs without a registry login.
 ```
 
-**Naming caveat**: Key Vault and storage account names must be globally
-unique. The script appends a hash of your subscription ID to keep them
-collision-safe.
+**Naming caveat**: Key Vault, storage account, and container registry names
+must be globally unique. The script appends a hash of your subscription ID to
+keep them collision-safe.
 
 ### GCP
 
@@ -385,7 +396,7 @@ three cloud free tiers cover most of this.
 | Cloud | Idle / month | Why |
 |---|--:|---|
 | AWS   | ~$0     | VPC, subnets, IGW, SGs, IAM are free; ECS cluster has no charge until a task runs. Secrets Manager: ~$0.40. |
-| Azure | ~$0.05  | RG, VNet, NSGs, Key Vault, SP free. Storage account file share: ~$0.05. |
+| Azure | ~$5     | RG, VNet, NSGs, Key Vault, SP free. Storage account file share: ~$0.05. Container registry (Basic): ~$5/mo — opt out with `SANDBOX_SKIP_ACR=1`. |
 | GCP   | ~$1.50  | Cloud NAT bills hourly even when idle. VPC, subnets, firewall rules, Secret Manager are free. |
 
 Running infrastructure adds the obvious things:
@@ -455,6 +466,9 @@ AWS_REGION=us-west-2          ./scripts/sandbox/Linux/setup-aws.sh
 AZURE_LOCATION=westus2        ./scripts/sandbox/Linux/setup-azure.sh
 GCP_PROJECT_ID=my-proj GCP_REGION=us-east1 ./scripts/sandbox/Linux/setup-gcp.sh
 SANDBOX_STATE_DIR=/path/to/state ./scripts/sandbox/Linux/setup-aws.sh
+SANDBOX_SKIP_ACR=1            ./scripts/sandbox/Linux/setup-azure.sh   # skip the ACR image mirror
+# Authenticated Docker Hub import (dodges the anonymous pull limit during az acr import):
+DOCKERHUB_USERNAME=me DOCKERHUB_TOKEN=dckr_pat_… ./scripts/sandbox/Linux/setup-azure.sh
 ```
 
 ```powershell
@@ -464,6 +478,7 @@ $env:AZURE_LOCATION = 'westus2';     .\scripts\sandbox\Windows\Setup-AzureSandbo
 $env:GCP_PROJECT_ID = 'my-proj'
 $env:GCP_REGION = 'us-east1';        .\scripts\sandbox\Windows\Setup-GcpSandbox.ps1
 $env:SANDBOX_STATE_DIR = 'C:\state'; .\scripts\sandbox\Windows\Setup-AwsSandbox.ps1
+$env:SANDBOX_SKIP_ACR = '1';         .\scripts\sandbox\Windows\Setup-AzureSandbox.ps1   # skip the ACR mirror
 ```
 
 CIDRs (10.99.0.0/16), subnet sizes, machine types, and IAM scope are
