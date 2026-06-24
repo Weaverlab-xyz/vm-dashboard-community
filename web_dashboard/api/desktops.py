@@ -12,12 +12,12 @@ table via ``vdesktop_service`` — no cloud calls, no PRA.
 """
 import logging
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from ..database import User, get_db
 from ..models.vdesktop import PoolCreateRequest, PoolScaleRequest
-from ..services import vdesktop_service
+from ..services import job_service, vdesktop_service
 from ..services.vdesktop_service import VDesktopError
 from .auth import require_admin
 
@@ -102,12 +102,12 @@ def _azure_spec(payload: PoolCreateRequest) -> dict:
 @router.post("/pools", status_code=201)
 async def create_pool(
     payload: PoolCreateRequest,
-    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
-    """Create a desktop pool. Azure provisions one private VM per seat (async,
-    tagged for the pool); AWS/GCP create records only (Phase 1 is Azure)."""
+    """Create a desktop pool. Azure provisions one private VM per seat (durable,
+    via the job runner, tagged for the pool); AWS/GCP create records only
+    (Phase 1 is Azure)."""
     spec = _azure_spec(payload) if payload.cloud == "azure" else None
     try:
         result = vdesktop_service.create_pool(
@@ -117,11 +117,10 @@ async def create_pool(
     except VDesktopError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    if result.get("to_provision"):
-        background_tasks.add_task(
-            vdesktop_service.provision_seats,
-            result["pool_name"], result.get("job_id"), result["to_provision"], result["spec"],
-        )
+    # create_pool already enqueued the vdesktop_pool_provision job with seat_ids +
+    # spec in its metadata; the in-container job runner claims it. No in-process
+    # BackgroundTask (a gunicorn recycle could kill it mid-provision, stranding a
+    # pending seat with an untracked VM). Mirrors clouddb/k8s.
     return result
 
 
@@ -129,39 +128,52 @@ async def create_pool(
 async def scale_pool(
     name: str,
     payload: PoolScaleRequest,
-    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
-    """Grow/shrink a pool to ``count`` seats (Azure provisions/terminates VMs)."""
+    """Grow/shrink a pool to ``count`` seats (Azure provisions/terminates VMs via
+    the durable job runner)."""
     try:
         result = vdesktop_service.scale_pool(db, name, payload.count)
     except VDesktopError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+    # Enqueue durable jobs instead of in-process BackgroundTasks (see create_pool).
     if result.get("to_provision"):
-        background_tasks.add_task(
-            vdesktop_service.provision_seats, name, None, result["to_provision"], result["spec"])
+        job = job_service.create_job(
+            db, job_type="vdesktop_pool_provision", created_by=current_user.username,
+            metadata={"pool_name": name, "seat_ids": result["to_provision"],
+                      "spec": result["spec"]},
+        )
+        result["job_id"] = job.id
     if result.get("to_teardown"):
-        background_tasks.add_task(vdesktop_service.teardown_seats, result["to_teardown"])
+        job = job_service.create_job(
+            db, job_type="vdesktop_pool_teardown", created_by=current_user.username,
+            metadata={"pool_name": name, "seat_ids": result["to_teardown"]},
+        )
+        result["job_id"] = job.id
     return result
 
 
 @router.delete("/pools/{name}")
 async def delete_pool(
     name: str,
-    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
-    """Delete a pool. Azure terminates the backing VMs (async) then drops the
-    rows; AWS/GCP drop the records immediately."""
+    """Delete a pool. Azure terminates the backing VMs (durable, via the job
+    runner) then drops the rows; AWS/GCP drop the records immediately."""
     result = vdesktop_service.delete_pool(db, name)
     if result["deleted_seats"] == 0:
         raise HTTPException(status_code=404, detail=f"Pool '{name}' not found.")
+    job_id = None
     if result.get("to_teardown"):
-        background_tasks.add_task(vdesktop_service.teardown_seats, result["to_teardown"])
-    return {"ok": True, "deleted_seats": result["deleted_seats"]}
+        job = job_service.create_job(
+            db, job_type="vdesktop_pool_teardown", created_by=current_user.username,
+            metadata={"pool_name": name, "seat_ids": result["to_teardown"]},
+        )
+        job_id = job.id
+    return {"ok": True, "deleted_seats": result["deleted_seats"], "job_id": job_id}
 
 
 @router.get("/pools/{name}/seats")

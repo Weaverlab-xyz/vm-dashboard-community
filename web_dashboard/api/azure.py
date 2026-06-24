@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 from sqlalchemy.orm import Session
 
 from ..config import settings
-from ..database import Job, User, get_db
+from ..database import Job, User, VirtualDesktop, get_db
 from ..models.azure import (
     AzureBulkDeployRequest,
     AzureBulkDeployResponse,
@@ -741,7 +741,13 @@ async def destroy_vm(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("azure", "delete")),
 ):
-    """Terminate a dashboard-deployed Azure VM and clean up NIC/PIP."""
+    """Terminate a dashboard-deployed Azure VM and clean up NIC/PIP.
+
+    The normal path matches the VM's completed ``azure_deploy`` job (and marks it
+    ``destroyed``). VDI **pool seats** (deployed via the desktop-pool path, no
+    ``azure_deploy`` job) and cloud-recovered VMs ("deployed by: unknown") have no
+    such job — for those we FALL BACK: confirm the VM still exists in Azure and
+    terminate it anyway, so the Azure-tab Destroy button isn't a dead 404."""
     deploy_jobs = (
         db.query(Job)
         .filter(Job.job_type == "azure_deploy", Job.status == "completed")
@@ -755,11 +761,7 @@ async def destroy_vm(
             break
 
     if not deploy_job:
-        raise HTTPException(
-            status_code=404,
-            detail=f"No active deployment found for VM '{vm_name}'. "
-                   "It may have already been terminated or was not deployed from this dashboard.",
-        )
+        return await _destroy_without_deploy_job(vm_name, db, current_user, background_tasks)
 
     destroy_job = job_service.create_job(
         db,
@@ -776,6 +778,69 @@ async def destroy_vm(
     rg = deploy_job.metadata_dict.get("resource_group") or _rg()
     background_tasks.add_task(_run_destroy, destroy_job.id, deploy_job.id, vm_name, rg)
 
+    return {"job_id": destroy_job.id, "status": "pending", "message": f"Azure VM '{vm_name}' termination queued"}
+
+
+async def _destroy_without_deploy_job(
+    vm_name: str, db: Session, current_user: User, background_tasks: BackgroundTasks,
+) -> dict:
+    """Fallback destroy for VMs that have no completed ``azure_deploy`` job — VDI
+    pool seats and cloud-recovered ("unknown") VMs.
+
+    Resolve the resource group (prefer the RG parsed from a matching desktop-seat's
+    ARM ``vm_resource_id``; else the configured ``azure_resource_group`` — the
+    sandbox keeps every VM in one RG), confirm the VM actually exists in Azure
+    (keep the 404 when it's genuinely gone), then terminate it via the same
+    ``_run_destroy`` task with no deploy job. If a desktop-seat row backs this VM,
+    drop it (and its PRA RDP jump) so destroying the VM here doesn't strand the
+    seat row + jump."""
+    from ..services import vdesktop_service
+
+    # Prefer the seat's full ARM id for the RG (more reliable than the flat config).
+    seat_rg = None
+    seat = (
+        db.query(VirtualDesktop)
+        .filter(
+            (VirtualDesktop.vm_resource_id == vm_name)
+            | VirtualDesktop.vm_resource_id.like("%/" + vm_name)
+        )
+        .first()
+    )
+    if seat is not None and seat.vm_resource_id and "/" in seat.vm_resource_id:
+        seat_rg, _ = vdesktop_service._parse_vm_id(seat.vm_resource_id)
+    rg = seat_rg or _rg()
+
+    try:
+        vm = await azure_service.get_vm(rg, vm_name)
+    except AzureError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    if vm is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No active deployment found for VM '{vm_name}'. "
+                   "It may have already been terminated or was not deployed from this dashboard.",
+        )
+
+    # Best-effort: drop the desktop-seat row (+ its PRA RDP jump) before terminating
+    # the VM, so the Azure-tab Destroy doesn't leave an orphaned seat / stranded jump.
+    try:
+        await vdesktop_service.drop_seat_by_vm(db, vm_name)
+    except Exception as exc:
+        logger.warning("desktop seat cleanup failed for Azure-tab destroy vm=%s: %s", vm_name, exc)
+
+    destroy_job = job_service.create_job(
+        db,
+        job_type="azure_destroy",
+        created_by=current_user.username,
+        metadata={"vm_name": vm_name, "resource_group": rg, "deploy_job_id": None},
+    )
+    job_service.log_audit(
+        db, current_user.username, "azure_destroy",
+        details={"vm_name": vm_name, "fallback": True},
+    )
+    # No deploy job to fetch/mark-destroyed: _run_destroy treats a missing
+    # deploy_job_id as "nothing extra to clean up" and still terminates the VM.
+    background_tasks.add_task(_run_destroy, destroy_job.id, "", vm_name, rg)
     return {"job_id": destroy_job.id, "status": "pending", "message": f"Azure VM '{vm_name}' termination queued"}
 
 

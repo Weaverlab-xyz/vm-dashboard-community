@@ -7,8 +7,12 @@ existing VM path: ``create_pool`` fans out to ``azure_service.deploy_vm`` (one
 AWS / GCP create seat *records* only (not provisioned until their Phase 1).
 Phase 2 registers each seat on the PRA Jumpoint (``pra_jump_id``).
 
-Provisioning + teardown are **async** (``deploy_vm`` / ``terminate_vm`` are slow);
-the API schedules ``provision_seats`` / ``teardown_seats`` as background tasks.
+Provisioning + teardown are **async** (``deploy_vm`` / ``terminate_vm`` are slow)
+and **durable**: the API enqueues a ``vdesktop_pool_provision`` /
+``vdesktop_pool_teardown`` job (args in its metadata) and the in-container job
+runner (``jobs_worker``) claims it and calls ``provision_seats`` /
+``teardown_seats`` — so a gunicorn worker recycling mid-provision can no longer
+strand a ``pending`` seat with an untracked VM (mirrors k8s / clouddb).
 """
 import logging
 import re
@@ -128,9 +132,11 @@ def _pool_spec(db: Session, name: str):
 
 def create_pool(db: Session, *, cloud: str, name: str, count: int, created_by: str,
                 spec: dict = None) -> dict:
-    """Create a pool. For Azure, validate the deploy spec, record it on a
-    provision Job (so scale-up can reuse it), and return the seat ids to provision.
-    AWS/GCP create pending rows only. The caller schedules ``provision_seats``."""
+    """Create a pool. For Azure, validate the deploy spec and enqueue a
+    ``vdesktop_pool_provision`` job whose metadata carries everything the worker
+    handler needs (``pool_name`` + ``seat_ids`` + ``spec``) — so the job is
+    self-contained from creation and the job runner can claim it without racing a
+    follow-up metadata write. AWS/GCP create pending rows only."""
     name = (name or "").strip()
     if cloud not in VALID_CLOUDS:
         raise VDesktopError(f"Unknown cloud '{cloud}'. Valid: {', '.join(VALID_CLOUDS)}.")
@@ -142,22 +148,27 @@ def create_pool(db: Session, *, cloud: str, name: str, count: int, created_by: s
         raise VDesktopError(f"Pool '{name}' already exists.")
 
     provision = cloud in PROVISIONING_CLOUDS
-    job_id = None
     if provision:
         spec = _validate_azure_spec(spec)
-        from . import job_service
-        job = job_service.create_job(
-            db, job_type="vdesktop_pool_provision", created_by=created_by,
-            metadata={"pool_name": name, "cloud": cloud, "count": count, "spec": spec},
-        )
-        job_id = job.id
 
+    # Generate the seat ids first so the provision job's metadata can name them.
     seat_ids = []
     for _ in range(count):
         sid = str(uuid.uuid4())
         db.add(VirtualDesktop(id=sid, cloud=cloud, pool_name=name, kind="vm_pool",
                               status="pending", created_by=created_by))
         seat_ids.append(sid)
+
+    job_id = None
+    if provision:
+        from . import job_service
+        job = job_service.create_job(
+            db, job_type="vdesktop_pool_provision", created_by=created_by,
+            metadata={"pool_name": name, "cloud": cloud, "count": count,
+                      "spec": spec, "seat_ids": seat_ids},
+        )
+        job_id = job.id
+
     db.commit()
     logger.info("Created desktop pool %s (%s x%d)%s", name, cloud, count,
                 " — provisioning" if provision else " — records only")
@@ -375,12 +386,20 @@ async def provision_seats(pool_name: str, job_id: str, seat_ids: list, spec: dic
         db.close()
 
 
-async def teardown_seats(seat_ids: list) -> None:
-    """Terminate the Azure VM behind each seat (best-effort) then drop the row."""
+async def teardown_seats(seat_ids: list, job_id: str = None) -> None:
+    """Terminate the Azure VM behind each seat (best-effort) then drop the row.
+
+    Runs on the durable worker (scale-down / pool-delete schedule a
+    ``vdesktop_pool_teardown`` job). When given the claiming ``job_id`` it owns
+    that job's running/completed lifecycle so the worker's claim doesn't leak as
+    ``running``; called with no ``job_id`` it just does the work (back-compat)."""
     from ..database import SessionLocal
-    from . import azure_service
+    from . import azure_service, job_service
     db = SessionLocal()
     try:
+        if job_id:
+            job_service.set_running(db, job_id)
+        dropped = 0
         for sid in seat_ids:
             row = db.query(VirtualDesktop).filter(VirtualDesktop.id == sid).first()
             if row is None:
@@ -401,5 +420,44 @@ async def teardown_seats(seat_ids: list) -> None:
                     logger.warning("desktop seat PRA jump removal failed seat=%s: %s", sid, exc)
             db.delete(row)
             db.commit()
+            dropped += 1
+        if job_id:
+            job_service.set_completed(db, job_id, {"torn_down": dropped, "requested": len(seat_ids)})
     finally:
         db.close()
+
+
+async def drop_seat_by_vm(db: Session, vm_name: str) -> bool:
+    """Clean up the desktop-seat row whose backing VM is being destroyed elsewhere
+    (e.g. via the Azure tab's Destroy button, which terminates the VM directly).
+
+    Matches a ``virtual_desktops`` row whose ``vm_resource_id`` equals ``vm_name``
+    or ends with ``/{vm_name}`` (a full ARM id). Removes the seat's PRA RDP jump
+    first (best-effort, state-driven) so it isn't stranded, then deletes the row.
+    Does NOT terminate the VM — the caller already does that. Returns True if a
+    seat row matched and was dropped."""
+    if not vm_name:
+        return False
+    suffix = "/" + vm_name
+    row = (
+        db.query(VirtualDesktop)
+        .filter(
+            (VirtualDesktop.vm_resource_id == vm_name)
+            | VirtualDesktop.vm_resource_id.like("%" + suffix)
+        )
+        .first()
+    )
+    if row is None:
+        return False
+    if row.pra_tunnel_state:
+        try:
+            from . import terraform_pra_service as pra
+            await pra.remove_rdp_jump(row.pra_tunnel_state)
+        except Exception as exc:
+            logger.warning("desktop seat PRA jump removal failed (Azure-tab destroy) seat=%s vm=%s: %s",
+                           row.id, vm_name, exc)
+    seat_id = row.id
+    db.delete(row)
+    db.commit()
+    logger.info("dropped desktop seat %s (backing VM %s destroyed via Azure tab)", seat_id, vm_name)
+    return True
