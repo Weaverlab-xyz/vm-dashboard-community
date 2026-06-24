@@ -122,6 +122,14 @@ def _materialize(deploy_dir: str, template_dir: str) -> None:
     """Copy a Terraform module template (incl. the cached .terraform/ providers)
     into deploy_dir. Used by apply, and by destroy to rebuild a deploy dir that a
     container recreate lost (remote state makes that destroy recoverable)."""
+    if not os.path.isdir(template_dir):
+        # The module isn't shipped in the image (e.g. a cloud's k8s_cluster/<cloud>
+        # module missing from the Dockerfile COPY). Fail clearly instead of letting
+        # os.listdir raise a bare FileNotFoundError mid-apply.
+        raise TerraformError(
+            f"Terraform module template not found: {template_dir} "
+            "(is the module shipped in the image / build context?)"
+        )
     os.makedirs(deploy_dir, exist_ok=True)
     for item in os.listdir(template_dir):
         src = os.path.join(template_dir, item)
@@ -380,6 +388,16 @@ async def destroy(deploy_dir: str, env: Optional[dict] = None,
             raise TerraformError(
                 f"No Terraform module/state in {deploy_dir} and backend is local — "
                 "cannot destroy; the resource may need manual termination."
+            )
+        else:
+            # main.tf is gone and we can't rebuild it: template_dir is missing/invalid
+            # (e.g. a cloud's module isn't shipped in the image). Running `terraform
+            # destroy` in the empty dir would emit confusing "Value for undeclared
+            # variable" errors for every -var, so fail clearly instead.
+            raise TerraformError(
+                f"Cannot destroy {deploy_dir}: no main.tf and the module template "
+                f"{template_dir!r} is unavailable (not shipped in the image?). "
+                "Re-add the module + rebuild, then retry the teardown."
             )
 
     if on_line is None:
