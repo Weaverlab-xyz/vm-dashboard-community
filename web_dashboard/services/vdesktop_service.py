@@ -403,3 +403,39 @@ async def teardown_seats(seat_ids: list) -> None:
             db.commit()
     finally:
         db.close()
+
+
+async def drop_seat_by_vm(db: Session, vm_name: str) -> bool:
+    """Clean up the desktop-seat row whose backing VM is being destroyed elsewhere
+    (e.g. via the Azure tab's Destroy button, which terminates the VM directly).
+
+    Matches a ``virtual_desktops`` row whose ``vm_resource_id`` equals ``vm_name``
+    or ends with ``/{vm_name}`` (a full ARM id). Removes the seat's PRA RDP jump
+    first (best-effort, state-driven) so it isn't stranded, then deletes the row.
+    Does NOT terminate the VM — the caller already does that. Returns True if a
+    seat row matched and was dropped."""
+    if not vm_name:
+        return False
+    suffix = "/" + vm_name
+    row = (
+        db.query(VirtualDesktop)
+        .filter(
+            (VirtualDesktop.vm_resource_id == vm_name)
+            | VirtualDesktop.vm_resource_id.like("%" + suffix)
+        )
+        .first()
+    )
+    if row is None:
+        return False
+    if row.pra_tunnel_state:
+        try:
+            from . import terraform_pra_service as pra
+            await pra.remove_rdp_jump(row.pra_tunnel_state)
+        except Exception as exc:
+            logger.warning("desktop seat PRA jump removal failed (Azure-tab destroy) seat=%s vm=%s: %s",
+                           row.id, vm_name, exc)
+    seat_id = row.id
+    db.delete(row)
+    db.commit()
+    logger.info("dropped desktop seat %s (backing VM %s destroyed via Azure tab)", seat_id, vm_name)
+    return True
