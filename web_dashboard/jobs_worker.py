@@ -35,6 +35,7 @@ HANDLED_TYPES = (
     "k8s_provision", "k8s_decommission",
     "k8s_management", "k8s_secret_delivery", "k8s_entitle_agent", "k8s_entitle_register",
     "clouddb_provision", "clouddb_decommission",
+    "vdesktop_pool_provision", "vdesktop_pool_teardown",
 )
 
 POLL_INTERVAL = 2.0  # seconds between queue polls when idle
@@ -110,6 +111,18 @@ async def _dispatch(job_id: str, job_type: str, meta: dict) -> None:
         elif job_type == "clouddb_decommission":
             await cloud_database_service.run_decommission(
                 db, db_id=meta["db_id"], job_id=job_id)
+        elif job_type == "vdesktop_pool_provision":
+            # provision_seats / teardown_seats own their own SessionLocal + the
+            # job lifecycle (set_running/set_completed) when given a job_id, so they
+            # don't take this dispatcher's `db`. Args come from the job metadata the
+            # desktops API stored at enqueue time.
+            from .services import vdesktop_service
+            await vdesktop_service.provision_seats(
+                pool_name=meta["pool_name"], job_id=job_id,
+                seat_ids=meta["seat_ids"], spec=meta["spec"])
+        elif job_type == "vdesktop_pool_teardown":
+            from .services import vdesktop_service
+            await vdesktop_service.teardown_seats(meta["seat_ids"], job_id=job_id)
         else:  # pragma: no cover — HANDLED_TYPES guards the claim
             logger.warning("job runner: unhandled job_type %s (job %s)", job_type, job_id)
     finally:
