@@ -444,6 +444,14 @@ class BeyondTrustFeatureConfig(BaseModel):
     pscli_client_id: str = ""
     pscli_client_secret: str = ""   # encrypted at rest
     pscli_api_account_name: str = ""  # run-as user, required by the passwordsafe TF provider (VM registration)
+    # Optional Password Safe VM resource registration (per-deploy opt-in).
+    passwordsafe_registration_enabled: bool = False
+    passwordsafe_workgroup: str = ""                      # workgroup name or id the managed system lands in
+    passwordsafe_vm_functional_account_aws: str = ""      # functional account (name or id) per cloud
+    passwordsafe_vm_functional_account_azure: str = ""
+    passwordsafe_vm_functional_account_gcp: str = ""
+    passwordsafe_managed_account_name: str = "adminuser"  # the baked-in account onboarded as managed
+    passwordsafe_ssh_key_enforcement_mode: str = "2"      # 0=none, 1=auto, 2=strict
     # PRA API credentials (used by the SRA Terraform provider for Shell Jump provisioning)
     bt_api_host: str = ""
     bt_client_id: str = ""
