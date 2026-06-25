@@ -866,8 +866,16 @@ def _runner_workdir(prefix: str) -> tuple:
     if work_dir and work_vol:
         os.makedirs(work_dir, exist_ok=True)
         tmpdir = tempfile.mkdtemp(prefix=prefix, dir=work_dir)
+        os.chmod(tmpdir, 0o755)  # mkdtemp is 0700; see below
         return tmpdir, ["-v", f"{work_vol}:{work_dir}"], tmpdir
     tmpdir = tempfile.mkdtemp(prefix=prefix)
+    # mkdtemp is 0700, but the kubectl runner (bitnami/kubectl runs as non-root UID
+    # 1001) must traverse the dir to read the kubeconfig the worker wrote, or it
+    # fails "permission denied" (the helm runner runs as root so it didn't trip
+    # this). The dir + its files are short-lived and the volume is internal to the
+    # dashboard's own containers, so 0755 is fine. (Files land 0644 via the default
+    # umask, which is world-readable.)
+    os.chmod(tmpdir, 0o755)
     return tmpdir, ["-v", f"{tmpdir}:/work"], "/work"
 
 
