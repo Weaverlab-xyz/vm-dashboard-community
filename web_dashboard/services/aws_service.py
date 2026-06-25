@@ -468,7 +468,16 @@ async def launch_instance(
         )
     except (ClientError, BotoCoreError) as e:
         msg = str(e)
-        if "instanceprofile" in msg.lower().replace(" ", ""):
+        low = msg.lower().replace(" ", "")
+        if "passrole" in low:
+            msg += (
+                " — Hint: launching an instance with an SSM instance profile requires "
+                "the dashboard's own AWS identity to hold iam:PassRole for the role "
+                "inside that profile. Attach a policy granting iam:PassRole on the "
+                "role's ARN (ideally conditioned on iam:PassedToService = "
+                "ec2.amazonaws.com) to the IAM principal the dashboard authenticates as."
+            )
+        elif "instanceprofile" in low:
             msg += (
                 " — Hint: the SSM Instance Profile setting must be the *instance "
                 "profile* name or ARN, not the role name. In IAM open the role and "
