@@ -451,7 +451,11 @@ class BeyondTrustFeatureConfig(BaseModel):
     passwordsafe_vm_functional_account_azure: str = ""
     passwordsafe_vm_functional_account_gcp: str = ""
     passwordsafe_managed_account_name: str = "adminuser"  # the baked-in account onboarded as managed
-    passwordsafe_ssh_key_enforcement_mode: str = "2"      # 0=none, 1=auto, 2=strict
+    passwordsafe_ssh_key_enforcement_mode: str = "2"      # 0=none, 1=auto, 2=strict (SSH method only)
+    # AWS Systems Manager (cloud-native) onboarding — see config.py for details.
+    passwordsafe_aws_registration_method: str = "ssm"     # "ssm" (AWS Systems Manager plugin) | "ssh"
+    passwordsafe_ssm_account_suffix: str = "local"        # managed-account name suffix; AssumeRole ARN for EC2 mode
+    passwordsafe_ssm_change_password_on_register: bool = False  # best-effort initial key mint via Change Password
     # PRA API credentials (used by the SRA Terraform provider for Shell Jump provisioning)
     bt_api_host: str = ""
     bt_client_id: str = ""

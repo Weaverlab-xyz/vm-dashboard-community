@@ -333,15 +333,35 @@
             <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Resource registration (VMs)</p>
             <p class="text-xs text-gray-400 mb-3">
               Optionally onboard each built Linux VM into Password Safe as a managed system + its baked-in
-              <code class="bg-gray-100 px-1 rounded">adminuser</code> account (SSH-key managed), via a per-deploy
-              opt-in on the cloud deploy forms. The functional account per cloud decides the management method
-              (cloud-native agent plugin vs. Resource Broker).
+              <code class="bg-gray-100 px-1 rounded">adminuser</code> account, via a per-deploy opt-in on the
+              cloud deploy forms. <strong>AWS</strong> defaults to the cloud-native <em>AWS Systems Manager</em>
+              plugin (managed over SSM — no per-VPC Resource Broker); Azure and GCP use the traditional SSH
+              managed-system flow. The functional account per cloud decides the management method.
             </p>
             <label class="flex items-center gap-2 text-sm text-gray-700 mb-3">
               <input type="checkbox" x-model="panelCfg.passwordsafe_registration_enabled" class="rounded text-blue-600">
               Enable Password Safe VM registration
             </label>
             <div class="space-y-3" x-show="panelCfg.passwordsafe_registration_enabled" x-cloak>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">AWS onboarding method</label>
+                <select x-model="panelCfg.passwordsafe_aws_registration_method"
+                        x-init="panelCfg.passwordsafe_aws_registration_method = panelCfg.passwordsafe_aws_registration_method || 'ssm'"
+                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                  <option value="ssm">AWS Systems Manager (cloud-native, recommended)</option>
+                  <option value="ssh">Direct SSH (managed system / Resource Broker)</option>
+                </select>
+                <p class="text-xs text-gray-400 mt-1" x-show="(panelCfg.passwordsafe_aws_registration_method || 'ssm') === 'ssm'">
+                  Manages Linux EC2 over AWS SSM <code class="bg-gray-100 px-1 rounded">SendCommand</code> — no SSH
+                  line-of-sight needed. The AWS functional account must be the <em>AWS Systems Manager Custom Plugin</em>
+                  account (password <code class="bg-gray-100 px-1 rounded">{AccessKeyID}:{AccessKeySecret}</code>), the
+                  plugin must be admin-uploaded in BeyondInsight, and each instance must already be SSM-managed.
+                </p>
+                <p class="text-xs text-gray-400 mt-1" x-show="(panelCfg.passwordsafe_aws_registration_method || 'ssm') === 'ssh'">
+                  Traditional managed system keyed by hostname/IP; pushes the VM's own SSH key and needs SSH
+                  line-of-sight (Resource Broker / Jumpoint). Azure and GCP always use this method.
+                </p>
+              </div>
               <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Workgroup</label>
                 <input type="text" x-model="panelCfg.passwordsafe_workgroup"
@@ -375,8 +395,8 @@
                          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
                          placeholder="adminuser">
                 </div>
-                <div>
-                  <label class="block text-sm font-medium text-gray-700 mb-1">SSH key enforcement</label>
+                <div x-show="(panelCfg.passwordsafe_aws_registration_method || 'ssm') === 'ssh'">
+                  <label class="block text-sm font-medium text-gray-700 mb-1">SSH key enforcement <span class="text-gray-400 font-normal">(SSH method)</span></label>
                   <select x-model="panelCfg.passwordsafe_ssh_key_enforcement_mode"
                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
                     <option value="0">0 — None</option>
@@ -384,10 +404,24 @@
                     <option value="2">2 — Strict</option>
                   </select>
                 </div>
+                <div x-show="(panelCfg.passwordsafe_aws_registration_method || 'ssm') === 'ssm'">
+                  <label class="block text-sm font-medium text-gray-700 mb-1">SSM account suffix <span class="text-gray-400 font-normal">(AWS Systems Manager)</span></label>
+                  <input type="text" x-model="panelCfg.passwordsafe_ssm_account_suffix"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="local">
+                  <p class="text-xs text-gray-400 mt-1"><code class="bg-gray-100 px-1 rounded">local</code> for IAM-user mode; an AssumeRole ARN for EC2 cross-account mode.</p>
+                </div>
               </div>
+              <label class="flex items-center gap-2 text-sm text-gray-700"
+                     x-show="(panelCfg.passwordsafe_aws_registration_method || 'ssm') === 'ssm'">
+                <input type="checkbox" x-model="panelCfg.passwordsafe_ssm_change_password_on_register" class="rounded text-blue-600">
+                Trigger an initial Change Password after onboarding (mints the first SSH key over SSM)
+              </label>
               <p class="text-xs text-gray-400">
                 The functional account + workgroup must already exist in Password Safe. The per-deploy opt-in
-                appears as “Onboard into Password Safe” on the AWS/Azure/GCP deploy forms.
+                appears as “Onboard into Password Safe” on the AWS/Azure/GCP deploy forms. For AWS Systems Manager,
+                the managed system DNS name is <code class="bg-gray-100 px-1 rounded">{instance-id}:{region}</code>
+                and the account name is <code class="bg-gray-100 px-1 rounded">{name};{suffix}</code>.
               </p>
             </div>
           </div>

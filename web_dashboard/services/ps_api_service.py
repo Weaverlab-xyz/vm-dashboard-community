@@ -177,6 +177,34 @@ async def get_workgroup_id(name_or_id: str) -> str:
             await _sign_out(client)
 
 
+async def change_managed_account_password(account_id: int) -> None:
+    """Queue an immediate Password Safe credential change ("Change Password") for a
+    managed account.
+
+    Used right after SSM (AWS Systems Manager custom plugin) onboarding to mint the
+    first SSH key over SSM — the plugin cannot set the initial private key at creation,
+    so the key only materialises on a credential change. Auto-management would rotate it
+    on schedule anyway, so the caller treats failure here as non-fatal.
+
+    Endpoint: ``POST ManagedAccounts/{id}/Credentials/Change`` (public API v3, present
+    across 21.x–24.x). The body is optional; ``Queue=false`` asks for an immediate change
+    rather than queueing behind other pending change operations.
+    Verify the exact shape against the tenant's API version during live testing."""
+    async with _client() as client:
+        await _sign_in(client)
+        try:
+            resp = await client.post(
+                f"ManagedAccounts/{int(account_id)}/Credentials/Change",
+                json={"Queue": False},
+            )
+            if resp.status_code not in (200, 201, 202, 204):
+                raise PSApiError(
+                    f"POST ManagedAccounts/{account_id}/Credentials/Change failed "
+                    f"({resp.status_code}): {resp.text[:400]}")
+        finally:
+            await _sign_out(client)
+
+
 async def create_functional_account(
     *, engine: str, account_name: str, display_name: str,
     password: str, description: str = "",

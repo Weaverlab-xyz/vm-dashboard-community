@@ -5,7 +5,16 @@ Terraform provider.
 Optional, per-VM-deploy add-on (mirrors entitle_registration_service.py): when an
 operator opts in, a freshly built VM is onboarded into Password Safe as a **managed
 system** with **one managed account** — the ``adminuser`` account the bt-ready
-provisioners baked into the image — managed by SSH key (no password).
+provisioners baked into the image.
+
+Two onboarding shapes (``method`` on register_managed_system):
+  - ``ssh`` — traditional managed system keyed by host_name/ip on an SSH platform; the
+    VM's own private key is pushed and SSH key enforcement manages it (needs SSH
+    line-of-sight, i.e. a Resource Broker / Jumpoint per VPC).
+  - ``ssm`` — the cloud-native "AWS Systems Manager" Password Safe custom plugin:
+    Password Safe manages the Linux EC2 instance over AWS SSM SendCommand, so the
+    managed system carries ``dns_name = {instance-id}:{region}`` and the account name
+    follows ``{name};{suffix}``; no private key is pushed (Change Password mints it).
 
 Shaped like entitle_registration_service / terraform_pra_service: inline HCL written
 to an ephemeral workdir, ``terraform apply``, ids pulled from outputs, the full
@@ -70,6 +79,18 @@ def _safe_name(name: str) -> str:
     return re.sub(r"[^a-z0-9_]", "_", (name or "").lower()) or "system"
 
 
+def _line(key: str, val) -> str:
+    """One aligned HCL attribute line (``  key = val``), padding the key so the
+    ``=`` lines up across the block — matches the hand-aligned style the tests assert."""
+    return f"  {key:<24} = {val}"
+
+
+def _ssm_account_name(name: str, suffix: str) -> str:
+    """SSM custom-plugin managed-account name, ``{name};{suffix}``. The suffix is
+    ``local`` for IAM-user mode, or the cross-account AssumeRole ARN for EC2 mode."""
+    return f"{name or 'adminuser'};{suffix or 'local'}"
+
+
 def _tf_env(extra_vars: Optional[dict] = None) -> dict:
     """Environment for Terraform calls. The provider OAuth credentials + the run-as
     user ride TF_VAR_* (the destroy path needs them too), as do per-apply secrets."""
@@ -124,44 +145,73 @@ def _generate_managed_system_hcl(*, name: str, host_name: str, ip_address: str, 
                                  functional_account_id: int, platform_id: int,
                                  entity_type_id: int, workgroup_id: str,
                                  managed_account_name: str, ssh_key_enforcement_mode: int,
-                                 application_host_id: int = 0) -> str:
-    """HCL onboarding a VM as a managed system + its existing account.
+                                 application_host_id: int = 0, method: str = "ssh",
+                                 dns_name: str = "", emit_private_key: bool = True) -> str:
+    """HCL onboarding a VM as a managed system + its account. Two shapes via ``method``:
 
-    The account's SSH private key + placeholder password ride sensitive TF_VARs.
-    ``application_host_id`` (>0) routes management through a specific application
-    host (the traditional Resource Broker path); 0 leaves it to the agent-plugin
-    platform the functional account is tied to."""
+    * ``ssh`` (default) — traditional managed system keyed by host_name/ip on an SSH
+      platform; the account's SSH private key + placeholder password ride sensitive
+      TF_VARs and ``ssh_key_enforcement_mode`` enforces key-only auth.
+    * ``ssm`` — the cloud-native "AWS Systems Manager" custom plugin: the managed system
+      carries ``dns_name = {instance-id}:{region}`` (the field the plugin parses), a
+      placeholder ip, and the custom-plugin platform (inherited from the functional
+      account). No private key is pushed — Password Safe mints the SSH key over SSM via
+      Change Password — so ``emit_private_key`` is False and the private-key TF_VAR is
+      omitted entirely (a declared-but-unset required var fails apply under TF_INPUT=0).
+
+    ``application_host_id`` (>0) routes management through a specific application host
+    (the traditional Resource Broker path); 0 leaves it to the functional account's platform."""
     label = _safe_name(name)
-    header = _provider_header(
-        'variable "ps_account_password"    { sensitive = true }\n'
-        'variable "ps_account_private_key" { sensitive = true }\n')
-    ip_line = f"  ip_address               = {json.dumps(ip_address)}\n" if ip_address else ""
-    app_host_lines = ""
+    extra_vars = 'variable "ps_account_password"    { sensitive = true }\n'
+    if emit_private_key:
+        extra_vars += 'variable "ps_account_private_key" { sensitive = true }\n'
+    header = _provider_header(extra_vars)
+
+    sys_lines = [
+        _line("workgroup_id", json.dumps(str(workgroup_id))),
+        _line("entity_type_id", int(entity_type_id)),
+        _line("host_name", json.dumps(host_name)),
+    ]
+    if method == "ssm" and dns_name:
+        sys_lines.append(_line("dns_name", json.dumps(dns_name)))
+    if ip_address:
+        sys_lines.append(_line("ip_address", json.dumps(ip_address)))
+    sys_lines += [
+        _line("platform_id", int(platform_id)),
+        _line("port", int(port)),
+        _line("functional_account_id", int(functional_account_id)),
+        _line("auto_management_flag", "true"),
+    ]
+    if method != "ssm":
+        sys_lines.append(_line("remote_client_type", '"ssh"'))
+        sys_lines.append(_line("ssh_key_enforcement_mode", int(ssh_key_enforcement_mode)))
     if application_host_id and int(application_host_id) > 0:
-        app_host_lines = (f"  application_host_id      = {int(application_host_id)}\n"
-                          "  is_application_host      = false\n")
+        sys_lines.append(_line("application_host_id", int(application_host_id)))
+        sys_lines.append(_line("is_application_host", "false"))
+    sys_lines.append(_line("description", '"Auto-onboarded by Infrastructure Management Dashboard"'))
+
+    acct_lines = [
+        _line("system_name", f"passwordsafe_managed_system_by_workgroup.{label}.managed_system_name"),
+        _line("account_name", json.dumps(managed_account_name)),
+        _line("password", "var.ps_account_password"),
+    ]
+    if emit_private_key:
+        acct_lines.append(_line("private_key", "var.ps_account_private_key"))
+    acct_lines += [
+        _line("dss_auto_management_flag", "true"),
+        _line("auto_management_flag", "true"),
+        _line("api_enabled", "true"),
+    ]
+
+    sys_block = "\n".join(sys_lines)
+    acct_block = "\n".join(acct_lines)
     return header + f"""
 resource "passwordsafe_managed_system_by_workgroup" {json.dumps(label)} {{
-  workgroup_id             = {json.dumps(str(workgroup_id))}
-  entity_type_id           = {int(entity_type_id)}
-  host_name                = {json.dumps(host_name)}
-{ip_line}  platform_id              = {int(platform_id)}
-  port                     = {int(port)}
-  functional_account_id    = {int(functional_account_id)}
-  auto_management_flag     = true
-  remote_client_type       = "ssh"
-  ssh_key_enforcement_mode = {int(ssh_key_enforcement_mode)}
-{app_host_lines}  description              = "Auto-onboarded by Infrastructure Management Dashboard"
+{sys_block}
 }}
 
 resource "passwordsafe_managed_account" {json.dumps(label)} {{
-  system_name              = passwordsafe_managed_system_by_workgroup.{label}.managed_system_name
-  account_name             = {json.dumps(managed_account_name)}
-  password                 = var.ps_account_password
-  private_key              = var.ps_account_private_key
-  dss_auto_management_flag = true
-  auto_management_flag     = true
-  api_enabled              = true
+{acct_block}
 }}
 
 output "managed_system_id" {{
@@ -253,31 +303,50 @@ def _destroy_sync(tf_state_json: str) -> None:
 
 # ── Public async API ──────────────────────────────────────────────────────────
 
-async def register_managed_system(*, name: str, host_name: str, private_key: str,
+async def register_managed_system(*, name: str, host_name: str, private_key: str = "",
                                    functional_account_id: int, platform_id: int,
                                    workgroup_id: str, ip_address: str = "", port: int = 22,
                                    entity_type_id: int = 1, managed_account_name: str = "adminuser",
                                    ssh_key_enforcement_mode: int = 2,
-                                   application_host_id: int = 0) -> dict:
-    """Onboard a VM as a Password Safe managed system + SSH-key-managed account.
-    Returns ``{managed_system_id, managed_account_id, tf_state_json}``."""
-    if not private_key:
-        raise PSResourceError(
-            "no SSH private key available for the managed account — Password Safe "
-            "manages the account by key; check the VM keypair secret")
-    hcl = _generate_managed_system_hcl(
-        name=name, host_name=host_name, ip_address=ip_address, port=port,
-        functional_account_id=functional_account_id, platform_id=platform_id,
-        entity_type_id=entity_type_id, workgroup_id=workgroup_id,
-        managed_account_name=managed_account_name,
-        ssh_key_enforcement_mode=ssh_key_enforcement_mode,
-        application_host_id=application_host_id)
-    # The provider requires a password even for a key-managed account; supply a
-    # strong placeholder it never uses (SSH-key enforcement lives on the system).
-    tf_vars = {
-        "ps_account_password": secrets.token_urlsafe(24),
-        "ps_account_private_key": private_key,
-    }
+                                   application_host_id: int = 0, method: str = "ssh",
+                                   dns_name: str = "", account_suffix: str = "") -> dict:
+    """Onboard a VM as a Password Safe managed system + managed account.
+    Returns ``{managed_system_id, managed_account_id, tf_state_json}``.
+
+    ``method="ssm"`` uses the AWS Systems Manager custom plugin: ``dns_name`` must be
+    ``{instance-id}:{region}``, the account name becomes ``{managed_account_name};{suffix}``
+    (suffix ``local`` for IAM-user mode or an AssumeRole ARN for EC2 mode), no private key
+    is pushed, and ip defaults to a ``127.0.0.1`` placeholder. ``method="ssh"`` (default)
+    keeps the traditional key-managed flow and requires ``private_key``."""
+    method = (method or "ssh").lower()
+    # The provider requires a password even for a key-managed account; supply a strong
+    # placeholder it never uses (the real credential is the SSH key, managed by Password Safe).
+    tf_vars = {"ps_account_password": secrets.token_urlsafe(24)}
+    if method == "ssm":
+        if not dns_name or ":" not in dns_name:
+            raise PSResourceError(
+                "SSM onboarding requires a dns_name of the form '{instance-id}:{region}'")
+        hcl = _generate_managed_system_hcl(
+            name=name, host_name=host_name, ip_address=ip_address or "127.0.0.1", port=port,
+            functional_account_id=functional_account_id, platform_id=platform_id,
+            entity_type_id=entity_type_id, workgroup_id=workgroup_id,
+            managed_account_name=_ssm_account_name(managed_account_name, account_suffix),
+            ssh_key_enforcement_mode=ssh_key_enforcement_mode,
+            application_host_id=application_host_id,
+            method="ssm", dns_name=dns_name, emit_private_key=False)
+    else:
+        if not private_key:
+            raise PSResourceError(
+                "no SSH private key available for the managed account — Password Safe "
+                "manages the account by key; check the VM keypair secret")
+        hcl = _generate_managed_system_hcl(
+            name=name, host_name=host_name, ip_address=ip_address, port=port,
+            functional_account_id=functional_account_id, platform_id=platform_id,
+            entity_type_id=entity_type_id, workgroup_id=workgroup_id,
+            managed_account_name=managed_account_name,
+            ssh_key_enforcement_mode=ssh_key_enforcement_mode,
+            application_host_id=application_host_id, method="ssh", emit_private_key=True)
+        tf_vars["ps_account_private_key"] = private_key
     return await asyncio.to_thread(_apply_hcl_sync, hcl, tf_vars)
 
 
