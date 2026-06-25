@@ -31,6 +31,7 @@ class PSApiError(Exception):
 _PLATFORM_BY_ENGINE = {
     "postgres": "PostgreSQL",
     "mysql": "MySQL",
+    "sqlserver": "SQL Server",
 }
 
 
