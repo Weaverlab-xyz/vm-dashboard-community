@@ -1236,6 +1236,18 @@
                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
                        placeholder="/subscriptions/…/privateDnsZones/…mysql.database.azure.com">
               </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">SQL Server PE subnet ID</label>
+                <input type="text" x-model="panelCfg.azure_db_sqlserver_subnet_id"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                       placeholder="/subscriptions/…/subnets/db-sqlserver-subnet">
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">SQL Server private DNS zone ID</label>
+                <input type="text" x-model="panelCfg.azure_db_sqlserver_private_dns_zone_id"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                       placeholder="/subscriptions/…/privateDnsZones/privatelink.database.windows.net">
+              </div>
             </div>
           </div>
 

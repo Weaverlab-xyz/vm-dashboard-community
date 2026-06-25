@@ -45,7 +45,7 @@ VALID_CLOUDS = {"aws", "azure", "gcp"}
 _IMPLEMENTED = {
     ("postgres", "aws"), ("postgres", "gcp"), ("postgres", "azure"),
     ("mysql", "aws"), ("mysql", "azure"), ("mysql", "gcp"),
-    ("sqlserver", "aws"), ("sqlserver", "gcp"),
+    ("sqlserver", "aws"), ("sqlserver", "gcp"), ("sqlserver", "azure"),
 }
 _PROVIDER = {
     ("postgres", "aws"): "rds",
@@ -56,6 +56,7 @@ _PROVIDER = {
     ("mysql", "gcp"): "cloudsql",
     ("sqlserver", "aws"): "rds",
     ("sqlserver", "gcp"): "cloudsql",
+    ("sqlserver", "azure"): "sql_database",
 }
 
 # terraform/<dir> module per (engine, cloud) — relative to repo root (parents[2]).
@@ -69,6 +70,7 @@ _TEMPLATE_DIRS = {
     ("mysql", "gcp"): os.path.join(_REPO_ROOT, "terraform", "db_gcp_mysql"),
     ("sqlserver", "aws"): os.path.join(_REPO_ROOT, "terraform", "db_sqlserver"),
     ("sqlserver", "gcp"): os.path.join(_REPO_ROOT, "terraform", "db_gcp_sqlserver"),
+    ("sqlserver", "azure"): os.path.join(_REPO_ROOT, "terraform", "db_azure_sqlserver"),
 }
 _DEPLOYMENTS_DIR = os.path.join(_REPO_ROOT, "terraform", "deployments")
 
@@ -252,6 +254,26 @@ def _build_tf_variables(
             "db_name": db_name,
             "delegated_subnet_id": opts.get("delegated_subnet_id") or _cfg("azure_db_mysql_subnet_id"),
             "private_dns_zone_id": opts.get("private_dns_zone_id") or _cfg("azure_db_mysql_private_dns_zone_id"),
+            "tags": {"managed-by": "vm-dashboard", "clouddb-id": db_id},
+        }
+
+    if (engine, cloud) == ("sqlserver", "azure"):
+        # Azure SQL Database + Private Endpoint (no flexible-server analog for SQL).
+        # Same azure credential shape (administrator_login/password) but reads the
+        # SQL-Server-specific PE subnet + privatelink.database.windows.net DNS zone the
+        # sandbox creates. The module forces public_network_access_enabled=false; Azure
+        # SQL's forced TLS is fine because the mssql tunnel does backend TLS itself.
+        # (The tunnel targets `master`, set in _broker_tunnel.)
+        return {
+            "resource_group_name": opts.get("resource_group_name") or _cfg("azure_resource_group"),
+            "location": region,
+            "identifier": f"clouddb-{db_id[:8]}",
+            "administrator_login": master_username,
+            "administrator_password": master_password,
+            "sku_name": opts.get("sku_name", "Basic"),
+            "db_name": db_name,
+            "subnet_id": opts.get("subnet_id") or _cfg("azure_db_sqlserver_subnet_id"),
+            "private_dns_zone_id": opts.get("private_dns_zone_id") or _cfg("azure_db_sqlserver_private_dns_zone_id"),
             "tags": {"managed-by": "vm-dashboard", "clouddb-id": db_id},
         }
 

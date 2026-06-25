@@ -575,6 +575,8 @@ class CloudDatabaseFeatureConfig(BaseModel):
     azure_db_private_dns_zone_id: str = ""            # postgres DNS zone
     azure_db_mysql_subnet_id: str = ""                # mysql delegated subnet (own)
     azure_db_mysql_private_dns_zone_id: str = ""      # mysql DNS zone (own)
+    azure_db_sqlserver_subnet_id: str = ""            # sqlserver private-endpoint subnet (plain, not delegated)
+    azure_db_sqlserver_private_dns_zone_id: str = ""  # sqlserver privatelink.database.windows.net zone
     # GCP Cloud SQL
     gcp_db_network: str = ""
 
