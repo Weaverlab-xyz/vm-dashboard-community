@@ -836,13 +836,16 @@ async def _register_vm_in_entitle(db, job_id: str, vm_name: str, hostname: str,
 
 
 async def _register_vm_in_passwordsafe(db, job_id: str, vm_name: str, hostname: str,
-                                       result: dict) -> None:
-    """Thin wrapper around the shared Password Safe VM hook (tag=AWS). Onboards the
-    VM as a managed system + its baked-in adminuser account, keyed by the VM's own
-    SSH keypair (the same secret used for the deploy / Entitle registration)."""
+                                       result: dict, *, instance_id: str = "",
+                                       region: str = "") -> None:
+    """Thin wrapper around the shared Password Safe VM hook (tag=AWS). Onboards the VM as
+    a managed system + its baked-in adminuser account. AWS defaults to the cloud-native
+    AWS Systems Manager plugin (managed system DNS = ``{instance_id}:{region}``); the SSH
+    method falls back to the VM's own keypair (the deploy / Entitle registration secret)."""
     from ..services import ps_vm_hook
     await ps_vm_hook.register(db, job_id, vm_name, hostname, result=result, tag="AWS",
-                              ssh_key_secret=result.get("ssh_secret_name") or "")
+                              ssh_key_secret=result.get("ssh_secret_name") or "",
+                              instance_id=instance_id, region=region)
 
 
 async def _run_deploy(
@@ -996,7 +999,8 @@ async def _run_deploy(
         from ..services import ps_vm_hook
         _psreg = bool((_job.metadata_dict or {}).get("register_in_passwordsafe")) if _job else False
         if _psreg and not is_windows and ps_vm_hook.registration_enabled():
-            await _register_vm_in_passwordsafe(db, job_id, instance_name, hostname, result)
+            await _register_vm_in_passwordsafe(db, job_id, instance_name, hostname, result,
+                                               instance_id=instance_id, region=_aws_region)
 
         job_service.set_completed(db, job_id, result)
         await cache_service.invalidate(cache_service.key_global("aws_instances"))
@@ -1156,7 +1160,8 @@ async def _run_bulk_deploy(
                 from ..services import ps_vm_hook
                 _bpsreg = bool((_bjob.metadata_dict or {}).get("register_in_passwordsafe")) if _bjob else False
                 if _bpsreg and not is_windows and ps_vm_hook.registration_enabled():
-                    await _register_vm_in_passwordsafe(db, job_id, item.instance_name, hostname, result)
+                    await _register_vm_in_passwordsafe(db, job_id, item.instance_name, hostname, result,
+                                                       instance_id=instance_id, region=_aws_region)
 
                 job_service.set_completed(db, job_id, result)
 

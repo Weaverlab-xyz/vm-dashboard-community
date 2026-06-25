@@ -32,6 +32,14 @@ _COMMON = dict(name="se-lab-vm", host_name="se-lab-vm", ip_address="10.0.0.5", p
                workgroup_id="55", managed_account_name="adminuser",
                ssh_key_enforcement_mode=2)
 
+# AWS Systems Manager custom-plugin shape: dns_name = {instance-id}:{region}, placeholder
+# ip, the account name already carrying its ;suffix, and NO private key pushed.
+_SSM = dict(name="se-lab-vm", host_name="se-lab-vm", ip_address="127.0.0.1", port=22,
+            functional_account_id=42, platform_id=9, entity_type_id=1,
+            workgroup_id="55", managed_account_name="adminuser;local",
+            ssh_key_enforcement_mode=2, method="ssm",
+            dns_name="i-0eaa6a10886717ed:us-east-1", emit_private_key=False)
+
 
 def test_provider_header_targets_passwordsafe_with_run_as_user():
     hcl = ps._provider_header()
@@ -82,6 +90,57 @@ def test_scrub_redacts_password_and_private_key():
     assert "BEGIN KEY" not in scrubbed
     assert ps._REDACTED in scrubbed
     assert "adminuser" in scrubbed  # non-secret survives
+
+
+def test_ssh_is_the_default_method_unchanged():
+    # No method kwarg → the traditional SSH shape (regression guard for the refactor).
+    hcl = ps._generate_managed_system_hcl(**_COMMON)
+    assert 'remote_client_type       = "ssh"' in hcl
+    assert "private_key              = var.ps_account_private_key" in hcl
+    assert 'variable "ps_account_private_key"' in hcl
+    assert "dns_name" not in hcl
+
+
+def test_ssm_system_block_uses_dns_name_and_placeholder_ip():
+    hcl = ps._generate_managed_system_hcl(**_SSM)
+    assert ps._line("dns_name", '"i-0eaa6a10886717ed:us-east-1"') in hcl
+    assert ps._line("ip_address", '"127.0.0.1"') in hcl
+    assert ps._line("platform_id", 9) in hcl
+    # SSH-only fields must NOT appear on the SSM custom-plugin managed system.
+    assert "remote_client_type" not in hcl
+    assert "ssh_key_enforcement_mode" not in hcl
+
+
+def test_ssm_account_block_has_suffix_name_and_no_private_key():
+    hcl = ps._generate_managed_system_hcl(**_SSM)
+    assert ps._line("account_name", '"adminuser;local"') in hcl
+    assert "private_key" not in hcl
+    assert "password                 = var.ps_account_password" in hcl
+    assert "dss_auto_management_flag = true" in hcl
+
+
+def test_ssm_header_omits_private_key_variable():
+    # A declared-but-unset required var fails `terraform apply` under TF_INPUT=0.
+    hcl = ps._generate_managed_system_hcl(**_SSM)
+    assert 'variable "ps_account_private_key"' not in hcl
+    assert 'variable "ps_account_password"' in hcl
+
+
+def test_ssm_account_name_helper():
+    assert ps._ssm_account_name("adminuser", "local") == "adminuser;local"
+    assert ps._ssm_account_name("svc", "arn:aws:iam::123:role/Cross") == "svc;arn:aws:iam::123:role/Cross"
+    assert ps._ssm_account_name("", "") == "adminuser;local"  # blanks fall back
+
+
+def test_scrub_handles_ssm_account_without_private_key():
+    state = (
+        '{"resources":[{"type":"passwordsafe_managed_account","instances":'
+        '[{"attributes":{"password":"placeholder","account_name":"adminuser;local"}}]}]}'
+    )
+    scrubbed = ps._scrub_state(state)
+    assert "placeholder" not in scrubbed
+    assert ps._REDACTED in scrubbed
+    assert "adminuser;local" in scrubbed  # non-secret survives
 
 
 if __name__ == "__main__":

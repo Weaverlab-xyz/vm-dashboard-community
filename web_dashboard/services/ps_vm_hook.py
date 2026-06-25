@@ -4,15 +4,22 @@ AWS / Azure / GCP deploy paths — the Password Safe counterpart to entitle_vm_h
 
 Each cloud's deploy background task, after provisioning the VM (and its Entitle
 registration), calls :func:`register` to optionally onboard the host as a Password
-Safe **managed system** with its baked-in ``adminuser`` account (SSH-key managed),
-and :func:`deregister` on teardown. Both are **non-fatal** — failures are recorded
-on the job ``result`` dict but never fail the deploy/destroy. Gating on the per-build
-opt-in + the global capability flag is the caller's job (carried on job metadata).
+Safe **managed system** with its baked-in ``adminuser`` account, and
+:func:`deregister` on teardown. Both are **non-fatal** — failures are recorded on the
+job ``result`` dict but never fail the deploy/destroy. Gating on the per-build opt-in +
+the global capability flag is the caller's job (carried on job metadata).
 
-Management method is config-driven: the operator configures a functional account per
-cloud (``passwordsafe_vm_functional_account_{aws,azure,gcp}``). Its platform decides
-whether management is agent-plugin- or Resource-Broker-based; the dashboard just
-resolves the account's id + platform_id and onboards against it.
+Two onboarding methods (see ps_resource_service):
+  - **AWS** defaults to ``ssm`` — the cloud-native "AWS Systems Manager" Password Safe
+    custom plugin (managed over SSM SendCommand; managed system DNS = {instance-id}:{region};
+    no SSH key pushed). Configurable via ``passwordsafe_aws_registration_method``.
+  - All other clouds (and AWS when set to ``ssh``) use the traditional SSH flow: a
+    managed system keyed by host_name/ip with the VM's own private key pushed.
+
+Either way the operator configures a functional account per cloud
+(``passwordsafe_vm_functional_account_{aws,azure,gcp}``); its platform decides the
+management method, and the dashboard resolves the account's id + platform_id and
+onboards against it.
 """
 import logging
 
@@ -38,24 +45,37 @@ def _functional_account_name(tag: str) -> str:
     return _cfg(f"passwordsafe_vm_functional_account_{t}") or _cfg("passwordsafe_vm_functional_account")
 
 
+def _registration_method(tag: str) -> str:
+    """Onboarding method for this cloud. AWS defaults to the cloud-native AWS Systems
+    Manager custom plugin (``ssm``); every other cloud uses the traditional SSH flow."""
+    if (tag or "").lower() == "aws":
+        return (_cfg("passwordsafe_aws_registration_method") or "ssm").lower()
+    return "ssh"
+
+
 async def register(db, job_id: str, vm_name: str, hostname: str, *,
                    result: dict, tag: str = "cloud",
-                   private_key: str = "", ssh_key_secret: str = "") -> None:
+                   private_key: str = "", ssh_key_secret: str = "",
+                   instance_id: str = "", region: str = "") -> None:
     """Onboard a built VM into Password Safe as a managed system + managed account.
 
-    The SSH private key is the VM's own keypair (the key cloud-init injected for the
-    bt-ready ``adminuser``), resolved the same way the Entitle SSH registration does
-    (``ssh_key_secret`` = the per-launch override when set, else the configured
-    default). The per-cloud functional account is resolved to its id + platform via
-    the Password Safe REST API. Writes ``ps_managed_system_id`` /
+    Method is per-cloud (``_registration_method``):
+
+    * **ssm** (AWS default) — the AWS Systems Manager custom plugin. The managed system's
+      DNS name is ``{instance_id}:{region}`` (so ``instance_id`` + ``region`` are required)
+      and the account name is ``{managed_account_name};{suffix}``. No SSH key is pushed —
+      Password Safe mints it over SSM. Optionally triggers an initial Change Password.
+    * **ssh** — the traditional flow. The SSH private key is the VM's own keypair (resolved
+      the same way the Entitle SSH registration does: ``ssh_key_secret`` = the per-launch
+      override when set, else the configured default).
+
+    The per-cloud functional account is resolved to its id + platform via the Password
+    Safe REST API (its platform binds the managed system — for ssm this is the custom
+    plugin). Writes ``ps_managed_system_id`` / ``ps_managed_account_id`` /
     ``ps_registration_tf_state`` onto ``result``. Non-fatal."""
-    from . import entitle_vm_hook, ps_api_service, ps_resource_service, job_service
+    from . import entitle_vm_hook, ps_api_service, ps_resource_service, job_service, config_service
     try:
-        pk = private_key or await entitle_vm_hook._resolve_vm_private_key(tag, ssh_key_secret)
-        if not pk:
-            raise ps_resource_service.PSResourceError(
-                "no SSH private key resolved for the VM keypair — Password Safe manages "
-                "the account by key; the chosen secret must carry a private key")
+        method = _registration_method(tag)
 
         fa_name = _functional_account_name(tag)
         if not fa_name:
@@ -64,23 +84,62 @@ async def register(db, job_id: str, vm_name: str, hostname: str, *,
                 f"(set passwordsafe_vm_functional_account_{(tag or '').lower()})")
         fa = await ps_api_service.get_functional_account(fa_name)
         workgroup_id = await ps_api_service.get_workgroup_id(_cfg("passwordsafe_workgroup"))
+        managed_account_name = _cfg("passwordsafe_managed_account_name") or "adminuser"
+        entity_type_id = int(_cfg("passwordsafe_entity_type_id") or "1")
 
-        r = await ps_resource_service.register_managed_system(
-            name=vm_name,
-            host_name=vm_name,
-            ip_address=hostname,
-            private_key=pk,
-            functional_account_id=fa["id"],
-            platform_id=fa["platform_id"],
-            workgroup_id=workgroup_id,
-            entity_type_id=int(_cfg("passwordsafe_entity_type_id") or "1"),
-            managed_account_name=_cfg("passwordsafe_managed_account_name") or "adminuser",
-            ssh_key_enforcement_mode=int(_cfg("passwordsafe_ssh_key_enforcement_mode") or "2"),
-            application_host_id=int(_cfg("passwordsafe_application_host_id") or "0"),
-        )
+        if method == "ssm":
+            if not (instance_id and region):
+                raise ps_resource_service.PSResourceError(
+                    "AWS Systems Manager onboarding needs the instance id + region "
+                    f"(got instance_id={instance_id!r}, region={region!r})")
+            r = await ps_resource_service.register_managed_system(
+                name=vm_name,
+                host_name=vm_name,
+                functional_account_id=fa["id"],
+                platform_id=fa["platform_id"],
+                workgroup_id=workgroup_id,
+                entity_type_id=entity_type_id,
+                managed_account_name=managed_account_name,
+                method="ssm",
+                dns_name=f"{instance_id}:{region}",
+                account_suffix=_cfg("passwordsafe_ssm_account_suffix") or "local",
+            )
+        else:
+            pk = private_key or await entitle_vm_hook._resolve_vm_private_key(tag, ssh_key_secret)
+            if not pk:
+                raise ps_resource_service.PSResourceError(
+                    "no SSH private key resolved for the VM keypair — Password Safe manages "
+                    "the account by key; the chosen secret must carry a private key")
+            r = await ps_resource_service.register_managed_system(
+                name=vm_name,
+                host_name=vm_name,
+                ip_address=hostname,
+                private_key=pk,
+                functional_account_id=fa["id"],
+                platform_id=fa["platform_id"],
+                workgroup_id=workgroup_id,
+                entity_type_id=entity_type_id,
+                managed_account_name=managed_account_name,
+                ssh_key_enforcement_mode=int(_cfg("passwordsafe_ssh_key_enforcement_mode") or "2"),
+                application_host_id=int(_cfg("passwordsafe_application_host_id") or "0"),
+            )
+
         result["ps_managed_system_id"] = r.get("managed_system_id")
         result["ps_managed_account_id"] = r.get("managed_account_id")
         result["ps_registration_tf_state"] = r.get("tf_state_json")
+
+        # Optional, best-effort (ssm): trigger an initial Change Password so Password Safe
+        # mints the first SSH key over SSM immediately. Off by default — auto-management
+        # rotates on schedule regardless — and never fails the deploy.
+        if (method == "ssm" and r.get("managed_account_id")
+                and config_service.get_bool("passwordsafe_ssm_change_password_on_register", False)):
+            try:
+                await ps_api_service.change_managed_account_password(int(r["managed_account_id"]))
+                result["ps_change_password_triggered"] = True
+            except Exception as ce:  # noqa: BLE001
+                result["ps_change_password_error"] = str(ce)
+                logger.warning("Password Safe initial Change Password failed for %s: %s", vm_name, ce)
+
         job_service.update_progress(
             db, job_id, 96, f"Onboarded into Password Safe (system {r.get('managed_system_id')}).")
     except Exception as e:  # noqa: BLE001 — registration must never fail the deploy

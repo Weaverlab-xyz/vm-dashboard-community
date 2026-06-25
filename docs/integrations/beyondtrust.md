@@ -119,6 +119,75 @@ fill in the fields.
 
 ---
 
+## Password Safe VM onboarding (managed systems)
+
+When enabled, each freshly built **Linux** VM can be onboarded into Password Safe as a
+**managed system + managed account** via a per-deploy **"Onboard into Password Safe"**
+checkbox on the AWS / Azure / GCP deploy forms. Turn the capability on under **Settings →
+Integrations → BeyondTrust → Resource registration (VMs)** (`passwordsafe_registration_enabled`).
+The functional account + workgroup must already exist in Password Safe; the dashboard
+resolves them over the public API and creates the managed system/account with Terraform.
+
+Two onboarding methods, chosen per cloud:
+
+### AWS — AWS Systems Manager custom plugin (cloud-native, default)
+
+The recommended path. Password Safe manages the Linux EC2 instance over **AWS SSM
+`SendCommand`** instead of SSH, so you need **no per-VPC Resource Broker and no SSH
+line-of-sight** — one Password Safe node (or a single Cloud Resource Broker on EC2) can
+manage Linux instances across many accounts/VPCs.
+
+The dashboard creates the managed system with **DNS name `{instance-id}:{region}`** (e.g.
+`i-0eaa6a10886717ed:us-east-1`, the field the plugin parses) on the custom-plugin platform,
+and a managed account named **`{managed_account_name};{suffix}`**. The account's credential
+is an SSH private key that **Password Safe mints over SSM on a credential change** — it is
+not set at creation. Auto-management rotates it on schedule; optionally the dashboard can
+trigger an immediate **Change Password** right after onboarding
+(`passwordsafe_ssm_change_password_on_register`, off by default).
+
+**Prerequisites (one-time, admin):**
+
+- Upload the **AWS Systems Manager** `.PSPLUGIN` in BeyondInsight → **Configuration →
+  Privileged Access Management → Platform Plugins**.
+- Create a **functional account on the *AWS Systems Manager Custom Plugin* platform** and
+  point the dashboard's **Functional account — AWS** at it. Its platform is what binds the
+  managed system to the plugin.
+  - **IAM-user mode** (suffix `local`): the functional account password is
+    `{AccessKeyID}:{AccessKeySecret}` for an IAM user with `ssm:SendCommand`,
+    `ssm:ListCommandInvocations`, `ssm:GetCommandInvocation`.
+  - **EC2 mode** (cross-account Resource Broker on EC2): set **SSM account suffix** to the
+    remote-account **AssumeRole ARN** (`{name};arn:aws:iam::…:role/…`); auth is the broker
+    EC2 instance's IAM role, so the functional account holds only placeholder credentials.
+- The instance must already be **SSM-managed** — the deploy attaches
+  `ec2_ssm_instance_profile`, which must grant `AmazonSSMManagedInstanceCore`. Confirm the
+  instance appears in **Fleet Manager** before onboarding.
+
+### Azure / GCP (and AWS when set to SSH) — traditional managed system
+
+A managed system keyed by hostname/IP on an SSH platform; the dashboard pushes the VM's own
+SSH private key into the managed account and `passwordsafe_ssh_key_enforcement_mode` enforces
+key-only auth. This requires SSH line-of-sight from a Resource Broker / Jumpoint.
+
+### Configuration keys
+
+| Key | Default | Notes |
+|---|---|---|
+| `passwordsafe_registration_enabled` | `false` | Global capability flag (also per-deploy opt-in) |
+| `passwordsafe_workgroup` | — | Workgroup name or id the managed system lands in |
+| `passwordsafe_vm_functional_account_aws` / `_azure` / `_gcp` | — | Functional account per cloud (for AWS+SSM, the custom-plugin account) |
+| `passwordsafe_managed_account_name` | `adminuser` | The onboarded account (the `{name}` part for SSM) |
+| `passwordsafe_aws_registration_method` | `ssm` | AWS method: `ssm` (AWS Systems Manager plugin) or `ssh` |
+| `passwordsafe_ssm_account_suffix` | `local` | SSM account-name suffix; an AssumeRole ARN for EC2 cross-account mode |
+| `passwordsafe_ssm_change_password_on_register` | `false` | Trigger an initial Change Password after onboarding (mints the key now) |
+| `passwordsafe_ssh_key_enforcement_mode` | `2` | SSH method only — 0 none / 1 auto / 2 strict |
+| `passwordsafe_application_host_id` | `0` | SSH method only — >0 routes via a broker/application host |
+
+Off-boarding is automatic: destroying the VM removes the managed system + account
+(Terraform destroy from the stored state). Onboarding failures are **non-fatal** — they are
+recorded on the job (`ps_error`) but never fail the deploy.
+
+---
+
 ## Preparing images for BT management
 
 Images built by the dashboard's Packer flow (`/images/aws`, `/images/azure`, `/images/gcp`) can be pre-conditioned for BeyondTrust pickup using the provisioner scripts under [`provisioners/beyondtrust/`](../../provisioners/beyondtrust/):
