@@ -106,6 +106,7 @@ class AzureDeployRequest(BaseModel):
     pra_credential_ref: Optional[str] = None     # secret ref → bt_client_secret override for the shell jump
     docker_deploy_key_ref: Optional[str] = None  # secret ref → ACI Jumpoint deploy key (else azure_aci_docker_deploy_key)
     register_in_entitle: bool = False            # opt in to registering this VM as an Entitle SSH integration (Linux only)
+    register_in_passwordsafe: bool = False       # opt in to onboarding this VM into Password Safe (managed system + account, Linux only)
     ssh_key_secret_override: Optional[str] = None  # optional Key Vault keypair secret to use for the SSH key (must be JSON with a public_key)
 
 
@@ -128,6 +129,7 @@ class AzureBulkDeployRequest(BaseModel):
     ssh_public_key: str = ""   # required for Linux (endpoint enforces)
     workgroup: str             # written as `workgroup` resource tag on all VMs
     register_in_entitle: bool = False  # opt in to registering each VM as an Entitle SSH integration (Linux only)
+    register_in_passwordsafe: bool = False  # opt in to onboarding each VM into Password Safe (managed system + account, Linux only)
     ssh_key_secret_override: Optional[str] = None  # optional Key Vault keypair secret to use for the SSH key (must be JSON with a public_key)
     # Marketplace image metadata (optional, used if present)
     image_publisher: Optional[str] = None

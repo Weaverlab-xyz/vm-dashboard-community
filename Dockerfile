@@ -182,12 +182,12 @@ RUN ARCH=$(dpkg --print-architecture) \
     && rm /tmp/terraform.zip \
     && mkdir -p "${TF_PLUGIN_CACHE_DIR}" \
     && mkdir -p /tmp/tf_provider_init \
-    && printf 'terraform {\n  required_providers {\n    sra = { source = "beyondtrust/sra", version = "~> 1.0" }\n    entitle = { source = "entitleio/entitle", version = "~> 3.0" }\n    aws = { source = "hashicorp/aws", version = "~> 5.0" }\n    azurerm = { source = "hashicorp/azurerm", version = "~> 3.0" }\n    google = { source = "hashicorp/google", version = "~> 5.0" }\n  }\n}\n' \
+    && printf 'terraform {\n  required_providers {\n    sra = { source = "beyondtrust/sra", version = "~> 1.0" }\n    passwordsafe = { source = "BeyondTrust/passwordsafe", version = "~> 1.0" }\n    entitle = { source = "entitleio/entitle", version = "~> 3.0" }\n    aws = { source = "hashicorp/aws", version = "~> 5.0" }\n    azurerm = { source = "hashicorp/azurerm", version = "~> 3.0" }\n    google = { source = "hashicorp/google", version = "~> 5.0" }\n  }\n}\n' \
        > /tmp/tf_provider_init/main.tf \
     && for attempt in 1 2 3 4 5; do \
            TF_REGISTRY_CLIENT_TIMEOUT=30 terraform -chdir=/tmp/tf_provider_init init && break; \
            if [ "$attempt" = 5 ]; then \
-               echo "terraform init failed to cache providers (sra/aws/azurerm/google) after 5 attempts" >&2; \
+               echo "terraform init failed to cache providers (sra/passwordsafe/entitle/aws/azurerm/google) after 5 attempts" >&2; \
                exit 1; \
            fi; \
            echo "terraform init attempt $attempt failed (transient registry error); retrying in $((attempt * 5))s..." >&2; \

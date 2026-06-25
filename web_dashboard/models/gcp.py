@@ -59,6 +59,7 @@ class GCPDeployRequest(BaseModel):
     network_tags: List[str] = []
     workgroup: str              # written as `workgroup` GCE label
     register_in_entitle: bool = False  # opt in to registering this VM as an Entitle SSH integration
+    register_in_passwordsafe: bool = False  # opt in to onboarding this VM into Password Safe (managed system + account)
     ssh_key_secret_override: Optional[str] = None  # optional Secret Manager secret to use for the SSH key (must be JSON with a public_key)
     # Per-deploy override — config default is the fallback. A secrets-backend
     # reference (e.g. gcp_sm://…) for the GCE Jumpoint deploy key. (GCP uses a

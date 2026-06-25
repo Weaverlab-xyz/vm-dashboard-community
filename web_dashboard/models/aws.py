@@ -69,6 +69,7 @@ class DeployRequest(BaseModel):
     security_group_ids: List[str] = Field(..., description="Security group IDs")
     workgroup: str = Field(..., description="Workgroup the instance belongs to (written as Workgroup tag)")
     register_in_entitle: bool = Field(default=False, description="Opt in to registering this VM as an Entitle SSH integration (requires entitle_registration_enabled + a provisioned agent)")
+    register_in_passwordsafe: bool = Field(default=False, description="Opt in to onboarding this VM into Password Safe as a managed system + account (requires passwordsafe_registration_enabled)")
     ssh_key_secret_override: Optional[str] = Field(default=None, description="Optional Secrets Manager secret name to use for the SSH key instead of the configured default (must be JSON with a public_key)")
     # PRA/jumpoint per-deploy overrides — config defaults are the fallback. Values
     # are secrets-backend references (e.g. aws_sm://…), not raw secrets.
@@ -131,6 +132,7 @@ class BulkDeployRequest(BaseModel):
     security_group_ids: List[str] = Field(..., description="Security group IDs (shared)")
     workgroup: str = Field(..., description="Workgroup all deployed instances belong to (written as Workgroup tag)")
     register_in_entitle: bool = Field(default=False, description="Opt in to registering each VM as an Entitle SSH integration (requires entitle_registration_enabled + a provisioned agent)")
+    register_in_passwordsafe: bool = Field(default=False, description="Opt in to onboarding each VM into Password Safe as a managed system + account (requires passwordsafe_registration_enabled)")
     ssh_key_secret_override: Optional[str] = Field(default=None, description="Optional Secrets Manager secret name to use for the SSH key instead of the configured default (must be JSON with a public_key)")
 
 

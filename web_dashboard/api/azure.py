@@ -1162,6 +1162,14 @@ async def _run_deploy(job_id: str, req: AzureDeployRequest, rg: str, loc: str):
                                            sudo_user=req.ssh_username,
                                            ssh_key_secret=req.ssh_key_secret_override or "")
 
+        # Step 5: Password Safe — onboard as a managed system + account (Linux only).
+        from ..services import ps_vm_hook
+        if (getattr(req, "register_in_passwordsafe", False) and not is_windows
+                and ps_vm_hook.registration_enabled()):
+            await ps_vm_hook.register(db, job_id, req.vm_name, hostname,
+                                      result=result, tag="Azure",
+                                      ssh_key_secret=req.ssh_key_secret_override or "")
+
         job_service.set_completed(db, job_id, result)
         await cache_service.invalidate(cache_service.key_global("azure_vms"))
 
@@ -1326,6 +1334,14 @@ async def _run_bulk_deploy(job_items: list, req: AzureBulkDeployRequest, rg: str
                                                    sudo_user=req.ssh_username,
                                                    ssh_key_secret=req.ssh_key_secret_override or "")
 
+                # Step 5: Password Safe — onboard as a managed system + account.
+                from ..services import ps_vm_hook
+                if (getattr(req, "register_in_passwordsafe", False) and not is_windows
+                        and ps_vm_hook.registration_enabled()):
+                    await ps_vm_hook.register(db, job_id, vm_name, hostname,
+                                              result=result, tag="Azure",
+                                              ssh_key_secret=req.ssh_key_secret_override or "")
+
                 job_service.set_completed(db, job_id, result)
 
             except AzureError as e:
@@ -1440,6 +1456,11 @@ async def _run_destroy(destroy_job_id: str, deploy_job_id: str, vm_name: str, rg
             if meta.get("entitle_registration_tf_state"):
                 from ..services import entitle_vm_hook
                 await entitle_vm_hook.deregister(meta, result)
+
+            # Off-board the Password Safe managed system if this deploy registered one.
+            if meta.get("ps_registration_tf_state"):
+                from ..services import ps_vm_hook
+                await ps_vm_hook.deregister(meta, result)
 
             # Mark original deploy job as destroyed (mirrors AWS pattern)
             meta["destroyed"] = True

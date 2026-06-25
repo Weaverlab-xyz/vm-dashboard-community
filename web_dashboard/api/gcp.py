@@ -533,6 +533,12 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
                                            sudo_user=payload.ssh_username,
                                            ssh_key_secret=secret_name)
 
+        # Password Safe — onboard as a managed system + account (per-build opt-in).
+        from ..services import ps_vm_hook
+        if getattr(payload, "register_in_passwordsafe", False) and ps_vm_hook.registration_enabled():
+            await ps_vm_hook.register(db, job_id, payload.instance_name, hostname,
+                                      result=final_meta, tag="GCP", ssh_key_secret=secret_name)
+
         job_service.set_completed(db, job_id, final_meta)
         await cache_service.invalidate(cache_service.key_global("gcp_instances"))
 
@@ -746,6 +752,11 @@ async def _run_destroy(
         if deploy_meta.get("entitle_registration_tf_state"):
             from ..services import entitle_vm_hook
             await entitle_vm_hook.deregister(deploy_meta, result)
+
+        # Off-board the Password Safe managed system if this deploy registered one.
+        if deploy_meta.get("ps_registration_tf_state"):
+            from ..services import ps_vm_hook
+            await ps_vm_hook.deregister(deploy_meta, result)
 
         job_service.update_progress(db, job_id, 50, f"Deleting instance {instance_name}…")
         await gcp_service.terminate_instance(project_id=project_id, zone=zone, instance_name=instance_name)
