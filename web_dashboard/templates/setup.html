@@ -144,8 +144,12 @@
               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
               placeholder="arn:aws:iam::123456789012:instance-profile/SSMRoleProfile  or  SSMRoleProfile">
             <p class="mt-1 text-xs text-gray-500">
-              IAM instance profile to attach to every deployed EC2 instance for AWS Systems Manager (SSM) access.
-              Leave blank if you are not using SSM. Requires the <code class="bg-gray-100 px-1 rounded">AmazonSSMManagedInstanceCore</code> policy on the role.
+              The IAM <strong>instance profile</strong> — its name or ARN, <strong>not the role name</strong> — attached to every
+              deployed EC2 instance for AWS Systems Manager (SSM) access. In IAM open your role and copy the
+              <span class="font-mono">Instance profile ARN</span>; the name is the part after <code class="bg-gray-100 px-1 rounded">instance-profile/</code>
+              (e.g. role <code class="bg-gray-100 px-1 rounded">ec2-ssm-role</code> → profile <code class="bg-gray-100 px-1 rounded">ec2-ssm-instance-profile</code>).
+              Required for the cloud-native AWS Systems Manager Password Safe onboarding; leave blank if you are not using SSM.
+              The role needs the <code class="bg-gray-100 px-1 rounded">AmazonSSMManagedInstanceCore</code> policy.
             </p>
           </div>
           <div>
