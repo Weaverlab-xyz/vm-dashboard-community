@@ -1199,6 +1199,141 @@ async def run_cloud_run_ansible_task(
         raise GCPError(f"Failed to run Cloud Run Ansible task: {e}") from e
 
 
+# ── Cloud Run Kubernetes runner ───────────────────────────────────────────────
+
+_K8S_RUNNER_PREFIX = "k8s-runner"
+
+
+def _run_cloud_run_k8s_sync(
+    project_id: str, region: str, image: str,
+    command: str, kubeconfig_b64: str, stdin_b64: str, job_id: str,
+    vpc_connector: str = "",
+) -> tuple:
+    """
+    Create a Cloud Run Job that runs a single kubectl/helm command against a
+    cluster's API, wait for it to finish, return (exit_code, log_output), and
+    delete the job.
+
+    Modelled on `_run_cloud_run_ansible_sync` — same create / run / poll / logs /
+    cleanup shape. The stock kubectl+helm `image`, the generic shell `command`,
+    and the kubeconfig (decoded from the ``KUBECONFIG_B64`` env into
+    ``$KUBECONFIG``) are the only differences.
+    """
+    import time
+    _require_run()
+    from google.cloud import run_v2
+
+    creds = _gcp_creds()
+    jobs_client = run_v2.JobsClient(credentials=creds)
+    executions_client = run_v2.ExecutionsClient(credentials=creds)
+
+    job_name = f"{_K8S_RUNNER_PREFIX}-{job_id[:8]}" if job_id else f"{_K8S_RUNNER_PREFIX}-adhoc"
+    parent = f"projects/{project_id}/locations/{region}"
+    job_resource_name = f"{parent}/jobs/{job_name}"
+
+    setup = (
+        "set -e; "
+        'printf %s "$KUBECONFIG_B64" | base64 -d > /tmp/kubeconfig; '
+        "export KUBECONFIG=/tmp/kubeconfig; "
+    )
+    if stdin_b64:
+        full_cmd = setup + 'printf %s "$STDIN_B64" | base64 -d | ' + command
+    else:
+        full_cmd = setup + command
+
+    env = [run_v2.EnvVar(name="KUBECONFIG_B64", value=kubeconfig_b64)]
+    if stdin_b64:
+        env.append(run_v2.EnvVar(name="STDIN_B64", value=stdin_b64))
+
+    task_template = run_v2.TaskTemplate(
+        containers=[
+            run_v2.Container(
+                image=image,
+                command=["sh", "-c", full_cmd],
+                env=env,
+                resources=run_v2.ResourceRequirements(
+                    limits={"cpu": "1000m", "memory": "512Mi"},
+                ),
+            )
+        ],
+        max_retries=0,
+        timeout="1200s",
+    )
+
+    exec_template = run_v2.ExecutionTemplate(template=task_template)
+    if vpc_connector:
+        exec_template.annotations = {
+            "run.googleapis.com/vpc-access-connector": vpc_connector,
+            "run.googleapis.com/vpc-access-egress": "private-ranges-only",
+        }
+
+    job = run_v2.Job(
+        template=exec_template,
+        labels={"managed-by": "vm-cli-dashboard", "purpose": "k8s-runner"},
+    )
+
+    logger.info("Cloud Run k8s: creating job %s in %s/%s", job_name, project_id, region)
+    create_op = jobs_client.create_job(parent=parent, job_id=job_name, job=job)
+    create_op.result()
+
+    output = ""
+    exit_code = 1
+    execution_name = None
+
+    try:
+        run_op = jobs_client.run_job(name=job_resource_name)
+        execution = run_op.result()
+        execution_name = execution.name
+
+        # Poll until execution completes (max 20 min)
+        for _ in range(120):
+            exec_info = executions_client.get_execution(name=execution_name)
+            if exec_info.completion_time and not exec_info.reconciling:
+                succeeded = exec_info.succeeded_count or 0
+                failed = exec_info.failed_count or 0
+                exit_code = 0 if (succeeded > 0 and failed == 0) else 1
+                break
+            time.sleep(10)
+
+        try:
+            output = _fetch_cloud_run_job_logs(project_id, job_name, execution_name, creds)
+        except Exception as log_err:
+            logger.warning("Cloud Run k8s: could not retrieve logs: %s", log_err)
+
+    finally:
+        try:
+            del_op = jobs_client.delete_job(name=job_resource_name)
+            del_op.result()
+            logger.info("Cloud Run k8s: deleted job %s", job_name)
+        except Exception as del_err:
+            logger.warning("Cloud Run k8s: could not delete job %s: %s", job_name, del_err)
+
+    return exit_code, output
+
+
+async def run_cloud_run_k8s_task(
+    *,
+    project_id: str, region: str, image: str,
+    command: str, kubeconfig_b64: str, stdin_b64: str = "", job_id: str,
+    vpc_connector: str = "",
+) -> tuple:
+    """
+    Run a kubectl/helm command against a cluster's API via a GCP Cloud Run Job.
+    Returns (exit_code, output_log).
+    """
+    try:
+        return await asyncio.to_thread(
+            _run_cloud_run_k8s_sync,
+            project_id, region, image,
+            command, kubeconfig_b64, stdin_b64, job_id,
+            vpc_connector,
+        )
+    except GCPError:
+        raise
+    except Exception as e:
+        raise GCPError(f"Failed to run Cloud Run k8s task: {e}") from e
+
+
 # ── Export custom image to VHD on GCS (portable artefact) ─────────────────────
 
 def _export_custom_image_to_vhd_sync(

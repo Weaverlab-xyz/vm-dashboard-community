@@ -508,6 +508,11 @@ class AnsibleFeatureConfig(BaseModel):
     gcp_ansible_cloud_run_region: str = ""
     gcp_ansible_image: str = "willhallonline/ansible:latest"
     gcp_ansible_vpc_connector: str = ""
+    # Kubernetes (kubectl/helm) runner — reuses the ECS/ACI/Cloud Run network
+    # settings above. "local" runs in-process; cloud modes run cluster-API ops
+    # as a one-shot stock kubectl+helm task with clean egress.
+    k8s_runner: str = "local"                # "local" | "ecs" | "aci" | "gcp"
+    k8s_runner_image: str = "dtzar/helm-kubectl:latest"
 
 class EntitleFeatureConfig(BaseModel):
     enabled: bool = False
