@@ -45,6 +45,7 @@ VALID_CLOUDS = {"aws", "azure", "gcp"}
 _IMPLEMENTED = {
     ("postgres", "aws"), ("postgres", "gcp"), ("postgres", "azure"),
     ("mysql", "aws"), ("mysql", "azure"), ("mysql", "gcp"),
+    ("sqlserver", "aws"),
 }
 _PROVIDER = {
     ("postgres", "aws"): "rds",
@@ -53,6 +54,7 @@ _PROVIDER = {
     ("mysql", "aws"): "rds",
     ("mysql", "azure"): "flexibleserver",
     ("mysql", "gcp"): "cloudsql",
+    ("sqlserver", "aws"): "rds",
 }
 
 # terraform/<dir> module per (engine, cloud) — relative to repo root (parents[2]).
@@ -64,6 +66,7 @@ _TEMPLATE_DIRS = {
     ("mysql", "aws"): os.path.join(_REPO_ROOT, "terraform", "db_mysql"),
     ("mysql", "azure"): os.path.join(_REPO_ROOT, "terraform", "db_azure_mysql"),
     ("mysql", "gcp"): os.path.join(_REPO_ROOT, "terraform", "db_gcp_mysql"),
+    ("sqlserver", "aws"): os.path.join(_REPO_ROOT, "terraform", "db_sqlserver"),
 }
 _DEPLOYMENTS_DIR = os.path.join(_REPO_ROOT, "terraform", "deployments")
 
@@ -135,6 +138,25 @@ def _build_tf_variables(
             # rds.force_ssl) — its own mysql8.0-family group the sandbox
             # pre-creates. Empty config → "" → module falls back to RDS default.
             "parameter_group_name": _cfg("aws_db_mysql_parameter_group_name"),
+            "tags": {"managed-by": "vm-dashboard", "clouddb-id": db_id},
+        }
+
+    if (engine, cloud) == ("sqlserver", "aws"):
+        # RDS SQL Server (sqlserver-ex). Mirrors mysql/aws but OMITS db_name — RDS for
+        # SQL Server rejects it at creation; you connect to the `master` system DB
+        # instead (the tunnel targets master for sqlserver). No no-SSL parameter group
+        # is needed: RDS SQL Server's rds.force_ssl defaults to optional and the PRA
+        # mssql tunnel is TDS-aware (handles encryption itself), so RDS's default group
+        # is fine. db.t3.small min (SQL Server needs >=2 GiB; t3.micro is too small).
+        return {
+            "region": region,
+            "identifier": f"clouddb-{db_id[:8]}",
+            "master_username": master_username,
+            "master_password": master_password,
+            "instance_class": opts.get("instance_class", "db.t3.small"),
+            "allocated_storage": opts.get("allocated_storage", 20),
+            "db_subnet_group_name": opts.get("db_subnet_group_name", ""),
+            "vpc_security_group_ids": opts.get("vpc_security_group_ids", []),
             "tags": {"managed-by": "vm-dashboard", "clouddb-id": db_id},
         }
 
@@ -429,7 +451,7 @@ async def _broker_tunnel(db: Session, *, row: CloudDatabase, job_id: str,
             jumpoint_name=row.jumpoint_name or _cfg("bt_jumpoint_name"),
             client_secret=client_secret,
             username=admin_username,
-            database=tf_variables.get("db_name", ""),
+            database=("master" if engine == "sqlserver" else tf_variables.get("db_name", "")),
             tag="clouddb",
             # Vault account for credential injection at tunnel launch; rides in
             # the same workspace/state so decommission destroys it too. The
@@ -480,7 +502,7 @@ async def _register_entitle(db: Session, *, row: CloudDatabase, job_id: str,
             port=row.port or 0,
             username=admin_username,
             password=admin_password,
-            database=tf_variables.get("db_name", ""),
+            database=("master" if engine == "sqlserver" else tf_variables.get("db_name", "")),
             private=True,   # dashboard-built DBs are private (publicly_accessible=false)
             tag="clouddb",
         )

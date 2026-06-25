@@ -316,7 +316,7 @@ async def remove_jump(tf_state_json: str) -> None:
 _DB_TUNNEL_RESOURCE = {
     "postgres": "sra_postgresql_tunnel_jump",
     "mysql": "sra_my_sql_tunnel_jump",   # schema-identical to the postgres jump (verified vs cached provider)
-    # "sqlserver": "sra_protocol_tunnel_jump",   # tunnel_type = mssql
+    "sqlserver": "sra_protocol_tunnel_jump",   # generic protocol tunnel; needs tunnel_type="mssql" (emitted below)
 }
 _DB_RESOURCE_ENGINE = {v: k for k, v in _DB_TUNNEL_RESOURCE.items()}
 
@@ -325,6 +325,7 @@ _DB_RESOURCE_ENGINE = {v: k for k, v in _DB_TUNNEL_RESOURCE.items()}
 _DB_JUMP_ITEM_TYPE = {
     "postgres": "postgresql_tunnel_jump",
     "mysql": "my_sql_tunnel_jump",   # mirrors the resource (sra_my_sql_tunnel_jump) minus the sra_ prefix
+    "sqlserver": "protocol_tunnel_jump",   # sra_protocol_tunnel_jump minus the sra_ prefix
 }
 
 
@@ -369,6 +370,10 @@ def _generate_db_tunnel_hcl(
         extra += f"  username      = {json.dumps(username)}\n"
     if database:
         extra += f"  database      = {json.dumps(database)}\n"
+    # The generic sra_protocol_tunnel_jump (sqlserver) requires an explicit
+    # tunnel_type; the dedicated postgres/mysql resources don't take one.
+    if resource_type == "sra_protocol_tunnel_jump":
+        extra += '  tunnel_type   = "mssql"\n'
 
     var_block = ""
     vault_block = ""

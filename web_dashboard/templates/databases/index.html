@@ -202,7 +202,7 @@
             <select x-model="form.engine" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
               <option value="postgres">PostgreSQL</option>
               <option value="mysql">MySQL</option>
-              <option value="sqlserver" disabled>SQL Server (Phase 3)</option>
+              <option value="sqlserver">SQL Server</option>
             </select>
           </div>
           <div>
@@ -407,6 +407,10 @@
         <p class="text-xs text-gray-400" x-show="conn?.engine === 'postgres'" x-cloak>
           The PRA tunnel hands your client cleartext on 127.0.0.1, so connect with
           <code>?sslmode=disable</code>.
+        </p>
+        <p class="text-xs text-gray-400" x-show="conn?.engine === 'sqlserver'" x-cloak>
+          The PRA tunnel hands your client cleartext on 127.0.0.1, so disable client encryption:
+          <code>sqlcmd -S 127.0.0.1,&lt;port&gt; -U … -P … -d master -N o -C</code>
         </p>
       </div>
       <div class="px-6 py-4 border-t border-gray-100 flex justify-end">
