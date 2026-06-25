@@ -732,6 +732,31 @@
                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
                    placeholder="projects/proj/locations/region/connectors/name">
           </div>
+
+          <!-- Kubernetes runner (kubectl/helm) -->
+          <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide pt-1">Kubernetes Runner (kubectl/helm)</p>
+          <p class="text-xs text-gray-400 -mt-1">
+            Runs the dashboard's cluster-API operations (kubectl/helm) either in-process
+            or as a one-shot cloud task with clean egress — useful when a corp proxy blocks
+            direct kubectl/helm. The cloud modes <strong>reuse the ECS / ACI / Cloud Run
+            network settings above</strong> (cluster, subnet, security groups, ACR, VPC connector).
+          </p>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Backend</label>
+            <select x-model="panelCfg.k8s_runner"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+              <option value="local">In-process (default)</option>
+              <option value="ecs">AWS ECS Fargate</option>
+              <option value="aci">Azure ACI</option>
+              <option value="gcp">GCP Cloud Run Jobs</option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Runner Image <span class="text-gray-400 font-normal">(stock kubectl + helm)</span></label>
+            <input type="text" x-model="panelCfg.k8s_runner_image"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                   placeholder="dtzar/helm-kubectl:latest">
+          </div>
         </div>
       </template>
 

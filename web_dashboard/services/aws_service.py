@@ -353,6 +353,23 @@ def _build_userdata(public_key: str, os_type: str, region: str) -> str:
     )
 
 
+def _iam_instance_profile_ref(value: str) -> dict:
+    """Build the boto3 RunInstances ``IamInstanceProfile`` argument from an
+    operator-supplied value.
+
+    boto3 accepts EITHER ``{"Name": <instance-profile-name>}`` OR
+    ``{"Arn": <instance-profile-arn>}`` — passing an ARN in the ``Name`` field
+    fails with "Invalid IAM Instance Profile name". We accept whichever the
+    operator configured (the setup wizard advertises both). Note this is the
+    *instance profile* name/ARN, which is NOT necessarily the role name —
+    in the IAM console it is the "Instance profile ARN" on the role's summary,
+    and the name is the segment after ``instance-profile/``."""
+    v = (value or "").strip()
+    if v.lower().startswith("arn:"):
+        return {"Arn": v}
+    return {"Name": v}
+
+
 def _launch_instance_sync(
     region: str,
     ami_id: str,
@@ -398,7 +415,7 @@ def _launch_instance_sync(
         userdata = _build_userdata(public_key, os_type, region)
         kwargs["UserData"] = userdata  # boto3 base64-encodes blob types automatically
     if iam_instance_profile:
-        kwargs["IamInstanceProfile"] = {"Name": iam_instance_profile}
+        kwargs["IamInstanceProfile"] = _iam_instance_profile_ref(iam_instance_profile)
     resp = ec2.run_instances(**kwargs)
     inst = resp["Instances"][0]
     return {
@@ -450,7 +467,15 @@ async def launch_instance(
             correlation_tag,
         )
     except (ClientError, BotoCoreError) as e:
-        raise AWSError(f"Failed to launch instance: {e}") from e
+        msg = str(e)
+        if "instanceprofile" in msg.lower().replace(" ", ""):
+            msg += (
+                " — Hint: the SSM Instance Profile setting must be the *instance "
+                "profile* name or ARN, not the role name. In IAM open the role and "
+                "copy its 'Instance profile ARN'; the name is the part after "
+                "'instance-profile/'."
+            )
+        raise AWSError(f"Failed to launch instance: {msg}") from e
     except NoCredentialsError:
         raise AWSError("AWS credentials not configured.")
 
@@ -1260,6 +1285,174 @@ async def run_ecs_ansible_task(
         raise
     except (ClientError, BotoCoreError) as e:
         raise AWSError(f"Failed to run ECS Ansible task: {e}") from e
+    except NoCredentialsError:
+        raise AWSError("AWS credentials not configured.")
+
+
+# ── ECS Kubernetes runner ─────────────────────────────────────────────────────
+
+def _run_ecs_k8s_sync(
+    region: str,
+    cluster: str,
+    task_family: str,
+    image: str,
+    cpu: str,
+    memory: str,
+    subnet_id: str,
+    security_group_ids: list,
+    execution_role_arn: str,
+    command: str,
+    kubeconfig_b64: str,
+    stdin_b64: str,
+    job_id: str,
+) -> tuple:
+    """Create an ECS Fargate task that runs one kubectl/helm command against a
+    cluster's API, wait for it to finish, retrieve CloudWatch logs, and return
+    (exit_code, output).
+
+    Modelled on `_run_ecs_ansible_sync` — same task-def-register / run-task /
+    poll-describe-tasks / pull-CloudWatch-logs shape. The stock kubectl+helm
+    `image`, the generic shell `command`, and the kubeconfig (decoded from
+    ``KUBECONFIG_B64`` env into ``$KUBECONFIG``) are the only differences."""
+    import time
+    ecs = _get_ecs(region)
+    logs_client = boto3.client("logs", region_name=region)
+    log_group = "/ecs/k8s-runner"
+    log_stream_prefix = f"k8s/{job_id[:8]}" if job_id else "k8s/adhoc"
+
+    try:
+        logs_client.create_log_group(logGroupName=log_group)
+    except ClientError as e:
+        if e.response["Error"]["Code"] != "ResourceAlreadyExistsException":
+            raise
+
+    # Decode the kubeconfig from the env var into $KUBECONFIG, then run the
+    # caller's ready-to-run shell command (optionally piping decoded stdin in).
+    setup = (
+        "set -e; "
+        'printf %s "$KUBECONFIG_B64" | base64 -d > /tmp/kubeconfig; '
+        "export KUBECONFIG=/tmp/kubeconfig; "
+    )
+    if stdin_b64:
+        full_cmd = setup + 'printf %s "$STDIN_B64" | base64 -d | ' + command
+    else:
+        full_cmd = setup + command
+
+    td_kwargs: dict = dict(
+        family=task_family,
+        networkMode="awsvpc",
+        requiresCompatibilities=["FARGATE"],
+        cpu=str(cpu),
+        memory=str(memory),
+        containerDefinitions=[{
+            "name": "k8s",
+            "image": image,
+            "essential": True,
+            "command": ["sh", "-c", full_cmd],
+            "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                    "awslogs-group": log_group,
+                    "awslogs-region": region,
+                    "awslogs-stream-prefix": log_stream_prefix,
+                },
+            },
+        }],
+    )
+    if execution_role_arn:
+        td_kwargs["executionRoleArn"] = execution_role_arn
+
+    td_resp = ecs.register_task_definition(**td_kwargs)
+    task_def_arn = td_resp["taskDefinition"]["taskDefinitionArn"]
+
+    ecs.create_cluster(clusterName=cluster)
+
+    environment = [{"name": "KUBECONFIG_B64", "value": kubeconfig_b64}]
+    if stdin_b64:
+        environment.append({"name": "STDIN_B64", "value": stdin_b64})
+
+    run_resp = ecs.run_task(
+        cluster=cluster,
+        taskDefinition=task_def_arn,
+        launchType="FARGATE",
+        networkConfiguration={"awsvpcConfiguration": {
+            "subnets": [subnet_id] if subnet_id else [],
+            "securityGroups": security_group_ids or [],
+            "assignPublicIp": "DISABLED" if subnet_id else "ENABLED",
+        }},
+        overrides={"containerOverrides": [{
+            "name": "k8s",
+            "environment": environment,
+        }]},
+        count=1,
+    )
+
+    tasks = run_resp.get("tasks", [])
+    if not tasks:
+        raise AWSError(f"ECS k8s task failed to start: {run_resp.get('failures', [])}")
+
+    task_arn = tasks[0]["taskArn"]
+    task_id = task_arn.split("/")[-1]
+
+    # Poll until stopped (max 20 min)
+    exit_code = 1
+    for _ in range(120):
+        desc = ecs.describe_tasks(cluster=cluster, tasks=[task_arn])
+        t = desc.get("tasks", [{}])[0]
+        if t.get("lastStatus") == "STOPPED":
+            for c in t.get("containers", []):
+                if c.get("name") == "k8s":
+                    ec = c.get("exitCode")
+                    exit_code = ec if ec is not None else 1
+                    break
+            break
+        time.sleep(10)
+
+    # Retrieve CloudWatch logs
+    output = ""
+    try:
+        log_stream = f"{log_stream_prefix}/k8s/{task_id}"
+        log_resp = logs_client.get_log_events(
+            logGroupName=log_group,
+            logStreamName=log_stream,
+            startFromHead=True,
+        )
+        output = "\n".join(e["message"] for e in log_resp.get("events", []))
+    except Exception as log_err:
+        logger.warning("ECS k8s: could not retrieve logs: %s", log_err)
+
+    return exit_code, output
+
+
+async def run_ecs_k8s_task(
+    *,
+    region: str,
+    cluster: str,
+    task_family: str,
+    image: str,
+    cpu: str,
+    memory: str,
+    subnet_id: str,
+    security_group_ids: list,
+    execution_role_arn: str,
+    command: str,
+    kubeconfig_b64: str,
+    stdin_b64: str = "",
+    job_id: str,
+) -> tuple:
+    """Run a kubectl/helm command against a cluster's API via ECS Fargate.
+    Returns (exit_code, output)."""
+    try:
+        return await asyncio.to_thread(
+            _run_ecs_k8s_sync,
+            region, cluster, task_family, image, cpu, memory,
+            subnet_id, security_group_ids, execution_role_arn,
+            command, kubeconfig_b64, stdin_b64, job_id,
+        )
+    except AWSError:
+        raise
+    except (ClientError, BotoCoreError) as e:
+        raise AWSError(f"Failed to run ECS k8s task: {e}") from e
     except NoCredentialsError:
         raise AWSError("AWS credentials not configured.")
 
