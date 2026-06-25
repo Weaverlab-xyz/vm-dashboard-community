@@ -935,7 +935,9 @@ async def _helm_via_runner(kubeconfig: str, helm_args: list, add_eso_repo: bool 
                 await asyncio.to_thread(
                     _run_sync, ["helm", "repo", "add", _ESO_HELM_REPO_NAME, _ESO_HELM_REPO_URL], None, env)
                 await asyncio.to_thread(_run_sync, ["helm", "repo", "update"], None, env)
-            logger.info("k8s helm: %s", " ".join(helm_args[:3]))
+            # NB: don't log helm_args — they can carry --set secrets
+            # (operator-supplied entitle_agent_helm_extra_set, etc.).
+            logger.info("k8s helm: local in-process (%d args)", len(helm_args))
             return await asyncio.to_thread(_run_sync, ["helm", *helm_args], values_stdin, env)
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -945,7 +947,7 @@ async def _helm_via_runner(kubeconfig: str, helm_args: list, add_eso_repo: bool 
     if add_eso_repo:
         prefix = f"helm repo add {_ESO_HELM_REPO_NAME} {_ESO_HELM_REPO_URL} && helm repo update && "
     command = prefix + "helm " + " ".join(shlex.quote(a) for a in helm_args)
-    logger.info("k8s helm (cloud runner): %s", " ".join(helm_args[:3]))
+    logger.info("k8s helm: cloud runner (%d args)", len(helm_args))
     return await k8s_runner_service.run(
         kubeconfig=_runner_kubeconfig(kubeconfig), command=command,
         stdin_text=values_stdin, job_id="")
