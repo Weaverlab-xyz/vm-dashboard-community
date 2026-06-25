@@ -858,53 +858,97 @@ def _helm_env(tmpdir: str) -> dict:
 
 
 async def _apply_manifest_via_runner(kubeconfig: str, manifest_ref: str) -> str:
-    """Apply a manifest with the baked-in ``kubectl`` (in-process subprocess -- no
-    Docker socket, so it works on managed/serverless runtimes). ``manifest_ref`` is
-    a URL (``kubectl apply -f <url>``) or inline YAML; the latter is streamed to
-    ``kubectl apply -f -`` over stdin so secret-bearing manifests never touch disk."""
-    tmpdir = _write_kubeconfig(kubeconfig)
-    try:
-        kpath = os.path.join(tmpdir, "kubeconfig")
-        is_url = manifest_ref.startswith(("http://", "https://"))
-        if is_url:
-            cmd = ["kubectl", "--kubeconfig", kpath, "apply", "-f", manifest_ref]
-            stdin_data = None
-        else:
-            cmd = ["kubectl", "--kubeconfig", kpath, "apply", "-f", "-"]
-            stdin_data = manifest_ref
-        logger.info("k8s apply: source=%s", "url" if is_url else "inline")
-        return await asyncio.to_thread(_run_sync, cmd, stdin_data)
-    finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
+    """Apply a manifest with ``kubectl``. ``manifest_ref`` is a URL
+    (``kubectl apply -f <url>``) or inline YAML; the latter is streamed to
+    ``kubectl apply -f -`` over stdin so secret-bearing manifests never touch disk.
+
+    Default (``k8s_runner=local``): the baked-in ``kubectl`` runs in-process
+    (subprocess -- no Docker socket, so it works on managed/serverless runtimes).
+    Otherwise the equivalent command runs as a one-shot cloud task with clean
+    egress to the cluster API (see ``k8s_runner_service``)."""
+    from . import k8s_runner_service
+    if k8s_runner_service.mode() == "local":
+        tmpdir = _write_kubeconfig(kubeconfig)
+        try:
+            kpath = os.path.join(tmpdir, "kubeconfig")
+            is_url = manifest_ref.startswith(("http://", "https://"))
+            if is_url:
+                cmd = ["kubectl", "--kubeconfig", kpath, "apply", "-f", manifest_ref]
+                stdin_data = None
+            else:
+                cmd = ["kubectl", "--kubeconfig", kpath, "apply", "-f", "-"]
+                stdin_data = manifest_ref
+            logger.info("k8s apply: source=%s", "url" if is_url else "inline")
+            return await asyncio.to_thread(_run_sync, cmd, stdin_data)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    is_url = manifest_ref.startswith(("http://", "https://"))
+    if is_url:
+        command = f"kubectl apply -f {shlex.quote(manifest_ref)}"
+        stdin_text = None
+    else:
+        command = "kubectl apply -f -"
+        stdin_text = manifest_ref
+    logger.info("k8s apply (cloud runner): source=%s", "url" if is_url else "inline")
+    return await k8s_runner_service.run(
+        kubeconfig=_runner_kubeconfig(kubeconfig), command=command,
+        stdin_text=stdin_text, job_id="")
 
 
 async def _delete_manifest_via_runner(kubeconfig: str, manifest: str) -> str:
-    """``kubectl delete -f -`` an inline manifest over stdin (best-effort teardown)."""
-    tmpdir = _write_kubeconfig(kubeconfig)
-    try:
-        kpath = os.path.join(tmpdir, "kubeconfig")
-        cmd = ["kubectl", "--kubeconfig", kpath, "delete", "--ignore-not-found", "-f", "-"]
-        return await asyncio.to_thread(_run_sync, cmd, manifest)
-    finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
+    """``kubectl delete -f -`` an inline manifest over stdin (best-effort teardown).
+
+    Local (``k8s_runner=local``) runs the baked-in ``kubectl`` in-process;
+    otherwise it runs as a one-shot cloud task (see ``k8s_runner_service``)."""
+    from . import k8s_runner_service
+    if k8s_runner_service.mode() == "local":
+        tmpdir = _write_kubeconfig(kubeconfig)
+        try:
+            kpath = os.path.join(tmpdir, "kubeconfig")
+            cmd = ["kubectl", "--kubeconfig", kpath, "delete", "--ignore-not-found", "-f", "-"]
+            return await asyncio.to_thread(_run_sync, cmd, manifest)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    return await k8s_runner_service.run(
+        kubeconfig=_runner_kubeconfig(kubeconfig),
+        command="kubectl delete --ignore-not-found -f -",
+        stdin_text=manifest, job_id="")
 
 
 async def _helm_via_runner(kubeconfig: str, helm_args: list, add_eso_repo: bool = True,
                            values_stdin: Optional[str] = None) -> str:
-    """Run the baked-in ``helm`` against the cluster in-process (no Docker socket).
-    ``values_stdin`` is streamed to helm's stdin -- pass ``-f -`` in ``helm_args`` so
-    secret values ride stdin instead of the process args."""
-    tmpdir = _write_kubeconfig(kubeconfig)
-    try:
-        env = _helm_env(tmpdir)
-        if add_eso_repo:
-            await asyncio.to_thread(
-                _run_sync, ["helm", "repo", "add", _ESO_HELM_REPO_NAME, _ESO_HELM_REPO_URL], None, env)
-            await asyncio.to_thread(_run_sync, ["helm", "repo", "update"], None, env)
-        logger.info("k8s helm: %s", " ".join(helm_args[:3]))
-        return await asyncio.to_thread(_run_sync, ["helm", *helm_args], values_stdin, env)
-    finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
+    """Run ``helm`` against the cluster. ``values_stdin`` is streamed to helm's
+    stdin -- pass ``-f -`` in ``helm_args`` so secret values ride stdin instead of
+    the process args.
+
+    Local (``k8s_runner=local``) runs the baked-in ``helm`` in-process (no Docker
+    socket); otherwise the equivalent ``helm`` command runs as a one-shot cloud
+    task with clean egress to the cluster API (see ``k8s_runner_service``)."""
+    from . import k8s_runner_service
+    if k8s_runner_service.mode() == "local":
+        tmpdir = _write_kubeconfig(kubeconfig)
+        try:
+            env = _helm_env(tmpdir)
+            if add_eso_repo:
+                await asyncio.to_thread(
+                    _run_sync, ["helm", "repo", "add", _ESO_HELM_REPO_NAME, _ESO_HELM_REPO_URL], None, env)
+                await asyncio.to_thread(_run_sync, ["helm", "repo", "update"], None, env)
+            logger.info("k8s helm: %s", " ".join(helm_args[:3]))
+            return await asyncio.to_thread(_run_sync, ["helm", *helm_args], values_stdin, env)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    # KUBECONFIG is exported by the runner shell, so no --kubeconfig is needed.
+    prefix = ""
+    if add_eso_repo:
+        prefix = f"helm repo add {_ESO_HELM_REPO_NAME} {_ESO_HELM_REPO_URL} && helm repo update && "
+    command = prefix + "helm " + " ".join(shlex.quote(a) for a in helm_args)
+    logger.info("k8s helm (cloud runner): %s", " ".join(helm_args[:3]))
+    return await k8s_runner_service.run(
+        kubeconfig=_runner_kubeconfig(kubeconfig), command=command,
+        stdin_text=values_stdin, job_id="")
 
 
 def _yaml_quote(value: str) -> str:
@@ -1364,19 +1408,35 @@ def _entitle_k8s_rbac_manifest(namespace: str, sa: str, secret: str) -> str:
 
 async def _get_secret_b64_via_runner(kubeconfig: str, namespace: str, secret: str, key: str) -> str:
     """Return the **base64** value of ``.data[<key>]`` from a Secret (the caller
-    decodes it in Python). Uses the baked-in kubectl in-process."""
-    tmpdir = _write_kubeconfig(kubeconfig)
-    try:
-        kpath = os.path.join(tmpdir, "kubeconfig")
-        jsonpath = "{.data." + key.replace(".", "\\.") + "}"
-        cmd = ["kubectl", "--kubeconfig", kpath, "-n", namespace,
-               "get", "secret", secret, "-o", "jsonpath=" + jsonpath]
+    decodes it in Python). Local (``k8s_runner=local``) uses the baked-in kubectl
+    in-process; otherwise it runs as a one-shot cloud task (see
+    ``k8s_runner_service``). Missing secret/key → ``""`` either way."""
+    from . import k8s_runner_service
+    jsonpath = "{.data." + key.replace(".", "\\.") + "}"
+    if k8s_runner_service.mode() == "local":
+        tmpdir = _write_kubeconfig(kubeconfig)
         try:
-            return (await asyncio.to_thread(_run_sync, cmd)).strip()
-        except K8sError:
-            return ""
-    finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
+            kpath = os.path.join(tmpdir, "kubeconfig")
+            cmd = ["kubectl", "--kubeconfig", kpath, "-n", namespace,
+                   "get", "secret", secret, "-o", "jsonpath=" + jsonpath]
+            try:
+                return (await asyncio.to_thread(_run_sync, cmd)).strip()
+            except K8sError:
+                return ""
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    command = (
+        f"kubectl -n {shlex.quote(namespace)} get secret {shlex.quote(secret)} "
+        f"-o {shlex.quote('jsonpath=' + jsonpath)}"
+    )
+    try:
+        out = await k8s_runner_service.run(
+            kubeconfig=_runner_kubeconfig(kubeconfig), command=command,
+            stdin_text=None, job_id="")
+        return out.strip()
+    except (K8sError, k8s_runner_service.K8sRunnerError):
+        return ""
 
 
 async def register_cluster_in_entitle(cluster_id: str, action: str = "register") -> None:

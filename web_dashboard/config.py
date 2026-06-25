@@ -524,6 +524,14 @@ class Settings(BaseSettings):
     gcp_ansible_cloud_run_region: str = ""   # defaults to gcp_region if blank
     gcp_ansible_image: str = "willhallonline/ansible:latest"
     gcp_ansible_vpc_connector: str = ""      # e.g. "projects/proj/locations/region/connectors/name" (optional, for private host access)
+
+    # Kubernetes (kubectl/helm) runner. "local" runs in-process; the cloud modes
+    # run cluster-API ops as a one-shot stock kubectl+helm task with clean egress
+    # (corp Cloudflare proxy 526s direct kubectl/helm). Reuses the Ansible
+    # runner's per-cloud ECS/ACI/Cloud Run network settings (see k8s_runner_service).
+    k8s_runner: str = "local"                # "local" | "ecs" | "aci" | "gcp"
+    k8s_runner_image: str = "dtzar/helm-kubectl:latest"
+
     epml_rpm_path: str = ""
     epml_deb_path: str = ""
     pathfinder_script_path: str = ""

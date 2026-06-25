@@ -1864,6 +1864,142 @@ async def run_aci_ansible_task(
         raise AzureError(f"Failed to run ACI Ansible task: {e}") from e
 
 
+# ── ACI Kubernetes runner ─────────────────────────────────────────────────────
+
+_K8S_RUNNER_PREFIX = "k8s-runner"
+
+
+def _run_aci_k8s_sync(
+    cred, sub_id: str, rg: str, location: str, subnet_id: str,
+    image: str, command: str, kubeconfig_b64: str, stdin_b64: str, job_id: str,
+    acr_server: str = "", acr_username: str = "", acr_password: str = "",
+) -> tuple:
+    """
+    Create an ACI container group that runs a single kubectl/helm command against
+    a cluster's API, wait for it to finish, return (exit_code, log_output), and
+    delete the group.
+
+    Modelled on `_run_aci_ansible_sync` — same create / poll / logs / exit-code /
+    cleanup shape. The stock kubectl+helm `image`, the generic shell `command`,
+    and the kubeconfig (decoded from the ``KUBECONFIG_B64`` secure env into
+    ``$KUBECONFIG``) are the only differences.
+    """
+    import time
+
+    aci = _get_aci(cred, sub_id)
+    group_name = f"{_K8S_RUNNER_PREFIX}-{job_id[:8]}" if job_id else f"{_K8S_RUNNER_PREFIX}-adhoc"
+
+    setup = (
+        "set -e; "
+        'printf %s "$KUBECONFIG_B64" | base64 -d > /tmp/kubeconfig; '
+        "export KUBECONFIG=/tmp/kubeconfig; "
+    )
+    if stdin_b64:
+        full_cmd = setup + 'printf %s "$STDIN_B64" | base64 -d | ' + command
+    else:
+        full_cmd = setup + command
+
+    env_vars = [EnvironmentVariable(name="KUBECONFIG_B64", secure_value=kubeconfig_b64)]
+    if stdin_b64:
+        env_vars.append(EnvironmentVariable(name="STDIN_B64", secure_value=stdin_b64))
+
+    container = Container(
+        name="k8s",
+        image=image,
+        resources=ResourceRequirements(requests=ResourceRequests(cpu=1.0, memory_in_gb=1.0)),
+        command=["sh", "-c", full_cmd],
+        environment_variables=env_vars,
+    )
+
+    group_params = ContainerGroup(
+        location=location,
+        containers=[container],
+        os_type=OperatingSystemTypes.LINUX,
+        restart_policy="Never",
+        tags={"ManagedBy": "vm-cli-dashboard", "Purpose": "k8s-runner"},
+    )
+
+    if subnet_id:
+        from azure.mgmt.containerinstance.models import ContainerGroupSubnetId
+        group_params.subnet_ids = [ContainerGroupSubnetId(id=subnet_id)]
+
+    if acr_server and acr_username and acr_password:
+        from azure.mgmt.containerinstance.models import ImageRegistryCredential
+        group_params.image_registry_credentials = [
+            ImageRegistryCredential(server=acr_server, username=acr_username, password=acr_password)
+        ]
+
+    logger.info("ACI k8s: creating container group %s in %s", group_name, rg)
+    aci.container_groups.begin_create_or_update(rg, group_name, group_params).result()
+
+    # Poll until the container exits (max 20 min)
+    output = ""
+    exit_code = 1
+    state = ""
+    try:
+        for _ in range(120):
+            cg = aci.container_groups.get(rg, group_name)
+            state = (cg.instance_view.state if cg.instance_view else "") or ""
+            if state in ("Succeeded", "Failed", "Stopped"):
+                break
+            time.sleep(10)
+
+        # Retrieve logs
+        try:
+            log_resp = aci.containers.list_logs(rg, group_name, "k8s")
+            output = log_resp.content or ""
+        except Exception as log_err:
+            logger.warning("ACI k8s: could not retrieve logs: %s", log_err)
+
+        # Retrieve exit code from container instance view
+        try:
+            cg = aci.container_groups.get(rg, group_name)
+            for c in (cg.containers or []):
+                if c.name == "k8s" and c.instance_view and c.instance_view.current_state:
+                    ec = c.instance_view.current_state.exit_code
+                    exit_code = ec if ec is not None else (0 if state == "Succeeded" else 1)
+                    break
+            else:
+                exit_code = 0 if state == "Succeeded" else 1
+        except Exception as ec_err:
+            logger.warning("ACI k8s: could not get exit code: %s", ec_err)
+            exit_code = 0 if state == "Succeeded" else 1
+
+    finally:
+        # Always delete the runner container group
+        try:
+            aci.container_groups.begin_delete(rg, group_name).result()
+            logger.info("ACI k8s: deleted container group %s", group_name)
+        except Exception as del_err:
+            logger.warning("ACI k8s: could not delete group %s: %s", group_name, del_err)
+
+    return exit_code, output
+
+
+async def run_aci_k8s_task(
+    *,
+    rg: str, location: str, subnet_id: str, image: str,
+    command: str, kubeconfig_b64: str, stdin_b64: str = "", job_id: str,
+    acr_server: str = "", acr_username: str = "", acr_password: str = "",
+) -> tuple:
+    """
+    Run a kubectl/helm command against a cluster's API inside the Azure VNet via ACI.
+    Returns (exit_code, output_log).
+    """
+    try:
+        cred, sub_id = await _ensure_creds()
+        return await asyncio.to_thread(
+            _run_aci_k8s_sync,
+            cred, sub_id, rg, location, subnet_id, image,
+            command, kubeconfig_b64, stdin_b64, job_id,
+            acr_server, acr_username, acr_password,
+        )
+    except AzureError:
+        raise
+    except Exception as e:
+        raise AzureError(f"Failed to run ACI k8s task: {e}") from e
+
+
 # ── Generic Docker Compose → ACI container group ─────────────────────────────
 
 # Map compose restart policies onto the single group-level ACI policy.
