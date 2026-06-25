@@ -489,8 +489,7 @@ async def _run_deploy_compose(job_id: str, req: dict):
                 assign_public_ip=overrides.get("assign_public_ip", True),
             )
         elif provider == "aci":
-            rg = (overrides.get("resource_group")
-                  or settings.azure_aci_resource_group or settings.azure_resource_group)
+            rg = overrides.get("resource_group") or _aci_rg()
             result = await azure_service.deploy_compose_aci(
                 rg=rg,
                 location=overrides.get("location") or settings.azure_location,
@@ -568,6 +567,16 @@ async def stop_ecs_task(
         raise HTTPException(status_code=503, detail=str(exc))
 
 
+def _aci_rg() -> str:
+    """ACI resource group: wizard/Settings (config_service) first, env fallback.
+    ACI-specific RG, else the general Azure RG. Mirrors azure.py:_aci_rg."""
+    from ..services import config_service
+    return (config_service.get("azure_aci_resource_group")
+            or config_service.get("azure_resource_group")
+            or settings.azure_aci_resource_group
+            or settings.azure_resource_group)
+
+
 # ── ACI Container Instances ────────────────────────────────────────────────────
 
 @router.get("/aci-containers", response_model=ACIContainerListResponse)
@@ -577,7 +586,7 @@ async def list_aci_containers(
     """List Azure Container Instances (ACI) in the configured resource group."""
     try:
         raw = await azure_service.list_aci_container_instances(
-            settings.azure_aci_resource_group or settings.azure_resource_group,
+            _aci_rg(),
         )
         containers = [
             ACIContainerInstanceInfo(
@@ -595,7 +604,7 @@ async def list_aci_containers(
             )
             for c in raw
         ]
-        rg = settings.azure_aci_resource_group or settings.azure_resource_group
+        rg = _aci_rg()
         return ACIContainerListResponse(
             containers=containers,
             resource_group=rg,
@@ -613,7 +622,7 @@ async def stop_aci_container(
     """Stop a running ACI container group."""
     try:
         await azure_service.stop_aci_container_group(
-            settings.azure_aci_resource_group or settings.azure_resource_group,
+            _aci_rg(),
             container_group_name,
         )
         return ContainerActionResponse(ok=True, message="ACI container stopped")
