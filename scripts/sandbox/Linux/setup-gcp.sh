@@ -214,17 +214,17 @@ gcloud services vpc-peerings connect \
 ok "servicenetworking peering on $VPC (Cloud SQL private IP path)"
 
 # Explicit, auditable egress ALLOW: jumpoint → the peered PSA range on 5432
-# (postgres) + 3306 (mysql) — both managed-DB engines are reached via the tunnel.
+# (postgres), 3306 (mysql), 1433 (sqlserver) — every managed-DB engine reaches via the tunnel.
 PSA_CIDR="$(gcloud compute addresses describe "$PSA_RANGE" --global --project "$PROJECT_ID" \
   --format 'value(address,prefixLength)' 2>/dev/null | awk 'NF==2{print $1"/"$2}')"
 if [[ -n "$PSA_CIDR" ]]; then
   gcloud compute firewall-rules create "${NAME}-allow-db-from-jumpoint" \
     --project "$PROJECT_ID" --network "$VPC" \
     --direction EGRESS --priority 998 \
-    --action ALLOW --rules tcp:5432,tcp:3306 \
+    --action ALLOW --rules tcp:5432,tcp:3306,tcp:1433 \
     --target-tags "$NETWORK_TAG_JP" --destination-ranges "$PSA_CIDR" \
     --quiet >/dev/null 2>&1 || true
-  ok "Firewall: allow-db-from-jumpoint (tcp:5432,tcp:3306 → $PSA_CIDR)"
+  ok "Firewall: allow-db-from-jumpoint (tcp:5432,tcp:3306,tcp:1433 → $PSA_CIDR)"
 else
   ok "PSA CIDR not resolvable yet — skipping explicit DB egress rule (jumpoint default egress still reaches the DB)"
 fi

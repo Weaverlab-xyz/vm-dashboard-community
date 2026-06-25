@@ -45,7 +45,7 @@ VALID_CLOUDS = {"aws", "azure", "gcp"}
 _IMPLEMENTED = {
     ("postgres", "aws"), ("postgres", "gcp"), ("postgres", "azure"),
     ("mysql", "aws"), ("mysql", "azure"), ("mysql", "gcp"),
-    ("sqlserver", "aws"),
+    ("sqlserver", "aws"), ("sqlserver", "gcp"),
 }
 _PROVIDER = {
     ("postgres", "aws"): "rds",
@@ -55,6 +55,7 @@ _PROVIDER = {
     ("mysql", "azure"): "flexibleserver",
     ("mysql", "gcp"): "cloudsql",
     ("sqlserver", "aws"): "rds",
+    ("sqlserver", "gcp"): "cloudsql",
 }
 
 # terraform/<dir> module per (engine, cloud) — relative to repo root (parents[2]).
@@ -67,6 +68,7 @@ _TEMPLATE_DIRS = {
     ("mysql", "azure"): os.path.join(_REPO_ROOT, "terraform", "db_azure_mysql"),
     ("mysql", "gcp"): os.path.join(_REPO_ROOT, "terraform", "db_gcp_mysql"),
     ("sqlserver", "aws"): os.path.join(_REPO_ROOT, "terraform", "db_sqlserver"),
+    ("sqlserver", "gcp"): os.path.join(_REPO_ROOT, "terraform", "db_gcp_sqlserver"),
 }
 _DEPLOYMENTS_DIR = os.path.join(_REPO_ROOT, "terraform", "deployments")
 
@@ -191,6 +193,25 @@ def _build_tf_variables(
             "master_username": master_username,
             "master_password": master_password,
             "tier": opts.get("tier", "db-f1-micro"),
+            "disk_size": opts.get("disk_size", 20),
+            "private_network": opts.get("private_network") or _cfg("gcp_db_network") or _cfg("gcp_network"),
+            "labels": {"managed-by": "vm-dashboard", "clouddb-id": db_id},
+        }
+
+    if (engine, cloud) == ("sqlserver", "gcp"):
+        # Cloud SQL SQL Server. Mirrors postgres/gcp, but the admin login is the built-in
+        # `sqlserver` account (set via the module's root_password) — force master_username
+        # to "sqlserver" (Cloud SQL ignores any other name). SQL Server needs a db-custom-*
+        # tier (no shared-core); the module defaults database_version=SQLSERVER_2022_STANDARD.
+        # (The tunnel targets `master`, set in _broker_tunnel.)
+        return {
+            "project": _cfg("gcp_project") or _cfg("gcp_project_id"),
+            "region": region,
+            "identifier": f"clouddb-{db_id[:8]}",
+            "db_name": db_name,
+            "master_username": "sqlserver",
+            "master_password": master_password,
+            "tier": opts.get("tier", "db-custom-2-7680"),
             "disk_size": opts.get("disk_size", 20),
             "private_network": opts.get("private_network") or _cfg("gcp_db_network") or _cfg("gcp_network"),
             "labels": {"managed-by": "vm-dashboard", "clouddb-id": db_id},
