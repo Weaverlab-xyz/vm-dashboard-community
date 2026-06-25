@@ -55,6 +55,13 @@ services:
     environment:
       - DATABASE_URL=postgresql://dashboardadmin:${POSTGRES_PASSWORD:-devpassword}@db:5432/vmclidashboard
       - JWT_SECRET_KEY_FILE=/run/secrets/jwt_key
+      # Shared work dir for the transient kubectl/helm runner containers. The
+      # runner is a sibling (launched over the host docker.sock), so it must read
+      # the kubeconfig from a NAMED VOLUME shared by name — a bind of an
+      # in-container tmpdir resolves empty on the host and helm then hits
+      # localhost:8080. See k8s_service._runner_workdir.
+      - RUNNER_WORK_DIR=/runner-work
+      - RUNNER_WORK_VOLUME=vmdash_runner_work
     secrets:
       - jwt_key
     depends_on:
@@ -71,6 +78,9 @@ services:
       - type: bind
         source: /var/run/docker.sock
         target: /var/run/docker.sock
+      # Shared named volume so the sibling kubectl/helm runner containers can read
+      # the kubeconfig this service writes (see k8s_service._runner_workdir).
+      - runner_work:/runner-work
 
   # Dedicated background job runner — long jobs (k8s + cloud-DB provision/
   # decommission, and the k8s management-plane / ESO installs) run here, OUT of the
@@ -86,6 +96,13 @@ services:
     environment:
       - DATABASE_URL=postgresql://dashboardadmin:${POSTGRES_PASSWORD:-devpassword}@db:5432/vmclidashboard
       - JWT_SECRET_KEY_FILE=/run/secrets/jwt_key
+      # Shared work dir for the transient kubectl/helm runner containers. The
+      # runner is a sibling (launched over the host docker.sock), so it must read
+      # the kubeconfig from a NAMED VOLUME shared by name — a bind of an
+      # in-container tmpdir resolves empty on the host and helm then hits
+      # localhost:8080. See k8s_service._runner_workdir.
+      - RUNNER_WORK_DIR=/runner-work
+      - RUNNER_WORK_VOLUME=vmdash_runner_work
     secrets:
       - jwt_key
     depends_on:
@@ -97,9 +114,17 @@ services:
       - type: bind
         source: /var/run/docker.sock
         target: /var/run/docker.sock
+      # Shared named volume so the sibling kubectl/helm runner containers can read
+      # the kubeconfig this service writes (see k8s_service._runner_workdir).
+      - runner_work:/runner-work
 
 volumes:
   pgdata:
+  # Shared between app/worker and the transient kubectl/helm runner containers
+  # they launch as siblings. Explicit name (no compose project prefix) so the
+  # runner can mount it by the name in RUNNER_WORK_VOLUME.
+  runner_work:
+    name: vmdash_runner_work
 
 secrets:
   jwt_key:

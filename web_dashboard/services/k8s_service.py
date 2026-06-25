@@ -848,6 +848,29 @@ def _runner_ca_args() -> list:
             "-e", "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt"]
 
 
+def _runner_workdir(prefix: str) -> tuple:
+    """Create a per-op work dir and return ``(tmpdir, mount_args, workpath)`` —
+    where ``workpath`` is where the **sibling runner** sees those files.
+
+    The transient kubectl/helm runners are siblings launched over the host
+    docker.sock, so ``-v {tmpdir}:/work`` of an *in-container* tmpdir is resolved
+    by the host daemon against the HOST filesystem (empty) — the kubeconfig never
+    reaches the runner and helm/kubectl fall back to ``localhost:8080``. When
+    ``RUNNER_WORK_DIR``/``RUNNER_WORK_VOLUME`` are set (compose mounts one shared
+    **named volume** at the same path on this container AND, by name, on the
+    runner), put the dir on that volume so the runner reads the very same files at
+    the very same path. Falls back to the legacy ``/tmp`` + ``:/work`` bind when
+    unset (which only works when there is no sibling boundary)."""
+    work_dir = os.environ.get("RUNNER_WORK_DIR", "").strip()
+    work_vol = os.environ.get("RUNNER_WORK_VOLUME", "").strip()
+    if work_dir and work_vol:
+        os.makedirs(work_dir, exist_ok=True)
+        tmpdir = tempfile.mkdtemp(prefix=prefix, dir=work_dir)
+        return tmpdir, ["-v", f"{work_vol}:{work_dir}"], tmpdir
+    tmpdir = tempfile.mkdtemp(prefix=prefix)
+    return tmpdir, ["-v", f"{tmpdir}:/work"], "/work"
+
+
 async def _apply_manifest_via_runner(kubeconfig: str, manifest_ref: str) -> str:
     """Apply a manifest into a cluster with a **transient kubectl container**
     (mirrors ansible_local_service's local-docker runner over the mounted
@@ -857,7 +880,7 @@ async def _apply_manifest_via_runner(kubeconfig: str, manifest_ref: str) -> str:
     never written to disk. The kubeconfig lives in a tmpdir mounted into the
     one-shot container, which holds cluster-admin only for the apply."""
     kubeconfig = _runner_kubeconfig(kubeconfig)
-    tmpdir = tempfile.mkdtemp(prefix="k8s_apply_")
+    tmpdir, vol_args, work = _runner_workdir("k8s_apply_")
     try:
         with open(os.path.join(tmpdir, "kubeconfig"), "w") as fh:
             fh.write(kubeconfig)
@@ -865,15 +888,15 @@ async def _apply_manifest_via_runner(kubeconfig: str, manifest_ref: str) -> str:
         stdin_data = None
         docker_flags = ["docker", "run", "--rm"]
         if is_url:
-            shell_cmd = f"kubectl --kubeconfig /work/kubeconfig apply -f {shlex.quote(manifest_ref)}"
+            shell_cmd = f"kubectl --kubeconfig {work}/kubeconfig apply -f {shlex.quote(manifest_ref)}"
         else:
             # Pipe inline YAML over stdin (`-f -`); keep it off disk so CodeQL's
             # clear-text-storage sink never sees the secret manifest body.
-            shell_cmd = "kubectl --kubeconfig /work/kubeconfig apply -f -"
+            shell_cmd = f"kubectl --kubeconfig {work}/kubeconfig apply -f -"
             stdin_data = manifest_ref
             docker_flags.append("-i")
         cmd = [*docker_flags, *_runner_ca_args(), "--entrypoint", "/bin/sh",
-               "-v", f"{tmpdir}:/work", _KUBECTL_IMAGE, "-c", shell_cmd]
+               *vol_args, _KUBECTL_IMAGE, "-c", shell_cmd]
         logger.info("k8s apply: image=%s source=%s", _KUBECTL_IMAGE, "url" if is_url else "inline")
         return await asyncio.to_thread(_run_sync, cmd, stdin_data)
     finally:
@@ -883,15 +906,15 @@ async def _apply_manifest_via_runner(kubeconfig: str, manifest_ref: str) -> str:
 async def _delete_manifest_via_runner(kubeconfig: str, manifest: str) -> str:
     """``kubectl delete -f`` an inline manifest (best-effort teardown)."""
     kubeconfig = _runner_kubeconfig(kubeconfig)
-    tmpdir = tempfile.mkdtemp(prefix="k8s_del_")
+    tmpdir, vol_args, work = _runner_workdir("k8s_del_")
     try:
         with open(os.path.join(tmpdir, "kubeconfig"), "w") as fh:
             fh.write(kubeconfig)
         with open(os.path.join(tmpdir, "manifest.yaml"), "w") as fh:
             fh.write(manifest)
-        shell_cmd = "kubectl --kubeconfig /work/kubeconfig delete --ignore-not-found -f /work/manifest.yaml"
+        shell_cmd = f"kubectl --kubeconfig {work}/kubeconfig delete --ignore-not-found -f {work}/manifest.yaml"
         cmd = ["docker", "run", "--rm", *_runner_ca_args(), "--entrypoint", "/bin/sh",
-               "-v", f"{tmpdir}:/work", _KUBECTL_IMAGE, "-c", shell_cmd]
+               *vol_args, _KUBECTL_IMAGE, "-c", shell_cmd]
         return await asyncio.to_thread(_run_sync, cmd)
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
@@ -906,7 +929,7 @@ async def _helm_via_runner(kubeconfig: str, helm_args: list, add_eso_repo: bool 
     pass ``-f -`` in ``helm_args`` and the (secret) values ride stdin instead of
     the command line, so they never appear in the runner's process args."""
     kubeconfig = _runner_kubeconfig(kubeconfig)
-    tmpdir = tempfile.mkdtemp(prefix="k8s_helm_")
+    tmpdir, vol_args, work = _runner_workdir("k8s_helm_")
     try:
         with open(os.path.join(tmpdir, "kubeconfig"), "w") as fh:
             fh.write(kubeconfig)
@@ -920,7 +943,7 @@ async def _helm_via_runner(kubeconfig: str, helm_args: list, add_eso_repo: bool 
         if values_stdin is not None:
             docker_flags.append("-i")  # forward stdin to `helm ... -f -`
         cmd = [*docker_flags, *_runner_ca_args(), "--entrypoint", "/bin/sh",
-               "-e", "KUBECONFIG=/work/kubeconfig", "-v", f"{tmpdir}:/work",
+               "-e", f"KUBECONFIG={work}/kubeconfig", *vol_args,
                _HELM_IMAGE, "-c", shell_cmd]
         logger.info("k8s helm: %s", " ".join(helm_args[:3]))
         return await asyncio.to_thread(_run_sync, cmd, values_stdin)
@@ -1387,15 +1410,15 @@ async def _get_secret_b64_via_runner(kubeconfig: str, namespace: str, secret: st
     """Return the **base64** value of ``.data[<key>]`` from a Secret (decode in Python —
     the minimal kubectl image has no ``base64``)."""
     kubeconfig = _runner_kubeconfig(kubeconfig)
-    tmpdir = tempfile.mkdtemp(prefix="k8s_get_")
+    tmpdir, vol_args, work = _runner_workdir("k8s_get_")
     try:
         with open(os.path.join(tmpdir, "kubeconfig"), "w") as fh:
             fh.write(kubeconfig)
         jsonpath = "{.data." + key.replace(".", "\\.") + "}"
-        shell_cmd = (f"kubectl --kubeconfig /work/kubeconfig -n {shlex.quote(namespace)} "
+        shell_cmd = (f"kubectl --kubeconfig {work}/kubeconfig -n {shlex.quote(namespace)} "
                      f"get secret {shlex.quote(secret)} -o jsonpath={shlex.quote(jsonpath)}")
         cmd = ["docker", "run", "--rm", *_runner_ca_args(), "--entrypoint", "/bin/sh",
-               "-v", f"{tmpdir}:/work", _KUBECTL_IMAGE, "-c", shell_cmd]
+               *vol_args, _KUBECTL_IMAGE, "-c", shell_cmd]
         try:
             return (await asyncio.to_thread(_run_sync, cmd)).strip()
         except K8sError:
