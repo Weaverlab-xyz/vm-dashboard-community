@@ -222,6 +222,22 @@ RUN ARCH=$(dpkg --print-architecture) \
        done \
     && rm -rf /tmp/tf_provider_init /tmp/tf_provider_init_az4 /tmp/tf_provider_init_g6
 
+# kubectl + helm -- baked in so the k8s management-plane / ESO / Entitle-agent ops
+# run them as in-process subprocesses (services/k8s_service), NOT as sibling
+# containers over a Docker socket. That removes the docker.sock dependency, so the
+# dashboard runs on managed/serverless runtimes (Azure Container Instances, Cloud
+# Run, ECS/Fargate) that don't expose one -- and drops the whole sibling-runner
+# failure class (entrypoint, CA trust, shared volume, file perms). Fetched on CI's
+# clean network; both are architecture-aware (linux/amd64 + linux/arm64).
+RUN ARCH=$(dpkg --print-architecture) \
+    && KVER="$(curl -fsSL https://dl.k8s.io/release/stable.txt)" \
+    && curl -fsSL "https://dl.k8s.io/release/${KVER}/bin/linux/${ARCH}/kubectl" \
+        -o /usr/local/bin/kubectl \
+    && chmod +x /usr/local/bin/kubectl \
+    && kubectl version --client \
+    && curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash \
+    && helm version
+
 # Entrypoint fixes SSH key permissions when the Windows override
 # bind-mounts a key from %USERPROFILE%. Docker Desktop surfaces Windows
 # files as mode 0777 and sshd-client refuses keys that world-readable,
