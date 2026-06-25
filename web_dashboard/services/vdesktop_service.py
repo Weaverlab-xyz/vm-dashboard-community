@@ -293,6 +293,7 @@ async def provision_seats(pool_name: str, job_id: str, seat_ids: list, spec: dic
     db = SessionLocal()
     is_windows = (spec.get("os_type") or "Linux").lower() == "windows"
     seat_passwords: dict = {}
+    errors: list = []
     try:
         if job_id:
             job_service.set_running(db, job_id)
@@ -362,10 +363,19 @@ async def provision_seats(pool_name: str, job_id: str, seat_ids: list, spec: dic
                 except Exception as tag_err:
                     logger.warning("desktop pool tag failed vm=%s: %s", vm_name, tag_err)
                 ok += 1
+                if job_id:
+                    job_service.update_progress(
+                        db, job_id, int((ok + len(errors)) * 100 / max(len(seat_ids), 1)),
+                        f"Provisioned {vm_name} ({ok}/{len(seat_ids)})")
             except Exception as exc:
                 row.status = "failed"
                 db.commit()
+                errors.append(f"{vm_name}: {exc}")
                 logger.warning("desktop seat provision failed pool=%s seat=%s: %s", pool_name, sid, exc)
+                if job_id:
+                    job_service.update_progress(
+                        db, job_id, int((ok + len(errors)) * 100 / max(len(seat_ids), 1)),
+                        f"Seat {vm_name} failed: {exc}")
         if seat_passwords:
             # Merge into the pool's provision job (scale-ups run with job_id=None,
             # so fall back to the create-time job that _pool_spec resolves).
@@ -380,7 +390,16 @@ async def provision_seats(pool_name: str, job_id: str, seat_ids: list, spec: dic
                 j.metadata_dict = md
                 db.commit()
         if job_id:
-            job_service.set_completed(db, job_id, {"provisioned": ok, "requested": len(seat_ids)})
+            total = len(seat_ids)
+            if ok == total:
+                job_service.set_completed(db, job_id, {"provisioned": ok, "requested": total})
+            else:
+                # A provision where seats failed must read as FAILED on the Jobs
+                # screen, with the reason — not a green job whose failure only shows
+                # on the Desktops seat rows.
+                detail = "; ".join(errors[:3]) if errors else "see per-seat status on the Desktops page"
+                job_service.set_failed(
+                    db, job_id, f"Provisioned {ok}/{total} seat(s). {detail}")
         logger.info("desktop pool %s provisioned %d/%d seats", pool_name, ok, len(seat_ids))
     finally:
         db.close()
@@ -400,6 +419,7 @@ async def teardown_seats(seat_ids: list, job_id: str = None) -> None:
         if job_id:
             job_service.set_running(db, job_id)
         dropped = 0
+        errors: list = []
         for sid in seat_ids:
             row = db.query(VirtualDesktop).filter(VirtualDesktop.id == sid).first()
             if row is None:
@@ -410,6 +430,7 @@ async def teardown_seats(seat_ids: list, job_id: str = None) -> None:
                     try:
                         await azure_service.terminate_vm(rg, name)
                     except Exception as exc:
+                        errors.append(f"{name}: terminate failed: {exc}")
                         logger.warning("desktop seat terminate failed seat=%s vm=%s: %s", sid, name, exc)
             # Phase 2: remove the seat's PRA RDP jump (+ vault account) — state-driven.
             if row.pra_tunnel_state:
@@ -417,12 +438,20 @@ async def teardown_seats(seat_ids: list, job_id: str = None) -> None:
                     from . import terraform_pra_service as pra
                     await pra.remove_rdp_jump(row.pra_tunnel_state)
                 except Exception as exc:
+                    errors.append(f"{sid[:8]}: PRA jump removal failed: {exc}")
                     logger.warning("desktop seat PRA jump removal failed seat=%s: %s", sid, exc)
             db.delete(row)
             db.commit()
             dropped += 1
         if job_id:
-            job_service.set_completed(db, job_id, {"torn_down": dropped, "requested": len(seat_ids)})
+            if errors:
+                # Rows are dropped regardless, but a failed terminate can leave an
+                # Azure VM behind — surface that as a failed job, not a silent green.
+                job_service.set_failed(
+                    db, job_id,
+                    f"Tore down {dropped}/{len(seat_ids)} seat(s) with cleanup errors: {'; '.join(errors[:3])}")
+            else:
+                job_service.set_completed(db, job_id, {"torn_down": dropped, "requested": len(seat_ids)})
     finally:
         db.close()
 
