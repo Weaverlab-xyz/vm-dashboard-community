@@ -28,6 +28,7 @@ terraform/*
 !terraform/db_gcp_mysql
 !terraform/db_sqlserver
 !terraform/db_gcp_sqlserver
+!terraform/db_azure_sqlserver
 !terraform/k8s_cluster
 *.tfstate
 *.tfstate.*

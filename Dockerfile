@@ -105,6 +105,7 @@ COPY terraform/db_azure_mysql/ ./terraform/db_azure_mysql/
 COPY terraform/db_gcp_mysql/ ./terraform/db_gcp_mysql/
 COPY terraform/db_sqlserver/ ./terraform/db_sqlserver/
 COPY terraform/db_gcp_sqlserver/ ./terraform/db_gcp_sqlserver/
+COPY terraform/db_azure_sqlserver/ ./terraform/db_azure_sqlserver/
 # Managed-Kubernetes provisioning modules (driven by k8s_service, §1.1a): EKS
 # (hashicorp/aws), AKS (hashicorp/azurerm ~> 3.0), GKE (hashicorp/google ~> 5.0) —
 # all three providers are already in the pre-cache init below. Without the AKS/GKE
