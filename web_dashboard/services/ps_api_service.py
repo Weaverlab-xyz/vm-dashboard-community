@@ -119,6 +119,63 @@ async def _platform_id(client: httpx.AsyncClient, engine: str) -> int:
     raise PSApiError(f"platform {platform_name!r} not found in Password Safe")
 
 
+async def get_functional_account(name: str) -> dict:
+    """Resolve an EXISTING functional account by name → ``{id, platform_id}``.
+
+    The VM Password-Safe registration onboards a managed system against an
+    operator-configured functional account (per cloud); the provider has no
+    functional-account data source, so we read it over REST. The functional
+    account's ``PlatformID`` also drives the managed system's ``platform_id``
+    (and thus the agent-plugin-vs-broker management method)."""
+    target = (name or "").strip()
+    if not target:
+        raise PSApiError("functional account name is empty")
+    async with _client() as client:
+        await _sign_in(client)
+        try:
+            resp = await client.get("FunctionalAccounts")
+            if resp.status_code != 200:
+                raise PSApiError(
+                    f"GET FunctionalAccounts failed ({resp.status_code}): {resp.text[:400]}")
+            # Accept a name or a numeric id; match AccountName (case-insensitive).
+            for fa in resp.json():
+                fa_id = fa.get("FunctionalAccountID") or fa.get("ID") or fa.get("Id")
+                acct = str(fa.get("AccountName") or "").strip()
+                if acct.lower() == target.lower() or str(fa_id) == target:
+                    pid = fa.get("PlatformID") or fa.get("PlatformId")
+                    if fa_id is None or pid is None:
+                        break
+                    return {"id": int(fa_id), "platform_id": int(pid)}
+            raise PSApiError(f"functional account {target!r} not found in Password Safe")
+        finally:
+            await _sign_out(client)
+
+
+async def get_workgroup_id(name_or_id: str) -> str:
+    """Resolve a workgroup name → id (string). A numeric value is passed through
+    unchanged (the managed_system_by_workgroup resource takes workgroup_id as a
+    string)."""
+    val = (name_or_id or "").strip()
+    if not val:
+        raise PSApiError("workgroup is not configured")
+    if val.isdigit():
+        return val
+    async with _client() as client:
+        await _sign_in(client)
+        try:
+            resp = await client.get("Workgroups")
+            if resp.status_code != 200:
+                raise PSApiError(f"GET Workgroups failed ({resp.status_code}): {resp.text[:400]}")
+            for wg in resp.json():
+                if str(wg.get("Name") or "").strip().lower() == val.lower():
+                    wid = wg.get("ID") or wg.get("Id") or wg.get("OrganizationID")
+                    if wid is not None:
+                        return str(wid)
+            raise PSApiError(f"workgroup {val!r} not found in Password Safe")
+        finally:
+            await _sign_out(client)
+
+
 async def create_functional_account(
     *, engine: str, account_name: str, display_name: str,
     password: str, description: str = "",

@@ -443,6 +443,7 @@ class BeyondTrustFeatureConfig(BaseModel):
     pscli_api_url: str = ""
     pscli_client_id: str = ""
     pscli_client_secret: str = ""   # encrypted at rest
+    pscli_api_account_name: str = ""  # run-as user, required by the passwordsafe TF provider (VM registration)
     # PRA API credentials (used by the SRA Terraform provider for Shell Jump provisioning)
     bt_api_host: str = ""
     bt_client_id: str = ""

@@ -419,6 +419,19 @@
           </p>
         </div>
         {% endif %}
+        {% if beyondtrust_enabled %}
+        <!-- Password Safe registration opt-in -->
+        <div class="pt-1">
+          <label class="flex items-center gap-2 text-sm text-gray-700">
+            <input type="checkbox" x-model="deployForm.register_in_passwordsafe"
+                   class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+            Onboard into Password Safe (managed system + account)
+          </label>
+          <p class="mt-1 text-xs text-gray-400 ml-6">
+            Requires Password Safe registration enabled; onboards the image's adminuser account, SSH-key managed.
+          </p>
+        </div>
+        {% endif %}
 
         <!-- Deploy error -->
         <div x-show="deployError" x-transition
@@ -714,6 +727,7 @@ function gcpDashboard() {
       dockerKeyBackend:   '',
       docker_deploy_key_ref: '',
       register_in_entitle: false,
+      register_in_passwordsafe: false,
       ssh_key_secret_override: '',
       sshKeySecrets: [],
     },
@@ -921,6 +935,7 @@ function gcpDashboard() {
         network_tags:       [],
         workgroup:          this._defaultWorkgroup(),
         register_in_entitle: false,
+        register_in_passwordsafe: false,
         ssh_key_secret_override: '',
         sshKeySecrets: [],
       };
@@ -971,6 +986,7 @@ function gcpDashboard() {
           workgroup:          this.deployForm.workgroup,
           docker_deploy_key_ref: this.deployForm.docker_deploy_key_ref || null,
           register_in_entitle: this.deployForm.register_in_entitle,
+          register_in_passwordsafe: this.deployForm.register_in_passwordsafe,
           ssh_key_secret_override: this.deployForm.ssh_key_secret_override || null,
         };
         const res = await API.post('/api/gcp/deploy', body);

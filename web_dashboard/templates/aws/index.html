@@ -799,6 +799,19 @@
             </p>
           </div>
           {% endif %}
+          {% if beyondtrust_enabled %}
+          <!-- Password Safe registration opt-in -->
+          <div class="mb-4">
+            <label class="flex items-center gap-2 text-sm text-gray-700">
+              <input type="checkbox" x-model="deployForm.register_in_passwordsafe"
+                     class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+              Onboard into Password Safe (managed system + account)
+            </label>
+            <p class="mt-1 text-xs text-gray-400 ml-6">
+              Requires Password Safe registration enabled; onboards the image's adminuser account, SSH-key managed.
+            </p>
+          </div>
+          {% endif %}
 
           <!-- BeyondTrust PRA options (optional per-deploy overrides) -->
           <div class="mb-4 space-y-3 p-3 bg-gray-50 rounded-lg border border-gray-200">
@@ -993,6 +1006,19 @@
             </label>
             <p class="mt-1 text-xs text-gray-400 ml-6">
               Requires Entitle registration enabled; private instances also need a provisioned Entitle agent.
+            </p>
+          </div>
+          {% endif %}
+          {% if beyondtrust_enabled %}
+          <!-- Password Safe registration opt-in (applies to every instance in the batch) -->
+          <div class="mb-1">
+            <label class="flex items-center gap-2 text-sm text-gray-700">
+              <input type="checkbox" x-model="deployForm.register_in_passwordsafe"
+                     class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+              Onboard each instance into Password Safe (managed system + account)
+            </label>
+            <p class="mt-1 text-xs text-gray-400 ml-6">
+              Requires Password Safe registration enabled; onboards the image's adminuser account, SSH-key managed.
             </p>
           </div>
           {% endif %}
@@ -1256,6 +1282,7 @@
         jump_group: '', jumpoint_name: '',
         praCredBackend: '', pra_credential_ref: '',
         register_in_entitle: false,
+        register_in_passwordsafe: false,
         ssh_key_secret_override: '',
         sshKeySecrets: [],
       },
@@ -1507,6 +1534,7 @@
           workgroup: this.availableWorkgroups.includes('default') ? 'default' :
                      (this.availableWorkgroups[0] || ''),
           register_in_entitle: false,
+          register_in_passwordsafe: false,
           ssh_key_secret_override: '',
           sshKeySecrets: [],
         };
@@ -1609,6 +1637,7 @@
             jumpoint_name: this.deployForm.jumpoint_name || null,
             pra_credential_ref: this.deployForm.pra_credential_ref || null,
             register_in_entitle: this.deployForm.register_in_entitle,
+            register_in_passwordsafe: this.deployForm.register_in_passwordsafe,
             ssh_key_secret_override: this.deployForm.ssh_key_secret_override || null,
           };
 
@@ -1724,6 +1753,7 @@
             security_group_ids: this.deployForm.security_group_ids,
             workgroup: this.deployForm.workgroup,
             register_in_entitle: this.deployForm.register_in_entitle,
+            register_in_passwordsafe: this.deployForm.register_in_passwordsafe,
             ssh_key_secret_override: this.deployForm.ssh_key_secret_override || null,
           });
           this.bulkDeployResults = resp.jobs || [];

@@ -191,6 +191,23 @@ class Settings(BaseSettings):
     pscli_api_url: str = ""      # e.g. "https://ps.company.com"
     pscli_client_id: str = ""
     pscli_client_secret: str = ""
+    pscli_api_account_name: str = ""  # Password Safe run-as user — REQUIRED by the passwordsafe TF provider block
+
+    # Optional Password Safe VM resource registration (per-deploy opt-in, mirrors
+    # entitle_registration_*). Onboards a built VM as a managed system + the baked-in
+    # adminuser account (SSH-key managed). The functional account is operator-configured
+    # per cloud; its platform decides agent-plugin vs Resource-Broker management.
+    passwordsafe_registration_enabled: bool = False     # global capability flag (also per-build opt-in)
+    passwordsafe_api_version: str = "3.1"               # passwordsafe provider api_version
+    passwordsafe_workgroup: str = ""                    # workgroup name or id the managed system lands in
+    passwordsafe_vm_functional_account: str = ""        # generic fallback functional account (name or id)
+    passwordsafe_vm_functional_account_aws: str = ""    # per-cloud functional account override
+    passwordsafe_vm_functional_account_azure: str = ""
+    passwordsafe_vm_functional_account_gcp: str = ""
+    passwordsafe_managed_account_name: str = "adminuser"  # the bt-ready account onboarded as managed
+    passwordsafe_entity_type_id: int = 1                # BeyondInsight entity type (1 per provider example)
+    passwordsafe_ssh_key_enforcement_mode: int = 2      # 0=none, 1=auto, 2=strict (confirm vs tenant)
+    passwordsafe_application_host_id: int = 0           # >0 routes management via a broker/application host
     bt_api_host: str = ""        # PRA host, used by terraform_pra_service
     bt_client_id: str = ""
     bt_client_secret: str = ""

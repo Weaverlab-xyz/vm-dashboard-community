@@ -367,6 +367,7 @@ async def deploy_ami(
             "security_group_ids": req.security_group_ids,
             "workgroup": workgroup,
             "register_in_entitle": req.register_in_entitle,
+            "register_in_passwordsafe": req.register_in_passwordsafe,
             "ssh_key_secret_override": req.ssh_key_secret_override,
         },
     )
@@ -435,6 +436,7 @@ async def bulk_deploy_amis(
                 "workgroup": workgroup,
                 "bulk": True,
                 "register_in_entitle": req.register_in_entitle,
+                "register_in_passwordsafe": req.register_in_passwordsafe,
                 "ssh_key_secret_override": req.ssh_key_secret_override,
             },
         )
@@ -833,6 +835,16 @@ async def _register_vm_in_entitle(db, job_id: str, vm_name: str, hostname: str,
                                    ssh_key_secret=result.get("ssh_secret_name") or "")
 
 
+async def _register_vm_in_passwordsafe(db, job_id: str, vm_name: str, hostname: str,
+                                       result: dict) -> None:
+    """Thin wrapper around the shared Password Safe VM hook (tag=AWS). Onboards the
+    VM as a managed system + its baked-in adminuser account, keyed by the VM's own
+    SSH keypair (the same secret used for the deploy / Entitle registration)."""
+    from ..services import ps_vm_hook
+    await ps_vm_hook.register(db, job_id, vm_name, hostname, result=result, tag="AWS",
+                              ssh_key_secret=result.get("ssh_secret_name") or "")
+
+
 async def _run_deploy(
     job_id: str,
     ami_id: str,
@@ -979,6 +991,12 @@ async def _run_deploy(
         if _reg and not is_windows and entitle_vm_hook.registration_enabled():
             await _register_vm_in_entitle(db, job_id, instance_name, hostname,
                                           result, private=not bool(result.get("public_ip")))
+
+        # ── Step 5: Password Safe — onboard as a managed system + account (optional)
+        from ..services import ps_vm_hook
+        _psreg = bool((_job.metadata_dict or {}).get("register_in_passwordsafe")) if _job else False
+        if _psreg and not is_windows and ps_vm_hook.registration_enabled():
+            await _register_vm_in_passwordsafe(db, job_id, instance_name, hostname, result)
 
         job_service.set_completed(db, job_id, result)
         await cache_service.invalidate(cache_service.key_global("aws_instances"))
@@ -1134,6 +1152,12 @@ async def _run_bulk_deploy(
                     await _register_vm_in_entitle(db, job_id, item.instance_name, hostname,
                                                   result, private=not bool(result.get("public_ip")))
 
+                # Step 5: Password Safe — onboard as a managed system + account (per-build opt-in)
+                from ..services import ps_vm_hook
+                _bpsreg = bool((_bjob.metadata_dict or {}).get("register_in_passwordsafe")) if _bjob else False
+                if _bpsreg and not is_windows and ps_vm_hook.registration_enabled():
+                    await _register_vm_in_passwordsafe(db, job_id, item.instance_name, hostname, result)
+
                 job_service.set_completed(db, job_id, result)
 
             except AWSError as e:
@@ -1222,6 +1246,12 @@ async def _run_destroy(destroy_job_id: str, deploy_job_id: str, instance_id: str
                 from ..services import entitle_vm_hook
                 await entitle_vm_hook.deregister(meta, result)
                 job_service.update_progress(db, destroy_job_id, 88, "Entitle integration removed.")
+
+            # Off-board the Password Safe managed system if this deploy registered one.
+            if meta.get("ps_registration_tf_state"):
+                from ..services import ps_vm_hook
+                await ps_vm_hook.deregister(meta, result)
+                job_service.update_progress(db, destroy_job_id, 89, "Password Safe system off-boarded.")
 
             # Mark original deploy job as destroyed
             meta["destroyed"] = True
