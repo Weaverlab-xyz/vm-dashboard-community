@@ -71,7 +71,7 @@ def upload_s3(local: str, bucket: str, key: str, region: str) -> None:
 
 def upload_azure(local: str, account: str, container: str, blob_name: str) -> None:
     from azure.identity import ClientSecretCredential
-    from azure.storage.blob import BlobServiceClient
+    from azure.storage.blob import BlobServiceClient, BlobType
     log(f"upload https://{account}.blob.core.windows.net/{container}/{blob_name}")
     cred = ClientSecretCredential(
         tenant_id=os.environ["AZURE_TENANT_ID"],
@@ -83,8 +83,22 @@ def upload_azure(local: str, account: str, container: str, blob_name: str) -> No
         credential=cred,
     )
     blob_client = svc.get_blob_client(container=container, blob=blob_name)
+    # Azure managed-image / managed-disk creation requires the VHD to be stored
+    # in a PAGE blob. upload_blob() defaults to a BLOCK blob, which Azure rejects
+    # at image-create time: "(InvalidParameter) The source blob ... is not a page
+    # blob." Page blobs must be 512-byte aligned — a valid fixed-format VHD always
+    # is; fail with a clear message rather than a cryptic SDK error if the source
+    # isn't (e.g. a dynamic VHD slipped through with no conversion).
+    size = os.path.getsize(local)
+    if size % 512 != 0:
+        raise ValueError(
+            f"VHD is {size} bytes — not a multiple of 512, so it can't be stored as an "
+            "Azure page blob. The source must be a fixed-format VHD."
+        )
     with open(local, "rb") as f:
-        blob_client.upload_blob(f, overwrite=True)
+        blob_client.upload_blob(
+            f, blob_type=BlobType.PageBlob, length=size, overwrite=True, max_concurrency=4,
+        )
     log("upload done")
 
 
