@@ -34,7 +34,7 @@ Desktop required).
 - [Appendix I — Entitle resource registration](#appendix-i--entitle-resource-registration)
 - [Appendix J — MCP server (AI client integration)](#appendix-j--mcp-server-ai-client-integration)
 - [Appendix K — Portainer CE integration](#appendix-k--portainer-ce-integration)
-- [Appendix L — Ansible config management](#appendix-l--ansible-config-management)
+- [Appendix L — Remote Worker (Ansible + Kubernetes runners)](#appendix-l--remote-worker-ansible--kubernetes-runners)
 
 ---
 
@@ -446,7 +446,8 @@ So, for the community edition:
   OS.
 - The optional **MCP server** (Appendix C) needs no extra containers —
   it runs inside the main app and is always available once the stack is up.
-- **Portainer**, **Ansible**, **Proxmox VE**, **VMware vSphere / ESXi**,
+- **Portainer**, **Remote Worker** (Ansible + Kubernetes runners),
+  **Proxmox VE**, **VMware vSphere / ESXi**,
   **Microsoft Hyper-V**, **Nutanix AHV**, **XCP-ng / XenServer**, and
   **Entitle** are optional integrations with their own backing infrastructure.
   See the detailed guides in [`docs/integrations/`](integrations/).
@@ -1083,17 +1084,23 @@ Docker containers from the dashboard.
 
 ---
 
-## Appendix L — Ansible config management
+## Appendix L — Remote Worker (Ansible + Kubernetes runners)
 
 > **Full guide:** [docs/integrations/ansible.md](integrations/ansible.md)
 
+> Formerly "Ansible config management." The Settings panel is now
+> **Configuration → Remote Worker**; it configures the Ansible runner
+> *and* the Kubernetes (kubectl/helm) runner, which share the same
+> per-cloud cloud-task settings.
+
 Optional. Enables the **Config Mgmt** tab for running Ansible playbooks
-against managed VMs. Playbooks can run via local Docker or a remote
-AWS ECS Fargate cluster.
+and provisioning assets against managed VMs, plus the Kubernetes runner
+for cluster-API ops. Each runner can run locally or as a one-shot cloud
+task (AWS ECS Fargate / Azure ACI / GCP Cloud Run).
 
 ### Enable the integration
 
-1. **Settings → Integrations** → toggle **Ansible config management** on.
-2. Configure your playbook runner (local Docker socket or ECS cluster ARN)
-   in the configuration panel.
+1. **Settings → Integrations** → toggle **Remote Worker** on.
+2. Configure the runner backends (`ansible_runner`, `k8s_runner`) and any
+   shared cloud infrastructure in the **Remote Worker** configuration panel.
 3. Click **Save**. No restart required.

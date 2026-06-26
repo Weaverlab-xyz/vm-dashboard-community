@@ -121,15 +121,18 @@ after first login — only if you have the backing infrastructure:
 - **Microsoft Hyper-V** — VM management via WinRM
 - **Nutanix AHV** — VM management via Prism Central REST API
 - **XCP-ng / XenServer** — VM management via XAPI
-- **Ansible provisioning runner** — run playbooks (`.yml`) and provisioning
-  assets (`.sh`, `.ps1`, `.rpm`, `.deb`) against any target: on-premises
-  hypervisors (Proxmox, vSphere, Hyper-V, Nutanix, XCP-ng) *or* cloud VMs
-  (EC2, Azure VMs, GCE). Assets live in storage you configure on `/storage`
-  (AWS S3 / Azure Blob / GCS / Local-or-UNC); the runner can be local Docker
-  for any target reachable from the dashboard host, or AWS ECS / Azure ACI /
-  GCP Cloud Run Jobs for VMs in private cloud subnets. Every runner is
-  one-shot — see [docs/config-management.md](docs/config-management.md) for
-  the security argument. Integration setup in
+- **Remote Worker (Ansible + Kubernetes runners)** — the **Ansible runner**
+  runs playbooks (`.yml`) and provisioning assets (`.sh`, `.ps1`, `.rpm`,
+  `.deb`) against any target: on-premises hypervisors (Proxmox, vSphere,
+  Hyper-V, Nutanix, XCP-ng) *or* cloud VMs (EC2, Azure VMs, GCE). Assets
+  live in storage you configure on `/storage` (AWS S3 / Azure Blob / GCS /
+  Local-or-UNC). The **Kubernetes runner** runs cluster-API ops
+  (`kubectl`/`helm`) for the entitle agent, ESO, and mgmt-plane. Both can be
+  local, or a one-shot AWS ECS / Azure ACI / GCP Cloud Run task for private
+  subnets or to side-step a corp proxy — and they share the same per-cloud
+  cloud-task settings (the image-promote runner reuses them too). Every
+  runner is one-shot — see [docs/config-management.md](docs/config-management.md)
+  for the security argument. Integration setup in
   [docs/integrations/ansible.md](docs/integrations/ansible.md).
 - **BeyondTrust Password Safe and/or PRA** — secret retrieval and session recording
 - **BeyondTrust EPM for Linux (EPM-L)** — list and build agent packages, one-click sync of `.rpm`/`.deb` packages to your Ansible asset bucket, installation-token issuance for new endpoint registration. See [docs/integrations/epml.md](docs/integrations/epml.md).
