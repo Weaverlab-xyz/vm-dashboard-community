@@ -36,12 +36,17 @@ logger = logging.getLogger(__name__)
 
 class K8sRunnerError(Exception):
     """Runner-side failure. Raised when the task can't be launched or completes
-    non-zero. Carries the log tail (if any) so the caller can surface it to the
-    operator."""
+    non-zero. ``log_output`` carries the runner's own stdout/stderr (kubectl/helm)
+    and is folded into the message (tail-capped) so a non-zero exit shows *why*
+    on the Job page — callers persist ``str(exc)`` — not just the bare exit code.
+    The full output stays available on ``.log_output``."""
 
     def __init__(self, message: str, log_output: str = ""):
-        super().__init__(message)
-        self.log_output = log_output
+        self.log_output = log_output or ""
+        tail = self.log_output.strip()
+        if len(tail) > 4000:
+            tail = "…(truncated)…\n" + tail[-4000:]
+        super().__init__(f"{message}\n\n{tail}" if tail else message)
 
 
 def _cfg(key: str, fallback: str = "") -> str:
@@ -247,5 +252,9 @@ async def run(
         raise K8sRunnerError(f"Unknown k8s_runner mode: {m!r}")
 
     if exit_code != 0:
+        logger.warning(
+            "k8s runner (%s) exited %s for job %s; output tail:\n%s",
+            m, exit_code, job_id or "(adhoc)", (output or "").strip()[-2000:],
+        )
         raise K8sRunnerError(f"k8s runner exited {exit_code}", log_output=output)
     return output
