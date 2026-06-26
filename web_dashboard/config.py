@@ -499,7 +499,15 @@ class Settings(BaseSettings):
     promote_runner_gcp_staging_prefix: str = "promote-staging"
     promote_runner_gcp_image_family: str = ""            # optional family label on the resulting custom image
 
-    ansible_runner: str = "local"              # "local" | "ecs" | "aci" | "gcp"
+    ansible_runner: str = "local"              # "local" | "ecs" | "aci" | "gcp" — global default/fallback
+    # Per-target-cloud Ansible runner backend. Overrides ansible_runner for that
+    # cloud's targets; blank → fall back to ansible_runner. Each cloud's only
+    # sensible cloud backend is its own task service, so the value is "local" or
+    # the matching service (AWS→ecs, Azure→aci, GCP→gcp). The run request's
+    # `cloud` field selects the key — see web_dashboard/api/config_mgmt.py.
+    ansible_runner_aws: str = ""               # "" | "local" | "ecs"
+    ansible_runner_azure: str = ""             # "" | "local" | "aci"
+    ansible_runner_gcp: str = ""               # "" | "local" | "gcp"
     # Per-cloud SSH user for Ansible cloud runner targets. Each cloud's stock
     # AMI / image family ships with a different default username, so a single
     # global value would be wrong for at least two of the three. Set the one
@@ -529,7 +537,14 @@ class Settings(BaseSettings):
     # run cluster-API ops as a one-shot stock kubectl+helm task with clean egress
     # (a TLS-inspecting corp proxy rejects/526s direct kubectl/helm). Reuses the Ansible
     # runner's per-cloud ECS/ACI/Cloud Run network settings (see k8s_runner_service).
-    k8s_runner: str = "local"                # "local" | "ecs" | "aci" | "gcp"
+    k8s_runner: str = "local"                # "local" | "ecs" | "aci" | "gcp" — global default/fallback
+    # Per-target-cluster-cloud runner backend. Overrides k8s_runner for that
+    # cloud's clusters; blank → fall back to k8s_runner. "local" or the matching
+    # service (AWS/EKS→ecs, Azure/AKS→aci, GCP/GKE→gcp). The cluster's cloud
+    # (K8sCluster.cloud) selects the key — see k8s_runner_service.mode().
+    k8s_runner_aws: str = ""                  # "" | "local" | "ecs"
+    k8s_runner_azure: str = ""                # "" | "local" | "aci"
+    k8s_runner_gcp: str = ""                  # "" | "local" | "gcp"
     k8s_runner_image: str = "dtzar/helm-kubectl:latest"
 
     epml_rpm_path: str = ""

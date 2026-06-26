@@ -48,9 +48,17 @@ def _cfg(key: str, fallback: str = "") -> str:
     return config_service.get(key) or getattr(settings, key, fallback)
 
 
-def mode() -> str:
-    """The configured runner mode: ``local`` (default) | ``ecs`` | ``aci`` | ``gcp``."""
-    return (_cfg("k8s_runner") or "local").strip().lower()
+def mode(target_cloud: str = "") -> str:
+    """The runner mode for a target cluster's cloud: ``local`` (default) |
+    ``ecs`` | ``aci`` | ``gcp``.
+
+    Resolves the per-cloud key (``k8s_runner_aws`` / ``_azure`` / ``_gcp``) first,
+    then the global ``k8s_runner``, then ``local``. ``target_cloud`` is the
+    cluster's cloud (``aws`` / ``azure`` / ``gcp`` from ``K8sCluster.cloud``); a
+    blank value uses the global setting (back-compat)."""
+    tc = (target_cloud or "").strip().lower()
+    per_cloud = _cfg(f"k8s_runner_{tc}") if tc in ("aws", "azure", "gcp") else ""
+    return (per_cloud or _cfg("k8s_runner") or "local").strip().lower()
 
 
 def _resolve_ecs() -> dict:
@@ -156,6 +164,7 @@ async def run(
     *,
     kubeconfig: str,
     command: str,
+    target_cloud: str = "",
     stdin_text: Optional[str] = None,
     job_id: str = "",
 ) -> str:
@@ -168,11 +177,14 @@ async def run(
     if given, is decoded and piped to the command's stdin (used to stream
     secret-bearing manifests / Helm values without touching disk).
 
+    ``target_cloud`` (the cluster's cloud — ``aws`` / ``azure`` / ``gcp``) selects
+    the backend via ``mode(target_cloud)``; blank uses the global ``k8s_runner``.
+
     Caller is expected to have already token-prepped ``kubeconfig`` via
     ``k8s_service._runner_kubeconfig``. Raises ``K8sRunnerError`` on a non-zero
     exit, carrying the log output.
     """
-    m = mode()
+    m = mode(target_cloud)
     if m == "local":
         # The k8s_service helpers handle the local in-process path directly and
         # must not reach here; guard against a mis-wired caller.

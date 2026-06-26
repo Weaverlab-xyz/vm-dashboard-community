@@ -220,20 +220,23 @@ async def _run_job(
             job_service.set_failed(db, job_id, f"Asset storage error: {e}")
             return
 
+        # Per-target-cloud runner backend: an AWS-target job uses
+        # ansible_runner_aws, Azure → ansible_runner_azure, GCP → ansible_runner_gcp,
+        # each falling back to the global ansible_runner. The target cloud is the
+        # run request's `cloud` field (operator-set for cloud targets; "" on-prem).
         runner = _cfg("ansible_runner") or "local"
+        if cloud in ("aws", "azure", "gcp"):
+            runner = _cfg(f"ansible_runner_{cloud}") or runner
         is_adhoc = "." in target or ":" in target
         is_playbook = ansible_local_service.asset_type(asset) == "playbook"
 
         # Cloud runners only support bare-IP targets and .yml playbooks.
         # Fall back to local for group targets or non-playbook assets.
         if runner != "local" and is_adhoc and is_playbook:
-            key_cloud = cloud or runner  # "ecs"→"aws", "aci"→"azure", etc.
-            if runner == "ecs":
-                key_cloud = "aws"
-            elif runner == "aci":
-                key_cloud = "azure"
-            elif runner == "gcp":
-                key_cloud = "gcp"
+            # key_cloud is the target cloud (drives SSH key + user lookup). The
+            # run request's `cloud` wins; fall back to inferring it from the
+            # runner backend for the legacy global path (no `cloud` supplied).
+            key_cloud = cloud or {"ecs": "aws", "aci": "azure", "gcp": "gcp"}.get(runner, runner)
 
             # SSH user: explicit ansible_user from the run request wins,
             # else the per-cloud config key, else the global fallback.
