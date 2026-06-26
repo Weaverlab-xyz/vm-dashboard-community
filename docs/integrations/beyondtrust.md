@@ -186,6 +186,14 @@ Off-boarding is automatic: destroying the VM removes the managed system + accoun
 (Terraform destroy from the stored state). Onboarding failures are **non-fatal** — they are
 recorded on the job (`ps_error`) but never fail the deploy.
 
+### Troubleshooting (AWS Systems Manager)
+
+| Symptom | Cause / fix |
+|---|---|
+| Managed system created on the **wrong platform** (e.g. "GCP VM SSH Rotation") | The functional account configured for AWS is on the wrong platform — the managed system inherits the FA's platform. Point `passwordsafe_vm_functional_account_aws` at the *AWS Systems Manager Custom Plugin* account. The dashboard now rejects this up front with a clear `ps_error`. |
+| Change Password → **"Instances not in a valid state for account"** | The EC2 instance is not an SSM **Managed Instance**. Confirm it's Online in **Systems Manager → Fleet Manager**; the usual cause is no network path to the SSM endpoints — give the instance internet egress (public subnet + IGW, or a NAT) or VPC interface endpoints for `ssm`, `ssmmessages`, and `ec2messages`, and ensure `ec2_ssm_instance_profile` grants `AmazonSSMManagedInstanceCore`. |
+| Change Password → **"Index was outside the bounds of the array"** on `Server=127.0.0.1` | The managed system had an IP address set; the plugin treats it as a second, invalid SSM target. The dashboard sets **no IP** for SSM systems (only the `{instance-id}:{region}` DNS name) — remove any IP from a hand-created system. |
+
 ---
 
 ## Preparing images for BT management

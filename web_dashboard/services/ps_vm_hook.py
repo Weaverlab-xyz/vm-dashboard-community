@@ -92,6 +92,15 @@ async def register(db, job_id: str, vm_name: str, hostname: str, *,
                 raise ps_resource_service.PSResourceError(
                     "AWS Systems Manager onboarding needs the instance id + region "
                     f"(got instance_id={instance_id!r}, region={region!r})")
+            # The managed system inherits the functional account's platform, so a non-SSM
+            # functional account would silently create the system on the wrong platform.
+            pname = fa.get("platform_name") or ""
+            if pname and "systems manager" not in pname.lower():
+                raise ps_resource_service.PSResourceError(
+                    f"functional account {fa_name!r} is on platform {pname!r}, not an "
+                    "'AWS Systems Manager' platform — the managed system would land on the "
+                    "wrong platform. Point passwordsafe_vm_functional_account_aws at your "
+                    "AWS Systems Manager Custom Plugin functional account.")
             r = await ps_resource_service.register_managed_system(
                 name=vm_name,
                 host_name=vm_name,
