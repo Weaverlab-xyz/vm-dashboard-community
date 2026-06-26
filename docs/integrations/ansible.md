@@ -1,4 +1,4 @@
-# Remote Worker (Ansible + Kubernetes runners)
+# Remote Worker (Ansible, Kubernetes & image-promote runners)
 
 > **Formerly "Ansible."** The Settings panel is now
 > **Configuration → Remote Worker**. The doc path
@@ -6,17 +6,23 @@
 
 ## What is it?
 
-The **Remote Worker** panel configures the dashboard's two off-host
-runners. Both run their work as a **one-shot cloud task** — a container
+The **Remote Worker** panel configures the dashboard's **three** off-host
+runners. Each runs its work as a **one-shot cloud task** — a container
 launched in the target cloud, run once, and destroyed when it exits — and
-both **share the same per-cloud network settings** (cluster, subnet,
-security group, role, ACR, VPC connector). The image-promote runner reuses
-those same settings too (see [Shared cloud infrastructure](#shared-cloud-infrastructure)).
+all three **share the same per-cloud network settings** (cluster, subnet,
+security group, role, ACR, VPC connector).
 
-| Runner | Config key | What it runs | Backends |
+| Runner | Config key | What it runs | Backend chosen by |
 |---|---|---|---|
-| **Ansible runner** | `ansible_runner` | Config-management playbooks (`.yml`) and wrapped `.sh`/`.ps1`/`.rpm`/`.deb` assets on VMs over SSH / WinRM | `local` \| `ecs` \| `aci` \| `gcp` |
-| **Kubernetes runner** | `k8s_runner` | Cluster-API ops — `kubectl apply/delete`, `helm …`, `kubectl get secret` (entitle agent install, External Secrets Operator, mgmt-plane) | `local` \| `ecs` \| `aci` \| `gcp` |
+| **Ansible runner** | `ansible_runner_<cloud>` (→ `ansible_runner`) | Config-management playbooks (`.yml`) and wrapped `.sh`/`.ps1`/`.rpm`/`.deb` assets on VMs over SSH / WinRM | the **run's target cloud** |
+| **Kubernetes runner** | `k8s_runner_<cloud>` (→ `k8s_runner`) | Cluster-API ops — `kubectl apply/delete`, `helm …`, `kubectl get secret` (entitle agent install, External Secrets Operator, mgmt-plane) | the **cluster's cloud** |
+| **Image-promote runner** | _(automatic, per target)_ | Convert + upload a built VM image into a cloud's image library (qemu-img → AMI / Azure Managed Image / GCE image) | the **promotion's target cloud** |
+
+Each runner picks its backend **per the job's target cloud** (see
+[Per-target-cloud backend](#per-target-cloud-backend)): an AWS-target job runs
+on ECS Fargate, an Azure-target job on ACI, a GCP-target job on Cloud Run. The
+Ansible and Kubernetes runners can also run **`local`** (a Docker sibling /
+in-process); image-promote always runs in its target cloud.
 
 The four backends:
 
@@ -63,6 +69,43 @@ stdin.
 
 ---
 
+## Per-target-cloud backend
+
+Each runner chooses its backend from the **job's target cloud**, not a single
+global switch. The selector offers **Local** or **that cloud's matching task
+service** — there is no cross-cloud option, because the network, identity, and
+storage a job needs live in its target cloud:
+
+| Target cloud | Ansible / Kubernetes backend |
+|---|---|
+| **AWS** (EC2 target / EKS cluster) | `local` or **ECS Fargate** (`ecs`) |
+| **Azure** (Azure VM / AKS cluster) | `local` or **ACI** (`aci`) |
+| **GCP** (GCE VM / GKE cluster) | `local` or **Cloud Run** (`gcp`) |
+
+So you can run, say, Kubernetes ops for **EKS** clusters in-process but **AKS**
+clusters on an ACI task (clean egress to `*.azmk8s.io`), and Ansible against AWS
+VMs on Fargate but Azure VMs locally — each independently, per runner.
+
+**Image-promote** is inherently per-target-cloud already: promoting to AWS runs
+on ECS, to Azure on ACI, to GCP on Cloud Run (no `local` — a promote always
+runs in the destination cloud, where it stages the converted disk).
+
+### Config keys
+
+| Key | Selects the backend for | Values |
+|---|---|---|
+| `ansible_runner_aws` / `_azure` / `_gcp` | the Ansible runner, by the run's target cloud | `local` \| matching service — blank inherits `ansible_runner` |
+| `k8s_runner_aws` / `_azure` / `_gcp` | the Kubernetes runner, by the cluster's cloud | `local` \| matching service — blank inherits `k8s_runner` |
+| `ansible_runner` / `k8s_runner` | global fallback for any cloud left blank | `local` \| `ecs` \| `aci` \| `gcp` |
+
+A per-cloud key takes precedence; when blank, the runner falls back to the
+global `ansible_runner` / `k8s_runner` (default `local`) — so existing
+single-runner configs keep working unchanged. On open, the panel pre-fills the
+per-cloud selectors from any global value (mapped to its matching cloud) so you
+see the effective config and can then adjust each cloud.
+
+---
+
 ## Config panel field reference
 
 Every field on **Configuration → Remote Worker**, grouped as the panel
@@ -73,10 +116,21 @@ meanings are taken from `web_dashboard/config.py`.
 
 ### Runner backends
 
+The panel shows a **runner × cloud grid**: for each runner (Ansible,
+Kubernetes) pick **Local** or the matching cloud service per target cloud. Each
+selector writes a per-cloud key; the global keys remain as a fallback (see
+[Per-target-cloud backend](#per-target-cloud-backend)).
+
 | Panel label | Config key | Env var | Default | Meaning |
 |---|---|---|---|---|
-| Ansible runner | `ansible_runner` | `ANSIBLE_RUNNER` | `local` | Where Ansible playbooks execute: `local` (Docker sibling) \| `ecs` \| `aci` \| `gcp`. |
-| Kubernetes runner | `k8s_runner` | `K8S_RUNNER` | `local` | Where cluster-API ops execute: `local` (in-process) \| `ecs` \| `aci` \| `gcp`. |
+| Ansible runner — AWS targets | `ansible_runner_aws` | `ANSIBLE_RUNNER_AWS` | _(empty → `ansible_runner`)_ | `local` \| `ecs`. Backend for AWS-target playbook runs. |
+| Ansible runner — Azure targets | `ansible_runner_azure` | `ANSIBLE_RUNNER_AZURE` | _(empty → `ansible_runner`)_ | `local` \| `aci`. |
+| Ansible runner — GCP targets | `ansible_runner_gcp` | `ANSIBLE_RUNNER_GCP` | _(empty → `ansible_runner`)_ | `local` \| `gcp`. |
+| Kubernetes runner — EKS (AWS) | `k8s_runner_aws` | `K8S_RUNNER_AWS` | _(empty → `k8s_runner`)_ | `local` \| `ecs`. Backend for EKS-cluster ops. |
+| Kubernetes runner — AKS (Azure) | `k8s_runner_azure` | `K8S_RUNNER_AZURE` | _(empty → `k8s_runner`)_ | `local` \| `aci`. |
+| Kubernetes runner — GKE (GCP) | `k8s_runner_gcp` | `K8S_RUNNER_GCP` | _(empty → `k8s_runner`)_ | `local` \| `gcp`. |
+| _(fallback)_ Ansible runner | `ansible_runner` | `ANSIBLE_RUNNER` | `local` | Global default used when a per-cloud key above is blank: `local` \| `ecs` \| `aci` \| `gcp`. |
+| _(fallback)_ Kubernetes runner | `k8s_runner` | `K8S_RUNNER` | `local` | Global default used when a per-cloud key above is blank. |
 
 ### Shared cloud infrastructure — AWS / ECS
 
@@ -196,9 +250,10 @@ for the full promote-runner key list.
 
 ## Kubernetes runner
 
-`k8s_runner` controls how the dashboard runs **cluster-API operations** —
-`kubectl apply`, `kubectl delete`, `helm repo add`/`helm upgrade`,
-`kubectl get secret`. These back the entitle agent install, the External
+`k8s_runner_<cloud>` (falling back to the global `k8s_runner`) controls how the
+dashboard runs **cluster-API operations** — `kubectl apply`, `kubectl delete`,
+`helm repo add`/`helm upgrade`, `kubectl get secret` — for a cluster, chosen by
+**that cluster's cloud**. These back the entitle agent install, the External
 Secrets Operator (ESO) rollout, and mgmt-plane operations.
 
 | Mode | How it runs |
@@ -235,11 +290,13 @@ to be reachable from the cloud-runner network:
 
 ### Configuration
 
-Pick the mode in **Configuration → Remote Worker → Kubernetes runner** and,
-if it's a cloud mode, make sure the [shared cloud infrastructure](#shared-cloud-infrastructure)
-for that cloud is set (the k8s runner reuses the Ansible runner's ECS / ACI /
-Cloud Run network plumbing). Override the image only if you mirror
-`dtzar/helm-kubectl` to a private registry — set `k8s_runner_image`.
+Pick the backend **per cluster cloud** in **Configuration → Remote Worker →
+Kubernetes runner** (EKS / AKS / GKE each get their own Local-or-cloud
+selector) and, if it's a cloud backend, make sure the
+[shared cloud infrastructure](#shared-cloud-infrastructure) for that cloud is
+set (the k8s runner reuses the Ansible runner's ECS / ACI / Cloud Run network
+plumbing). Override the image only if you mirror `dtzar/helm-kubectl` to a
+private registry — set `k8s_runner_image`.
 
 ---
 
@@ -369,9 +426,9 @@ IAM details all live in [docs/storage-management.md](../storage-management.md).
 2. Open **Settings → Integrations**. The **Remote Worker** toggle, previously
    greyed out, is now selectable.
 3. Click **Configure** on the Remote Worker row to set the
-   [runner backends](#runner-backends) (`ansible_runner`, `k8s_runner`), the
-   per-cloud SSH usernames, and — for cloud backends — the
-   [shared cloud infrastructure](#shared-cloud-infrastructure).
+   [runner backends](#runner-backends) — pick Local or the matching cloud
+   service per target cloud for each runner — the per-cloud SSH usernames, and,
+   for cloud backends, the [shared cloud infrastructure](#shared-cloud-infrastructure).
 4. Toggle Remote Worker **on**. No restart required.
 
 ### Per-cloud SSH user (Ansible runner)
@@ -697,9 +754,9 @@ to a Serverless VPC Access connector in the same region as your GCE instances.
 ### Kubernetes runner
 
 **Direct kubectl/helm fails with HTTP 526 / TLS errors** — a corp egress
-proxy is inspecting TLS to the cluster's private-CA API. Switch
-`k8s_runner` to a cloud backend (`ecs` / `aci` / `gcp`) so the op runs from a
-task with clean egress.
+proxy is inspecting TLS to the cluster's private-CA API. Set that cluster's
+cloud to a cloud backend (`k8s_runner_<cloud>` = `ecs` / `aci` / `gcp`) so the
+op runs from a task with clean egress.
 
 **Cloud k8s task times out reaching the API** — the cluster API isn't
 reachable from the runner's network. Confirm the cluster has a public

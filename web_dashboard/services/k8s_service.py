@@ -857,7 +857,7 @@ def _helm_env(tmpdir: str) -> dict:
     return env
 
 
-async def _apply_manifest_via_runner(kubeconfig: str, manifest_ref: str) -> str:
+async def _apply_manifest_via_runner(kubeconfig: str, manifest_ref: str, target_cloud: str = "") -> str:
     """Apply a manifest with ``kubectl``. ``manifest_ref`` is a URL
     (``kubectl apply -f <url>``) or inline YAML; the latter is streamed to
     ``kubectl apply -f -`` over stdin so secret-bearing manifests never touch disk.
@@ -867,7 +867,7 @@ async def _apply_manifest_via_runner(kubeconfig: str, manifest_ref: str) -> str:
     Otherwise the equivalent command runs as a one-shot cloud task with clean
     egress to the cluster API (see ``k8s_runner_service``)."""
     from . import k8s_runner_service
-    if k8s_runner_service.mode() == "local":
+    if k8s_runner_service.mode(target_cloud) == "local":
         tmpdir = _write_kubeconfig(kubeconfig)
         try:
             kpath = os.path.join(tmpdir, "kubeconfig")
@@ -893,16 +893,16 @@ async def _apply_manifest_via_runner(kubeconfig: str, manifest_ref: str) -> str:
     logger.info("k8s apply (cloud runner): source=%s", "url" if is_url else "inline")
     return await k8s_runner_service.run(
         kubeconfig=_runner_kubeconfig(kubeconfig), command=command,
-        stdin_text=stdin_text, job_id="")
+        target_cloud=target_cloud, stdin_text=stdin_text, job_id="")
 
 
-async def _delete_manifest_via_runner(kubeconfig: str, manifest: str) -> str:
+async def _delete_manifest_via_runner(kubeconfig: str, manifest: str, target_cloud: str = "") -> str:
     """``kubectl delete -f -`` an inline manifest over stdin (best-effort teardown).
 
     Local (``k8s_runner=local``) runs the baked-in ``kubectl`` in-process;
     otherwise it runs as a one-shot cloud task (see ``k8s_runner_service``)."""
     from . import k8s_runner_service
-    if k8s_runner_service.mode() == "local":
+    if k8s_runner_service.mode(target_cloud) == "local":
         tmpdir = _write_kubeconfig(kubeconfig)
         try:
             kpath = os.path.join(tmpdir, "kubeconfig")
@@ -914,11 +914,11 @@ async def _delete_manifest_via_runner(kubeconfig: str, manifest: str) -> str:
     return await k8s_runner_service.run(
         kubeconfig=_runner_kubeconfig(kubeconfig),
         command="kubectl delete --ignore-not-found -f -",
-        stdin_text=manifest, job_id="")
+        target_cloud=target_cloud, stdin_text=manifest, job_id="")
 
 
 async def _helm_via_runner(kubeconfig: str, helm_args: list, add_eso_repo: bool = True,
-                           values_stdin: Optional[str] = None) -> str:
+                           values_stdin: Optional[str] = None, target_cloud: str = "") -> str:
     """Run ``helm`` against the cluster. ``values_stdin`` is streamed to helm's
     stdin -- pass ``-f -`` in ``helm_args`` so secret values ride stdin instead of
     the process args.
@@ -927,7 +927,7 @@ async def _helm_via_runner(kubeconfig: str, helm_args: list, add_eso_repo: bool 
     socket); otherwise the equivalent ``helm`` command runs as a one-shot cloud
     task with clean egress to the cluster API (see ``k8s_runner_service``)."""
     from . import k8s_runner_service
-    if k8s_runner_service.mode() == "local":
+    if k8s_runner_service.mode(target_cloud) == "local":
         tmpdir = _write_kubeconfig(kubeconfig)
         try:
             env = _helm_env(tmpdir)
@@ -950,7 +950,7 @@ async def _helm_via_runner(kubeconfig: str, helm_args: list, add_eso_repo: bool 
     logger.info("k8s helm: cloud runner (%d args)", len(helm_args))
     return await k8s_runner_service.run(
         kubeconfig=_runner_kubeconfig(kubeconfig), command=command,
-        stdin_text=values_stdin, job_id="")
+        target_cloud=target_cloud, stdin_text=values_stdin, job_id="")
 
 
 def _yaml_quote(value: str) -> str:
@@ -1069,9 +1069,9 @@ async def setup_secret_delivery(cluster_id: str, kind: str) -> None:
             try:
                 await _delete_manifest_via_runner(kubeconfig, _eso_clustersecretstore_manifest(
                     css_name, _eso_bt_api_url() or "https://x/", _cfg("eso_bt_retrieval_type", "SECRET"),
-                    namespace, secret_name))
+                    namespace, secret_name), target_cloud=row.cloud)
                 await _helm_via_runner(kubeconfig, ["uninstall", "external-secrets", "-n", namespace],
-                                       add_eso_repo=False)
+                                       add_eso_repo=False, target_cloud=row.cloud)
             except Exception as exc:
                 logger.warning("ESO teardown for %s partially failed: %s", cluster_id, exc)
             row.secrets_delivery_kind = None
@@ -1097,12 +1097,12 @@ async def setup_secret_delivery(cluster_id: str, kind: str) -> None:
                          "--set", "installCRDs=true"]
             if ver:
                 helm_args += ["--version", ver]
-            await _helm_via_runner(kubeconfig, helm_args)
+            await _helm_via_runner(kubeconfig, helm_args, target_cloud=row.cloud)
             await _apply_manifest_via_runner(kubeconfig, _eso_credentials_secret_manifest(
-                namespace, secret_name, client_id, client_secret))
+                namespace, secret_name, client_id, client_secret), target_cloud=row.cloud)
             await _apply_manifest_via_runner(kubeconfig, _eso_clustersecretstore_manifest(
                 css_name, api_url, _cfg("eso_bt_retrieval_type", "SECRET"),
-                namespace, secret_name, _cfg("eso_bt_api_version", "3.1")))
+                namespace, secret_name, _cfg("eso_bt_api_version", "3.1")), target_cloud=row.cloud)
             row.secrets_delivery_kind = "eso"
             db.commit()
             logger.info("ESO + Password Safe secret delivery installed on cluster %s", row.name)
@@ -1141,7 +1141,7 @@ async def launch_management_plane(cluster_id: str, mgmt_kind: str = "portainer")
         db.commit()
         try:
             kubeconfig = resolve_kubeconfig(db, cluster_id)
-            await _apply_manifest_via_runner(kubeconfig, _PORTAINER_AGENT_MANIFEST_URL)
+            await _apply_manifest_via_runner(kubeconfig, _PORTAINER_AGENT_MANIFEST_URL, target_cloud=row.cloud)
             host = _api_host(row.api_server)
             endpoint = await portainer_service.add_agent_endpoint(
                 name=row.name, ip=host, port=_PORTAINER_AGENT_NODEPORT)
@@ -1266,9 +1266,9 @@ async def setup_entitle_agent(cluster_id: str, action: str = "install") -> None:
         if action == "remove":
             try:
                 await _helm_via_runner(kubeconfig, ["uninstall", "entitle-agent", "-n", namespace],
-                                       add_eso_repo=False)
+                                       add_eso_repo=False, target_cloud=row.cloud)
                 await _delete_manifest_via_runner(
-                    kubeconfig, _entitle_agent_secret_manifest(namespace, secret_name, "x"))
+                    kubeconfig, _entitle_agent_secret_manifest(namespace, secret_name, "x"), target_cloud=row.cloud)
             except Exception as exc:
                 logger.warning("entitle-agent teardown for %s partially failed: %s", cluster_id, exc)
             if config_service.get("entitle_agent_cluster_id") == cluster_id:
@@ -1314,7 +1314,7 @@ async def setup_entitle_agent(cluster_id: str, action: str = "install") -> None:
             # Existing-Secret path (for a future chart version): apply the Secret +
             # point the chart at it so the token stays out of Helm values.
             await _apply_manifest_via_runner(
-                kubeconfig, _entitle_agent_secret_manifest(namespace, secret_name, token))
+                kubeconfig, _entitle_agent_secret_manifest(namespace, secret_name, token), target_cloud=row.cloud)
             helm_args += ["--set",
                           f"{_cfg('entitle_agent_existing_secret_helm_key', 'agent.existingSecret')}={secret_name}"]
 
@@ -1325,7 +1325,7 @@ async def setup_entitle_agent(cluster_id: str, action: str = "install") -> None:
                 helm_args += ["--set", extra]
 
         await _helm_via_runner(kubeconfig, helm_args, add_eso_repo=False,
-                               values_stdin=helm_values_stdin)
+                               values_stdin=helm_values_stdin, target_cloud=row.cloud)
         config_service.set("entitle_agent_cluster_id", cluster_id)
         logger.info("Entitle agent installed on cluster %s (ns=%s)", row.name, namespace)
     finally:
@@ -1408,14 +1408,14 @@ def _entitle_k8s_rbac_manifest(namespace: str, sa: str, secret: str) -> str:
     )
 
 
-async def _get_secret_b64_via_runner(kubeconfig: str, namespace: str, secret: str, key: str) -> str:
+async def _get_secret_b64_via_runner(kubeconfig: str, namespace: str, secret: str, key: str, target_cloud: str = "") -> str:
     """Return the **base64** value of ``.data[<key>]`` from a Secret (the caller
     decodes it in Python). Local (``k8s_runner=local``) uses the baked-in kubectl
     in-process; otherwise it runs as a one-shot cloud task (see
     ``k8s_runner_service``). Missing secret/key → ``""`` either way."""
     from . import k8s_runner_service
     jsonpath = "{.data." + key.replace(".", "\\.") + "}"
-    if k8s_runner_service.mode() == "local":
+    if k8s_runner_service.mode(target_cloud) == "local":
         tmpdir = _write_kubeconfig(kubeconfig)
         try:
             kpath = os.path.join(tmpdir, "kubeconfig")
@@ -1435,7 +1435,7 @@ async def _get_secret_b64_via_runner(kubeconfig: str, namespace: str, secret: st
     try:
         out = await k8s_runner_service.run(
             kubeconfig=_runner_kubeconfig(kubeconfig), command=command,
-            stdin_text=None, job_id="")
+            target_cloud=target_cloud, stdin_text=None, job_id="")
         return out.strip()
     except (K8sError, k8s_runner_service.K8sRunnerError):
         return ""
@@ -1476,10 +1476,10 @@ async def register_cluster_in_entitle(cluster_id: str, action: str = "register")
             ns = _cfg("entitle_agent_namespace", "entitle")
             sa = _cfg("entitle_k8s_sa_name", "entitle-access")
             secret = f"{sa}-token"
-            await _apply_manifest_via_runner(kubeconfig, _entitle_k8s_rbac_manifest(ns, sa, secret))
+            await _apply_manifest_via_runner(kubeconfig, _entitle_k8s_rbac_manifest(ns, sa, secret), target_cloud=row.cloud)
             token = ""
             for _ in range(6):  # the token controller populates .data.token async
-                b64 = await _get_secret_b64_via_runner(kubeconfig, ns, secret, "token")
+                b64 = await _get_secret_b64_via_runner(kubeconfig, ns, secret, "token", target_cloud=row.cloud)
                 if b64:
                     token = base64.b64decode(b64).decode("utf-8")
                     break
@@ -1607,7 +1607,7 @@ def _apply_overrides(row, *, jump_group=None, jumpoint_name=None, pra_credential
         row.pra_credential_ref = pra_credential_ref.strip() or None
 
 
-async def _mint_pra_sa_token(kubeconfig: str) -> str:
+async def _mint_pra_sa_token(kubeconfig: str, target_cloud: str = "") -> str:
     """Mint a cluster-admin ServiceAccount bearer token for PRA Vault injection:
     apply the SA + cluster-admin binding + token Secret (idempotent), then read the
     token (the token controller populates ``.data.token`` asynchronously). Reuses
@@ -1615,9 +1615,9 @@ async def _mint_pra_sa_token(kubeconfig: str) -> str:
     ns = _cfg("pra_k8s_namespace", "kube-system")
     sa = _cfg("pra_k8s_sa_name", "pra-access")
     secret = f"{sa}-token"
-    await _apply_manifest_via_runner(kubeconfig, _entitle_k8s_rbac_manifest(ns, sa, secret))
+    await _apply_manifest_via_runner(kubeconfig, _entitle_k8s_rbac_manifest(ns, sa, secret), target_cloud=target_cloud)
     for _ in range(6):
-        b64 = await _get_secret_b64_via_runner(kubeconfig, ns, secret, "token")
+        b64 = await _get_secret_b64_via_runner(kubeconfig, ns, secret, "token", target_cloud=target_cloud)
         if b64:
             return base64.b64decode(b64).decode("utf-8")
         await asyncio.sleep(2)
@@ -1689,7 +1689,7 @@ async def register_pra_tunnel(db: Session, cluster_id: str, *, jump_group: str =
     sa_token = ""
     group_id = vault_account_group_id
     if vault_inject:
-        sa_token = await _mint_pra_sa_token(kubeconfig)
+        sa_token = await _mint_pra_sa_token(kubeconfig, target_cloud=row.cloud)
         vault_account_name = f"k8s-{row.name}-sa"
         if group_id is None:
             cfg_group = _cfg("bt_vault_account_group_id")
@@ -1737,7 +1737,7 @@ async def deregister_pra_tunnel(db: Session, cluster_id: str) -> dict:
         ns = _cfg("pra_k8s_namespace", "pra-access")
         sa = _cfg("pra_k8s_sa_name", "pra-access")
         await _delete_manifest_via_runner(
-            resolve_kubeconfig(db, cluster_id), _entitle_k8s_rbac_manifest(ns, sa, f"{sa}-token"))
+            resolve_kubeconfig(db, cluster_id), _entitle_k8s_rbac_manifest(ns, sa, f"{sa}-token"), target_cloud=row.cloud)
     except Exception as exc:
         logger.warning("k8s tunnel: PRA ServiceAccount revoke for %s failed (non-fatal): %s",
                        cluster_id, exc)

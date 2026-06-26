@@ -481,8 +481,11 @@ class PortainerFeatureConfig(BaseModel):
 
 class AnsibleFeatureConfig(BaseModel):
     enabled: bool = False
-    # Runner selection
-    ansible_runner: str = "local"            # "local" | "ecs" | "aci" | "gcp"
+    # Runner selection — global default plus per-target-cloud overrides.
+    ansible_runner: str = "local"            # "local" | "ecs" | "aci" | "gcp" (global fallback)
+    ansible_runner_aws: str = ""             # "" | "local" | "ecs"  (AWS targets)
+    ansible_runner_azure: str = ""           # "" | "local" | "aci"  (Azure targets)
+    ansible_runner_gcp: str = ""             # "" | "local" | "gcp"  (GCP targets)
     # Per-cloud SSH user (each cloud ships with its own stock username
     # convention — see config.py for context).
     ansible_aws_user: str = "ec2-user"
@@ -514,7 +517,10 @@ class AnsibleFeatureConfig(BaseModel):
     # Kubernetes (kubectl/helm) runner — reuses the ECS/ACI/Cloud Run network
     # settings above. "local" runs in-process; cloud modes run cluster-API ops
     # as a one-shot stock kubectl+helm task with clean egress.
-    k8s_runner: str = "local"                # "local" | "ecs" | "aci" | "gcp"
+    k8s_runner: str = "local"                # "local" | "ecs" | "aci" | "gcp" (global fallback)
+    k8s_runner_aws: str = ""                 # "" | "local" | "ecs"  (EKS clusters)
+    k8s_runner_azure: str = ""               # "" | "local" | "aci"  (AKS clusters)
+    k8s_runner_gcp: str = ""                 # "" | "local" | "gcp"  (GKE clusters)
     k8s_runner_image: str = "dtzar/helm-kubectl:latest"
 
 class EntitleFeatureConfig(BaseModel):
