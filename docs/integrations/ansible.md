@@ -32,10 +32,11 @@ The four backends:
 - **Private subnets** — the target VM (Ansible) or cluster API (Kubernetes)
   has no route back to the dashboard host. A task launched *in* the target
   cloud sits on the right network.
-- **Corp proxy** — a corporate egress proxy (e.g. Cloudflare SSL inspection)
-  `526`s direct `kubectl`/`helm` calls to a cluster API that presents a
-  private-CA cert. A one-shot cloud task has **clean egress** and side-steps
-  the proxy.
+- **Corp proxy** — a TLS-inspecting corporate egress proxy can't validate the
+  cluster API's **private-CA** cert during inspection, so it rejects direct
+  `kubectl`/`helm` calls (e.g. an HTTP `526` "invalid SSL certificate", or the
+  proxy's own block page). A one-shot cloud task has **clean egress** and
+  side-steps the proxy.
 
 > **Read these first:**
 > - [`docs/config-management.md`](../config-management.md) — philosophy,
@@ -208,11 +209,12 @@ Secrets Operator (ESO) rollout, and mgmt-plane operations.
 ### When to use a cloud backend
 
 Use `ecs` / `aci` / `gcp` when **direct `kubectl`/`helm` from the dashboard
-host fails because of a corporate egress proxy.** The common symptom is a
-Cloudflare-style **HTTP 526** ("invalid SSL certificate") when the proxy
-inspects TLS to a cluster API server that presents a **private-CA** cert it
-won't trust. A one-shot cloud task has clean egress to the cluster API and
-side-steps the proxy entirely.
+host fails because of a TLS-inspecting corporate egress proxy.** The symptom is
+a TLS / SSL-certificate error when the proxy inspects traffic to a cluster API
+server that presents a **private-CA** cert it can't validate — for example an
+**HTTP 526** ("invalid SSL certificate"), or the proxy's own block page. A
+one-shot cloud task has clean egress to the cluster API and side-steps the
+proxy entirely.
 
 (The same private-subnet reasoning as the Ansible runner also applies: a
 cloud task can reach a cluster API that has no route back to the dashboard
