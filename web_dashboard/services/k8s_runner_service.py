@@ -5,8 +5,9 @@ Dispatches the dashboard's cluster-API operations (``kubectl apply``,
 ``kubectl delete``, ``helm …``, ``kubectl get secret``) either **in-process**
 (the default — handled directly by ``k8s_service``'s subprocess helpers) or as a
 one-shot transient **cloud task** that runs a stock kubectl+helm image with
-clean egress to the cluster's API server. The cloud path side-steps the corp
-Cloudflare proxy that 526s direct kubectl/helm from the operator's machine.
+clean egress to the cluster's API server. The cloud path side-steps a
+TLS-inspecting corporate proxy that rejects (e.g. 526s) direct kubectl/helm to a
+private-CA cluster API from the operator's machine.
 
 Runners by cloud (mirror the Ansible + image-promote cloud-runner pattern):
   - AWS:   ECS Fargate task   (``aws_service.run_ecs_k8s_task``)
