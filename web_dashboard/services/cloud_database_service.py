@@ -152,12 +152,18 @@ def _build_tf_variables(
         # is needed: RDS SQL Server's rds.force_ssl defaults to optional and the PRA
         # mssql tunnel is TDS-aware (handles encryption itself), so RDS's default group
         # is fine. db.t3.small min (SQL Server needs >=2 GiB; t3.micro is too small).
+        # The AWS form defaults instance_class to db.t3.micro (1 GiB) — too small for SQL
+        # Server (needs >=2 GiB; micro is unsupported for sqlserver-ex) — so bump any
+        # *.micro class up to db.t3.small.
+        sqlserver_class = opts.get("instance_class") or "db.t3.small"
+        if sqlserver_class.endswith(".micro"):
+            sqlserver_class = "db.t3.small"
         return {
             "region": region,
             "identifier": f"clouddb-{db_id[:8]}",
             "master_username": master_username,
             "master_password": master_password,
-            "instance_class": opts.get("instance_class", "db.t3.small"),
+            "instance_class": sqlserver_class,
             "allocated_storage": opts.get("allocated_storage", 20),
             "db_subnet_group_name": opts.get("db_subnet_group_name", ""),
             "vpc_security_group_ids": opts.get("vpc_security_group_ids", []),
@@ -206,6 +212,12 @@ def _build_tf_variables(
         # to "sqlserver" (Cloud SQL ignores any other name). SQL Server needs a db-custom-*
         # tier (no shared-core); the module defaults database_version=SQLSERVER_2022_STANDARD.
         # (The tunnel targets `master`, set in _broker_tunnel.)
+        # The GCP form's tier picker defaults to db-f1-micro (shared-core), which Cloud SQL
+        # rejects for SQL Server ("requires a custom machine type") — coerce any non-db-custom
+        # tier to a db-custom one.
+        sqlserver_tier = opts.get("tier") or ""
+        if not sqlserver_tier.startswith("db-custom"):
+            sqlserver_tier = "db-custom-2-7680"
         return {
             "project": _cfg("gcp_project") or _cfg("gcp_project_id"),
             "region": region,
@@ -213,7 +225,7 @@ def _build_tf_variables(
             "db_name": db_name,
             "master_username": "sqlserver",
             "master_password": master_password,
-            "tier": opts.get("tier", "db-custom-2-7680"),
+            "tier": sqlserver_tier,
             "disk_size": opts.get("disk_size", 20),
             "private_network": opts.get("private_network") or _cfg("gcp_db_network") or _cfg("gcp_network"),
             "labels": {"managed-by": "vm-dashboard", "clouddb-id": db_id},
