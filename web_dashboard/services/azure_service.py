@@ -2473,6 +2473,14 @@ async def create_image_from_blob(
 
 _PROMOTE_RUNNER_PREFIX = "promote-runner"
 
+# ACI's `command` is the full exec form — it *replaces* the image's
+# ENTRYPOINT+CMD, it does not append to the ENTRYPOINT the way AWS ECS's
+# container `command` override does. So we must include the runner's
+# entrypoint here ourselves; passing only the argv makes ACI try to exec
+# `--source-url` as the binary ("executable file not found in $PATH").
+# Must stay in lockstep with ENTRYPOINT in runners/promote/Dockerfile.
+_PROMOTE_RUNNER_ENTRYPOINT = ["python", "/entrypoint.py"]
+
 
 def _run_aci_promote_runner_sync(
     cred,
@@ -2514,10 +2522,9 @@ def _run_aci_promote_runner_sync(
         resources=ResourceRequirements(
             requests=ResourceRequests(cpu=cpu, memory_in_gb=memory_gb),
         ),
-        # ENTRYPOINT in the runner Dockerfile launches the python script;
-        # ACI maps `command` to the container CMD, which becomes argparse
-        # argv. Don't pre-pend python -m anything.
-        command=list(runner_args),
+        # ACI replaces (not appends to) the image entrypoint, so prepend the
+        # runner's entrypoint ourselves — see _PROMOTE_RUNNER_ENTRYPOINT.
+        command=_PROMOTE_RUNNER_ENTRYPOINT + list(runner_args),
         environment_variables=env_vars,
     )
 
