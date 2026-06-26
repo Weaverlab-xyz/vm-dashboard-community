@@ -32,9 +32,10 @@ _COMMON = dict(name="se-lab-vm", host_name="se-lab-vm", ip_address="10.0.0.5", p
                workgroup_id="55", managed_account_name="adminuser",
                ssh_key_enforcement_mode=2)
 
-# AWS Systems Manager custom-plugin shape: dns_name = {instance-id}:{region}, placeholder
-# ip, the account name already carrying its ;suffix, and NO private key pushed.
-_SSM = dict(name="se-lab-vm", host_name="se-lab-vm", ip_address="127.0.0.1", port=22,
+# AWS Systems Manager custom-plugin shape: dns_name = {instance-id}:{region}, NO ip (the
+# plugin targets by instance-id:region; a stray IP becomes an invalid 2nd SSM target),
+# the account name already carrying its ;suffix, and NO private key pushed.
+_SSM = dict(name="se-lab-vm", host_name="se-lab-vm", ip_address="", port=22,
             functional_account_id=42, platform_id=9, entity_type_id=1,
             workgroup_id="55", managed_account_name="adminuser;local",
             ssh_key_enforcement_mode=2, method="ssm",
@@ -101,10 +102,12 @@ def test_ssh_is_the_default_method_unchanged():
     assert "dns_name" not in hcl
 
 
-def test_ssm_system_block_uses_dns_name_and_placeholder_ip():
+def test_ssm_system_block_uses_dns_name_and_no_ip():
     hcl = ps._generate_managed_system_hcl(**_SSM)
     assert ps._line("dns_name", '"i-0eaa6a10886717ed:us-east-1"') in hcl
-    assert ps._line("ip_address", '"127.0.0.1"') in hcl
+    # SSM sets no IP — the plugin targets the instance via dns_name only; a stray IP
+    # (e.g. a 127.0.0.1 placeholder) is treated as a second, invalid SSM target.
+    assert "ip_address" not in hcl
     assert ps._line("platform_id", 9) in hcl
     # SSH-only fields must NOT appear on the SSM custom-plugin managed system.
     assert "remote_client_type" not in hcl

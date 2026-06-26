@@ -316,8 +316,9 @@ async def register_managed_system(*, name: str, host_name: str, private_key: str
     ``method="ssm"`` uses the AWS Systems Manager custom plugin: ``dns_name`` must be
     ``{instance-id}:{region}``, the account name becomes ``{managed_account_name};{suffix}``
     (suffix ``local`` for IAM-user mode or an AssumeRole ARN for EC2 mode), no private key
-    is pushed, and ip defaults to a ``127.0.0.1`` placeholder. ``method="ssh"`` (default)
-    keeps the traditional key-managed flow and requires ``private_key``."""
+    is pushed, and NO IP is set — the plugin targets the instance via the DNS name, and a
+    stray IP (e.g. a 127.0.0.1 placeholder) is treated as a second, invalid SSM target.
+    ``method="ssh"`` (default) keeps the traditional key-managed flow and requires ``private_key``."""
     method = (method or "ssh").lower()
     # The provider requires a password even for a key-managed account; supply a strong
     # placeholder it never uses (the real credential is the SSH key, managed by Password Safe).
@@ -327,7 +328,7 @@ async def register_managed_system(*, name: str, host_name: str, private_key: str
             raise PSResourceError(
                 "SSM onboarding requires a dns_name of the form '{instance-id}:{region}'")
         hcl = _generate_managed_system_hcl(
-            name=name, host_name=host_name, ip_address=ip_address or "127.0.0.1", port=port,
+            name=name, host_name=host_name, ip_address=ip_address, port=port,
             functional_account_id=functional_account_id, platform_id=platform_id,
             entity_type_id=entity_type_id, workgroup_id=workgroup_id,
             managed_account_name=_ssm_account_name(managed_account_name, account_suffix),
