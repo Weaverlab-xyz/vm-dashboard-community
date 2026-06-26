@@ -1793,14 +1793,17 @@ def _run_aci_ansible_sync(
             ImageRegistryCredential(server=acr_server, username=acr_username, password=acr_password)
         ]
 
-    logger.info("ACI Ansible: creating container group %s in %s", group_name, rg)
-    aci.container_groups.begin_create_or_update(rg, group_name, group_params).result()
-
     # Poll until the container exits (max 20 min)
     output = ""
     exit_code = 1
     state = ""
     try:
+        logger.info("ACI Ansible: creating container group %s in %s", group_name, rg)
+        # Keep create inside the try: when the container can't start, .result()
+        # raises and the finally below still deletes the failed group instead
+        # of leaking it in the subscription.
+        aci.container_groups.begin_create_or_update(rg, group_name, group_params).result()
+
         for _ in range(120):
             cg = aci.container_groups.get(rg, group_name)
             state = (cg.instance_view.state if cg.instance_view else "") or ""
@@ -1929,14 +1932,17 @@ def _run_aci_k8s_sync(
             ImageRegistryCredential(server=acr_server, username=acr_username, password=acr_password)
         ]
 
-    logger.info("ACI k8s: creating container group %s in %s", group_name, rg)
-    aci.container_groups.begin_create_or_update(rg, group_name, group_params).result()
-
     # Poll until the container exits (max 20 min)
     output = ""
     exit_code = 1
     state = ""
     try:
+        logger.info("ACI k8s: creating container group %s in %s", group_name, rg)
+        # Keep create inside the try: when the container can't start, .result()
+        # raises and the finally below still deletes the failed group instead
+        # of leaking it in the subscription.
+        aci.container_groups.begin_create_or_update(rg, group_name, group_params).result()
+
         for _ in range(120):
             cg = aci.container_groups.get(rg, group_name)
             state = (cg.instance_view.state if cg.instance_view else "") or ""
@@ -2544,13 +2550,17 @@ def _run_aci_promote_runner_sync(
             ImageRegistryCredential(server=acr_server, username=acr_username, password=acr_password)
         ]
 
-    logger.info("ACI promote-runner: creating container group %s in %s/%s", group_name, rg, location)
-    aci.container_groups.begin_create_or_update(rg, group_name, group_params).result()
-
     output = ""
     exit_code = 1
     state = ""
     try:
+        logger.info("ACI promote-runner: creating container group %s in %s/%s", group_name, rg, location)
+        # .result() blocks until the create LRO settles. When the container
+        # can't start (e.g. a bad entrypoint), this *raises* after ACI's
+        # provisioning timeout — keep it inside the try so the finally still
+        # deletes the failed group instead of leaking it in the subscription.
+        aci.container_groups.begin_create_or_update(rg, group_name, group_params).result()
+
         waited = 0
         # Default 2 hours — multi-GB transfers + qemu-img convert can take a while.
         while waited < poll_seconds_max:
