@@ -579,27 +579,151 @@
       <template x-if="panel?.key === 'ansible' && !panelLoading">
         <div class="space-y-4">
           <p class="text-sm text-gray-500">
-            Ansible-based configuration management via AWS ECS Fargate, Azure ACI, or GCP Cloud Run Jobs.
-            Configure <strong>one</strong> storage backend for playbooks (S3, Azure Blob, or GCS).
+            Remote Worker configures where the dashboard runs config-management (Ansible) and
+            Kubernetes (kubectl/helm) operations — in-process, or as one-shot cloud tasks
+            (AWS ECS Fargate, Azure ACI, GCP Cloud Run) with clean egress. The cloud runners
+            share the same per-cloud network settings below (also shared with the image-promote
+            runner). Configure <strong>one</strong> storage backend for Ansible playbooks
+            (S3 / Azure Blob / GCS).
           </p>
 
-          <!-- Runner selection -->
-          <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide pt-1">Runner</p>
-          <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">Backend</label>
-            <select x-model="panelCfg.ansible_runner"
-                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
-              <option value="local">Local Docker (default)</option>
-              <option value="ecs">AWS ECS Fargate</option>
-              <option value="aci">Azure ACI</option>
-              <option value="gcp">GCP Cloud Run Jobs</option>
-            </select>
+          <!-- ── Runner backends ── -->
+          <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide pt-1">Runner backends</p>
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Ansible (config-mgmt) runner</label>
+              <select x-model="panelCfg.ansible_runner"
+                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                <option value="local">Local Docker</option>
+                <option value="ecs">AWS ECS Fargate</option>
+                <option value="aci">Azure ACI</option>
+                <option value="gcp">GCP Cloud Run Jobs</option>
+              </select>
+              <p class="text-xs text-gray-400 mt-1">
+                Runs playbooks on your VMs. Local = a container on the dashboard host;
+                cloud = a one-shot task on clean egress.
+              </p>
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Kubernetes (kubectl/helm) runner</label>
+              <select x-model="panelCfg.k8s_runner"
+                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                <option value="local">In-process</option>
+                <option value="ecs">AWS ECS Fargate</option>
+                <option value="aci">Azure ACI</option>
+                <option value="gcp">GCP Cloud Run Jobs</option>
+              </select>
+              <p class="text-xs text-gray-400 mt-1">
+                Runs cluster-API ops (entitle agent, ESO, mgmt-plane). Use a cloud backend
+                when a corp proxy blocks direct kubectl/helm.
+              </p>
+            </div>
           </div>
 
-          <!-- Per-cloud SSH user. Each cloud's stock image ships with a different
-               default username, so we surface them individually rather than one
-               value for all three. -->
-          <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide pt-1">SSH user (per cloud)</p>
+          <!-- ── Shared cloud infrastructure (only when a cloud runner is selected) ── -->
+          <template x-if="['ecs','aci','gcp'].includes(panelCfg.ansible_runner) || ['ecs','aci','gcp'].includes(panelCfg.k8s_runner)">
+            <div class="space-y-3">
+              <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide pt-1">Shared cloud infrastructure</p>
+              <p class="text-xs text-gray-400 -mt-1">
+                Used by the Ansible runner, the Kubernetes runner, and the image-promote
+                runner. Only the cloud(s) selected above are shown.
+              </p>
+
+              <!-- AWS — ECS Fargate -->
+              <div class="rounded-lg border border-gray-200 p-3 space-y-3"
+                   x-show="panelCfg.ansible_runner==='ecs' || panelCfg.k8s_runner==='ecs'" x-cloak>
+                <p class="text-sm font-semibold text-gray-700">AWS — ECS Fargate</p>
+                <div class="grid grid-cols-2 gap-3">
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">ECS Cluster</label>
+                    <input type="text" x-model="panelCfg.ansible_ecs_cluster"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                           placeholder="bt-jumpoint">
+                  </div>
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">ECS Task Family</label>
+                    <input type="text" x-model="panelCfg.ansible_ecs_task_family"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                           placeholder="ansible-config-mgmt">
+                  </div>
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Subnet ID <span class="text-gray-400 font-normal">(private subnet for the Fargate task)</span></label>
+                  <input type="text" x-model="panelCfg.ansible_ecs_subnet_id"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="subnet-0abc1234">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Security Group IDs <span class="text-gray-400 font-normal">(comma-separated, optional)</span></label>
+                  <input type="text" x-model="panelCfg.ansible_ecs_security_group_ids"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="sg-0abc1234, sg-0def5678">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Execution Role ARN <span class="text-gray-400 font-normal">(task execution role — required; allows image pull + log write)</span></label>
+                  <input type="text" x-model="panelCfg.ansible_ecs_execution_role_arn"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="arn:aws:iam::…:role/ecsTaskExecutionRole">
+                </div>
+              </div>
+
+              <!-- Azure — Container Instances -->
+              <div class="rounded-lg border border-gray-200 p-3 space-y-3"
+                   x-show="panelCfg.ansible_runner==='aci' || panelCfg.k8s_runner==='aci'" x-cloak>
+                <p class="text-sm font-semibold text-gray-700">Azure — Container Instances</p>
+                <p class="text-xs text-gray-400 -mt-1">Resource group + location come from the Azure configuration.</p>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Subnet ID <span class="text-gray-400 font-normal">(optional — for VNet access)</span></label>
+                  <input type="text" x-model="panelCfg.ansible_aci_subnet_id"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="/subscriptions/.../resourceGroups/.../providers/Microsoft.Network/virtualNetworks/.../subnets/...">
+                </div>
+                <p class="text-xs text-gray-400">ACR credentials <span class="font-normal">(only for a private registry image; blank for Docker Hub)</span>.</p>
+                <div class="grid grid-cols-2 gap-3">
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">ACR Server</label>
+                    <input type="text" x-model="panelCfg.ansible_aci_acr_server"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                           placeholder="myorg.azurecr.io">
+                  </div>
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">ACR Username</label>
+                    <input type="text" x-model="panelCfg.ansible_aci_acr_username"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                           placeholder="myorg">
+                  </div>
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">ACR Password</label>
+                  <input type="password" x-model="panelCfg.ansible_aci_acr_password"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="••••••••">
+                </div>
+              </div>
+
+              <!-- GCP — Cloud Run Jobs -->
+              <div class="rounded-lg border border-gray-200 p-3 space-y-3"
+                   x-show="panelCfg.ansible_runner==='gcp' || panelCfg.k8s_runner==='gcp'" x-cloak>
+                <p class="text-sm font-semibold text-gray-700">GCP — Cloud Run Jobs</p>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Cloud Run Region <span class="text-gray-400 font-normal">(blank = GCP region)</span></label>
+                  <input type="text" x-model="panelCfg.gcp_ansible_cloud_run_region"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="us-central1">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">VPC Connector <span class="text-gray-400 font-normal">(optional, for private egress)</span></label>
+                  <input type="text" x-model="panelCfg.gcp_ansible_vpc_connector"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="projects/proj/locations/region/connectors/name">
+                </div>
+              </div>
+            </div>
+          </template>
+
+          <!-- ── Ansible runner ── -->
+          <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide pt-1">Ansible runner</p>
+          <p class="text-xs text-gray-400 -mt-1">Config-management playbooks run on your VMs over SSH.</p>
           <div class="grid grid-cols-3 gap-3">
             <div>
               <label class="block text-sm font-medium text-gray-700 mb-1">AWS</label>
@@ -620,6 +744,42 @@
                      placeholder="gcp-user">
             </div>
           </div>
+          <p class="text-xs text-gray-400 -mt-1">Default SSH login per cloud's stock image.</p>
+
+          <!-- ACI Ansible image (only when the Ansible runner is ACI) -->
+          <div x-show="panelCfg.ansible_runner==='aci'" x-cloak class="space-y-3">
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">ACI Ansible Image</label>
+              <input type="text" x-model="panelCfg.ansible_aci_image"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                     placeholder="willhallonline/ansible:latest">
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">SSH Key Vault Secret <span class="text-gray-400 font-normal">(Key Vault secret holding the Ansible SSH private key)</span></label>
+              <input type="text" x-model="panelCfg.ansible_aci_ssh_key_secret_name"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                     placeholder="ansible-ssh-private-key">
+            </div>
+          </div>
+
+          <!-- GCP Ansible image (only when the Ansible runner is GCP) -->
+          <div x-show="panelCfg.ansible_runner==='gcp'" x-cloak>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Cloud Run Ansible Image</label>
+            <input type="text" x-model="panelCfg.gcp_ansible_image"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                   placeholder="willhallonline/ansible:latest">
+          </div>
+
+          <!-- ── Kubernetes runner (only when not local) ── -->
+          <div x-show="panelCfg.k8s_runner!=='local'" x-cloak class="space-y-3">
+            <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide pt-1">Kubernetes runner</p>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Runner Image <span class="text-gray-400 font-normal">(stock kubectl + helm; reaches the cluster API on clean egress)</span></label>
+              <input type="text" x-model="panelCfg.k8s_runner_image"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                     placeholder="dtzar/helm-kubectl:latest">
+            </div>
+          </div>
 
           <!-- Storage backend pointer + prereq gate -->
           <div class="rounded-lg border p-4"
@@ -631,131 +791,14 @@
             </p>
             <p class="text-sm text-gray-700 mb-2" x-show="storageReady" x-cloak>
               Active backend: <strong x-text="storageBackendLabel"></strong>. Enable
-              the Ansible feature flag below to start running playbooks.
+              the Remote Worker feature flag below to start running playbooks.
             </p>
             <p class="text-sm text-gray-700 mb-2" x-show="!storageReady" x-cloak>
-              The Ansible feature flag can't be turned on until at least one
+              The Remote Worker feature flag can't be turned on until at least one
               storage backend is configured and selected as active. Configure
               storage on the dedicated <a href="/storage" class="text-blue-600 hover:underline">/storage</a>
-              page, then return here to enable Ansible.
+              page, then return here to enable Remote Worker.
             </p>
-          </div>
-
-          <!-- Azure ACI runner -->
-          <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide pt-1">Azure Runner (ACI)</p>
-          <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">Ansible Image</label>
-            <input type="text" x-model="panelCfg.ansible_aci_image"
-                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                   placeholder="willhallonline/ansible:latest">
-          </div>
-          <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">Subnet ID <span class="text-gray-400 font-normal">(optional — for VNet access)</span></label>
-            <input type="text" x-model="panelCfg.ansible_aci_subnet_id"
-                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                   placeholder="/subscriptions/.../resourceGroups/.../providers/Microsoft.Network/virtualNetworks/.../subnets/...">
-          </div>
-          <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">SSH Key Vault Secret <span class="text-gray-400 font-normal">(Key Vault secret name for Ansible SSH private key)</span></label>
-            <input type="text" x-model="panelCfg.ansible_aci_ssh_key_secret_name"
-                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                   placeholder="ansible-ssh-private-key">
-          </div>
-          <p class="text-xs text-gray-400">ACR credentials — leave blank for Docker Hub images.</p>
-          <div class="grid grid-cols-2 gap-3">
-            <div>
-              <label class="block text-sm font-medium text-gray-700 mb-1">ACR Server</label>
-              <input type="text" x-model="panelCfg.ansible_aci_acr_server"
-                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                     placeholder="myorg.azurecr.io">
-            </div>
-            <div>
-              <label class="block text-sm font-medium text-gray-700 mb-1">ACR Username</label>
-              <input type="text" x-model="panelCfg.ansible_aci_acr_username"
-                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                     placeholder="myorg">
-            </div>
-          </div>
-          <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">ACR Password</label>
-            <input type="password" x-model="panelCfg.ansible_aci_acr_password"
-                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                   placeholder="••••••••">
-          </div>
-
-          <!-- AWS ECS runner -->
-          <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide pt-1">AWS Runner (ECS Fargate)</p>
-          <div class="grid grid-cols-2 gap-3">
-            <div>
-              <label class="block text-sm font-medium text-gray-700 mb-1">ECS Cluster</label>
-              <input type="text" x-model="panelCfg.ansible_ecs_cluster"
-                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                     placeholder="bt-jumpoint">
-            </div>
-            <div>
-              <label class="block text-sm font-medium text-gray-700 mb-1">ECS Task Family</label>
-              <input type="text" x-model="panelCfg.ansible_ecs_task_family"
-                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                     placeholder="ansible-config-mgmt">
-            </div>
-          </div>
-          <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">Subnet ID <span class="text-gray-400 font-normal">(private subnet for Fargate task)</span></label>
-            <input type="text" x-model="panelCfg.ansible_ecs_subnet_id"
-                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                   placeholder="subnet-0abc1234">
-          </div>
-          <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">Security Group IDs <span class="text-gray-400 font-normal">(comma-separated, optional)</span></label>
-            <input type="text" x-model="panelCfg.ansible_ecs_security_group_ids"
-                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                   placeholder="sg-0abc1234, sg-0def5678">
-          </div>
-
-          <!-- GCP Cloud Run runner -->
-          <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide pt-1">GCP Runner (Cloud Run Jobs)</p>
-          <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">Cloud Run Region <span class="text-gray-400 font-normal">(blank = GCP region)</span></label>
-            <input type="text" x-model="panelCfg.gcp_ansible_cloud_run_region"
-                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                   placeholder="us-central1">
-          </div>
-          <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">Ansible Image</label>
-            <input type="text" x-model="panelCfg.gcp_ansible_image"
-                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                   placeholder="willhallonline/ansible:latest">
-          </div>
-          <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">VPC Connector <span class="text-gray-400 font-normal">(optional)</span></label>
-            <input type="text" x-model="panelCfg.gcp_ansible_vpc_connector"
-                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                   placeholder="projects/proj/locations/region/connectors/name">
-          </div>
-
-          <!-- Kubernetes runner (kubectl/helm) -->
-          <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide pt-1">Kubernetes Runner (kubectl/helm)</p>
-          <p class="text-xs text-gray-400 -mt-1">
-            Runs the dashboard's cluster-API operations (kubectl/helm) either in-process
-            or as a one-shot cloud task with clean egress — useful when a corp proxy blocks
-            direct kubectl/helm. The cloud modes <strong>reuse the ECS / ACI / Cloud Run
-            network settings above</strong> (cluster, subnet, security groups, ACR, VPC connector).
-          </p>
-          <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">Backend</label>
-            <select x-model="panelCfg.k8s_runner"
-                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
-              <option value="local">In-process (default)</option>
-              <option value="ecs">AWS ECS Fargate</option>
-              <option value="aci">Azure ACI</option>
-              <option value="gcp">GCP Cloud Run Jobs</option>
-            </select>
-          </div>
-          <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">Runner Image <span class="text-gray-400 font-normal">(stock kubectl + helm)</span></label>
-            <input type="text" x-model="panelCfg.k8s_runner_image"
-                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                   placeholder="dtzar/helm-kubectl:latest">
           </div>
         </div>
       </template>
@@ -1605,8 +1648,8 @@ function settingsPage() {
         desc: 'Password Safe secret retrieval and PRA session recording.' },
       { key: 'portainer',    label: 'Portainer CE',            hasConfig: true,  enabled: false,
         desc: 'On-prem Docker host management.' },
-      { key: 'ansible',      label: 'Ansible',                 hasConfig: true,  enabled: false,
-        desc: 'Config management via AWS ECS Fargate, Azure ACI, or GCP Cloud Run Jobs.' },
+      { key: 'ansible',      label: 'Remote Worker',           hasConfig: true,  enabled: false,
+        desc: 'Where config-management (Ansible) and Kubernetes (kubectl/helm) ops run — in-process or as one-shot cloud tasks (ECS / ACI / Cloud Run).' },
       { key: 'entitle',      label: 'Entitle',                 hasConfig: true,  enabled: false,
         desc: 'Register built VMs & databases as Entitle integrations.' },
       { key: 'proxmox',      label: 'Proxmox VE',              hasConfig: true,  enabled: false,

@@ -497,6 +497,9 @@ class AnsibleFeatureConfig(BaseModel):
     ansible_ecs_task_family: str = "ansible-config-mgmt"
     ansible_ecs_subnet_id: str = ""
     ansible_ecs_security_group_ids: str = ""
+    ansible_ecs_execution_role_arn: str = ""
+    ansible_ecs_cpu: str = "256"
+    ansible_ecs_memory: str = "512"
     # Azure ACI runner
     ansible_aci_image: str = "willhallonline/ansible:latest"
     ansible_aci_subnet_id: str = ""
