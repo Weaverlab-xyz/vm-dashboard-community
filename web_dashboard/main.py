@@ -99,6 +99,12 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(_ci_sweeper_loop(), name="ci_sweeper_loop")
     )
 
+    # Cost-summary warmer — always launched; no-ops (no billable calls) while the
+    # cost feature is off, so flipping the flag in Settings warms the next pass.
+    warmers.append(
+        asyncio.create_task(_warm_cost_summary(), name="warm_cost_summary")
+    )
+
     yield
 
     for task in warmers:
@@ -186,6 +192,25 @@ async def _warm_loop(name: str, fetcher, key_fn, ttl: int) -> None:
             logger.debug("cache warmed key=%s", key_fn())
         except Exception as exc:
             logger.warning("cache warmer %s failed: %s", name, exc)
+        await asyncio.sleep(interval)
+
+
+async def _warm_cost_summary() -> None:
+    """Pre-populate the cross-cloud cost tile. Skips the (billable) cloud calls
+    while cost_explorer_enabled is off, so a runtime flag flip activates it on
+    the next pass — and the endpoint self-populates on first load regardless."""
+    from .services import cost_service
+    ttl = cache_service.TTL["cost_summary"]
+    interval = int(ttl * 0.8)
+    while True:
+        try:
+            if config_service.get_bool("cost_explorer_enabled", settings.cost_explorer_enabled):
+                data = await cost_service.get_cost_summary()
+                await cache_service.set(cache_service.key_global("cost_summary"), data, ttl)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("cache warmer cost_summary failed: %s", exc)
         await asyncio.sleep(interval)
 
 
@@ -402,6 +427,7 @@ def _feature_flags() -> dict:
         "vdesktops_enabled":    config_service.get_bool("vdesktops_enabled",     settings.vdesktops_enabled),
         "cloud_database_enabled": config_service.get_bool("cloud_database_enabled", settings.cloud_database_enabled),
         "k8s_management_enabled": config_service.get_bool("k8s_management_enabled", settings.k8s_management_enabled),
+        "cost_explorer_enabled": config_service.get_bool("cost_explorer_enabled", settings.cost_explorer_enabled),
         # Entitle user-JIT Phase 4 UI affordances — surfaces the
         # "Request access" nav link + portal URL when both are configured.
         "entitle_user_jit_enabled":   config_service.get_bool("entitle_user_jit_enabled", settings.entitle_user_jit_enabled),
@@ -533,6 +559,13 @@ try:
     app.include_router(k8s_api.router, dependencies=[_feature_gate("k8s_management_enabled")])
 except ImportError as exc:
     logger.warning("API router 'k8s' not loaded: %s", exc)
+
+try:
+    # Cross-cloud cost (MTD spend tile). Gated on cost_explorer_enabled.
+    from .api import costs  # noqa: E402
+    app.include_router(costs.router, dependencies=[_feature_gate("cost_explorer_enabled")])
+except ImportError as exc:
+    logger.warning("API router 'costs' not loaded: %s", exc)
 
 
 # ── HTML pages ────────────────────────────────────────────────────────────────
@@ -753,6 +786,7 @@ async def features():
         "hyperv":       flags["hyperv_enabled"],
         "nutanix":      flags["nutanix_enabled"],
         "xcpng":        flags["xcpng_enabled"],
+        "cost":         flags["cost_explorer_enabled"],
     }
 
 
