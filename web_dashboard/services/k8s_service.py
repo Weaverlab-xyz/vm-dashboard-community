@@ -1,16 +1,14 @@
-"""Kubernetes cluster lifecycle — Phase 1 (register + record).
+"""Kubernetes cluster lifecycle.
 
-Phase 1 of docs/saas-kubernetes-management-plan.md. A **thin lifecycle**
-service over the ``k8s_clusters`` table: register a reachable cluster from its
-kubeconfig (the dev-testable path — the cluster is provisioned out-of-band),
-store the kubeconfig as a **secrets-backend reference** (never in the row), and
-list/get/delete. No kubectl wrapping and no live cluster calls — the
-management-plane launch (Phase 2; Portainer-k8s first, then Rancher), brokered
-access + native PRA ``tunnel_type=k8s`` jump (Phase 3), and in-cluster Password
-Safe delivery (Phase 4) build on this.
-
-Cloud-provisioned clusters (a ``terraform/k8s_cluster/*`` module) are a later
-sub-phase; ``create_cluster`` raises until then — register an existing cluster.
+A lifecycle service over the ``k8s_clusters`` table with two entry paths:
+**provision** a new cluster with Terraform (``terraform/k8s_cluster/<cloud>`` for
+aws/azure/gcp — see ``_PROVISION_IMPLEMENTED``) or **register** an
+already-reachable cluster from its kubeconfig. Either way the kubeconfig is
+stored as a **secrets-backend reference** (never in the row), plus list/get/
+delete. On top of that: management-plane launch (Portainer / Rancher / Argo CD /
+Headlamp — see ``VALID_MGMT_KINDS``), kubectl/helm run via the cloud-task
+runner, brokered access via native PRA ``tunnel_type=k8s`` jump, and Entitle
+cluster registration.
 """
 import asyncio
 import base64
@@ -220,7 +218,8 @@ def create_cluster(db: Session, *, cloud: str, name: str, region: str,
         raise K8sError(f"unknown cloud {cloud!r} (expected one of {', '.join(VALID_CLOUDS)})")
     if cloud not in _PROVISION_IMPLEMENTED:
         raise NotImplementedError(
-            f"cluster provisioning for {cloud!r} is not wired yet — §1.1a implements aws (EKS) first"
+            f"cluster provisioning for {cloud!r} is not supported "
+            f"(implemented: {', '.join(_PROVISION_IMPLEMENTED)})"
         )
     if not (region or "").strip():
         raise K8sError("region is required")

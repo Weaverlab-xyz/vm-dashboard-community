@@ -8,9 +8,9 @@ side-stepping AWS/GCP's "import source must be on our own storage"
 constraint.
 
 Runners by target cloud:
-  - AWS:   ECS Fargate task (this PR)
-  - Azure: ACI container group  (TODO, PR 4)
-  - GCP:   Cloud Run job        (TODO, PR 5)
+  - AWS:   ECS Fargate task
+  - Azure: ACI container group
+  - GCP:   Cloud Run job
 
 Each runner uses the same public image (`chrweav/dashboard-promote-runner`
 by default; operator override via `promote_runner_image`). The runner reads

@@ -1,14 +1,17 @@
-"""Virtual-desktop management API — Phase 0 scaffold.
+"""Virtual-desktop management API.
 
-Gated on ``vdesktops_enabled``. Phase 0 endpoints CRUD the ``virtual_desktops``
-table via ``vdesktop_service`` — no cloud calls, no PRA.
+Gated on ``vdesktops_enabled``. CRUD over the ``virtual_desktops`` table via
+``vdesktop_service``; Azure pools provision one private VM per seat (durable,
+via the job runner) and seats can be brokered as PRA RDP Jump Items. AWS/GCP
+create seat records only for now.
 
-  GET    /api/desktops/__phase0__       — health check (router-mounted probe)
-  GET    /api/desktops                  — list seats
-  GET    /api/desktops/pools            — list pool summaries
-  POST   /api/desktops/pools            — create a pool (Phase 0: seat rows only)
-  POST   /api/desktops/pools/{name}/scale
-  DELETE /api/desktops/pools/{name}
+  GET    /api/desktops                       — list seats
+  GET    /api/desktops/pools                 — list pool summaries
+  POST   /api/desktops/pools                 — create a pool (Azure provisions VMs)
+  POST   /api/desktops/pools/{name}/scale    — grow/shrink a pool
+  DELETE /api/desktops/pools/{name}          — delete a pool
+  GET    /api/desktops/pools/{name}/seats    — seats in one pool
+  GET    /api/desktops/seats/{id}/session    — PRA connection info for a seat
 """
 import logging
 
@@ -32,8 +35,8 @@ def phase0_status() -> dict:
         "phase": 0,
         "ok": True,
         "note": (
-            "Virtual-desktop Phase 0 scaffold — virtual_desktops CRUD only; "
-            "Phase 1 wires real VM provisioning, Phase 2 adds PRA brokering."
+            "Virtual-desktop router mounted. Azure pools provision VMs via the "
+            "job runner; seats can be brokered as PRA RDP Jump Items."
         ),
     }
 

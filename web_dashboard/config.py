@@ -30,9 +30,9 @@ class Settings(BaseSettings):
     hyperv_enabled: bool = False        # Hyper-V router + /hyperv page (WinRM to Windows host)
     nutanix_enabled: bool = False       # Nutanix AHV router + /nutanix page (Prism Central REST API)
     xcpng_enabled: bool = False         # XCP-ng/XenServer router + /xcpng page (XAPI XML-RPC)
-    vdesktops_enabled: bool = False     # Virtual desktops router + /desktops page (Phase 0 scaffold)
+    vdesktops_enabled: bool = False     # Virtual desktops router + /desktops page (Azure pools + PRA brokering)
     cloud_database_enabled: bool = False  # /api/databases router — private managed DBs brokered via a PRA tunnel
-    k8s_management_enabled: bool = False  # /api/k8s router — register/manage Kubernetes clusters (Phase 1)
+    k8s_management_enabled: bool = False  # /api/k8s router — provision/register/manage Kubernetes clusters
     # K8s Phase 3b broker (community = beyondtrust/sra Terraform path). The tunnel
     # uses bt_jump_group_name + bt_jumpoint_name (per-cluster overrides fall back
     # to these). Read live via config_service.
