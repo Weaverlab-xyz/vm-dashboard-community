@@ -6,12 +6,13 @@ only through a BeyondTrust PRA tunnel, and records each in the ``cloud_databases
 inventory table. Shaped like the other cloud services; drives Terraform via a
 per-job deploy dir (``terraform/deployments/{job_id}``).
 
-Phase 1 implements **postgres + aws** end-to-end on the dashboard side
-(record + Terraform variables + apply/destroy plumbing); other engines/clouds
-raise ``NotImplementedError``. The PRA tunnel (Phase 2) is brokered with the
-``beyondtrust/sra`` Terraform provider (``terraform_pra_service``) — **never
-``btapi``** — so MongoDB is not offered in community until the provider ships a
-resource. Credentials are stored encrypted in the DB via ``config_service``
+Implements **postgres / mysql / sqlserver across aws / azure / gcp**
+end-to-end on the dashboard side (record + Terraform variables + apply/destroy
+plumbing); see ``_IMPLEMENTED`` for the supported engine/cloud matrix —
+anything outside it raises ``NotImplementedError``. The PRA tunnel is brokered
+with the ``beyondtrust/sra`` Terraform provider (``terraform_pra_service``) —
+**never ``btapi``** — so MongoDB is not offered in community until the provider
+ships a resource. Credentials are stored encrypted in the DB via ``config_service``
 (community has no Password Safe dependency).
 
 ``provision`` does the synchronous record-keeping and returns; the actual
@@ -39,7 +40,7 @@ from . import config_service, job_service, terraform, terraform_provider_env
 logger = logging.getLogger(__name__)
 
 # Community supports the three engines the beyondtrust/sra provider can tunnel
-# (no MongoDB resource yet). Phase 1 wires postgres/aws; the rest fan out later.
+# (no MongoDB resource yet). All engine × cloud combos are wired — see _IMPLEMENTED.
 VALID_ENGINES = {"postgres", "mysql", "sqlserver"}
 VALID_CLOUDS = {"aws", "azure", "gcp"}
 _IMPLEMENTED = {
@@ -104,7 +105,7 @@ def _build_tf_variables(
     *, engine: str, cloud: str, region: str, db_id: str, db_name: str,
     master_username: str, master_password: str, opts: dict,
 ) -> dict:
-    """The Terraform -var set for the engine module. Phase 1: postgres/aws.
+    """The Terraform -var set for the engine module (per engine/cloud branch below).
 
     The module itself hardcodes ``publicly_accessible = false`` — the private-only
     guarantee lives in the .tf, not in a toggle-able variable.

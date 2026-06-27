@@ -499,14 +499,14 @@ except ImportError as exc:
     logger.warning("API router 'epml' not loaded: %s", exc)
 
 try:
-    # Virtual desktop management — Phase 0 scaffold. Gated on vdesktops_enabled.
+    # Virtual desktop management (Azure pools + PRA brokering). Gated on vdesktops_enabled.
     from .api import desktops  # noqa: E402
     app.include_router(desktops.router, dependencies=[_feature_gate("vdesktops_enabled")])
 except ImportError as exc:
     logger.warning("API router 'desktops' not loaded: %s", exc)
 
 try:
-    # Kubernetes management — Phase 1. Gated on k8s_management_enabled.
+    # Kubernetes management (provision + register clusters). Gated on k8s_management_enabled.
     from .api import k8s as k8s_api  # noqa: E402
     app.include_router(k8s_api.router, dependencies=[_feature_gate("k8s_management_enabled")])
 except ImportError as exc:
@@ -652,16 +652,16 @@ async def images_page(request: Request):
 
 @app.get("/desktops", response_class=HTMLResponse, include_in_schema=False)
 async def desktops_page(request: Request):
-    """Virtual-desktop management page — Phase 0 scaffold. Nav-gated on
-    vdesktops_enabled; the /api/desktops router is feature-gated."""
+    """Virtual-desktop management page. Nav-gated on vdesktops_enabled;
+    the /api/desktops router is feature-gated."""
     return templates.TemplateResponse("desktops/index.html", {"request": request, **_feature_flags()})
 
 
 @app.get("/databases", response_class=HTMLResponse, include_in_schema=False)
 async def databases_page(request: Request):
     """Cloud database infrastructure page. Nav-gated on cloud_database_enabled;
-    the /api/databases router self-gates per call. PostgreSQL/AWS is live;
-    other engines/clouds are 'coming soon' (Phase 3)."""
+    the /api/databases router self-gates per call. PostgreSQL/MySQL/SQL Server
+    are live across AWS/Azure/GCP."""
     return templates.TemplateResponse("databases/index.html", {"request": request, **_feature_flags()})
 
 

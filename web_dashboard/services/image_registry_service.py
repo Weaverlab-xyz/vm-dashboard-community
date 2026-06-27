@@ -1,10 +1,11 @@
 """Image registry service.
 
 Backs the /images page and /api/images router. The registry is operator-
-maintained today (Phase 1): you tell the dashboard "this image exists at
-this location" and the registry tracks where promotions land. Cross-cloud
-promotion is a manual-steps payload returned by `compute_manual_steps` —
-Phase 2 will replace it with native VM-import automation.
+maintained: you tell the dashboard "this image exists at this location" and
+the registry tracks where promotions land. Cross-cloud promotion runs as
+runner-driven, native VM-import automation for AWS/Azure/GCP targets (via
+`promote_to_*_automated`); `compute_manual_steps` remains an operator
+walkthrough fallback.
 """
 import json
 import logging
@@ -116,8 +117,9 @@ def delete_image(db: Session, image_id: str) -> bool:
 
 def compute_manual_steps(image: dict, target_cloud: str) -> str:
     """Generate operator-readable instructions for promoting `image` to
-    `target_cloud`. Phase 2 will replace this with automated VM-import calls;
-    today the operator runs the listed commands by hand."""
+    `target_cloud`. This is the manual fallback to the automated, runner-driven
+    promote (`promote_to_*_automated`) — the listed commands let an operator do
+    it by hand."""
     src = image["source_cloud"]
     artefact = image.get("artefact_url") or "<not set>"
     fmt = image.get("artefact_format") or "<not set>"
@@ -422,8 +424,9 @@ def record_promotion(
 # Same-cloud (AWS source → AWS target, cross-region) skips the runner — a
 # native ec2 copy-image does it server-side.
 #
-# Azure / GCP targets are PR 4 / PR 5; this PR keeps their flow on the
-# manual-steps return for backwards compatibility.
+# Azure / GCP targets have their own automated runner paths
+# (`promote_to_azure_automated` / `promote_to_gcp_automated`); the
+# manual-steps return remains available as a fallback.
 
 
 def _parse_hub_url(artefact_url: str) -> tuple[str, str]:
