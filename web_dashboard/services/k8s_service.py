@@ -1353,12 +1353,15 @@ async def run_entitle_agent(db: Session, *, cluster_id: str, job_id: str,
 # registered through entitle_registration_service like VMs/DBs. Two modes:
 #   * In-Cluster — when the Entitle agent is installed on THIS cluster: register with
 #     just a user_prefix; the agent provides access (private API clusters).
-#   * External   — mint a least-privilege Entitle ServiceAccount + token in-cluster
-#     and register host + token + CA (public API clusters).
+#   * External   — mint an Entitle ServiceAccount (cluster-admin — see below) + token
+#     in-cluster and register host + token + CA (public API clusters).
 # Integration id + Terraform state are stashed (encrypted) in config_service so the
-# deregister path can tear it down. ⚠️ The ServiceAccount is bound to cluster-admin
-# for v1 (Entitle manages native RBAC); scope down once the required ClusterRole is
-# confirmed against the Entitle Kubernetes integration docs.
+# deregister path can tear it down. The ServiceAccount is bound to cluster-admin by
+# design: Entitle's Kubernetes integration documents and requires it. A general RBAC
+# broker can only grant permissions it already holds (K8s privilege-escalation
+# prevention), so cluster-admin is necessary for Entitle to create short-lived access
+# to arbitrary resources on a user's behalf — it is not a placeholder to scope down.
+# See https://docs.beyondtrust.com/entitle/docs/entitle-integration-kubernetes.
 
 VALID_ENTITLE_CLUSTER_ACTIONS = ("register", "deregister")
 
@@ -1388,7 +1391,10 @@ def _kubeconfig_host_ca(kubeconfig: str) -> tuple:
 def _entitle_k8s_rbac_manifest(namespace: str, sa: str, secret: str) -> str:
     """Namespace + a ServiceAccount bound to cluster-admin + a long-lived SA token
     Secret (K8s 1.24+ no longer auto-creates token Secrets) for Entitle's
-    External-Access connection."""
+    External-Access connection. cluster-admin is required by Entitle's K8s
+    integration (see the register-cluster note above), not a placeholder. Also
+    reused by ``_mint_pra_sa_token`` for the PRA-injected, brokered-session token,
+    which is intentionally privileged."""
     return (
         "apiVersion: v1\nkind: Namespace\nmetadata:\n"
         f"  name: {namespace}\n---\n"
