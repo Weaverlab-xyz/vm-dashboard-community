@@ -160,9 +160,10 @@ cloud-init set up with the injected key + passwordless sudo (the
 - **K8s cluster registration implemented** — `register_kubernetes` (entitle_registration_service) +
   `register_cluster_in_entitle`/`run_entitle_register` (k8s_service), `POST /api/k8s/clusters/{id}/entitle-register`,
   `k8s_entitle_register` worker, "Register in Entitle" cluster button. Generic **Kubernetes** app:
-  In-Cluster via the agent for private API clusters, else a minted least-priv ServiceAccount (External
-  Access). Open: scope the ServiceAccount ClusterRole down from cluster-admin once the required perms are
-  confirmed; the GKE-specific GCP-IAM integration is a separate optional path.
+  In-Cluster via the agent for private API clusters, else a minted ServiceAccount (External Access)
+  bound to cluster-admin — confirmed required by [Entitle's Kubernetes integration docs](https://docs.beyondtrust.com/entitle/docs/entitle-integration-kubernetes)
+  (a general RBAC broker can only grant permissions it already holds, so it must hold cluster-admin),
+  so it is **not** scoped down; the GKE-specific GCP-IAM integration is a separate optional path.
 - **Sample workloads** for managed clusters live in [`examples/k8s/`](../../examples/k8s/)
   (the community counterpart to `examples/compose/` + `examples/playbooks/`): namespaced,
   `restricted`-PSS-compliant Deployment/Service/Ingress/HPA/ConfigMap/Secret/StatefulSet/
