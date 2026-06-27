@@ -1,0 +1,59 @@
+name: Tests
+
+# Runs the tests/ suite on every pull request and on pushes to main.
+#
+# Each test file is executed as its own process (via its `if __name__ ==
+# "__main__"` runner) rather than through a single `pytest tests/` invocation.
+# That's deliberate: several test files install fakes into sys.modules (to stub
+# the cloud SDKs / pydantic config / database) with no teardown, so running them
+# in one shared process could let one file's stubs leak into another. Per-file
+# subprocesses keep them isolated — and every file already ships a standalone
+# runner for exactly this reason. Each runner prints `ok`/`FAIL` per test and
+# exits non-zero on failure.
+#
+# The full app requirements are installed so nothing silently skips (a few tests
+# import the real FastAPI app / boto3 rather than stubbing them).
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"  # matches the Dockerfile base image
+          cache: pip
+          cache-dependency-path: web_dashboard/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r web_dashboard/requirements.txt
+
+      - name: Run test suite
+        run: |
+          fail=0
+          for f in tests/test_*.py; do
+            echo "::group::$f"
+            python "$f" || fail=1
+            echo "::endgroup::"
+          done
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::One or more test files failed"
+          fi
+          exit $fail
