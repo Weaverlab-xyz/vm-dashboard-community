@@ -74,7 +74,11 @@ google-auth>=2.20.0
 azure-storage-blob>=12.19.0,<13
 
 # Async HTTP client (Portainer CE API, Ollama)
-httpx>=0.27.0
+# Upper-bounded below 0.28: httpx 0.28 removed the `app=` shortcut that the
+# Starlette TestClient bundled with fastapi 0.109.2 passes to httpx.Client,
+# which breaks fastapi.testclient.TestClient (see tests/test_containers_page_
+# resilience.py). Bump deliberately alongside fastapi/starlette.
+httpx>=0.27.0,<0.28
 
 # YAML parsing (playbook generation validation)
 PyYAML>=6.0
