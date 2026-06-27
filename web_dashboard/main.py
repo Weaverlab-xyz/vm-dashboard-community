@@ -18,6 +18,10 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from .config import settings
+from .logging_context import (
+    LOG_FORMAT, install_log_correlation, new_request_id,
+    reset_correlation_id, set_correlation_id,
+)
 from .database import SessionLocal, User, create_admin_user, init_db
 from .services import cache_service
 from .services import config_service
@@ -26,9 +30,12 @@ from .services import config_service
 
 os.makedirs(settings.log_dir, exist_ok=True)
 
+# Install the correlation-id LogRecord factory before basicConfig so every record
+# carries `cid` for the %(cid)s field in LOG_FORMAT (see logging_context).
+install_log_correlation()
 logging.basicConfig(
     level=getattr(logging, settings.log_level.upper(), logging.INFO),
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    format=LOG_FORMAT,
     handlers=[
         logging.StreamHandler(),
         logging.FileHandler(os.path.join(settings.log_dir, "api.log"), encoding="utf-8"),
@@ -348,6 +355,21 @@ app.add_middleware(
     allow_methods=["GET", "POST", "DELETE", "PUT", "PATCH"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def request_correlation(request: Request, call_next):
+    """Tag every request's log lines with a short correlation id (honouring an
+    inbound X-Request-ID), and echo it back as the X-Request-ID response header
+    so a client/proxy can tie its record to the dashboard's."""
+    rid = request.headers.get("x-request-id") or new_request_id()
+    token = set_correlation_id(rid)
+    try:
+        response = await call_next(request)
+    finally:
+        reset_correlation_id(token)
+    response.headers["X-Request-ID"] = rid
+    return response
 
 
 # ── Static files & templates ──────────────────────────────────────────────────

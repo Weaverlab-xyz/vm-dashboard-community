@@ -24,6 +24,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from .database import SessionLocal, Job, init_db
+from .logging_context import LOG_FORMAT, correlation, install_log_correlation
 from .services import job_service
 
 logger = logging.getLogger(__name__)
@@ -156,29 +157,33 @@ async def _run_loop(poll_interval: float = POLL_INTERVAL) -> None:
             continue
 
         job_id, job_type, meta = claim
-        logger.info("job runner: claimed %s job %s", job_type, job_id)
-        try:
-            await _dispatch(job_id, job_type, meta)
-        except Exception as exc:
-            logger.exception("job runner: dispatch crashed for job %s", job_id)
-            # The service fns mark failed themselves; this backstops an error
-            # raised around them (e.g. a missing metadata key) so the job is never
-            # left stuck 'running'.
-            db = SessionLocal()
+        # Tag this job's whole fan-out (dispatch → service calls → WebSocket
+        # progress writes) with the job id so its log lines are traceable.
+        with correlation(job_id):
+            logger.info("job runner: claimed %s job %s", job_type, job_id)
             try:
-                cur = job_service.get_job(db, job_id)
-                if cur and cur.status == "running":
-                    job_service.set_failed(db, job_id, f"job runner error: {exc}")
-            except Exception:
-                logger.exception("job runner: could not mark job %s failed", job_id)
-            finally:
-                db.close()
+                await _dispatch(job_id, job_type, meta)
+            except Exception as exc:
+                logger.exception("job runner: dispatch crashed for job %s", job_id)
+                # The service fns mark failed themselves; this backstops an error
+                # raised around them (e.g. a missing metadata key) so the job is
+                # never left stuck 'running'.
+                db = SessionLocal()
+                try:
+                    cur = job_service.get_job(db, job_id)
+                    if cur and cur.status == "running":
+                        job_service.set_failed(db, job_id, f"job runner error: {exc}")
+                except Exception:
+                    logger.exception("job runner: could not mark job %s failed", job_id)
+                finally:
+                    db.close()
 
 
 def main() -> None:
+    install_log_correlation()
     logging.basicConfig(
         level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        format=LOG_FORMAT,
     )
     # depends_on only waits for the DB to be healthy, not for the app's migrations;
     # if the runner wins the boot race the new JobLog table must still exist.
