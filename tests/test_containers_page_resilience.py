@@ -50,6 +50,11 @@ def _patch_unconfigured(monkey):
     monkey["az"] = containers.azure_service.list_aci_container_instances
     containers.aws_service.list_ecs_tasks = aws_boom
     containers.azure_service.list_aci_container_instances = az_boom
+    # _aci_rg() reads the resource group via config_service (a DB-backed cache).
+    # Stub it so the ACI path stays hermetic — mirrors the _gcp_project_id stub
+    # below; otherwise an uninitialised DB turns the handled-503 path into a 500.
+    monkey["aci_rg"] = containers._aci_rg
+    containers._aci_rg = lambda: "test-rg"
 
     from web_dashboard.services import gcp_service
     monkey["gcp_j"] = gcp_service.list_gce_jumpoints
@@ -71,6 +76,8 @@ def _patch_configured(monkey):
     monkey["az"] = containers.azure_service.list_aci_container_instances
     containers.aws_service.list_ecs_tasks = ok_list
     containers.azure_service.list_aci_container_instances = ok_list
+    monkey["aci_rg"] = containers._aci_rg
+    containers._aci_rg = lambda: "test-rg"
 
     from web_dashboard.services import gcp_service
     monkey["gcp_j"] = gcp_service.list_gce_jumpoints
@@ -85,6 +92,7 @@ def _restore(monkey):
     from web_dashboard.services import gcp_service
     containers.aws_service.list_ecs_tasks = monkey["aws"]
     containers.azure_service.list_aci_container_instances = monkey["az"]
+    containers._aci_rg = monkey["aci_rg"]
     gcp_service.list_gce_jumpoints = monkey["gcp_j"]
     gcp_service.list_gce_compose = monkey["gcp_c"]
     containers._gcp_project_id = monkey["proj"]
