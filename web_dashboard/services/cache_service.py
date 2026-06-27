@@ -44,6 +44,9 @@ TTL = {
     "portainer_endpoints": 300,   # 5 min
     "portainer_containers": 60,   # 1 min
     "portainer_stacks":    120,   # 2 min
+    # Cost (cross-cloud MTD spend) — long TTL: cost data updates slowly and AWS
+    # Cost Explorer bills ~$0.01/request, so cache hard.
+    "cost_summary":      21600,   # 6 h
 }
 
 # ── Internal store ────────────────────────────────────────────────────────────

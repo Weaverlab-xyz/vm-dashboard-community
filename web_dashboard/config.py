@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     vdesktops_enabled: bool = False     # Virtual desktops router + /desktops page (Azure pools + PRA brokering)
     cloud_database_enabled: bool = False  # /api/databases router — private managed DBs brokered via a PRA tunnel
     k8s_management_enabled: bool = False  # /api/k8s router — provision/register/manage Kubernetes clusters
+    cost_explorer_enabled: bool = False   # /api/costs router + dashboard spend tile (AWS Cost Explorer + Azure Cost Mgmt)
     # K8s Phase 3b broker (community = beyondtrust/sra Terraform path). The tunnel
     # uses bt_jump_group_name + bt_jumpoint_name (per-cluster overrides fall back
     # to these). Read live via config_service.
