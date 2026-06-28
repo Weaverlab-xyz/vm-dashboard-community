@@ -33,6 +33,14 @@ _AZURE_GROUPED_RESULT = {"properties": {
     "columns": [{"name": "Cost"}, {"name": "ServiceName"}, {"name": "Currency"}],
     "rows": [[6.0, "Virtual Machines", "USD"], [1.5, "Storage", "USD"]],
 }}
+# GCP BigQuery billing-export fake rows (a Row supports r["col"]; dicts suffice).
+_BQ_SUMMARY = [{"net": 42.5, "currency": "USD"}]
+_BQ_GROUPED = [
+    {"service": "Compute Engine", "amount": 30.0, "currency": "USD"},
+    {"service": "Cloud Storage", "amount": 12.5, "currency": "USD"},
+]
+# Backs the stubbed config_service so tests can set/clear the export table.
+CONF = {}
 
 
 class _AWSError(Exception):
@@ -100,6 +108,45 @@ def _install_stubs():
     sys.modules["botocore"] = botocore
     sys.modules["botocore.exceptions"] = exc
 
+    # gcp_service (creds + GCPError) + config_service (export-table key) + a light
+    # web_dashboard.config so cost_service's lazy `from ..config import settings`
+    # doesn't pull pydantic.
+    gcp = types.ModuleType("web_dashboard.services.gcp_service")
+    gcp.GCPError = type("GCPError", (Exception,), {})
+    gcp._gcp_project = lambda: "proj"
+    gcp._gcp_creds = lambda: None
+    sys.modules["web_dashboard.services.gcp_service"] = gcp
+
+    cfg = types.ModuleType("web_dashboard.services.config_service")
+    cfg.get = lambda key, default="": CONF.get(key, default)
+    sys.modules["web_dashboard.services.config_service"] = cfg
+
+    confmod = types.ModuleType("web_dashboard.config")
+    confmod.settings = type("_S", (), {"__getattr__": lambda self, k: ""})()
+    sys.modules["web_dashboard.config"] = confmod
+
+    # google.cloud.bigquery — fake Client returning grouped/summary rows by SQL.
+    class _QueryJob:
+        def __init__(self, rows): self._rows = rows
+        def result(self): return iter(self._rows)
+
+    class _BQClient:
+        def __init__(self, *a, **k): pass
+        def query(self, sql, job_config=None):
+            return _QueryJob(_BQ_GROUPED if "GROUP BY" in sql else _BQ_SUMMARY)
+
+    google = sys.modules.get("google") or types.ModuleType("google")
+    gcloud = types.ModuleType("google.cloud")
+    bq = types.ModuleType("google.cloud.bigquery")
+    bq.Client = _BQClient
+    bq.QueryJobConfig = lambda **k: None
+    bq.ScalarQueryParameter = lambda *a, **k: None
+    gcloud.bigquery = bq
+    google.cloud = gcloud
+    sys.modules["google"] = google
+    sys.modules["google.cloud"] = gcloud
+    sys.modules["google.cloud.bigquery"] = bq
+
 
 _install_stubs()
 try:
@@ -119,6 +166,8 @@ _ORIG_AWS = svc.get_aws_mtd_cost
 _ORIG_AZURE = svc.get_azure_mtd_cost
 _ORIG_AWS_BD = svc.get_aws_managed_breakdown
 _ORIG_AZURE_BD = svc.get_azure_managed_breakdown
+_ORIG_GCP = svc.get_gcp_mtd_cost
+_ORIG_GCP_BD = svc.get_gcp_managed_breakdown
 
 
 def _run(coro):
@@ -130,6 +179,8 @@ def _restore():
     svc.get_azure_mtd_cost = _ORIG_AZURE
     svc.get_aws_managed_breakdown = _ORIG_AWS_BD
     svc.get_azure_managed_breakdown = _ORIG_AZURE_BD
+    svc.get_gcp_mtd_cost = _ORIG_GCP
+    svc.get_gcp_managed_breakdown = _ORIG_GCP_BD
 
 
 def _by_cloud(summary):
@@ -171,13 +222,14 @@ def test_summary_all_unavailable_total_none():
     assert all(c["status"] == "unavailable" for c in s["clouds"])
 
 
-def test_gcp_always_unavailable():
+def test_gcp_unavailable_without_export_table():
+    CONF.pop("gcp_billing_export_table", None)
     async def aws(): return (1.0, "USD")
     async def azure(): return (2.0, "USD")
     svc.get_aws_mtd_cost, svc.get_azure_mtd_cost = aws, azure
     gcp = _by_cloud(_run(svc.get_cost_summary()))["gcp"]
     assert gcp["status"] == "unavailable"
-    assert "BigQuery" in gcp["detail"]
+    assert "BigQuery" in gcp["detail"]  # the configure-the-export hint
 
 
 # ── per-cloud parsing ────────────────────────────────────────────────────────
@@ -250,12 +302,49 @@ def test_breakdown_one_unavailable_excluded_from_grand_total():
         _restore()
 
 
-def test_breakdown_gcp_always_unavailable():
+def test_breakdown_gcp_unavailable_without_table():
+    CONF.pop("gcp_billing_export_table", None)
     svc.get_aws_managed_breakdown = _bd(1.0)
     svc.get_azure_managed_breakdown = _bd(2.0)
     try:
         gcp = {c["cloud"]: c for c in _run(svc.get_cost_breakdown())["clouds"]}["gcp"]
         assert gcp["status"] == "unavailable" and "BigQuery" in gcp["detail"]
+    finally:
+        _restore()
+
+
+# ── GCP (BigQuery billing export) ────────────────────────────────────────────
+
+def test_gcp_mtd_parsing_net_cost():
+    _restore()
+    CONF["gcp_billing_export_table"] = "proj.ds.gcp_billing_export_v1_ABC"
+    try:
+        amount, currency = _run(svc.get_gcp_mtd_cost())  # stubbed BQ → _BQ_SUMMARY
+        assert amount == 42.5 and currency == "USD"
+    finally:
+        CONF.clear()
+
+
+def test_gcp_breakdown_parsing_groups_by_service():
+    _restore()
+    CONF["gcp_billing_export_table"] = "proj.ds.gcp_billing_export_v1_ABC"
+    try:
+        res = _run(svc.get_gcp_managed_breakdown())  # stubbed BQ → _BQ_GROUPED
+        assert res["total"] == 42.5
+        assert [s["service"] for s in res["services"]] == ["Compute Engine", "Cloud Storage"]
+    finally:
+        CONF.clear()
+
+
+def test_summary_includes_gcp_when_configured():
+    async def aws(): return (10.0, "USD")
+    async def azure(): return (5.0, "USD")
+    async def gcp(): return (7.0, "USD")
+    svc.get_aws_mtd_cost, svc.get_azure_mtd_cost, svc.get_gcp_mtd_cost = aws, azure, gcp
+    try:
+        s = _run(svc.get_cost_summary())
+        assert s["total_mtd"] == 22.0  # all three clouds counted
+        assert _by_cloud(s)["gcp"]["status"] == "ok" and _by_cloud(s)["gcp"]["amount"] == 7.0
     finally:
         _restore()
 

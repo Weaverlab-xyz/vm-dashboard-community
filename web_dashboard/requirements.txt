@@ -68,6 +68,8 @@ google-cloud-run>=0.10.0
 # than added to a runtime install path so it's part of the image's
 # pre-resolved dependency set.
 google-cloud-build>=3.20.0
+# Cloud cost: query the GCP Cloud Billing BigQuery export (services/cost_service.py).
+google-cloud-bigquery>=3.0.0
 google-auth>=2.20.0
 
 # Azure Blob Storage (Packer template archive)

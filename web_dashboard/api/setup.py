@@ -647,6 +647,7 @@ class CostExplorerFeatureConfig(BaseModel):
     spend budget used for the over/approaching alerts (0 = no budget)."""
     enabled: bool = False
     cost_monthly_budget: float = 0.0
+    gcp_billing_export_table: str = ""
 
     @field_validator("cost_monthly_budget", mode="before")
     @classmethod
