@@ -24,6 +24,15 @@ _AZURE_QUERY_RESULT = {"properties": {
     "columns": [{"name": "Cost"}, {"name": "Currency"}],
     "rows": [[123.456, "USD"]],
 }}
+# Grouped (per-service) fixtures for the dashboard-managed breakdown.
+_AWS_CE_GROUPED = {"ResultsByTime": [{"Groups": [
+    {"Keys": ["Amazon EC2"], "Metrics": {"UnblendedCost": {"Amount": "8.00", "Unit": "USD"}}},
+    {"Keys": ["Amazon RDS"], "Metrics": {"UnblendedCost": {"Amount": "2.50", "Unit": "USD"}}},
+]}]}
+_AZURE_GROUPED_RESULT = {"properties": {
+    "columns": [{"name": "Cost"}, {"name": "ServiceName"}, {"name": "Currency"}],
+    "rows": [[6.0, "Virtual Machines", "USD"], [1.5, "Storage", "USD"]],
+}}
 
 
 class _AWSError(Exception):
@@ -58,14 +67,18 @@ def _install_stubs():
     httpx.HTTPError = type("HTTPError", (Exception,), {})
 
     class _Resp:
+        def __init__(self, data): self._data = data
         def raise_for_status(self): pass
-        def json(self): return _AZURE_QUERY_RESULT
+        def json(self): return self._data
 
     class _AsyncClient:
         def __init__(self, *a, **k): pass
         async def __aenter__(self): return self
         async def __aexit__(self, *a): return False
-        async def post(self, *a, **k): return _Resp()
+        async def post(self, *a, **k):
+            # Grouped query (breakdown) carries dataset.grouping; ungrouped is the summary.
+            grouped = bool(((k.get("json") or {}).get("dataset") or {}).get("grouping"))
+            return _Resp(_AZURE_GROUPED_RESULT if grouped else _AZURE_QUERY_RESULT)
     httpx.AsyncClient = _AsyncClient
     sys.modules["httpx"] = httpx
 
@@ -73,7 +86,9 @@ def _install_stubs():
     boto3 = types.ModuleType("boto3")
 
     class _CE:
-        def get_cost_and_usage(self, **kw): return _AWS_CE_RESULT
+        def get_cost_and_usage(self, **kw):
+            # GroupBy present → the breakdown query; else the summary query.
+            return _AWS_CE_GROUPED if "GroupBy" in kw else _AWS_CE_RESULT
     boto3.client = lambda name, **kw: _CE()
     sys.modules["boto3"] = boto3
 
@@ -102,6 +117,8 @@ except Exception as exc:  # pragma: no cover
 # tests reassigning the module globals (pytest runs in definition order).
 _ORIG_AWS = svc.get_aws_mtd_cost
 _ORIG_AZURE = svc.get_azure_mtd_cost
+_ORIG_AWS_BD = svc.get_aws_managed_breakdown
+_ORIG_AZURE_BD = svc.get_azure_managed_breakdown
 
 
 def _run(coro):
@@ -111,6 +128,8 @@ def _run(coro):
 def _restore():
     svc.get_aws_mtd_cost = _ORIG_AWS
     svc.get_azure_mtd_cost = _ORIG_AZURE
+    svc.get_aws_managed_breakdown = _ORIG_AWS_BD
+    svc.get_azure_managed_breakdown = _ORIG_AZURE_BD
 
 
 def _by_cloud(summary):
@@ -175,6 +194,70 @@ def test_azure_parsing_reads_cost_and_currency_columns():
     amount, currency = _run(svc.get_azure_mtd_cost())  # stubbed httpx → _AZURE_QUERY_RESULT
     assert round(amount, 3) == 123.456
     assert currency == "USD"
+
+
+# ── managed breakdown: parsing ───────────────────────────────────────────────
+
+def test_aws_breakdown_parsing_groups_by_service():
+    _restore()
+    res = _run(svc.get_aws_managed_breakdown())  # stubbed boto3 → _AWS_CE_GROUPED
+    assert res["total"] == 10.5 and res["currency"] == "USD"
+    # sorted by amount desc
+    assert [s["service"] for s in res["services"]] == ["Amazon EC2", "Amazon RDS"]
+    assert res["services"][0]["amount"] == 8.0 and res["services"][1]["amount"] == 2.5
+
+
+def test_azure_breakdown_parsing_reads_servicename():
+    _restore()
+    res = _run(svc.get_azure_managed_breakdown())  # stubbed httpx → _AZURE_GROUPED_RESULT
+    assert res["total"] == 7.5
+    assert [s["service"] for s in res["services"]] == ["Virtual Machines", "Storage"]
+
+
+# ── managed breakdown: orchestration ─────────────────────────────────────────
+
+def _bd(total, currency="USD", services=None):
+    async def _f():
+        return {"total": total, "currency": currency, "services": services or []}
+    return _f
+
+
+def test_breakdown_both_ok_grand_total_and_services():
+    svc.get_aws_managed_breakdown = _bd(10.0, services=[{"service": "EC2", "amount": 10.0}])
+    svc.get_azure_managed_breakdown = _bd(5.0, services=[{"service": "VMs", "amount": 5.0}])
+    try:
+        out = _run(svc.get_cost_breakdown())
+        assert out["grand_total"] == 15.0
+        by = {c["cloud"]: c for c in out["clouds"]}
+        assert by["aws"]["status"] == "ok" and by["aws"]["total"] == 10.0
+        assert by["aws"]["services"][0]["service"] == "EC2"
+        assert by["azure"]["status"] == "ok"
+    finally:
+        _restore()
+
+
+def test_breakdown_one_unavailable_excluded_from_grand_total():
+    async def boom(): raise svc.aws_service.AWSError("activate the managed-by tag")
+    svc.get_aws_managed_breakdown = boom
+    svc.get_azure_managed_breakdown = _bd(5.0)
+    try:
+        out = _run(svc.get_cost_breakdown())
+        assert out["grand_total"] == 5.0
+        by = {c["cloud"]: c for c in out["clouds"]}
+        assert by["aws"]["status"] == "unavailable" and by["aws"]["total"] is None
+        assert "managed-by" in by["aws"]["detail"]
+    finally:
+        _restore()
+
+
+def test_breakdown_gcp_always_unavailable():
+    svc.get_aws_managed_breakdown = _bd(1.0)
+    svc.get_azure_managed_breakdown = _bd(2.0)
+    try:
+        gcp = {c["cloud"]: c for c in _run(svc.get_cost_breakdown())["clouds"]}["gcp"]
+        assert gcp["status"] == "unavailable" and "BigQuery" in gcp["detail"]
+    finally:
+        _restore()
 
 
 if __name__ == "__main__":

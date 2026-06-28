@@ -196,17 +196,22 @@ async def _warm_loop(name: str, fetcher, key_fn, ttl: int) -> None:
 
 
 async def _warm_cost_summary() -> None:
-    """Pre-populate the cross-cloud cost tile. Skips the (billable) cloud calls
-    while cost_explorer_enabled is off, so a runtime flag flip activates it on
-    the next pass — and the endpoint self-populates on first load regardless."""
+    """Pre-populate the cost tile + /costs page (account summary and the
+    dashboard-managed breakdown). Skips the (billable) cloud calls while
+    cost_explorer_enabled is off, so a runtime flag flip activates it on the next
+    pass — and the endpoints self-populate on first load regardless."""
     from .services import cost_service
     ttl = cache_service.TTL["cost_summary"]
     interval = int(ttl * 0.8)
     while True:
         try:
             if config_service.get_bool("cost_explorer_enabled", settings.cost_explorer_enabled):
-                data = await cost_service.get_cost_summary()
-                await cache_service.set(cache_service.key_global("cost_summary"), data, ttl)
+                summary = await cost_service.get_cost_summary()
+                await cache_service.set(cache_service.key_global("cost_summary"), summary, ttl)
+                breakdown = await cost_service.get_cost_breakdown()
+                await cache_service.set(
+                    cache_service.key_global("cost_breakdown"), breakdown,
+                    cache_service.TTL["cost_breakdown"])
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -675,6 +680,14 @@ async def jobs_page(request: Request):
 async def inventory_page(request: Request):
     """Cross-provider deployment inventory (read-only aggregation of DB records)."""
     return templates.TemplateResponse("inventory/list.html", {"request": request, **_feature_flags()})
+
+
+@app.get("/costs", response_class=HTMLResponse, include_in_schema=False)
+async def costs_page(request: Request):
+    """Cloud cost page: account-total summary + dashboard-managed spend breakdown.
+    Nav-gated on cost_explorer_enabled (+ admin); the /api/costs/* routes are
+    admin-only and feature-gated."""
+    return templates.TemplateResponse("costs/index.html", {"request": request, **_feature_flags()})
 
 
 @app.get("/jobs/{job_id}", response_class=HTMLResponse, include_in_schema=False)

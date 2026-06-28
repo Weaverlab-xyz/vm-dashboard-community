@@ -47,6 +47,7 @@ TTL = {
     # Cost (cross-cloud MTD spend) — long TTL: cost data updates slowly and AWS
     # Cost Explorer bills ~$0.01/request, so cache hard.
     "cost_summary":      21600,   # 6 h
+    "cost_breakdown":    21600,   # 6 h — billable, grouped CE/CM queries; cache hard
     # Deployment inventory (DB aggregation) — short TTL; cheap indexed queries.
     "deployment_inventory": 60,   # 1 min
 }
