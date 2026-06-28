@@ -9,7 +9,7 @@ GET  /api/setup/config     — current config with secrets redacted (admin JWT i
 import logging
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/setup", tags=["setup"])
@@ -641,6 +641,20 @@ class VirtualDesktopsFeatureConfig(BaseModel):
     azure_desktops_vault_account_group_id: str = ""
 
 
+class CostExplorerFeatureConfig(BaseModel):
+    """Cloud cost tracking. The toggle owns `cost_explorer_enabled` (the feature
+    name maps to it via _feature_to_cfg_key). `cost_monthly_budget` is the monthly
+    spend budget used for the over/approaching alerts (0 = no budget)."""
+    enabled: bool = False
+    cost_monthly_budget: float = 0.0
+
+    @field_validator("cost_monthly_budget", mode="before")
+    @classmethod
+    def _blank_to_zero(cls, v):
+        # An empty/blank input (no budget) round-trips as "" / null — treat as 0.
+        return 0.0 if v in (None, "") else v
+
+
 _FEATURE_MODELS = {
     "vmware":       VMwareFeatureConfig,
     "beyondtrust":  BeyondTrustFeatureConfig,
@@ -655,6 +669,7 @@ _FEATURE_MODELS = {
     "cloud_database": CloudDatabaseFeatureConfig,
     "k8s_management": K8sManagementFeatureConfig,
     "vdesktops":      VirtualDesktopsFeatureConfig,
+    "cost_explorer":  CostExplorerFeatureConfig,
 }
 
 # Features whose panel carries config but NOT an enable toggle — their on/off

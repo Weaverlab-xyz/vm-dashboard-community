@@ -260,6 +260,43 @@ def test_breakdown_gcp_always_unavailable():
         _restore()
 
 
+# ── budget evaluation ────────────────────────────────────────────────────────
+
+from datetime import date as _date
+
+# Mid-month "today" so projection = MTD / 15 * 30 = 2x MTD (June has 30 days).
+_MID = _date(2026, 6, 15)
+
+
+def test_budget_disabled_returns_none():
+    assert svc.evaluate_budget(100.0, "USD", 0, today=_MID) is None
+    assert svc.evaluate_budget(100.0, "USD", None, today=_MID) is None
+    assert svc.evaluate_budget(None, "USD", 500, today=_MID) is None  # no spend data
+
+
+def test_budget_over_when_mtd_exceeds_limit():
+    b = svc.evaluate_budget(600.0, "USD", 500, today=_MID)
+    assert b["status"] == "over" and b["pct_of_budget"] == 120.0
+    assert b["limit"] == 500.0 and b["mtd"] == 600.0
+
+
+def test_budget_approaching_when_on_pace():
+    # MTD 300 on day 15 of a 30-day month → projected 600 ≥ 500 budget, but
+    # MTD (300) < 500, so it's "approaching", not "over".
+    b = svc.evaluate_budget(300.0, "USD", 500, today=_MID)
+    assert b["status"] == "approaching" and b["projected"] == 600.0
+
+
+def test_budget_ok_when_under_and_not_on_pace():
+    # MTD 200 → projected 400 < 500 budget → ok.
+    b = svc.evaluate_budget(200.0, "USD", 500, today=_MID)
+    assert b["status"] == "ok" and b["projected"] == 400.0
+
+
+def test_budget_currency_defaults_usd():
+    assert svc.evaluate_budget(100.0, None, 500, today=_MID)["currency"] == "USD"
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0

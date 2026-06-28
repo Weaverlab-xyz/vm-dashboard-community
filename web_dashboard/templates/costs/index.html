@@ -15,6 +15,25 @@
     </button>
   </div>
 
+  <!-- ── Monthly budget ────────────────────────────────────────────────────── -->
+  <div x-show="summary.budget" class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-8">
+    <div class="flex items-baseline justify-between mb-2">
+      <h2 class="font-semibold text-gray-800">Monthly budget</h2>
+      <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium"
+            :class="budgetBadge(summary.budget?.status)" x-text="summary.budget?.status"></span>
+    </div>
+    <div class="w-full bg-gray-200 rounded-full h-2.5 mb-2">
+      <div class="h-2.5 rounded-full" :class="budgetBar(summary.budget?.status)"
+           :style="'width:' + Math.min(100, summary.budget?.pct_of_budget || 0) + '%'"></div>
+    </div>
+    <p class="text-sm text-gray-600">
+      <span class="font-medium" x-text="money(summary.budget?.mtd, summary.budget?.currency)"></span>
+      of <span x-text="money(summary.budget?.limit, summary.budget?.currency)"></span>
+      (<span x-text="(summary.budget?.pct_of_budget ?? 0) + '%'"></span>) ·
+      projected <span x-text="money(summary.budget?.projected, summary.budget?.currency)"></span> by month-end
+    </p>
+  </div>
+
   <!-- ── Account total ─────────────────────────────────────────────────────── -->
   <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-8">
     <div class="flex items-baseline justify-between mb-4">
@@ -113,6 +132,15 @@
         } finally {
           this.loading = false;
         }
+      },
+
+      budgetBadge(s) {
+        return ({ over: 'bg-red-100 text-red-700', approaching: 'bg-yellow-100 text-yellow-700',
+                  ok: 'bg-green-100 text-green-700' })[s] || 'bg-gray-100 text-gray-600';
+      },
+
+      budgetBar(s) {
+        return ({ over: 'bg-red-500', approaching: 'bg-yellow-400', ok: 'bg-green-500' })[s] || 'bg-gray-400';
       },
 
       money(amount, currency) {
