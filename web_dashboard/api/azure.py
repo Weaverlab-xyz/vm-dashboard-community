@@ -36,7 +36,7 @@ from ..models.azure import (
     AzureSSHKeyInfo,
     AzureVMInfo,
 )
-from ..services import azure_service, job_service, cache_service, workgroup_service
+from ..services import azure_service, job_service, cache_service, cloud_stats, workgroup_service
 from ..services.azure_service import AzureError
 from .auth import get_current_user, require_admin, require_permission
 
@@ -472,6 +472,86 @@ async def get_vm_admin_password(
 
 # ── VM listing ────────────────────────────────────────────────────────────────
 
+async def _fetch_vms(db: Session) -> list:
+    """Dashboard-deployed Azure VMs (azure_deploy jobs) merged with live power
+    state. Shared by /vms and /dashboard-stats. Workgroup is normalized to
+    lowercase so both the list filter and the stats RBAC compare consistently."""
+    deploy_jobs = (
+        db.query(Job)
+        .filter(Job.job_type == "azure_deploy")
+        .order_by(Job.created_at.desc())
+        .all()
+    )
+    job_meta = {
+        j.metadata_dict["vm_name"]: {
+            "id": j.id,
+            "created_by": j.created_by,
+            "resource_group": j.metadata_dict.get("resource_group"),
+            "destroyed": j.metadata_dict.get("destroyed", False),
+            "workgroup": (j.workgroup or j.metadata_dict.get("workgroup") or "").lower() or None,
+        }
+        for j in deploy_jobs if j.metadata_dict.get("vm_name")
+    }
+
+    live_vms = await azure_service.describe_vms(_rg())
+    live_vm_names = {vm["name"] for vm in live_vms}
+    for vm_name, meta in job_meta.items():
+        if vm_name not in live_vm_names and not meta["destroyed"]:
+            rg = meta["resource_group"] or _rg()
+            try:
+                vm_data = await azure_service.get_vm(rg, vm_name)
+                if vm_data:
+                    live_vms.append(vm_data)
+                    live_vm_names.add(vm_name)
+            except Exception:
+                pass
+
+    result = []
+    for vm in live_vms:
+        meta = job_meta.get(vm["name"])
+        wg = ((meta or {}).get("workgroup") or vm.get("workgroup") or "").lower() or None
+        result.append({
+            **vm,
+            "workgroup": wg,
+            "job_id": meta["id"] if meta else None,
+            "deployed_by": meta["created_by"] if meta else "unknown",
+        })
+    return result
+
+
+@router.get("/dashboard-stats")
+async def azure_dashboard_stats(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("azure", "read")),
+):
+    """One-call counts for the Azure dashboard tiles (VMs total+running, images
+    total) — reuses the same cached data + RBAC as the list endpoints. A null
+    section → the tile shows unavailable."""
+    out = {"instances": None, "images": None}
+    try:
+        raw, _ = await cache_service.get_or_refresh(
+            cache_service.key_global("azure_vms"),
+            cache_service.TTL["azure_vms"],
+            lambda: _fetch_vms(db))
+        out["instances"] = cloud_stats.summarize_instances(
+            raw, _accessible_workgroups(current_user), "state")
+    except AzureError:
+        pass
+    try:
+        from ..services.region_config import resolve_azure_region
+        region = resolve_azure_region(_loc())
+        payload, _ = await cache_service.get_or_refresh(
+            cache_service.key_global("azure_images"),
+            cache_service.TTL["azure_images"],
+            lambda: azure_service.list_private_images(
+                region["gallery_name"], region["gallery_resource_group"],
+                region["resource_group"] or "vm-cli-rg"))
+        out["images"] = {"total": len(payload.get("images", []))}
+    except AzureError:
+        pass
+    return out
+
+
 @router.get("/vms")
 async def list_vms(
     bust: bool = False,
@@ -495,54 +575,10 @@ async def list_vms(
     cache_key = cache_service.key_global("azure_vms")
     ttl = cache_service.TTL["azure_vms"]
 
-    deploy_jobs = (
-        db.query(Job)
-        .filter(Job.job_type == "azure_deploy")
-        .order_by(Job.created_at.desc())
-        .all()
-    )
-    job_meta = {
-        j.metadata_dict["vm_name"]: {
-            "id": j.id,
-            "created_by": j.created_by,
-            "resource_group": j.metadata_dict.get("resource_group"),
-            "destroyed": j.metadata_dict.get("destroyed", False),
-            "workgroup": (j.workgroup or j.metadata_dict.get("workgroup") or "").lower() or None,
-        }
-        for j in deploy_jobs if j.metadata_dict.get("vm_name")
-    }
-
-    async def _fetch():
-        live_vms = await azure_service.describe_vms(_rg())
-        live_vm_names = {vm["name"] for vm in live_vms}
-
-        for vm_name, meta in job_meta.items():
-            if vm_name not in live_vm_names and not meta["destroyed"]:
-                rg = meta["resource_group"] or _rg()
-                try:
-                    vm_data = await azure_service.get_vm(rg, vm_name)
-                    if vm_data:
-                        live_vms.append(vm_data)
-                        live_vm_names.add(vm_name)
-                except Exception:
-                    pass
-
-        result = []
-        for vm in live_vms:
-            meta = job_meta.get(vm["name"])
-            wg = (meta or {}).get("workgroup") or vm.get("workgroup")
-            result.append({
-                **vm,
-                "workgroup": wg,
-                "job_id": meta["id"] if meta else None,
-                "deployed_by": meta["created_by"] if meta else "unknown",
-            })
-        return result
-
     try:
         if bust:
             await cache_service.invalidate(cache_key)
-        raw, cached_at = await cache_service.get_or_refresh(cache_key, ttl, _fetch)
+        raw, cached_at = await cache_service.get_or_refresh(cache_key, ttl, lambda: _fetch_vms(db))
         filtered = []
         for vm in raw:
             vm_wg = (vm.get("workgroup") or "").lower() or None

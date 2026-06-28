@@ -408,16 +408,46 @@
       async refreshSection(section) {
         if (!section) return;
         section.loaded = false;
-        const visible = this.visibleTiles(section.tiles);
-
-        // Map tile.key → fetcher promise
-        const tasks = visible.map(t => this._fetchTile(t).then(r => [t.key, r]).catch(() => [t.key, {value: -1}]));
-        const results = await Promise.all(tasks);
-        for (const [key, val] of results) {
-          this.stats[key] = val;
+        if (section.id === 'cloud') {
+          // One aggregated stats call per cloud (instances+images) instead of a
+          // full list call per tile. cost + ovas keep their own fetchers.
+          await this._refreshCloudSection(section);
+        } else {
+          const visible = this.visibleTiles(section.tiles);
+          const tasks = visible.map(t => this._fetchTile(t).then(r => [t.key, r]).catch(() => [t.key, {value: -1}]));
+          const results = await Promise.all(tasks);
+          for (const [key, val] of results) {
+            this.stats[key] = val;
+          }
         }
         section.loaded = true;
         section.loadedAt = Date.now();
+      },
+
+      async _refreshCloudSection(section) {
+        const tasks = [];
+        if (this.features.aws)   tasks.push(this._fetchCloudStats('/api/aws/dashboard-stats',   'aws_instances', 'aws_amis'));
+        if (this.features.azure) tasks.push(this._fetchCloudStats('/api/azure/dashboard-stats', 'azure_vms',     'azure_images'));
+        if (this.features.gcp)   tasks.push(this._fetchCloudStats('/api/gcp/dashboard-stats',   'gcp_instances', 'gcp_images'));
+        // ovas + cloud_cost aren't cloud-VM tiles — keep their per-tile fetchers.
+        for (const t of this.visibleTiles(section.tiles)) {
+          if (t.key === 'ovas' || t.key === 'cloud_cost') {
+            tasks.push(this._fetchTile(t).then(r => { this.stats[t.key] = r; }).catch(() => { this.stats[t.key] = {value: -1}; }));
+          }
+        }
+        await Promise.all(tasks);
+      },
+
+      // One call → counts for a cloud's instance + image tiles. Null section → unavailable.
+      async _fetchCloudStats(url, instKey, imgKey) {
+        try {
+          const r = await API.get(url);
+          this.stats[instKey] = r?.instances ? { value: r.instances.total, secondary: r.instances.running } : { value: -1 };
+          this.stats[imgKey]  = r?.images ? { value: r.images.total } : { value: -1 };
+        } catch (e) {
+          this.stats[instKey] = { value: -1 };
+          this.stats[imgKey]  = { value: -1 };
+        }
       },
 
       // Per-tile data fetcher — keyed by tile.key. Each returns {value, secondary?}.

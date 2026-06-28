@@ -39,7 +39,7 @@ from ..models.aws import (
     NetworkOptions,
     SSHKeySecretDetail,
 )
-from ..services import aws_service, job_service, cache_service, workgroup_service
+from ..services import aws_service, job_service, cache_service, cloud_stats, workgroup_service
 from ..services.aws_service import AWSError
 from .auth import get_current_user, require_admin, require_permission
 
@@ -166,6 +166,80 @@ async def network_options(
 
 # ── EC2 instance listing ──────────────────────────────────────────────────────
 
+async def _fetch_instances(db: Session) -> list:
+    """Dashboard-deployed EC2 instances (completed, non-destroyed ec2_deploy jobs)
+    merged with live state. Shared by /instances and /dashboard-stats so both hit
+    the same cache key. Returns dicts carrying `state` + `workgroup`."""
+    deploy_jobs = (
+        db.query(Job)
+        .filter(Job.job_type == "ec2_deploy", Job.status == "completed")
+        .order_by(Job.created_at.desc())
+        .all()
+    )
+    active_jobs = []
+    instance_ids = []
+    for job in deploy_jobs:
+        meta = job.metadata_dict
+        if meta.get("destroyed"):
+            continue
+        iid = meta.get("instance_id")
+        if iid:
+            active_jobs.append(job)
+            instance_ids.append(iid)
+
+    if not instance_ids:
+        return []
+
+    live_instances = await aws_service.describe_instances(_aws_region(), instance_ids)
+    live_by_id = {inst["instance_id"]: inst for inst in live_instances}
+    job_by_instance = {job.metadata_dict.get("instance_id"): job for job in active_jobs}
+
+    result = []
+    for iid in instance_ids:
+        live = live_by_id.get(iid)
+        if not live:
+            continue
+        job = job_by_instance.get(iid)
+        wg = (job.workgroup or "").lower() if job and job.workgroup else None
+        result.append({
+            **live,
+            "key_name": live.get("key_name"),
+            "workgroup": wg,
+            "job_id": job.id if job else None,
+            "deployed_by": job.created_by if job else None,
+        })
+    return result
+
+
+@router.get("/dashboard-stats")
+async def aws_dashboard_stats(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("aws", "read")),
+):
+    """One-call counts for the AWS dashboard tiles (instances total+running, AMIs
+    total) — reuses the same cached data + RBAC as the list endpoints, so it adds
+    no cloud calls on a warm cache. A null section → the tile shows unavailable."""
+    out = {"instances": None, "images": None}
+    try:
+        raw, _ = await cache_service.get_or_refresh(
+            cache_service.key_global("aws_instances"),
+            cache_service.TTL["aws_instances"],
+            lambda: _fetch_instances(db))
+        out["instances"] = cloud_stats.summarize_instances(
+            raw, _accessible_workgroups(current_user), "state")
+    except AWSError:
+        pass
+    try:
+        amis, _ = await cache_service.get_or_refresh(
+            cache_service.key_global("aws_amis"),
+            cache_service.TTL["aws_amis"],
+            lambda: aws_service.list_amis(_aws_region()))
+        out["images"] = {"total": len(amis)}
+    except AWSError:
+        pass
+    return out
+
+
 @router.get("/instances", response_model=EC2InstanceListResponse)
 async def list_instances(
     workgroup: Optional[str] = None,
@@ -188,49 +262,9 @@ async def list_instances(
     cache_key = cache_service.key_global("aws_instances")
     ttl = cache_service.TTL["aws_instances"]
 
-    async def _fetch():
-        deploy_jobs = (
-            db.query(Job)
-            .filter(Job.job_type == "ec2_deploy", Job.status == "completed")
-            .order_by(Job.created_at.desc())
-            .all()
-        )
-        active_jobs = []
-        instance_ids = []
-        for job in deploy_jobs:
-            meta = job.metadata_dict
-            if meta.get("destroyed"):
-                continue
-            iid = meta.get("instance_id")
-            if iid:
-                active_jobs.append(job)
-                instance_ids.append(iid)
-
-        if not instance_ids:
-            return []
-
-        live_instances = await aws_service.describe_instances(_aws_region(), instance_ids)
-        live_by_id = {inst["instance_id"]: inst for inst in live_instances}
-        job_by_instance = {job.metadata_dict.get("instance_id"): job for job in active_jobs}
-
-        result = []
-        for iid in instance_ids:
-            live = live_by_id.get(iid)
-            if not live:
-                continue
-            job = job_by_instance.get(iid)
-            wg = (job.workgroup or "").lower() if job and job.workgroup else None
-            result.append({
-                **live,
-                "key_name": live.get("key_name"),
-                "workgroup": wg,
-                "job_id": job.id if job else None,
-                "deployed_by": job.created_by if job else None,
-            })
-        return result
-
     try:
-        raw, cached_at = await cache_service.get_or_refresh(cache_key, ttl, _fetch)
+        raw, cached_at = await cache_service.get_or_refresh(
+            cache_key, ttl, lambda: _fetch_instances(db))
         filtered = []
         for inst in raw:
             inst_wg = inst.get("workgroup")
