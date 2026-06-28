@@ -1,0 +1,148 @@
+{% extends "base.html" %}
+{% block title %}Inventory – Infrastructure Management{% endblock %}
+
+{% block content %}
+<div x-data="inventoryList()" x-init="init()">
+
+  <div class="flex items-center justify-between mb-6">
+    <div>
+      <h1 class="text-2xl font-bold text-gray-900">Deployment Inventory</h1>
+      <p class="text-sm text-gray-500 mt-1" x-text="filtered().length + ' of ' + items.length + ' resources'"></p>
+    </div>
+    <button @click="load()" :disabled="loading"
+            class="text-sm bg-white border border-gray-300 hover:bg-gray-50 px-3 py-2 rounded-lg shadow-sm font-medium transition">
+      Refresh
+    </button>
+  </div>
+
+  <!-- Filters -->
+  <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-4 mb-6">
+    <div class="flex flex-wrap items-center gap-4">
+      <div class="flex items-center gap-2">
+        <label class="text-sm font-medium text-gray-600">Provider:</label>
+        <select x-model="filterProvider"
+                class="text-sm border border-gray-300 rounded-lg px-2 py-1.5 focus:ring-2 focus:ring-blue-500">
+          <option value="">All</option>
+          <template x-for="p in providers()" :key="p">
+            <option :value="p" x-text="p"></option>
+          </template>
+        </select>
+      </div>
+      <div class="flex items-center gap-2">
+        <label class="text-sm font-medium text-gray-600">Kind:</label>
+        <select x-model="filterKind"
+                class="text-sm border border-gray-300 rounded-lg px-2 py-1.5 focus:ring-2 focus:ring-blue-500">
+          <option value="">All</option>
+          <option value="vm">VM</option>
+          <option value="database">Database</option>
+          <option value="k8s">Kubernetes</option>
+          <option value="desktop">Desktop</option>
+        </select>
+      </div>
+    </div>
+  </div>
+
+  <!-- Inventory table -->
+  <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+    <table class="w-full text-sm">
+      <thead>
+        <tr class="bg-gray-50 border-b border-gray-200 text-left">
+          <th class="px-4 py-3 font-semibold text-gray-600">Provider</th>
+          <th class="px-4 py-3 font-semibold text-gray-600">Kind</th>
+          <th class="px-4 py-3 font-semibold text-gray-600">Name</th>
+          <th class="px-4 py-3 font-semibold text-gray-600">Region</th>
+          <th class="px-4 py-3 font-semibold text-gray-600">State</th>
+          <th class="px-4 py-3 font-semibold text-gray-600">Workgroup</th>
+          <th class="px-4 py-3 font-semibold text-gray-600">Deployed By</th>
+          <th class="px-4 py-3 font-semibold text-gray-600">Created</th>
+          <th class="px-4 py-3 font-semibold text-gray-600 text-right">Details</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-gray-50">
+        <tr x-show="loading">
+          <td colspan="9" class="px-4 py-10 text-center text-gray-400">Loading…</td>
+        </tr>
+        <tr x-show="!loading && filtered().length === 0">
+          <td colspan="9" class="px-4 py-10 text-center text-gray-400">No deployed resources found.</td>
+        </tr>
+        <template x-for="r in filtered()" :key="r.id">
+          <tr class="hover:bg-gray-50 transition">
+            <td class="px-4 py-3 font-medium text-gray-800 uppercase" x-text="r.cloud"></td>
+            <td class="px-4 py-3 text-gray-600" x-text="kindLabel(r.kind)"></td>
+            <td class="px-4 py-3 text-gray-800 max-w-[220px] truncate" x-text="r.name" :title="r.name"></td>
+            <td class="px-4 py-3 text-gray-500" x-text="r.region || '–'"></td>
+            <td class="px-4 py-3">
+              <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium"
+                    :class="stateBadge(r.state)" x-text="r.state"></span>
+            </td>
+            <td class="px-4 py-3 text-gray-500" x-text="r.workgroup || '–'"></td>
+            <td class="px-4 py-3 text-gray-500" x-text="r.deployed_by || '–'"></td>
+            <td class="px-4 py-3 text-gray-500 text-xs" x-text="timeAgo(r.created_at)"></td>
+            <td class="px-4 py-3 text-right">
+              <a :href="r.detail_href"
+                 class="text-blue-500 hover:underline text-xs font-medium" x-text="'Open →'"></a>
+            </td>
+          </tr>
+        </template>
+      </tbody>
+    </table>
+  </div>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  function inventoryList() {
+    return {
+      items: [],
+      loading: true,
+      filterProvider: '',
+      filterKind: '',
+
+      async init() {
+        requireAuth();
+        await this.load();
+      },
+
+      async load() {
+        this.loading = true;
+        try {
+          const resp = await API.get('/api/inventory');
+          this.items = (resp && resp.items) || [];
+        } catch (e) {
+          toast('Failed to load inventory: ' + e.message, 'error');
+        } finally {
+          this.loading = false;
+        }
+      },
+
+      providers() {
+        return [...new Set(this.items.map(i => i.cloud))].sort();
+      },
+
+      filtered() {
+        return this.items.filter(i =>
+          (!this.filterProvider || i.cloud === this.filterProvider) &&
+          (!this.filterKind || i.kind === this.filterKind));
+      },
+
+      kindLabel(k) {
+        return ({ vm: 'VM', database: 'Database', k8s: 'Kubernetes', desktop: 'Desktop' })[k] || k;
+      },
+
+      stateBadge(state) {
+        const good = ['active', 'available', 'registered', 'running'];
+        const bad = ['failed', 'error'];
+        const busy = ['provisioning', 'pending', 'decommissioning', 'deprovisioning', 'stopped'];
+        if (good.includes(state)) return 'bg-green-100 text-green-700';
+        if (bad.includes(state)) return 'bg-red-100 text-red-700';
+        if (busy.includes(state)) return 'bg-yellow-100 text-yellow-700';
+        return 'bg-gray-100 text-gray-600';
+      },
+
+      timeAgo,
+    };
+  }
+</script>
+{% endblock %}
