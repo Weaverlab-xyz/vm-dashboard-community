@@ -567,6 +567,13 @@ try:
 except ImportError as exc:
     logger.warning("API router 'costs' not loaded: %s", exc)
 
+try:
+    # Cross-provider deployment inventory. Always-on (like jobs); RBAC-filtered.
+    from .api import inventory  # noqa: E402
+    app.include_router(inventory.router)
+except ImportError as exc:
+    logger.warning("API router 'inventory' not loaded: %s", exc)
+
 
 # ── HTML pages ────────────────────────────────────────────────────────────────
 
@@ -662,6 +669,12 @@ async def containers_page(request: Request):
 @app.get("/jobs", response_class=HTMLResponse, include_in_schema=False)
 async def jobs_page(request: Request):
     return templates.TemplateResponse("jobs/list.html", {"request": request, **_feature_flags()})
+
+
+@app.get("/inventory", response_class=HTMLResponse, include_in_schema=False)
+async def inventory_page(request: Request):
+    """Cross-provider deployment inventory (read-only aggregation of DB records)."""
+    return templates.TemplateResponse("inventory/list.html", {"request": request, **_feature_flags()})
 
 
 @app.get("/jobs/{job_id}", response_class=HTMLResponse, include_in_schema=False)

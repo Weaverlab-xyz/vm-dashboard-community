@@ -179,6 +179,12 @@
               valueClass: 'text-blue-600',
               // jobs tile is always-on (jobs run for every integration)
             },
+            {
+              key: 'deployed_resources', title: 'Deployed Resources', href: '/inventory',
+              description: 'across all providers',
+              valueClass: 'text-indigo-600',
+              // always-on cross-provider inventory count
+            },
           ],
         },
         {
@@ -238,7 +244,7 @@
 
         await this.loadFeatures();
         // Load on-prem stats + jobs in parallel; cloud/hypervisor/containers in background
-        await Promise.all([this.loadOnPremStats(), this.loadJobs()]);
+        await Promise.all([this.loadOnPremStats(), this.loadJobs(), this.loadInventoryCount()]);
         this.refreshSection(this.tileSections.find(s => s.id === 'cloud'));
         this.refreshSection(this.tileSections.find(s => s.id === 'hypervisors'));
         this.refreshSection(this.tileSections.find(s => s.id === 'containers'));
@@ -268,6 +274,16 @@
         if (val === null || val === undefined) return '…';
         if (val === -1) return '–';
         return val;
+      },
+
+      async loadInventoryCount() {
+        // Cross-provider count of dashboard-deployed resources (RBAC-filtered server-side).
+        try {
+          const r = await API.get('/api/inventory');
+          this.stats.deployed_resources = { value: r?.count ?? 0 };
+        } catch (e) {
+          this.stats.deployed_resources = { value: -1 };
+        }
       },
 
       async loadOnPremStats() {
