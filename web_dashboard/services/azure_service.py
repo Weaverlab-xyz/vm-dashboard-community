@@ -869,7 +869,7 @@ def _deploy_vm_sync(
     # messages and avoids orphaned half-deploys.
     _validate_deploy_consistency(compute, network, location, subnet_id, nsg_ids,
                                  vm_size, trusted_launch)
-    tags = {"ManagedBy": "vm-cli-dashboard"}
+    tags = {"managed-by": "vm-dashboard"}
     if workgroup:
         tags["workgroup"] = workgroup
 
@@ -1146,13 +1146,23 @@ async def set_desktop_pool_tag(rg: str, vm_name: str, pool_name: str) -> None:
         raise AzureError(f"Failed to set desktop_pool tag on {vm_name}: {e}") from e
 
 
+def _is_dashboard_managed(tags: dict) -> bool:
+    """True when a resource carries the dashboard's managed-by tag — the
+    canonical ``managed-by=vm-dashboard`` or the legacy
+    ``ManagedBy=vm-cli-dashboard`` (kept so resources created before the #194
+    tag normalization still show up)."""
+    tags = tags or {}
+    return (tags.get("managed-by") == "vm-dashboard"
+            or tags.get("ManagedBy") == "vm-cli-dashboard")
+
+
 def _describe_vms_sync(cred, sub_id: str, rg: str) -> list:
     compute = _get_compute(cred, sub_id)
     network = _get_network(cred, sub_id)
     results = []
     for vm in compute.virtual_machines.list(rg):
         tags = vm.tags or {}
-        if tags.get("ManagedBy") != "vm-cli-dashboard":
+        if not _is_dashboard_managed(tags):
             continue
         try:
             iv = compute.virtual_machines.instance_view(rg, vm.name)
@@ -1360,7 +1370,7 @@ def _run_vm_jumpoint_sync(
     except Exception:
         pass
 
-    tags = {"ManagedBy": "vm-cli-dashboard", "purpose": "clouddb-jumpoint"}
+    tags = {"managed-by": "vm-dashboard", "purpose": "clouddb-jumpoint"}
     nic_name = f"{name}-nic"
     ip_config = NetworkInterfaceIPConfiguration(
         name="ipconfig1", subnet={"id": subnet_id},
@@ -1438,7 +1448,7 @@ def _create_image_from_vm_sync(cred, sub_id: str, rg: str, vm_name: str, image_n
     image_params = {
         "location": vm.location,
         "source_virtual_machine": {"id": vm.id},
-        "tags": {"ManagedBy": "vm-cli-dashboard"},
+        "tags": {"managed-by": "vm-dashboard"},
     }
 
     img = compute.images.begin_create_or_update(rg, image_name, image_params).result()
@@ -1643,7 +1653,7 @@ def _run_aci_jumpoint_sync(
         os_type=OperatingSystemTypes.LINUX,
         restart_policy="Always",
         volumes=volumes or None,
-        tags={"ManagedBy": "vm-cli-dashboard"},
+        tags={"managed-by": "vm-dashboard"},
     )
 
     if subnet_id:
@@ -1711,7 +1721,7 @@ def _list_aci_tasks_sync(cred, sub_id: str, rg: str) -> list:
     results = []
     for group in aci.container_groups.list_by_resource_group(rg):
         tags = group.tags or {}
-        if tags.get("ManagedBy") != "vm-cli-dashboard":
+        if not _is_dashboard_managed(tags):
             continue
         if not group.name.startswith(_JUMPOINT_CONTAINER_GROUP_PREFIX):
             continue
@@ -1780,7 +1790,7 @@ def _run_aci_ansible_sync(
         containers=[container],
         os_type=OperatingSystemTypes.LINUX,
         restart_policy="Never",
-        tags={"ManagedBy": "vm-cli-dashboard", "Purpose": "ansible-runner"},
+        tags={"managed-by": "vm-dashboard", "Purpose": "ansible-runner"},
     )
 
     if subnet_id:
@@ -1919,7 +1929,7 @@ def _run_aci_k8s_sync(
         containers=[container],
         os_type=OperatingSystemTypes.LINUX,
         restart_policy="Never",
-        tags={"ManagedBy": "vm-cli-dashboard", "Purpose": "k8s-runner"},
+        tags={"managed-by": "vm-dashboard", "Purpose": "k8s-runner"},
     )
 
     if subnet_id:
@@ -2064,7 +2074,7 @@ def _deploy_compose_aci_sync(
         containers=containers,
         os_type=OperatingSystemTypes.LINUX,
         restart_policy=restart_policy,
-        tags={"ManagedBy": "vm-cli-dashboard", "Purpose": "compose"},
+        tags={"managed-by": "vm-dashboard", "Purpose": "compose"},
     )
 
     if group_ports:
@@ -2434,7 +2444,7 @@ def _create_image_from_blob_sync(
             os_disk=ImageOSDisk(**os_disk_kwargs),
             zone_resilient=False,
         ),
-        tags={"ManagedBy": "vm-cli-dashboard", "Purpose": "promote-target"},
+        tags={"managed-by": "vm-dashboard", "Purpose": "promote-target"},
     )
 
     poller = compute.images.begin_create_or_update(target_rg, image_name, img_params)
@@ -2539,7 +2549,7 @@ def _run_aci_promote_runner_sync(
         containers=[container],
         os_type=OperatingSystemTypes.LINUX,
         restart_policy="Never",
-        tags={"ManagedBy": "vm-cli-dashboard", "Purpose": "promote-runner"},
+        tags={"managed-by": "vm-dashboard", "Purpose": "promote-runner"},
     )
     if subnet_id:
         from azure.mgmt.containerinstance.models import ContainerGroupSubnetId

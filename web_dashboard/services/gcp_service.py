@@ -1133,7 +1133,7 @@ def _run_cloud_run_ansible_sync(
 
     job = run_v2.Job(
         template=exec_template,
-        labels={"managed-by": "vm-cli-dashboard", "purpose": "ansible-runner"},
+        labels={"managed-by": "vm-dashboard", "purpose": "ansible-runner"},
     )
 
     logger.info("Cloud Run Ansible: creating job %s in %s/%s", job_name, project_id, region)
@@ -1269,7 +1269,7 @@ def _run_cloud_run_k8s_sync(
 
     job = run_v2.Job(
         template=exec_template,
-        labels={"managed-by": "vm-cli-dashboard", "purpose": "k8s-runner"},
+        labels={"managed-by": "vm-dashboard", "purpose": "k8s-runner"},
     )
 
     logger.info("Cloud Run k8s: creating job %s in %s/%s", job_name, project_id, region)
@@ -1571,7 +1571,7 @@ def _run_cloud_run_promote_runner_sync(
 
     job = run_v2.Job(
         template=exec_template,
-        labels={"managed-by": "vm-cli-dashboard", "purpose": "promote-runner"},
+        labels={"managed-by": "vm-dashboard", "purpose": "promote-runner"},
     )
 
     logger.info(
