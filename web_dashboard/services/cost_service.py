@@ -8,8 +8,9 @@ Two views:
   grouped per cloud → per service.
 
 AWS uses Cost Explorer; Azure uses the Cost Management REST query (reusing the
-existing ``httpx`` + Azure credential — no extra SDK). GCP has no simple cost API
-(it needs a BigQuery billing export), so it always reports ``unavailable``.
+existing ``httpx`` + Azure credential — no extra SDK). GCP has no simple cost API,
+so it queries the **BigQuery billing export** (when an export table is configured;
+otherwise it reports ``unavailable`` with a configure hint).
 
 Per-cloud failures are caught and reported as ``status="unavailable"`` so one
 misconfigured cloud never sinks the result — same resilience contract as the
@@ -22,7 +23,7 @@ from datetime import date, timedelta
 
 import httpx
 
-from . import aws_service, azure_service
+from . import aws_service, azure_service, config_service, gcp_service
 
 logger = logging.getLogger(__name__)
 
@@ -232,12 +233,105 @@ async def get_azure_managed_breakdown() -> dict:
     return _breakdown_result(services, currency)
 
 
+# ── GCP (BigQuery billing export) ────────────────────────────────────────────
+
+_GCP_TABLE_KEY = "gcp_billing_export_table"
+# Net cost = usage cost + credits (credits are negative) — matches the GCP Billing
+# console's "cost".
+_GCP_NET = "SUM(cost) + SUM(IFNULL((SELECT SUM(c.amount) FROM UNNEST(credits) c), 0))"
+
+
+def _gcp_billing_table() -> str:
+    from ..config import settings
+    return (config_service.get(_GCP_TABLE_KEY) or getattr(settings, _GCP_TABLE_KEY, "") or "").strip()
+
+
+def _gcp_bq_client(table: str):
+    """A BigQuery client from the dashboard's GCP creds. Raises GCPError when the
+    export table isn't configured or the lib isn't installed."""
+    if not table:
+        raise gcp_service.GCPError(
+            "GCP cost is unavailable — set the BigQuery billing-export table on the "
+            "Cloud Costs settings (project.dataset.gcp_billing_export_v1_XXXX) and grant the "
+            "dashboard service account BigQuery Data Viewer + Job User on that dataset."
+        )
+    try:
+        from google.cloud import bigquery
+    except ImportError as e:
+        raise gcp_service.GCPError("google-cloud-bigquery is not installed.") from e
+    client = bigquery.Client(
+        project=gcp_service._gcp_project() or None, credentials=gcp_service._gcp_creds())
+    return bigquery, client
+
+
+def _gcp_month_param(bigquery):
+    return bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ScalarQueryParameter("month_start", "STRING", _month_range()[0]),
+    ])
+
+
+async def get_gcp_mtd_cost() -> tuple:
+    """GCP account month-to-date **net** cost from the BigQuery billing export.
+    Returns (amount, currency). Raises ``gcp_service.GCPError`` (incl. when the
+    export table isn't configured)."""
+    table = _gcp_billing_table()
+
+    def _query() -> tuple:
+        bigquery, client = _gcp_bq_client(table)
+        sql = (f"SELECT {_GCP_NET} AS net, ANY_VALUE(currency) AS currency "
+               f"FROM `{table}` WHERE usage_start_time >= TIMESTAMP(@month_start)")
+        rows = list(client.query(sql, job_config=_gcp_month_param(bigquery)).result())
+        if not rows:
+            return 0.0, "USD"
+        return float(rows[0]["net"] or 0), (rows[0]["currency"] or "USD")
+
+    try:
+        return await asyncio.to_thread(_query)
+    except gcp_service.GCPError:
+        raise
+    except Exception as e:  # noqa: BLE001
+        raise gcp_service.GCPError(f"GCP BigQuery cost query failed: {e}") from e
+
+
+async def get_gcp_managed_breakdown() -> dict:
+    """GCP MTD net cost for resources labelled ``managed-by=vm-dashboard``, grouped
+    by service. Returns ``{total, currency, services:[...]}``. Raises GCPError."""
+    table = _gcp_billing_table()
+
+    def _query() -> dict:
+        bigquery, client = _gcp_bq_client(table)
+        # The label key/value are fixed constants (not user input); the table is an
+        # admin-configured identifier (BigQuery can't parameterize table names).
+        sql = (
+            f"SELECT service.description AS service, {_GCP_NET} AS amount, "
+            f"ANY_VALUE(currency) AS currency FROM `{table}` "
+            f"WHERE usage_start_time >= TIMESTAMP(@month_start) "
+            f"AND EXISTS (SELECT 1 FROM UNNEST(labels) l "
+            f"WHERE l.key = '{_MANAGED_TAG_KEY}' AND l.value = '{_MANAGED_TAG_VALUE}') "
+            f"GROUP BY service"
+        )
+        services, currency = {}, "USD"
+        for r in client.query(sql, job_config=_gcp_month_param(bigquery)).result():
+            name = r["service"] or "(unknown)"
+            services[name] = services.get(name, 0.0) + float(r["amount"] or 0)
+            if r["currency"]:
+                currency = r["currency"]
+        return _breakdown_result(services, currency)
+
+    try:
+        return await asyncio.to_thread(_query)
+    except gcp_service.GCPError:
+        raise
+    except Exception as e:  # noqa: BLE001
+        raise gcp_service.GCPError(f"GCP BigQuery breakdown query failed: {e}") from e
+
+
 async def _breakdown_entry(cloud: str, fetch) -> dict:
     """One cloud's breakdown, degrading any failure to status=unavailable."""
     try:
         res = await fetch()
         return {"cloud": cloud, "status": "ok", "detail": "", **res}
-    except (aws_service.AWSError, azure_service.AzureError) as e:
+    except (aws_service.AWSError, azure_service.AzureError, gcp_service.GCPError) as e:
         return {"cloud": cloud, "status": "unavailable", "detail": str(e),
                 "total": None, "currency": None, "services": []}
     except Exception as e:  # noqa: BLE001 — defensive: unknown errors are still per-cloud
@@ -248,17 +342,14 @@ async def _breakdown_entry(cloud: str, fetch) -> dict:
 
 async def get_cost_breakdown() -> dict:
     """Per-cloud, per-service MTD spend for dashboard-managed resources
-    (``managed-by=vm-dashboard``). AWS + Azure live; GCP unavailable.
+    (``managed-by=vm-dashboard``). AWS + Azure live; GCP via BigQuery when configured.
     ``grand_total`` sums only the clouds that returned ``ok``."""
-    aws_entry, azure_entry = await asyncio.gather(
+    aws_entry, azure_entry, gcp_entry = await asyncio.gather(
         _breakdown_entry("aws", get_aws_managed_breakdown),
         _breakdown_entry("azure", get_azure_managed_breakdown),
+        _breakdown_entry("gcp", get_gcp_managed_breakdown),
     )
-    clouds = [aws_entry, azure_entry, {
-        "cloud": "gcp", "status": "unavailable", "total": None, "currency": None,
-        "services": [],
-        "detail": "GCP cost requires a BigQuery billing export (not yet supported).",
-    }]
+    clouds = [aws_entry, azure_entry, gcp_entry]
     oks = [c for c in clouds if c["status"] == "ok"]
     grand_total = round(sum(c["total"] for c in oks), 2) if oks else None
     currency = oks[0]["currency"] if oks else "USD"
@@ -272,7 +363,7 @@ async def _cloud_entry(cloud: str, fetch) -> dict:
         amount, currency = await fetch()
         return {"cloud": cloud, "amount": round(amount, 2),
                 "currency": currency, "status": "ok", "detail": ""}
-    except (aws_service.AWSError, azure_service.AzureError) as e:
+    except (aws_service.AWSError, azure_service.AzureError, gcp_service.GCPError) as e:
         return {"cloud": cloud, "amount": None, "currency": None,
                 "status": "unavailable", "detail": str(e)}
     except Exception as e:  # noqa: BLE001 — defensive: unknown errors are still per-cloud
@@ -283,16 +374,14 @@ async def _cloud_entry(cloud: str, fetch) -> dict:
 
 async def get_cost_summary() -> dict:
     """Per-cloud account/subscription MTD spend. AWS + Azure are queried live; GCP
-    is reported unavailable (needs a BigQuery billing export). ``total_mtd`` sums
+    is queried via the BigQuery billing export when configured. ``total_mtd`` sums
     only the clouds that returned ``ok``."""
-    aws_entry, azure_entry = await asyncio.gather(
+    aws_entry, azure_entry, gcp_entry = await asyncio.gather(
         _cloud_entry("aws", get_aws_mtd_cost),
         _cloud_entry("azure", get_azure_mtd_cost),
+        _cloud_entry("gcp", get_gcp_mtd_cost),
     )
-    clouds = [aws_entry, azure_entry, {
-        "cloud": "gcp", "amount": None, "currency": None, "status": "unavailable",
-        "detail": "GCP cost requires a BigQuery billing export (not yet supported).",
-    }]
+    clouds = [aws_entry, azure_entry, gcp_entry]
     oks = [c for c in clouds if c["status"] == "ok"]
     total = round(sum(c["amount"] for c in oks), 2) if oks else None
     currency = oks[0]["currency"] if oks else "USD"
