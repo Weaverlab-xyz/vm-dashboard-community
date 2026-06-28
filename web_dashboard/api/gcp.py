@@ -25,7 +25,7 @@ from ..models.gcp import (
     GCPNetworkOptions,
     GCPSSHKeyDetail,
 )
-from ..services import cache_service, job_service, workgroup_service
+from ..services import cache_service, cloud_stats, job_service, workgroup_service
 from ..services import gcp_service
 from .auth import require_admin, require_permission
 
@@ -191,6 +191,93 @@ async def network_options(
     return result
 
 
+async def _build_gcp_instances(db, project_id: str) -> list:
+    """Query completed, non-destroyed gce_deploy jobs, fetch live per-zone state,
+    cache the full list under `gcp_instances`, and return it (unfiltered). Shared
+    by /instances and /dashboard-stats. Raises gcp_service.GCPError on a live-API
+    failure (callers decide how to surface it)."""
+    deploy_jobs = (
+        db.query(Job)
+        .filter(Job.job_type == "gce_deploy", Job.status == "completed")
+        .order_by(Job.created_at.desc())
+        .all()
+    )
+    by_zone: dict = {}
+    job_meta: dict = {}
+    for job in deploy_jobs:
+        if not job.extra_data:
+            continue
+        try:
+            data = json.loads(job.extra_data)
+        except Exception:
+            continue
+        if data.get("destroyed"):
+            continue
+        name = data.get("instance_name")
+        zone = data.get("zone") or _gcp_zone()
+        if name:
+            by_zone.setdefault(zone, []).append(name)
+            job_meta[name] = {
+                "job_id": job.id,
+                "deployed_by": job.created_by,
+                "extra": data,
+                "workgroup": (job.workgroup or data.get("workgroup") or "").lower() or None,
+            }
+
+    instances = []
+    for zone, names in by_zone.items():
+        live = await gcp_service.describe_instances(project_id=project_id, zone=zone, instance_names=names)
+        for inst in live:
+            meta = job_meta.get(inst["instance_name"], {})
+            inst["job_id"] = meta.get("job_id")
+            inst["deployed_by"] = meta.get("deployed_by")
+            inst["workgroup"] = meta.get("workgroup") or inst.get("workgroup")
+            instances.append(inst)
+
+    full = GCPInstanceListResponse(instances=instances, project_id=project_id, zone=_gcp_zone())
+    await cache_service.set(cache_service.key_global("gcp_instances"), full.model_dump(), ttl=60)
+    return instances
+
+
+async def _gcp_instances_unfiltered(db, project_id: str) -> list:
+    """Full dashboard GCE instances, cache-aware (reads the gcp_instances cache,
+    builds + caches on miss)."""
+    cached = await cache_service.get(cache_service.key_global("gcp_instances"))
+    if cached:
+        return (cached.get("data") or {}).get("instances") or []
+    return await _build_gcp_instances(db, project_id)
+
+
+@router.get("/dashboard-stats")
+async def gcp_dashboard_stats(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("gcp", "read")),
+):
+    """One-call counts for the GCP dashboard tiles (instances total+running,
+    custom images total) — reuses the gcp_instances / gcp_custom_images caches +
+    RBAC. A null section → the tile shows unavailable."""
+    out = {"instances": None, "images": None}
+    project_id = _gcp_project()
+    if not project_id:
+        return out
+    try:
+        instances = await _gcp_instances_unfiltered(db, project_id)
+        out["instances"] = cloud_stats.summarize_instances(
+            instances, _accessible_workgroups(current_user), "status")
+    except gcp_service.GCPError:
+        pass
+    try:
+        cached = await cache_service.get(cache_service.key_global("gcp_custom_images"))
+        if cached:
+            imgs = (cached.get("data") or {}).get("images") or []
+        else:
+            imgs = await gcp_service.list_custom_images(project_id=project_id)
+        out["images"] = {"total": len(imgs)}
+    except gcp_service.GCPError:
+        pass
+    return out
+
+
 @router.get("/instances", response_model=GCPInstanceListResponse)
 async def list_instances(
     bust: bool = Query(False),
@@ -234,57 +321,10 @@ async def list_instances(
                 payload = {**payload, "instances": filtered}
             return payload
 
-    deploy_jobs = (
-        db.query(Job)
-        .filter(
-            Job.job_type == "gce_deploy",
-            Job.status == "completed",
-        )
-        .order_by(Job.created_at.desc())
-        .all()
-    )
-
-    by_zone: dict[str, list[str]] = {}
-    job_meta: dict[str, dict] = {}
-    for job in deploy_jobs:
-        if not job.extra_data:
-            continue
-        try:
-            data = json.loads(job.extra_data)
-        except Exception:
-            continue
-        # Skip instances already terminated via the dashboard — the terminate
-        # flow marks the deploy job destroyed=True. Without this, the (now-deleted)
-        # instance is re-queried and lingers in the list showing TERMINATED, as
-        # GCE briefly returns it post-delete. Mirrors api/aws.py + api/azure.py.
-        if data.get("destroyed"):
-            continue
-        name = data.get("instance_name")
-        zone = data.get("zone") or _gcp_zone()
-        if name:
-            by_zone.setdefault(zone, []).append(name)
-            job_meta[name] = {
-                "job_id": job.id,
-                "deployed_by": job.created_by,
-                "extra": data,
-                "workgroup": (job.workgroup or data.get("workgroup") or "").lower() or None,
-            }
-
-    instances = []
     try:
-        for zone, names in by_zone.items():
-            live = await gcp_service.describe_instances(project_id=project_id, zone=zone, instance_names=names)
-            for inst in live:
-                meta = job_meta.get(inst["instance_name"], {})
-                inst["job_id"] = meta.get("job_id")
-                inst["deployed_by"] = meta.get("deployed_by")
-                inst["workgroup"] = meta.get("workgroup") or inst.get("workgroup")
-                instances.append(inst)
+        instances = await _build_gcp_instances(db, project_id)
     except gcp_service.GCPError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-
-    full = GCPInstanceListResponse(instances=instances, project_id=project_id, zone=_gcp_zone())
-    await cache_service.set(cache_key, full.model_dump(), ttl=60)
 
     filtered = []
     for inst in instances:
