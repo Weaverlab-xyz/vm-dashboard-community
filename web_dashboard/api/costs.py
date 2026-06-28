@@ -30,3 +30,17 @@ async def cost_summary(current_user: User = Depends(require_admin)) -> dict:
         cost_service.get_cost_summary,
     )
     return {**data, "cached_at": cached_at}
+
+
+@router.get("/breakdown")
+async def cost_breakdown(current_user: User = Depends(require_admin)) -> dict:
+    """Per-cloud, per-service MTD spend for dashboard-managed resources
+    (``managed-by=vm-dashboard``), cached. Same resilience contract as
+    /summary — clouds without the tag/creds/permission report "unavailable"
+    (with a hint) rather than failing the request."""
+    data, cached_at = await cache_service.get_or_refresh(
+        cache_service.key_global("cost_breakdown"),
+        cache_service.TTL["cost_breakdown"],
+        cost_service.get_cost_breakdown,
+    )
+    return {**data, "cached_at": cached_at}

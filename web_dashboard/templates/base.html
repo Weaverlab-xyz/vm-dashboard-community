@@ -109,6 +109,11 @@
              class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
              {% if request.url.path.startswith('/k8s') %}{{ nav_active }}{% endif %}">Kubernetes</a>
           {% endif %}
+          {% if cost_explorer_enabled %}
+          <a x-show="$store.auth.isAdmin" href="/costs"
+             class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
+             {% if request.url.path.startswith('/costs') %}{{ nav_active }}{% endif %}">Costs</a>
+          {% endif %}
           {% if ansible_enabled %}
           <a href="/config-mgmt" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
              {% if request.url.path == '/config-mgmt' %}{{ nav_active }}{% endif %}">Configuration</a>
