@@ -16,6 +16,7 @@ misconfigured cloud never sinks the result — same resilience contract as the
 containers page.
 """
 import asyncio
+import calendar
 import logging
 from datetime import date, timedelta
 
@@ -31,6 +32,40 @@ _AZURE_MGMT = "https://management.azure.com"
 # dashboard-managed resources.
 _MANAGED_TAG_KEY = "managed-by"
 _MANAGED_TAG_VALUE = "vm-dashboard"
+
+
+def evaluate_budget(total_mtd, currency, limit, today=None) -> dict:
+    """Compare month-to-date spend against a monthly budget.
+
+    Returns ``None`` when there's no budget (``limit`` <= 0) or no spend figure.
+    Otherwise ``{limit, currency, mtd, projected, pct_of_budget, status}`` where
+    ``projected`` is the month-end estimate from the current pace
+    (MTD / day-of-month * days-in-month) and ``status`` is:
+      - ``"over"``        — MTD already at/over budget,
+      - ``"approaching"`` — on pace to exceed by month-end (projected >= limit),
+      - ``"ok"``          — otherwise.
+    ``today`` is injectable for deterministic tests."""
+    if not limit or limit <= 0 or total_mtd is None:
+        return None
+    today = today or date.today()
+    days_in_month = calendar.monthrange(today.year, today.month)[1]
+    day = today.day or 1
+    projected = round(total_mtd / day * days_in_month, 2)
+    pct = round(total_mtd / limit * 100, 1)
+    if total_mtd >= limit:
+        status = "over"
+    elif projected >= limit:
+        status = "approaching"
+    else:
+        status = "ok"
+    return {
+        "limit": round(float(limit), 2),
+        "currency": currency or "USD",
+        "mtd": round(total_mtd, 2),
+        "projected": projected,
+        "pct_of_budget": pct,
+        "status": status,
+    }
 
 
 def _month_range() -> tuple:

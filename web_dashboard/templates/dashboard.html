@@ -334,14 +334,16 @@
 
       async loadAttention() {
         // Compose existing endpoints (each already RBAC-filtered): failed jobs in
-        // the last 24h, jobs running > 1h (likely stuck), and deployed resources
-        // in a failed/error state. Best-effort — any source that fails is skipped.
+        // the last 24h, jobs running > 1h (likely stuck), deployed resources in a
+        // failed/error state, and an over/approaching cost budget (admin-only —
+        // non-admins 403, skipped). Best-effort — any source that fails is skipped.
         const out = [];
         const dayAgo = Date.now() - 24 * 60 * 60 * 1000;
-        const [failed, running, inv] = await Promise.all([
+        const [failed, running, inv, cost] = await Promise.all([
           API.get('/api/jobs?status=failed&page_size=10').catch(() => null),
           API.get('/api/jobs?status=running&page_size=20').catch(() => null),
           API.get('/api/inventory').catch(() => null),
+          API.get('/api/costs/summary').catch(() => null),
         ]);
         for (const j of (failed?.jobs || [])) {
           if (new Date(j.created_at).getTime() < dayAgo) continue;
@@ -360,6 +362,16 @@
           out.push({ id: i.id, severity: 'error', title: i.name + ' (' + i.kind + ') — ' + i.state,
                      detail: (i.cloud || '') + (i.region ? ' · ' + i.region : ''),
                      time: i.created_at, href: i.detail_href || '/inventory' });
+        }
+        const b = cost && cost.budget;
+        if (b && (b.status === 'over' || b.status === 'approaching')) {
+          const sym = (b.currency && b.currency !== 'USD') ? (b.currency + ' ') : '$';
+          const m = n => sym + Math.round(n).toLocaleString();
+          out.push({
+            id: 'budget', severity: b.status === 'over' ? 'error' : 'warn',
+            title: 'Cloud spend ' + m(b.mtd) + ' is ' + b.pct_of_budget + '% of budget ' + m(b.limit),
+            detail: 'projected ' + m(b.projected) + ' by month-end', time: null, href: '/costs',
+          });
         }
         // error before warn, then newest first
         out.sort((a, b) => a.severity === b.severity

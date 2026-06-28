@@ -29,7 +29,16 @@ async def cost_summary(current_user: User = Depends(require_admin)) -> dict:
         cache_service.TTL["cost_summary"],
         cost_service.get_cost_summary,
     )
-    return {**data, "cached_at": cached_at}
+    # Budget is date- and config-dependent, so evaluate it per request from the
+    # (cached) total rather than caching it.
+    from ..services import config_service
+    from ..config import settings
+    try:
+        limit = float(config_service.get("cost_monthly_budget") or settings.cost_monthly_budget or 0)
+    except (TypeError, ValueError):
+        limit = 0.0
+    budget = cost_service.evaluate_budget(data.get("total_mtd"), data.get("currency"), limit)
+    return {**data, "budget": budget, "cached_at": cached_at}
 
 
 @router.get("/breakdown")

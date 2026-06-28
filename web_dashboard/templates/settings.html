@@ -283,6 +283,29 @@
            x-text="panelError"></div>
 
       <!-- ── BeyondTrust ── -->
+      <!-- ── Cloud Costs ── -->
+      <template x-if="panel?.key === 'cost_explorer' && !panelLoading">
+        <div class="space-y-4">
+          <p class="text-sm text-gray-500">
+            Month-to-date cloud spend (AWS Cost Explorer + Azure Cost Management) shown on the
+            dashboard tile and the <code>/costs</code> page. Set a monthly budget to get an alert
+            when spend exceeds it — or is on pace to by month-end.
+          </p>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Monthly budget</label>
+            <input type="number" min="0" step="0.01" x-model.number="panelCfg.cost_monthly_budget"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                   placeholder="0 = no budget alert">
+            <p class="text-[11px] text-gray-400 mt-1">
+              In your account currency. The dashboard's “Needs attention” panel flags
+              <strong>over</strong> (spend ≥ budget) and <strong>approaching</strong> (projected to
+              exceed by month-end). Needs <code>ce:GetCostAndUsage</code> (AWS) /
+              Cost Management reader (Azure).
+            </p>
+          </div>
+        </div>
+      </template>
+
       <template x-if="panel?.key === 'beyondtrust' && !panelLoading">
         <div class="space-y-4">
           <p class="text-sm text-gray-500">
@@ -1702,6 +1725,8 @@ function settingsPage() {
         desc: 'Nutanix AHV VM management via Prism Central REST API v3.' },
       { key: 'xcpng',        label: 'XCP-ng / XenServer',       hasConfig: true,  enabled: false,
         desc: 'XCP-ng and XenServer VM management via the XAPI XML-RPC API.' },
+      { key: 'cost_explorer', label: 'Cloud Costs',             hasConfig: true,  enabled: false,
+        desc: 'Month-to-date cloud spend, with an optional monthly budget alert.' },
     ],
 
     // ── Slide-over panel state ───────────────────────────────────────────
@@ -1924,6 +1949,7 @@ function settingsPage() {
           hyperv: features.hyperv,
           nutanix: features.nutanix,
           xcpng: features.xcpng,
+          cost_explorer: features.cost,
         };
         for (const intg of this.integrations) {
           intg.enabled = !!map[intg.key];
