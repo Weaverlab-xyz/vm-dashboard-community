@@ -28,6 +28,34 @@
     </a>
   </div>
 
+  <!-- Needs attention — failed jobs, stuck jobs, resources in a bad state.
+       Silent when there's nothing to act on. -->
+  <div x-show="attention.length > 0" class="bg-white rounded-xl shadow-sm border border-red-200 mb-8">
+    <div class="px-5 py-3 border-b border-red-100 bg-red-50 rounded-t-xl">
+      <h2 class="font-semibold text-red-800 text-sm">
+        ⚠ Needs attention <span x-text="'(' + attention.length + ')'"></span>
+      </h2>
+    </div>
+    <ul class="divide-y divide-gray-50">
+      <template x-for="a in attention" :key="a.id">
+        <li class="px-5 py-3 flex items-center justify-between hover:bg-gray-50">
+          <div class="flex items-center gap-3 min-w-0">
+            <span class="h-2 w-2 rounded-full shrink-0"
+                  :class="a.severity === 'error' ? 'bg-red-500' : 'bg-yellow-400'"></span>
+            <div class="min-w-0">
+              <p class="text-sm font-medium text-gray-800 truncate" x-text="a.title" :title="a.title"></p>
+              <p class="text-xs text-gray-400 truncate" x-show="a.detail" x-text="a.detail"></p>
+            </div>
+          </div>
+          <div class="flex items-center gap-3 ml-4 shrink-0">
+            <span class="text-xs text-gray-400" x-show="a.time" x-text="timeAgo(a.time)"></span>
+            <a :href="a.href" class="text-xs text-blue-500 hover:underline">View →</a>
+          </div>
+        </li>
+      </template>
+    </ul>
+  </div>
+
   <!-- Sections (rendered dynamically from tileSections) -->
   <template x-for="section in tileSections" :key="section.id">
     <div x-show="visibleTiles(section.tiles).length > 0" class="mb-8">
@@ -146,6 +174,9 @@
       recentJobs: [],
       loadingJobs: true,
 
+      // Needs-attention items (failed/stuck jobs, bad-state resources)
+      attention: [],
+
       // ── Tile catalog ──────────────────────────────────────────────────────
       // Each section: id, label, grid class, refreshable, list of tiles.
       // Each tile:
@@ -244,7 +275,7 @@
 
         await this.loadFeatures();
         // Load on-prem stats + jobs in parallel; cloud/hypervisor/containers in background
-        await Promise.all([this.loadOnPremStats(), this.loadJobs(), this.loadInventoryCount()]);
+        await Promise.all([this.loadOnPremStats(), this.loadJobs(), this.loadInventoryCount(), this.loadAttention()]);
         this.refreshSection(this.tileSections.find(s => s.id === 'cloud'));
         this.refreshSection(this.tileSections.find(s => s.id === 'hypervisors'));
         this.refreshSection(this.tileSections.find(s => s.id === 'containers'));
@@ -274,6 +305,42 @@
         if (val === null || val === undefined) return '…';
         if (val === -1) return '–';
         return val;
+      },
+
+      async loadAttention() {
+        // Compose existing endpoints (each already RBAC-filtered): failed jobs in
+        // the last 24h, jobs running > 1h (likely stuck), and deployed resources
+        // in a failed/error state. Best-effort — any source that fails is skipped.
+        const out = [];
+        const dayAgo = Date.now() - 24 * 60 * 60 * 1000;
+        const [failed, running, inv] = await Promise.all([
+          API.get('/api/jobs?status=failed&page_size=10').catch(() => null),
+          API.get('/api/jobs?status=running&page_size=20').catch(() => null),
+          API.get('/api/inventory').catch(() => null),
+        ]);
+        for (const j of (failed?.jobs || [])) {
+          if (new Date(j.created_at).getTime() < dayAgo) continue;
+          out.push({ id: 'job:' + j.id, severity: 'error', title: this.jobLabel(j) + ' failed',
+                     detail: j.error_message || '', time: j.created_at, href: '/jobs/' + j.id });
+        }
+        for (const j of (running?.jobs || [])) {
+          if ((j.duration_seconds || 0) <= 3600) continue;
+          const hrs = Math.floor(j.duration_seconds / 3600);
+          out.push({ id: 'job:' + j.id, severity: 'warn',
+                     title: this.jobLabel(j) + ' running ' + hrs + 'h+',
+                     detail: 'still running — may be stuck', time: j.created_at, href: '/jobs/' + j.id });
+        }
+        for (const i of (inv?.items || [])) {
+          if (i.state !== 'failed' && i.state !== 'error') continue;
+          out.push({ id: i.id, severity: 'error', title: i.name + ' (' + i.kind + ') — ' + i.state,
+                     detail: (i.cloud || '') + (i.region ? ' · ' + i.region : ''),
+                     time: i.created_at, href: i.detail_href || '/inventory' });
+        }
+        // error before warn, then newest first
+        out.sort((a, b) => a.severity === b.severity
+          ? (new Date(b.time || 0) - new Date(a.time || 0))
+          : (a.severity === 'error' ? -1 : 1));
+        this.attention = out.slice(0, 8);
       },
 
       async loadInventoryCount() {
