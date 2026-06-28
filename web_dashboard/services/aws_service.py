@@ -386,7 +386,7 @@ def _launch_instance_sync(
     ec2 = _get_ec2(region)
     tags = [
         {"Key": "Name", "Value": instance_name},
-        {"Key": "ManagedBy", "Value": "vm-cli-dashboard"},
+        {"Key": "managed-by", "Value": "vm-dashboard"},
     ]
     if workgroup:
         tags.append({"Key": "Workgroup", "Value": workgroup})
@@ -541,9 +541,9 @@ def _run_container_instance_sync(
             "ResourceType": "instance",
             "Tags": [
                 {"Key": "Name", "Value": name_tag},
-                # ManagedBy matches dashboard EC2 instances so the sandbox VPC
+                # managed-by matches dashboard EC2 instances so the sandbox VPC
                 # sweep / rollback cleans the host up too.
-                {"Key": "ManagedBy", "Value": "vm-cli-dashboard"},
+                {"Key": "managed-by", "Value": "vm-dashboard"},
             ],
         }],
     )
@@ -840,7 +840,7 @@ def _copy_ami_sync(
     ec2.create_tags(
         Resources=[new_ami_id],
         Tags=[
-            {"Key": "ManagedBy", "Value": "vm-cli-dashboard"},
+            {"Key": "managed-by", "Value": "vm-dashboard"},
             {"Key": "CopiedFrom", "Value": source_ami_id},
             {"Key": "Name", "Value": name},
         ],
@@ -1617,7 +1617,7 @@ def _register_with_ena_sync(region: str, ami_id: str) -> str:
         Resources=[new_ami_id],
         Tags=[
             {"Key": "Name", "Value": new_name},
-            {"Key": "ManagedBy", "Value": "vm-cli-dashboard"},
+            {"Key": "managed-by", "Value": "vm-dashboard"},
             {"Key": "SourceAMI", "Value": ami_id},
         ],
     )
@@ -1658,7 +1658,7 @@ def _create_image_sync(
                 "ResourceType": "image",
                 "Tags": [
                     {"Key": "Name", "Value": name},
-                    {"Key": "ManagedBy", "Value": "vm-cli-dashboard"},
+                    {"Key": "managed-by", "Value": "vm-dashboard"},
                     {"Key": "SourceInstance", "Value": instance_id},
                 ],
             }

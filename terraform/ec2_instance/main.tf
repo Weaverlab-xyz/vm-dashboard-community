@@ -61,7 +61,7 @@ resource "aws_iam_role" "ssm_role" {
   })
 
   tags = {
-    ManagedBy = "vm-cli-dashboard"
+    "managed-by" = "vm-dashboard"
   }
 }
 
@@ -85,7 +85,7 @@ resource "aws_instance" "vm" {
 
   tags = {
     Name      = var.instance_name
-    ManagedBy = "vm-cli-dashboard"
+    "managed-by" = "vm-dashboard"
   }
 }
 

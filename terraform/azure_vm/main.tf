@@ -103,7 +103,7 @@ resource "azurerm_public_ip" "vm_pip" {
   location            = var.location
   allocation_method   = "Dynamic"
   tags = {
-    ManagedBy = "vm-cli-dashboard"
+    "managed-by" = "vm-dashboard"
   }
 }
 
@@ -122,7 +122,7 @@ resource "azurerm_network_interface" "vm_nic" {
   }
 
   tags = {
-    ManagedBy = "vm-cli-dashboard"
+    "managed-by" = "vm-dashboard"
   }
 }
 
@@ -157,7 +157,7 @@ resource "azurerm_linux_virtual_machine" "vm" {
   }
 
   tags = {
-    ManagedBy = "vm-cli-dashboard"
+    "managed-by" = "vm-dashboard"
   }
 }
 
