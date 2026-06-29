@@ -647,9 +647,13 @@ class CostExplorerFeatureConfig(BaseModel):
     spend budget used for the over/approaching alerts (0 = no budget)."""
     enabled: bool = False
     cost_monthly_budget: float = 0.0
+    cost_budget_aws: float = 0.0
+    cost_budget_azure: float = 0.0
+    cost_budget_gcp: float = 0.0
     gcp_billing_export_table: str = ""
 
-    @field_validator("cost_monthly_budget", mode="before")
+    @field_validator("cost_monthly_budget", "cost_budget_aws", "cost_budget_azure",
+                     "cost_budget_gcp", mode="before")
     @classmethod
     def _blank_to_zero(cls, v):
         # An empty/blank input (no budget) round-trips as "" / null — treat as 0.

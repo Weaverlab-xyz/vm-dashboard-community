@@ -396,15 +396,20 @@
                      detail: (i.cloud || '') + (i.region ? ' · ' + i.region : ''),
                      time: i.created_at, href: i.detail_href || '/inventory' });
         }
-        const b = cost && cost.budget;
-        if (b && (b.status === 'over' || b.status === 'approaching')) {
-          const sym = (b.currency && b.currency !== 'USD') ? (b.currency + ' ') : '$';
+        // Budget alerts — overall + per-cloud (cost is null for non-admins).
+        const budgetItem = (bdg, label, idSuffix) => {
+          if (!bdg || (bdg.status !== 'over' && bdg.status !== 'approaching')) return;
+          const sym = (bdg.currency && bdg.currency !== 'USD') ? (bdg.currency + ' ') : '$';
           const m = n => sym + Math.round(n).toLocaleString();
           out.push({
-            id: 'budget', severity: b.status === 'over' ? 'error' : 'warn',
-            title: 'Cloud spend ' + m(b.mtd) + ' is ' + b.pct_of_budget + '% of budget ' + m(b.limit),
-            detail: 'projected ' + m(b.projected) + ' by month-end', time: null, href: '/costs',
+            id: 'budget:' + idSuffix, severity: bdg.status === 'over' ? 'error' : 'warn',
+            title: label + ' ' + m(bdg.mtd) + ' is ' + bdg.pct_of_budget + '% of budget ' + m(bdg.limit),
+            detail: 'projected ' + m(bdg.projected) + ' by month-end', time: null, href: '/costs',
           });
+        };
+        budgetItem(cost && cost.budget, 'Cloud spend', 'overall');
+        for (const c of (cost?.clouds || [])) {
+          budgetItem(c.budget, (c.cloud || '').toUpperCase() + ' spend', c.cloud);
         }
         // error before warn, then newest first
         out.sort((a, b) => a.severity === b.severity

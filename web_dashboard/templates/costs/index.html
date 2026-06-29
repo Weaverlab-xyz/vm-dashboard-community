@@ -49,6 +49,11 @@
              x-text="c.status === 'ok' ? money(c.amount, c.currency) : 'unavailable'"
              :class="c.status === 'ok' ? 'text-gray-900' : 'text-gray-400'"></p>
           <p class="text-xs text-gray-400 mt-1" x-show="c.status !== 'ok'" x-text="c.detail"></p>
+          <p class="mt-1" x-show="c.budget">
+            <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-medium"
+                  :class="budgetBadge(c.budget?.status)"
+                  x-text="(c.budget?.pct_of_budget ?? 0) + '% of ' + money(c.budget?.limit, c.budget?.currency)"></span>
+          </p>
         </div>
       </template>
     </div>
