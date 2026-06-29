@@ -386,6 +386,37 @@ def test_budget_currency_defaults_usd():
     assert svc.evaluate_budget(100.0, None, 500, today=_MID)["currency"] == "USD"
 
 
+# ── apply_budget_alerts (overall + per-cloud) ────────────────────────────────
+
+def test_apply_budget_alerts_overall_and_per_cloud():
+    # Force "over" via MTD >= limit so the result is independent of today's date.
+    CONF.clear()
+    CONF.update({"cost_monthly_budget": "120", "cost_budget_aws": "50"})  # azure/gcp unset
+    try:
+        summary = {"total_mtd": 150.0, "currency": "USD", "clouds": [
+            {"cloud": "aws", "amount": 100.0, "currency": "USD", "status": "ok"},
+            {"cloud": "azure", "amount": 20.0, "currency": "USD", "status": "ok"},
+            {"cloud": "gcp", "amount": None, "currency": None, "status": "unavailable"},
+        ]}
+        out = svc.apply_budget_alerts(summary)
+        assert out["budget"]["status"] == "over"            # 150 >= 120
+        by = {c["cloud"]: c for c in out["clouds"]}
+        assert by["aws"]["budget"]["status"] == "over"      # 100 >= 50
+        assert by["azure"]["budget"] is None                # no azure budget set
+        assert by["gcp"]["budget"] is None                  # no amount → None
+        assert "budget" not in summary["clouds"][0]         # original not mutated
+    finally:
+        CONF.clear()
+
+
+def test_apply_budget_alerts_none_without_config():
+    CONF.clear()
+    summary = {"total_mtd": 10.0, "currency": "USD",
+               "clouds": [{"cloud": "aws", "amount": 5.0, "currency": "USD", "status": "ok"}]}
+    out = svc.apply_budget_alerts(summary)
+    assert out["budget"] is None and out["clouds"][0]["budget"] is None
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0

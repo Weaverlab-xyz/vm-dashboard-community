@@ -69,6 +69,36 @@ def evaluate_budget(total_mtd, currency, limit, today=None) -> dict:
     }
 
 
+_BUDGET_KEYS = {"aws": "cost_budget_aws", "azure": "cost_budget_azure", "gcp": "cost_budget_gcp"}
+
+
+def _budget_limit(key: str) -> float:
+    """A configured budget value as a float (0 when unset/blank/invalid)."""
+    from ..config import settings
+    if not key:
+        return 0.0
+    try:
+        return float(config_service.get(key) or getattr(settings, key, 0) or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def apply_budget_alerts(summary: dict) -> dict:
+    """Return a copy of a cost summary with budget evaluations attached: a
+    top-level ``budget`` (total vs ``cost_monthly_budget``) and a per-cloud
+    ``budget`` on each ``clouds[]`` entry (its amount vs ``cost_budget_<cloud>``).
+    Date/config-dependent — call per request, not inside the cached summary."""
+    clouds = [
+        {**c, "budget": evaluate_budget(
+            c.get("amount"), c.get("currency"),
+            _budget_limit(_BUDGET_KEYS.get(c.get("cloud"), "")))}
+        for c in summary.get("clouds", [])
+    ]
+    overall = evaluate_budget(summary.get("total_mtd"), summary.get("currency"),
+                              _budget_limit("cost_monthly_budget"))
+    return {**summary, "clouds": clouds, "budget": overall}
+
+
 def _month_range() -> tuple:
     """(first-of-month, tomorrow) as YYYY-MM-DD. AWS CE's End is exclusive, so
     tomorrow captures today's partial spend."""
