@@ -452,6 +452,7 @@ def _feature_flags() -> dict:
 from fastapi import Depends  # noqa: E402
 from .api import auth, jobs, websocket, aws, azure, gcp, packer, mfa, tokens, users, groups, setup, secrets, storage, images  # noqa: E402
 from .api import cloud_databases  # noqa: E402
+from .api import audit as audit_api  # noqa: E402
 from .api import workgroups as workgroups_api  # noqa: E402
 from .api import workgroup_overrides as workgroup_overrides_api  # noqa: E402
 from .api import cloud_identity as cloud_identity_api  # noqa: E402
@@ -483,6 +484,7 @@ app.include_router(groups.router)
 app.include_router(workgroups_api.router)
 app.include_router(workgroup_overrides_api.router)
 app.include_router(jobs.router)
+app.include_router(audit_api.router)
 app.include_router(websocket.router)
 app.include_router(aws.router)
 app.include_router(cloud_databases.router)

@@ -273,6 +273,13 @@ class AuditLog(Base):
     details = Column(Text)  # JSON string
     ip_address = Column(String(45))  # IPv4 or IPv6
 
+    # Tamper-evident hash chain (see services/audit_chain.py + /api/audit/verify).
+    # Nullable so the ALTER-TABLE migration + one-time backfill can populate
+    # pre-existing rows; uniqueness of seq is enforced via ix_audit_log_seq.
+    seq = Column(Integer)                # global monotonic sequence
+    prev_hash = Column(String(64))       # previous entry's entry_hash (genesis = "0"*64)
+    entry_hash = Column(String(64))      # sha256 over this entry's fields + prev_hash
+
     @property
     def details_dict(self) -> dict:
         """Parse JSON details into dict"""
@@ -747,6 +754,12 @@ def init_db():
             "ALTER TABLE cloud_databases ADD COLUMN jumpoint_name VARCHAR(128)",
             "ALTER TABLE cloud_databases ADD COLUMN pra_credential_ref VARCHAR(256)",
             "ALTER TABLE cloud_databases ADD COLUMN entitle_integration_id VARCHAR(64)",
+            # Tamper-evident audit log: hash-chain columns + unique seq. Existing
+            # rows are chained by the one-time backfill in init_db (below).
+            "ALTER TABLE audit_log ADD COLUMN seq INTEGER",
+            "ALTER TABLE audit_log ADD COLUMN prev_hash VARCHAR(64)",
+            "ALTER TABLE audit_log ADD COLUMN entry_hash VARCHAR(64)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS ix_audit_log_seq ON audit_log(seq)",
         ]
         for stmt in _migrations:
             if _is_sqlite:
@@ -774,6 +787,18 @@ def init_db():
     from .services import workgroup_service
     with SessionLocal() as _seed_db:
         workgroup_service.seed_if_empty(_seed_db)
+
+    # One-time: chain any pre-existing (pre-upgrade) audit rows so the whole
+    # history is tamper-evident, not just entries written after this upgrade.
+    # Guarded + advisory-locked inside the service; a no-op once done.
+    from .services import job_service
+    with SessionLocal() as _audit_db:
+        try:
+            n = job_service.backfill_audit_chain(_audit_db)
+            if n:
+                print(f"Audit chain: backfilled {n} pre-existing entr{'y' if n == 1 else 'ies'}.")
+        except Exception as e:  # never block startup on backfill
+            print(f"Audit chain backfill skipped: {e}")
 
     print("Database initialized successfully!")
 

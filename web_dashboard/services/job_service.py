@@ -6,9 +6,17 @@ import json
 import uuid
 from datetime import datetime, timedelta
 from typing import Optional, List
+from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..database import Job, AuditLog
+from . import audit_chain
+
+# Postgres transaction-advisory-lock id that serializes audit-chain appends +
+# backfill across Gunicorn/jobs-worker processes (distinct from init_db's
+# 20260101). No-op on SQLite, whose whole-DB write lock already serializes.
+_AUDIT_LOCK_ID = 20260102
 
 
 def create_job(
@@ -170,6 +178,15 @@ def has_active_job_for_vm(db: Session, vmx_path: str) -> bool:
     return count > 0
 
 
+def _audit_lock(db: Session) -> None:
+    """Serialize audit-chain appends/backfill across processes. Transaction-scoped
+    pg advisory lock on PostgreSQL (released on this txn's commit/rollback); a
+    no-op on SQLite, which already serializes writers at the DB level."""
+    from ..database import _is_sqlite
+    if not _is_sqlite:
+        db.execute(text("SELECT pg_advisory_xact_lock(:i)"), {"i": _AUDIT_LOCK_ID})
+
+
 def log_audit(
     db: Session,
     username: str,
@@ -178,20 +195,94 @@ def log_audit(
     target_vm: Optional[str] = None,
     details: Optional[dict] = None,
 ):
-    """Write an entry to the audit log table."""
-    import uuid
-    entry = AuditLog(
-        id=str(uuid.uuid4()),
-        timestamp=datetime.utcnow(),
-        username=username,
-        action=action,
-        target_vm=target_vm,
-        ip_address=ip_address,
+    """Append a hash-chained entry to the audit log.
+
+    Each entry links to its predecessor (``prev_hash``/``entry_hash``) so tampering
+    is detectable via :func:`verify_audit_chain` (exposed at ``/api/audit/verify``).
+    Appends are serialized with :func:`_audit_lock` so concurrent workers can't fork
+    the chain; the unique ``seq`` index is the backstop, and a brief retry absorbs
+    the rare SQLite write race. Callers are unchanged from the pre-chain signature.
+    """
+    for attempt in range(3):
+        try:
+            _audit_lock(db)
+            last = (
+                db.query(AuditLog.seq, AuditLog.entry_hash)
+                .filter(AuditLog.seq.isnot(None))
+                .order_by(AuditLog.seq.desc())
+                .first()
+            )
+            seq = (last[0] + 1) if last else 1
+            prev_hash = last[1] if last else audit_chain.GENESIS_PREV
+            entry = AuditLog(
+                id=str(uuid.uuid4()),
+                timestamp=datetime.utcnow(),
+                username=username,
+                action=action,
+                target_vm=target_vm,
+                ip_address=ip_address,
+                seq=seq,
+                prev_hash=prev_hash,
+            )
+            if details:
+                entry.details_dict = details
+            # Hash the STORED details string (set above), so verify recomputes it
+            # from the same value without re-serializing.
+            entry.entry_hash = audit_chain.compute_entry_hash(
+                seq, entry.timestamp, username, action, target_vm, entry.details, prev_hash
+            )
+            db.add(entry)
+            db.commit()
+            return
+        except IntegrityError:
+            # A concurrent writer took this seq first (SQLite race). Roll back and
+            # retry against the new tip; on the last attempt, surface the error.
+            db.rollback()
+            if attempt == 2:
+                raise
+
+
+def verify_audit_chain(db: Session) -> dict:
+    """Recompute the whole audit chain and report integrity.
+
+    Returns ``{"ok": bool, "count": int, "first_broken_seq": int | None}``.
+    ``ok`` is False (with the offending ``seq``) if any row was edited, deleted,
+    or reordered since it was written."""
+    rows = (
+        db.query(AuditLog)
+        .filter(AuditLog.seq.isnot(None))
+        .order_by(AuditLog.seq.asc())
+        .all()
     )
-    if details:
-        entry.details_dict = details
-    db.add(entry)
+    ok, broken = audit_chain.verify_chain(rows)
+    return {"ok": ok, "count": len(rows), "first_broken_seq": broken}
+
+
+def backfill_audit_chain(db: Session) -> int:
+    """One-time: assign ``seq`` + chain hashes to pre-existing unchained rows.
+
+    Runs only when no row is chained yet (a fresh upgrade); returns the number of
+    rows chained (0 if already done / empty). Advisory-locked so it can't race the
+    first appends or a second init_db caller. Orders history by ``(timestamp, id)``."""
+    _audit_lock(db)
+    if db.query(AuditLog.id).filter(AuditLog.seq.isnot(None)).first():
+        db.commit()  # release the advisory lock; nothing to do
+        return 0
+    rows = (
+        db.query(AuditLog)
+        .order_by(AuditLog.timestamp.asc(), AuditLog.id.asc())
+        .all()
+    )
+    prev = audit_chain.GENESIS_PREV
+    for i, e in enumerate(rows, start=1):
+        e.seq = i
+        e.prev_hash = prev
+        e.entry_hash = audit_chain.compute_entry_hash(
+            i, e.timestamp, e.username, e.action, e.target_vm, e.details, prev
+        )
+        prev = e.entry_hash
     db.commit()
+    return len(rows)
 
 
 def append_job_log(db: Session, job_id: str, line: str) -> None:
