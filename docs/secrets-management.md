@@ -285,6 +285,33 @@ for setup instructions.
 
 ---
 
+## Secret staleness — age alerting
+
+The dashboard can flag stored secrets that haven't changed in a while, so a
+long-forgotten credential doesn't sit un-rotated indefinitely. It's **read-only**
+— it never rotates or touches the secret; it only surfaces an age.
+
+- **Turn it on** on the `/secrets` page: *"Flag secrets older than N days"*
+  (`secret_max_age_days`; **0 disables**, the default).
+- **What's tracked** — the config-secret registry (cloud credentials, integration
+  tokens/passwords). A secret is flagged once its age reaches the threshold.
+- **How age is measured** — this is the important part:
+  - **Database-stored secrets** use the dashboard's own last-saved time
+    (`AppConfig.updated_at`, stamped whenever you save the value).
+  - **External-vault references** (`aws_sm://` / `azure_kv://` / `gcp_sm://` /
+    `bt_safe://`) use **the vault's own last-changed / last-rotated date** — so a
+    secret you rotate in AWS Secrets Manager or BeyondTrust Password Safe reads as
+    *fresh*, not stale-since-you-pasted-the-reference. If a backend can't report a
+    date, it falls back to when the reference was configured here.
+- **Where it shows** — `GET /api/secrets/staleness` (admin) returns the per-secret
+  ages; the dashboard's **Needs attention** panel rolls up *"N secrets not rotated
+  in X+ days."*
+
+This is deliberately the safe half of secret lifecycle — staleness signalling
+only. Automated rotation is a hosted-edition concern (see the *SaaS roadmap*).
+
+---
+
 ## Security best practices
 
 **Do immediately after first run:**

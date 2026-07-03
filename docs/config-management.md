@@ -210,6 +210,53 @@ a fleet of long-lived runners to a security review.
 
 ---
 
+## Secret scanning (advisory)
+
+Uploaded assets are scanned for hard-coded secrets and you're **warned** — it's
+advisory: the upload always succeeds, the finding is a heads-up. The point is to
+catch an AWS key or a plaintext password *before* it's stored in the asset backend
+and shipped to a target.
+
+- **When** — on upload, at both `/api/storage/upload` and `/api/config-mgmt/upload`.
+- **What it catches** — AWS access keys, private-key blocks, GitHub / Google /
+  Slack tokens, and generic `password` / `secret` / `token` / `api_key`
+  assignments. Matched values are **redacted** in the finding.
+- **What it ignores** (so it doesn't cry wolf) — templated values (`{{ … }}`,
+  `$VAR`, `${VAR}`), placeholders (`changeme`, `<your-password>`),
+  Ansible-Vault-encrypted files, and binary assets (`.rpm` / `.deb`).
+- **Config** — `secret_scan_enabled` (default **on**; it only warns). Set false to
+  disable.
+
+The right fix when it fires: move the value into a vault reference (see
+[Secrets Management](secrets-management.md)) or Ansible Vault, and reference it
+from the playbook rather than hard-coding it.
+
+---
+
+## Config-drift visibility
+
+The Ansible stream remembers each successful apply, so you can tell when a target
+has drifted out of "known-good." It's **passive** — it records a fingerprint on a
+successful run; it never touches a target to check (no `--check` reconciler).
+
+- **What's recorded** — on each successful run, a per-`(target, playbook)` row with
+  a content fingerprint of the applied asset and the timestamp
+  (`config_drift_tracking_enabled`, default **on**).
+- **Two signals** —
+  - **Unverified** — the last apply is older than `config_drift_stale_days`
+    (default 14): *"host X unverified since 2026-06-20."*
+  - **Changed** — the playbook's *current* content in storage no longer matches
+    what was applied: the target is running an **older version** than what's on
+    disk now.
+- **Where it shows** — `GET /api/config-mgmt/drift` returns the per-target signals;
+  the dashboard's **Needs attention** panel rolls up *"N config targets need
+  attention."* Re-applying the playbook clears the signal.
+
+Fingerprints are one-way hashes — the inputs/secret values themselves are never
+stored.
+
+---
+
 ## Best practices
 
 **Stage your changes.** Build a target group with one or two test hosts
