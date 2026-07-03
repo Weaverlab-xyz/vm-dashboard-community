@@ -52,6 +52,9 @@ class Settings(BaseSettings):
     # Secret hygiene: flag stored secrets not changed in more than this many days
     # (age from AppConfig.updated_at). 0 = disabled (no staleness flagging).
     secret_max_age_days: int = 0
+    # Advisory scan of uploaded playbooks/scripts for hard-coded secrets. On by
+    # default — it only warns (never blocks the upload). Set false to disable.
+    secret_scan_enabled: bool = True
     # K8s Phase 3b broker (community = beyondtrust/sra Terraform path). The tunnel
     # uses bt_jump_group_name + bt_jumpoint_name (per-cluster overrides fall back
     # to these). Read live via config_service.

@@ -688,11 +688,21 @@ function storagePage() {
         let bin = '';
         for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
         const b64 = btoa(bin);
-        await API.post('/api/storage/upload', {
+        const res = await API.post('/api/storage/upload', {
           filename: this.pendingFile.name,
           content_b64: b64,
         });
         this.showToast(`Uploaded ${this.pendingFile.name}`);
+        // Advisory secret scan (upload still succeeded — this is a heads-up).
+        const findings = res?.secret_findings || [];
+        if (findings.length) {
+          const where = findings.slice(0, 3)
+            .map(f => `${f.rule} (line ${f.line})`).join(', ');
+          this.showToast(
+            `⚠ Possible hard-coded secret${findings.length > 1 ? 's' : ''} in `
+            + `${this.pendingFile.name}: ${where}${findings.length > 3 ? '…' : ''}. `
+            + `Use a vault reference or Ansible Vault instead.`, 'error');
+        }
         this.pendingFile = null;
         // Reset the file input so picking the same file again re-fires the change event.
         const inp = document.querySelector('input[type="file"]');

@@ -444,11 +444,18 @@ async def upload_asset(
         data = base64.b64decode(req.content_b64)
     except Exception:
         raise HTTPException(status_code=400, detail="content_b64 is not valid base64.")
+    # Advisory secret scan (never blocks the upload — a heads-up only).
+    findings = []
+    from ..services import config_service as cs, secret_scan
+    if cs.get_bool("secret_scan_enabled", True):
+        findings = secret_scan.scan_bytes(data, req.filename)
+
     try:
         await storage_service.upload_asset(req.filename, data)
     except StorageError as e:
         raise HTTPException(status_code=502, detail=str(e))
-    return {"ok": True, "filename": req.filename, "size": len(data)}
+    return {"ok": True, "filename": req.filename, "size": len(data),
+            "secret_findings": findings}
 
 
 # ── DELETE /api/storage/asset/{name} (active backend only) ───────────────────
