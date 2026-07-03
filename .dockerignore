@@ -30,6 +30,9 @@ terraform/*
 !terraform/db_gcp_sqlserver
 !terraform/db_azure_sqlserver
 !terraform/k8s_cluster
+# Admission-control Rego policies — read at runtime by admission_service (the
+# pre-action guardrails). COPYed by the Dockerfile, so must be in the context.
+!terraform/policy
 *.tfstate
 *.tfstate.*
 *.tfvars
@@ -43,8 +46,9 @@ __pycache__/
 venv/
 *.egg-info/
 
-# Docs and scripts (not needed at runtime)
-docs/
+# Scripts aren't needed at runtime. docs/ IS now shipped — it's rendered at
+# /docs/<page> by api/docs_pages.py (the in-app guide links), so it must stay
+# in the build context (markdown only; small).
 scripts/
 
 # IDE / OS

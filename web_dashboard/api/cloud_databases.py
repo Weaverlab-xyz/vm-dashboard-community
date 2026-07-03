@@ -149,6 +149,16 @@ async def provision_database(
         "sku_name": payload.sku_name,
         "storage_mb": payload.storage_mb,
     }.items() if v is not None}
+
+    # Pre-action policy gate (inert unless enabled + this action is gated).
+    from ..services import admission_service
+    admission_service.enforce(
+        "clouddb:provision",
+        request={"region": payload.region, "engine": payload.engine,
+                 "cloud": payload.cloud, "name": payload.name,
+                 "instance_type": payload.instance_class or payload.tier or payload.sku_name or ""},
+        actor=current_user, db=db,
+    )
     try:
         result = cloud_database_service.provision(
             db, engine=payload.engine, cloud=payload.cloud, region=payload.region,

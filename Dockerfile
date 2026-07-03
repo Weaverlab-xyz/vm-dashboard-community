@@ -92,6 +92,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy the application.
 COPY web_dashboard/ ./web_dashboard/
 
+# In-repo docs, rendered at /docs/<page> by api/docs_pages.py (the "guide" links
+# in Settings). Markdown only; small.
+COPY docs/ ./docs/
+
 # Cloud-database Terraform modules (driven by cloud_database_service). The rest
 # of terraform/ is generated at runtime / cached at build, so only the static
 # DB modules are copied in. One COPY per cloud — adding a cloud means adding its
@@ -114,6 +118,10 @@ COPY terraform/db_azure_sqlserver/ ./terraform/db_azure_sqlserver/
 COPY terraform/k8s_cluster/aws_eks/ ./terraform/k8s_cluster/aws_eks/
 COPY terraform/k8s_cluster/azure_aks/ ./terraform/k8s_cluster/azure_aks/
 COPY terraform/k8s_cluster/gcp_gke/ ./terraform/k8s_cluster/gcp_gke/
+# Action-level admission-control policies (Rego), evaluated by admission_service
+# via the bundled OPA binary (installed below). Ship the tree so operators can
+# add/edit rules; admission_service reads terraform/policy/admission/ pre-action.
+COPY terraform/policy/ ./terraform/policy/
 
 # Container-sane defaults; .env overrides these at runtime.
 ENV LOG_DIR=/tmp/logs \
@@ -157,6 +165,21 @@ RUN ARCH=$(dpkg --print-architecture) \
     && packer plugins install github.com/hashicorp/amazon \
     && packer plugins install github.com/hashicorp/azure \
     && packer plugins install github.com/hashicorp/googlecompute
+
+# Install OPA (Open Policy Agent) — the bundled binary admission_service shells
+# for pre-action policy guardrails (services/_opa.py). Static build, arch-aware
+# (multi-arch image: amd64 + arm64). See docs/policy-guardrails.md.
+ARG OPA_VERSION=0.70.0
+RUN ARCH=$(dpkg --print-architecture) \
+    && case "$ARCH" in \
+         amd64) OPA_ARCH=amd64 ;; \
+         arm64) OPA_ARCH=arm64 ;; \
+         *) echo "unsupported arch $ARCH for OPA" && exit 1 ;; \
+       esac \
+    && curl -fsSL "https://openpolicyagent.org/downloads/v${OPA_VERSION}/opa_linux_${OPA_ARCH}_static" \
+        -o /usr/local/bin/opa \
+    && chmod +x /usr/local/bin/opa \
+    && /usr/local/bin/opa version
 
 # Install Terraform (architecture-aware) and pre-cache every provider the
 # dashboard uses at run time — the BeyondTrust SRA provider (PRA tunnels/shell

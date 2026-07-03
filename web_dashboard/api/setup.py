@@ -660,6 +660,19 @@ class CostExplorerFeatureConfig(BaseModel):
         return 0.0 if v in (None, "") else v
 
 
+class AdmissionControlFeatureConfig(BaseModel):
+    """Action-level policy guardrails (pre-action admission control). The toggle owns
+    `admission_control_enabled` (feature name → key via _feature_to_cfg_key).
+    `admission_gated_actions` selects which deploy actions are gated; the rest are
+    caps injected into the Rego policies as input.limits. All lists accept JSON
+    (["a","b"]) or CSV (a,b)."""
+    enabled: bool = False
+    admission_gated_actions: str = ""
+    admission_allowed_regions: str = ""
+    admission_denied_instance_types: str = ""
+    admission_prod_window: str = ""
+
+
 _FEATURE_MODELS = {
     "vmware":       VMwareFeatureConfig,
     "beyondtrust":  BeyondTrustFeatureConfig,
@@ -675,6 +688,7 @@ _FEATURE_MODELS = {
     "k8s_management": K8sManagementFeatureConfig,
     "vdesktops":      VirtualDesktopsFeatureConfig,
     "cost_explorer":  CostExplorerFeatureConfig,
+    "admission_control": AdmissionControlFeatureConfig,
 }
 
 # Features whose panel carries config but NOT an enable toggle — their on/off

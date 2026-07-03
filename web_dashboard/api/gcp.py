@@ -387,6 +387,16 @@ async def deploy_instance(
     workgroup = _validate_workgroup(db, current_user, payload.workgroup)
     payload.workgroup = workgroup
 
+    # Pre-action policy gate (inert unless enabled + this action is gated).
+    from ..services import admission_service
+    admission_service.enforce(
+        "gcp:gce:deploy",
+        request={"region": _gcp_region(), "zone": zone,
+                 "instance_type": payload.machine_type, "image": payload.image_self_link,
+                 "name": payload.instance_name},
+        actor=current_user, db=db,
+    )
+
     # Validate an optional per-launch SSH-key-secret override: must be a JSON object
     # carrying a public_key, else the VM would be unreachable.
     if payload.ssh_key_secret_override:

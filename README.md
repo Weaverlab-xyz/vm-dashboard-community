@@ -139,6 +139,7 @@ after first login — only if you have the backing infrastructure:
 - **Portainer CE** — on-prem Docker host management
 - **Entitle** — approval-workflow integration
 - **MCP server** — read-only AI client integration (Claude Desktop, Claude Code, Cursor…) via Personal Access Token; mounted at `/mcp`, no extra containers needed
+- **Action Guardrails** — pre-action policy gate (OPA): evaluate every deploy against Rego policies *before* the job starts — allowed regions, blocked instance sizes, change-freeze windows — and block disallowed ones (403, audited). Fails closed. See [docs/policy-guardrails.md](docs/policy-guardrails.md).
 
 ## License
 
