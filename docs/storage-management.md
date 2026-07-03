@@ -37,6 +37,14 @@ backends does **not** move data; the Migrate panel does that explicitly,
 and only deletes from the source if you ask it to (today: never — see
 "Migration semantics" below).
 
+The active backend holds two kinds of data: **user assets** (playbooks,
+packages, Packer manifests, the image-registry hub) and **Terraform
+remote state** for cloud deploys (see [What counts as an asset](#what-counts-as-an-asset)).
+That second kind is why switching backends is guarded — if live deployments
+have state on the current backend, the dashboard won't let you flip the
+active backend out from under it without migrating that state too (see
+"Migration semantics").
+
 ---
 
 ## Why storage is its own page
@@ -266,6 +274,17 @@ backend. Operating principles:
   appears in the Failed list with its error; the rest of the migration
   continues. You can re-run with the same source/target to retry just the
   failed ones (already-copied files are skipped automatically).
+- **Terraform state migrates separately, and switching is guarded.** The
+  asset Migrate panel copies *assets*. **Terraform remote state** (under
+  the `terraform-state/` prefix) is handled on the active-backend switch
+  itself: if live deployments still have state on the current backend, the
+  dashboard **blocks the switch** rather than stranding it, and asks you to
+  migrate the state. Confirming copies every `terraform-state/*` object to
+  the new backend (`storage_service.migrate_terraform_state`), then flips
+  the active backend. So the safe cutover is: migrate assets → switch the
+  active backend and confirm the state migration → verify → delete from the
+  old backend by hand. Losing that state orphans the resources it tracks
+  (see [Infrastructure as Code → State](infrastructure-as-code.md#state-the-thing-that-makes-iac-work)).
 
 The migrate result block on the page summarises three lists: Copied,
 Skipped, Failed. Save the page or screenshot before navigating away if
@@ -321,7 +340,10 @@ Use each provider's native primitives:
 - **GCS** — object versioning, lifecycle rules.
 
 Recommended baseline for any production-style deployment: enable
-versioning so an accidental overwrite or migration can be reverted.
+versioning so an accidental overwrite or migration can be reverted. This
+matters doubly for the `terraform-state/` prefix — versioning there is your
+recovery path if a state object is corrupted or deleted, since losing it
+orphans the resources that state tracks.
 
 ---
 
