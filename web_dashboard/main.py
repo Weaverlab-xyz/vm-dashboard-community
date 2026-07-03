@@ -841,5 +841,9 @@ async def health_powershell():
         result = await powershell.execute("health_check", {})
         return {"status": "ok", "details": result}
     except powershell.PowerShellError as e:
-        return JSONResponse(status_code=503, content={"status": "error", "detail": str(e)})
+        # Log the real error server-side; return a generic detail (a raw exception
+        # string here would leak internal detail — CodeQL py/stack-trace-exposure).
+        logger.warning("powershell health check failed: %s", e)
+        return JSONResponse(status_code=503,
+                            content={"status": "error", "detail": "PowerShell wrapper unavailable"})
 

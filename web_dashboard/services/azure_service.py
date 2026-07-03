@@ -440,7 +440,12 @@ def verify_ssh_keypair(public_key: str, private_key: str) -> dict:
             "error": None,
         }
     except Exception as e:  # noqa: BLE001
-        return {"matches": False, "derived_public_key": None, "error": str(e)}
+        # Log the real parse error server-side; return a sanitized reason to the
+        # caller (this dict is surfaced in an API response, so a raw exception
+        # string would leak internal detail — CodeQL py/stack-trace-exposure).
+        logger.warning("verify_ssh_keypair: could not parse private key: %s", e)
+        return {"matches": False, "derived_public_key": None,
+                "error": "could not parse the private key (unsupported format, or it needs a passphrase)"}
 
 
 # ── Marketplace image sources ─────────────────────────────────────────────────
