@@ -72,6 +72,15 @@ Files outside this set are rejected at upload. Assets are stored under a
 configurable key prefix (default `config-mgmt/`), so multiple deployments
 can share a bucket if the prefix differs.
 
+> **Beyond user-uploaded assets, the active backend also holds Terraform
+> remote state.** Cloud VM, cloud-database, and Kubernetes-cluster deploys
+> write their state to the *same* active backend (keyed per job under
+> `terraform-state/`, with backend-native locking), so the backend you pick
+> here is load-bearing for infrastructure teardown, not just playbooks. The
+> BeyondTrust PRA tunnel state is the one exception — it's scrubbed of
+> credentials and kept in the database instead. See
+> [Infrastructure as Code → State](infrastructure-as-code.md#state-the-thing-that-makes-iac-work).
+
 ## Uploading
 
 Two equivalent paths to put an asset in storage:

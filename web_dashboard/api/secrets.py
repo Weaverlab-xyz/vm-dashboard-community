@@ -43,10 +43,9 @@ def _require_admin(request: Request) -> None:
 
 
 def _require_admin_dep(request: Request) -> None:
-    """FastAPI Depends-compatible wrapper around `_require_admin`. Used so
-    that approval-gated endpoints fail fast on non-admin callers BEFORE the
-    approval dependency creates an Entitle request the caller couldn't
-    consume anyway."""
+    """FastAPI Depends-compatible wrapper around `_require_admin` — secret
+    read/update/delete are admin-only. (There is no approval gate; secret
+    access is not mediated by an Entitle request.)"""
     _require_admin(request)
 
 
