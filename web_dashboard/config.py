@@ -55,6 +55,11 @@ class Settings(BaseSettings):
     # Advisory scan of uploaded playbooks/scripts for hard-coded secrets. On by
     # default — it only warns (never blocks the upload). Set false to disable.
     secret_scan_enabled: bool = True
+    # Config-drift tracking: record a per-target fingerprint on each successful
+    # Ansible apply (passive). A target is "unverified" once its last apply is
+    # this many days old.
+    config_drift_tracking_enabled: bool = True
+    config_drift_stale_days: int = 14
     # K8s Phase 3b broker (community = beyondtrust/sra Terraform path). The tunnel
     # uses bt_jump_group_name + bt_jumpoint_name (per-cluster overrides fall back
     # to these). Read live via config_service.
