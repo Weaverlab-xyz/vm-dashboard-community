@@ -372,11 +372,12 @@
         // non-admins 403, skipped). Best-effort — any source that fails is skipped.
         const out = [];
         const dayAgo = Date.now() - 24 * 60 * 60 * 1000;
-        const [failed, running, inv, cost] = await Promise.all([
+        const [failed, running, inv, cost, secrets] = await Promise.all([
           API.get('/api/jobs?status=failed&page_size=10').catch(() => null),
           API.get('/api/jobs?status=running&page_size=20').catch(() => null),
           API.get('/api/inventory').catch(() => null),
           API.get('/api/costs/summary').catch(() => null),
+          API.get('/api/secrets/staleness').catch(() => null),
         ]);
         for (const j of (failed?.jobs || [])) {
           if (new Date(j.created_at).getTime() < dayAgo) continue;
@@ -410,6 +411,18 @@
         budgetItem(cost && cost.budget, 'Cloud spend', 'overall');
         for (const c of (cost?.clouds || [])) {
           budgetItem(c.budget, (c.cloud || '').toUpperCase() + ' spend', c.cloud);
+        }
+        // Stale secrets — secrets not changed in > secret_max_age_days (admin-only;
+        // enabled + non-zero max age only). One rolled-up item.
+        if (secrets?.enabled && secrets.stale_count > 0) {
+          out.push({
+            id: 'secrets:stale', severity: 'warn',
+            title: secrets.stale_count + ' secret' + (secrets.stale_count === 1 ? '' : 's')
+                   + ' not rotated in ' + secrets.max_age_days + '+ days',
+            detail: secrets.stale_keys.slice(0, 4).join(', ')
+                    + (secrets.stale_keys.length > 4 ? '…' : ''),
+            time: null, href: '/secrets',
+          });
         }
         // error before warn, then newest first
         out.sort((a, b) => a.severity === b.severity

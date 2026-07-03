@@ -107,6 +107,7 @@ class BackendConfigPayload(BaseModel):
     secrets_bt_host: str = ""
     secrets_bt_folder: str = "Dashboard"
     secrets_bt_owner: str = ""
+    secret_max_age_days: int = 0   # flag secrets older than this; 0 = disabled
 
 
 class MigratePayload(BaseModel):
@@ -162,6 +163,7 @@ async def get_backend_config(request: Request):
         "secrets_bt_host":     cs.get("secrets_bt_host", ""),
         "secrets_bt_folder":   cs.get("secrets_bt_folder", "Dashboard"),
         "secrets_bt_owner":    cs.get("secrets_bt_owner", ""),
+        "secret_max_age_days": int(cs.get("secret_max_age_days") or 0),
     }
 
 
@@ -181,6 +183,7 @@ async def update_backend_config(payload: BackendConfigPayload, request: Request)
         "secrets_bt_host":      payload.secrets_bt_host,
         "secrets_bt_folder":    payload.secrets_bt_folder,
         "secrets_bt_owner":     payload.secrets_bt_owner,
+        "secret_max_age_days":  str(max(0, payload.secret_max_age_days)),
     })
     logger.info("Secrets backend config updated: backend=%s", payload.backend)
     return {"ok": True}
@@ -232,6 +235,59 @@ async def list_secrets(request: Request):
             "ref":         ref,
         })
     return result
+
+
+@router.get("/staleness")
+async def secret_staleness(request: Request):
+    """Per-secret age + staleness for the config-secret registry.
+
+    For external-vault references the age comes from the backend's own
+    last-changed date (so a secret rotated in the vault reads as fresh); DB-stored
+    secrets — and refs the vault can't date — use the dashboard's
+    ``AppConfig.updated_at``. A secret is flagged ``stale`` when its age reaches
+    ``secret_max_age_days`` (0 = disabled). Admin-only, read-only.
+    """
+    _require_admin(request)
+    from ..services import config_service as cs, secret_hygiene
+    from ..config import settings
+    from ..database import SessionLocal, AppConfig
+
+    try:
+        max_age = int(cs.get("secret_max_age_days")
+                      or getattr(settings, "secret_max_age_days", 0) or 0)
+    except (TypeError, ValueError):
+        max_age = 0
+
+    cs._ensure_loaded()
+    keys = [k for k, _ in _SECRET_REGISTRY]
+    db = SessionLocal()
+    try:
+        updated = {
+            r.key: r.updated_at
+            for r in db.query(AppConfig).filter(
+                AppConfig.key.in_(keys), AppConfig.workgroup.is_(None)).all()
+        }
+    finally:
+        db.close()
+
+    items = []
+    for key in keys:
+        with cs._cache_lock:
+            raw = cs._cache.get(key, "")
+        if not raw:
+            continue  # unset → nothing to age
+        source = "database"
+        changed_at = updated.get(key)
+        for b_id, prefix in _BACKEND_PREFIXES.items():
+            if prefix and raw.startswith(prefix):
+                source = b_id
+                # Prefer the vault's real last-changed date; fall back to when the
+                # reference was configured in the dashboard.
+                changed_at = cs.describe_reference(raw) or updated.get(key)
+                break
+        items.append({"key": key, "source": source, "changed_at": changed_at})
+
+    return secret_hygiene.summarize(items, max_age)
 
 
 @router.post("/migrate")
