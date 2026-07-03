@@ -16,6 +16,9 @@ The companion docs:
   artefacts (playbooks, Packer manifests) live
 - [Secrets Management](secrets-management.md) — credentials feeding
   the IaC layer
+- [Policy Guardrails](policy-guardrails.md) — optional pre-action OPA
+  checks that can block a deploy before it starts (allowed regions,
+  instance-size caps, change-freeze windows)
 
 ---
 
@@ -59,7 +62,7 @@ state. No "ssh into the cloud console and click delete" lifecycle.
 | Declarative | Each cloud uses a small Terraform module ([`terraform/ec2_instance/`](../terraform/ec2_instance/), [`terraform/azure_vm/`](../terraform/azure_vm/), [`terraform/gce_instance/`](../terraform/gce_instance/)) with a fixed resource shape. The deploy form provides variable values; the module is unchanged across deploys. |
 | Version-controlled | All HCL is in the repo. Runtime variables flow through `services/terraform.py`'s `apply()` as `-var key=value`, never spliced into the template. Compromise an HCL template via PR review, not by hand-edit. |
 | Plan-then-record | Deploys run as background jobs (`/jobs`) with progress and final state saved to `Job.extra_data`. Failed apply leaves the deploy job marked `failed` with the Terraform stderr captured for forensics. |
-| Idempotent destroy | Each deploy creates a per-job state directory at `terraform/deployments/{job_id}/`. Destroy reads that exact state and runs `terraform destroy -auto-approve`. The destroy path is purely state-driven — there's no "re-derive the resource ID from current cloud state" step that could go wrong. |
+| Idempotent destroy | Each deploy's state is keyed per job (`terraform-state/{job_id}/`) in your active storage backend; destroy replays that exact state through `terraform destroy -auto-approve`. Purely state-driven — no "re-derive the resource ID from live cloud state" step. Because the state is remote, destroy still works after the container is recreated. |
 
 ---
 
@@ -79,9 +82,12 @@ small per-cloud Terraform module:
 | Azure | [`terraform/azure_vm/`](../terraform/azure_vm/) | NIC + (optional) public IP + virtual machine |
 | GCP | [`terraform/gce_instance/`](../terraform/gce_instance/) | `google_compute_instance` with `ssh-keys` metadata |
 
-State lives in `terraform/deployments/{job_id}/` — one directory per
-deploy, isolated. The dashboard never reuses or merges state between
-jobs, so a destroy can never accidentally target a sibling deploy.
+State is keyed per deploy (`terraform-state/{job_id}/`) in your active
+storage backend — isolated per job, never reused or merged, so a destroy
+can't accidentally target a sibling deploy. The container-side
+`terraform/deployments/{job_id}/` holds only the working copy (module +
+provider cache); the canonical state lives in the backend (see
+[State](#state-the-thing-that-makes-iac-work)).
 
 The `services/terraform.py` wrapper handles `init` / `apply` /
 `destroy`, captures stderr on failure, and runs everything via
@@ -129,33 +135,66 @@ form drops your VMs onto that network.
 
 ## State: the thing that makes IaC work
 
-Every Terraform-driven deploy lives in `terraform/deployments/{job_id}/`
-inside the dashboard container. The directory contains:
+Terraform state is the canonical record of what a deploy created — lose
+it and the destroy path can no longer target those resources. The
+dashboard keeps state in **two places, by design**.
 
-- The HCL module (copied from `terraform/{cloud}/` at deploy time)
-- `terraform.tfstate` — the canonical record of what got created
-- `.terraform/providers/` — pinned provider binaries for that deploy
+**Most state lives in your active storage backend.** Cloud VM,
+cloud-database, and Kubernetes-cluster deploys write their state to the
+same backend the [/storage](storage-management.md) system uses (AWS S3 /
+Azure Blob / GCS), keyed per job at
+`terraform-state/{job_id}/terraform.tfstate`, authenticated with the same
+credentials. It's remote and **locked**: S3 uses native state locking
+(the `use_lockfile` mechanism, Terraform ≥ 1.10 — no DynamoDB table
+needed), Azure Blob uses a blob lease, GCS is natively consistent. Two
+operators pressing Deploy on the same target serialise safely instead of
+corrupting state. Wiring lives in
+[`services/terraform.py`](../web_dashboard/services/terraform.py)
+(`_backend_settings`). If no storage backend is configured, state falls
+back to the local deploy directory.
 
-State is the thing the dashboard cannot lose. If the directory is
-deleted out from under the dashboard, the destroy path can no longer
-target the resources — they become orphans. Two implications:
+Because that state is remote, the per-job directory inside the container
+(`terraform/deployments/{job_id}/`) holds only the **working copy** — the
+HCL module copied from `terraform/{cloud}/` plus the pinned
+`.terraform/providers/`. If the container is recreated and that directory
+is lost, a destroy still works: the module is re-materialised from its
+template and `terraform init` re-attaches to the remote state. (Under the
+local-backend fallback, losing that directory orphans the resources — so
+configure a storage backend for durability.)
 
-- **Persist `terraform/deployments/`.** In a Docker-Compose deploy,
-  this is part of the bind-mounted `web_dashboard/` volume by default.
-  Don't blow it away when you upgrade the image.
-- **Don't run Terraform out-of-band against these directories.** Hand-
-  editing state in a deploy directory desyncs it from the dashboard's
-  job tracker. The dashboard reads cloud state through the
-  job-extra_data path, not by re-running `terraform refresh`, so
-  out-of-band edits are invisible until the next apply attempts to
-  rectify them.
+**Some state lives in the dashboard database — deliberately.** The
+BeyondTrust PRA tunnel state (the Terraform `sra` provider, via
+[`services/terraform_pra_service.py`](../web_dashboard/services/terraform_pra_service.py))
+is a security carve-out: raw `sra` state contains **live PRA /
+vault-account credentials**, so the dashboard **scrubs those secrets and
+stores the scrubbed state on the job/resource row in the database**, never
+in the storage bucket. A remote backend would persist the *unredacted*
+state and leak credentials into object storage; the scrubbed-state-in-DB
+model keeps secrets out of the bucket while staying recreate-durable (it
+lives in Postgres). That's why *some* state is in the database and *most*
+is in the storage backend.
+
+**Switching backends is guarded.** Changing your active storage backend
+while deployments have live state would strand them, so the dashboard
+provides an explicit migrate step
+(`storage_service.migrate_terraform_state`) that copies the
+`terraform-state/*` objects from the old backend to the new one.
+
+Two operating rules follow:
+
+- **Back up the state backend, not the container.** The durable record is
+  the bucket (plus the DB for PRA state); the container's deploy
+  directories are disposable working copies.
+- **Don't run Terraform out-of-band** against these deploys. Hand-editing
+  state (local dir or bucket object) desyncs it from the dashboard's job
+  tracker, which reads outcomes from `Job.extra_data`, not by re-running
+  `terraform refresh`.
 
 Note the deliberate asymmetry with [config-management.md](config-management.md):
 **Ansible runs are ephemeral by design; Terraform state is persistent
-by necessity.** Different layers, different lifecycles. The runner
-that *does* the apply is short-lived (one Terraform process, exits
-when done); the *output* of that apply lives forever, or at least as
-long as the resources it describes.
+by necessity.** The runner that *does* the apply is short-lived (one
+Terraform process, exits when done); the *state* that apply produces
+outlives it — in the storage backend, or the DB for PRA tunnels.
 
 ---
 
@@ -172,9 +211,10 @@ A typical deploy:
    it before the user VM comes up. State for the Jumpoint deployment
    is recorded under the same job's extra_data.
 4. **Terraform apply** — the per-cloud module is copied into a fresh
-   `terraform/deployments/{job_id}/`, init pulls providers, apply runs
-   with the form variables passed via `-var`. Stderr / stdout are
-   captured.
+   `terraform/deployments/{job_id}/` working dir; `init` configures the
+   backend (state → your storage backend) and attaches the cached
+   providers; `apply` runs with the form variables passed via `-var`.
+   Stderr / stdout are captured.
 5. **Record outcome** — instance ID, IP addresses, AMI/image ID, all
    land in `Job.extra_data` for later destroy.
 6. **Provision Shell Jump** (if BT enabled) — a separate Terraform
@@ -183,12 +223,14 @@ A typical deploy:
 A typical destroy:
 
 1. **Job lookup** — dashboard finds the deploy job by instance name +
-   job_type, reads `extra_data.bt_tf_state` (Shell Jump state) and the
-   on-disk `terraform/deployments/{job_id}/` (instance state).
+   job_type, reads `extra_data.bt_tf_state` (the scrubbed, DB-held Shell
+   Jump state) and re-attaches to the instance state in the storage
+   backend (`terraform-state/{job_id}/`).
 2. **Shell Jump destroy first** — the Terraform PRA apply uses the
    stored tf_state to delete the Shell Jump cleanly.
 3. **Instance destroy** — `terraform destroy -auto-approve` against
-   the per-job state directory.
+   the per-job state (in the storage backend; the working dir is
+   re-materialised from the module template if the container lost it).
 4. **Sibling-aware Jumpoint cleanup** — if no other active deploys
    reference the same Jumpoint, the cloud Jumpoint container is
    stopped too; otherwise it stays running for the others.
@@ -243,16 +285,12 @@ build/deploy split natively but doesn't enforce naming hygiene.
 
 ## Where this is heading on SaaS
 
-A few things the community edition does *not* try to do. They're
-SaaS priorities — see [docs/saas-comparison.md](saas-comparison.md)
-for the hosted-edition philosophy.
+Remote state with locking already ships in community (see
+[State](#state-the-thing-that-makes-iac-work) above), as do pre-action
+policy guardrails ([Policy Guardrails](policy-guardrails.md)). A few
+things the community edition still leaves to the hosted edition — see
+[docs/saas-comparison.md](saas-comparison.md) for the philosophy.
 
-- **Centralised state with locking.** Community keeps Terraform state
-  on the dashboard's filesystem. It's correct for a single-operator
-  deployment but doesn't tolerate two operators pressing Deploy
-  simultaneously. SaaS uses a remote state backend (S3 + DynamoDB
-  locking, or its Azure / GCP equivalent) so concurrent operations
-  serialise safely.
 - **Continuous drift detection.** Community's view of a deployed VM
   is whatever was true at apply time; if someone resizes the instance
   in the cloud console, the dashboard doesn't notice. SaaS reconciles
@@ -264,11 +302,13 @@ for the hosted-edition philosophy.
   parameterised module that replaces them" — same shape as the
   AI-assisted Ansible playbook generation the SaaS edition will
   offer for config management.
-- **Compliance-as-code.** Continuously evaluate deployed
-  infrastructure against policy (OPA / Sentinel / cloud-provider
-  policy services) and mark non-compliant resources in the
-  dashboard. Community gives you the inventory; SaaS adds the
-  comparison.
+- **Post-apply compliance-as-code.** Community enforces policy
+  *pre-action* — the OPA guardrails block a disallowed deploy before it
+  starts ([Policy Guardrails](policy-guardrails.md)). SaaS adds the
+  *post-apply* half: continuously evaluating already-deployed
+  infrastructure against policy and flagging resources that have drifted
+  out of compliance. Pre-action gate + post-apply scan = one policy
+  intent, two enforcement points.
 
 You can be productive on community indefinitely. Move to SaaS when
 concurrent operator safety, drift surfacing, or compliance auditing
@@ -286,11 +326,14 @@ know your account can reach (the
 button supports arbitrary IDs).
 
 **Destroy fails with "Failed to load state file."**
-The per-deploy state directory was lost (container rebuilt without
-the bind mount, or the volume was deleted). The cloud resource is now
-orphaned. Find it via tag (`managed-by=dashboard`) and delete via
-cloud console; mark the dashboard job as destroyed manually if the UI
-won't.
+This is a **local-backend fallback** symptom — the per-deploy working
+directory was lost (container rebuilt without persistence) and there was
+no storage backend holding the state. With a storage backend configured,
+the state is remote and destroy re-attaches to it, so this doesn't happen.
+If you're on local state: find the orphaned resource by tag
+(`managed-by=dashboard`), delete it via the cloud console, mark the job
+destroyed manually — then configure a storage backend to avoid the failure
+mode.
 
 **"Provider configuration not present" during apply.**
 Provider cache wasn't pre-pulled. The dashboard image bakes Terraform
@@ -308,7 +351,9 @@ the partial outputs. Manually destroy the partial cloud resources
 (again, find by tag), then `rm -rf terraform/deployments/{job_id}`
 inside the container, then re-deploy.
 
-**Two operators destroying the same VM at the same time.**
-Don't. Community has no state lock; whichever one runs first wins,
-the other gets a "resource not found" error and a confused job log.
-SaaS adds the lock.
+**Two operators deploying/destroying the same target at once.**
+With a storage backend configured, the backend's native state lock (S3
+`use_lockfile` / Azure blob lease / GCS) serialises them — the second
+waits rather than corrupting state. Under the local-backend fallback there
+is no lock, so avoid concurrent operations on the same deploy (or configure
+a storage backend).
