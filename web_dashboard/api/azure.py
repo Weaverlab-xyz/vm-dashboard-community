@@ -619,6 +619,15 @@ async def deploy_vm(
     req.workgroup = workgroup
     await _validate_ssh_key_override(req.ssh_key_secret_override)
 
+    # Pre-action policy gate (inert unless enabled + this action is gated).
+    from ..services import admission_service
+    admission_service.enforce(
+        "azure:vm:deploy",
+        request={"region": loc, "instance_type": req.vm_size,
+                 "image": req.image_id, "name": req.vm_name},
+        actor=current_user, db=db,
+    )
+
     job = job_service.create_job(
         db,
         job_type="azure_deploy",

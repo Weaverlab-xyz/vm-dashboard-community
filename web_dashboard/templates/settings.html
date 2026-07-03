@@ -339,6 +339,55 @@
         </div>
       </template>
 
+      <template x-if="panel?.key === 'admission_control' && !panelLoading">
+        <div class="space-y-4">
+          <p class="text-sm text-gray-500">
+            Evaluate every deploy against OPA policies <strong>before</strong> the job starts.
+            A blocked deploy returns 403 with the reason and is recorded in the
+            tamper-evident audit log — nothing is created. See the
+            <a href="/docs/policy-guardrails" class="underline" target="_blank">guardrails guide</a>.
+          </p>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Gated actions</label>
+            <input type="text" x-model="panelCfg.admission_gated_actions"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                   placeholder="aws:ec2:deploy, azure:vm:deploy, gcp:gce:deploy, clouddb:provision, k8s:provision">
+            <p class="text-[11px] text-gray-400 mt-1">
+              Comma-separated. Only these actions are gated; everything else is unaffected.
+              Leave blank and the gate is inert even while enabled.
+            </p>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Allowed regions</label>
+            <input type="text" x-model="panelCfg.admission_allowed_regions"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                   placeholder="us-east-1, us-west-2, eastus">
+            <p class="text-[11px] text-gray-400 mt-1">Allow-list of regions/locations/zones. Blank = no region restriction.</p>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Blocked instance types</label>
+            <input type="text" x-model="panelCfg.admission_denied_instance_types"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                   placeholder="p4d.24xlarge, Standard_NV48s_v3">
+            <p class="text-[11px] text-gray-400 mt-1">Block-list of sizes/classes (EC2 type, Azure vm_size, GCE machine type, DB class/sku, node type).</p>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Change-freeze days</label>
+            <input type="text" x-model="panelCfg.admission_prod_window"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                   placeholder="sat, sun">
+            <p class="text-[11px] text-gray-400 mt-1">
+              Weekdays (UTC) on which deploys are frozen (<code>mon</code>…<code>sun</code>). Blank = no freeze.
+              Custom rules: drop a <code>.rego</code> into <code>terraform/policy/admission/</code>.
+            </p>
+          </div>
+          <p class="text-[11px] text-amber-600">
+            Requires the bundled OPA binary (in the image). With the gate on but OPA missing,
+            gated deploys <strong>fail closed</strong> (403) rather than slipping through.
+          </p>
+        </div>
+      </template>
+
       <template x-if="panel?.key === 'beyondtrust' && !panelLoading">
         <div class="space-y-4">
           <p class="text-sm text-gray-500">
@@ -1760,6 +1809,8 @@ function settingsPage() {
         desc: 'XCP-ng and XenServer VM management via the XAPI XML-RPC API.' },
       { key: 'cost_explorer', label: 'Cloud Costs',             hasConfig: true,  enabled: false,
         desc: 'Month-to-date cloud spend, with an optional monthly budget alert.' },
+      { key: 'admission_control', label: 'Action Guardrails',   hasConfig: true,  enabled: false,
+        desc: 'Pre-action policy gate (OPA): allowed regions, blocked sizes, change-freeze.' },
     ],
 
     // ── Slide-over panel state ───────────────────────────────────────────
@@ -1983,6 +2034,7 @@ function settingsPage() {
           nutanix: features.nutanix,
           xcpng: features.xcpng,
           cost_explorer: features.cost,
+          admission_control: features.admission,
         };
         for (const intg of this.integrations) {
           intg.enabled = !!map[intg.key];

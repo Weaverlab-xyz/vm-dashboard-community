@@ -388,6 +388,15 @@ async def deploy_ami(
     workgroup = _validate_workgroup(db, current_user, req.workgroup)
     await _validate_ssh_key_override(req.ssh_key_secret_override)
 
+    # Pre-action policy gate (inert unless enabled + this action is gated).
+    from ..services import admission_service
+    admission_service.enforce(
+        "aws:ec2:deploy",
+        request={"region": _aws_region(), "instance_type": req.instance_type,
+                 "image": req.ami_id, "name": req.instance_name},
+        actor=current_user, db=db,
+    )
+
     job = job_service.create_job(
         db,
         job_type="ec2_deploy",

@@ -39,6 +39,16 @@ class Settings(BaseSettings):
     cost_budget_azure: float = 0.0
     cost_budget_gcp: float = 0.0
     gcp_billing_export_table: str = ""    # BigQuery billing-export table for GCP cost (project.dataset.table); blank = GCP cost off
+    # Action-level policy guardrails (pre-action admission control via OPA). Master
+    # flag; when off, admission_service.enforce() is a no-op. Which actions are gated
+    # is the list `admission_gated_actions` (default none). The caps below are injected
+    # into policies as input.limits, settable from Settings without writing Rego. All
+    # list values accept JSON (["a","b"]) or CSV (a,b).
+    admission_control_enabled: bool = False
+    admission_gated_actions: str = ""          # e.g. aws:ec2:deploy,clouddb:provision
+    admission_allowed_regions: str = ""        # allow-list; empty = no region restriction
+    admission_denied_instance_types: str = ""  # block-list of sizes/classes
+    admission_prod_window: str = ""            # frozen weekdays, e.g. sat,sun
     # K8s Phase 3b broker (community = beyondtrust/sra Terraform path). The tunnel
     # uses bt_jump_group_name + bt_jumpoint_name (per-cluster overrides fall back
     # to these). Read live via config_service.

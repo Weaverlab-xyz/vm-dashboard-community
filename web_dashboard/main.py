@@ -433,6 +433,7 @@ def _feature_flags() -> dict:
         "cloud_database_enabled": config_service.get_bool("cloud_database_enabled", settings.cloud_database_enabled),
         "k8s_management_enabled": config_service.get_bool("k8s_management_enabled", settings.k8s_management_enabled),
         "cost_explorer_enabled": config_service.get_bool("cost_explorer_enabled", settings.cost_explorer_enabled),
+        "admission_control_enabled": config_service.get_bool("admission_control_enabled", settings.admission_control_enabled),
         # Entitle user-JIT Phase 4 UI affordances — surfaces the
         # "Request access" nav link + portal URL when both are configured.
         "entitle_user_jit_enabled":   config_service.get_bool("entitle_user_jit_enabled", settings.entitle_user_jit_enabled),
@@ -453,6 +454,7 @@ from fastapi import Depends  # noqa: E402
 from .api import auth, jobs, websocket, aws, azure, gcp, packer, mfa, tokens, users, groups, setup, secrets, storage, images  # noqa: E402
 from .api import cloud_databases  # noqa: E402
 from .api import audit as audit_api  # noqa: E402
+from .api import docs_pages  # noqa: E402
 from .api import workgroups as workgroups_api  # noqa: E402
 from .api import workgroup_overrides as workgroup_overrides_api  # noqa: E402
 from .api import cloud_identity as cloud_identity_api  # noqa: E402
@@ -485,6 +487,7 @@ app.include_router(workgroups_api.router)
 app.include_router(workgroup_overrides_api.router)
 app.include_router(jobs.router)
 app.include_router(audit_api.router)
+app.include_router(docs_pages.router)
 app.include_router(websocket.router)
 app.include_router(aws.router)
 app.include_router(cloud_databases.router)
@@ -815,6 +818,7 @@ async def features():
         "nutanix":      flags["nutanix_enabled"],
         "xcpng":        flags["xcpng_enabled"],
         "cost":         flags["cost_explorer_enabled"],
+        "admission":    flags["admission_control_enabled"],
     }
 
 

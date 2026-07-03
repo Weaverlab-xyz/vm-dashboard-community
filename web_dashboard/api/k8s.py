@@ -99,6 +99,15 @@ async def provision_cluster(
         "authorized_cidrs": payload.authorized_cidrs,
         "zone": payload.zone,
     }.items() if v is not None}
+
+    # Pre-action policy gate (inert unless enabled + this action is gated).
+    from ..services import admission_service
+    admission_service.enforce(
+        "k8s:provision",
+        request={"region": payload.region, "instance_type": payload.node_instance_type,
+                 "name": payload.name, "node_count": payload.node_count},
+        actor=current_user, db=db,
+    )
     try:
         result = k8s_service.create_cluster(
             db, cloud=payload.cloud, name=payload.name, region=payload.region,
