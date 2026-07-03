@@ -255,6 +255,32 @@ def resolve_reference(raw: str, workgroup: str | None = None) -> str:
     return _resolve_external(raw, workgroup=workgroup)
 
 
+def describe_reference(raw: str, workgroup: str | None = None):
+    """Best-effort last-changed timestamp for an external-backend reference.
+
+    Returns a naive-UTC ``datetime`` (the vault's own last-changed / last-rotated
+    date) for an ``aws_sm://`` / ``azure_kv://`` / ``gcp_sm://`` / ``bt_safe://``
+    ref, or ``None`` for a non-reference or when the backend can't report it.
+    Cached alongside resolved values (same TTL) so staleness checks don't hammer
+    the vault. Never raises — the backend describe path fails soft to ``None``.
+    """
+    for prefix, backend in _EXT_PREFIXES.items():
+        if raw.startswith(prefix):
+            vault_id, ref = _parse_ref(raw, backend)
+            now = time.monotonic()
+            cache_key = ("__desc__", raw, vault_id, workgroup)
+            with _ext_cache_lock:
+                cached = _ext_cache.get(cache_key)
+                if cached and cached[1] > now:
+                    return cached[0]
+            from .secrets_backend_service import describe_sync
+            dt = describe_sync(backend, ref, vault_id=vault_id)
+            with _ext_cache_lock:
+                _ext_cache[cache_key] = (dt, now + EXT_CACHE_TTL)
+            return dt
+    return None
+
+
 def get_bool(key: str, default: bool = False) -> bool:
     """Return a config flag as bool. Stored as '1'/'0' (legacy rows may hold
     'True'/'False' from pre-normalization _write_feature); env-var fallback via settings."""

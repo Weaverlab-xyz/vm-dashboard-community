@@ -516,6 +516,111 @@ def read_sync(backend: str, ref: str, vault_id: str | None = None) -> str:
     return fn(ref, vault_id=vault_id)
 
 
+# ── Secret metadata (last-changed) for staleness — best-effort, read-only ──────
+#
+# Each describe_* returns the backend's own "when did this value last change"
+# timestamp as a naive-UTC datetime (or None when the backend can't report it).
+# Used by secret_hygiene so an externally-rotated secret reads by its real
+# rotation date, not the date its reference was pasted into the dashboard.
+
+def _naive_utc(dt):
+    """Coerce an aware/naive datetime (or ISO string) to naive UTC; None-safe."""
+    from datetime import datetime as _dt, timezone as _tz
+    if dt is None:
+        return None
+    if isinstance(dt, str):
+        try:
+            dt = _dt.fromisoformat(dt.replace("Z", "+00:00"))
+        except Exception:
+            return None
+    to_dt = getattr(dt, "ToDatetime", None)  # google.protobuf Timestamp
+    if callable(to_dt):
+        dt = to_dt()
+    if getattr(dt, "tzinfo", None) is not None:
+        dt = dt.astimezone(_tz.utc).replace(tzinfo=None)
+    return dt
+
+
+def describe_aws_sm(ref: str, vault_id: str | None = None):
+    import boto3
+    region = None
+    if vault_id:
+        from ..database import SessionLocal, SecretVault
+        db = SessionLocal()
+        try:
+            row = db.query(SecretVault).filter(
+                SecretVault.id == vault_id, SecretVault.backend == "aws_sm").first()
+        finally:
+            db.close()
+        if row:
+            region = row.endpoint
+    if region is None:
+        region, _ = _aws_cfg()
+    resp = boto3.client("secretsmanager", region_name=region).describe_secret(SecretId=ref)
+    return _naive_utc(resp.get("LastChangedDate") or resp.get("LastRotatedDate")
+                      or resp.get("CreatedDate"))
+
+
+def describe_azure_kv(ref: str, vault_id: str | None = None):
+    client, _ = (_azure_kv_client_for(vault_id) if vault_id else _azure_kv_client())
+    props = client.get_secret(ref).properties
+    return _naive_utc(getattr(props, "updated_on", None) or getattr(props, "created_on", None))
+
+
+def describe_gcp_sm(ref: str, vault_id: str | None = None):
+    project = None
+    if vault_id:
+        from ..database import SessionLocal, SecretVault
+        db = SessionLocal()
+        try:
+            row = db.query(SecretVault).filter(
+                SecretVault.id == vault_id, SecretVault.backend == "gcp_sm").first()
+        finally:
+            db.close()
+        if row:
+            project = row.endpoint
+    if project is None:
+        project, _, _ = _gcp_cfg()
+    ver = _gcp_client().get_secret_version(
+        request={"name": f"projects/{project}/secrets/{ref}/versions/latest"})
+    return _naive_utc(getattr(ver, "create_time", None))
+
+
+def describe_bt_secrets_safe(ref: str, vault_id: str | None = None):
+    _ = vault_id
+    data = _ps_run(["secrets", "get", "-t", ref, "-d"])
+    if not isinstance(data, list) or not data:
+        return None
+    entry = data[0]
+    for field in ("LastChangeDate", "ChangeDate", "ModifiedDate", "LastModified",
+                  "Modified", "UpdatedOn", "DateModified"):
+        val = entry.get(field)
+        if val:
+            return _naive_utc(val)
+    return None
+
+
+_DESCRIBE_FN = {
+    "aws_sm":          describe_aws_sm,
+    "azure_kv":        describe_azure_kv,
+    "gcp_sm":          describe_gcp_sm,
+    "bt_secrets_safe": describe_bt_secrets_safe,
+}
+
+
+def describe_sync(backend: str, ref: str, vault_id: str | None = None):
+    """Best-effort last-changed datetime for a secret; None on any failure so the
+    caller falls back to the dashboard's own record."""
+    fn = _DESCRIBE_FN.get(backend)
+    if not fn:
+        return None
+    try:
+        return fn(ref, vault_id=vault_id)
+    except Exception as exc:  # noqa: BLE001 — never let metadata lookup break staleness
+        logger.warning("describe %s failed for %s: %s", backend, ref[:40], exc)
+        return None
+
+
 # ── Secret browse / CRUD (issue: Secrets page expansion) ─────────────────────
 #
 # The functions below give the Secrets page full CRUD over individual secrets

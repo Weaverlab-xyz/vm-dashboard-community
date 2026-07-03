@@ -49,6 +49,9 @@ class Settings(BaseSettings):
     admission_allowed_regions: str = ""        # allow-list; empty = no region restriction
     admission_denied_instance_types: str = ""  # block-list of sizes/classes
     admission_prod_window: str = ""            # frozen weekdays, e.g. sat,sun
+    # Secret hygiene: flag stored secrets not changed in more than this many days
+    # (age from AppConfig.updated_at). 0 = disabled (no staleness flagging).
+    secret_max_age_days: int = 0
     # K8s Phase 3b broker (community = beyondtrust/sra Terraform path). The tunnel
     # uses bt_jump_group_name + bt_jumpoint_name (per-cluster overrides fall back
     # to these). Read live via config_service.
