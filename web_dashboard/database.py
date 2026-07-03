@@ -296,6 +296,24 @@ class AuditLog(Base):
         self.details = json.dumps(value)
 
 
+class ConfigApplyState(Base):
+    """Per-(target, playbook) fingerprint of the last successful Ansible apply —
+    powers config-drift visibility (backlog #5). `content_hash` fingerprints the
+    applied asset bytes so a later edit is detectable; `applied_at` drives the
+    'unverified since' staleness signal. Upserted by config_drift.record_apply."""
+    __tablename__ = "config_apply_state"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    target = Column(String(255), nullable=False)
+    playbook_ref = Column(String(255), nullable=False)
+    content_hash = Column(String(64), nullable=False)   # sha256 of the applied asset bytes
+    inputs_hash = Column(String(64))                    # sha256 of resolved extra_vars (one-way)
+    applied_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    job_id = Column(String(36))
+
+    __table_args__ = (UniqueConstraint("target", "playbook_ref", name="uq_apply_target_playbook"),)
+
+
 class OAuthGroupMapping(Base):
     """Maps an Entra ID group Object ID to a dashboard workgroup name."""
     __tablename__ = "oauth_group_mappings"

@@ -372,12 +372,13 @@
         // non-admins 403, skipped). Best-effort — any source that fails is skipped.
         const out = [];
         const dayAgo = Date.now() - 24 * 60 * 60 * 1000;
-        const [failed, running, inv, cost, secrets] = await Promise.all([
+        const [failed, running, inv, cost, secrets, drift] = await Promise.all([
           API.get('/api/jobs?status=failed&page_size=10').catch(() => null),
           API.get('/api/jobs?status=running&page_size=20').catch(() => null),
           API.get('/api/inventory').catch(() => null),
           API.get('/api/costs/summary').catch(() => null),
           API.get('/api/secrets/staleness').catch(() => null),
+          API.get('/api/config-mgmt/drift').catch(() => null),
         ]);
         for (const j of (failed?.jobs || [])) {
           if (new Date(j.created_at).getTime() < dayAgo) continue;
@@ -422,6 +423,20 @@
             detail: secrets.stale_keys.slice(0, 4).join(', ')
                     + (secrets.stale_keys.length > 4 ? '…' : ''),
             time: null, href: '/secrets',
+          });
+        }
+        // Config drift — targets unverified (last apply is stale) or running a
+        // playbook that's changed in storage since. One rolled-up item.
+        const driftN = (drift?.unverified_count || 0) + (drift?.changed_count || 0);
+        if (driftN > 0) {
+          const parts = [];
+          if (drift.unverified_count) parts.push(drift.unverified_count + ' unverified');
+          if (drift.changed_count) parts.push(drift.changed_count + ' running a changed playbook');
+          out.push({
+            id: 'drift:targets', severity: 'warn',
+            title: driftN + ' config target' + (driftN === 1 ? '' : 's') + ' need attention',
+            detail: parts.join(', ') + ' — re-apply to reconcile',
+            time: null, href: '/config-mgmt',
           });
         }
         // error before warn, then newest first
