@@ -73,5 +73,8 @@ async def doc_page(page: str) -> HTMLResponse:
         raise HTTPException(status_code=404, detail="doc not found")
 
     html = _render_markdown(candidate.read_text(encoding="utf-8"))
-    title = rel.rsplit("/", 1)[-1].replace("-", " ").replace("_", " ").title()
+    # Escape the page-derived title before reflecting it into the HTML shell —
+    # it originates from the request path, so render it as text, not markup
+    # (prevents reflected XSS; CodeQL py/reflective-xss).
+    title = _html.escape(rel.rsplit("/", 1)[-1].replace("-", " ").replace("_", " ").title())
     return HTMLResponse(_SHELL.format(title=title, body=html))
