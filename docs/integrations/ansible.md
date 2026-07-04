@@ -435,6 +435,35 @@ message — move it there via **Secrets → migrate**, then reference it as
 `aws_sm://<name>` / `gcp_sm://<name>`. ACI has no such requirement. The SSH-key
 secret always rides the existing `SSH_KEY_B64` channel and needs no migration.
 
+### Managed-account checkout (BeyondTrust Password Safe)
+
+When **BeyondTrust is enabled** (`beyondtrust_enabled`), a run can also use a
+Password Safe **managed account** as the login identity — instead of referencing a
+*stored* secret, the operator picks an account from a **live list** and the
+dashboard checks out its credential **just-in-time** at run time. The operator
+never sees the value; the checkout is scrubbed from output and audited exactly like
+the secret path above (and needs the same **`secrets:use`** permission).
+
+How to use it: on `/config-mgmt`, pick **Target → On-prem host (IP / hostname)** and
+enter a system registered in Password Safe (a cloud VM's IP works too). The
+dashboard looks up that host's managed systems + accounts and shows an account
+picker (each tagged **[SSH key]** or **[password]**). Selecting one:
+
+- sets `ansible_user` to the account name;
+- injects its credential as the **connection** secret — an **SSH-key** account
+  becomes the connection key; a **password** account becomes
+  `ansible_ssh_pass` / `ansible_password` (Windows targets need
+  `ansible_connection: winrm` in the play);
+- optionally, a **second** managed account can be picked for the become/sudo
+  password (`ansible_become_password`).
+
+**Local runner only.** A checked-out credential is ephemeral, so the store-residency
+model above can't apply to it — a managed-account run that would dispatch to a
+cloud runner is **rejected up front**. SSH-password targets require `sshpass` in the
+runner image (already true for the built-in on-prem SSH path). The lookup and
+checkout go through `ps-cli`, authenticated by the configured Password Safe OAuth
+client (`pscli_api_url` / `pscli_client_id` / `pscli_client_secret`).
+
 ---
 
 ## Storage prerequisite (Ansible runner)

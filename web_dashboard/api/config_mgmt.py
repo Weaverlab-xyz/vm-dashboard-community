@@ -184,6 +184,16 @@ async def get_cloud_targets(
 
 # ── Playbook / asset run ───────────────────────────────────────────────────────
 
+class ManagedAccountRef(BaseModel):
+    """A BeyondTrust Password Safe managed account the operator picked from the
+    live list. The ids drive the just-in-time credential checkout; the name is
+    non-secret and becomes ``ansible_user``. Never carries a credential."""
+    system_id: int
+    account_id: int
+    account_name: str = ""
+    uses_ssh_key: bool = False   # DSSAutoManagementFlag → checkout as -t dsskey
+
+
 class RunRequest(BaseModel):
     asset: str           # filename of any supported type (.yml, .sh, .deb, .rpm)
     target: str          # on-prem group key OR bare IP/hostname for cloud/ad-hoc
@@ -202,6 +212,12 @@ class RunRequest(BaseModel):
     # passes the backend explicitly because the same asset name may exist on
     # multiple backends.
     asset_backend: str = ""
+    # BeyondTrust Password Safe managed-account checkout (LOCAL runner only). The
+    # credential is checked out just-in-time at run time — the operator never sees
+    # it. managed_account is the connection identity; managed_become is an optional
+    # separate account for the become/sudo password.
+    managed_account: ManagedAccountRef | None = None
+    managed_become: ManagedAccountRef | None = None
 
 
 def _cfg(key: str) -> str:
@@ -287,6 +303,8 @@ async def _run_job(
     secret_vars: dict | None = None,
     secret_become_source: str = "",
     secret_ssh_key_source: str = "",
+    managed_account: dict | None = None,
+    managed_become: dict | None = None,
 ) -> None:
     import base64
     from ..database import SessionLocal
@@ -332,6 +350,36 @@ async def _run_job(
                 secret_ssh_pem = _resolve_source(secret_ssh_key_source) or None
             secret_values = [v for v in list(secret_extra_vars.values())
                              + ([secret_ssh_pem] if secret_ssh_pem else []) if v]
+
+        # Managed-account checkout (BeyondTrust Password Safe) — check out the
+        # credential just-in-time and merge into the SAME local-runner channels
+        # (secret_extra_vars / secret_ssh_pem / scrub set) the secret path uses.
+        # The account is the connection identity; managed_become is an optional
+        # separate account for the sudo/become password. Never stored or shown.
+        if managed_account or managed_become:
+            from ..services import btapi_service
+            try:
+                if managed_account:
+                    cred = await btapi_service.get_ps_credential(
+                        managed_account["system_id"], managed_account["account_id"],
+                        uses_ssh_key=managed_account.get("uses_ssh_key", False))
+                    if managed_account.get("account_name"):
+                        secret_extra_vars["ansible_user"] = managed_account["account_name"]
+                    if managed_account.get("uses_ssh_key"):
+                        secret_ssh_pem = cred                     # connection key
+                    else:
+                        secret_extra_vars["ansible_ssh_pass"] = cred  # SSH password (sshpass)
+                        secret_extra_vars["ansible_password"] = cred  # WinRM targets
+                    secret_values.append(cred)
+                if managed_become:
+                    bcred = await btapi_service.get_ps_credential(
+                        managed_become["system_id"], managed_become["account_id"],
+                        uses_ssh_key=False)
+                    secret_extra_vars["ansible_become_password"] = bcred
+                    secret_values.append(bcred)
+            except btapi_service.BTAPIError as e:
+                job_service.set_failed(db, job_id, f"Password Safe checkout failed: {e}")
+                return
 
         # Per-target-cloud runner backend: an AWS-target job uses
         # ansible_runner_aws, Azure → ansible_runner_azure, GCP → ansible_runner_gcp,
@@ -598,12 +646,21 @@ async def run_playbook(
     # become-password secrets work on both the local and the cloud runners; on the
     # cloud they are injected via the provider's secret channel (ECS valueFrom /
     # Cloud Run secret-env / ACI secure_value).
+    has_managed = bool(payload.managed_account or payload.managed_become)
     wants_secret = bool(payload.secret_vars or payload.secret_become_source
-                        or payload.secret_ssh_key_source)
+                        or payload.secret_ssh_key_source or has_managed)
     if wants_secret and not _can_use_secrets(current_user):
         raise HTTPException(
             status_code=403,
             detail="Using a Secrets-Management secret in a run requires the 'secrets:use' permission.")
+
+    # A managed-account checkout needs BeyondTrust Password Safe enabled.
+    if has_managed:
+        from ..services import config_service as cs
+        if not cs.get_bool("beyondtrust_enabled"):
+            raise HTTPException(
+                status_code=400,
+                detail="Managed-account checkout requires BeyondTrust Password Safe to be enabled in Settings.")
 
     atype = ansible_local_service.asset_type(payload.asset)
 
@@ -617,6 +674,14 @@ async def run_playbook(
             and is_adhoc and atype == "playbook"):
         _validate_cloud_secret_stores(
             eff_runner, payload.secret_vars, payload.secret_become_source)
+
+    # Managed-account checkout is LOCAL runner only — a JIT credential is ephemeral
+    # and can't live in a cloud store the way #217's cloud secrets must.
+    from ..services import managed_accounts as _ma
+    if _ma.local_only_violation(has_managed, eff_runner, is_adhoc, atype == "playbook"):
+        raise HTTPException(
+            status_code=400,
+            detail="Managed-account checkout runs on the local Ansible runner only.")
     description = f"Ansible ({atype}): {payload.asset} → {payload.target}"
 
     job = job_service.create_job(
@@ -635,14 +700,29 @@ async def run_playbook(
             kinds.append("become-password")
         if payload.secret_ssh_key_source:
             kinds.append("ssh-key")
+        # Managed-account use — record kind + account name(s) + system, never the credential.
+        managed_accts = []
+        if payload.managed_account:
+            kinds.append("managed-account (checkout)")
+            managed_accts.append({"role": "connection",
+                                  "account": payload.managed_account.account_name,
+                                  "system_id": payload.managed_account.system_id})
+        if payload.managed_become:
+            kinds.append("managed-account become (checkout)")
+            managed_accts.append({"role": "become",
+                                  "account": payload.managed_become.account_name,
+                                  "system_id": payload.managed_become.system_id})
         job_service.log_audit(
             db, current_user.username, "ansible_secret_use",
             details={"kinds": kinds, "vars": sorted(payload.secret_vars.keys()),
+                     "managed_accounts": managed_accts,
                      "asset": payload.asset, "target": payload.target})
     background_tasks.add_task(
         _run_job, job.id, payload.asset, payload.target, payload.cloud,
         payload.ansible_user, payload.extra_vars, asset_backend, payload.secret_vars,
         payload.secret_become_source, payload.secret_ssh_key_source,
+        payload.managed_account.model_dump() if payload.managed_account else None,
+        payload.managed_become.model_dump() if payload.managed_become else None,
     )
     return {"job_id": job.id, "status": "queued"}
 
@@ -664,6 +744,49 @@ async def list_secret_options(current_user: User = Depends(get_current_user)):
             has = bool(cs._cache.get(key, ""))
         out.append({"key": key, "description": desc, "has_value": has})
     return out
+
+
+@router.get("/managed-accounts")
+async def list_managed_accounts(
+    host: str,
+    current_user: User = Depends(get_current_user),
+):
+    """Live BeyondTrust Password Safe managed-account list for a target host —
+    **ids + names only, never credentials**. Requires ``secrets:use`` (using a
+    managed account = checking out a credential without seeing it). The run form
+    calls this on target change to populate the account picker.
+
+    Returns ``{"enabled": false, "systems": []}`` when BeyondTrust is off (no
+    ps-cli call), and never 500s a lookup — a ps-cli error yields an ``error`` note
+    with an empty list so the UI can surface it inline."""
+    if not _can_use_secrets(current_user):
+        raise HTTPException(status_code=403, detail="The 'secrets:use' permission is required.")
+
+    from ..services import config_service as cs, btapi_service, managed_accounts as ma
+
+    if not cs.get_bool("beyondtrust_enabled"):
+        return {"enabled": False, "systems": []}
+
+    host = (host or "").strip()
+    if not host:
+        return {"enabled": True, "systems": []}
+
+    ip = host if ma.host_is_ip(host) else ""
+    name = "" if ma.host_is_ip(host) else host
+    try:
+        systems = await btapi_service.list_ps_managed_systems_by_ip_or_name(ip, name)
+        accounts_by_system: dict = {}
+        for s in systems:
+            sid = s.get("ManagedSystemID") or s.get("SystemId") or s.get("SystemID")
+            if sid is None:
+                continue
+            accounts_by_system[int(sid)] = \
+                await btapi_service.list_ps_managed_accounts_with_fallback(int(sid))
+        return {"enabled": True,
+                "systems": ma.normalize_managed_systems(systems, accounts_by_system)}
+    except btapi_service.BTAPIError as exc:
+        logger.warning("managed-account lookup for %r failed: %s", host, exc)
+        return {"enabled": True, "systems": [], "error": str(exc)}
 
 
 @router.get("/drift")
