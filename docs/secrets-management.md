@@ -285,6 +285,40 @@ for setup instructions.
 
 ---
 
+## Using a secret in an Ansible run (without seeing it)
+
+Stored secrets aren't only consumed by cloud-credential lookups — an operator can
+inject one directly into a **Config Management** run without ever seeing the value.
+On `/config-mgmt` the **Use a secret** panel offers three bindings, resolved
+just-in-time, scrubbed from job output, and audited (kinds + var names only, never
+the value):
+
+| Binding | Becomes | Runners |
+|---|---|---|
+| Named variable | an extra var (`-e`) | local + cloud |
+| Become / sudo password | `ansible_become_password` (`no_log`) | local + cloud |
+| SSH private key | the connection key | local + cloud |
+
+- **Permission:** requires **`secrets:use`** (admins / legacy-unrestricted bypass).
+  The value is never shown, stored on the job, or placed on a command line.
+- **Cloud runners are hardened per provider:** the value is delivered through
+  ECS `valueFrom` / Cloud Run secret-env / ACI `secure_value`, not plaintext task
+  env. Because ECS/Cloud Run *reference* a store secret, a variable/become secret
+  used there must already live in that cloud's store (`aws_sm://` / `gcp_sm://`) —
+  otherwise the run is rejected with a *move it via Secrets → migrate* message.
+
+**Managed-account checkout (Tier 3):** with BeyondTrust enabled, the same panel
+also lets the operator pick a Password Safe **managed account** from a live list
+and use it as the login identity — the credential is checked out just-in-time (an
+SSH-key account → the connection key; a password account → `ansible_ssh_pass`).
+Managed-account checkout is **local-runner only** (a JIT credential is ephemeral,
+so it can't satisfy the cloud store-residency rule above).
+
+Full operator detail lives in
+[docs/integrations/ansible.md → Using a Secrets-Management secret in a run](integrations/ansible.md#using-a-secrets-management-secret-in-a-run).
+
+---
+
 ## Secret staleness — age alerting
 
 The dashboard can flag stored secrets that haven't changed in a while, so a
