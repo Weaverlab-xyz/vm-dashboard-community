@@ -785,8 +785,12 @@ async def list_managed_accounts(
         return {"enabled": True,
                 "systems": ma.normalize_managed_systems(systems, accounts_by_system)}
     except btapi_service.BTAPIError as exc:
+        # Log the real ps-cli error server-side; return a generic reason. A raw
+        # BTAPIError string carries ps-cli stderr, so returning it here would leak
+        # internal detail to the caller — CodeQL py/stack-trace-exposure.
         logger.warning("managed-account lookup for %r failed: %s", host, exc)
-        return {"enabled": True, "systems": [], "error": str(exc)}
+        return {"enabled": True, "systems": [],
+                "error": "Password Safe lookup failed — check the BeyondTrust configuration and server logs."}
 
 
 @router.get("/drift")
