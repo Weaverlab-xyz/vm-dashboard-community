@@ -233,6 +233,49 @@ def _can_use_secrets(user) -> bool:
     return "use" in perms.get("secrets", [])
 
 
+# ── Cloud-runner secret injection (hardened per provider) ───────────────────────
+# The per-provider resolution is pure (services/cloud_ansible_secrets); here we
+# inject the real config_service / secrets-backend callables and map the module's
+# StoreMismatch to an actionable HTTP 400.
+def _effective_runner(cloud: str) -> str:
+    """The Ansible runner backend that will actually handle a run for this target
+    cloud — per-cloud override (ansible_runner_<cloud>) falling back to global."""
+    runner = _cfg("ansible_runner") or "local"
+    if cloud in ("aws", "azure", "gcp"):
+        runner = _cfg(f"ansible_runner_{cloud}") or runner
+    return runner
+
+
+def _validate_cloud_secret_stores(runner: str, secret_vars: dict | None,
+                                  secret_become_source: str) -> None:
+    """For the ECS/GCP runners, require every named/become secret to reference that
+    cloud's store. Raises HTTPException(400) otherwise; no-op for ACI/local. Pure
+    prefix check (no backend I/O) so it can gate the request synchronously."""
+    from ..services import config_service as cs, cloud_ansible_secrets as _cas
+    try:
+        _cas.validate_stores(runner, secret_vars, secret_become_source,
+                             is_reference=cs.is_reference, get_raw=cs.get_raw)
+    except _cas.StoreMismatch as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+def _resolve_cloud_secrets(runner: str, secret_vars: dict | None,
+                           secret_become_source: str) -> tuple:
+    """Build ``(secret_entries, manifest_b64, inline_values)`` for a cloud run —
+    ECS ``{env, arn}`` / GCP ``{env, secret_name}`` / ACI ``{env, value}``.
+    ``inline_values`` (ACI only) feed the output scrub set."""
+    from ..services import (config_service as cs, cloud_ansible_secrets as _cas,
+                            secrets_backend_service as sbs)
+    try:
+        return _cas.resolve_entries(
+            runner, secret_vars, secret_become_source,
+            is_reference=cs.is_reference, get=cs.get, get_raw=cs.get_raw,
+            resolve_reference=cs.resolve_reference, parse_ref=cs._parse_ref,
+            aws_sm_arn=sbs.aws_sm_arn)
+    except _cas.StoreMismatch as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 async def _run_job(
     job_id: str,
     asset: str,
@@ -339,6 +382,16 @@ async def _run_job(
 
             ssh_key_b64 = base64.b64encode(ssh_key_pem.encode()).decode() if ssh_key_pem else ""
 
+            # Named-var / become secrets → per-provider secret channel (ECS
+            # valueFrom, Cloud Run secret-env, ACI secure_value). ECS/GCP require
+            # the secret to already live in that cloud's store; ACI takes the value
+            # inline (added to the scrub set below).
+            cloud_secret_entries, cloud_manifest_b64, cloud_inline_values = (
+                _resolve_cloud_secrets(runner, secret_vars, secret_become_source))
+            for _v in cloud_inline_values:
+                if _v and _v not in secret_values:
+                    secret_values.append(_v)
+
             job_service.update_progress(db, job_id, 20, f"Launching {runner.upper()} runner for {asset}…")
             exit_code, output = await _dispatch_cloud_runner(
                 runner=runner,
@@ -347,6 +400,8 @@ async def _run_job(
                 playbook_b64=asset_b64,
                 ssh_key_b64=ssh_key_b64,
                 job_id=job_id,
+                secret_entries=cloud_secret_entries,
+                manifest_b64=cloud_manifest_b64,
             )
 
             output = _scrub_secrets(output, secret_values)
@@ -415,8 +470,14 @@ async def _dispatch_cloud_runner(
     playbook_b64: str,
     ssh_key_b64: str,
     job_id: str,
+    secret_entries: list | None = None,
+    manifest_b64: str = "",
 ) -> tuple:
-    """Route to the configured cloud Ansible runner. Returns (exit_code, output)."""
+    """Route to the configured cloud Ansible runner. Returns (exit_code, output).
+
+    secret_entries/manifest_b64 (when present) carry per-provider secret refs — the
+    runner injects each via the provider's secret channel and the container builds a
+    0600 vars file from the manifest before running ansible-playbook."""
     if runner == "ecs":
         from ..services import aws_service
         region = _cfg("aws_region") or "us-east-1"
@@ -437,6 +498,8 @@ async def _dispatch_cloud_runner(
             playbook_b64=playbook_b64,
             ssh_key_b64=ssh_key_b64,
             job_id=job_id,
+            secret_entries=secret_entries,
+            manifest_b64=manifest_b64,
         )
 
     if runner == "aci":
@@ -458,6 +521,8 @@ async def _dispatch_cloud_runner(
             acr_server=_cfg("ansible_aci_acr_server") or "",
             acr_username=_cfg("ansible_aci_acr_username") or "",
             acr_password=_cfg("ansible_aci_acr_password") or "",
+            secret_entries=secret_entries,
+            manifest_b64=manifest_b64,
         )
 
     if runner == "gcp":
@@ -473,6 +538,8 @@ async def _dispatch_cloud_runner(
             ssh_key_b64=ssh_key_b64,
             job_id=job_id,
             vpc_connector=_cfg("gcp_ansible_vpc_connector") or "",
+            secret_entries=secret_entries,
+            manifest_b64=manifest_b64,
         )
 
     raise ValueError(f"Unknown ansible_runner: {runner!r}")
@@ -527,23 +594,29 @@ async def run_playbook(
         )
 
     # Using a Secrets-Management secret in a run requires the `secrets:use`
-    # permission (admins bypass). The operator never sees the value. Named-var and
-    # become-password secrets run on the LOCAL runner only; an SSH-key secret works
-    # on the cloud runner too (it just replaces the connection key).
+    # permission (admins bypass) — the operator never sees the value. Named-var and
+    # become-password secrets work on both the local and the cloud runners; on the
+    # cloud they are injected via the provider's secret channel (ECS valueFrom /
+    # Cloud Run secret-env / ACI secure_value).
     wants_secret = bool(payload.secret_vars or payload.secret_become_source
                         or payload.secret_ssh_key_source)
     if wants_secret and not _can_use_secrets(current_user):
         raise HTTPException(
             status_code=403,
             detail="Using a Secrets-Management secret in a run requires the 'secrets:use' permission.")
-    local_only_secret = bool(payload.secret_vars or payload.secret_become_source)
-    if local_only_secret and (runs_in_cloud_runner or is_cloud_target):
-        raise HTTPException(
-            status_code=400,
-            detail=("Named-variable and become-password secrets run on the local Ansible runner only. "
-                    "Cloud runs support an SSH-key secret."))
 
     atype = ansible_local_service.asset_type(payload.asset)
+
+    # A cloud run only actually uses the cloud runner for bare-IP playbook targets;
+    # otherwise it falls back to local. When it will run on ECS/GCP, every named/
+    # become secret must already live in that cloud's store (fail fast with an
+    # actionable move-it message rather than a mid-job failure). ACI takes the value
+    # inline, so no store requirement.
+    eff_runner = _effective_runner(payload.cloud)
+    if (wants_secret and eff_runner in ("ecs", "aci", "gcp")
+            and is_adhoc and atype == "playbook"):
+        _validate_cloud_secret_stores(
+            eff_runner, payload.secret_vars, payload.secret_become_source)
     description = f"Ansible ({atype}): {payload.asset} → {payload.target}"
 
     job = job_service.create_job(

@@ -240,6 +240,24 @@ def get(key: str, default: str = "", workgroup: str | None = None) -> str:
     return _resolve_external(raw, workgroup=workgroup)
 
 
+def get_raw(key: str, default: str = "", workgroup: str | None = None) -> str:
+    """Return the **stored** value for key *without* resolving external references.
+
+    Unlike get(), which transparently resolves aws_sm:// / gcp_sm:// / … to the
+    actual secret value, this returns the raw stored string — so callers can tell
+    whether a config key holds a literal or a backend reference (and which backend).
+    Used by the cloud Ansible runner to require a secret to live in a given cloud's
+    store before injecting it via that provider's secret channel."""
+    _ensure_loaded()
+    with _cache_lock:
+        raw = None
+        if workgroup is not None:
+            raw = _cache.get((key, workgroup))
+        if raw is None:
+            raw = _cache.get((key, None), default)
+    return raw or ""
+
+
 def is_reference(raw: str) -> bool:
     """True if raw is an external secret-backend reference (aws_sm://, azure_kv://,
     gcp_sm://, …) rather than a literal value."""
