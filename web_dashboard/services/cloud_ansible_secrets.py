@@ -65,6 +65,22 @@ def extra_vars_arg() -> str:
     return f"-e @{VARS_FILE} "
 
 
+def inline_entries(vars_dict: dict) -> tuple[list, str]:
+    """Build ACI-style inline ``{env, value}`` entries + manifest from an already
+    resolved ``{ansible_var: value}`` dict.
+
+    ACI injects each value via ``secure_value`` (inline, hidden from the portal),
+    so it carries local-runner semantics: the full resolved var set — named-var and
+    become secrets *and* a checked-out Password Safe managed-account credential —
+    is delivered as inline vars, no cloud store required. (ECS/Cloud Run reference a
+    store secret, so they can't take an inline value — see ``resolve_entries``.)
+    """
+    names = list(vars_dict.keys())
+    env_names, manifest_b64 = build_manifest(names)
+    entries = [{"env": env, "value": vars_dict[var]} for env, var in zip(env_names, names)]
+    return entries, manifest_b64
+
+
 # ── Per-provider secret resolution (pure; provider I/O is injected) ─────────────
 # ECS/Cloud Run reference a *store* secret (the task identity fetches the value at
 # launch — it never touches the task env or command line), so a secret used there

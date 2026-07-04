@@ -8,7 +8,11 @@ run wiring lives in api/config_mgmt. This module only shapes the *live list*
 """
 import re
 
-CLOUD_RUNNERS = ("ecs", "aci", "gcp")
+# Runners that *reference* a store secret (the task identity fetches the value at
+# launch) rather than taking it inline. A checked-out managed-account credential is
+# ephemeral, so it can't be injected inline on these — it would need an ephemeral
+# store copy. ACI is NOT here: it injects inline via secure_value.
+EPHEMERAL_STORE_RUNNERS = ("ecs", "gcp")
 
 _IPV4_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
 
@@ -55,10 +59,13 @@ def normalize_managed_systems(systems: list, accounts_by_system: dict) -> list:
     return out
 
 
-def local_only_violation(has_managed: bool, eff_runner: str,
-                         is_adhoc: bool, is_playbook: bool) -> bool:
-    """True when a managed-account run would dispatch to a cloud runner — which is
-    unsupported (a JIT-checked-out credential is ephemeral, so it can't live in a
-    cloud store the way #217's cloud secrets must). Managed accounts are
-    local-runner only; the API rejects this combination up front."""
-    return bool(has_managed) and eff_runner in CLOUD_RUNNERS and is_adhoc and is_playbook
+def requires_ephemeral_store(has_managed: bool, eff_runner: str,
+                             is_adhoc: bool, is_playbook: bool) -> bool:
+    """True when a managed-account run would dispatch to a store-referencing cloud
+    runner (ECS / Cloud Run), where a JIT-checked-out credential can't be injected
+    inline and would need an ephemeral store copy.
+
+    ACI is excluded — it injects inline via ``secure_value``, so managed accounts
+    work there directly. The API rejects the ECS/GCP case up front unless/until
+    ephemeral store copy is implemented + enabled."""
+    return bool(has_managed) and eff_runner in EPHEMERAL_STORE_RUNNERS and is_adhoc and is_playbook

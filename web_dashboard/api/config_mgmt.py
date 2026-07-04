@@ -430,15 +430,22 @@ async def _run_job(
 
             ssh_key_b64 = base64.b64encode(ssh_key_pem.encode()).decode() if ssh_key_pem else ""
 
-            # Named-var / become secrets → per-provider secret channel (ECS
-            # valueFrom, Cloud Run secret-env, ACI secure_value). ECS/GCP require
-            # the secret to already live in that cloud's store; ACI takes the value
-            # inline (added to the scrub set below).
-            cloud_secret_entries, cloud_manifest_b64, cloud_inline_values = (
-                _resolve_cloud_secrets(runner, secret_vars, secret_become_source))
-            for _v in cloud_inline_values:
-                if _v and _v not in secret_values:
-                    secret_values.append(_v)
+            # Secret injection → per-provider secret channel. ACI injects inline
+            # (secure_value), so it carries local semantics: deliver the full
+            # resolved var set — #216/#217 named vars + become AND any managed-
+            # account credential (already merged into secret_extra_vars above) — as
+            # inline vars. The SSH key rides SSH_KEY_B64 (above). ECS/Cloud Run
+            # reference a store secret, so they resolve per-provider store refs and
+            # a managed-account run never reaches here (rejected at the endpoint).
+            from ..services import cloud_ansible_secrets as _cas
+            if runner == "aci":
+                cloud_secret_entries, cloud_manifest_b64 = _cas.inline_entries(secret_extra_vars)
+            else:
+                cloud_secret_entries, cloud_manifest_b64, cloud_inline_values = (
+                    _resolve_cloud_secrets(runner, secret_vars, secret_become_source))
+                for _v in cloud_inline_values:
+                    if _v and _v not in secret_values:
+                        secret_values.append(_v)
 
             job_service.update_progress(db, job_id, 20, f"Launching {runner.upper()} runner for {asset}…")
             exit_code, output = await _dispatch_cloud_runner(
@@ -675,13 +682,16 @@ async def run_playbook(
         _validate_cloud_secret_stores(
             eff_runner, payload.secret_vars, payload.secret_become_source)
 
-    # Managed-account checkout is LOCAL runner only — a JIT credential is ephemeral
-    # and can't live in a cloud store the way #217's cloud secrets must.
+    # Managed-account checkout works on the local and ACI runners (both inject the
+    # credential inline). ECS / Cloud Run reference a store secret, so a JIT-checked-
+    # out (ephemeral) credential can't be injected there — reject up front.
     from ..services import managed_accounts as _ma
-    if _ma.local_only_violation(has_managed, eff_runner, is_adhoc, atype == "playbook"):
+    if _ma.requires_ephemeral_store(has_managed, eff_runner, is_adhoc, atype == "playbook"):
         raise HTTPException(
             status_code=400,
-            detail="Managed-account checkout runs on the local Ansible runner only.")
+            detail=("Managed-account checkout isn't supported on the ECS / Cloud Run runners — "
+                    "a checked-out credential can't be injected inline there. Use the local or "
+                    "Azure (ACI) runner."))
     description = f"Ansible ({atype}): {payload.asset} → {payload.target}"
 
     job = job_service.create_job(

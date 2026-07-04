@@ -301,7 +301,7 @@
               <p x-show="managedSystems.length > 0" class="text-[11px] text-gray-400">
                 Sets <code>ansible_user</code> to the account and injects its credential (SSH key → connection
                 key; password → <code>ansible_ssh_pass</code>). Checked out just-in-time; you never see the value.
-                <strong>Local runner only.</strong>
+                Works on the <strong>local</strong> and <strong>Azure (ACI)</strong> runners; not on ECS / Cloud Run.
               </p>
             </div>
           </div>
