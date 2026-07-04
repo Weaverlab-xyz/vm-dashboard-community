@@ -1076,6 +1076,7 @@ def _run_cloud_run_ansible_sync(
     target_ip: str, ansible_user: str,
     playbook_b64: str, ssh_key_b64: str, job_id: str,
     vpc_connector: str = "",
+    secret_entries: list | None = None, manifest_b64: str = "",
 ) -> tuple:
     """
     Create a Cloud Run Job that runs a single Ansible playbook, wait for it to
@@ -1093,18 +1094,35 @@ def _run_cloud_run_ansible_sync(
     parent = f"projects/{project_id}/locations/{region}"
     job_resource_name = f"{parent}/jobs/{job_name}"
 
+    from . import cloud_ansible_secrets as _cas
+    _secret_prefix = _cas.command_prefix() if manifest_b64 else ""
+    _secret_ev = _cas.extra_vars_arg() if manifest_b64 else ""
     cmd = (
         "set -e && "
         "echo \"$PLAYBOOK_B64\" | base64 -d > /tmp/playbook.yml && "
         "echo \"$SSH_KEY_B64\" | base64 -d > /tmp/ssh_key && "
         "chmod 600 /tmp/ssh_key && "
+        + _secret_prefix +
         f"ansible-playbook -i '{target_ip},' "
         "--forks 1 "
         f"-u {ansible_user} "
         "--private-key /tmp/ssh_key "
+        + _secret_ev +
         "--ssh-extra-args='-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null' "
         "/tmp/playbook.yml"
     )
+
+    # GCP secret-env: each secret var references a Secret Manager secret (must live
+    # in this project). The manifest env is plain (non-secret env→var mapping).
+    _secret_env = []
+    if manifest_b64:
+        _secret_env.append(run_v2.EnvVar(name=_cas.MANIFEST_ENV, value=manifest_b64))
+        for e in (secret_entries or []):
+            _secret_env.append(run_v2.EnvVar(
+                name=e["env"],
+                value_source=run_v2.EnvVarSource(
+                    secret_key_ref=run_v2.SecretKeySelector(secret=e["secret_name"], version="latest")),
+            ))
 
     task_template = run_v2.TaskTemplate(
         containers=[
@@ -1114,7 +1132,7 @@ def _run_cloud_run_ansible_sync(
                 env=[
                     run_v2.EnvVar(name="PLAYBOOK_B64", value=playbook_b64),
                     run_v2.EnvVar(name="SSH_KEY_B64", value=ssh_key_b64),
-                ],
+                ] + _secret_env,
                 resources=run_v2.ResourceRequirements(
                     limits={"cpu": "1000m", "memory": "512Mi"},
                 ),
@@ -1180,6 +1198,7 @@ async def run_cloud_run_ansible_task(
     target_ip: str, ansible_user: str,
     playbook_b64: str, ssh_key_b64: str, job_id: str,
     vpc_connector: str = "",
+    secret_entries: list | None = None, manifest_b64: str = "",
 ) -> tuple:
     """
     Run an Ansible playbook via a GCP Cloud Run Job.
@@ -1192,6 +1211,7 @@ async def run_cloud_run_ansible_task(
             target_ip, ansible_user,
             playbook_b64, ssh_key_b64, job_id,
             vpc_connector,
+            secret_entries, manifest_b64,
         )
     except GCPError:
         raise

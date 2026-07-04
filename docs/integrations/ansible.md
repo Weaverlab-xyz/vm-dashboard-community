@@ -397,6 +397,46 @@ gcloud secrets add-iam-policy-binding ssh-ansible-keypair \
 
 ---
 
+## Using a Secrets-Management secret in a run
+
+Beyond the SSH key, a run can pull secrets from
+[Secrets Management](../secrets-management.md) — a DB-stored secret or an external
+vault reference (`aws_sm://`, `gcp_sm://`, `azure_kv://`, `bt_safe://`) — **without
+the operator ever seeing the value**. The **Use a secret** panel on `/config-mgmt`
+offers three bindings:
+
+| Binding | Becomes | Runners |
+|---|---|---|
+| **Named variable** | an extra var (`-e`) — redacted from job output | local + cloud |
+| **Become / sudo password** | `ansible_become_password` (Ansible `no_log`s it) | local + cloud |
+| **SSH private key** | the connection key (replaces the configured key) | local + cloud |
+
+Using a secret requires the **`secrets:use`** permission (admins and legacy
+unrestricted users bypass). The use is audited — kinds + var names only, never the
+source refs or values — and any resolved value is scrubbed from the job output.
+
+### Cloud runners: hardened per provider (and the store requirement)
+
+On the cloud runners the value is **not** placed in the task's plaintext env or on
+the command line. Each secret is delivered through the provider's own secret
+channel, and the container decodes a non-secret manifest into a `0600` vars file
+before running `ansible-playbook -e @file`:
+
+| Runner | Channel | Requirement |
+|---|---|---|
+| **ECS** (AWS) | container `secrets` → `valueFrom` (SM ARN); the **execution role** fetches it at launch | secret must live in **AWS Secrets Manager** (`aws_sm://…`); role needs `secretsmanager:GetSecretValue` |
+| **Cloud Run** (GCP) | secret-env `secret_key_ref` (`version: latest`); the **service account** fetches it | secret must live in **GCP Secret Manager** (`gcp_sm://…`); SA needs `roles/secretmanager.secretAccessor` |
+| **ACI** (Azure) | `secure_value` env (inline, hidden from the portal) | any secret — the value is injected inline |
+
+Because ECS and Cloud Run **reference** a store secret rather than carrying its
+value, a variable/become secret used on those runners must already live in that
+cloud's store. If it doesn't, the run is **rejected up front** with an actionable
+message — move it there via **Secrets → migrate**, then reference it as
+`aws_sm://<name>` / `gcp_sm://<name>`. ACI has no such requirement. The SSH-key
+secret always rides the existing `SSH_KEY_B64` channel and needs no migration.
+
+---
+
 ## Storage prerequisite (Ansible runner)
 
 The Ansible runner fetches its assets (playbooks, scripts, packages) from a

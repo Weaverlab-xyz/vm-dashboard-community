@@ -1155,6 +1155,8 @@ def _run_ecs_ansible_sync(
     playbook_b64: str,
     ssh_key_b64: str,
     job_id: str,
+    secret_entries: list | None = None,
+    manifest_b64: str = "",
 ) -> tuple:
     """Create an ECS Fargate task that runs one Ansible playbook, wait for it to
     finish, retrieve CloudWatch logs, and return (exit_code, output)."""
@@ -1170,16 +1172,25 @@ def _run_ecs_ansible_sync(
         if e.response["Error"]["Code"] != "ResourceAlreadyExistsException":
             raise
 
+    from . import cloud_ansible_secrets as _cas
+    _secret_prefix = _cas.command_prefix() if manifest_b64 else ""
+    _secret_ev = _cas.extra_vars_arg() if manifest_b64 else ""
     cmd = (
         "set -e && "
         'echo "$PLAYBOOK_B64" | base64 -d > /tmp/playbook.yml && '
         'echo "$SSH_KEY_B64" | base64 -d > /tmp/ssh_key && '
         "chmod 600 /tmp/ssh_key && "
+        + _secret_prefix +
         f"ansible-playbook -i '{target_ip},' --forks 1 "
         f"-u {ansible_user} --private-key /tmp/ssh_key "
+        + _secret_ev +
         "--ssh-extra-args='-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null' "
         "/tmp/playbook.yml"
     )
+
+    # ECS secrets: valueFrom → Secrets Manager ARN (the execution role must be
+    # allowed secretsmanager:GetSecretValue on it). Defined on the task def.
+    _secrets_def = [{"name": e["env"], "valueFrom": e["arn"]} for e in (secret_entries or [])]
 
     td_kwargs: dict = dict(
         family=task_family,
@@ -1192,6 +1203,7 @@ def _run_ecs_ansible_sync(
             "image": image,
             "essential": True,
             "command": ["sh", "-c", cmd],
+            **({"secrets": _secrets_def} if _secrets_def else {}),
             "logConfiguration": {
                 "logDriver": "awslogs",
                 "options": {
@@ -1224,7 +1236,7 @@ def _run_ecs_ansible_sync(
             "environment": [
                 {"name": "PLAYBOOK_B64", "value": playbook_b64},
                 {"name": "SSH_KEY_B64", "value": ssh_key_b64},
-            ],
+            ] + ([{"name": _cas.MANIFEST_ENV, "value": manifest_b64}] if manifest_b64 else []),
         }]},
         count=1,
     )
@@ -1281,6 +1293,8 @@ async def run_ecs_ansible_task(
     playbook_b64: str,
     ssh_key_b64: str,
     job_id: str,
+    secret_entries: list | None = None,
+    manifest_b64: str = "",
 ) -> tuple:
     """Run an Ansible playbook via ECS Fargate. Returns (exit_code, output)."""
     try:
@@ -1289,6 +1303,7 @@ async def run_ecs_ansible_task(
             region, cluster, task_family, image, cpu, memory,
             subnet_id, security_group_ids, execution_role_arn,
             target_ip, ansible_user, playbook_b64, ssh_key_b64, job_id,
+            secret_entries, manifest_b64,
         )
     except AWSError:
         raise

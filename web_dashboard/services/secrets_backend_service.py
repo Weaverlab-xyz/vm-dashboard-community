@@ -201,6 +201,33 @@ def read_aws_sm(ref: str, vault_id: str | None = None) -> str:
     return resp.get("SecretString", "")
 
 
+def aws_sm_arn(ref: str, vault_id: str | None = None) -> str:
+    """Return the full ARN of an AWS SM secret **without fetching its value**.
+
+    The ECS Ansible runner injects secrets via ``secrets valueFrom`` (the task
+    execution role fetches the value at launch), which needs the secret's full
+    ARN — including the random suffix Secrets Manager appends — so a describe is
+    required. Region/vault resolution mirrors read_aws_sm()."""
+    import boto3
+    region = None
+    if vault_id:
+        from ..database import SessionLocal, SecretVault
+        db = SessionLocal()
+        try:
+            row = db.query(SecretVault).filter(
+                SecretVault.id == vault_id,
+                SecretVault.backend == "aws_sm",
+            ).first()
+        finally:
+            db.close()
+        if row:
+            region = row.endpoint
+    if region is None:
+        region, _ = _aws_cfg()
+    client = boto3.client("secretsmanager", region_name=region)
+    return client.describe_secret(SecretId=ref)["ARN"]
+
+
 # ── Azure Key Vault ───────────────────────────────────────────────────────────
 
 def _azure_kv_client():

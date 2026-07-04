@@ -1756,25 +1756,35 @@ def _run_aci_ansible_sync(
     image: str, target_ip: str, ansible_user: str,
     playbook_b64: str, ssh_key_b64: str, job_id: str,
     acr_server: str = "", acr_username: str = "", acr_password: str = "",
+    secret_entries: list | None = None, manifest_b64: str = "",
 ) -> tuple:
     """
     Create an ACI container group that runs a single Ansible playbook, wait for
     it to finish, return (exit_code, log_output), and delete the group.
+
+    Secrets: each ``secret_entries`` item ``{env, value}`` is passed as a
+    ``secure_value`` env (hidden from the portal); ``manifest_b64`` maps env→var
+    so the task command builds a 0600 vars file consumed via ``-e @file``.
     """
     import time
+    from . import cloud_ansible_secrets as _cas
 
     aci = _get_aci(cred, sub_id)
     group_name = f"{_ANSIBLE_RUNNER_PREFIX}-{job_id[:8]}"
 
+    _secret_prefix = _cas.command_prefix() if manifest_b64 else ""
+    _secret_ev = _cas.extra_vars_arg() if manifest_b64 else ""
     cmd = (
         "set -e && "
         "echo \"$PLAYBOOK_B64\" | base64 -d > /tmp/playbook.yml && "
         "echo \"$SSH_KEY_B64\" | base64 -d > /tmp/ssh_key && "
         "chmod 600 /tmp/ssh_key && "
+        + _secret_prefix +
         f"ansible-playbook -i '{target_ip},' "
         "--forks 1 "
         f"-u {ansible_user} "
         "--private-key /tmp/ssh_key "
+        + _secret_ev +
         "--ssh-extra-args='-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null' "
         "/tmp/playbook.yml"
     )
@@ -1784,10 +1794,16 @@ def _run_aci_ansible_sync(
         image=image,
         resources=ResourceRequirements(requests=ResourceRequests(cpu=1.0, memory_in_gb=1.0)),
         command=["sh", "-c", cmd],
-        environment_variables=[
-            EnvironmentVariable(name="PLAYBOOK_B64", value=playbook_b64),
-            EnvironmentVariable(name="SSH_KEY_B64", secure_value=ssh_key_b64),
-        ],
+        environment_variables=(
+            [
+                EnvironmentVariable(name="PLAYBOOK_B64", value=playbook_b64),
+                EnvironmentVariable(name="SSH_KEY_B64", secure_value=ssh_key_b64),
+            ]
+            + ([EnvironmentVariable(name=_cas.MANIFEST_ENV, value=manifest_b64)]
+               if manifest_b64 else [])
+            + [EnvironmentVariable(name=e["env"], secure_value=e["value"])
+               for e in (secret_entries or [])]
+        ),
     )
 
     group_params = ContainerGroup(
@@ -1863,6 +1879,7 @@ async def run_aci_ansible_task(
     target_ip: str, ansible_user: str,
     playbook_b64: str, ssh_key_b64: str, job_id: str,
     acr_server: str = "", acr_username: str = "", acr_password: str = "",
+    secret_entries: list | None = None, manifest_b64: str = "",
 ) -> tuple:
     """
     Run an Ansible playbook inside the Azure VNet via ACI.
@@ -1875,6 +1892,7 @@ async def run_aci_ansible_task(
             cred, sub_id, rg, location, subnet_id, image,
             target_ip, ansible_user, playbook_b64, ssh_key_b64, job_id,
             acr_server, acr_username, acr_password,
+            secret_entries, manifest_b64,
         )
     except AzureError:
         raise

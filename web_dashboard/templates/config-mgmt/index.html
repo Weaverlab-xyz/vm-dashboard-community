@@ -186,7 +186,7 @@
           <div x-show="canUseSecrets" x-cloak class="border border-gray-100 rounded-lg p-3 space-y-3">
             <p class="text-sm font-medium text-gray-700">Use a secret <span class="text-gray-400 font-normal">(you never see the value)</span></p>
 
-            <!-- As named variables (local runner only) -->
+            <!-- As named variables (local + cloud runners) -->
             <template x-for="(row, i) in secretRows" :key="i">
               <div class="flex items-center gap-2">
                 <input x-model="row.var" placeholder="ansible var name"
@@ -207,14 +207,16 @@
             <button @click="addSecretRow()" type="button"
                     class="text-xs text-blue-600 hover:underline">+ Add secret as a variable</button>
             <p class="text-[11px] text-gray-400">
-              Passed to the playbook as that var (redacted from job output). <strong>Local runner only</strong>
-              in this release — a cloud run with a variable secret is rejected.
+              Passed to the playbook as that var (redacted from job output). Works on the local
+              <strong>and</strong> cloud runners.
+              <span x-show="cloudSecretHint" x-text="cloudSecretHint"
+                    class="block mt-1 text-amber-600"></span>
             </p>
 
             <!-- As credentials -->
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 border-t border-gray-100 pt-3">
               <div>
-                <label class="block text-xs font-medium text-gray-600 mb-1">Become / sudo password <span class="text-gray-400">(local)</span></label>
+                <label class="block text-xs font-medium text-gray-600 mb-1">Become / sudo password <span class="text-gray-400">(local + cloud)</span></label>
                 <select x-model="secretBecomeSource"
                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
                   <option value="">— none —</option>
@@ -236,7 +238,7 @@
             </div>
             <p class="text-[11px] text-gray-400">
               Credentials are handed to Ansible as the connection/become secret — Ansible <code>no_log</code>s
-              these, so they can't be printed. The SSH-key secret also works on the cloud runner.
+              these, so they can't be printed. Become and SSH-key secrets also work on the cloud runner.
             </p>
           </div>
 
@@ -437,6 +439,20 @@ function configMgmt() {
       if (t.startsWith('aws:'))   return 'aws';
       if (t.startsWith('azure:')) return 'azure';
       if (t.startsWith('gcp:'))   return 'gcp';
+      return '';
+    },
+
+    // Store-residency hint for variable/become secrets on the selected cloud
+    // target. ECS/Cloud Run inject via the provider's secret channel (the value
+    // never touches the task), so the secret must already live in that store; ACI
+    // takes the value inline. Only shown when a variable/become secret is in play.
+    get cloudSecretHint() {
+      const usesVarOrBecome = this.secretRows.some(r => r.source) || this.secretBecomeSource;
+      if (!usesVarOrBecome) return '';
+      const c = this.targetCloud;
+      if (c === 'aws')   return 'AWS target: the secret must live in AWS Secrets Manager (aws_sm://) — the ECS runner injects it via valueFrom. Move it there first (Secrets → migrate).';
+      if (c === 'gcp')   return 'GCP target: the secret must live in GCP Secret Manager (gcp_sm://) — Cloud Run injects it as a secret env. Move it there first (Secrets → migrate).';
+      if (c === 'azure') return 'Azure target: any secret works — the ACI runner injects the value inline (secure_value).';
       return '';
     },
 
