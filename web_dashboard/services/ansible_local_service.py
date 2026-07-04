@@ -366,6 +366,7 @@ async def run_playbook(
     extra_vars: dict | None = None,
     asset_name: str = "playbook.yml",
     ssh_key_pem: str | None = None,
+    secret_extra_vars: dict | None = None,
 ) -> tuple[str, int]:
     """
     Run an Ansible playbook or provisioning asset in a sibling Docker container.
@@ -423,6 +424,17 @@ async def run_playbook(
             except OSError:
                 pass  # Windows NTFS — container will handle it
 
+        # ── write secret extra-vars to a 0600 file (never on the command line) ──
+        has_secret_vars = bool(secret_extra_vars)
+        if has_secret_vars:
+            sv_path = os.path.join(tmpdir, "secret_vars.json")
+            with open(sv_path, "w") as f:
+                json.dump(secret_extra_vars, f)
+            try:
+                os.chmod(sv_path, 0o600)
+            except OSError:
+                pass  # Windows NTFS — the file is in the per-run tmpdir either way
+
         # ── build ansible-playbook args ───────────────────────────────────────
         ansible_args: list[str] = [
             "ansible-playbook",
@@ -437,6 +449,11 @@ async def run_playbook(
             ansible_args += ["--private-key", "/ansible/id_rsa"]
         if extra_vars:
             ansible_args += ["--extra-vars", json.dumps(extra_vars)]
+        if has_secret_vars:
+            # @file keeps secret values off the process args and logs; it's read
+            # inside the container and deleted with the tmpdir when the run ends.
+            # Comes after the inline extra-vars so a secret var wins on conflict.
+            ansible_args += ["--extra-vars", "@/ansible/secret_vars.json"]
 
         # Wrap in sh -c so we can chmod the key inside the container (needed on
         # Windows Docker Desktop where host-side chmod may not propagate).

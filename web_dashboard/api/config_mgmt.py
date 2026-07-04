@@ -190,6 +190,10 @@ class RunRequest(BaseModel):
     cloud: str = ""      # "" | "aws" | "azure" | "gcp" — drives SSH key retrieval
     ansible_user: str = ""  # SSH user for cloud runner targets; falls back to ansible_default_user
     extra_vars: dict = {}
+    # Optional: inject Secrets-Management secrets as Ansible vars — {var_name: source},
+    # source = a config-secret registry key or a raw vault ref (bt_safe:// …).
+    # Admin-only (injecting a secret == reading it); local runner only.
+    secret_vars: dict = {}
     # Which storage backend the asset should be fetched from. Empty = active
     # backend (back-compat). With multi-backend support (issue #16), the UI
     # passes the backend explicitly because the same asset name may exist on
@@ -209,6 +213,7 @@ async def _run_job(
     ansible_user: str,
     extra_vars: dict,
     asset_backend: str = "",
+    secret_vars: dict | None = None,
 ) -> None:
     import base64
     from ..database import SessionLocal
@@ -308,6 +313,15 @@ async def _run_job(
             except Exception as exc:
                 logger.warning("Failed to retrieve SSH key for %s: %s — proceeding without key", cloud, exc)
 
+        # Resolve any Secrets-Management secrets JIT (never stored on the job /
+        # never on the command line — passed via a 0600 tmpfile inside run_playbook).
+        secret_extra_vars = {}
+        if secret_vars:
+            from ..services import ansible_secrets, config_service as cs
+            secret_extra_vars = ansible_secrets.resolve_secret_vars(
+                secret_vars, get=cs.get, resolve_reference=cs.resolve_reference,
+                is_reference=cs.is_reference)
+
         job_service.update_progress(db, job_id, 20, f"Running {asset} against {target}…")
         output, rc = await ansible_local_service.run_playbook(
             asset_b64=asset_b64,
@@ -315,6 +329,7 @@ async def _run_job(
             extra_vars=extra_vars or None,
             asset_name=asset,
             ssh_key_pem=ssh_key_pem,
+            secret_extra_vars=secret_extra_vars or None,
         )
 
         if rc == 0:
@@ -459,6 +474,18 @@ async def run_playbook(
             ),
         )
 
+    # Secret injection is admin-only — injecting a secret into a run you control is
+    # equivalent to reading it — and local-runner only in this release.
+    if payload.secret_vars:
+        if not current_user.is_admin:
+            raise HTTPException(
+                status_code=403,
+                detail="Injecting Secrets-Management secrets into a run requires an admin.")
+        if runs_in_cloud_runner:
+            raise HTTPException(
+                status_code=400,
+                detail="Secret injection is only supported on the local Ansible runner in this release.")
+
     atype = ansible_local_service.asset_type(payload.asset)
     description = f"Ansible ({atype}): {payload.asset} → {payload.target}"
 
@@ -469,11 +496,37 @@ async def run_playbook(
         workgroup="ansible",
         owner_id=current_user.id,
     )
+    if payload.secret_vars:
+        # Audit the use (var names only — never the source refs or values).
+        job_service.log_audit(
+            db, current_user.username, "ansible_secret_inject",
+            details={"vars": sorted(payload.secret_vars.keys()),
+                     "count": len(payload.secret_vars),
+                     "asset": payload.asset, "target": payload.target})
     background_tasks.add_task(
         _run_job, job.id, payload.asset, payload.target, payload.cloud,
-        payload.ansible_user, payload.extra_vars, asset_backend,
+        payload.ansible_user, payload.extra_vars, asset_backend, payload.secret_vars,
     )
     return {"job_id": job.id, "status": "queued"}
+
+
+@router.get("/secret-options")
+async def list_secret_options(current_user: User = Depends(get_current_user)):
+    """Secret sources the operator can inject into a run — **names only, never
+    values**. Admin-only, matching who may read secrets; the run form uses this to
+    populate the secret picker."""
+    if not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin required to inject secrets.")
+    from ..services import config_service as cs
+    from .secrets import _SECRET_REGISTRY
+
+    cs._ensure_loaded()
+    out = []
+    for key, desc in _SECRET_REGISTRY:
+        with cs._cache_lock:
+            has = bool(cs._cache.get(key, ""))
+        out.append({"key": key, "description": desc, "has_value": has})
+    return out
 
 
 @router.get("/drift")
