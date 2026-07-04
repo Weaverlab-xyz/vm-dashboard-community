@@ -270,6 +270,13 @@ shell scripts. Reference secrets via Ansible's `lookup('env', ...)`,
 the `ansible-vault` integration, or fetched-at-runtime variables that
 the runner reads from the cloud secret store.
 
+**Use a secret without seeing it.** The run form's **Use a secret** panel injects
+a Secrets-Management secret (as a named var, become password, or SSH key) — or a
+**BeyondTrust Password Safe managed account** checked out just-in-time — straight
+into the run. The operator never sees the value; it's scrubbed from job output and
+the use is audited. Requires the `secrets:use` permission. See
+[Using a Secrets-Management secret in a run](integrations/ansible.md#using-a-secrets-management-secret-in-a-run).
+
 **Tag your runs.** The `Extra Vars` field on the run form accepts JSON
 — include a `run_id` or a deployment ticket number so when something
 breaks at midnight you can `grep` the logs back to the playbook
