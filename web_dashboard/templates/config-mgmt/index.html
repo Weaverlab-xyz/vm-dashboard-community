@@ -181,6 +181,65 @@
             <p x-show="extraVarsError" x-cloak class="text-xs text-red-600 mt-1" x-text="extraVarsError"></p>
           </div>
 
+          <!-- Use secrets (needs secrets:use) — resolves a Secrets-Management secret
+               (DB or vault ref) at run time; the value is never shown, stored, or logged. -->
+          <div x-show="canUseSecrets" x-cloak class="border border-gray-100 rounded-lg p-3 space-y-3">
+            <p class="text-sm font-medium text-gray-700">Use a secret <span class="text-gray-400 font-normal">(you never see the value)</span></p>
+
+            <!-- As named variables (local runner only) -->
+            <template x-for="(row, i) in secretRows" :key="i">
+              <div class="flex items-center gap-2">
+                <input x-model="row.var" placeholder="ansible var name"
+                       class="w-1/3 border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono
+                              focus:outline-none focus:ring-2 focus:ring-blue-500">
+                <select x-model="row.source"
+                        class="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm
+                               focus:outline-none focus:ring-2 focus:ring-blue-500">
+                  <option value="">— pick a secret —</option>
+                  <template x-for="o in secretOptions" :key="o.key">
+                    <option :value="o.key" x-text="o.description + ' (' + o.key + ')'"></option>
+                  </template>
+                </select>
+                <button @click="removeSecretRow(i)" type="button"
+                        class="text-gray-400 hover:text-red-500 text-lg leading-none px-1">×</button>
+              </div>
+            </template>
+            <button @click="addSecretRow()" type="button"
+                    class="text-xs text-blue-600 hover:underline">+ Add secret as a variable</button>
+            <p class="text-[11px] text-gray-400">
+              Passed to the playbook as that var (redacted from job output). <strong>Local runner only</strong>
+              in this release — a cloud run with a variable secret is rejected.
+            </p>
+
+            <!-- As credentials -->
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 border-t border-gray-100 pt-3">
+              <div>
+                <label class="block text-xs font-medium text-gray-600 mb-1">Become / sudo password <span class="text-gray-400">(local)</span></label>
+                <select x-model="secretBecomeSource"
+                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                  <option value="">— none —</option>
+                  <template x-for="o in secretOptions" :key="'b-'+o.key">
+                    <option :value="o.key" x-text="o.description"></option>
+                  </template>
+                </select>
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-gray-600 mb-1">SSH private key <span class="text-gray-400">(local + cloud)</span></label>
+                <select x-model="secretSshKeySource"
+                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                  <option value="">— use configured key —</option>
+                  <template x-for="o in secretOptions" :key="'k-'+o.key">
+                    <option :value="o.key" x-text="o.description"></option>
+                  </template>
+                </select>
+              </div>
+            </div>
+            <p class="text-[11px] text-gray-400">
+              Credentials are handed to Ansible as the connection/become secret — Ansible <code>no_log</code>s
+              these, so they can't be printed. The SSH-key secret also works on the cloud runner.
+            </p>
+          </div>
+
           <!-- Error / status -->
           <p x-show="runError" x-cloak class="text-xs text-red-600" x-text="runError"></p>
 
@@ -357,6 +416,14 @@ function configMgmt() {
     // can override per job; the value the form actually submits is whatever's
     // in form.ansible_user at submit time.
     sshUserSuggestions: {},
+    // Secret use (requires secrets:use). secretRows: [{var, source}] → secret_vars;
+    // secretBecomeSource / secretSshKeySource → credential secrets. Options (names
+    // only) from /api/config-mgmt/secret-options. Value is never shown here.
+    canUseSecrets: false,
+    secretOptions: [],
+    secretRows: [],
+    secretBecomeSource: '',
+    secretSshKeySource: '',
     get hasCloudTargets() {
       return this.cloudTargets.aws.length > 0
           || this.cloudTargets.azure.length > 0
@@ -416,9 +483,24 @@ function configMgmt() {
         this.loadAssets(),
         this.loadCloudTargets(),
         this.loadJobs(),
+        this.loadSecretOptions(),
       ]);
       this.loading = false;
     },
+
+    async loadSecretOptions() {
+      // Succeeds only for users with secrets:use (admins included); a 403 hides the panel.
+      try {
+        this.secretOptions = (await API.get('/api/config-mgmt/secret-options') || [])
+          .filter(o => o.has_value);
+        this.canUseSecrets = true;
+      } catch (e) {
+        this.canUseSecrets = false;
+      }
+    },
+
+    addSecretRow() { this.secretRows.push({ var: '', source: '' }); },
+    removeSecretRow(i) { this.secretRows.splice(i, 1); },
 
     async loadInventory() {
       try {
@@ -498,6 +580,18 @@ function configMgmt() {
       const [assetBackend, ...rest] = this.form.asset_key.split('|');
       const assetName = rest.join('|');
 
+      // Build secret bindings (never the values) — only if the user may use secrets.
+      const secret_vars = {};
+      let secret_become_source = '', secret_ssh_key_source = '';
+      if (this.canUseSecrets) {
+        for (const r of this.secretRows) {
+          const v = (r.var || '').trim(), s = (r.source || '').trim();
+          if (v && s) secret_vars[v] = s;
+        }
+        secret_become_source = (this.secretBecomeSource || '').trim();
+        secret_ssh_key_source = (this.secretSshKeySource || '').trim();
+      }
+
       this.running = true;
       try {
         const result = await API.post('/api/config-mgmt/run', {
@@ -507,6 +601,9 @@ function configMgmt() {
           cloud,
           ansible_user: (this.form.ansible_user || '').trim(),
           extra_vars,
+          secret_vars,
+          secret_become_source,
+          secret_ssh_key_source,
         });
         toast(`Queued — job ${result.job_id.slice(0, 8)}…`, 'success');
         window.location.href = '/jobs/' + result.job_id;

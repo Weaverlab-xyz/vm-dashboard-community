@@ -190,6 +190,13 @@ class RunRequest(BaseModel):
     cloud: str = ""      # "" | "aws" | "azure" | "gcp" — drives SSH key retrieval
     ansible_user: str = ""  # SSH user for cloud runner targets; falls back to ansible_default_user
     extra_vars: dict = {}
+    # Use Secrets-Management secrets in the run WITHOUT ever seeing the value.
+    # Requires the `secrets:use` permission (admins bypass). A "source" is a
+    # config-secret registry key or a raw vault ref (bt_safe:// …). Resolved
+    # values are scrubbed from job output and never stored on the job.
+    secret_vars: dict = {}            # {ansible_var: source} — named vars; LOCAL runner only
+    secret_become_source: str = ""    # source → ansible_become_password (no_log); LOCAL runner only
+    secret_ssh_key_source: str = ""   # source → the connection SSH private key; LOCAL + cloud runner
     # Which storage backend the asset should be fetched from. Empty = active
     # backend (back-compat). With multi-backend support (issue #16), the UI
     # passes the backend explicitly because the same asset name may exist on
@@ -201,6 +208,31 @@ def _cfg(key: str) -> str:
     return ansible_local_service._cfg(key)
 
 
+def _scrub_secrets(text: str, values: list) -> str:
+    """Redact resolved secret values from run output before it's stored/shown —
+    defense in depth so a ``debug`` in a playbook can't leak an injected secret to
+    the job log. Values shorter than 4 chars are skipped to avoid over-redaction."""
+    if not text or not values:
+        return text
+    for v in values:
+        v = str(v)
+        if len(v) >= 4:
+            text = text.replace(v, "***")
+    return text
+
+
+def _can_use_secrets(user) -> bool:
+    """True if the user may use a secret in a run (without ever seeing it): an
+    admin, an unrestricted (NULL-permission) legacy user, or one granted
+    ``secrets:use``."""
+    if getattr(user, "is_effective_admin", False):
+        return True
+    perms = user.effective_permissions_dict  # {} / NULL → unrestricted (legacy)
+    if not perms:
+        return True
+    return "use" in perms.get("secrets", [])
+
+
 async def _run_job(
     job_id: str,
     asset: str,
@@ -209,6 +241,9 @@ async def _run_job(
     ansible_user: str,
     extra_vars: dict,
     asset_backend: str = "",
+    secret_vars: dict | None = None,
+    secret_become_source: str = "",
+    secret_ssh_key_source: str = "",
 ) -> None:
     import base64
     from ..database import SessionLocal
@@ -226,6 +261,34 @@ async def _run_job(
         except StorageError as e:
             job_service.set_failed(db, job_id, f"Asset storage error: {e}")
             return
+
+        # Resolve requested Secrets-Management secrets ONCE, just-in-time — never
+        # stored on the job, never on the command line; values are scrubbed from
+        # output below. Named vars + become password apply to the local runner;
+        # the SSH-key secret applies to both (used as the connection key).
+        secret_extra_vars: dict = {}
+        secret_ssh_pem = None
+        secret_values: list = []
+        if secret_vars or secret_become_source or secret_ssh_key_source:
+            from ..services import ansible_secrets, config_service as cs
+
+            def _resolve_source(src: str) -> str:
+                src = (src or "").strip()
+                if not src:
+                    return ""
+                return cs.resolve_reference(src) if cs.is_reference(src) else cs.get(src)
+
+            secret_extra_vars = ansible_secrets.resolve_secret_vars(
+                secret_vars, get=cs.get, resolve_reference=cs.resolve_reference,
+                is_reference=cs.is_reference)
+            if secret_become_source:
+                _bp = _resolve_source(secret_become_source)
+                if _bp:
+                    secret_extra_vars["ansible_become_password"] = _bp
+            if secret_ssh_key_source:
+                secret_ssh_pem = _resolve_source(secret_ssh_key_source) or None
+            secret_values = [v for v in list(secret_extra_vars.values())
+                             + ([secret_ssh_pem] if secret_ssh_pem else []) if v]
 
         # Per-target-cloud runner backend: an AWS-target job uses
         # ansible_runner_aws, Azure → ansible_runner_azure, GCP → ansible_runner_gcp,
@@ -264,12 +327,15 @@ async def _run_job(
                 or cloud_default
             )
 
-            job_service.update_progress(db, job_id, 10, f"Retrieving SSH key for {key_cloud.upper()}…")
-            ssh_key_pem: str | None = None
-            try:
-                ssh_key_pem = await ansible_local_service.fetch_ssh_key(key_cloud)
-            except Exception as exc:
-                logger.warning("SSH key retrieval failed (%s) — proceeding without key: %s", key_cloud, exc)
+            # A Secrets-Management SSH-key secret (if supplied) overrides the
+            # configured key — this is the only secret kind the cloud runner takes.
+            ssh_key_pem: str | None = secret_ssh_pem
+            if ssh_key_pem is None:
+                job_service.update_progress(db, job_id, 10, f"Retrieving SSH key for {key_cloud.upper()}…")
+                try:
+                    ssh_key_pem = await ansible_local_service.fetch_ssh_key(key_cloud)
+                except Exception as exc:
+                    logger.warning("SSH key retrieval failed (%s) — proceeding without key: %s", key_cloud, exc)
 
             ssh_key_b64 = base64.b64encode(ssh_key_pem.encode()).decode() if ssh_key_pem else ""
 
@@ -283,6 +349,7 @@ async def _run_job(
                 job_id=job_id,
             )
 
+            output = _scrub_secrets(output, secret_values)
             if exit_code == 0:
                 job_service.set_completed(db, job_id, {"output": output, "returncode": exit_code})
             else:
@@ -295,16 +362,14 @@ async def _run_job(
         if runner != "local" and not is_playbook:
             logger.debug("ansible_runner=%s ignored for non-playbook asset %r — using local runner", runner, asset)
 
-        ssh_key_pem = None
-        if cloud in ("aws", "gcp", "azure"):
+        # A Secrets-Management SSH-key secret (if supplied) overrides the key.
+        ssh_key_pem = secret_ssh_pem
+        if ssh_key_pem is None and cloud in ("aws", "gcp", "azure"):
             job_service.update_progress(db, job_id, 10, f"Retrieving SSH key for {cloud.upper()}…")
             try:
                 ssh_key_pem = await ansible_local_service.fetch_ssh_key(cloud)
                 if not ssh_key_pem:
-                    logger.warning(
-                        "No SSH key configured for %s — proceeding without key",
-                        cloud,
-                    )
+                    logger.warning("No SSH key configured for %s — proceeding without key", cloud)
             except Exception as exc:
                 logger.warning("Failed to retrieve SSH key for %s: %s — proceeding without key", cloud, exc)
 
@@ -315,8 +380,10 @@ async def _run_job(
             extra_vars=extra_vars or None,
             asset_name=asset,
             ssh_key_pem=ssh_key_pem,
+            secret_extra_vars=secret_extra_vars or None,
         )
 
+        output = _scrub_secrets(output, secret_values)
         if rc == 0:
             job_service.set_completed(db, job_id, {"output": output, "returncode": rc})
             # Config-drift: record the per-target fingerprint of this apply (passive,
@@ -459,6 +526,23 @@ async def run_playbook(
             ),
         )
 
+    # Using a Secrets-Management secret in a run requires the `secrets:use`
+    # permission (admins bypass). The operator never sees the value. Named-var and
+    # become-password secrets run on the LOCAL runner only; an SSH-key secret works
+    # on the cloud runner too (it just replaces the connection key).
+    wants_secret = bool(payload.secret_vars or payload.secret_become_source
+                        or payload.secret_ssh_key_source)
+    if wants_secret and not _can_use_secrets(current_user):
+        raise HTTPException(
+            status_code=403,
+            detail="Using a Secrets-Management secret in a run requires the 'secrets:use' permission.")
+    local_only_secret = bool(payload.secret_vars or payload.secret_become_source)
+    if local_only_secret and (runs_in_cloud_runner or is_cloud_target):
+        raise HTTPException(
+            status_code=400,
+            detail=("Named-variable and become-password secrets run on the local Ansible runner only. "
+                    "Cloud runs support an SSH-key secret."))
+
     atype = ansible_local_service.asset_type(payload.asset)
     description = f"Ansible ({atype}): {payload.asset} → {payload.target}"
 
@@ -469,11 +553,44 @@ async def run_playbook(
         workgroup="ansible",
         owner_id=current_user.id,
     )
+    if wants_secret:
+        # Audit the use — kinds + var names only, never the source refs or values.
+        kinds = []
+        if payload.secret_vars:
+            kinds.append(f"{len(payload.secret_vars)} var(s)")
+        if payload.secret_become_source:
+            kinds.append("become-password")
+        if payload.secret_ssh_key_source:
+            kinds.append("ssh-key")
+        job_service.log_audit(
+            db, current_user.username, "ansible_secret_use",
+            details={"kinds": kinds, "vars": sorted(payload.secret_vars.keys()),
+                     "asset": payload.asset, "target": payload.target})
     background_tasks.add_task(
         _run_job, job.id, payload.asset, payload.target, payload.cloud,
-        payload.ansible_user, payload.extra_vars, asset_backend,
+        payload.ansible_user, payload.extra_vars, asset_backend, payload.secret_vars,
+        payload.secret_become_source, payload.secret_ssh_key_source,
     )
     return {"job_id": job.id, "status": "queued"}
+
+
+@router.get("/secret-options")
+async def list_secret_options(current_user: User = Depends(get_current_user)):
+    """Secret sources the operator can use in a run — **names only, never
+    values**. Requires ``secrets:use`` (admins bypass); the run form uses this to
+    populate the secret picker."""
+    if not _can_use_secrets(current_user):
+        raise HTTPException(status_code=403, detail="The 'secrets:use' permission is required.")
+    from ..services import config_service as cs
+    from .secrets import _SECRET_REGISTRY
+
+    cs._ensure_loaded()
+    out = []
+    for key, desc in _SECRET_REGISTRY:
+        with cs._cache_lock:
+            has = bool(cs._cache.get(key, ""))
+        out.append({"key": key, "description": desc, "has_value": has})
+    return out
 
 
 @router.get("/drift")
