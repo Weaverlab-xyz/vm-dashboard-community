@@ -457,12 +457,15 @@ picker (each tagged **[SSH key]** or **[password]**). Selecting one:
 - optionally, a **second** managed account can be picked for the become/sudo
   password (`ansible_become_password`).
 
-**Local runner only.** A checked-out credential is ephemeral, so the store-residency
-model above can't apply to it — a managed-account run that would dispatch to a
-cloud runner is **rejected up front**. SSH-password targets require `sshpass` in the
-runner image (already true for the built-in on-prem SSH path). The lookup and
-checkout go through `ps-cli`, authenticated by the configured Password Safe OAuth
-client (`pscli_api_url` / `pscli_client_id` / `pscli_client_secret`).
+**Local and Azure (ACI) runners.** Both inject the credential inline — the local
+runner via a `0600` vars file, ACI via `secure_value` — so a checked-out managed
+account works on either. The **ECS** and **Cloud Run** runners *reference* a store
+secret (the task identity fetches it at launch), which a checked-out (ephemeral)
+credential can't satisfy, so a managed-account run that would dispatch to those is
+**rejected up front**. SSH-password targets require `sshpass` in the runner image
+(already true for the built-in on-prem SSH path). The lookup and checkout go through
+`ps-cli`, authenticated by the configured Password Safe OAuth client
+(`pscli_api_url` / `pscli_client_id` / `pscli_client_secret`).
 
 ---
 

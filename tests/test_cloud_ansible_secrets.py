@@ -54,6 +54,27 @@ def test_env_name_helper():
     assert cas.env_name(3) == "DASH_SECRET_3"
 
 
+# ── inline_entries (ACI inline var injection) ───────────────────────────────────
+
+def test_inline_entries_builds_env_value_pairs_and_manifest():
+    vars_dict = {"ansible_user": "svc-ansible", "ansible_ssh_pass": "s3cr3t"}
+    entries, manifest_b64 = cas.inline_entries(vars_dict)
+    assert entries == [
+        {"env": "DASH_SECRET_0", "value": "svc-ansible"},
+        {"env": "DASH_SECRET_1", "value": "s3cr3t"},
+    ]
+    manifest = json.loads(base64.b64decode(manifest_b64))
+    assert manifest == [
+        {"env": "DASH_SECRET_0", "var": "ansible_user"},
+        {"env": "DASH_SECRET_1", "var": "ansible_ssh_pass"},
+    ]
+
+
+def test_inline_entries_empty():
+    entries, manifest_b64 = cas.inline_entries({})
+    assert entries == [] and json.loads(base64.b64decode(manifest_b64)) == []
+
+
 # ── Per-provider resolution ─────────────────────────────────────────────────────
 
 def _fakes(store):

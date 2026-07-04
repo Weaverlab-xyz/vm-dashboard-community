@@ -311,8 +311,9 @@ the value):
 also lets the operator pick a Password Safe **managed account** from a live list
 and use it as the login identity — the credential is checked out just-in-time (an
 SSH-key account → the connection key; a password account → `ansible_ssh_pass`).
-Managed-account checkout is **local-runner only** (a JIT credential is ephemeral,
-so it can't satisfy the cloud store-residency rule above).
+Managed-account checkout works on the **local and Azure (ACI) runners** (both
+inject inline); it's rejected on ECS / Cloud Run, which reference a store secret a
+JIT (ephemeral) credential can't satisfy.
 
 Full operator detail lives in
 [docs/integrations/ansible.md → Using a Secrets-Management secret in a run](integrations/ansible.md#using-a-secrets-management-secret-in-a-run).

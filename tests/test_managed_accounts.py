@@ -76,26 +76,30 @@ def test_normalize_empty():
     assert ma.normalize_managed_systems(None, {}) == []
 
 
-# ── local_only_violation ────────────────────────────────────────────────────────
+# ── requires_ephemeral_store ────────────────────────────────────────────────────
 
-def test_local_only_violation_true_for_cloud_runner_adhoc_playbook():
-    assert ma.local_only_violation(True, "ecs", True, True)
-    assert ma.local_only_violation(True, "aci", True, True)
-    assert ma.local_only_violation(True, "gcp", True, True)
-
-
-def test_local_only_violation_false_when_no_managed():
-    assert not ma.local_only_violation(False, "ecs", True, True)
+def test_requires_ephemeral_store_true_for_ecs_and_gcp():
+    assert ma.requires_ephemeral_store(True, "ecs", True, True)
+    assert ma.requires_ephemeral_store(True, "gcp", True, True)
 
 
-def test_local_only_violation_false_for_local_runner():
-    assert not ma.local_only_violation(True, "local", True, True)
+def test_requires_ephemeral_store_false_for_aci():
+    # ACI injects inline (secure_value) — managed accounts work there directly.
+    assert not ma.requires_ephemeral_store(True, "aci", True, True)
 
 
-def test_local_only_violation_false_when_not_adhoc_or_not_playbook():
+def test_requires_ephemeral_store_false_when_no_managed():
+    assert not ma.requires_ephemeral_store(False, "ecs", True, True)
+
+
+def test_requires_ephemeral_store_false_for_local_runner():
+    assert not ma.requires_ephemeral_store(True, "local", True, True)
+
+
+def test_requires_ephemeral_store_false_when_not_adhoc_or_not_playbook():
     # group target (not adhoc) or non-playbook → falls back to local anyway
-    assert not ma.local_only_violation(True, "ecs", False, True)
-    assert not ma.local_only_violation(True, "ecs", True, False)
+    assert not ma.requires_ephemeral_store(True, "ecs", False, True)
+    assert not ma.requires_ephemeral_store(True, "ecs", True, False)
 
 
 if __name__ == "__main__":
