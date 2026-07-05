@@ -436,43 +436,45 @@ def write_gcp_sm(key: str, value: str) -> str:
 
 # ── Ephemeral GCP SM secrets (managed-account checkout on the Cloud Run runner) ─
 
-def write_gcp_sm_ephemeral(secret_id: str, value: str, runner_sa: str) -> str:
+def write_gcp_sm_ephemeral(name: str, value: str, runner_sa: str) -> str:
     """Create a **labelled** ephemeral GCP SM secret, add the value, and bind
     ``roles/secretmanager.secretAccessor`` on **only this secret** to ``runner_sa``
     (the SA the Cloud Run job runs as) — no project-level accessor, so only the
-    runner can read it. Returns the secret id."""
+    runner can read it. ``name`` is the (non-secret) resource id we generate; the
+    credential is ``value``. Returns the resource id."""
     from . import ephemeral_secrets as _eph
     from google.api_core.exceptions import AlreadyExists
     project, _, _ = _gcp_cfg()
     client = _gcp_client()
     parent = f"projects/{project}"
-    name = f"{parent}/secrets/{secret_id}"
+    resource = f"{parent}/secrets/{name}"
     try:
         client.create_secret(request={
-            "parent": parent, "secret_id": secret_id,
+            "parent": parent, "secret_id": name,
             "secret": {"replication": {"automatic": {}},
                        "labels": {_eph.TAG_KEY: _eph.TAG_VALUE}},
         })
     except AlreadyExists:
         pass
-    client.add_secret_version(request={"parent": name, "payload": {"data": value.encode()}})
+    client.add_secret_version(request={"parent": resource, "payload": {"data": value.encode()}})
     if runner_sa:
-        policy = client.get_iam_policy(request={"resource": name})
+        policy = client.get_iam_policy(request={"resource": resource})
         from google.iam.v1 import policy_pb2
         policy.bindings.append(policy_pb2.Binding(
             role="roles/secretmanager.secretAccessor",
             members=[f"serviceAccount:{runner_sa}"]))
-        client.set_iam_policy(request={"resource": name, "policy": policy})
-    logger.info("GCP SM: wrote ephemeral secret %s (rbac→%s)", secret_id, runner_sa or "none")
-    return secret_id
+        client.set_iam_policy(request={"resource": resource, "policy": policy})
+    logger.info("GCP SM: wrote ephemeral secret %s (rbac→%s)", name, runner_sa or "none")
+    return name
 
 
-def delete_gcp_sm(secret_id: str) -> None:
-    """Delete an ephemeral GCP SM secret (immediate). Used for post-run cleanup."""
+def delete_gcp_sm(ref: str) -> None:
+    """Delete an ephemeral GCP SM secret by its (non-secret) resource id. Used for
+    post-run cleanup."""
     project, _, _ = _gcp_cfg()
     client = _gcp_client()
-    client.delete_secret(request={"name": f"projects/{project}/secrets/{secret_id}"})
-    logger.info("GCP SM: deleted %s", secret_id)
+    client.delete_secret(request={"name": f"projects/{project}/secrets/{ref}"})
+    logger.info("GCP SM: deleted %s", ref)
 
 
 def list_gcp_sm_ephemeral() -> list:
