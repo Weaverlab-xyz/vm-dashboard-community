@@ -339,11 +339,13 @@ def _delete_ephemeral(cleanup: list) -> None:
         try:
             (sbs.delete_aws_sm if provider == "aws" else sbs.delete_gcp_sm)(sid)
         except Exception:
-            # Log the provider + traceback only — the resource id is a loop-derived
-            # value CodeQL taints from the credential dict, and it isn't needed here
-            # (the GC sweeper reaps by tag; the traceback names the failing call).
-            logger.warning("ephemeral %s cleanup failed (GC will reap it)",
-                           provider, exc_info=True)
+            # Static message + traceback only, no interpolated data. Everything
+            # unpacked from `cleanup` — even the "aws"/"gcp" provider literal — is
+            # tainted by CodeQL because the list is built in the credential-handling
+            # loop, so logging any of it trips py/clear-text-logging. The traceback
+            # still names the failing delete call; the GC sweeper reaps by tag.
+            logger.warning("an ephemeral secret cleanup failed (GC will reap it)",
+                           exc_info=True)
 
 
 async def _run_job(

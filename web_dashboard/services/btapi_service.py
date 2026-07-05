@@ -347,7 +347,9 @@ async def rotate_ps_request_on_checkin(request_id: int) -> bool:
         await asyncio.to_thread(_rotate_on_checkin_sync, request_id)
         return True
     except BTAPIError as exc:
-        logger.warning("rotate-on-check-in failed for request %s: %s", request_id, exc)
+        # request_id is omitted from the message: it's unpacked from the
+        # (request_id, credential) checkout tuple, which CodeQL taints as sensitive.
+        logger.warning("Password Safe rotate-on-check-in failed: %s", exc)
         return False
 
 
@@ -358,7 +360,7 @@ async def checkin_ps_request(request_id: int) -> bool:
         await asyncio.to_thread(_checkin_request_sync, request_id)
         return True
     except BTAPIError as exc:
-        logger.warning("check-in failed for request %s: %s", request_id, exc)
+        logger.warning("Password Safe check-in failed: %s", exc)
         return False
 
 
