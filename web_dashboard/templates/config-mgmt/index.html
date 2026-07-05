@@ -298,10 +298,12 @@
                   </div>
                 </div>
               </template>
+              <p x-show="managedSystems.length > 0 && managedCarWarning"
+                 x-text="managedCarWarning" class="text-[11px] text-amber-600"></p>
               <p x-show="managedSystems.length > 0" class="text-[11px] text-gray-400">
                 Sets <code>ansible_user</code> to the account and injects its credential (SSH key → connection
                 key; password → <code>ansible_ssh_pass</code>). Checked out just-in-time; you never see the value.
-                Works on the <strong>local</strong> and <strong>Azure (ACI)</strong> runners; not on ECS / Cloud Run.
+                Works on the <strong>local</strong> and <strong>Azure (ACI)</strong> runners<template x-if="managedEphemeralEnabled"><span>, and on <strong>ECS / Cloud Run</strong> via a short-lived RBAC-locked store copy</template><template x-if="!managedEphemeralEnabled"><span>; not on ECS / Cloud Run</span></template>.
               </p>
             </div>
           </div>
@@ -497,6 +499,7 @@ function configMgmt() {
     // out just-in-time server-side and never touch the browser.
     customHost: '',
     managedEnabled: false,
+    managedEphemeralEnabled: false,
     managedLoading: false,
     managedError: '',
     managedSystems: [],
@@ -572,6 +575,7 @@ function configMgmt() {
       try {
         const r = await API.get('/api/config-mgmt/managed-accounts?host=' + encodeURIComponent(host)) || {};
         this.managedEnabled = !!r.enabled;
+        this.managedEphemeralEnabled = !!r.ephemeral_enabled;
         this.managedSystems = r.systems || [];
         if (r.error) this.managedError = r.error;
       } catch (e) {
@@ -597,6 +601,35 @@ function configMgmt() {
         }
       }
       return null;
+    },
+
+    // Find the raw account object for a picker value (to read change_after_release).
+    _managedAccountObj(key) {
+      if (!key) return null;
+      const [sid, aid] = key.split(':').map(Number);
+      for (const s of this.managedSystems) {
+        if (s.system_id !== sid) continue;
+        return s.accounts.find(a => a.account_id === aid) || null;
+      }
+      return null;
+    },
+
+    // Advisory: on an ECS/GCP ephemeral run the credential is briefly copied to the
+    // cloud store. The dashboard flags the request to rotate on check-in, but that's
+    // best-effort (not enforceable). The reliable backstop is the account's standing
+    // "Change Password After Release" — nudge when a selected password account lacks it.
+    get managedCarWarning() {
+      if (!this.managedEphemeralEnabled) return '';
+      for (const key of [this.managedAccountKey, this.managedBecomeKey]) {
+        const a = this._managedAccountObj(key);
+        if (a && !a.uses_ssh_key && a.change_after_release !== true) {
+          const state = a.change_after_release === false ? 'is off' : 'is unconfirmed';
+          return `On ECS / Cloud Run the credential is briefly copied to the cloud store. The dashboard flags ` +
+                 `the request to rotate on check-in (best-effort). Reliable backstop: enable "Change Password ` +
+                 `After Release" on "${a.name}" in Password Safe (${state}) so a missed cleanup leaves a dead credential.`;
+        }
+      }
+      return '';
     },
 
     get selectedAsset() {

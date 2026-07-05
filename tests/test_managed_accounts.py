@@ -36,10 +36,26 @@ def test_normalize_locally_managed_account_ssh_and_password():
     assert out == [{
         "system_id": 5, "name": "web01", "ip": "10.0.0.5",
         "accounts": [
-            {"account_id": 45, "name": "root", "domain": "", "uses_ssh_key": True},
-            {"account_id": 46, "name": "deploy", "domain": "", "uses_ssh_key": False},
+            {"account_id": 45, "name": "root", "domain": "", "uses_ssh_key": True,
+             "change_after_release": None},
+            {"account_id": 46, "name": "deploy", "domain": "", "uses_ssh_key": False,
+             "change_after_release": None},
         ],
     }]
+
+
+def test_normalize_surfaces_change_after_release_flag():
+    systems = [{"ManagedSystemID": 1, "Name": "x", "IPAddress": "1.1.1.1"}]
+    accounts = {1: [
+        {"ManagedAccountID": 1, "AccountName": "rotates",
+         "ChangePasswordAfterAnyReleaseFlag": True},
+        {"ManagedAccountID": 2, "AccountName": "static",
+         "ChangePasswordAfterAnyReleaseFlag": False},
+        {"ManagedAccountID": 3, "AccountName": "unknown"},   # flag absent
+    ]}
+    out = ma.normalize_managed_systems(systems, accounts)
+    car = {a["name"]: a["change_after_release"] for a in out[0]["accounts"]}
+    assert car == {"rotates": True, "static": False, "unknown": None}
 
 
 def test_normalize_domain_linked_field_variants():
@@ -52,7 +68,8 @@ def test_normalize_domain_linked_field_variants():
     assert out[0]["system_id"] == 9 and out[0]["name"] == "DC01"
     acct = out[0]["accounts"][0]
     assert acct == {"account_id": 100, "name": "svc-ansible",
-                    "domain": "SHIELD", "uses_ssh_key": False}
+                    "domain": "SHIELD", "uses_ssh_key": False,
+                    "change_after_release": None}
 
 
 def test_normalize_skips_systems_and_accounts_without_ids():

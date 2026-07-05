@@ -457,15 +457,21 @@ picker (each tagged **[SSH key]** or **[password]**). Selecting one:
 - optionally, a **second** managed account can be picked for the become/sudo
   password (`ansible_become_password`).
 
-**Local and Azure (ACI) runners.** Both inject the credential inline — the local
-runner via a `0600` vars file, ACI via `secure_value` — so a checked-out managed
-account works on either. The **ECS** and **Cloud Run** runners *reference* a store
-secret (the task identity fetches it at launch), which a checked-out (ephemeral)
-credential can't satisfy, so a managed-account run that would dispatch to those is
-**rejected up front**. SSH-password targets require `sshpass` in the runner image
-(already true for the built-in on-prem SSH path). The lookup and checkout go through
-`ps-cli`, authenticated by the configured Password Safe OAuth client
-(`pscli_api_url` / `pscli_client_id` / `pscli_client_secret`).
+**Local and Azure (ACI) runners** inject the credential inline — the local runner
+via a `0600` vars file, ACI via `secure_value` — so a checked-out managed account
+works on either out of the box.
+
+**ECS and Cloud Run** *reference* a store secret (the task identity fetches it at
+launch), which a checked-out (ephemeral) credential has none of — so they're
+**rejected unless "Ephemeral cloud secrets" is enabled** (Settings → Ansible). When
+on, the credential is written to that cloud's store as a short-lived, RBAC-locked
+secret, injected via the provider's channel, then force-deleted after the run — see
+[Ephemeral cloud secrets](../secrets-management.md#ephemeral-cloud-secrets).
+
+SSH-password targets require `sshpass` in the runner image (already true for the
+built-in on-prem SSH path). The lookup and checkout go through `ps-cli`,
+authenticated by the configured Password Safe OAuth client (`pscli_api_url` /
+`pscli_client_id` / `pscli_client_secret`).
 
 ---
 

@@ -560,6 +560,26 @@ class Settings(BaseSettings):
     gcp_ansible_image: str = "willhallonline/ansible:latest"
     gcp_ansible_vpc_connector: str = ""      # e.g. "projects/proj/locations/region/connectors/name" (optional, for private host access)
 
+    # Ephemeral cloud secrets for managed-account checkout on the ECS / Cloud Run
+    # runners. OFF by default: a checked-out Password Safe credential is written to
+    # the cloud secret store as a short-lived, RBAC-locked secret, injected via the
+    # provider's secret channel, then force-deleted after the run. Enabling this
+    # copies a PAM-vaulted credential into the cloud store for the task's lifetime —
+    # pair it with "Change Password After Release" on the managed account so a
+    # missed cleanup leaves only a rotated, dead credential. See docs/secrets-management.md.
+    ansible_cloud_ephemeral_secrets_enabled: bool = False
+    ansible_ephemeral_secret_ttl_min: int = 30       # GC safety-net age (>= max task runtime)
+    # Password Safe request duration for a managed-account checkout. Must outlast the
+    # whole run so the request is still open for us to flag rotate-on-check-in and
+    # then check it in afterwards (best-effort — rotation isn't enforceable, it
+    # depends on the account being auto-managed). Default 60 min covers a long cloud task.
+    ansible_managed_request_duration_min: int = 60
+    ansible_ephemeral_kms_key_id: str = ""           # AWS: CMK for the ephemeral secret; its key policy
+                                                     # should grant kms:Decrypt to the ECS execution role
+                                                     # only (the true read-restriction on AWS). "" = default key.
+    gcp_ansible_runner_service_account: str = ""     # GCP: SA the Cloud Run job runs as; REQUIRED for ephemeral
+                                                     # on GCP so secretAccessor can be bound to just that SA.
+
     # Kubernetes (kubectl/helm) runner. "local" runs in-process; the cloud modes
     # run cluster-API ops as a one-shot stock kubectl+helm task with clean egress
     # (a TLS-inspecting corp proxy rejects/526s direct kubectl/helm). Reuses the Ansible

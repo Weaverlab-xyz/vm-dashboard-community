@@ -1077,6 +1077,7 @@ def _run_cloud_run_ansible_sync(
     playbook_b64: str, ssh_key_b64: str, job_id: str,
     vpc_connector: str = "",
     secret_entries: list | None = None, manifest_b64: str = "",
+    service_account: str = "",
 ) -> tuple:
     """
     Create a Cloud Run Job that runs a single Ansible playbook, wait for it to
@@ -1140,6 +1141,10 @@ def _run_cloud_run_ansible_sync(
         ],
         max_retries=0,
         timeout="1200s",
+        # Pin the job identity so an ephemeral secret's accessor can be bound to
+        # exactly this SA (secret-env / ephemeral managed-account checkout). Blank
+        # → the project default compute SA (unchanged legacy behaviour).
+        **({"service_account": service_account} if service_account else {}),
     )
 
     exec_template = run_v2.ExecutionTemplate(template=task_template)
@@ -1198,6 +1203,7 @@ async def run_cloud_run_ansible_task(
     target_ip: str, ansible_user: str,
     playbook_b64: str, ssh_key_b64: str, job_id: str,
     vpc_connector: str = "",
+    service_account: str = "",
     secret_entries: list | None = None, manifest_b64: str = "",
 ) -> tuple:
     """
@@ -1212,6 +1218,7 @@ async def run_cloud_run_ansible_task(
             playbook_b64, ssh_key_b64, job_id,
             vpc_connector,
             secret_entries, manifest_b64,
+            service_account,
         )
     except GCPError:
         raise

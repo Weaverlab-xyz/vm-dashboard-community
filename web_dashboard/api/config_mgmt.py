@@ -292,6 +292,62 @@ def _resolve_cloud_secrets(runner: str, secret_vars: dict | None,
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+def _add_ephemeral_managed_entries(runner: str, entries: list, manifest_b64: str,
+                                   managed_cred_vars: dict, job_id: str) -> tuple:
+    """Materialise managed-account credential vars as short-lived, RBAC-locked cloud
+    store secrets (ECS → AWS SM, GCP → GCP SM) and extend the (entries, manifest)
+    with them, continuing the env-index numbering. Returns
+    ``(entries, manifest_b64, cleanup)`` where ``cleanup`` is ``[(provider, id)]``
+    to force-delete after the run. A JIT credential can't reference a pre-existing
+    store secret (#217), so we create one per run and reap it."""
+    import base64 as _b64, json as _json
+    from ..services import (cloud_ansible_secrets as _cas, ephemeral_secrets as _eph,
+                            secrets_backend_service as sbs)
+    if not managed_cred_vars:
+        return entries, manifest_b64, []
+    entries = list(entries)
+    manifest = _json.loads(_b64.b64decode(manifest_b64)) if manifest_b64 else []
+    cleanup = []
+    start = len(entries)
+    for i, (var, value) in enumerate(managed_cred_vars.items()):
+        env = _cas.env_name(start + i)
+        if runner == "ecs":
+            name = _eph.aws_secret_name(job_id, start + i)
+            arn = sbs.write_aws_sm_ephemeral(
+                name, value, exec_role_arn=_cfg("ansible_ecs_execution_role_arn"),
+                kms_key_id=_cfg("ansible_ephemeral_kms_key_id"))
+            entries.append({"env": env, "arn": arn})
+            cleanup.append(("aws", name))
+        else:  # gcp
+            sid = _eph.gcp_secret_id(job_id, start + i)
+            sbs.write_gcp_sm_ephemeral(
+                sid, value, runner_sa=_cfg("gcp_ansible_runner_service_account"))
+            entries.append({"env": env, "secret_name": sid})
+            cleanup.append(("gcp", sid))
+        manifest.append({"env": env, "var": var})
+    manifest_b64 = _b64.b64encode(_json.dumps(manifest).encode()).decode()
+    return entries, manifest_b64, cleanup
+
+
+def _delete_ephemeral(cleanup: list) -> None:
+    """Best-effort force-delete of the ephemeral store secrets created for a run.
+    A failure here is non-fatal — the GC sweeper reaps anything left behind."""
+    if not cleanup:
+        return
+    from ..services import secrets_backend_service as sbs
+    for provider, sid in cleanup:
+        try:
+            (sbs.delete_aws_sm if provider == "aws" else sbs.delete_gcp_sm)(sid)
+        except Exception:
+            # Static message + traceback only, no interpolated data. Everything
+            # unpacked from `cleanup` — even the "aws"/"gcp" provider literal — is
+            # tainted by CodeQL because the list is built in the credential-handling
+            # loop, so logging any of it trips py/clear-text-logging. The traceback
+            # still names the failing delete call; the GC sweeper reaps by tag.
+            logger.warning("an ephemeral secret cleanup failed (GC will reap it)",
+                           exc_info=True)
+
+
 async def _run_job(
     job_id: str,
     asset: str,
@@ -352,34 +408,48 @@ async def _run_job(
                              + ([secret_ssh_pem] if secret_ssh_pem else []) if v]
 
         # Managed-account checkout (BeyondTrust Password Safe) — check out the
-        # credential just-in-time and merge into the SAME local-runner channels
-        # (secret_extra_vars / secret_ssh_pem / scrub set) the secret path uses.
-        # The account is the connection identity; managed_become is an optional
-        # separate account for the sudo/become password. Never stored or shown.
+        # credential just-in-time. The account is the connection identity;
+        # managed_become is an optional separate account for the sudo/become
+        # password. Tracked separately so each runner can route it correctly:
+        #   • local / ACI → inline (merged into secret_extra_vars below)
+        #   • ECS / GCP   → the password vars become ephemeral store secrets, the
+        #                   SSH key rides SSH_KEY_B64, ansible_user is a plain var.
+        managed_cred_vars: dict = {}   # cred vars needing a secure channel on cloud
+        managed_plain_vars: dict = {}    # non-secret vars (ansible_user)
+        managed_request_ids: list = []   # PS request ids — checked in (rotate-on-release) after a cloud run
         if managed_account or managed_become:
             from ..services import btapi_service
+            # Long enough that the request is still open after the run for the
+            # rotate-on-check-in + check-in below (best-effort mitigation).
+            _req_dur = int(_cfg("ansible_managed_request_duration_min") or 60)
             try:
                 if managed_account:
-                    cred = await btapi_service.get_ps_credential(
+                    req_id, cred = await btapi_service.get_ps_credential_with_request(
                         managed_account["system_id"], managed_account["account_id"],
+                        duration_min=_req_dur,
                         uses_ssh_key=managed_account.get("uses_ssh_key", False))
+                    managed_request_ids.append(req_id)
                     if managed_account.get("account_name"):
-                        secret_extra_vars["ansible_user"] = managed_account["account_name"]
+                        managed_plain_vars["ansible_user"] = managed_account["account_name"]
                     if managed_account.get("uses_ssh_key"):
-                        secret_ssh_pem = cred                     # connection key
+                        secret_ssh_pem = cred                     # connection key (SSH_KEY_B64)
                     else:
-                        secret_extra_vars["ansible_ssh_pass"] = cred  # SSH password (sshpass)
-                        secret_extra_vars["ansible_password"] = cred  # WinRM targets
+                        managed_cred_vars["ansible_ssh_pass"] = cred  # SSH password (sshpass)
+                        managed_cred_vars["ansible_password"] = cred  # WinRM targets
                     secret_values.append(cred)
                 if managed_become:
-                    bcred = await btapi_service.get_ps_credential(
+                    breq_id, bcred = await btapi_service.get_ps_credential_with_request(
                         managed_become["system_id"], managed_become["account_id"],
-                        uses_ssh_key=False)
-                    secret_extra_vars["ansible_become_password"] = bcred
+                        duration_min=_req_dur, uses_ssh_key=False)
+                    managed_request_ids.append(breq_id)
+                    managed_cred_vars["ansible_become_password"] = bcred
                     secret_values.append(bcred)
             except btapi_service.BTAPIError as e:
                 job_service.set_failed(db, job_id, f"Password Safe checkout failed: {e}")
                 return
+            # Local / ACI runners consume everything inline via secret_extra_vars.
+            secret_extra_vars.update(managed_cred_vars)
+            secret_extra_vars.update(managed_plain_vars)
 
         # Per-target-cloud runner backend: an AWS-target job uses
         # ansible_runner_aws, Azure → ansible_runner_azure, GCP → ansible_runner_gcp,
@@ -417,6 +487,9 @@ async def _run_job(
                 or _cfg("ansible_default_user")
                 or cloud_default
             )
+            # A managed account is the login identity — its name wins as the SSH user.
+            if managed_plain_vars.get("ansible_user"):
+                resolved_user = managed_plain_vars["ansible_user"]
 
             # A Secrets-Management SSH-key secret (if supplied) overrides the
             # configured key — this is the only secret kind the cloud runner takes.
@@ -438,6 +511,7 @@ async def _run_job(
             # reference a store secret, so they resolve per-provider store refs and
             # a managed-account run never reaches here (rejected at the endpoint).
             from ..services import cloud_ansible_secrets as _cas
+            ephemeral_cleanup: list = []
             if runner == "aci":
                 cloud_secret_entries, cloud_manifest_b64 = _cas.inline_entries(secret_extra_vars)
             else:
@@ -446,18 +520,49 @@ async def _run_job(
                 for _v in cloud_inline_values:
                     if _v and _v not in secret_values:
                         secret_values.append(_v)
+                # Managed-account creds → ephemeral, RBAC-locked store secrets (the
+                # ECS/GCP secret channel references a store secret; a JIT credential
+                # has none, so we mint one per run and reap it). Sweep leaked ones
+                # first (belt-and-braces with the startup GC).
+                if managed_cred_vars:
+                    try:
+                        from ..services import ephemeral_gc
+                        ephemeral_gc.sweep()
+                    except Exception:
+                        logger.warning("ephemeral GC pre-sweep failed (non-fatal)", exc_info=True)
+                    cloud_secret_entries, cloud_manifest_b64, ephemeral_cleanup = (
+                        _add_ephemeral_managed_entries(
+                            runner, cloud_secret_entries, cloud_manifest_b64,
+                            managed_cred_vars, job_id))
+                    # Best-effort: flag the PS requests to rotate on check-in, so the
+                    # copied-to-store credential is rotated (dead) once we check in
+                    # below — even if the store cleanup is missed. Not enforceable
+                    # (rotation depends on the account being auto-managed).
+                    from ..services import btapi_service as _bt
+                    for _rid in managed_request_ids:
+                        await _bt.rotate_ps_request_on_checkin(_rid)
 
             job_service.update_progress(db, job_id, 20, f"Launching {runner.upper()} runner for {asset}…")
-            exit_code, output = await _dispatch_cloud_runner(
-                runner=runner,
-                target_ip=target,
-                ansible_user=resolved_user,
-                playbook_b64=asset_b64,
-                ssh_key_b64=ssh_key_b64,
-                job_id=job_id,
-                secret_entries=cloud_secret_entries,
-                manifest_b64=cloud_manifest_b64,
-            )
+            try:
+                exit_code, output = await _dispatch_cloud_runner(
+                    runner=runner,
+                    target_ip=target,
+                    ansible_user=resolved_user,
+                    playbook_b64=asset_b64,
+                    ssh_key_b64=ssh_key_b64,
+                    job_id=job_id,
+                    secret_entries=cloud_secret_entries,
+                    manifest_b64=cloud_manifest_b64,
+                )
+            finally:
+                # Value already fetched by the task identity at launch — safe to reap
+                # the store copy and check the PS requests in (rotates on release when
+                # flagged above). Both best-effort; the GC sweeper backstops leaks.
+                _delete_ephemeral(ephemeral_cleanup)
+                if ephemeral_cleanup and managed_request_ids:
+                    from ..services import btapi_service as _bt
+                    for _rid in managed_request_ids:
+                        await _bt.checkin_ps_request(_rid)
 
             output = _scrub_secrets(output, secret_values)
             if exit_code == 0:
@@ -593,6 +698,7 @@ async def _dispatch_cloud_runner(
             ssh_key_b64=ssh_key_b64,
             job_id=job_id,
             vpc_connector=_cfg("gcp_ansible_vpc_connector") or "",
+            service_account=_cfg("gcp_ansible_runner_service_account") or "",
             secret_entries=secret_entries,
             manifest_b64=manifest_b64,
         )
@@ -684,14 +790,24 @@ async def run_playbook(
 
     # Managed-account checkout works on the local and ACI runners (both inject the
     # credential inline). ECS / Cloud Run reference a store secret, so a JIT-checked-
-    # out (ephemeral) credential can't be injected there — reject up front.
-    from ..services import managed_accounts as _ma
+    # out credential needs an ephemeral, RBAC-locked store copy — gated behind an
+    # explicit opt-in (it copies a PAM-vaulted credential into the cloud store for
+    # the run). Rejected up front when that isn't enabled.
+    from ..services import managed_accounts as _ma, config_service as _cs2
     if _ma.requires_ephemeral_store(has_managed, eff_runner, is_adhoc, atype == "playbook"):
-        raise HTTPException(
-            status_code=400,
-            detail=("Managed-account checkout isn't supported on the ECS / Cloud Run runners — "
-                    "a checked-out credential can't be injected inline there. Use the local or "
-                    "Azure (ACI) runner."))
+        if not _cs2.get_bool("ansible_cloud_ephemeral_secrets_enabled"):
+            raise HTTPException(
+                status_code=400,
+                detail=("Managed-account checkout on the ECS / Cloud Run runners requires "
+                        "'Ephemeral cloud secrets' to be enabled in Settings (it briefly copies "
+                        "the credential into the cloud store, RBAC-locked). Otherwise use the "
+                        "local or Azure (ACI) runner."))
+        if eff_runner == "gcp" and not _cfg("gcp_ansible_runner_service_account"):
+            raise HTTPException(
+                status_code=400,
+                detail=("GCP ephemeral secrets require 'gcp_ansible_runner_service_account' to be "
+                        "set — the Cloud Run job runs as that SA and read access to the ephemeral "
+                        "secret is locked to it."))
     description = f"Ansible ({atype}): {payload.asset} → {payload.target}"
 
     job = job_service.create_job(
@@ -774,12 +890,15 @@ async def list_managed_accounts(
 
     from ..services import config_service as cs, btapi_service, managed_accounts as ma
 
+    # ephemeral_enabled tells the UI that managed accounts can run on ECS/GCP (via
+    # the ephemeral store copy) and to nudge on change-after-release for those.
+    ephemeral_enabled = cs.get_bool("ansible_cloud_ephemeral_secrets_enabled")
     if not cs.get_bool("beyondtrust_enabled"):
-        return {"enabled": False, "systems": []}
+        return {"enabled": False, "ephemeral_enabled": ephemeral_enabled, "systems": []}
 
     host = (host or "").strip()
     if not host:
-        return {"enabled": True, "systems": []}
+        return {"enabled": True, "ephemeral_enabled": ephemeral_enabled, "systems": []}
 
     ip = host if ma.host_is_ip(host) else ""
     name = "" if ma.host_is_ip(host) else host
@@ -792,14 +911,14 @@ async def list_managed_accounts(
                 continue
             accounts_by_system[int(sid)] = \
                 await btapi_service.list_ps_managed_accounts_with_fallback(int(sid))
-        return {"enabled": True,
+        return {"enabled": True, "ephemeral_enabled": ephemeral_enabled,
                 "systems": ma.normalize_managed_systems(systems, accounts_by_system)}
     except btapi_service.BTAPIError as exc:
         # Log the real ps-cli error server-side; return a generic reason. A raw
         # BTAPIError string carries ps-cli stderr, so returning it here would leak
         # internal detail to the caller — CodeQL py/stack-trace-exposure.
         logger.warning("managed-account lookup for %r failed: %s", host, exc)
-        return {"enabled": True, "systems": [],
+        return {"enabled": True, "ephemeral_enabled": ephemeral_enabled, "systems": [],
                 "error": "Password Safe lookup failed — check the BeyondTrust configuration and server logs."}
 
 

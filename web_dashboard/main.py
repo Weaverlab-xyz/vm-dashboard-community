@@ -105,6 +105,22 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(_warm_cost_summary(), name="warm_cost_summary")
     )
 
+    # Ephemeral-secret GC — reap any managed-account ephemeral cloud secrets a prior
+    # run leaked (a crash between create and its finally-cleanup). No-op unless the
+    # feature is enabled; runs off-thread so blocking cloud calls don't stall startup.
+    async def _ephemeral_gc_startup():
+        try:
+            from .services import config_service as cs
+            if not cs.get_bool("ansible_cloud_ephemeral_secrets_enabled"):
+                return
+            from .services import ephemeral_gc
+            await asyncio.to_thread(ephemeral_gc.sweep)
+        except Exception:
+            logger.warning("startup ephemeral GC sweep failed (non-fatal)", exc_info=True)
+    warmers.append(
+        asyncio.create_task(_ephemeral_gc_startup(), name="ephemeral_gc_startup")
+    )
+
     yield
 
     for task in warmers:

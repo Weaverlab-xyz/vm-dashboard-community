@@ -228,6 +228,78 @@ def aws_sm_arn(ref: str, vault_id: str | None = None) -> str:
     return client.describe_secret(SecretId=ref)["ARN"]
 
 
+# ── Ephemeral AWS SM secrets (managed-account checkout on the ECS runner) ──────
+
+def write_aws_sm_ephemeral(name: str, value: str, exec_role_arn: str = "",
+                           kms_key_id: str = "") -> str:
+    """Create a short-lived, RBAC-locked AWS SM secret and return its ARN.
+
+    - **Tagged** (ephemeral_secrets.TAG_KEY) so the GC sweeper can find and reap it.
+    - **CMK** (kms_key_id, optional) is the real read-restriction: reading requires
+      kms:Decrypt, so a key policy granting Decrypt to only the execution role locks
+      the value even against account IAM admins. "" → the account default SM key.
+    - **Resource policy** scopes secretsmanager:GetSecretValue to exec_role_arn (the
+      ECS task execution identity that fetches the valueFrom at launch).
+    """
+    from . import ephemeral_secrets as _eph
+    region, _ = _aws_cfg()
+    import boto3, json as _json
+    client = boto3.client("secretsmanager", region_name=region)
+    kwargs = {
+        "Name": name,
+        "SecretString": value,
+        "Description": "VM Dashboard ephemeral ansible managed-account credential",
+        "Tags": [{"Key": _eph.TAG_KEY, "Value": _eph.TAG_VALUE}],
+    }
+    if kms_key_id:
+        kwargs["KmsKeyId"] = kms_key_id
+    try:
+        resp = client.create_secret(**kwargs)
+        arn = resp["ARN"]
+    except client.exceptions.ResourceExistsException:
+        # A prior run of the same job/index leaked; overwrite and reuse.
+        client.put_secret_value(SecretId=name, SecretString=value)
+        arn = client.describe_secret(SecretId=name)["ARN"]
+    if exec_role_arn:
+        policy = {"Version": "2012-10-17", "Statement": [{
+            "Effect": "Allow",
+            "Principal": {"AWS": exec_role_arn},
+            "Action": "secretsmanager:GetSecretValue",
+            "Resource": "*",   # a resource policy is attached to *this* secret
+        }]}
+        client.put_resource_policy(SecretId=arn, ResourcePolicy=_json.dumps(policy),
+                                   BlockPublicPolicy=True)
+    logger.info("AWS SM: wrote ephemeral secret %s (rbac→%s)", name, exec_role_arn or "default")
+    return arn
+
+
+def delete_aws_sm(name_or_arn: str) -> None:
+    """Force-delete an AWS SM secret (no recovery window — so the name frees
+    immediately and billing stops). Used to clean up an ephemeral after the run."""
+    region, _ = _aws_cfg()
+    import boto3
+    client = boto3.client("secretsmanager", region_name=region)
+    client.delete_secret(SecretId=name_or_arn, ForceDeleteWithoutRecovery=True)
+    logger.info("AWS SM: force-deleted %s", name_or_arn)
+
+
+def list_aws_sm_ephemeral() -> list:
+    """List ephemeral secrets (by tag) as ``[{"id": arn, "created_ts": epoch}]``
+    for the GC sweeper."""
+    from . import ephemeral_secrets as _eph
+    region, _ = _aws_cfg()
+    import boto3
+    client = boto3.client("secretsmanager", region_name=region)
+    out = []
+    paginator = client.get_paginator("list_secrets")
+    filters = [{"Key": "tag-key", "Values": [_eph.TAG_KEY]}]
+    for page in paginator.paginate(Filters=filters):
+        for s in page.get("SecretList", []):
+            created = s.get("CreatedDate")
+            out.append({"id": s["ARN"], "created_ts": created.timestamp() if created else 0})
+    return out
+
+
 # ── Azure Key Vault ───────────────────────────────────────────────────────────
 
 def _azure_kv_client():
@@ -360,6 +432,65 @@ def write_gcp_sm(key: str, value: str) -> str:
     })
     logger.info("GCP SM: wrote secret %s", secret_id)
     return secret_id
+
+
+# ── Ephemeral GCP SM secrets (managed-account checkout on the Cloud Run runner) ─
+
+def write_gcp_sm_ephemeral(name: str, value: str, runner_sa: str) -> str:
+    """Create a **labelled** ephemeral GCP SM secret, add the value, and bind
+    ``roles/secretmanager.secretAccessor`` on **only this secret** to ``runner_sa``
+    (the SA the Cloud Run job runs as) — no project-level accessor, so only the
+    runner can read it. ``name`` is the (non-secret) resource id we generate; the
+    credential is ``value``. Returns the resource id."""
+    from . import ephemeral_secrets as _eph
+    from google.api_core.exceptions import AlreadyExists
+    project, _, _ = _gcp_cfg()
+    client = _gcp_client()
+    parent = f"projects/{project}"
+    resource = f"{parent}/secrets/{name}"
+    try:
+        client.create_secret(request={
+            "parent": parent, "secret_id": name,
+            "secret": {"replication": {"automatic": {}},
+                       "labels": {_eph.TAG_KEY: _eph.TAG_VALUE}},
+        })
+    except AlreadyExists:
+        pass
+    client.add_secret_version(request={"parent": resource, "payload": {"data": value.encode()}})
+    if runner_sa:
+        policy = client.get_iam_policy(request={"resource": resource})
+        from google.iam.v1 import policy_pb2
+        policy.bindings.append(policy_pb2.Binding(
+            role="roles/secretmanager.secretAccessor",
+            members=[f"serviceAccount:{runner_sa}"]))
+        client.set_iam_policy(request={"resource": resource, "policy": policy})
+    logger.info("GCP SM: wrote ephemeral secret %s (rbac→%s)", name, runner_sa or "none")
+    return name
+
+
+def delete_gcp_sm(ref: str) -> None:
+    """Delete an ephemeral GCP SM secret by its (non-secret) resource id. Used for
+    post-run cleanup."""
+    project, _, _ = _gcp_cfg()
+    client = _gcp_client()
+    client.delete_secret(request={"name": f"projects/{project}/secrets/{ref}"})
+    logger.info("GCP SM: deleted %s", ref)
+
+
+def list_gcp_sm_ephemeral() -> list:
+    """List ephemeral secrets (by label) as ``[{"id": secret_id, "created_ts": epoch}]``
+    for the GC sweeper."""
+    from . import ephemeral_secrets as _eph
+    project, _, _ = _gcp_cfg()
+    client = _gcp_client()
+    parent = f"projects/{project}"
+    out = []
+    for s in client.list_secrets(request={
+        "parent": parent, "filter": f"labels.{_eph.TAG_KEY}={_eph.TAG_VALUE}"
+    }):
+        sid = s.name.split("/secrets/")[-1]
+        out.append({"id": sid, "created_ts": s.create_time.timestamp() if s.create_time else 0})
+    return out
 
 
 def read_gcp_sm(ref: str, vault_id: str | None = None) -> str:
