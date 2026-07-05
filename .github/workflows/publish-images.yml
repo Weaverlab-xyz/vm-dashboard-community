@@ -12,6 +12,7 @@ name: Publish images
 # and retain full Debian security updates):
 #   chrweav/infra-dashboard            (context: .)
 #   chrweav/dashboard-promote-runner   (context: runners/promote)
+#   chrweav/ansible-winrm              (context: runners/ansible-winrm)
 
 on:
   push:
@@ -35,6 +36,9 @@ jobs:
           - image: chrweav/dashboard-promote-runner
             context: runners/promote
             dockerfile: runners/promote/Dockerfile
+          - image: chrweav/ansible-winrm
+            context: runners/ansible-winrm
+            dockerfile: runners/ansible-winrm/Dockerfile
     steps:
       - name: Checkout
         uses: actions/checkout@v4

@@ -252,7 +252,7 @@ Container registry dashboardsandboxacr…  (Basic SKU)
   Mirrors 3 public images so deploy-time pulls come from ACR, not Docker Hub
   (which rate-limits anonymous pulls):
     beyondtrust/sra-jumpoint:latest          [ACI Shell-Jump Jumpoint]
-    willhallonline/ansible:latest            [ACI config-mgmt runner]
+    chrweav/ansible-winrm:latest             [ACI config-mgmt runner]
     chrweav/dashboard-promote-runner:latest  [ACI cross-cloud image promote]
   One registry serves every region (globally pullable); per-region re-runs reuse it.
   Opt out with SANDBOX_SKIP_ACR=1. The VM-based tunnel Jumpoint still pulls from

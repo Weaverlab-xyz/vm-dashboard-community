@@ -182,13 +182,13 @@ the image-promote runner (see [Shared cloud infrastructure](#shared-cloud-infras
 | AWS SSH user | `ansible_aws_user` | `ANSIBLE_AWS_USER` | `ec2-user` | Default SSH username for `aws:` targets (Amazon Linux). Per-job editable; pre-filled from this. |
 | Azure SSH user | `ansible_azure_user` | `ANSIBLE_AZURE_USER` | `azureuser` | Default SSH username for `azure:` targets. Per-job editable. |
 | GCP SSH user | `ansible_gcp_user` | `ANSIBLE_GCP_USER` | `gcp-user` | Default SSH username for `gcp:` targets. Per-job editable. |
-| ACI runner image | `ansible_aci_image` | `ANSIBLE_ACI_IMAGE` | `willhallonline/ansible:latest` | Ansible image the ACI task pulls. |
-| Cloud Run runner image | `gcp_ansible_image` | `GCP_ANSIBLE_IMAGE` | `willhallonline/ansible:latest` | Ansible image the Cloud Run Job pulls. |
+| ACI runner image | `ansible_aci_image` | `ANSIBLE_ACI_IMAGE` | `chrweav/ansible-winrm:latest` | Ansible image the ACI task pulls (default includes pywinrm). |
+| Cloud Run runner image | `gcp_ansible_image` | `GCP_ANSIBLE_IMAGE` | `chrweav/ansible-winrm:latest` | Ansible image the Cloud Run Job pulls (default includes pywinrm). |
 | ACI SSH key secret name | `ansible_aci_ssh_key_secret_name` | `ANSIBLE_ACI_SSH_KEY_SECRET_NAME` | _(empty)_ | Azure Key Vault secret name holding the Ansible SSH private key for Azure VM targets. |
 
 > The ECS Ansible image is `ansible_ecs_image` (env `ANSIBLE_ECS_IMAGE`,
-> default `willhallonline/ansible:latest`). The local runner image is
-> `ansible_local_image` (env `ANSIBLE_LOCAL_IMAGE`). The AWS SSH key for
+> default `chrweav/ansible-winrm:latest`). The local runner image is
+> `ansible_local_image` (env `ANSIBLE_LOCAL_IMAGE`, same default). The AWS SSH key for
 > EC2 targets comes from `ansible_ssh_key_sm_name` (env
 > `ANSIBLE_SSH_KEY_SM_NAME`, default `ec2/ssh-keypair`) — see
 > [Cloud VM SSH keys](#cloud-vm-ssh-keys-ansible-runner). The final-fallback
@@ -340,7 +340,7 @@ backends need nothing beyond the Docker socket (Ansible) or in-container
   **only when** the runner image lives in a private ACR. ACI uses these as
   image-registry credentials at container-group create time to pull the
   image; they are passed as secure values, not stored on the container.
-  Leave blank for the public `willhallonline/ansible` / `dtzar/helm-kubectl`
+  Leave blank for the public `chrweav/ansible-winrm` / `dtzar/helm-kubectl`
   images.
 - **VNet subnet** (`ansible_aci_subnet_id`) when the container group must
   run inside a private VNet to reach the target.
@@ -554,24 +554,32 @@ separate optgroups populated from the AWS / Azure / GCP tab caches.
 | Nutanix AHV | SSH | `nutanix_password` (targets the CVM SSH interface) |
 | XCP-ng / XenServer | SSH | `xcpng_password` (root — same credentials as the XAPI connection) |
 
-### Hyper-V WinRM requirements
+### WinRM and the runner image (pywinrm)
 
-The Ansible `community.windows` collection (included in
-`willhallonline/ansible`) is required for Windows playbooks. If `pywinrm`
-is not bundled in your image, install it:
+Any Windows / WinRM target — on-prem Hyper-V **or** a Windows cloud VM (AWS / Azure /
+GCP) — needs [`pywinrm`](https://pypi.org/project/pywinrm/) in the **runner image**.
+The dashboard's **default** runner image, **`chrweav/ansible-winrm:latest`**, is
+upstream `willhallonline/ansible` **plus** `pywinrm`, so Windows works out of the box
+on every runner — no image change needed. (Source:
+[`runners/ansible-winrm/`](../../runners/ansible-winrm/).)
 
-```bash
-pip install pywinrm
-```
+This matters only if you **override** the image. Upstream `willhallonline/ansible`
+does *not* bundle `pywinrm`, so pointing a runner at it (or any image without
+pywinrm) makes Windows runs fail with *"pywinrm is not installed"*. The image
+settings, all defaulting to `chrweav/ansible-winrm:latest`:
 
-Or use a custom image that includes it:
+| Runner | Setting |
+|---|---|
+| Local Docker | `ANSIBLE_LOCAL_IMAGE` / `ansible_local_image` |
+| AWS ECS | `ansible_ecs_image` |
+| Azure ACI | `ansible_aci_image` |
+| GCP Cloud Run | `gcp_ansible_image` |
 
-```
-ANSIBLE_LOCAL_IMAGE=my-registry/ansible-winrm:latest
-```
-
-WinRM must be enabled on the Hyper-V host (`Enable-PSRemoting -Force`) — the
-same requirement as the Hyper-V management integration.
+Beyond the image, a Windows run needs WinRM enabled and reachable on the target
+(`Enable-PSRemoting -Force` on Hyper-V; ports 5985/5986 open to the runner) — and on
+the cloud runners the credential supplied via
+[Use a secret](#using-a-secrets-management-secret-in-a-run), since they don't forward
+plaintext extra vars.
 
 ### Proxmox SSH note
 
@@ -593,11 +601,13 @@ vim-cmd hostsvc/enable_ssh
 ### Changing the local Ansible image
 
 ```
-ANSIBLE_LOCAL_IMAGE=willhallonline/ansible:latest
+ANSIBLE_LOCAL_IMAGE=chrweav/ansible-winrm:latest   # the default
 ```
 
 Any image with `ansible-playbook` on its `PATH` works. The playbook and
-inventory are bind-mounted into `/ansible/` inside the container.
+inventory are bind-mounted into `/ansible/` inside the container. Note: an image
+without `pywinrm` (e.g. upstream `willhallonline/ansible`) can't drive Windows/WinRM
+targets.
 
 ---
 
@@ -765,9 +775,11 @@ for SSH). For ESXi, SSH must be enabled on the host.
 **Hyper-V: "WinRM connection refused"** — WinRM is not enabled. Run
 `Enable-PSRemoting -Force` on the Hyper-V host.
 
-**Hyper-V: "pywinrm is not installed"** — the Ansible image doesn't include
-`pywinrm`. Set `ANSIBLE_LOCAL_IMAGE` to an image that does, or build a custom
-image.
+**"pywinrm is not installed"** (any Windows/WinRM target, any runner) — you've
+**overridden** the runner image with one that lacks `pywinrm` (e.g. upstream
+`willhallonline/ansible`). The default `chrweav/ansible-winrm:latest` includes it;
+either clear the override or point it at an image that has pywinrm. See
+[WinRM and the runner image (pywinrm)](#winrm-and-the-runner-image-pywinrm).
 
 **Container starts but can't reach the hypervisor** — the Ansible container
 runs on the same Docker network as the dashboard (`compose` default bridge).
