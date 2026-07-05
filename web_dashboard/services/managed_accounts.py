@@ -44,11 +44,17 @@ def normalize_managed_systems(systems: list, accounts_by_system: dict) -> list:
             aid = a.get("ManagedAccountID") or a.get("AccountId") or a.get("AccountID")
             if aid is None:
                 continue
+            # Change-after-release: BeyondTrust rotates the password when the
+            # request/session is released. Recommended for accounts used on the
+            # ECS/GCP ephemeral path — a missed cleanup then leaves only a rotated,
+            # dead credential. None when ps-cli doesn't report the flag (unknown).
+            car = a.get("ChangePasswordAfterAnyReleaseFlag")
             accounts.append({
                 "account_id":   int(aid),
                 "name":         a.get("AccountName") or a.get("Name") or "",
                 "domain":       a.get("DomainName") or "",
                 "uses_ssh_key": bool(a.get("DSSAutoManagementFlag")),
+                "change_after_release": None if car is None else bool(car),
             })
         out.append({
             "system_id": sid,

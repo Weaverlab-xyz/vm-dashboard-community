@@ -312,11 +312,52 @@ also lets the operator pick a Password Safe **managed account** from a live list
 and use it as the login identity — the credential is checked out just-in-time (an
 SSH-key account → the connection key; a password account → `ansible_ssh_pass`).
 Managed-account checkout works on the **local and Azure (ACI) runners** (both
-inject inline); it's rejected on ECS / Cloud Run, which reference a store secret a
-JIT (ephemeral) credential can't satisfy.
+inject inline); on **ECS / Cloud Run** it requires the opt-in below.
 
 Full operator detail lives in
 [docs/integrations/ansible.md → Using a Secrets-Management secret in a run](integrations/ansible.md#using-a-secrets-management-secret-in-a-run).
+
+### Ephemeral cloud secrets
+
+The ECS and Cloud Run runners inject a secret by *referencing* one in that cloud's
+store (the task identity fetches it at launch); a just-in-time managed-account
+credential has no such store entry. Enabling **Ephemeral cloud secrets**
+(Settings → Ansible, **off by default**) bridges that: for the run, the dashboard
+
+1. checks the credential out of Password Safe,
+2. writes it to the cloud store as a **short-lived, RBAC-locked** secret,
+3. injects it via the provider's secret channel (ECS `valueFrom` / Cloud Run
+   secret-env), and
+4. **force-deletes** it in a `finally` when the run ends.
+
+**RBAC lock-down — only the runner can read it:**
+
+| Cloud | How access is restricted |
+|---|---|
+| **GCP** | The Cloud Run job runs as a configured **runner service account**, and `roles/secretmanager.secretAccessor` is granted **on that one secret** to **only** that SA (no project-level accessor). Requires `gcp_ansible_runner_service_account`. |
+| **AWS** | A resource policy scopes `GetSecretValue` to the **ECS execution role**. For a *cryptographic* lock, set `ansible_ephemeral_kms_key_id` to a CMK whose key policy grants `kms:Decrypt` to only that role — then reading requires decrypt permission even for account IAM admins. |
+
+**Rotate-on-release (best-effort).** The dashboard uses a **long-enough Password
+Safe request** (`ansible_managed_request_duration_min`, default 60 min — must
+outlast the run) so the request is still open to flag **rotate-on-check-in** and
+then **check it in** after the run. Rotation isn't enforceable (it depends on the
+account being auto-managed), so the reliable backstop is enabling **Change Password
+After Release** on the managed account — either way a missed cleanup then leaves a
+rotated, dead credential.
+
+**Garbage collection.** Each run reaps its own ephemerals; a sweeper (on startup and
+before each run) force-deletes any tagged ephemeral older than the TTL, covering a
+crash between create and cleanup.
+
+**The trade-off.** This briefly writes a PAM-vaulted credential into the cloud store
+(a second trust domain) for the task's lifetime. Mitigations shrink but don't erase
+that: the per-secret RBAC lock, optional CMK, short request duration, rotate-on-
+check-in / Change-After-Release, force-delete + GC, and dashboard-side audit of the
+use. If that trade-off isn't acceptable, use the local or ACI runner (inline, no
+store copy) — the default.
+
+Full operator detail:
+[docs/integrations/ansible.md → Managed-account checkout](integrations/ansible.md#managed-account-checkout-beyondtrust-password-safe).
 
 ---
 

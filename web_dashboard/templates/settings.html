@@ -862,6 +862,47 @@
                          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
                          placeholder="projects/proj/locations/region/connectors/name">
                 </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Runner Service Account <span class="text-gray-400 font-normal">(required for ephemeral secrets — the SA the job runs as)</span></label>
+                  <input type="text" x-model="panelCfg.gcp_ansible_runner_service_account"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="ansible-runner@project.iam.gserviceaccount.com">
+                </div>
+              </div>
+
+              <!-- Ephemeral cloud secrets (managed-account checkout on ECS / Cloud Run) -->
+              <div class="rounded-lg border border-amber-200 bg-amber-50 p-3 space-y-3"
+                   x-show="panelCfg.ansible_runner_aws==='ecs' || panelCfg.ansible_runner_gcp==='gcp'" x-cloak>
+                <label class="flex items-start gap-2">
+                  <input type="checkbox" x-model="panelCfg.ansible_cloud_ephemeral_secrets_enabled" class="mt-1">
+                  <span>
+                    <span class="text-sm font-semibold text-gray-700">Ephemeral cloud secrets</span>
+                    <span class="block text-xs text-gray-600">Allow a BeyondTrust managed-account checkout on the ECS / Cloud Run runners. The
+                    checked-out credential is written to the cloud secret store as a short-lived, RBAC-locked secret
+                    (readable only by the runner identity), injected via the provider's secret channel, then
+                    force-deleted after the run. <strong>This copies a PAM-vaulted credential into the cloud store for the
+                    run</strong> — pair it with "Change Password After Release" on the account (or rely on the best-effort
+                    rotate-on-check-in the dashboard applies).</span>
+                  </span>
+                </label>
+                <div class="grid grid-cols-2 gap-3" x-show="panelCfg.ansible_cloud_ephemeral_secrets_enabled" x-cloak>
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">GC TTL (min)</label>
+                    <input type="number" x-model.number="panelCfg.ansible_ephemeral_secret_ttl_min"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                  </div>
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Request duration (min)</label>
+                    <input type="number" x-model.number="panelCfg.ansible_managed_request_duration_min"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                  </div>
+                  <div class="col-span-2">
+                    <label class="block text-sm font-medium text-gray-700 mb-1">AWS KMS Key ID <span class="text-gray-400 font-normal">(optional — CMK for true read-restriction; grant Decrypt to the ECS execution role only)</span></label>
+                    <input type="text" x-model="panelCfg.ansible_ephemeral_kms_key_id"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                           placeholder="arn:aws:kms:…:key/… or alias/…">
+                  </div>
+                </div>
               </div>
             </div>
           </template>

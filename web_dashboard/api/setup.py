@@ -514,6 +514,13 @@ class AnsibleFeatureConfig(BaseModel):
     gcp_ansible_cloud_run_region: str = ""
     gcp_ansible_image: str = "willhallonline/ansible:latest"
     gcp_ansible_vpc_connector: str = ""
+    gcp_ansible_runner_service_account: str = ""   # SA the Cloud Run job runs as (required for GCP ephemeral secrets)
+    # Ephemeral cloud secrets — managed-account checkout on ECS / Cloud Run. OFF by
+    # default; copies a PAM credential into the cloud store (RBAC-locked) for the run.
+    ansible_cloud_ephemeral_secrets_enabled: bool = False
+    ansible_ephemeral_secret_ttl_min: int = 30     # GC safety-net age
+    ansible_ephemeral_kms_key_id: str = ""         # AWS CMK for the ephemeral secret (true read-restriction)
+    ansible_managed_request_duration_min: int = 60  # PS request duration (must outlast the run)
     # Kubernetes (kubectl/helm) runner — reuses the ECS/ACI/Cloud Run network
     # settings above. "local" runs in-process; cloud modes run cluster-API ops
     # as a one-shot stock kubectl+helm task with clean egress.

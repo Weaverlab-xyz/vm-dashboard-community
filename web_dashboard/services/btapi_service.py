@@ -17,12 +17,15 @@ BT_API_HOST credentials.
 """
 import asyncio
 import json
+import logging
 import os
 import re
 import subprocess
 import sys
 
 from ..config import settings
+
+logger = logging.getLogger(__name__)
 
 
 def _cfg(key: str) -> str:
@@ -305,6 +308,57 @@ async def get_ps_credential(
     return await asyncio.to_thread(
         _get_credential_by_request_sync, request_id, uses_ssh_key
     )
+
+
+async def get_ps_credential_with_request(
+    system_id: int, account_id: int, duration_min: int = 30, uses_ssh_key: bool = False
+) -> tuple:
+    """Like get_ps_credential, but also return the numeric request id so the caller
+    can flag rotate-on-check-in and check the request in when done. Returns
+    ``(request_id, credential)``."""
+    request_id = await asyncio.to_thread(
+        _create_ps_request_sync, system_id, account_id, duration_min
+    )
+    cred = await asyncio.to_thread(
+        _get_credential_by_request_sync, request_id, uses_ssh_key
+    )
+    return request_id, cred
+
+
+# Per-request rotation, so a credential can be rotated on release without the
+# managed account's standing "Change Password After Release" setting. Mirrors the
+# BeyondTrust REST endpoints PUT /api/public/v3/requests/{id}/rotateoncheckin and
+# .../checkin. Best-effort via ps-cli — a failure is logged, never fatal (the
+# ephemeral store copy is force-deleted regardless).
+
+def _rotate_on_checkin_sync(request_id: int) -> None:
+    _ps_run(["requests", "rotate-on-checkin", "-r", str(request_id)])
+
+
+def _checkin_request_sync(request_id: int) -> None:
+    _ps_run(["requests", "checkin", "-r", str(request_id)])
+
+
+async def rotate_ps_request_on_checkin(request_id: int) -> bool:
+    """Flag a credential request so Password Safe rotates the password when it's
+    checked in. Returns True on success, False (logged) on any failure."""
+    try:
+        await asyncio.to_thread(_rotate_on_checkin_sync, request_id)
+        return True
+    except BTAPIError as exc:
+        logger.warning("rotate-on-check-in failed for request %s: %s", request_id, exc)
+        return False
+
+
+async def checkin_ps_request(request_id: int) -> bool:
+    """Check a credential request back in (releases it; triggers rotation if the
+    request was flagged rotate-on-check-in). Returns True on success."""
+    try:
+        await asyncio.to_thread(_checkin_request_sync, request_id)
+        return True
+    except BTAPIError as exc:
+        logger.warning("check-in failed for request %s: %s", request_id, exc)
+        return False
 
 
 # ── Password Safe secrets (ps-cli) ────────────────────────────────────────────
