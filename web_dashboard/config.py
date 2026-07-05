@@ -319,7 +319,7 @@ class Settings(BaseSettings):
     portainer_verify_ssl: bool = True                # Set False for self-signed certs
     portainer_agent_image: str = "portainer/agent:latest"
     portainer_agent_port: int = 9001
-    ansible_local_image: str = "willhallonline/ansible:latest"
+    ansible_local_image: str = "chrweav/ansible-winrm:latest"
 
     # Azure resource-management credentials.
     # Preferred: set the four direct env vars below (community edition / simple
@@ -346,7 +346,7 @@ class Settings(BaseSettings):
     azure_aci_resource_group: str = ""            # defaults to azure_resource_group if empty
     azure_aci_subnet_id: str = ""                 # required for ACI VNet injection
     azure_aci_jumpoint_image: str = "beyondtrust/sra-jumpoint:latest"
-    ansible_aci_image: str = "willhallonline/ansible:latest"  # Ansible image for ACI config mgmt runner
+    ansible_aci_image: str = "chrweav/ansible-winrm:latest"  # Ansible image for ACI config mgmt runner
     ansible_aci_ssh_key_secret_name: str = ""  # Azure Key Vault secret name for the Ansible SSH private key
     azure_aci_cpu: float = 1.0
     azure_aci_memory: float = 2.0
@@ -547,7 +547,7 @@ class Settings(BaseSettings):
     ansible_default_user: str = "ec2-user"    # fallback for unknown cloud tags
     ansible_ecs_cluster: str = "bt-jumpoint"  # Shares cluster with BT Jumpoint
     ansible_ecs_task_family: str = "ansible-config-mgmt"
-    ansible_ecs_image: str = "willhallonline/ansible:latest"
+    ansible_ecs_image: str = "chrweav/ansible-winrm:latest"
     ansible_ecs_cpu: str = "256"
     ansible_ecs_memory: str = "512"
     ansible_ecs_subnet_id: str = ""           # Fargate task subnet (VPC private subnet recommended)
@@ -557,7 +557,7 @@ class Settings(BaseSettings):
     ansible_ssh_key_sm_name: str = "ec2/ssh-keypair"  # AWS Secrets Manager secret name/ARN (preferred)
     # GCP Cloud Run Jobs ansible runner (mirrors azure_ansible_aci_image / ACI runner)
     gcp_ansible_cloud_run_region: str = ""   # defaults to gcp_region if blank
-    gcp_ansible_image: str = "willhallonline/ansible:latest"
+    gcp_ansible_image: str = "chrweav/ansible-winrm:latest"
     gcp_ansible_vpc_connector: str = ""      # e.g. "projects/proj/locations/region/connectors/name" (optional, for private host access)
 
     # Ephemeral cloud secrets for managed-account checkout on the ECS / Cloud Run

@@ -128,7 +128,7 @@ Where the Ansible process actually runs. Picked in
 
 | Runner | Where it runs | Best for |
 |---|---|---|
-| **Local Docker** | Inside the dashboard container's Docker context. Uses a side-car `willhallonline/ansible` container per run. | On-prem hypervisor targets; corporate-network targets; anything reachable from the dashboard host. |
+| **Local Docker** | Inside the dashboard container's Docker context. Uses a side-car `chrweav/ansible-winrm` container per run (ansible + pywinrm). | On-prem hypervisor targets; corporate-network targets; anything reachable from the dashboard host. |
 | **AWS ECS Fargate** | A Fargate task launched per run in your VPC. | EC2 targets in private subnets without a path back to the dashboard host. |
 | **Azure ACI** | An Azure Container Instance per run, in your VNet. | Azure VMs in private subnets. |
 | **GCP Cloud Run Jobs** | A Cloud Run Job per run, in your project. | GCE instances. |

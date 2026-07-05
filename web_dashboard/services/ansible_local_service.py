@@ -383,7 +383,7 @@ async def run_playbook(
     The temp directory (containing credentials and any SSH key) is deleted as
     soon as the container exits.
     """
-    image = _cfg("ansible_local_image") or "willhallonline/ansible:latest"
+    image = _cfg("ansible_local_image") or "chrweav/ansible-winrm:latest"
     inventory = build_inventory()
     is_group = target in inventory and target not in ("_meta", "on_premises")
     atype = asset_type(asset_name)

@@ -57,7 +57,7 @@ class AzureSetup(BaseModel):
     # Credentials are stored encrypted via config_service and resolved through
     # whichever secrets backend the user picked on /secrets.
     azure_acr_server: str = ""                                # e.g. myregistry.azurecr.io
-    azure_ansible_aci_image: str = "willhallonline/ansible:latest"
+    azure_ansible_aci_image: str = "chrweav/ansible-winrm:latest"
     azure_aci_jumpoint_image: str = "beyondtrust/sra-jumpoint:latest"
     azure_acr_username: str = ""
     azure_acr_password: str = ""
@@ -504,7 +504,7 @@ class AnsibleFeatureConfig(BaseModel):
     ansible_ecs_cpu: str = "256"
     ansible_ecs_memory: str = "512"
     # Azure ACI runner
-    ansible_aci_image: str = "willhallonline/ansible:latest"
+    ansible_aci_image: str = "chrweav/ansible-winrm:latest"
     ansible_aci_subnet_id: str = ""
     ansible_aci_ssh_key_secret_name: str = ""
     ansible_aci_acr_server: str = ""
@@ -512,7 +512,7 @@ class AnsibleFeatureConfig(BaseModel):
     ansible_aci_acr_password: str = ""      # encrypted at rest
     # GCP Cloud Run runner
     gcp_ansible_cloud_run_region: str = ""
-    gcp_ansible_image: str = "willhallonline/ansible:latest"
+    gcp_ansible_image: str = "chrweav/ansible-winrm:latest"
     gcp_ansible_vpc_connector: str = ""
     gcp_ansible_runner_service_account: str = ""   # SA the Cloud Run job runs as (required for GCP ephemeral secrets)
     # Ephemeral cloud secrets — managed-account checkout on ECS / Cloud Run. OFF by

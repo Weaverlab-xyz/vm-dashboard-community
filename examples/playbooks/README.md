@@ -87,8 +87,9 @@ Cloud Run runners are for Linux SSH targets.)
 
 - These are starting points — review and adapt before running against real hosts.
   `ssh-hardening.yml` disables SSH password auth, so confirm key access first.
-- Playbooks use fully-qualified module names; the runner image
-  (`willhallonline/ansible`) ships the `ansible.builtin`, `ansible.posix`,
-  `ansible.windows`, and `community.windows` collections.
+- Playbooks use fully-qualified module names; the default runner image
+  (`chrweav/ansible-winrm` — upstream `willhallonline/ansible` + `pywinrm`) ships the
+  `ansible.builtin`, `ansible.posix`, `ansible.windows`, and `community.windows`
+  collections, so WinRM/Windows works out of the box.
 - `tests/test_playbook_samples.py` validates every file here is a well-formed play
   list, so a malformed sample can't ship.
