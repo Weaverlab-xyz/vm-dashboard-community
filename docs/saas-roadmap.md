@@ -17,6 +17,18 @@ solution), see [saas-comparison.md](saas-comparison.md).
 > reality" section reflect that. Per-feature design/execution plans are
 > tracked in the (non-public) engineering planning workspace; this doc
 > stays the high-level honest-status view.
+>
+> **Maintenance note (2026-07-05):** four items that were SaaS-distinct on
+> this list have **shipped into the community edition** and are no longer
+> SaaS-only: the **tamper-evident (hash-chained) audit trail**,
+> **action-level policy guardrails** (OPA pre-action admission), **config
+> drift-aware runs**, and the staleness-alerting + artefact
+> secret-scanning half of **secret lifecycle**. Each entry below is
+> updated with a "Shipped in community" note and the residual SaaS-only
+> delta (e.g. WORM/SIEM export, scheduled rotation). See the community
+> docs [policy-guardrails.md](policy-guardrails.md),
+> [config-management.md](config-management.md), and
+> [secrets-management.md](secrets-management.md).
 
 ---
 
@@ -114,17 +126,27 @@ next things queued for QA.
 
 ### Secret lifecycle — rotation, expiry, and scanning
 
-- **What community does:** secrets are stored and resolved, but nothing
-  rotates them, alerts on staleness, or scans the playbooks / Terraform
-  / manifests the platform runs for embedded secrets.
-- **What SaaS adds:** scheduled rotation for supported backends,
-  expiry/staleness alerting on credentials, and secret-scanning of the
-  artefacts the platform executes — the lifecycle half that "store
-  secrets" leaves out.
-- **Status:** In design. *(Backlog — sketched 2026-05-30; not yet
-  specified.)*
-- **Dev-testable?** Partial. Staleness detection + secret-scanning run
-  locally; live rotation needs real backend credentials.
+> **Shipped in community (was fully on this list):** **staleness/expiry
+> alerting** (`secret_max_age_days`, `GET /api/secrets/staleness`, the
+> Needs-attention rollup — vault refs use the backend's own last-changed
+> date) and **artefact secret-scanning** (uploaded playbooks / scripts are
+> scanned on upload, `secret_scan_enabled`) both run in the community
+> edition — see [secrets-management.md](secrets-management.md) and
+> [config-management.md](config-management.md#secret-scanning-advisory).
+> A rotation *primitive* also shipped: a Password Safe managed-account
+> checkout used on a cloud run can be flagged **rotate-on-check-in**
+> ([ansible.md](integrations/ansible.md#managed-account-checkout-beyondtrust-password-safe)).
+
+- **What community does:** stores + resolves secrets, **alerts on
+  staleness**, and **scans executed artefacts** for embedded secrets;
+  rotates a managed-account credential on release (best-effort). What it
+  lacks is *scheduled* rotation of stored backend secrets.
+- **What SaaS adds:** **scheduled rotation** for supported backends — the
+  one lifecycle piece still missing — on top of the staleness + scanning
+  that now ship in community.
+- **Status:** In design (scheduled rotation only; staleness + scanning
+  shipped in community).
+- **Dev-testable?** Partial. Live rotation needs real backend credentials.
 
 ---
 
@@ -299,12 +321,22 @@ next things queued for QA.
 
 ### Drift-aware runs
 
-- **What community does:** job log is the audit trail; nothing
-  watches the target between runs.
-- **What SaaS adds:** stores the per-target hash of the last
-  successfully applied playbook; surfaces *"state of host X
-  unverified since 2026-04-12"*.
-- **Status:** In design.
+> **Shipped in community (was on this list):** the config-drift signal
+> runs in the community edition — each successful apply records a
+> per-target fingerprint (`config_apply_state`), and `GET
+> /api/config-mgmt/drift` surfaces **unverified** (no apply within
+> `config_drift_stale_days`) and **changed** (stored playbook now differs
+> from what was applied) targets. See
+> [config-management.md](config-management.md).
+
+- **What community does:** records the per-target content/inputs hash of
+  the last successful apply and surfaces unverified/changed targets in the
+  Ansible stream — *"state of host X unverified since 2026-04-12"*.
+- **What SaaS adds:** the remaining active half — a *scheduled reconciler*
+  that re-checks targets between runs rather than only recording at
+  apply-time.
+- **Status:** Shipped in community (passive/apply-time); SaaS adds a
+  scheduled reconciler.
 - **Dev-testable?** Yes.
 
 ### Tenant-scoped runner networking
@@ -383,17 +415,24 @@ next things queued for QA.
 
 ### Action-level policy guardrails (pre-action admission control)
 
-- **What community does:** nothing pre-empts an operation. RBAC gates
-  who can act; compliance-as-code (above) evaluates infrastructure
-  *after* apply.
-- **What SaaS adds:** pre-action admission control over dashboard
-  operations — allowed regions, allowed base images, instance-size
-  caps, prod-window restrictions — evaluated by the same OPA engine as
-  compliance-as-code but at the *pre-action* decision point, so a
-  disallowed deploy never starts.
-- **Status:** In design. *(Backlog — sketched 2026-05-30; not yet
-  specified.)* Sibling of compliance-as-code; shares the OPA engine,
-  differs in decision point (pre-action vs post-deploy).
+> **Shipped in community (was on this list):** pre-action admission
+> control runs in the community edition — an OPA-backed engine
+> (`admission_service`) evaluates a deploy request against Rego policies
+> (allowed regions, instance-size caps, prod-window) at the pre-action
+> decision point and **blocks before the job is created**, failing closed.
+> Config-driven limits are settable without writing Rego, and denials land
+> in the (hash-chained) audit log. Off by default
+> (`admission_control_enabled`). See
+> [policy-guardrails.md](policy-guardrails.md).
+
+- **What community does:** OPA pre-action guardrails over deploy
+  operations (allowed regions / instance-size caps / prod-window), gated
+  by a feature flag, blocking before job creation.
+- **What SaaS adds:** shares the OPA engine with **compliance-as-code**
+  (post-deploy, still SaaS-only) and extends admission to the broader
+  multi-tenant action set and the async human **approval gate** below.
+- **Status:** Shipped in community (deploy guardrails); SaaS extends to
+  post-deploy compliance + approval routing.
 - **Dev-testable?** Yes (OPA runs locally).
 
 ---
@@ -442,16 +481,20 @@ and network scoping**.
 
 ### Tamper-evident audit trail
 
-- **What community does:** each subsystem logs to its own store;
-  records are mutable like any other DB row, and nothing guarantees the
-  trail wasn't altered or truncated.
-- **What SaaS adds:** an append-only, hash-chained audit log (and/or
-  continuous export to a customer-owned WORM bucket / SIEM) so the
-  trail is *evidence*, not just convenience. This is the integrity
-  foundation the centralised audit pane sits on — the pane aggregates;
-  this guarantees the records can be trusted.
-- **Status:** In design. *(Backlog — sketched 2026-05-30; not yet
-  specified.)*
+> **Shipped in community (was on this list):** the append-only,
+> **hash-chained audit log** runs in the community edition
+> (`audit_chain` — each record links to the prior record's hash, so
+> alteration or truncation is detectable). This is the integrity
+> foundation the centralised audit pane sits on.
+
+- **What community does:** hash-chained, tamper-evident audit log
+  (detects alteration/truncation) via `audit_chain`.
+- **What SaaS adds:** continuous **export to a customer-owned WORM bucket
+  / SIEM** so the trail is externally durable evidence, not only locally
+  verifiable — plus the multi-tenant scoping and the centralised audit
+  pane that aggregates it.
+- **Status:** Shipped in community (hash-chained log); SaaS adds WORM/SIEM
+  export + the aggregating pane.
 - **Dev-testable?** Yes. Hash-chaining is local; external WORM / SIEM
   export needs a target.
 
@@ -495,24 +538,32 @@ queued for QA:
 - **Containerised Arc-worker** — dashboard onboarding + polling
   scaffolded; container packaging + QA token-expiry test remain.
 
-**In design** — CVE scanning + signed manifests, config drift-aware
-runs, TF state-locking + drift detection + compliance-as-code, the
-audit pane + cross-tenant catalog, and re-scoped tenant identity (OIDC)
-+ per-tenant webhook.
+**Shipped into community since the last update (2026-07-05)** — four
+items left the SaaS-only column: the **tamper-evident (hash-chained)
+audit trail**, **action-level policy guardrails** (OPA pre-action
+admission), **config drift-aware runs**, and the **staleness-alerting +
+artefact secret-scanning** half of secret lifecycle. Each keeps a
+residual SaaS-only delta (WORM/SIEM export, post-deploy compliance,
+scheduled reconciler, scheduled rotation) noted in its entry above.
+
+**In design** — CVE scanning + signed manifests, TF state-locking + drift
+detection + compliance-as-code, the audit pane + cross-tenant catalog, and
+re-scoped tenant identity (OIDC) + per-tenant webhook.
 
 **Researching (deferred — no plan yet)** — the three AI-assisted
 features (image hardening, playbook generation, module refactoring).
 Each is buildable but flagged above: value unproven and/or output runs
 with privilege, so they wait behind their non-AI foundations.
 
-**Backlog (In design — sketched 2026-05-30, not yet specified)** — six
-governance/assurance items added to harden the "secure and auditable"
-story: approval / change-control gate for destructive automation,
-secret lifecycle (rotation + expiry + scanning), self-supply-chain for
-the platform's own privileged containers, action-level policy
-guardrails (pre-action admission control), tamper-evident audit trail,
-and compliance evidence reporting. Accepted into scope but not yet
-specified.
+**Backlog (In design — sketched 2026-05-30, not yet specified)** — of the
+six governance/assurance items added to harden the "secure and auditable"
+story, **two shipped into community** (action-level policy guardrails,
+tamper-evident audit trail) and **secret lifecycle partly shipped**
+(staleness + scanning done; scheduled rotation remains). The residual
+backlog is: approval / change-control gate for destructive automation,
+scheduled secret rotation, self-supply-chain for the platform's own
+privileged containers, and compliance evidence reporting. Accepted into
+scope but not yet specified.
 
 When a feature flips status, this doc updates. When it flips into the
 community open-source surface, the relevant lifecycle doc gets the
