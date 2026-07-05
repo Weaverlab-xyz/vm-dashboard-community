@@ -66,17 +66,19 @@ Azure KV, GCP SM, or BeyondTrust Secrets Safe.
 
 The remaining SaaS-shaped work on top of this prod topology — workload
 identity (OIDC federation) instead of a system-assigned managed
-identity, per-tenant Key Vault scoping, Container Apps as the runtime
-instead of an Arc-enrolled VM — is documented in
-[saas-roadmap.md](saas-roadmap.md). The bootstrap loop itself is
-already solved.
+identity, and per-tenant Key Vault scoping — is documented in
+[saas-roadmap.md](saas-roadmap.md). (An earlier draft assumed a move to
+per-tenant Container Apps / AKS as the runtime; that hosting model was
+**rejected on cost** — the direction is to stay on the docker-compose
+topology. See the feasibility flag in the roadmap.) The bootstrap loop
+itself is already solved.
 
 ## Side-by-side
 
 | | Community (shipping) | Prod topology (shipping) | SaaS multi-tenant (planned) |
 |---|---|---|---|
 | JWT root key location | Host filesystem / Docker secret | Azure Key Vault, hydrated to env at startup | Per-tenant Azure Key Vault |
-| How the dashboard authenticates to the key store | n/a (local file) | Arc-host managed identity (prod) / `az login` (dev) | Workload identity + OIDC federation per Container Apps revision |
+| How the dashboard authenticates to the key store | n/a (local file) | Arc-host managed identity (prod) / `az login` (dev) | Per-tenant workload identity + OIDC federation (docker-compose topology) |
 | Application secrets (cloud creds, integration tokens) | Encrypted DB → migratable to external vault | Same, with KV-hydrated env as primary | Same, with per-tenant KV |
 | Rotating the root key | Stop app, replace key file, restart, **re-enter all DB-encrypted values** | Rotate in Key Vault, next container start picks it up | Same, with per-tenant rotation |
 | Audit trail for root-key access | Filesystem ACL only | Key Vault diagnostic logs (single-tenant scope) | Key Vault diagnostic logs (per-tenant scope) |
