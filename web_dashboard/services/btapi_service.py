@@ -326,18 +326,18 @@ async def get_ps_credential_with_request(
 
 
 # Per-request rotation, so a credential can be rotated on release without the
-# managed account's standing "Change Password After Release" setting. These are the
-# ps-cli "requests" subcommands (verbatim from the ps-cli command reference) that
-# map to PUT /api/public/v3/requests/{id}/rotateoncheckin and .../checkin — note the
-# -r-id flag (same style as create-request's -a-id/-s-id). Best-effort: a failure is
+# managed account's standing "Change Password After Release" setting. Sent as raw
+# ps-cli API calls (`ps-cli raw PUT <endpoint>`) so they map exactly to the
+# documented REST endpoints PUT /api/public/v3/Requests/{id}/rotateoncheckin and
+# .../checkin — no dependency on subcommand naming. Best-effort: a failure is
 # logged, never fatal (the ephemeral store copy is force-deleted regardless).
 
 def _rotate_on_checkin_sync(request_id: int) -> None:
-    _ps_run(["requests", "request-rotate-on-checkin", "-r-id", str(request_id)])
+    _ps_run(["raw", "PUT", f"Requests/{request_id}/rotateoncheckin"])
 
 
 def _checkin_request_sync(request_id: int) -> None:
-    _ps_run(["requests", "put-request-checkin", "-r-id", str(request_id)])
+    _ps_run(["raw", "PUT", f"Requests/{request_id}/checkin"])
 
 
 async def rotate_ps_request_on_checkin(request_id: int) -> bool:
