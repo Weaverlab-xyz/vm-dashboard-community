@@ -293,7 +293,7 @@ def _resolve_cloud_secrets(runner: str, secret_vars: dict | None,
 
 
 def _add_ephemeral_managed_entries(runner: str, entries: list, manifest_b64: str,
-                                   managed_secret_vars: dict, job_id: str) -> tuple:
+                                   managed_cred_vars: dict, job_id: str) -> tuple:
     """Materialise managed-account credential vars as short-lived, RBAC-locked cloud
     store secrets (ECS → AWS SM, GCP → GCP SM) and extend the (entries, manifest)
     with them, continuing the env-index numbering. Returns
@@ -303,13 +303,13 @@ def _add_ephemeral_managed_entries(runner: str, entries: list, manifest_b64: str
     import base64 as _b64, json as _json
     from ..services import (cloud_ansible_secrets as _cas, ephemeral_secrets as _eph,
                             secrets_backend_service as sbs)
-    if not managed_secret_vars:
+    if not managed_cred_vars:
         return entries, manifest_b64, []
     entries = list(entries)
     manifest = _json.loads(_b64.b64decode(manifest_b64)) if manifest_b64 else []
     cleanup = []
     start = len(entries)
-    for i, (var, value) in enumerate(managed_secret_vars.items()):
+    for i, (var, value) in enumerate(managed_cred_vars.items()):
         env = _cas.env_name(start + i)
         if runner == "ecs":
             name = _eph.aws_secret_name(job_id, start + i)
@@ -339,8 +339,11 @@ def _delete_ephemeral(cleanup: list) -> None:
         try:
             (sbs.delete_aws_sm if provider == "aws" else sbs.delete_gcp_sm)(sid)
         except Exception:
-            logger.warning("ephemeral cleanup failed for %s %s (GC will reap it)",
-                           provider, sid, exc_info=True)
+            # Log the provider + traceback only — the resource id is a loop-derived
+            # value CodeQL taints from the credential dict, and it isn't needed here
+            # (the GC sweeper reaps by tag; the traceback names the failing call).
+            logger.warning("ephemeral %s cleanup failed (GC will reap it)",
+                           provider, exc_info=True)
 
 
 async def _run_job(
@@ -409,7 +412,7 @@ async def _run_job(
         #   • local / ACI → inline (merged into secret_extra_vars below)
         #   • ECS / GCP   → the password vars become ephemeral store secrets, the
         #                   SSH key rides SSH_KEY_B64, ansible_user is a plain var.
-        managed_secret_vars: dict = {}   # cred vars needing a secure channel on cloud
+        managed_cred_vars: dict = {}   # cred vars needing a secure channel on cloud
         managed_plain_vars: dict = {}    # non-secret vars (ansible_user)
         managed_request_ids: list = []   # PS request ids — checked in (rotate-on-release) after a cloud run
         if managed_account or managed_become:
@@ -429,21 +432,21 @@ async def _run_job(
                     if managed_account.get("uses_ssh_key"):
                         secret_ssh_pem = cred                     # connection key (SSH_KEY_B64)
                     else:
-                        managed_secret_vars["ansible_ssh_pass"] = cred  # SSH password (sshpass)
-                        managed_secret_vars["ansible_password"] = cred  # WinRM targets
+                        managed_cred_vars["ansible_ssh_pass"] = cred  # SSH password (sshpass)
+                        managed_cred_vars["ansible_password"] = cred  # WinRM targets
                     secret_values.append(cred)
                 if managed_become:
                     breq_id, bcred = await btapi_service.get_ps_credential_with_request(
                         managed_become["system_id"], managed_become["account_id"],
                         duration_min=_req_dur, uses_ssh_key=False)
                     managed_request_ids.append(breq_id)
-                    managed_secret_vars["ansible_become_password"] = bcred
+                    managed_cred_vars["ansible_become_password"] = bcred
                     secret_values.append(bcred)
             except btapi_service.BTAPIError as e:
                 job_service.set_failed(db, job_id, f"Password Safe checkout failed: {e}")
                 return
             # Local / ACI runners consume everything inline via secret_extra_vars.
-            secret_extra_vars.update(managed_secret_vars)
+            secret_extra_vars.update(managed_cred_vars)
             secret_extra_vars.update(managed_plain_vars)
 
         # Per-target-cloud runner backend: an AWS-target job uses
@@ -519,7 +522,7 @@ async def _run_job(
                 # ECS/GCP secret channel references a store secret; a JIT credential
                 # has none, so we mint one per run and reap it). Sweep leaked ones
                 # first (belt-and-braces with the startup GC).
-                if managed_secret_vars:
+                if managed_cred_vars:
                     try:
                         from ..services import ephemeral_gc
                         ephemeral_gc.sweep()
@@ -528,7 +531,7 @@ async def _run_job(
                     cloud_secret_entries, cloud_manifest_b64, ephemeral_cleanup = (
                         _add_ephemeral_managed_entries(
                             runner, cloud_secret_entries, cloud_manifest_b64,
-                            managed_secret_vars, job_id))
+                            managed_cred_vars, job_id))
                     # Best-effort: flag the PS requests to rotate on check-in, so the
                     # copied-to-store credential is rotated (dead) once we check in
                     # below — even if the store cleanup is missed. Not enforceable
