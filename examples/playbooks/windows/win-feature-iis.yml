@@ -2,9 +2,10 @@
 # Target: Windows Server cloud VMs (Azure today) over WinRM.
 # Installs IIS (+ management tools) and serves a simple page. Idempotent.
 #
-# HOW TO RUN — via the LOCAL runner; supply credentials as extra_vars:
+# HOW TO RUN — local runner, or the Azure (ACI) cloud runner; supply the admin
+# password via Use a secret (recommended) or as an extra_var:
 #   ansible_user: azureuser
-#   ansible_password: <Windows admin password>
+#   ansible_password: <bind via Use a secret, or the Windows admin password>
 # Make sure the NSG allows :80 if you want to reach the page.
 - name: Install IIS
   hosts: all

@@ -211,10 +211,14 @@ the next things queued for QA.
 
 ### Containerised remote worker for zero-touch SaaS spokes
 
-- **What community does:** none — community is single-host; there is
-  no concept of a remote worker that performs cloud-side actions on
-  the dashboard's behalf.
-- **What the hosted topology does today:** the remote worker lives on a
+- **What community does:** community already dispatches **ephemeral
+  remote runners** (ECS / ACI / Cloud Run) for Ansible, Kubernetes, and
+  image-promote runs — but those run **cloud-side** and are torn down after
+  each job. What community has no concept of is a **persistent,
+  customer-hosted worker with access to on-prem/local resources** — a spoke
+  the dashboard can reach into the customer's own network (e.g. to a
+  local OVA artefact) rather than acting only cloud-side.
+- **What the hosted topology does today:** that on-prem worker lives on a
   customer-owned machine the customer enrols by hand, installing every
   job prerequisite (the cloud provider CLIs/SDKs, `qemu-img`, etc.)
   manually.
@@ -371,16 +375,24 @@ the next things queued for QA.
 
 ## Infrastructure as code
 
-### Centralised Terraform state with locking
+### Terraform state — remote + locked
 
-- **What community does:** state lives on the dashboard filesystem
-  under `terraform/deployments/{job_id}/`. No locking — two
-  operators running `apply` concurrently can corrupt state.
-- **What SaaS adds:** a remote state backend with locking (an object
-  store + a lock table, per cloud) serialising concurrent operations.
-- **Status:** In design.
-- **Dev-testable?** Yes. Drop in any remote backend; locking is
-  a backend-config change, not a code rewrite.
+> **Shipped in community (was on this list):** each deploy writes its
+> Terraform state to the **active storage backend** (S3 / Azure Blob / GCS)
+> at `terraform-state/{job_id}/terraform.tfstate` — remote, per-deploy, and
+> **locked** (S3 native `use_lockfile`, Terraform ≥ 1.10 — no DynamoDB
+> table), so concurrent `apply`s can't corrupt state. It falls back to the
+> local filesystem only when no storage backend is configured. See
+> [infrastructure-as-code.md → State](infrastructure-as-code.md#state-the-thing-that-makes-iac-work).
+
+- **What community does:** remote, per-deploy, locked Terraform state in
+  the configured storage backend (state-driven destroy survives a
+  container recreate).
+- **What SaaS adds:** per-tenant state scoping (rides on multi-tenancy) —
+  the remote + locked backend itself already ships.
+- **Status:** Shipped in community (remote + locked); SaaS adds per-tenant
+  scoping.
+- **Dev-testable?** Yes.
 
 ### Continuous drift detection
 
@@ -547,9 +559,9 @@ artefact secret-scanning** half of secret lifecycle. Each keeps a
 residual SaaS-only delta (WORM/SIEM export, post-deploy compliance,
 scheduled reconciler, scheduled rotation) noted in its entry above.
 
-**In design** — CVE scanning + signed manifests, TF state-locking + drift
-detection + compliance-as-code, the audit pane + cross-tenant catalog, and
-per-tenant federated identity for the root-key store + per-tenant webhook.
+**In design** — CVE scanning + signed manifests, Terraform drift detection
++ compliance-as-code, the audit pane + cross-tenant catalog, and per-tenant
+federated identity for the root-key store + per-tenant webhook.
 
 **Researching (deferred — no plan yet)** — the three AI-assisted
 features (image hardening, playbook generation, module refactoring).

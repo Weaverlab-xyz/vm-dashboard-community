@@ -3,9 +3,10 @@
 # Bootstraps Chocolatey (win_chocolatey installs it on first use) and installs a
 # small set of packages. Idempotent.
 #
-# HOW TO RUN — via the LOCAL runner; supply credentials as extra_vars:
+# HOW TO RUN — local runner, or the Azure (ACI) cloud runner; supply the admin
+# password via Use a secret (recommended) or as an extra_var:
 #   ansible_user: azureuser
-#   ansible_password: <Windows admin password>
+#   ansible_password: <bind via Use a secret, or the Windows admin password>
 #
 # extra_vars (optional): choco_packages: ["git", "7zip", "googlechrome"]
 - name: Install software with Chocolatey

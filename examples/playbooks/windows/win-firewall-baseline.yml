@@ -2,10 +2,10 @@
 # Target: Windows cloud VMs (Azure today) over WinRM.
 # Ensures all firewall profiles are enabled and adds a sample inbound allow rule.
 #
-# HOW TO RUN — via the LOCAL runner; supply credentials as extra_vars:
+# HOW TO RUN — local runner, or the Azure (ACI) cloud runner; supply the admin
+# password via Use a secret (recommended) or as an extra_var:
 #   ansible_user: azureuser
-#   ansible_password: <Windows admin password>
-# (The cloud runner is SSH-only and does not forward extra_vars.)
+#   ansible_password: <bind via Use a secret, or the Windows admin password>
 - name: Configure Windows firewall baseline
   hosts: all
   gather_facts: false

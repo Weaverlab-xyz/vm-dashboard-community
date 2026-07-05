@@ -2,10 +2,11 @@
 # Target: Windows cloud VMs (Azure today) over WinRM.
 # Creates a local user and adds it to the Administrators group. Idempotent.
 #
-# HOW TO RUN — via the LOCAL runner; supply credentials as extra_vars:
+# HOW TO RUN — local runner, or the Azure (ACI) cloud runner; supply the login
+# password via Use a secret (recommended) or as an extra_var:
 #   ansible_user: azureuser
-#   ansible_password: <existing Windows admin password>
-# Plus the new account's details:
+#   ansible_password: <bind via Use a secret, or the existing admin password>
+# Plus the new account's details (new_admin_password is best bound via Use a secret):
 #   new_admin_username: opsadmin
 #   new_admin_password: <strong password for the new account>
 - name: Create a local administrator

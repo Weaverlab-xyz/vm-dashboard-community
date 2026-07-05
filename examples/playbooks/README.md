@@ -14,6 +14,23 @@ the placeholders, and run.
 3. **Watch** the job on the Jobs page; output (and CloudWatch/Cloud Logging logs for
    cloud runners) is linked from there.
 
+### Supplying credentials — use a secret, not plaintext
+
+Anything sensitive a play needs (a WinRM/SSH password, a become password, an API
+token a task references) can be injected from **Secrets Management** via the run
+form's **Use a secret** panel instead of a plaintext extra var — the value is never
+shown, never stored on the job, and is scrubbed from the job output (requires the
+`secrets:use` permission). Three ways to bind one:
+
+- **As a named variable** — e.g. map `ansible_password` (Windows) or a var the play
+  references (`admin_password`, …) to a stored secret.
+- **As the become/sudo password** — injected as `ansible_become_password`.
+- **As a BeyondTrust Password Safe managed account** — pick the account from the
+  live list; the credential is checked out just-in-time.
+
+See [Using a Secrets-Management secret in a run](../../docs/integrations/ansible.md#using-a-secrets-management-secret-in-a-run).
+Plaintext extra vars still work for non-sensitive parameters.
+
 ## Linux (`linux/`)
 
 `- hosts: all`, `become: yes`, generic modules so they span Debian/Ubuntu and
@@ -32,12 +49,14 @@ as the per-cloud user with the key the dashboard injected at deploy) or the loca
 ## Windows (`windows/`)
 
 WinRM playbooks using `ansible.windows` / `community.windows`. The static
-connection settings live in each play's `vars:`; you supply the credentials as
-**extra vars** at run time:
+connection settings live in each play's `vars:`; you supply the login at run time —
+the admin password via **Use a secret** (recommended: bind `ansible_password` to a
+stored secret or a Password Safe managed account, so it's never shown or logged), or
+as a plaintext extra var:
 
 ```
 ansible_user: azureuser
-ansible_password: <the Windows admin password stored at deploy time>
+ansible_password: <bind via Use a secret, or the deploy-time admin password>
 ```
 
 | File | Purpose |
@@ -48,21 +67,21 @@ ansible_password: <the Windows admin password stored at deploy time>
 | `win-create-local-admin.yml` | Create a local user + add to Administrators |
 | `win-feature-iis.yml` | Install the IIS web server role |
 
-### Run Windows samples via the **local runner**
+### Running the Windows samples
 
-Two constraints make the local runner the path for Windows today:
+**The local runner is the proven path.** Set `ansible_runner = local`, target the
+Windows VM's IP, ensure **WinRM is reachable** (ports 5985/5986; open it in the
+NSG), and supply `ansible_user` + the admin password (via **Use a secret**, or as
+extra vars). On-prem Hyper-V Windows hosts work the same way and are already wired
+into the dashboard inventory.
 
-- **The cloud runner is SSH-only and does not forward `extra_vars`.** Only the
-  local runner forwards extra vars, which is how the WinRM `ansible_password`
-  reaches the play. (Linux samples don't need this — they authenticate with the
-  injected SSH key.)
-- **Windows cloud VMs are Azure-only and password-based.** Ensure **WinRM is
-  reachable** (ports 5985/5986; open it in the NSG) and pass the admin password —
-  stored in your secrets backend at deploy — as `ansible_password`.
-
-So: set `ansible_runner = local`, target the Windows VM's IP, and pass
-`ansible_user` / `ansible_password` as extra vars. (On-prem Hyper-V Windows hosts
-work the same way and are already wired in the dashboard inventory.)
+The **cloud runner** now injects named-variable / become secrets through each
+provider's secret channel (it builds an `-e @file` inside the container), so it can
+carry `ansible_password` too — for Windows that's the **Azure (ACI)** runner. A play
+that sets `ansible_connection: winrm` in its `vars:` overrides the runner's default
+SSH connection, so a WinRM run on ACI is now workable. It's newer than the local
+path, so validate it end-to-end for your image before relying on it. (The ECS /
+Cloud Run runners are for Linux SSH targets.)
 
 ## Notes
 

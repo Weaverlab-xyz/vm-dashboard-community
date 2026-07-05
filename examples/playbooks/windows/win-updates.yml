@@ -1,11 +1,11 @@
 # Install Windows security updates and reboot if needed
 # Target: Windows cloud VMs (Azure today) over WinRM.
 #
-# HOW TO RUN — via the LOCAL runner (the cloud runner is SSH-only and does not
-# forward extra_vars). Connection vars are set below; supply the credentials as
-# extra_vars on the Config Management run:
+# HOW TO RUN — local runner, or the Azure (ACI) cloud runner. Connection vars are
+# set below; supply the admin password via Use a secret (recommended — bind
+# ansible_password to a stored secret / managed account) or as an extra_var:
 #   ansible_user: azureuser
-#   ansible_password: <the Windows admin password stored at deploy time>
+#   ansible_password: <bind via Use a secret, or the deploy-time admin password>
 # WinRM must be reachable (ports 5985/5986; open it in the NSG).
 - name: Apply Windows updates
   hosts: all
