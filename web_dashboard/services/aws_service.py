@@ -1229,7 +1229,7 @@ def _run_ecs_ansible_sync(
         networkConfiguration={"awsvpcConfiguration": {
             "subnets": [subnet_id] if subnet_id else [],
             "securityGroups": security_group_ids or [],
-            "assignPublicIp": "DISABLED" if subnet_id else "ENABLED",
+            "assignPublicIp": "ENABLED",  # public-subnet egress via IGW (sandbox has no NAT; runner needs egress, not inbound)
         }},
         overrides={"containerOverrides": [{
             "name": "ansible",
@@ -1402,7 +1402,7 @@ def _run_ecs_k8s_sync(
         networkConfiguration={"awsvpcConfiguration": {
             "subnets": [subnet_id] if subnet_id else [],
             "securityGroups": security_group_ids or [],
-            "assignPublicIp": "DISABLED" if subnet_id else "ENABLED",
+            "assignPublicIp": "ENABLED",  # public-subnet egress via IGW (sandbox has no NAT; runner needs egress, not inbound)
         }},
         overrides={"containerOverrides": [{
             "name": "k8s",

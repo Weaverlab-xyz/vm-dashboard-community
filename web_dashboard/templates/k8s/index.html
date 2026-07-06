@@ -247,23 +247,12 @@
                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="(blank = open to all)">
           <p class="text-[11px] text-gray-400 mt-1">Restricts the <strong>public</strong> API endpoint. Blank = open (0.0.0.0/0). The dashboard runner must be able to reach it.</p>
         </div>
-        <!-- AWS only — subnet override (strict multi-select; pre-selected to the configured sandbox subnets) -->
+        <!-- AWS only — the EKS build creates + peers its OWN VPC; optional CIDR override -->
         <div x-show="provForm.cloud === 'aws'" x-cloak>
-          <label class="block text-sm font-medium text-gray-700 mb-1">Subnet IDs <span class="text-gray-400">(EKS needs ≥2 in distinct AZs)</span></label>
-          <div class="border border-gray-300 rounded-lg max-h-36 overflow-y-auto p-2 space-y-1">
-            <p x-show="!loadingProvOpts && (provOptions.subnets || []).length === 0" x-cloak class="text-xs text-amber-600 p-1">
-              No VPC subnets discovered — the configured <code>aws_k8s_subnet_a_id</code> / <code>_b_id</code> sandbox defaults will be used.
-            </p>
-            <template x-for="s in provOptions.subnets || []" :key="s.id">
-              <label class="flex items-center gap-2 p-1 rounded hover:bg-gray-50 cursor-pointer">
-                <input type="checkbox" :value="s.id" @change="toggleProvSubnet($event, s.id)"
-                       :checked="provForm.subnet_ids.includes(s.id)"
-                       class="rounded border-gray-300 text-emerald-600 focus:ring-emerald-500">
-                <span class="text-xs text-gray-700" x-text="s.name"></span>
-              </label>
-            </template>
-          </div>
-          <p x-show="provForm.subnet_ids.length === 0" x-cloak class="text-[11px] text-gray-400 mt-1">None selected — the configured <code>aws_k8s_subnet_*_id</code> defaults apply.</p>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Cluster VPC CIDR <span class="text-gray-400">(the EKS build creates + peers its own VPC)</span></label>
+          <input type="text" x-model="provForm.vpc_cidr"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="10.97.0.0/16">
+          <p class="text-[11px] text-gray-400 mt-1">Blank = default <code>10.97.0.0/16</code>. Must not overlap the sandbox VPC (<code>10.99.0.0/16</code>); give each concurrent cluster a distinct block.</p>
         </div>
         <p class="text-[11px] text-gray-400">
           Provisioning takes ~5–15 min; the row shows <span class="font-mono">provisioning → registered</span>.
@@ -385,7 +374,7 @@ function k8sPage() {
     showRegister: false, saving: false,
     form: { name: '', cloud: 'local', kubeconfig: '', mgmt_kind: '' },
     showProvision: false, provBusy: false,
-    provForm: { name: '', cloud: 'aws', region: '', k8s_version: '', node_instance_type: '', node_count: 2, subnet_ids: [], authorized_cidrs: '', zone: '' },
+    provForm: { name: '', cloud: 'aws', region: '', k8s_version: '', node_instance_type: '', node_count: 2, vpc_cidr: '', authorized_cidrs: '', zone: '' },
     provOptions: { cloud: '', region: '', regions: [], node_instance_types: [], k8s_versions: [], subnets: [], configured_subnet_ids: [] },
     loadingProvOpts: false, provOptsError: '',
     showBroker: false, brokering: false, brokerTarget: null,
@@ -428,7 +417,7 @@ function k8sPage() {
     },
 
     openProvision() {
-      this.provForm = { name: '', cloud: 'aws', region: '', k8s_version: '', node_instance_type: '', node_count: 2, subnet_ids: [], authorized_cidrs: '', zone: '' };
+      this.provForm = { name: '', cloud: 'aws', region: '', k8s_version: '', node_instance_type: '', node_count: 2, vpc_cidr: '', authorized_cidrs: '', zone: '' };
       this.provOptions = { cloud: '', region: '', regions: [], node_instance_types: [], k8s_versions: [], subnets: [], configured_subnet_ids: [] };
       this.provOptsError = '';
       this.showProvision = true;
@@ -448,10 +437,7 @@ function k8sPage() {
         o.cloud = this.provForm.cloud;
         this.provOptions = o;
         if (!this.provForm.region) this.provForm.region = o.region;
-        if (this.provForm.cloud === 'aws') {
-          const ids = (o.subnets || []).map(s => s.id);
-          this.provForm.subnet_ids = (o.configured_subnet_ids || []).filter(id => ids.includes(id));
-        }
+        // AWS EKS builds + peers its own VPC — no subnet pre-selection needed.
       } catch (e) {
         this.provOptsError = `Failed to load ${this.provForm.cloud.toUpperCase()} options: ` + (e.message || e);
       } finally {
@@ -463,7 +449,7 @@ function k8sPage() {
       this.provForm.region = '';
       this.provForm.k8s_version = '';
       this.provForm.node_instance_type = '';
-      this.provForm.subnet_ids = [];
+      this.provForm.vpc_cidr = '';
       this.provForm.zone = '';
       this.provOptions = { cloud: '', region: '', regions: [], node_instance_types: [], k8s_versions: [], subnets: [], configured_subnet_ids: [] };
       this.loadProvOptions();
@@ -472,17 +458,9 @@ function k8sPage() {
     onProvRegionChange() {
       const r = (this.provForm.region || '').trim();
       if (!r || r === this.provOptions.region) return;
-      if (this.provForm.cloud === 'aws') this.provForm.subnet_ids = [];
       this.loadProvOptions(r);
     },
 
-    toggleProvSubnet(event, id) {
-      if (event.target.checked) {
-        this.provForm.subnet_ids = [...this.provForm.subnet_ids, id];
-      } else {
-        this.provForm.subnet_ids = this.provForm.subnet_ids.filter(s => s !== id);
-      }
-    },
 
     async submitProvision() {
       this.provBusy = true;
@@ -492,8 +470,8 @@ function k8sPage() {
         if (f.k8s_version) body.k8s_version = f.k8s_version;
         if (f.node_instance_type) body.node_instance_type = f.node_instance_type;
         if (f.node_count) body.node_count = Number(f.node_count);
-        if (f.cloud === 'aws' && Array.isArray(f.subnet_ids) && f.subnet_ids.length) {
-          body.subnet_ids = f.subnet_ids;   // already an array of subnet ids
+        if (f.cloud === 'aws' && f.vpc_cidr && f.vpc_cidr.trim()) {
+          body.vpc_cidr = f.vpc_cidr.trim();
         }
         if (f.authorized_cidrs && f.authorized_cidrs.trim()) {
           body.authorized_cidrs = f.authorized_cidrs.split(',').map(s => s.trim()).filter(Boolean);
