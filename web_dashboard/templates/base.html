@@ -15,9 +15,9 @@
 <body class="bg-gray-50 min-h-screen font-sans text-gray-800">
 
   <!-- Navigation -->
-  <nav class="{{ 'bg-blue-900' if app_env == 'production' else 'bg-emerald-700' }} text-white shadow-lg relative" x-data="{ mobileNav: false }" x-cloak x-show="$store.auth.isLoggedIn">
+  <nav class="{{ 'bg-blue-900' if app_env == 'production' else 'bg-emerald-700' }} text-white shadow-lg relative" x-data="responsiveNav()" x-cloak x-show="$store.auth.isLoggedIn" @keydown.escape.window="mobileNav = false">
     <div class="max-w-screen-2xl mx-auto px-4 sm:px-6 lg:px-8">
-      <div class="flex items-center justify-between h-16">
+      <div x-ref="navRow" class="flex items-center justify-between h-16 overflow-hidden">
         <!-- Brand -->
         <div class="flex items-center space-x-3">
           <svg class="h-7 w-7 {{ 'text-blue-300' if app_env == 'production' else 'text-emerald-200' }}" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -30,119 +30,27 @@
           {% endif %}
         </div>
 
-        <!-- Nav links — inline on lg+, a hamburger dropdown below lg (single source). -->
+        <!-- Nav links: same content rendered twice — inline in the bar
+             when it fits, in a right-side flyout drawer when it doesn't.
+             _nav_links.html is the single source for the link list. -->
         {% set nav_hover = 'hover:bg-blue-800' if app_env == 'production' else 'hover:bg-emerald-600' %}
         {% set nav_active = 'bg-blue-800' if app_env == 'production' else 'bg-emerald-600' %}
-        <div class="lg:flex lg:items-center lg:space-x-1"
+        <div x-show="!compact"
              @click="mobileNav = false"
-             :class="mobileNav
-               ? 'flex flex-col items-stretch space-y-1 absolute left-0 right-0 top-16 {{ 'bg-blue-900' if app_env == 'production' else 'bg-emerald-700' }} px-4 pb-4 shadow-lg z-40'
-               : 'hidden lg:flex'">
-          {# Order per issue #17:
-             Dashboard → on-prem hypervisors (Workstation, Proxmox, vSphere, Hyper-V,
-             Nutanix, XCP-ng) → AWS → Azure → GCP → Containers → Storage →
-             Configuration (renamed from "Config Mgmt") → Secrets → Users → Groups.
-             Jobs, Images, and Workgroups are kept and slotted where they
-             logically belong (Jobs alongside other operational links, Workgroups
-             with Groups in the admin section, Images with Storage as a content
-             section). #}
-          <a href="/" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
-             {% if request.url.path == '/' %}{{ nav_active }}{% endif %}">Dashboard</a>
-
-          {# ── On-premises hypervisors ───────────────────────────────────────── #}
-          {% if vmware_enabled %}
-          <a href="/vms" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
-             {% if request.url.path == '/vms' %}{{ nav_active }}{% endif %}">Workstation</a>
-          {% endif %}
-          {% if proxmox_enabled %}
-          <a href="/proxmox" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
-             {% if request.url.path == '/proxmox' %}{{ nav_active }}{% endif %}">Proxmox</a>
-          {% endif %}
-          {% if vsphere_enabled %}
-          <a href="/vsphere" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
-             {% if request.url.path == '/vsphere' %}{{ nav_active }}{% endif %}">vSphere</a>
-          {% endif %}
-          {% if hyperv_enabled %}
-          <a href="/hyperv" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
-             {% if request.url.path == '/hyperv' %}{{ nav_active }}{% endif %}">Hyper-V</a>
-          {% endif %}
-          {% if nutanix_enabled %}
-          <a href="/nutanix" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
-             {% if request.url.path == '/nutanix' %}{{ nav_active }}{% endif %}">Nutanix</a>
-          {% endif %}
-          {% if xcpng_enabled %}
-          <a href="/xcpng" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
-             {% if request.url.path == '/xcpng' %}{{ nav_active }}{% endif %}">XCP-ng</a>
-          {% endif %}
-
-          {# ── Cloud providers ──────────────────────────────────────────────── #}
-          <a href="/aws" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
-             {% if request.url.path == '/aws' %}{{ nav_active }}{% endif %}">AWS</a>
-          <a href="/azure" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
-             {% if request.url.path == '/azure' %}{{ nav_active }}{% endif %}">Azure</a>
-          <a href="/gcp" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
-             {% if request.url.path == '/gcp' %}{{ nav_active }}{% endif %}">GCP</a>
-
-          {# ── Workloads / artefacts ────────────────────────────────────────── #}
-          {% if portainer_enabled %}
-          <a href="/containers" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
-             {% if request.url.path == '/containers' %}{{ nav_active }}{% endif %}">Containers</a>
-          {% endif %}
-          <a x-show="$store.auth.isAdmin" href="/images"
-             class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
-             {% if request.url.path.startswith('/images') %}{{ nav_active }}{% endif %}">Images</a>
-          <a x-show="$store.auth.isAdmin" href="/storage"
-             class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
-             {% if request.url.path.startswith('/storage') %}{{ nav_active }}{% endif %}">Storage</a>
-          {% if vdesktops_enabled %}
-          <a x-show="$store.auth.isAdmin" href="/desktops"
-             class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
-             {% if request.url.path.startswith('/desktops') %}{{ nav_active }}{% endif %}">Desktops</a>
-          {% endif %}
-          {% if cloud_database_enabled %}
-          <a x-show="$store.auth.isAdmin" href="/databases"
-             class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
-             {% if request.url.path.startswith('/databases') %}{{ nav_active }}{% endif %}">Databases</a>
-          {% endif %}
-          {% if k8s_management_enabled %}
-          <a x-show="$store.auth.isAdmin" href="/k8s"
-             class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
-             {% if request.url.path.startswith('/k8s') %}{{ nav_active }}{% endif %}">Kubernetes</a>
-          {% endif %}
-          {% if cost_explorer_enabled %}
-          <a x-show="$store.auth.isAdmin" href="/costs"
-             class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
-             {% if request.url.path.startswith('/costs') %}{{ nav_active }}{% endif %}">Costs</a>
-          {% endif %}
-          {% if ansible_enabled %}
-          <a href="/config-mgmt" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
-             {% if request.url.path == '/config-mgmt' %}{{ nav_active }}{% endif %}">Configuration</a>
-          {% endif %}
-          <a href="/inventory" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
-             {% if request.url.path.startswith('/inventory') %}{{ nav_active }}{% endif %}">Inventory</a>
-          <a href="/jobs" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
-             {% if request.url.path.startswith('/jobs') %}{{ nav_active }}{% endif %}">Jobs</a>
-
-          {# ── Admin ────────────────────────────────────────────────────────── #}
-          <a x-show="$store.auth.isAdmin" href="/secrets"
-             class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
-             {% if request.url.path.startswith('/secrets') %}{{ nav_active }}{% endif %}">Secrets</a>
-          <a x-show="$store.auth.isAdmin" href="/users"
-             class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
-             {% if request.url.path.startswith('/users') %}{{ nav_active }}{% endif %}">Users</a>
-          <a x-show="$store.auth.isAdmin" href="/groups"
-             class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
-             {% if request.url.path.startswith('/groups') %}{{ nav_active }}{% endif %}">Groups</a>
-          <a x-show="$store.auth.isAdmin" href="/workgroups"
-             class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
-             {% if request.url.path.startswith('/workgroups') %}{{ nav_active }}{% endif %}">Workgroups</a>
-          {% if entitle_user_jit_enabled and entitle_request_portal_url %}
-          <!-- Entitle user-JIT Phase 4: surface the Request access link only
-               when both the toggle is on and a portal URL is configured. -->
-          <a href="{{ entitle_request_portal_url }}" target="_blank" rel="noopener noreferrer"
-             class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}"
-             title="Request access via Entitle">Request access</a>
-          {% endif %}
+             class="flex items-center space-x-1 flex-shrink-0">
+          {% include '_nav_links.html' %}
+        </div>
+        <div x-show="compact && mobileNav"
+             @click="mobileNav = false"
+             x-transition:enter="transition ease-out duration-200 transform"
+             x-transition:enter-start="translate-x-full"
+             x-transition:enter-end="translate-x-0"
+             x-transition:leave="transition ease-in duration-200 transform"
+             x-transition:leave-start="translate-x-0"
+             x-transition:leave-end="translate-x-full"
+             class="fixed top-0 right-0 h-full w-72 flex flex-col items-stretch space-y-1 {{ 'bg-blue-900' if app_env == 'production' else 'bg-emerald-700' }} shadow-2xl z-50 p-4 pt-20 overflow-y-auto"
+             x-cloak>
+          {% include '_nav_links.html' %}
         </div>
 
         <!-- User menu -->
@@ -150,7 +58,8 @@
         {% set logout_btn = 'bg-blue-700 hover:bg-blue-600' if app_env == 'production' else 'bg-emerald-600 hover:bg-emerald-500' %}
         <div class="flex items-center space-x-3">
           <button @click="mobileNav = !mobileNav"
-                  class="lg:hidden p-2 -ml-1 rounded-md {{ nav_hover }}"
+                  x-show="compact"
+                  class="p-2 -ml-1 rounded-md {{ nav_hover }}"
                   :aria-expanded="mobileNav" aria-label="Toggle navigation menu">
             <svg class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path x-show="!mobileNav" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/>
@@ -173,6 +82,18 @@
         </div>
       </div>
     </div>
+    <!-- Flyout backdrop: dims the page while the drawer is open. Click
+         to dismiss. Sits below the drawer (z-40 < drawer's z-50). -->
+    <div x-show="compact && mobileNav"
+         @click="mobileNav = false"
+         x-transition:enter="transition ease-out duration-200"
+         x-transition:enter-start="opacity-0"
+         x-transition:enter-end="opacity-100"
+         x-transition:leave="transition ease-in duration-200"
+         x-transition:leave-start="opacity-100"
+         x-transition:leave-end="opacity-0"
+         class="fixed inset-0 bg-black/40 z-40"
+         x-cloak></div>
   </nav>
 
   <!-- Page content -->

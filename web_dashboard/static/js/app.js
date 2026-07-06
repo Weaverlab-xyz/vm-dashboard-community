@@ -220,6 +220,45 @@ function requireAuth() {
     }
 }
 
+// Responsive nav: swap the inline link row for a hamburger + dropdown when
+// the links can't fit alongside the brand and user menu. Measures overflow
+// directly instead of using a fixed Tailwind breakpoint, so it stays correct
+// as feature flags add or remove nav items per install.
+function responsiveNav() {
+    return {
+        compact: false,
+        mobileNav: false,
+        _measuring: false,
+        _t: null,
+        init() {
+            const measure = () => {
+                if (this._measuring || this.mobileNav) return;
+                this._measuring = true;
+                // Force the inline layout so we can read the row's natural
+                // vs available width. One-frame flash on resize is fine.
+                this.compact = false;
+                this.$nextTick(() => {
+                    const row = this.$refs.navRow;
+                    if (row) {
+                        this.compact = row.scrollWidth > row.clientWidth + 1;
+                    }
+                    this._measuring = false;
+                });
+            };
+            const onResize = () => {
+                clearTimeout(this._t);
+                this._t = setTimeout(measure, 50);
+            };
+            window.addEventListener('resize', onResize);
+            // The nav is x-show=isLoggedIn, so it has zero size until login;
+            // re-measure when the token changes to catch that transition.
+            this.$watch('$store.auth.token', () => this.$nextTick(measure));
+            this.$nextTick(measure);
+        },
+    };
+}
+window.responsiveNav = responsiveNav;
+
 // ── WebAuthn / FIDO2 helper ────────────────────────────────────────────────────
 // window assignment ensures inline template scripts can access it regardless of scope
 window.WebAuthnHelper = {
