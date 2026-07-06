@@ -213,10 +213,11 @@ async def list_secrets(request: Request):
 
     result = []
     for key, description in _SECRET_REGISTRY:
-        # Read raw DB value (without external resolution) to show where it lives
-        cs._ensure_loaded()
-        with cs._cache_lock:
-            raw = cs._cache.get(key, "")
+        # Read the raw stored value (without external resolution) to show where
+        # it lives. get_raw() reads the correctly-keyed global row; reaching into
+        # _cache directly here would miss it — the cache is keyed on (key, None)
+        # tuples, not bare key strings.
+        raw = cs.get_raw(key)
 
         has_value = bool(raw)
         backend = "database"
@@ -272,8 +273,7 @@ async def secret_staleness(request: Request):
 
     items = []
     for key in keys:
-        with cs._cache_lock:
-            raw = cs._cache.get(key, "")
+        raw = cs.get_raw(key)
         if not raw:
             continue  # unset → nothing to age
         source = "database"
@@ -332,9 +332,10 @@ async def migrate_secrets(payload: MigratePayload, request: Request):
             })
             continue
 
-        cs._ensure_loaded()
-        with cs._cache_lock:
-            raw = cs._cache.get(key, "")
+        # Raw stored value (external refs left unresolved so we can detect
+        # their backend prefix below). Read via get_raw() — the cache is keyed
+        # on (key, None) tuples, so a bare-key _cache.get(key) never matches.
+        raw = cs.get_raw(key)
 
         if not raw:
             skipped.append({"key": key, "reason": "not configured"})

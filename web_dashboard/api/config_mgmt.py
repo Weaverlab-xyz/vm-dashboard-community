@@ -863,11 +863,11 @@ async def list_secret_options(current_user: User = Depends(get_current_user)):
     from ..services import config_service as cs
     from .secrets import _SECRET_REGISTRY
 
-    cs._ensure_loaded()
     out = []
     for key, desc in _SECRET_REGISTRY:
-        with cs._cache_lock:
-            has = bool(cs._cache.get(key, ""))
+        # get_raw() reads the correctly-keyed global row; the cache is keyed on
+        # (key, None) tuples, so a bare-key _cache.get(key) always misses.
+        has = bool(cs.get_raw(key))
         out.append({"key": key, "description": desc, "has_value": has})
     return out
 
