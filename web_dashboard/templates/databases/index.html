@@ -12,16 +12,15 @@
 
   <div class="flex items-center justify-between mb-1">
     <h1 class="text-2xl font-bold text-gray-800">Cloud Databases</h1>
-    <button @click="openProvision()" x-show="activeTab === 'aws' || activeTab === 'gcp' || activeTab === 'azure'"
+    <button @click="openProvision()"
             class="bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-3 py-1.5 rounded-lg">
       Provision database
     </button>
   </div>
   <p class="text-sm text-gray-500 mb-6">
     Managed databases are provisioned <strong>private</strong> (no public endpoint) and
-    reached only through a BeyondTrust PRA protocol-tunnel jump. <strong>PostgreSQL on
-    AWS, GCP, and Azure</strong> and <strong>MySQL on AWS and Azure</strong> are live; GCP MySQL
-    and SQL Server are coming.
+    reached only through a BeyondTrust PRA protocol-tunnel jump. <strong>PostgreSQL, MySQL,
+    and SQL Server</strong> across <strong>AWS, Azure, and GCP</strong> are all supported.
   </p>
 
   <!-- Toast -->
@@ -29,27 +28,18 @@
        :class="toastType === 'error' ? 'bg-red-50 border-red-200 text-red-700' : 'bg-green-50 border-green-200 text-green-700'"
        class="mb-6 border rounded-lg px-4 py-3 text-sm" x-text="toast"></div>
 
-  <!-- Cloud tabs -->
-  <div class="flex gap-1 border-b border-gray-200 mb-6">
-    <template x-for="c in ['aws','azure','gcp']" :key="c">
-      <button @click="activeTab = c"
-              class="px-4 py-2 text-sm font-medium border-b-2 -mb-px transition uppercase"
-              :class="activeTab === c ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700'"
-              x-text="c"></button>
-    </template>
-  </div>
-
-  <!-- AWS tab (live) -->
-  <div x-show="activeTab === 'aws'" x-cloak>
+  <!-- All cloud databases (unified list) -->
+  <div>
     <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
       <div x-show="loading" x-cloak class="p-6 text-center text-sm text-gray-400">Loading…</div>
-      <div x-show="!loading && awsDatabases.length === 0" x-cloak class="p-10 text-center text-sm text-gray-400">
-        No databases yet. Click <strong>Provision database</strong> to create a private PostgreSQL instance.
+      <div x-show="!loading && databases.length === 0" x-cloak class="p-10 text-center text-sm text-gray-400">
+        No databases yet. Click <strong>Provision database</strong> to create a private managed instance.
       </div>
-      <table x-show="!loading && awsDatabases.length > 0" x-cloak class="min-w-full text-sm">
+      <table x-show="!loading && databases.length > 0" x-cloak class="min-w-full text-sm">
         <thead>
           <tr class="text-left text-xs uppercase text-gray-500 bg-gray-50 border-b border-gray-200">
             <th class="px-4 py-3">Engine</th>
+            <th class="px-4 py-3">Cloud</th>
             <th class="px-4 py-3">Region</th>
             <th class="px-4 py-3">Status</th>
             <th class="px-4 py-3">Endpoint (private)</th>
@@ -58,109 +48,14 @@
           </tr>
         </thead>
         <tbody class="divide-y divide-gray-100">
-          <template x-for="d in awsDatabases" :key="d.id">
+          <template x-for="d in databases" :key="d.id">
             <tr class="hover:bg-gray-50 align-top">
               <td class="px-4 py-3">
                 <div class="font-medium text-gray-900" x-text="d.engine"></div>
                 <div class="text-xs text-gray-400" x-text="d.provider"></div>
               </td>
-              <td class="px-4 py-3 text-gray-500" x-text="d.region"></td>
               <td class="px-4 py-3">
-                <span class="text-[10px] uppercase font-semibold px-1.5 py-0.5 rounded" :class="statusBadge(d.status)" x-text="d.status"></span>
-              </td>
-              <td class="px-4 py-3 text-xs text-gray-700 font-mono">
-                <span x-show="d.private_host" x-text="d.private_host + (d.port ? ':' + d.port : '')"></span>
-                <span x-show="!d.private_host" class="text-gray-300">(pending)</span>
-              </td>
-              <td class="px-4 py-3 text-xs">
-                <span x-show="d.jump_item_id" class="text-emerald-700" title="PRA tunnel brokered">brokered</span>
-                <span x-show="!d.jump_item_id" class="text-gray-400">none</span>
-              </td>
-              <td class="px-4 py-3 text-right whitespace-nowrap">
-                <button @click="showConnection(d)" class="text-xs px-2 py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded font-medium">Connection</button>
-                <button @click="decommission(d)" x-show="d.status !== 'decommissioned' && d.status !== 'decommissioning'"
-                        class="text-xs px-2 py-1 text-red-600 hover:underline ml-1">Decommission</button>
-              </td>
-            </tr>
-          </template>
-        </tbody>
-      </table>
-    </div>
-  </div>
-
-  <!-- GCP tab (live) -->
-  <div x-show="activeTab === 'gcp'" x-cloak>
-    <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-      <div x-show="loading" x-cloak class="p-6 text-center text-sm text-gray-400">Loading…</div>
-      <div x-show="!loading && gcpDatabases.length === 0" x-cloak class="p-10 text-center text-sm text-gray-400">
-        No GCP databases yet. Click <strong>Provision database</strong> to create a private Cloud SQL PostgreSQL instance.
-      </div>
-      <table x-show="!loading && gcpDatabases.length > 0" x-cloak class="min-w-full text-sm">
-        <thead>
-          <tr class="text-left text-xs uppercase text-gray-500 bg-gray-50 border-b border-gray-200">
-            <th class="px-4 py-3">Engine</th>
-            <th class="px-4 py-3">Region</th>
-            <th class="px-4 py-3">Status</th>
-            <th class="px-4 py-3">Endpoint (private)</th>
-            <th class="px-4 py-3">PRA tunnel</th>
-            <th class="px-4 py-3 text-right">Actions</th>
-          </tr>
-        </thead>
-        <tbody class="divide-y divide-gray-100">
-          <template x-for="d in gcpDatabases" :key="d.id">
-            <tr class="hover:bg-gray-50 align-top">
-              <td class="px-4 py-3">
-                <div class="font-medium text-gray-900" x-text="d.engine"></div>
-                <div class="text-xs text-gray-400" x-text="d.provider"></div>
-              </td>
-              <td class="px-4 py-3 text-gray-500" x-text="d.region"></td>
-              <td class="px-4 py-3">
-                <span class="text-[10px] uppercase font-semibold px-1.5 py-0.5 rounded" :class="statusBadge(d.status)" x-text="d.status"></span>
-              </td>
-              <td class="px-4 py-3 text-xs text-gray-700 font-mono">
-                <span x-show="d.private_host" x-text="d.private_host + (d.port ? ':' + d.port : '')"></span>
-                <span x-show="!d.private_host" class="text-gray-300">(pending)</span>
-              </td>
-              <td class="px-4 py-3 text-xs">
-                <span x-show="d.jump_item_id" class="text-emerald-700" title="PRA tunnel brokered">brokered</span>
-                <span x-show="!d.jump_item_id" class="text-gray-400">none</span>
-              </td>
-              <td class="px-4 py-3 text-right whitespace-nowrap">
-                <button @click="showConnection(d)" class="text-xs px-2 py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded font-medium">Connection</button>
-                <button @click="decommission(d)" x-show="d.status !== 'decommissioned' && d.status !== 'decommissioning'"
-                        class="text-xs px-2 py-1 text-red-600 hover:underline ml-1">Decommission</button>
-              </td>
-            </tr>
-          </template>
-        </tbody>
-      </table>
-    </div>
-  </div>
-
-  <!-- Azure tab (live) -->
-  <div x-show="activeTab === 'azure'" x-cloak>
-    <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-      <div x-show="loading" x-cloak class="p-6 text-center text-sm text-gray-400">Loading…</div>
-      <div x-show="!loading && azureDatabases.length === 0" x-cloak class="p-10 text-center text-sm text-gray-400">
-        No Azure databases yet. Click <strong>Provision database</strong> to create a private PostgreSQL Flexible Server.
-      </div>
-      <table x-show="!loading && azureDatabases.length > 0" x-cloak class="min-w-full text-sm">
-        <thead>
-          <tr class="text-left text-xs uppercase text-gray-500 bg-gray-50 border-b border-gray-200">
-            <th class="px-4 py-3">Engine</th>
-            <th class="px-4 py-3">Region</th>
-            <th class="px-4 py-3">Status</th>
-            <th class="px-4 py-3">Endpoint (private)</th>
-            <th class="px-4 py-3">PRA tunnel</th>
-            <th class="px-4 py-3 text-right">Actions</th>
-          </tr>
-        </thead>
-        <tbody class="divide-y divide-gray-100">
-          <template x-for="d in azureDatabases" :key="d.id">
-            <tr class="hover:bg-gray-50 align-top">
-              <td class="px-4 py-3">
-                <div class="font-medium text-gray-900" x-text="d.engine"></div>
-                <div class="text-xs text-gray-400" x-text="d.provider"></div>
+                <span class="text-[10px] uppercase font-semibold px-1.5 py-0.5 rounded bg-slate-100 text-slate-600" x-text="d.cloud"></span>
               </td>
               <td class="px-4 py-3 text-gray-500" x-text="d.region"></td>
               <td class="px-4 py-3">
@@ -198,6 +93,14 @@
       <div class="px-6 py-5 space-y-4">
         <div class="grid grid-cols-2 gap-3">
           <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Cloud *</label>
+            <select x-model="form.cloud" @change="onCloudChange()" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm uppercase">
+              <option value="aws">AWS</option>
+              <option value="azure">Azure</option>
+              <option value="gcp">GCP</option>
+            </select>
+          </div>
+          <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">Engine *</label>
             <select x-model="form.engine" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
               <option value="postgres">PostgreSQL</option>
@@ -205,14 +108,16 @@
               <option value="sqlserver">SQL Server</option>
             </select>
           </div>
+        </div>
+        <div class="grid grid-cols-2 gap-3">
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">Region *</label>
             <input type="text" x-model="form.region" @change="onRegionChange()" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="us-east-2">
           </div>
-        </div>
-        <div>
-          <label class="block text-sm font-medium text-gray-700 mb-1">Name *</label>
-          <input type="text" x-model="form.name" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="app-db">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Name *</label>
+            <input type="text" x-model="form.name" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="app-db">
+          </div>
         </div>
         <div x-show="loadingOptions" x-cloak class="text-center text-gray-400 text-sm py-1">
           Loading <span x-text="(form.cloud || 'aws').toUpperCase()"></span> options…
@@ -426,7 +331,7 @@
 function databasesPage() {
   return {
     ...secretPickerState(),
-    databases: [], loading: true, activeTab: 'aws',
+    databases: [], loading: true,
     toast: '', toastType: 'success',
     showForm: false, saving: false, conn: null,
     options: { cloud: '', region: '', instance_classes: [], db_subnet_groups: [], security_groups: [], vault_account_groups: [], jump_groups: [], jumpoints: [] },
@@ -436,10 +341,6 @@ function databasesPage() {
             tier: 'db-f1-micro', disk_size: null, private_network: '',
             sku_name: 'B_Standard_B1ms', storage_gb: 32,
             jump_group: '', jumpoint_name: '', praCredBackend: '', pra_credential_ref: '' },
-
-    get awsDatabases() { return this.databases.filter(d => d.cloud === 'aws'); },
-    get gcpDatabases() { return this.databases.filter(d => d.cloud === 'gcp'); },
-    get azureDatabases() { return this.databases.filter(d => d.cloud === 'azure'); },
 
     _pollTimer: null,
 
@@ -473,7 +374,7 @@ function databasesPage() {
     },
 
     openProvision() {
-      const cloud = ['gcp', 'azure'].includes(this.activeTab) ? this.activeTab : 'aws';
+      const cloud = 'aws';   // modal opens on AWS; the Cloud select switches it
       this.form = { engine: 'postgres', cloud, region: '', name: '', master_username: 'dbadmin',
                     instance_class: 'db.t3.micro', allocated_storage: null, db_subnet_group_name: '', vpc_security_group_ids: [], vault_account_group_id: null,
                     tier: 'db-f1-micro', disk_size: null, private_network: '',
@@ -518,6 +419,17 @@ function databasesPage() {
         this.form.vpc_security_group_ids = [];
       }
       this.loadOptions(r);
+    },
+
+    onCloudChange() {
+      // Switching cloud in the modal: reset region + cloud-specific fields and reload
+      // that cloud's options (instance sizes, subnet/SG pickers, PRA jump groups).
+      this.form.region = '';
+      this.form.db_subnet_group_name = '';
+      this.form.vpc_security_group_ids = [];
+      this.options = { cloud: '', region: '', instance_classes: [], db_subnet_groups: [], security_groups: [], vault_account_groups: [], jump_groups: [], jumpoints: [] };
+      this.optionsError = '';
+      this.loadOptions();
     },
 
     toggleSG(event, sgId) {
