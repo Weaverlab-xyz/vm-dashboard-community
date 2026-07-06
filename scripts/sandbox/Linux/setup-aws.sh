@@ -625,6 +625,21 @@ DASHBOARD_POLICY_DOC="$(jq -c . <<JSON
       "Resource": "*"
     },
     {
+      "Sid": "DashboardVPCManage",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:*Vpc*",
+        "ec2:*Subnet*",
+        "ec2:*RouteTable*",
+        "ec2:CreateRoute",
+        "ec2:DeleteRoute",
+        "ec2:ReplaceRoute",
+        "ec2:*Address*",
+        "ec2:*InternetGateway*"
+      ],
+      "Resource": "*"
+    },
+    {
       "Sid": "DashboardVMImportExport",
       "Effect": "Allow",
       "Action": [
