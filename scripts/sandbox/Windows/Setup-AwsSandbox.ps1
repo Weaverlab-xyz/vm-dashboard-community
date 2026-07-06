@@ -88,23 +88,17 @@ $PrivateSubnetId = _MakeSubnet '10.99.2.0/24' "$Name-private"
 # Dedicated to managed databases; the VM subnets above are left untouched.
 $DbSubnetAId = _MakeSubnet '10.99.3.0/24' "$Name-db-a" $Az
 $DbSubnetBId = _MakeSubnet '10.99.4.0/24' "$Name-db-b" $Az2
-# Two private K8s subnets in distinct AZs — managed Kubernetes (EKS) requires
-# subnets in >= 2 AZs, like RDS. Dedicated to clusters; separate from the VM and
-# DB subnets above.
-$K8sSubnetAId = _MakeSubnet '10.99.5.0/24' "$Name-k8s-a" $Az
-$K8sSubnetBId = _MakeSubnet '10.99.6.0/24' "$Name-k8s-b" $Az2
+# Managed Kubernetes (EKS) no longer needs sandbox subnets — the aws_eks module
+# builds its OWN VPC + subnets + NAT-instance egress per cluster and peers back
+# to this VPC (see aws_vpc_id / aws_private_route_table_id emitted at the end).
 Write-Ok "Public subnet (Jumpoint) $PublicSubnetId"
 Write-Ok "Private subnet (VMs)    $PrivateSubnetId"
 Write-Ok "DB subnet A ($Az)        $DbSubnetAId"
 Write-Ok "DB subnet B ($Az2)        $DbSubnetBId"
-Write-Ok "K8s subnet A ($Az)       $K8sSubnetAId"
-Write-Ok "K8s subnet B ($Az2)       $K8sSubnetBId"
 Set-StateValue aws public_subnet_id  $PublicSubnetId
 Set-StateValue aws private_subnet_id $PrivateSubnetId
 Set-StateValue aws db_subnet_a_id    $DbSubnetAId
 Set-StateValue aws db_subnet_b_id    $DbSubnetBId
-Set-StateValue aws k8s_subnet_a_id   $K8sSubnetAId
-Set-StateValue aws k8s_subnet_b_id   $K8sSubnetBId
 
 # ── 4. Route tables ───────────────────────────────────────────────────────────
 Write-Section 'Route tables'
@@ -160,48 +154,13 @@ _AssociateRT $PrivateRtId $DbSubnetBId
 Write-Ok "Public  RT $PublicRtId  → IGW (0.0.0.0/0)"
 Write-Ok "Private RT $PrivateRtId → local VPC only (VMs + DBs)"
 
-# ── 4a. K8s node egress — NAT gateway + dedicated k8s route table ─────────────
-# Managed EKS nodes must reach the EKS API + pull images (ECR/S3/STS) to join,
-# which the VPC-only private RT can't provide. Give ONLY the k8s subnets egress
-# via a NAT gateway in the public subnet + a dedicated k8s route table, so the
-# VM + DB subnets stay isolated. The NAT + Elastic IP carry standing cost —
-# Rollback-Sandbox.ps1 deletes the NAT and releases the EIP (both tagged).
-Write-Section 'K8s node egress (NAT)'
-
-# Elastic IP for the NAT (idempotent: reuse the sandbox-tagged one if present).
-$NatEipAllocId = (aws ec2 describe-addresses --region $Region `
-    --filters "Name=tag:$($Script:SandboxTagKey),Values=$($Script:SandboxTagValue)" "Name=tag:Name,Values=$Name-k8s-nat-eip" `
-    --query 'Addresses[0].AllocationId' --output text 2>$null)
-if (-not $NatEipAllocId -or $NatEipAllocId -eq 'None') {
-    $NatEipAllocId = (aws ec2 allocate-address --region $Region --domain vpc `
-        --tag-specifications (_TagSpec 'elastic-ip' "$Name-k8s-nat-eip") `
-        --query 'AllocationId' --output text).Trim()
-}
-
-# NAT gateway in the public subnet (idempotent: reuse a live one in this VPC).
-$NatGwId = (aws ec2 describe-nat-gateways --region $Region `
-    --filter "Name=vpc-id,Values=$VpcId" "Name=tag:$($Script:SandboxTagKey),Values=$($Script:SandboxTagValue)" `
-    --query "NatGateways[?State=='available' || State=='pending'].NatGatewayId | [0]" --output text 2>$null)
-if (-not $NatGwId -or $NatGwId -eq 'None') {
-    $NatGwId = (aws ec2 create-nat-gateway --region $Region `
-        --subnet-id $PublicSubnetId --allocation-id $NatEipAllocId `
-        --tag-specifications (_TagSpec 'natgateway' "$Name-k8s-nat") `
-        --query 'NatGateway.NatGatewayId' --output text).Trim()
-    Write-Ok "Creating NAT gateway $NatGwId (waiting for it to become available…)"
-    aws ec2 wait nat-gateway-available --region $Region --nat-gateway-ids $NatGwId
-}
-
-# Dedicated k8s route table: 0.0.0.0/0 → NAT; k8s subnets only (VM/DB stay private).
-$K8sRtId = _MakeRouteTable "$Name-k8s-rt"
-aws ec2 create-route --region $Region --route-table-id $K8sRtId `
-    --destination-cidr-block 0.0.0.0/0 --nat-gateway-id $NatGwId 2>$null | Out-Null
-_MoveSubnetToRt $K8sRtId $K8sSubnetAId
-_MoveSubnetToRt $K8sRtId $K8sSubnetBId
-
-Set-StateValue aws nat_gateway_id   $NatGwId
-Set-StateValue aws nat_eip_alloc_id $NatEipAllocId
-Set-StateValue aws k8s_rt_id        $K8sRtId
-Write-Ok "K8s RT $K8sRtId → NAT $NatGwId → internet  [EKS nodes; VM/DB subnets stay isolated]"
+# ── 4a. K8s node egress — now owned by the EKS Terraform build ────────────────
+# The sandbox no longer stands up a NAT for k8s (no standing NAT cost). Managed
+# Kubernetes (EKS) is self-contained like AKS/GKE: the aws_eks module builds its
+# OWN VPC + subnets + NAT instance per cluster (torn down with the cluster) and
+# VPC-peers back to this sandbox VPC for direct management-plane access. The
+# dashboard passes the peering inputs emitted at the end.
+Set-StateValue aws private_rt_id $PrivateRtId
 
 # ── 4b. RDS DB subnet group ───────────────────────────────────────────────────
 # The managed-database feature deploys private RDS instances (no public
@@ -744,8 +703,11 @@ $cfg = @(
     "aws_default_security_group_id=$VmSg               # Deploy form's default SG (VM-tier, no internet egress)",
     "aws_db_subnet_group_name=$DbSubnetGroupName       # Managed-DB deploys: private RDS subnet group (2 AZs)",
     "aws_db_security_group_id=$VmSg                     # Managed-DB deploys: reuse the VM-tier SG (no internet egress)",
-    "aws_k8s_subnet_a_id=$K8sSubnetAId                  # Managed-K8s (EKS) provisioning: private cluster subnet AZ-a",
-    "aws_k8s_subnet_b_id=$K8sSubnetBId                  # Managed-K8s (EKS) provisioning: private cluster subnet AZ-b",
+    "aws_vpc_id=$VpcId                                  # Sandbox VPC the EKS module peers its own VPC back to",
+    "aws_vpc_cidr=10.99.0.0/16                          # Sandbox VPC CIDR (EKS peering route target)",
+    "aws_private_route_table_id=$PrivateRtId            # Sandbox private RT — gets the EKS peering return route",
+    "ansible_ecs_subnet_id=$PublicSubnetId              # ECS Fargate ansible/k8s runners: public subnet (egress via IGW, no NAT)",
+    "ansible_ecs_security_group_ids=$JumpointSg         # runner SG (egress 0.0.0.0/0)",
     "ec2_ssh_key_secret=$SshSecretName                 # JSON {public_key,private_key} for EC2 cloud-init + Ansible",
     "bt_ecs_cluster=$EcsCluster                          # ECS cluster the Jumpoint Fargate task runs in",
     "bt_ecs_task_family=bt-jumpoint",

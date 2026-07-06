@@ -27,6 +27,15 @@ written by one variant are readable by the other (same
 | Azure | ACI container in delegated subnet | NSG denies `Internet` outbound, allows `VirtualNetwork` |
 | GCP   | COS-on-GCE VM in NAT-attached subnet | Sibling subnet has no Cloud NAT mapping + firewall egress-deny rule on tagged VMs |
 
+**Managed Kubernetes** clusters (EKS/AKS/GKE) are network-**self-contained**: the
+dashboard's Terraform build creates each cluster's own VPC/VNet + subnets + egress
+(AWS uses a small NAT instance) and destroys it on decommission — so the sandbox
+itself stands up **no NAT**. The AWS EKS build additionally **VPC-peers** its
+network back to the sandbox VPC and opens the DB/VM security groups, so an
+in-cluster Entitle agent can reach the private resources it manages directly
+(Entitle/PRA also broker access without the peering). Decommission EKS clusters
+via the dashboard **before** running rollback, or the peering blocks VPC teardown.
+
 ## Prerequisites
 
 Tools needed regardless of which variant you run:
@@ -157,6 +166,10 @@ A running Jumpoint container/VM adds:
 - AWS:  ~$10/mo for ECS Fargate (256 CPU / 512 MB).
 - Azure: ~$10/mo for ACI (1 vCPU / 2 GB).
 - GCP:  ~$5/mo for `e2-micro`.
+
+A running **managed Kubernetes cluster** adds its control-plane + node cost, plus
+(AWS EKS) a small NAT instance ~$3/mo. Each cluster builds its own VPC + egress
+and tears it all down on decommission, so idle cost stays ~$0.
 
 ## Tear-down
 

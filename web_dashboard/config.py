@@ -187,12 +187,18 @@ class Settings(BaseSettings):
     # The sandbox creates one with rds.force_ssl=0 (the PRA protocol tunnel needs
     # a cleartext backend) and writes its name here; empty = RDS default group.
     aws_db_parameter_group_name: str = ""
-    # Managed-Kubernetes (EKS) provisioning (§1.1a). The sandbox emits the two
-    # private k8s subnet ids (2 AZs) and they're pushed via /api/setup/import; the
-    # provision form can also override per-cluster. Empty version / node type →
-    # the terraform/k8s_cluster/aws_eks module defaults.
-    aws_k8s_subnet_a_id: str = ""
-    aws_k8s_subnet_b_id: str = ""
+    # Managed-Kubernetes (EKS) provisioning (§1.1a). The EKS module now builds its
+    # OWN VPC / subnets / NAT-instance egress (self-contained, like AKS/GKE) and
+    # peers it back to the sandbox VPC for direct management-plane access. The
+    # sandbox emits its VPC id / CIDR / private route-table id; the DB + default
+    # (VM) SGs drive the cross-VPC ingress rules. Empty version / node type / VPC
+    # CIDR → the terraform/k8s_cluster/aws_eks module defaults.
+    aws_vpc_id: str = ""                     # sandbox VPC to peer the EKS VPC with
+    aws_vpc_cidr: str = "10.99.0.0/16"       # sandbox VPC CIDR (peering route target)
+    aws_private_route_table_id: str = ""     # sandbox private RT — gets the peering return route
+    aws_eks_vpc_cidr: str = "10.97.0.0/16"   # the EKS cluster's own VPC CIDR (must not overlap the sandbox)
+    aws_k8s_subnet_a_id: str = ""            # legacy (pre-self-contained EKS); no longer consumed
+    aws_k8s_subnet_b_id: str = ""            # legacy; no longer consumed
     aws_eks_k8s_version: str = ""
     aws_eks_node_instance_type: str = ""
 

@@ -27,8 +27,9 @@ class ClusterProvisionRequest(BaseModel):
     """Provision a new cluster with Terraform. The dashboard provisions the cluster,
     stores the generated kubeconfig as a reference, and flips the record to
     ``registered`` so the manage / broker / secrets / delete flows apply unchanged.
-    Implemented for ``aws`` (EKS), ``azure`` (AKS), and ``gcp`` (GKE). AKS/GKE create
-    their own network + egress; EKS reuses the sandbox's private k8s subnets.
+    Implemented for ``aws`` (EKS), ``azure`` (AKS), and ``gcp`` (GKE). All three
+    create their own network + egress; the EKS build additionally peers its VPC
+    back to the sandbox VPC for direct management-plane access.
     """
     name: str                                 # dashboard-unique cluster name
     cloud: str = "aws"                        # aws (EKS) | azure (AKS) | gcp (GKE)
@@ -36,7 +37,7 @@ class ClusterProvisionRequest(BaseModel):
     k8s_version: Optional[str] = None         # control-plane version (else config / module default)
     node_instance_type: Optional[str] = None  # node size: EC2 type / AKS vm_size / GKE machine type
     node_count: Optional[int] = None          # desired node count (else module default)
-    subnet_ids: Optional[list[str]] = None    # AWS only — override the sandbox-emitted private k8s subnets
+    vpc_cidr: Optional[str] = None            # AWS only — the EKS module's own VPC CIDR (default 10.97.0.0/16; distinct per concurrent cluster)
     authorized_cidrs: Optional[list[str]] = None  # restrict the public API endpoint (empty = open)
     zone: Optional[str] = None                # GCP only — zonal cluster zone (else <region>-a)
 

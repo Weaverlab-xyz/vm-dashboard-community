@@ -72,13 +72,15 @@ def _build(cloud, **over):
 # ── AWS / EKS ────────────────────────────────────────────────────────────────
 
 def test_aws_basics_and_node_desired():
+    # EKS is self-contained now: it builds its OWN VPC (vpc_cidr), no subnet_ids.
     tf = _build("aws", opts={
-        "subnet_ids": ["subnet-a", "subnet-b"], "node_instance_type": "m5.large",
+        "vpc_cidr": "10.42.0.0/16", "node_instance_type": "m5.large",
         "k8s_version": "1.29", "node_count": 3,
     })
     assert tf["cluster_name"] == "k8s-demo"            # _eks_name("k8s-demo")
     assert tf["region"] == "r1"
-    assert tf["subnet_ids"] == ["subnet-a", "subnet-b"]
+    assert tf["vpc_cidr"] == "10.42.0.0/16"            # the cluster's own VPC
+    assert "subnet_ids" not in tf                       # no longer consumes sandbox subnets
     assert tf["tags"] == {"managed-by": "vm-dashboard", "k8s-cluster-id": "cid-123"}
     assert tf["k8s_version"] == "1.29"
     assert tf["node_instance_type"] == "m5.large"
@@ -87,11 +89,39 @@ def test_aws_basics_and_node_desired():
     assert "vm_size" not in tf and "machine_type" not in tf
 
 
-def test_aws_subnet_fallback_from_config():
+def test_aws_peering_vars_from_config():
+    # When the sandbox emitted its VPC id, the EKS module gets the peering inputs
+    # + the DB/VM SGs that drive the cross-VPC management-plane rules; vpc_cidr
+    # falls back to the configured default.
     CONF.clear()
-    CONF.update({"aws_k8s_subnet_a_id": "sn-a", "aws_k8s_subnet_b_id": "sn-b"})
+    CONF.update({
+        "aws_vpc_id": "vpc-sandbox", "aws_vpc_cidr": "10.99.0.0/16",
+        "aws_private_route_table_id": "rtb-priv",
+        "aws_db_security_group_id": "sg-db", "aws_default_security_group_id": "sg-vm",
+        "aws_eks_vpc_cidr": "10.97.0.0/16",
+    })
     try:
-        assert _build("aws")["subnet_ids"] == ["sn-a", "sn-b"]
+        tf = _build("aws")
+        assert tf["vpc_cidr"] == "10.97.0.0/16"                    # config default flows through
+        assert tf["sandbox_vpc_id"] == "vpc-sandbox"
+        assert tf["sandbox_vpc_cidr"] == "10.99.0.0/16"
+        assert tf["sandbox_private_route_table_id"] == "rtb-priv"
+        assert tf["db_security_group_id"] == "sg-db"
+        assert tf["vm_security_group_id"] == "sg-vm"
+        assert "subnet_ids" not in tf
+    finally:
+        CONF.clear()
+
+
+def test_aws_no_peering_without_sandbox_vpc():
+    # No sandbox VPC id → no peering / SG vars (a bare, isolated cluster).
+    CONF.clear()
+    try:
+        tf = _build("aws", opts={"vpc_cidr": "10.50.0.0/16"})
+        assert tf["vpc_cidr"] == "10.50.0.0/16"
+        for k in ("sandbox_vpc_id", "sandbox_vpc_cidr", "sandbox_private_route_table_id",
+                  "db_security_group_id", "vm_security_group_id", "subnet_ids"):
+            assert k not in tf
     finally:
         CONF.clear()
 

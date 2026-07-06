@@ -62,6 +62,19 @@ function Invoke-AwsRollback {
             return
         }
 
+        # A managed EKS cluster owns a VPC peering back to this sandbox VPC (plus a
+        # route on the private RT + cross-VPC SG rules), all in the cluster's own
+        # Terraform state. Those block VPC teardown — refuse if any peering remains.
+        $peerings = (aws ec2 describe-vpc-peering-connections --region $region `
+            --filters "Name=status-code,Values=active,pending-acceptance,provisioning" `
+            --query "VpcPeeringConnections[?RequesterVpcInfo.VpcId=='$vpcId' || AccepterVpcInfo.VpcId=='$vpcId'].VpcPeeringConnectionId" `
+            --output text 2>$null).Trim()
+        if ($peerings -and $peerings -ne 'None') {
+            Write-Warn "Active VPC peering(s) on $vpcId : $peerings"
+            Write-Warn 'An EKS cluster is still peered to this VPC. Decommission EKS clusters via the dashboard first, then re-run rollback. Skipping VPC teardown.'
+            return
+        }
+
         # RDS DB subnet groups in this VPC — RDS holds the subnets, so these
         # must go before the subnet sweep below or delete-subnet fails.
         $dbgs = (aws rds describe-db-subnet-groups --region $region `

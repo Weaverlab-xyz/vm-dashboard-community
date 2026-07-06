@@ -95,7 +95,7 @@ async def provision_cluster(
         "k8s_version": payload.k8s_version,
         "node_instance_type": payload.node_instance_type,
         "node_count": payload.node_count,
-        "subnet_ids": payload.subnet_ids,
+        "vpc_cidr": payload.vpc_cidr,
         "authorized_cidrs": payload.authorized_cidrs,
         "zone": payload.zone,
     }.items() if v is not None}

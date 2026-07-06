@@ -306,23 +306,26 @@ def _build_cluster_tf_variables(*, cloud: str, cluster_id: str, name: str,
     """The Terraform ``-var`` set for the cluster module (aws EKS / azure AKS /
     gcp GKE).
 
-    AWS subnet ids default to the two private k8s subnets the sandbox emits
-    (``aws_k8s_subnet_a_id`` / ``aws_k8s_subnet_b_id``). AKS/GKE create their own
-    network (self-contained + egress) so they take none. k8s version + node size
+    All three clouds' modules create their own network (self-contained VPC +
+    egress). The AWS module additionally peers its VPC back to the sandbox VPC
+    (``aws_vpc_id`` / ``aws_vpc_cidr`` / ``aws_private_route_table_id``) and opens
+    the DB/VM SGs for direct management-plane access. k8s version + node size
     fall back to config then the module defaults; ``node_instance_type`` maps to
     the per-cloud node-size var (EKS instance type / AKS vm_size / GKE machine
     type)."""
     _tags = {"managed-by": "vm-dashboard", "k8s-cluster-id": cluster_id}
     if cloud == "aws":
-        subnets = opts.get("subnet_ids") or [
-            s for s in (_cfg("aws_k8s_subnet_a_id"), _cfg("aws_k8s_subnet_b_id")) if s
-        ]
         tf = {
             "region": region,
             "cluster_name": _eks_name(f"k8s-{name}"),
-            "subnet_ids": subnets,
             "tags": {"managed-by": "vm-dashboard", "k8s-cluster-id": cluster_id},
         }
+        # The EKS module builds its own VPC / subnets / NAT-instance egress
+        # (self-contained, like AKS/GKE). Optional per-cluster VPC CIDR override so
+        # concurrent peered clusters don't overlap (each needs a distinct block).
+        vpc_cidr = opts.get("vpc_cidr") or _cfg("aws_eks_vpc_cidr")
+        if vpc_cidr:
+            tf["vpc_cidr"] = vpc_cidr
         version = opts.get("k8s_version") or _cfg("aws_eks_k8s_version")
         if version:
             tf["k8s_version"] = version
@@ -331,6 +334,20 @@ def _build_cluster_tf_variables(*, cloud: str, cluster_id: str, name: str,
             tf["node_instance_type"] = node_type
         if opts.get("node_count"):
             tf["node_desired"] = int(opts["node_count"])
+        # Peer the cluster's own VPC back to the sandbox VPC so an in-cluster agent
+        # can reach the private VMs/DBs directly (Entitle/PRA also brokers access
+        # without this). Only when the sandbox emitted its VPC id + return RT.
+        sandbox_vpc = _cfg("aws_vpc_id")
+        if sandbox_vpc:
+            tf["sandbox_vpc_id"] = sandbox_vpc
+            tf["sandbox_vpc_cidr"] = _cfg("aws_vpc_cidr")
+            tf["sandbox_private_route_table_id"] = _cfg("aws_private_route_table_id")
+            db_sg = _cfg("aws_db_security_group_id")
+            if db_sg:
+                tf["db_security_group_id"] = db_sg
+            vm_sg = _cfg("aws_default_security_group_id")
+            if vm_sg:
+                tf["vm_security_group_id"] = vm_sg
         return tf
 
     if cloud == "azure":
@@ -423,13 +440,8 @@ async def provision_options(cloud: str, region: str = "") -> dict:
         "subnets": [],
         "configured_subnet_ids": [],
     }
-    if cloud == "aws":
-        from . import aws_service
-        net = await aws_service.get_network_options(region)
-        out["subnets"] = net.get("subnets", [])
-        out["configured_subnet_ids"] = [
-            s for s in (_cfg("aws_k8s_subnet_a_id"), _cfg("aws_k8s_subnet_b_id")) if s
-        ]
+    # All three cloud modules build their own network now (EKS self-contained +
+    # peered), so no per-cloud subnet options are served.
     return out
 
 
