@@ -520,7 +520,8 @@ $DashboardPolicy = @"
         "arn:aws:iam::${AccountId}:role/${VmImportRoleName}",
         "arn:aws:iam::${AccountId}:role/ecsTaskExecutionRole",
         "arn:aws:iam::${AccountId}:role/${PromoteTaskRoleName}",
-        "arn:aws:iam::${AccountId}:role/k8s-*"
+        "arn:aws:iam::${AccountId}:role/k8s-*",
+        "arn:aws:iam::${AccountId}:role/ec2-ssm-*"
       ]
     },
     {
