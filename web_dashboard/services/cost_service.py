@@ -136,14 +136,55 @@ async def get_aws_mtd_cost() -> tuple:
     return await asyncio.to_thread(_query)
 
 
+def _retry_after_seconds(header_val, *, default: int, cap: int = 30) -> int:
+    """Parse a Cost Management ``Retry-After`` header (seconds; HTTP-date form is
+    not used by the API). Falls back to ``default``, capped so a retry never
+    stretches a request past a reasonable ceiling."""
+    if not header_val:
+        return default
+    try:
+        return max(1, min(int(header_val), cap))
+    except (TypeError, ValueError):
+        return default
+
+
+async def _azure_cost_query(sub_id: str, token: str, body: dict, *, label: str) -> dict:
+    """POST an Azure Cost Management query and return the parsed JSON body.
+
+    Cost Management is aggressively rate-limited per subscription (429 with a
+    ``Retry-After`` header) — retry once honoring the header so a single throttled
+    response doesn't poison the tile for the whole 6 h cache TTL. On a repeat
+    429 (or any other HTTP error) surface an ``AzureError`` with a message that
+    starts with ``label`` so the caller's user-facing string is preserved."""
+    url = (f"{_AZURE_MGMT}/subscriptions/{sub_id}/providers/"
+           "Microsoft.CostManagement/query?api-version=2023-03-01")
+    headers = {"Authorization": f"Bearer {token}"}
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            for attempt in (0, 1):
+                resp = await client.post(url, json=body, headers=headers)
+                if getattr(resp, "status_code", None) == 429 and attempt == 0:
+                    wait = _retry_after_seconds(
+                        resp.headers.get("Retry-After") if hasattr(resp, "headers") else None,
+                        default=10)
+                    logger.warning(
+                        "azure cost 429 for %s; retrying in %ss (Retry-After honored)",
+                        label, wait)
+                    await asyncio.sleep(wait)
+                    continue
+                resp.raise_for_status()
+                return resp.json() or {}
+    except httpx.HTTPError as e:
+        raise azure_service.AzureError(f"{label}: {e}") from e
+    raise azure_service.AzureError(f"{label}: rate limited after retry")
+
+
 async def get_azure_mtd_cost() -> tuple:
     """Azure subscription month-to-date ActualCost via the Cost Management REST
     query. Returns (amount, currency). Reuses ``azure_service._ensure_creds`` for
     the credential + subscription; raises ``azure_service.AzureError``."""
     cred, sub_id = await azure_service._ensure_creds()
     token = (await asyncio.to_thread(cred.get_token, f"{_AZURE_MGMT}/.default")).token
-    url = (f"{_AZURE_MGMT}/subscriptions/{sub_id}/providers/"
-           "Microsoft.CostManagement/query?api-version=2023-03-01")
     body = {
         "type": "ActualCost",
         "timeframe": "MonthToDate",
@@ -152,15 +193,9 @@ async def get_azure_mtd_cost() -> tuple:
             "aggregation": {"totalCost": {"name": "Cost", "function": "Sum"}},
         },
     }
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                url, json=body, headers={"Authorization": f"Bearer {token}"})
-        resp.raise_for_status()
-    except httpx.HTTPError as e:
-        raise azure_service.AzureError(f"Azure Cost Management query failed: {e}") from e
-
-    props = (resp.json() or {}).get("properties", {})
+    data = await _azure_cost_query(
+        sub_id, token, body, label="Azure Cost Management query failed")
+    props = data.get("properties", {})
     cols = [c.get("name") for c in props.get("columns", [])]
     cost_idx = cols.index("Cost") if "Cost" in cols else 0
     cur_idx = cols.index("Currency") if "Currency" in cols else None
@@ -228,8 +263,6 @@ async def get_azure_managed_breakdown() -> dict:
     ``azure_service.AzureError``."""
     cred, sub_id = await azure_service._ensure_creds()
     token = (await asyncio.to_thread(cred.get_token, f"{_AZURE_MGMT}/.default")).token
-    url = (f"{_AZURE_MGMT}/subscriptions/{sub_id}/providers/"
-           "Microsoft.CostManagement/query?api-version=2023-03-01")
     body = {
         "type": "ActualCost",
         "timeframe": "MonthToDate",
@@ -241,15 +274,9 @@ async def get_azure_managed_breakdown() -> dict:
                                 "values": [_MANAGED_TAG_VALUE]}},
         },
     }
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                url, json=body, headers={"Authorization": f"Bearer {token}"})
-        resp.raise_for_status()
-    except httpx.HTTPError as e:
-        raise azure_service.AzureError(f"Azure Cost Management breakdown failed: {e}") from e
-
-    props = (resp.json() or {}).get("properties", {})
+    data = await _azure_cost_query(
+        sub_id, token, body, label="Azure Cost Management breakdown failed")
+    props = data.get("properties", {})
     cols = [c.get("name") for c in props.get("columns", [])]
     cost_idx = cols.index("Cost") if "Cost" in cols else 0
     svc_idx = cols.index("ServiceName") if "ServiceName" in cols else None
