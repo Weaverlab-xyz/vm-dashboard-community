@@ -184,8 +184,16 @@ resource "aws_subnet" "private" {
 # NAT instance in the public subnet: enables ip_forward + MASQUERADE via
 # user-data, source/dest check off so it forwards, holds an EIP for a stable
 # egress IP (so public_access_cidrs / SaaS allow-lists can pin it).
-data "aws_ssm_parameter" "nat_ami" {
-  name = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64"
+# Resolve the latest Amazon Linux 2023 arm64 AMI via ec2:DescribeImages (already
+# granted for the VM-deploy AMI picker) rather than the SSM public parameter,
+# which needs a separate ssm:GetParameter grant the dashboard IAM user lacks.
+data "aws_ami" "nat" {
+  most_recent = true
+  owners      = ["amazon"] # AL2023 is published under the "amazon" owner alias
+  filter {
+    name   = "name"
+    values = ["al2023-ami-2023.*-kernel-*-arm64"]
+  }
 }
 
 resource "aws_security_group" "nat" {
@@ -209,7 +217,7 @@ resource "aws_security_group" "nat" {
 }
 
 resource "aws_instance" "nat" {
-  ami                         = data.aws_ssm_parameter.nat_ami.value
+  ami                         = data.aws_ami.nat.id
   instance_type               = var.nat_instance_type
   subnet_id                   = aws_subnet.public.id
   vpc_security_group_ids      = [aws_security_group.nat.id]
