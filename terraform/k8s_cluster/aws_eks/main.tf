@@ -226,14 +226,18 @@ resource "aws_instance" "nat" {
 
   user_data = <<-NATUD
     #!/bin/bash
-    set -e
+    set -euxo pipefail
+    # AL2023 is minimal and ships WITHOUT iptables — install it BEFORE any
+    # iptables use, or the script dies here (nothing gets masqueraded → the NAT
+    # forwards nothing → private nodes have no egress → EKS nodes can't join).
+    dnf install -y iptables-services
     sysctl -w net.ipv4.ip_forward=1
     echo 'net.ipv4.ip_forward=1' > /etc/sysctl.d/99-nat.conf
     IFACE="$(ip route | awk '/default/{print $5; exit}')"
     iptables -t nat -A POSTROUTING -o "$IFACE" -j MASQUERADE
-    dnf install -y iptables-services
+    iptables -P FORWARD ACCEPT
     service iptables save
-    systemctl enable iptables
+    systemctl enable --now iptables
   NATUD
 
   tags = merge(var.tags, { Name = "${var.cluster_name}-nat" })
