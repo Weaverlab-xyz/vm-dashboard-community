@@ -222,6 +222,26 @@
       //   valueClass: optional Tailwind class override for the big number
       tileSections: [
         {
+          // Always-on summary band (jobs run for every integration; inventory is
+          // cross-provider), so it lives up top rather than under On-Premises.
+          id: 'overview',
+          label: 'Overview',
+          gridClass: 'grid grid-cols-1 sm:grid-cols-2 gap-4',
+          refreshable: false,
+          tiles: [
+            {
+              key: 'active_jobs', title: 'Active Jobs', href: '/jobs',
+              description: 'pending / running',
+              valueClass: 'text-blue-600',
+            },
+            {
+              key: 'deployed_resources', title: 'Deployed Resources', href: '/inventory',
+              description: 'across all providers',
+              valueClass: 'text-indigo-600',
+            },
+          ],
+        },
+        {
           id: 'onprem',
           label: 'On-Premises',
           gridClass: 'grid grid-cols-1 sm:grid-cols-3 gap-4',
@@ -235,18 +255,6 @@
               key: 'running_vms', title: 'Running', href: '/vms',
               flag: 'vmware', description: 'VMs currently online',
               valueClass: 'text-green-600',
-            },
-            {
-              key: 'active_jobs', title: 'Active Jobs', href: '/jobs',
-              description: 'pending / running',
-              valueClass: 'text-blue-600',
-              // jobs tile is always-on (jobs run for every integration)
-            },
-            {
-              key: 'deployed_resources', title: 'Deployed Resources', href: '/inventory',
-              description: 'across all providers',
-              valueClass: 'text-indigo-600',
-              // always-on cross-provider inventory count
             },
           ],
         },
@@ -307,7 +315,7 @@
 
         await this.loadFeatures();
         // Load on-prem stats + jobs in parallel; cloud/hypervisor/containers in background
-        await Promise.all([this.loadOnPremStats(), this.loadJobs(), this.loadInventoryCount(), this.loadAttention()]);
+        await Promise.all([this.loadOnPremStats(), this.loadActiveJobs(), this.loadJobs(), this.loadInventoryCount(), this.loadAttention()]);
         this.refreshSection(this.tileSections.find(s => s.id === 'cloud'));
         this.refreshSection(this.tileSections.find(s => s.id === 'hypervisors'));
         this.refreshSection(this.tileSections.find(s => s.id === 'containers'));
@@ -315,7 +323,7 @@
         // Live updates: poll the cheap, status-bearing surfaces (jobs + attention)
         // every 10s; tick `now` every 30s so "updated Xm ago" labels stay current.
         // Cloud/hypervisor tiles stay manual-refresh (they hit live cloud APIs).
-        setInterval(() => { this.loadJobs(true); this.loadAttention(); }, 10000);
+        setInterval(() => { this.loadJobs(true); this.loadActiveJobs(); this.loadAttention(); }, 10000);
         setInterval(() => { this.now = Date.now(); }, 30000);
       },
 
@@ -463,7 +471,6 @@
           if (!resp) return;
           this.stats.total_vms   = { value: resp.total_vms };
           this.stats.running_vms = { value: resp.running_vms };
-          this.stats.active_jobs = { value: resp.active_jobs };
           for (const wg of this.workgroups) {
             wg.count = resp.workgroup_counts[wg.name] ?? 0;
           }
@@ -472,14 +479,16 @@
           this.stats.total_vms   = { value: -1 };
           this.stats.running_vms = { value: -1 };
         }
-        // Active jobs is always-on; load it separately if vmware was off
-        if (this.stats.active_jobs.value === null || this.stats.active_jobs.value === -1) {
-          try {
-            const j = await API.get('/api/jobs?page_size=1&status=running');
-            this.stats.active_jobs = { value: j?.total ?? 0 };
-          } catch (e) {
-            this.stats.active_jobs = { value: -1 };
-          }
+      },
+
+      async loadActiveJobs() {
+        // Always-on: pending + running jobs across every integration (RBAC-scoped
+        // server-side — admins see all, others see their own).
+        try {
+          const j = await API.get('/api/jobs?page_size=1&status=pending,running');
+          this.stats.active_jobs = { value: j?.total ?? 0 };
+        } catch (e) {
+          this.stats.active_jobs = { value: -1 };
         }
       },
 

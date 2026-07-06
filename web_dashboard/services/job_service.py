@@ -152,7 +152,9 @@ def list_jobs(
     """
     query = db.query(Job)
     if status:
-        query = query.filter(Job.status == status)
+        # Accept a comma-separated list (e.g. "pending,running") so a single
+        # count call can span multiple statuses; a single value still works.
+        query = query.filter(Job.status.in_([s for s in status.split(",") if s]))
     if created_by:
         query = query.filter(Job.created_by == created_by)
     if workgroup:
