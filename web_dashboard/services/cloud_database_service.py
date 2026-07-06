@@ -277,13 +277,19 @@ def _build_tf_variables(
         # sandbox creates. The module forces public_network_access_enabled=false; Azure
         # SQL's forced TLS is fine because the mssql tunnel does backend TLS itself.
         # (The tunnel targets `master`, set in _broker_tunnel.)
+        # The Azure form's SKU picker offers Flexible-Server SKUs (B_Standard_*, GP_Standard_*),
+        # which are invalid for azurerm_mssql_database (Azure SQL DB wants Basic / S0 / P1 /
+        # GP_S_Gen5_1 / …). Coerce any Flexible-Server SKU to Basic; honor a real SQL-DB SKU.
+        sqlserver_sku = opts.get("sku_name") or "Basic"
+        if "_Standard_" in sqlserver_sku:
+            sqlserver_sku = "Basic"
         return {
             "resource_group_name": opts.get("resource_group_name") or _cfg("azure_resource_group"),
             "location": region,
             "identifier": f"clouddb-{db_id[:8]}",
             "administrator_login": master_username,
             "administrator_password": master_password,
-            "sku_name": opts.get("sku_name", "Basic"),
+            "sku_name": sqlserver_sku,
             "db_name": db_name,
             "subnet_id": opts.get("subnet_id") or _cfg("azure_db_sqlserver_subnet_id"),
             "private_dns_zone_id": opts.get("private_dns_zone_id") or _cfg("azure_db_sqlserver_private_dns_zone_id"),
