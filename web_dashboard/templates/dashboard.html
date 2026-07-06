@@ -50,6 +50,9 @@
           <div class="flex items-center gap-3 ml-4 shrink-0">
             <span class="text-xs text-gray-400" x-show="a.time" x-text="timeAgo(a.time)"></span>
             <a :href="a.href" class="text-xs text-blue-500 hover:underline">View →</a>
+            <button @click="dismissAttention(a.id)"
+                    class="text-xs text-gray-400 hover:text-gray-700"
+                    title="Dismiss this alert">Dismiss</button>
           </div>
         </li>
       </template>
@@ -205,6 +208,9 @@
 
       // Needs-attention items (failed/stuck jobs, bad-state resources)
       attention: [],
+      // Item ids the user has dismissed (persisted per-browser). Filtered out of
+      // `attention` on every rebuild so they stay hidden across polls/reloads.
+      dismissedAttention: JSON.parse(localStorage.getItem('attention_dismissed') || '[]'),
 
       // Bumped on a timer so relative "updated Xm ago" labels stay current
       now: Date.now(),
@@ -451,7 +457,16 @@
         out.sort((a, b) => a.severity === b.severity
           ? (new Date(b.time || 0) - new Date(a.time || 0))
           : (a.severity === 'error' ? -1 : 1));
-        this.attention = out.slice(0, 8);
+        // Drop anything the user has dismissed before capping the list.
+        this.attention = out.filter(a => !this.dismissedAttention.includes(a.id)).slice(0, 8);
+      },
+
+      // Hide an alert for good (per-browser). It's re-derived from live sources on
+      // every poll, so we remember the id in localStorage and filter it out there.
+      dismissAttention(id) {
+        this.dismissedAttention = [...new Set([...this.dismissedAttention, id])];
+        localStorage.setItem('attention_dismissed', JSON.stringify(this.dismissedAttention));
+        this.attention = this.attention.filter(a => a.id !== id);
       },
 
       async loadInventoryCount() {
