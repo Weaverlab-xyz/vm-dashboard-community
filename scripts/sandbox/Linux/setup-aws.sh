@@ -682,7 +682,8 @@ DASHBOARD_POLICY_DOC="$(jq -c . <<JSON
         "arn:aws:iam::${ACCOUNT_ID}:role/ecsTaskExecutionRole",
         "arn:aws:iam::${ACCOUNT_ID}:role/ecsInstanceRole",
         "arn:aws:iam::${ACCOUNT_ID}:role/${PROMOTE_TASK_ROLE_NAME}",
-        "arn:aws:iam::${ACCOUNT_ID}:role/k8s-*"
+        "arn:aws:iam::${ACCOUNT_ID}:role/k8s-*",
+        "arn:aws:iam::${ACCOUNT_ID}:role/ec2-ssm-*"
       ]
     },
     {
