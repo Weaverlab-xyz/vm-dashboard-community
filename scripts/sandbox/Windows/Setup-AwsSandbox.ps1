@@ -160,13 +160,17 @@ _AssociateRT $PrivateRtId $DbSubnetBId
 Write-Ok "Public  RT $PublicRtId  → IGW (0.0.0.0/0)"
 Write-Ok "Private RT $PrivateRtId → local VPC only (VMs + DBs)"
 
-# ── 4a. K8s node egress — NAT gateway + dedicated k8s route table ─────────────
-# Managed EKS nodes must reach the EKS API + pull images (ECR/S3/STS) to join,
-# which the VPC-only private RT can't provide. Give ONLY the k8s subnets egress
-# via a NAT gateway in the public subnet + a dedicated k8s route table, so the
-# VM + DB subnets stay isolated. The NAT + Elastic IP carry standing cost —
-# Rollback-Sandbox.ps1 deletes the NAT and releases the EIP (both tagged).
-Write-Section 'K8s node egress (NAT)'
+# ── 4a. K8s node egress — NAT *instance* + dedicated k8s route table ──────────
+# Managed EKS nodes (and the ECS Fargate ansible/k8s runners, which run with
+# assignPublicIp=DISABLED when given a subnet) must reach the EKS API + pull
+# images (ECR/Docker Hub) to work, which the VPC-only private RT can't provide.
+# Give ONLY the k8s subnets egress via a small NAT *instance* (t4g.nano, ~$3/mo)
+# in the public subnet — far cheaper than a managed NAT gateway (~$32/mo) for a
+# lab — so the VM + DB subnets stay isolated. The instance holds a standing
+# Elastic IP; Rollback-Sandbox.ps1 terminates it + releases the EIP (both
+# tagged). Trade-off: a single ~5 Gbps box you patch; if it's terminated the
+# route breaks (re-run this script to repair it).
+Write-Section 'K8s node egress (NAT instance)'
 
 # Elastic IP for the NAT (idempotent: reuse the sandbox-tagged one if present).
 $NatEipAllocId = (aws ec2 describe-addresses --region $Region `
@@ -178,30 +182,81 @@ if (-not $NatEipAllocId -or $NatEipAllocId -eq 'None') {
         --query 'AllocationId' --output text).Trim()
 }
 
-# NAT gateway in the public subnet (idempotent: reuse a live one in this VPC).
-$NatGwId = (aws ec2 describe-nat-gateways --region $Region `
+# Migration: older sandboxes used a managed NAT gateway. Delete it (frees the
+# EIP) so we can point the route at the NAT instance.
+$OldNatGwId = (aws ec2 describe-nat-gateways --region $Region `
     --filter "Name=vpc-id,Values=$VpcId" "Name=tag:$($Script:SandboxTagKey),Values=$($Script:SandboxTagValue)" `
     --query "NatGateways[?State=='available' || State=='pending'].NatGatewayId | [0]" --output text 2>$null)
-if (-not $NatGwId -or $NatGwId -eq 'None') {
-    $NatGwId = (aws ec2 create-nat-gateway --region $Region `
-        --subnet-id $PublicSubnetId --allocation-id $NatEipAllocId `
-        --tag-specifications (_TagSpec 'natgateway' "$Name-k8s-nat") `
-        --query 'NatGateway.NatGatewayId' --output text).Trim()
-    Write-Ok "Creating NAT gateway $NatGwId (waiting for it to become available…)"
-    aws ec2 wait nat-gateway-available --region $Region --nat-gateway-ids $NatGwId
+if ($OldNatGwId -and $OldNatGwId -ne 'None') {
+    Write-Warn "Migrating: deleting legacy managed NAT gateway $OldNatGwId (replaced by a NAT instance)…"
+    aws ec2 delete-nat-gateway --region $Region --nat-gateway-id $OldNatGwId 2>$null | Out-Null
+    aws ec2 wait nat-gateway-deleted --region $Region --nat-gateway-ids $OldNatGwId 2>$null | Out-Null
 }
 
-# Dedicated k8s route table: 0.0.0.0/0 → NAT; k8s subnets only (VM/DB stay private).
+# NAT-instance security group: ingress from the VPC, egress anywhere (default).
+$NatSg = _MakeSG "$Name-k8s-nat-sg" 'NAT instance for k8s egress — ingress from VPC, egress all'
+aws ec2 authorize-security-group-ingress --region $Region --group-id $NatSg `
+    --ip-permissions '[{"IpProtocol":"-1","IpRanges":[{"CidrIp":"10.99.0.0/16"}]}]' 2>$null | Out-Null
+
+# NAT instance (idempotent: reuse a running sandbox-tagged one if present).
+$NatInstanceId = (aws ec2 describe-instances --region $Region `
+    --filters "Name=tag:$($Script:SandboxTagKey),Values=$($Script:SandboxTagValue)" "Name=tag:Name,Values=$Name-k8s-nat" "Name=instance-state-name,Values=running,pending" `
+    --query 'Reservations[0].Instances[0].InstanceId' --output text 2>$null)
+if (-not $NatInstanceId -or $NatInstanceId -eq 'None') {
+    $NatAmi = (aws ssm get-parameter --region $Region `
+        --name /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64 `
+        --query 'Parameter.Value' --output text).Trim()
+    $NatUserData = @'
+#!/bin/bash
+set -e
+sysctl -w net.ipv4.ip_forward=1
+echo 'net.ipv4.ip_forward=1' > /etc/sysctl.d/99-nat.conf
+IFACE="$(ip route | awk '/default/{print $5; exit}')"
+iptables -t nat -A POSTROUTING -o "$IFACE" -j MASQUERADE
+dnf install -y iptables-services
+service iptables save
+systemctl enable iptables
+'@
+    $NatUd = [System.IO.Path]::GetTempFileName()
+    try {
+        Set-Content -Path $NatUd -Value $NatUserData -Encoding ascii
+        $NatInstanceId = (aws ec2 run-instances --region $Region `
+            --image-id $NatAmi --instance-type t4g.nano `
+            --subnet-id $PublicSubnetId --security-group-ids $NatSg `
+            --associate-public-ip-address --user-data "file://$NatUd" `
+            --tag-specifications (_TagSpec 'instance' "$Name-k8s-nat") `
+            --query 'Instances[0].InstanceId' --output text).Trim()
+    } finally { Remove-Item $NatUd -Force -ErrorAction SilentlyContinue }
+    Write-Ok "Launching NAT instance $NatInstanceId (t4g.nano; waiting for running…)"
+    aws ec2 wait instance-running --region $Region --instance-ids $NatInstanceId
+}
+
+# A NAT forwards traffic not addressed to it → source/dest check must be off.
+aws ec2 modify-instance-attribute --region $Region --instance-id $NatInstanceId --no-source-dest-check 2>$null | Out-Null
+
+# Give it the standing EIP + resolve its primary ENI (the route target).
+aws ec2 associate-address --region $Region --allocation-id $NatEipAllocId --instance-id $NatInstanceId 2>$null | Out-Null
+$NatEniId = (aws ec2 describe-instances --region $Region --instance-ids $NatInstanceId `
+    --query 'Reservations[0].Instances[0].NetworkInterfaces[0].NetworkInterfaceId' --output text).Trim()
+
+# Dedicated k8s route table: 0.0.0.0/0 → NAT instance ENI; k8s subnets only
+# (VM/DB stay private). create-route on first run, replace-route on re-runs.
 $K8sRtId = _MakeRouteTable "$Name-k8s-rt"
 aws ec2 create-route --region $Region --route-table-id $K8sRtId `
-    --destination-cidr-block 0.0.0.0/0 --nat-gateway-id $NatGwId 2>$null | Out-Null
+    --destination-cidr-block 0.0.0.0/0 --network-interface-id $NatEniId 2>$null | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    aws ec2 replace-route --region $Region --route-table-id $K8sRtId `
+        --destination-cidr-block 0.0.0.0/0 --network-interface-id $NatEniId 2>$null | Out-Null
+}
 _MoveSubnetToRt $K8sRtId $K8sSubnetAId
 _MoveSubnetToRt $K8sRtId $K8sSubnetBId
 
-Set-StateValue aws nat_gateway_id   $NatGwId
-Set-StateValue aws nat_eip_alloc_id $NatEipAllocId
-Set-StateValue aws k8s_rt_id        $K8sRtId
-Write-Ok "K8s RT $K8sRtId → NAT $NatGwId → internet  [EKS nodes; VM/DB subnets stay isolated]"
+Set-StateValue aws nat_instance_id     $NatInstanceId
+Set-StateValue aws nat_instance_eni_id $NatEniId
+Set-StateValue aws nat_sg_id           $NatSg
+Set-StateValue aws nat_eip_alloc_id    $NatEipAllocId
+Set-StateValue aws k8s_rt_id           $K8sRtId
+Write-Ok "K8s RT $K8sRtId → NAT instance $NatInstanceId ($NatEniId) → internet  [EKS nodes + ECS runners; VM/DB stay isolated]"
 
 # ── 4b. RDS DB subnet group ───────────────────────────────────────────────────
 # The managed-database feature deploys private RDS instances (no public
@@ -746,6 +801,8 @@ $cfg = @(
     "aws_db_security_group_id=$VmSg                     # Managed-DB deploys: reuse the VM-tier SG (no internet egress)",
     "aws_k8s_subnet_a_id=$K8sSubnetAId                  # Managed-K8s (EKS) provisioning: private cluster subnet AZ-a",
     "aws_k8s_subnet_b_id=$K8sSubnetBId                  # Managed-K8s (EKS) provisioning: private cluster subnet AZ-b",
+    "ansible_ecs_subnet_id=$K8sSubnetAId               # ECS Fargate ansible/k8s runners: private k8s subnet (NAT-instance egress)",
+    "ansible_ecs_security_group_ids=$JumpointSg        # runner SG: egress 0.0.0.0/0 (internet via the k8s subnet's NAT instance)",
     "ec2_ssh_key_secret=$SshSecretName                 # JSON {public_key,private_key} for EC2 cloud-init + Ansible",
     "bt_ecs_cluster=$EcsCluster                          # ECS cluster the Jumpoint Fargate task runs in",
     "bt_ecs_task_family=bt-jumpoint",

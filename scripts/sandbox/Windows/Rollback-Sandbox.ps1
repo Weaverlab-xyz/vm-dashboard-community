@@ -99,16 +99,28 @@ function Invoke-AwsRollback {
             if ($LASTEXITCODE -eq 0) { Write-Ok "Deleted RT $rt" } else { Write-Warn "Could not delete RT $rt" }
         }
 
-        # NAT gateway + its Elastic IP (the k8s node-egress NAT). The NAT must be
-        # deleted BEFORE the subnets (it holds an ENI in the public subnet), and the
-        # EIP released or it keeps billing while unattached.
+        # NAT *instance* + its Elastic IP (the k8s node-egress NAT). The instance
+        # must be terminated BEFORE the subnets (it holds an ENI in the public
+        # subnet); its EIP is released below. Also delete a legacy managed NAT
+        # gateway if an older sandbox left one.
+        $natInstances = (aws ec2 describe-instances --region $region `
+            --filters "Name=vpc-id,Values=$vpcId" $filter "Name=tag:Name,Values=*-k8s-nat" "Name=instance-state-name,Values=pending,running,stopping,stopped" `
+            --query 'Reservations[].Instances[].InstanceId' --output text 2>$null).Trim()
+        foreach ($inst in $natInstances.Split()) {
+            if (-not $inst -or $inst -eq 'None') { continue }
+            & aws ec2 terminate-instances --region $region --instance-ids $inst *> $null
+            if ($LASTEXITCODE -eq 0) { Write-Ok "Terminating NAT instance $inst (waiting…)" }
+            else { Write-Warn "Could not terminate NAT instance $inst" }
+            & aws ec2 wait instance-terminated --region $region --instance-ids $inst *> $null
+            if ($LASTEXITCODE -ne 0) { Write-Warn "NAT instance $inst still terminating — if subnet teardown fails, re-run rollback shortly" }
+        }
         $nats = (aws ec2 describe-nat-gateways --region $region `
             --filter "Name=vpc-id,Values=$vpcId" $filter `
             --query "NatGateways[?State=='available' || State=='pending'].NatGatewayId" --output text 2>$null).Trim()
         foreach ($nat in $nats.Split()) {
             if (-not $nat -or $nat -eq 'None') { continue }
             & aws ec2 delete-nat-gateway --region $region --nat-gateway-id $nat *> $null
-            if ($LASTEXITCODE -eq 0) { Write-Ok "Deleting NAT gateway $nat (waiting for it to drain…)" }
+            if ($LASTEXITCODE -eq 0) { Write-Ok "Deleting legacy NAT gateway $nat (waiting for it to drain…)" }
             else { Write-Warn "Could not delete NAT $nat" }
             & aws ec2 wait nat-gateway-deleted --region $region --nat-gateway-ids $nat *> $null
             if ($LASTEXITCODE -ne 0) { Write-Warn "NAT $nat still deleting — if subnet teardown fails, re-run rollback shortly" }

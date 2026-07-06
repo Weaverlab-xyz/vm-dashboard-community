@@ -331,6 +331,15 @@ def _build_cluster_tf_variables(*, cloud: str, cluster_id: str, name: str,
             tf["node_instance_type"] = node_type
         if opts.get("node_count"):
             tf["node_desired"] = int(opts["node_count"])
+        # Management-plane reachability: open the lab's private DB / VM security
+        # groups to the cluster nodes so an in-cluster agent (Entitle) can reach
+        # the resources it manages. Blank config → the module skips the rules.
+        db_sg = _cfg("aws_db_security_group_id")
+        if db_sg:
+            tf["db_security_group_id"] = db_sg
+        vm_sg = _cfg("aws_default_security_group_id")
+        if vm_sg:
+            tf["vm_security_group_id"] = vm_sg
         return tf
 
     if cloud == "azure":

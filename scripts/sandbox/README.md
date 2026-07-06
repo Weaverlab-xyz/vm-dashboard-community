@@ -27,6 +27,17 @@ written by one variant are readable by the other (same
 | Azure | ACI container in delegated subnet | NSG denies `Internet` outbound, allows `VirtualNetwork` |
 | GCP   | COS-on-GCE VM in NAT-attached subnet | Sibling subnet has no Cloud NAT mapping + firewall egress-deny rule on tagged VMs |
 
+**Kubernetes (EKS) egress + management plane (AWS).** The two private k8s
+subnets reach the internet (EKS API, ECR, Entitle SaaS) through a small NAT
+*instance* (t4g.nano, ~$3/mo) holding a standing Elastic IP — far cheaper than a
+managed NAT gateway (~$32/mo) for a lab; the ECS Fargate ansible/k8s runners
+share that egress. Because the whole lab is one VPC, an EKS cluster running the
+Entitle agent can act as a **management plane** for the private VMs/DBs: when
+provisioned through the dashboard it auto-opens ingress from the cluster's node
+security group to the DB SG (5432/3306/1433) and the VM SG (22), so the agent
+can reach the resources it manages — and those rules are torn down with the
+cluster.
+
 ## Prerequisites
 
 Tools needed regardless of which variant you run:
@@ -149,7 +160,7 @@ deployed):
 
 | Cloud | Idle cost / month | Why |
 |---|---|---|
-| AWS   | ~$0   | VPC, subnets, IGW, SGs, IAM are free; ECS cluster is free until a task runs. Secret in Secrets Manager: ~$0.40. |
+| AWS   | ~$7   | NAT *instance* (t4g.nano, ~$3) + its Elastic IP (~$3.60 while attached) give the k8s subnets egress — a managed NAT gateway would be ~$32/mo. VPC, subnets, IGW, SGs, IAM free; ECS cluster free until a task runs. Secret ~$0.40. |
 | Azure | ~$5   | RG, VNet, NSGs, Key Vault free at idle. Storage account ~$0.05. Container registry (Basic, mirrors the Jumpoint/Ansible/promote images so deploy-time pulls skip Docker Hub rate limits): ~$5/mo — opt out with `SANDBOX_SKIP_ACR=1`. |
 | GCP   | ~$1.50 | Cloud NAT charges per-hour even when idle (~$1.50/mo). VPC, subnets, firewall rules, Secret Manager are free. |
 

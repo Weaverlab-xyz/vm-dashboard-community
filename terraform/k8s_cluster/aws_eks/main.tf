@@ -89,6 +89,34 @@ variable "tags" {
   description = "Resource tags (managed-by, cluster id)"
 }
 
+# Optional peer security-group reachability — lets the in-cluster workload (e.g.
+# the Entitle agent) reach the lab's private VMs / databases it manages. Blank =
+# skip. Node instances carry the EKS-managed cluster security group, which is the
+# source of the ingress rules added on these SGs below.
+variable "db_security_group_id" {
+  type        = string
+  default     = ""
+  description = "SG id of the managed databases; blank to skip. Opens ingress on db_ports from the cluster SG."
+}
+
+variable "vm_security_group_id" {
+  type        = string
+  default     = ""
+  description = "SG id of the lab VMs; blank to skip. Opens ingress on vm_ports from the cluster SG."
+}
+
+variable "db_ports" {
+  type        = list(number)
+  default     = [5432, 3306, 1433]
+  description = "DB engine ports opened from the cluster SG to db_security_group_id (Postgres / MySQL / SQL Server)."
+}
+
+variable "vm_ports" {
+  type        = list(number)
+  default     = [22]
+  description = "Ports opened from the cluster SG to vm_security_group_id (SSH by default)."
+}
+
 # ── IAM — cluster + node roles ───────────────────────────────────────────────
 # The cluster role lets the EKS control plane manage AWS resources; the node
 # role lets nodes join, pull from ECR, and run the VPC CNI. Both must exist with
@@ -183,6 +211,39 @@ resource "aws_eks_node_group" "this" {
   ]
 }
 
+# ── Management-plane reachability (optional) ─────────────────────────────────
+# Open the private VM / DB security groups to the cluster's node instances (they
+# carry the EKS-managed cluster security group) so an in-cluster agent can reach
+# the resources it manages. Rules live in THIS cluster's state (each keyed by its
+# own cluster SG as source) → torn down with the cluster; no orphans, and two
+# clusters targeting the same DB/VM SG don't collide. Created only when the peer
+# SG id is provided.
+locals {
+  cluster_sg_id = aws_eks_cluster.this.vpc_config[0].cluster_security_group_id
+}
+
+resource "aws_security_group_rule" "db_from_cluster" {
+  for_each                 = var.db_security_group_id == "" ? toset([]) : toset([for p in var.db_ports : tostring(p)])
+  type                     = "ingress"
+  security_group_id        = var.db_security_group_id
+  source_security_group_id = local.cluster_sg_id
+  protocol                 = "tcp"
+  from_port                = tonumber(each.value)
+  to_port                  = tonumber(each.value)
+  description              = "EKS ${var.cluster_name} nodes → managed DB"
+}
+
+resource "aws_security_group_rule" "vm_from_cluster" {
+  for_each                 = var.vm_security_group_id == "" ? toset([]) : toset([for p in var.vm_ports : tostring(p)])
+  type                     = "ingress"
+  security_group_id        = var.vm_security_group_id
+  source_security_group_id = local.cluster_sg_id
+  protocol                 = "tcp"
+  from_port                = tonumber(each.value)
+  to_port                  = tonumber(each.value)
+  description              = "EKS ${var.cluster_name} nodes → lab VM"
+}
+
 # ── Outputs ──────────────────────────────────────────────────────────────────
 # The service (k8s_service.run_provision_apply) assembles an exec-based kubeconfig
 # from these — keeping AWS creds + region out of Terraform state.
@@ -205,4 +266,9 @@ output "ca_certificate" {
 output "cluster_arn" {
   value       = aws_eks_cluster.this.arn
   description = "EKS cluster ARN"
+}
+
+output "cluster_security_group_id" {
+  value       = local.cluster_sg_id
+  description = "EKS-managed cluster security group (carried by node instances; source of the DB/VM ingress rules)"
 }
