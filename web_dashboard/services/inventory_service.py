@@ -120,7 +120,8 @@ def collect(db: Session) -> list:
             continue
         items.append(_vm_item(job))
 
-    for row in db.query(CloudDatabase).filter(CloudDatabase.status != "deleted").all():
+    for row in (db.query(CloudDatabase)
+                .filter(CloudDatabase.status.notin_(("deleted", "decommissioned"))).all()):
         items.append(_db_item(row))
 
     for row in db.query(K8sCluster).filter(K8sCluster.status != "deleted").all():
