@@ -248,6 +248,91 @@ def test_azure_parsing_reads_cost_and_currency_columns():
     assert currency == "USD"
 
 
+def test_azure_429_retries_once_and_recovers(monkeypatch=None):
+    """Cost Management throttles at 429 with a Retry-After header. One 429 must not
+    poison the tile — the helper must retry once (honoring Retry-After) and return
+    the second response."""
+    _restore()
+    import httpx as _httpx
+
+    class _Resp429:
+        status_code = 429
+        headers = {"Retry-After": "1"}
+        def raise_for_status(self): pass
+        def json(self): return {}
+
+    class _Resp200:
+        status_code = 200
+        headers = {}
+        def raise_for_status(self): pass
+        def json(self): return _AZURE_QUERY_RESULT
+
+    calls = {"n": 0}
+
+    class _Client:
+        def __init__(self, *a, **k): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, *a, **k):
+            calls["n"] += 1
+            return _Resp429() if calls["n"] == 1 else _Resp200()
+
+    orig_client, orig_sleep = _httpx.AsyncClient, asyncio.sleep
+    slept = []
+    async def _fast_sleep(s): slept.append(s)
+    _httpx.AsyncClient = _Client
+    asyncio.sleep = _fast_sleep
+    try:
+        amount, currency = _run(svc.get_azure_mtd_cost())
+    finally:
+        _httpx.AsyncClient = orig_client
+        asyncio.sleep = orig_sleep
+    assert calls["n"] == 2                # first was 429, second succeeded
+    assert slept == [1]                   # honored Retry-After: 1s
+    assert round(amount, 3) == 123.456    # parsed the retry response
+
+
+def test_azure_429_twice_raises_azure_error():
+    """Two consecutive 429s exhaust the single retry — surface AzureError so the
+    caller can degrade the tile, but only after a real second attempt was made."""
+    _restore()
+    import httpx as _httpx
+
+    class _Resp429:
+        status_code = 429
+        headers = {}
+        def raise_for_status(self):
+            raise _httpx.HTTPError("429 Too Many Requests")
+        def json(self): return {}
+
+    calls = {"n": 0}
+
+    class _Client:
+        def __init__(self, *a, **k): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, *a, **k):
+            calls["n"] += 1
+            return _Resp429()
+
+    orig_client, orig_sleep = _httpx.AsyncClient, asyncio.sleep
+    async def _fast_sleep(_): pass
+    _httpx.AsyncClient = _Client
+    asyncio.sleep = _fast_sleep
+    try:
+        raised = False
+        try:
+            _run(svc.get_azure_mtd_cost())
+        except svc.azure_service.AzureError as e:
+            raised = True
+            assert "Azure Cost Management query failed" in str(e)
+    finally:
+        _httpx.AsyncClient = orig_client
+        asyncio.sleep = orig_sleep
+    assert raised
+    assert calls["n"] == 2  # exactly one retry, not an infinite loop
+
+
 # ── managed breakdown: parsing ───────────────────────────────────────────────
 
 def test_aws_breakdown_parsing_groups_by_service():
