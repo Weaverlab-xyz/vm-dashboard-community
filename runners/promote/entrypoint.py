@@ -59,6 +59,23 @@ def convert(src: str, dst: str, target_format: str) -> None:
     log(f"convert done ({size_mb:.1f} MiB)")
 
 
+def convert_to_fixed_vhd(src: str, dst: str) -> None:
+    """Produce a FIXED-format VHD for Azure. Azure managed-image/disk creation
+    rejects dynamic VHDs ("is of Dynamic VHD type. Please retry with fixed VHD
+    type"), and qemu-img's `vpc` output is dynamic unless subformat=fixed.
+    force_size=on keeps the virtual size exact so the footer size Azure reads
+    back is correct (no CHS-geometry rounding). qemu-img auto-detects the source
+    format, so this works whether the source is a dynamic VHD or raw."""
+    log(f"convert to fixed VHD {src} -> {dst}")
+    subprocess.check_call(
+        ["qemu-img", "convert", "-p", "-O", "vpc", "-o", "subformat=fixed,force_size=on", src, dst],
+        stdout=sys.stdout,
+        stderr=sys.stderr,
+    )
+    size_mb = os.path.getsize(dst) / (1024 * 1024)
+    log(f"fixed VHD done ({size_mb:.1f} MiB)")
+
+
 def upload_s3(local: str, bucket: str, key: str, region: str) -> None:
     import boto3
     log(f"upload s3://{bucket}/{key} (region={region})")
@@ -159,7 +176,9 @@ def main() -> int:
 
     try:
         download(args.source_url, src_path)
-        if src_ext != dst_ext:
+        # Azure is handled specially below (it always needs a fixed-format VHD,
+        # normalised straight from the source), so skip the generic convert here.
+        if src_ext != dst_ext and args.target != "azure":
             convert(src_path, dst_path, dst_ext)
         if args.target == "s3":
             if not (args.dest_s3_bucket and args.dest_s3_key):
@@ -170,7 +189,13 @@ def main() -> int:
             if not (args.dest_azure_account and args.dest_azure_container and args.dest_azure_blob):
                 log("ERROR: --target azure requires --dest-azure-account / --dest-azure-container / --dest-azure-blob")
                 return 2
-            upload_azure(dst_path, args.dest_azure_account, args.dest_azure_container, args.dest_azure_blob)
+            # Azure managed-image/disk creation requires a FIXED-format VHD. The
+            # source is frequently a dynamic VHD (and when source==target==vhd the
+            # generic convert is skipped), so always normalise to a fixed VHD here,
+            # straight from the downloaded source, before upload.
+            azure_vhd = "/tmp/azure-fixed.vhd"
+            convert_to_fixed_vhd(src_path, azure_vhd)
+            upload_azure(azure_vhd, args.dest_azure_account, args.dest_azure_container, args.dest_azure_blob)
         elif args.target == "gcs":
             if not (args.dest_gcs_bucket and args.dest_gcs_object):
                 log("ERROR: --target gcs requires --dest-gcs-bucket and --dest-gcs-object")
