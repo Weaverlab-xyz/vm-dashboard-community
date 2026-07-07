@@ -198,6 +198,19 @@ def _active_k8s_count(db, cloud: Optional[str] = None) -> int:
     return q.count()
 
 
+def _active_vdesktop_count(db, cloud: Optional[str] = None) -> int:
+    # A desktop seat needs the shared Jumpoint only while it has a live PRA Remote
+    # RDP jump routing through it — i.e. pra_jump_id is set. Mirrors
+    # _active_k8s_count so a VDI pool keeps the jumpoint alive, and neither a
+    # clouddb/k8s teardown yanks it from under running seats nor a VDI teardown
+    # from under a DB/cluster.
+    from ..database import VirtualDesktop
+    q = db.query(VirtualDesktop).filter(VirtualDesktop.pra_jump_id.isnot(None))
+    if cloud:
+        q = q.filter(VirtualDesktop.cloud == cloud)
+    return q.count()
+
+
 async def teardown_jumpoint_host_if_idle(db, cloud: str, region: str) -> None:
     """Terminate the shared Jumpoint host for ``cloud`` iff nothing is left using
     it. Dispatches per cloud. Best-effort; logs and returns on error."""
@@ -213,7 +226,8 @@ async def _teardown_jumpoint_host_if_idle_aws(db, region: str) -> None:
     instance, no active AWS cloud database). Best-effort; logs and returns on error."""
     from . import aws_service
     try:
-        active = _active_db_count(db, "aws") + _active_ec2_count(db) + _active_k8s_count(db, "aws")
+        active = (_active_db_count(db, "aws") + _active_ec2_count(db)
+                  + _active_k8s_count(db, "aws") + _active_vdesktop_count(db, "aws"))
         if active > 0:
             logger.info("jumpoint-host: keeping host (%d active resource(s))", active)
             return
@@ -332,7 +346,8 @@ async def _teardown_jumpoint_host_if_idle_gcp(db, region: str) -> None:
     using it. Best-effort; logs and returns on error."""
     from . import gcp_service
     try:
-        active = _active_db_count(db, "gcp") + _active_k8s_count(db, "gcp")
+        active = (_active_db_count(db, "gcp") + _active_k8s_count(db, "gcp")
+                  + _active_vdesktop_count(db, "gcp"))
         if active > 0:
             logger.info("jumpoint-host(gcp): keeping jumpoint (%d active resource(s))", active)
             return
@@ -416,7 +431,8 @@ async def _teardown_jumpoint_host_if_idle_azure(db, region: str) -> None:
     left using it. Best-effort; logs and returns on error."""
     from . import azure_service
     try:
-        active = _active_db_count(db, "azure") + _active_k8s_count(db, "azure")
+        active = (_active_db_count(db, "azure") + _active_k8s_count(db, "azure")
+                  + _active_vdesktop_count(db, "azure"))
         if active > 0:
             logger.info("jumpoint-host(azure): keeping jumpoint (%d active resource(s))", active)
             return

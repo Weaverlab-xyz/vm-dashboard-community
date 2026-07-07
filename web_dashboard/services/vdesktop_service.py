@@ -297,6 +297,23 @@ async def provision_seats(pool_name: str, job_id: str, seat_ids: list, spec: dic
     try:
         if job_id:
             job_service.set_running(db, job_id)
+        # Bring the shared PRA Jumpoint node online BEFORE the seats register their
+        # Remote RDP jump items — otherwise the items register but read
+        # "Unavailable" (no Jumpoint to broker them). Idempotent find-or-create +
+        # best-effort, mirroring clouddb/k8s (jumpoint_host_service). It warms in
+        # parallel with the seats' VM creates (usually reused → instant; ~1-2 min
+        # only the first time), so it's typically online by the first registration.
+        # The jumpoint lands in azure_location's jumpoint subnet — for a seat in a
+        # different region the VNets must be peered (per-region jumpoints TODO).
+        if is_windows and _pra_configured():
+            if job_id:
+                job_service.update_progress(db, job_id, 0, "Ensuring PRA Jumpoint host is online…")
+            try:
+                from . import jumpoint_host_service
+                await jumpoint_host_service.ensure_jumpoint_host("azure", spec.get("location") or "")
+            except Exception as jp_err:
+                logger.warning("desktop pool %s: ensure jumpoint host failed (non-fatal): %s",
+                               pool_name, jp_err)
         ok = 0
         for sid in seat_ids:
             row = db.query(VirtualDesktop).filter(VirtualDesktop.id == sid).first()
@@ -443,6 +460,14 @@ async def teardown_seats(seat_ids: list, job_id: str = None) -> None:
             db.delete(row)
             db.commit()
             dropped += 1
+        # If no brokered Azure resource is left using the shared PRA Jumpoint, reap
+        # it (ref-counted — now counts remaining VDI seats too). The torn-down rows
+        # were deleted above, so the count reflects what remains. Best-effort.
+        try:
+            from . import jumpoint_host_service
+            await jumpoint_host_service.teardown_jumpoint_host_if_idle(db, "azure", _cfg("azure_location"))
+        except Exception as jp_err:
+            logger.warning("desktop teardown: idle jumpoint reap failed (non-fatal): %s", jp_err)
         if job_id:
             if errors:
                 # Rows are dropped regardless, but a failed terminate can leave an
