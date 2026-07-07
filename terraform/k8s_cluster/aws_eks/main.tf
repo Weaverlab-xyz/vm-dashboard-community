@@ -423,7 +423,7 @@ resource "aws_security_group_rule" "db_from_cluster" {
   protocol                 = "tcp"
   from_port                = tonumber(each.value)
   to_port                  = tonumber(each.value)
-  description              = "EKS ${var.cluster_name} nodes → managed DB (over peering)"
+  description              = "EKS ${var.cluster_name} nodes to managed DB (over peering)"
   depends_on               = [aws_vpc_peering_connection.sandbox]
 }
 
@@ -435,7 +435,7 @@ resource "aws_security_group_rule" "vm_from_cluster" {
   protocol                 = "tcp"
   from_port                = tonumber(each.value)
   to_port                  = tonumber(each.value)
-  description              = "EKS ${var.cluster_name} nodes → lab VM (over peering)"
+  description              = "EKS ${var.cluster_name} nodes to lab VM (over peering)"
   depends_on               = [aws_vpc_peering_connection.sandbox]
 }
 
