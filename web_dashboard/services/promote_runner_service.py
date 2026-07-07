@@ -313,8 +313,11 @@ def _resolve_gcp_runner_config() -> dict:
     project_id = _cfg("gcp_project_id")
     region = _cfg("promote_runner_gcp_region") or _cfg("gcp_region")
     image = _cfg("promote_runner_image") or "chrweav/dashboard-promote-runner:latest"
-    cpu = _cfg("promote_runner_gcp_cpu") or "2000m"
-    memory = _cfg("promote_runner_gcp_memory") or "4Gi"
+    # 16Gi / 4 vCPU default: the GCP path materialises source.vhd + a full raw +
+    # the tar.gz in Cloud Run's memory-backed /tmp, which OOMs at the old 4Gi
+    # default for any real multi-GB image. Cloud Run requires >=4 vCPU for >8Gi.
+    cpu = _cfg("promote_runner_gcp_cpu") or "4"
+    memory = _cfg("promote_runner_gcp_memory") or "16Gi"
     vpc_connector = _cfg("promote_runner_gcp_vpc_connector")
     sa_email = _cfg("promote_runner_gcp_service_account")
 
