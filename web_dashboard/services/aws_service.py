@@ -1162,7 +1162,7 @@ def _run_ecs_ansible_sync(
     finish, retrieve CloudWatch logs, and return (exit_code, output)."""
     import time
     ecs = _get_ecs(region)
-    logs_client = boto3.client("logs", region_name=region)
+    logs_client = boto3.client("logs", **_aws_kwargs(region))
     log_group = "/ecs/ansible-runner"
     log_stream_prefix = f"ansible/{job_id[:8]}"
 
@@ -1340,7 +1340,7 @@ def _run_ecs_k8s_sync(
     ``KUBECONFIG_B64`` env into ``$KUBECONFIG``) are the only differences."""
     import time
     ecs = _get_ecs(region)
-    logs_client = boto3.client("logs", region_name=region)
+    logs_client = boto3.client("logs", **_aws_kwargs(region))
     log_group = "/ecs/k8s-runner"
     log_stream_prefix = f"k8s/{job_id[:8]}" if job_id else "k8s/adhoc"
 
