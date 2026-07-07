@@ -1047,16 +1047,20 @@ def _fetch_cloud_run_job_logs(project_id: str, job_name: str, execution_name: st
     except ImportError:
         return ""
 
-    exec_short = execution_name.split("/")[-1]
     session = AuthorizedSession(creds or _gcp_creds())
     url = "https://logging.googleapis.com/v2/entries:list"
+    # execution_name may be absent (e.g. run_job failed before returning the
+    # execution) — fall back to filtering by job_name so failures are still
+    # surfaced rather than crashing on a None .split().
+    filter_parts = [
+        'resource.type="cloud_run_job"',
+        f'resource.labels.job_name="{job_name}"',
+    ]
+    if execution_name:
+        filter_parts.append(f'resource.labels.execution_name="{execution_name.split("/")[-1]}"')
     body = {
         "resourceNames": [f"projects/{project_id}"],
-        "filter": (
-            f'resource.type="cloud_run_job" '
-            f'resource.labels.job_name="{job_name}" '
-            f'resource.labels.execution_name="{exec_short}"'
-        ),
+        "filter": " ".join(filter_parts),
         "orderBy": "timestamp asc",
         "pageSize": 1000,
     }
@@ -1489,11 +1493,19 @@ def _create_image_from_gcs_sync(
     creds = _gcp_creds()
     images_client = compute_v1.ImagesClient(credentials=creds)
 
+    # compute.images.insert rejects the gs:// scheme for rawDisk.source ("not a
+    # valid Google Cloud Storage object or Artifact Registry URL") — it requires
+    # the https://storage.googleapis.com/<bucket>/<object> form. Normalise here so
+    # the caller can pass either.
+    raw_source = gcs_url
+    if raw_source.startswith("gs://"):
+        raw_source = "https://storage.googleapis.com/" + raw_source[len("gs://"):]
+
     image = compute_v1.Image(
         name=image_name,
         description=description,
         family=family or None,
-        raw_disk=compute_v1.RawDisk(source=gcs_url),
+        raw_disk=compute_v1.RawDisk(source=raw_source),
     )
     op = images_client.insert(project=project_id, image_resource=image)
     op.result()  # blocks until READY/FAILED
@@ -1605,6 +1617,16 @@ def _run_cloud_run_promote_runner_sync(
         "Cloud Run promote-runner: creating job %s in %s/%s",
         job_name, project_id, region,
     )
+    # The job name is derived from the image id (stable across runs), so a run
+    # that was cancelled or whose app process restarted before the finally-delete
+    # ran can leave the job behind — making create_job 409 "already exists".
+    # Best-effort delete any stale instance first so retries are idempotent.
+    from google.api_core import exceptions as _gcp_exc
+    try:
+        jobs_client.delete_job(name=job_resource_name).result()
+        logger.info("Cloud Run promote-runner: removed stale job %s before create", job_name)
+    except _gcp_exc.NotFound:
+        pass
     create_op = jobs_client.create_job(parent=parent, job_id=job_name, job=job)
     create_op.result()
 
@@ -1614,23 +1636,30 @@ def _run_cloud_run_promote_runner_sync(
 
     try:
         run_op = jobs_client.run_job(name=job_resource_name)
-        execution = run_op.result()
-        execution_name = execution.name
+        try:
+            execution = run_op.result()
+            execution_name = execution.name
 
-        # Poll until completion. Multi-GB image transfers + qemu-img + tar
-        # can easily exceed 20 minutes, so allow up to 2h by default.
-        waited = 0
-        # Poll every 10s; ceiling at the explicit timeout passed in (the
-        # Cloud Run Job's own timeout will cut us off too).
-        while waited < timeout_seconds:
-            exec_info = executions_client.get_execution(name=execution_name)
-            if exec_info.completion_time and not exec_info.reconciling:
-                succeeded = exec_info.succeeded_count or 0
-                failed = exec_info.failed_count or 0
-                exit_code = 0 if (succeeded > 0 and failed == 0) else 1
-                break
-            time.sleep(10)
-            waited += 10
+            # Poll until completion. Multi-GB image transfers + qemu-img + tar
+            # can easily exceed 20 minutes, so allow up to 2h by default.
+            waited = 0
+            # Poll every 10s; ceiling at the explicit timeout passed in (the
+            # Cloud Run Job's own timeout will cut us off too).
+            while waited < timeout_seconds:
+                exec_info = executions_client.get_execution(name=execution_name)
+                if exec_info.completion_time and not exec_info.reconciling:
+                    succeeded = exec_info.succeeded_count or 0
+                    failed = exec_info.failed_count or 0
+                    exit_code = 0 if (succeeded > 0 and failed == 0) else 1
+                    break
+                time.sleep(10)
+                waited += 10
+        except Exception as run_err:
+            # The run LRO raises when the execution fails to reach a clean state
+            # (e.g. the task was OOM-killed). Keep exit_code=1 and fall through to
+            # log retrieval so the container's own output is surfaced instead of a
+            # bare Cloud Run "Task ... exit code 1". execution_name may be None here.
+            logger.warning("Cloud Run promote-runner: execution failed: %s", run_err)
 
         try:
             output = _fetch_cloud_run_job_logs(project_id, job_name, execution_name, creds)
