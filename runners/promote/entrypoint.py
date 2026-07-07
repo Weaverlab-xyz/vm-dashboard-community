@@ -144,7 +144,14 @@ def wrap_as_gcp_image_tar(raw_path: str, out_tar_gz_path: str) -> None:
         log(f"renaming {raw_path} -> {disk_raw}")
         shutil.move(raw_path, disk_raw)
     log(f"writing tar.gz {out_tar_gz_path} (contents: disk.raw)")
-    with tarfile.open(out_tar_gz_path, "w:gz") as tar:
+    # GCP's image importer parses the tar itself (not via GNU tar) and rejects
+    # PAX-format archives — Python tarfile's default. A >8GiB disk.raw exceeds the
+    # ustar size limit, forcing a size extension that PAX encodes as a leading
+    # `././@PaxHeader` entry, which GCP treats as an invalid extra file
+    # ("INVALID_IMAGE_TAR: The tar archive is not a valid image"). Write GNU format
+    # (matching GCP's documented `tar --format=oldgnu`) so the size is encoded
+    # inline with no pax header.
+    with tarfile.open(out_tar_gz_path, "w:gz", format=tarfile.GNU_FORMAT) as tar:
         tar.add(disk_raw, arcname="disk.raw")
     size_mb = os.path.getsize(out_tar_gz_path) / (1024 * 1024)
     log(f"tar.gz done ({size_mb:.1f} MiB compressed)")
