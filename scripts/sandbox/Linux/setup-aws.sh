@@ -334,6 +334,41 @@ state_write aws jumpoint_sg "$JUMPOINT_SG"
 state_write aws vm_sg "$VM_SG"
 state_write aws db_sg "$DB_SG"
 
+# ── 5b. SSM interface VPC endpoints (private SSM path for onboarded VMs) ───────
+# The AWS Systems Manager Password Safe onboarding manages Linux EC2 over SSM
+# SendCommand. The VM SG egresses to the VPC only (internet was revoked above),
+# so an onboarded VM reaches the SSM control plane ONLY through interface
+# endpoints. Create the three the agent needs (ssm, ssmmessages, ec2messages)
+# with private DNS, so the public SSM hostnames resolve to them VPC-wide — no NAT
+# or public IP required. Small hourly cost per endpoint while the sandbox is up;
+# set SANDBOX_SSM_ENDPOINTS=0 to skip (e.g. if you only onboard VMs over SSH).
+if [[ "${SANDBOX_SSM_ENDPOINTS:-1}" != "0" ]]; then
+  section "SSM VPC endpoints"
+  SSM_VPCE_SG="$(make_sg "${NAME}-ssm-vpce-sg" "SSM interface endpoints - HTTPS ingress from the VPC")"
+  aws ec2 authorize-security-group-ingress --region "$REGION" --group-id "$SSM_VPCE_SG" \
+    --ip-permissions '[{"IpProtocol":"tcp","FromPort":443,"ToPort":443,"IpRanges":[{"CidrIp":"10.99.0.0/16"}]}]' >/dev/null 2>&1 || true
+  for _svc in ssm ssmmessages ec2messages; do
+    _svc_name="com.amazonaws.${REGION}.${_svc}"
+    _existing="$(aws ec2 describe-vpc-endpoints --region "$REGION" \
+      --filters "Name=vpc-id,Values=$VPC_ID" "Name=service-name,Values=$_svc_name" \
+      --query 'VpcEndpoints[0].VpcEndpointId' --output text 2>/dev/null || true)"
+    if [[ "$_existing" != "None" && -n "$_existing" ]]; then
+      ok "Reusing $_svc endpoint $_existing"
+      continue
+    fi
+    _epid="$(aws ec2 create-vpc-endpoint --region "$REGION" \
+      --vpc-id "$VPC_ID" --vpc-endpoint-type Interface --service-name "$_svc_name" \
+      --subnet-ids "$PRIVATE_SUBNET_ID" --security-group-ids "$SSM_VPCE_SG" \
+      --private-dns-enabled \
+      --tag-specifications "$(tag_spec vpc-endpoint "${NAME}-${_svc}")" \
+      --query 'VpcEndpoint.VpcEndpointId' --output text)"
+    ok "Created $_svc endpoint $_epid"
+  done
+  state_write aws ssm_vpce_sg "$SSM_VPCE_SG"
+else
+  ok "SSM VPC endpoints skipped (SANDBOX_SSM_ENDPOINTS=0)"
+fi
+
 # ── 6. SSH keypair JSON in Secrets Manager ────────────────────────────────────
 section "SSH keypair (Secrets Manager)"
 SSH_SECRET_NAME="dashboard/sandbox/ssh-keypair"
