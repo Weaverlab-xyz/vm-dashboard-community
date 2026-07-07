@@ -819,10 +819,18 @@ async def features():
         and (config_service.get("azure_subscription_id") or settings.azure_subscription_id)
     )
     gcp_configured = bool(config_service.get("gcp_project_id") or settings.gcp_project_id)
+    # Portainer needs both the toggle AND a URL — enabled-but-unconfigured should
+    # hide the dashboard tile rather than show a permanently "unavailable" one.
+    portainer_configured = flags["portainer_enabled"] and bool(
+        config_service.get("portainer_url") or settings.portainer_url
+    )
     return {
         "vmware":       flags["vmware_enabled"],
         "beyondtrust":  flags["beyondtrust_enabled"],
         "portainer":    flags["portainer_enabled"],
+        # Distinct from the enabled toggle: the dashboard tile hides unless
+        # Portainer is both enabled AND has a URL configured.
+        "portainer_configured": portainer_configured,
         "ansible":      flags["ansible_enabled"],
         "entitle":      flags["entitle_enabled"],
         "aws":          aws_configured,
