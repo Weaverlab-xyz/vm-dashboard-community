@@ -214,6 +214,39 @@ Write-Ok "VM SG       $VmSg (egress: VPC only; ingress 22/tcp from Jumpoint SG)"
 Set-StateValue aws jumpoint_sg $JumpointSg
 Set-StateValue aws vm_sg       $VmSg
 
+# ── 5b. SSM interface VPC endpoints (private SSM path for onboarded VMs) ───────
+# Twin of setup-aws.sh: the VM SG egresses to the VPC only, so an onboarded VM
+# reaches the SSM control plane only through interface endpoints. Create the three
+# the agent needs (ssm, ssmmessages, ec2messages) with private DNS — no NAT/public
+# IP needed. Set SANDBOX_SSM_ENDPOINTS=0 to skip (small hourly cost per endpoint).
+if ($env:SANDBOX_SSM_ENDPOINTS -ne '0') {
+    Write-Section 'SSM VPC endpoints'
+    $SsmVpceSg = _MakeSG "$Name-ssm-vpce-sg" 'SSM interface endpoints — HTTPS ingress from the VPC'
+    $vpceIngress = "[{`"IpProtocol`":`"tcp`",`"FromPort`":443,`"ToPort`":443,`"IpRanges`":[{`"CidrIp`":`"10.99.0.0/16`"}]}]"
+    aws ec2 authorize-security-group-ingress --region $Region --group-id $SsmVpceSg `
+        --ip-permissions $vpceIngress 2>$null | Out-Null
+    foreach ($svc in @('ssm', 'ssmmessages', 'ec2messages')) {
+        $svcName = "com.amazonaws.$Region.$svc"
+        $existing = (aws ec2 describe-vpc-endpoints --region $Region `
+            --filters "Name=vpc-id,Values=$VpcId" "Name=service-name,Values=$svcName" `
+            --query 'VpcEndpoints[0].VpcEndpointId' --output text 2>$null)
+        if ($existing -and $existing -ne 'None') {
+            Write-Ok "Reusing $svc endpoint $existing"
+            continue
+        }
+        $epid = (aws ec2 create-vpc-endpoint --region $Region `
+            --vpc-id $VpcId --vpc-endpoint-type Interface --service-name $svcName `
+            --subnet-ids $PrivateSubnetId --security-group-ids $SsmVpceSg `
+            --private-dns-enabled `
+            --tag-specifications (_TagSpec 'vpc-endpoint' "$Name-$svc") `
+            --query 'VpcEndpoint.VpcEndpointId' --output text).Trim()
+        Write-Ok "Created $svc endpoint $epid"
+    }
+    Set-StateValue aws ssm_vpce_sg $SsmVpceSg
+} else {
+    Write-Ok 'SSM VPC endpoints skipped (SANDBOX_SSM_ENDPOINTS=0)'
+}
+
 # ── 6. SSH keypair JSON in Secrets Manager ────────────────────────────────────
 Write-Section 'SSH keypair (Secrets Manager)'
 $SshSecretName = 'dashboard/sandbox/ssh-keypair'
