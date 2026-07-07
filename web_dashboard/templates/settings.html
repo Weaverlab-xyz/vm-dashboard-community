@@ -643,11 +643,13 @@
         </div>
       </template>
 
-      <!-- ── Portainer ── -->
+      <!-- ── Containers ── -->
       <template x-if="panel?.key === 'portainer' && !panelLoading">
         <div class="space-y-4">
           <p class="text-sm text-gray-500">
-            Portainer CE integration for on-prem Docker host management.
+            Containers are shown for every configured cloud provider (AWS ECS, Azure ACI,
+            GCP Cloud Run) automatically. Optionally connect a Portainer CE server below to
+            also manage on-prem Docker hosts.
           </p>
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">Portainer URL</label>
@@ -1832,8 +1834,8 @@ function settingsPage() {
         desc: 'VM management on a Windows host. Toggle to enable.' },
       { key: 'beyondtrust',  label: 'BeyondTrust',             hasConfig: true,  enabled: false,
         desc: 'Password Safe secret retrieval and PRA session recording.' },
-      { key: 'portainer',    label: 'Portainer CE',            hasConfig: true,  enabled: false,
-        desc: 'On-prem Docker host management.' },
+      { key: 'portainer',    label: 'Containers',              hasConfig: true,  enabled: false,
+        desc: 'Manage and view containers across all configured cloud providers (AWS ECS, Azure ACI, GCP Cloud Run), plus optional on-prem Portainer management.' },
       { key: 'ansible',      label: 'Remote Worker',           hasConfig: true,  enabled: false,
         desc: 'Where config-management (Ansible) and Kubernetes (kubectl/helm) ops run — in-process or as one-shot cloud tasks (ECS / ACI / Cloud Run).' },
       { key: 'entitle',      label: 'Entitle',                 hasConfig: true,  enabled: false,

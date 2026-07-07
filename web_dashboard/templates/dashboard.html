@@ -299,7 +299,7 @@
           gridClass: 'grid grid-cols-1 sm:grid-cols-3 gap-4',
           refreshable: true,
           tiles: [
-            { key: 'portainer_endpoints', title: 'Portainer Endpoints', href: '/containers',       flag: 'portainer', secondaryLabel: 'online' },
+            { key: 'portainer_endpoints', title: 'Portainer Endpoints', href: '/containers',       flag: 'portainer_configured', secondaryLabel: 'online' },
             { key: 'ecs_tasks',           title: 'ECS Tasks',           href: '/containers#cloud', flag: 'aws',       description: 'running tasks' },
             { key: 'aci_containers',      title: 'ACI Containers',      href: '/containers#cloud', flag: 'azure',     secondaryLabel: 'running' },
           ],
@@ -336,7 +336,8 @@
       // Relative "updated Xm ago" label; reads `now` so it re-renders on each tick.
       freshness(ts) {
         const _tick = this.now;  // eslint-disable-line no-unused-vars — reactivity dep
-        return ts ? 'updated ' + timeAgo(ts) : '';
+        // loadedAt is a numeric epoch (Date.now()); timeAgo expects an ISO string.
+        return ts ? 'updated ' + timeAgo(new Date(ts).toISOString()) : '';
       },
 
       async loadFeatures() {
