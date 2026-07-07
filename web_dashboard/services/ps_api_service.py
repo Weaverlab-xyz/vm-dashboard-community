@@ -120,14 +120,31 @@ async def _platform_id(client: httpx.AsyncClient, engine: str) -> int:
     raise PSApiError(f"platform {platform_name!r} not found in Password Safe")
 
 
+async def _platform_name(client: httpx.AsyncClient, platform_id: int) -> str:
+    """Reverse of _platform_id: PlatformID → display name. Best-effort — returns ""
+    on any failure so a sanity-check lookup never blocks onboarding."""
+    try:
+        resp = await client.get("Platforms")
+        if resp.status_code == 200:
+            for p in resp.json():
+                pid = p.get("PlatformID") or p.get("PlatformId") or p.get("ID")
+                if pid is not None and int(pid) == int(platform_id):
+                    return str(p.get("Name") or p.get("PlatformName") or "").strip()
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
+
+
 async def get_functional_account(name: str) -> dict:
-    """Resolve an EXISTING functional account by name → ``{id, platform_id}``.
+    """Resolve an EXISTING functional account by name → ``{id, platform_id, platform_name}``.
 
     The VM Password-Safe registration onboards a managed system against an
     operator-configured functional account (per cloud); the provider has no
     functional-account data source, so we read it over REST. The functional
     account's ``PlatformID`` also drives the managed system's ``platform_id``
-    (and thus the agent-plugin-vs-broker management method)."""
+    (and thus the management method); ``platform_name`` lets callers sanity-check it
+    (e.g. SSM onboarding requires an "AWS Systems Manager" platform — guarding against
+    a functional account from a different platform being configured by mistake)."""
     target = (name or "").strip()
     if not target:
         raise PSApiError("functional account name is empty")
@@ -146,7 +163,8 @@ async def get_functional_account(name: str) -> dict:
                     pid = fa.get("PlatformID") or fa.get("PlatformId")
                     if fa_id is None or pid is None:
                         break
-                    return {"id": int(fa_id), "platform_id": int(pid)}
+                    return {"id": int(fa_id), "platform_id": int(pid),
+                            "platform_name": await _platform_name(client, int(pid))}
             raise PSApiError(f"functional account {target!r} not found in Password Safe")
         finally:
             await _sign_out(client)
