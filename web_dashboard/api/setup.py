@@ -733,6 +733,16 @@ def _read_feature(feature: str, model_cls) -> dict:
         if info.annotation is bool:
             data[field] = config_service.get_bool(field, bool(info.default))
             continue
+        # Int fields have the same problem: an unset key reads back as "" (get's
+        # default), which fails int validation on the PATCH round-trip and blocks
+        # the whole panel save. Coerce to int, falling back to the model default.
+        if info.annotation is int:
+            raw = config_service.get(field)
+            try:
+                data[field] = int(raw)
+            except (TypeError, ValueError):
+                data[field] = info.default
+            continue
         val = config_service.get(field)
         # Redact secrets for display
         data[field] = "••••••••" if (field in _SECRET_FEATURE_KEYS and val) else val
