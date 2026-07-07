@@ -594,10 +594,13 @@ class XcpNgFeatureConfig(BaseModel):
 
 
 class CloudDatabaseFeatureConfig(BaseModel):
-    """Config-only panel (no `enabled`) for the Cloud Databases PREVIEW feature.
-    The preview toggle owns `cloud_database_enabled`; this panel only holds the
-    per-cloud Managed-DB network IDs the sandbox emits (normally pushed via
-    /api/setup/import). See _CONFIG_ONLY_FEATURES."""
+    """Config panel for the Cloud Databases feature. Graduated from preview to GA
+    once every engine (PostgreSQL / MySQL / SQL Server) was validated end-to-end on
+    all three clouds. The toggle owns `cloud_database_enabled` via its own `enabled`
+    field (feature name → key through _feature_to_cfg_key, like cost_explorer /
+    admission_control); the rest hold the per-cloud Managed-DB network IDs the
+    sandbox emits (normally pushed via /api/setup/import)."""
+    enabled: bool = False
     # AWS RDS
     aws_db_subnet_group_name: str = ""
     aws_db_parameter_group_name: str = ""            # postgres: rds.force_ssl=0 group
@@ -701,7 +704,7 @@ _FEATURE_MODELS = {
 # Features whose panel carries config but NOT an enable toggle — their on/off
 # lives elsewhere (e.g. a preview flag). _read/_write_feature skip the enabled
 # key for these, so saving config can't flip the feature's flag.
-_CONFIG_ONLY_FEATURES = {"cloud_database", "k8s_management", "vdesktops"}
+_CONFIG_ONLY_FEATURES = {"k8s_management", "vdesktops"}
 
 _SECRET_FEATURE_KEYS = frozenset({
     "pscli_client_secret", "bt_client_secret", "epml_pat",
@@ -864,8 +867,6 @@ def put_azure_regions(payload: AzureRegionConfigsPayload, request: Request):
 _PREVIEW_FLAGS = {
     "vdesktops_enabled": (
         "Virtual Desktops", "Desktop pools brokered as PRA sessions (Phase 1: Azure)."),
-    "cloud_database_enabled": (
-        "Cloud Databases", "Private managed databases reached through a PRA tunnel."),
     "k8s_management_enabled": (
         "Kubernetes Management", "Provision (AWS EKS), register, and broker Kubernetes clusters."),
 }
@@ -875,7 +876,6 @@ _PREVIEW_FLAGS = {
 # the panel is config-only (see _CONFIG_ONLY_FEATURES).
 _PREVIEW_FLAG_CONFIG = {
     "vdesktops_enabled": "vdesktops",
-    "cloud_database_enabled": "cloud_database",
     "k8s_management_enabled": "k8s_management",
 }
 

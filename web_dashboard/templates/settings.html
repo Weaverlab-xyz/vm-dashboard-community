@@ -1526,14 +1526,14 @@
         </div>
       </template>
 
-      <!-- ── Cloud Databases (preview-feature config — config-only, no toggle) ── -->
+      <!-- ── Cloud Databases (config panel; enable/disable via the feature toggle) ── -->
       <template x-if="panel?.key === 'cloud_database' && !panelLoading">
         <div class="space-y-4">
           <p class="text-sm text-gray-500">
             Per-cloud Managed-DB network placement. Normally populated by
             <code>setup-&lt;cloud&gt;.sh</code> + the sandbox <code>--push-only</code> import;
-            set or override the values by hand here. Enable/disable the feature with the
-            Preview toggle.
+            set or override the values by hand here. Enable or disable the feature with its
+            toggle in the integrations list above.
           </p>
 
           <!-- AWS RDS -->
@@ -1854,6 +1854,8 @@ function settingsPage() {
         desc: 'Month-to-date cloud spend, with an optional monthly budget alert.' },
       { key: 'admission_control', label: 'Action Guardrails',   hasConfig: true,  enabled: false,
         desc: 'Pre-action policy gate (OPA): allowed regions, blocked sizes, change-freeze.' },
+      { key: 'cloud_database', label: 'Cloud Databases',        hasConfig: true,  enabled: false,
+        desc: 'Private managed databases (PostgreSQL, MySQL, SQL Server) on AWS, Azure and GCP, reached through a PRA tunnel.' },
     ],
 
     // ── Slide-over panel state ───────────────────────────────────────────
@@ -2078,6 +2080,7 @@ function settingsPage() {
           xcpng: features.xcpng,
           cost_explorer: features.cost,
           admission_control: features.admission,
+          cloud_database: features.cloud_database,
         };
         for (const intg of this.integrations) {
           intg.enabled = !!map[intg.key];
