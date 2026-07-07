@@ -843,6 +843,7 @@ async def features():
         "xcpng":        flags["xcpng_enabled"],
         "cost":         flags["cost_explorer_enabled"],
         "admission":    flags["admission_control_enabled"],
+        "cloud_database": flags["cloud_database_enabled"],
     }
 
 
