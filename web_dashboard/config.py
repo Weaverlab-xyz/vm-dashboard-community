@@ -86,6 +86,8 @@ class Settings(BaseSettings):
     rancher_ui_jump_group: str = ""           # "" = bt_jump_group_name
     rancher_ui_jumpoint_name: str = ""        # "" = bt_jumpoint_name
     rancher_ui_local_port: int = 443          # local listen port (match Rancher 443 for SNI/cert)
+    rancher_ui_web_jump_id: str = ""          # PRA Web Jump id for the central Rancher UI (runtime-set)
+    rancher_ui_web_jump_tfstate: str = ""     # terraform state for the Web Jump (for teardown)
     # Entitle Rancher connector registration. The application slug + connection
     # field names are tenant/connector-specific — confirm against the
     # entitle_applications catalog before use (defaults are best-effort).

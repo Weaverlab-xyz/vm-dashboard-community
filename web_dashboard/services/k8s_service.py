@@ -1910,6 +1910,33 @@ async def _entitle_rancher_grant(cluster_id: str, username: str) -> dict:
     return {"request_id": rid, "status": category, "reason": reason}
 
 
+async def register_rancher_ui_web_jump(db: Session) -> dict:
+    """Ensure a PRA **Web Jump** to the central Rancher UI exists — created ONCE
+    and reused by every cluster's console (they all live in the same Rancher UI).
+    Idempotent: returns the stored id if already provisioned. Requires the central
+    Rancher stood up + PRA configured. Lets the operator reach the internal Rancher
+    UI from the PRA representative console (no public ingress)."""
+    from . import config_service, terraform_pra_service as pra
+    existing = _cfg("rancher_ui_web_jump_id")
+    if existing:
+        return {"web_jump_id": existing, "reused": True}
+    server_url = _cfg("rancher_server_url")
+    if not server_url:
+        raise K8sError("central Rancher is not stood up yet (no rancher_server_url)")
+    if not _pra_configured():
+        raise K8sError("PRA is not configured (bt_api_host / bt_client_id / bt_jumpoint_name)")
+    jump_group = _cfg("rancher_ui_jump_group") or _cfg("bt_jump_group_name")
+    jumpoint = _cfg("rancher_ui_jumpoint_name") or _cfg("bt_jumpoint_name")
+    result = await pra.provision_web_jump(
+        name="rancher-ui", url=server_url,
+        jump_group_name=jump_group, jumpoint_name=jumpoint)
+    config_service.set("rancher_ui_web_jump_id", str(result.get("web_jump_id") or ""))
+    if result.get("tf_state_json"):
+        config_service.set("rancher_ui_web_jump_tfstate", result["tf_state_json"])
+    return {"web_jump_id": result.get("web_jump_id"), "jump_group": jump_group,
+            "jumpoint": jumpoint, "reused": False}
+
+
 async def open_console(db: Session, cluster_id: str, username: str = "system", *,
                        jump_group: str = None, jumpoint_name: str = None,
                        pra_credential_ref: str = None, vault_inject: bool = False,
@@ -1937,6 +1964,22 @@ async def open_console(db: Session, cluster_id: str, username: str = "system", *
 
     if row.mgmt_kind == "rancher" and config_service.get_bool("entitle_enabled", True):
         out["entitle"] = await _entitle_rancher_grant(cluster_id, username)
+
+    # Rancher UI is brokered via a PRA Web Jump to the central Rancher (created
+    # once, reused by every cluster's console). The console deep-link is the
+    # in-Rancher view the operator lands on after opening the Web Jump. The
+    # tunnel_type=k8s jump below stays for raw kubectl access.
+    if row.mgmt_kind == "rancher" and _cfg("rancher_server_url") and _pra_configured():
+        try:
+            wj = await register_rancher_ui_web_jump(db)
+            out["rancher_ui"] = {
+                "web_jump_id": wj.get("web_jump_id"),
+                "console_deeplink": row.mgmt_endpoint,
+                "note": "Open the 'rancher-ui' Web Jump from the BeyondTrust PRA representative console — no public ingress.",
+            }
+        except Exception as exc:
+            logger.warning("Rancher UI web-jump provisioning failed for %s: %s", cluster_id, exc)
+            out["rancher_ui_error"] = str(exc)
 
     if _pra_configured():
         if not row.pra_jump_id:
