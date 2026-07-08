@@ -643,6 +643,10 @@ async def promote_to_azure_automated(
         dest_account=dest_account,
         dest_container=dest_container,
         dest_blob=dest_blob,
+        # Linux images must have waagent baked in during promotion or the
+        # resulting Azure VM never finishes OS provisioning (deploy hangs at
+        # "Creating"). Windows images ship the Azure VM agent already.
+        install_linux_agent=(os_type or "Linux").lower() != "windows",
     )
 
     # 3: ask Azure compute to create a managed image from the staged blob.

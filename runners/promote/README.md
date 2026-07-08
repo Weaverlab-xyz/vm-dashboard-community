@@ -230,6 +230,21 @@ IAM role or container env overrides).
 | `--dest-azure-blob`    | `--target azure` | Blob name                                  |
 | `--dest-gcs-bucket`    | `--target gcs`   | GCS bucket                                 |
 | `--dest-gcs-object`    | `--target gcs`   | GCS object name (should end in `.tar.gz`)  |
+| `--install-linux-agent`| optional (Azure) | Bake WALinuxAgent into the disk before upload (Linux images). |
+
+**Azure Linux-agent injection (`--install-linux-agent`):** a foreign Linux
+image (e.g. an AWS AMI) doesn't carry the Azure Linux Agent (waagent). On Azure
+such a VM boots and gets a private IP, but its ARM `provisioningState` never
+leaves `Creating` — nothing reports OS-provisioning complete — so the
+dashboard's deploy poller hangs until it times out. When this flag is set the
+runner uses libguestfs `virt-customize` to install + enable waagent and
+deprovision (generalize) the disk before the fixed-VHD conversion. The
+WALinuxAgent source is bundled in the image and installed via the guest's own
+Python, so it's distro-agnostic and needs no guest network or package repo. The
+dashboard sets this automatically for Linux images on Azure promotions
+(`os_type != "windows"`); Windows images already ship the Azure VM agent. If
+injection fails the runner exits non-zero — a Linux Azure image without waagent
+is broken, so we don't ship one silently.
 
 **GCP target quirk:** GCP's `compute.images.insert` requires the source object to be a `.tar.gz` containing exactly one entry named `disk.raw`. When `--target gcs` is paired with `--target-format raw` (the dashboard's only supported GCP path today), the runner automatically tar+gzips the converted raw file under that name before upload. The dashboard always passes `--dest-gcs-object` ending in `.tar.gz` for this reason.
 

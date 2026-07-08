@@ -59,6 +59,66 @@ def convert(src: str, dst: str, target_format: str) -> None:
     log(f"convert done ({size_mb:.1f} MiB)")
 
 
+# Where the Dockerfile unpacks the bundled WALinuxAgent source.
+WALINUXAGENT_SRC = "/opt/walinuxagent-src"
+
+# Our --source-format vocabulary → the qemu/libguestfs disk-format name.
+# VHD is "vpc" to qemu; auto-detection of VHD is unreliable, so we pass it
+# explicitly to virt-customize.
+_LIBGUESTFS_FORMAT = {"vhd": "vpc", "raw": "raw", "qcow2": "qcow2", "vmdk": "vmdk"}
+
+
+def install_linux_agent(disk_path: str, source_format: str) -> None:
+    """Offline-inject the Azure Linux Agent (waagent) into a Linux disk image.
+
+    Foreign images (e.g. an AWS AMI) don't carry waagent. On Azure the VM boots
+    and gets a private IP, but its ARM ``provisioningState`` never leaves
+    ``Creating`` because nothing reports OS-provisioning complete — so the
+    dashboard's deploy poller hangs until it times out. Baking waagent in here,
+    during promotion, makes promoted Linux images provision natively on Azure.
+
+    Uses libguestfs ``virt-customize`` (works in an unprivileged container) to:
+      1. copy the bundled WALinuxAgent source into the guest,
+      2. install + register the service via the guest's OWN Python — no guest
+         network or package repo needed, so it's distro-agnostic, and
+      3. deprovision (generalize): strip the source cloud's user/host keys so
+         Azure re-creates the admin user + injects the SSH key from the VM's
+         os_profile at deploy time.
+
+    Raises on failure: a promoted Linux Azure image without waagent is broken
+    in exactly the way this fixes, so we must not silently ship one.
+    """
+    fmt = _LIBGUESTFS_FORMAT.get((source_format or "").lower())
+    log(f"inject waagent into {disk_path} (format={fmt or 'auto'})")
+    cmd = ["virt-customize", "-a", disk_path]
+    if fmt:
+        cmd += ["--format", fmt]
+    cmd += [
+        # Lands at /opt/walinuxagent-src inside the guest.
+        "--copy-in", f"{WALINUXAGENT_SRC}:/opt",
+        # Install via whatever Python the guest ships (py3 → py2 → py). waagent
+        # supports both; --register-service wires up the systemd/init unit.
+        "--run-command",
+        "cd /opt/walinuxagent-src && "
+        "for py in python3 python2 python; do "
+        "if command -v $py >/dev/null 2>&1; then "
+        "$py setup.py install --register-service && exit 0; exit 1; fi; done; "
+        "echo 'no python interpreter in guest for waagent install' >&2; exit 1",
+        # Belt-and-suspenders: ensure the unit is enabled under either name.
+        "--run-command",
+        "systemctl enable waagent.service 2>/dev/null || "
+        "systemctl enable walinuxagent.service 2>/dev/null || true",
+        # Generalize for re-imaging. -force skips the interactive confirm.
+        "--run-command",
+        "waagent -deprovision+user -force || "
+        "/usr/sbin/waagent -deprovision+user -force || true",
+        # Fix SELinux labels touched by the edits (no-op on non-SELinux guests).
+        "--selinux-relabel",
+    ]
+    subprocess.check_call(cmd, stdout=sys.stdout, stderr=sys.stderr)
+    log("waagent injection done")
+
+
 def convert_to_fixed_vhd(src: str, dst: str) -> None:
     """Produce a FIXED-format VHD for Azure. Azure managed-image/disk creation
     rejects dynamic VHDs ("is of Dynamic VHD type. Please retry with fixed VHD
@@ -174,6 +234,11 @@ def main() -> int:
     # GCS target
     ap.add_argument("--dest-gcs-bucket")
     ap.add_argument("--dest-gcs-object")
+    # Azure only: bake the Azure Linux Agent into the image before upload so a
+    # promoted foreign Linux image provisions natively on Azure. The dashboard
+    # sets this for Linux images; Windows images bring their own agent.
+    ap.add_argument("--install-linux-agent", action="store_true",
+                    help="inject WALinuxAgent into a Linux disk (Azure target)")
     args = ap.parse_args()
 
     src_ext = args.source_format.lower()
@@ -196,6 +261,12 @@ def main() -> int:
             if not (args.dest_azure_account and args.dest_azure_container and args.dest_azure_blob):
                 log("ERROR: --target azure requires --dest-azure-account / --dest-azure-container / --dest-azure-blob")
                 return 2
+            # Bake the Azure Linux Agent into the source disk BEFORE the fixed
+            # VHD conversion, so the deprovision/generalize is captured in the
+            # image Azure imports. Without this, promoted foreign Linux images
+            # boot but never finish Azure OS provisioning (deploy hangs).
+            if args.install_linux_agent:
+                install_linux_agent(src_path, args.source_format)
             # Azure managed-image/disk creation requires a FIXED-format VHD. The
             # source is frequently a dynamic VHD (and when source==target==vhd the
             # generic convert is skipped), so always normalise to a fixed VHD here,
