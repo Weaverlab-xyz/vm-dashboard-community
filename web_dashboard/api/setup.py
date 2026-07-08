@@ -528,7 +528,10 @@ class AnsibleFeatureConfig(BaseModel):
     k8s_runner_aws: str = ""                 # "" | "local" | "ecs"  (EKS clusters)
     k8s_runner_azure: str = ""               # "" | "local" | "aci"  (AKS clusters)
     k8s_runner_gcp: str = ""                 # "" | "local" | "gcp"  (GKE clusters)
-    k8s_runner_image: str = "dtzar/helm-kubectl:latest"
+    k8s_runner_image: str = "dtzar/helm-kubectl:latest"  # shared default for all clouds
+    k8s_runner_image_aws: str = ""    # per-cloud override; blank → k8s_runner_image
+    k8s_runner_image_azure: str = ""  # e.g. an ACR mirror, to avoid Docker Hub pulls
+    k8s_runner_image_gcp: str = ""
 
 class EntitleFeatureConfig(BaseModel):
     enabled: bool = False

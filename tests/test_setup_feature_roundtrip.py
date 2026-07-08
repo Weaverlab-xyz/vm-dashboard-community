@@ -79,7 +79,25 @@ def test_set_int_field_is_preserved():
         CONF.clear()
 
 
+def test_per_cloud_runner_image_keys_round_trip():
+    """The per-cloud k8s runner image overrides exist and round-trip: blank when
+    unset (they fall back to k8s_runner_image at resolve time), and a configured
+    Azure override (e.g. an ACR mirror) survives the GET->PATCH cycle."""
+    CONF.clear()
+    data = _read_feature("ansible", AnsibleFeatureConfig)
+    for k in ("k8s_runner_image_aws", "k8s_runner_image_azure", "k8s_runner_image_gcp"):
+        assert k in data and data[k] == ""
+    CONF["k8s_runner_image_azure"] = "myacr.azurecr.io/dtzar/helm-kubectl:latest"
+    try:
+        data = _read_feature("ansible", AnsibleFeatureConfig)
+        assert data["k8s_runner_image_azure"] == "myacr.azurecr.io/dtzar/helm-kubectl:latest"
+        AnsibleFeatureConfig(**data)
+    finally:
+        CONF.clear()
+
+
 if __name__ == "__main__":
     test_unset_int_fields_round_trip()
     test_set_int_field_is_preserved()
+    test_per_cloud_runner_image_keys_round_trip()
     print("ok")
