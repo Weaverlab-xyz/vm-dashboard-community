@@ -62,10 +62,10 @@ class K8sProvisionOptions(BaseModel):
 class ManagementRequest(BaseModel):
     """Launch a management plane into a registered cluster (Phase 2).
 
-    Phase 2 wires ``portainer`` (agent + brokered Portainer server); other kinds
-    are accepted but not yet launched.
+    Phase 2 wires ``rancher`` (central Rancher + import); other kinds are accepted
+    but not yet launched.
     """
-    mgmt_kind: str = "portainer"           # portainer | rancher | argocd | headlamp
+    mgmt_kind: str = "rancher"             # rancher | argocd | headlamp
 
 
 class BrokerAccessRequest(BaseModel):

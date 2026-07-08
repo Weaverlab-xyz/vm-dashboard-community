@@ -32,19 +32,18 @@ from ..database import Job, K8sCluster
 logger = logging.getLogger(__name__)
 
 VALID_CLOUDS = ("aws", "azure", "gcp", "local")
-VALID_MGMT_KINDS = ("portainer", "rancher", "argocd", "headlamp")
+VALID_MGMT_KINDS = ("rancher", "argocd", "headlamp")
 
 # config_service key that holds a cluster's kubeconfig; the row stores this
 # string as kubeconfig_ref and config_service.get() resolves it.
 _KUBECONFIG_KEY = "k8s_kubeconfig_{cluster_id}"
 
-# Phase 2 — management-plane launch. The apply runs in a transient kubectl
-# container (mirrors ansible_local_service's local-docker runner) so the app
-# process never holds cluster-admin. Phase 2's first plane is Portainer-k8s:
-# deploy the Portainer Agent into the cluster, then register it in the Portainer
-# server the dashboard already brokers (portainer_service.add_agent_endpoint).
-_PORTAINER_AGENT_MANIFEST_URL = "https://downloads.portainer.io/ce-lts/portainer-agent-k8s-nodeport.yaml"
-_PORTAINER_AGENT_NODEPORT = 30778
+# Phase 2 — management-plane launch = Rancher (central + import). One Rancher
+# server is deployed on a designated management cluster (cert-manager + an
+# internal ingress-nginx + the rancher chart, all via the transient helm/kubectl
+# runner); every other cluster is imported into it (cattle-cluster-agent dials
+# out — fits private clusters). See launch_management_plane /
+# _deploy_rancher_server / _import_into_rancher.
 
 # Phase 4 (Feature D) — in-cluster Password Safe secret delivery. The dashboard
 # installs BeyondTrust's own integration rather than proxying secrets itself.
@@ -764,16 +763,42 @@ def delete_cluster(db: Session, cluster_id: str) -> dict:
     return {"ok": True, "deregistered": name}
 
 
-# ── Phase 2: management-plane launch ───────────────────────────────────────────
+# ── Phase 2: management-plane launch (Rancher: central + import) ───────────────
 
-def _api_host(api_server: str) -> str:
-    """The hostname/IP from a cluster API URL (where the agent NodePort is
-    reachable). Best-effort — the live test confirms the agent's actual
-    reachable address for the operator's network."""
-    try:
-        return urlparse(api_server).hostname or ""
-    except Exception:
-        return ""
+async def _run_cluster_command(kubeconfig: str, command: str, target_cloud: str = "") -> str:
+    """Run an arbitrary shell command against the cluster (KUBECONFIG exported),
+    returning stdout. Backs the Rancher API calls, which run as one-shot
+    ``kubectl run … curl`` pods inside the cluster (rancher_service builds them).
+    Local mode runs in-process; otherwise a one-shot cloud task (k8s_runner_service)."""
+    from . import k8s_runner_service
+    if k8s_runner_service.mode(target_cloud) == "local":
+        tmpdir = _write_kubeconfig(kubeconfig)
+        try:
+            env = _helm_env(tmpdir)  # exports KUBECONFIG into the tmpdir
+            return await asyncio.to_thread(_run_sync, ["sh", "-c", command], None, env)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+    return await k8s_runner_service.run(
+        kubeconfig=_runner_kubeconfig(kubeconfig), command=command,
+        target_cloud=target_cloud, job_id="")
+
+
+def _default_storageclass_manifest() -> str:
+    """A default gp3 StorageClass. EKS ships none; the aws-ebs-csi-driver addon
+    (terraform) provisions it. Marked the cluster default so Rancher's PVCs bind
+    without an explicit storageClassName."""
+    return (
+        "apiVersion: storage.k8s.io/v1\n"
+        "kind: StorageClass\n"
+        "metadata:\n"
+        "  name: gp3\n"
+        "  annotations:\n"
+        "    storageclass.kubernetes.io/is-default-class: \"true\"\n"
+        "provisioner: ebs.csi.aws.com\n"
+        "volumeBindingMode: WaitForFirstConsumer\n"
+        "parameters:\n"
+        "  type: gp3\n"
+    )
 
 
 def _run_sync(cmd: list, stdin_data: Optional[str] = None, env: Optional[dict] = None) -> str:
@@ -1126,41 +1151,130 @@ async def setup_secret_delivery(cluster_id: str, kind: str) -> None:
         db.close()
 
 
-async def launch_management_plane(cluster_id: str, mgmt_kind: str = "portainer") -> None:
-    """**Phase 2** — launch a management plane into a registered cluster, then
-    register it in the brokered Portainer server. Scheduled as a background task
-    by the API (the apply is slow).
+async def _deploy_rancher_server(db: Session, row, kubeconfig: str) -> None:
+    """Stand up the central Rancher server on THIS cluster: default StorageClass →
+    cert-manager → internal ingress-nginx → the rancher chart (all via the helm/
+    kubectl runner), then bootstrap it (pin server-url, mint an API token). Records
+    the cluster as the central Rancher in config + on the row."""
+    from . import config_service, rancher_service
+    ns = _cfg("rancher_namespace", "cattle-system")
+    server_url = _cfg("rancher_server_url")
+    if not server_url:
+        raise K8sError("rancher_server_url is not configured (the stable internal hostname Rancher pins as server-url)")
+    bootstrap_pw = _cfg("rancher_bootstrap_password")
+    if not bootstrap_pw:
+        raise K8sError("rancher_bootstrap_password is not configured")
 
-    Phase 2's first plane is **Portainer-k8s** (operator's chosen model: agent +
-    brokered server): apply the Portainer Agent into the cluster, then
-    ``portainer_service.add_agent_endpoint`` registers it as an endpoint in the
-    Portainer server the dashboard already brokers. Other ``mgmt_kind`` values
-    are accepted by Phase 1 registration but not yet launched here."""
+    # 1. Default StorageClass (EKS ships none; the EBS CSI addon backs it).
+    await _apply_manifest_via_runner(kubeconfig, _default_storageclass_manifest(), target_cloud=row.cloud)
+    # 2. cert-manager (Rancher TLS dependency).
+    cm_args = ["upgrade", "--install", "cert-manager", "cert-manager",
+               "--repo", "https://charts.jetstack.io", "-n", "cert-manager",
+               "--create-namespace", "--wait", "--set", "crds.enabled=true"]
+    if _cfg("cert_manager_chart_version"):
+        cm_args += ["--version", _cfg("cert_manager_chart_version")]
+    await _helm_via_runner(kubeconfig, cm_args, add_eso_repo=False, target_cloud=row.cloud)
+    # 3. ingress-nginx as an INTERNAL LB (no public ingress; reachable by imported
+    #    cluster-agents over the peering + by the operator via the PRA tcp-tunnel).
+    ing_args = ["upgrade", "--install", "ingress-nginx", "ingress-nginx",
+                "--repo", "https://kubernetes.github.io/ingress-nginx",
+                "-n", "ingress-nginx", "--create-namespace", "--wait",
+                "--set", "controller.service.annotations.service\\.beta\\.kubernetes\\.io/aws-load-balancer-scheme=internal"]
+    if _cfg("ingress_nginx_chart_version"):
+        ing_args += ["--version", _cfg("ingress_nginx_chart_version")]
+    await _helm_via_runner(kubeconfig, ing_args, add_eso_repo=False, target_cloud=row.cloud)
+    # 4. Rancher. bootstrapPassword rides values-stdin (-f -) so it never lands in
+    #    the runner's process args; hostname is the pinned server-url host.
+    hostname = _api_host_from_url(server_url) or server_url
+    rancher_args = ["upgrade", "--install", "rancher", _cfg("rancher_chart", "rancher"),
+                    "--repo", _cfg("rancher_chart_repo", "https://releases.rancher.com/server-charts/stable"),
+                    "-n", ns, "--create-namespace", "--wait",
+                    "--set", f"hostname={hostname}",
+                    "--set", "replicas=1",
+                    "--set", f"ingress.tls.source={_cfg('rancher_cert_source', 'rancher')}",
+                    "-f", "-"]
+    if _cfg("rancher_chart_version"):
+        rancher_args += ["--version", _cfg("rancher_chart_version")]
+    values = yaml.safe_dump({"bootstrapPassword": bootstrap_pw}, default_flow_style=False)
+    await _helm_via_runner(kubeconfig, rancher_args, add_eso_repo=False,
+                           values_stdin=values, target_cloud=row.cloud)
+
+    # 5. Bootstrap (runner-executed, in-cluster): pin server-url + mint an API token.
+    async def _run(command: str) -> str:
+        return await _run_cluster_command(kubeconfig, command, target_cloud=row.cloud)
+    api_token = await rancher_service.bootstrap(_run, bootstrap_password=bootstrap_pw, server_url=server_url)
+
+    config_service.set("rancher_central_cluster_id", row.id)
+    config_service.set("rancher_server_url", server_url)
+    config_service.set("rancher_api_token", api_token)
+    row.mgmt_kind = "rancher"
+    row.mgmt_endpoint = server_url
+    logger.info("Central Rancher stood up on cluster %s (server-url %s)", row.name, server_url)
+
+
+async def _import_into_rancher(db: Session, row, kubeconfig: str) -> None:
+    """Import THIS cluster into the central Rancher: create an imported cluster in
+    Rancher (API calls run inside the CENTRAL cluster), then apply the returned
+    registration manifest into THIS (downstream) cluster — its cattle-cluster-agent
+    dials out to Rancher. Sets mgmt_endpoint to the Rancher dashboard deep-link."""
+    from . import config_service, rancher_service
+    central_id = _cfg("rancher_central_cluster_id")
+    server_url = _cfg("rancher_server_url")
+    api_token = _cfg("rancher_api_token")
+    if not (central_id and server_url and api_token):
+        raise K8sError("central Rancher is not stood up yet (launch it on the management cluster first)")
+    central = db.query(K8sCluster).filter(K8sCluster.id == central_id).first()
+    if central is None:
+        raise K8sError(f"central Rancher cluster {central_id} not found")
+
+    # Rancher API calls run inside the CENTRAL cluster (where Rancher lives).
+    central_kubeconfig = resolve_kubeconfig(db, central_id)
+
+    async def _run(command: str) -> str:
+        return await _run_cluster_command(central_kubeconfig, command, target_cloud=central.cloud)
+    rancher_cluster_id, manifest_url = await rancher_service.create_import_cluster(
+        _run, api_token=api_token, name=row.name)
+
+    # Apply the cattle registration manifest into THIS (downstream) cluster.
+    await _apply_manifest_via_runner(kubeconfig, manifest_url, target_cloud=row.cloud)
+
+    config_service.set(f"rancher_cluster_id_{row.id}", rancher_cluster_id)
+    row.mgmt_kind = "rancher"
+    row.mgmt_endpoint = f"{server_url.rstrip('/')}/dashboard/c/{rancher_cluster_id}"
+    logger.info("Cluster %s imported into Rancher (%s)", row.name, row.mgmt_endpoint)
+
+
+async def launch_management_plane(cluster_id: str, mgmt_kind: str = "rancher") -> None:
+    """**Phase 2** — launch/join the Rancher management plane for a cluster.
+
+    Central + import model: the first cluster launched (or the one already recorded
+    as ``rancher_central_cluster_id``) becomes the central Rancher server
+    (:func:`_deploy_rancher_server`); every other cluster is imported into it
+    (:func:`_import_into_rancher`). Only ``rancher`` is wired; other kinds are
+    accepted at registration but not launched here. Runs as a background task."""
     from ..database import SessionLocal
-    from . import portainer_service
     db = SessionLocal()
     try:
         row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
         if row is None:
             return
-        if mgmt_kind != "portainer":
+        if mgmt_kind != "rancher":
             row.status = "failed"
             db.commit()
-            logger.warning("management-plane launch: only 'portainer' is wired in Phase 2 (got %r)", mgmt_kind)
+            logger.warning("management-plane launch: only 'rancher' is wired (got %r)", mgmt_kind)
             return
         row.status = "deploying"
         db.commit()
         try:
             kubeconfig = resolve_kubeconfig(db, cluster_id)
-            await _apply_manifest_via_runner(kubeconfig, _PORTAINER_AGENT_MANIFEST_URL, target_cloud=row.cloud)
-            host = _api_host(row.api_server)
-            endpoint = await portainer_service.add_agent_endpoint(
-                name=row.name, ip=host, port=_PORTAINER_AGENT_NODEPORT)
-            row.mgmt_kind = "portainer"
-            row.mgmt_endpoint = str(endpoint.get("Id") or endpoint.get("Name") or host)
+            central_id = _cfg("rancher_central_cluster_id")
+            if not central_id or central_id == cluster_id:
+                await _deploy_rancher_server(db, row, kubeconfig)
+            else:
+                await _import_into_rancher(db, row, kubeconfig)
             row.status = "managed"
             db.commit()
-            logger.info("Cluster %s management plane up (portainer endpoint %s)", row.name, row.mgmt_endpoint)
+            logger.info("Cluster %s management plane up (rancher, endpoint %s)", row.name, row.mgmt_endpoint)
         except Exception as exc:
             row.status = "failed"
             db.commit()
@@ -1171,7 +1285,7 @@ async def launch_management_plane(cluster_id: str, mgmt_kind: str = "portainer")
 
 
 async def run_management_plane(db: Session, *, cluster_id: str, job_id: str,
-                               mgmt_kind: str = "portainer") -> None:
+                               mgmt_kind: str = "rancher") -> None:
     """Worker entry for a ``k8s_management`` job: drive :func:`launch_management_plane`
     with Job tracking + a heartbeat, so the outcome and any error are visible in the
     UI (it was a fire-and-forget background task with no Job). Mirrors the job
@@ -1535,13 +1649,11 @@ async def run_entitle_register(db: Session, *, cluster_id: str, job_id: str,
 # ── Phase 3: brokered access ───────────────────────────────────────────────────
 
 def console_url(db: Session, cluster_id: str) -> dict:
-    """A link to the cluster's management console (Phase 3a). For **Portainer-k8s**
-    the cluster was registered as a Portainer endpoint at launch (Phase 2), so the
-    console is that endpoint's view on the Portainer server the dashboard already
-    brokers — built from the configured server URL + the endpoint id stored in
-    ``mgmt_endpoint``. For a plane whose ``mgmt_endpoint`` is already a URL
-    (Rancher / Argo ingress), return it directly. (The native PRA
-    ``tunnel_type=k8s`` jump + a true short-lived brokered session are Phase 3b.)"""
+    """A link to the cluster's management console (Phase 3a). For Rancher (the only
+    wired plane) ``mgmt_endpoint`` holds the Rancher dashboard URL — the server-url
+    for the central cluster, a ``/dashboard/c/<id>`` deep-link for imported ones —
+    so it's returned directly. Reaching that internal URL is brokered separately by
+    :func:`open_console` (the PRA tcp-tunnel) — no public ingress."""
     row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
     if row is None:
         raise K8sError(f"cluster {cluster_id} not found")
@@ -1550,14 +1662,7 @@ def console_url(db: Session, cluster_id: str) -> dict:
     ep = row.mgmt_endpoint
     if ep.startswith(("http://", "https://")):
         return {"url": ep, "kind": row.mgmt_kind}
-    if row.mgmt_kind == "portainer":
-        from ..config import settings
-        from . import config_service
-        base = (config_service.get("portainer_url") or getattr(settings, "portainer_url", "")).rstrip("/")
-        if not base:
-            raise K8sError("Portainer server URL is not configured (set portainer_url)")
-        return {"url": f"{base}/#!/{ep}/kubernetes/dashboard", "kind": "portainer", "endpoint_id": ep}
-    raise K8sError(f"no console URL builder for mgmt_kind={row.mgmt_kind!r}")
+    raise K8sError(f"management plane {row.mgmt_kind!r} has no console URL (mgmt_endpoint is not a URL)")
 
 
 # ── Phase 3b: native PRA tunnel_type=k8s jump (beyondtrust/sra) + Entitle JIT ──

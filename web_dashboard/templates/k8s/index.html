@@ -3,9 +3,9 @@
 {% block title %}Kubernetes – Infrastructure Management{% endblock %}
 
 {# Kubernetes management — Phase 3a (docs/saas-kubernetes-management-plan.md).
-   Register reachable clusters, launch a Portainer-k8s management plane, and open
-   the brokered console. The native PRA tunnel_type=k8s jump + Entitle-Rancher JIT
-   land in Phase 3b. #}
+   Provision/register clusters, launch the Rancher management plane (central
+   server + imported clusters), and open the brokered console. The PRA tunnel +
+   Entitle-Rancher JIT land in Phase 3b. #}
 
 {% block content %}
 <div class="max-w-6xl mx-auto py-8 px-4" x-data="k8sPage()" x-init="init()">
@@ -25,8 +25,8 @@
   </div>
   <p class="text-sm text-gray-500 mb-6">
     Provision a new cluster (<strong>AWS EKS</strong>) or register a reachable one from its
-    kubeconfig, launch a management plane (<strong>Portainer-k8s</strong>), and open the
-    brokered console. The kubeconfig is stored as a secrets-backend reference, never shown back.
+    kubeconfig, launch the <strong>Rancher</strong> management plane (central server + imported
+    clusters), and open the brokered console. The kubeconfig is stored as a secrets-backend reference, never shown back.
   </p>
 
   <div x-show="toast" x-cloak x-transition
@@ -140,7 +140,6 @@
           <label class="block text-sm font-medium text-gray-700 mb-1">Management plane (optional)</label>
           <select x-model="form.mgmt_kind" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
             <option value="">— set later —</option>
-            <option value="portainer">portainer</option>
             <option value="rancher">rancher</option>
             <option value="argocd">argocd</option>
             <option value="headlamp">headlamp</option>
@@ -503,9 +502,9 @@ function k8sPage() {
     },
 
     async launch(c) {
-      if (!confirm(`Launch a Portainer management plane on "${c.name}"?\n\nDeploys the Portainer Agent into the cluster and registers it in the brokered Portainer server.`)) return;
+      if (!confirm(`Launch the Rancher management plane on "${c.name}"?\n\nThe first cluster becomes the central Rancher server; later clusters are imported into it. Deploys cert-manager + ingress-nginx + Rancher — this can take several minutes.`)) return;
       try {
-        await API.post(`/api/k8s/clusters/${c.id}/management`, { mgmt_kind: 'portainer' });
+        await API.post(`/api/k8s/clusters/${c.id}/management`, { mgmt_kind: 'rancher' });
         this.flash('Launching management plane…');
         await this.refresh();
         this._pollUntilManaged(c.id);

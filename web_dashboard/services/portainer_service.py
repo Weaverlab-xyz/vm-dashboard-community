@@ -425,94 +425,10 @@ async def list_stacks(endpoint_id: int) -> list[dict]:
         return resp.json() or []
 
 
-async def check_agent_health(ip: str, port: int = 9001, timeout_secs: int = 30) -> bool:
-    """
-    Poll the agent endpoint until it's responsive or timeout.
-    In automation mode, routes through the Hybrid Worker.
-    """
-    if _EXECUTION_MODE == "automation":
-        agent_url = f"https://{ip}:{port}"
-        for endpoint in ["/ping", "/"]:
-            try:
-                result = await _proxy_request("GET", f"{agent_url}{endpoint}", {})
-                if result.get("status_code", 0) < 400:
-                    return True
-            except PortainerError:
-                continue
-        raise PortainerError(
-            f"Agent at {agent_url} did not respond via proxy. "
-            f"Check container logs: ssh <user>@{ip} 'docker logs portainer_agent'"
-        )
-
-    import asyncio
-    agent_url = f"https://{ip}:{port}"
-    endpoints_to_try = ["/ping", "/"]
-
-    for attempt in range(timeout_secs // 2):
-        for endpoint in endpoints_to_try:
-            try:
-                async with httpx.AsyncClient(timeout=3.0, verify=False) as client:
-                    resp = await client.get(f"{agent_url}{endpoint}")
-                    if 200 <= resp.status_code < 400:
-                        logger.info(
-                            "Agent health check passed for %s:%d on attempt %d (endpoint %s)",
-                            ip, port, attempt + 1, endpoint
-                        )
-                        return True
-            except Exception as e:
-                logger.debug("Agent health check attempt %d to %s failed: %s", attempt + 1, endpoint, type(e).__name__)
-                continue
-
-        if attempt < (timeout_secs // 2) - 1:
-            await asyncio.sleep(2)
-
-    raise PortainerError(
-        f"Agent at {agent_url} did not respond within {timeout_secs} seconds. "
-        f"Check container logs: ssh <user>@{ip} 'docker logs portainer_agent' "
-        f"and socket permissions: 'ls -l /var/run/docker.sock'"
-    )
-
-
-@_wrap_transport_errors
-async def add_agent_endpoint(name: str, ip: str, port: int = 9001) -> dict:
-    """
-    Register a Portainer Agent endpoint (EndpointCreationType=2).
-    The agent must already be running on the target VM at https://<ip>:<port>.
-    """
-    agent_url = f"https://{ip}:{port}"
-
-    try:
-        await check_agent_health(ip, port)
-    except Exception as e:
-        raise PortainerError(f"Agent health check failed at {agent_url}: {e}")
-
-    form_fields = {
-        "Name": name,
-        "EndpointCreationType": "2",
-        "Type": "1",
-        "URL": agent_url,
-        "TLS": "true",
-        "TLSSkipVerify": "true",
-        "TLSSkipClientVerify": "true",
-    }
-
-    if _EXECUTION_MODE == "automation":
-        url, headers = await _portainer_url_and_headers()
-        result = await _proxy_request(
-            "POST", f"{url}/api/endpoints", headers,
-            form_data=json.dumps(form_fields),
-        )
-        await cache_service.invalidate_prefix("portainer_endpoints")
-        logger.info("Registered Portainer agent endpoint %s at %s via proxy", name, agent_url)
-        return result["body"]
-
-    async with await _client() as client:
-        logger.debug("Creating Portainer agent endpoint: %s with form: %s", name, form_fields)
-        resp = await client.post("/api/endpoints", data=form_fields)
-        if not resp.is_success:
-            _raise(resp, f"add_agent_endpoint({name})")
-    logger.info("Registered Portainer agent endpoint %s at %s", name, agent_url)
-    return resp.json()
+# NOTE: the k8s management plane moved from Portainer (agent + endpoint
+# registration) to Rancher — the former ``check_agent_health`` /
+# ``add_agent_endpoint`` helpers were removed with that switch. This module now
+# serves only the non-k8s Containers page (Docker-host / container management).
 
 
 @_wrap_transport_errors

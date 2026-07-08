@@ -93,7 +93,7 @@ async def _dispatch(job_id: str, job_type: str, meta: dict) -> None:
         elif job_type == "k8s_management":
             await k8s_service.run_management_plane(
                 db, cluster_id=meta["cluster_id"], job_id=job_id,
-                mgmt_kind=meta.get("mgmt_kind", "portainer"))
+                mgmt_kind=meta.get("mgmt_kind", "rancher"))
         elif job_type == "k8s_secret_delivery":
             await k8s_service.run_secret_delivery(
                 db, cluster_id=meta["cluster_id"], job_id=job_id, kind=meta["kind"])
