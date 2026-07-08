@@ -288,6 +288,37 @@ output "integration_id" {{
 """
 
 
+def _generate_rancher_hcl(*, name: str, url: str, verify: bool, private: bool) -> str:
+    """Entitle **Rancher** integration. connection_json = {url, access_token,
+    secret_key, verify} — Rancher's API access+secret key PAIR (sensitive TF_VARs;
+    see docs.beyondtrust.com/entitle/docs/entitle-integration-rancher). ``private``
+    (the Rancher server isn't reachable from Entitle's cloud — the internal-LB case)
+    attaches the shared agent_token via _common_attrs_hcl."""
+    label = _safe_name(name)
+    slug = _cfg("entitle_rancher_app_slug") or "rancher"
+    header = _provider_header(
+        'variable "rancher_access_token" { sensitive = true }\n'
+        'variable "rancher_secret_key" { sensitive = true }\n')
+    conn = (
+        "  connection_json = jsonencode({\n"
+        f"    url          = {json.dumps(url)}\n"
+        "    access_token = var.rancher_access_token\n"
+        "    secret_key   = var.rancher_secret_key\n"
+        f"    verify       = {str(bool(verify)).lower()}\n"
+        "  })\n"
+    )
+    return header + f"""
+resource "entitle_integration" {json.dumps(label)} {{
+  name        = {json.dumps(name[:50])}
+  application = {{ name = {json.dumps(slug)} }}
+{conn}{_common_attrs_hcl(private)}}}
+
+output "integration_id" {{
+  value = entitle_integration.{label}.id
+}}
+"""
+
+
 # ── Terraform plumbing ────────────────────────────────────────────────────────
 
 def _run_tf(args: list, work_dir: str, env: dict, timeout: int = 120) -> subprocess.CompletedProcess:
@@ -411,6 +442,23 @@ async def register_kubernetes(*, name: str, private: bool = True,
     hcl = _generate_k8s_hcl(name=name, host=host, user_prefix=user_prefix, private=private)
     tf_vars = {} if private else {"k8s_token": token, "k8s_ca_cert": ca_cert}
     return await asyncio.to_thread(_apply_hcl_sync, hcl, tf_vars)
+
+
+async def register_rancher(*, name: str, server_url: str, api_token: str,
+                           verify: bool = False, private: bool = True) -> dict:
+    """Register the central Rancher as an Entitle **Rancher** integration. Rancher's
+    API bearer (``token-xxxxx:yyyyy``) IS the access+secret key pair the connector
+    wants — split on ``:``. ``private`` (internal Rancher, unreachable from Entitle's
+    cloud) attaches the shared agent_token. Returns {integration_id, tf_state_json};
+    stash the state so :func:`deregister` can remove it."""
+    access, _sep, secret = (api_token or "").partition(":")
+    if not (access and secret):
+        raise EntitleRegistrationError(
+            "Rancher api_token must be a Rancher API key pair 'access:secret' (e.g. token-xxxxx:yyyyy)")
+    hcl = _generate_rancher_hcl(name=name, url=server_url, verify=verify, private=private)
+    return await asyncio.to_thread(
+        _apply_hcl_sync, hcl,
+        {"rancher_access_token": access, "rancher_secret_key": secret})
 
 
 # ── Agent token (bootstrap for the k8s agent + private-target registration) ─────
