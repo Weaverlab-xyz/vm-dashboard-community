@@ -53,11 +53,17 @@ The dashboard defaults to pulling
 `.github/workflows/publish-images.yml` on each tagged release.
 
 Operators who want to pin a hardened build can override via
-`promote_runner_image` on `/storage` — the default is a convenience,
-not a requirement. The cloud-native runner (ECS / ACI / Cloud Run)
-pulls from a registry it can reach, so air-gapped or private-registry
-deployments should push a copy to ECR / ACR / Artifact Registry and
-point `promote_runner_image` at it.
+`promote_runner_image` — set it in **Settings → Remote Worker → Image-promote
+runner**, or PATCH it on `/api/storage/config`. The default is a convenience,
+not a requirement. The cloud-native runner (ECS / ACI / Cloud Run) pulls from a
+registry it can reach, so air-gapped or private-registry deployments should push
+a copy to ECR / ACR / Artifact Registry and point `promote_runner_image` at it.
+
+> **Note:** the runner uses `promote_runner_image` **verbatim** — it does not
+> prepend a registry server. For a private ACR/ECR/AR mirror, set the *full*
+> path incl. registry host and tag (e.g.
+> `myregistry.azurecr.io/chrweav/dashboard-promote-runner:latest`). A bare
+> `chrweav/…` value pulls from Docker Hub.
 
 ## Build locally
 
@@ -78,7 +84,8 @@ docker push \
   <account>.dkr.ecr.us-east-2.amazonaws.com/dashboard-promote-runner:0.1.0
 ```
 
-Then set `promote_runner_image` on `/storage` to the pushed reference.
+Then set `promote_runner_image` to the pushed reference (full registry path)
+in **Settings → Remote Worker → Image-promote runner**.
 
 ## Prerequisites per target cloud
 

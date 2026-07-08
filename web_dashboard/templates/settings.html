@@ -767,6 +767,18 @@
             </div>
           </div>
 
+          <!-- Image-promote runner — always cloud-hosted (no selector); only the image is configurable here -->
+          <div class="rounded-lg border border-gray-200 p-3 space-y-2">
+            <p class="text-sm font-semibold text-gray-700">Image-promote runner</p>
+            <p class="text-xs text-gray-400 -mt-1">Container image launched (ECS / ACI / Cloud Run) to convert &amp; stage a promoted disk image. Leave blank for the public Docker Hub image; set a full registry path to use a private mirror (e.g. your ACR).</p>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Runner image</label>
+              <input type="text" x-model="panelCfg.promote_runner_image"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                     placeholder="chrweav/dashboard-promote-runner:latest">
+            </div>
+          </div>
+
           <!-- ── Shared cloud infrastructure (only when a cloud runner is selected) ── -->
           <template x-if="[panelCfg.ansible_runner_aws,panelCfg.ansible_runner_azure,panelCfg.ansible_runner_gcp,panelCfg.k8s_runner_aws,panelCfg.k8s_runner_azure,panelCfg.k8s_runner_gcp].some(v => v && v !== 'local')">
             <div class="space-y-3">
