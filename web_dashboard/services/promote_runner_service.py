@@ -238,6 +238,7 @@ async def run_for_azure_target(
     dest_account: str,
     dest_container: str,
     dest_blob: str,
+    install_linux_agent: bool = False,
     presign_expiry_seconds: int = 7200,
 ) -> tuple:
     """Launch the Azure promote-runner ACI container group to copy
@@ -264,6 +265,10 @@ async def run_for_azure_target(
         "--dest-azure-container", dest_container,
         "--dest-azure-blob", dest_blob,
     ]
+    # Linux images need the Azure Linux Agent baked in or the VM never finishes
+    # Azure OS provisioning (deploy hangs). Windows images bring their own agent.
+    if install_linux_agent:
+        runner_args.append("--install-linux-agent")
     azure_env = {
         "AZURE_TENANT_ID":     _cfg("azure_tenant_id"),
         "AZURE_CLIENT_ID":     _cfg("azure_client_id"),
