@@ -550,6 +550,12 @@ class EntitleFeatureConfig(BaseModel):
     entitle_user_jit_enabled: bool = False
     entitle_request_portal_url: str = ""
     entitle_resource_ids_json: str = "{}"
+    # Rancher connector — register the central Rancher as an Entitle integration.
+    # Slug + connection field names are tenant/connector-specific; confirm against
+    # the entitle_applications catalog (defaults best-effort).
+    entitle_rancher_app_slug: str = "rancher"
+    entitle_rancher_url_key: str = "url"
+    entitle_rancher_token_key: str = "api_token"
 
 class ProxmoxFeatureConfig(BaseModel):
     enabled: bool = False
@@ -634,6 +640,21 @@ class K8sManagementFeatureConfig(BaseModel):
     # Optional defaults (blank → the terraform/k8s_cluster/aws_eks module defaults).
     aws_eks_k8s_version: str = ""
     aws_eks_node_instance_type: str = ""
+    # Rancher management plane (central + import). Deploy config for the central
+    # Rancher server; runtime ids (rancher_central_cluster_id / rancher_api_token)
+    # are set by the deploy flow, not entered here.
+    rancher_server_url: str = ""
+    rancher_bootstrap_password: str = ""      # first-run admin bootstrap; encrypted at rest
+    rancher_namespace: str = "cattle-system"
+    rancher_chart_repo: str = "https://releases.rancher.com/server-charts/stable"
+    rancher_chart: str = "rancher"
+    rancher_chart_version: str = ""
+    rancher_cert_source: str = "rancher"
+    cert_manager_chart_version: str = ""
+    ingress_nginx_chart_version: str = ""
+    rancher_ui_jump_group: str = ""
+    rancher_ui_jumpoint_name: str = ""
+    rancher_ui_local_port: int = 443
 
 
 class VirtualDesktopsFeatureConfig(BaseModel):
@@ -719,6 +740,7 @@ _SECRET_FEATURE_KEYS = frozenset({
     "nutanix_password",
     "xcpng_password",
     "ansible_aci_acr_password",
+    "rancher_bootstrap_password", "rancher_api_token",
 })
 
 

@@ -687,6 +687,113 @@ async def remove_db_tunnel(tf_state_json: str) -> None:
     await asyncio.to_thread(_remove_db_tunnel_sync, tf_state_json)
 
 
+# ── Web Jump (Rancher management UI) ──────────────────────────────────────────
+# The central Rancher UI is brokered to the operator via a PRA Web Jump (the sra
+# provider's sra_web_jump) — the rep opens it from the PRA representative console;
+# no public ingress. Simpler than the DB tunnel: no credential injection (Rancher
+# does its own login), so no Vault account / no sensitive resource TF_VARs.
+
+def _generate_web_jump_hcl(name: str, url: str, jump_group_name: str,
+                           jumpoint_name: str, tag: str = "rancher",
+                           verify_certificate: bool = False) -> str:
+    """HCL for one sra_web_jump. Required: name, url, jump_group_id, jumpoint_id
+    (ids resolved from the jump-group/jumpoint list data sources, same as the DB
+    tunnel). verify_certificate defaults false (Rancher's cert-manager CA is
+    self-signed)."""
+    safe_name = re.sub(r"[^a-z0-9_]", "_", name.lower())
+    return f"""\
+terraform {{
+  required_providers {{
+    sra = {{
+      source  = "beyondtrust/sra"
+      version = "~> 1.0"
+    }}
+  }}
+}}
+
+variable "bt_host"          {{ sensitive = false }}
+variable "bt_client_id"     {{ sensitive = true }}
+variable "bt_client_secret" {{ sensitive = true }}
+
+provider "sra" {{
+  host          = var.bt_host
+  client_id     = var.bt_client_id
+  client_secret = var.bt_client_secret
+}}
+
+data "sra_jump_group_list" "jg" {{
+  name = {json.dumps(jump_group_name)}
+}}
+
+data "sra_jumpoint_list" "jp" {{
+  name = {json.dumps(jumpoint_name)}
+}}
+
+resource "sra_web_jump" {json.dumps(safe_name)} {{
+  name               = {json.dumps(name)}
+  url                = {json.dumps(url)}
+  jump_group_id      = tonumber(data.sra_jump_group_list.jg.items[0].id)
+  jumpoint_id        = tonumber(data.sra_jumpoint_list.jp.items[0].id)
+  verify_certificate = {str(bool(verify_certificate)).lower()}
+  tag                = {json.dumps(tag)}
+  comments           = "Auto-provisioned by Infrastructure Management Dashboard (Rancher management UI)"
+}}
+
+output "web_jump_id" {{
+  value = sra_web_jump.{safe_name}.id
+}}
+"""
+
+
+def _provision_web_jump_sync(name, url, jump_group_name, jumpoint_name,
+                             tag="rancher", verify_certificate=False, client_secret="") -> dict:
+    _cred_env = {"TF_VAR_bt_client_secret": client_secret} if client_secret else {}
+    with tempfile.TemporaryDirectory(prefix="pra_web_tf_") as work_dir:
+        Path(work_dir, "main.tf").write_text(
+            _generate_web_jump_hcl(name, url, jump_group_name, jumpoint_name, tag, verify_certificate))
+        init = _run_tf(["init", "-upgrade=false"], work_dir, timeout=60)
+        if init.returncode != 0:
+            raise TerraformPRAError(
+                f"terraform init failed: {init.stderr.strip() or init.stdout.strip()}")
+        apply = _run_tf(["apply", "-auto-approve"], work_dir, timeout=120, extra_env=_cred_env or None)
+        if apply.returncode != 0:
+            _run_tf(["destroy", "-auto-approve", "-refresh=false"], work_dir, timeout=120)
+            raise TerraformPRAError(
+                f"terraform apply failed: {apply.stderr.strip() or apply.stdout.strip()}")
+        out = _run_tf(["output", "-json"], work_dir, timeout=30)
+        web_jump_id: Optional[str] = None
+        if out.returncode == 0 and out.stdout.strip():
+            try:
+                web_jump_id = str(json.loads(out.stdout).get("web_jump_id", {}).get("value", "")) or None
+            except (json.JSONDecodeError, AttributeError):
+                pass
+        state_path = Path(work_dir, "terraform.tfstate")
+        tf_state_json = state_path.read_text() if state_path.exists() else None
+        return {
+            "web_jump_id": web_jump_id,
+            "jump_group_name": jump_group_name,
+            "tf_state_json": _scrub_tf_state(tf_state_json) if tf_state_json else None,
+        }
+
+
+async def provision_web_jump(
+    *, name: str, url: str, jump_group_name: str, jumpoint_name: str,
+    tag: str = "rancher", verify_certificate: bool = False, client_secret: str = "",
+) -> dict:
+    """Provision a PRA Web Jump to a web UI (the central Rancher). The Jump Group +
+    Jumpoint must already exist. Returns {web_jump_id, jump_group_name,
+    tf_state_json} — stash tf_state_json for remove_web_jump."""
+    return await asyncio.to_thread(
+        _provision_web_jump_sync, name, url, jump_group_name, jumpoint_name,
+        tag, verify_certificate, client_secret)
+
+
+async def remove_web_jump(tf_state_json: str) -> None:
+    """Destroy a previously provisioned Web Jump using its stored state
+    (provider-only state destroy; the web jump carries no secrets)."""
+    await asyncio.to_thread(_destroy_state_only_sync, tf_state_json)
+
+
 # ── Remote RDP jump (VDI desktops, Phase 2) ──────────────────────────────────
 # A VDI seat is reached over PRA via an agentless Remote RDP jump item on the
 # Jumpoint. Mirrors the DB-tunnel template (resource + optional Vault account +

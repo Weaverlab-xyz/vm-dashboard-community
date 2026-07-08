@@ -68,6 +68,12 @@ variable "node_max" {
   description = "Maximum node count"
 }
 
+variable "enable_ebs_csi" {
+  type        = bool
+  default     = true
+  description = "Install the aws-ebs-csi-driver addon so dynamic PVCs bind. EKS ships no CSI driver / default StorageClass out of the box, so stateful workloads (e.g. a Rancher management plane) can't get volumes without it. Lab wiring grants the driver via the node instance role (no IRSA); a default StorageClass is applied post-provision by the k8s runner."
+}
+
 # Endpoint access. MVP default: public endpoint (optionally CIDR-restricted) +
 # private access, so the dashboard host (and its transient kubectl/helm runner)
 # can reach the API and the existing Phase 2-4 flows work unchanged.
@@ -362,6 +368,15 @@ resource "aws_iam_role_policy_attachment" "node_ecr" {
   policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
 }
 
+# EBS CSI driver permissions on the node role (lab shortcut — no IRSA/OIDC). The
+# managed aws-ebs-csi-driver addon then uses the node instance role to
+# create/attach EBS volumes for dynamic PVCs.
+resource "aws_iam_role_policy_attachment" "node_ebs_csi" {
+  count      = var.enable_ebs_csi ? 1 : 0
+  role       = aws_iam_role.node.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy"
+}
+
 # ── EKS cluster + managed node group ─────────────────────────────────────────
 
 resource "aws_eks_cluster" "this" {
@@ -403,6 +418,17 @@ resource "aws_eks_node_group" "this" {
     aws_iam_role_policy_attachment.node_ecr,
     aws_route.private_nat,
   ]
+}
+
+# EBS CSI driver — dynamic volume provisioner. EKS ships none, so PVCs stay
+# Pending without it; a Rancher management plane (stateful) needs it. Uses the
+# node instance role for AWS calls (node_ebs_csi above) — no IRSA for the lab.
+resource "aws_eks_addon" "ebs_csi" {
+  count        = var.enable_ebs_csi ? 1 : 0
+  cluster_name = aws_eks_cluster.this.name
+  addon_name   = "aws-ebs-csi-driver"
+  tags         = var.tags
+  depends_on   = [aws_eks_node_group.this, aws_iam_role_policy_attachment.node_ebs_csi]
 }
 
 # ── Management-plane reachability (optional; needs the sandbox peering) ───────

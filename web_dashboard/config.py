@@ -65,6 +65,37 @@ class Settings(BaseSettings):
     # to these). Read live via config_service.
     k8s_rancher_entitle_bundle: str = ""    # Entitle bundle/role id for time-boxed Rancher RBAC (mgmt_kind=rancher)
     k8s_entitle_duration_minutes: int = 60  # default grant window for the Rancher JIT request
+    # K8s management plane = Rancher (central + import). One Rancher server is
+    # stood up on a designated management cluster; other clusters are imported
+    # (cattle-cluster-agent dials out — fits private clusters). Deployed via the
+    # k8s runner (helm). Read live via config_service.
+    rancher_central_cluster_id: str = ""      # K8sCluster.id hosting the central Rancher ("" = not stood up yet)
+    rancher_server_url: str = ""              # Rancher server-url (stable internal host, e.g. https://rancher.<zone>.internal)
+    rancher_api_token: str = ""               # Rancher API bearer token minted at bootstrap; encrypted at rest
+    rancher_bootstrap_password: str = ""      # first-run admin bootstrap password; encrypted at rest
+    rancher_namespace: str = "cattle-system"  # namespace the Rancher server installs into
+    rancher_chart_repo: str = "https://releases.rancher.com/server-charts/stable"
+    rancher_chart: str = "rancher"            # chart name within rancher_chart_repo
+    rancher_chart_version: str = ""           # pin the Rancher chart version ("" = latest in the repo)
+    rancher_cert_source: str = "rancher"      # cert-manager mode: rancher (self-signed CA) | letsEncrypt | secret
+    cert_manager_chart_version: str = ""      # pin cert-manager ("" = latest)
+    ingress_nginx_chart_version: str = ""     # pin ingress-nginx ("" = latest)
+    # Rancher UI PRA web-broker: a tunnel_type=tcp jump to the central Rancher's
+    # HTTPS so the operator reaches the UI via the PRA rep console (no public
+    # ingress). Blank jump group/jumpoint fall back to the shared bt_* defaults.
+    rancher_ui_jump_group: str = ""           # "" = bt_jump_group_name
+    rancher_ui_jumpoint_name: str = ""        # "" = bt_jumpoint_name
+    rancher_ui_local_port: int = 443          # local listen port (match Rancher 443 for SNI/cert)
+    rancher_ui_web_jump_id: str = ""          # PRA Web Jump id for the central Rancher UI (runtime-set)
+    rancher_ui_web_jump_tfstate: str = ""     # terraform state for the Web Jump (for teardown)
+    # Entitle Rancher connector registration. The application slug + connection
+    # field names are tenant/connector-specific — confirm against the
+    # entitle_applications catalog before use (defaults are best-effort).
+    entitle_rancher_app_slug: str = "rancher"     # Entitle application catalog slug for the Rancher connector
+    entitle_rancher_url_key: str = "url"          # connection_json key for the Rancher server URL
+    entitle_rancher_token_key: str = "api_token"  # connection_json key for the Rancher API token
+    entitle_rancher_integration_id: str = ""      # set after register_rancher
+    entitle_rancher_tfstate: str = ""             # terraform state for the Rancher integration (for deregister)
     # K8s Phase 4 (Feature D) — in-cluster Password Safe secret delivery via the
     # External Secrets Operator. The BeyondTrust ClusterSecretStore authenticates
     # with the configured Password Safe OAuth client (pscli_api_url / pscli_client_id
