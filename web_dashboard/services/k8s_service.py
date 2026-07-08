@@ -650,6 +650,16 @@ def start_decommission(db: Session, cluster_id: str, created_by: str = "") -> di
     row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
     if row is None:
         raise K8sError(f"cluster {cluster_id} not found")
+    # Central Rancher guard: refuse while imported clusters still depend on it
+    # (deleting it would orphan every import — Risk 5).
+    if cluster_id == _cfg("rancher_central_cluster_id"):
+        imports = (db.query(K8sCluster)
+                     .filter(K8sCluster.mgmt_kind == "rancher", K8sCluster.id != cluster_id)
+                     .count())
+        if imports:
+            raise K8sError(
+                f"this cluster hosts the central Rancher management plane and {imports} "
+                f"cluster(s) are imported into it — decommission those first")
     if row.status == "decommissioning":
         existing = (db.query(Job)
                       .filter(Job.job_type == "k8s_decommission")
@@ -695,6 +705,27 @@ async def run_decommission(db: Session, *, cluster_id: str, job_id: str) -> None
     except Exception as exc:
         errors.append(f"PRA tunnel removal: {exc}")
         logger.warning("k8s decommission: tunnel removal for %s failed: %s", cluster_id, exc)
+
+    # 1b. Rancher: remove this cluster from the central Rancher (best-effort,
+    #     log-only — a stale Rancher entry must not fail the cloud teardown).
+    rancher_import_id = _cfg(f"rancher_cluster_id_{cluster_id}")
+    if rancher_import_id:
+        job_service.update_progress(db, job_id, 25, "Removing from Rancher…")
+        try:
+            from . import rancher_service
+            central_id = _cfg("rancher_central_cluster_id")
+            api_token = _cfg("rancher_api_token")
+            central = (db.query(K8sCluster).filter(K8sCluster.id == central_id).first()
+                       if central_id else None)
+            if central and api_token:
+                central_kubeconfig = resolve_kubeconfig(db, central_id)
+
+                async def _run(command: str) -> str:
+                    return await _run_cluster_command(central_kubeconfig, command, target_cloud=central.cloud)
+                await rancher_service.delete_cluster(_run, api_token=api_token, cluster_id=rancher_import_id)
+            config_service.set(f"rancher_cluster_id_{cluster_id}", "")
+        except Exception as exc:
+            logger.warning("k8s decommission: Rancher removal for %s failed: %s", cluster_id, exc)
 
     # 2. terraform destroy (the long step). State lives in the active storage
     #    backend, so destroy recovers a deploy dir lost to a container recreate —
