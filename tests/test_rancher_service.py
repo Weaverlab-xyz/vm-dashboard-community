@@ -68,13 +68,17 @@ def test_bootstrap_orchestration():
         calls.append(command)
         return responses[len(calls) - 1]
 
-    tok = asyncio.run(rs.bootstrap(fake_run, bootstrap_password="bootpw",
-                                   server_url="https://rancher.lab.internal"))
+    # Non-URL sentinel: keeps the "value flows through" assertion below from
+    # tripping CodeQL's py/incomplete-url-substring-sanitization (it flags a
+    # URL-shaped literal in an `in` check). bootstrap only interpolates the
+    # string, so its format is irrelevant to this test.
+    server_url = "SERVER-URL-SENTINEL"
+    tok = asyncio.run(rs.bootstrap(fake_run, bootstrap_password="bootpw", server_url=server_url))
     assert tok == "token-xyz:secret"
     assert "/v3-public/localProviders/local?action=login" in calls[0]
     assert "bootpw" in calls[0]
     assert "/v3/settings/server-url" in calls[1]
-    assert "https://rancher.lab.internal" in calls[1]
+    assert server_url in calls[1]
     assert "Authorization: Bearer login-abc" in calls[1]
     assert "/v3/token" in calls[2]
     assert "Authorization: Bearer login-abc" in calls[2]
