@@ -326,14 +326,15 @@ PROJECT_NUMBER="$(gcloud projects describe "$PROJECT_ID" --format='value(project
 for cb_sa in "${PROJECT_NUMBER}@cloudbuild.gserviceaccount.com" \
              "${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"; do
   for role in roles/compute.admin roles/iam.serviceAccountUser \
-              roles/iam.serviceAccountTokenCreator roles/storage.admin; do
+              roles/iam.serviceAccountTokenCreator roles/storage.admin \
+              roles/logging.logWriter; do
     retry 3 4 gcloud projects add-iam-policy-binding "$PROJECT_ID" \
       --member "serviceAccount:$cb_sa" --role "$role" \
       --condition=None --quiet >/dev/null 2>&1 \
       || warn "Could not grant $role to $cb_sa (SA may not exist on this project — safe to ignore if export works)"
   done
 done
-ok "Granted Cloud Build export SA(s) compute.admin, iam.serviceAccountUser, iam.serviceAccountTokenCreator, storage.admin (best-effort)"
+ok "Granted Cloud Build export SA(s) compute.admin, iam.serviceAccountUser, iam.serviceAccountTokenCreator, storage.admin, logging.logWriter (best-effort)"
 
 # ── 6. Secret Manager: SSH keypair JSON ─────────────────────────────────────
 section "Secret Manager — SSH keypair"
