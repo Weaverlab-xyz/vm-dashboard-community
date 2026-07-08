@@ -430,7 +430,12 @@ def generate_gcp_template(
         '  project_id   = "' + project_id + '"\n'
         '  zone         = "' + zone + '"\n'
         '  machine_type = "' + machine_type + '"\n'
-        '  source_image = "' + source_image + '"\n'
+        # The dashboard's source values are GCP image *families* (debian-12,
+        # rocky-linux-9, ubuntu-2204-lts-amd64, …), not exact image names, so use
+        # source_image_family — which resolves to the family's latest image across
+        # the standard public projects. `source_image` would look for an image
+        # literally named e.g. "rocky-linux-9" and 404 in every project.
+        '  source_image_family = "' + source_image + '"\n'
         '  image_name   = "' + safe + '-{{timestamp}}"\n'
         '  ssh_username = "' + ssh_username + '"\n\n'
         '  image_labels = {\n'
