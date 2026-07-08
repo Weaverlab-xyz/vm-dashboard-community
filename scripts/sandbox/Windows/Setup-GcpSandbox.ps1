@@ -46,10 +46,12 @@ Write-Section 'Enable APIs'
 # (the runner launches as a Cloud Run Job in the target project).
 # cloudbuild.googleapis.com powers image-export-to-VHD (the Daisy
 # gce_vm_image_export workflow runs as a Cloud Build job).
-foreach ($api in @('compute.googleapis.com','secretmanager.googleapis.com','iam.googleapis.com','run.googleapis.com','cloudbuild.googleapis.com')) {
+# container.googleapis.com is the Kubernetes Engine API — GKE provisioning
+# (google_container_cluster / node pools) fails SERVICE_DISABLED without it.
+foreach ($api in @('compute.googleapis.com','secretmanager.googleapis.com','iam.googleapis.com','run.googleapis.com','cloudbuild.googleapis.com','container.googleapis.com')) {
     gcloud services enable $api --project $ProjectId --quiet | Out-Null
 }
-Write-Ok 'Enabled compute, secretmanager, iam, run, cloudbuild'
+Write-Ok 'Enabled compute, secretmanager, iam, run, cloudbuild, container'
 
 # ── 2. VPC + subnets ─────────────────────────────────────────────────────────
 Write-Section 'VPC + subnets'
@@ -211,14 +213,16 @@ if ($LASTEXITCODE -ne 0) {
 
 # cloudbuild.builds.editor lets the dashboard SA SUBMIT the image-export Cloud
 # Build (the "403 The caller does not have permission" at export time otherwise).
+# container.admin lets the dashboard SA create/manage GKE clusters + node pools
+# (compute.admin covers the module's VPC/subnet/router/NAT but not the cluster).
 foreach ($role in @('roles/compute.admin','roles/secretmanager.secretAccessor',
                     'roles/iam.serviceAccountUser','roles/run.admin','roles/run.developer',
                     'roles/run.invoker','roles/cloudsql.admin','roles/servicenetworking.networksAdmin',
-                    'roles/cloudbuild.builds.editor')) {
+                    'roles/cloudbuild.builds.editor','roles/container.admin')) {
     gcloud projects add-iam-policy-binding $ProjectId `
         --member "serviceAccount:$SaEmail" --role $role --condition=None --quiet | Out-Null
 }
-Write-Ok 'Granted compute.admin, secretmanager.secretAccessor, iam.serviceAccountUser, run.{admin,developer,invoker}, cloudsql.admin, servicenetworking.networksAdmin, cloudbuild.builds.editor'
+Write-Ok 'Granted compute.admin, secretmanager.secretAccessor, iam.serviceAccountUser, run.{admin,developer,invoker}, cloudsql.admin, servicenetworking.networksAdmin, cloudbuild.builds.editor, container.admin'
 
 $SaKeyPath = Join-Path (Get-StateDir gcp) 'sa-key.json'
 if (-not (Test-Path $SaKeyPath) -or (Get-Item $SaKeyPath).Length -eq 0) {

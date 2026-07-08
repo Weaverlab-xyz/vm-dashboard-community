@@ -65,10 +65,12 @@ section "Enable APIs"
 # cloudbuild.googleapis.com powers image-export-to-VHD: registering a built
 # image as a promotable hub artefact runs the Daisy gce_vm_image_export
 # workflow as a Cloud Build job.
-for api in compute.googleapis.com secretmanager.googleapis.com iam.googleapis.com run.googleapis.com cloudbuild.googleapis.com; do
+# container.googleapis.com is the Kubernetes Engine API — GKE provisioning
+# (google_container_cluster / node pools) fails SERVICE_DISABLED without it.
+for api in compute.googleapis.com secretmanager.googleapis.com iam.googleapis.com run.googleapis.com cloudbuild.googleapis.com container.googleapis.com; do
   gcloud services enable "$api" --project "$PROJECT_ID" --quiet
 done
-ok "Enabled compute, secretmanager, iam, run, cloudbuild"
+ok "Enabled compute, secretmanager, iam, run, cloudbuild, container"
 
 # ── 2. VPC + subnets ─────────────────────────────────────────────────────────
 section "VPC + subnets"
@@ -254,10 +256,12 @@ fi
 # binding until the SA has propagated; bindings are idempotent, so this is safe.
 # cloudbuild.builds.editor lets the dashboard SA SUBMIT the image-export Cloud
 # Build (the "403 The caller does not have permission" at export time otherwise).
+# container.admin lets the dashboard SA create/manage GKE clusters + node pools
+# (compute.admin covers the module's VPC/subnet/router/NAT but not the cluster).
 for role in roles/compute.admin roles/secretmanager.secretAccessor \
              roles/iam.serviceAccountUser roles/run.admin roles/run.developer \
              roles/run.invoker roles/cloudsql.admin roles/servicenetworking.networksAdmin \
-             roles/cloudbuild.builds.editor; do
+             roles/cloudbuild.builds.editor roles/container.admin; do
   retry 8 5 gcloud projects add-iam-policy-binding "$PROJECT_ID" \
     --member "serviceAccount:$SA_EMAIL" --role "$role" \
     --condition=None --quiet >/dev/null
