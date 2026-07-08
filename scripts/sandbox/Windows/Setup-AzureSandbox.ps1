@@ -328,6 +328,23 @@ if ($existingBlobRole) {
     Write-Ok "Granted SP Storage Blob Data Contributor on $SaName"
 }
 
+# AKS provisioning self-grants the dashboard SP "Azure Kubernetes Service RBAC
+# Cluster Admin" (an azurerm_role_assignment in the aks cluster module) so the
+# in-cluster runner can authenticate over AAD RBAC. Creating a role assignment
+# needs Microsoft.Authorization/roleAssignments/write, which Contributor lacks —
+# grant User Access Administrator on the RG so that self-grant succeeds (else the
+# AKS apply 403s at the very end on the role assignment).
+$existingUaaRole = (az role assignment list --assignee $SpObjectId --scope $RgScope `
+    --role 'User Access Administrator' --query '[0].id' -o tsv 2>$null).Trim()
+if ($existingUaaRole) {
+    Write-Ok "SP already has User Access Administrator on the RG"
+} else {
+    az role assignment create --assignee-object-id $SpObjectId `
+        --assignee-principal-type ServicePrincipal `
+        --role 'User Access Administrator' --scope $RgScope | Out-Null
+    Write-Ok "Granted SP User Access Administrator on the RG (lets AKS self-grant its RBAC Cluster Admin)"
+}
+
 # Register the ACI provider if not already (no-op if registered). The
 # promote runner launches as an ACI container group.
 $AciState = (az provider show --namespace Microsoft.ContainerInstance `
