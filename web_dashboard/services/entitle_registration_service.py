@@ -66,7 +66,7 @@ _APP_SLUG = {
     "postgres":   "postgresql",
     "mysql":      "mysql",
     "sqlserver":  "mssql",
-    "kubernetes": "Kubernetes",
+    "kubernetes": "kubernetes",
 }
 
 _DEFAULT_DURATIONS = "3600,43200,86400"  # 1h, 12h, 24h (all valid Entitle values)
