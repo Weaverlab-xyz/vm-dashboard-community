@@ -74,7 +74,7 @@ def _resolve_ecs() -> dict:
     region = _cfg("aws_region") or "us-east-1"
     cluster = _cfg("ansible_ecs_cluster") or "bt-jumpoint"
     task_family = "k8s-runner"
-    image = _cfg("k8s_runner_image") or "dtzar/helm-kubectl:latest"
+    image = _cfg("k8s_runner_image_aws") or _cfg("k8s_runner_image") or "dtzar/helm-kubectl:latest"
     cpu = _cfg("ansible_ecs_cpu") or "256"
     memory = _cfg("ansible_ecs_memory") or "512"
     subnet_id = _cfg("ansible_ecs_subnet_id")
@@ -113,7 +113,7 @@ def _resolve_aci() -> dict:
     rg = _cfg("azure_resource_group")
     location = _cfg("azure_location") or "centralus"
     subnet_id = _cfg("ansible_aci_subnet_id")
-    image = _cfg("k8s_runner_image") or "dtzar/helm-kubectl:latest"
+    image = _cfg("k8s_runner_image_azure") or _cfg("k8s_runner_image") or "dtzar/helm-kubectl:latest"
     acr_server = _cfg("ansible_aci_acr_server")
     acr_username = _cfg("ansible_aci_acr_username")
     acr_password = _cfg("ansible_aci_acr_password")
@@ -143,7 +143,7 @@ def _resolve_gcp() -> dict:
     gcp_* and Ansible runner Cloud Run keys as fallbacks."""
     project_id = _cfg("gcp_project_id")
     region = _cfg("gcp_region") or _cfg("gcp_ansible_cloud_run_region")
-    image = _cfg("k8s_runner_image") or "dtzar/helm-kubectl:latest"
+    image = _cfg("k8s_runner_image_gcp") or _cfg("k8s_runner_image") or "dtzar/helm-kubectl:latest"
     vpc_connector = _cfg("gcp_ansible_vpc_connector")
 
     missing = []

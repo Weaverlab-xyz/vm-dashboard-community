@@ -598,7 +598,13 @@ class Settings(BaseSettings):
     k8s_runner_aws: str = ""                  # "" | "local" | "ecs"
     k8s_runner_azure: str = ""                # "" | "local" | "aci"
     k8s_runner_gcp: str = ""                  # "" | "local" | "gcp"
-    k8s_runner_image: str = "dtzar/helm-kubectl:latest"
+    k8s_runner_image: str = "dtzar/helm-kubectl:latest"  # shared default for all clouds
+    # Per-target-cluster-cloud image override; blank → k8s_runner_image. Lets Azure
+    # pull from an ACR mirror (avoiding Docker Hub) while AWS/GCP use the shared
+    # default — an AWS/GCP runner can't authenticate to an Azure ACR.
+    k8s_runner_image_aws: str = ""
+    k8s_runner_image_azure: str = ""
+    k8s_runner_image_gcp: str = ""
 
     epml_rpm_path: str = ""
     epml_deb_path: str = ""
