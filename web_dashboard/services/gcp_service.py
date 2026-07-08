@@ -1367,6 +1367,34 @@ async def run_cloud_run_k8s_task(
 
 # ── Export custom image to VHD on GCS (portable artefact) ─────────────────────
 
+def _fetch_cloud_build_log(project_id: str, build_id: str, creds, tail: int = 30) -> str:
+    """Return the last `tail` non-empty lines of a Cloud Build's step output from
+    Cloud Logging. Used to surface the *real* export failure (e.g. the Daisy
+    `ZONE_RESOURCE_POOL_EXHAUSTED`) instead of the SDK's generic "Build failed;
+    check build logs for details"."""
+    if not build_id:
+        return ""
+    try:
+        from google.auth.transport.requests import AuthorizedSession
+    except ImportError:
+        return ""
+    session = AuthorizedSession(creds or _gcp_creds())
+    body = {
+        "resourceNames": [f"projects/{project_id}"],
+        "filter": f'resource.type="build" resource.labels.build_id="{build_id}"',
+        "orderBy": "timestamp asc",
+        "pageSize": 1000,
+    }
+    resp = session.post("https://logging.googleapis.com/v2/entries:list", json=body, timeout=30)
+    resp.raise_for_status()
+    lines = []
+    for entry in resp.json().get("entries", []):
+        text = entry.get("textPayload") or entry.get("jsonPayload", {}).get("message", "")
+        if text and text.strip():
+            lines.append(text.rstrip())
+    return "\n".join(lines[-tail:])
+
+
 def _export_custom_image_to_vhd_sync(
     project_id: str,
     image_name: str,
@@ -1423,11 +1451,30 @@ def _export_custom_image_to_vhd_sync(
     if progress_cb and build_id:
         progress_cb(f"Cloud Build {build_id} started — polling")
 
-    # op.result() blocks until the build finishes; SDK raises on non-SUCCESS.
-    result = op.result(timeout=timeout)
+    # op.result() blocks until the build finishes and RAISES on failure with a
+    # useless generic "Build failed; check build logs for details". Catch it and
+    # pull the build's own log tail (the Daisy export error — e.g. a
+    # ZONE_RESOURCE_POOL_EXHAUSTED or a permission denial) so the operator sees
+    # the real reason in the job detail instead of having to `gcloud builds log`.
+    try:
+        result = op.result(timeout=timeout)
+    except Exception as build_err:
+        tail = ""
+        try:
+            tail = _fetch_cloud_build_log(project_id, build_id, creds)
+        except Exception as log_err:
+            logger.warning("Cloud Build export: could not retrieve build log: %s", log_err)
+        detail = tail.strip() or str(build_err)
+        raise GCPError(f"Cloud Build {build_id or '(unknown)'} export failed:\n{detail}") from build_err
+
     status = cloudbuild_v1.Build.Status(result.status).name if result.status else "UNKNOWN"
     if status != "SUCCESS":
-        raise GCPError(f"Cloud Build {build_id} ended in status {status}: {result.status_detail}")
+        tail = ""
+        try:
+            tail = _fetch_cloud_build_log(project_id, build_id, creds)
+        except Exception:
+            pass
+        raise GCPError(f"Cloud Build {build_id} ended in status {status}:\n{tail.strip() or result.status_detail}")
 
     if progress_cb:
         progress_cb(f"Export complete: {dest_uri}")

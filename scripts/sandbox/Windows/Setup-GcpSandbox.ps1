@@ -288,7 +288,8 @@ $ProjectNumber = "$(gcloud projects describe $ProjectId --format='value(projectN
 foreach ($cbSa in @("${ProjectNumber}@cloudbuild.gserviceaccount.com",
                     "${ProjectNumber}-compute@developer.gserviceaccount.com")) {
     foreach ($role in @('roles/compute.admin','roles/iam.serviceAccountUser',
-                        'roles/iam.serviceAccountTokenCreator','roles/storage.admin')) {
+                        'roles/iam.serviceAccountTokenCreator','roles/storage.admin',
+                        'roles/logging.logWriter')) {
         gcloud projects add-iam-policy-binding $ProjectId `
             --member "serviceAccount:$cbSa" --role $role --condition=None --quiet *> $null
         if ($LASTEXITCODE -ne 0) {
@@ -296,7 +297,7 @@ foreach ($cbSa in @("${ProjectNumber}@cloudbuild.gserviceaccount.com",
         }
     }
 }
-Write-Ok 'Granted Cloud Build export SA(s) compute.admin, iam.serviceAccountUser, iam.serviceAccountTokenCreator, storage.admin (best-effort)'
+Write-Ok 'Granted Cloud Build export SA(s) compute.admin, iam.serviceAccountUser, iam.serviceAccountTokenCreator, storage.admin, logging.logWriter (best-effort)'
 
 # ── 6. Secret Manager: SSH keypair JSON ─────────────────────────────────────
 Write-Section 'Secret Manager — SSH keypair'
