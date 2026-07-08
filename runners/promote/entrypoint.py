@@ -90,9 +90,12 @@ def install_linux_agent(disk_path: str, source_format: str) -> None:
     """
     fmt = _LIBGUESTFS_FORMAT.get((source_format or "").lower())
     log(f"inject waagent into {disk_path} (format={fmt or 'auto'})")
-    cmd = ["virt-customize", "-a", disk_path]
+    # virt-customize requires --format to appear BEFORE -a (it applies to the
+    # disk added by the -a that follows it).
+    cmd = ["virt-customize"]
     if fmt:
         cmd += ["--format", fmt]
+    cmd += ["-a", disk_path]
     cmd += [
         # Lands at /opt/walinuxagent-src inside the guest.
         "--copy-in", f"{WALINUXAGENT_SRC}:/opt",
