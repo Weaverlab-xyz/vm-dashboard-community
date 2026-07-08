@@ -44,10 +44,12 @@ $NetTagVm  = "$Name-vm"         # the dashboard auto-attaches this to user VMs
 Write-Section 'Enable APIs'
 # run.googleapis.com is needed for the dashboard's automated image promote
 # (the runner launches as a Cloud Run Job in the target project).
-foreach ($api in @('compute.googleapis.com','secretmanager.googleapis.com','iam.googleapis.com','run.googleapis.com')) {
+# cloudbuild.googleapis.com powers image-export-to-VHD (the Daisy
+# gce_vm_image_export workflow runs as a Cloud Build job).
+foreach ($api in @('compute.googleapis.com','secretmanager.googleapis.com','iam.googleapis.com','run.googleapis.com','cloudbuild.googleapis.com')) {
     gcloud services enable $api --project $ProjectId --quiet | Out-Null
 }
-Write-Ok 'Enabled compute, secretmanager, iam, run'
+Write-Ok 'Enabled compute, secretmanager, iam, run, cloudbuild'
 
 # ── 2. VPC + subnets ─────────────────────────────────────────────────────────
 Write-Section 'VPC + subnets'
@@ -207,13 +209,16 @@ if ($LASTEXITCODE -ne 0) {
     Write-Ok "Reusing SA $SaEmail"
 }
 
+# cloudbuild.builds.editor lets the dashboard SA SUBMIT the image-export Cloud
+# Build (the "403 The caller does not have permission" at export time otherwise).
 foreach ($role in @('roles/compute.admin','roles/secretmanager.secretAccessor',
                     'roles/iam.serviceAccountUser','roles/run.admin','roles/run.developer',
-                    'roles/run.invoker','roles/cloudsql.admin','roles/servicenetworking.networksAdmin')) {
+                    'roles/run.invoker','roles/cloudsql.admin','roles/servicenetworking.networksAdmin',
+                    'roles/cloudbuild.builds.editor')) {
     gcloud projects add-iam-policy-binding $ProjectId `
         --member "serviceAccount:$SaEmail" --role $role --condition=None --quiet | Out-Null
 }
-Write-Ok 'Granted compute.admin, secretmanager.secretAccessor, iam.serviceAccountUser, run.{admin,developer,invoker}, cloudsql.admin, servicenetworking.networksAdmin'
+Write-Ok 'Granted compute.admin, secretmanager.secretAccessor, iam.serviceAccountUser, run.{admin,developer,invoker}, cloudsql.admin, servicenetworking.networksAdmin, cloudbuild.builds.editor'
 
 $SaKeyPath = Join-Path (Get-StateDir gcp) 'sa-key.json'
 if (-not (Test-Path $SaKeyPath) -or (Get-Item $SaKeyPath).Length -eq 0) {
@@ -268,6 +273,30 @@ Set-StateValue gcp storage_bucket $StorageBucket
 gcloud storage buckets add-iam-policy-binding "gs://$StorageBucket" `
     --member "serviceAccount:$SaEmail" --role 'roles/storage.objectAdmin' --quiet | Out-Null
 Write-Ok "Granted $SaEmail storage.objectAdmin on gs://$StorageBucket"
+
+# ── 5c. Cloud Build image-export IAM ─────────────────────────────────────────
+# The dashboard SUBMITS the image-export Cloud Build as itself (granted
+# cloudbuild.builds.editor above), but the build RUNS as Cloud Build's default
+# build service account — which spins up a temp export VM and writes the VHD, so
+# THAT SA needs compute + act-as + storage roles (else export fails minutes in
+# with a permission error, not at submit time). Cloud Build's default build SA
+# is the legacy <num>@cloudbuild SA on older projects and the Compute Engine
+# default <num>-compute@developer SA on newer ones — grant both; best-effort
+# since a project may not have the legacy SA.
+Write-Section 'Cloud Build image-export IAM'
+$ProjectNumber = "$(gcloud projects describe $ProjectId --format='value(projectNumber)')".Trim()
+foreach ($cbSa in @("${ProjectNumber}@cloudbuild.gserviceaccount.com",
+                    "${ProjectNumber}-compute@developer.gserviceaccount.com")) {
+    foreach ($role in @('roles/compute.admin','roles/iam.serviceAccountUser',
+                        'roles/iam.serviceAccountTokenCreator','roles/storage.admin')) {
+        gcloud projects add-iam-policy-binding $ProjectId `
+            --member "serviceAccount:$cbSa" --role $role --condition=None --quiet *> $null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warn "Could not grant $role to $cbSa (SA may not exist on this project — safe to ignore if export works)"
+        }
+    }
+}
+Write-Ok 'Granted Cloud Build export SA(s) compute.admin, iam.serviceAccountUser, iam.serviceAccountTokenCreator, storage.admin (best-effort)'
 
 # ── 6. Secret Manager: SSH keypair JSON ─────────────────────────────────────
 Write-Section 'Secret Manager — SSH keypair'
