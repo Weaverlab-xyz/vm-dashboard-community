@@ -1183,21 +1183,27 @@ async def setup_secret_delivery(cluster_id: str, kind: str) -> None:
 
 
 async def _deploy_rancher_server(db: Session, row, kubeconfig: str) -> None:
-    """Stand up the central Rancher server on THIS cluster: default StorageClass →
-    cert-manager → internal ingress-nginx → the rancher chart (all via the helm/
-    kubectl runner), then bootstrap it (pin server-url, mint an API token). Records
-    the cluster as the central Rancher in config + on the row."""
+    """Stand up the central Rancher server on THIS cluster (ANY cloud): a default
+    StorageClass on AWS (AKS/GKE already ship one) → cert-manager → a PUBLIC
+    ingress-nginx LB (restricted by rancher_allowed_source_cidrs) → the rancher
+    chart, all via the helm/kubectl runner; then bootstrap it (pin server-url, mint
+    an API token). A public, source-restricted server-url lets downstream clusters
+    on ANY cloud reach Rancher over their egress — no cross-cloud peering."""
     from . import config_service, rancher_service
     ns = _cfg("rancher_namespace", "cattle-system")
     server_url = _cfg("rancher_server_url")
     if not server_url:
-        raise K8sError("rancher_server_url is not configured (the stable internal hostname Rancher pins as server-url)")
+        raise K8sError("rancher_server_url is not configured (the public hostname Rancher pins as "
+                       "server-url; point its DNS at the ingress LB)")
     bootstrap_pw = _cfg("rancher_bootstrap_password")
     if not bootstrap_pw:
         raise K8sError("rancher_bootstrap_password is not configured")
 
-    # 1. Default StorageClass (EKS ships none; the EBS CSI addon backs it).
-    await _apply_manifest_via_runner(kubeconfig, _default_storageclass_manifest(), target_cloud=row.cloud)
+    # 1. Default StorageClass — only AWS needs one (EKS ships none; the EBS CSI
+    #    addon backs gp3). AKS/GKE already provide a default SC, so skip there
+    #    (applying the AWS ebs.csi SC would wrongly become their cluster default).
+    if row.cloud == "aws":
+        await _apply_manifest_via_runner(kubeconfig, _default_storageclass_manifest(), target_cloud=row.cloud)
     # 2. cert-manager (Rancher TLS dependency).
     cm_args = ["upgrade", "--install", "cert-manager", "cert-manager",
                "--repo", "https://charts.jetstack.io", "-n", "cert-manager",
@@ -1205,12 +1211,21 @@ async def _deploy_rancher_server(db: Session, row, kubeconfig: str) -> None:
     if _cfg("cert_manager_chart_version"):
         cm_args += ["--version", _cfg("cert_manager_chart_version")]
     await _helm_via_runner(kubeconfig, cm_args, add_eso_repo=False, target_cloud=row.cloud)
-    # 3. ingress-nginx as an INTERNAL LB (no public ingress; reachable by imported
-    #    cluster-agents over the peering + by the operator via the PRA tcp-tunnel).
+    # 3. ingress-nginx as a PUBLIC LB, locked to rancher_allowed_source_cidrs.
+    #    loadBalancerSourceRanges is a standard k8s Service field honored on
+    #    AWS/Azure/GCP — no per-cloud annotation needed. Empty allowlist = open
+    #    (still TLS + admin-auth gated). A public server-url is what lets
+    #    cross-cloud downstream agents reach Rancher over their egress.
     ing_args = ["upgrade", "--install", "ingress-nginx", "ingress-nginx",
                 "--repo", "https://kubernetes.github.io/ingress-nginx",
-                "-n", "ingress-nginx", "--create-namespace", "--wait",
-                "--set", "controller.service.annotations.service\\.beta\\.kubernetes\\.io/aws-load-balancer-scheme=internal"]
+                "-n", "ingress-nginx", "--create-namespace", "--wait"]
+    cidrs = [c.strip() for c in _cfg("rancher_allowed_source_cidrs").split(",") if c.strip()]
+    if cidrs:
+        ing_args += ["--set", "controller.service.loadBalancerSourceRanges={" + ",".join(cidrs) + "}"]
+    else:
+        logger.warning("rancher_allowed_source_cidrs is empty — the Rancher LB will accept all "
+                       "source IPs (still TLS + admin-auth gated); set it to the downstream "
+                       "clusters' egress IPs + your IP to restrict.")
     if _cfg("ingress_nginx_chart_version"):
         ing_args += ["--version", _cfg("ingress_nginx_chart_version")]
     await _helm_via_runner(kubeconfig, ing_args, add_eso_repo=False, target_cloud=row.cloud)
@@ -2006,7 +2021,7 @@ async def open_console(db: Session, cluster_id: str, username: str = "system", *
             out["rancher_ui"] = {
                 "web_jump_id": wj.get("web_jump_id"),
                 "console_deeplink": row.mgmt_endpoint,
-                "note": "Open the 'rancher-ui' Web Jump from the BeyondTrust PRA representative console — no public ingress.",
+                "note": "Reach Rancher at its (source-restricted) server-url, or open the 'rancher-ui' Web Jump from the BeyondTrust PRA representative console for brokered/recorded access.",
             }
         except Exception as exc:
             logger.warning("Rancher UI web-jump provisioning failed for %s: %s", cluster_id, exc)

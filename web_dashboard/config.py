@@ -80,6 +80,7 @@ class Settings(BaseSettings):
     rancher_cert_source: str = "rancher"      # cert-manager mode: rancher (self-signed CA) | letsEncrypt | secret
     cert_manager_chart_version: str = ""      # pin cert-manager ("" = latest)
     ingress_nginx_chart_version: str = ""     # pin ingress-nginx ("" = latest)
+    rancher_allowed_source_cidrs: str = ""    # CSV CIDRs allowed to reach the PUBLIC Rancher LB (Service loadBalancerSourceRanges); "" = open (TLS + admin-auth only). Set to the downstream clusters' egress IPs + the operator's IP to restrict.
     # Rancher UI PRA web-broker: a tunnel_type=tcp jump to the central Rancher's
     # HTTPS so the operator reaches the UI via the PRA rep console (no public
     # ingress). Blank jump group/jumpoint fall back to the shared bt_* defaults.

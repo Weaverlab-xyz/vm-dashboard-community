@@ -655,6 +655,7 @@ class K8sManagementFeatureConfig(BaseModel):
     rancher_ui_jump_group: str = ""
     rancher_ui_jumpoint_name: str = ""
     rancher_ui_local_port: int = 443
+    rancher_allowed_source_cidrs: str = ""    # CSV CIDRs for the public Rancher LB (loadBalancerSourceRanges); "" = open (TLS + auth only)
 
 
 class VirtualDesktopsFeatureConfig(BaseModel):
