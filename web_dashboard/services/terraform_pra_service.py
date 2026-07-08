@@ -694,6 +694,21 @@ async def remove_db_tunnel(tf_state_json: str) -> None:
 # are the sra_remote_rdp resource (no port/protocol/database; optional
 # rdp_username) and the association type "remote_rdp".
 
+def _qualify_local_windows_user(username: str) -> str:
+    """Qualify a Windows LOCAL account for NLA/CredSSP over RDP.
+
+    A VDI seat is a standalone workgroup VM whose only admin is a local account
+    (e.g. ``azureuser``). A bare username fails the NLA handshake — the injected
+    credential must name the local machine, so prefix ``.\\`` ("this computer").
+    Left unchanged when already qualified (``domain\\user``) or a UPN
+    (``user@domain`` — a future Entra/AD-joined seat), and when blank.
+    """
+    u = (username or "").strip()
+    if not u or "\\" in u or "@" in u:
+        return u
+    return ".\\" + u
+
+
 def _generate_rdp_hcl(
     name: str,
     hostname: str,
@@ -719,9 +734,13 @@ def _generate_rdp_hcl(
     template, which the state-driven destroy path relies on.
     """
     safe_name = re.sub(r"[^a-z0-9_]", "_", name.lower())
+    # Local-account seats need the username domain-qualified (`.\user`) or NLA
+    # rejects the RDP handshake — the injected credential and the jump's default
+    # username both use the qualified form.
+    q_user = _qualify_local_windows_user(rdp_username)
     extra = ""
-    if rdp_username:
-        extra += f"  rdp_username  = {json.dumps(rdp_username)}\n"
+    if q_user:
+        extra += f"  rdp_username  = {json.dumps(q_user)}\n"
 
     var_block = ""
     vault_block = ""
@@ -730,23 +749,24 @@ def _generate_rdp_hcl(
         group_line = (f"  account_group_id = {int(vault_account_group_id)}\n"
                       if vault_account_group_id else "")
         # Schema (provider v1.3.0): jump_item_association is a SINGLE nested
-        # attribute; jump_items is a set of {id, type}; the criteria arrays must
-        # be present (empty) or the PRA API 4xxes. The association `type` is the
-        # resource name minus the sra_ prefix (→ "remote_rdp").
+        # attribute. `criteria` and every sub-field are optional+COMPUTED — force
+        # them to empty [] and the provider recomputes a different value →
+        # "Provider produced inconsistent result after apply", which left the seat
+        # with a credential-less jump and NLA "Unknown connection error (10001)".
+        # So set ONLY the matcher we need: the jump item's unique name (== this
+        # VM's name) scopes the account to exactly this RDP jump; leave the other
+        # criteria fields computed. `jump_items` pins it by id too. The association
+        # `type` is the resource name minus the sra_ prefix (→ "remote_rdp").
         vault_block = f"""
 resource "sra_vault_username_password_account" "rdp_admin" {{
   name        = {json.dumps(vault_account_name)}
-  username    = {json.dumps(rdp_username)}
+  username    = {json.dumps(q_user)}
   password    = var.rdp_password
   description = "Auto-provisioned by Infrastructure Management Dashboard (VDI desktop)"
 {group_line}  jump_item_association = {{
     filter_type = "criteria"
     criteria = {{
-      shared_jump_groups = []
-      host               = []
-      name               = []
-      tag                = []
-      comment            = []
+      name = [{json.dumps(name)}]
     }}
     jump_items = [{{
       id   = tonumber(sra_remote_rdp.{safe_name}.id)
