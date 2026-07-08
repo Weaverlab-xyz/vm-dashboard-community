@@ -528,7 +528,7 @@
 
         <!-- Source Image -->
         <div>
-          <label class="block text-sm font-medium text-gray-700 mb-1">Source Image <span class="text-red-500">*</span></label>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Source Image Family <span class="text-red-500">*</span></label>
           <div class="flex gap-2 mb-2 flex-wrap">
             <template x-for="p in gcpImagePresets" :key="p.id">
               <button @click="gcpPackerForm.source_image = p.image"
@@ -540,7 +540,7 @@
           <input type="text" x-model="gcpPackerForm.source_image"
                  placeholder="debian-12"
                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:ring-blue-500 focus:border-blue-500">
-          <p class="text-xs text-gray-400 mt-1">Image name or family from any GCP public image project.</p>
+          <p class="text-xs text-gray-400 mt-1">GCP image <span class="font-mono">family</span> (e.g. <span class="font-mono">debian-12</span>, <span class="font-mono">rocky-linux-9</span>, <span class="font-mono">ubuntu-2204-lts-amd64</span>) — resolves to the family's latest image across the standard public projects.</p>
         </div>
 
         <!-- Machine Type + SSH Username -->
