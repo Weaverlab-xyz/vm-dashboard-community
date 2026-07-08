@@ -532,6 +532,11 @@ class AnsibleFeatureConfig(BaseModel):
     k8s_runner_image_aws: str = ""    # per-cloud override; blank → k8s_runner_image
     k8s_runner_image_azure: str = ""  # e.g. an ACR mirror, to avoid Docker Hub pulls
     k8s_runner_image_gcp: str = ""
+    # Image-promote runner — always runs as a one-shot task in the target cloud
+    # (ECS / ACI / Cloud Run); no per-cloud selector. Blank → the public Docker
+    # Hub image; set a full registry path to use a private mirror (e.g. an ACR
+    # copy that dodges Docker Hub pull limits). Read by promote_runner_service.
+    promote_runner_image: str = ""
 
 class EntitleFeatureConfig(BaseModel):
     enabled: bool = False
