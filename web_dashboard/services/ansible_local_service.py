@@ -172,9 +172,13 @@ def _fetch_azure_ssh_key_sync(cred, vault_url: str, secret_name: str) -> str:
     return _extract_private_key(_get_ssh_key_from_vault_sync(cred, vault_url, secret_name))
 
 
-async def fetch_ssh_key(cloud: str) -> str | None:
+async def fetch_ssh_key(cloud: str, secret_name: str = "") -> str | None:
     """
     Fetch the SSH private key PEM for the given cloud.
+
+    ``secret_name`` — when given, fetch that specific secret (used to retrieve the
+    keypair a cloud VM was actually built with, resolved from its deploy metadata).
+    When empty, fall back to the per-cloud global Ansible key config:
 
     "aws"   → AWS Secrets Manager (ansible_ssh_key_sm_name config key)
     "gcp"   → GCP Secret Manager  (gcp_ssh_key_secret_name config key)
@@ -185,17 +189,17 @@ async def fetch_ssh_key(cloud: str) -> str | None:
     `{public_key, private_key}` envelope and return CRLF-normalized PEM.
     """
     if cloud == "aws":
-        secret_name = _cfg("ansible_ssh_key_sm_name")
+        secret_name = secret_name or _cfg("ansible_ssh_key_sm_name")
         if not secret_name:
             return None
         return await asyncio.to_thread(_fetch_aws_ssh_key_sync, secret_name)
     if cloud == "gcp":
-        secret_name = _cfg("gcp_ssh_key_secret_name")
+        secret_name = secret_name or _cfg("gcp_ssh_key_secret_name")
         if not secret_name:
             return None
         return await asyncio.to_thread(_fetch_gcp_ssh_key_sync, secret_name)
     if cloud == "azure":
-        secret_name = _cfg("ansible_aci_ssh_key_secret_name")
+        secret_name = secret_name or _cfg("ansible_aci_ssh_key_secret_name")
         vault_url = _cfg("azure_key_vault_url")
         if not secret_name or not vault_url:
             return None

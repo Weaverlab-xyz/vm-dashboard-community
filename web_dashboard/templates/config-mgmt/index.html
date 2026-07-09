@@ -241,7 +241,7 @@
                 <label class="block text-xs font-medium text-gray-600 mb-1">SSH private key <span class="text-gray-400">(local + cloud)</span></label>
                 <select x-model="secretSshKeySource"
                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
-                  <option value="">— use configured key —</option>
+                  <option value="" x-text="targetCloud ? `— auto: the VM's own deploy key —` : '— use configured key —'"></option>
                   <template x-for="o in secretOptions" :key="'k-'+o.key">
                     <option :value="o.key" x-text="o.description"></option>
                   </template>
@@ -251,6 +251,10 @@
             <p class="text-[11px] text-gray-400">
               Credentials are handed to Ansible as the connection/become secret — Ansible <code>no_log</code>s
               these, so they can't be printed. Become and SSH-key secrets also work on the cloud runner.
+              <span x-show="targetCloud" x-cloak class="block mt-1">
+                For a cloud VM, <strong>auto</strong> retrieves the keypair the VM was actually deployed with
+                (from its deploy record) — pick a secret above only to override it.
+              </span>
             </p>
 
             <!-- Managed account (BeyondTrust Password Safe) — live list, JIT checkout.
@@ -547,6 +551,22 @@ function configMgmt() {
       return '';
     },
 
+    // The selected cloud VM's deploy name — passed to the managed-account lookup
+    // as a system-name hint. Cloud-native Password Safe onboarding (e.g. the AWS
+    // Systems Manager plugin) registers the managed system by instance name with a
+    // placeholder IP, so an IP-only lookup misses it; the name finds it. '' for
+    // on-prem free-text hosts (there the host string is itself the name).
+    get effectiveHostName() {
+      const t = this.form.target;
+      let list = null, ip = '';
+      if (t.startsWith('aws:'))        { list = this.cloudTargets.aws;   ip = t.slice(4); }
+      else if (t.startsWith('azure:')) { list = this.cloudTargets.azure; ip = t.slice(6); }
+      else if (t.startsWith('gcp:'))   { list = this.cloudTargets.gcp;   ip = t.slice(4); }
+      if (!list) return '';
+      const m = list.find(x => x.ip === ip);
+      return m ? (m.name || '') : '';
+    },
+
     // When the user picks a different cloud target, pre-fill ansible_user
     // with the matching per-cloud suggestion (only if the field is empty or
     // still holds the previous cloud's suggestion — never overwrite a value
@@ -573,7 +593,10 @@ function configMgmt() {
       if (!this.canUseSecrets || !host) { this.managedEnabled = false; return; }
       this.managedLoading = true;
       try {
-        const r = await API.get('/api/config-mgmt/managed-accounts?host=' + encodeURIComponent(host)) || {};
+        let url = '/api/config-mgmt/managed-accounts?host=' + encodeURIComponent(host);
+        const name = this.effectiveHostName;
+        if (name) url += '&name=' + encodeURIComponent(name);
+        const r = await API.get(url) || {};
         this.managedEnabled = !!r.enabled;
         this.managedEphemeralEnabled = !!r.ephemeral_enabled;
         this.managedSystems = r.systems || [];
