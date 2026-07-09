@@ -21,6 +21,7 @@ def _job_to_response(job) -> JobResponse:
         job_type=job.job_type,
         workgroup=job.workgroup,
         vm_path=job.vm_path,
+        description=job.metadata_dict.get("description"),
         status=job.status,
         progress_pct=job.progress_pct,
         progress_message=job.progress_message,

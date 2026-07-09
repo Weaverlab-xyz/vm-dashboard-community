@@ -876,9 +876,9 @@ async def run_playbook(
     job = job_service.create_job(
         db,
         job_type="ansible_local",
-        description=description,
+        created_by=current_user.username,
         workgroup="ansible",
-        owner_id=current_user.id,
+        metadata={"description": description},
     )
     if wants_secret:
         # Audit the use — kinds + var names only, never the source refs or values.
