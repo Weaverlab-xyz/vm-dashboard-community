@@ -258,15 +258,18 @@ fi
 # Build (the "403 The caller does not have permission" at export time otherwise).
 # container.admin lets the dashboard SA create/manage GKE clusters + node pools
 # (compute.admin covers the module's VPC/subnet/router/NAT but not the cluster).
+# logging.viewer lets the dashboard READ Cloud Logging so it can surface the
+# real Cloud Build export failure (the Daisy error, e.g. a zone-capacity or
+# quota message) on the job page instead of a generic "Build failed".
 for role in roles/compute.admin roles/secretmanager.secretAccessor \
              roles/iam.serviceAccountUser roles/run.admin roles/run.developer \
              roles/run.invoker roles/cloudsql.admin roles/servicenetworking.networksAdmin \
-             roles/cloudbuild.builds.editor roles/container.admin; do
+             roles/cloudbuild.builds.editor roles/container.admin roles/logging.viewer; do
   retry 8 5 gcloud projects add-iam-policy-binding "$PROJECT_ID" \
     --member "serviceAccount:$SA_EMAIL" --role "$role" \
     --condition=None --quiet >/dev/null
 done
-ok "Granted compute.admin, secretmanager.secretAccessor, iam.serviceAccountUser, run.{admin,developer,invoker}, cloudsql.admin, servicenetworking.networksAdmin, cloudbuild.builds.editor"
+ok "Granted compute.admin, secretmanager.secretAccessor, iam.serviceAccountUser, run.{admin,developer,invoker}, cloudsql.admin, servicenetworking.networksAdmin, cloudbuild.builds.editor, container.admin, logging.viewer"
 
 SA_KEY_PATH="$(state_dir gcp)/sa-key.json"
 if [[ ! -s "$SA_KEY_PATH" ]]; then
