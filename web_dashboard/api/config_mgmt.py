@@ -499,8 +499,16 @@ async def _run_job(
                     _login = ma.ssh_login_user(managed_account.get("account_name", ""))
                     if _login:
                         managed_plain_vars["ansible_user"] = _login
-                    if managed_account.get("uses_ssh_key"):
-                        secret_ssh_pem = cred                     # connection key (SSH_KEY_B64)
+                    # The credential is an SSH private key when the account is
+                    # DSS-managed (uses_ssh_key) OR the AWS Systems Manager Custom
+                    # Plugin — whose account "password" IS the minted private key,
+                    # WITHOUT the DSS flag set. Detect by content so the key is used
+                    # as the connection key (SSH_KEY_B64), not a password: password
+                    # routing would send it down the ECS ephemeral-store path and
+                    # Ubuntu rejects password SSH anyway. Normalize so OpenSSH
+                    # accepts it (trailing newline).
+                    if managed_account.get("uses_ssh_key") or "PRIVATE KEY" in (cred or ""):
+                        secret_ssh_pem = ansible_local_service._normalize_key(cred)  # connection key
                     else:
                         managed_cred_vars["ansible_ssh_pass"] = cred  # SSH password (sshpass)
                         managed_cred_vars["ansible_password"] = cred  # WinRM targets
