@@ -9,6 +9,7 @@ class JobResponse(BaseModel):
     job_type: str
     workgroup: Optional[str]
     vm_path: Optional[str]
+    description: Optional[str] = None  # human label stored in metadata (e.g. Ansible runs)
     status: str
     progress_pct: int
     progress_message: Optional[str]
