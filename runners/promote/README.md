@@ -253,6 +253,14 @@ dashboard sets this automatically for Linux images on Azure promotions
 injection fails the runner exits non-zero — a Linux Azure image without waagent
 is broken, so we don't ship one silently.
 
+Before injecting, the runner inspects the source's `/etc/os-release` and
+**rejects distros that can't provision on Azure at all** (exit 5) — currently
+Amazon Linux (`ID=amzn`), which has no waagent handler and whose cloud-init is
+pinned to the EC2 datasource. This fails the promote immediately with an
+actionable message instead of producing an image that boots but hangs at
+`Creating` until the deploy times out. Build Azure-bound images from an
+Azure-endorsed distro (Ubuntu, RHEL, Rocky, Alma, Debian, SUSE).
+
 **GCP target quirk:** GCP's `compute.images.insert` requires the source object to be a `.tar.gz` containing exactly one entry named `disk.raw`. When `--target gcs` is paired with `--target-format raw` (the dashboard's only supported GCP path today), the runner automatically tar+gzips the converted raw file under that name before upload. The dashboard always passes `--dest-gcs-object` ending in `.tar.gz` for this reason.
 
 Credential env vars per target:
@@ -272,6 +280,7 @@ container never sees source-side credentials.
 | 2    | Invalid args (missing target-specific flags)           |
 | 3    | qemu-img conversion failed                             |
 | 4    | Any other failure (network, upload, etc.)              |
+| 5    | Source distro can't provision on Azure (e.g. Amazon Linux) — promote rejected before injection |
 
 The orchestrator reads stdout/stderr from CloudWatch (AWS) / Log Analytics
 (Azure) / Cloud Logging (GCP) and surfaces the tail to the operator on the
