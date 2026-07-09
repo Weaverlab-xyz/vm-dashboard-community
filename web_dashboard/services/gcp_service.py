@@ -1440,6 +1440,15 @@ def _export_custom_image_to_vhd_sync(
         ],
         timeout={"seconds": timeout},
         tags=["vm-cli-dashboard", "image-export"],
+        # Force step output to Cloud Logging (not GCS-only, which is the default
+        # here and leaves nothing queryable). Without this the build's real error
+        # — e.g. the Daisy ZONE_RESOURCE_POOL_EXHAUSTED — never reaches Cloud
+        # Logging, so _fetch_cloud_build_log finds only audit entries and the job
+        # falls back to the generic "Build failed". Requires the build's service
+        # account to have roles/logging.logWriter (granted in setup-gcp.sh).
+        options=cloudbuild_v1.BuildOptions(
+            logging=cloudbuild_v1.BuildOptions.LoggingMode.CLOUD_LOGGING_ONLY,
+        ),
     )
 
     if progress_cb:
