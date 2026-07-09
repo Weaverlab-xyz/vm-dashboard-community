@@ -134,10 +134,15 @@ def generate_playbook_yaml(asset_name: str) -> str:
 # ── SSH key retrieval ─────────────────────────────────────────────────────────
 
 def _normalize_key(value: str) -> str:
-    """Strip CR characters and normalize line endings. Some secret stores
-    (and copy-paste from PRA / Key Vault portals) deliver PEM blobs with
-    CRLF, which `cryptography` rejects via its line-based regex matchers."""
-    return (value or "").replace("\r\n", "\n").replace("\r", "\n")
+    """Strip CR characters, normalize line endings, and guarantee exactly one
+    trailing newline. Some secret stores (and copy-paste from PRA / Key Vault
+    portals) deliver PEM blobs with CRLF, which `cryptography` rejects via its
+    line-based regex matchers. And OpenSSH refuses a private-key file that lacks a
+    final newline with ``Load key "…": error in libcrypto`` → the connection then
+    fails ``Permission denied (publickey)``; many stores hold the PEM with no
+    trailing newline, so add one."""
+    v = (value or "").replace("\r\n", "\n").replace("\r", "\n").rstrip()
+    return v + "\n" if v else ""
 
 
 def _extract_private_key(raw: str) -> str:
