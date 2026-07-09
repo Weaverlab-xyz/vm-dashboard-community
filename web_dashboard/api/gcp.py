@@ -881,8 +881,6 @@ async def export_custom_image(
     """Manually export a custom GCE image to VHD on the hub backend and
     register it in the image registry. Useful when the auto-export during
     build was skipped or failed."""
-    from .packer import export_and_register_gcp
-
     project_id = _gcp_project()
     if not project_id:
         raise HTTPException(status_code=400, detail="GCP project ID not configured.")
@@ -891,38 +889,16 @@ async def export_custom_image(
         db,
         job_type="gcp_export_image",
         created_by=current_user.username,
-        metadata={"image_name": image_name, "registry_name": req.image_name, "project_id": project_id},
+        metadata={"image_name": image_name, "registry_name": req.image_name,
+                  "project_id": project_id, "created_by": current_user.username},
     )
     job_service.log_audit(
         db, current_user.username, "gcp_export_image",
         details={"image_name": image_name, "registry_name": req.image_name},
     )
 
-    # Capture scalars before defining the background closure. FastAPI closes
-    # the request's DB session when this handler returns, so `current_user`
-    # would be a detached ORM instance by the time _run() executes and any
-    # attribute access (e.g. .username) would raise DetachedInstanceError.
-    job_id = job.id
-    registry_name = req.image_name
-    username = current_user.username
-
-    async def _run():
-        d = _get_db_session()
-        try:
-            job_service.set_running(d, job_id)
-            result = await export_and_register_gcp(
-                d, job_id, registry_name, image_name, project_id, username,
-            )
-            if result.get("export_error") or result.get("export_skipped"):
-                job_service.set_failed(d, job_id, result.get("export_error") or result["export_skipped"])
-            else:
-                job_service.set_completed(d, job_id, result)
-        except Exception as e:
-            job_service.set_failed(d, job_id, f"Export failed: {e}")
-        finally:
-            d.close()
-
-    background_tasks.add_task(_run)
+    # Enqueued as a pending job; the worker container claims + runs it
+    # (survives gunicorn worker recycling, unlike an in-app BackgroundTask).
     return ExportImageResponse(
         job_id=job.id,
         status="pending",

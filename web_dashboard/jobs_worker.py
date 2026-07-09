@@ -29,14 +29,18 @@ from .services import job_service
 
 logger = logging.getLogger(__name__)
 
-# Job types this runner owns (the long Terraform jobs). VM / packer / mgmt-plane
-# launch jobs stay in-process for now (shorter, and the mgmt-plane uses the docker
-# runner) — see the plan's "out of scope".
+# Job types this runner owns. Beyond the Terraform provisions, the long image
+# build / export / promote jobs now run here too — they used to be in-app FastAPI
+# BackgroundTasks and got killed by gunicorn worker recycling (~5-min --timeout),
+# leaving zombie 'running' jobs (the cloud op finished but nothing finalised it).
 HANDLED_TYPES = (
     "k8s_provision", "k8s_decommission",
     "k8s_management", "k8s_secret_delivery", "k8s_entitle_agent", "k8s_entitle_register",
     "clouddb_provision", "clouddb_decommission",
     "vdesktop_pool_provision", "vdesktop_pool_teardown",
+    "packer_aws_build", "packer_azure_build", "packer_gcp_build",
+    "aws_export_image", "gcp_export_image", "azure_export_image",
+    "image_promote_aws", "image_promote_azure", "image_promote_gcp",
 )
 
 POLL_INTERVAL = 2.0  # seconds between queue polls when idle
@@ -124,6 +128,43 @@ async def _dispatch(job_id: str, job_type: str, meta: dict) -> None:
         elif job_type == "vdesktop_pool_teardown":
             from .services import vdesktop_service
             await vdesktop_service.teardown_seats(meta["seat_ids"], job_id=job_id)
+        elif job_type in ("packer_aws_build", "packer_azure_build", "packer_gcp_build"):
+            # The build runners live in api/packer.py and own their full lifecycle
+            # + the nested auto-export; reconstruct the Pydantic request from the
+            # metadata the endpoint stored (secret refs only — resolved at launch).
+            from .api import packer as _packer
+            from .models.packer import (
+                AWSPackerBuildRequest, AzurePackerBuildRequest, GCPPackerBuildRequest,
+            )
+            created_by = meta.get("created_by", "system")
+            if job_type == "packer_aws_build":
+                await _packer._run_aws_build(job_id, AWSPackerBuildRequest(**meta["req"]), created_by)
+            elif job_type == "packer_azure_build":
+                await _packer._run_azure_build(job_id, AzurePackerBuildRequest(**meta["req"]), created_by)
+            else:
+                await _packer._run_gcp_build(job_id, GCPPackerBuildRequest(**meta["req"]), created_by)
+        elif job_type == "aws_export_image":
+            from .api import packer as _packer
+            await _packer.run_export_aws(job_id, meta)
+        elif job_type == "gcp_export_image":
+            from .api import packer as _packer
+            await _packer.run_export_gcp(job_id, meta)
+        elif job_type == "azure_export_image":
+            from .api import packer as _packer
+            await _packer.run_export_azure(job_id, meta)
+        elif job_type == "image_promote_aws":
+            from .api import images as _images
+            await _images._run_aws_automated_promote(
+                meta["image_id"], meta.get("target_region") or "", job_id)
+        elif job_type == "image_promote_azure":
+            from .api import images as _images
+            await _images._run_azure_automated_promote(
+                meta["image_id"], meta.get("target_resource_group") or "",
+                meta.get("target_region") or "", job_id)
+        elif job_type == "image_promote_gcp":
+            from .api import images as _images
+            await _images._run_gcp_automated_promote(
+                meta["image_id"], meta.get("target_region") or "", job_id)
         else:  # pragma: no cover — HANDLED_TYPES guards the claim
             logger.warning("job runner: unhandled job_type %s (job %s)", job_type, job_id)
     finally:
