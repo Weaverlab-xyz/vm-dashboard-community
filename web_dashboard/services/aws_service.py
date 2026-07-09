@@ -687,13 +687,26 @@ async def set_source_dest_check(region: str, instance_id: str, value: bool) -> N
 
 def _get_instance_primary_eni_sync(region: str, instance_id: str) -> str:
     ec2 = _get_ec2(region)
-    resp = ec2.describe_instances(InstanceIds=[instance_id])
-    for r in resp.get("Reservations", []):
-        for i in r.get("Instances", []):
-            for eni in i.get("NetworkInterfaces", []):
-                if eni.get("Attachment", {}).get("DeviceIndex") == 0:
-                    return eni["NetworkInterfaceId"]
-    raise AWSError(f"No primary ENI found for instance {instance_id}")
+    # A just-launched instance is eventually consistent — describe_instances by id
+    # can briefly raise InvalidInstanceID.NotFound (or return no ENI yet). Retry
+    # past the lag so the NAT route can be attached right after launch.
+    import time
+    last_err = None
+    for _ in range(8):  # ~20s budget
+        try:
+            resp = ec2.describe_instances(InstanceIds=[instance_id])
+            for r in resp.get("Reservations", []):
+                for i in r.get("Instances", []):
+                    for eni in i.get("NetworkInterfaces", []):
+                        if eni.get("Attachment", {}).get("DeviceIndex") == 0:
+                            return eni["NetworkInterfaceId"]
+        except ClientError as e:
+            if "InvalidInstanceID.NotFound" not in str(e):
+                raise
+            last_err = e
+        time.sleep(2.5)
+    raise AWSError(f"No primary ENI found for instance {instance_id}"
+                   + (f" (last: {last_err})" if last_err else ""))
 
 
 async def get_instance_primary_eni(region: str, instance_id: str) -> str:
