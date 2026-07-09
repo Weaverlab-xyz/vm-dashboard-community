@@ -50,10 +50,16 @@ Beyond the PRA Shell Jump prereqs, the scripts also prepare the image for
 
 - **`adminuser`** (override with `BT_ADMIN_USER`) — a dedicated account created to be
   **Password-Safe-managed** (onboarded + key/password rotated out-of-band).
-- **Scoped sudo.** `adminuser` gets NOPASSWD sudo limited to exactly the commands an
+- **Scoped sudo (default).** `adminuser` gets NOPASSWD sudo limited to exactly the commands an
   SSH "ephemeral accounts" workflow needs — `cat chmod chown mkdir mv rm sed tee
   useradd userdel` — written to `/etc/sudoers.d/91-bt-adminuser` and validated with
   `visudo -c`. Not blanket `ALL`.
+- **Full passwordless sudo for Ansible (opt-in, `BT_ADMIN_NOPASSWD_ALL=1`).** Use this when
+  running the dashboard's config-mgmt (Ansible) as `adminuser`. Ansible `become` runs
+  `sudo /bin/sh -c '… python3 AnsiballZ_*.py'`, so sudo's target is the shell, not the
+  package tool — the scoped whitelist above can't satisfy it and `become` tasks fail with
+  `Missing sudo password`. `BT_ADMIN_NOPASSWD_ALL=1` writes `ALL=(ALL) NOPASSWD: ALL` to the
+  same sudoers file instead. Off by default (keeps the scoped set); enable per image.
 - **Seed key for the AWS Systems Manager Custom Plugin (opt-in, `BT_SEED_ADMIN_KEY=1`).**
   That plugin **rotates an existing key in place** — it does not bootstrap
   `~adminuser/.ssh/authorized_keys`, so with nothing seeded it has nothing to rotate and
@@ -123,6 +129,7 @@ Packer outside the dashboard.
 | `BT_TARGET_USER` | autodetect | Force the sudoers-target username instead of the cloud-default detection. |
 | `BT_ADMIN_USER` | `adminuser` | Name of the Password-Safe-managed bootstrap account the script creates. |
 | `BT_SEED_ADMIN_KEY` | `0` | When `1`, seed `adminuser`'s `authorized_keys` with a throwaway public key (private half generated + discarded at build) so the AWS Systems Manager Custom Plugin has an existing key to rotate. Required for that plugin (it rotates in place, doesn't bootstrap). Leave `0` for Entitle / cloud-default-user images. |
+| `BT_ADMIN_NOPASSWD_ALL` | `0` | When `1`, give `adminuser` full passwordless sudo (`ALL=(ALL) NOPASSWD: ALL`) instead of the scoped Entitle command set. Needed for **Ansible config-mgmt** as this account: Ansible `become` runs `sudo /bin/sh -c '… python3 …'`, so sudo's target is the shell — a per-package whitelist can't cover it. Leave `0` to keep the least-privilege scoped set. |
 | `BT_EPML_URL` | (unset) | Presigned URL to the OS-appropriate EPM-L package (`.deb` for Debian, `.rpm` for RPM). Set = download + install at build; unset = skip. **Activation runs post-deploy via the EPM-L integration**, not at build. The dashboard's Install EPM-L dropdown fills this in for you. |
 | `BT_AUTOPATCH` | `0` | When `1`, enable `unattended-upgrades` (Debian) / `dnf-automatic` (RPM) for ongoing security updates. |
 | `BT_SKIP_UPDATES` | `0` | When `1`, skip the dist-upgrade in step 3. Useful for iteration. |

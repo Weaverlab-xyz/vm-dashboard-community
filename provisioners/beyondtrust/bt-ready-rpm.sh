@@ -19,6 +19,8 @@
 #   BT_ADMIN_USER      Password-Safe-managed bootstrap account name (default: adminuser)
 #   BT_SEED_ADMIN_KEY=1 seed adminuser's authorized_keys with a throwaway key so the
 #                      AWS Systems Manager Custom Plugin has one to rotate (private half discarded)
+#   BT_ADMIN_NOPASSWD_ALL=1 grant adminuser full passwordless sudo (NOPASSWD: ALL) instead
+#                      of the scoped set — needed for Ansible config-mgmt `become` (sudo's /bin/sh)
 #   BT_EPML_URL        presigned URL to the EPM-L .rpm; set to install (activation is Ansible's job)
 #   BT_AUTOPATCH=1     enable dnf-automatic on the built image
 #   BT_SKIP_UPDATES=1  skip security upgrade (faster iteration builds)
@@ -208,27 +210,40 @@ if ! id -u "$BT_ADMIN_USER" >/dev/null 2>&1; then
   useradd -m -s /bin/bash "$BT_ADMIN_USER"
 fi
 
-# Scoped NOPASSWD sudo — exactly the commands Entitle ephemeral-accounts needs,
-# nothing more. Resolve absolute paths (visudo wants real paths; locations differ
-# across distros) via command -v.
-ENT_CMDS="cat chmod chown mkdir mv rm sed tee useradd userdel"
-CMNDLIST=""
-for c in $ENT_CMDS; do
-  p="$(command -v "$c" 2>/dev/null || true)"
-  if [ -z "$p" ]; then
-    log "warn: command '$c' not found on PATH — Entitle ephemeral accounts may need it"
-    continue
-  fi
-  if [ -z "$CMNDLIST" ]; then CMNDLIST="$p"; else CMNDLIST="$CMNDLIST, $p"; fi
-done
-[ -n "$CMNDLIST" ] || die "could not resolve any Entitle sudo commands — refusing to write an empty sudoers"
 ADMIN_SUDOERS=/etc/sudoers.d/91-bt-adminuser
-log "writing $ADMIN_SUDOERS (scoped NOPASSWD for Entitle ephemeral accounts)"
-cat > "$ADMIN_SUDOERS" <<EOF
+if [ "${BT_ADMIN_NOPASSWD_ALL:-0}" = "1" ]; then
+  # Full passwordless sudo — required when config-mgmt (Ansible) runs `become`
+  # tasks as this account: Ansible sudo's /bin/sh (not the package tool), so a
+  # per-command whitelist can't cover it. Opt-in; the default (below) keeps the
+  # scoped Entitle set for least privilege.
+  log "writing $ADMIN_SUDOERS (NOPASSWD: ALL — BT_ADMIN_NOPASSWD_ALL=1)"
+  cat > "$ADMIN_SUDOERS" <<EOF
+# Managed by bt-ready provisioner. Full passwordless sudo for $BT_ADMIN_USER
+# (BT_ADMIN_NOPASSWD_ALL=1) — required for Ansible config-mgmt become tasks.
+$BT_ADMIN_USER ALL=(ALL) NOPASSWD: ALL
+EOF
+else
+  # Scoped NOPASSWD sudo — exactly the commands Entitle ephemeral-accounts needs,
+  # nothing more. Resolve absolute paths (visudo wants real paths; locations differ
+  # across distros) via command -v.
+  ENT_CMDS="cat chmod chown mkdir mv rm sed tee useradd userdel"
+  CMNDLIST=""
+  for c in $ENT_CMDS; do
+    p="$(command -v "$c" 2>/dev/null || true)"
+    if [ -z "$p" ]; then
+      log "warn: command '$c' not found on PATH — Entitle ephemeral accounts may need it"
+      continue
+    fi
+    if [ -z "$CMNDLIST" ]; then CMNDLIST="$p"; else CMNDLIST="$CMNDLIST, $p"; fi
+  done
+  [ -n "$CMNDLIST" ] || die "could not resolve any Entitle sudo commands — refusing to write an empty sudoers"
+  log "writing $ADMIN_SUDOERS (scoped NOPASSWD for Entitle ephemeral accounts)"
+  cat > "$ADMIN_SUDOERS" <<EOF
 # Managed by bt-ready provisioner. Scoped NOPASSWD sudo for Entitle SSH
 # ephemeral accounts — least privilege, only the commands Entitle runs.
 $BT_ADMIN_USER ALL=(root) NOPASSWD: $CMNDLIST
 EOF
+fi
 chmod 0440 "$ADMIN_SUDOERS"
 if ! visudo -c -f "$ADMIN_SUDOERS" >/dev/null; then
   rm -f "$ADMIN_SUDOERS"
