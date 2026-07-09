@@ -1544,7 +1544,13 @@
         const fetches = [];
         if (!this.networkOpts.subnets) {
           this.loadingNetworkOpts = true;
-          fetches.push(API.get('/api/aws/network-options').then(o => { if (o) this.networkOpts = o; }));
+          fetches.push(API.get('/api/aws/network-options').then(o => { if (o) {
+            this.networkOpts = o;
+            // Preselect the sandbox private subnet + VM SG (where the on-demand NAT
+            // route applies) when the operator hasn't already chosen. Overridable.
+            if (!this.deployForm.subnet_id && o.default_subnet_id) this.deployForm.subnet_id = o.default_subnet_id;
+            if (this.deployForm.security_group_ids.length === 0 && o.default_security_group_id) this.deployForm.security_group_ids = [o.default_security_group_id];
+          } }));
         }
         fetches.push(
           API.get('/api/aws/secrets/ssh-key').then(r => {
@@ -1706,7 +1712,13 @@
         const fetches = [];
         if (!this.networkOpts.subnets) {
           this.loadingNetworkOpts = true;
-          fetches.push(API.get('/api/aws/network-options').then(o => { if (o) this.networkOpts = o; }));
+          fetches.push(API.get('/api/aws/network-options').then(o => { if (o) {
+            this.networkOpts = o;
+            // Preselect the sandbox private subnet + VM SG (where the on-demand NAT
+            // route applies) when the operator hasn't already chosen. Overridable.
+            if (!this.deployForm.subnet_id && o.default_subnet_id) this.deployForm.subnet_id = o.default_subnet_id;
+            if (this.deployForm.security_group_ids.length === 0 && o.default_security_group_id) this.deployForm.security_group_ids = [o.default_security_group_id];
+          } }));
         }
         // Fetch configured key preview if not already loaded from a prior modal open
         if (!this.deployForm.sshKeyName) {

@@ -52,6 +52,10 @@ class NetworkOptions(BaseModel):
     subnets: List[dict]
     security_groups: List[dict]
     instance_types: List[str]
+    # Deploy-form defaults (from the sandbox config) so new VMs land on the private
+    # subnet where the on-demand NAT route applies. Empty when unset.
+    default_subnet_id: str = ""
+    default_security_group_id: str = ""
     cached_at: Optional[str] = None
 
 

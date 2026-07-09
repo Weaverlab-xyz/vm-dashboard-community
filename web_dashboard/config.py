@@ -348,6 +348,20 @@ class Settings(BaseSettings):
     # remains as a Password-Safe-only fallback.
     aws_ecs_docker_deploy_key: str = ""
 
+    # Shared, on-demand NAT instance for sandbox VM egress. When enabled, the
+    # dashboard creates ONE NAT instance (auto public IP, no EIP) on the first EC2
+    # deploy and points the private route table's 0.0.0.0/0 at it, then terminates
+    # it when the last VM is destroyed — so private-subnet VMs get outbound internet
+    # with zero standing cost. Set by scripts/sandbox/Linux/setup-aws.sh. See
+    # services/nat_instance_service.py. Blanks: SG → find-or-create; subnet →
+    # bt_ecs_jumpoint_subnet_id (public); AMI → newest AL2023 for the arch.
+    aws_nat_instance_enabled: bool = False
+    aws_nat_instance_type: str = "t4g.nano"
+    aws_nat_instance_name: str = "dashboard-sandbox-nat"  # EC2 Name tag (find-or-create key)
+    aws_nat_security_group_id: str = ""
+    aws_nat_subnet_id: str = ""
+    aws_nat_ami_id: str = ""
+
     # Portainer CE integration — a single connection, configured via
     # Settings → Integrations → Portainer CE (config_service); these env vars
     # are the fallback for compose-file-driven installs.

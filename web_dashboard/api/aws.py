@@ -930,6 +930,21 @@ async def _run_deploy(
         else:
             job_service.update_progress(db, job_id, 35, "Preparing EC2 launch…")
 
+        # ── Step 1b: Ensure the shared on-demand NAT instance (independent of
+        # BeyondTrust) so the VM's private subnet gets outbound internet. ────────
+        if _cfg_svc.get_bool("aws_nat_instance_enabled"):
+            try:
+                from ..services import nat_instance_service
+                nat_id = await nat_instance_service.ensure_nat_instance(_aws_region)
+                if nat_id:
+                    result["nat_instance_id"] = nat_id
+                    job_service.update_progress(db, job_id, 36, "NAT instance ready (VM egress enabled)…")
+            except Exception as e:
+                result["nat_error"] = str(e)
+                job_service.update_progress(
+                    db, job_id, 36,
+                    f"NAT ensure failed (non-fatal): {e} — VM may lack outbound internet…")
+
         # ── Step 2: Fetch SSH public key from Secrets Manager ──────────────────
         job_service.update_progress(db, job_id, 38, "Fetching SSH public key from Secrets Manager…")
         ami_info = await aws_service.describe_ami(_aws_region, ami_id)
@@ -1100,6 +1115,17 @@ async def _run_bulk_deploy(
                 f"Preparing {len(job_items)}-instance batch…"
             )
 
+        # Step 1b: Ensure ONE shared NAT instance for the whole batch (independent
+        # of BeyondTrust) so the VMs' private subnet gets outbound internet.
+        nat_instance_id = None
+        nat_error = None
+        if _cfg_svc.get_bool("aws_nat_instance_enabled"):
+            try:
+                from ..services import nat_instance_service
+                nat_instance_id = await nat_instance_service.ensure_nat_instance(_aws_region)
+            except Exception as e:
+                nat_error = str(e)
+
         # Step 2: Fetch SSH public key once for the whole batch
         job_service.update_progress(db, first_job_id, 18, "Fetching SSH public key from Secrets Manager…")
         key_detail = await aws_service.get_ssh_public_key_from_secret(_aws_region, ssh_secret_name)
@@ -1112,6 +1138,10 @@ async def _run_bulk_deploy(
                 result["jumpoint_host_id"] = jumpoint_host_id
             elif ecs_error:
                 result["ecs_error"] = ecs_error
+            if nat_instance_id:
+                result["nat_instance_id"] = nat_instance_id
+            elif nat_error:
+                result["nat_error"] = nat_error
 
             try:
                 job_service.update_progress(
@@ -1312,6 +1342,14 @@ async def _run_destroy(destroy_job_id: str, deploy_job_id: str, instance_id: str
             await jumpoint_host_service.teardown_jumpoint_host_if_idle(db, "aws", _aws_region())
         except Exception as e:
             result["jumpoint_host_teardown_error"] = str(e)
+
+        # Reclaim the shared on-demand NAT instance if no EC2 instance is left
+        # (same exclusion — this deploy job is already marked destroyed).
+        try:
+            from ..services import nat_instance_service
+            await nat_instance_service.reclaim_nat_instance(db, _aws_region())
+        except Exception as e:
+            result["nat_teardown_error"] = str(e)
 
         job_service.set_completed(db, destroy_job_id, result)
         await cache_service.invalidate(cache_service.key_global("aws_instances"))

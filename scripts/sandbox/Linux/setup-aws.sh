@@ -2,16 +2,18 @@
 # AWS sandbox bootstrap for the VM Dashboard.
 #
 # Creates a small, isolated VPC where:
-#   • A public subnet hosts the BeyondTrust ECS Fargate Jumpoint task — it
-#     reaches the internet via an Internet Gateway so the Jumpoint can phone
-#     home to PRA's relay.
-#   • A private subnet hosts deployed EC2 instances — no IGW route, only
-#     local VPC traffic, so the lab VMs themselves never reach the internet
-#     except through the Jumpoint.
+#   • A public subnet hosts the BeyondTrust Jumpoint host (ECS-on-EC2, launched
+#     on demand by the dashboard) and the ECS Fargate ansible/promote runners —
+#     they reach the internet via an Internet Gateway (the host/runners get a
+#     public IP) so the Jumpoint can phone home to PRA's relay.
+#   • A private subnet hosts deployed EC2 instances — no IGW route. Their
+#     outbound internet is provided by a shared, on-demand NAT instance the
+#     dashboard creates on the first EC2 deploy and removes with the last VM
+#     (so there is no standing NAT gateway or Elastic IP).
 #
-# Also creates an SSH keypair JSON in Secrets Manager and an IAM role for
-# Fargate task execution. Prints a config block to paste into the dashboard's
-# /setup wizard.
+# Also creates an SSH keypair JSON in Secrets Manager and IAM roles for the
+# ECS task execution + on-demand Jumpoint host. Prints a config block to paste
+# into the dashboard's /setup wizard.
 
 set -Eeuo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -312,6 +314,11 @@ aws ec2 revoke-security-group-egress --region "$REGION" --group-id "$VM_SG" \
 # VM SG: egress to VPC only, ingress SSH from Jumpoint SG.
 aws ec2 authorize-security-group-egress --region "$REGION" --group-id "$VM_SG" \
   --ip-permissions '[{"IpProtocol":"-1","IpRanges":[{"CidrIp":"10.99.0.0/16"}]}]' >/dev/null 2>&1 || true
+# Also allow outbound HTTP 80 / HTTPS 443 / DNS 53 to the internet so VMs routed
+# through the on-demand NAT instance can reach package mirrors + repos. Harmless
+# before a NAT exists — the private route table blackholes 0.0.0.0/0 until then.
+aws ec2 authorize-security-group-egress --region "$REGION" --group-id "$VM_SG" \
+  --ip-permissions '[{"IpProtocol":"tcp","FromPort":80,"ToPort":80,"IpRanges":[{"CidrIp":"0.0.0.0/0"}]},{"IpProtocol":"tcp","FromPort":443,"ToPort":443,"IpRanges":[{"CidrIp":"0.0.0.0/0"}]},{"IpProtocol":"tcp","FromPort":53,"ToPort":53,"IpRanges":[{"CidrIp":"0.0.0.0/0"}]},{"IpProtocol":"udp","FromPort":53,"ToPort":53,"IpRanges":[{"CidrIp":"0.0.0.0/0"}]}]' >/dev/null 2>&1 || true
 aws ec2 authorize-security-group-ingress --region "$REGION" --group-id "$VM_SG" \
   --ip-permissions "[{\"IpProtocol\":\"tcp\",\"FromPort\":22,\"ToPort\":22,\"UserIdGroupPairs\":[{\"GroupId\":\"$JUMPOINT_SG\"}]}]" >/dev/null 2>&1 || true
 
@@ -327,12 +334,23 @@ for _db_port in 5432 3306 1433; do   # postgres (live), mysql / sqlserver (Phase
     --ip-permissions "[{\"IpProtocol\":\"tcp\",\"FromPort\":$_db_port,\"ToPort\":$_db_port,\"UserIdGroupPairs\":[{\"GroupId\":\"$JUMPOINT_SG\"}]}]" >/dev/null 2>&1 || true
 done
 
+# NAT SG: attached to the on-demand shared NAT instance the dashboard creates on
+# the first EC2 deploy. Ingress all from the VPC (forwarded traffic from private
+# VMs), egress all to the internet (default rule left in place). Pre-created here
+# (SGs are free) so teardown never races an SG delete against the terminating
+# NAT's ENI.
+NAT_SG="$(make_sg "${NAME}-nat-sg" "On-demand NAT instance - ingress from VPC, egress all")"
+aws ec2 authorize-security-group-ingress --region "$REGION" --group-id "$NAT_SG" \
+  --ip-permissions '[{"IpProtocol":"-1","IpRanges":[{"CidrIp":"10.99.0.0/16"}]}]' >/dev/null 2>&1 || true
+
 ok "Jumpoint SG $JUMPOINT_SG (default egress 0.0.0.0/0)"
-ok "VM SG       $VM_SG (egress: VPC only; ingress 22/tcp from Jumpoint SG)"
+ok "VM SG       $VM_SG (egress: VPC + internet 80/443/53; ingress 22/tcp from Jumpoint SG)"
 ok "DB SG       $DB_SG (ingress 5432/3306/1433 from Jumpoint SG; no egress)"
+ok "NAT SG      $NAT_SG (ingress all from VPC; egress all — for the on-demand NAT instance)"
 state_write aws jumpoint_sg "$JUMPOINT_SG"
 state_write aws vm_sg "$VM_SG"
 state_write aws db_sg "$DB_SG"
+state_write aws nat_sg "$NAT_SG"
 
 # ── 5b. SSM interface VPC endpoints (private SSM path for onboarded VMs) ───────
 # The AWS Systems Manager Password Safe onboarding manages Linux EC2 over SSM
@@ -941,6 +959,12 @@ _cfg=(
   "bt_ecs_jumpoint_subnet_id=$PUBLIC_SUBNET_ID         # subnet the dashboard launches the Jumpoint host into (public, IGW-routed)"
   "bt_ecs_jumpoint_security_group_id=$JUMPOINT_SG      # SG for the Jumpoint host"
   ""
+  "# On-demand shared NAT instance — created on the first EC2 deploy, removed with the last VM (private-subnet VM outbound internet, no standing NAT/EIP):"
+  "aws_nat_instance_enabled=true"
+  "aws_nat_security_group_id=$NAT_SG                    # SG for the on-demand NAT instance"
+  "aws_nat_instance_type=t4g.nano                       # NAT size (arm64); subnet defaults to the public/IGW subnet, AMI to newest AL2023"
+  "aws_nat_instance_name=${NAME}-nat                    # EC2 Name tag (find-or-create key)"
+  ""
   "# Image-registry hub + automated cross-cloud promote:"
   "storage_s3_bucket=$STORAGE_BUCKET                                       # Image hub + promote staging"
   "storage_active_backend=s3                                                  # Active asset backend"
@@ -966,7 +990,7 @@ Sandbox topology summary
 
   VPC ${VPC_ID} (10.99.0.0/16)
     ├─ public  ${PUBLIC_SUBNET_ID}  (10.99.1.0/24) → IGW → internet  [Jumpoint host + ECS Fargate runners]
-    ├─ private ${PRIVATE_SUBNET_ID}  (10.99.2.0/24) → no internet     [user EC2s]
+    ├─ private ${PRIVATE_SUBNET_ID}  (10.99.2.0/24) → internet via on-demand NAT instance (created with the first VM, removed with the last)  [user EC2s]
     └─ db      ${DB_SUBNET_A_ID} / ${DB_SUBNET_B_ID}  (10.99.3-4.0/24, 2 AZs) → no internet  [managed RDS]
 
   Managed EKS clusters build their OWN VPC + NAT-instance egress per cluster and
