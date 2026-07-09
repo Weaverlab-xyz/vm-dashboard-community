@@ -627,13 +627,16 @@ async def promote_to_azure_automated(
     blob_uri = f"https://{dest_account}.blob.core.windows.net/{dest_container}/{dest_blob}"
     target_image_name = f"{image['name']}-{image['version']}"
 
-    def _say(msg: str) -> None:
+    # progress_cb takes (pct, msg) so the job UI shows real phase progress
+    # instead of a pinned number. azure_service functions want a string-only
+    # callback, so we adapt them per-phase with `lambda m: _say(<pct>, m)`.
+    def _say(pct: int, msg: str) -> None:
         logger.info("[promote %s -> azure] %s", image_id, msg)
         if progress_cb:
-            progress_cb(msg)
+            progress_cb(pct, msg)
 
     # 1+2: kick the ACI runner — converts (if formats differ) + uploads to dest.
-    _say(f"Launching promote runner: {hub_backend}://{hub_key} -> {blob_uri}")
+    _say(10, f"Launching promote runner: {hub_backend}://{hub_key} -> {blob_uri}")
     await promote_runner_service.run_for_azure_target(
         job_id=image_id,
         hub_backend=hub_backend,
@@ -650,7 +653,7 @@ async def promote_to_azure_automated(
     )
 
     # 3: ask Azure compute to create a managed image from the staged blob.
-    _say(f"Creating managed image '{target_image_name}' in {target_rg} from {blob_uri[:80]}…")
+    _say(60, f"Creating managed image '{target_image_name}' in {target_rg} from {blob_uri[:80]}…")
     img_result = await azure_service.create_image_from_blob(
         target_rg=target_rg,
         location=target_loc,
@@ -659,11 +662,11 @@ async def promote_to_azure_automated(
         os_type=os_type,
         hyper_v_generation=hyper_v_generation,
         storage_account_id=target_storage_account_id,
-        progress_cb=_say,
+        progress_cb=lambda m: _say(60, m),
     )
     resource_id = img_result["resource_id"]
     state = img_result["provisioning_state"]
-    _say(f"Image create returned: {state} ({resource_id})")
+    _say(85, f"Image create returned: {state} ({resource_id})")
 
     if state and state.lower() != "succeeded":
         # Cloud-side import didn't reach a clean state — record failure and
@@ -674,7 +677,7 @@ async def promote_to_azure_automated(
 
     # 4: cleanup staged blob — only after the cloud-side image is Succeeded.
     try:
-        _say(f"Cleaning up staged blob {dest_account}/{dest_container}/{dest_blob}")
+        _say(92, f"Cleaning up staged blob {dest_account}/{dest_container}/{dest_blob}")
         await azure_service.delete_staged_blob(dest_account, dest_container, dest_blob)
     except Exception as e:
         logger.warning(
