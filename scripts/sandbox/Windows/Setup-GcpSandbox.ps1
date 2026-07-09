@@ -215,14 +215,16 @@ if ($LASTEXITCODE -ne 0) {
 # Build (the "403 The caller does not have permission" at export time otherwise).
 # container.admin lets the dashboard SA create/manage GKE clusters + node pools
 # (compute.admin covers the module's VPC/subnet/router/NAT but not the cluster).
+# logging.viewer lets the dashboard READ Cloud Logging so it can surface the real
+# Cloud Build export failure on the job page instead of a generic "Build failed".
 foreach ($role in @('roles/compute.admin','roles/secretmanager.secretAccessor',
                     'roles/iam.serviceAccountUser','roles/run.admin','roles/run.developer',
                     'roles/run.invoker','roles/cloudsql.admin','roles/servicenetworking.networksAdmin',
-                    'roles/cloudbuild.builds.editor','roles/container.admin')) {
+                    'roles/cloudbuild.builds.editor','roles/container.admin','roles/logging.viewer')) {
     gcloud projects add-iam-policy-binding $ProjectId `
         --member "serviceAccount:$SaEmail" --role $role --condition=None --quiet | Out-Null
 }
-Write-Ok 'Granted compute.admin, secretmanager.secretAccessor, iam.serviceAccountUser, run.{admin,developer,invoker}, cloudsql.admin, servicenetworking.networksAdmin, cloudbuild.builds.editor, container.admin'
+Write-Ok 'Granted compute.admin, secretmanager.secretAccessor, iam.serviceAccountUser, run.{admin,developer,invoker}, cloudsql.admin, servicenetworking.networksAdmin, cloudbuild.builds.editor, container.admin, logging.viewer'
 
 $SaKeyPath = Join-Path (Get-StateDir gcp) 'sa-key.json'
 if (-not (Test-Path $SaKeyPath) -or (Get-Item $SaKeyPath).Length -eq 0) {
