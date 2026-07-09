@@ -747,6 +747,11 @@ def store_windows_admin_password(vm_name: str, key_suffix: str, password: str) -
 # unsupported size/image combo) must fail the job rather than hang it forever.
 _VM_DEPLOY_TIMEOUT_S = 1200  # 20 min — generous for any normal deploy
 
+# Managed-image-from-blob bounded-wait timeout: an image-create that never
+# reaches "Succeeded" (unreadable/malformed source blob) must fail the promote
+# rather than hang the in-app background task forever.
+_IMAGE_CREATE_TIMEOUT_S = 1800  # 30 min — generous for a multi-GB VHD import
+
 
 def _best_effort_cleanup(compute, network, rg, vm_name, nic_name, pip_name=None) -> None:
     """Remove a half-created VM + NIC (+ optional PIP) after a failed deploy so a
@@ -2470,7 +2475,18 @@ def _create_image_from_blob_sync(
         tags={"managed-by": "vm-dashboard", "Purpose": "promote-target"},
     )
 
+    # Bounded wait: a stuck image-create (unreadable/malformed source blob) must
+    # fail the promote, not hang the in-app background task forever.
     poller = compute.images.begin_create_or_update(target_rg, image_name, img_params)
+    deadline = time.monotonic() + _IMAGE_CREATE_TIMEOUT_S
+    while not poller.done():
+        if time.monotonic() > deadline:
+            raise AzureError(
+                f"Managed image '{image_name}' did not finish creating within "
+                f"{_IMAGE_CREATE_TIMEOUT_S // 60} min — the source VHD blob may be "
+                f"unreadable by the target subscription or malformed ({blob_uri[:120]})."
+            )
+        poller.wait(15)
     img = poller.result()
     if progress_cb:
         progress_cb(f"Image create returned: {img.provisioning_state} ({img.id})")
