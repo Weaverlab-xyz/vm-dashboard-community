@@ -54,6 +54,15 @@ Beyond the PRA Shell Jump prereqs, the scripts also prepare the image for
   SSH "ephemeral accounts" workflow needs — `cat chmod chown mkdir mv rm sed tee
   useradd userdel` — written to `/etc/sudoers.d/91-bt-adminuser` and validated with
   `visudo -c`. Not blanket `ALL`.
+- **Seed key for the AWS Systems Manager Custom Plugin (opt-in, `BT_SEED_ADMIN_KEY=1`).**
+  That plugin **rotates an existing key in place** — it does not bootstrap
+  `~adminuser/.ssh/authorized_keys`, so with nothing seeded it has nothing to rotate and
+  the account is never SSH-reachable. With `BT_SEED_ADMIN_KEY=1` the provisioner generates
+  a throwaway keypair, installs the **public** half in `adminuser`'s `authorized_keys`, and
+  **discards the private half** (it never leaves the build — no standing access), giving the
+  plugin a placeholder to replace on its first Change Password. Off by default so Entitle /
+  cloud-default-user images are unaffected. (The Windows script's equivalent is
+  `BT_AUTHORIZED_KEY`.)
 
 > **Entitle SSH integration — no key baked here.** The dashboard's Entitle
 > SSH-ephemeral-accounts registration connects as the **cloud-default user** with the
@@ -113,6 +122,7 @@ Packer outside the dashboard.
 |---|---|---|
 | `BT_TARGET_USER` | autodetect | Force the sudoers-target username instead of the cloud-default detection. |
 | `BT_ADMIN_USER` | `adminuser` | Name of the Password-Safe-managed bootstrap account the script creates. |
+| `BT_SEED_ADMIN_KEY` | `0` | When `1`, seed `adminuser`'s `authorized_keys` with a throwaway public key (private half generated + discarded at build) so the AWS Systems Manager Custom Plugin has an existing key to rotate. Required for that plugin (it rotates in place, doesn't bootstrap). Leave `0` for Entitle / cloud-default-user images. |
 | `BT_EPML_URL` | (unset) | Presigned URL to the OS-appropriate EPM-L package (`.deb` for Debian, `.rpm` for RPM). Set = download + install at build; unset = skip. **Activation runs post-deploy via the EPM-L integration**, not at build. The dashboard's Install EPM-L dropdown fills this in for you. |
 | `BT_AUTOPATCH` | `0` | When `1`, enable `unattended-upgrades` (Debian) / `dnf-automatic` (RPM) for ongoing security updates. |
 | `BT_SKIP_UPDATES` | `0` | When `1`, skip the dist-upgrade in step 3. Useful for iteration. |
