@@ -425,6 +425,11 @@ async def _run_job(
     from ..database import SessionLocal
     db = SessionLocal()
     try:
+        # Flip to 'running' up front so this in-process BackgroundTask is visible to
+        # reconcile_stale_jobs. It only reconciles 'running' jobs; a config-mgmt run
+        # left at 'pending' after an app restart orphaned its task would otherwise
+        # hang forever at partial progress instead of being failed on next startup.
+        job_service.set_running(db, job_id)
         job_service.update_progress(db, job_id, 5, f"Fetching asset '{asset}'…")
         try:
             if asset_backend:
