@@ -67,6 +67,51 @@ WALINUXAGENT_SRC = "/opt/walinuxagent-src"
 # explicitly to virt-customize.
 _LIBGUESTFS_FORMAT = {"vhd": "vpc", "raw": "raw", "qcow2": "qcow2", "vmdk": "vmdk"}
 
+# /etc/os-release ID values that can't run on Azure regardless of waagent.
+# Amazon Linux (amzn) is built for EC2: waagent has no handler for it (so it
+# never registers/reports), and its cloud-init is pinned to the Ec2 datasource
+# + EC2 IMDS. The VM boots but provisioningState hangs at "Creating" forever.
+# Failing the promote here turns a silent 20-min deploy hang into an instant,
+# explanatory error.
+_UNSUPPORTED_AZURE_DISTRO_IDS = {"amzn"}
+
+
+def guest_os_release_id(disk_path: str, source_format: str) -> str:
+    """Return the guest's /etc/os-release ID (lowercased), or "" if it can't be
+    read. Uses libguestfs virt-cat — read-only, no boot. Never raises: a failed
+    inspection must not block a promote (we just skip the compatibility check)."""
+    fmt = _LIBGUESTFS_FORMAT.get((source_format or "").lower())
+    cmd = ["virt-cat"]
+    if fmt:
+        cmd += ["--format", fmt]
+    cmd += ["-a", disk_path, "/etc/os-release"]
+    try:
+        out = subprocess.check_output(cmd, stderr=sys.stderr, text=True)
+    except Exception as e:
+        log(f"could not read /etc/os-release ({e}); skipping Azure distro check")
+        return ""
+    for line in out.splitlines():
+        if line.startswith("ID="):
+            return line.split("=", 1)[1].strip().strip('"').lower()
+    return ""
+
+
+def assert_azure_supported_distro(disk_path: str, source_format: str) -> None:
+    """Fail the promote fast if the source distro can't provision on Azure.
+
+    Raises RuntimeError for a known-incompatible distro (e.g. Amazon Linux) so
+    the operator gets an actionable message instead of a VM that boots but hangs
+    at "Creating" until the deploy poller times out."""
+    distro = guest_os_release_id(disk_path, source_format)
+    if distro in _UNSUPPORTED_AZURE_DISTRO_IDS:
+        raise RuntimeError(
+            f"source image distro '{distro}' is not supported on Azure — its guest "
+            "agent (waagent) can't provision there, so the VM would boot but hang at "
+            "'Creating'. Build Azure-bound images from an Azure-endorsed distro "
+            "(Ubuntu, RHEL, Rocky, Alma, Debian, SUSE)."
+        )
+    log(f"Azure distro check OK (id={distro or 'unknown'})")
+
 
 def install_linux_agent(disk_path: str, source_format: str) -> None:
     """Offline-inject the Azure Linux Agent (waagent) into a Linux disk image.
@@ -267,8 +312,15 @@ def main() -> int:
             # Bake the Azure Linux Agent into the source disk BEFORE the fixed
             # VHD conversion, so the deprovision/generalize is captured in the
             # image Azure imports. Without this, promoted foreign Linux images
-            # boot but never finish Azure OS provisioning (deploy hangs).
+            # boot but never finish Azure OS provisioning (deploy hangs). First
+            # reject distros that can't provision on Azure at all (e.g. Amazon
+            # Linux) — fail fast rather than ship an image that hangs on deploy.
             if args.install_linux_agent:
+                try:
+                    assert_azure_supported_distro(src_path, args.source_format)
+                except RuntimeError as e:
+                    log(f"ERROR: {e}")
+                    return 5
                 install_linux_agent(src_path, args.source_format)
             # Azure managed-image/disk creation requires a FIXED-format VHD. The
             # source is frequently a dynamic VHD (and when source==target==vhd the
