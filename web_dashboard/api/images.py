@@ -143,9 +143,13 @@ async def _run_aws_automated_promote(
     from ..database import SessionLocal
     db = SessionLocal()
     try:
-        def _progress(msg: str) -> None:
+        # Mark running so the job UI shows a real status + duration instead of
+        # sitting at "pending" for the whole promote.
+        job_service.set_running(db, job_id)
+
+        def _progress(pct: int, msg: str) -> None:
             try:
-                job_service.update_progress(db, job_id, 50, msg[:200])
+                job_service.update_progress(db, job_id, pct, msg[:200])
             except Exception:
                 logger.exception("Failed to update job %s progress", job_id)
 
@@ -194,9 +198,13 @@ async def _run_gcp_automated_promote(
     from ..database import SessionLocal
     db = SessionLocal()
     try:
-        def _progress(msg: str) -> None:
+        # Mark running so the job UI shows a real status + duration instead of
+        # sitting at "pending" for the whole promote.
+        job_service.set_running(db, job_id)
+
+        def _progress(pct: int, msg: str) -> None:
             try:
-                job_service.update_progress(db, job_id, 50, msg[:200])
+                job_service.update_progress(db, job_id, pct, msg[:200])
             except Exception:
                 logger.exception("Failed to update job %s progress", job_id)
 
