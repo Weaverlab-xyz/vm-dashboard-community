@@ -474,8 +474,8 @@ async def promote_to_aws_automated(
       5. After AMI reaches `Available`, delete the staged S3 blob.
       6. Update `RegisteredImage.promotions["aws"]` with the new AMI ID.
 
-    progress_cb is an optional sync callable taking a single string; the
-    caller wires it to job_service.update_progress.
+    progress_cb is an optional sync callable taking (pct, msg); the caller
+    wires it to job_service.update_progress.
     """
     from . import promote_runner_service, storage_service, aws_service
 
@@ -496,13 +496,16 @@ async def promote_to_aws_automated(
 
     dest_bucket, dest_key = promote_runner_service.resolve_aws_staging(image["name"], image["version"])
 
-    def _say(msg: str) -> None:
+    # progress_cb takes (pct, msg) so the job UI shows real phase progress
+    # instead of a pinned number; string-only aws_service callbacks are adapted
+    # per-phase with `lambda m: _say(<pct>, m)`.
+    def _say(pct: int, msg: str) -> None:
         logger.info("[promote %s -> aws] %s", image_id, msg)
         if progress_cb:
-            progress_cb(msg)
+            progress_cb(pct, msg)
 
     # 1+2: kick the ECS runner
-    _say(f"Launching promote runner: {hub_backend}://{hub_key} -> s3://{dest_bucket}/{dest_key}")
+    _say(10, f"Launching promote runner: {hub_backend}://{hub_key} -> s3://{dest_bucket}/{dest_key}")
     await promote_runner_service.run_for_aws_target(
         job_id=image_id,  # caller picks the actual Job id; we just use it as a tag.
         hub_backend=hub_backend,
@@ -517,7 +520,7 @@ async def promote_to_aws_automated(
     # 3: ec2:ImportImage from the staged S3 object
     from . import config_service
     role_name = config_service.get("aws_vmimport_role_name") or "vmimport"
-    _say(f"Calling ec2:ImportImage from s3://{dest_bucket}/{dest_key}")
+    _say(60, f"Calling ec2:ImportImage from s3://{dest_bucket}/{dest_key}")
     import_result = await aws_service.import_image_from_vhd(
         region=target_region,
         s3_bucket=dest_bucket,
@@ -525,10 +528,10 @@ async def promote_to_aws_automated(
         role_name=role_name,
         description=f"Promoted from registered image {image['name']}/{image['version']}",
         disk_format=target_format,
-        progress_cb=_say,
+        progress_cb=lambda m: _say(60, m),
     )
     new_ami_id = import_result["image_id"]
-    _say(f"Import complete: {new_ami_id}")
+    _say(85, f"Import complete: {new_ami_id}")
 
     # 4: cleanup staged S3 blob — only after the AMI is Available (the import
     # poll above already waits for the terminal state, so we can delete now).
@@ -536,7 +539,7 @@ async def promote_to_aws_automated(
     # configured, which may not be `storage_s3_bucket` (delete_image_in
     # hard-codes that one).
     try:
-        _say(f"Cleaning up staged S3 object s3://{dest_bucket}/{dest_key}")
+        _say(92, f"Cleaning up staged S3 object s3://{dest_bucket}/{dest_key}")
         import asyncio
         from .aws_service import _aws_kwargs
         import boto3
@@ -756,13 +759,16 @@ async def promote_to_gcp_automated(
     # validation surface.
     target_image_name = f"{image['name']}-{image['version']}".lower()
 
-    def _say(msg: str) -> None:
+    # progress_cb takes (pct, msg) so the job UI shows real phase progress
+    # instead of a pinned number; string-only gcp_service callbacks are adapted
+    # per-phase with `lambda m: _say(<pct>, m)`.
+    def _say(pct: int, msg: str) -> None:
         logger.info("[promote %s -> gcp] %s", image_id, msg)
         if progress_cb:
-            progress_cb(msg)
+            progress_cb(pct, msg)
 
     # 1+2: kick the Cloud Run runner — vhd → raw → tar.gz → GCS.
-    _say(f"Launching promote runner: {hub_backend}://{hub_key} -> {gcs_url}")
+    _say(10, f"Launching promote runner: {hub_backend}://{hub_key} -> {gcs_url}")
     await promote_runner_service.run_for_gcp_target(
         job_id=image_id,
         hub_backend=hub_backend,
@@ -773,18 +779,18 @@ async def promote_to_gcp_automated(
     )
 
     # 3: ask GCP compute to create a custom image from the staged tar.gz.
-    _say(f"Calling compute.images.insert '{target_image_name}' from {gcs_url}")
+    _say(60, f"Calling compute.images.insert '{target_image_name}' from {gcs_url}")
     img_result = await gcp_service.create_image_from_gcs(
         project_id=project_id,
         image_name=target_image_name,
         gcs_url=gcs_url,
         description=f"Promoted from registered image {image['name']}/{image['version']}",
         family=family,
-        progress_cb=_say,
+        progress_cb=lambda m: _say(60, m),
     )
     self_link = img_result["self_link"]
     status = (img_result.get("status") or "").upper()
-    _say(f"Image insert returned: status={status} ({self_link})")
+    _say(85, f"Image insert returned: status={status} ({self_link})")
 
     if status and status != "READY":
         raise ImageRegistryError(
@@ -793,7 +799,7 @@ async def promote_to_gcp_automated(
 
     # 4: cleanup the staged GCS tar.gz now that the image is READY.
     try:
-        _say(f"Cleaning up staged object gs://{dest_bucket}/{dest_object}")
+        _say(92, f"Cleaning up staged object gs://{dest_bucket}/{dest_object}")
         await gcp_service.delete_gcs_object(dest_bucket, dest_object)
     except Exception as e:
         logger.warning(

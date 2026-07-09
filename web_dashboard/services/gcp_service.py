@@ -1515,6 +1515,12 @@ async def export_custom_image_to_vhd(
 
 # ── Import GCS-staged tar.gz → custom image (cross-cloud promote target) ─────
 
+# images.insert from a raw-disk tarball converts server-side and can take a
+# while for a multi-GB disk; 40 min is generous but still bounds a genuinely
+# stuck operation so it fails the promote instead of hanging forever.
+_IMAGE_INSERT_TIMEOUT_S = 2400
+
+
 def _create_image_from_gcs_sync(
     project_id: str,
     image_name: str,
@@ -1555,7 +1561,17 @@ def _create_image_from_gcs_sync(
         raw_disk=compute_v1.RawDisk(source=raw_source),
     )
     op = images_client.insert(project=project_id, image_resource=image)
-    op.result()  # blocks until READY/FAILED
+    # Bounded wait: a stuck images.insert (unreadable/malformed rawDisk source)
+    # must fail the promote, not hang the in-app background task forever.
+    import concurrent.futures
+    try:
+        op.result(timeout=_IMAGE_INSERT_TIMEOUT_S)  # blocks until READY/FAILED
+    except concurrent.futures.TimeoutError:
+        raise GCPError(
+            f"Custom image '{image_name}' did not finish creating within "
+            f"{_IMAGE_INSERT_TIMEOUT_S // 60} min — the source object may be "
+            f"unreadable or malformed ({raw_source[:120]})."
+        )
 
     created = images_client.get(project=project_id, image=image_name)
     if progress_cb:
