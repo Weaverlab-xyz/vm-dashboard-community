@@ -591,6 +591,214 @@ async def find_instances_by_tag(region: str, *, name_tag: str, states: list) -> 
         raise AWSError("AWS credentials not configured.")
 
 
+# ── NAT instance primitives (shared on-demand egress; see nat_instance_service) ──
+
+def _find_nat_ami_sync(region: str, arch: str) -> str:
+    ec2 = _get_ec2(region)
+    resp = ec2.describe_images(
+        Owners=["amazon"],  # AL2023 is published under the "amazon" owner alias
+        Filters=[
+            {"Name": "name", "Values": [f"al2023-ami-2023.*-kernel-*-{arch}"]},
+            {"Name": "state", "Values": ["available"]},
+            {"Name": "architecture", "Values": [arch]},
+        ],
+    )
+    imgs = sorted(resp.get("Images", []), key=lambda i: i.get("CreationDate", ""), reverse=True)
+    if not imgs:
+        raise AWSError(f"No available AL2023 {arch} AMI found in {region}")
+    return imgs[0]["ImageId"]
+
+
+async def find_nat_ami(region: str, arch: str = "arm64") -> str:
+    """Newest Amazon Linux 2023 AMI id for ``arch`` via DescribeImages — mirrors
+    the EKS module's data.aws_ami.nat and avoids needing an ssm:GetParameter grant."""
+    try:
+        return await asyncio.to_thread(_find_nat_ami_sync, region, arch)
+    except (ClientError, BotoCoreError) as e:
+        raise AWSError(f"Failed to resolve NAT AMI: {e}") from e
+    except NoCredentialsError:
+        raise AWSError("AWS credentials not configured.")
+
+
+def _run_nat_instance_sync(
+    region: str, ami_id: str, instance_type: str, subnet_id: str,
+    security_group_ids: list, user_data: str, name_tag: str,
+) -> dict:
+    ec2 = _get_ec2(region)
+    resp = ec2.run_instances(
+        ImageId=ami_id,
+        InstanceType=instance_type,
+        MinCount=1,
+        MaxCount=1,
+        # Auto-assigned public IP (NOT an EIP) so egress works with zero standing
+        # cost — the instance is terminated when the last VM is destroyed. No
+        # IamInstanceProfile: a NAT instance needs no AWS API access.
+        NetworkInterfaces=[{
+            "DeviceIndex": 0,
+            "SubnetId": subnet_id,
+            "Groups": security_group_ids,
+            "AssociatePublicIpAddress": True,
+        }],
+        UserData=user_data,  # boto3 base64-encodes for run_instances
+        TagSpecifications=[{
+            "ResourceType": "instance",
+            "Tags": [
+                {"Key": "Name", "Value": name_tag},
+                # managed-by matches dashboard EC2 instances so the sandbox VPC
+                # sweep / rollback cleans the NAT up too.
+                {"Key": "managed-by", "Value": "vm-dashboard"},
+            ],
+        }],
+    )
+    inst = resp["Instances"][0]
+    return {"instance_id": inst["InstanceId"], "state": inst["State"]["Name"]}
+
+
+async def run_nat_instance(
+    region: str, *, ami_id: str, instance_type: str, subnet_id: str,
+    security_group_ids: list, user_data: str, name_tag: str,
+) -> dict:
+    """Launch the shared NAT instance (auto public IP, no instance profile, no EIP)."""
+    try:
+        return await asyncio.to_thread(
+            _run_nat_instance_sync, region, ami_id, instance_type, subnet_id,
+            security_group_ids, user_data, name_tag,
+        )
+    except (ClientError, BotoCoreError) as e:
+        raise AWSError(f"Failed to launch NAT instance: {e}") from e
+    except NoCredentialsError:
+        raise AWSError("AWS credentials not configured.")
+
+
+def _set_source_dest_check_sync(region: str, instance_id: str, value: bool) -> None:
+    ec2 = _get_ec2(region)
+    ec2.modify_instance_attribute(InstanceId=instance_id, SourceDestCheck={"Value": value})
+
+
+async def set_source_dest_check(region: str, instance_id: str, value: bool) -> None:
+    """Toggle an instance's source/dest check (must be False to route/NAT)."""
+    try:
+        await asyncio.to_thread(_set_source_dest_check_sync, region, instance_id, value)
+    except (ClientError, BotoCoreError) as e:
+        raise AWSError(f"Failed to set source/dest check on {instance_id}: {e}") from e
+    except NoCredentialsError:
+        raise AWSError("AWS credentials not configured.")
+
+
+def _get_instance_primary_eni_sync(region: str, instance_id: str) -> str:
+    ec2 = _get_ec2(region)
+    resp = ec2.describe_instances(InstanceIds=[instance_id])
+    for r in resp.get("Reservations", []):
+        for i in r.get("Instances", []):
+            for eni in i.get("NetworkInterfaces", []):
+                if eni.get("Attachment", {}).get("DeviceIndex") == 0:
+                    return eni["NetworkInterfaceId"]
+    raise AWSError(f"No primary ENI found for instance {instance_id}")
+
+
+async def get_instance_primary_eni(region: str, instance_id: str) -> str:
+    """Return the DeviceIndex-0 ENI id of an instance — the NAT route target."""
+    try:
+        return await asyncio.to_thread(_get_instance_primary_eni_sync, region, instance_id)
+    except (ClientError, BotoCoreError) as e:
+        raise AWSError(f"Failed to get primary ENI for {instance_id}: {e}") from e
+    except NoCredentialsError:
+        raise AWSError("AWS credentials not configured.")
+
+
+def _default_route_target_sync(region: str, rt_id: str) -> str | None:
+    ec2 = _get_ec2(region)
+    resp = ec2.describe_route_tables(RouteTableIds=[rt_id])
+    for rt in resp.get("RouteTables", []):
+        for rte in rt.get("Routes", []):
+            if rte.get("DestinationCidrBlock") == "0.0.0.0/0":
+                return (rte.get("NetworkInterfaceId") or rte.get("NatGatewayId")
+                        or rte.get("GatewayId"))
+    return None
+
+
+def _upsert_default_route_via_eni_sync(region: str, rt_id: str, eni_id: str) -> None:
+    ec2 = _get_ec2(region)
+    current = _default_route_target_sync(region, rt_id)
+    if current == eni_id:
+        return  # already correct
+    if current is None:
+        ec2.create_route(RouteTableId=rt_id, DestinationCidrBlock="0.0.0.0/0",
+                         NetworkInterfaceId=eni_id)
+    else:
+        # Stale target (e.g. NAT was replaced) — repoint it.
+        ec2.replace_route(RouteTableId=rt_id, DestinationCidrBlock="0.0.0.0/0",
+                          NetworkInterfaceId=eni_id)
+
+
+async def upsert_default_route_via_eni(region: str, rt_id: str, eni_id: str) -> None:
+    """Ensure ``rt_id`` has ``0.0.0.0/0 -> eni_id`` (create / replace-if-stale / no-op)."""
+    try:
+        await asyncio.to_thread(_upsert_default_route_via_eni_sync, region, rt_id, eni_id)
+    except (ClientError, BotoCoreError) as e:
+        raise AWSError(f"Failed to set default route on {rt_id}: {e}") from e
+    except NoCredentialsError:
+        raise AWSError("AWS credentials not configured.")
+
+
+def _delete_default_route_sync(region: str, rt_id: str) -> None:
+    ec2 = _get_ec2(region)
+    try:
+        ec2.delete_route(RouteTableId=rt_id, DestinationCidrBlock="0.0.0.0/0")
+    except ClientError as e:
+        if "InvalidRoute.NotFound" not in str(e):
+            raise
+
+
+async def delete_default_route(region: str, rt_id: str) -> None:
+    """Delete the ``0.0.0.0/0`` route from ``rt_id`` (no-op if already absent)."""
+    try:
+        await asyncio.to_thread(_delete_default_route_sync, region, rt_id)
+    except (ClientError, BotoCoreError) as e:
+        raise AWSError(f"Failed to delete default route on {rt_id}: {e}") from e
+    except NoCredentialsError:
+        raise AWSError("AWS credentials not configured.")
+
+
+def _ensure_nat_security_group_sync(region: str, vpc_id: str, vpc_cidr: str, name: str) -> str:
+    ec2 = _get_ec2(region)
+    resp = ec2.describe_security_groups(Filters=[
+        {"Name": "group-name", "Values": [name]},
+        {"Name": "vpc-id", "Values": [vpc_id]},
+    ])
+    if resp.get("SecurityGroups"):
+        return resp["SecurityGroups"][0]["GroupId"]
+    sg = ec2.create_security_group(
+        GroupName=name,
+        Description="NAT instance - ingress from this VPC, egress all",
+        VpcId=vpc_id,
+        TagSpecifications=[{
+            "ResourceType": "security-group",
+            "Tags": [{"Key": "Name", "Value": name},
+                     {"Key": "managed-by", "Value": "vm-dashboard"}],
+        }],
+    )
+    sg_id = sg["GroupId"]
+    # Ingress: all protocols from the VPC (forwarded traffic from private VMs).
+    # Egress: default 0.0.0.0/0 all is present on create — leave it.
+    ec2.authorize_security_group_ingress(
+        GroupId=sg_id,
+        IpPermissions=[{"IpProtocol": "-1", "IpRanges": [{"CidrIp": vpc_cidr}]}],
+    )
+    return sg_id
+
+
+async def ensure_nat_security_group(region: str, *, vpc_id: str, vpc_cidr: str, name: str) -> str:
+    """Find-or-create the NAT SG (ingress all from ``vpc_cidr``, egress all).
+    Fallback for sandboxes that predate the script pre-creating it."""
+    try:
+        return await asyncio.to_thread(_ensure_nat_security_group_sync, region, vpc_id, vpc_cidr, name)
+    except (ClientError, BotoCoreError) as e:
+        raise AWSError(f"Failed to ensure NAT security group: {e}") from e
+    except NoCredentialsError:
+        raise AWSError("AWS credentials not configured.")
+
+
 def _set_workgroup_tag_sync(region: str, instance_id: str, workgroup: str) -> None:
     """Overwrite the `Workgroup` tag on an existing instance."""
     ec2 = _get_ec2(region)
@@ -650,10 +858,19 @@ def _get_network_options_sync(region: str) -> dict:
         "c5.large", "c5.xlarge", "r5.large",
     ]
 
+    # Deploy-form defaults from the sandbox config so new VMs land on the private
+    # subnet (where the on-demand NAT route applies) + its VM-tier SG. Empty when
+    # unset — the form then leaves the pickers unselected.
+    from . import config_service
+    default_subnet_id = config_service.get("aws_default_subnet_id") or ""
+    default_sg_id = config_service.get("aws_default_security_group_id") or ""
+
     return {
         "subnets": subnets,
         "security_groups": security_groups,
         "instance_types": instance_types,
+        "default_subnet_id": default_subnet_id,
+        "default_security_group_id": default_sg_id,
     }
 
 

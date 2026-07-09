@@ -205,14 +205,25 @@ aws ec2 revoke-security-group-egress --region $Region --group-id $VmSg `
 
 aws ec2 authorize-security-group-egress --region $Region --group-id $VmSg `
     --ip-permissions '[{"IpProtocol":"-1","IpRanges":[{"CidrIp":"10.99.0.0/16"}]}]' 2>$null | Out-Null
+# Also allow outbound HTTP 80 / HTTPS 443 / DNS 53 to the internet so VMs routed
+# through the on-demand NAT instance can reach package mirrors + repos.
+aws ec2 authorize-security-group-egress --region $Region --group-id $VmSg `
+    --ip-permissions '[{"IpProtocol":"tcp","FromPort":80,"ToPort":80,"IpRanges":[{"CidrIp":"0.0.0.0/0"}]},{"IpProtocol":"tcp","FromPort":443,"ToPort":443,"IpRanges":[{"CidrIp":"0.0.0.0/0"}]},{"IpProtocol":"tcp","FromPort":53,"ToPort":53,"IpRanges":[{"CidrIp":"0.0.0.0/0"}]},{"IpProtocol":"udp","FromPort":53,"ToPort":53,"IpRanges":[{"CidrIp":"0.0.0.0/0"}]}]' 2>$null | Out-Null
 $ingressJson = "[{`"IpProtocol`":`"tcp`",`"FromPort`":22,`"ToPort`":22,`"UserIdGroupPairs`":[{`"GroupId`":`"$JumpointSg`"}]}]"
 aws ec2 authorize-security-group-ingress --region $Region --group-id $VmSg `
     --ip-permissions $ingressJson 2>$null | Out-Null
 
+# NAT SG for the on-demand shared NAT instance (ingress all from VPC, egress all).
+$NatSg = _MakeSG "$Name-nat-sg" 'On-demand NAT instance — ingress from VPC, egress all'
+aws ec2 authorize-security-group-ingress --region $Region --group-id $NatSg `
+    --ip-permissions '[{"IpProtocol":"-1","IpRanges":[{"CidrIp":"10.99.0.0/16"}]}]' 2>$null | Out-Null
+
 Write-Ok "Jumpoint SG $JumpointSg (default egress 0.0.0.0/0)"
-Write-Ok "VM SG       $VmSg (egress: VPC only; ingress 22/tcp from Jumpoint SG)"
+Write-Ok "VM SG       $VmSg (egress: VPC + internet 80/443/53; ingress 22/tcp from Jumpoint SG)"
+Write-Ok "NAT SG      $NatSg (ingress all from VPC; egress all — for the on-demand NAT instance)"
 Set-StateValue aws jumpoint_sg $JumpointSg
 Set-StateValue aws vm_sg       $VmSg
+Set-StateValue aws nat_sg      $NatSg
 
 # ── 5b. SSM interface VPC endpoints (private SSM path for onboarded VMs) ───────
 # Twin of setup-aws.sh: the VM SG egresses to the VPC only, so an onboarded VM
@@ -764,6 +775,12 @@ $cfg = @(
     "bt_ecs_execution_role_arn=$RoleArn",
     "bt_ecs_jumpoint_subnet_id=$PublicSubnetId         # Jumpoint task lands here (public, IGW-routed)",
     "bt_ecs_jumpoint_security_group_id=$JumpointSg      # SG for the Jumpoint task",
+    "",
+    "# On-demand shared NAT instance — created on the first EC2 deploy, removed with the last VM (private-subnet VM outbound internet, no standing NAT/EIP):",
+    "aws_nat_instance_enabled=true",
+    "aws_nat_security_group_id=$NatSg                    # SG for the on-demand NAT instance",
+    "aws_nat_instance_type=t4g.nano                       # NAT size (arm64); subnet defaults to the public/IGW subnet, AMI to newest AL2023",
+    "aws_nat_instance_name=$Name-nat                      # EC2 Name tag (find-or-create key)",
     "",
     "# Image-registry hub + automated cross-cloud promote:",
     "storage_s3_bucket=$StorageBucket                                       # Image hub + promote staging",
