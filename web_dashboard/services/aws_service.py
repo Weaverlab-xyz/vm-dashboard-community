@@ -1203,6 +1203,17 @@ def _run_ecs_ansible_sync(
             "image": image,
             "essential": True,
             "command": ["sh", "-c", cmd],
+            # The playbook (and the secret-var manifest, which carries var *names*
+            # not values) ride the per-run task definition, NOT the RunTask
+            # override. AWS caps the RunTask containerOverrides at 8192 bytes, and
+            # a larger playbook + the ~4.5 KB base64 SSH key together blow that
+            # limit (InvalidParameterException). A playbook isn't a credential —
+            # real secrets are injected via `secrets`/valueFrom (below) or the
+            # ephemeral store — so it's safe on the task def; only the SSH key
+            # stays an ephemeral RunTask override so it isn't retained in task-def
+            # revision history.
+            "environment": [{"name": "PLAYBOOK_B64", "value": playbook_b64}]
+                + ([{"name": _cas.MANIFEST_ENV, "value": manifest_b64}] if manifest_b64 else []),
             **({"secrets": _secrets_def} if _secrets_def else {}),
             "logConfiguration": {
                 "logDriver": "awslogs",
@@ -1231,12 +1242,14 @@ def _run_ecs_ansible_sync(
             "securityGroups": security_group_ids or [],
             "assignPublicIp": "ENABLED",  # public-subnet egress via IGW (sandbox has no NAT; runner needs egress, not inbound)
         }},
+        # Only the SSH key rides the RunTask override (ephemeral, ~4.5 KB base64 —
+        # comfortably under the 8192-byte overrides cap); everything else is on the
+        # task def above.
         overrides={"containerOverrides": [{
             "name": "ansible",
             "environment": [
-                {"name": "PLAYBOOK_B64", "value": playbook_b64},
                 {"name": "SSH_KEY_B64", "value": ssh_key_b64},
-            ] + ([{"name": _cas.MANIFEST_ENV, "value": manifest_b64}] if manifest_b64 else []),
+            ],
         }]},
         count=1,
     )
