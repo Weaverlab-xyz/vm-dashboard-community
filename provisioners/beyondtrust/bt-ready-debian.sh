@@ -15,6 +15,8 @@
 # Operator-overridable via Packer build env:
 #   BT_TARGET_USER     force sudoers-target user (default: autodetect ubuntu/debian/admin)
 #   BT_ADMIN_USER      Password-Safe-managed bootstrap account name (default: adminuser)
+#   BT_SEED_ADMIN_KEY=1 seed adminuser's authorized_keys with a throwaway key so the
+#                      AWS Systems Manager Custom Plugin has one to rotate (private half discarded)
 #   BT_EPML_URL        presigned URL to the EPM-L .deb; set to install (activation is Ansible's job)
 #   BT_AUTOPATCH=1     enable unattended-upgrades on the built image
 #   BT_SKIP_UPDATES=1  skip dist-upgrade (faster iteration builds)
@@ -202,8 +204,40 @@ if ! visudo -c -f "$ADMIN_SUDOERS" >/dev/null; then
   die "visudo rejected 91-bt-adminuser — sudoers not installed"
 fi
 
-# Password Safe onboards this account and manages its key/password out-of-band —
-# the provisioner does not install any authorized_keys here.
+# adminuser SSH key seed (opt-in: BT_SEED_ADMIN_KEY=1).
+# Password Safe's AWS Systems Manager Custom Plugin ROTATES an existing key in
+# place — it does NOT bootstrap ~/.ssh/authorized_keys. For that model the image
+# must ship a placeholder key the plugin can rotate on its first Change Password;
+# with nothing seeded, the plugin has nothing to replace and the account never
+# becomes SSH-reachable. Generate a throwaway keypair and DISCARD the private half
+# immediately (it never leaves the build), so the seeded key grants no standing
+# access — it exists only to give the plugin something to rotate. Off by default
+# so Entitle / cloud-default-user images are unaffected (they connect as the
+# cloud-default user with the launch keypair, not this account).
+if [ "${BT_SEED_ADMIN_KEY:-0}" = "1" ]; then
+  if ! command -v ssh-keygen >/dev/null 2>&1; then
+    log "BT_SEED_ADMIN_KEY=1 but ssh-keygen missing — installing openssh-client"
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssh-client >/dev/null 2>&1 || true
+  fi
+  if command -v ssh-keygen >/dev/null 2>&1; then
+    ADMIN_HOME="$(getent passwd "$BT_ADMIN_USER" | cut -d: -f6)"
+    [ -n "$ADMIN_HOME" ] || ADMIN_HOME="/home/$BT_ADMIN_USER"
+    SEED_DIR="$(mktemp -d)"
+    ssh-keygen -t ed25519 -N "" -C "bt-ready-seed (rotate me)" -f "$SEED_DIR/seed" >/dev/null
+    install -d -m 700 -o "$BT_ADMIN_USER" -g "$BT_ADMIN_USER" "$ADMIN_HOME/.ssh"
+    install -m 600 -o "$BT_ADMIN_USER" -g "$BT_ADMIN_USER" \
+      "$SEED_DIR/seed.pub" "$ADMIN_HOME/.ssh/authorized_keys"
+    rm -rf "$SEED_DIR"   # discard the throwaway private key — never leaves the build
+    log "seeded $ADMIN_HOME/.ssh/authorized_keys with a throwaway key (private half discarded) — Password Safe rotates it on first Change Password"
+  else
+    log "warn: ssh-keygen unavailable — could not seed $BT_ADMIN_USER authorized_keys"
+  fi
+else
+  # Not seeded (default): Password Safe manages the key out-of-band. If you use the
+  # AWS Systems Manager Custom Plugin (rotate-in-place), set BT_SEED_ADMIN_KEY=1 so
+  # the image ships a placeholder key for it to rotate.
+  log "not seeding $BT_ADMIN_USER SSH key (set BT_SEED_ADMIN_KEY=1 for the AWS SSM Custom Plugin)"
+fi
 
 # ── EPM-L package install (opt-in via BT_EPML_URL) ───────────────────────────
 # Install ONLY. EPM-L activation (pbactivate -t <token>) is performed post-deploy
