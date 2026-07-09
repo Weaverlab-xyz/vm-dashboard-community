@@ -23,6 +23,38 @@ def host_is_ip(host: str) -> bool:
     return bool(_IPV4_RE.match((host or "").strip()))
 
 
+def lookup_args(host: str, name: str = "") -> tuple:
+    """Resolve ``(ip, name)`` for a Password Safe managed-system lookup.
+
+    ``host`` is the connection address the operator picked (a cloud VM's IP, or a
+    free-text on-prem host). ``name`` is an optional system-name hint — for a cloud
+    VM it's the deploy name, which is how cloud-native onboarding registers the
+    system (e.g. the AWS Systems Manager plugin keys the managed system on the
+    instance name with a placeholder IP, so an IP-only lookup never finds it).
+
+    - IP ``host``  → match on IPAddress, but still pass the ``name`` hint so a
+      name-registered system with no matching IP is found (falls back to it).
+    - non-IP host  → the host is itself the system name; an explicit ``name`` wins.
+    """
+    host = (host or "").strip()
+    name = (name or "").strip()
+    if host_is_ip(host):
+        return host, name
+    return "", (name or host)
+
+
+def ssh_login_user(account_name: str) -> str:
+    """The OS login user for a managed account name used as ``ansible_user``.
+
+    Cloud-native plugins qualify the account name with a scope suffix after a
+    ``;`` — the AWS Systems Manager plugin registers ``{user};{suffix}`` (suffix
+    ``local`` for IAM-user mode or an AssumeRole ARN for EC2 mode). That suffix is
+    a Password Safe naming detail, not part of the Unix username, so strip it. A
+    ``;`` can't appear in a real Unix username, so this is a no-op for ordinary
+    accounts (e.g. ``root``, ``svc-ansible``)."""
+    return (account_name or "").split(";", 1)[0].strip()
+
+
 def normalize_managed_systems(systems: list, accounts_by_system: dict) -> list:
     """Shape ps-cli managed-systems + their accounts into the API/UI response —
     **ids and names only, never credentials**.

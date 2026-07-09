@@ -224,6 +224,65 @@ def _cfg(key: str) -> str:
     return ansible_local_service._cfg(key)
 
 
+# Deploy job type + the config key holding the SSH keypair secret the deploy used,
+# per cloud. A dashboard-built VM's own keypair (the one cloud-init injected) lives
+# in that secret; a per-launch override is recorded on the deploy job metadata as
+# ``ssh_key_secret_override``. This is the key the VM actually trusts — the global
+# ``ansible_ssh_key_sm_name`` is only a fallback for externally-built hosts.
+_CLOUD_DEPLOY_JOB_TYPE = {"aws": "ec2_deploy", "azure": "azure_deploy", "gcp": "gce_deploy"}
+_VM_BUILD_KEY_DEFAULT_CFG = {
+    "aws":   "ec2_ssh_key_secret",
+    "gcp":   "gcp_ssh_key_secret_name",
+    "azure": "azure_ssh_keypair_secret_name",
+}
+
+
+def _find_cloud_deploy_meta(db, cloud: str, ip: str) -> dict:
+    """Metadata of the most-recent, non-destroyed deploy job for the cloud VM at
+    ``ip`` — mirrors how /cloud-targets enumerates targets. Empty dict when none
+    matches (externally-created VM, or a manually-typed cloud IP)."""
+    job_type = _CLOUD_DEPLOY_JOB_TYPE.get(cloud)
+    if not job_type or not ip:
+        return {}
+    jobs = (
+        db.query(Job)
+        .filter(Job.job_type == job_type, Job.status == "completed")
+        .order_by(Job.created_at.desc())
+        .all()
+    )
+    for job in jobs:
+        meta = job.metadata_dict
+        if meta.get("destroyed"):
+            continue
+        if (meta.get("public_ip") or meta.get("private_ip")) == ip:
+            return meta
+    return {}
+
+
+def _vm_build_key_secret(cloud: str, meta: dict) -> str:
+    """The secret name holding the keypair the VM was built with: the per-launch
+    override recorded on the deploy job, else the cloud's configured deploy default."""
+    override = (meta.get("ssh_key_secret_override") or "").strip()
+    return override or _cfg(_VM_BUILD_KEY_DEFAULT_CFG.get(cloud, ""))
+
+
+async def _resolve_cloud_ssh_key(db, cloud: str, ip: str) -> str | None:
+    """Best SSH private key for a cloud VM run: the keypair the VM was actually
+    built with (resolved from its deploy metadata) first, then the per-cloud global
+    Ansible key as a fallback. Never raises — a retrieval error yields the fallback
+    (and ultimately None), matching the prior "proceed without key" behaviour."""
+    build_secret = _vm_build_key_secret(cloud, _find_cloud_deploy_meta(db, cloud, ip))
+    if build_secret:
+        try:
+            pem = await ansible_local_service.fetch_ssh_key(cloud, secret_name=build_secret)
+            if pem:
+                return pem
+        except Exception as exc:
+            logger.warning("VM build-key retrieval failed (%s) — trying the global key: %s",
+                           cloud, exc)
+    return await ansible_local_service.fetch_ssh_key(cloud)
+
+
 def _scrub_secrets(text: str, values: list) -> str:
     """Redact resolved secret values from run output before it's stored/shown —
     defense in depth so a ``debug`` in a playbook can't leak an injected secret to
@@ -418,7 +477,7 @@ async def _run_job(
         managed_plain_vars: dict = {}    # non-secret vars (ansible_user)
         managed_request_ids: list = []   # PS request ids — checked in (rotate-on-release) after a cloud run
         if managed_account or managed_become:
-            from ..services import btapi_service
+            from ..services import btapi_service, managed_accounts as ma
             # Long enough that the request is still open after the run for the
             # rotate-on-check-in + check-in below (best-effort mitigation).
             _req_dur = int(_cfg("ansible_managed_request_duration_min") or 60)
@@ -429,8 +488,12 @@ async def _run_job(
                         duration_min=_req_dur,
                         uses_ssh_key=managed_account.get("uses_ssh_key", False))
                     managed_request_ids.append(req_id)
-                    if managed_account.get("account_name"):
-                        managed_plain_vars["ansible_user"] = managed_account["account_name"]
+                    # The account is the login identity → ansible_user. Strip any
+                    # cloud-plugin scope suffix (e.g. AWS Systems Manager's
+                    # ``adminuser;local``) so the SSH connection uses the real OS user.
+                    _login = ma.ssh_login_user(managed_account.get("account_name", ""))
+                    if _login:
+                        managed_plain_vars["ansible_user"] = _login
                     if managed_account.get("uses_ssh_key"):
                         secret_ssh_pem = cred                     # connection key (SSH_KEY_B64)
                     else:
@@ -497,7 +560,7 @@ async def _run_job(
             if ssh_key_pem is None:
                 job_service.update_progress(db, job_id, 10, f"Retrieving SSH key for {key_cloud.upper()}…")
                 try:
-                    ssh_key_pem = await ansible_local_service.fetch_ssh_key(key_cloud)
+                    ssh_key_pem = await _resolve_cloud_ssh_key(db, key_cloud, target)
                 except Exception as exc:
                     logger.warning("SSH key retrieval failed (%s) — proceeding without key: %s", key_cloud, exc)
 
@@ -582,9 +645,9 @@ async def _run_job(
         if ssh_key_pem is None and cloud in ("aws", "gcp", "azure"):
             job_service.update_progress(db, job_id, 10, f"Retrieving SSH key for {cloud.upper()}…")
             try:
-                ssh_key_pem = await ansible_local_service.fetch_ssh_key(cloud)
+                ssh_key_pem = await _resolve_cloud_ssh_key(db, cloud, target)
                 if not ssh_key_pem:
-                    logger.warning("No SSH key configured for %s — proceeding without key", cloud)
+                    logger.warning("No SSH key resolved for %s — proceeding without key", cloud)
             except Exception as exc:
                 logger.warning("Failed to retrieve SSH key for %s: %s — proceeding without key", cloud, exc)
 
@@ -875,12 +938,19 @@ async def list_secret_options(current_user: User = Depends(get_current_user)):
 @router.get("/managed-accounts")
 async def list_managed_accounts(
     host: str,
+    name: str = "",
     current_user: User = Depends(get_current_user),
 ):
     """Live BeyondTrust Password Safe managed-account list for a target host —
     **ids + names only, never credentials**. Requires ``secrets:use`` (using a
     managed account = checking out a credential without seeing it). The run form
     calls this on target change to populate the account picker.
+
+    ``host`` is the connection address (a cloud VM's IP or a free-text on-prem
+    host); ``name`` is an optional system-name hint the run form passes for a cloud
+    VM (its deploy name). Cloud-native onboarding — e.g. the AWS Systems Manager
+    Password Safe plugin — registers the managed system keyed on the instance name
+    with a placeholder IP, so an IP-only lookup never finds it; the name hint does.
 
     Returns ``{"enabled": false, "systems": []}`` when BeyondTrust is off (no
     ps-cli call), and never 500s a lookup — a ps-cli error yields an ``error`` note
@@ -900,8 +970,7 @@ async def list_managed_accounts(
     if not host:
         return {"enabled": True, "ephemeral_enabled": ephemeral_enabled, "systems": []}
 
-    ip = host if ma.host_is_ip(host) else ""
-    name = "" if ma.host_is_ip(host) else host
+    ip, name = ma.lookup_args(host, name)
     try:
         systems = await btapi_service.list_ps_managed_systems_by_ip_or_name(ip, name)
         accounts_by_system: dict = {}

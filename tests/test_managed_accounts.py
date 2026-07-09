@@ -24,6 +24,57 @@ def test_host_is_ip():
     assert not ma.host_is_ip("dc01")
 
 
+# ── lookup_args ─────────────────────────────────────────────────────────────────
+
+def test_lookup_args_ip_only():
+    # No name hint → match on IP alone (unchanged behaviour).
+    assert ma.lookup_args("10.99.1.186") == ("10.99.1.186", "")
+    assert ma.lookup_args(" 10.99.1.186 ") == ("10.99.1.186", "")
+
+
+def test_lookup_args_ip_with_name_hint():
+    # A cloud VM: keep the IP but pass the deploy name so a name-registered system
+    # with a placeholder IP (AWS Systems Manager plugin) is still found.
+    assert ma.lookup_args("10.99.1.186", "ubuntu24-1783462329") \
+        == ("10.99.1.186", "ubuntu24-1783462329")
+
+
+def test_lookup_args_non_ip_host_is_the_name():
+    assert ma.lookup_args("dc01.shield.int") == ("", "dc01.shield.int")
+
+
+def test_lookup_args_explicit_name_wins_over_non_ip_host():
+    assert ma.lookup_args("some-host", "real-name") == ("", "real-name")
+
+
+def test_lookup_args_trims_and_handles_empty():
+    assert ma.lookup_args("", "") == ("", "")
+    assert ma.lookup_args("  ", "  vm-1 ") == ("", "vm-1")
+
+
+# ── ssh_login_user ──────────────────────────────────────────────────────────────
+
+def test_ssh_login_user_plain_account_unchanged():
+    assert ma.ssh_login_user("root") == "root"
+    assert ma.ssh_login_user("svc-ansible") == "svc-ansible"
+
+
+def test_ssh_login_user_strips_ssm_local_suffix():
+    # AWS Systems Manager plugin IAM-user mode: "{user};local".
+    assert ma.ssh_login_user("adminuser;local") == "adminuser"
+
+
+def test_ssh_login_user_strips_ssm_arn_suffix():
+    # AWS Systems Manager plugin EC2 mode: "{user};<AssumeRole ARN>".
+    assert ma.ssh_login_user("ec2-user;arn:aws:iam::123456789012:role/PS-SSM") == "ec2-user"
+
+
+def test_ssh_login_user_handles_empty_and_whitespace():
+    assert ma.ssh_login_user("") == ""
+    assert ma.ssh_login_user(None) == ""
+    assert ma.ssh_login_user("  adminuser ; local ") == "adminuser"
+
+
 # ── normalize_managed_systems ───────────────────────────────────────────────────
 
 def test_normalize_locally_managed_account_ssh_and_password():
