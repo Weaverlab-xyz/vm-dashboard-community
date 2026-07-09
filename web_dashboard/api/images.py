@@ -365,9 +365,8 @@ async def promote_image(
             region=payload.target_region,
             notes=f"Automated promote in progress (job {job.id}).",
         )
-        background_tasks.add_task(
-            _run_aws_automated_promote, image_id, payload.target_region, job.id,
-        )
+        # Enqueued as a pending job; the worker container claims + runs it
+        # (survives gunicorn worker recycling, unlike an in-app BackgroundTask).
         return {
             "ok":        True,
             "automated": True,
@@ -407,9 +406,6 @@ async def promote_image(
             region=payload.target_region,
             notes=f"Automated promote in progress (job {job.id}).",
         )
-        background_tasks.add_task(
-            _run_azure_automated_promote, image_id, target_rg or "", payload.target_region or "", job.id,
-        )
         return {
             "ok":        True,
             "automated": True,
@@ -444,9 +440,6 @@ async def promote_image(
             status="running",
             region=payload.target_region,
             notes=f"Automated promote in progress (job {job.id}).",
-        )
-        background_tasks.add_task(
-            _run_gcp_automated_promote, image_id, payload.target_region or "", job.id,
         )
         return {
             "ok":        True,

@@ -688,45 +688,20 @@ async def export_ami(
     """Manually export an existing AMI to VHD on the hub backend and register
     it in the image registry. Useful when the auto-export in the Packer build
     flow was skipped or failed but the AMI itself is fine."""
-    from .packer import export_and_register_aws  # local import: avoid cycle
-
     job = job_service.create_job(
         db,
         job_type="aws_export_image",
         created_by=current_user.username,
-        metadata={"ami_id": ami_id, "image_name": req.image_name, "region": _aws_region()},
+        metadata={"ami_id": ami_id, "image_name": req.image_name,
+                  "region": _aws_region(), "created_by": current_user.username},
     )
     job_service.log_audit(
         db, current_user.username, "aws_export_image",
         details={"ami_id": ami_id, "image_name": req.image_name},
     )
 
-    # Capture scalars before defining the background closure. FastAPI closes
-    # the request's DB session when this handler returns, so `current_user`
-    # would be a detached ORM instance by the time _run() executes and any
-    # attribute access (e.g. .username) would raise DetachedInstanceError.
-    job_id = job.id
-    image_name = req.image_name
-    region = _aws_region()
-    username = current_user.username
-
-    async def _run():
-        d = _get_db_session()
-        try:
-            job_service.set_running(d, job_id)
-            result = await export_and_register_aws(
-                d, job_id, image_name, ami_id, region, username,
-            )
-            if result.get("export_error") or result.get("export_skipped"):
-                job_service.set_failed(d, job_id, result.get("export_error") or result["export_skipped"])
-            else:
-                job_service.set_completed(d, job_id, result)
-        except Exception as e:
-            job_service.set_failed(d, job_id, f"Export failed: {e}")
-        finally:
-            d.close()
-
-    background_tasks.add_task(_run)
+    # Enqueued as a pending job; the worker container claims + runs it
+    # (survives gunicorn worker recycling, unlike an in-app BackgroundTask).
     return ExportImageResponse(
         job_id=job.id,
         status="pending",

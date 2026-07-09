@@ -130,13 +130,19 @@ async def build_aws_image(
             "image_name": req.image_name,
             "source_ami": req.source_ami,
             "instance_type": req.instance_type,
+            # Full request + creator so the worker can reconstruct and run the
+            # build. Only secret *references* live in the request (resolved at
+            # build launch), so nothing sensitive is persisted here.
+            "req": req.model_dump(),
+            "created_by": current_user.username,
         },
     )
     job_service.log_audit(
         db, current_user.username, "packer_aws_build",
         details={"image_name": req.image_name, "source_ami": req.source_ami},
     )
-    background_tasks.add_task(_run_aws_build, job.id, req, current_user.username)
+    # Enqueued as a pending job; the worker container claims + runs it (survives
+    # gunicorn worker recycling, unlike an in-app BackgroundTask).
     return PackerBuildResponse(
         job_id=job.id,
         status="pending",
@@ -167,13 +173,14 @@ async def build_azure_image(
             "image_offer": req.image_offer,
             "image_sku": req.image_sku,
             "os_type": req.os_type,
+            "req": req.model_dump(),
+            "created_by": current_user.username,
         },
     )
     job_service.log_audit(
         db, current_user.username, "packer_azure_build",
         details={"image_name": req.image_name, "image_sku": req.image_sku},
     )
-    background_tasks.add_task(_run_azure_build, job.id, req, current_user.username)
     return PackerBuildResponse(
         job_id=job.id,
         status="pending",
@@ -204,13 +211,14 @@ async def build_gcp_image(
             "image_name": req.image_name,
             "source_image": req.source_image,
             "machine_type": req.machine_type,
+            "req": req.model_dump(),
+            "created_by": current_user.username,
         },
     )
     job_service.log_audit(
         db, current_user.username, "packer_gcp_build",
         details={"image_name": req.image_name, "source_image": req.source_image},
     )
-    background_tasks.add_task(_run_gcp_build, job.id, req, current_user.username)
     return PackerBuildResponse(
         job_id=job.id,
         status="pending",
@@ -641,6 +649,64 @@ async def _land_on_hub(
             build_backend, build_key, e,
         )
     return (hub, hub_key)
+
+
+# ── Worker entrypoints for manual export/register jobs ──────────────────────
+# Wrap the export_and_register_* helpers with the job lifecycle the API
+# endpoint's BackgroundTask closure used to own. The worker (jobs_worker.py)
+# calls these after claiming the pending job (the claim already set it running),
+# reading args from the job metadata. Export errors are FATAL here (unlike the
+# non-fatal auto-export inside a build).
+
+async def run_export_aws(job_id: str, meta: dict) -> None:
+    d = _get_db_session()
+    try:
+        result = await export_and_register_aws(
+            d, job_id, meta["image_name"], meta["ami_id"], meta["region"],
+            meta.get("created_by", "system"),
+        )
+        if result.get("export_error") or result.get("export_skipped"):
+            job_service.set_failed(d, job_id, result.get("export_error") or result["export_skipped"])
+        else:
+            job_service.set_completed(d, job_id, result)
+    except Exception as e:
+        job_service.set_failed(d, job_id, f"Export failed: {e}")
+    finally:
+        d.close()
+
+
+async def run_export_gcp(job_id: str, meta: dict) -> None:
+    d = _get_db_session()
+    try:
+        result = await export_and_register_gcp(
+            d, job_id, meta["registry_name"], meta["image_name"], meta["project_id"],
+            meta.get("created_by", "system"),
+        )
+        if result.get("export_error") or result.get("export_skipped"):
+            job_service.set_failed(d, job_id, result.get("export_error") or result["export_skipped"])
+        else:
+            job_service.set_completed(d, job_id, result)
+    except Exception as e:
+        job_service.set_failed(d, job_id, f"Export failed: {e}")
+    finally:
+        d.close()
+
+
+async def run_export_azure(job_id: str, meta: dict) -> None:
+    d = _get_db_session()
+    try:
+        result = await export_and_register_azure(
+            d, job_id, meta["registry_name"], meta["image_name"], meta["resource_group"],
+            meta.get("created_by", "system"), os_type=meta.get("os_type", "Linux"),
+        )
+        if result.get("export_error") or result.get("export_skipped"):
+            job_service.set_failed(d, job_id, result.get("export_error") or result["export_skipped"])
+        else:
+            job_service.set_completed(d, job_id, result)
+    except Exception as e:
+        job_service.set_failed(d, job_id, f"Export failed: {e}")
+    finally:
+        d.close()
 
 
 async def export_and_register_aws(
