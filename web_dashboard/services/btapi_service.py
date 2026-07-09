@@ -221,15 +221,24 @@ def _create_ps_request_sync(
 ) -> int:
     """Create a credential request; returns the numeric RequestID.
     No -a-type flag — ps-cli request creation does not take a type argument.
+
+    ``-c-op reuse`` (ConflictOption): when an active request already exists for this
+    account — a prior just-in-time checkout that hasn't been checked in or expired —
+    Password Safe returns that request instead of a 409 Conflict. Without it, the
+    409 error text ("...statuscode: 409") got mis-parsed as a bogus RequestID and
+    the subsequent credential fetch failed opaquely.
     """
     args = ["requests", "create", "-a-id", str(account_id),
-            "-d", str(duration_min), "-s-id", str(system_id)]
+            "-d", str(duration_min), "-s-id", str(system_id), "-c-op", "reuse"]
     raw = _ps_run(args)
-    # Response is a JSON string like "RequestID: 345"
-    match = re.search(r"\d+", str(raw))
+    # Success is a string like "RequestID: 345" — parse the id that follows the
+    # RequestID label specifically, so an error body (which may contain other
+    # numbers, e.g. a 409 status) can't be mistaken for a request id.
+    raw_str = str(raw)
+    match = re.search(r"RequestID\D*(\d+)", raw_str)
     if not match:
-        raise BTAPIError(f"Could not parse RequestID from ps-cli response: {raw!r}")
-    return int(match.group())
+        raise BTAPIError(f"Could not create a Password Safe request: {raw_str.strip()}")
+    return int(match.group(1))
 
 
 def _get_credential_by_request_sync(request_id: int, ssh_key: bool = False) -> str:
