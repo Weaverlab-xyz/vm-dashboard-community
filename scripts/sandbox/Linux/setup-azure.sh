@@ -506,7 +506,8 @@ if [[ -z "${SANDBOX_SKIP_ACR:-}" ]]; then
   for _img in \
     beyondtrust/sra-jumpoint:latest \
     willhallonline/ansible:latest \
-    chrweav/dashboard-promote-runner:latest; do
+    chrweav/dashboard-promote-runner:latest \
+    dtzar/helm-kubectl:latest; do
     if [[ -n "${DOCKERHUB_USERNAME:-}" && -n "${DOCKERHUB_TOKEN:-}" ]]; then
       retry 5 10 az acr import -n "$ACR_NAME" --source "docker.io/$_img" --image "$_img" \
         --username "$DOCKERHUB_USERNAME" --password "$DOCKERHUB_TOKEN" --force >/dev/null
@@ -589,7 +590,7 @@ _cfg=(
 if [[ -n "$ACR_LOGIN_SERVER" ]]; then
   _cfg+=(
     ""
-    "# Azure Container Registry (mirrors 3 public images; dodges Docker Hub rate limits):"
+    "# Azure Container Registry (mirrors 4 public images; dodges Docker Hub rate limits):"
     "azure_acr_server=$ACR_LOGIN_SERVER"
     "azure_acr_username=$SP_APP_ID                            # SP appId (granted AcrPull above)"
     "azure_acr_password=$SP_PASSWORD"
@@ -597,6 +598,7 @@ if [[ -n "$ACR_LOGIN_SERVER" ]]; then
     "ansible_aci_acr_server=$ACR_LOGIN_SERVER"
     "ansible_aci_acr_username=$SP_APP_ID"
     "ansible_aci_acr_password=$SP_PASSWORD"
+    "k8s_runner_image_azure=$ACR_LOGIN_SERVER/dtzar/helm-kubectl:latest   # AKS k8s runner (ACI); full path, no server prepend"
   )
 fi
 
