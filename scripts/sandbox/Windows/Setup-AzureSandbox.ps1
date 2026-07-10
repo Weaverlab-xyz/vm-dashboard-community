@@ -415,7 +415,8 @@ if (-not $env:SANDBOX_SKIP_ACR) {
     foreach ($img in @(
         'beyondtrust/sra-jumpoint:latest',
         'willhallonline/ansible:latest',
-        'chrweav/dashboard-promote-runner:latest')) {
+        'chrweav/dashboard-promote-runner:latest',
+        'dtzar/helm-kubectl:latest')) {
         if ($env:DOCKERHUB_USERNAME -and $env:DOCKERHUB_TOKEN) {
             az acr import -n $AcrName --source "docker.io/$img" --image $img `
                 --username $env:DOCKERHUB_USERNAME --password $env:DOCKERHUB_TOKEN --force | Out-Null
@@ -498,14 +499,15 @@ $cfg = @(
 if ($AcrLoginServer) {
     $cfg += @(
         '',
-        '# Azure Container Registry (mirrors 3 public images; dodges Docker Hub rate limits):',
+        '# Azure Container Registry (mirrors 4 public images; dodges Docker Hub rate limits):',
         "azure_acr_server=$AcrLoginServer",
         "azure_acr_username=$SpAppId                            # SP appId (granted AcrPull above)",
         "azure_acr_password=$SpPassword",
         "ansible_aci_image=$AcrLoginServer/willhallonline/ansible:latest   # full path: the ansible runner does not prepend the server",
         "ansible_aci_acr_server=$AcrLoginServer",
         "ansible_aci_acr_username=$SpAppId",
-        "ansible_aci_acr_password=$SpPassword"
+        "ansible_aci_acr_password=$SpPassword",
+        "k8s_runner_image_azure=$AcrLoginServer/dtzar/helm-kubectl:latest   # AKS k8s runner (ACI); full path, no server prepend"
     )
 }
 Write-DashboardConfig 'Azure sandbox configuration' $cfg
