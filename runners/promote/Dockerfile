@@ -5,7 +5,18 @@
 # prebuilt binary, so we build it from source for BOTH guest arches and bake it
 # in offline (the launcher picks the right one at guest boot). CGO off → a
 # static binary that runs on any Linux guest.
-FROM golang:1.23-bookworm AS gcp-guest-agent
+#
+# The builder's Go must satisfy the pinned guest-agent's go.mod `go` directive,
+# which Google bumps aggressively — 20260529.00 needs Go >= 1.26. The official
+# golang image pins GOTOOLCHAIN=local (won't fetch a newer toolchain), so a base
+# that trails the requirement hard-fails the build ("go.mod requires go >= 1.26
+# (running go 1.23.x; GOTOOLCHAIN=local)"). That failure silently shipped a
+# runner image WITHOUT --install-gcp-guest-agent, breaking every GCP promote
+# with argparse exit 2. Keep the base current AND set GOTOOLCHAIN=auto so a
+# future version bump fetches the toolchain go.mod asks for instead of breaking
+# another release.
+FROM golang:1.26-bookworm AS gcp-guest-agent
+ENV GOTOOLCHAIN=auto
 ARG GUEST_AGENT_VERSION=20260529.00
 RUN apt-get update \
     && apt-get install -y --no-install-recommends git ca-certificates \
