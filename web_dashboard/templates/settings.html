@@ -464,8 +464,34 @@
                 </p>
                 <p class="text-xs text-gray-400 mt-1" x-show="(panelCfg.passwordsafe_aws_registration_method || 'ssm') === 'ssh'">
                   Traditional managed system keyed by hostname/IP; pushes the VM's own SSH key and needs SSH
-                  line-of-sight (Resource Broker / Jumpoint). Azure and GCP always use this method.
+                  line-of-sight (Resource Broker / Jumpoint). GCP always uses this method (Azure has its own below).
                 </p>
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Azure onboarding method</label>
+                <select x-model="panelCfg.passwordsafe_azure_registration_method"
+                        x-init="panelCfg.passwordsafe_azure_registration_method = panelCfg.passwordsafe_azure_registration_method || 'azurevm'"
+                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                  <option value="azurevm">Azure VM SSH Rotation (cloud-native, recommended)</option>
+                  <option value="ssh">Direct SSH (managed system / Resource Broker)</option>
+                </select>
+                <p class="text-xs text-gray-400 mt-1" x-show="(panelCfg.passwordsafe_azure_registration_method || 'azurevm') === 'azurevm'">
+                  Rotates the <code class="bg-gray-100 px-1 rounded">adminuser</code> key over Azure VM
+                  <code class="bg-gray-100 px-1 rounded">Run Command</code> — no SSH line-of-sight needed. The Azure
+                  functional account must be the <em>Azure VM SSH Rotation Custom Plugin</em> account (username = Azure
+                  app/client ID, password = client secret), the plugin must be admin-uploaded in BeyondInsight, and the
+                  service principal needs <em>Virtual Machine Contributor</em> on the resource group. Managed system
+                  address = <code class="bg-gray-100 px-1 rounded">tenantId/subscriptionId/resourceGroup/vmName</code>.
+                </p>
+                <p class="text-xs text-gray-400 mt-1" x-show="(panelCfg.passwordsafe_azure_registration_method || 'azurevm') === 'ssh'">
+                  Traditional managed system keyed by hostname/IP; pushes the VM's own SSH key and needs SSH
+                  line-of-sight (Resource Broker / Jumpoint).
+                </p>
+                <label class="flex items-center gap-2 text-sm text-gray-700 mt-2"
+                       x-show="(panelCfg.passwordsafe_azure_registration_method || 'azurevm') === 'azurevm'">
+                  <input type="checkbox" x-model="panelCfg.passwordsafe_azure_change_password_on_register" class="rounded text-blue-600">
+                  Mint the first key on onboard (the baked-in <code class="bg-gray-100 px-1 rounded">adminuser</code> has no credential yet)
+                </label>
               </div>
               <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Workgroup</label>
@@ -500,7 +526,7 @@
                          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
                          placeholder="adminuser">
                 </div>
-                <div x-show="(panelCfg.passwordsafe_aws_registration_method || 'ssm') === 'ssh'">
+                <div x-show="(panelCfg.passwordsafe_aws_registration_method || 'ssm') === 'ssh' || (panelCfg.passwordsafe_azure_registration_method || 'azurevm') === 'ssh'">
                   <label class="block text-sm font-medium text-gray-700 mb-1">SSH key enforcement <span class="text-gray-400 font-normal">(SSH method)</span></label>
                   <select x-model="panelCfg.passwordsafe_ssh_key_enforcement_mode"
                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">

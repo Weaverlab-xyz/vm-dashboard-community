@@ -9,11 +9,15 @@ Safe **managed system** with its baked-in ``adminuser`` account, and
 job ``result`` dict but never fail the deploy/destroy. Gating on the per-build opt-in +
 the global capability flag is the caller's job (carried on job metadata).
 
-Two onboarding methods (see ps_resource_service):
+Onboarding methods (see ps_resource_service):
   - **AWS** defaults to ``ssm`` — the cloud-native "AWS Systems Manager" Password Safe
     custom plugin (managed over SSM SendCommand; managed system DNS = {instance-id}:{region};
     no SSH key pushed). Configurable via ``passwordsafe_aws_registration_method``.
-  - All other clouds (and AWS when set to ``ssh``) use the traditional SSH flow: a
+  - **Azure** defaults to ``azurevm`` — the cloud-native "Azure VM SSH Rotation" Password
+    Safe custom plugin (managed over Azure VM Run Command; managed system address =
+    tenantId/subscriptionId/resourceGroup/vmName; no SSH key pushed). Configurable via
+    ``passwordsafe_azure_registration_method``.
+  - Every other cloud (and AWS/Azure when set to ``ssh``) uses the traditional SSH flow: a
     managed system keyed by host_name/ip with the VM's own private key pushed.
 
 Either way the operator configures a functional account per cloud
@@ -47,16 +51,21 @@ def _functional_account_name(tag: str) -> str:
 
 def _registration_method(tag: str) -> str:
     """Onboarding method for this cloud. AWS defaults to the cloud-native AWS Systems
-    Manager custom plugin (``ssm``); every other cloud uses the traditional SSH flow."""
-    if (tag or "").lower() == "aws":
+    Manager custom plugin (``ssm``); Azure defaults to the cloud-native Azure VM SSH
+    Rotation custom plugin (``azurevm``); every other cloud uses the traditional SSH flow."""
+    t = (tag or "").lower()
+    if t == "aws":
         return (_cfg("passwordsafe_aws_registration_method") or "ssm").lower()
+    if t == "azure":
+        return (_cfg("passwordsafe_azure_registration_method") or "azurevm").lower()
     return "ssh"
 
 
 async def register(db, job_id: str, vm_name: str, hostname: str, *,
                    result: dict, tag: str = "cloud",
                    private_key: str = "", ssh_key_secret: str = "",
-                   instance_id: str = "", region: str = "") -> None:
+                   instance_id: str = "", region: str = "",
+                   resource_group: str = "") -> None:
     """Onboard a built VM into Password Safe as a managed system + managed account.
 
     Method is per-cloud (``_registration_method``):
@@ -65,6 +74,11 @@ async def register(db, job_id: str, vm_name: str, hostname: str, *,
       DNS name is ``{instance_id}:{region}`` (so ``instance_id`` + ``region`` are required)
       and the account name is ``{managed_account_name};{suffix}``. No SSH key is pushed —
       Password Safe mints it over SSM. Optionally triggers an initial Change Password.
+    * **azurevm** (Azure default) — the Azure VM SSH Rotation custom plugin. The managed
+      system's address is ``tenantId/subscriptionId/resourceGroup/vmName`` (tenant +
+      subscription from Azure config, ``resource_group`` + ``vm_name`` from the deploy).
+      No SSH key is pushed — Password Safe writes the key over Azure VM Run Command.
+      Triggers an initial Change Password by default (``adminuser`` has no baked-in key).
     * **ssh** — the traditional flow. The SSH private key is the VM's own keypair (resolved
       the same way the Entitle SSH registration does: ``ssh_key_secret`` = the per-launch
       override when set, else the configured default).
@@ -113,6 +127,37 @@ async def register(db, job_id: str, vm_name: str, hostname: str, *,
                 dns_name=f"{instance_id}:{region}",
                 account_suffix=_cfg("passwordsafe_ssm_account_suffix") or "local",
             )
+        elif method == "azurevm":
+            tenant_id = _cfg("azure_tenant_id")
+            subscription_id = _cfg("azure_subscription_id")
+            missing = [n for n, v in (("azure_tenant_id", tenant_id),
+                                      ("azure_subscription_id", subscription_id),
+                                      ("resource_group", resource_group),
+                                      ("vm_name", vm_name)) if not v]
+            if missing:
+                raise ps_resource_service.PSResourceError(
+                    "Azure VM SSH Rotation onboarding needs " + ", ".join(missing)
+                    + " (address is tenantId/subscriptionId/resourceGroup/vmName)")
+            # The managed system inherits the functional account's platform, so a non-plugin
+            # functional account would silently create the system on the wrong platform.
+            pname = fa.get("platform_name") or ""
+            if pname and "azure vm ssh rotation" not in pname.lower():
+                raise ps_resource_service.PSResourceError(
+                    f"functional account {fa_name!r} is on platform {pname!r}, not an "
+                    "'Azure VM SSH Rotation' platform — the managed system would land on the "
+                    "wrong platform. Point passwordsafe_vm_functional_account_azure at your "
+                    "Azure VM SSH Rotation Custom Plugin functional account.")
+            r = await ps_resource_service.register_managed_system(
+                name=vm_name,
+                host_name=vm_name,
+                functional_account_id=fa["id"],
+                platform_id=fa["platform_id"],
+                workgroup_id=workgroup_id,
+                entity_type_id=entity_type_id,
+                managed_account_name=managed_account_name,
+                method="azurevm",
+                dns_name=f"{tenant_id}/{subscription_id}/{resource_group}/{vm_name}",
+            )
         else:
             pk = private_key or await entitle_vm_hook._resolve_vm_private_key(tag, ssh_key_secret)
             if not pk:
@@ -137,11 +182,19 @@ async def register(db, job_id: str, vm_name: str, hostname: str, *,
         result["ps_managed_account_id"] = r.get("managed_account_id")
         result["ps_registration_tf_state"] = r.get("tf_state_json")
 
-        # Optional, best-effort (ssm): trigger an initial Change Password so Password Safe
-        # mints the first SSH key over SSM immediately. Off by default — auto-management
-        # rotates on schedule regardless — and never fails the deploy.
-        if (method == "ssm" and r.get("managed_account_id")
-                and config_service.get_bool("passwordsafe_ssm_change_password_on_register", False)):
+        # Optional, best-effort: trigger an initial Change Password so Password Safe mints
+        # the first SSH key immediately (over SSM SendCommand / Azure Run Command).
+        #   • ssm — off by default (auto-management rotates on schedule regardless).
+        #   • azurevm — ON by default: the baked-in adminuser has no key, so without an
+        #     initial mint the account is unusable until the first scheduled rotation.
+        # Never fails the deploy.
+        mint = (
+            (method == "ssm"
+             and config_service.get_bool("passwordsafe_ssm_change_password_on_register", False))
+            or (method == "azurevm"
+                and config_service.get_bool("passwordsafe_azure_change_password_on_register", True))
+        )
+        if mint and r.get("managed_account_id"):
             try:
                 await ps_api_service.change_managed_account_password(int(r["managed_account_id"]))
                 result["ps_change_password_triggered"] = True

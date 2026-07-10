@@ -7,7 +7,7 @@ operator opts in, a freshly built VM is onboarded into Password Safe as a **mana
 system** with **one managed account** — the ``adminuser`` account the bt-ready
 provisioners baked into the image.
 
-Two onboarding shapes (``method`` on register_managed_system):
+Onboarding shapes (``method`` on register_managed_system):
   - ``ssh`` — traditional managed system keyed by host_name/ip on an SSH platform; the
     VM's own private key is pushed and SSH key enforcement manages it (needs SSH
     line-of-sight, i.e. a Resource Broker / Jumpoint per VPC).
@@ -15,6 +15,12 @@ Two onboarding shapes (``method`` on register_managed_system):
     Password Safe manages the Linux EC2 instance over AWS SSM SendCommand, so the
     managed system carries ``dns_name = {instance-id}:{region}`` and the account name
     follows ``{name};{suffix}``; no private key is pushed (Change Password mints it).
+  - ``azurevm`` — the cloud-native "Azure VM SSH Rotation" Password Safe custom plugin:
+    Password Safe writes the key onto the VM via Azure VM Run Command, so the managed
+    system carries ``dns_name = tenantId/subscriptionId/resourceGroup/vmName`` and the
+    account name is the plain Linux user (``adminuser``); no private key is pushed
+    (Change Password mints it). ``ssm`` and ``azurevm`` are the cloud-API "plugin"
+    methods (see ``_PLUGIN_METHODS``) — no SSH reachability required.
 
 Shaped like entitle_registration_service / terraform_pra_service: inline HCL written
 to an ephemeral workdir, ``terraform apply``, ids pulled from outputs, the full
@@ -57,6 +63,13 @@ _TERRAFORM = os.environ.get("TERRAFORM_EXECUTABLE", "terraform")
 _PLUGIN_CACHE_DIR = os.environ.get("TF_PLUGIN_CACHE_DIR", "/root/.terraform.d/plugin-cache")
 
 _REDACTED = "**REDACTED-BY-DASHBOARD**"
+
+# Cloud-API "plugin" methods — Password Safe drives the host over a cloud control
+# plane (AWS SSM / Azure Run Command) rather than SSH, so the managed system carries
+# the plugin's address in ``dns_name``, uses a placeholder ip, omits the SSH-only
+# fields (remote_client_type / ssh_key_enforcement_mode), and pushes no private key
+# (the plugin mints/rotates the key itself). ``ssh`` is the traditional method.
+_PLUGIN_METHODS = frozenset({"ssm", "azurevm"})
 
 
 class PSResourceError(Exception):
@@ -152,12 +165,15 @@ def _generate_managed_system_hcl(*, name: str, host_name: str, ip_address: str, 
     * ``ssh`` (default) — traditional managed system keyed by host_name/ip on an SSH
       platform; the account's SSH private key + placeholder password ride sensitive
       TF_VARs and ``ssh_key_enforcement_mode`` enforces key-only auth.
-    * ``ssm`` — the cloud-native "AWS Systems Manager" custom plugin: the managed system
-      carries ``dns_name = {instance-id}:{region}`` (the field the plugin parses), a
-      placeholder ip, and the custom-plugin platform (inherited from the functional
-      account). No private key is pushed — Password Safe mints the SSH key over SSM via
-      Change Password — so ``emit_private_key`` is False and the private-key TF_VAR is
-      omitted entirely (a declared-but-unset required var fails apply under TF_INPUT=0).
+    * ``ssm`` / ``azurevm`` — the cloud-native custom plugins ("AWS Systems Manager" /
+      "Azure VM SSH Rotation"): the managed system carries the plugin's address in
+      ``dns_name`` (``{instance-id}:{region}`` for ssm, ``tenantId/subscriptionId/
+      resourceGroup/vmName`` for azurevm — the field the plugin parses), a placeholder
+      ip, and the custom-plugin platform (inherited from the functional account). No
+      private key is pushed — Password Safe mints the SSH key via Change Password (over
+      SSM SendCommand / Azure Run Command) — so ``emit_private_key`` is False and the
+      private-key TF_VAR is omitted entirely (a declared-but-unset required var fails
+      apply under TF_INPUT=0).
 
     ``application_host_id`` (>0) routes management through a specific application host
     (the traditional Resource Broker path); 0 leaves it to the functional account's platform."""
@@ -172,7 +188,7 @@ def _generate_managed_system_hcl(*, name: str, host_name: str, ip_address: str, 
         _line("entity_type_id", int(entity_type_id)),
         _line("host_name", json.dumps(host_name)),
     ]
-    if method == "ssm" and dns_name:
+    if method in _PLUGIN_METHODS and dns_name:
         sys_lines.append(_line("dns_name", json.dumps(dns_name)))
     if ip_address:
         sys_lines.append(_line("ip_address", json.dumps(ip_address)))
@@ -182,7 +198,7 @@ def _generate_managed_system_hcl(*, name: str, host_name: str, ip_address: str, 
         _line("functional_account_id", int(functional_account_id)),
         _line("auto_management_flag", "true"),
     ]
-    if method != "ssm":
+    if method not in _PLUGIN_METHODS:
         sys_lines.append(_line("remote_client_type", '"ssh"'))
         sys_lines.append(_line("ssh_key_enforcement_mode", int(ssh_key_enforcement_mode)))
     if application_host_id and int(application_host_id) > 0:
@@ -316,8 +332,15 @@ async def register_managed_system(*, name: str, host_name: str, private_key: str
     ``method="ssm"`` uses the AWS Systems Manager custom plugin: ``dns_name`` must be
     ``{instance-id}:{region}``, the account name becomes ``{managed_account_name};{suffix}``
     (suffix ``local`` for IAM-user mode or an AssumeRole ARN for EC2 mode), no private key
-    is pushed, and ip defaults to a ``127.0.0.1`` placeholder. ``method="ssh"`` (default)
-    keeps the traditional key-managed flow and requires ``private_key``."""
+    is pushed, and ip defaults to a ``127.0.0.1`` placeholder.
+
+    ``method="azurevm"`` uses the Azure VM SSH Rotation custom plugin: ``dns_name`` must be
+    ``tenantId/subscriptionId/resourceGroup/vmName`` (four slash-separated parts, the field
+    the plugin parses), the account name is the plain Linux user (no suffix), no private key
+    is pushed, and ip defaults to a ``127.0.0.1`` placeholder.
+
+    ``method="ssh"`` (default) keeps the traditional key-managed flow and requires
+    ``private_key``."""
     method = (method or "ssh").lower()
     # The provider requires a password even for a key-managed account; supply a strong
     # placeholder it never uses (the real credential is the SSH key, managed by Password Safe).
@@ -334,6 +357,19 @@ async def register_managed_system(*, name: str, host_name: str, private_key: str
             ssh_key_enforcement_mode=ssh_key_enforcement_mode,
             application_host_id=application_host_id,
             method="ssm", dns_name=dns_name, emit_private_key=False)
+    elif method == "azurevm":
+        if not dns_name or dns_name.count("/") != 3:
+            raise PSResourceError(
+                "Azure VM SSH Rotation onboarding requires a dns_name of the form "
+                "'tenantId/subscriptionId/resourceGroup/vmName'")
+        hcl = _generate_managed_system_hcl(
+            name=name, host_name=host_name, ip_address=ip_address or "127.0.0.1", port=port,
+            functional_account_id=functional_account_id, platform_id=platform_id,
+            entity_type_id=entity_type_id, workgroup_id=workgroup_id,
+            managed_account_name=managed_account_name,
+            ssh_key_enforcement_mode=ssh_key_enforcement_mode,
+            application_host_id=application_host_id,
+            method="azurevm", dns_name=dns_name, emit_private_key=False)
     else:
         if not private_key:
             raise PSResourceError(
