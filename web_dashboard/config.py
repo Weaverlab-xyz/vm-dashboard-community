@@ -260,13 +260,18 @@ class Settings(BaseSettings):
 
     # Optional Password Safe VM resource registration (per-deploy opt-in, mirrors
     # entitle_registration_*). Onboards a built VM as a managed system + the baked-in
-    # adminuser account. Two AWS onboarding methods (passwordsafe_aws_registration_method):
-    #   • "ssm" (default) — cloud-native "AWS Systems Manager" Password Safe custom plugin.
-    #     Manages Linux EC2 over AWS SSM SendCommand (no per-VPC Resource Broker / SSH
-    #     reachability). Managed system DNS name = {instance-id}:{region}; the functional
-    #     account is the custom-plugin FA (its platform binds the managed system).
-    #   • "ssh" — traditional managed system keyed by hostname/IP on an SSH platform; the
-    #     VM's own private key is pushed and management needs SSH line-of-sight (broker).
+    # adminuser account. Per-cloud onboarding methods:
+    #   • AWS (passwordsafe_aws_registration_method, default "ssm") — cloud-native "AWS
+    #     Systems Manager" custom plugin. Manages Linux EC2 over AWS SSM SendCommand (no
+    #     per-VPC Resource Broker / SSH reachability). Managed system DNS = {instance-id}:{region}.
+    #   • Azure (passwordsafe_azure_registration_method, default "azurevm") — cloud-native
+    #     "Azure VM SSH Rotation" custom plugin. Writes the key onto the VM over Azure VM
+    #     Run Command (no Resource Broker / SSH reachability). Managed system address =
+    #     tenantId/subscriptionId/resourceGroup/vmName; the first key is minted on onboard
+    #     (passwordsafe_azure_change_password_on_register) since adminuser has none baked in.
+    #   • "ssh" (every other cloud, and AWS/Azure when overridden) — traditional managed
+    #     system keyed by hostname/IP on an SSH platform; the VM's own private key is pushed
+    #     and management needs SSH line-of-sight (broker).
     # The functional account is operator-configured per cloud; its platform decides the
     # management method (agent-plugin / custom-plugin / Resource-Broker).
     passwordsafe_registration_enabled: bool = False     # global capability flag (also per-build opt-in)
@@ -284,6 +289,9 @@ class Settings(BaseSettings):
     passwordsafe_aws_registration_method: str = "ssm"   # "ssm" (AWS Systems Manager plugin, default) | "ssh"
     passwordsafe_ssm_account_suffix: str = "local"      # managed-account name suffix; AssumeRole ARN for EC2 cross-account mode
     passwordsafe_ssm_change_password_on_register: bool = False  # best-effort initial key mint via PS Change Password (off; endpoint verified live)
+    # Azure VM SSH Rotation (cloud-native) onboarding — Azure counterpart of the SSM plugin.
+    passwordsafe_azure_registration_method: str = "azurevm"  # "azurevm" (Azure VM SSH Rotation plugin, default) | "ssh"
+    passwordsafe_azure_change_password_on_register: bool = True  # mint first key via Run Command on onboard (adminuser has none baked in)
     bt_api_host: str = ""        # PRA host, used by terraform_pra_service
     bt_client_id: str = ""
     bt_client_secret: str = ""

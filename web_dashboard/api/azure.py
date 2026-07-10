@@ -1188,7 +1188,8 @@ async def _run_deploy(job_id: str, req: AzureDeployRequest, rg: str, loc: str):
                 and ps_vm_hook.registration_enabled()):
             await ps_vm_hook.register(db, job_id, req.vm_name, hostname,
                                       result=result, tag="Azure",
-                                      ssh_key_secret=req.ssh_key_secret_override or "")
+                                      ssh_key_secret=req.ssh_key_secret_override or "",
+                                      resource_group=rg)
 
         job_service.set_completed(db, job_id, result)
         await cache_service.invalidate(cache_service.key_global("azure_vms"))
@@ -1360,7 +1361,8 @@ async def _run_bulk_deploy(job_items: list, req: AzureBulkDeployRequest, rg: str
                         and ps_vm_hook.registration_enabled()):
                     await ps_vm_hook.register(db, job_id, vm_name, hostname,
                                               result=result, tag="Azure",
-                                              ssh_key_secret=req.ssh_key_secret_override or "")
+                                              ssh_key_secret=req.ssh_key_secret_override or "",
+                                              resource_group=rg)
 
                 job_service.set_completed(db, job_id, result)
 

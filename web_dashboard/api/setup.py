@@ -456,6 +456,9 @@ class BeyondTrustFeatureConfig(BaseModel):
     passwordsafe_aws_registration_method: str = "ssm"     # "ssm" (AWS Systems Manager plugin) | "ssh"
     passwordsafe_ssm_account_suffix: str = "local"        # managed-account name suffix; AssumeRole ARN for EC2 mode
     passwordsafe_ssm_change_password_on_register: bool = False  # best-effort initial key mint via Change Password
+    # Azure VM SSH Rotation (cloud-native) onboarding — Azure counterpart of the SSM plugin.
+    passwordsafe_azure_registration_method: str = "azurevm"  # "azurevm" (Azure VM SSH Rotation plugin) | "ssh"
+    passwordsafe_azure_change_password_on_register: bool = True  # mint first key on onboard (adminuser has none baked in)
     # PRA API credentials (used by the SRA Terraform provider for Shell Jump provisioning)
     bt_api_host: str = ""
     bt_client_id: str = ""

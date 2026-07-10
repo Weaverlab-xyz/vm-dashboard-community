@@ -162,7 +162,39 @@ trigger an immediate **Change Password** right after onboarding
   `ec2_ssm_instance_profile`, which must grant `AmazonSSMManagedInstanceCore`. Confirm the
   instance appears in **Fleet Manager** before onboarding.
 
-### Azure / GCP (and AWS when set to SSH) — traditional managed system
+### Azure — Azure VM SSH Rotation custom plugin (cloud-native, default)
+
+The recommended path for Azure. Password Safe writes the key onto the VM over **Azure VM
+Run Command** (through the Azure control plane) instead of SSH, so you need **no Resource
+Broker and no SSH line-of-sight** — one Password Safe node can manage Linux VMs across many
+resource groups and regions. This is the Azure counterpart of the AWS Systems Manager path;
+plugin internals are documented in **`Beekeeper-AzureVmSshRotation.docx`**.
+
+The dashboard creates the managed system with **address
+`tenantId/subscriptionId/resourceGroup/vmName`** (tenant + subscription from the dashboard's
+Azure config, resource group + VM name from the deploy — the field the plugin parses) on the
+custom-plugin platform, and a managed account named after the baked-in **`adminuser`** Linux
+user (no `;suffix`). The account's credential is an SSH key the plugin **generates and writes
+onto `adminuser`'s `~/.ssh/authorized_keys` via Run Command** on a credential change. Because
+`adminuser` has no key baked in, the dashboard triggers an initial **Change Password** right
+after onboarding by default (`passwordsafe_azure_change_password_on_register`, on) so the
+account is immediately usable.
+
+**Prerequisites (one-time, admin):**
+
+- Upload the **Azure VM SSH Rotation** `.PSPLUGIN` in BeyondInsight → **Configuration →
+  Privileged Access Management → Platform Plugins**.
+- Create a **functional account on the *Azure VM SSH Rotation Custom Plugin* platform** and
+  point the dashboard's **Functional account — Azure** at it. Its platform is what binds the
+  managed system to the plugin. The credentials are the Azure service principal:
+  **Username = Application (client) ID**, **Password = client secret**.
+- Grant that service principal **Virtual Machine Contributor** on the target resource group
+  (covers `Microsoft.Compute/virtualMachines/read` + `runCommand/action`). You may reuse the
+  service principal the dashboard already uses to deploy Azure VMs — it qualifies.
+- The image must be built with the **bt-ready** provisioner so the `adminuser` account exists
+  on the VM (the plugin `chown`s the key to it; it does not create the account).
+
+### GCP (and AWS / Azure when set to SSH) — traditional managed system
 
 A managed system keyed by hostname/IP on an SSH platform; the dashboard pushes the VM's own
 SSH private key into the managed account and `passwordsafe_ssh_key_enforcement_mode` enforces
@@ -179,6 +211,8 @@ key-only auth. This requires SSH line-of-sight from a Resource Broker / Jumpoint
 | `passwordsafe_aws_registration_method` | `ssm` | AWS method: `ssm` (AWS Systems Manager plugin) or `ssh` |
 | `passwordsafe_ssm_account_suffix` | `local` | SSM account-name suffix; an AssumeRole ARN for EC2 cross-account mode |
 | `passwordsafe_ssm_change_password_on_register` | `false` | Trigger an initial Change Password after onboarding (mints the key now) |
+| `passwordsafe_azure_registration_method` | `azurevm` | Azure method: `azurevm` (Azure VM SSH Rotation plugin) or `ssh` |
+| `passwordsafe_azure_change_password_on_register` | `true` | Mint `adminuser`'s first key over Run Command right after onboarding |
 | `passwordsafe_ssh_key_enforcement_mode` | `2` | SSH method only — 0 none / 1 auto / 2 strict |
 | `passwordsafe_application_host_id` | `0` | SSH method only — >0 routes via a broker/application host |
 
