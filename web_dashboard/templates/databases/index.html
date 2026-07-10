@@ -71,6 +71,14 @@
               </td>
               <td class="px-4 py-3 text-right whitespace-nowrap">
                 <button @click="showConnection(d)" class="text-xs px-2 py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded font-medium">Connection</button>
+                <button @click="entitleRegister(d)"
+                        x-show="entitleRegEnabled && d.status === 'available' && !d.entitle_integration_id"
+                        title="Register this database as an Entitle integration so users request JIT access (ephemeral accounts)"
+                        class="text-xs px-2 py-1 bg-fuchsia-600 hover:bg-fuchsia-700 text-white rounded font-medium ml-1">Register in Entitle</button>
+                <button @click="entitleDeregister(d)"
+                        x-show="entitleRegEnabled && d.entitle_integration_id"
+                        title="Remove this database's Entitle integration"
+                        class="text-xs px-2 py-1 text-fuchsia-700 hover:underline ml-1">Deregister</button>
                 <button @click="decommission(d)" x-show="d.status !== 'decommissioned' && d.status !== 'decommissioning'"
                         class="text-xs px-2 py-1 text-red-600 hover:underline ml-1">Decommission</button>
               </td>
@@ -332,6 +340,7 @@ function databasesPage() {
   return {
     ...secretPickerState(),
     databases: [], loading: true,
+    entitleRegEnabled: {{ entitle_registration_enabled | default(false) | tojson }},
     toast: '', toastType: 'success',
     showForm: false, saving: false, conn: null,
     options: { cloud: '', region: '', instance_classes: [], db_subnet_groups: [], security_groups: [], vault_account_groups: [], jump_groups: [], jumpoints: [] },
@@ -491,6 +500,28 @@ function databasesPage() {
         await this.refresh();
       } catch (e) {
         this.flash(e.message || 'Decommission failed.', 'error');
+      }
+    },
+
+    async entitleRegister(d) {
+      if (!confirm(`Register "${d.engine}" database in ${d.region} as an Entitle integration?\n\nEntitle connects through the shared agent and mints JIT (ephemeral) accounts on the database. The PRA tunnel remains the path the user's client connects through. Track progress in Jobs.`)) return;
+      try {
+        await API.post(`/api/databases/${d.id}/entitle-register`, { action: 'register' });
+        this.flash('Registering database in Entitle — track progress in Jobs.');
+        await this.refresh();
+      } catch (e) {
+        this.flash(e.message || 'Entitle registration failed.', 'error');
+      }
+    },
+
+    async entitleDeregister(d) {
+      if (!confirm(`Deregister "${d.engine}" database from Entitle?\n\nThis destroys the Entitle integration; the database and its PRA tunnel are unaffected.`)) return;
+      try {
+        await API.post(`/api/databases/${d.id}/entitle-register`, { action: 'deregister' });
+        this.flash('Deregistering from Entitle — track progress in Jobs.');
+        await this.refresh();
+      } catch (e) {
+        this.flash(e.message || 'Entitle deregistration failed.', 'error');
       }
     },
 

@@ -272,3 +272,44 @@ async def decommission_database(
         return result
     except cloud_database_service.CloudDatabaseError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+class EntitleDatabaseRegisterRequest(BaseModel):
+    action: str = "register"   # register | deregister
+
+
+@router.post("/{db_id}/entitle-register", status_code=202)
+async def register_database_in_entitle(
+    db_id: str,
+    payload: EntitleDatabaseRegisterRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Register (or deregister) a provisioned database as an Entitle integration
+    (PostgreSQL / MySQL / SQL Server) so users request JIT access in Entitle. The
+    private DB is reached by the shared Entitle agent; the PRA tunnel the dashboard
+    brokers is the separate path the user's client connects through. Async —
+    enqueues a ``clouddb_entitle_register`` job; open the job for status/error.
+    Mirrors the k8s cluster ``entitle-register`` endpoint."""
+    _require_enabled()
+    if payload.action not in cloud_database_service.VALID_ENTITLE_DB_ACTIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown action {payload.action!r} (expected one of "
+                   f"{', '.join(cloud_database_service.VALID_ENTITLE_DB_ACTIONS)})",
+        )
+    if payload.action == "register" and not config_service.get_bool("entitle_registration_enabled", False):
+        raise HTTPException(
+            status_code=409,
+            detail="Entitle registration is disabled (set entitle_registration_enabled)")
+    try:
+        cloud_database_service.connection_info(db, db_id)   # 404 if unknown
+    except cloud_database_service.CloudDatabaseError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    job = job_service.create_job(
+        db, job_type="clouddb_entitle_register", created_by=current_user.username,
+        metadata={"db_id": db_id, "action": payload.action},
+    )
+    return {"ok": True,
+            "status": "registering" if payload.action == "register" else "deregistering",
+            "db_id": db_id, "action": payload.action, "job_id": job.id}

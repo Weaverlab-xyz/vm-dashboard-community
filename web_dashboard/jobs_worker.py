@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 HANDLED_TYPES = (
     "k8s_provision", "k8s_decommission",
     "k8s_management", "k8s_secret_delivery", "k8s_entitle_agent", "k8s_entitle_register",
-    "clouddb_provision", "clouddb_decommission",
+    "clouddb_provision", "clouddb_decommission", "clouddb_entitle_register",
     "vdesktop_pool_provision", "vdesktop_pool_teardown",
     "packer_aws_build", "packer_azure_build", "packer_gcp_build",
     "aws_export_image", "gcp_export_image", "azure_export_image",
@@ -125,6 +125,10 @@ async def _dispatch(job_id: str, job_type: str, meta: dict) -> None:
         elif job_type == "clouddb_decommission":
             await cloud_database_service.run_decommission(
                 db, db_id=meta["db_id"], job_id=job_id)
+        elif job_type == "clouddb_entitle_register":
+            await cloud_database_service.run_entitle_register(
+                db, db_id=meta["db_id"], job_id=job_id,
+                action=meta.get("action", "register"))
         elif job_type == "vdesktop_pool_provision":
             # provision_seats / teardown_seats own their own SessionLocal + the
             # job lifecycle (set_running/set_completed) when given a job_id, so they

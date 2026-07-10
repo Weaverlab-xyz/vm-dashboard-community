@@ -543,44 +543,152 @@ def _registration_enabled() -> bool:
     return config_service.get_bool("entitle_registration_enabled", False)
 
 
-async def _register_entitle(db: Session, *, row: CloudDatabase, job_id: str,
-                            engine: str, tf_variables: dict) -> None:
+# Actions accepted by the post-provision entitle-register endpoint / job.
+VALID_ENTITLE_DB_ACTIONS = ("register", "deregister")
+
+
+def _provision_job_for(db: Session, db_id: str) -> Optional[Job]:
+    """The most recent ``clouddb_provision`` Job for this DB — where a DB's mutable
+    operational metadata lives (``tf_variables`` minus secrets, the tunnel/Entitle
+    TF state). Mirrors the lookup :func:`run_decommission` uses so registration
+    state is stashed exactly where teardown reads it."""
+    jobs = (db.query(Job)
+              .filter(Job.job_type == "clouddb_provision")
+              .order_by(Job.created_at.desc()).all())
+    return next((j for j in jobs if (j.metadata_dict or {}).get("db_id") == db_id), None)
+
+
+async def _entitle_register_core(db: Session, *, row: CloudDatabase, engine: str,
+                                 tf_variables: Optional[dict] = None) -> None:
     """Register the managed DB as an Entitle integration (PostgreSQL / MySQL /
     SQL Server) so users can request JIT access. Records ``entitle_integration_id``
-    on the row and stashes the registration's Terraform state in the job metadata
-    for teardown. Private (PRA-only) DB → attaches the shared Entitle agent.
-    Non-fatal: a failure leaves the DB up, unregistered."""
+    on the row and stashes the registration's Terraform state in the DB's
+    **provisioning-job** metadata — where :func:`run_decommission` reads
+    ``entitle_registration_tf_state`` for teardown, regardless of which job
+    triggered the registration. Private (PRA-only) DB → attaches the shared
+    Entitle agent. **Raises** on failure (the caller decides whether that's fatal).
+
+    ``tf_variables`` is supplied on the provision path (password already re-injected);
+    the post-hoc path passes ``None`` and we reconstruct the admin credential from
+    the provisioning job metadata + the encrypted config store."""
     from . import entitle_registration_service as ent
-    # Per-cloud admin credential key normalization (mirrors _broker_tunnel).
-    admin_username = (tf_variables.get("master_username")
-                      or tf_variables.get("administrator_login") or "")
-    admin_password = (tf_variables.get("master_password")
-                      or tf_variables.get("administrator_password") or "")
-    try:
-        result = await ent.register_database(
-            engine=engine,
-            name=tf_variables.get("identifier") or f"clouddb-{row.id[:8]}",
-            host=row.private_host,
-            port=row.port or 0,
-            username=admin_username,
-            password=admin_password,
-            database=("master" if engine == "sqlserver" else tf_variables.get("db_name", "")),
-            private=True,   # dashboard-built DBs are private (publicly_accessible=false)
-            tag="clouddb",
-        )
-        row.entitle_integration_id = result.get("integration_id") or None
-        db.commit()
-        job = db.query(Job).filter(Job.id == job_id).first()
-        if job is not None:
-            meta = job.metadata_dict or {}
+    prov_job = _provision_job_for(db, row.id)
+    tfv = tf_variables if tf_variables is not None else \
+        ((prov_job.metadata_dict or {}).get("tf_variables") if prov_job else None) or {}
+
+    # Per-cloud admin credential key normalization (mirrors _broker_tunnel). The
+    # password is never in job metadata (scrubbed) — fall back to the config store
+    # (still present until a clean decommission). Cloud SQL SQL Server forces the
+    # 'sqlserver' admin login; everything else defaults to 'dbadmin'.
+    default_user = "sqlserver" if (engine == "sqlserver" and row.cloud == "gcp") else "dbadmin"
+    admin_username = (tfv.get("master_username")
+                      or tfv.get("administrator_login") or default_user)
+    admin_password = (tfv.get("master_password")
+                      or tfv.get("administrator_password")
+                      or config_service.get(f"clouddb/{row.id}/admin") or "")
+    if not admin_password:
+        raise CloudDatabaseError(
+            f"no admin credential available for db_id={row.id} "
+            f"(provisioning job pruned?) — cannot register in Entitle")
+
+    result = await ent.register_database(
+        engine=engine,
+        name=tfv.get("identifier") or f"clouddb-{row.id[:8]}",
+        host=row.private_host,
+        port=row.port or 0,
+        username=admin_username,
+        password=admin_password,
+        database=("master" if engine == "sqlserver" else tfv.get("db_name", "")),
+        private=True,   # dashboard-built DBs are private (publicly_accessible=false)
+        tag="clouddb",
+    )
+    row.entitle_integration_id = result.get("integration_id") or None
+    db.commit()
+    if prov_job is not None:
+        j = db.query(Job).filter(Job.id == prov_job.id).first()
+        if j is not None:
+            meta = j.metadata_dict or {}
             meta["entitle_registration_tf_state"] = result.get("tf_state_json")
-            job.metadata_dict = meta
+            j.metadata_dict = meta
             db.commit()
-        logger.info("clouddb registered in Entitle db_id=%s integration_id=%s",
-                    row.id, row.entitle_integration_id)
+    logger.info("clouddb registered in Entitle db_id=%s integration_id=%s",
+                row.id, row.entitle_integration_id)
+
+
+async def _register_entitle(db: Session, *, row: CloudDatabase, engine: str,
+                            tf_variables: Optional[dict] = None) -> None:
+    """Non-fatal wrapper used on the provision path: register the DB in Entitle but
+    never let a registration failure fail the provision (the DB is up regardless)."""
+    try:
+        await _entitle_register_core(db, row=row, engine=engine, tf_variables=tf_variables)
     except Exception as exc:
         logger.warning("clouddb Entitle registration failed db_id=%s (DB is up): %s",
                        row.id, exc)
+
+
+async def _deregister_entitle_core(db: Session, *, row: CloudDatabase) -> None:
+    """Destroy the DB's Entitle integration using the state stashed on its
+    provisioning job, then clear ``entitle_integration_id`` + the state key.
+    **Raises** on a real destroy failure."""
+    from . import entitle_registration_service as ent
+    prov_job = _provision_job_for(db, row.id)
+    ent_state = ((prov_job.metadata_dict or {}).get("entitle_registration_tf_state")
+                 if prov_job else None)
+    if not ent_state:
+        # Nothing recorded to destroy — just clear any stale id so the UI recovers.
+        if row.entitle_integration_id:
+            row.entitle_integration_id = None
+            db.commit()
+        logger.info("clouddb Entitle deregister: no stored state for db_id=%s "
+                    "(nothing to destroy)", row.id)
+        return
+    await ent.deregister(ent_state)
+    row.entitle_integration_id = None
+    db.commit()
+    j = db.query(Job).filter(Job.id == prov_job.id).first()
+    if j is not None:
+        meta = j.metadata_dict or {}
+        meta.pop("entitle_registration_tf_state", None)
+        j.metadata_dict = meta
+        db.commit()
+    logger.info("clouddb Entitle integration deregistered db_id=%s", row.id)
+
+
+async def run_entitle_register(db: Session, *, db_id: str, job_id: str,
+                               action: str = "register") -> None:
+    """Worker entry for a ``clouddb_entitle_register`` job: register or deregister
+    the DB as an Entitle integration with Job tracking. Mirrors
+    ``k8s_service.run_entitle_register``. Marks the job failed on error (unlike the
+    provision path's non-fatal wrapper, a post-hoc request should surface failures)."""
+    row = db.query(CloudDatabase).filter(CloudDatabase.id == db_id).first()
+    if not row:
+        job_service.set_failed(db, job_id, f"cloud database {db_id} not found")
+        return
+    job_service.set_running(db, job_id)
+    try:
+        if action == "deregister":
+            job_service.update_progress(db, job_id, 30, "Removing Entitle integration…")
+            await _deregister_entitle_core(db, row=row)
+        else:
+            if not _registration_enabled():
+                raise CloudDatabaseError(
+                    "Entitle registration is disabled (set entitle_registration_enabled)")
+            if not row.private_host:
+                raise CloudDatabaseError(
+                    "database has no private host yet — wait for provisioning to finish")
+            job_service.update_progress(db, job_id, 30, "Registering database in Entitle…")
+            await _entitle_register_core(db, row=row, engine=row.engine, tf_variables=None)
+            if not row.entitle_integration_id:
+                raise CloudDatabaseError("Entitle registration returned no integration id")
+        job_service.set_completed(db, job_id, {
+            "db_id": db_id, "action": action,
+            "entitle_integration_id": row.entitle_integration_id,
+        })
+        logger.info("clouddb entitle %s complete db_id=%s integration_id=%s",
+                    action, db_id, row.entitle_integration_id)
+    except Exception as exc:
+        job_service.set_failed(db, job_id, str(exc))
+        logger.exception("clouddb entitle %s job failed db_id=%s: %s", action, db_id, exc)
 
 
 async def _store_ps_credentials(db: Session, *, row: CloudDatabase, job_id: str,
@@ -747,7 +855,7 @@ async def run_provision_apply(
         _job = db.query(Job).filter(Job.id == job_id).first()
         _reg_choice = bool((_job.metadata_dict or {}).get("register_in_entitle")) if _job else False
         if row.private_host and _reg_choice and _registration_enabled():
-            await _register_entitle(db, row=row, job_id=job_id, engine=engine, tf_variables=tf_variables)
+            await _register_entitle(db, row=row, engine=engine, tf_variables=tf_variables)
 
         job_service.set_completed(db, job_id)
         logger.info("clouddb apply complete db_id=%s host=%s tunnel=%s",
