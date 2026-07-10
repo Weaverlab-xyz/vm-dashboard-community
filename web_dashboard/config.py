@@ -766,6 +766,16 @@ class Settings(BaseSettings):
     entitle_agent_existing_secret_helm_key: str = "agent.existingSecret"  # used only when the plaintext key is cleared (future chart)
     entitle_agent_helm_extra_set: str = ""           # extra `--set key=value` args, comma-separated (e.g. datadog.datadog.apiKey=…); the chart bundles Datadog
     entitle_agent_kms_type: str = "kubernetes_secret_manager"  # where the running agent vaults integration creds
+    # Per-target-cloud kmsType override; blank → entitle_agent_kms_type. AKS needs
+    # azure_secret_manager — the in-cluster-Secrets path 401s there; the azure_aks
+    # module builds the workload-identity MI + per-cluster Key Vault it requires.
+    # EKS/GKE keep kubernetes_secret_manager. Keyed off the cluster's cloud.
+    entitle_agent_kms_type_aws: str = ""
+    entitle_agent_kms_type_azure: str = "azure_secret_manager"
+    entitle_agent_kms_type_gcp: str = ""
+    # ServiceAccount the agent pod runs as (the chart's default). Must equal the AKS
+    # federated-credential subject's SA (azure_aks module) — pinned on the install.
+    entitle_agent_service_account: str = "entitle-agent-sa"
     # Register managed clusters as Entitle Kubernetes integrations (generic "Kubernetes"
     # app; EKS/AKS/GKE). External access mints a least-priv ServiceAccount; private API
     # clusters use the agent's In-Cluster access.

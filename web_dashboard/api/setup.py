@@ -570,6 +570,15 @@ class EntitleFeatureConfig(BaseModel):
     entitle_workflow_id: str = ""       # REQUIRED for registration: default approval workflow UUID
     entitle_endpoint: str = ""          # optional provider endpoint override; blank → derived from the API URL host
     entitle_agent_token_name: str = ""  # read-only display only; auto-set by ensure_agent_token (not edited here)
+    # Agent KMS backend (where the agent vaults integration creds). Per-cloud override;
+    # blank → entitle_agent_kms_type. AKS needs azure_secret_manager (the azure_aks
+    # module provisions the workload-identity MI + Key Vault it requires); EKS/GKE keep
+    # kubernetes_secret_manager.
+    entitle_agent_kms_type: str = "kubernetes_secret_manager"
+    entitle_agent_kms_type_aws: str = ""
+    entitle_agent_kms_type_azure: str = "azure_secret_manager"
+    entitle_agent_kms_type_gcp: str = ""
+    entitle_agent_service_account: str = "entitle-agent-sa"  # agent pod SA; must match the AKS federated subject
     entitle_ssh_sudo_user: str = ""
     entitle_ssh_private_key_ref: str = ""
     # User-JIT (Phase 4) — operator surfaces these via the Settings panel.

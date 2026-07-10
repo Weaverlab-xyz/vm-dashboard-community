@@ -377,6 +377,14 @@ def _build_cluster_tf_variables(*, cloud: str, cluster_id: str, name: str,
         cidrs = opts.get("authorized_cidrs") or _cfg_list("azure_aks_authorized_cidrs")
         if cidrs:
             tf["authorized_ip_ranges"] = cidrs
+        # Entitle agent workload identity + per-cluster Key Vault (azure_secret_manager):
+        # the module derives the Key Vault name from cluster_id and sets the federated
+        # credential subject from the namespace/SA — which must match the agent install
+        # (setup_entitle_agent). cluster_id is passed on destroy too (row.id), so the
+        # vault name stays stable.
+        tf["cluster_id"] = cluster_id
+        tf["agent_namespace"] = _cfg("entitle_agent_namespace", "entitle")
+        tf["agent_service_account"] = _cfg("entitle_agent_service_account", "entitle-agent-sa")
         return tf
 
     if cloud == "gcp":
@@ -626,6 +634,16 @@ async def run_provision_apply(db: Session, *, cluster_id: str, job_id: str,
             ca_b64=ca_b64, region=row.region or "")
         ref = _KUBECONFIG_KEY.format(cluster_id=cluster_id)
         config_service.set(ref, kubeconfig)
+        # Azure: capture the agent's workload-identity client id + per-cluster Key
+        # Vault name (module outputs) so setup_entitle_agent can thread them into the
+        # chart's platform.azure.* values for kmsType=azure_secret_manager.
+        if cloud == "azure":
+            azure_client_id = str(outputs.get("agent_identity_client_id") or "")
+            azure_kv_name = str(outputs.get("agent_key_vault_name") or "")
+            if azure_client_id:
+                config_service.set(f"entitle_agent_azure_client_id_{cluster_id}", azure_client_id)
+            if azure_kv_name:
+                config_service.set(f"entitle_agent_azure_key_vault_name_{cluster_id}", azure_kv_name)
         row.kubeconfig_ref = ref
         row.api_server = endpoint
         row.status = "registered"
@@ -775,6 +793,14 @@ async def run_decommission(db: Session, *, cluster_id: str, job_id: str) -> None
             config_service.set(row.kubeconfig_ref, "")
         except Exception as exc:
             logger.warning("k8s decommission: clearing kubeconfig for %s failed: %s", cluster_id, exc)
+    # Clear the per-cluster Entitle-agent azure_secret_manager values (the MI + Key
+    # Vault themselves are TF-managed and destroyed with the cluster above).
+    for _k in (f"entitle_agent_azure_client_id_{cluster_id}",
+               f"entitle_agent_azure_key_vault_name_{cluster_id}"):
+        try:
+            config_service.set(_k, "")
+        except Exception as exc:
+            logger.warning("k8s decommission: clearing %s failed: %s", _k, exc)
     db.delete(row)
     db.commit()
     job_service.set_completed(db, job_id, {"cluster_id": cluster_id, "deregistered": name})
@@ -1468,9 +1494,38 @@ async def setup_entitle_agent(cluster_id: str, action: str = "install") -> None:
         if not token:
             raise K8sError("Entitle agent token resolved empty after mint")
 
+        # Per-cloud KMS backend: AKS uses azure_secret_manager (Azure Key Vault via
+        # workload identity — the in-cluster-Secrets path 401s there); EKS/GKE keep
+        # kubernetes_secret_manager. Blank per-cloud → the shared entitle_agent_kms_type.
+        kms_type = (_cfg(f"entitle_agent_kms_type_{row.cloud}")
+                    or _cfg("entitle_agent_kms_type")
+                    or "kubernetes_secret_manager")
         helm_args = ["upgrade", "--install", "entitle-agent", _cfg("entitle_agent_chart", "entitle-agent"),
                      "--repo", repo, "--namespace", namespace, "--create-namespace", "--wait",
-                     "--set", f"kmsType={_cfg('entitle_agent_kms_type', 'kubernetes_secret_manager')}"]
+                     "--set", f"kmsType={kms_type}"]
+        # azure_secret_manager: the agent vaults its keys in the per-cluster Key Vault
+        # via workload identity. The azure_aks module built the MI + federated credential
+        # + vault + Secrets-Officer grant and run_provision_apply captured the client id +
+        # vault name; thread them into the chart. The chart auto-wires the SA annotation +
+        # pod label from platform.mode=azure + platform.azure.clientId (verified via
+        # `helm template`), so no manual annotation/label --set is needed.
+        if row.cloud == "azure" and kms_type == "azure_secret_manager":
+            client_id = config_service.get(f"entitle_agent_azure_client_id_{cluster_id}")
+            kv_name = config_service.get(f"entitle_agent_azure_key_vault_name_{cluster_id}")
+            tenant_id = _cfg("azure_tenant_id")
+            sa_name = _cfg("entitle_agent_service_account", "entitle-agent-sa")
+            missing = [n for n, v in (("client id", client_id), ("key vault name", kv_name),
+                                      ("tenant id", tenant_id)) if not v]
+            if missing:
+                raise K8sError(
+                    f"azure_secret_manager needs the agent managed-identity {', '.join(missing)} — "
+                    "provision the AKS cluster with the workload-identity module, or set "
+                    "entitle_agent_kms_type_azure to kubernetes_secret_manager")
+            helm_args += ["--set", "platform.mode=azure",
+                          "--set", f"platform.azure.clientId={client_id}",
+                          "--set", f"platform.azure.keyVaultName={kv_name}",
+                          "--set", f"platform.azure.tenantId={tenant_id}",
+                          "--set", f"serviceAccount.name={sa_name}"]
         ver = _cfg("entitle_agent_chart_version")
         if ver:
             helm_args += ["--version", ver]
