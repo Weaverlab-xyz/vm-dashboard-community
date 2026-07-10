@@ -517,6 +517,69 @@ async def get_ssm_parameter(region: str, name: str) -> str:
         raise AWSError("AWS credentials not configured.")
 
 
+def _run_ssm_command_sync(region: str, instance_id: str, commands: list,
+                          timeout: int, poll_interval: int) -> dict:
+    """Send an AWS-RunShellScript command to a managed instance and poll to
+    completion. Returns {status, response_code, stdout, stderr, command_id}.
+
+    Used to run DB-client SQL on the shared Jumpoint host (the only dashboard
+    component with line-of-sight to the private DB) — the same SSM SendCommand
+    path Password Safe's DB custom plugin uses for rotation."""
+    import time
+    _require_boto3()
+    ssm = boto3.client("ssm", **_aws_kwargs(region))
+    send = ssm.send_command(
+        InstanceIds=[instance_id],
+        DocumentName="AWS-RunShellScript",
+        Comment="vm-dashboard cloud-db onboarding"[:100],
+        Parameters={
+            "commands": list(commands),
+            # SSM caps executionTimeout at 172800; keep it >= our poll window.
+            "executionTimeout": [str(max(int(timeout), 60))],
+        },
+    )
+    command_id = send["Command"]["CommandId"]
+    # The invocation isn't queryable for a beat after send — tolerate the
+    # InvocationDoesNotExist race while polling for a terminal status.
+    terminal = {"Success", "Failed", "Cancelled", "TimedOut", "Undeliverable", "Terminated"}
+    deadline = time.monotonic() + max(int(timeout), 60)
+    inv: dict = {}
+    while time.monotonic() < deadline:
+        time.sleep(poll_interval)
+        try:
+            inv = ssm.get_command_invocation(CommandId=command_id, InstanceId=instance_id)
+        except ClientError as e:
+            if e.response.get("Error", {}).get("Code") == "InvocationDoesNotExist":
+                continue
+            raise
+        if inv.get("Status") in terminal:
+            break
+    return {
+        "command_id": command_id,
+        "status": inv.get("Status", "TimedOut"),
+        "response_code": inv.get("ResponseCode", -1),
+        "stdout": inv.get("StandardOutputContent", "") or "",
+        "stderr": inv.get("StandardErrorContent", "") or "",
+    }
+
+
+async def ssm_send_command(region: str, instance_id: str, commands: list, *,
+                           timeout: int = 300, poll_interval: int = 3) -> dict:
+    """Run shell ``commands`` on an SSM-managed instance and wait for the result.
+
+    Returns ``{command_id, status, response_code, stdout, stderr}``. A non-Success
+    status (or non-zero response_code) is surfaced to the caller — this never raises
+    on a failed command, only on an AWS/transport error, so callers decide whether a
+    SQL failure is fatal."""
+    try:
+        return await asyncio.to_thread(
+            _run_ssm_command_sync, region, instance_id, commands, timeout, poll_interval)
+    except (ClientError, BotoCoreError) as e:
+        raise AWSError(f"SSM SendCommand to {instance_id} failed: {e}") from e
+    except NoCredentialsError:
+        raise AWSError("AWS credentials not configured.")
+
+
 def _run_container_instance_sync(
     region: str, ami_id: str, instance_type: str, subnet_id: str,
     security_group_ids: list, instance_profile: str, user_data: str, name_tag: str,

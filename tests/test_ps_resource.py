@@ -16,6 +16,7 @@ account):
 Imports ps_resource_service with a stubbed web_dashboard.config (no app deps).
 Runs under pytest or standalone:  python tests/test_ps_resource.py
 """
+import json
 import os
 import sys
 import types
@@ -195,6 +196,84 @@ def test_azurevm_register_rejects_non_four_part_address():
             raise AssertionError("expected PSResourceError for dns_name=%r" % bad)
         except ps.PSResourceError:
             pass
+
+
+# ── Cloud-DB onboarding shapes (dbssm = "{engine} SSM Custom Plugin"; pravault =
+# "PRA Vault Username Password") — password-managed (no SSH key, dss flag off). ─
+
+_DB_DNS = "i-0eaa6a10886717ed;us-east-1;db.abc.us-east-1.rds.amazonaws.com;appdb;C:\\Utils\\public_ssm.pem;local"
+_DBSSM = dict(name="clouddb-pg", host_name="db.abc.us-east-1.rds.amazonaws.com",
+              ip_address="127.0.0.1", port=5432, functional_account_id=42, platform_id=20,
+              entity_type_id=1, workgroup_id="55", managed_account_name="psafe_ab12cd34ef56",
+              ssh_key_enforcement_mode=2, method="dbssm", dns_name=_DB_DNS,
+              emit_private_key=False, dss_auto_management=False)
+
+_PRAVAULT = dict(name="clouddb-pg-pravault", host_name="https://pra.example.com",
+                 ip_address="127.0.0.1", port=443, functional_account_id=7, platform_id=21,
+                 entity_type_id=1, workgroup_id="55", managed_account_name="clouddb-pg-admin",
+                 ssh_key_enforcement_mode=2, method="pravault", dns_name="",
+                 emit_private_key=False, dss_auto_management=False)
+
+
+def test_dbssm_system_block_uses_dns_name_placeholder_ip_and_no_ssh():
+    hcl = ps._generate_managed_system_hcl(**_DBSSM)
+    assert ps._line("dns_name", json.dumps(_DB_DNS)) in hcl
+    assert ps._line("ip_address", '"127.0.0.1"') in hcl
+    assert ps._line("platform_id", 20) in hcl
+    assert ps._line("port", 5432) in hcl
+    assert "remote_client_type" not in hcl
+    assert "ssh_key_enforcement_mode" not in hcl
+
+
+def test_dbssm_account_is_password_managed_no_key_no_dss():
+    hcl = ps._generate_managed_system_hcl(**_DBSSM)
+    assert ps._line("account_name", '"psafe_ab12cd34ef56"') in hcl
+    assert "private_key" not in hcl
+    assert ps._line("password", "var.ps_account_password") in hcl
+    # Password-managed, so DSS (SSH-key) auto-management is OFF but auto-management is ON.
+    assert ps._line("dss_auto_management_flag", "false") in hcl
+    assert ps._line("auto_management_flag", "true") in hcl
+    assert 'variable "ps_account_private_key"' not in hcl
+
+
+def test_dbssm_register_rejects_dns_name_without_six_parts():
+    import asyncio
+    for bad in ("", "a;b;c", "a;b;c;d;e;f;g", "no-semicolons"):
+        try:
+            asyncio.run(ps.register_managed_system(
+                name="pg", host_name="pg", functional_account_id=1, platform_id=20,
+                workgroup_id="wg", method="dbssm", dns_name=bad))
+            raise AssertionError("expected PSResourceError for dns_name=%r" % bad)
+        except ps.PSResourceError:
+            pass
+
+
+def test_pravault_system_uses_host_url_no_dns_no_ssh():
+    hcl = ps._generate_managed_system_hcl(**_PRAVAULT)
+    assert ps._line("host_name", '"https://pra.example.com"') in hcl
+    assert "dns_name" not in hcl
+    assert ps._line("ip_address", '"127.0.0.1"') in hcl
+    assert "remote_client_type" not in hcl
+    assert "ssh_key_enforcement_mode" not in hcl
+
+
+def test_pravault_account_is_the_vault_account_name_password_managed():
+    hcl = ps._generate_managed_system_hcl(**_PRAVAULT)
+    assert ps._line("account_name", '"clouddb-pg-admin"') in hcl
+    assert "private_key" not in hcl
+    assert ps._line("dss_auto_management_flag", "false") in hcl
+    assert ps._line("auto_management_flag", "true") in hcl
+
+
+def test_pravault_register_rejects_empty_host_name():
+    import asyncio
+    try:
+        asyncio.run(ps.register_managed_system(
+            name="pv", host_name="", functional_account_id=1, platform_id=21,
+            workgroup_id="wg", method="pravault"))
+        raise AssertionError("expected PSResourceError for empty host_name")
+    except ps.PSResourceError:
+        pass
 
 
 if __name__ == "__main__":

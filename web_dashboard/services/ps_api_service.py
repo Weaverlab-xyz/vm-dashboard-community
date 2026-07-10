@@ -104,20 +104,44 @@ async def _sign_out(client: httpx.AsyncClient) -> None:
         pass
 
 
-async def _platform_id(client: httpx.AsyncClient, engine: str) -> int:
-    platform_name = _PLATFORM_BY_ENGINE.get(engine)
-    if not platform_name:
-        raise PSApiError(f"no Password Safe platform mapping for engine {engine!r}")
+async def _platform_id_by_name(client: httpx.AsyncClient, platform_name: str) -> int:
+    """Resolve a platform display name → PlatformID via GET Platforms. Used for
+    both the built-in DB engines and the operator-installed custom plugins
+    ("psql SSM Custom Plugin", "PRA Vault Username Password", …)."""
     resp = await client.get("Platforms")
     if resp.status_code != 200:
         raise PSApiError(f"GET Platforms failed ({resp.status_code}): {resp.text[:400]}")
     for p in resp.json():
         name = str(p.get("Name") or p.get("PlatformName") or "").strip()
-        if name.lower() == platform_name.lower():
+        if name.lower() == platform_name.strip().lower():
             pid = p.get("PlatformID") or p.get("PlatformId") or p.get("ID")
             if pid is not None:
                 return int(pid)
     raise PSApiError(f"platform {platform_name!r} not found in Password Safe")
+
+
+async def _platform_id(client: httpx.AsyncClient, engine: str) -> int:
+    platform_name = _PLATFORM_BY_ENGINE.get(engine)
+    if not platform_name:
+        raise PSApiError(f"no Password Safe platform mapping for engine {engine!r}")
+    return await _platform_id_by_name(client, platform_name)
+
+
+async def get_platform_id(name_or_id: str) -> int:
+    """Resolve a Password Safe platform by display name → id (a numeric value is
+    passed through). Public helper for the cloud-DB onboarding, which points at
+    operator-installed custom-plugin platforms configured by name."""
+    val = (name_or_id or "").strip()
+    if not val:
+        raise PSApiError("platform name is empty")
+    if val.isdigit():
+        return int(val)
+    async with _client() as client:
+        await _sign_in(client)
+        try:
+            return await _platform_id_by_name(client, val)
+        finally:
+            await _sign_out(client)
 
 
 async def _platform_name(client: httpx.AsyncClient, platform_id: int) -> str:
@@ -240,6 +264,40 @@ async def create_functional_account(
             pid = await _platform_id(client, engine)
             resp = await client.post("FunctionalAccounts", json={
                 "PlatformID": pid,
+                "AccountName": account_name,
+                "DisplayName": display_name,
+                "Password": password,
+                "Description": description[:1000],
+            })
+            if resp.status_code not in (200, 201):
+                raise PSApiError(
+                    f"POST FunctionalAccounts failed ({resp.status_code}): {resp.text[:400]}")
+            body = resp.json()
+            fa_id = body.get("FunctionalAccountID") or body.get("ID") or body.get("Id")
+            if fa_id is None:
+                raise PSApiError(f"FunctionalAccounts response had no id: {str(body)[:400]}")
+            return int(fa_id)
+        finally:
+            await _sign_out(client)
+
+
+async def create_functional_account_on_platform(
+    *, platform_id: int, account_name: str, display_name: str,
+    password: str, description: str = "",
+) -> int:
+    """Create a functional account on an explicit platform id and return its id.
+
+    Used by the cloud-DB Password Safe onboarding for the two custom-plugin
+    functional accounts (the "{engine} SSM Custom Plugin" account whose username/
+    password bundle the AWS + DB-login credentials, and the "PRA Vault Username
+    Password" account holding the PRA OAuth client id/secret). The (platform,
+    domain, account name, display name) tuple must be unique tenant-side — the
+    caller carries per-database uniqueness in display_name."""
+    async with _client() as client:
+        await _sign_in(client)
+        try:
+            resp = await client.post("FunctionalAccounts", json={
+                "PlatformID": int(platform_id),
                 "AccountName": account_name,
                 "DisplayName": display_name,
                 "Password": password,

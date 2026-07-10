@@ -299,6 +299,39 @@ class Settings(BaseSettings):
     bt_jumpoint_name: str = ""    # name of the pre-existing Jumpoint in PRA (required for Terraform path)
     bt_ps_deploy_key_title: str = "Docker Deploy Key"  # Password Safe secret title
 
+    # ── Optional cloud-DATABASE Password Safe onboarding (AWS-only) ───────────
+    # When enabled, provisioning an AWS DB additionally: creates a dedicated managed DB
+    # user (via the DB client run on the shared Jumpoint host over SSM), onboards the DB
+    # as a Password Safe managed system + managed account on the "{engine} SSM Custom
+    # Plugin" platform, and onboards the PRA Vault account as a managed account on the
+    # "PRA Vault Username Password" plugin so Password Safe propagates each rotation into
+    # the PRA vaulted credential. No privileged DB "functional login" is created — the
+    # IAM user (below) is Password Safe's functional account (SSM transport) and the
+    # managed account self-rotates. The two custom plugins + jump-host RSA prep are
+    # one-time MANUAL setup (see docs); the platform names below are how the dashboard
+    # finds them.
+    clouddb_ps_onboarding_enabled: bool = False
+    clouddb_ps_platform_postgres: str = "psql SSM Custom Plugin"
+    clouddb_ps_platform_mysql: str = "mysql SSM Custom Plugin"
+    clouddb_ps_platform_sqlserver: str = "mssql SSM Custom Plugin"
+    clouddb_ps_pravault_platform: str = "PRA Vault Username Password"
+    clouddb_ps_workgroup: str = ""                 # blank → falls back to passwordsafe_workgroup
+    # DB-client container images run on the jump host (override for a mirrored registry).
+    clouddb_db_client_image_postgres: str = "postgres:16"
+    clouddb_db_client_image_mysql: str = "mysql:8.4"
+    clouddb_db_client_image_sqlserver: str = "mcr.microsoft.com/mssql-tools18"
+    # AWS IAM user = Password Safe functional account for SSM SendCommand. EC2 mode
+    # (default, no keys): username "EC2", role on the PS node/broker authorizes SSM. IAM
+    # mode (set username + keys): username "{iam}", password "{AKID}:{secret}".
+    clouddb_ps_ssm_iam_username: str = ""
+    clouddb_ps_ssm_access_key_id: str = ""
+    clouddb_ps_ssm_secret_access_key: str = ""     # encrypted at rest
+    clouddb_ps_ssm_account_suffix: str = "local"   # DNS-name 6th field: "local" or a cross-account AssumeRole ARN
+    clouddb_ps_ssm_public_key_path: str = ""        # DNS-name 5th field: public key path on the PS node/broker
+    # PRA Configuration-API OAuth account for the PRA Vault plugin (blank → reuse bt_client_*).
+    pra_config_api_client_id: str = ""
+    pra_config_api_client_secret: str = ""          # encrypted at rest
+
     # EPM for Linux (EPM-L) — Pathfinder public API gateway.
     # The gateway base is api.beyondtrust.io (NOT app.beyondtrust.io — that host
     # only accepts browser session cookies and 401s every Bearer request). The
