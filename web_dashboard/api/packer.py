@@ -29,7 +29,7 @@ from ..services import (
     packer_service,
     storage_service,
 )
-from ..services.packer_service import PackerError
+from ..services.packer_service import PackerError, PackerCancelled
 from .auth import get_current_user, require_permission
 
 logger = logging.getLogger(__name__)
@@ -47,6 +47,20 @@ def _cfg(key: str, fallback: str = "") -> str:
 def _get_db_session():
     from ..database import SessionLocal
     return SessionLocal()
+
+
+def _cancel_checker(job_id: str):
+    """Return a cheap ``() -> bool`` probe for whether ``job_id`` was cancelled,
+    for packer_service.run_build's cancel watcher. Each call opens a fresh
+    short-lived session (like job_service.cancel_check) so it always sees the
+    API's committed Cancel and never touches the long-held build session."""
+    def _check() -> bool:
+        s = _get_db_session()
+        try:
+            return job_service.is_cancelled(s, job_id)
+        finally:
+            s.close()
+    return _check
 
 
 async def _bt_provisioner_env(req) -> dict:
@@ -265,7 +279,8 @@ async def _run_aws_build(job_id: str, req: AWSPackerBuildRequest, created_by: st
         def on_progress(pct, msg):
             job_service.update_progress(db, job_id, pct, msg)
 
-        result = await packer_service.run_build("aws", build_dir, env, on_progress)
+        result = await packer_service.run_build(
+            "aws", build_dir, env, on_progress, is_cancelled=_cancel_checker(job_id))
 
         # Archive template
         if req.archive_template:
@@ -294,6 +309,11 @@ async def _run_aws_build(job_id: str, req: AWSPackerBuildRequest, created_by: st
 
     except PackerError as e:
         job_service.set_failed(db, job_id, str(e))
+    except PackerCancelled:
+        # Operator cancelled: packer was signalled and ran its own cleanup, so the
+        # temp build instance is torn down. The job is already 'cancelled' (that
+        # flip is what the watcher polled for) — leave it, don't mark it failed.
+        logger.info("packer build %s cancelled; build instance cleaned up", job_id)
     except Exception as e:
         job_service.set_failed(db, job_id, f"Unexpected error: {e}")
     finally:
@@ -413,7 +433,8 @@ async def _run_azure_build(job_id: str, req: AzurePackerBuildRequest, created_by
         def on_progress(pct, msg):
             job_service.update_progress(db, job_id, pct, msg)
 
-        result = await packer_service.run_build("azure", build_dir, env, on_progress)
+        result = await packer_service.run_build(
+            "azure", build_dir, env, on_progress, is_cancelled=_cancel_checker(job_id))
 
         # Archive template
         if req.archive_template:
@@ -455,6 +476,11 @@ async def _run_azure_build(job_id: str, req: AzurePackerBuildRequest, created_by
 
     except PackerError as e:
         job_service.set_failed(db, job_id, str(e))
+    except PackerCancelled:
+        # Operator cancelled: packer was signalled and ran its own cleanup, so the
+        # temp build instance is torn down. The job is already 'cancelled' (that
+        # flip is what the watcher polled for) — leave it, don't mark it failed.
+        logger.info("packer build %s cancelled; build instance cleaned up", job_id)
     except Exception as e:
         job_service.set_failed(db, job_id, f"Unexpected error: {e}")
     finally:
@@ -509,7 +535,8 @@ async def _run_gcp_build(job_id: str, req: GCPPackerBuildRequest, created_by: st
         def on_progress(pct, msg):
             job_service.update_progress(db, job_id, pct, msg)
 
-        result = await packer_service.run_build("gcp", build_dir, env, on_progress)
+        result = await packer_service.run_build(
+            "gcp", build_dir, env, on_progress, is_cancelled=_cancel_checker(job_id))
 
         # Archive template
         if req.archive_template:
@@ -536,6 +563,11 @@ async def _run_gcp_build(job_id: str, req: GCPPackerBuildRequest, created_by: st
 
     except PackerError as e:
         job_service.set_failed(db, job_id, str(e))
+    except PackerCancelled:
+        # Operator cancelled: packer was signalled and ran its own cleanup, so the
+        # temp build instance is torn down. The job is already 'cancelled' (that
+        # flip is what the watcher polled for) — leave it, don't mark it failed.
+        logger.info("packer build %s cancelled; build instance cleaned up", job_id)
     except Exception as e:
         job_service.set_failed(db, job_id, f"Unexpected error: {e}")
     finally:

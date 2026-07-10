@@ -10,6 +10,7 @@ Credentials are injected via environment variables so they never appear
 in command-line arguments or on-disk templates.
 """
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -21,8 +22,24 @@ logger = logging.getLogger(__name__)
 
 BUILDS_DIR = Path(__file__).parent.parent.parent / "packer" / "builds"
 
+# How long to let Packer run its own interrupt cleanup (terminate the build
+# instance, delete the generated keypair/security-group) after a cancel SIGTERM
+# before we escalate to SIGKILL. Cleanup makes real cloud API calls, so it needs
+# far more headroom than terraform's 10s (a SIGKILL here would re-orphan the VM).
+PACKER_CANCEL_GRACE_S = 120.0
+
+
 class PackerError(Exception):
     pass
+
+
+class PackerCancelled(Exception):
+    """Raised when a build was cancelled mid-flight (the job's status flipped to
+    ``cancelled``). Before raising, the packer subprocess is sent SIGTERM so it
+    runs its built-in interrupt cleanup and tears down the temp build instance —
+    otherwise a cancelled build leaks an orphaned VM in the user's cloud account.
+    Distinct from :class:`PackerError` so callers can leave the job ``cancelled``
+    rather than flipping it to ``failed``."""
 
 
 # ── Name sanitization ─────────────────────────────────────────────────────────
@@ -457,8 +474,20 @@ async def _stream_command(
     cwd: Path,
     env: dict,
     on_line: Callable[[str], None],
+    is_cancelled: Optional[Callable[[], bool]] = None,
+    cancel_poll_s: float = 5.0,
 ) -> tuple[int, str]:
-    """Run a command, streaming each output line to on_line. Returns (returncode, full_output)."""
+    """Run a command, streaming each output line to on_line. Returns (returncode, full_output).
+
+    When ``is_cancelled`` is given, a concurrent watcher polls it every
+    ``cancel_poll_s`` seconds — *independent of build output* — and, on a cancel,
+    sends the subprocess SIGTERM so packer runs its interrupt cleanup, then raises
+    :class:`PackerCancelled`. Polling off a timer (not the per-line ``on_line``
+    hook, the way terraform does) is deliberate: a build that stalls with no
+    output — e.g. a hung plugin/SDK download, the exact case that stranded a build
+    at 24% — produces no lines to hook, so an on-line check would never fire and
+    the build VM would be orphaned. The SIGTERM also unblocks the stalled
+    ``readline`` (the dying process closes stdout → EOF)."""
     proc = await asyncio.create_subprocess_exec(
         *args,
         cwd=str(cwd),
@@ -466,15 +495,51 @@ async def _stream_command(
         stderr=asyncio.subprocess.STDOUT,
         env=env,
     )
+
+    cancelled = False
+
+    async def _watch() -> None:
+        nonlocal cancelled
+        while True:
+            await asyncio.sleep(cancel_poll_s)
+            if proc.returncode is not None:
+                return  # finished on its own
+            try:
+                triggered = bool(is_cancelled())
+            except Exception:
+                logger.exception("packer: cancel poll failed; assuming not cancelled")
+                triggered = False
+            if triggered:
+                cancelled = True
+                logger.info("packer: job cancelled — sending SIGTERM for cleanup (pid %s)", proc.pid)
+                with contextlib.suppress(ProcessLookupError):
+                    proc.terminate()
+                    try:
+                        await asyncio.wait_for(proc.wait(), timeout=PACKER_CANCEL_GRACE_S)
+                    except asyncio.TimeoutError:
+                        logger.warning("packer: cleanup exceeded %.0fs after SIGTERM — sending SIGKILL",
+                                       PACKER_CANCEL_GRACE_S)
+                        proc.kill()
+                return
+
+    watcher = asyncio.ensure_future(_watch()) if is_cancelled else None
     lines = []
-    while True:
-        raw = await proc.stdout.readline()
-        if not raw:
-            break
-        line = raw.decode(errors="replace").rstrip()
-        lines.append(line)
-        on_line(line)
+    try:
+        while True:
+            raw = await proc.stdout.readline()
+            if not raw:
+                break
+            line = raw.decode(errors="replace").rstrip()
+            lines.append(line)
+            on_line(line)
+    finally:
+        if watcher:
+            watcher.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await watcher
     await proc.wait()
+    if cancelled:
+        raise PackerCancelled("build cancelled — packer was signalled to clean up its build instance")
     return proc.returncode, "\n".join(lines)
 
 
@@ -517,12 +582,14 @@ async def run_build(
     build_dir: Path,
     env: dict,
     on_progress: Callable[[int, str], None],
+    is_cancelled: Optional[Callable[[], bool]] = None,
 ) -> dict[str, Any]:
     """
     Run `packer init` then `packer build` in build_dir.
     Calls on_progress(percent, message) with live log lines.
     Returns a dict with at minimum {"artifact_id": ...}.
-    Raises PackerError on failure.
+    Raises PackerError on failure, or PackerCancelled if ``is_cancelled`` reports
+    the job was cancelled (packer is signalled to tear down its build instance).
     """
     # Step 1: packer init (fast, validates/installs plugins)
     on_progress(8, "Running packer init…")
@@ -556,11 +623,14 @@ async def run_build(
     # before exiting. The previous value (-on-error=abort) suppressed cleanup
     # and left orphaned compute instances running in the user's cloud account
     # whenever a provisioner script failed (issue #21).
+    # Only the build step gets the cancel watcher: `packer init` is fast, local,
+    # and provisions nothing in the cloud, so there's nothing to clean up there.
     rc, _ = await _stream_command(
         ["packer", "build", "-machine-readable", "-on-error=cleanup", "."],
         cwd=build_dir,
         env=env,
         on_line=_on_line,
+        is_cancelled=is_cancelled,
     )
     full_output = "\n".join(build_output)
 
