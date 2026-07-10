@@ -772,9 +772,13 @@ def start_decommission(db: Session, db_id: str, created_by: str = "") -> dict:
         raise CloudDatabaseError(f"cloud database {db_id} not found")
 
     # Already in flight — return the existing job rather than starting a second.
+    # Only short-circuit on an ACTIVE (pending/running) job; a cancelled/failed
+    # prior decommission would otherwise wedge the row at "decommissioning" forever
+    # (re-Delete becomes a silent no-op). Fall through to start a fresh teardown.
     if row.status == "decommissioning":
         existing = (db.query(Job)
-                      .filter(Job.job_type == "clouddb_decommission")
+                      .filter(Job.job_type == "clouddb_decommission",
+                              Job.status.in_(("pending", "running")))
                       .order_by(Job.created_at.desc()).all())
         job = next((j for j in existing if (j.metadata_dict or {}).get("db_id") == db_id), None)
         if job:
