@@ -661,8 +661,14 @@ def start_decommission(db: Session, cluster_id: str, created_by: str = "") -> di
                 f"this cluster hosts the central Rancher management plane and {imports} "
                 f"cluster(s) are imported into it — decommission those first")
     if row.status == "decommissioning":
+        # Only short-circuit if a teardown is actually still in flight. A prior
+        # decommission that was cancelled/failed (e.g. the worker was busy and the
+        # user cancelled it) leaves the row wedged at "decommissioning"; without the
+        # status filter the stale job is returned and re-Delete is a silent no-op, so
+        # the cluster can never be removed from the UI. Fall through to a fresh job.
         existing = (db.query(Job)
-                      .filter(Job.job_type == "k8s_decommission")
+                      .filter(Job.job_type == "k8s_decommission",
+                              Job.status.in_(("pending", "running")))
                       .order_by(Job.created_at.desc()).all())
         job = next((j for j in existing if (j.metadata_dict or {}).get("cluster_id") == cluster_id), None)
         if job:
