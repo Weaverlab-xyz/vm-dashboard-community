@@ -17,6 +17,7 @@ No AWS/ECS dependency: it runs anywhere Docker runs, sharing the DB + config +
 state backend with the app via the same env/secrets.
 """
 import asyncio
+import contextlib
 import logging
 from datetime import datetime
 from typing import Optional
@@ -44,6 +45,14 @@ HANDLED_TYPES = (
 )
 
 POLL_INTERVAL = 2.0  # seconds between queue polls when idle
+
+# While a worker owns a job it actively bumps the job's `updated_at` every
+# HEARTBEAT_INTERVAL seconds. This is the liveness signal `reconcile_stale_jobs`
+# keys off (its 10-min cutoff = ~10 missed beats): a job whose owner is alive
+# keeps a fresh heartbeat even during quiet phases that don't stream output, so a
+# starting/restarting SIBLING worker (or the app) can never reconcile-fail it.
+# Must stay well under reconcile's stale_after_minutes * 60.
+HEARTBEAT_INTERVAL = 60.0
 
 
 def _claim_one(db: Session) -> Optional[tuple]:
@@ -171,6 +180,26 @@ async def _dispatch(job_id: str, job_type: str, meta: dict) -> None:
         db.close()
 
 
+async def _heartbeat(job_id: str, interval: float = HEARTBEAT_INTERVAL) -> None:
+    """Bump the owned job's ``updated_at`` every ``interval`` seconds so the row's
+    heartbeat stays fresh independent of whether the job is streaming output.
+    Guarded by ``status='running'`` so it can't resurrect a job the dispatch just
+    completed/failed/cancelled. Runs for the lifetime of one ``_dispatch`` and is
+    cancelled in its ``finally``. Best-effort — a DB hiccup must not kill the job."""
+    while True:
+        await asyncio.sleep(interval)
+        db = SessionLocal()
+        try:
+            db.query(Job).filter(Job.id == job_id, Job.status == "running").update(
+                {Job.updated_at: datetime.utcnow()}, synchronize_session=False
+            )
+            db.commit()
+        except Exception:
+            logger.exception("job runner: heartbeat failed for job %s", job_id)
+        finally:
+            db.close()
+
+
 async def _run_loop(poll_interval: float = POLL_INTERVAL) -> None:
     # This runner now owns job execution → reconcile jobs whose heartbeat went
     # stale because a prior runner crashed/restarted, before claiming new work.
@@ -202,6 +231,9 @@ async def _run_loop(poll_interval: float = POLL_INTERVAL) -> None:
         # progress writes) with the job id so its log lines are traceable.
         with correlation(job_id):
             logger.info("job runner: claimed %s job %s", job_type, job_id)
+            # Keep this job's heartbeat fresh for its whole run so a sibling
+            # worker's startup reconcile can't false-fail it (see _heartbeat).
+            hb = asyncio.create_task(_heartbeat(job_id))
             try:
                 await _dispatch(job_id, job_type, meta)
             except Exception as exc:
@@ -218,6 +250,10 @@ async def _run_loop(poll_interval: float = POLL_INTERVAL) -> None:
                     logger.exception("job runner: could not mark job %s failed", job_id)
                 finally:
                     db.close()
+            finally:
+                hb.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await hb
 
 
 def main() -> None:

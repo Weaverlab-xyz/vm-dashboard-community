@@ -387,6 +387,32 @@ back up (`./scripts/onboard.sh --hub`) so it targets the published image.
 Postgres data persists in the `pgdata` Docker volume across restarts. The
 wizard won't appear again — your credentials are already in the database.
 
+### Scaling the job worker
+
+Long jobs — Kubernetes and cloud-database provisions, Packer image builds, and
+image export/promote — run in the dedicated `worker` container, not the web app.
+**Each worker runs one such job at a time**, so if quick jobs pile up behind a
+long one (e.g. an export waiting on a 25-minute cluster provision), run more
+workers. The job queue claims each job atomically, so extra workers never
+double-run a job.
+
+Set the count in `.env`, then bring the stack up as usual:
+
+```bash
+WORKER_REPLICAS=3          # in .env — number of long jobs that can run at once
+./scripts/onboard.sh       # (keep --hub if you used it)
+```
+
+Or scale ad-hoc without editing `.env`:
+
+```bash
+docker compose up -d --scale worker=3          # add -f docker-compose.hub.yml if you used --hub
+```
+
+`WORKER_CPU_LIMIT` / `WORKER_MEM_LIMIT` (also in `.env`) cap each worker's CPU and
+memory so several concurrent heavy jobs can't exhaust the host — tune them to your
+machine. Defaults: 1 worker, 2 CPUs and 2 GB each.
+
 ### Reconfiguring credentials after first run
 
 To update credentials or toggle feature flags after setup, navigate to

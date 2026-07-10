@@ -87,10 +87,25 @@ services:
   # gunicorn request workers, so they survive worker recycling/crashes/redeploys.
   # Same published image as `app`; shares the DB + config + state backend. No HTTP
   # port, no bind mount.
+  #
+  # Each worker runs ONE job at a time (serially), so the replica count IS the
+  # number of long jobs that can run concurrently — raise WORKER_REPLICAS (in .env)
+  # when quick jobs queue behind long ones. The `jobs` table claim is atomic, so
+  # replicas never double-execute a job.
   worker:
     image: chrweav/infra-dashboard:${INFRA_DASHBOARD_TAG:-latest}
     command: ["python", "-m", "web_dashboard.jobs_worker"]
     restart: unless-stopped
+    deploy:
+      # Concurrent workers = concurrent long jobs. `docker compose up` honors this;
+      # override ad-hoc with: docker compose up -d --scale worker=N
+      replicas: ${WORKER_REPLICAS:-1}
+      # Per-worker caps bound aggregate host usage when several heavy jobs run at
+      # once (jobs are mostly orchestration + cloud-API waits). Tune to your host.
+      resources:
+        limits:
+          cpus: "${WORKER_CPU_LIMIT:-2}"
+          memory: ${WORKER_MEM_LIMIT:-2g}
     env_file:
       - .env
     environment:
