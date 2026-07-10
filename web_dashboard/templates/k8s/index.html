@@ -84,6 +84,10 @@
               <button x-show="c.status === 'managed'" @click="openBroker(c)"
                       title="Broker access via the native PRA tunnel_type=k8s jump + Entitle-Rancher JIT (Phase 3b)"
                       class="text-xs px-2 py-1 bg-sky-600 hover:bg-sky-700 text-white rounded font-medium">Broker access</button>
+              <button x-show="c.status === 'registered' || c.status === 'managed'" @click="openTunnel(c)"
+                      title="Provision/remove this cluster's PRA tunnel_type=k8s jump — raw kubectl to the API server via the BeyondTrust representative console (no public ingress)"
+                      class="text-xs px-2 py-1 bg-teal-600 hover:bg-teal-700 text-white rounded font-medium"
+                      x-text="c.pra_jump_id ? 'PRA tunnel ✓' : 'PRA tunnel'"></button>
               <button @click="openSecrets(c)"
                       title="In-cluster Password Safe secret delivery (External Secrets Operator, Phase 4)"
                       class="text-xs px-2 py-1 bg-violet-600 hover:bg-violet-700 text-white rounded font-medium">
@@ -325,6 +329,82 @@
     </div>
   </div>
 
+  <!-- PRA tunnel modal (Phase 3b — dedicated per-cluster k8s API tunnel) -->
+  <div x-show="showTunnel" x-cloak class="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
+       @click.self="showTunnel = false">
+    <div class="bg-white rounded-xl shadow-xl w-full max-w-lg">
+      <div class="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+        <h3 class="font-semibold text-gray-800">PRA tunnel<span x-show="tunnelTarget" class="text-gray-400 font-normal"> — <span x-text="tunnelTarget && tunnelTarget.name"></span></span></h3>
+        <button @click="showTunnel = false" class="text-gray-400 hover:text-gray-600 text-xl">&times;</button>
+      </div>
+      <div class="px-6 py-4 space-y-4">
+        <p class="text-xs text-gray-500">
+          Provisions a native <code>tunnel_type=k8s</code> jump (via the beyondtrust/sra provider) to this
+          cluster's API server, so you reach it with raw kubectl through the PRA representative console — no
+          public ingress. These per-cluster overrides fall back to the configured defaults.
+        </p>
+        <p x-show="!tunnelOpts.configured" x-cloak class="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+          PRA is not configured (bt_api_host / bt_client_id / bt_client_secret). Set it on Settings — the dropdowns stay empty and provisioning will fail until then.
+        </p>
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Jump group <span class="text-gray-400">(name override)</span></label>
+          <select x-model="tunnelForm.jump_group" class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
+            <option value="">(configured default)</option>
+            <template x-for="g in tunnelOpts.jump_groups" :key="g.id">
+              <option :value="g.name" x-text="g.name"></option>
+            </template>
+          </select>
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Jumpoint <span class="text-gray-400">(the "separate jumpoint" the tunnel routes through)</span></label>
+          <select x-model="tunnelForm.jumpoint_name" class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
+            <option value="">(configured default)</option>
+            <template x-for="j in tunnelOpts.jumpoints" :key="j.id">
+              <option :value="j.name" x-text="j.name"></option>
+            </template>
+          </select>
+        </div>
+        {{ secret_picker("tunnelForm", "tunnelCredBackend", "pra_credential_ref",
+                         "PRA credential",
+                         "Resolved to a bt_client_secret override for this cluster's tunnel provisioning.") }}
+        <div class="border-t border-gray-100 pt-3">
+          <label class="flex items-start gap-2 cursor-pointer">
+            <input type="checkbox" x-model="tunnelForm.vault_inject" class="mt-0.5">
+            <span class="text-sm text-gray-700">
+              Inject credential via PRA Vault <span class="text-gray-400">(no Entitle)</span>
+              <span class="block text-[11px] text-gray-400">
+                Mints a cluster-admin ServiceAccount bearer token and stores it in the PRA Vault for
+                injection at session launch — standing access without Entitle JIT. The token is revoked
+                (SA deleted) when the tunnel is removed.
+              </span>
+            </span>
+          </label>
+          <div x-show="tunnelForm.vault_inject" x-cloak class="mt-2">
+            <label class="block text-xs font-medium text-gray-600 mb-1">Vault account group <span class="text-gray-400">(optional)</span></label>
+            <select x-model.number="tunnelForm.vault_account_group_id" class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
+              <option :value="null">(bt_vault_account_group_id default)</option>
+              <template x-for="v in tunnelOpts.vault_account_groups" :key="v.id">
+                <option :value="v.id" x-text="v.name"></option>
+              </template>
+            </select>
+          </div>
+        </div>
+      </div>
+      <div class="px-6 py-4 border-t border-gray-100 flex items-center gap-3">
+        <button x-show="tunnelTarget && tunnelTarget.pra_jump_id" x-cloak @click="removeTunnel()" :disabled="tunneling"
+                class="px-4 py-2 text-sm border border-red-300 text-red-600 hover:bg-red-50 disabled:opacity-50 rounded-lg">Remove tunnel</button>
+        <div class="flex justify-end gap-3 ml-auto">
+          <button @click="showTunnel = false" class="px-4 py-2 text-sm border border-gray-300 rounded-lg">Cancel</button>
+          <button @click="submitTunnel()" :disabled="tunneling"
+                  class="px-4 py-2 bg-teal-600 hover:bg-teal-700 disabled:opacity-50 text-white text-sm font-medium rounded-lg">
+            <span x-show="!tunneling" x-text="tunnelTarget && tunnelTarget.pra_jump_id ? 'Re-apply' : 'Create tunnel'"></span>
+            <span x-show="tunneling" x-cloak>Working…</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Secret delivery modal (Phase 4 — Feature D) -->
   <div x-show="showSecrets" x-cloak class="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
        @click.self="showSecrets = false">
@@ -379,6 +459,9 @@ function k8sPage() {
     showBroker: false, brokering: false, brokerTarget: null,
     brokerForm: { jump_group: '', jumpoint_name: '', praCredBackend: '', pra_credential_ref: '', vault_inject: false, vault_account_group_id: null },
     showSecrets: false, secretsBusy: false, secretsTarget: null, secretsKind: 'eso',
+    showTunnel: false, tunneling: false, tunnelTarget: null,
+    tunnelForm: { jump_group: '', jumpoint_name: '', tunnelCredBackend: '', pra_credential_ref: '', vault_inject: false, vault_account_group_id: null },
+    tunnelOpts: { configured: true, jump_groups: [], jumpoints: [], vault_account_groups: [] },
 
     async init() { requireAuth(); this.loadSecretBackends(); await this.refresh(); },
 
@@ -597,6 +680,61 @@ function k8sPage() {
         this.flash(e.message || 'Broker access failed.', 'error');
       } finally {
         this.brokering = false;
+      }
+    },
+
+    async openTunnel(c) {
+      this.tunnelTarget = c;
+      this.tunnelForm = {
+        jump_group: c.jump_group || '',
+        jumpoint_name: c.jumpoint_name || '',
+        tunnelCredBackend: '', pra_credential_ref: c.pra_credential_ref || '',
+        vault_inject: false, vault_account_group_id: null,
+      };
+      this.tunnelOpts = { configured: true, jump_groups: [], jumpoints: [], vault_account_groups: [] };
+      this.showTunnel = true;
+      try {
+        this.tunnelOpts = await API.get('/api/k8s/clusters/pra-options');
+      } catch (e) {
+        this.flash(e.message || 'Could not load PRA options.', 'error');
+      }
+    },
+
+    async submitTunnel() {
+      this.tunneling = true;
+      try {
+        const body = {
+          jump_group: this.tunnelForm.jump_group || null,
+          jumpoint_name: this.tunnelForm.jumpoint_name || null,
+          pra_credential_ref: this.tunnelForm.pra_credential_ref || null,
+          vault_inject: !!this.tunnelForm.vault_inject,
+          vault_account_group_id: this.tunnelForm.vault_account_group_id || null,
+        };
+        const r = await API.post(`/api/k8s/clusters/${this.tunnelTarget.id}/tunnel`, body);
+        this.showTunnel = false;
+        this.flash(r.already_registered
+          ? `PRA tunnel already exists (jump ${r.pra_jump_id}).`
+          : `PRA tunnel created (jump ${r.pra_jump_id || '—'}) — connect via the BeyondTrust representative console.`);
+        await this.refresh();
+      } catch (e) {
+        this.flash(e.message || 'PRA tunnel provisioning failed.', 'error');
+      } finally {
+        this.tunneling = false;
+      }
+    },
+
+    async removeTunnel() {
+      if (!confirm(`Remove the PRA tunnel for "${this.tunnelTarget.name}"? This deletes the Jump Item and revokes any injected PRA Vault ServiceAccount token.`)) return;
+      this.tunneling = true;
+      try {
+        await API.del(`/api/k8s/clusters/${this.tunnelTarget.id}/tunnel`);
+        this.showTunnel = false;
+        this.flash('PRA tunnel removed.');
+        await this.refresh();
+      } catch (e) {
+        this.flash(e.message || 'PRA tunnel removal failed.', 'error');
+      } finally {
+        this.tunneling = false;
       }
     },
 
