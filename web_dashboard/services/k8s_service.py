@@ -1505,6 +1505,18 @@ async def setup_entitle_agent(cluster_id: str, action: str = "install") -> None:
                                values_stdin=helm_values_stdin, target_cloud=row.cloud)
         config_service.set("entitle_agent_cluster_id", cluster_id)
         logger.info("Entitle agent installed on cluster %s (ns=%s)", row.name, namespace)
+        # If a k8s connector was already registered for this cluster (before the agent
+        # existed) it used External/service-account mode; now that the agent is present,
+        # re-register it In-Cluster (agent-brokered) so it no longer depends on Entitle's
+        # cloud reaching the API directly. Best-effort, non-fatal.
+        if config_service.get(f"entitle_k8s_integration_id_{cluster_id}"):
+            try:
+                await register_cluster_in_entitle(cluster_id, action="deregister")
+                await register_cluster_in_entitle(cluster_id, action="register")
+                logger.info("re-registered Entitle k8s connector for %s In-Cluster after agent install", row.name)
+            except Exception as exc:
+                logger.warning("In-Cluster re-registration of the Entitle connector for %s failed "
+                               "(non-fatal): %s", row.name, exc)
     finally:
         db.close()
 
@@ -1656,6 +1668,11 @@ async def register_cluster_in_entitle(cluster_id: str, action: str = "register")
             host, ca = _kubeconfig_host_ca(kubeconfig)
             if not host:
                 raise K8sError("could not parse the API server host from the cluster kubeconfig")
+            logger.warning(
+                "cluster %s has no Entitle agent installed — registering the k8s connector in "
+                "External/service-account mode: Entitle's cloud connects directly to the API server (%s) "
+                "with a minted SA token, which is unhealthy for a private/unreachable API. Install the "
+                "Entitle agent and re-register for In-Cluster (agent-brokered) access.", row.name, host)
             ns = _cfg("entitle_agent_namespace", "entitle")
             sa = _cfg("entitle_k8s_sa_name", "entitle-access")
             secret = f"{sa}-token"
