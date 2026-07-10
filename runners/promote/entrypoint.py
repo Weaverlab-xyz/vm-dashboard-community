@@ -174,6 +174,58 @@ def install_linux_agent(disk_path: str, source_format: str) -> None:
     log("waagent injection done")
 
 
+# Where the Dockerfile stages the GCE guest agent: both arch binaries under
+# amd64/ + arm64/, the arch-selecting launcher `google_guest_agent`, and the
+# `google-guest-agent.service` systemd unit.
+GCP_GUEST_AGENT_SRC = "/opt/gcp-guest-agent"
+
+
+def install_gcp_guest_agent(disk_path: str, source_format: str) -> None:
+    """Offline-inject the Google Compute Engine guest agent into a Linux image.
+
+    Foreign images (e.g. an AWS AMI) don't carry google-guest-agent. GCP does
+    NOT gate the instance's RUNNING state on a guest agent (unlike Azure), so the
+    VM boots fine — but with no agent, `ssh-keys` instance metadata is never
+    applied to ~/.ssh/authorized_keys, so key-based SSH (and the Password Safe
+    GCP SSH-rotation plugin) silently never works. Baking the agent in during
+    promotion fixes that.
+
+    Uses libguestfs virt-customize (unprivileged container) to drop both the
+    amd64 and arm64 binaries, our arch-selecting launcher at the unit's
+    ExecStart path, and the systemd unit, then enable it. Distro-agnostic (the
+    binary is static Go) and needs no guest network. Assumes a systemd guest.
+    """
+    fmt = _LIBGUESTFS_FORMAT.get((source_format or "").lower())
+    log(f"inject google-guest-agent into {disk_path} (format={fmt or 'auto'})")
+    cmd = ["virt-customize"]
+    if fmt:
+        cmd += ["--format", fmt]
+    cmd += ["-a", disk_path]
+    cmd += [
+        "--mkdir", "/usr/lib/google-guest-agent",
+        # Real per-arch binaries → /usr/lib/google-guest-agent/{amd64,arm64}/…
+        "--copy-in", f"{GCP_GUEST_AGENT_SRC}/amd64:/usr/lib/google-guest-agent",
+        "--copy-in", f"{GCP_GUEST_AGENT_SRC}/arm64:/usr/lib/google-guest-agent",
+        # Arch-selecting launcher → /usr/bin/google_guest_agent (unit ExecStart).
+        "--copy-in", f"{GCP_GUEST_AGENT_SRC}/google_guest_agent:/usr/bin",
+        # systemd unit → /lib/systemd/system.
+        "--copy-in", f"{GCP_GUEST_AGENT_SRC}/google-guest-agent.service:/lib/systemd/system",
+        "--run-command",
+        "chmod 0755 /usr/bin/google_guest_agent "
+        "/usr/lib/google-guest-agent/amd64/google_guest_agent "
+        "/usr/lib/google-guest-agent/arm64/google_guest_agent",
+        # Enable at boot. `|| echo` (not hard-fail) so a non-systemd guest doesn't
+        # break the bake — the agent just won't start, surfaced in the log.
+        "--run-command",
+        "systemctl enable google-guest-agent.service 2>/dev/null || "
+        "echo 'WARNING: could not enable google-guest-agent.service (non-systemd guest?)' >&2",
+        # Fix SELinux labels on the files we added (no-op on non-SELinux guests).
+        "--selinux-relabel",
+    ]
+    subprocess.check_call(cmd, stdout=sys.stdout, stderr=sys.stderr)
+    log("google-guest-agent injection done")
+
+
 def convert_to_fixed_vhd(src: str, dst: str) -> None:
     """Produce a FIXED-format VHD for Azure. Azure managed-image/disk creation
     rejects dynamic VHDs ("is of Dynamic VHD type. Please retry with fixed VHD
@@ -294,6 +346,10 @@ def main() -> int:
     # sets this for Linux images; Windows images bring their own agent.
     ap.add_argument("--install-linux-agent", action="store_true",
                     help="inject WALinuxAgent into a Linux disk (Azure target)")
+    # GCS/GCP only: bake the GCE guest agent into the image so a promoted foreign
+    # Linux image applies ssh-keys metadata (key-based SSH + PS rotation plugin).
+    ap.add_argument("--install-gcp-guest-agent", action="store_true",
+                    help="inject google-guest-agent into a Linux disk (GCS target)")
     args = ap.parse_args()
 
     src_ext = args.source_format.lower()
@@ -340,6 +396,12 @@ def main() -> int:
             if not (args.dest_gcs_bucket and args.dest_gcs_object):
                 log("ERROR: --target gcs requires --dest-gcs-bucket and --dest-gcs-object")
                 return 2
+            # Bake google-guest-agent into the (already raw-converted) disk before
+            # the tar wrap, so a promoted foreign Linux image applies ssh-keys
+            # metadata on GCP — otherwise key-based SSH silently never works.
+            # dst_path is the raw disk here (--target-format is forced to raw).
+            if args.install_gcp_guest_agent:
+                install_gcp_guest_agent(dst_path, args.target_format)
             # GCP custom-image insert requires the source to be a `.tar.gz`
             # whose single entry is `disk.raw`. The dashboard always tells us
             # `--target-format raw` for GCP targets; we wrap the result into

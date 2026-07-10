@@ -1,3 +1,23 @@
+# ── Build stage: Google Compute Engine guest agent ───────────────────────────
+# Foreign images promoted to GCP (e.g. an AWS AMI) don't carry
+# google-guest-agent, so `ssh-keys` metadata is never applied inside the guest
+# (see install_gcp_guest_agent in entrypoint.py). Upstream releases ship no
+# prebuilt binary, so we build it from source for BOTH guest arches and bake it
+# in offline (the launcher picks the right one at guest boot). CGO off → a
+# static binary that runs on any Linux guest.
+FROM golang:1.23-bookworm AS gcp-guest-agent
+ARG GUEST_AGENT_VERSION=20260529.00
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+RUN git clone --depth 1 --branch "${GUEST_AGENT_VERSION}" \
+      https://github.com/GoogleCloudPlatform/guest-agent /src
+WORKDIR /src
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
+      -o /out/amd64/google_guest_agent ./google_guest_agent \
+ && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath \
+      -o /out/arm64/google_guest_agent ./google_guest_agent
+
 # Promote-runner image — transient task that converts and uploads a VM
 # disk image between cloud storage backends as part of cross-cloud
 # image promotion. Launched as an ECS Fargate task / Azure ACI container
@@ -42,6 +62,14 @@ RUN curl -fsSL \
     && tar -xzf /tmp/waagent.tar.gz -C /opt/walinuxagent-src --strip-components=1 \
     && rm /tmp/waagent.tar.gz \
     && pip install --no-cache-dir --target /opt/walinuxagent-src/_vendor "setuptools<80"
+
+# Bundle the GCE guest agent (built in the stage above) + our arch-selecting
+# launcher + the systemd unit, so the GCS-target promote can inject it offline
+# into a foreign Linux image. See install_gcp_guest_agent in entrypoint.py.
+COPY --from=gcp-guest-agent /out/amd64/google_guest_agent /opt/gcp-guest-agent/amd64/google_guest_agent
+COPY --from=gcp-guest-agent /out/arm64/google_guest_agent /opt/gcp-guest-agent/arm64/google_guest_agent
+COPY gcp-guest-agent/launch.sh /opt/gcp-guest-agent/google_guest_agent
+COPY gcp-guest-agent/google-guest-agent.service /opt/gcp-guest-agent/google-guest-agent.service
 
 # Cloud SDKs cover all three targets so a single image works for AWS / Azure / GCP.
 RUN pip install --no-cache-dir \
