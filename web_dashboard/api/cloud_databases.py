@@ -98,33 +98,12 @@ async def _pra_pickers() -> dict:
     region/cloud-scoped). Best-effort: any individual failure yields an empty
     list for that picker (the dropdown just falls back to the configured default
     at broker time)."""
-    empty = {"vault_account_groups": [], "jump_groups": [], "jumpoints": []}
+    from ..services import pra_api_service
     try:
-        import asyncio
-        from ..services import pra_api_service
-        if not pra_api_service.configured():
-            return empty
-        vg, jg, jp = await asyncio.gather(
-            pra_api_service.list_vault_account_groups(),
-            pra_api_service.list_jump_groups(),
-            pra_api_service.list_jumpoints(),
-            return_exceptions=True,
-        )
-
-        def _ok(x, what):
-            if isinstance(x, Exception):
-                logger.warning("PRA %s listing failed (non-fatal): %s", what, x)
-                return []
-            return x
-
-        return {
-            "vault_account_groups": _ok(vg, "vault account-group"),
-            "jump_groups": _ok(jg, "jump-group"),
-            "jumpoints": _ok(jp, "jumpoint"),
-        }
+        return await pra_api_service.list_pickers()
     except Exception as exc:
         logger.warning("PRA pickers fetch failed (non-fatal): %s", exc)
-        return empty
+        return {"vault_account_groups": [], "jump_groups": [], "jumpoints": []}
 
 
 def _default_region() -> str:

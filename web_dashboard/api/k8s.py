@@ -29,7 +29,7 @@ from ..models.k8s import (
     ManagementRequest,
     SecretDeliveryRequest,
 )
-from ..services import k8s_service, job_service, cache_service
+from ..services import k8s_service, job_service, cache_service, pra_api_service
 from ..services.aws_service import AWSError
 from ..services.k8s_service import K8sError
 from .auth import require_admin
@@ -155,6 +155,19 @@ async def provision_options(
         raise HTTPException(status_code=400, detail=str(e))
     except AWSError as e:
         raise HTTPException(status_code=503, detail=str(e))
+
+
+@router.get("/clusters/pra-options")
+async def pra_options(
+    current_user: User = Depends(require_admin),
+):
+    """PRA pickers for the per-cluster tunnel modal — Jump Groups, Jumpoints and
+    Vault account groups (best-effort, cluster-agnostic). ``configured`` is false
+    when PRA OAuth isn't set, so the UI shows a note instead of empty dropdowns.
+    Declared before ``/clusters/{cluster_id}`` so the literal isn't captured by the
+    path param (same ordering rule as ``/clusters/provision-options``)."""
+    pickers = await pra_api_service.list_pickers()
+    return {"configured": pra_api_service.configured(), **pickers}
 
 
 @router.get("/clusters/{cluster_id}")

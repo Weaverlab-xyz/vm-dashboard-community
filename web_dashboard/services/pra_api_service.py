@@ -171,3 +171,32 @@ async def list_jumpoints() -> list[dict]:
     """PRA Jumpoints for the provision form's jumpoint picker — ``[{id, name}]``.
     The tunnel HCL filters by name (sra_jumpoint_list), so callers submit the name."""
     return await _list_config("/api/config/v1/jumpoint", "jumpoint")
+
+
+async def list_pickers() -> dict:
+    """All PRA-sourced form pickers — Vault account groups, Jump Groups and Jumpoints —
+    fetched concurrently. Cloud-agnostic (PRA objects aren't region/cloud-scoped).
+    Best-effort: any individual failure yields an empty list for that picker (callers
+    fall back to the configured default at broker time). Returns
+    ``{vault_account_groups, jump_groups, jumpoints}`` — all empty when PRA is
+    unconfigured. Shared by the cloud-DB provision form + the k8s PRA-tunnel modal."""
+    import asyncio
+    empty = {"vault_account_groups": [], "jump_groups": [], "jumpoints": []}
+    if not configured():
+        return empty
+    vg, jg, jp = await asyncio.gather(
+        list_vault_account_groups(), list_jump_groups(), list_jumpoints(),
+        return_exceptions=True,
+    )
+
+    def _ok(x, what):
+        if isinstance(x, Exception):
+            logger.warning("PRA %s listing failed (non-fatal): %s", what, x)
+            return []
+        return x
+
+    return {
+        "vault_account_groups": _ok(vg, "vault account-group"),
+        "jump_groups": _ok(jg, "jump-group"),
+        "jumpoints": _ok(jp, "jumpoint"),
+    }
