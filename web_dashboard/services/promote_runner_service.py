@@ -373,6 +373,7 @@ async def run_for_gcp_target(
     source_format: str,
     dest_bucket: str,
     dest_object: str,
+    install_guest_agent: bool = False,
     presign_expiry_seconds: int = 7200,
 ) -> tuple:
     """Launch the Cloud Run promote-runner job to copy `hub_backend://hub_key`
@@ -400,6 +401,11 @@ async def run_for_gcp_target(
         "--dest-gcs-bucket", dest_bucket,
         "--dest-gcs-object", dest_object,
     ]
+    # Linux images need google-guest-agent baked in or a promoted foreign image
+    # never applies ssh-keys metadata (key-based SSH silently fails). Windows
+    # images use the separate GCEWindowsAgent, so skip.
+    if install_guest_agent:
+        runner_args.append("--install-gcp-guest-agent")
 
     logger.info(
         "Launching GCP promote-runner Cloud Run job for %s: hub=%s://%s -> gs://%s/%s",

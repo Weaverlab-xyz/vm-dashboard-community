@@ -238,6 +238,7 @@ IAM role or container env overrides).
 | `--dest-gcs-bucket`    | `--target gcs`   | GCS bucket                                 |
 | `--dest-gcs-object`    | `--target gcs`   | GCS object name (should end in `.tar.gz`)  |
 | `--install-linux-agent`| optional (Azure) | Bake WALinuxAgent into the disk before upload (Linux images). |
+| `--install-gcp-guest-agent`| optional (GCS) | Bake google-guest-agent into the disk before the tar wrap (Linux images). |
 
 **Azure Linux-agent injection (`--install-linux-agent`):** a foreign Linux
 image (e.g. an AWS AMI) doesn't carry the Azure Linux Agent (waagent). On Azure
@@ -260,6 +261,22 @@ pinned to the EC2 datasource. This fails the promote immediately with an
 actionable message instead of producing an image that boots but hangs at
 `Creating` until the deploy times out. Build Azure-bound images from an
 Azure-endorsed distro (Ubuntu, RHEL, Rocky, Alma, Debian, SUSE).
+
+**GCP guest-agent injection (`--install-gcp-guest-agent`):** a foreign Linux
+image (e.g. an AWS AMI) doesn't carry `google-guest-agent`. Unlike Azure, GCP
+does **not** gate the instance's `RUNNING` state on a guest agent, so the VM
+boots fine — but with no agent, `ssh-keys` instance metadata is never applied to
+`~/.ssh/authorized_keys`, so key-based SSH (and the Password Safe GCP
+SSH-rotation plugin) **silently never works**. When this flag is set the runner
+uses libguestfs `virt-customize` to drop the agent + a systemd unit into the
+(already raw-converted) disk before the tar wrap, and enable it. The agent is
+built from source for **both** amd64 and arm64 and baked in; an arch-selecting
+launcher picks the right binary at guest boot, so no offline arch detection is
+needed. Distro-agnostic (static Go binary; assumes a systemd guest) and needs no
+guest network. The dashboard sets this automatically for Linux images on GCP
+promotions (`os_type != "windows"`); Windows uses the separate GCEWindowsAgent.
+No distro is rejected (the agent runs on any systemd Linux, including Amazon
+Linux — GCP has no waagent-style per-distro handler).
 
 **GCP target quirk:** GCP's `compute.images.insert` requires the source object to be a `.tar.gz` containing exactly one entry named `disk.raw`. When `--target gcs` is paired with `--target-format raw` (the dashboard's only supported GCP path today), the runner automatically tar+gzips the converted raw file under that name before upload. The dashboard always passes `--dest-gcs-object` ending in `.tar.gz` for this reason.
 

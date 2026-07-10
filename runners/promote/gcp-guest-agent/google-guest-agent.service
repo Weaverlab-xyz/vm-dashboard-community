@@ -1,0 +1,20 @@
+[Unit]
+Description=Google Compute Engine Guest Agent
+Before=sshd.service ssh.service
+After=network-online.target syslog.service
+After=network.service networking.service NetworkManager.service systemd-networkd.service
+Wants=network-online.target
+PartOf=network.service networking.service NetworkManager.service systemd-networkd.service
+
+[Service]
+Type=notify
+# /usr/bin/google_guest_agent is our arch-selecting launcher (see launch.sh);
+# it exec's the real amd64/arm64 binary, so sd_notify still reaches systemd.
+ExecStart=/usr/bin/google_guest_agent
+OOMScoreAdjust=-999
+Restart=always
+
+[Install]
+WantedBy=sshd.service ssh.service
+WantedBy=multi-user.target
+WantedBy=network.service networking.service NetworkManager.service systemd-networkd.service

@@ -776,6 +776,10 @@ async def promote_to_gcp_automated(
         source_format=source_format,
         dest_bucket=dest_bucket,
         dest_object=dest_object,
+        # Linux images need google-guest-agent baked in so the promoted image
+        # applies ssh-keys metadata (key-based SSH + PS SSH-rotation plugin).
+        # Windows uses the separate GCEWindowsAgent.
+        install_guest_agent=(image.get("os_type") or "Linux").lower() != "windows",
     )
 
     # 3: ask GCP compute to create a custom image from the staged tar.gz.
