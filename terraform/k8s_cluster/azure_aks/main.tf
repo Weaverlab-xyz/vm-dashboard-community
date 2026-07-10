@@ -2,7 +2,7 @@ terraform {
   required_providers {
     azurerm = {
       source  = "hashicorp/azurerm"
-      version = "~> 3.0"
+      version = "~> 3.35" # >= 3.35, < 4.0: oidc_issuer/workload_identity + azurerm_federated_identity_credential need ≥3.35; must stay < 4.0 (the AAD-legacy `managed` block below is removed in 4.0)
     }
   }
   required_version = ">= 1.3.0"
@@ -12,7 +12,15 @@ terraform {
 # (terraform_provider_env.azure_env): ARM_CLIENT_ID / ARM_CLIENT_SECRET /
 # ARM_TENANT_ID / ARM_SUBSCRIPTION_ID. No creds in this file or in state.
 provider "azurerm" {
-  features {}
+  features {
+    # The per-cluster agent Key Vault (below) is torn down with the cluster —
+    # purge it on destroy so its globally-unique name isn't held for the 90-day
+    # soft-delete window, and recover a same-named soft-deleted vault on re-apply.
+    key_vault {
+      purge_soft_delete_on_destroy    = true
+      recover_soft_deleted_key_vaults = true
+    }
+  }
 }
 
 # The authenticated service principal — used to grant the dashboard's own
@@ -83,10 +91,37 @@ variable "tags" {
   description = "Resource tags (managed-by, cluster id)"
 }
 
+# ── Entitle agent (workload identity + per-cluster Key Vault for azure_secret_manager) ──
+# The agent's KMS backend on AKS is Azure Key Vault, reached via a federated
+# user-assigned managed identity (workload identity). These are all defaulted so
+# the destroy path (_build_cluster_tf_variables with opts={}) still resolves.
+
+variable "cluster_id" {
+  type        = string
+  default     = ""
+  description = "Dashboard cluster id — used to derive the per-cluster agent Key Vault's globally-unique name."
+}
+
+variable "agent_namespace" {
+  type        = string
+  default     = "entitle"
+  description = "Namespace the Entitle agent runs in (the federated-credential subject's namespace)."
+}
+
+variable "agent_service_account" {
+  type        = string
+  default     = "entitle-agent-sa"
+  description = "ServiceAccount the Entitle agent pod uses (federated-credential subject; the chart's default)."
+}
+
 # ── Networking (self-contained VNet + subnet; egress via managed outbound LB) ──
 
 locals {
   rg_name = var.resource_group_name != "" ? var.resource_group_name : "${var.cluster_name}-rg"
+  # Key Vault names are global + ≤24 chars, alphanumeric; derive a unique-per-cluster
+  # slug from the (hyphen-stripped) cluster id. The dashboard always passes cluster_id
+  # on both apply and destroy, so the name stays stable across the cluster's lifecycle.
+  agent_kv_name = substr("entkv${replace(var.cluster_id, "-", "")}", 0, 24)
 }
 
 resource "azurerm_resource_group" "this" {
@@ -121,6 +156,12 @@ resource "azurerm_kubernetes_cluster" "this" {
   dns_prefix          = var.cluster_name
   kubernetes_version  = var.k8s_version != "" ? var.k8s_version : null
   tags                = var.tags
+
+  # Workload identity: the Entitle agent pod uses a federated user-assigned MI to
+  # reach Azure Key Vault (kmsType=azure_secret_manager). Both flags are required —
+  # oidc_issuer_url is only populated when oidc_issuer_enabled = true.
+  oidc_issuer_enabled       = true
+  workload_identity_enabled = true
 
   default_node_pool {
     name           = "default"
@@ -166,6 +207,50 @@ resource "azurerm_role_assignment" "dashboard_admin" {
   principal_id         = data.azurerm_client_config.current.object_id
 }
 
+# ── Entitle agent identity + per-cluster Key Vault (azure_secret_manager) ──────
+# The agent stores its keys in Azure Key Vault instead of k8s Secrets (the
+# in-cluster-Secrets path 401s on AKS). It authenticates with a federated
+# user-assigned managed identity (workload identity): the entitle-agent chart
+# annotates the agent ServiceAccount with this MI's client id + labels the pod
+# (azure.workload.identity/*), the AKS webhook injects a token, and the MI holds
+# Secrets Officer on the vault below. Live-validated on a standard AKS cluster.
+
+resource "azurerm_key_vault" "agent" {
+  name                       = local.agent_kv_name
+  location                   = var.location
+  resource_group_name        = local.rg_name
+  tenant_id                  = data.azurerm_client_config.current.tenant_id
+  sku_name                   = "standard"
+  enable_rbac_authorization  = true  # grant the agent MI via the role assignment below
+  purge_protection_enabled   = false # torn down with the cluster; see the provider key_vault features
+  soft_delete_retention_days = 7
+  tags                       = var.tags
+  depends_on                 = [azurerm_resource_group.this]
+}
+
+resource "azurerm_user_assigned_identity" "agent" {
+  name                = "${var.cluster_name}-entitle-agent"
+  location            = var.location
+  resource_group_name = local.rg_name
+  tags                = var.tags
+  depends_on          = [azurerm_resource_group.this]
+}
+
+resource "azurerm_federated_identity_credential" "agent" {
+  name                = "entitle-agent"
+  resource_group_name = local.rg_name
+  parent_id           = azurerm_user_assigned_identity.agent.id
+  audience            = ["api://AzureADTokenExchange"]
+  issuer              = azurerm_kubernetes_cluster.this.oidc_issuer_url
+  subject             = "system:serviceaccount:${var.agent_namespace}:${var.agent_service_account}"
+}
+
+resource "azurerm_role_assignment" "agent_kv" {
+  scope                = azurerm_key_vault.agent.id
+  role_definition_name = "Key Vault Secrets Officer" # the agent writes + reads its own keys
+  principal_id         = azurerm_user_assigned_identity.agent.principal_id
+}
+
 # ── Outputs ──────────────────────────────────────────────────────────────────
 # k8s_service._assemble_aks_kubeconfig builds a kubelogin exec kubeconfig from
 # these; the transient runner swaps the exec for a server-minted AAD token
@@ -190,4 +275,21 @@ output "ca_certificate" {
   value       = azurerm_kubernetes_cluster.this.kube_config[0].cluster_ca_certificate
   description = "Cluster CA, base64 PEM (kubeconfig certificate-authority-data)"
   sensitive   = true # see endpoint above — kube_config is sensitive
+}
+
+# Entitle agent (azure_secret_manager) — the dashboard captures these per cluster
+# and threads them into the chart's platform.azure.* Helm values.
+output "agent_identity_client_id" {
+  value       = azurerm_user_assigned_identity.agent.client_id
+  description = "Client id of the agent's user-assigned MI (Helm platform.azure.clientId)"
+}
+
+output "agent_key_vault_name" {
+  value       = azurerm_key_vault.agent.name
+  description = "Per-cluster agent Key Vault name (Helm platform.azure.keyVaultName)"
+}
+
+output "agent_identity_tenant_id" {
+  value       = data.azurerm_client_config.current.tenant_id
+  description = "Tenant id for the agent pod (Helm platform.azure.tenantId)"
 }
