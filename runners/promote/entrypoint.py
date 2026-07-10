@@ -146,10 +146,17 @@ def install_linux_agent(disk_path: str, source_format: str) -> None:
         "--copy-in", f"{WALINUXAGENT_SRC}:/opt",
         # Install via whatever Python the guest ships (py3 → py2 → py). waagent
         # supports both; --register-service wires up the systemd/init unit.
+        # Minimal cloud images ship Python WITHOUT setuptools (and py3.12+ dropped
+        # stdlib distutils), which setup.py needs — so if the guest has no
+        # setuptools, fall back to the copy vendored beside the source
+        # (SETUPTOOLS_USE_DISTUTILS=local makes it use its own distutils shim on
+        # py3.12+). Guests that already have setuptools use their own.
         "--run-command",
         "cd /opt/walinuxagent-src && "
         "for py in python3 python2 python; do "
         "if command -v $py >/dev/null 2>&1; then "
+        "$py -c 'import setuptools' >/dev/null 2>&1 || "
+        "export PYTHONPATH=/opt/walinuxagent-src/_vendor SETUPTOOLS_USE_DISTUTILS=local; "
         "$py setup.py install --register-service && exit 0; exit 1; fi; done; "
         "echo 'no python interpreter in guest for waagent install' >&2; exit 1",
         # Belt-and-suspenders: ensure the unit is enabled under either name.
