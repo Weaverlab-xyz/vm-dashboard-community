@@ -222,6 +222,79 @@ recorded on the job (`ps_error`) but never fail the deploy.
 
 ---
 
+## Password Safe cloud-database onboarding (AWS)
+
+An optional extension of the cloud databases feature (AWS RDS only
+for now — Postgres / MySQL / SQL Server). When enabled, provisioning an AWS database also
+hands rotation of a database credential to Password Safe and keeps the PRA-vaulted credential
+in sync. Turn it on under **Settings → Integrations → BeyondTrust → Cloud Database Onboarding**
+(`clouddb_ps_onboarding_enabled`).
+
+**What the dashboard does, per provisioned AWS DB:**
+
+1. Creates a **dedicated managed DB user** (the rotation target) from the minted admin
+   credential, by running the DB client (`psql` / `mysql` / `sqlcmd`) on the shared **PRA
+   Jumpoint host over AWS SSM `SendCommand`** — the only dashboard component with line-of-sight
+   to the private DB. No DB drivers are added to the dashboard; the client runs as a
+   `docker run` on the jump host.
+2. Points the **PRA tunnel's injected Vault credential** at this managed user (not the master
+   admin), so day-to-day access uses the rotated account.
+3. Onboards the DB as a **managed system + managed account** on the **`{engine} SSM Custom
+   Plugin`** platform. The managed system's DNS name is
+   `{instanceArn};{region};{dbEndpoint};{dbName};{publicKeyPath};{suffix}`. The **Password
+   Safe functional account is the AWS IAM user** used for SSM — there is **no privileged DB
+   login**; the managed account changes *its own* password on rotation (self-rotation needs no
+   elevated DB privilege).
+4. Onboards the PRA Vault account as a managed account on the **`PRA Vault Username Password`**
+   plugin (managed system address = the PRA appliance URL; functional account = the PRA
+   Configuration-API OAuth client). When Password Safe rotates the DB managed account, this
+   propagates the new value into the PRA Vault credential the tunnel injects.
+
+**Prerequisites (one-time, admin — the dashboard cannot automate these):**
+
+- Upload the **`{engine} SSM Custom Plugin`** and **`PRA Vault Username Password`**
+  `.PSPLUGIN`s in BeyondInsight → **Configuration → Privileged Access Management → Platform
+  Plugins**. Plugin internals are documented in the Beekeeper articles
+  (`Beekeeper-UsernamePasswordPRAVault.docx` and the per-engine SSM plugin guides). Set the
+  platform-name fields in Settings to match what you uploaded.
+- Prepare the **jump host** for the SSM DB plugin: the DB client binary at the path the plugin
+  invokes, plus the RSA key pair (`private.pem` + `passphrase.txt`) in the `ssm-user` home for
+  credential decryption (see the plugin guide). The dashboard's own managed-user creation uses
+  the `docker run` client image instead and does not need this.
+- Create a **PRA Configuration-API account** (OAuth client) with **Vault Account Management**
+  permission; put its client id/secret in the PRA Config API fields (or leave blank to reuse
+  the PRA credentials the SRA provider already uses).
+- Run the updated `scripts/sandbox/Linux/setup-aws.sh` so the jumpoint host's `ecsInstanceRole`
+  has `AmazonSSMManagedInstanceCore` and the dashboard IAM user has `ssm:SendCommand` /
+  `ssm:GetCommandInvocation`.
+
+> **Password sync note.** The dashboard registers both managed systems; making Password Safe
+> *propagate* a DB rotation into the PRA Vault managed account may require a Password Safe
+> **SmartRule / linked-account** configuration that the Terraform provider cannot express — set
+> that up in Password Safe if your rotation policy requires the two to move together.
+
+### Configuration keys (cloud-DB onboarding)
+
+| Key | Default | Notes |
+|---|---|---|
+| `clouddb_ps_onboarding_enabled` | `false` | Master toggle (AWS only) |
+| `clouddb_ps_platform_postgres` / `_mysql` / `_sqlserver` | `psql/mysql/mssql SSM Custom Plugin` | Custom-plugin platform names (as uploaded) |
+| `clouddb_ps_pravault_platform` | `PRA Vault Username Password` | PRA Vault plugin platform name |
+| `clouddb_ps_workgroup` | — | Workgroup; blank falls back to `passwordsafe_workgroup` |
+| `clouddb_db_client_image_postgres` / `_mysql` / `_sqlserver` | `postgres:16` / `mysql:8.4` / `mcr.microsoft.com/mssql-tools18` | DB-client images run on the jump host |
+| `clouddb_ps_ssm_iam_username` | — | IAM user (functional account); blank → EC2 role mode |
+| `clouddb_ps_ssm_access_key_id` / `_secret_access_key` | — | IAM-mode credentials for the functional account |
+| `clouddb_ps_ssm_account_suffix` | `local` | DNS-name suffix; an AssumeRole ARN for cross-account mode |
+| `clouddb_ps_ssm_public_key_path` | — | Public-key path on the PS node/broker (plugin cred encryption) |
+| `pra_config_api_client_id` / `_secret` | — | PRA Config API OAuth account; blank → reuse `bt_client_id` / `bt_client_secret` |
+
+Off-boarding is automatic: decommissioning the DB deregisters both managed systems and deletes
+both functional accounts (before the RDS instance is destroyed — the managed DB user goes with
+it). Every onboarding step is **non-fatal**: any failure logs a warning and falls back to the
+legacy admin-credential staging, leaving the database up.
+
+---
+
 ## Preparing images for BT management
 
 Images built by the dashboard's Packer flow (`/images/aws`, `/images/azure`, `/images/gcp`) can be pre-conditioned for BeyondTrust pickup using the provisioner scripts under [`provisioners/beyondtrust/`](../../provisioners/beyondtrust/):

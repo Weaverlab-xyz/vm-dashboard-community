@@ -466,6 +466,24 @@ class BeyondTrustFeatureConfig(BaseModel):
     # Shell Jump provisioning — Jump Group and Jumpoint must pre-exist in PRA
     bt_jump_group_name: str = ""
     bt_jumpoint_name: str = ""
+    # Optional cloud-DATABASE Password Safe onboarding (AWS-only) — see config.py.
+    # The two custom plugins + jump-host RSA prep are one-time MANUAL setup.
+    clouddb_ps_onboarding_enabled: bool = False
+    clouddb_ps_platform_postgres: str = "psql SSM Custom Plugin"
+    clouddb_ps_platform_mysql: str = "mysql SSM Custom Plugin"
+    clouddb_ps_platform_sqlserver: str = "mssql SSM Custom Plugin"
+    clouddb_ps_pravault_platform: str = "PRA Vault Username Password"
+    clouddb_ps_workgroup: str = ""                 # blank → falls back to passwordsafe_workgroup
+    clouddb_db_client_image_postgres: str = "postgres:16"
+    clouddb_db_client_image_mysql: str = "mysql:8.4"
+    clouddb_db_client_image_sqlserver: str = "mcr.microsoft.com/mssql-tools18"
+    clouddb_ps_ssm_iam_username: str = ""           # blank → EC2 role mode
+    clouddb_ps_ssm_access_key_id: str = ""
+    clouddb_ps_ssm_secret_access_key: str = ""      # encrypted at rest
+    clouddb_ps_ssm_account_suffix: str = "local"    # "local" or a cross-account AssumeRole ARN
+    clouddb_ps_ssm_public_key_path: str = ""         # public key path on the PS node/broker
+    pra_config_api_client_id: str = ""              # blank → reuse bt_client_id
+    pra_config_api_client_secret: str = ""          # encrypted at rest; blank → reuse bt_client_secret
     # Azure-specific overrides (leave blank to fall back to the AWS values above)
     azure_bt_jump_group_name: str = ""
     azure_jumpoint_name: str = ""
@@ -741,6 +759,7 @@ _CONFIG_ONLY_FEATURES = {"k8s_management", "vdesktops"}
 
 _SECRET_FEATURE_KEYS = frozenset({
     "pscli_client_secret", "bt_client_secret", "epml_pat",
+    "clouddb_ps_ssm_secret_access_key", "pra_config_api_client_secret",
     "portainer_pat",
     "entitle_api_token", "entitle_api_key",
     "proxmox_token_secret", "proxmox_password",

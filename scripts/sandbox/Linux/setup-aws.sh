@@ -460,6 +460,13 @@ else
     --policy-arn arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
   ok "Created IAM role $ECS_INSTANCE_ROLE"
 fi
+# The Jumpoint host doubles as the SSM Run Command target for the optional
+# cloud-DB Password Safe onboarding (the dashboard runs the DB client on it via
+# SSM to create the managed DB user). Attach the SSM managed-instance core policy
+# so the host's SSM agent registers it as a managed instance (idempotent).
+retry 8 5 aws iam attach-role-policy --role-name "$ECS_INSTANCE_ROLE" \
+  --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore || \
+  warn "could not attach AmazonSSMManagedInstanceCore to $ECS_INSTANCE_ROLE (cloud-DB PS onboarding needs it)"
 # Instance profile wraps the role for EC2 attachment (idempotent).
 if ! aws iam get-instance-profile --instance-profile-name "$ECS_INSTANCE_ROLE" >/dev/null 2>&1; then
   aws iam create-instance-profile --instance-profile-name "$ECS_INSTANCE_ROLE" \
@@ -744,6 +751,12 @@ DASHBOARD_POLICY_DOC="$(jq -c . <<JSON
       "Effect": "Allow",
       "Action": ["ssm:GetParameter", "ssm:GetParameters"],
       "Resource": "arn:aws:ssm:*::parameter/aws/service/ecs/optimized-ami/*"
+    },
+    {
+      "Sid": "DashboardSSMRunCommand",
+      "Effect": "Allow",
+      "Action": ["ssm:SendCommand", "ssm:GetCommandInvocation", "ssm:ListCommandInvocations"],
+      "Resource": "*"
     },
     {
       "Sid": "DashboardECS",

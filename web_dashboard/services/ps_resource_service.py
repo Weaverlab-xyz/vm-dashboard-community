@@ -64,12 +64,18 @@ _PLUGIN_CACHE_DIR = os.environ.get("TF_PLUGIN_CACHE_DIR", "/root/.terraform.d/pl
 
 _REDACTED = "**REDACTED-BY-DASHBOARD**"
 
-# Cloud-API "plugin" methods — Password Safe drives the host over a cloud control
-# plane (AWS SSM / Azure Run Command) rather than SSH, so the managed system carries
-# the plugin's address in ``dns_name``, uses a placeholder ip, omits the SSH-only
-# fields (remote_client_type / ssh_key_enforcement_mode), and pushes no private key
-# (the plugin mints/rotates the key itself). ``ssh`` is the traditional method.
-_PLUGIN_METHODS = frozenset({"ssm", "azurevm"})
+# Custom-plugin methods — Password Safe drives the target through a custom plugin
+# (AWS SSM / Azure Run Command / a DB client / the PRA Config API) rather than SSH,
+# so the managed system carries the plugin's address in ``dns_name``/``host_name``,
+# uses a placeholder ip, omits the SSH-only fields (remote_client_type /
+# ssh_key_enforcement_mode), and pushes no private key. ``ssh`` is the traditional
+# method. ``ssm``/``azurevm`` are SSH-key-managed (dss auto-management on); ``dbssm``
+# (cloud-DB via the "{engine} SSM Custom Plugin") and ``pravault`` (the "PRA Vault
+# Username Password" plugin) are PASSWORD-managed, so their account emits
+# dss_auto_management_flag = false.
+_PLUGIN_METHODS = frozenset({"ssm", "azurevm", "dbssm", "pravault"})
+# Methods whose managed account is password-managed (no SSH DSS key auto-management).
+_PASSWORD_MANAGED_METHODS = frozenset({"dbssm", "pravault"})
 
 
 class PSResourceError(Exception):
@@ -159,7 +165,8 @@ def _generate_managed_system_hcl(*, name: str, host_name: str, ip_address: str, 
                                  entity_type_id: int, workgroup_id: str,
                                  managed_account_name: str, ssh_key_enforcement_mode: int,
                                  application_host_id: int = 0, method: str = "ssh",
-                                 dns_name: str = "", emit_private_key: bool = True) -> str:
+                                 dns_name: str = "", emit_private_key: bool = True,
+                                 dss_auto_management: bool = True) -> str:
     """HCL onboarding a VM as a managed system + its account. Two shapes via ``method``:
 
     * ``ssh`` (default) — traditional managed system keyed by host_name/ip on an SSH
@@ -214,7 +221,7 @@ def _generate_managed_system_hcl(*, name: str, host_name: str, ip_address: str, 
     if emit_private_key:
         acct_lines.append(_line("private_key", "var.ps_account_private_key"))
     acct_lines += [
-        _line("dss_auto_management_flag", "true"),
+        _line("dss_auto_management_flag", "true" if dss_auto_management else "false"),
         _line("auto_management_flag", "true"),
         _line("api_enabled", "true"),
     ]
@@ -339,6 +346,15 @@ async def register_managed_system(*, name: str, host_name: str, private_key: str
     the plugin parses), the account name is the plain Linux user (no suffix), no private key
     is pushed, and ip defaults to a ``127.0.0.1`` placeholder.
 
+    ``method="dbssm"`` uses the cloud-DB "{engine} SSM Custom Plugin": ``dns_name`` must be
+    ``{instanceArn};{region};{dbEndpoint};{dbName};{publicKeyPath};local`` (six ``;``-separated
+    parts), ``port`` is the real DB port, ``managed_account_name`` is the dedicated DB user,
+    and the account is password-managed (no SSH DSS key).
+
+    ``method="pravault"`` uses the "PRA Vault Username Password" plugin: ``host_name`` must be
+    the PRA appliance URL and ``managed_account_name`` the exact PRA Vault account name; the
+    account is password-managed.
+
     ``method="ssh"`` (default) keeps the traditional key-managed flow and requires
     ``private_key``."""
     method = (method or "ssh").lower()
@@ -370,6 +386,42 @@ async def register_managed_system(*, name: str, host_name: str, private_key: str
             ssh_key_enforcement_mode=ssh_key_enforcement_mode,
             application_host_id=application_host_id,
             method="azurevm", dns_name=dns_name, emit_private_key=False)
+    elif method == "dbssm":
+        # Cloud-DB via the "{engine} SSM Custom Plugin": Password Safe reaches the
+        # private RDS instance by running the DB client on a jump host over SSM.
+        # dns_name encodes everything the plugin parses, ip is a placeholder, the
+        # real DB port applies, and the account is PASSWORD-managed (no SSH key).
+        if not dns_name or dns_name.count(";") != 5:
+            raise PSResourceError(
+                "DB SSM onboarding requires a dns_name of the form "
+                "'{instanceArn};{region};{dbEndpoint};{dbName};{publicKeyPath};local'")
+        hcl = _generate_managed_system_hcl(
+            name=name, host_name=host_name, ip_address=ip_address or "127.0.0.1", port=port,
+            functional_account_id=functional_account_id, platform_id=platform_id,
+            entity_type_id=entity_type_id, workgroup_id=workgroup_id,
+            managed_account_name=managed_account_name,
+            ssh_key_enforcement_mode=ssh_key_enforcement_mode,
+            application_host_id=application_host_id,
+            method="dbssm", dns_name=dns_name, emit_private_key=False,
+            dss_auto_management=False)
+    elif method == "pravault":
+        # "PRA Vault Username Password" plugin: Password Safe PATCHes the rotated
+        # password into a PRA Vault username_password account via the PRA Config API.
+        # The managed system's network address (host_name) is the PRA appliance URL;
+        # the managed account name is the exact PRA Vault account name. Password-managed.
+        if not host_name:
+            raise PSResourceError(
+                "PRA Vault onboarding requires host_name set to the PRA appliance URL")
+        hcl = _generate_managed_system_hcl(
+            name=name, host_name=host_name, ip_address=ip_address or "127.0.0.1",
+            port=port or 443,
+            functional_account_id=functional_account_id, platform_id=platform_id,
+            entity_type_id=entity_type_id, workgroup_id=workgroup_id,
+            managed_account_name=managed_account_name,
+            ssh_key_enforcement_mode=ssh_key_enforcement_mode,
+            application_host_id=application_host_id,
+            method="pravault", dns_name="", emit_private_key=False,
+            dss_auto_management=False)
     else:
         if not private_key:
             raise PSResourceError(

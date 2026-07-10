@@ -472,11 +472,16 @@ async def _ensure_jumpoint_node(region: str) -> None:
 
 
 async def _broker_tunnel(db: Session, *, row: CloudDatabase, job_id: str,
-                         engine: str, tf_variables: dict) -> None:
+                         engine: str, tf_variables: dict,
+                         override_cred: Optional[tuple] = None) -> None:
     """Phase 2: provision a PRA protocol-tunnel jump to the private DB via the
     beyondtrust/sra provider, record ``jump_item_id`` on the row, and stash the
     tunnel's Terraform state in the provisioning job's metadata for teardown.
-    Non-fatal: a failure leaves the DB up with no tunnel (retryable)."""
+    Non-fatal: a failure leaves the DB up with no tunnel (retryable).
+
+    ``override_cred`` — when the Password Safe onboarding is active it passes
+    ``(managed_user, managed_password)`` so the injected/vaulted credential is the
+    dedicated managed DB user (the rotation target) rather than the master admin."""
     from . import terraform_pra_service as pra
     # The shared Jumpoint host was ensured at the start of run_provision_apply
     # (so its ~2-min boot overlaps the RDS apply); ensure again here — idempotent
@@ -505,6 +510,9 @@ async def _broker_tunnel(db: Session, *, row: CloudDatabase, job_id: str,
                           or tf_variables.get("administrator_login") or "")
         admin_password = (tf_variables.get("master_password")
                           or tf_variables.get("administrator_password") or "")
+        if override_cred:
+            admin_username, admin_password = override_cred
+        vault_account_name = f"{jump_name}-admin"
         tun = await pra.provision_db_tunnel(
             engine=engine,
             name=jump_name,
@@ -519,7 +527,7 @@ async def _broker_tunnel(db: Session, *, row: CloudDatabase, job_id: str,
             # the same workspace/state so decommission destroys it too. The
             # account group makes it visible to users via group policies.
             admin_password=admin_password,
-            vault_account_name=f"{jump_name}-admin",
+            vault_account_name=vault_account_name,
             vault_account_group_id=vault_group_id,
         )
         row.jump_item_id = tun.get("tunnel_jump_id") or None
@@ -529,6 +537,7 @@ async def _broker_tunnel(db: Session, *, row: CloudDatabase, job_id: str,
             meta = job.metadata_dict or {}
             meta["tunnel_tf_state"] = tun.get("tf_state_json")   # scrubbed of secrets
             meta["vault_account_id"] = tun.get("vault_account_id")
+            meta["vault_account_name"] = vault_account_name      # pravault managed-account name
             job.metadata_dict = meta
             db.commit()
         logger.info("clouddb tunnel brokered db_id=%s jump_item_id=%s vault_account_id=%s",
@@ -764,6 +773,147 @@ async def _store_ps_credentials(db: Session, *, row: CloudDatabase, job_id: str,
             db.commit()
 
 
+# ── Optional Password Safe DB onboarding (AWS-only, opt-in) ───────────────────
+
+def _ps_db_onboarding_enabled(row: CloudDatabase) -> bool:
+    """Gate for the full Password Safe DB onboarding: AWS-only, the Password Safe
+    OAuth client configured, and the operator opt-in flag set. When off, the DB
+    still provisions and the legacy admin-credential staging runs instead."""
+    return (row.cloud == "aws" and _pscli_configured()
+            and config_service.get_bool("clouddb_ps_onboarding_enabled", False))
+
+
+def _managed_user_name(db_id: str) -> str:
+    """A safe, per-database DB identifier for the dedicated managed user
+    (letter-led, ``[A-Za-z0-9_]`` — see cloud_db_sql_service._IDENT_RE)."""
+    return f"psafe_{db_id.replace('-', '')[:12]}"
+
+
+async def _create_db_managed_user(db: Session, *, row: CloudDatabase, job_id: str,
+                                  engine: str, tf_variables: dict) -> dict:
+    """Create the dedicated managed DB user from the admin credential by running
+    the DB client on the shared Jumpoint host over AWS SSM. Returns the onboarding
+    context (managed user + password, jump host id, region, db name, admin user,
+    client image). Raises on failure so the caller falls back to admin staging."""
+    from . import aws_service, jumpoint_host_service
+    from . import cloud_db_sql_service as sql
+    region = _cfg(row.cloud + "_region") or row.region
+    host_id = await jumpoint_host_service.ensure_jumpoint_host(row.cloud, region)
+    if not host_id:
+        raise CloudDatabaseError(
+            "no SSM jump host available — the shared Jumpoint host must be up to run "
+            "the DB client (check aws_ecs_docker_deploy_key + jumpoint config)")
+    admin_username = (tf_variables.get("master_username")
+                      or tf_variables.get("administrator_login") or "dbadmin")
+    admin_password = (config_service.get(f"clouddb/{row.id}/admin")
+                      or tf_variables.get("master_password") or "")
+    db_name = "master" if engine == "sqlserver" else tf_variables.get("db_name", "")
+    managed_user = _managed_user_name(row.id)
+    managed_pw = sql.generate_password()
+    image = _cfg(f"clouddb_db_client_image_{engine}") or sql.default_client_image(engine)
+    port = row.port or sql.default_port(engine)
+    cmds = sql.onboard_commands(
+        engine, host=row.private_host, port=port,
+        database=db_name, admin_user=admin_username, admin_password=admin_password,
+        managed_user=managed_user, managed_password=managed_pw, client_image=image)
+    result = await aws_service.ssm_send_command(region, host_id, cmds, timeout=300)
+    if result.get("status") != "Success" or int(result.get("response_code", -1)) != 0:
+        detail = (result.get("stderr") or result.get("stdout") or "")[:400]
+        raise CloudDatabaseError(
+            f"managed-user creation on the jump host failed "
+            f"(status={result.get('status')}, rc={result.get('response_code')}): {detail}")
+    logger.info("clouddb: managed DB user %r created via SSM on %s db_id=%s",
+                managed_user, host_id, row.id)
+    return {"managed_user": managed_user, "managed_pw": managed_pw, "jump_host_id": host_id,
+            "region": region, "db_name": db_name, "admin_username": admin_username,
+            "client_image": image, "port": port}
+
+
+async def _onboard_ps_managed_systems(db: Session, *, row: CloudDatabase, job_id: str,
+                                      engine: str, tf_variables: dict, ctx: dict) -> None:
+    """Onboard the DB into Password Safe: a managed system + managed account on the
+    "{engine} SSM Custom Plugin" platform (functional account = the AWS IAM user for
+    SSM), and — when a PRA Vault account exists for this DB — a managed system +
+    managed account on the "PRA Vault Username Password" platform so Password Safe
+    propagates rotations into the vaulted credential the tunnel injects. Ids +
+    teardown state are stashed on the provisioning job's metadata. Best-effort."""
+    from . import ps_api_service, ps_resource_service
+    name = tf_variables.get("identifier") or f"clouddb-{row.id[:8]}"
+    workgroup_id = await ps_api_service.get_workgroup_id(
+        _cfg("clouddb_ps_workgroup") or _cfg("passwordsafe_workgroup"))
+    stash: dict = {
+        "ps_db_managed_user": ctx["managed_user"],
+        "ps_db_jump_host_id": ctx["jump_host_id"],
+        "ps_db_region": ctx["region"],
+        "ps_db_admin_username": ctx["admin_username"],
+        "ps_db_client_image": ctx["client_image"],
+        "ps_db_name": ctx["db_name"],
+    }
+
+    # ── DB managed system (dbssm) ──
+    db_platform_id = await ps_api_service.get_platform_id(_cfg(f"clouddb_ps_platform_{engine}"))
+    iam_user = _cfg("clouddb_ps_ssm_iam_username")
+    akid = _cfg("clouddb_ps_ssm_access_key_id")
+    secret = _cfg("clouddb_ps_ssm_secret_access_key")
+    if iam_user and akid and secret:
+        fa_username, fa_password = iam_user, f"{akid}:{secret}"   # IAM-user mode
+    else:
+        fa_username, fa_password = "EC2", secrets.token_urlsafe(16)  # EC2 mode: role-based; PS still stores a value
+    db_fa_id = await ps_api_service.create_functional_account_on_platform(
+        platform_id=db_platform_id, account_name=fa_username,
+        display_name=f"{name}-ssm-fa", password=fa_password,
+        description=f"AWS SSM functional account for dashboard database {name} (db_id={row.id})")
+    stash["ps_db_functional_account_id"] = db_fa_id
+    # DNS name: {instance};{region};{db endpoint};{db name};{public key path};{suffix}
+    dns_name = ";".join([
+        ctx["jump_host_id"], ctx["region"], row.private_host, ctx["db_name"] or "",
+        _cfg("clouddb_ps_ssm_public_key_path"), _cfg("clouddb_ps_ssm_account_suffix") or "local"])
+    reg = await ps_resource_service.register_managed_system(
+        name=f"{name}-db", host_name=row.private_host, ip_address="127.0.0.1",
+        port=ctx["port"], functional_account_id=db_fa_id, platform_id=db_platform_id,
+        workgroup_id=workgroup_id, managed_account_name=ctx["managed_user"],
+        method="dbssm", dns_name=dns_name)
+    stash["ps_db_registration_tf_state"] = reg.get("tf_state_json")
+    stash["ps_db_system_id"] = reg.get("managed_system_id")
+    stash["ps_db_account_id"] = reg.get("managed_account_id")
+    logger.info("clouddb: onboarded DB managed system db_id=%s system_id=%s account_id=%s",
+                row.id, reg.get("managed_system_id"), reg.get("managed_account_id"))
+
+    # ── PRA Vault managed system (pravault) — only if the tunnel minted a vault account ──
+    job = db.query(Job).filter(Job.id == job_id).first()
+    vault_account_name = (job.metadata_dict or {}).get("vault_account_name") if job else None
+    if vault_account_name and _cfg("bt_api_host"):
+        pv_platform_id = await ps_api_service.get_platform_id(_cfg("clouddb_ps_pravault_platform"))
+        pra_url = _cfg("bt_api_host")
+        if not pra_url.lower().startswith("http"):
+            pra_url = f"https://{pra_url}"
+        pv_fa_id = await ps_api_service.create_functional_account_on_platform(
+            platform_id=pv_platform_id,
+            account_name=(_cfg("pra_config_api_client_id") or _cfg("bt_client_id")),
+            display_name=f"{name}-pravault-fa",
+            password=(_cfg("pra_config_api_client_secret") or _cfg("bt_client_secret")),
+            description=f"PRA Config API functional account for dashboard database {name} (db_id={row.id})")
+        stash["ps_pravault_functional_account_id"] = pv_fa_id
+        reg2 = await ps_resource_service.register_managed_system(
+            name=f"{name}-pravault", host_name=pra_url, ip_address="127.0.0.1", port=443,
+            functional_account_id=pv_fa_id, platform_id=pv_platform_id,
+            workgroup_id=workgroup_id, managed_account_name=vault_account_name, method="pravault")
+        stash["ps_pravault_registration_tf_state"] = reg2.get("tf_state_json")
+        stash["ps_pravault_system_id"] = reg2.get("managed_system_id")
+        stash["ps_pravault_account_id"] = reg2.get("managed_account_id")
+        logger.info("clouddb: onboarded PRA Vault managed system db_id=%s system_id=%s (account=%r)",
+                    row.id, reg2.get("managed_system_id"), vault_account_name)
+    else:
+        logger.info("clouddb: no PRA Vault account for db_id=%s — skipping PRA Vault onboarding", row.id)
+
+    job = db.query(Job).filter(Job.id == job_id).first()
+    if job is not None:
+        meta = job.metadata_dict or {}
+        meta.update(stash)
+        job.metadata_dict = meta
+        db.commit()
+
+
 # Generic terraform line → (pct, message) milestones for the DB job's progress bar
 # (engine-agnostic phrases, since the resource type varies by cloud).
 _DB_MILESTONES = [
@@ -838,17 +988,42 @@ async def run_provision_apply(
         row.status = "available"
         db.commit()
 
-        # Phase 2: broker the PRA tunnel (only when PRA is configured + we have a host).
-        if row.private_host and _pra_configured():
-            await _broker_tunnel(db, row=row, job_id=job_id, engine=engine, tf_variables=tf_variables)
+        # Optional Password Safe DB onboarding (AWS-only, opt-in). Create the
+        # dedicated managed user FIRST so the tunnel/vault injects it, then let PS
+        # own its rotation. Any failure falls back to the legacy admin staging.
+        onboard_ctx = None
+        if row.private_host and _ps_db_onboarding_enabled(row):
+            try:
+                onboard_ctx = await _create_db_managed_user(
+                    db, row=row, job_id=job_id, engine=engine, tf_variables=tf_variables)
+            except Exception as exc:
+                logger.warning("clouddb: PS managed-user creation failed db_id=%s "
+                               "(falling back to admin staging): %s", db_id, exc)
+                onboard_ctx = None
 
-        # Stage the credential in Password Safe / Secrets Safe — independent of
-        # PRA (gated only on pscli_* config). Non-fatal.
-        try:
-            await _store_ps_credentials(db, row=row, job_id=job_id, tf_variables=tf_variables)
-        except Exception as exc:
-            logger.warning("clouddb credential staging failed db_id=%s (non-fatal): %s",
-                           db_id, exc)
+        # Phase 2: broker the PRA tunnel (only when PRA is configured + we have a host).
+        # With PS onboarding active, inject the managed user; otherwise the admin cred.
+        if row.private_host and _pra_configured():
+            override = (onboard_ctx["managed_user"], onboard_ctx["managed_pw"]) if onboard_ctx else None
+            await _broker_tunnel(db, row=row, job_id=job_id, engine=engine,
+                                 tf_variables=tf_variables, override_cred=override)
+
+        if onboard_ctx:
+            # Full Password Safe onboarding (managed systems + accounts + PRA Vault sync).
+            try:
+                await _onboard_ps_managed_systems(
+                    db, row=row, job_id=job_id, engine=engine, tf_variables=tf_variables, ctx=onboard_ctx)
+            except Exception as exc:
+                logger.warning("clouddb: PS managed-system onboarding failed db_id=%s "
+                               "(non-fatal): %s", db_id, exc)
+        else:
+            # Legacy: stage the admin credential (functional account + Secrets Safe doc)
+            # — independent of PRA (gated only on pscli_* config). Non-fatal.
+            try:
+                await _store_ps_credentials(db, row=row, job_id=job_id, tf_variables=tf_variables)
+            except Exception as exc:
+                logger.warning("clouddb credential staging failed db_id=%s (non-fatal): %s",
+                               db_id, exc)
 
         # Register the DB as an Entitle integration (opt-in, non-fatal). Gated by
         # the global capability flag AND the per-build choice (on the job metadata).
@@ -971,6 +1146,36 @@ async def run_decommission(db: Session, *, db_id: str, job_id: str) -> None:
         except Exception as exc:
             errors.append(f"Secrets Safe secret: {exc}")
             logger.warning("clouddb secrets-safe delete for %s failed: %s", db_id, exc)
+
+    # 3b. Password Safe DB onboarding artifacts (managed systems + functional
+    #     accounts). Deregister each managed system BEFORE deleting its functional
+    #     account — a managed system that still references the functional account
+    #     blocks the delete. The managed DB user itself dies with the RDS instance
+    #     (step 4), so no DB-side drop is needed here.
+    if any(meta.get(k) for k in ("ps_db_registration_tf_state", "ps_pravault_registration_tf_state",
+                                 "ps_db_functional_account_id", "ps_pravault_functional_account_id")):
+        job_service.update_progress(db, job_id, 50, "Removing Password Safe managed systems…")
+        from . import ps_resource_service, ps_api_service
+        for key, label in (("ps_pravault_registration_tf_state", "PRA Vault managed system"),
+                           ("ps_db_registration_tf_state", "DB managed system")):
+            state = meta.get(key)
+            if state:
+                try:
+                    await ps_resource_service.deregister(state)
+                    logger.info("clouddb %s removed db_id=%s", label, db_id)
+                except Exception as exc:
+                    errors.append(f"{label}: {exc}")
+                    logger.warning("clouddb %s removal for %s failed: %s", label, db_id, exc)
+        for key, label in (("ps_pravault_functional_account_id", "PRA Vault functional account"),
+                           ("ps_db_functional_account_id", "DB functional account")):
+            fa = meta.get(key)
+            if fa:
+                try:
+                    await ps_api_service.delete_functional_account(int(fa))
+                    logger.info("clouddb %s %s deleted db_id=%s", label, fa, db_id)
+                except Exception as exc:
+                    errors.append(f"{label}: {exc}")
+                    logger.warning("clouddb %s delete for %s failed: %s", label, db_id, exc)
 
     # 4. The RDS instance itself (the long step).
     job_service.update_progress(db, job_id, 60, "Destroying the database instance…")

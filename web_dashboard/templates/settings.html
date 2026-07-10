@@ -639,6 +639,129 @@
             </div>
           </div>
 
+          <!-- Cloud Database Password Safe onboarding (AWS-only) -->
+          <div class="border-t border-gray-100 pt-4">
+            <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Cloud Database Onboarding <span class="text-gray-400 font-normal normal-case">(AWS only)</span></p>
+            <p class="text-xs text-gray-400 mb-3">
+              When on, provisioning an AWS database creates a dedicated managed DB user, onboards the DB as a
+              Password Safe managed system + managed account (via the <code class="bg-gray-100 px-1 rounded">{engine} SSM Custom Plugin</code>),
+              and onboards the PRA Vault credential (via the <code class="bg-gray-100 px-1 rounded">PRA Vault Username Password</code> plugin)
+              so Password Safe propagates rotations into the tunnel-injected credential. The custom plugins + jump-host RSA
+              key prep are one-time manual setup — see the BeyondTrust integration docs.
+            </p>
+            <label class="flex items-center gap-2 mb-3 text-sm text-gray-700">
+              <input type="checkbox" x-model="panelCfg.clouddb_ps_onboarding_enabled"
+                     class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+              Enable Password Safe onboarding for AWS cloud databases
+            </label>
+            <div x-show="panelCfg.clouddb_ps_onboarding_enabled" class="space-y-3">
+              <div class="grid grid-cols-3 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">PostgreSQL Platform</label>
+                  <input type="text" x-model="panelCfg.clouddb_ps_platform_postgres"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="psql SSM Custom Plugin">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">MySQL Platform</label>
+                  <input type="text" x-model="panelCfg.clouddb_ps_platform_mysql"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="mysql SSM Custom Plugin">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">SQL Server Platform</label>
+                  <input type="text" x-model="panelCfg.clouddb_ps_platform_sqlserver"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="mssql SSM Custom Plugin">
+                </div>
+              </div>
+              <div class="grid grid-cols-2 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">PRA Vault Platform</label>
+                  <input type="text" x-model="panelCfg.clouddb_ps_pravault_platform"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="PRA Vault Username Password">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Workgroup <span class="text-gray-400 font-normal">(blank = reuse VM workgroup)</span></label>
+                  <input type="text" x-model="panelCfg.clouddb_ps_workgroup"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="Default Workgroup">
+                </div>
+              </div>
+              <p class="text-xs text-gray-400">Functional account = the AWS IAM user for SSM SendCommand. Leave the IAM fields blank to use the EC2 instance-role mode (Password Safe node/broker on an EC2 with the SSM role).</p>
+              <div class="grid grid-cols-3 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">IAM Username</label>
+                  <input type="text" x-model="panelCfg.clouddb_ps_ssm_iam_username"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="(blank = EC2 role mode)">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">IAM Access Key ID</label>
+                  <input type="text" x-model="panelCfg.clouddb_ps_ssm_access_key_id"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="AKIA…">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">IAM Secret Access Key</label>
+                  <input type="password" x-model="panelCfg.clouddb_ps_ssm_secret_access_key"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="••••••••">
+                </div>
+              </div>
+              <div class="grid grid-cols-2 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Account Suffix</label>
+                  <input type="text" x-model="panelCfg.clouddb_ps_ssm_account_suffix"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="local (or a cross-account AssumeRole ARN)">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Public Key Path <span class="text-gray-400 font-normal">(on PS node)</span></label>
+                  <input type="text" x-model="panelCfg.clouddb_ps_ssm_public_key_path"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="C:\Utils\public_ssm.pem">
+                </div>
+              </div>
+              <p class="text-xs text-gray-400">PRA Configuration-API OAuth account for the PRA Vault plugin — leave blank to reuse the PRA credentials above.</p>
+              <div class="grid grid-cols-2 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">PRA Config API Client ID</label>
+                  <input type="text" x-model="panelCfg.pra_config_api_client_id"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="(blank = reuse PRA client id)">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">PRA Config API Client Secret</label>
+                  <input type="password" x-model="panelCfg.pra_config_api_client_secret"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="••••••••">
+                </div>
+              </div>
+              <div class="grid grid-cols-3 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">psql Client Image</label>
+                  <input type="text" x-model="panelCfg.clouddb_db_client_image_postgres"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="postgres:16">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">mysql Client Image</label>
+                  <input type="text" x-model="panelCfg.clouddb_db_client_image_mysql"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="mysql:8.4">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">sqlcmd Client Image</label>
+                  <input type="text" x-model="panelCfg.clouddb_db_client_image_sqlserver"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="mcr.microsoft.com/mssql-tools18">
+                </div>
+              </div>
+            </div>
+          </div>
+
           <!-- EPM for Linux -->
           <div class="border-t border-gray-100 pt-4">
             <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">EPM for Linux (EPM-L)</p>
