@@ -447,6 +447,7 @@ def _feature_flags() -> dict:
         "xcpng_enabled":        config_service.get_bool("xcpng_enabled",         settings.xcpng_enabled),
         "vdesktops_enabled":    config_service.get_bool("vdesktops_enabled",     settings.vdesktops_enabled),
         "cloud_database_enabled": config_service.get_bool("cloud_database_enabled", settings.cloud_database_enabled),
+        "entitle_registration_enabled": config_service.get_bool("entitle_registration_enabled", settings.entitle_registration_enabled),
         "k8s_management_enabled": config_service.get_bool("k8s_management_enabled", settings.k8s_management_enabled),
         "cost_explorer_enabled": config_service.get_bool("cost_explorer_enabled", settings.cost_explorer_enabled),
         "admission_control_enabled": config_service.get_bool("admission_control_enabled", settings.admission_control_enabled),

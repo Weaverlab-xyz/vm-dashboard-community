@@ -34,9 +34,15 @@ Optional:
 ⚠️  APPLICATION SLUGS: ``application.name`` is a lowercase slug from Entitle's
     catalog. ``postgresql`` is confirmed from the provider docs; ``mysql`` /
     ``mssql`` / ``ssh`` are best-effort — confirm against the ``entitle_applications``
-    data source for your tenant and adjust ``_APP_SLUG`` if they differ. The
-    ``connection_json`` keys are likewise application-specific (the DB shape is
-    confirmed; the SSH shape follows the BeyondTrust SSH-ephemeral docs).
+    data source for your tenant and adjust ``_APP_SLUG`` if they differ.
+
+    ``connection_json`` keys are application-specific and DIFFER PER DB ENGINE
+    (see ``_db_connection_json_hcl``), matching Entitle's connector docs:
+      - postgresql: host, port, username, password, [database]  (ephemeral accounts)
+      - mssql:      server ("host,port"), user, password, [database], [version]  (ephemeral accounts)
+      - mysql:      host, port, user, password, [mysql_version]  (persistent roles, NOT ephemeral)
+    The mssql ``server`` vs separate ``port`` split and the exact version keys
+    should be confirmed against the tenant before first live use.
 """
 
 import asyncio
@@ -122,7 +128,7 @@ def _durations_hcl() -> str:
     return "[" + ", ".join(nums) + "]"
 
 
-def _common_attrs_hcl(private: bool) -> str:
+def _common_attrs_hcl(private: bool, *, allow_creating_accounts: bool = True) -> str:
     """The required owner/workflow blocks + allowed_durations, plus the
     ``agent_token`` block **only for private targets**.
 
@@ -130,7 +136,13 @@ def _common_attrs_hcl(private: bool) -> str:
     registers with no agent (no Kubernetes cluster needed). Private targets
     (our PRA-only VMs / private RDS) require the shared Entitle agent — raise if
     one isn't configured so the operator provisions it first. Always raises if
-    owner/workflow are unset (an integration can't be created without them)."""
+    owner/workflow are unset (an integration can't be created without them).
+
+    ``allow_creating_accounts`` is the **ephemeral-account** switch — Entitle mints
+    a short-lived account/role on the target per grant. Defaults ``True`` (SSH /
+    Kubernetes / Rancher all use it); the MySQL DB path passes ``False`` because
+    Entitle's MySQL connector assigns persistent roles rather than ephemeral
+    accounts."""
     owner_id = _cfg("entitle_owner_id")
     workflow_id = _cfg("entitle_workflow_id")
     if not owner_id:
@@ -151,7 +163,7 @@ def _common_attrs_hcl(private: bool) -> str:
         f"  workflow = {{ id = {json.dumps(workflow_id)} }}\n"
         f"{agent_block}"
         f"  allowed_durations       = {_durations_hcl()}\n"
-        f"  allow_creating_accounts = true\n"
+        f"  allow_creating_accounts = {str(bool(allow_creating_accounts)).lower()}\n"
     )
 
 
@@ -221,8 +233,49 @@ output "integration_id" {{
 """
 
 
+def _db_connection_json_hcl(*, engine: str, host: str, port: int,
+                            username: str, database: str, version: str) -> str:
+    """Emit the ``connection_json = jsonencode({...})`` block with the
+    **engine-correct** connection keys. ``password`` stays a raw ``var.db_password``
+    reference (interpolated by jsonencode at apply time) so the secret never lands
+    in the HCL on disk — which is why this is built as an HCL string, not a dict.
+
+    Per Entitle's connector docs the key names differ by engine:
+      - postgresql: host, port, username, password, [database]
+      - mysql:      host, port, user,     password, [mysql_version]
+      - mssql:      server (host[,port]), user, password, [database], [version]
+    """
+    lines: list[str] = []
+    if engine == "sqlserver":
+        # The mssql connector takes `server` (host[,port]) + `user`; no separate `port`.
+        server = f"{host},{port}" if port else host
+        lines.append(f"    server   = {json.dumps(server)}")
+        lines.append(f"    user     = {json.dumps(username)}")
+        lines.append("    password = var.db_password")
+        if database:
+            lines.append(f"    database = {json.dumps(database)}")
+        if version:
+            lines.append(f"    version  = {json.dumps(version)}")
+    elif engine == "mysql":
+        lines.append(f"    host     = {json.dumps(host)}")
+        lines.append(f"    port     = {port}")
+        lines.append(f"    user     = {json.dumps(username)}")
+        lines.append("    password = var.db_password")
+        if version:
+            lines.append(f"    mysql_version = {json.dumps(version)}")
+    else:  # postgres
+        lines.append(f"    host     = {json.dumps(host)}")
+        lines.append(f"    port     = {port}")
+        lines.append(f"    username = {json.dumps(username)}")
+        lines.append("    password = var.db_password")
+        if database:
+            lines.append(f"    database = {json.dumps(database)}")
+    body = "\n".join(lines)
+    return f"  connection_json = jsonencode({{\n{body}\n  }})\n"
+
+
 def _generate_db_hcl(*, engine: str, name: str, host: str, port: int,
-                     username: str, database: str, private: bool) -> str:
+                     username: str, database: str, version: str, private: bool) -> str:
     slug = _APP_SLUG.get(engine)
     if not slug or engine == "ssh":
         raise EntitleRegistrationError(
@@ -231,18 +284,15 @@ def _generate_db_hcl(*, engine: str, name: str, host: str, port: int,
         )
     label = _safe_name(name)
     header = _provider_header('variable "db_password" { sensitive = true }\n')
-    db_line = f"    database = {json.dumps(database)}\n" if database else ""
+    conn = _db_connection_json_hcl(engine=engine, host=host, port=port,
+                                   username=username, database=database, version=version)
+    # Ephemeral (JIT) accounts for postgres/sqlserver; mysql assigns persistent roles.
+    allow_creating = engine != "mysql"
     return header + f"""
 resource "entitle_integration" {json.dumps(label)} {{
   name        = {json.dumps(name[:50])}
   application = {{ name = {json.dumps(slug)} }}
-  connection_json = jsonencode({{
-    host     = {json.dumps(host)}
-    port     = {port}
-    username = {json.dumps(username)}
-    password = var.db_password
-{db_line}  }})
-{_common_attrs_hcl(private)}}}
+{conn}{_common_attrs_hcl(private, allow_creating_accounts=allow_creating)}}}
 
 output "integration_id" {{
   value = entitle_integration.{label}.id
@@ -413,15 +463,22 @@ async def register_ssh_host(
 
 async def register_database(
     *, engine: str, name: str, host: str, port: int, username: str,
-    password: str, database: str = "", private: bool = True, tag: str = "vm-dashboard",
+    password: str, database: str = "", version: str = "",
+    private: bool = True, tag: str = "vm-dashboard",
 ) -> dict:
     """Register a managed database as an Entitle DB integration
     (PostgreSQL / MySQL / Microsoft SQL Server). ``private`` controls whether an
-    ``agent_token`` is attached (``False`` = publicly reachable, no agent)."""
+    ``agent_token`` is attached (``False`` = publicly reachable, no agent).
+
+    ``version`` is the engine version the connector wants (mysql ``mysql_version`` /
+    mssql ``version``); optional and omitted from the connection_json when empty
+    (postgres needs none). postgres/sqlserver register with ephemeral-account
+    creation enabled; mysql uses persistent role assignment."""
     if not password:
         raise EntitleRegistrationError("DB service-account password is empty")
     hcl = _generate_db_hcl(engine=engine, name=name, host=host, port=port,
-                           username=username, database=database, private=private)
+                           username=username, database=database, version=version,
+                           private=private)
     return await asyncio.to_thread(_apply_hcl_sync, hcl, {"db_password": password})
 
 

@@ -14,13 +14,19 @@ for the operator view; this doc covers the architecture + the two open build-out
 
 ## Resource → integration mapping
 
-| Built resource | Entitle `application` | `connection_json` keys |
-|---|---|---|
-| Linux VM (AWS/Azure/GCP) | `ssh` (ephemeral accounts) | host, port, user, privateKey |
-| PostgreSQL DB | `postgresql` | host, port, database, username, password |
-| MySQL DB | `mysql` | host, port, username, password |
-| SQL Server DB | `mssql` | host, port, username, password |
-| _(future)_ EKS/AKS/GKE | Kubernetes | per provider |
+| Built resource | Entitle `application` | `connection_json` keys | Account model |
+|---|---|---|---|
+| Linux VM (AWS/Azure/GCP) | `ssh` | host, port, user, privateKey | ephemeral |
+| PostgreSQL DB | `postgresql` | host, port, username, password, [database] | ephemeral |
+| SQL Server DB | `mssql` | server (`host,port`), user, password, [database], [version] | ephemeral (`entitle_`-prefixed, auto-deleted) |
+| MySQL DB | `mysql` | host, port, user, password, [mysql_version] | persistent roles (read/write/admin) — **not** ephemeral |
+| _(future)_ EKS/AKS/GKE | Kubernetes | per provider | ephemeral |
+
+DB `connection_json` keys differ per engine (Entitle's MySQL / MSSQL connectors
+use `user` not `username`, MSSQL folds host+port into `server`, and each wants an
+engine version) — see `_db_connection_json_hcl` in `entitle_registration_service.py`.
+Only postgres/sqlserver set `allow_creating_accounts = true`; MySQL assigns
+persistent roles, so it is left off there.
 
 Each integration also sets the required `owner = {id}`, `workflow = {id}`,
 `allowed_durations`, and — for **private** targets — `agent_token = {name}`.
