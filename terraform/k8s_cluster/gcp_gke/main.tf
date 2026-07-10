@@ -48,14 +48,26 @@ variable "k8s_version" {
 
 variable "machine_type" {
   type        = string
-  default     = "e2-small"
-  description = "Machine type for the node pool"
+  default     = "e2-standard-2"
+  description = "Machine type for the node pool. e2-standard-2 (2 vCPU / 8 GB) fits the 3-replica Entitle agent + Datadog; e2-small (2 GB) cannot."
 }
 
 variable "node_count" {
   type        = number
-  default     = 2
-  description = "Node count (per the cluster's single zone)"
+  default     = 3
+  description = "Node count (per the cluster's single zone). 3 lets the Entitle agent's 3 anti-affinity replicas each land on a node."
+}
+
+variable "disk_size_gb" {
+  type        = number
+  default     = 50
+  description = "Node boot disk size (GB)."
+}
+
+variable "disk_type" {
+  type        = string
+  default     = "pd-standard"
+  description = "Node boot disk type. pd-standard draws from a separate quota than SSD (pd-balanced/pd-ssd), so nodes don't consume the project's SSD_TOTAL_GB quota."
 }
 
 variable "subnet_cidr" {
@@ -190,6 +202,8 @@ resource "google_container_node_pool" "this" {
 
   node_config {
     machine_type = var.machine_type
+    disk_size_gb = var.disk_size_gb
+    disk_type    = var.disk_type
     oauth_scopes = ["https://www.googleapis.com/auth/cloud-platform"]
     labels       = var.tags
   }
