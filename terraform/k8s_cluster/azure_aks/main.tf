@@ -15,11 +15,6 @@ provider "azurerm" {
   features {}
 }
 
-# The authenticated service principal — used to grant the dashboard's own
-# identity cluster-admin (Azure RBAC for Kubernetes) so the minted AAD token
-# (azure_service.aks_get_token) can drive the cluster.
-data "azurerm_client_config" "current" {}
-
 # ── Variables ────────────────────────────────────────────────────────────────
 
 variable "location" {
@@ -139,12 +134,11 @@ resource "azurerm_kubernetes_cluster" "this" {
     network_plugin = "azure"
   }
 
-  # AAD-integrated, Azure RBAC for Kubernetes — the dashboard authenticates with
-  # an AAD token (azure_service.aks_get_token) rather than a static admin cert.
-  azure_active_directory_role_based_access_control {
-    managed            = true
-    azure_rbac_enabled = true
-  }
+  # Standard Kubernetes RBAC — no AAD integration. Local accounts stay enabled, so
+  # kube_config is a client-cert (system:masters) admin credential and the API server
+  # authorizes ServiceAccounts via native k8s RBAC (like EKS/GKE). This is what the
+  # in-cluster Entitle agent's SA token needs — Azure RBAC for Kubernetes 401s it.
+  # The dashboard stores kube_config_raw verbatim as the cluster kubeconfig.
 
   # Public endpoint; restrict only when authorized_ip_ranges is non-empty.
   dynamic "api_server_access_profile" {
@@ -157,19 +151,16 @@ resource "azurerm_kubernetes_cluster" "this" {
   depends_on = [azurerm_resource_group.this]
 }
 
-# Grant the dashboard's service principal cluster-admin via Azure RBAC so its
-# minted AAD token has full cluster access (mirrors EKS, where the provisioning
-# IAM principal is implicitly cluster admin).
-resource "azurerm_role_assignment" "dashboard_admin" {
-  scope                = azurerm_kubernetes_cluster.this.id
-  role_definition_name = "Azure Kubernetes Service RBAC Cluster Admin"
-  principal_id         = data.azurerm_client_config.current.object_id
-}
-
 # ── Outputs ──────────────────────────────────────────────────────────────────
-# k8s_service._assemble_aks_kubeconfig builds a kubelogin exec kubeconfig from
-# these; the transient runner swaps the exec for a server-minted AAD token
-# (_runner_kubeconfig → azure_service.aks_get_token).
+# Non-AAD cluster: kube_config_raw is a client-cert (system:masters) admin
+# kubeconfig. k8s_service stores it verbatim as the cluster kubeconfig — the
+# runner passes cert kubeconfigs through unchanged (no kubelogin/AAD token).
+
+output "kube_config_raw" {
+  value       = azurerm_kubernetes_cluster.this.kube_config_raw
+  description = "Full admin (client-cert) kubeconfig for the non-AAD cluster; stored verbatim by the dashboard."
+  sensitive   = true
+}
 
 output "cluster_name" {
   value       = azurerm_kubernetes_cluster.this.name

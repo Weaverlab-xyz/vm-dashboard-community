@@ -621,9 +621,16 @@ async def run_provision_apply(db: Session, *, cluster_id: str, job_id: str,
         if not (endpoint and ca_b64):
             raise K8sError("cluster apply did not return endpoint + ca_certificate outputs")
 
-        kubeconfig = _assemble_cluster_kubeconfig(
-            cloud=cloud, cluster_name=cluster_out_name, endpoint=endpoint,
-            ca_b64=ca_b64, region=row.region or "")
+        # AKS is provisioned with standard k8s RBAC (non-AAD), so the module emits a
+        # client-cert (system:masters) admin kubeconfig — store it verbatim (the runner
+        # passes cert kubeconfigs through unchanged). EKS/GKE synthesize an exec kubeconfig.
+        admin_kubeconfig = str(outputs.get("kube_config_raw") or "")
+        if cloud == "azure" and admin_kubeconfig:
+            kubeconfig = admin_kubeconfig
+        else:
+            kubeconfig = _assemble_cluster_kubeconfig(
+                cloud=cloud, cluster_name=cluster_out_name, endpoint=endpoint,
+                ca_b64=ca_b64, region=row.region or "")
         ref = _KUBECONFIG_KEY.format(cluster_id=cluster_id)
         config_service.set(ref, kubeconfig)
         row.kubeconfig_ref = ref
