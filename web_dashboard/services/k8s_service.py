@@ -1446,6 +1446,24 @@ def _entitle_agent_secret_manifest(namespace: str, secret_name: str, token: str)
     )
 
 
+def _entitle_agent_clusterrolebinding_manifest(namespace: str, sa: str) -> str:
+    """A ClusterRoleBinding granting the Entitle **agent** ServiceAccount
+    cluster-admin. In In-Cluster (agent-brokered) mode Entitle drives this SA to
+    enumerate the cluster (namespaces, roles, clusterroles) and to create/delete
+    (Cluster)RoleBindings for JIT grants. The agent Helm chart only grants a
+    namespace-scoped Role for self-management, so without this the integration
+    reports "Failed to fetch the resources of <cluster>". Same cluster-admin
+    requirement as the External SA (see _entitle_k8s_rbac_manifest); applied as a
+    separate manifest so it doesn't depend on the chart's RBAC value schema."""
+    return (
+        "apiVersion: rbac.authorization.k8s.io/v1\nkind: ClusterRoleBinding\nmetadata:\n"
+        "  name: entitle-agent-cluster-admin\n"
+        "roleRef:\n  apiGroup: rbac.authorization.k8s.io\n  kind: ClusterRole\n  name: cluster-admin\n"
+        "subjects:\n"
+        f"- kind: ServiceAccount\n  name: {sa}\n  namespace: {namespace}\n"
+    )
+
+
 async def setup_entitle_agent(cluster_id: str, action: str = "install") -> None:
     """Install (or remove) the Entitle agent in a managed cluster. Background task.
 
@@ -1470,6 +1488,10 @@ async def setup_entitle_agent(cluster_id: str, action: str = "install") -> None:
 
         if action == "remove":
             try:
+                agent_sa = _cfg("entitle_agent_service_account", "entitle-agent-sa")
+                await _delete_manifest_via_runner(
+                    kubeconfig, _entitle_agent_clusterrolebinding_manifest(namespace, agent_sa),
+                    target_cloud=row.cloud)
                 await _helm_via_runner(kubeconfig, ["uninstall", "entitle-agent", "-n", namespace],
                                        add_eso_repo=False, target_cloud=row.cloud)
                 await _delete_manifest_via_runner(
@@ -1560,6 +1582,15 @@ async def setup_entitle_agent(cluster_id: str, action: str = "install") -> None:
 
         await _helm_via_runner(kubeconfig, helm_args, add_eso_repo=False,
                                values_stdin=helm_values_stdin, target_cloud=row.cloud)
+        # Grant the agent ServiceAccount cluster-admin. In-Cluster mode drives this
+        # SA to enumerate the cluster and manage JIT (Cluster)RoleBindings, but the
+        # chart only gives it a namespace Role — without this the Entitle integration
+        # reports "Failed to fetch the resources". The chart creates the SA (name from
+        # entitle_agent_service_account, matching the chart default), so bind it now.
+        agent_sa = _cfg("entitle_agent_service_account", "entitle-agent-sa")
+        await _apply_manifest_via_runner(
+            kubeconfig, _entitle_agent_clusterrolebinding_manifest(namespace, agent_sa),
+            target_cloud=row.cloud)
         config_service.set("entitle_agent_cluster_id", cluster_id)
         logger.info("Entitle agent installed on cluster %s (ns=%s)", row.name, namespace)
         # If a k8s connector was already registered for this cluster (before the agent
