@@ -89,8 +89,9 @@ services:
     restart: unless-stopped
     deploy:
       # Concurrent workers = concurrent long jobs. `docker compose up` honors this;
-      # override ad-hoc with: docker compose up -d --scale worker=N
-      replicas: ${WORKER_REPLICAS:-1}
+      # override ad-hoc with: docker compose up -d --scale worker=N. Defaults to 3
+      # (drop WORKER_REPLICAS toward 1 on small hosts, raise it if jobs still queue).
+      replicas: ${WORKER_REPLICAS:-3}
       # Per-worker caps bound aggregate host usage when several heavy jobs run at
       # once (jobs are mostly orchestration + cloud-API waits). Tune to your host.
       resources:
