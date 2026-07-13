@@ -584,10 +584,13 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
                                            ssh_key_secret=secret_name)
 
         # Password Safe — onboard as a managed system + account (per-build opt-in).
+        # GCP defaults to the cloud-native "GCP VM SSH Rotation" plugin (managed system
+        # address = projectId/zone/instanceName), so pass the project + zone.
         from ..services import ps_vm_hook
         if getattr(payload, "register_in_passwordsafe", False) and ps_vm_hook.registration_enabled():
             await ps_vm_hook.register(db, job_id, payload.instance_name, hostname,
-                                      result=final_meta, tag="GCP", ssh_key_secret=secret_name)
+                                      result=final_meta, tag="GCP", ssh_key_secret=secret_name,
+                                      project=_gcp_project(), zone=result["zone"])
 
         job_service.set_completed(db, job_id, final_meta)
         await cache_service.invalidate(cache_service.key_global("gcp_instances"))

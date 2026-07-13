@@ -269,7 +269,13 @@ class Settings(BaseSettings):
     #     Run Command (no Resource Broker / SSH reachability). Managed system address =
     #     tenantId/subscriptionId/resourceGroup/vmName; the first key is minted on onboard
     #     (passwordsafe_azure_change_password_on_register) since adminuser has none baked in.
-    #   • "ssh" (every other cloud, and AWS/Azure when overridden) — traditional managed
+    #   • GCP (passwordsafe_gcp_registration_method, default "gcpvm") — cloud-native
+    #     "GCP VM SSH Rotation" custom plugin. Writes the public key into the GCE instance's
+    #     ssh-keys metadata (no Resource Broker / SSH reachability; requires OS Login
+    #     disabled on the instance). Managed system address = projectId/zone/instanceName;
+    #     the first key is minted on onboard (passwordsafe_gcp_change_password_on_register)
+    #     since adminuser has none baked in.
+    #   • "ssh" (every other cloud, and AWS/Azure/GCP when overridden) — traditional managed
     #     system keyed by hostname/IP on an SSH platform; the VM's own private key is pushed
     #     and management needs SSH line-of-sight (broker).
     # The functional account is operator-configured per cloud; its platform decides the
@@ -292,6 +298,9 @@ class Settings(BaseSettings):
     # Azure VM SSH Rotation (cloud-native) onboarding — Azure counterpart of the SSM plugin.
     passwordsafe_azure_registration_method: str = "azurevm"  # "azurevm" (Azure VM SSH Rotation plugin, default) | "ssh"
     passwordsafe_azure_change_password_on_register: bool = True  # mint first key via Run Command on onboard (adminuser has none baked in)
+    # GCP VM SSH Rotation (cloud-native) onboarding — GCP counterpart (writes the key into GCE ssh-keys metadata).
+    passwordsafe_gcp_registration_method: str = "gcpvm"  # "gcpvm" (GCP VM SSH Rotation plugin, default) | "ssh"
+    passwordsafe_gcp_change_password_on_register: bool = True  # mint first key via GCE metadata on onboard (adminuser has none baked in)
     bt_api_host: str = ""        # PRA host, used by terraform_pra_service
     bt_client_id: str = ""
     bt_client_secret: str = ""
