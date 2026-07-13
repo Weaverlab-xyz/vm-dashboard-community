@@ -78,6 +78,7 @@ def _parse_api_server(kubeconfig: str) -> str:
 
 
 def _serialize(r: K8sCluster) -> dict:
+    from . import config_service
     return {
         "id":                    r.id,
         "cloud":                 r.cloud,
@@ -93,6 +94,7 @@ def _serialize(r: K8sCluster) -> dict:
         "jumpoint_name":         r.jumpoint_name,
         "pra_credential_ref":    r.pra_credential_ref,
         "secrets_delivery_kind": r.secrets_delivery_kind,
+        "entitle_agent_installed": config_service.get("entitle_agent_cluster_id") == r.id,
         "created_by":            r.created_by,
         "created_at":            r.created_at.isoformat() if r.created_at else "",
     }
@@ -1770,6 +1772,35 @@ async def run_entitle_register(db: Session, *, cluster_id: str, job_id: str,
     job_service.set_completed(db, job_id)
 
 
+async def run_tunnel(db: Session, *, cluster_id: str, job_id: str, action: str = "register",
+                     jump_group: str = None, jumpoint_name: str = None,
+                     pra_credential_ref: str = None, vault_inject: bool = False,
+                     vault_account_group_id: Optional[int] = None) -> None:
+    """Worker entry for a ``k8s_tunnel`` job: provision/remove the cluster's
+    ``tunnel_type=k8s`` PRA jump with Job tracking. Runs as a background job (not
+    inline in the request) because the vault-inject path mints a cluster-admin SA
+    token via the cluster runner — on a GCP Cloud Run runner that's several minutes,
+    which would otherwise hang the request past the gunicorn worker timeout."""
+    from . import job_service
+    from ..api.websocket import broadcast_progress
+    job_service.set_running(db, job_id)
+    try:
+        if action == "remove":
+            await broadcast_progress(job_id, 20, "Removing the PRA tunnel…")
+            await deregister_pra_tunnel(db, cluster_id)
+        else:
+            await broadcast_progress(job_id, 20, "Provisioning the PRA tunnel…")
+            await register_pra_tunnel(
+                db, cluster_id, jump_group=jump_group, jumpoint_name=jumpoint_name,
+                pra_credential_ref=pra_credential_ref, vault_inject=vault_inject,
+                vault_account_group_id=vault_account_group_id)
+    except Exception as exc:
+        job_service.set_failed(db, job_id, str(exc))
+        logger.exception("k8s tunnel job failed cluster=%s action=%s", cluster_id, action)
+        return
+    job_service.set_completed(db, job_id)
+
+
 # ── Phase 3: brokered access ───────────────────────────────────────────────────
 
 def console_url(db: Session, cluster_id: str) -> dict:
@@ -1854,20 +1885,53 @@ def _apply_overrides(row, *, jump_group=None, jumpoint_name=None, pra_credential
 
 
 async def _mint_pra_sa_token(kubeconfig: str, target_cloud: str = "") -> str:
-    """Mint a cluster-admin ServiceAccount bearer token for PRA Vault injection:
-    apply the SA + cluster-admin binding + token Secret (idempotent), then read the
-    token (the token controller populates ``.data.token`` asynchronously). Reuses
-    the same RBAC manifest + runner the Entitle External registration uses."""
+    """Mint a cluster-admin ServiceAccount bearer token for PRA Vault injection in a
+    **single** runner invocation: apply the SA + cluster-admin binding + token Secret,
+    then read the token — preferring the long-lived Secret token (K8s populates
+    ``.data.token`` for a manually-created service-account-token Secret) and falling
+    back to a bound ``kubectl create token`` (TokenRequest) when the controller doesn't
+    populate it, e.g. GKE. The token is echoed sentinel-wrapped (``BTKN<…>BTKN``) so it
+    survives the runner's combined stdout/stderr log capture.
+
+    One command on purpose: on a Cloud Run runner each kubectl call is a fresh ~2-min
+    container, so the old apply-then-poll-``.data.token``-6× loop was ~7 containers
+    (~14 min) and still timed out on GKE, which never populated the Secret."""
     ns = _cfg("pra_k8s_namespace", "kube-system")
     sa = _cfg("pra_k8s_sa_name", "pra-access")
     secret = f"{sa}-token"
-    await _apply_manifest_via_runner(kubeconfig, _entitle_k8s_rbac_manifest(ns, sa, secret), target_cloud=target_cloud)
-    for _ in range(6):
-        b64 = await _get_secret_b64_via_runner(kubeconfig, ns, secret, "token", target_cloud=target_cloud)
-        if b64:
-            return base64.b64decode(b64).decode("utf-8")
-        await asyncio.sleep(2)
-    raise K8sError("the PRA ServiceAccount token did not populate — retry")
+    manifest = _entitle_k8s_rbac_manifest(ns, sa, secret)
+    q_ns, q_sa, q_sec = shlex.quote(ns), shlex.quote(sa), shlex.quote(secret)
+    # stdin (the manifest) is piped into `kubectl apply -f -`; the rest runs after `&&`
+    # and reads no stdin. KUBECONFIG is exported by the runner (cloud) / _helm_env (local).
+    command = (
+        "kubectl apply -f - 1>&2 && { tok=''; "
+        "for i in $(seq 1 10); do "
+        f"v=$(kubectl -n {q_ns} get secret {q_sec} -o jsonpath='{{.data.token}}' 2>/dev/null || true); "
+        "if [ -n \"$v\" ]; then tok=$(printf '%s' \"$v\" | base64 -d 2>/dev/null); break; fi; sleep 2; done; "
+        f"if [ -z \"$tok\" ]; then tok=$(kubectl -n {q_ns} create token {q_sa} --duration=24h 2>/dev/null || true); fi; "
+        "if [ -z \"$tok\" ]; then echo pra-token-unavailable 1>&2; exit 3; fi; "
+        "printf 'BTKN<%s>BTKN\\n' \"$tok\"; }"
+    )
+    from . import k8s_runner_service
+    if k8s_runner_service.mode(target_cloud) == "local":
+        tmpdir = _write_kubeconfig(kubeconfig)
+        try:
+            out = await asyncio.to_thread(_run_sync, ["sh", "-c", command], manifest, _helm_env(tmpdir))
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+    else:
+        out = await k8s_runner_service.run(
+            kubeconfig=_runner_kubeconfig(kubeconfig), command=command,
+            target_cloud=target_cloud, stdin_text=manifest, job_id="")
+    # rfind → the LAST marker, so a reused runner-job name that pulled more than one
+    # run's logs still yields THIS run's (newest) token.
+    _i = (out or "").rfind("BTKN<")
+    token = out[_i + 5:].partition(">BTKN")[0].strip() if _i != -1 else ""
+    if not token:
+        logger.error("PRA token mint: no BTKN marker in runner output (len=%d): %r",
+                     len(out or ""), (out or "")[-1200:])
+        raise K8sError("could not mint the PRA ServiceAccount token — see the job logs")
+    return token
 
 
 async def register_pra_tunnel(db: Session, cluster_id: str, *, jump_group: str = None,

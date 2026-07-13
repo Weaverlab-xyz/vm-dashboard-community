@@ -256,39 +256,55 @@ async def broker_access(
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@router.post("/clusters/{cluster_id}/tunnel", status_code=201)
+@router.post("/clusters/{cluster_id}/tunnel", status_code=202)
 async def register_tunnel(
     cluster_id: str,
     payload: BrokerAccessRequest = BrokerAccessRequest(),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
-    """Provision the cluster's sra ``tunnel_type=k8s`` jump (Phase 3b). Idempotent.
-    Optional jump-group / jumpoint-name / PRA-credential overrides fall back to config."""
+    """Provision the cluster's sra ``tunnel_type=k8s`` jump (Phase 3b) — enqueues a
+    ``k8s_tunnel`` job the worker runs (async: the vault-inject path mints an SA token
+    via the cluster runner, minutes on a Cloud Run runner — too long for the request).
+    Idempotent. Optional jump-group / jumpoint-name / PRA-credential / vault overrides
+    fall back to config. Open the returned job for status/logs."""
     try:
-        return await k8s_service.register_pra_tunnel(
-            db, cluster_id,
-            jump_group=payload.jump_group,
-            jumpoint_name=payload.jumpoint_name,
-            pra_credential_ref=payload.pra_credential_ref,
-            vault_inject=payload.vault_inject,
-            vault_account_group_id=payload.vault_account_group_id,
-        )
+        k8s_service.get_cluster(db, cluster_id)   # 404 if unknown
     except K8sError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=404, detail=str(e))
+    job = job_service.create_job(
+        db, job_type="k8s_tunnel", created_by=current_user.username,
+        metadata={
+            "cluster_id": cluster_id, "action": "register",
+            "jump_group": payload.jump_group, "jumpoint_name": payload.jumpoint_name,
+            "pra_credential_ref": payload.pra_credential_ref,
+            "vault_inject": payload.vault_inject,
+            "vault_account_group_id": payload.vault_account_group_id,
+        },
+    )
+    return {"ok": True, "status": "provisioning", "cluster_id": cluster_id,
+            "action": "register", "job_id": job.id}
 
 
-@router.delete("/clusters/{cluster_id}/tunnel")
+@router.delete("/clusters/{cluster_id}/tunnel", status_code=202)
 async def remove_tunnel(
     cluster_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
-    """Destroy the cluster's PRA tunnel jump and clear its state (Phase 3b)."""
+    """Destroy the cluster's PRA tunnel jump + clear its state (Phase 3b) — enqueues a
+    ``k8s_tunnel`` (action=remove) job the worker runs (the vault path revokes the
+    in-cluster SA via the runner). Open the returned job for status/logs."""
     try:
-        return await k8s_service.deregister_pra_tunnel(db, cluster_id)
+        k8s_service.get_cluster(db, cluster_id)   # 404 if unknown
     except K8sError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=404, detail=str(e))
+    job = job_service.create_job(
+        db, job_type="k8s_tunnel", created_by=current_user.username,
+        metadata={"cluster_id": cluster_id, "action": "remove"},
+    )
+    return {"ok": True, "status": "removing", "cluster_id": cluster_id,
+            "action": "remove", "job_id": job.id}
 
 
 @router.post("/clusters/{cluster_id}/management", status_code=202)
