@@ -220,6 +220,19 @@ if ($envVars.FIRST_RUN_ADMIN_PASSWORD -eq "REPLACE_ME_WITH_ADMIN_PASSWORD" -or
 
 if (-not $changed) { Write-Ok "All auto-generated secrets already set" }
 
+# ── 4b. Set the default job-worker count ───────────────────────────────
+# Long jobs run one-per-worker, so the replica count is how many run concurrently.
+# Default to 3. Migrate installs still on the old default of 1, but leave any other
+# explicit choice (2, 5, ...) untouched.
+Write-Step "Setting job-worker default"
+$workerReplicas = $envVars.WORKER_REPLICAS
+if (-not $workerReplicas -or $workerReplicas -eq "1") {
+    Set-EnvValue -Path $envFile -Key "WORKER_REPLICAS" -Value "3"
+    Write-Ok "Set WORKER_REPLICAS=3 (default job-worker count)"
+} else {
+    Write-Ok "WORKER_REPLICAS=$workerReplicas (keeping explicit value)"
+}
+
 # Re-read after generation so validation sees the new values.
 $envVars = Read-EnvFile -Path $envFile
 

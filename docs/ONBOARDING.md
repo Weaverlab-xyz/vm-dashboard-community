@@ -396,22 +396,25 @@ long one (e.g. an export waiting on a 25-minute cluster provision), run more
 workers. The job queue claims each job atomically, so extra workers never
 double-run a job.
 
-Set the count in `.env`, then bring the stack up as usual:
+The stack starts **3 workers** by default (the onboard scripts migrate installs
+still pinned at the old default of 1). Change the count in `.env`, then bring the
+stack up as usual:
 
 ```bash
-WORKER_REPLICAS=3          # in .env — number of long jobs that can run at once
+WORKER_REPLICAS=5          # in .env — number of long jobs that can run at once
 ./scripts/onboard.sh       # (keep --hub if you used it)
 ```
 
 Or scale ad-hoc without editing `.env`:
 
 ```bash
-docker compose up -d --scale worker=3          # add -f docker-compose.hub.yml if you used --hub
+docker compose up -d --scale worker=5          # add -f docker-compose.hub.yml if you used --hub
 ```
 
 `WORKER_CPU_LIMIT` / `WORKER_MEM_LIMIT` (also in `.env`) cap each worker's CPU and
 memory so several concurrent heavy jobs can't exhaust the host — tune them to your
-machine. Defaults: 1 worker, 2 CPUs and 2 GB each.
+machine. Defaults: 3 workers, 2 CPUs and 2 GB each (3 busy workers can use up to
+~3× those limits, so lower `WORKER_REPLICAS` on small hosts).
 
 ### Reconfiguring credentials after first run
 

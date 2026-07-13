@@ -224,6 +224,18 @@ if [[ "$(read_env POSTGRES_PASSWORD)" == "REPLACE_ME_WITH_STRONG_PASSWORD" || -z
 fi
 (( changed )) || ok "Bootstrap secrets already set"
 
+# ── 4b. Set the default job-worker count ────────────────────────────────
+# Long jobs run one-per-worker, so the worker replica count is how many can run
+# concurrently. Default to 3. Migrate installs still on the old default of 1, but
+# leave any other explicit choice (2, 5, ...) untouched.
+step "Setting job-worker default"
+_worker_replicas="$(read_env WORKER_REPLICAS)"
+if [[ -z "$_worker_replicas" || "$_worker_replicas" == "1" ]]; then
+    set_env WORKER_REPLICAS 3; ok "Set WORKER_REPLICAS=3 (default job-worker count)"
+else
+    ok "WORKER_REPLICAS=$_worker_replicas (keeping explicit value)"
+fi
+
 # ── 4. Bring up the stack ───────────────────────────────────────────────
 if (( HUB )); then
     step "Pulling prebuilt image and starting Docker Compose stack"
