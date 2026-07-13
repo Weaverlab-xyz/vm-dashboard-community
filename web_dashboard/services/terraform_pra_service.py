@@ -1061,16 +1061,19 @@ _K8S_JUMP_ITEM_TYPE = "protocol_tunnel_jump"
 def _generate_k8s_vault_account_hcl(
     vault_account_name: str,
     vault_account_group_id: Optional[int] = None,
+    jump_group_id: Optional[int] = None,
 ) -> str:
     """HCL for a PRA Vault **token** account (``sra_vault_token_account``) holding a
-    cluster's ServiceAccount bearer token, associated to an existing k8s tunnel jump
+    cluster's ServiceAccount bearer token, scoped to the k8s tunnel's **Jump Group**
     for credential injection.
 
-    The tunnel jump itself is created over the REST API (the sra provider's
-    ``tunnel_type`` validator blocks ``"k8s"``; see pra_api_service), so this HCL
-    references the jump by its REST-assigned id via ``TF_VAR_k8s_jump_id`` rather
-    than a resource reference. The token rides ``TF_VAR_k8s_sa_token`` (sensitive)
-    and never lands in the HCL."""
+    The tunnel jump is created over the REST API (the sra provider's ``tunnel_type``
+    validator blocks ``"k8s"``; see pra_api_service). A per-jump-item association
+    (``jump_items = [{id, type}]``) is REJECTED by PRA for a tunnel_type=k8s jump
+    (422 ``jump_items.0.type … The selected value is invalid``), so the account is
+    associated to the jump's Jump Group instead via ``criteria.shared_jump_groups``
+    (``TF_VAR_k8s_jump_group_id``). The token rides ``TF_VAR_k8s_sa_token``
+    (sensitive) and never lands in the HCL."""
     group_line = (f"  account_group_id = {int(vault_account_group_id)}\n"
                   if vault_account_group_id else "")
     return f"""\
@@ -1086,8 +1089,8 @@ terraform {{
 variable "bt_host"          {{ sensitive = false }}
 variable "bt_client_id"     {{ sensitive = true }}
 variable "bt_client_secret" {{ sensitive = true }}
-variable "k8s_sa_token"     {{ sensitive = true }}
-variable "k8s_jump_id"      {{ sensitive = false }}
+variable "k8s_sa_token"       {{ sensitive = true }}
+variable "k8s_jump_group_id"  {{ sensitive = false }}
 
 provider "sra" {{
   host          = var.bt_host
@@ -1102,16 +1105,12 @@ resource "sra_vault_token_account" "k8s_access" {{
 {group_line}  jump_item_association = {{
     filter_type = "criteria"
     criteria = {{
-      shared_jump_groups = []
+      shared_jump_groups = [tonumber(var.k8s_jump_group_id)]
       host               = []
       name               = []
       tag                = []
       comment            = []
     }}
-    jump_items = [{{
-      id   = tonumber(var.k8s_jump_id)
-      type = {json.dumps(_K8S_JUMP_ITEM_TYPE)}
-    }}]
   }}
 }}
 
@@ -1122,15 +1121,17 @@ output "vault_account_id" {{
 
 
 def _provision_k8s_vault_sync(jump_id, vault_account_name, sa_token,
-                              vault_account_group_id=None, client_secret="") -> dict:
-    """TF-apply a Vault token account associated to the (REST-created) k8s jump.
-    Returns ``{vault_account_id, tf_state_json}`` (state scrubbed of the token)."""
-    extra_env = {"TF_VAR_k8s_sa_token": sa_token, "TF_VAR_k8s_jump_id": str(jump_id)}
+                              vault_account_group_id=None, client_secret="",
+                              jump_group_id=None) -> dict:
+    """TF-apply a Vault token account scoped (via jump_item_association criteria) to
+    the k8s jump's Jump Group. Returns ``{vault_account_id, tf_state_json}`` (state
+    scrubbed of the token)."""
+    extra_env = {"TF_VAR_k8s_sa_token": sa_token, "TF_VAR_k8s_jump_group_id": str(jump_group_id)}
     if client_secret:
         extra_env["TF_VAR_bt_client_secret"] = client_secret
     with tempfile.TemporaryDirectory(prefix="pra_k8s_vault_tf_") as work_dir:
         Path(work_dir, "main.tf").write_text(
-            _generate_k8s_vault_account_hcl(vault_account_name, vault_account_group_id))
+            _generate_k8s_vault_account_hcl(vault_account_name, vault_account_group_id, jump_group_id))
         init = _run_tf(["init", "-upgrade=false"], work_dir, timeout=60)
         if init.returncode != 0:
             raise TerraformPRAError(
@@ -1184,7 +1185,7 @@ async def provision_k8s_tunnel(
     Returns ``{tunnel_jump_id, vault_account_id, jump_group_name, tf_state_json}`` —
     ``tunnel_jump_id`` + ``tf_state_json`` drive ``remove_k8s_tunnel`` later."""
     from . import pra_api_service
-    jump_id = await pra_api_service.create_k8s_tunnel_jump(
+    jump_id, jump_group_id = await pra_api_service.create_k8s_tunnel_jump(
         name=name, hostname=hostname, url=api_url, ca_certificates=ca_certificates,
         jump_group_name=jump_group_name, jumpoint_name=jumpoint_name, tag=tag)
 
@@ -1194,7 +1195,7 @@ async def provision_k8s_tunnel(
         try:
             v = await asyncio.to_thread(
                 _provision_k8s_vault_sync, jump_id, vault_account_name, sa_token,
-                vault_account_group_id, client_secret)
+                vault_account_group_id, client_secret, jump_group_id)
             vault_account_id = v.get("vault_account_id")
             tf_state_json = v.get("tf_state_json")
         except Exception as exc:  # noqa: BLE001 — vault is an enhancement, tunnel stands

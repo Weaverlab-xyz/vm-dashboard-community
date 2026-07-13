@@ -103,9 +103,11 @@ async def _resolve_id(items: list[dict], name: str, label: str) -> int:
 
 async def create_k8s_tunnel_jump(*, name: str, hostname: str, url: str,
                                  ca_certificates: str, jump_group_name: str,
-                                 jumpoint_name: str, tag: str = "Kubernetes") -> int:
+                                 jumpoint_name: str, tag: str = "Kubernetes") -> tuple[int, int]:
     """Create a ``tunnel_type=k8s`` protocol-tunnel jump via the PRA Config API and
-    return its numeric id. Resolves the Jump Group + Jumpoint names to ids first
+    return ``(jump_id, jump_group_id)`` — the jump-group id is reused to scope the
+    Vault token account to the group (a per-jump-item association is rejected for
+    ``tunnel_type=k8s``). Resolves the Jump Group + Jumpoint names to ids first
     (both must already exist). This is the REST replacement for the Terraform path,
     which the sra provider blocks for k8s (see module docstring)."""
     host = _host()
@@ -141,7 +143,7 @@ async def create_k8s_tunnel_jump(*, name: str, hostname: str, url: str,
         jump_id = (resp.json() or {}).get("id")
         if jump_id is None:
             raise PRAApiError(f"k8s tunnel create returned no id: {resp.text[:300]}")
-        return int(jump_id)
+        return int(jump_id), int(jg_id)
 
 
 async def delete_protocol_tunnel_jump(jump_id) -> None:

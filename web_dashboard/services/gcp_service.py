@@ -682,12 +682,27 @@ def _run_gce_jumpoint_sync(
     creds = _gcp_creds()
     client = compute_v1.InstancesClient(credentials=creds)
 
-    # Reuse if already present
+    # Reuse if already present — but "reused" must mean a LIVE gateway. A name match
+    # alone isn't enough: a STOPPED/TERMINATED VM was previously reported reused with a
+    # dead jumpoint (no gateway for the tunnel). If it isn't RUNNING, start it — COS
+    # re-runs the jumpoint container on boot — and wait for RUNNING before returning.
     try:
         existing = client.get(project=project_id, zone=zone, instance=name)
+        status = existing.status
+        if status != "RUNNING":
+            logger.info("GCE Jumpoint '%s' exists but status=%s — starting it for a live gateway",
+                        name, status)
+            try:
+                start_op = client.start(project=project_id, zone=zone, instance=name)
+                start_op.result(timeout=180)
+                existing = client.get(project=project_id, zone=zone, instance=name)
+                status = existing.status
+            except Exception as start_err:
+                logger.warning("GCE Jumpoint '%s' start failed (status=%s): %s",
+                               name, status, start_err)
         return {
             "name": name, "zone": zone, "self_link": existing.self_link,
-            "status": existing.status, "reused": True,
+            "status": status, "reused": True,
         }
     except NotFound:
         pass
@@ -1039,7 +1054,8 @@ def _require_run():
         raise GCPError("google-cloud-run is not installed — run: pip install google-cloud-run")
 
 
-def _fetch_cloud_run_job_logs(project_id: str, job_name: str, execution_name: str, creds) -> str:
+def _fetch_cloud_run_job_logs(project_id: str, job_name: str, execution_name: str, creds,
+                              start_rfc3339: str = "") -> str:
     """Retrieve Cloud Run job stdout/stderr from Cloud Logging via REST."""
     try:
         from google.auth.transport.requests import AuthorizedSession
@@ -1056,22 +1072,46 @@ def _fetch_cloud_run_job_logs(project_id: str, job_name: str, execution_name: st
         'resource.type="cloud_run_job"',
         f'resource.labels.job_name="{job_name}"',
     ]
-    if execution_name:
-        filter_parts.append(f'resource.labels.execution_name="{execution_name.split("/")[-1]}"')
+    # Scope to THIS run by timestamp rather than the per-execution label: the label
+    # (run.googleapis.com/execution_name) IS on the entries, but it lags Cloud Logging
+    # ingestion past our retry window, so filtering on it returned nothing. The floor is
+    # this run's start — delete-before-create means the fixed job name isn't reused
+    # concurrently, so only this run's logs are at/after it.
+    if start_rfc3339:
+        filter_parts.append(f'timestamp>="{start_rfc3339}"')
     body = {
         "resourceNames": [f"projects/{project_id}"],
         "filter": " ".join(filter_parts),
         "orderBy": "timestamp asc",
         "pageSize": 1000,
     }
-    resp = session.post(url, json=body, timeout=30)
-    resp.raise_for_status()
-    data = resp.json()
+    # Cloud Logging ingestion lags container exit by seconds-to-tens-of-seconds. The
+    # k8s runner reads command OUTPUT from these logs (e.g. a minted SA token via
+    # `kubectl create token`), so an immediate query usually returns nothing — retry
+    # until entries appear rather than handing the caller an empty result.
+    import json as _json
+    import time
     lines = []
-    for entry in data.get("entries", []):
-        text = entry.get("textPayload") or entry.get("jsonPayload", {}).get("message", "")
-        if text:
-            lines.append(text)
+    last_count = -1
+    for _attempt in range(24):  # ~120s: Cloud Logging ingestion of Cloud Run Job stdout lags well past a few seconds here
+        resp = session.post(url, json=body, timeout=30)
+        resp.raise_for_status()
+        entries = resp.json().get("entries", [])
+        last_count = len(entries)
+        if entries:
+            for entry in entries:
+                text = entry.get("textPayload") or entry.get("jsonPayload", {}).get("message", "")
+                if text:
+                    lines.append(text)
+            if lines:
+                break
+            logger.warning("Cloud Run k8s logs: %d entries but no text in textPayload/jsonPayload.message "
+                           "— raw sample: %s", len(entries), _json.dumps(entries[:2])[:1800])
+            break
+        time.sleep(5)
+    if not lines:
+        logger.warning("Cloud Run k8s logs: no usable text (last entry count=%d, filter=%s)",
+                       last_count, " ".join(filter_parts))
     return "\n".join(lines)
 
 
@@ -1258,7 +1298,13 @@ def _run_cloud_run_k8s_sync(
     jobs_client = run_v2.JobsClient(credentials=creds)
     executions_client = run_v2.ExecutionsClient(credentials=creds)
 
-    job_name = f"{_K8S_RUNNER_PREFIX}-{job_id[:8]}" if job_id else f"{_K8S_RUNNER_PREFIX}-adhoc"
+    # Unique per invocation: a fixed "-adhoc" name (empty job_id — the SA-token mint,
+    # apply/get helpers) collided (409 "already exists") when two runner ops overlapped
+    # or one left a leftover. A uuid suffix removes the clash entirely; the finally-block
+    # still deletes this run's job, and the log fetch scopes by this exact name + time.
+    import uuid
+    _suffix = job_id[:8] if job_id else uuid.uuid4().hex[:8]
+    job_name = f"{_K8S_RUNNER_PREFIX}-{_suffix}"
     parent = f"projects/{project_id}/locations/{region}"
     job_resource_name = f"{parent}/jobs/{job_name}"
 
@@ -1303,6 +1349,16 @@ def _run_cloud_run_k8s_sync(
         labels={"managed-by": "vm-dashboard", "purpose": "k8s-runner"},
     )
 
+    # A prior run's job can linger — its delete in the finally below failed, the run
+    # crashed before reaching it, or two adhoc runs raced on the fixed
+    # "k8s-runner-adhoc" name — which then 409s "already exists" on create. Remove any
+    # leftover of the same name first (best-effort; NotFound is the normal case).
+    try:
+        jobs_client.delete_job(name=job_resource_name).result()
+        logger.info("Cloud Run k8s: removed a pre-existing job %s before create", job_name)
+    except Exception as stale_err:
+        logger.debug("Cloud Run k8s: no pre-existing job %s to remove (%s)", job_name, stale_err)
+
     logger.info("Cloud Run k8s: creating job %s in %s/%s", job_name, project_id, region)
     create_op = jobs_client.create_job(parent=parent, job_id=job_name, job=job)
     create_op.result()
@@ -1327,7 +1383,12 @@ def _run_cloud_run_k8s_sync(
             time.sleep(10)
 
         try:
-            output = _fetch_cloud_run_job_logs(project_id, job_name, execution_name, creds)
+            # Scope the log query to this execution's start (create_time) so a reused
+            # job name doesn't pull a prior run's output; the label-based scope lagged
+            # ingestion. run_v2 exposes create_time as a tz-aware datetime.
+            _ct = getattr(execution, "create_time", None)
+            _floor = _ct.isoformat().replace("+00:00", "Z") if hasattr(_ct, "isoformat") else ""
+            output = _fetch_cloud_run_job_logs(project_id, job_name, execution_name, creds, start_rfc3339=_floor)
         except Exception as log_err:
             logger.warning("Cloud Run k8s: could not retrieve logs: %s", log_err)
 

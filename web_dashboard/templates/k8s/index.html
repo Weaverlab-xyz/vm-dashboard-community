@@ -95,7 +95,8 @@
               </button>
               <button @click="installEntitleAgent(c)"
                       title="Install the Entitle agent into this cluster (agent-cluster bootstrap) so private resources registered in Entitle are reachable"
-                      class="text-xs px-2 py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded font-medium">Entitle agent</button>
+                      class="text-xs px-2 py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded font-medium"
+                      x-text="c.entitle_agent_installed ? 'Entitle agent ✓' : 'Entitle agent'"></button>
               <button @click="entitleRegister(c)"
                       title="Register this cluster as an Entitle Kubernetes integration (JIT cluster RBAC)"
                       class="text-xs px-2 py-1 bg-fuchsia-600 hover:bg-fuchsia-700 text-white rounded font-medium">Register in Entitle</button>
@@ -712,9 +713,8 @@ function k8sPage() {
         };
         const r = await API.post(`/api/k8s/clusters/${this.tunnelTarget.id}/tunnel`, body);
         this.showTunnel = false;
-        this.flash(r.already_registered
-          ? `PRA tunnel already exists (jump ${r.pra_jump_id}).`
-          : `PRA tunnel created (jump ${r.pra_jump_id || '—'}) — connect via the BeyondTrust representative console.`);
+        this.flash('PRA tunnel job started — opening the job…');
+        if (r && r.job_id) { window.location.href = '/jobs/' + r.job_id; return; }
         await this.refresh();
       } catch (e) {
         this.flash(e.message || 'PRA tunnel provisioning failed.', 'error');
@@ -727,9 +727,10 @@ function k8sPage() {
       if (!confirm(`Remove the PRA tunnel for "${this.tunnelTarget.name}"? This deletes the Jump Item and revokes any injected PRA Vault ServiceAccount token.`)) return;
       this.tunneling = true;
       try {
-        await API.del(`/api/k8s/clusters/${this.tunnelTarget.id}/tunnel`);
+        const r = await API.del(`/api/k8s/clusters/${this.tunnelTarget.id}/tunnel`);
         this.showTunnel = false;
-        this.flash('PRA tunnel removed.');
+        this.flash('PRA tunnel removal job started — opening the job…');
+        if (r && r.job_id) { window.location.href = '/jobs/' + r.job_id; return; }
         await this.refresh();
       } catch (e) {
         this.flash(e.message || 'PRA tunnel removal failed.', 'error');
