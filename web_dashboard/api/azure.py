@@ -1061,17 +1061,24 @@ async def _run_deploy(job_id: str, req: AzureDeployRequest, rg: str, loc: str):
                 aci_group_name = await azure_service.run_aci_jumpoint_task(
                     rg=_aci_rg(),
                     location=loc,
-                    subnet_id=settings.azure_aci_subnet_id,
+                    # ACI jumpoint params come from config_service (the wizard /
+                    # sandbox write them to the DB) — NOT the Pydantic settings
+                    # object, whose env-var defaults are empty here. An empty
+                    # subnet_id creates the jumpoint OUTSIDE the VNet, so it has no
+                    # route to the VM's private IP and the SSH Shell Jump times out
+                    # (credential rotation still works — that's the control plane).
+                    # Same fix class as the jump-group/jumpoint-name resolution below.
+                    subnet_id=_cfg("azure_aci_subnet_id") or settings.azure_aci_subnet_id,
                     image=_cfg("azure_aci_jumpoint_image"),
-                    cpu=settings.azure_aci_cpu,
-                    memory=settings.azure_aci_memory,
+                    cpu=float(_cfg("azure_aci_cpu") or settings.azure_aci_cpu),
+                    memory=float(_cfg("azure_aci_memory") or settings.azure_aci_memory),
                     deploy_key=deploy_key,
                     acr_server=acr_server,
                     acr_username=acr_username,
                     acr_password=acr_password,
-                    storage_account=settings.azure_aci_storage_account,
-                    storage_account_rg=settings.azure_aci_storage_account_rg,
-                    file_share=settings.azure_aci_file_share,
+                    storage_account=_cfg("azure_aci_storage_account") or settings.azure_aci_storage_account,
+                    storage_account_rg=_cfg("azure_aci_storage_account_rg") or settings.azure_aci_storage_account_rg,
+                    file_share=_cfg("azure_aci_file_share") or settings.azure_aci_file_share,
                 )
                 result["aci_group_name"] = aci_group_name
                 job_service.update_progress(
@@ -1237,17 +1244,24 @@ async def _run_bulk_deploy(job_items: list, req: AzureBulkDeployRequest, rg: str
                 aci_group_name = await azure_service.run_aci_jumpoint_task(
                     rg=_aci_rg(),
                     location=loc,
-                    subnet_id=settings.azure_aci_subnet_id,
+                    # ACI jumpoint params come from config_service (the wizard /
+                    # sandbox write them to the DB) — NOT the Pydantic settings
+                    # object, whose env-var defaults are empty here. An empty
+                    # subnet_id creates the jumpoint OUTSIDE the VNet, so it has no
+                    # route to the VM's private IP and the SSH Shell Jump times out
+                    # (credential rotation still works — that's the control plane).
+                    # Same fix class as the jump-group/jumpoint-name resolution below.
+                    subnet_id=_cfg("azure_aci_subnet_id") or settings.azure_aci_subnet_id,
                     image=_cfg("azure_aci_jumpoint_image"),
-                    cpu=settings.azure_aci_cpu,
-                    memory=settings.azure_aci_memory,
+                    cpu=float(_cfg("azure_aci_cpu") or settings.azure_aci_cpu),
+                    memory=float(_cfg("azure_aci_memory") or settings.azure_aci_memory),
                     deploy_key=deploy_key,
                     acr_server=acr_server,
                     acr_username=acr_username,
                     acr_password=acr_password,
-                    storage_account=settings.azure_aci_storage_account,
-                    storage_account_rg=settings.azure_aci_storage_account_rg,
-                    file_share=settings.azure_aci_file_share,
+                    storage_account=_cfg("azure_aci_storage_account") or settings.azure_aci_storage_account,
+                    storage_account_rg=_cfg("azure_aci_storage_account_rg") or settings.azure_aci_storage_account_rg,
+                    file_share=_cfg("azure_aci_file_share") or settings.azure_aci_file_share,
                 )
             except Exception as e:
                 aci_error = str(e)
