@@ -747,7 +747,12 @@ async def _dispatch_cloud_runner(
         return await azure_service.run_aci_ansible_task(
             rg=rg,
             location=location,
-            subnet_id=_cfg("ansible_aci_subnet_id") or "",
+            # Fall back to the jumpoint's VNet-delegated subnet (azure_aci_subnet_id)
+            # when the runner's own subnet is unset: it already has line-of-sight to
+            # the target VM subnet and outbound egress for the image pull. With no
+            # subnet at all the container group is public and can't reach private IPs
+            # (SSH to the VM times out → UNREACHABLE).
+            subnet_id=_cfg("ansible_aci_subnet_id") or _cfg("azure_aci_subnet_id") or "",
             image=_cfg("ansible_aci_image") or "chrweav/ansible-winrm:latest",
             target_ip=target_ip,
             ansible_user=ansible_user,
