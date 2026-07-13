@@ -112,7 +112,10 @@ def _resolve_aci() -> dict:
     subnet / ACR creds as fallbacks."""
     rg = _cfg("azure_resource_group")
     location = _cfg("azure_location") or "centralus"
-    subnet_id = _cfg("ansible_aci_subnet_id")
+    # Mirror the Ansible runner: fall back to the jumpoint's VNet-delegated subnet
+    # (azure_aci_subnet_id) when the shared ACI runner subnet is unset, so the
+    # container group can reach private cluster APIs instead of running public.
+    subnet_id = _cfg("ansible_aci_subnet_id") or _cfg("azure_aci_subnet_id")
     image = _cfg("k8s_runner_image_azure") or _cfg("k8s_runner_image") or "dtzar/helm-kubectl:latest"
     acr_server = _cfg("ansible_aci_acr_server")
     acr_username = _cfg("ansible_aci_acr_username")
