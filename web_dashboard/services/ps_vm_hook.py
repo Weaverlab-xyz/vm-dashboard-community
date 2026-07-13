@@ -17,8 +17,13 @@ Onboarding methods (see ps_resource_service):
     Safe custom plugin (managed over Azure VM Run Command; managed system address =
     tenantId/subscriptionId/resourceGroup/vmName; no SSH key pushed). Configurable via
     ``passwordsafe_azure_registration_method``.
-  - Every other cloud (and AWS/Azure when set to ``ssh``) uses the traditional SSH flow: a
-    managed system keyed by host_name/ip with the VM's own private key pushed.
+  - **GCP** defaults to ``gcpvm`` — the cloud-native "GCP VM SSH Rotation" Password Safe
+    custom plugin (managed by writing the public key into the GCE instance's ``ssh-keys``
+    metadata; managed system address = projectId/zone/instanceName; no SSH key pushed;
+    requires OS Login disabled on the instance). Configurable via
+    ``passwordsafe_gcp_registration_method``.
+  - Every other cloud (and AWS/Azure/GCP when set to ``ssh``) uses the traditional SSH
+    flow: a managed system keyed by host_name/ip with the VM's own private key pushed.
 
 Either way the operator configures a functional account per cloud
 (``passwordsafe_vm_functional_account_{aws,azure,gcp}``); its platform decides the
@@ -52,12 +57,15 @@ def _functional_account_name(tag: str) -> str:
 def _registration_method(tag: str) -> str:
     """Onboarding method for this cloud. AWS defaults to the cloud-native AWS Systems
     Manager custom plugin (``ssm``); Azure defaults to the cloud-native Azure VM SSH
-    Rotation custom plugin (``azurevm``); every other cloud uses the traditional SSH flow."""
+    Rotation custom plugin (``azurevm``); GCP defaults to the cloud-native GCP VM SSH
+    Rotation custom plugin (``gcpvm``); every other cloud uses the traditional SSH flow."""
     t = (tag or "").lower()
     if t == "aws":
         return (_cfg("passwordsafe_aws_registration_method") or "ssm").lower()
     if t == "azure":
         return (_cfg("passwordsafe_azure_registration_method") or "azurevm").lower()
+    if t == "gcp":
+        return (_cfg("passwordsafe_gcp_registration_method") or "gcpvm").lower()
     return "ssh"
 
 
@@ -65,7 +73,7 @@ async def register(db, job_id: str, vm_name: str, hostname: str, *,
                    result: dict, tag: str = "cloud",
                    private_key: str = "", ssh_key_secret: str = "",
                    instance_id: str = "", region: str = "",
-                   resource_group: str = "") -> None:
+                   resource_group: str = "", project: str = "", zone: str = "") -> None:
     """Onboard a built VM into Password Safe as a managed system + managed account.
 
     Method is per-cloud (``_registration_method``):
@@ -79,6 +87,11 @@ async def register(db, job_id: str, vm_name: str, hostname: str, *,
       subscription from Azure config, ``resource_group`` + ``vm_name`` from the deploy).
       No SSH key is pushed — Password Safe writes the key over Azure VM Run Command.
       Triggers an initial Change Password by default (``adminuser`` has no baked-in key).
+    * **gcpvm** (GCP default) — the GCP VM SSH Rotation custom plugin. The managed system's
+      address is ``projectId/zone/instanceName`` (``project`` + ``zone`` + ``vm_name`` from
+      the deploy). No SSH key is pushed — Password Safe writes the public key into the GCE
+      instance's ``ssh-keys`` metadata. Triggers an initial Change Password by default
+      (``adminuser`` has no baked-in key).
     * **ssh** — the traditional flow. The SSH private key is the VM's own keypair (resolved
       the same way the Entitle SSH registration does: ``ssh_key_secret`` = the per-launch
       override when set, else the configured default).
@@ -158,6 +171,34 @@ async def register(db, job_id: str, vm_name: str, hostname: str, *,
                 method="azurevm",
                 dns_name=f"{tenant_id}/{subscription_id}/{resource_group}/{vm_name}",
             )
+        elif method == "gcpvm":
+            missing = [n for n, v in (("project", project),
+                                      ("zone", zone),
+                                      ("vm_name", vm_name)) if not v]
+            if missing:
+                raise ps_resource_service.PSResourceError(
+                    "GCP VM SSH Rotation onboarding needs " + ", ".join(missing)
+                    + " (address is projectId/zone/instanceName)")
+            # The managed system inherits the functional account's platform, so a non-plugin
+            # functional account would silently create the system on the wrong platform.
+            pname = fa.get("platform_name") or ""
+            if pname and "gcp vm ssh rotation" not in pname.lower():
+                raise ps_resource_service.PSResourceError(
+                    f"functional account {fa_name!r} is on platform {pname!r}, not a "
+                    "'GCP VM SSH Rotation' platform — the managed system would land on the "
+                    "wrong platform. Point passwordsafe_vm_functional_account_gcp at your "
+                    "GCP VM SSH Rotation Custom Plugin functional account.")
+            r = await ps_resource_service.register_managed_system(
+                name=vm_name,
+                host_name=vm_name,
+                functional_account_id=fa["id"],
+                platform_id=fa["platform_id"],
+                workgroup_id=workgroup_id,
+                entity_type_id=entity_type_id,
+                managed_account_name=managed_account_name,
+                method="gcpvm",
+                dns_name=f"{project}/{zone}/{vm_name}",
+            )
         else:
             pk = private_key or await entitle_vm_hook._resolve_vm_private_key(tag, ssh_key_secret)
             if not pk:
@@ -183,16 +224,19 @@ async def register(db, job_id: str, vm_name: str, hostname: str, *,
         result["ps_registration_tf_state"] = r.get("tf_state_json")
 
         # Optional, best-effort: trigger an initial Change Password so Password Safe mints
-        # the first SSH key immediately (over SSM SendCommand / Azure Run Command).
+        # the first SSH key immediately (over SSM SendCommand / Azure Run Command / GCE
+        # metadata).
         #   • ssm — off by default (auto-management rotates on schedule regardless).
-        #   • azurevm — ON by default: the baked-in adminuser has no key, so without an
-        #     initial mint the account is unusable until the first scheduled rotation.
+        #   • azurevm / gcpvm — ON by default: the baked-in adminuser has no key, so without
+        #     an initial mint the account is unusable until the first scheduled rotation.
         # Never fails the deploy.
         mint = (
             (method == "ssm"
              and config_service.get_bool("passwordsafe_ssm_change_password_on_register", False))
             or (method == "azurevm"
                 and config_service.get_bool("passwordsafe_azure_change_password_on_register", True))
+            or (method == "gcpvm"
+                and config_service.get_bool("passwordsafe_gcp_change_password_on_register", True))
         )
         if mint and r.get("managed_account_id"):
             try:

@@ -19,8 +19,14 @@ Onboarding shapes (``method`` on register_managed_system):
     Password Safe writes the key onto the VM via Azure VM Run Command, so the managed
     system carries ``dns_name = tenantId/subscriptionId/resourceGroup/vmName`` and the
     account name is the plain Linux user (``adminuser``); no private key is pushed
-    (Change Password mints it). ``ssm`` and ``azurevm`` are the cloud-API "plugin"
-    methods (see ``_PLUGIN_METHODS``) — no SSH reachability required.
+    (Change Password mints it).
+  - ``gcpvm`` — the cloud-native "GCP VM SSH Rotation" Password Safe custom plugin:
+    Password Safe writes the public key into the GCE instance's ``ssh-keys`` metadata
+    (the guest agent propagates it to ``authorized_keys``), so the managed system carries
+    ``dns_name = projectId/zone/instanceName`` and the account name is the plain Linux
+    user (``adminuser``); no private key is pushed (Change Password mints it). ``ssm``,
+    ``azurevm`` and ``gcpvm`` are the cloud-API "plugin" methods (see ``_PLUGIN_METHODS``)
+    — no SSH reachability required.
 
 Shaped like entitle_registration_service / terraform_pra_service: inline HCL written
 to an ephemeral workdir, ``terraform apply``, ids pulled from outputs, the full
@@ -65,15 +71,15 @@ _PLUGIN_CACHE_DIR = os.environ.get("TF_PLUGIN_CACHE_DIR", "/root/.terraform.d/pl
 _REDACTED = "**REDACTED-BY-DASHBOARD**"
 
 # Custom-plugin methods — Password Safe drives the target through a custom plugin
-# (AWS SSM / Azure Run Command / a DB client / the PRA Config API) rather than SSH,
-# so the managed system carries the plugin's address in ``dns_name``/``host_name``,
-# uses a placeholder ip, omits the SSH-only fields (remote_client_type /
-# ssh_key_enforcement_mode), and pushes no private key. ``ssh`` is the traditional
-# method. ``ssm``/``azurevm`` are SSH-key-managed (dss auto-management on); ``dbssm``
-# (cloud-DB via the "{engine} SSM Custom Plugin") and ``pravault`` (the "PRA Vault
-# Username Password" plugin) are PASSWORD-managed, so their account emits
-# dss_auto_management_flag = false.
-_PLUGIN_METHODS = frozenset({"ssm", "azurevm", "dbssm", "pravault"})
+# (AWS SSM / Azure Run Command / GCP instance metadata / a DB client / the PRA Config
+# API) rather than SSH, so the managed system carries the plugin's address in
+# ``dns_name``/``host_name``, uses a placeholder ip, omits the SSH-only fields
+# (remote_client_type / ssh_key_enforcement_mode), and pushes no private key. ``ssh``
+# is the traditional method. ``ssm``/``azurevm``/``gcpvm`` are SSH-key-managed (dss
+# auto-management on); ``dbssm`` (cloud-DB via the "{engine} SSM Custom Plugin") and
+# ``pravault`` (the "PRA Vault Username Password" plugin) are PASSWORD-managed, so their
+# account emits dss_auto_management_flag = false.
+_PLUGIN_METHODS = frozenset({"ssm", "azurevm", "gcpvm", "dbssm", "pravault"})
 # Methods whose managed account is password-managed (no SSH DSS key auto-management).
 _PASSWORD_MANAGED_METHODS = frozenset({"dbssm", "pravault"})
 
@@ -172,13 +178,14 @@ def _generate_managed_system_hcl(*, name: str, host_name: str, ip_address: str, 
     * ``ssh`` (default) — traditional managed system keyed by host_name/ip on an SSH
       platform; the account's SSH private key + placeholder password ride sensitive
       TF_VARs and ``ssh_key_enforcement_mode`` enforces key-only auth.
-    * ``ssm`` / ``azurevm`` — the cloud-native custom plugins ("AWS Systems Manager" /
-      "Azure VM SSH Rotation"): the managed system carries the plugin's address in
-      ``dns_name`` (``{instance-id}:{region}`` for ssm, ``tenantId/subscriptionId/
-      resourceGroup/vmName`` for azurevm — the field the plugin parses), a placeholder
-      ip, and the custom-plugin platform (inherited from the functional account). No
-      private key is pushed — Password Safe mints the SSH key via Change Password (over
-      SSM SendCommand / Azure Run Command) — so ``emit_private_key`` is False and the
+    * ``ssm`` / ``azurevm`` / ``gcpvm`` — the cloud-native custom plugins ("AWS Systems
+      Manager" / "Azure VM SSH Rotation" / "GCP VM SSH Rotation"): the managed system
+      carries the plugin's address in ``dns_name`` (``{instance-id}:{region}`` for ssm,
+      ``tenantId/subscriptionId/resourceGroup/vmName`` for azurevm, ``projectId/zone/
+      instanceName`` for gcpvm — the field the plugin parses), a placeholder ip, and the
+      custom-plugin platform (inherited from the functional account). No private key is
+      pushed — Password Safe mints the SSH key via Change Password (over SSM SendCommand /
+      Azure Run Command / GCE metadata) — so ``emit_private_key`` is False and the
       private-key TF_VAR is omitted entirely (a declared-but-unset required var fails
       apply under TF_INPUT=0).
 
@@ -346,6 +353,11 @@ async def register_managed_system(*, name: str, host_name: str, private_key: str
     the plugin parses), the account name is the plain Linux user (no suffix), no private key
     is pushed, and ip defaults to a ``127.0.0.1`` placeholder.
 
+    ``method="gcpvm"`` uses the GCP VM SSH Rotation custom plugin: ``dns_name`` must be
+    ``projectId/zone/instanceName`` (three slash-separated parts, the field the plugin parses),
+    the account name is the plain Linux user (no suffix), no private key is pushed, and ip
+    defaults to a ``127.0.0.1`` placeholder.
+
     ``method="dbssm"`` uses the cloud-DB "{engine} SSM Custom Plugin": ``dns_name`` must be
     ``{instanceArn};{region};{dbEndpoint};{dbName};{publicKeyPath};local`` (six ``;``-separated
     parts), ``port`` is the real DB port, ``managed_account_name`` is the dedicated DB user,
@@ -386,6 +398,19 @@ async def register_managed_system(*, name: str, host_name: str, private_key: str
             ssh_key_enforcement_mode=ssh_key_enforcement_mode,
             application_host_id=application_host_id,
             method="azurevm", dns_name=dns_name, emit_private_key=False)
+    elif method == "gcpvm":
+        if not dns_name or dns_name.count("/") != 2:
+            raise PSResourceError(
+                "GCP VM SSH Rotation onboarding requires a dns_name of the form "
+                "'projectId/zone/instanceName'")
+        hcl = _generate_managed_system_hcl(
+            name=name, host_name=host_name, ip_address=ip_address or "127.0.0.1", port=port,
+            functional_account_id=functional_account_id, platform_id=platform_id,
+            entity_type_id=entity_type_id, workgroup_id=workgroup_id,
+            managed_account_name=managed_account_name,
+            ssh_key_enforcement_mode=ssh_key_enforcement_mode,
+            application_host_id=application_host_id,
+            method="gcpvm", dns_name=dns_name, emit_private_key=False)
     elif method == "dbssm":
         # Cloud-DB via the "{engine} SSM Custom Plugin": Password Safe reaches the
         # private RDS instance by running the DB client on a jump host over SSM.

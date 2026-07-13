@@ -459,6 +459,9 @@ class BeyondTrustFeatureConfig(BaseModel):
     # Azure VM SSH Rotation (cloud-native) onboarding — Azure counterpart of the SSM plugin.
     passwordsafe_azure_registration_method: str = "azurevm"  # "azurevm" (Azure VM SSH Rotation plugin) | "ssh"
     passwordsafe_azure_change_password_on_register: bool = True  # mint first key on onboard (adminuser has none baked in)
+    # GCP VM SSH Rotation (cloud-native) onboarding — GCP counterpart (writes the key into GCE ssh-keys metadata).
+    passwordsafe_gcp_registration_method: str = "gcpvm"   # "gcpvm" (GCP VM SSH Rotation plugin) | "ssh"
+    passwordsafe_gcp_change_password_on_register: bool = True  # mint first key on onboard (adminuser has none baked in)
     # PRA API credentials (used by the SRA Terraform provider for Shell Jump provisioning)
     bt_api_host: str = ""
     bt_client_id: str = ""

@@ -439,9 +439,11 @@
             <p class="text-xs text-gray-400 mb-3">
               Optionally onboard each built Linux VM into Password Safe as a managed system + its baked-in
               <code class="bg-gray-100 px-1 rounded">adminuser</code> account, via a per-deploy opt-in on the
-              cloud deploy forms. <strong>AWS</strong> defaults to the cloud-native <em>AWS Systems Manager</em>
-              plugin (managed over SSM — no per-VPC Resource Broker); Azure and GCP use the traditional SSH
-              managed-system flow. The functional account per cloud decides the management method.
+              cloud deploy forms. Each cloud defaults to its cloud-native plugin (no per-VPC Resource Broker):
+              <strong>AWS</strong> → <em>AWS Systems Manager</em> (over SSM), <strong>Azure</strong> →
+              <em>Azure VM SSH Rotation</em> (over Run Command), <strong>GCP</strong> → <em>GCP VM SSH
+              Rotation</em> (over GCE instance metadata). The functional account per cloud decides the
+              management method; each cloud can be switched to the traditional SSH flow below.
             </p>
             <label class="flex items-center gap-2 text-sm text-gray-700 mb-3">
               <input type="checkbox" x-model="panelCfg.passwordsafe_registration_enabled" class="rounded text-blue-600">
@@ -494,6 +496,35 @@
                 </label>
               </div>
               <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">GCP onboarding method</label>
+                <select x-model="panelCfg.passwordsafe_gcp_registration_method"
+                        x-init="panelCfg.passwordsafe_gcp_registration_method = panelCfg.passwordsafe_gcp_registration_method || 'gcpvm'"
+                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                  <option value="gcpvm">GCP VM SSH Rotation (cloud-native, recommended)</option>
+                  <option value="ssh">Direct SSH (managed system / Resource Broker)</option>
+                </select>
+                <p class="text-xs text-gray-400 mt-1" x-show="(panelCfg.passwordsafe_gcp_registration_method || 'gcpvm') === 'gcpvm'">
+                  Rotates the <code class="bg-gray-100 px-1 rounded">adminuser</code> key by writing it into the GCE
+                  instance's <code class="bg-gray-100 px-1 rounded">ssh-keys</code> metadata — no SSH line-of-sight
+                  needed. The GCP functional account must be the <em>GCP VM SSH Rotation Custom Plugin</em> account
+                  (username = service-account email, password = the service-account JSON key), the plugin must be
+                  admin-uploaded in BeyondInsight, and the service account needs
+                  <code class="bg-gray-100 px-1 rounded">roles/compute.instanceAdmin.v1</code>. <strong>OS Login must
+                  be disabled</strong> on the instance (metadata <code class="bg-gray-100 px-1 rounded">ssh-keys</code>
+                  is ignored when OS Login is on). Managed system address =
+                  <code class="bg-gray-100 px-1 rounded">projectId/zone/instanceName</code>.
+                </p>
+                <p class="text-xs text-gray-400 mt-1" x-show="(panelCfg.passwordsafe_gcp_registration_method || 'gcpvm') === 'ssh'">
+                  Traditional managed system keyed by hostname/IP; pushes the VM's own SSH key and needs SSH
+                  line-of-sight (Resource Broker / Jumpoint).
+                </p>
+                <label class="flex items-center gap-2 text-sm text-gray-700 mt-2"
+                       x-show="(panelCfg.passwordsafe_gcp_registration_method || 'gcpvm') === 'gcpvm'">
+                  <input type="checkbox" x-model="panelCfg.passwordsafe_gcp_change_password_on_register" class="rounded text-blue-600">
+                  Mint the first key on onboard (the baked-in <code class="bg-gray-100 px-1 rounded">adminuser</code> has no credential yet)
+                </label>
+              </div>
+              <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Workgroup</label>
                 <input type="text" x-model="panelCfg.passwordsafe_workgroup"
                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
@@ -526,7 +557,7 @@
                          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
                          placeholder="adminuser">
                 </div>
-                <div x-show="(panelCfg.passwordsafe_aws_registration_method || 'ssm') === 'ssh' || (panelCfg.passwordsafe_azure_registration_method || 'azurevm') === 'ssh'">
+                <div x-show="(panelCfg.passwordsafe_aws_registration_method || 'ssm') === 'ssh' || (panelCfg.passwordsafe_azure_registration_method || 'azurevm') === 'ssh' || (panelCfg.passwordsafe_gcp_registration_method || 'gcpvm') === 'ssh'">
                   <label class="block text-sm font-medium text-gray-700 mb-1">SSH key enforcement <span class="text-gray-400 font-normal">(SSH method)</span></label>
                   <select x-model="panelCfg.passwordsafe_ssh_key_enforcement_mode"
                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">

@@ -128,7 +128,7 @@ Integrations → BeyondTrust → Resource registration (VMs)** (`passwordsafe_re
 The functional account + workgroup must already exist in Password Safe; the dashboard
 resolves them over the public API and creates the managed system/account with Terraform.
 
-Two onboarding methods, chosen per cloud:
+Three onboarding methods, chosen per cloud:
 
 ### AWS — AWS Systems Manager custom plugin (cloud-native, default)
 
@@ -194,11 +194,46 @@ account is immediately usable.
 - The image must be built with the **bt-ready** provisioner so the `adminuser` account exists
   on the VM (the plugin `chown`s the key to it; it does not create the account).
 
-### GCP (and AWS / Azure when set to SSH) — traditional managed system
+### GCP — GCP VM SSH Rotation custom plugin (cloud-native, default)
+
+The recommended path for GCP. Password Safe writes the public key into the GCE instance's
+**`ssh-keys` metadata** (through the Compute Engine API); the in-guest Google guest agent then
+propagates it to the user's `~/.ssh/authorized_keys`, so you need **no Resource Broker and no
+SSH line-of-sight** — one Password Safe node can manage instances across many projects and
+zones. This is the GCP counterpart of the AWS Systems Manager / Azure paths; plugin internals
+are documented in **`Beekeeper-GcpVmSshRotation.docx`**.
+
+The dashboard creates the managed system with **DNS name `projectId/zone/instanceName`**
+(project from the dashboard's GCP config, zone + instance name from the deploy — the field the
+plugin parses) on the custom-plugin platform, and a managed account named after the baked-in
+**`adminuser`** Linux user (no `;suffix`). The account's credential is an SSH key the plugin
+**generates and writes into the instance's `ssh-keys` metadata** on a credential change. Because
+`adminuser` has no key baked in, the dashboard triggers an initial **Change Password** right
+after onboarding by default (`passwordsafe_gcp_change_password_on_register`, on) so the account
+is immediately usable.
+
+**Prerequisites (one-time, admin):**
+
+- Upload the **GCP VM SSH Rotation** `.PSPLUGIN` in BeyondInsight → **Configuration →
+  Privileged Access Management → Platform Plugins**.
+- Create a **functional account on the *GCP VM SSH Rotation Custom Plugin* platform** and point
+  the dashboard's **Functional account — GCP** at it. Its platform is what binds the managed
+  system to the plugin. The credentials are a Google **service account**:
+  **Username = service-account email**, **Password = the full service-account JSON key**.
+- Grant that service account **`roles/compute.instanceAdmin.v1`** on the target project (covers
+  `compute.instances.get` / `setMetadata` / `list` and `compute.zoneOperations.get`).
+- **OS Login must be disabled** on the target instances/project — GCE ignores instance
+  `ssh-keys` metadata when OS Login is enabled, so the plugin's updates would have no effect.
+  (Dashboard-built VMs have OS Login off by default.)
+- The image must be built with the **bt-ready** provisioner so the `adminuser` account exists
+  on the VM (the guest agent syncs metadata to that existing user; it does not create it).
+
+### AWS / Azure / GCP when set to SSH — traditional managed system
 
 A managed system keyed by hostname/IP on an SSH platform; the dashboard pushes the VM's own
 SSH private key into the managed account and `passwordsafe_ssh_key_enforcement_mode` enforces
-key-only auth. This requires SSH line-of-sight from a Resource Broker / Jumpoint.
+key-only auth. This requires SSH line-of-sight from a Resource Broker / Jumpoint. Select it per
+cloud via the `*_registration_method` key (set to `ssh`).
 
 ### Configuration keys
 
@@ -213,6 +248,8 @@ key-only auth. This requires SSH line-of-sight from a Resource Broker / Jumpoint
 | `passwordsafe_ssm_change_password_on_register` | `false` | Trigger an initial Change Password after onboarding (mints the key now) |
 | `passwordsafe_azure_registration_method` | `azurevm` | Azure method: `azurevm` (Azure VM SSH Rotation plugin) or `ssh` |
 | `passwordsafe_azure_change_password_on_register` | `true` | Mint `adminuser`'s first key over Run Command right after onboarding |
+| `passwordsafe_gcp_registration_method` | `gcpvm` | GCP method: `gcpvm` (GCP VM SSH Rotation plugin) or `ssh` |
+| `passwordsafe_gcp_change_password_on_register` | `true` | Mint `adminuser`'s first key into GCE `ssh-keys` metadata right after onboarding |
 | `passwordsafe_ssh_key_enforcement_mode` | `2` | SSH method only — 0 none / 1 auto / 2 strict |
 | `passwordsafe_application_host_id` | `0` | SSH method only — >0 routes via a broker/application host |
 

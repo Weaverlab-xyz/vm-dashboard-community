@@ -9,8 +9,9 @@ account):
   key management (dss flag + remote_client_type=ssh + enforcement mode);
 - application_host_id is opt-in (broker route);
 - the cloud-native plugin shapes (ssm = AWS Systems Manager, azurevm = Azure VM SSH
-  Rotation) emit the plugin address in dns_name, a placeholder ip, no SSH-only fields,
-  and no pushed private key (Password Safe mints the key);
+  Rotation, gcpvm = GCP VM SSH Rotation) emit the plugin address in dns_name, a
+  placeholder ip, no SSH-only fields, and no pushed private key (Password Safe mints
+  the key);
 - _scrub_state redacts password + private_key so neither lands in stashed state.
 
 Imports ps_resource_service with a stubbed web_dashboard.config (no app deps).
@@ -53,6 +54,15 @@ _AZUREVM = dict(name="se-lab-vm", host_name="se-lab-vm", ip_address="127.0.0.1",
                 workgroup_id="55", managed_account_name="adminuser",
                 ssh_key_enforcement_mode=2, method="azurevm",
                 dns_name=_AZ_ADDR, emit_private_key=False)
+
+# GCP VM SSH Rotation custom-plugin shape: dns_name = projectId/zone/instanceName,
+# placeholder ip, a PLAIN account name (no ;suffix), and NO private key pushed.
+_GCP_ADDR = "my-project-123/us-central1-a/web-server-01"
+_GCPVM = dict(name="se-lab-vm", host_name="se-lab-vm", ip_address="127.0.0.1", port=22,
+              functional_account_id=42, platform_id=12, entity_type_id=1,
+              workgroup_id="55", managed_account_name="adminuser",
+              ssh_key_enforcement_mode=2, method="gcpvm",
+              dns_name=_GCP_ADDR, emit_private_key=False)
 
 
 def test_provider_header_targets_passwordsafe_with_run_as_user():
@@ -193,6 +203,50 @@ def test_azurevm_register_rejects_non_four_part_address():
             asyncio.run(ps.register_managed_system(
                 name="web01", host_name="web01", functional_account_id=1, platform_id=11,
                 workgroup_id="wg", method="azurevm", dns_name=bad))
+            raise AssertionError("expected PSResourceError for dns_name=%r" % bad)
+        except ps.PSResourceError:
+            pass
+
+
+# ── GCP VM SSH Rotation shape (gcpvm) — SSH-key-managed via GCE ssh-keys metadata,
+# 3-part address projectId/zone/instanceName, no pushed private key. ─────────────
+
+def test_gcpvm_system_block_uses_slash_address_and_placeholder_ip():
+    hcl = ps._generate_managed_system_hcl(**_GCPVM)
+    assert ps._line("dns_name", '"%s"' % _GCP_ADDR) in hcl
+    assert ps._line("ip_address", '"127.0.0.1"') in hcl
+    assert ps._line("platform_id", 12) in hcl
+    # SSH-only fields must NOT appear on the GCP VM SSH Rotation custom-plugin managed system.
+    assert "remote_client_type" not in hcl
+    assert "ssh_key_enforcement_mode" not in hcl
+
+
+def test_gcpvm_account_block_is_plain_name_with_no_private_key():
+    hcl = ps._generate_managed_system_hcl(**_GCPVM)
+    assert ps._line("account_name", '"adminuser"') in hcl
+    assert "adminuser;" not in hcl  # plain Linux user, no SSM-style ;suffix
+    assert "private_key" not in hcl
+    assert ps._line("password", "var.ps_account_password") in hcl
+    assert ps._line("dss_auto_management_flag", "true") in hcl
+    assert ps._line("api_enabled", "true") in hcl
+
+
+def test_gcpvm_header_omits_private_key_variable():
+    # A declared-but-unset required var fails `terraform apply` under TF_INPUT=0.
+    hcl = ps._generate_managed_system_hcl(**_GCPVM)
+    assert 'variable "ps_account_private_key"' not in hcl
+    assert 'variable "ps_account_password"' in hcl
+
+
+def test_gcpvm_register_rejects_non_three_part_address():
+    # The address validation fires synchronously (before any terraform call), so we can
+    # assert it without a live provider.
+    import asyncio
+    for bad in ("", "proj/zone", "proj/zone/vm/extra", "no-slashes"):
+        try:
+            asyncio.run(ps.register_managed_system(
+                name="web01", host_name="web01", functional_account_id=1, platform_id=12,
+                workgroup_id="wg", method="gcpvm", dns_name=bad))
             raise AssertionError("expected PSResourceError for dns_name=%r" % bad)
         except ps.PSResourceError:
             pass
