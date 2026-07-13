@@ -69,6 +69,22 @@ def _registration_method(tag: str) -> str:
     return "ssh"
 
 
+def _platform_name_ok(platform_name: str, *required_tokens: str) -> bool:
+    """Sanity-check that the functional account's platform is the expected custom
+    plugin, tolerant of admin renames.
+
+    Matches on lowercased substring *tokens* (all must be present) rather than one
+    rigid contiguous phrase, so renaming the platform in Password Safe — e.g.
+    ``Azure VM SSH Rotation`` → ``Azure Waagent VM SSH Rotation`` — doesn't break
+    onboarding. The tokens still discriminate the intended plugin from siblings
+    (``Azure SSH Key Vault`` lacks "ssh rotation"; ``GCP VM SSH Rotation`` lacks
+    "azure"). A blank name means the best-effort lookup failed, so we never block."""
+    p = (platform_name or "").strip().lower()
+    if not p:
+        return True
+    return all(tok.lower() in p for tok in required_tokens)
+
+
 async def register(db, job_id: str, vm_name: str, hostname: str, *,
                    result: dict, tag: str = "cloud",
                    private_key: str = "", ssh_key_secret: str = "",
@@ -122,7 +138,7 @@ async def register(db, job_id: str, vm_name: str, hostname: str, *,
             # The managed system inherits the functional account's platform, so a non-SSM
             # functional account would silently create the system on the wrong platform.
             pname = fa.get("platform_name") or ""
-            if pname and "systems manager" not in pname.lower():
+            if not _platform_name_ok(pname, "systems manager"):
                 raise ps_resource_service.PSResourceError(
                     f"functional account {fa_name!r} is on platform {pname!r}, not an "
                     "'AWS Systems Manager' platform — the managed system would land on the "
@@ -154,7 +170,7 @@ async def register(db, job_id: str, vm_name: str, hostname: str, *,
             # The managed system inherits the functional account's platform, so a non-plugin
             # functional account would silently create the system on the wrong platform.
             pname = fa.get("platform_name") or ""
-            if pname and "azure vm ssh rotation" not in pname.lower():
+            if not _platform_name_ok(pname, "azure", "ssh rotation"):
                 raise ps_resource_service.PSResourceError(
                     f"functional account {fa_name!r} is on platform {pname!r}, not an "
                     "'Azure VM SSH Rotation' platform — the managed system would land on the "
@@ -182,7 +198,7 @@ async def register(db, job_id: str, vm_name: str, hostname: str, *,
             # The managed system inherits the functional account's platform, so a non-plugin
             # functional account would silently create the system on the wrong platform.
             pname = fa.get("platform_name") or ""
-            if pname and "gcp vm ssh rotation" not in pname.lower():
+            if not _platform_name_ok(pname, "gcp", "ssh rotation"):
                 raise ps_resource_service.PSResourceError(
                     f"functional account {fa_name!r} is on platform {pname!r}, not a "
                     "'GCP VM SSH Rotation' platform — the managed system would land on the "
