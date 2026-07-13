@@ -1611,8 +1611,14 @@ _JUMPOINT_CONTAINER_GROUP_PREFIX = "bt-jumpoint-azure"
 
 def _get_storage_account_key_sync(cred, sub_id: str, rg: str, account_name: str) -> str:
     storage_client = StorageManagementClient(cred, sub_id)
-    keys = storage_client.storage_accounts.list_keys(rg, account_name)
-    return keys.keys[0].value
+    result = storage_client.storage_accounts.list_keys(rg, account_name)
+    # azure-mgmt-storage 25.x models are Mapping-like: attribute access to
+    # ``result.keys`` resolves to the dict ``keys()`` METHOD, not the
+    # StorageAccountKey list (``keys.keys[0]`` → "'method' object is not
+    # subscriptable"). Item access returns the list; each element exposes
+    # ``.value`` (also item-accessible on older/newer models).
+    first = result["keys"][0]
+    return first["value"] if isinstance(first, dict) else first.value
 
 
 def _run_aci_jumpoint_sync(
@@ -1692,10 +1698,19 @@ async def run_aci_jumpoint_task(
         storage_key = ""
         if storage_account:
             # Storage account may be in a different RG than the ACI container group.
-            storage_key = await asyncio.to_thread(
-                _get_storage_account_key_sync, cred, sub_id,
-                storage_account_rg or rg, storage_account
-            )
+            # The /jpt mount only persists the jumpoint's identity — it must never
+            # block the jumpoint itself (the critical Shell Jump broker). Fetch the
+            # key best-effort: on failure, log and start without the mount.
+            try:
+                storage_key = await asyncio.to_thread(
+                    _get_storage_account_key_sync, cred, sub_id,
+                    storage_account_rg or rg, storage_account
+                )
+            except Exception as e:
+                logger.warning(
+                    "ACI jumpoint: storage-key fetch for /jpt persistence failed "
+                    "(%s) — starting jumpoint without persistence", e)
+                storage_account = ""  # skip the mount in _run_aci_jumpoint_sync
         return await asyncio.to_thread(
             _run_aci_jumpoint_sync,
             cred, sub_id, rg, location, subnet_id, image, cpu, memory, deploy_key,
