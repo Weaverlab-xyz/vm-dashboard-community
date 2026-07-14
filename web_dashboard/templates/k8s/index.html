@@ -88,6 +88,10 @@
                       title="Provision/remove this cluster's PRA tunnel_type=k8s jump — raw kubectl to the API server via the BeyondTrust representative console (no public ingress)"
                       class="text-xs px-2 py-1 bg-teal-600 hover:bg-teal-700 text-white rounded font-medium"
                       x-text="c.pra_jump_id ? 'PRA tunnel ✓' : 'PRA tunnel'"></button>
+              <button x-show="c.status === 'registered' || c.status === 'managed'" @click="openApiTunnel(c)"
+                      title="Direct kubectl-to-API TCP tunnel + downloadable cloud-login (token-free) kubeconfig; supports kubectl --as impersonation for Entitle grants"
+                      class="text-xs px-2 py-1 bg-cyan-600 hover:bg-cyan-700 text-white rounded font-medium"
+                      x-text="c.api_tunnel_jump ? 'API tunnel ✓' : 'API tunnel'"></button>
               <button @click="openSecrets(c)"
                       title="In-cluster Password Safe secret delivery (External Secrets Operator, Phase 4)"
                       class="text-xs px-2 py-1 bg-violet-600 hover:bg-violet-700 text-white rounded font-medium">
@@ -406,6 +410,71 @@
     </div>
   </div>
 
+  <!-- Direct API TCP tunnel modal (token-free, cloud-login kubeconfig) -->
+  <div x-show="showApiTunnel" x-cloak class="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
+       @click.self="showApiTunnel = false">
+    <div class="bg-white rounded-xl shadow-xl w-full max-w-lg">
+      <div class="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+        <h3 class="font-semibold text-gray-800">Direct API tunnel<span x-show="apiTunnelTarget" class="text-gray-400 font-normal"> — <span x-text="apiTunnelTarget && apiTunnelTarget.name"></span></span></h3>
+        <button @click="showApiTunnel = false" class="text-gray-400 hover:text-gray-600 text-xl">&times;</button>
+      </div>
+      <div class="px-6 py-4 space-y-4">
+        <p class="text-xs text-gray-500">
+          Provisions a generic <code>tunnel_type=tcp</code> jump straight to this cluster's API server and gives
+          you a <strong>token-free</strong> kubeconfig that logs in with your own cloud-CLI identity — so
+          <code>kubectl --as</code> impersonation works for Entitle grants (the <code>tunnel_type=k8s</code>
+          tunnel injects a fixed token and blocks impersonation). These overrides fall back to the configured defaults.
+        </p>
+        <p class="text-[11px] text-gray-400">
+          Prereq: the cloud CLI + auth plugin (<code>gke-gcloud-auth-plugin</code> / <code>aws</code> /
+          <code>kubelogin</code>) installed and logged in as an identity with cluster RBAC; impersonating
+          Entitle grants needs that identity to be cluster-admin.
+        </p>
+        <p x-show="!tunnelOpts.configured" x-cloak class="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+          PRA is not configured (bt_api_host / bt_client_id / bt_client_secret). Set it on Settings — the dropdowns stay empty and provisioning will fail until then.
+        </p>
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Jump group <span class="text-gray-400">(name override)</span></label>
+          <select x-model="apiTunnelForm.jump_group" class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
+            <option value="">(configured default)</option>
+            <template x-for="g in tunnelOpts.jump_groups" :key="g.id">
+              <option :value="g.name" x-text="g.name"></option>
+            </template>
+          </select>
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Jumpoint <span class="text-gray-400">(the jumpoint the tunnel routes through)</span></label>
+          <select x-model="apiTunnelForm.jumpoint_name" class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
+            <option value="">(configured default)</option>
+            <template x-for="j in tunnelOpts.jumpoints" :key="j.id">
+              <option :value="j.name" x-text="j.name"></option>
+            </template>
+          </select>
+        </div>
+        {{ secret_picker("apiTunnelForm", "apiTunnelCredBackend", "pra_credential_ref",
+                         "PRA credential",
+                         "Resolved to a bt_client_secret override for this cluster's tunnel provisioning.") }}
+        <div x-show="apiTunnelTarget && apiTunnelTarget.api_tunnel_jump" x-cloak class="border-t border-gray-100 pt-3">
+          <p class="text-xs text-gray-600 mb-2">Tunnel provisioned. Connect the Jump Item in the PRA representative console, then download this kubeconfig and point <code>KUBECONFIG</code> at it.</p>
+          <button @click="downloadApiKubeconfig()"
+                  class="px-3 py-1.5 text-sm bg-cyan-600 hover:bg-cyan-700 text-white rounded-lg font-medium">Download kubeconfig</button>
+        </div>
+      </div>
+      <div class="px-6 py-4 border-t border-gray-100 flex items-center gap-3">
+        <button x-show="apiTunnelTarget && apiTunnelTarget.api_tunnel_jump" x-cloak @click="removeApiTunnel()" :disabled="apiTunneling"
+                class="px-4 py-2 text-sm border border-red-300 text-red-600 hover:bg-red-50 disabled:opacity-50 rounded-lg">Remove tunnel</button>
+        <div class="flex justify-end gap-3 ml-auto">
+          <button @click="showApiTunnel = false" class="px-4 py-2 text-sm border border-gray-300 rounded-lg">Cancel</button>
+          <button @click="submitApiTunnel()" :disabled="apiTunneling"
+                  class="px-4 py-2 bg-cyan-600 hover:bg-cyan-700 disabled:opacity-50 text-white text-sm font-medium rounded-lg">
+            <span x-show="!apiTunneling" x-text="apiTunnelTarget && apiTunnelTarget.api_tunnel_jump ? 'Re-apply' : 'Create tunnel'"></span>
+            <span x-show="apiTunneling" x-cloak>Working…</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Secret delivery modal (Phase 4 — Feature D) -->
   <div x-show="showSecrets" x-cloak class="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
        @click.self="showSecrets = false">
@@ -463,6 +532,8 @@ function k8sPage() {
     showTunnel: false, tunneling: false, tunnelTarget: null,
     tunnelForm: { jump_group: '', jumpoint_name: '', tunnelCredBackend: '', pra_credential_ref: '', vault_inject: false, vault_account_group_id: null },
     tunnelOpts: { configured: true, jump_groups: [], jumpoints: [], vault_account_groups: [] },
+    showApiTunnel: false, apiTunneling: false, apiTunnelTarget: null,
+    apiTunnelForm: { jump_group: '', jumpoint_name: '', apiTunnelCredBackend: '', pra_credential_ref: '' },
 
     async init() { requireAuth(); this.loadSecretBackends(); await this.refresh(); },
 
@@ -736,6 +807,79 @@ function k8sPage() {
         this.flash(e.message || 'PRA tunnel removal failed.', 'error');
       } finally {
         this.tunneling = false;
+      }
+    },
+
+    async openApiTunnel(c) {
+      this.apiTunnelTarget = c;
+      this.apiTunnelForm = {
+        jump_group: c.jump_group || '',
+        jumpoint_name: c.jumpoint_name || '',
+        apiTunnelCredBackend: '', pra_credential_ref: c.pra_credential_ref || '',
+      };
+      this.tunnelOpts = { configured: true, jump_groups: [], jumpoints: [], vault_account_groups: [] };
+      this.showApiTunnel = true;
+      try {
+        this.tunnelOpts = await API.get('/api/k8s/clusters/pra-options');
+      } catch (e) {
+        this.flash(e.message || 'Could not load PRA options.', 'error');
+      }
+    },
+
+    async submitApiTunnel() {
+      this.apiTunneling = true;
+      try {
+        const body = {
+          jump_group: this.apiTunnelForm.jump_group || null,
+          jumpoint_name: this.apiTunnelForm.jumpoint_name || null,
+          pra_credential_ref: this.apiTunnelForm.pra_credential_ref || null,
+        };
+        const r = await API.post(`/api/k8s/clusters/${this.apiTunnelTarget.id}/api-tunnel`, body);
+        this.showApiTunnel = false;
+        this.flash('API tunnel job started — opening the job…');
+        if (r && r.job_id) { window.location.href = '/jobs/' + r.job_id; return; }
+        await this.refresh();
+      } catch (e) {
+        this.flash(e.message || 'API tunnel provisioning failed.', 'error');
+      } finally {
+        this.apiTunneling = false;
+      }
+    },
+
+    async downloadApiKubeconfig() {
+      const c = this.apiTunnelTarget;
+      try {
+        const token = Alpine.store('auth').token;
+        const resp = await fetch(`/api/k8s/clusters/${c.id}/api-tunnel-kubeconfig`, {
+          headers: { ...(token ? { 'Authorization': `Bearer ${token}` } : {}) },
+        });
+        if (!resp.ok) { this.flash(`kubeconfig download failed (HTTP ${resp.status}).`, 'error'); return; }
+        const text = await resp.text();
+        const url = URL.createObjectURL(new Blob([text], { type: 'application/yaml' }));
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${c.name || c.id}-api-tunnel.kubeconfig`;
+        document.body.appendChild(a); a.click(); a.remove();
+        URL.revokeObjectURL(url);
+        this.flash('kubeconfig downloaded — point KUBECONFIG at it.');
+      } catch (e) {
+        this.flash(e.message || 'kubeconfig download failed.', 'error');
+      }
+    },
+
+    async removeApiTunnel() {
+      if (!confirm(`Remove the direct API tunnel for "${this.apiTunnelTarget.name}"? This deletes the TCP Jump Item.`)) return;
+      this.apiTunneling = true;
+      try {
+        const r = await API.del(`/api/k8s/clusters/${this.apiTunnelTarget.id}/api-tunnel`);
+        this.showApiTunnel = false;
+        this.flash('API tunnel removal job started — opening the job…');
+        if (r && r.job_id) { window.location.href = '/jobs/' + r.job_id; return; }
+        await this.refresh();
+      } catch (e) {
+        this.flash(e.message || 'API tunnel removal failed.', 'error');
+      } finally {
+        this.apiTunneling = false;
       }
     },
 

@@ -95,6 +95,7 @@ def _serialize(r: K8sCluster) -> dict:
         "pra_credential_ref":    r.pra_credential_ref,
         "secrets_delivery_kind": r.secrets_delivery_kind,
         "entitle_agent_installed": config_service.get("entitle_agent_cluster_id") == r.id,
+        "api_tunnel_jump":       bool(config_service.get(f"k8s_api_tunnel_jump_{r.id}")),
         "created_by":            r.created_by,
         "created_at":            r.created_at.isoformat() if r.created_at else "",
     }
@@ -724,13 +725,15 @@ async def run_decommission(db: Session, *, cluster_id: str, job_id: str) -> None
 
     errors: list = []
 
-    # 1. PRA tunnel (best-effort; clears pra_jump_id / pra_tunnel_state on the row).
-    job_service.update_progress(db, job_id, 15, "Removing PRA tunnel…")
-    try:
-        await deregister_pra_tunnel(db, cluster_id)
-    except Exception as exc:
-        errors.append(f"PRA tunnel removal: {exc}")
-        logger.warning("k8s decommission: tunnel removal for %s failed: %s", cluster_id, exc)
+    # 1. PRA tunnels (best-effort; clears the k8s tunnel's pra_jump_id / state on
+    #    the row and the API tunnel's config_service keys).
+    job_service.update_progress(db, job_id, 15, "Removing PRA tunnels…")
+    for _dereg in (deregister_pra_tunnel, deregister_api_tunnel):
+        try:
+            await _dereg(db, cluster_id)
+        except Exception as exc:
+            errors.append(f"PRA tunnel removal: {exc}")
+            logger.warning("k8s decommission: tunnel removal for %s failed: %s", cluster_id, exc)
 
     # 1b. Rancher: remove this cluster from the central Rancher (best-effort,
     #     log-only — a stale Rancher entry must not fail the cloud teardown).
@@ -2098,6 +2101,164 @@ async def deregister_pra_tunnel(db: Session, cluster_id: str) -> dict:
             logger.warning("k8s tunnel: jumpoint idle-teardown failed (non-fatal): %s", exc)
 
     return {"ok": True, "removed": True}
+
+
+# ── k8s API TCP tunnel (direct-kubectl, token-free kubeconfig) ────────────────
+#
+# A parallel action to the tunnel_type=k8s tunnel above. This one creates a
+# GENERIC tunnel_type=tcp jump straight to the API endpoint (host:443) with a
+# pinned local listen port, and hands back a kubeconfig that authenticates with
+# the cluster's own (cloud-native, exec-plugin) auth — NO injected token. Because
+# raw TCP forwards bytes only, kubectl's `--as` impersonation reaches the API
+# intact, so an operator can consume per-user Entitle grants (unlike the k8s
+# tunnel, whose proxy strips impersonation). Tracked in config_service keys
+# (k8s_api_tunnel_jump_{cid} / k8s_api_tunnel_state_{cid}) — no DB column.
+
+async def register_api_tunnel(db: Session, cluster_id: str, *, jump_group: str = None,
+                              jumpoint_name: str = None, pra_credential_ref: str = None) -> dict:
+    """Provision the cluster's ``tunnel_type=tcp`` API tunnel jump (pinned local
+    port) and record its id + Terraform state in config_service. Idempotent:
+    returns the existing jump id without recreating when one is already set."""
+    row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
+    if row is None:
+        raise K8sError(f"cluster {cluster_id} not found")
+    if not _pra_configured():
+        raise K8sError(
+            "PRA is not configured — set bt_api_host, bt_client_id/secret, and a "
+            "Jumpoint name (bt_jumpoint_name, the Jumpoint the tunnel routes through)"
+        )
+    _apply_overrides(row, jump_group=jump_group, jumpoint_name=jumpoint_name,
+                     pra_credential_ref=pra_credential_ref)
+
+    if row.cloud in ("aws", "azure", "gcp"):
+        try:
+            from . import jumpoint_host_service
+            await jumpoint_host_service.ensure_jumpoint_host(
+                row.cloud, _cfg(row.cloud + "_region") or row.region or "")
+        except Exception as exc:
+            logger.warning("k8s API tunnel: ensure jumpoint host failed (non-fatal): %s", exc)
+
+    from . import config_service, terraform_pra_service as pra
+    jump_key = f"k8s_api_tunnel_jump_{cluster_id}"
+    state_key = f"k8s_api_tunnel_state_{cluster_id}"
+    if config_service.get(jump_key):
+        return {"api_tunnel_jump_id": config_service.get(jump_key), "already_registered": True}
+
+    kubeconfig = resolve_kubeconfig(db, cluster_id)
+    api_url = row.api_server or _parse_api_server(kubeconfig)
+    if not api_url:
+        raise K8sError("cluster API URL is unknown — cannot register an API tunnel")
+    host = _api_host_from_url(api_url)
+    remote_port = urlparse(api_url).port or 443
+    local_port = int(_cfg("k8s_api_tunnel_local_port", "6443"))
+
+    cred_ref = row.pra_credential_ref
+    client_secret = config_service.resolve_reference(cred_ref) if cred_ref else ""
+
+    result = await pra.provision_api_tunnel(
+        name=f"k8s-{row.name}-api",
+        hostname=host,
+        jump_group_name=row.jump_group or _cfg("bt_jump_group_name"),
+        jumpoint_name=row.jumpoint_name or _cfg("bt_jumpoint_name"),
+        local_port=local_port,
+        remote_port=remote_port,
+        client_secret=client_secret,
+    )
+    config_service.set(jump_key, str(result.get("tunnel_jump_id") or ""))
+    config_service.set(state_key, result.get("tf_state_json") or "")
+    logger.info("Registered k8s API TCP tunnel for cluster %s (jump id %s, local port %s)",
+                row.name, result.get("tunnel_jump_id"), local_port)
+    return {"api_tunnel_jump_id": str(result.get("tunnel_jump_id") or ""),
+            "jump_group_name": result.get("jump_group_name"), "local_port": local_port}
+
+
+async def deregister_api_tunnel(db: Session, cluster_id: str) -> dict:
+    """Tear down the cluster's API TCP tunnel jump (TF destroy from stored state)
+    and clear its config_service keys (best-effort). No in-cluster SA to revoke —
+    this tunnel injects no credential."""
+    row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
+    from . import config_service, terraform_pra_service as pra
+    jump_key = f"k8s_api_tunnel_jump_{cluster_id}"
+    state_key = f"k8s_api_tunnel_state_{cluster_id}"
+    if row is None or not config_service.get(jump_key):
+        return {"ok": True, "removed": False}
+    state = config_service.get(state_key)
+    if state:
+        try:
+            await pra.remove_api_tunnel(state)
+        except Exception as exc:
+            logger.warning("removing k8s API tunnel for %s failed: %s", cluster_id, exc)
+    config_service.set(jump_key, "")
+    config_service.set(state_key, "")
+
+    if row.cloud in ("aws", "azure", "gcp"):
+        try:
+            from . import jumpoint_host_service
+            await jumpoint_host_service.teardown_jumpoint_host_if_idle(
+                db, row.cloud, _cfg(row.cloud + "_region") or row.region or "")
+        except Exception as exc:
+            logger.warning("k8s API tunnel: jumpoint idle-teardown failed (non-fatal): %s", exc)
+
+    return {"ok": True, "removed": True}
+
+
+def _repoint_kubeconfig_to_tunnel(kubeconfig: str, local_port: int) -> str:
+    """Pure transform: return ``kubeconfig`` with the current-context cluster's
+    ``server`` repointed at ``https://127.0.0.1:<local_port>`` and ``tls-server-name``
+    set to the original API host (so its cert SAN still validates through localhost).
+    The CA and the ``users`` (cloud-native exec-plugin) auth are kept verbatim — the
+    result is token-free and carries no injected credential."""
+    cfg = yaml.safe_load(kubeconfig) or {}
+    clusters = cfg.get("clusters") or []
+    target = None
+    cur = cfg.get("current-context")
+    if cur:
+        cl_name = next((c.get("context", {}).get("cluster")
+                        for c in cfg.get("contexts", []) if c.get("name") == cur), None)
+        target = next((c for c in clusters if c.get("name") == cl_name), None)
+    if target is None and clusters:
+        target = clusters[0]
+    if target is None or "cluster" not in target:
+        raise K8sError("stored kubeconfig has no cluster entry to repoint")
+    cl = target["cluster"]
+    orig_host = _api_host_from_url(cl.get("server", ""))
+    cl["server"] = f"https://127.0.0.1:{int(local_port)}"
+    if orig_host:
+        cl["tls-server-name"] = orig_host
+    return yaml.safe_dump(cfg, default_flow_style=False, sort_keys=False)
+
+
+def build_api_tunnel_kubeconfig(db: Session, cluster_id: str) -> str:
+    """Return a kubeconfig for the cluster's API TCP tunnel: the STORED kubeconfig
+    repointed at the local tunnel port (see ``_repoint_kubeconfig_to_tunnel``).
+    Token-free — reuses the cluster's own cloud-native exec-plugin auth."""
+    kubeconfig = resolve_kubeconfig(db, cluster_id)
+    return _repoint_kubeconfig_to_tunnel(kubeconfig, int(_cfg("k8s_api_tunnel_local_port", "6443")))
+
+
+async def run_api_tunnel(db: Session, *, cluster_id: str, job_id: str, action: str = "register",
+                         jump_group: str = None, jumpoint_name: str = None,
+                         pra_credential_ref: str = None) -> None:
+    """Worker entry for a ``k8s_api_tunnel`` job: provision/remove the cluster's
+    ``tunnel_type=tcp`` API tunnel with Job tracking (a background job because the
+    terraform apply against the sra provider can take a minute or two)."""
+    from . import job_service
+    from ..api.websocket import broadcast_progress
+    job_service.set_running(db, job_id)
+    try:
+        if action == "remove":
+            await broadcast_progress(job_id, 20, "Removing the API TCP tunnel…")
+            await deregister_api_tunnel(db, cluster_id)
+        else:
+            await broadcast_progress(job_id, 20, "Provisioning the API TCP tunnel…")
+            await register_api_tunnel(
+                db, cluster_id, jump_group=jump_group, jumpoint_name=jumpoint_name,
+                pra_credential_ref=pra_credential_ref)
+    except Exception as exc:
+        job_service.set_failed(db, job_id, str(exc))
+        logger.exception("k8s API tunnel job failed cluster=%s action=%s", cluster_id, action)
+        return
+    job_service.set_completed(db, job_id)
 
 
 async def _entitle_rancher_grant(cluster_id: str, username: str) -> dict:

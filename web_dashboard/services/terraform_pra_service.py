@@ -687,6 +687,137 @@ async def remove_db_tunnel(tf_state_json: str) -> None:
     await asyncio.to_thread(_remove_db_tunnel_sync, tf_state_json)
 
 
+# ── k8s API TCP tunnel (direct-kubectl feature) ───────────────────────────────
+#
+# A GENERIC tunnel_type="tcp" protocol-tunnel jump straight to the cluster's API
+# endpoint (host:443), with a PINNED local listen port. Unlike the tunnel_type="k8s"
+# jump (created over REST because the sra provider blocks "k8s", and which injects
+# a fixed pra-access token + strips client `--as` impersonation), a raw TCP tunnel
+# forwards bytes only: kubectl authenticates end-to-end with its own kubeconfig
+# (the cloud-native exec plugin) and can impersonate. tunnel_definitions is a
+# semicolon-separated list of local;remote port pairs (e.g. "6443;443") and
+# tunnel_listen_address must be within 127.0.0.0/24 — both confirmed against a
+# live appliance jump. No Vault account, no credential injection.
+
+def _generate_api_tunnel_hcl(name: str, hostname: str, jump_group_name: str,
+                             jumpoint_name: str, tunnel_definitions: str,
+                             tag: str = "Kubernetes") -> str:
+    """HCL for one sra_protocol_tunnel_jump with tunnel_type="tcp". No url/
+    ca_certificates (those are k8s-tunnel-only) and no Vault account — the
+    kubeconfig carries its own (token-free, exec-plugin) auth."""
+    safe_name = re.sub(r"[^a-z0-9_]", "_", name.lower())
+    return f"""\
+terraform {{
+  required_providers {{
+    sra = {{
+      source  = "beyondtrust/sra"
+      version = "~> 1.0"
+    }}
+  }}
+}}
+
+variable "bt_host"          {{ sensitive = false }}
+variable "bt_client_id"     {{ sensitive = true }}
+variable "bt_client_secret" {{ sensitive = true }}
+
+provider "sra" {{
+  host          = var.bt_host
+  client_id     = var.bt_client_id
+  client_secret = var.bt_client_secret
+}}
+
+data "sra_jump_group_list" "jg" {{
+  name = {json.dumps(jump_group_name)}
+}}
+
+data "sra_jumpoint_list" "jp" {{
+  name = {json.dumps(jumpoint_name)}
+}}
+
+resource "sra_protocol_tunnel_jump" {json.dumps(safe_name)} {{
+  name                  = {json.dumps(name)}
+  hostname              = {json.dumps(hostname)}
+  jump_group_id         = tonumber(data.sra_jump_group_list.jg.items[0].id)
+  jumpoint_id           = tonumber(data.sra_jumpoint_list.jp.items[0].id)
+  tunnel_type           = "tcp"
+  tunnel_definitions    = {json.dumps(tunnel_definitions)}
+  tunnel_listen_address = "127.0.0.1"
+  tag                   = {json.dumps(tag)}
+  comments              = "Auto-provisioned by Infrastructure Management Dashboard (k8s API tunnel)"
+}}
+
+output "tunnel_jump_id" {{
+  value = sra_protocol_tunnel_jump.{safe_name}.id
+}}
+"""
+
+
+def _provision_api_tunnel_sync(name, hostname, jump_group_name, jumpoint_name,
+                               tunnel_definitions, tag="Kubernetes", client_secret="") -> dict:
+    # A per-cluster PRA credential overrides the configured bt_client_secret for
+    # this apply only (the sensitive TF_VAR the provider block reads).
+    _cred_env = {"TF_VAR_bt_client_secret": client_secret} if client_secret else {}
+    with tempfile.TemporaryDirectory(prefix="pra_api_tf_") as work_dir:
+        Path(work_dir, "main.tf").write_text(
+            _generate_api_tunnel_hcl(name, hostname, jump_group_name, jumpoint_name,
+                                     tunnel_definitions, tag))
+        init = _run_tf(["init", "-upgrade=false"], work_dir, timeout=60)
+        if init.returncode != 0:
+            raise TerraformPRAError(
+                f"terraform init failed: {init.stderr.strip() or init.stdout.strip()}")
+        apply = _run_tf(["apply", "-auto-approve"], work_dir, timeout=120,
+                        extra_env=_cred_env or None)
+        if apply.returncode != 0:
+            _run_tf(["destroy", "-auto-approve", "-refresh=false"], work_dir, timeout=120,
+                    extra_env=_cred_env or None)
+            raise TerraformPRAError(
+                f"terraform apply failed: {apply.stderr.strip() or apply.stdout.strip()}")
+
+        out = _run_tf(["output", "-json"], work_dir, timeout=30)
+        tunnel_jump_id: Optional[str] = None
+        if out.returncode == 0 and out.stdout.strip():
+            try:
+                outputs = json.loads(out.stdout)
+                tunnel_jump_id = str(outputs.get("tunnel_jump_id", {}).get("value", ""))
+            except (json.JSONDecodeError, AttributeError):
+                pass
+
+        state_path = Path(work_dir, "terraform.tfstate")
+        tf_state_json = state_path.read_text() if state_path.exists() else None
+        return {
+            "tunnel_jump_id": tunnel_jump_id,
+            "jump_group_name": jump_group_name,
+            "tf_state_json": _scrub_tf_state(tf_state_json) if tf_state_json else None,
+        }
+
+
+async def provision_api_tunnel(
+    name: str,
+    hostname: str,
+    jump_group_name: str,
+    jumpoint_name: str,
+    local_port: int = 6443,
+    remote_port: int = 443,
+    tag: str = "Kubernetes",
+    client_secret: str = "",
+) -> dict:
+    """Provision a generic tunnel_type="tcp" PRA protocol-tunnel jump to a k8s
+    API server, with a pinned local listen port. The Jump Group + Jumpoint must
+    already exist. Returns ``{tunnel_jump_id, jump_group_name, tf_state_json}``
+    (state SCRUBBED, safe to stash; drives ``remove_api_tunnel`` later)."""
+    tunnel_definitions = f"{int(local_port)};{int(remote_port)}"
+    return await asyncio.to_thread(
+        _provision_api_tunnel_sync, name, hostname, jump_group_name, jumpoint_name,
+        tunnel_definitions, tag, client_secret)
+
+
+async def remove_api_tunnel(tf_state_json: str) -> None:
+    """Destroy a previously provisioned k8s API TCP tunnel using its stored state.
+    The state holds a single sra_protocol_tunnel_jump, so a provider-only destroy
+    is sufficient (no engine-specific re-derivation)."""
+    await asyncio.to_thread(_destroy_state_only_sync, tf_state_json)
+
+
 # ── Web Jump (Rancher management UI) ──────────────────────────────────────────
 # The central Rancher UI is brokered to the operator via a PRA Web Jump (the sra
 # provider's sra_web_jump) — the rep opens it from the PRA representative console;
