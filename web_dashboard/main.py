@@ -845,6 +845,7 @@ async def features():
         "cost":         flags["cost_explorer_enabled"],
         "admission":    flags["admission_control_enabled"],
         "cloud_database": flags["cloud_database_enabled"],
+        "k8s_management": flags["k8s_management_enabled"],
     }
 
 

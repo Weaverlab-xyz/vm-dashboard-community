@@ -1835,14 +1835,14 @@
         </div>
       </template>
 
-      <!-- ── Kubernetes Management (preview-feature config — config-only, no toggle) ── -->
+      <!-- ── Kubernetes Management (config panel; enable/disable via the feature toggle) ── -->
       <template x-if="panel?.key === 'k8s_management' && !panelLoading">
         <div class="space-y-4">
           <p class="text-sm text-gray-500">
             Defaults for <strong>provisioning</strong> AWS EKS clusters. Normally populated by
             <code>setup-aws.sh</code> + the sandbox <code>--push-only</code> import; set or override
             the values by hand here. Registering an existing cluster from its kubeconfig needs none of
-            this. Enable/disable the feature with the Preview toggle.
+            this. Enable or disable the feature with its toggle in the integrations list above.
           </p>
 
           <!-- AWS EKS — cluster networking -->
@@ -2095,6 +2095,8 @@ function settingsPage() {
         desc: 'Pre-action policy gate (OPA): allowed regions, blocked sizes, change-freeze.' },
       { key: 'cloud_database', label: 'Cloud Databases',        hasConfig: true,  enabled: false,
         desc: 'Private managed databases (PostgreSQL, MySQL, SQL Server) on AWS, Azure and GCP, reached through a PRA tunnel.' },
+      { key: 'k8s_management', label: 'Kubernetes',             hasConfig: true,  enabled: false,
+        desc: 'Provision (EKS/AKS/GKE), register, and broker Kubernetes clusters — PRA tunnels + Entitle real-identity JIT.' },
     ],
 
     // ── Slide-over panel state ───────────────────────────────────────────
@@ -2320,6 +2322,7 @@ function settingsPage() {
           cost_explorer: features.cost,
           admission_control: features.admission,
           cloud_database: features.cloud_database,
+          k8s_management: features.k8s_management,
         };
         for (const intg of this.integrations) {
           intg.enabled = !!map[intg.key];
