@@ -76,7 +76,8 @@
             </td>
             <td class="px-4 py-3 text-gray-500" x-text="c.mgmt_kind || '—'"></td>
             <td class="px-4 py-3 text-xs text-gray-400 font-mono truncate max-w-[14rem]" x-text="c.api_server"></td>
-            <td class="px-4 py-3 text-right whitespace-nowrap">
+            <td class="px-4 py-3">
+              <div class="flex flex-wrap justify-end items-center gap-1">
               <button x-show="c.status === 'registered'" @click="launch(c)"
                       class="text-xs px-2 py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded font-medium">Launch mgmt</button>
               <button x-show="c.status === 'managed'" @click="openConsole(c)"
@@ -104,7 +105,8 @@
               <button @click="entitleRegister(c)"
                       title="Register this cluster as an Entitle Kubernetes integration (JIT cluster RBAC)"
                       class="text-xs px-2 py-1 bg-fuchsia-600 hover:bg-fuchsia-700 text-white rounded font-medium">Register in Entitle</button>
-              <button @click="del(c)" class="text-xs px-2 py-1 text-red-600 hover:underline ml-1">Delete</button>
+              <button @click="del(c)" class="text-xs px-2 py-1 text-red-600 hover:underline">Delete</button>
+              </div>
             </td>
           </tr>
         </template>
