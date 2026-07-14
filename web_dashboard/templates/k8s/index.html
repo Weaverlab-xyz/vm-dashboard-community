@@ -78,8 +78,13 @@
             <td class="px-4 py-3 text-xs text-gray-400 font-mono truncate max-w-[14rem]" x-text="c.api_server"></td>
             <td class="px-4 py-3">
               <div class="flex flex-wrap justify-end items-center gap-1">
-              <button x-show="c.status === 'registered'" @click="launch(c)"
-                      class="text-xs px-2 py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded font-medium">Launch mgmt</button>
+              {# "Launch mgmt" (Rancher management plane) hidden pending a full Rancher
+                 setup — the deploy needs rancher_server_url + a designated mgmt cluster +
+                 cert-manager/ingress/LB (fails "rancher_server_url is not configured"
+                 otherwise). Backend (launch_management + rancher_service) is kept; restore
+                 this button when the Rancher plane is configured. See [[rancher_mgmt_plane]]. #}
+              {# <button x-show="c.status === 'registered'" @click="launch(c)"
+                      class="text-xs px-2 py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded font-medium">Launch mgmt</button> #}
               <button x-show="c.status === 'managed'" @click="openConsole(c)"
                       class="text-xs px-2 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded font-medium">Open console</button>
               <button x-show="c.status === 'managed'" @click="openBroker(c)"
