@@ -279,8 +279,12 @@ async def _run_aws_build(job_id: str, req: AWSPackerBuildRequest, created_by: st
         def on_progress(pct, msg):
             job_service.update_progress(db, job_id, pct, msg)
 
+        def on_log(line):
+            job_service.append_job_log(db, job_id, line)
+
         result = await packer_service.run_build(
-            "aws", build_dir, env, on_progress, is_cancelled=_cancel_checker(job_id))
+            "aws", build_dir, env, on_progress,
+            is_cancelled=_cancel_checker(job_id), on_log=on_log)
 
         # Archive template
         if req.archive_template:
@@ -447,8 +451,12 @@ async def _run_azure_build(job_id: str, req: AzurePackerBuildRequest, created_by
         def on_progress(pct, msg):
             job_service.update_progress(db, job_id, pct, msg)
 
+        def on_log(line):
+            job_service.append_job_log(db, job_id, line)
+
         result = await packer_service.run_build(
-            "azure", build_dir, env, on_progress, is_cancelled=_cancel_checker(job_id))
+            "azure", build_dir, env, on_progress,
+            is_cancelled=_cancel_checker(job_id), on_log=on_log)
 
         # Archive template
         if req.archive_template:
@@ -544,6 +552,8 @@ async def _run_gcp_build(job_id: str, req: GCPPackerBuildRequest, created_by: st
             has_provisioner=bool(req.provisioner_script.strip()),
             provisioner_env=plain_env,
             provisioner_secret_vars=secret_vars,
+            disk_type=req.disk_type,
+            disk_size=req.disk_size_gb,
         )
         (build_dir / "build.pkr.hcl").write_text(template)
         _write_provisioner(build_dir, req.provisioner_script)
@@ -551,8 +561,12 @@ async def _run_gcp_build(job_id: str, req: GCPPackerBuildRequest, created_by: st
         def on_progress(pct, msg):
             job_service.update_progress(db, job_id, pct, msg)
 
+        def on_log(line):
+            job_service.append_job_log(db, job_id, line)
+
         result = await packer_service.run_build(
-            "gcp", build_dir, env, on_progress, is_cancelled=_cancel_checker(job_id))
+            "gcp", build_dir, env, on_progress,
+            is_cancelled=_cancel_checker(job_id), on_log=on_log)
 
         # Archive template
         if req.archive_template:
