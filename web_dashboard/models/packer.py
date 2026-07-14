@@ -78,6 +78,13 @@ class GCPPackerBuildRequest(BaseModel):
     source_image: str
     machine_type: str = "e2-medium"
     ssh_username: str = "packer"
+    # Boot-disk knobs for the transient build VM. disk_type defaults to pd-ssd —
+    # the googlecompute builder's own default (pd-standard, HDD) has low IOPS that
+    # drags out provisioning. disk_size_gb is optional (None → source-image default;
+    # a size smaller than the image would fail the build). Both are inlined into the
+    # generated HCL, so disk_type is allow-listed and disk_size_gb is range-checked.
+    disk_type: str = "pd-ssd"
+    disk_size_gb: Optional[int] = None
     provisioner_script: str = ""
     archive_template: bool = False
     # Generic provisioner environment variables (literals + secret-manager refs).
@@ -85,6 +92,24 @@ class GCPPackerBuildRequest(BaseModel):
     # BeyondTrust provisioner knobs — passed to the bt-ready provisioner as env vars.
     bt_admin_user: Optional[str] = None        # → BT_ADMIN_USER (Password-Safe-managed bootstrap account)
     bt_epml: Optional[str] = None              # "deb" | "rpm" — install EPM-L package of this family (else skip)
+
+    @field_validator("disk_type")
+    @classmethod
+    def _valid_disk_type(cls, v: str) -> str:
+        v = (v or "").strip() or "pd-ssd"
+        allowed = {"pd-standard", "pd-balanced", "pd-ssd", "pd-extreme"}
+        if v not in allowed:
+            raise ValueError(f"invalid disk_type {v!r} — must be one of {sorted(allowed)}")
+        return v
+
+    @field_validator("disk_size_gb")
+    @classmethod
+    def _valid_disk_size(cls, v: Optional[int]) -> Optional[int]:
+        if v is None:
+            return None
+        if not (10 <= v <= 2000):
+            raise ValueError("disk_size_gb must be between 10 and 2000")
+        return v
 
 
 class PackerBuildResponse(BaseModel):

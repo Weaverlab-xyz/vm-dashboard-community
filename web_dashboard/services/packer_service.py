@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -27,6 +28,15 @@ BUILDS_DIR = Path(__file__).parent.parent.parent / "packer" / "builds"
 # before we escalate to SIGKILL. Cleanup makes real cloud API calls, so it needs
 # far more headroom than terraform's 10s (a SIGKILL here would re-orphan the VM).
 PACKER_CANCEL_GRACE_S = 120.0
+
+# Packer forwards a shell provisioner's remote stdout as newline-terminated UI
+# lines, but long package installs/downloads report progress with carriage
+# returns (dnf/apt/yum progress bars), so many minutes can pass with no complete
+# line — the progress bar freezes and the build looks hung even though it's fine.
+# A timer emits a keepalive on the progress channel after this many idle seconds
+# so the UI keeps showing forward motion. (It touches only the progress message,
+# never the Live Output stream, so it doesn't spam the log.)
+PACKER_HEARTBEAT_S = 30.0
 
 
 class PackerError(Exception):
@@ -509,11 +519,22 @@ def generate_gcp_template(
     has_provisioner: bool,
     provisioner_env: dict = None,
     provisioner_secret_vars: dict = None,
+    disk_type: str = "pd-ssd",
+    disk_size: Optional[int] = None,
 ) -> str:
     safe = _safe_gcp_name(image_name)
     envb = _provisioner_env_block(provisioner_env, provisioner_secret_vars)
     decls = _secret_var_decls(provisioner_secret_vars)
     prov = ('\n  provisioner "shell" {\n    script = "provision.sh"\n' + envb + '  }\n') if has_provisioner else ""
+    # Boot disk. The googlecompute builder defaults to pd-standard (a spinning
+    # HDD): low IOPS, which drags out unpacking hundreds of RPMs/debs during a
+    # provisioner. For a short-lived build VM an SSD-backed disk costs a few
+    # cents but cuts provisioning time substantially, so default to pd-ssd.
+    # disk_size is only emitted when set — a value smaller than the source image
+    # makes the build fail, so an unset size means "use the image default".
+    disk_block = '  disk_type    = "' + disk_type + '"\n'
+    if disk_size and disk_size > 0:
+        disk_block += '  disk_size    = ' + str(int(disk_size)) + '\n'
     return (
         'packer {\n'
         '  required_plugins {\n'
@@ -529,6 +550,7 @@ def generate_gcp_template(
         '  project_id   = "' + project_id + '"\n'
         '  zone         = "' + zone + '"\n'
         '  machine_type = "' + machine_type + '"\n'
+        + disk_block +
         # The dashboard's source values are GCP image *families* (debian-12,
         # rocky-linux-9, ubuntu-2204-lts-amd64, …), not exact image names, so use
         # source_image_family — which resolves to the family's latest image across
@@ -665,10 +687,13 @@ async def run_build(
     env: dict,
     on_progress: Callable[[int, str], None],
     is_cancelled: Optional[Callable[[], bool]] = None,
+    on_log: Optional[Callable[[str], None]] = None,
 ) -> dict[str, Any]:
     """
     Run `packer init` then `packer build` in build_dir.
-    Calls on_progress(percent, message) with live log lines.
+    Calls on_progress(percent, message) to drive the progress bar, and — when
+    given — on_log(line) for each human-readable build line so the caller can
+    persist a Live Output stream (packer builds otherwise show no live output).
     Returns a dict with at minimum {"artifact_id": ...}.
     Raises PackerError on failure, or PackerCancelled if ``is_cancelled`` reports
     the job was cancelled (packer is signalled to tear down its build instance).
@@ -688,16 +713,37 @@ async def run_build(
     on_progress(12, "Starting Packer build — this typically takes 5–15 minutes…")
     build_output: list[str] = []
     progress_pct = 12
+    last_activity = time.monotonic()
 
     def _on_line(line: str) -> None:
-        nonlocal progress_pct
+        nonlocal progress_pct, last_activity
         build_output.append(line)
         readable = _human_readable(line)
         if readable:
+            last_activity = time.monotonic()
             # Advance progress slowly from 12 → 90 as lines arrive
             if progress_pct < 90:
                 progress_pct = min(90, progress_pct + 1)
             on_progress(progress_pct, readable[:200])
+            if on_log:
+                on_log(readable[:1000])
+
+    # Keepalive: while packer emits no complete lines (a quiet package install /
+    # large download), re-emit the progress message with an elapsed-idle note so
+    # the UI shows the build is still working rather than frozen. Progress only,
+    # never on_log — the Live Output stream stays clean.
+    async def _heartbeat() -> None:
+        while True:
+            await asyncio.sleep(PACKER_HEARTBEAT_S)
+            idle = time.monotonic() - last_activity
+            if idle >= PACKER_HEARTBEAT_S:
+                mins = int(idle // 60)
+                idle_txt = f"{mins}m" if mins else f"{int(idle)}s"
+                on_progress(
+                    progress_pct,
+                    f"Still building — a package install/download is running quietly "
+                    f"(no new Packer output for {idle_txt})…",
+                )
 
     # -on-error=cleanup is Packer's default but we set it explicitly so the
     # intent is obvious: on build failure, Packer terminates the EC2/GCE/Azure
@@ -707,13 +753,19 @@ async def run_build(
     # whenever a provisioner script failed (issue #21).
     # Only the build step gets the cancel watcher: `packer init` is fast, local,
     # and provisions nothing in the cloud, so there's nothing to clean up there.
-    rc, _ = await _stream_command(
-        ["packer", "build", "-machine-readable", "-on-error=cleanup", "."],
-        cwd=build_dir,
-        env=env,
-        on_line=_on_line,
-        is_cancelled=is_cancelled,
-    )
+    heartbeat = asyncio.ensure_future(_heartbeat())
+    try:
+        rc, _ = await _stream_command(
+            ["packer", "build", "-machine-readable", "-on-error=cleanup", "."],
+            cwd=build_dir,
+            env=env,
+            on_line=_on_line,
+            is_cancelled=is_cancelled,
+        )
+    finally:
+        heartbeat.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await heartbeat
     full_output = "\n".join(build_output)
 
     if rc != 0:

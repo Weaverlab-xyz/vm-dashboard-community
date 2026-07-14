@@ -549,17 +549,39 @@
             <label class="block text-sm font-medium text-gray-700 mb-1">Build Machine Type</label>
             <select x-model="gcpPackerForm.machine_type"
                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500">
-              <option>e2-micro</option>
-              <option>e2-small</option>
               <option>e2-medium</option>
               <option>e2-standard-2</option>
+              <option>e2-standard-4</option>
+              <option>e2-standard-8</option>
             </select>
+            <p class="text-xs text-gray-400 mt-1">Shared-core types (e2-micro/small) are omitted — they throttle to a fraction of a vCPU and make image builds crawl.</p>
           </div>
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">SSH Username</label>
             <input type="text" x-model="gcpPackerForm.ssh_username"
                    placeholder="packer"
                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500">
+          </div>
+        </div>
+
+        <!-- Boot Disk -->
+        <div class="grid grid-cols-2 gap-4">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Boot Disk Type</label>
+            <select x-model="gcpPackerForm.disk_type"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500">
+              <option value="pd-ssd">pd-ssd (fastest)</option>
+              <option value="pd-balanced">pd-balanced</option>
+              <option value="pd-standard">pd-standard (HDD, slow)</option>
+            </select>
+            <p class="text-xs text-gray-400 mt-1">SSD-backed disks make package installs much faster on the throwaway build VM.</p>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Boot Disk Size (GB)</label>
+            <input type="number" x-model.number="gcpPackerForm.disk_size_gb" min="10" max="2000"
+                   placeholder="source image default"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500">
+            <p class="text-xs text-gray-400 mt-1">Leave blank to use the source image's default size. Cannot be smaller than the image.</p>
           </div>
         </div>
 
@@ -746,6 +768,8 @@ function gcpDashboard() {
       source_image:      'debian-12',
       machine_type:      'e2-medium',
       ssh_username:      'packer',
+      disk_type:         'pd-ssd',
+      disk_size_gb:      null,   // null → source image default (omit disk_size from HCL)
       provisioner_script: '',
       archive_template:  false,
       loaded_from:       '',
@@ -1092,7 +1116,14 @@ function gcpDashboard() {
       if (!this.gcpPackerForm.source_image) { this.gcpPackerError = 'Source image is required.'; return; }
       this.gcpPackerBuilding = true;
       try {
-        const resp = await API.post('/api/packer/gcp/build', this.gcpPackerForm);
+        // Blank disk size → omit it (null) so the builder uses the source image
+        // default; an empty number input can arrive as '' / NaN which the API rejects.
+        const size = Number(this.gcpPackerForm.disk_size_gb);
+        const payload = {
+          ...this.gcpPackerForm,
+          disk_size_gb: Number.isFinite(size) && size > 0 ? size : null,
+        };
+        const resp = await API.post('/api/packer/gcp/build', payload);
         toast('Packer GCP build queued!', 'success');
         setTimeout(() => window.location.href = '/jobs/' + resp.job_id, 400);
       } catch (e) {
