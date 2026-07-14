@@ -665,12 +665,16 @@ class CloudDatabaseFeatureConfig(BaseModel):
 
 
 class K8sManagementFeatureConfig(BaseModel):
-    """Config-only panel (no `enabled`) for the Kubernetes Management PREVIEW
-    feature. The preview toggle owns `k8s_management_enabled`; this panel holds the
-    AWS EKS cluster-provisioning defaults the sandbox emits (the two private k8s
-    subnet ids) plus optional version / node-size defaults. Normally pushed via
-    /api/setup/import. See _CONFIG_ONLY_FEATURES. Registering an existing cluster
+    """Config panel for the Kubernetes Management feature. Graduated from preview to
+    GA once provision (EKS/AKS/GKE), register, PRA broker/tunnel, and Entitle
+    real-identity JIT were validated end-to-end. The toggle owns
+    `k8s_management_enabled` via its own `enabled` field (feature name → key through
+    _feature_to_cfg_key, like cost_explorer / cloud_database); the rest hold the AWS
+    EKS cluster-provisioning defaults the sandbox emits (the two private k8s subnet
+    ids) plus optional version / node-size defaults and the Rancher / Entra-RBAC
+    knobs. Normally pushed via /api/setup/import. Registering an existing cluster
     needs none of this — it's only for §1.1a provisioning."""
+    enabled: bool = False
     # AWS EKS provisioning (§1.1a) — the two private k8s subnets (2 AZs) the
     # cluster + node group land in.
     aws_k8s_subnet_a_id: str = ""
@@ -773,7 +777,7 @@ _FEATURE_MODELS = {
 # Features whose panel carries config but NOT an enable toggle — their on/off
 # lives elsewhere (e.g. a preview flag). _read/_write_feature skip the enabled
 # key for these, so saving config can't flip the feature's flag.
-_CONFIG_ONLY_FEATURES = {"k8s_management", "vdesktops"}
+_CONFIG_ONLY_FEATURES = {"vdesktops"}
 
 _SECRET_FEATURE_KEYS = frozenset({
     "pscli_client_secret", "bt_client_secret", "epml_pat",
@@ -938,8 +942,6 @@ def put_azure_regions(payload: AzureRegionConfigsPayload, request: Request):
 _PREVIEW_FLAGS = {
     "vdesktops_enabled": (
         "Virtual Desktops", "Desktop pools brokered as PRA sessions (Phase 1: Azure)."),
-    "k8s_management_enabled": (
-        "Kubernetes Management", "Provision (AWS EKS), register, and broker Kubernetes clusters."),
 }
 
 # Preview flags that ALSO have a config panel — maps the flag key to the
@@ -947,7 +949,6 @@ _PREVIEW_FLAGS = {
 # the panel is config-only (see _CONFIG_ONLY_FEATURES).
 _PREVIEW_FLAG_CONFIG = {
     "vdesktops_enabled": "vdesktops",
-    "k8s_management_enabled": "k8s_management",
 }
 
 
