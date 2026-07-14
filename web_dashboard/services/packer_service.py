@@ -249,6 +249,88 @@ def generate_azure_template(
     )
 
 
+def generate_azure_linux_gallery_template(
+    image_publisher: str,
+    image_offer: str,
+    image_sku: str,
+    vm_size: str,
+    image_name: str,
+    has_provisioner: bool,
+    provisioner_env: dict = None,
+    provisioner_secret_vars: dict = None,
+) -> str:
+    """Linux build → Shared Image Gallery *version* (instead of a managed image).
+
+    A captured managed image keeps a dangling reference to the (Packer-deleted)
+    source OS disk, so it cannot be exported to VHD — and Azure rejects a managed
+    image ID in a disk's ``creationData.imageReference``. A Compute Gallery version
+    is self-contained and exportable, so Linux builds publish here and register the
+    version directly (no VHD export). The gallery + image definition are ensured by
+    azure_service before the build; their coordinates arrive as sensitive-free
+    PKR_VAR_gallery_* vars. Mirrors generate_azure_template otherwise (same shell
+    provisioner + waagent generalize)."""
+    envb = _provisioner_env_block(provisioner_env, provisioner_secret_vars)
+    decls = _secret_var_decls(provisioner_secret_vars)
+    prov = (
+        '\n  provisioner "shell" {\n'
+        '    execute_command = "chmod +x {{ .Path }}; {{ .Vars }} sudo -E sh \'{{ .Path }}\'"\n'
+        '    script          = "provision.sh"\n'
+        + envb +
+        '  }\n'
+    ) if has_provisioner else ""
+    deprovision = (
+        '\n  provisioner "shell" {\n'
+        '    execute_command = "chmod +x {{ .Path }}; {{ .Vars }} sudo -E sh \'{{ .Path }}\'"\n'
+        '    inline          = ["/usr/sbin/waagent -force -deprovision+user && export HISTSIZE=0 && sync"]\n'
+        '  }\n'
+    )
+    return (
+        'packer {\n'
+        '  required_plugins {\n'
+        '    azure = {\n'
+        '      version = ">= 1.4.0"\n'
+        '      source  = "github.com/hashicorp/azure"\n'
+        '    }\n'
+        '  }\n'
+        '}\n\n'
+        '# Service-principal credentials are wired into the source block below via\n'
+        '# sensitive PKR_VAR_* vars — the azure-arm builder does NOT read ARM_* env vars.\n\n'
+        + _AZURE_SP_VAR_DECLS +
+        'variable "resource_group"         { default = "" }\n'
+        'variable "location"               { default = "centralus" }\n'
+        'variable "gallery_subscription"   { default = "" }\n'
+        'variable "gallery_resource_group" { default = "" }\n'
+        'variable "gallery_name"           { default = "" }\n'
+        'variable "gallery_image_name"     { default = "" }\n'
+        'variable "gallery_image_version"  { default = "" }\n\n'
+        + decls +
+        'source "azure-arm" "build" {\n'
+        + _AZURE_SP_SOURCE_FIELDS +
+        '  os_type         = "Linux"\n'
+        '  image_publisher = "' + image_publisher + '"\n'
+        '  image_offer     = "' + image_offer + '"\n'
+        '  image_sku       = "' + image_sku + '"\n\n'
+        '  shared_image_gallery_destination {\n'
+        '    subscription         = var.gallery_subscription\n'
+        '    resource_group       = var.gallery_resource_group\n'
+        '    gallery_name         = var.gallery_name\n'
+        '    image_name           = var.gallery_image_name\n'
+        '    image_version        = var.gallery_image_version\n'
+        '    storage_account_type = "Standard_LRS"\n'
+        '  }\n\n'
+        # Build in an existing RG the SP already controls — avoids needing
+        # subscription-level rights to create a temp pkr-Resource-Group-*.
+        '  build_resource_group_name = var.resource_group\n'
+        '  vm_size  = "' + vm_size + '"\n'
+        '}\n\n'
+        'build {\n'
+        '  name    = "vm-dashboard"\n'
+        '  sources = ["source.azure-arm.build"]\n'
+        + prov + deprovision +
+        '}\n'
+    )
+
+
 def generate_azure_windows_template(
     image_publisher: str,
     image_offer: str,

@@ -1113,6 +1113,41 @@ async def ensure_trusted_launch_image_definition(rg: str, gallery_name: str,
     )
 
 
+def _ensure_linux_image_def_sync(cred, sub_id: str, rg: str, gallery_name: str,
+                                 image_def_name: str, location: str,
+                                 hyper_v_generation: str = "V2"):
+    from azure.mgmt.compute.models import GalleryImage, GalleryImageIdentifier
+    compute = _get_compute(cred, sub_id)
+    img_def = GalleryImage(
+        location=location,
+        os_type="Linux",
+        os_state="Generalized",          # waagent -deprovision generalized the source
+        # Must match the generation of the built VM (which follows the source
+        # marketplace SKU). Mismatch makes Packer's gallery publish fail.
+        hyper_v_generation=hyper_v_generation,
+        identifier=GalleryImageIdentifier(
+            # Dashboard-owned label namespace — NOT the marketplace source.
+            publisher="vm-dashboard", offer="linux", sku=image_def_name,
+        ),
+    )
+    return compute.gallery_images.begin_create_or_update(
+        rg, gallery_name, image_def_name, img_def
+    ).result()
+
+
+async def ensure_linux_image_definition(rg: str, gallery_name: str,
+                                        image_def_name: str, location: str,
+                                        hyper_v_generation: str = "V2"):
+    """Create a Linux / Generalized image definition if missing (idempotent).
+    Packer publishes a version into it. ``hyper_v_generation`` (V1/V2) must match
+    the built VM's generation, which follows the source marketplace SKU."""
+    cred, sub_id = await _ensure_creds()
+    return await asyncio.to_thread(
+        _ensure_linux_image_def_sync, cred, sub_id, rg, gallery_name, image_def_name,
+        location, hyper_v_generation,
+    )
+
+
 def _set_workgroup_tag_sync(cred, sub_id: str, rg: str, vm_name: str, workgroup: str) -> None:
     """Merge a `workgroup` tag into the VM's existing tags (preserves others)."""
     compute = _get_compute(cred, sub_id)
@@ -2265,7 +2300,7 @@ def _export_managed_image_to_vhd_sync(
     Returns {blob_url, format, snapshot_name}.
     """
     import time
-    from azure.mgmt.compute.models import GrantAccessData
+    from azure.mgmt.compute.models import GrantAccessData, Snapshot, CreationData
     from azure.storage.blob import BlobServiceClient
 
     compute = _get_compute(cred, sub_id)
@@ -2295,11 +2330,15 @@ def _export_managed_image_to_vhd_sync(
     snapshot_name = f"export-{image_name}-{uuid.uuid4().hex[:8]}"
     if progress_cb:
         progress_cb(f"Creating snapshot {snapshot_name} from {source_disk_id}")
-    snap_params = {
-        "location": location,
-        "creation_data": {"create_option": "Copy", "source_resource_id": source_disk_id},
-        "incremental": False,
-    }
+    # Use the SDK model objects (not a raw dict) so the request serializes to the
+    # ARM REST shape — camelCase keys under `properties`. A raw snake_case dict is
+    # sent verbatim by the track2 SDK, which Azure rejects with
+    # "Could not find member 'creation_data' on object of type 'ResourceDefinition'".
+    snap_params = Snapshot(
+        location=location,
+        creation_data=CreationData(create_option="Copy", source_resource_id=source_disk_id),
+        incremental=False,
+    )
     compute.snapshots.begin_create_or_update(image_rg, snapshot_name, snap_params).result()
 
     sas_url = None

@@ -363,12 +363,19 @@ async def _run_azure_build(job_id: str, req: AzurePackerBuildRequest, created_by
 
         is_windows = req.os_type.lower() == "windows"
         is_win_client = is_windows and bool(getattr(req, "trusted_launch", False))
+        # Linux builds also publish to a Compute Gallery: a captured managed image
+        # references the Packer-deleted source disk (so it can't be exported to VHD,
+        # and Azure rejects a managed-image ID in a disk's creationData.imageReference),
+        # whereas a gallery version is self-contained and exportable. Windows Server
+        # still uses the managed-image path (gallery migration is a follow-up).
+        is_linux_gallery = not is_windows
+        use_gallery = is_win_client or is_linux_gallery
 
-        # Win 11 / Trusted Launch publishes to a Compute Gallery — Azure can't
-        # create a managed image from a Trusted Launch VM. Ensure the gallery + a
-        # Gen2/TrustedLaunch/Generalized image definition exist, then hand their
-        # coordinates to Packer via PKR_VAR_gallery_*.
-        if is_win_client:
+        # Ensure the gallery + a matching image definition, then hand their
+        # coordinates to Packer via PKR_VAR_gallery_*. Win 11 needs Trusted Launch
+        # (Azure can't create a managed image from a TL VM); Linux uses a plain
+        # Generalized definition.
+        if use_gallery:
             from datetime import datetime
             gallery_rg = req.gallery_resource_group or _cfg("azure_gallery_resource_group") or resource_group
             gallery_name = req.gallery_name or _cfg("azure_shared_image_gallery") or "vmDashboardGallery"
@@ -380,8 +387,15 @@ async def _run_azure_build(job_id: str, req: AzurePackerBuildRequest, created_by
                 db, job_id, 4,
                 f"Ensuring Compute Gallery '{gallery_name}' + image definition '{img_def_name}'…")
             await azure_service.ensure_gallery(gallery_rg, location, gallery_name)
-            await azure_service.ensure_trusted_launch_image_definition(
-                gallery_rg, gallery_name, img_def_name, location)
+            if is_win_client:
+                await azure_service.ensure_trusted_launch_image_definition(
+                    gallery_rg, gallery_name, img_def_name, location)
+            else:
+                # The image-definition generation must match the built VM's, which
+                # follows the source marketplace SKU (…-gen2 → Gen2, else Gen1).
+                hyper_v_gen = "V2" if "gen2" in f"{req.image_sku} {req.image_offer}".lower() else "V1"
+                await azure_service.ensure_linux_image_definition(
+                    gallery_rg, gallery_name, img_def_name, location, hyper_v_gen)
             env["PKR_VAR_gallery_subscription"] = subscription_id
             env["PKR_VAR_gallery_resource_group"] = gallery_rg
             env["PKR_VAR_gallery_name"] = gallery_name
@@ -394,7 +408,7 @@ async def _run_azure_build(job_id: str, req: AzurePackerBuildRequest, created_by
         elif is_windows:
             generate = packer_service.generate_azure_windows_template
         else:
-            generate = packer_service.generate_azure_template
+            generate = packer_service.generate_azure_linux_gallery_template
         gen_kwargs = dict(
             image_publisher=req.image_publisher,
             image_offer=req.image_offer,
@@ -453,9 +467,10 @@ async def _run_azure_build(job_id: str, req: AzurePackerBuildRequest, created_by
                 except Exception as e:
                     result["archive_error"] = str(e)
 
-        if is_win_client:
-            # Trusted Launch builds publish a gallery image VERSION — there's no
-            # managed image to export to VHD. Register the version directly.
+        if use_gallery:
+            # Gallery builds (Win-client TL + all Linux) publish a gallery image
+            # VERSION — there's no managed image to export to VHD. Register the
+            # version directly.
             gallery_version_id = (
                 f"/subscriptions/{subscription_id}/resourceGroups/{gallery_rg}"
                 f"/providers/Microsoft.Compute/galleries/{gallery_name}"
@@ -463,9 +478,10 @@ async def _run_azure_build(job_id: str, req: AzurePackerBuildRequest, created_by
             )
             result["gallery_image_version_id"] = gallery_version_id
             result.update(await _register_gallery_image(
-                db, job_id, req.image_name, gallery_version_id, location, created_by))
+                db, job_id, req.image_name, gallery_version_id, location, created_by,
+                os_type=req.os_type))
         else:
-            # Export to portable VHD + auto-register (Phase 2)
+            # Windows Server (managed image): export to portable VHD + auto-register.
             export_result = await export_and_register_azure(
                 db, job_id, req.image_name, result.get("artifact_id") or "", resource_group, created_by,
                 os_type=req.os_type,
@@ -825,13 +841,14 @@ async def export_and_register_aws(
 
 async def _register_gallery_image(
     db, job_id: str, registry_name: str, gallery_version_id: str,
-    location: str, created_by: str,
+    location: str, created_by: str, os_type: str = "Linux",
 ) -> dict:
     """Register a Compute Gallery image VERSION in the image registry.
 
-    Win-client / Trusted Launch builds publish a gallery version (not a managed
-    image), so there is no VHD to export — we record the version resource id
-    directly. No hub artefact_url (the gallery version *is* the artefact)."""
+    Gallery builds (Win-client Trusted Launch + all Linux) publish a gallery
+    version (not a managed image), so there is no VHD to export — we record the
+    version resource id directly. No hub artefact_url (the gallery version *is*
+    the artefact)."""
     try:
         registered = image_registry_service.register_image(
             db,
@@ -839,12 +856,12 @@ async def _register_gallery_image(
             version=gallery_version_id.rstrip("/").split("/")[-1],
             source_cloud="azure",
             created_by=created_by,
-            description=f"Trusted Launch gallery image (job {job_id})",
+            description=f"Compute Gallery image (job {job_id})",
             source_image_id=gallery_version_id,
             source_region=location,
             artefact_url=None,
             artefact_format=None,
-            os_type="Windows",
+            os_type=os_type,
         )
         job_service.update_progress(db, job_id, 99, f"Gallery image registered: {registered['id']}")
         return {"registered_image_id": registered["id"]}
