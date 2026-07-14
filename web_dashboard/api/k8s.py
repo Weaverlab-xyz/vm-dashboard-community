@@ -15,7 +15,7 @@ a registered cluster. See docs/saas-kubernetes-management-plan.md.
 """
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy.orm import Session
 
 from ..database import User, get_db
@@ -206,10 +206,11 @@ async def delete_cluster(
         result = k8s_service.start_decommission(db, cluster_id, created_by=current_user.username)
         return {"status": "decommissioning", **result}
 
-    try:
-        await k8s_service.deregister_pra_tunnel(db, cluster_id)
-    except Exception as e:
-        logger.warning("tunnel cleanup during delete of %s failed: %s", cluster_id, e)
+    for _dereg in (k8s_service.deregister_pra_tunnel, k8s_service.deregister_api_tunnel):
+        try:
+            await _dereg(db, cluster_id)
+        except Exception as e:
+            logger.warning("tunnel cleanup during delete of %s failed: %s", cluster_id, e)
     try:
         return k8s_service.delete_cluster(db, cluster_id)
     except K8sError as e:
@@ -305,6 +306,81 @@ async def remove_tunnel(
     )
     return {"ok": True, "status": "removing", "cluster_id": cluster_id,
             "action": "remove", "job_id": job.id}
+
+
+@router.post("/clusters/{cluster_id}/api-tunnel", status_code=202)
+async def register_api_tunnel(
+    cluster_id: str,
+    payload: BrokerAccessRequest = BrokerAccessRequest(),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Provision a generic ``tunnel_type=tcp`` PRA jump straight to the cluster's
+    API server (pinned local port) — enqueues a ``k8s_api_tunnel`` job. Unlike the
+    ``tunnel_type=k8s`` tunnel, this forwards raw TCP, so kubectl authenticates
+    end-to-end with the downloadable cloud-login kubeconfig and can ``--as``
+    impersonate Entitle grants. Optional jump-group / jumpoint / PRA-credential
+    overrides fall back to config (vault fields on the body are ignored — this
+    tunnel injects no credential). Open the returned job for status/logs."""
+    try:
+        k8s_service.get_cluster(db, cluster_id)   # 404 if unknown
+    except K8sError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    job = job_service.create_job(
+        db, job_type="k8s_api_tunnel", created_by=current_user.username,
+        metadata={
+            "cluster_id": cluster_id, "action": "register",
+            "jump_group": payload.jump_group, "jumpoint_name": payload.jumpoint_name,
+            "pra_credential_ref": payload.pra_credential_ref,
+        },
+    )
+    return {"ok": True, "status": "provisioning", "cluster_id": cluster_id,
+            "action": "register", "job_id": job.id}
+
+
+@router.delete("/clusters/{cluster_id}/api-tunnel", status_code=202)
+async def remove_api_tunnel(
+    cluster_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Destroy the cluster's API TCP tunnel jump + clear its state — enqueues a
+    ``k8s_api_tunnel`` (action=remove) job. Open the returned job for status/logs."""
+    try:
+        k8s_service.get_cluster(db, cluster_id)   # 404 if unknown
+    except K8sError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    job = job_service.create_job(
+        db, job_type="k8s_api_tunnel", created_by=current_user.username,
+        metadata={"cluster_id": cluster_id, "action": "remove"},
+    )
+    return {"ok": True, "status": "removing", "cluster_id": cluster_id,
+            "action": "remove", "job_id": job.id}
+
+
+@router.get("/clusters/{cluster_id}/api-tunnel-kubeconfig")
+async def api_tunnel_kubeconfig(
+    cluster_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Download a kubeconfig for the cluster's API TCP tunnel: the stored kubeconfig
+    repointed at ``https://127.0.0.1:<local_port>`` with ``tls-server-name`` set to
+    the real API host, keeping the CA and the cloud-native exec-plugin auth. Token-
+    free — carries no injected credential. Connect the tunnel on that local port,
+    point ``KUBECONFIG`` at this file, and kubectl authenticates as your own cloud
+    identity (and can ``--as`` impersonate Entitle grants)."""
+    try:
+        content = k8s_service.build_api_tunnel_kubeconfig(db, cluster_id)
+        info = k8s_service.get_cluster(db, cluster_id)
+    except K8sError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    filename = f"{info.get('name') or cluster_id}-api-tunnel.kubeconfig"
+    return Response(
+        content=content,
+        media_type="application/yaml",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.post("/clusters/{cluster_id}/management", status_code=202)

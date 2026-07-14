@@ -188,14 +188,18 @@ def _active_ec2_count(db) -> int:
 
 
 def _active_k8s_count(db, cloud: Optional[str] = None) -> int:
-    # A managed cluster needs the shared Jumpoint only while it has a live PRA
-    # k8s tunnel routing through it — i.e. pra_jump_id is set. (Registered local
+    # A managed cluster needs the shared Jumpoint while it has EITHER a live PRA
+    # k8s tunnel (pra_jump_id set) OR a live API TCP tunnel (config key
+    # k8s_api_tunnel_jump_{id} set — no DB column) routing through it, so neither
+    # tunnel's teardown yanks the jumpoint from under the other. (Registered local
     # clusters carry cloud='local' and never match a real-cloud filter.)
     from ..database import K8sCluster
-    q = db.query(K8sCluster).filter(K8sCluster.pra_jump_id.isnot(None))
+    from . import config_service
+    q = db.query(K8sCluster)
     if cloud:
         q = q.filter(K8sCluster.cloud == cloud)
-    return q.count()
+    return sum(1 for r in q.all()
+               if r.pra_jump_id or config_service.get(f"k8s_api_tunnel_jump_{r.id}"))
 
 
 def _active_vdesktop_count(db, cloud: Optional[str] = None) -> int:

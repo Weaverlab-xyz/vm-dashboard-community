@@ -113,5 +113,7 @@ class ClusterInfo(BaseModel):
     jumpoint_name: Optional[str] = None
     pra_credential_ref: Optional[str] = None
     secrets_delivery_kind: Optional[str] = None
+    entitle_agent_installed: bool = False
+    api_tunnel_jump: bool = False             # true when a direct API TCP tunnel jump exists (config-tracked)
     created_by: Optional[str] = None
     created_at: str
