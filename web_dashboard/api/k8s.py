@@ -25,6 +25,7 @@ from ..models.k8s import (
     ClusterRegisterRequest,
     EntitleAgentRequest,
     EntitleClusterRegisterRequest,
+    EntraGroupRequest,
     K8sProvisionOptions,
     ManagementRequest,
     SecretDeliveryRequest,
@@ -206,7 +207,8 @@ async def delete_cluster(
         result = k8s_service.start_decommission(db, cluster_id, created_by=current_user.username)
         return {"status": "decommissioning", **result}
 
-    for _dereg in (k8s_service.deregister_pra_tunnel, k8s_service.deregister_api_tunnel):
+    for _dereg in (k8s_service.deregister_pra_tunnel, k8s_service.deregister_api_tunnel,
+                   k8s_service.unbind_entra_group):
         try:
             await _dereg(db, cluster_id)
         except Exception as e:
@@ -381,6 +383,52 @@ async def api_tunnel_kubeconfig(
         media_type="application/yaml",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+@router.post("/clusters/{cluster_id}/entra-group", status_code=202)
+async def bind_entra_group(
+    cluster_id: str,
+    payload: EntraGroupRequest = EntraGroupRequest(),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Bind an Entra (AAD) group to a ClusterRole on the cluster — enqueues a
+    ``k8s_group_binding`` job. Members of the group get the role when they sign in as
+    themselves (their AAD token's group OID matches a `Group` RBAC subject), so
+    Entitle's Entra-ID integration can JIT-grant real-identity cluster access with no
+    impersonation. ``group_id``/``role`` fall back to config (entra_rbac_group_id /
+    entra_rbac_group_role, default cluster-admin). Open the returned job for status."""
+    try:
+        k8s_service.get_cluster(db, cluster_id)   # 404 if unknown
+    except K8sError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    job = job_service.create_job(
+        db, job_type="k8s_group_binding", created_by=current_user.username,
+        metadata={"cluster_id": cluster_id, "action": "bind",
+                  "group_id": payload.group_id, "role": payload.role},
+    )
+    return {"ok": True, "status": "binding", "cluster_id": cluster_id,
+            "action": "bind", "job_id": job.id}
+
+
+@router.delete("/clusters/{cluster_id}/entra-group", status_code=202)
+async def unbind_entra_group(
+    cluster_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Remove the cluster's Entra-group ClusterRoleBinding — enqueues a
+    ``k8s_group_binding`` (action=unbind) job. Open the returned job for status."""
+    try:
+        k8s_service.get_cluster(db, cluster_id)   # 404 if unknown
+    except K8sError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    job = job_service.create_job(
+        db, job_type="k8s_group_binding", created_by=current_user.username,
+        metadata={"cluster_id": cluster_id, "action": "unbind"},
+    )
+    return {"ok": True, "status": "unbinding", "cluster_id": cluster_id,
+            "action": "unbind", "job_id": job.id}
 
 
 @router.post("/clusters/{cluster_id}/management", status_code=202)
