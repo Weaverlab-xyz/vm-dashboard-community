@@ -97,6 +97,10 @@ def _serialize(r: K8sCluster) -> dict:
         "entitle_agent_installed": config_service.get("entitle_agent_cluster_id") == r.id,
         "api_tunnel_jump":       bool(config_service.get(f"k8s_api_tunnel_jump_{r.id}")),
         "entra_group_bound":     bool(config_service.get(f"k8s_entra_group_{r.id}")),
+        # AKS is natively Entra-integrated (always federated); EKS/GKE are federated
+        # once the "Entra federation" action runs (tracked in config).
+        "entra_federation_enabled": (r.cloud == "azure")
+                                    or bool(config_service.get(f"k8s_entra_fed_{r.id}")),
         "created_by":            r.created_by,
         "created_at":            r.created_at.isoformat() if r.created_at else "",
     }
@@ -2359,6 +2363,197 @@ async def run_group_binding(db: Session, *, cluster_id: str, job_id: str, action
     except Exception as exc:
         job_service.set_failed(db, job_id, str(exc))
         logger.exception("k8s Entra-group job failed cluster=%s action=%s", cluster_id, action)
+        return
+    job_service.set_completed(db, job_id)
+
+
+# ── Entra OIDC federation → cluster trust (real-identity JIT) ─────────────────
+#
+# Make a cluster TRUST Entra as the token issuer so a user's own Entra token (not
+# an impersonation subject, not the dashboard's cloud SP) authenticates and its
+# group OIDs match the RBAC `Group` binding done by bind_entra_group. Per-cluster
+# action, per cloud: EKS associates a shared Entra app as an OIDC identity provider
+# (bare group OID subject, matching AKS); AKS is native (no-op); GKE uses Workforce
+# Identity Federation + Connect Gateway (Phase 2). Enable state is tracked in
+# config_service (k8s_entra_fed_{cid}); the EKS name+region are cached alongside
+# (k8s_entra_fed_eks_{cid}) so disable works without re-reading the kubeconfig.
+
+def _entra_oidc_settings() -> dict:
+    """Resolve the shared Entra OIDC app settings for EKS federation. Issuer derives
+    from azure_tenant_id when entra_oidc_issuer_url is unset. Raises when the client
+    id (audience) or a resolvable issuer is missing."""
+    client_id = _cfg("entra_oidc_client_id")
+    if not client_id:
+        raise K8sError("no Entra OIDC app configured — set entra_oidc_client_id on "
+                       "Settings (k8s panel): the shared Entra app registration's "
+                       "Application (client) ID")
+    issuer = _cfg("entra_oidc_issuer_url")
+    if not issuer:
+        tenant = _cfg("azure_tenant_id")
+        if not tenant:
+            raise K8sError("no Entra issuer — set entra_oidc_issuer_url, or azure_tenant_id "
+                           "to derive https://login.microsoftonline.com/<tenant>/v2.0")
+        issuer = f"https://login.microsoftonline.com/{tenant}/v2.0"
+    return {
+        "client_id": client_id,
+        "issuer": issuer,
+        "username_claim": _cfg("entra_oidc_username_claim", "oid") or "oid",
+        "groups_claim": _cfg("entra_oidc_groups_claim", "groups") or "groups",
+    }
+
+
+def _eks_name_region(kubeconfig: str) -> tuple:
+    """Extract the EKS cluster name + region from a stored EKS kubeconfig's
+    ``aws eks get-token`` exec args (robust for both provisioned and registered
+    clusters). ("", "") when the kubeconfig isn't an EKS exec config."""
+    try:
+        cfg = yaml.safe_load(kubeconfig) or {}
+        for u in (cfg.get("users") or []):
+            exec_blk = (u.get("user") or {}).get("exec") or {}
+            args = exec_blk.get("args") or []
+            if exec_blk.get("command") == "aws" and "get-token" in args:
+                def _arg(flag: str) -> str:
+                    return args[args.index(flag) + 1] if (flag in args and args.index(flag) + 1 < len(args)) else ""
+                return _arg("--cluster-name"), _arg("--region")
+    except Exception:
+        pass
+    return "", ""
+
+
+async def enable_entra_federation(db: Session, cluster_id: str) -> dict:
+    """Make the cluster TRUST Entra so users authenticate as themselves. EKS: associate
+    a shared Entra app as the cluster's OIDC identity provider (async on AWS's side —
+    the worker polls to ACTIVE). AKS: native (no-op). GKE: Phase 2 (Workforce Identity
+    Federation). Records enable state in config_service."""
+    row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
+    if row is None:
+        raise K8sError(f"cluster {cluster_id} not found")
+    from . import config_service
+    if row.cloud == "azure":
+        config_service.set(f"k8s_entra_fed_{cluster_id}", "1")
+        return {"cloud": "azure", "native": True, "status": "ACTIVE"}
+    if row.cloud == "aws":
+        oidc = _entra_oidc_settings()
+        name, region = _eks_name_region(resolve_kubeconfig(db, cluster_id))
+        if not name:
+            raise K8sError("could not determine the EKS cluster name from its kubeconfig "
+                           "— is this an EKS cluster with an `aws eks get-token` kubeconfig?")
+        region = region or _cfg("aws_region")
+        from . import aws_service
+        res = await asyncio.to_thread(
+            aws_service.associate_eks_oidc, name, region,
+            issuer_url=oidc["issuer"], client_id=oidc["client_id"],
+            username_claim=oidc["username_claim"], groups_claim=oidc["groups_claim"])
+        config_service.set(f"k8s_entra_fed_{cluster_id}", "1")
+        config_service.set(f"k8s_entra_fed_eks_{cluster_id}", f"{name}|{region}")
+        logger.info("Enabled Entra OIDC federation on EKS cluster %s (region %s, already=%s)",
+                    name, region, res.get("already"))
+        return {"cloud": "aws", "eks_cluster": name, "region": region, **res}
+    raise K8sError(f"Entra federation for {row.cloud} clusters is not yet available "
+                   "(GKE Workforce Identity Federation lands in a follow-up)")
+
+
+async def disable_entra_federation(db: Session, cluster_id: str) -> dict:
+    """Remove the cluster's Entra trust (idempotent, best-effort). EKS: disassociate
+    the OIDC IdP. AKS: native (no-op). Clears the enable state."""
+    row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
+    from . import config_service
+    if row is None or not config_service.get(f"k8s_entra_fed_{cluster_id}"):
+        return {"ok": True, "removed": False}
+    if row.cloud == "aws":
+        try:
+            cached = config_service.get(f"k8s_entra_fed_eks_{cluster_id}") or ""
+            if "|" in cached:
+                name, region = cached.split("|", 1)
+            else:
+                name, region = _eks_name_region(resolve_kubeconfig(db, cluster_id))
+                region = region or _cfg("aws_region")
+            from . import aws_service
+            await asyncio.to_thread(aws_service.disassociate_eks_oidc, name, region)
+        except Exception as exc:
+            logger.warning("EKS OIDC disassociate for %s failed (non-fatal): %s", cluster_id, exc)
+    config_service.set(f"k8s_entra_fed_{cluster_id}", "")
+    config_service.set(f"k8s_entra_fed_eks_{cluster_id}", "")
+    return {"ok": True, "removed": True}
+
+
+def _entra_oidc_login_kubeconfig(kubeconfig: str, oidc: dict) -> str:
+    """Pure transform: replace every user's exec block with int128 ``kubectl
+    oidc-login`` against the shared Entra app (``oidc`` from _entra_oidc_settings).
+    Token-free — no static credential (token / client-key-data) is written; the CA
+    and cluster ``server`` are left untouched (repoint happens before this)."""
+    cfg = yaml.safe_load(kubeconfig) or {}
+    exec_args = [
+        "oidc-login", "get-token",
+        f"--oidc-issuer-url={oidc['issuer']}",
+        f"--oidc-client-id={oidc['client_id']}",
+        "--oidc-extra-scope=openid", "--oidc-extra-scope=email", "--oidc-extra-scope=profile",
+    ]
+    for u in (cfg.get("users") or []):
+        u["user"] = {"exec": {
+            "apiVersion": "client.authentication.k8s.io/v1beta1",
+            "command": "kubectl",
+            "args": exec_args,
+            "interactiveMode": "IfAvailable",
+        }}
+    return yaml.safe_dump(cfg, default_flow_style=False, sort_keys=False)
+
+
+def build_entra_oidc_kubeconfig(db: Session, cluster_id: str) -> str:
+    """Return a token-free kubeconfig for real-identity access over the API tunnel,
+    authenticating as the USER's own Entra identity (not the dashboard's). EKS: the
+    stored kubeconfig repointed at the local tunnel port with the exec block replaced
+    by ``kubectl oidc-login`` (int128 kubelogin) against the shared Entra app. AKS:
+    the existing kubelogin (Azure) kubeconfig repointed at the tunnel — already Entra."""
+    row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
+    if row is None:
+        raise K8sError(f"cluster {cluster_id} not found")
+    local_port = int(_cfg("k8s_api_tunnel_local_port", "6443"))
+    kubeconfig = _repoint_kubeconfig_to_tunnel(resolve_kubeconfig(db, cluster_id), local_port)
+    if row.cloud == "azure":
+        return kubeconfig  # AKS kubelogin exec is already the user's Entra identity
+    if row.cloud != "aws":
+        raise K8sError(f"an Entra kubeconfig for {row.cloud} is not available here "
+                       "(GKE uses Connect Gateway, not the tunnel — see the docs)")
+    return _entra_oidc_login_kubeconfig(kubeconfig, _entra_oidc_settings())
+
+
+async def run_entra_federation(db: Session, *, cluster_id: str, job_id: str,
+                               action: str = "enable") -> None:
+    """Worker entry for a ``k8s_entra_federation`` job: enable/disable the cluster's
+    Entra trust. The EKS associate is asynchronous on AWS's side (several minutes,
+    cluster UPDATING) — poll to ACTIVE with a heartbeat so it isn't mistaken for a
+    hang. Runs in the worker (no HTTP timeout)."""
+    from . import job_service, aws_service
+    from ..api.websocket import broadcast_progress
+    job_service.set_running(db, job_id)
+    try:
+        if action == "disable":
+            await broadcast_progress(job_id, 20, "Disabling Entra federation…")
+            await disable_entra_federation(db, cluster_id)
+            job_service.set_completed(db, job_id)
+            return
+        await broadcast_progress(job_id, 15, "Enabling Entra federation…")
+        res = await enable_entra_federation(db, cluster_id)
+        if res.get("cloud") == "aws" and res.get("status") != "ACTIVE":
+            name, region = res.get("eks_cluster"), res.get("region")
+            await broadcast_progress(
+                job_id, 40,
+                "Associating the Entra OIDC provider — EKS makes this ACTIVE in a few minutes…")
+            for i in range(60):  # ~10 min at 10s
+                status = await asyncio.to_thread(aws_service.describe_eks_oidc_status, name, region)
+                if status == "ACTIVE":
+                    break
+                await broadcast_progress(job_id, min(40 + i, 95),
+                                         f"Waiting for the OIDC provider to become ACTIVE… ({status or 'pending'})")
+                await asyncio.sleep(10)
+            else:
+                raise K8sError("EKS OIDC provider did not reach ACTIVE in time — check the "
+                               "cluster's identity-provider config on AWS and retry")
+        await broadcast_progress(job_id, 100, "Entra federation enabled.")
+    except Exception as exc:
+        job_service.set_failed(db, job_id, str(exc))
+        logger.exception("k8s Entra-federation job failed cluster=%s action=%s", cluster_id, action)
         return
     job_service.set_completed(db, job_id)
 

@@ -69,6 +69,82 @@ def eks_get_token(cluster_name: str, region: str) -> str:
     return "k8s-aws-v1." + base64.urlsafe_b64encode(url.encode("utf-8")).decode("utf-8").rstrip("=")
 
 
+def _get_eks(region: str):
+    _require_boto3()
+    return boto3.client("eks", **_aws_kwargs(region))
+
+
+# ── EKS OIDC identity-provider federation (Entra ID) ─────────────────────────────
+#
+# Associate a shared Entra app registration as an EKS cluster's OIDC identity
+# provider so a user's Entra token authenticates to the cluster and its `groups`
+# claim (Entra group Object IDs) matches the RBAC `Group` binding done by
+# k8s_service.bind_entra_group. Additive to IAM/aws-auth (node bootstrap + console
+# access stay IAM). EKS allows ONE OIDC provider per cluster. No `groupsPrefix`
+# (the bare group OID is the RBAC subject, matching AKS); `usernamePrefix` only
+# keeps federated user names from colliding with IAM (we bind groups, not users).
+
+def associate_eks_oidc(cluster_name: str, region: str, *, issuer_url: str, client_id: str,
+                       username_claim: str = "oid", groups_claim: str = "groups",
+                       config_name: str = "entra") -> dict:
+    """Associate the Entra OIDC IdP on ``cluster_name``. Idempotent: an existing
+    config of the same name (any status) is treated as success. Async on AWS's side
+    (cluster enters UPDATING) — poll :func:`describe_eks_oidc_status` to ACTIVE."""
+    _require_boto3()
+    existing = describe_eks_oidc_status(cluster_name, region, config_name)
+    if existing:
+        return {"update_id": None, "already": True, "status": existing}
+    eks = _get_eks(region)
+    try:
+        resp = eks.associate_identity_provider_config(
+            clusterName=cluster_name,
+            oidc={
+                "identityProviderConfigName": config_name,
+                "issuerUrl": issuer_url,
+                "clientId": client_id,
+                "usernameClaim": username_claim,
+                "usernamePrefix": "entra:",
+                "groupsClaim": groups_claim,
+            },
+        )
+    except (ClientError, BotoCoreError) as e:
+        raise AWSError(f"EKS associate OIDC identity provider failed: {e}")
+    return {"update_id": (resp.get("update") or {}).get("id"), "already": False}
+
+
+def describe_eks_oidc_status(cluster_name: str, region: str, config_name: str = "entra") -> str:
+    """Status of the cluster's ``config_name`` OIDC identity-provider config:
+    ``CREATING`` | ``ACTIVE`` | ``DELETING``, or "" when none exists."""
+    _require_boto3()
+    eks = _get_eks(region)
+    try:
+        resp = eks.describe_identity_provider_config(
+            clusterName=cluster_name,
+            identityProviderConfig={"type": "oidc", "name": config_name})
+    except (ClientError, BotoCoreError) as e:
+        code = getattr(e, "response", {}).get("Error", {}).get("Code", "") if hasattr(e, "response") else ""
+        if code in ("ResourceNotFoundException", "NotFoundException"):
+            return ""
+        raise AWSError(f"EKS describe OIDC identity provider failed: {e}")
+    return ((resp.get("identityProviderConfig") or {}).get("oidc") or {}).get("status", "") or ""
+
+
+def disassociate_eks_oidc(cluster_name: str, region: str, config_name: str = "entra") -> dict:
+    """Remove the cluster's ``config_name`` OIDC identity-provider config (idempotent —
+    no-op when absent). Async on AWS's side (cluster UPDATING)."""
+    _require_boto3()
+    if not describe_eks_oidc_status(cluster_name, region, config_name):
+        return {"removed": False}
+    eks = _get_eks(region)
+    try:
+        eks.disassociate_identity_provider_config(
+            clusterName=cluster_name,
+            identityProviderConfig={"type": "oidc", "name": config_name})
+    except (ClientError, BotoCoreError) as e:
+        raise AWSError(f"EKS disassociate OIDC identity provider failed: {e}")
+    return {"removed": True}
+
+
 def _get_ec2(region: str):
     _require_boto3()
     return boto3.client("ec2", **_aws_kwargs(region))

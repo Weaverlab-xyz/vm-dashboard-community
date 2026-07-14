@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 HANDLED_TYPES = (
     "k8s_provision", "k8s_decommission",
     "k8s_management", "k8s_secret_delivery", "k8s_entitle_agent", "k8s_entitle_register",
-    "k8s_tunnel", "k8s_api_tunnel", "k8s_group_binding",
+    "k8s_tunnel", "k8s_api_tunnel", "k8s_group_binding", "k8s_entra_federation",
     "clouddb_provision", "clouddb_decommission", "clouddb_entitle_register",
     "vdesktop_pool_provision", "vdesktop_pool_teardown",
     "packer_aws_build", "packer_azure_build", "packer_gcp_build",
@@ -138,6 +138,10 @@ async def _dispatch(job_id: str, job_type: str, meta: dict) -> None:
                 db, cluster_id=meta["cluster_id"], job_id=job_id,
                 action=meta.get("action", "bind"),
                 group_id=meta.get("group_id"), role=meta.get("role"))
+        elif job_type == "k8s_entra_federation":
+            await k8s_service.run_entra_federation(
+                db, cluster_id=meta["cluster_id"], job_id=job_id,
+                action=meta.get("action", "enable"))
         elif job_type == "clouddb_provision":
             await cloud_database_service.run_provision_apply(
                 db, db_id=meta["db_id"], job_id=job_id,

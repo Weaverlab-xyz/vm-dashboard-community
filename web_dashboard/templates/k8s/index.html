@@ -102,6 +102,10 @@
                       title="Bind an Entra (AAD) group to a ClusterRole — members get real-identity JIT access when Entitle's Entra-ID integration grants them membership (no impersonation)"
                       class="text-xs px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded font-medium"
                       x-text="c.entra_group_bound ? 'Entra group ✓' : 'Entra group'"></button>
+              <button x-show="c.status === 'registered' || c.status === 'managed'" @click="openEntraFed(c)"
+                      title="Make the cluster TRUST Entra as an OIDC identity provider so users authenticate as themselves (EKS via associate-identity-provider-config; AKS is native). Pairs with the Entra group binding + the API tunnel."
+                      class="text-xs px-2 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded font-medium"
+                      x-text="c.entra_federation_enabled ? 'Federated ✓' : 'Entra federation'"></button>
               <button @click="openSecrets(c)"
                       title="In-cluster Password Safe secret delivery (External Secrets Operator, Phase 4)"
                       class="text-xs px-2 py-1 bg-violet-600 hover:bg-violet-700 text-white rounded font-medium">
@@ -533,6 +537,70 @@
     </div>
   </div>
 
+  <!-- Entra federation modal (make the cluster TRUST Entra as an OIDC IdP) -->
+  <div x-show="showEntraFed" x-cloak class="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
+       @click.self="showEntraFed = false">
+    <div class="bg-white rounded-xl shadow-xl w-full max-w-lg">
+      <div class="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+        <h3 class="font-semibold text-gray-800">Entra federation<span x-show="fedTarget" class="text-gray-400 font-normal"> — <span x-text="fedTarget && fedTarget.name"></span></span></h3>
+        <button @click="showEntraFed = false" class="text-gray-400 hover:text-gray-600 text-xl">&times;</button>
+      </div>
+      <div class="px-6 py-4 space-y-4">
+        <!-- AKS: native -->
+        <template x-if="fedTarget && fedTarget.cloud === 'azure'">
+          <p class="text-xs text-gray-500">
+            <strong>AKS is natively Entra-integrated</strong> — the control plane already trusts Entra tokens,
+            so no federation step is needed. Bind an <strong>Entra group</strong>, connect the <strong>API tunnel</strong>,
+            and download the Entra kubeconfig to sign in as yourself with <code>kubelogin</code>.
+          </p>
+        </template>
+        <!-- EKS: associate an OIDC IdP -->
+        <template x-if="fedTarget && fedTarget.cloud === 'aws'">
+          <div class="space-y-3">
+            <p class="text-xs text-gray-500">
+              Associates the shared Entra app (Settings → Kubernetes → <code>entra_oidc_client_id</code>) as this
+              EKS cluster's <strong>OIDC identity provider</strong>, so a user's Entra token authenticates and its
+              group Object IDs match the <strong>Entra group</strong> RBAC binding — real-identity JIT, no
+              impersonation. EKS makes the association <strong>ACTIVE</strong> over a few minutes (the job polls).
+              Additive to IAM — node bootstrap and console access are unchanged.
+            </p>
+            <p class="text-[11px] text-amber-600">
+              End users need <code>kubectl oidc-login</code> (int128 kubelogin) installed. Connect the API tunnel,
+              then use the downloaded Entra kubeconfig. EKS allows one OIDC provider per cluster.
+            </p>
+          </div>
+        </template>
+        <!-- GKE: not in this phase -->
+        <template x-if="fedTarget && fedTarget.cloud === 'gcp'">
+          <p class="text-xs text-amber-600">
+            GKE federation uses <strong>Workforce Identity Federation + Connect Gateway</strong> (not this tunnel) and
+            lands in a follow-up. Use AKS or EKS for the Entra-federated demo today.
+          </p>
+        </template>
+        <!-- Download Entra kubeconfig (federated or AKS-native) -->
+        <div x-show="fedTarget && (fedTarget.entra_federation_enabled) && fedTarget.cloud !== 'gcp'" x-cloak
+             class="border-t border-gray-100 pt-3">
+          <p class="text-xs text-gray-500 mb-2">Real-identity kubeconfig (token-free; authenticates as <em>your</em> Entra identity over the API tunnel):</p>
+          <button @click="downloadEntraKubeconfig()"
+                  class="px-3 py-1.5 text-sm bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-medium">Download Entra kubeconfig</button>
+        </div>
+      </div>
+      <div class="px-6 py-4 border-t border-gray-100 flex items-center gap-3">
+        <button x-show="fedTarget && fedTarget.cloud === 'aws' && fedTarget.entra_federation_enabled" x-cloak
+                @click="disableEntraFed()" :disabled="fedBusy"
+                class="px-4 py-2 text-sm border border-red-300 text-red-600 hover:bg-red-50 disabled:opacity-50 rounded-lg">Disable</button>
+        <div class="flex justify-end gap-3 ml-auto">
+          <button @click="showEntraFed = false" class="px-4 py-2 text-sm border border-gray-300 rounded-lg">Close</button>
+          <button x-show="fedTarget && fedTarget.cloud === 'aws'" @click="enableEntraFed()" :disabled="fedBusy"
+                  class="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-sm font-medium rounded-lg">
+            <span x-show="!fedBusy" x-text="fedTarget && fedTarget.entra_federation_enabled ? 'Re-apply' : 'Enable federation'"></span>
+            <span x-show="fedBusy" x-cloak>Working…</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Secret delivery modal (Phase 4 — Feature D) -->
   <div x-show="showSecrets" x-cloak class="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
        @click.self="showSecrets = false">
@@ -594,6 +662,7 @@ function k8sPage() {
     apiTunnelForm: { jump_group: '', jumpoint_name: '', apiTunnelCredBackend: '', pra_credential_ref: '' },
     showEntraGroup: false, entraBusy: false, entraTarget: null,
     entraForm: { group_id: '', role: '' },
+    showEntraFed: false, fedBusy: false, fedTarget: null,
 
     async init() { requireAuth(); this.loadSecretBackends(); await this.refresh(); },
 
@@ -978,6 +1047,63 @@ function k8sPage() {
         this.flash(e.message || 'Entra-group unbind failed.', 'error');
       } finally {
         this.entraBusy = false;
+      }
+    },
+
+    openEntraFed(c) {
+      this.fedTarget = c;
+      this.showEntraFed = true;
+    },
+
+    async enableEntraFed() {
+      this.fedBusy = true;
+      try {
+        const r = await API.post(`/api/k8s/clusters/${this.fedTarget.id}/entra-federation`, {});
+        this.showEntraFed = false;
+        this.flash('Entra federation job started — opening the job…');
+        if (r && r.job_id) { window.location.href = '/jobs/' + r.job_id; return; }
+        await this.refresh();
+      } catch (e) {
+        this.flash(e.message || 'Enabling Entra federation failed.', 'error');
+      } finally {
+        this.fedBusy = false;
+      }
+    },
+
+    async disableEntraFed() {
+      if (!confirm(`Disable Entra federation on "${this.fedTarget.name}"? This disassociates the OIDC identity provider.`)) return;
+      this.fedBusy = true;
+      try {
+        const r = await API.del(`/api/k8s/clusters/${this.fedTarget.id}/entra-federation`);
+        this.showEntraFed = false;
+        this.flash('Entra federation removal job started — opening the job…');
+        if (r && r.job_id) { window.location.href = '/jobs/' + r.job_id; return; }
+        await this.refresh();
+      } catch (e) {
+        this.flash(e.message || 'Disabling Entra federation failed.', 'error');
+      } finally {
+        this.fedBusy = false;
+      }
+    },
+
+    async downloadEntraKubeconfig() {
+      const c = this.fedTarget;
+      try {
+        const token = Alpine.store('auth').token;
+        const resp = await fetch(`/api/k8s/clusters/${c.id}/entra-kubeconfig`, {
+          headers: { ...(token ? { 'Authorization': `Bearer ${token}` } : {}) },
+        });
+        if (!resp.ok) { this.flash(`kubeconfig download failed (HTTP ${resp.status}).`, 'error'); return; }
+        const text = await resp.text();
+        const url = URL.createObjectURL(new Blob([text], { type: 'application/yaml' }));
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${c.name || c.id}-entra.kubeconfig`;
+        document.body.appendChild(a); a.click(); a.remove();
+        URL.revokeObjectURL(url);
+        this.flash('Entra kubeconfig downloaded — connect the API tunnel, then point KUBECONFIG at it.');
+      } catch (e) {
+        this.flash(e.message || 'kubeconfig download failed.', 'error');
       }
     },
 

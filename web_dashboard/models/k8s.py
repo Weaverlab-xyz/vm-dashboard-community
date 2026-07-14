@@ -123,5 +123,6 @@ class ClusterInfo(BaseModel):
     entitle_agent_installed: bool = False
     api_tunnel_jump: bool = False             # true when a direct API TCP tunnel jump exists (config-tracked)
     entra_group_bound: bool = False           # true when an Entra group is bound to a ClusterRole (config-tracked)
+    entra_federation_enabled: bool = False    # true when the cluster trusts Entra as an OIDC IdP (AKS native; EKS via action)
     created_by: Optional[str] = None
     created_at: str

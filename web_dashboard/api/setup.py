@@ -704,6 +704,13 @@ class K8sManagementFeatureConfig(BaseModel):
     entra_rbac_group_id: str = ""             # Entra group Object ID (GUID)
     entra_rbac_group_name: str = ""           # OPTIONAL friendly name (display only)
     entra_rbac_group_role: str = "cluster-admin"  # ClusterRole the group binds to
+    # Entra OIDC federation for EKS (the "Entra federation" action's AWS leg): a
+    # shared Entra app registration associated as the cluster's OIDC IdP so a user's
+    # Entra token authenticates and its group OIDs match the binding above.
+    entra_oidc_client_id: str = ""            # shared Entra app client id (OIDC audience); required to federate EKS
+    entra_oidc_issuer_url: str = ""           # blank → https://login.microsoftonline.com/<azure_tenant_id>/v2.0
+    entra_oidc_username_claim: str = "oid"    # OIDC username claim (portable Entra user Object ID)
+    entra_oidc_groups_claim: str = "groups"   # OIDC groups claim (Entra emits group Object IDs)
 
 
 class VirtualDesktopsFeatureConfig(BaseModel):

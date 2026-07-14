@@ -805,6 +805,15 @@ class Settings(BaseSettings):
     entra_rbac_group_id: str = ""
     entra_rbac_group_name: str = ""                  # OPTIONAL friendly name (display only)
     entra_rbac_group_role: str = "cluster-admin"     # ClusterRole the group binds to
+    # Entra OIDC federation for EKS (the "Entra federation" action's AWS leg): a
+    # shared Entra app registration is associated as the cluster's OIDC IdP so a
+    # user's Entra token authenticates and its group OIDs match the RBAC binding
+    # above. client_id = the app's Application (client) ID (= token audience);
+    # issuer blank → derived from azure_tenant_id (login.microsoftonline.com/<t>/v2.0).
+    entra_oidc_client_id: str = ""                   # shared Entra app client id (OIDC audience); required to federate EKS
+    entra_oidc_issuer_url: str = ""                  # blank → https://login.microsoftonline.com/<azure_tenant_id>/v2.0
+    entra_oidc_username_claim: str = "oid"           # OIDC username claim (portable Entra user Object ID)
+    entra_oidc_groups_claim: str = "groups"          # OIDC groups claim (Entra emits group Object IDs)
     bt_vault_account_group_id: str = ""              # OPTIONAL — PRA Vault account group id for injected k8s/DB credentials
     entitle_allowed_durations: str = "3600,43200,86400"  # JIT durations (seconds) offered on created integrations
     entitle_ssh_sudo_user: str = ""                 # OPTIONAL override — each VM deploy passes its image's cloud-default login user (ubuntu/ec2-user/azureuser/gcp-user) automatically; set this only to force a different sudo user for ALL registrations
