@@ -98,6 +98,13 @@ class EntitleClusterRegisterRequest(BaseModel):
     action: str = "register"                  # register | deregister
 
 
+class EntraGroupRequest(BaseModel):
+    """Bind an Entra (AAD) group to a ClusterRole on a cluster for real-identity JIT.
+    Both optional — fall back to config (entra_rbac_group_id / entra_rbac_group_role)."""
+    group_id: Optional[str] = None            # Entra group Object ID (else entra_rbac_group_id)
+    role: Optional[str] = None                # ClusterRole to bind (else entra_rbac_group_role, default cluster-admin)
+
+
 class ClusterInfo(BaseModel):
     id: str
     cloud: str
@@ -115,5 +122,6 @@ class ClusterInfo(BaseModel):
     secrets_delivery_kind: Optional[str] = None
     entitle_agent_installed: bool = False
     api_tunnel_jump: bool = False             # true when a direct API TCP tunnel jump exists (config-tracked)
+    entra_group_bound: bool = False           # true when an Entra group is bound to a ClusterRole (config-tracked)
     created_by: Optional[str] = None
     created_at: str

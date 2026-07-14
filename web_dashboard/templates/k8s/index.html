@@ -93,6 +93,10 @@
                       title="Direct kubectl-to-API TCP tunnel + downloadable cloud-login (token-free) kubeconfig; supports kubectl --as impersonation for Entitle grants"
                       class="text-xs px-2 py-1 bg-cyan-600 hover:bg-cyan-700 text-white rounded font-medium"
                       x-text="c.api_tunnel_jump ? 'API tunnel ✓' : 'API tunnel'"></button>
+              <button x-show="c.status === 'registered' || c.status === 'managed'" @click="openEntraGroup(c)"
+                      title="Bind an Entra (AAD) group to a ClusterRole — members get real-identity JIT access when Entitle's Entra-ID integration grants them membership (no impersonation)"
+                      class="text-xs px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded font-medium"
+                      x-text="c.entra_group_bound ? 'Entra group ✓' : 'Entra group'"></button>
               <button @click="openSecrets(c)"
                       title="In-cluster Password Safe secret delivery (External Secrets Operator, Phase 4)"
                       class="text-xs px-2 py-1 bg-violet-600 hover:bg-violet-700 text-white rounded font-medium">
@@ -477,6 +481,53 @@
     </div>
   </div>
 
+  <!-- Entra group → cluster RBAC modal (real-identity JIT) -->
+  <div x-show="showEntraGroup" x-cloak class="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
+       @click.self="showEntraGroup = false">
+    <div class="bg-white rounded-xl shadow-xl w-full max-w-lg">
+      <div class="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+        <h3 class="font-semibold text-gray-800">Entra group → cluster RBAC<span x-show="entraTarget" class="text-gray-400 font-normal"> — <span x-text="entraTarget && entraTarget.name"></span></span></h3>
+        <button @click="showEntraGroup = false" class="text-gray-400 hover:text-gray-600 text-xl">&times;</button>
+      </div>
+      <div class="px-6 py-4 space-y-4">
+        <p class="text-xs text-gray-500">
+          Binds an Entra (AAD) group to a ClusterRole on this cluster. Any member gets that role when they sign in
+          as <strong>themselves</strong> (their AAD token's group id matches the RBAC subject) — so Entitle's
+          <strong>Entra-ID</strong> integration JIT-grants real-identity access, no impersonation and no synthetic
+          subject. Leave a field blank to use the default configured on Settings → Kubernetes.
+        </p>
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Entra group Object ID <span class="text-gray-400">(blank = Settings default)</span></label>
+          <input type="text" x-model="entraForm.group_id"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm font-mono"
+                 placeholder="(configured default)">
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">ClusterRole</label>
+          <select x-model="entraForm.role" class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
+            <option value="">(configured default)</option>
+            <option value="cluster-admin">cluster-admin</option>
+            <option value="admin">admin</option>
+            <option value="edit">edit</option>
+            <option value="view">view</option>
+          </select>
+        </div>
+      </div>
+      <div class="px-6 py-4 border-t border-gray-100 flex items-center gap-3">
+        <button x-show="entraTarget && entraTarget.entra_group_bound" x-cloak @click="removeEntraGroup()" :disabled="entraBusy"
+                class="px-4 py-2 text-sm border border-red-300 text-red-600 hover:bg-red-50 disabled:opacity-50 rounded-lg">Unbind</button>
+        <div class="flex justify-end gap-3 ml-auto">
+          <button @click="showEntraGroup = false" class="px-4 py-2 text-sm border border-gray-300 rounded-lg">Cancel</button>
+          <button @click="submitEntraGroup()" :disabled="entraBusy"
+                  class="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-medium rounded-lg">
+            <span x-show="!entraBusy" x-text="entraTarget && entraTarget.entra_group_bound ? 'Re-bind' : 'Bind group'"></span>
+            <span x-show="entraBusy" x-cloak>Working…</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Secret delivery modal (Phase 4 — Feature D) -->
   <div x-show="showSecrets" x-cloak class="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
        @click.self="showSecrets = false">
@@ -536,6 +587,8 @@ function k8sPage() {
     tunnelOpts: { configured: true, jump_groups: [], jumpoints: [], vault_account_groups: [] },
     showApiTunnel: false, apiTunneling: false, apiTunnelTarget: null,
     apiTunnelForm: { jump_group: '', jumpoint_name: '', apiTunnelCredBackend: '', pra_credential_ref: '' },
+    showEntraGroup: false, entraBusy: false, entraTarget: null,
+    entraForm: { group_id: '', role: '' },
 
     async init() { requireAuth(); this.loadSecretBackends(); await this.refresh(); },
 
@@ -882,6 +935,44 @@ function k8sPage() {
         this.flash(e.message || 'API tunnel removal failed.', 'error');
       } finally {
         this.apiTunneling = false;
+      }
+    },
+
+    openEntraGroup(c) {
+      this.entraTarget = c;
+      this.entraForm = { group_id: '', role: '' };
+      this.showEntraGroup = true;
+    },
+
+    async submitEntraGroup() {
+      this.entraBusy = true;
+      try {
+        const body = { group_id: this.entraForm.group_id || null, role: this.entraForm.role || null };
+        const r = await API.post(`/api/k8s/clusters/${this.entraTarget.id}/entra-group`, body);
+        this.showEntraGroup = false;
+        this.flash('Entra-group bind job started — opening the job…');
+        if (r && r.job_id) { window.location.href = '/jobs/' + r.job_id; return; }
+        await this.refresh();
+      } catch (e) {
+        this.flash(e.message || 'Entra-group bind failed.', 'error');
+      } finally {
+        this.entraBusy = false;
+      }
+    },
+
+    async removeEntraGroup() {
+      if (!confirm(`Unbind the Entra group from "${this.entraTarget.name}"? This deletes the ClusterRoleBinding.`)) return;
+      this.entraBusy = true;
+      try {
+        const r = await API.del(`/api/k8s/clusters/${this.entraTarget.id}/entra-group`);
+        this.showEntraGroup = false;
+        this.flash('Entra-group unbind job started — opening the job…');
+        if (r && r.job_id) { window.location.href = '/jobs/' + r.job_id; return; }
+        await this.refresh();
+      } catch (e) {
+        this.flash(e.message || 'Entra-group unbind failed.', 'error');
+      } finally {
+        this.entraBusy = false;
       }
     },
 

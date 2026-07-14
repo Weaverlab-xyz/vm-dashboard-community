@@ -799,6 +799,12 @@ class Settings(BaseSettings):
     pra_k8s_namespace: str = "pra-access"            # dedicated ns for the PRA ServiceAccount (deleted on revoke)
     pra_k8s_sa_name: str = "pra-access"              # ServiceAccount minted in-cluster for PRA Vault token injection
     k8s_api_tunnel_local_port: int = 6443            # local listen port for the direct API TCP tunnel (kubeconfig points at 127.0.0.1:<this>)
+    # Entra/IdP group → cluster RBAC (real-identity JIT): default group the k8s "Entra
+    # group" action binds (per-cluster override in the action). Members get <role>;
+    # Entitle's Entra-ID integration JIT-grants membership. group_id = Entra Object ID.
+    entra_rbac_group_id: str = ""
+    entra_rbac_group_name: str = ""                  # OPTIONAL friendly name (display only)
+    entra_rbac_group_role: str = "cluster-admin"     # ClusterRole the group binds to
     bt_vault_account_group_id: str = ""              # OPTIONAL — PRA Vault account group id for injected k8s/DB credentials
     entitle_allowed_durations: str = "3600,43200,86400"  # JIT durations (seconds) offered on created integrations
     entitle_ssh_sudo_user: str = ""                 # OPTIONAL override — each VM deploy passes its image's cloud-default login user (ubuntu/ec2-user/azureuser/gcp-user) automatically; set this only to force a different sudo user for ALL registrations

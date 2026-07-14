@@ -96,6 +96,7 @@ def _serialize(r: K8sCluster) -> dict:
         "secrets_delivery_kind": r.secrets_delivery_kind,
         "entitle_agent_installed": config_service.get("entitle_agent_cluster_id") == r.id,
         "api_tunnel_jump":       bool(config_service.get(f"k8s_api_tunnel_jump_{r.id}")),
+        "entra_group_bound":     bool(config_service.get(f"k8s_entra_group_{r.id}")),
         "created_by":            r.created_by,
         "created_at":            r.created_at.isoformat() if r.created_at else "",
     }
@@ -728,7 +729,7 @@ async def run_decommission(db: Session, *, cluster_id: str, job_id: str) -> None
     # 1. PRA tunnels (best-effort; clears the k8s tunnel's pra_jump_id / state on
     #    the row and the API tunnel's config_service keys).
     job_service.update_progress(db, job_id, 15, "Removing PRA tunnels…")
-    for _dereg in (deregister_pra_tunnel, deregister_api_tunnel):
+    for _dereg in (deregister_pra_tunnel, deregister_api_tunnel, unbind_entra_group):
         try:
             await _dereg(db, cluster_id)
         except Exception as exc:
@@ -2257,6 +2258,107 @@ async def run_api_tunnel(db: Session, *, cluster_id: str, job_id: str, action: s
     except Exception as exc:
         job_service.set_failed(db, job_id, str(exc))
         logger.exception("k8s API tunnel job failed cluster=%s action=%s", cluster_id, action)
+        return
+    job_service.set_completed(db, job_id)
+
+
+# ── Entra/IdP group → cluster RBAC (real-identity JIT) ────────────────────────
+#
+# Bind an Entra (AAD) group to a ClusterRole on a managed cluster: any member of
+# the group gets that role when they authenticate as themselves (their AAD token
+# carries the group OID → matches a `Group` RBAC subject). Entitle's Entra-ID
+# integration JIT-grants group membership, so this is real-identity JIT without
+# the synthetic `entitle:` impersonation subject the k8s (agent) connector uses.
+# The group id + role default from config (entra_rbac_group_id / _role) and are
+# overridable per call; tracked in config_service (k8s_entra_group_{cid}). The
+# ClusterRoleBinding is a fixed name per cluster; rebind delete-then-creates so a
+# role change works (roleRef is immutable under `apply`).
+
+_ENTRA_GROUP_BINDING_NAME = "entra-group-binding"
+
+
+def _entra_group_bind_command(role: str, group_id: str) -> str:
+    """Shell command that (re)binds the Entra group to ``role`` on the cluster:
+    delete-then-create the fixed-name ClusterRoleBinding (so a role change applies —
+    roleRef is immutable under apply) with a ``Group`` subject = the Entra Object ID.
+    Prints ``ENTRA_BOUND_OK`` only when create succeeds."""
+    q_name = shlex.quote(_ENTRA_GROUP_BINDING_NAME)
+    q_role, q_gid = shlex.quote(role), shlex.quote(group_id)
+    return (
+        f"kubectl delete clusterrolebinding {q_name} --ignore-not-found 1>&2 || true; "
+        f"kubectl create clusterrolebinding {q_name} --clusterrole={q_role} --group={q_gid} 1>&2 "
+        "&& echo ENTRA_BOUND_OK"
+    )
+
+
+def _entra_group_unbind_command() -> str:
+    """Shell command that removes the Entra-group ClusterRoleBinding (idempotent)."""
+    q_name = shlex.quote(_ENTRA_GROUP_BINDING_NAME)
+    return f"kubectl delete clusterrolebinding {q_name} --ignore-not-found 1>&2; echo ENTRA_UNBOUND_OK"
+
+
+async def bind_entra_group(db: Session, cluster_id: str, *, group_id: str = None,
+                           role: str = None) -> dict:
+    """Bind an Entra group (Object ID) to a ClusterRole on the cluster. group_id/role
+    fall back to config (entra_rbac_group_id / entra_rbac_group_role, default
+    cluster-admin). Idempotent — delete-then-create so a role change applies."""
+    row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
+    if row is None:
+        raise K8sError(f"cluster {cluster_id} not found")
+    gid = (group_id or "").strip() or _cfg("entra_rbac_group_id")
+    if not gid:
+        raise K8sError("no Entra group configured — set entra_rbac_group_id on Settings "
+                       "(k8s panel) or pass a group Object ID")
+    role = (role or "").strip() or _cfg("entra_rbac_group_role", "cluster-admin")
+    kubeconfig = resolve_kubeconfig(db, cluster_id)
+    out = await _run_cluster_command(
+        kubeconfig, _entra_group_bind_command(role, gid), target_cloud=row.cloud)
+    if "ENTRA_BOUND_OK" not in (out or ""):
+        logger.error("Entra group bind: no success sentinel (len=%d): %r",
+                     len(out or ""), (out or "")[-800:])
+        raise K8sError("failed to bind the Entra group to the cluster — see the job logs")
+    from . import config_service
+    config_service.set(f"k8s_entra_group_{cluster_id}", gid)
+    config_service.set(f"k8s_entra_group_role_{cluster_id}", role)
+    logger.info("Bound Entra group %s → %s on cluster %s", gid, role, row.name)
+    return {"group_id": gid, "role": role}
+
+
+async def unbind_entra_group(db: Session, cluster_id: str) -> dict:
+    """Remove the cluster's Entra-group ClusterRoleBinding + clear its config keys
+    (best-effort, idempotent)."""
+    row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
+    from . import config_service
+    if row is None or not config_service.get(f"k8s_entra_group_{cluster_id}"):
+        return {"ok": True, "removed": False}
+    try:
+        await _run_cluster_command(
+            resolve_kubeconfig(db, cluster_id), _entra_group_unbind_command(),
+            target_cloud=row.cloud)
+    except Exception as exc:
+        logger.warning("Entra group unbind for %s failed (non-fatal): %s", cluster_id, exc)
+    config_service.set(f"k8s_entra_group_{cluster_id}", "")
+    config_service.set(f"k8s_entra_group_role_{cluster_id}", "")
+    return {"ok": True, "removed": True}
+
+
+async def run_group_binding(db: Session, *, cluster_id: str, job_id: str, action: str = "bind",
+                            group_id: str = None, role: str = None) -> None:
+    """Worker entry for a ``k8s_group_binding`` job: bind/unbind an Entra group to a
+    ClusterRole on the cluster (runs as a job — the bind drives the cloud runner)."""
+    from . import job_service
+    from ..api.websocket import broadcast_progress
+    job_service.set_running(db, job_id)
+    try:
+        if action == "unbind":
+            await broadcast_progress(job_id, 20, "Removing the Entra-group binding…")
+            await unbind_entra_group(db, cluster_id)
+        else:
+            await broadcast_progress(job_id, 20, "Binding the Entra group to the cluster…")
+            await bind_entra_group(db, cluster_id, group_id=group_id, role=role)
+    except Exception as exc:
+        job_service.set_failed(db, job_id, str(exc))
+        logger.exception("k8s Entra-group job failed cluster=%s action=%s", cluster_id, action)
         return
     job_service.set_completed(db, job_id)
 
