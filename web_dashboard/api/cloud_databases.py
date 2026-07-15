@@ -153,12 +153,11 @@ async def provision_database(
     except NotImplementedError as exc:
         raise HTTPException(status_code=501, detail=str(exc)) from exc
 
-    # Persist the Terraform vars on the job — MINUS the master password (never store
-    # a secret in jobs.extra_data; run_provision_apply re-injects it from the secrets
-    # backend). The dedicated job runner claims the pending job and runs the apply.
-    tf_vars = {k: v for k, v in result["tf_variables"].items()
-               if k not in ("master_password", "administrator_password")}
-    job_service.update_metadata(db, result["job_id"], {"tf_variables": tf_vars})
+    # The secret-stripped Terraform vars are embedded in the job metadata atomically
+    # by provision() (the master password is never written to jobs.extra_data;
+    # run_provision_apply re-injects it from the secrets backend). Embedding at
+    # create time means the dedicated job runner can't claim the pending job in a
+    # window before tf_variables is persisted → dispatch with no tf_variables.
     return {"ok": True, "db_id": result["db_id"], "job_id": result["job_id"]}
 
 

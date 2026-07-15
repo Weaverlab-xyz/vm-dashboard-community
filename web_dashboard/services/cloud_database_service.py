@@ -77,6 +77,12 @@ _DEPLOYMENTS_DIR = os.path.join(_REPO_ROOT, "terraform", "deployments")
 
 _DEFAULT_PORTS = {"postgres": 5432, "mysql": 3306, "sqlserver": 1433}
 
+# tf_variables keys that hold the admin secret — stripped before the -var set is
+# persisted to the job metadata (a secret is never written to jobs.extra_data).
+# run_provision_apply re-injects the password from the secrets backend. aws/gcp
+# use master_password; azure's Flexible Server module uses administrator_password.
+_SECRET_TF_KEYS = ("master_password", "administrator_password")
+
 
 class CloudDatabaseError(Exception):
     pass
@@ -353,16 +359,27 @@ def provision(
         # Carried via job metadata (not tf_variables — those map 1:1 to the
         # cloud module's declared variables) for _broker_tunnel to pick up.
         job_meta["vault_account_group_id"] = int(vault_account_group_id)
-    job = job_service.create_job(
-        db, job_type="clouddb_provision", created_by=created_by,
-        metadata=job_meta,
-    )
 
+    # Build the -var set BEFORE creating the job so its (secret-stripped) copy can
+    # be embedded in the job metadata atomically. The apply runs in a separate
+    # process (the dedicated job runner) that polls for pending jobs and dispatches
+    # them reading meta["tf_variables"]. If the job were committed without
+    # tf_variables and patched in by a follow-up call, the runner could claim it in
+    # that gap and dispatch with no tf_variables → KeyError('tf_variables'). The
+    # master password is NEVER persisted to jobs.extra_data — run_provision_apply
+    # re-injects it from the secrets backend before the apply / tunnel read it back.
     tf_variables = _build_tf_variables(
         engine=engine, cloud=cloud, region=region, db_id=row.id,
         db_name=_db_name_from(name), master_username=master_username,
         master_password=master_password, opts=opts,
     )
+    job_meta["tf_variables"] = {k: v for k, v in tf_variables.items()
+                                if k not in _SECRET_TF_KEYS}
+    job = job_service.create_job(
+        db, job_type="clouddb_provision", created_by=created_by,
+        metadata=job_meta,
+    )
+
     logger.info("clouddb provisioned record db_id=%s engine=%s cloud=%s job_id=%s",
                 row.id, engine, cloud, job.id)
     return {"ok": True, "db_id": row.id, "job_id": job.id, "tf_variables": tf_variables}
