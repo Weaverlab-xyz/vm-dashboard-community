@@ -480,6 +480,7 @@ $DashboardPolicy = @"
       "Action": [
         "ec2:Describe*",
         "ec2:RunInstances",
+        "ec2:*LaunchTemplate*",
         "ec2:StartInstances",
         "ec2:StopInstances",
         "ec2:TerminateInstances",
@@ -563,10 +564,23 @@ $DashboardPolicy = @"
       "Resource": [
         "arn:aws:iam::${AccountId}:role/${VmImportRoleName}",
         "arn:aws:iam::${AccountId}:role/ecsTaskExecutionRole",
+        "arn:aws:iam::${AccountId}:role/ecsInstanceRole",
         "arn:aws:iam::${AccountId}:role/${PromoteTaskRoleName}",
         "arn:aws:iam::${AccountId}:role/k8s-*",
         "arn:aws:iam::${AccountId}:role/ec2-ssm-*"
       ]
+    },
+    {
+      "Sid": "DashboardECSOptimizedAMI",
+      "Effect": "Allow",
+      "Action": ["ssm:GetParameter", "ssm:GetParameters"],
+      "Resource": "arn:aws:ssm:*::parameter/aws/service/ecs/optimized-ami/*"
+    },
+    {
+      "Sid": "DashboardSSMRunCommand",
+      "Effect": "Allow",
+      "Action": ["ssm:SendCommand", "ssm:GetCommandInvocation", "ssm:ListCommandInvocations"],
+      "Resource": "*"
     },
     {
       "Sid": "DashboardECS",
@@ -582,7 +596,9 @@ $DashboardPolicy = @"
         "ecs:RunTask",
         "ecs:StopTask",
         "ecs:DescribeTasks",
-        "ecs:ListTasks"
+        "ecs:ListTasks",
+        "ecs:ListContainerInstances",
+        "ecs:DescribeContainerInstances"
       ],
       "Resource": "*"
     },

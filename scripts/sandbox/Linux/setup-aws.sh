@@ -657,6 +657,7 @@ DASHBOARD_POLICY_DOC="$(jq -c . <<JSON
       "Action": [
         "ec2:Describe*",
         "ec2:RunInstances",
+        "ec2:*LaunchTemplate*",
         "ec2:StartInstances",
         "ec2:StopInstances",
         "ec2:TerminateInstances",
