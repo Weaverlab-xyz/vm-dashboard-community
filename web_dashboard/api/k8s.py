@@ -431,6 +431,74 @@ async def unbind_entra_group(
             "action": "unbind", "job_id": job.id}
 
 
+@router.post("/clusters/{cluster_id}/entra-federation", status_code=202)
+async def enable_entra_federation(
+    cluster_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Make the cluster TRUST Entra as an OIDC identity provider so users authenticate
+    as themselves (their Entra token's group OIDs match the Entra-group RBAC binding)
+    — enqueues a ``k8s_entra_federation`` job. EKS associates a shared Entra app as the
+    cluster's OIDC IdP (async — the job polls to ACTIVE); AKS is native (no-op). The
+    shared Entra app is set via entra_oidc_client_id on Settings. Open the returned job
+    for status/logs."""
+    try:
+        k8s_service.get_cluster(db, cluster_id)   # 404 if unknown
+    except K8sError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    job = job_service.create_job(
+        db, job_type="k8s_entra_federation", created_by=current_user.username,
+        metadata={"cluster_id": cluster_id, "action": "enable"},
+    )
+    return {"ok": True, "status": "enabling", "cluster_id": cluster_id,
+            "action": "enable", "job_id": job.id}
+
+
+@router.delete("/clusters/{cluster_id}/entra-federation", status_code=202)
+async def disable_entra_federation(
+    cluster_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Remove the cluster's Entra OIDC trust — enqueues a ``k8s_entra_federation``
+    (action=disable) job (EKS disassociates the OIDC IdP; AKS no-op). Open the returned
+    job for status/logs."""
+    try:
+        k8s_service.get_cluster(db, cluster_id)   # 404 if unknown
+    except K8sError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    job = job_service.create_job(
+        db, job_type="k8s_entra_federation", created_by=current_user.username,
+        metadata={"cluster_id": cluster_id, "action": "disable"},
+    )
+    return {"ok": True, "status": "disabling", "cluster_id": cluster_id,
+            "action": "disable", "job_id": job.id}
+
+
+@router.get("/clusters/{cluster_id}/entra-kubeconfig")
+async def entra_kubeconfig(
+    cluster_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Download a token-free kubeconfig for real-identity access over the API tunnel,
+    authenticating as the USER's own Entra identity. EKS uses ``kubectl oidc-login``
+    (int128 kubelogin) against the shared Entra app; AKS uses the native Azure
+    kubelogin. Connect the API tunnel first, then point ``KUBECONFIG`` at this file."""
+    try:
+        content = k8s_service.build_entra_oidc_kubeconfig(db, cluster_id)
+        info = k8s_service.get_cluster(db, cluster_id)
+    except K8sError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    filename = f"{info.get('name') or cluster_id}-entra.kubeconfig"
+    return Response(
+        content=content,
+        media_type="application/yaml",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @router.post("/clusters/{cluster_id}/management", status_code=202)
 async def launch_management(
     cluster_id: str,
