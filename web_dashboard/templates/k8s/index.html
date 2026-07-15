@@ -570,28 +570,46 @@
             </p>
           </div>
         </template>
-        <!-- GKE: not in this phase -->
+        <!-- GKE: Workforce Identity Federation + Connect Gateway -->
         <template x-if="fedTarget && fedTarget.cloud === 'gcp'">
-          <p class="text-xs text-amber-600">
-            GKE federation uses <strong>Workforce Identity Federation + Connect Gateway</strong> (not this tunnel) and
-            lands in a follow-up. Use AKS or EKS for the Entra-federated demo today.
-          </p>
+          <div class="space-y-3">
+            <p class="text-xs text-gray-500">
+              GKE uses <strong>Workforce Identity Federation + Connect Gateway</strong> (not the API tunnel).
+              Enabling registers this cluster to the fleet, turns on Connect Gateway, and grants your Entra
+              group's <code>principalSet</code> the <code>gkehub.gateway</code> IAM roles. Bind the
+              <strong>Entra group</strong> too — its RBAC subject on GKE is the workforce
+              <code>principalSet</code> (same Entra group). Set the pool on Settings → Kubernetes.
+            </p>
+            <p class="text-[11px] text-amber-600">
+              End users reach the cluster through Connect Gateway (no tunnel). Sign in as your Entra-federated
+              workforce identity first, then use the downloaded kubeconfig:
+            </p>
+            <pre class="text-[11px] bg-gray-50 border border-gray-200 rounded p-2 overflow-x-auto">gcloud iam workforce-pools create-login-config \
+  locations/global/workforcePools/&lt;pool&gt;/providers/&lt;provider&gt; \
+  --output-file=login.json
+gcloud auth login --login-config=login.json</pre>
+          </div>
         </template>
-        <!-- Download Entra kubeconfig (federated or AKS-native) -->
-        <div x-show="fedTarget && (fedTarget.entra_federation_enabled) && fedTarget.cloud !== 'gcp'" x-cloak
+        <!-- Download the real-identity kubeconfig (Entra/EKS-AKS via tunnel; Connect Gateway for GKE) -->
+        <div x-show="fedTarget && fedTarget.entra_federation_enabled" x-cloak
              class="border-t border-gray-100 pt-3">
-          <p class="text-xs text-gray-500 mb-2">Real-identity kubeconfig (token-free; authenticates as <em>your</em> Entra identity over the API tunnel):</p>
+          <p class="text-xs text-gray-500 mb-2">
+            <span x-show="fedTarget && fedTarget.cloud !== 'gcp'">Real-identity kubeconfig (token-free; authenticates as <em>your</em> Entra identity over the API tunnel):</span>
+            <span x-show="fedTarget && fedTarget.cloud === 'gcp'" x-cloak>Connect Gateway kubeconfig (token-free; authenticates as <em>your</em> workforce identity — run the <code>gcloud auth login</code> above first):</span>
+          </p>
           <button @click="downloadEntraKubeconfig()"
-                  class="px-3 py-1.5 text-sm bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-medium">Download Entra kubeconfig</button>
+                  class="px-3 py-1.5 text-sm bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-medium">
+            Download <span x-text="fedTarget && fedTarget.cloud === 'gcp' ? 'Connect Gateway' : 'Entra'"></span> kubeconfig
+          </button>
         </div>
       </div>
       <div class="px-6 py-4 border-t border-gray-100 flex items-center gap-3">
-        <button x-show="fedTarget && fedTarget.cloud === 'aws' && fedTarget.entra_federation_enabled" x-cloak
+        <button x-show="fedTarget && (fedTarget.cloud === 'aws' || fedTarget.cloud === 'gcp') && fedTarget.entra_federation_enabled" x-cloak
                 @click="disableEntraFed()" :disabled="fedBusy"
                 class="px-4 py-2 text-sm border border-red-300 text-red-600 hover:bg-red-50 disabled:opacity-50 rounded-lg">Disable</button>
         <div class="flex justify-end gap-3 ml-auto">
           <button @click="showEntraFed = false" class="px-4 py-2 text-sm border border-gray-300 rounded-lg">Close</button>
-          <button x-show="fedTarget && fedTarget.cloud === 'aws'" @click="enableEntraFed()" :disabled="fedBusy"
+          <button x-show="fedTarget && (fedTarget.cloud === 'aws' || fedTarget.cloud === 'gcp')" @click="enableEntraFed()" :disabled="fedBusy"
                   class="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-sm font-medium rounded-lg">
             <span x-show="!fedBusy" x-text="fedTarget && fedTarget.entra_federation_enabled ? 'Re-apply' : 'Enable federation'"></span>
             <span x-show="fedBusy" x-cloak>Working…</span>

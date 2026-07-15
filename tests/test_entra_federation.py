@@ -151,6 +151,55 @@ def test_eks_name_region_empty_for_non_eks():
     assert k._eks_name_region(aks) == ("", "")
 
 
+# ── GKE (Workforce Identity Federation) ──────────────────────────────────────
+
+def test_workforce_principalset_wraps_group_oid():
+    restore = _with_cfg({"gcp_workforce_pool_id": "bt-entra-pool", "gcp_workforce_location": "global"})
+    try:
+        ps = k._workforce_principalset("1051c7ab-6284-4865-979f-55f55766e437")
+        assert ps == ("principalSet://iam.googleapis.com/locations/global"
+                      "/workforcePools/bt-entra-pool/group/1051c7ab-6284-4865-979f-55f55766e437")
+    finally:
+        restore()
+
+
+def test_workforce_principalset_raises_without_pool():
+    restore = _with_cfg({})   # no gcp_workforce_pool_id
+    try:
+        try:
+            k._workforce_principalset("oid")
+            raise AssertionError("expected K8sError when pool unset")
+        except k.K8sError:
+            pass
+    finally:
+        restore()
+
+
+def test_bind_command_accepts_principalset_subject():
+    # The GKE subject flows through the same command builder unchanged (safe chars,
+    # so shlex adds no quotes) — no injection, and the principalSet is the --group.
+    ps = ("principalSet://iam.googleapis.com/locations/global"
+          "/workforcePools/bt-entra-pool/group/OID")
+    cmd = k._entra_group_bind_command("view", ps)
+    assert f"--group={ps}" in cmd
+    assert "kubectl create clusterrolebinding entra-group-binding --clusterrole=view" in cmd
+
+
+def test_connect_gateway_kubeconfig_is_token_free():
+    server = ("https://connectgateway.googleapis.com/v1/projects/123456"
+              "/locations/global/gkeMemberships/k8s-gke")
+    out = k._connect_gateway_kubeconfig("k8s-gke", server)
+    cfg = yaml.safe_load(out)
+    cl = cfg["clusters"][0]["cluster"]
+    assert cl["server"] == server
+    assert "certificate-authority-data" not in cl   # gateway serves a public cert
+    exec_blk = cfg["users"][0]["user"]["exec"]
+    assert exec_blk["command"] == "gke-gcloud-auth-plugin"
+    assert exec_blk.get("provideClusterInfo") is True
+    assert "token" not in cfg["users"][0]["user"]   # picks up the active workforce identity
+    assert "k8s-aws-v1." not in out and "client-key-data" not in out
+
+
 if __name__ == "__main__":
     fns = [v for name, v in sorted(globals().items()) if name.startswith("test_")]
     failures = 0

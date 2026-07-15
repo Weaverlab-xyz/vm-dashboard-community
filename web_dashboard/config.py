@@ -814,6 +814,15 @@ class Settings(BaseSettings):
     entra_oidc_issuer_url: str = ""                  # blank → https://login.microsoftonline.com/<azure_tenant_id>/v2.0
     entra_oidc_username_claim: str = "oid"           # OIDC username claim (portable Entra user Object ID)
     entra_oidc_groups_claim: str = "groups"          # OIDC groups claim (Entra emits group Object IDs)
+    # GKE Workforce Identity Federation (the "Entra federation" action's GCP leg):
+    # GKE can't use an OIDC IdP (GKE Identity Service is off for new orgs), so a
+    # user reaches the cluster through Connect Gateway as a workforce identity. The
+    # RBAC subject is principalSet://…/workforcePools/<pool>/group/<entra-oid> — the
+    # same Entra group, wrapped in the pool URI. The pool + Entra OIDC provider are
+    # created once at the org level (gcloud iam workforce-pools).
+    gcp_workforce_pool_id: str = ""                  # bare workforce pool id (e.g. bt-entra-pool); required to federate GKE
+    gcp_workforce_provider_id: str = ""              # OIDC provider id in the pool (e.g. bt-entra-oidc); for the end-user login config
+    gcp_workforce_location: str = "global"           # workforce pool location (always "global" today)
     bt_vault_account_group_id: str = ""              # OPTIONAL — PRA Vault account group id for injected k8s/DB credentials
     entitle_allowed_durations: str = "3600,43200,86400"  # JIT durations (seconds) offered on created integrations
     entitle_ssh_sudo_user: str = ""                 # OPTIONAL override — each VM deploy passes its image's cloud-default login user (ubuntu/ec2-user/azureuser/gcp-user) automatically; set this only to force a different sudo user for ALL registrations
