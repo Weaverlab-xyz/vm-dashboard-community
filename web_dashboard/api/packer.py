@@ -986,6 +986,10 @@ async def export_and_register_gcp(
     object_path = _versioned_blob_name(image_name)
     network = _cfg("gcp_export_network") or ""
     subnet = _cfg("gcp_export_subnet") or ""
+    # Preferred zone for the export worker VM; the exporter falls back to sibling
+    # zones on a capacity error. gcp_export_zone lets an operator pin it separately
+    # from the deploy zone (gcp_zone) if one region/zone is chronically tight.
+    zone = _cfg("gcp_export_zone") or _cfg("gcp_zone") or "us-central1-a"
 
     def _on_progress(line: str) -> None:
         job_service.update_progress(db, job_id, 96, line[:200])
@@ -999,6 +1003,7 @@ async def export_and_register_gcp(
             dest_object=object_path,
             network=network,
             subnet=subnet,
+            zone=zone,
             progress_cb=_on_progress,
         )
         result["export"] = export
