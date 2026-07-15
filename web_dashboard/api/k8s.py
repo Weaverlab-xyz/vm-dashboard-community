@@ -118,10 +118,10 @@ async def provision_cluster(
         raise HTTPException(status_code=400, detail=str(e))
     except NotImplementedError as e:
         raise HTTPException(status_code=501, detail=str(e))
-    # Persist the Terraform vars on the job; the dedicated job runner (a separate
-    # process, immune to gunicorn worker recycling) claims the pending job and runs
-    # the apply. cloud + cluster_id are already in the job metadata (create_cluster).
-    job_service.update_metadata(db, result["job_id"], {"tf_variables": result["tf_variables"]})
+    # tf_variables (+ cloud, cluster_id) are embedded in the job metadata atomically
+    # by create_cluster, so the dedicated job runner (a separate process, immune to
+    # gunicorn worker recycling) can't claim the pending job in a window before they
+    # are persisted — which would dispatch with no tf_variables → KeyError.
     return {"ok": True, "cluster_id": result["cluster_id"], "job_id": result["job_id"]}
 
 

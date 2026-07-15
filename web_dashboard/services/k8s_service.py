@@ -241,16 +241,24 @@ def create_cluster(db: Session, *, cloud: str, name: str, region: str,
     db.add(row)
     db.commit()
 
+    # Build the -var set BEFORE creating the job so it can be embedded in the job
+    # metadata atomically. The apply runs in a separate process (the dedicated job
+    # runner) that polls for pending jobs. If the job were committed without
+    # tf_variables and patched in by a follow-up call, the runner could claim it in
+    # that gap and dispatch with no tf_variables → KeyError('tf_variables'). k8s
+    # tf_variables carry no secrets, so embedding them at create time is safe.
+    tf_variables = _build_cluster_tf_variables(
+        cloud=cloud, cluster_id=cluster_id, name=name, region=region, opts=opts)
+
     from . import job_service
     job = job_service.create_job(
         db, job_type="k8s_provision", created_by=created_by,
-        metadata={"cluster_id": cluster_id, "cloud": cloud, "name": name, "region": region},
+        metadata={"cluster_id": cluster_id, "cloud": cloud, "name": name,
+                  "region": region, "tf_variables": tf_variables},
     )
     row.deploy_job_id = job.id
     db.commit()
 
-    tf_variables = _build_cluster_tf_variables(
-        cloud=cloud, cluster_id=cluster_id, name=name, region=region, opts=opts)
     logger.info("k8s provision record cluster_id=%s cloud=%s name=%s job_id=%s",
                 cluster_id, cloud, name, job.id)
     return {"ok": True, "cluster_id": cluster_id, "job_id": job.id, "tf_variables": tf_variables}
