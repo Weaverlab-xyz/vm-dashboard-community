@@ -1650,21 +1650,23 @@ def _export_build_error_detail(project_id, build_id, creds, since, fallback: str
     return tail.strip() or fallback
 
 
-def _export_candidate_zones(project_id: str, preferred_zone: str, creds, limit: int = 4) -> list:
+def _export_candidate_zones(project_id: str, preferred_zone: str, creds, limit: int = 10) -> list:
     """Ordered list of zones to try for the export worker VM.
 
     The Daisy exporter creates a temporary VM in a single zone and fails hard
     with ZONE_RESOURCE_POOL_EXHAUSTED when that zone is out of capacity — and,
     left to its own devices, it keeps picking the *same* zone, so a plain retry
-    doesn't help. Retrying in a sibling zone of the same region does. Returns the
-    preferred zone first, then the region's other UP zones (queried best-effort).
-    Falls back to ``[preferred]`` (or ``[""]`` — let Daisy choose — if no
-    preferred zone) when the region can't be enumerated."""
+    doesn't help. Tried in order:
+      1. the preferred zone,
+      2. the preferred region's other UP zones (a single-zone blip), then
+      3. one UP zone from each *other* US region — so a whole-region outage
+         (e.g. us-central1 at capacity, observed 2026-07-15) still finds
+         somewhere to run the export. The source image is global and the
+         exporter auto-creates a per-region scratch bucket, so a cross-region
+         worker is fine; it just adds some GCS egress on the way to the hub.
+    Best-effort: falls back to ``[preferred]`` (or ``[""]`` — let Daisy choose)
+    if the project's zones can't be enumerated."""
     pref = (preferred_zone or "").strip()
-    if not pref:
-        return [""]
-    region = pref.rsplit("-", 1)[0]
-    ordered = [pref]
     try:
         from google.auth.transport.requests import AuthorizedSession
         session = AuthorizedSession(creds or _gcp_creds())
@@ -1673,13 +1675,37 @@ def _export_candidate_zones(project_id: str, preferred_zone: str, creds, limit: 
             timeout=30,
         )
         resp.raise_for_status()
-        for z in resp.json().get("items", []):
-            name = z.get("name", "")
-            if name != pref and name.startswith(region + "-") and z.get("status") == "UP":
-                ordered.append(name)
+        up = sorted(z["name"] for z in resp.json().get("items", [])
+                    if z.get("status") == "UP" and z.get("name"))
     except Exception as e:
-        logger.warning("export: could not enumerate zones in %s (%s); no zone fallback", region, e)
-    return ordered[:limit]
+        logger.warning("export: could not enumerate zones (%s); no zone fallback", e)
+        return [pref] if pref else [""]
+
+    def region_of(z: str) -> str:
+        return z.rsplit("-", 1)[0]
+
+    up_set = set(up)
+    pref_region = region_of(pref) if pref else ""
+    ordered: list = []
+
+    def add(z: str) -> None:
+        if z and z not in ordered:
+            ordered.append(z)
+
+    if pref in up_set:
+        add(pref)
+    for z in up:                       # same-region siblings (single-zone blip)
+        if region_of(z) == pref_region:
+            add(z)
+    seen_regions = set()               # then one zone per other US region
+    for z in up:
+        r = region_of(z)
+        if r == pref_region or not r.startswith("us-") or r in seen_regions:
+            continue
+        seen_regions.add(r)
+        add(z)
+
+    return ordered[:limit] or ([pref] if pref else [""])
 
 
 def _export_custom_image_to_vhd_sync(
@@ -1692,7 +1718,7 @@ def _export_custom_image_to_vhd_sync(
     timeout: int,
     progress_cb,
     zone: str = "",
-    retry_delay: int = 45,
+    retry_delay: int = 20,
 ) -> dict:
     """Trigger the Daisy gce_vm_image_export workflow via Cloud Build.
 
@@ -1702,10 +1728,12 @@ def _export_custom_image_to_vhd_sync(
 
     On a transient Compute-capacity failure (503 SERVICE_UNAVAILABLE /
     ZONE_RESOURCE_POOL_EXHAUSTED while creating the export worker VM) the export
-    is retried in a *different* zone of the same region (`-zone`) — a plain retry
-    is useless because the exporter otherwise keeps picking the same exhausted
-    zone. Non-transient failures (quota, permissions, a bad source image) raise
-    immediately. ``zone`` is the preferred first zone; siblings are discovered.
+    is retried in a *different* zone via the `-zone` flag — same-region siblings
+    first, then other US regions if the whole region is out of capacity — a plain
+    retry is useless because the exporter otherwise keeps picking the same
+    exhausted zone (see _export_candidate_zones). Non-transient failures (quota,
+    permissions, a bad source image) raise immediately. ``zone`` is the preferred
+    first zone.
 
     Returns {gs_url, format, build_id}.
     """
