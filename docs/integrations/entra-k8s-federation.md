@@ -7,9 +7,10 @@ JIT-grants group membership, so access appears (and expires) just-in-time with *
 impersonation and no synthetic subject**.
 
 This works natively on **AKS**. On **EKS** it needs the cluster to *trust Entra as an
-OIDC identity provider* — the one-click **Entra federation** action does that. (GKE
-uses Workforce Identity Federation + Connect Gateway, which is a separate path — see
-the end of this doc.)
+OIDC identity provider*; on **GKE** it uses **Workforce Identity Federation + Connect
+Gateway**. The one-click **Entra federation** action wires up whichever the cluster
+needs. Either way it's the *same Entra group* — on GKE the RBAC subject is that group
+Object ID wrapped in a workforce `principalSet` URI.
 
 | Cloud | Trust mechanism | End-user auth | Reached via |
 |---|---|---|---|
@@ -105,15 +106,78 @@ listens on `http://localhost:8000`.
 - **Two "kubelogin" tools:** int128 `kubectl oidc-login` for EKS/GKE-Entra; Azure
   `kubelogin` for AKS. They are different binaries.
 - **Same group everywhere:** the group Object ID is the RBAC `Group` subject on AKS
-  and EKS alike, so one Entitle grant covers both.
+  and EKS (bare) and on GKE (wrapped in a `principalSet` URI), so one Entitle grant
+  covers all three.
 
 ---
 
-## GKE (Workforce Identity Federation) — follow-up
+## GKE — Workforce Identity Federation + Connect Gateway
 
-GKE cannot use the OIDC-identity-provider path (GKE Identity Service is unavailable in
-Google Cloud organizations created on/after 2025-07-01). GKE therefore uses **Workforce
-Identity Federation + Connect Gateway**: users reach the cluster through Google's
-Connect Gateway (not this API tunnel), and the RBAC subject is a workforce-pool URI
-(`principalSet://iam.googleapis.com/locations/global/workforcePools/<pool>/group/<entra-oid>`)
-that still wraps the same Entra group Object ID. That leg is delivered separately.
+GKE can't use the OIDC-identity-provider path (GKE Identity Service is unavailable in
+Google Cloud orgs created on/after 2025-07-01). Instead a user reaches the cluster as a
+**workforce identity** through **Connect Gateway** — a Google-hosted endpoint that
+proxies into the private cluster via the in-cluster Connect agent. The API tunnel is
+**not** used for GKE.
+
+### One-time org setup (org admin)
+
+Create the workforce pool + Entra OIDC provider, with the **groups** attribute mapping:
+
+```bash
+gcloud iam workforce-pools create bt-entra-pool \
+  --organization=<ORG_ID> --location=global --display-name="Entra Workforce Pool"
+
+gcloud iam workforce-pools providers create-oidc bt-entra-oidc \
+  --workforce-pool=bt-entra-pool --location=global \
+  --issuer-uri="https://login.microsoftonline.com/<tenant>/v2.0" \
+  --client-id="<entra-app-client-id>" --client-secret-value="<secret>" \
+  --web-sso-response-type=code \
+  --web-sso-assertion-claims-behavior=merge-user-info-over-id-token-claims \
+  --attribute-mapping="google.subject=assertion.sub,google.groups=assertion.groups"
+```
+
+The **`google.groups=assertion.groups`** mapping is load-bearing — it carries the Entra
+group Object IDs into the token so the `principalSet` RBAC subject matches. The Entra
+app must emit the **groups claim on the ID token** (Token configuration → Security
+groups). Add the WIF redirect URI
+`https://auth.cloud.google/signin-callback/locations/global/workforcePools/bt-entra-pool/providers/bt-entra-oidc`
+to the app.
+
+Then set the pool on **Settings → Kubernetes**: `gcp_workforce_pool_id=bt-entra-pool`,
+`gcp_workforce_provider_id=bt-entra-oidc`, location `global`.
+
+> **Dashboard service account** needs `roles/gkehub.admin`,
+> `roles/serviceusage.serviceUsageAdmin`, and `roles/resourcemanager.projectIamAdmin`
+> (or equivalent) to register the fleet, enable APIs, and grant the gateway IAM.
+
+### Federate a GKE cluster
+
+1. **Entra federation → Enable federation.** The dashboard fleet-registers the cluster,
+   enables the Connect Gateway APIs, and grants your Entra group's
+   `principalSet://…/workforcePools/<pool>/group/<entra-oid>` the
+   `roles/gkehub.gatewayEditor` + `roles/gkehub.viewer` IAM roles.
+2. **Entra group → Bind group.** On GKE the RBAC subject is the workforce `principalSet`
+   (the dashboard builds it automatically from the group Object ID + your pool).
+3. **Entra federation → Download Connect Gateway kubeconfig.**
+4. On the user's machine (needs `gcloud` + `gke-gcloud-auth-plugin`), as an Entra member
+   of the group:
+   ```bash
+   gcloud iam workforce-pools create-login-config \
+     locations/global/workforcePools/bt-entra-pool/providers/bt-entra-oidc \
+     --output-file=login.json
+   gcloud auth login --login-config=login.json
+   export KUBECONFIG=<downloaded>-entra.kubeconfig   # Connect Gateway kubeconfig
+   kubectl get ns
+   ```
+   (Or `gcloud container fleet memberships get-credentials <membership>` to have gcloud
+   write the kubeconfig itself.)
+
+### GKE notes
+
+- **No tunnel / no PRA jump** for GKE — Connect Gateway provides the reachability.
+- **IAM vs RBAC split:** `gkehub.gateway*` authorizes *reaching* the cluster through the
+  gateway; the `principalSet` ClusterRoleBinding authorizes *what you can do*. Both are
+  required (the action + the Entra-group bind cover both).
+- **Fleet membership** is left in place on Disable (only the gateway IAM is revoked) —
+  re-enabling reuses it.
+- **Connect Gateway quota:** ~10 concurrent streams per fleet host project.

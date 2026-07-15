@@ -730,10 +730,13 @@ async def run_decommission(db: Session, *, cluster_id: str, job_id: str) -> None
 
     errors: list = []
 
-    # 1. PRA tunnels (best-effort; clears the k8s tunnel's pra_jump_id / state on
-    #    the row and the API tunnel's config_service keys).
+    # 1. PRA tunnels + Entra wiring (best-effort; clears the k8s tunnel's pra_jump_id /
+    #    state on the row and the config_service keys). disable_entra_federation matters
+    #    most on GKE — its gateway IAM grant + fleet state are project-level and would
+    #    otherwise outlive the destroyed cluster (EKS's OIDC config dies with it).
     job_service.update_progress(db, job_id, 15, "Removing PRA tunnels…")
-    for _dereg in (deregister_pra_tunnel, deregister_api_tunnel, unbind_entra_group):
+    for _dereg in (deregister_pra_tunnel, deregister_api_tunnel, unbind_entra_group,
+                   disable_entra_federation):
         try:
             await _dereg(db, cluster_id)
         except Exception as exc:
@@ -2301,11 +2304,29 @@ def _entra_group_unbind_command() -> str:
     return f"kubectl delete clusterrolebinding {q_name} --ignore-not-found 1>&2; echo ENTRA_UNBOUND_OK"
 
 
+def _workforce_principalset(group_oid: str) -> str:
+    """The GKE Workforce-Identity RBAC subject for an Entra group: the same group
+    Object ID wrapped in the workforce-pool ``principalSet`` URI (GKE can't take a
+    bare group id — its authenticator only knows workforce principals). Requires
+    gcp_workforce_pool_id (set on Settings → Kubernetes)."""
+    pool = _cfg("gcp_workforce_pool_id")
+    if not pool:
+        raise K8sError("no GCP workforce pool configured — set gcp_workforce_pool_id on "
+                       "Settings (k8s panel) to federate GKE (the pool your Entra WIF "
+                       "provider lives in)")
+    loc = _cfg("gcp_workforce_location", "global") or "global"
+    return (f"principalSet://iam.googleapis.com/locations/{loc}"
+            f"/workforcePools/{pool}/group/{group_oid}")
+
+
 async def bind_entra_group(db: Session, cluster_id: str, *, group_id: str = None,
                            role: str = None) -> dict:
     """Bind an Entra group (Object ID) to a ClusterRole on the cluster. group_id/role
     fall back to config (entra_rbac_group_id / entra_rbac_group_role, default
-    cluster-admin). Idempotent — delete-then-create so a role change applies."""
+    cluster-admin). Idempotent — delete-then-create so a role change applies. The RBAC
+    subject is cloud-aware: the bare group OID on EKS/AKS (their tokens carry the OID
+    directly), the workforce ``principalSet`` URI on GKE (Workforce Identity
+    Federation) — same Entra group either way."""
     row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
     if row is None:
         raise K8sError(f"cluster {cluster_id} not found")
@@ -2314,9 +2335,10 @@ async def bind_entra_group(db: Session, cluster_id: str, *, group_id: str = None
         raise K8sError("no Entra group configured — set entra_rbac_group_id on Settings "
                        "(k8s panel) or pass a group Object ID")
     role = (role or "").strip() or _cfg("entra_rbac_group_role", "cluster-admin")
+    subject = _workforce_principalset(gid) if row.cloud == "gcp" else gid
     kubeconfig = resolve_kubeconfig(db, cluster_id)
     out = await _run_cluster_command(
-        kubeconfig, _entra_group_bind_command(role, gid), target_cloud=row.cloud)
+        kubeconfig, _entra_group_bind_command(role, subject), target_cloud=row.cloud)
     if "ENTRA_BOUND_OK" not in (out or ""):
         logger.error("Entra group bind: no success sentinel (len=%d): %r",
                      len(out or ""), (out or "")[-800:])
@@ -2449,8 +2471,33 @@ async def enable_entra_federation(db: Session, cluster_id: str) -> dict:
         logger.info("Enabled Entra OIDC federation on EKS cluster %s (region %s, already=%s)",
                     name, region, res.get("already"))
         return {"cloud": "aws", "eks_cluster": name, "region": region, **res}
-    raise K8sError(f"Entra federation for {row.cloud} clusters is not yet available "
-                   "(GKE Workforce Identity Federation lands in a follow-up)")
+    if row.cloud == "gcp":
+        # GKE: Workforce Identity Federation + Connect Gateway. Register the cluster
+        # to the fleet, enable the Connect Gateway APIs, and grant the workforce
+        # group's principalSet the gkehub.gateway* roles. The RBAC binding (the
+        # principalSet ClusterRoleBinding) is applied by the separate Entra-group action.
+        from . import gcp_service
+        project = _cfg("gcp_project_id")
+        if not project:
+            raise K8sError("gcp_project_id is not configured")
+        gid = _cfg("entra_rbac_group_id")
+        if not gid:
+            raise K8sError("no Entra group configured — set entra_rbac_group_id on Settings "
+                           "(k8s panel); GKE grants the Connect Gateway IAM to that group")
+        principal = _workforce_principalset(gid)   # also validates gcp_workforce_pool_id
+        name, location = await asyncio.to_thread(
+            gcp_service.find_gke_cluster, _gke_name(f"k8s-{row.name}"), project)
+        await asyncio.to_thread(gcp_service.enable_connect_gateway_apis, project)
+        membership = await asyncio.to_thread(
+            gcp_service.register_fleet_membership, project, location, name)
+        await asyncio.to_thread(gcp_service.grant_gateway_iam, principal, project)
+        config_service.set(f"k8s_entra_fed_{cluster_id}", "1")
+        config_service.set(f"k8s_entra_fed_gke_{cluster_id}", membership)
+        logger.info("Enabled GKE WIF federation for %s (membership %s, principalSet=%s)",
+                    name, membership, principal)
+        return {"cloud": "gcp", "membership": membership, "location": location,
+                "principal_set": principal, "status": "ACTIVE"}
+    raise K8sError(f"Entra federation is not supported for {row.cloud} clusters")
 
 
 async def disable_entra_federation(db: Session, cluster_id: str) -> dict:
@@ -2472,8 +2519,20 @@ async def disable_entra_federation(db: Session, cluster_id: str) -> dict:
             await asyncio.to_thread(aws_service.disassociate_eks_oidc, name, region)
         except Exception as exc:
             logger.warning("EKS OIDC disassociate for %s failed (non-fatal): %s", cluster_id, exc)
+    elif row.cloud == "gcp":
+        # Revoke the workforce group's Connect Gateway IAM. Leave the fleet membership
+        # in place (harmless, and re-enable reuses it — deregistering is slow).
+        try:
+            gid = _cfg("entra_rbac_group_id")
+            if gid:
+                from . import gcp_service
+                await asyncio.to_thread(
+                    gcp_service.revoke_gateway_iam, _workforce_principalset(gid), _cfg("gcp_project_id"))
+        except Exception as exc:
+            logger.warning("GKE gateway IAM revoke for %s failed (non-fatal): %s", cluster_id, exc)
     config_service.set(f"k8s_entra_fed_{cluster_id}", "")
     config_service.set(f"k8s_entra_fed_eks_{cluster_id}", "")
+    config_service.set(f"k8s_entra_fed_gke_{cluster_id}", "")
     return {"ok": True, "removed": True}
 
 
@@ -2499,22 +2558,54 @@ def _entra_oidc_login_kubeconfig(kubeconfig: str, oidc: dict) -> str:
     return yaml.safe_dump(cfg, default_flow_style=False, sort_keys=False)
 
 
+def _connect_gateway_kubeconfig(context_name: str, server: str) -> str:
+    """A token-free Connect Gateway kubeconfig for GKE: server = the public gateway
+    URL, auth = ``gke-gcloud-auth-plugin`` (picks up the active gcloud/workforce
+    identity). No CA (the gateway serves a public cert). The user runs
+    ``gcloud auth login --login-config`` as their Entra-federated workforce identity
+    first; kubectl then reaches the private cluster through the gateway."""
+    cfg = {
+        "apiVersion": "v1", "kind": "Config",
+        "clusters": [{"name": context_name, "cluster": {"server": server}}],
+        "contexts": [{"name": context_name,
+                      "context": {"cluster": context_name, "user": context_name}}],
+        "current-context": context_name,
+        "users": [{"name": context_name, "user": {"exec": {
+            "apiVersion": "client.authentication.k8s.io/v1beta1",
+            "command": "gke-gcloud-auth-plugin",
+            "provideClusterInfo": True,
+            "installHint": ("Install the gke-gcloud-auth-plugin: "
+                            "https://cloud.google.com/kubernetes-engine/docs/how-to/cluster-access-for-kubectl"),
+        }}}],
+    }
+    return yaml.safe_dump(cfg, default_flow_style=False, sort_keys=False)
+
+
 def build_entra_oidc_kubeconfig(db: Session, cluster_id: str) -> str:
-    """Return a token-free kubeconfig for real-identity access over the API tunnel,
-    authenticating as the USER's own Entra identity (not the dashboard's). EKS: the
-    stored kubeconfig repointed at the local tunnel port with the exec block replaced
-    by ``kubectl oidc-login`` (int128 kubelogin) against the shared Entra app. AKS:
-    the existing kubelogin (Azure) kubeconfig repointed at the tunnel — already Entra."""
+    """Return a token-free kubeconfig for real-identity access, authenticating as the
+    USER's own Entra identity (not the dashboard's). EKS: the stored kubeconfig
+    repointed at the API tunnel with the exec block replaced by ``kubectl oidc-login``
+    (int128 kubelogin) against the shared Entra app. AKS: the existing kubelogin
+    (Azure) kubeconfig repointed at the tunnel — already Entra. GKE: a **Connect
+    Gateway** kubeconfig (NOT the tunnel) — the user's workforce identity reaches the
+    private cluster through the gateway."""
     row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
     if row is None:
         raise K8sError(f"cluster {cluster_id} not found")
+    if row.cloud == "gcp":
+        from . import config_service, gcp_service
+        project = _cfg("gcp_project_id")
+        membership = (config_service.get(f"k8s_entra_fed_gke_{cluster_id}")
+                      or _gke_name(f"k8s-{row.name}"))
+        try:
+            server = gcp_service.connect_gateway_server_url(membership, project, "global")
+        except Exception as exc:
+            raise K8sError(f"could not build the Connect Gateway URL: {exc}")
+        return _connect_gateway_kubeconfig(row.name, server)
     local_port = int(_cfg("k8s_api_tunnel_local_port", "6443"))
     kubeconfig = _repoint_kubeconfig_to_tunnel(resolve_kubeconfig(db, cluster_id), local_port)
     if row.cloud == "azure":
         return kubeconfig  # AKS kubelogin exec is already the user's Entra identity
-    if row.cloud != "aws":
-        raise K8sError(f"an Entra kubeconfig for {row.cloud} is not available here "
-                       "(GKE uses Connect Gateway, not the tunnel — see the docs)")
     return _entra_oidc_login_kubeconfig(kubeconfig, _entra_oidc_settings())
 
 

@@ -109,6 +109,150 @@ def gke_get_token() -> str:
     return creds.token
 
 
+# ── GKE fleet + Connect Gateway + IAM (Workforce Identity Federation) ─────────
+#
+# The "Entra federation" action's GCP leg. A workforce (WIF) user reaches a private
+# GKE cluster ONLY through Connect Gateway (connectgateway.googleapis.com) — the
+# cluster's own authenticator can't validate a workforce token — so we register the
+# cluster to the project's fleet, enable the Connect Gateway APIs, and grant the
+# workforce group's principalSet the gkehub.gateway* roles. Kubernetes RBAC (the
+# principalSet ClusterRoleBinding) is applied separately by k8s_service. All REST via
+# an AuthorizedSession (google-auth only — gkehub/resourcemanager have no client lib
+# wired here). Synchronous; callers wrap in asyncio.to_thread.
+
+_GATEWAY_ROLES = ("roles/gkehub.gatewayEditor", "roles/gkehub.viewer")
+
+
+def _authed_session():
+    """An AuthorizedSession bound to the dashboard's GCP creds (SA JSON or ADC),
+    cloud-platform scope — for the fleet / Connect Gateway / IAM REST calls."""
+    from google.auth.transport.requests import AuthorizedSession
+    creds = _gcp_creds()
+    if creds is None:  # ADC
+        import google.auth
+        creds, _ = google.auth.default(
+            scopes=["https://www.googleapis.com/auth/cloud-platform"])
+    return AuthorizedSession(creds)
+
+
+def _poll_lro(session, op: dict, base: str, timeout_s: int = 300) -> dict:
+    """Poll a GCP long-running operation (``op`` has a ``name``) under ``base`` (the
+    API root, e.g. https://gkehub.googleapis.com/v1) until done. Returns the final op."""
+    import time
+    if not op.get("name") or op.get("done"):
+        return op
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        r = session.get(f"{base}/{op['name']}")
+        r.raise_for_status()
+        cur = r.json()
+        if cur.get("done"):
+            if cur.get("error"):
+                raise GCPError(f"GCP operation failed: {cur['error']}")
+            return cur
+        time.sleep(5)
+    raise GCPError(f"GCP operation {op['name']} did not complete within {timeout_s}s")
+
+
+def project_number(project: str = "") -> str:
+    """Resolve a project's numeric id (the Connect Gateway URL uses the number)."""
+    project = project or _gcp_project()
+    s = _authed_session()
+    r = s.get(f"https://cloudresourcemanager.googleapis.com/v1/projects/{project}")
+    r.raise_for_status()
+    return str(r.json().get("projectNumber") or "")
+
+
+def enable_connect_gateway_apis(project: str = "") -> None:
+    """Ensure the APIs Connect Gateway needs are enabled (idempotent)."""
+    project = project or _gcp_project()
+    s = _authed_session()
+    r = s.post(
+        f"https://serviceusage.googleapis.com/v1/projects/{project}/services:batchEnable",
+        json={"serviceIds": ["connectgateway.googleapis.com",
+                             "gkeconnect.googleapis.com", "gkehub.googleapis.com"]})
+    r.raise_for_status()
+    _poll_lro(s, r.json(), "https://serviceusage.googleapis.com/v1")
+
+
+def register_fleet_membership(project: str, location: str, cluster_name: str,
+                              membership_id: str = "") -> str:
+    """Register a GKE cluster to the project's fleet (idempotent) so Connect Gateway
+    can reach it; returns the membership id. ``location`` is the cluster's zone or
+    region. GKE-on-GCP clusters get the Connect agent installed automatically."""
+    project = project or _gcp_project()
+    membership_id = membership_id or cluster_name
+    s = _authed_session()
+    base = "https://gkehub.googleapis.com/v1"
+    parent = f"projects/{project}/locations/global"
+    if s.get(f"{base}/{parent}/memberships/{membership_id}").status_code == 200:
+        return membership_id  # already registered
+    resource_link = (f"//container.googleapis.com/projects/{project}"
+                     f"/locations/{location}/clusters/{cluster_name}")
+    r = s.post(f"{base}/{parent}/memberships?membershipId={membership_id}",
+               json={"endpoint": {"gkeCluster": {"resourceLink": resource_link}}})
+    r.raise_for_status()
+    _poll_lro(s, r.json(), base)
+    return membership_id
+
+
+def grant_gateway_iam(principal_set: str, project: str = "", roles: tuple = _GATEWAY_ROLES) -> None:
+    """Add ``principal_set`` to the Connect Gateway IAM roles on the project so its
+    members can reach the cluster through the gateway (idempotent)."""
+    _modify_project_iam(principal_set, project, roles, add=True)
+
+
+def revoke_gateway_iam(principal_set: str, project: str = "", roles: tuple = _GATEWAY_ROLES) -> None:
+    """Remove ``principal_set`` from the Connect Gateway IAM roles (idempotent)."""
+    _modify_project_iam(principal_set, project, roles, add=False)
+
+
+def _modify_project_iam(member: str, project: str, roles: tuple, *, add: bool) -> None:
+    project = project or _gcp_project()
+    s = _authed_session()
+    base = f"https://cloudresourcemanager.googleapis.com/v1/projects/{project}"
+    r = s.post(f"{base}:getIamPolicy", json={"options": {"requestedPolicyVersion": 3}})
+    r.raise_for_status()
+    policy = r.json()
+    bindings = policy.setdefault("bindings", [])
+    changed = False
+    for role in roles:
+        b = next((x for x in bindings if x.get("role") == role and not x.get("condition")), None)
+        if add:
+            if b is None:
+                bindings.append({"role": role, "members": [member]})
+                changed = True
+            elif member not in b.get("members", []):
+                b.setdefault("members", []).append(member)
+                changed = True
+        elif b is not None and member in b.get("members", []):
+            b["members"].remove(member)
+            changed = True
+    if changed:
+        s.post(f"{base}:setIamPolicy", json={"policy": policy}).raise_for_status()
+
+
+def connect_gateway_server_url(membership_id: str, project: str = "", location: str = "global") -> str:
+    """The Connect Gateway kube-apiserver URL for a fleet membership (uses the project
+    NUMBER, per the gateway URL scheme)."""
+    return (f"https://connectgateway.googleapis.com/v1/projects/{project_number(project)}"
+            f"/locations/{location}/gkeMemberships/{membership_id}")
+
+
+def find_gke_cluster(name: str, project: str = "") -> tuple:
+    """Locate a GKE cluster by name across all locations in the project. Returns
+    (name, location) — location is the zone (zonal) or region (regional), needed for
+    the fleet membership resourceLink. Raises when the cluster isn't found."""
+    project = project or _gcp_project()
+    s = _authed_session()
+    r = s.get(f"https://container.googleapis.com/v1/projects/{project}/locations/-/clusters")
+    r.raise_for_status()
+    for c in (r.json().get("clusters") or []):
+        if c.get("name") == name:
+            return c["name"], c.get("location") or ""
+    raise GCPError(f"GKE cluster '{name}' not found in project {project}")
+
+
 def _require_compute():
     try:
         from google.cloud import compute_v1  # noqa: F401
