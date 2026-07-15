@@ -1650,6 +1650,64 @@ def _export_build_error_detail(project_id, build_id, creds, since, fallback: str
     return tail.strip() or fallback
 
 
+def _export_candidate_zones(project_id: str, preferred_zone: str, creds, limit: int = 10) -> list:
+    """Ordered list of zones to try for the export worker VM.
+
+    The Daisy exporter creates a temporary VM in a single zone and fails hard
+    with ZONE_RESOURCE_POOL_EXHAUSTED when that zone is out of capacity — and,
+    left to its own devices, it keeps picking the *same* zone, so a plain retry
+    doesn't help. Tried in order:
+      1. the preferred zone,
+      2. the preferred region's other UP zones (a single-zone blip), then
+      3. one UP zone from each *other* US region — so a whole-region outage
+         (e.g. us-central1 at capacity, observed 2026-07-15) still finds
+         somewhere to run the export. The source image is global and the
+         exporter auto-creates a per-region scratch bucket, so a cross-region
+         worker is fine; it just adds some GCS egress on the way to the hub.
+    Best-effort: falls back to ``[preferred]`` (or ``[""]`` — let Daisy choose)
+    if the project's zones can't be enumerated."""
+    pref = (preferred_zone or "").strip()
+    try:
+        from google.auth.transport.requests import AuthorizedSession
+        session = AuthorizedSession(creds or _gcp_creds())
+        resp = session.get(
+            f"https://compute.googleapis.com/compute/v1/projects/{project_id}/zones",
+            timeout=30,
+        )
+        resp.raise_for_status()
+        up = sorted(z["name"] for z in resp.json().get("items", [])
+                    if z.get("status") == "UP" and z.get("name"))
+    except Exception as e:
+        logger.warning("export: could not enumerate zones (%s); no zone fallback", e)
+        return [pref] if pref else [""]
+
+    def region_of(z: str) -> str:
+        return z.rsplit("-", 1)[0]
+
+    up_set = set(up)
+    pref_region = region_of(pref) if pref else ""
+    ordered: list = []
+
+    def add(z: str) -> None:
+        if z and z not in ordered:
+            ordered.append(z)
+
+    if pref in up_set:
+        add(pref)
+    for z in up:                       # same-region siblings (single-zone blip)
+        if region_of(z) == pref_region:
+            add(z)
+    seen_regions = set()               # then one zone per other US region
+    for z in up:
+        r = region_of(z)
+        if r == pref_region or not r.startswith("us-") or r in seen_regions:
+            continue
+        seen_regions.add(r)
+        add(z)
+
+    return ordered[:limit] or ([pref] if pref else [""])
+
+
 def _export_custom_image_to_vhd_sync(
     project_id: str,
     image_name: str,
@@ -1659,8 +1717,8 @@ def _export_custom_image_to_vhd_sync(
     subnet: str,
     timeout: int,
     progress_cb,
-    max_attempts: int = 2,
-    retry_delay: int = 45,
+    zone: str = "",
+    retry_delay: int = 20,
 ) -> dict:
     """Trigger the Daisy gce_vm_image_export workflow via Cloud Build.
 
@@ -1668,10 +1726,14 @@ def _export_custom_image_to_vhd_sync(
     `-format=vpc` to produce a VHD blob written to gs://dest_bucket/dest_object.
     Args also include `-source_image` and `-destination_uri`.
 
-    A transient Compute-capacity failure (503 SERVICE_UNAVAILABLE /
-    ZONE_RESOURCE_POOL_EXHAUSTED while creating the export worker VM) is retried
-    up to ``max_attempts`` times with a fresh build; non-transient failures
-    (quota, permissions, a bad source image) raise immediately.
+    On a transient Compute-capacity failure (503 SERVICE_UNAVAILABLE /
+    ZONE_RESOURCE_POOL_EXHAUSTED while creating the export worker VM) the export
+    is retried in a *different* zone via the `-zone` flag — same-region siblings
+    first, then other US regions if the whole region is out of capacity — a plain
+    retry is useless because the exporter otherwise keeps picking the same
+    exhausted zone (see _export_candidate_zones). Non-transient failures (quota,
+    permissions, a bad source image) raise immediately. ``zone`` is the preferred
+    first zone.
 
     Returns {gs_url, format, build_id}.
     """
@@ -1680,7 +1742,7 @@ def _export_custom_image_to_vhd_sync(
     client = cloudbuild_v1.CloudBuildClient(credentials=creds)
 
     dest_uri = f"gs://{dest_bucket}/{dest_object}"
-    args = [
+    base_args = [
         "-timeout=" + f"{max(timeout - 600, 600)}s",
         "-source_image=" + image_name,
         "-client_id=api",
@@ -1688,35 +1750,41 @@ def _export_custom_image_to_vhd_sync(
         "-destination_uri=" + dest_uri,
     ]
     if network:
-        args.append("-network=" + network)
+        base_args.append("-network=" + network)
     if subnet:
-        args.append("-subnet=" + subnet)
+        base_args.append("-subnet=" + subnet)
 
-    build = cloudbuild_v1.Build(
-        steps=[
-            cloudbuild_v1.BuildStep(
-                name="gcr.io/compute-image-tools/gce_vm_image_export:release",
-                args=args,
-                env=["BUILD_ID=$BUILD_ID"],
-            )
-        ],
-        timeout={"seconds": timeout},
-        tags=["vm-cli-dashboard", "image-export"],
-        # Force step output to Cloud Logging (not GCS-only, which is the default
-        # here and leaves nothing queryable). Without this the build's real error
-        # — e.g. the Daisy ZONE_RESOURCE_POOL_EXHAUSTED — never reaches Cloud
-        # Logging, so _fetch_cloud_build_log finds only audit entries and the job
-        # falls back to the generic "Build failed". Requires the build's service
-        # account to have roles/logging.logWriter (granted in setup-gcp.sh).
-        options=cloudbuild_v1.BuildOptions(
-            logging=cloudbuild_v1.BuildOptions.LoggingMode.CLOUD_LOGGING_ONLY,
-        ),
-    )
-
+    zones = _export_candidate_zones(project_id, zone, creds)
+    total = len(zones)
     last_err: Optional[GCPError] = None
-    for attempt in range(1, max_attempts + 1):
+    for attempt, z in enumerate(zones, start=1):
+        args = list(base_args)
+        if z:
+            args.append("-zone=" + z)
+        build = cloudbuild_v1.Build(
+            steps=[
+                cloudbuild_v1.BuildStep(
+                    name="gcr.io/compute-image-tools/gce_vm_image_export:release",
+                    args=args,
+                    env=["BUILD_ID=$BUILD_ID"],
+                )
+            ],
+            timeout={"seconds": timeout},
+            tags=["vm-cli-dashboard", "image-export"],
+            # Force step output to Cloud Logging (not GCS-only, which is the default
+            # here and leaves nothing queryable). Without this the build's real error
+            # — e.g. the Daisy ZONE_RESOURCE_POOL_EXHAUSTED — never reaches Cloud
+            # Logging, so _fetch_cloud_build_log finds only audit entries and the job
+            # falls back to the generic "Build failed". Requires the build's service
+            # account to have roles/logging.logWriter (granted in setup-gcp.sh).
+            options=cloudbuild_v1.BuildOptions(
+                logging=cloudbuild_v1.BuildOptions.LoggingMode.CLOUD_LOGGING_ONLY,
+            ),
+        )
+
         if progress_cb:
-            suffix = f" (attempt {attempt}/{max_attempts})" if max_attempts > 1 else ""
+            where = f" in {z}" if z else ""
+            suffix = f" (attempt {attempt}/{total}{where})" if total > 1 else where
             progress_cb(f"Submitting Cloud Build export for {image_name} → {dest_uri}{suffix}")
 
         op = client.create_build(project_id=project_id, build=build)
@@ -1747,17 +1815,19 @@ def _export_custom_image_to_vhd_sync(
             err = GCPError(f"Cloud Build {build_id or '(unknown)'} export failed:\n{detail}")
 
         last_err = err
-        if attempt < max_attempts and _is_transient_export_error(str(err)):
-            logger.warning("Cloud Build export: transient failure (attempt %d/%d), retrying: %s",
-                           attempt, max_attempts, detail.splitlines()[-1] if detail else "")
+        if attempt < total and _is_transient_export_error(str(err)):
+            next_zone = zones[attempt]
+            logger.warning("Cloud Build export: transient failure in zone %r (attempt %d/%d), "
+                           "retrying in %r: %s", z or "(default)", attempt, total, next_zone,
+                           detail.splitlines()[-1] if detail else "")
             if progress_cb:
-                progress_cb(f"Export hit a transient capacity error; retrying in {retry_delay}s "
-                            f"(attempt {attempt}/{max_attempts})…")
+                progress_cb(f"Export hit a capacity error in {z or 'the default zone'}; "
+                            f"retrying in {next_zone} in {retry_delay}s…")
             time.sleep(retry_delay)
             continue
         raise err
 
-    # Loop only exits here if the last attempt was transient-and-out-of-retries.
+    # Loop only exits here if the last attempt failed transiently with no zones left.
     raise last_err
 
 
@@ -1770,11 +1840,14 @@ async def export_custom_image_to_vhd(
     subnet: str = "",
     timeout: int = 7200,
     progress_cb=None,
+    zone: str = "",
 ) -> dict:
     """Export a GCE custom image to a VHD on GCS via the Daisy workflow.
 
     Returns {gs_url, format, build_id}. progress_cb is an optional sync callable
-    taking a single string for streaming status into a Job log.
+    taking a single string for streaming status into a Job log. ``zone`` is the
+    preferred zone for the export worker VM; on a capacity failure the export
+    retries in sibling zones of the same region.
     """
     try:
         from google.cloud.devtools import cloudbuild_v1  # noqa: F401
@@ -1784,7 +1857,7 @@ async def export_custom_image_to_vhd(
         return await asyncio.to_thread(
             _export_custom_image_to_vhd_sync,
             project_id, image_name, dest_bucket, dest_object,
-            network, subnet, timeout, progress_cb,
+            network, subnet, timeout, progress_cb, zone,
         )
     except GCPError:
         raise
