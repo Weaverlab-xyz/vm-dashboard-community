@@ -40,6 +40,7 @@ class ClusterProvisionRequest(BaseModel):
     vpc_cidr: Optional[str] = None            # AWS only — the EKS module's own VPC CIDR (default 10.97.0.0/16; distinct per concurrent cluster)
     authorized_cidrs: Optional[list[str]] = None  # restrict the public API endpoint (empty = open)
     zone: Optional[str] = None                # GCP only — zonal cluster zone (else <region>-a)
+    enable_ebs_csi: Optional[bool] = None     # AWS only — install the EBS CSI driver addon (dynamic PVCs); off by default, opt in for stateful workloads (e.g. Rancher)
 
 
 class K8sProvisionOptions(BaseModel):

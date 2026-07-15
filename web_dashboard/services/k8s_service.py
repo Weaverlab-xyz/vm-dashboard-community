@@ -349,6 +349,13 @@ def _build_cluster_tf_variables(*, cloud: str, cluster_id: str, name: str,
             tf["node_instance_type"] = node_type
         if opts.get("node_count"):
             tf["node_desired"] = int(opts["node_count"])
+        # EBS CSI driver (dynamic PVCs) — opt-in; the module default is OFF (most
+        # demo/federation clusters have no storage workloads + it's the slowest,
+        # most failure-prone provision step). The node launch template raises the
+        # IMDS hop limit so the driver's controller can fetch node-role creds when
+        # it IS enabled (e.g. a Rancher management plane).
+        if opts.get("enable_ebs_csi"):
+            tf["enable_ebs_csi"] = True
         # Peer the cluster's own VPC back to the sandbox VPC so an in-cluster agent
         # can reach the private VMs/DBs directly (Entitle/PRA also brokers access
         # without this). Only when the sandbox emitted its VPC id + return RT.
