@@ -70,8 +70,8 @@ variable "node_max" {
 
 variable "enable_ebs_csi" {
   type        = bool
-  default     = true
-  description = "Install the aws-ebs-csi-driver addon so dynamic PVCs bind. EKS ships no CSI driver / default StorageClass out of the box, so stateful workloads (e.g. a Rancher management plane) can't get volumes without it. Lab wiring grants the driver via the node instance role (no IRSA); a default StorageClass is applied post-provision by the k8s runner."
+  default     = false
+  description = "Install the aws-ebs-csi-driver addon so dynamic PVCs bind. OFF by default — most demo/federation clusters have no PVC workloads, and the addon is the slowest, most failure-prone provision step. Opt in for stateful workloads (e.g. a Rancher management plane), which can't get volumes without it. Lab wiring grants the driver via the node instance role (no IRSA), so the node launch template MUST set the IMDS hop limit to 2 (below) or the driver can't fetch node-role creds; a default StorageClass is applied post-provision by the k8s runner."
 }
 
 # Endpoint access. MVP default: public endpoint (optionally CIDR-restricted) +
@@ -397,12 +397,38 @@ resource "aws_eks_cluster" "this" {
   depends_on = [aws_iam_role_policy_attachment.cluster_eks]
 }
 
+# Node launch template — its sole purpose is to raise the IMDS hop limit to 2 so
+# PODS (one network hop from the node) can reach the instance metadata service.
+# The default hop limit is 1, which drops pod→IMDS requests, so any IRSA-less pod
+# that needs the node role's creds via IMDS (e.g. the aws-ebs-csi-driver controller)
+# fails with "no EC2 IMDS role found" → CrashLoopBackOff and the addon never goes
+# ACTIVE. IMDSv2 stays required. No AMI/user_data here — the managed node group
+# still supplies the EKS-optimized AMI + bootstrap.
+resource "aws_launch_template" "node" {
+  name_prefix = "${var.cluster_name}-node-"
+  metadata_options {
+    http_endpoint               = "enabled"
+    http_tokens                 = "required"
+    http_put_response_hop_limit = 2
+  }
+  tag_specifications {
+    resource_type = "instance"
+    tags          = var.tags
+  }
+  tags = var.tags
+}
+
 resource "aws_eks_node_group" "this" {
   cluster_name    = aws_eks_cluster.this.name
   node_group_name = "${var.cluster_name}-ng"
   node_role_arn   = aws_iam_role.node.arn
   subnet_ids      = aws_subnet.private[*].id
   instance_types  = [var.node_instance_type]
+
+  launch_template {
+    id      = aws_launch_template.node.id
+    version = aws_launch_template.node.latest_version
+  }
 
   scaling_config {
     desired_size = var.node_desired

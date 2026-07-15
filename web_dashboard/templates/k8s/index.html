@@ -277,6 +277,14 @@
                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="10.97.0.0/16">
           <p class="text-[11px] text-gray-400 mt-1">Blank = default <code>10.97.0.0/16</code>. Must not overlap the sandbox VPC (<code>10.99.0.0/16</code>); give each concurrent cluster a distinct block.</p>
         </div>
+        <!-- AWS only — EBS CSI driver (dynamic PVCs); off by default, opt in for stateful workloads -->
+        <div x-show="provForm.cloud === 'aws'" x-cloak class="flex items-start gap-2">
+          <input type="checkbox" id="ebs_csi" x-model="provForm.enable_ebs_csi" class="mt-0.5">
+          <label for="ebs_csi" class="text-sm text-gray-700">
+            Install the EBS CSI driver <span class="text-gray-400">(dynamic PVCs)</span>
+            <span class="block text-[11px] text-gray-400">Leave off for federation/JIT demos (no storage). Tick it only for stateful workloads (e.g. a Rancher management plane) — it adds a slower, occasionally flaky addon step.</span>
+          </label>
+        </div>
         <p class="text-[11px] text-gray-400">
           Provisioning takes ~5–15 min; the row shows <span class="font-mono">provisioning → registered</span>.
           AKS/GKE nodes get internet egress (managed outbound / Cloud NAT) so an installed Entitle agent can reach its SaaS.
@@ -667,7 +675,7 @@ function k8sPage() {
     showRegister: false, saving: false,
     form: { name: '', cloud: 'local', kubeconfig: '', mgmt_kind: '' },
     showProvision: false, provBusy: false,
-    provForm: { name: '', cloud: 'aws', region: '', k8s_version: '', node_instance_type: '', node_count: 2, vpc_cidr: '', authorized_cidrs: '', zone: '' },
+    provForm: { name: '', cloud: 'aws', region: '', k8s_version: '', node_instance_type: '', node_count: 2, vpc_cidr: '', authorized_cidrs: '', zone: '', enable_ebs_csi: false },
     provOptions: { cloud: '', region: '', regions: [], node_instance_types: [], k8s_versions: [], subnets: [], configured_subnet_ids: [] },
     loadingProvOpts: false, provOptsError: '',
     showBroker: false, brokering: false, brokerTarget: null,
@@ -718,7 +726,7 @@ function k8sPage() {
     },
 
     openProvision() {
-      this.provForm = { name: '', cloud: 'aws', region: '', k8s_version: '', node_instance_type: '', node_count: 2, vpc_cidr: '', authorized_cidrs: '', zone: '' };
+      this.provForm = { name: '', cloud: 'aws', region: '', k8s_version: '', node_instance_type: '', node_count: 2, vpc_cidr: '', authorized_cidrs: '', zone: '', enable_ebs_csi: false };
       this.provOptions = { cloud: '', region: '', regions: [], node_instance_types: [], k8s_versions: [], subnets: [], configured_subnet_ids: [] };
       this.provOptsError = '';
       this.showProvision = true;
@@ -778,6 +786,7 @@ function k8sPage() {
           body.authorized_cidrs = f.authorized_cidrs.split(',').map(s => s.trim()).filter(Boolean);
         }
         if (f.cloud === 'gcp' && f.zone && f.zone.trim()) body.zone = f.zone.trim();
+        if (f.cloud === 'aws' && f.enable_ebs_csi) body.enable_ebs_csi = true;
         const r = await API.post('/api/k8s/clusters/provision', body);
         this.showProvision = false;
         this.flash('Provisioning cluster… (takes ~10–15 min; watch the status)');

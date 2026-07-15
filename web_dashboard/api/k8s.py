@@ -99,6 +99,7 @@ async def provision_cluster(
         "vpc_cidr": payload.vpc_cidr,
         "authorized_cidrs": payload.authorized_cidrs,
         "zone": payload.zone,
+        "enable_ebs_csi": payload.enable_ebs_csi,
     }.items() if v is not None}
 
     # Pre-action policy gate (inert unless enabled + this action is gated).
