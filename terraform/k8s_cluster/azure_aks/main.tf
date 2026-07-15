@@ -13,11 +13,18 @@ terraform {
 # ARM_TENANT_ID / ARM_SUBSCRIPTION_ID. No creds in this file or in state.
 provider "azurerm" {
   features {
-    # The per-cluster agent Key Vault (below) is torn down with the cluster —
-    # purge it on destroy so its globally-unique name isn't held for the 90-day
-    # soft-delete window, and recover a same-named soft-deleted vault on re-apply.
+    # The per-cluster agent Key Vault (below) is torn down with the cluster.
+    # Don't purge on destroy: purging needs the subscription-scope action
+    # Microsoft.KeyVault/locations/deletedVaults/purge/action, which the
+    # dashboard's service principal isn't granted — so a purge-on-destroy
+    # fails the whole `terraform destroy` even though every resource
+    # (including the vault's soft-delete) was already torn down. The vault's
+    # name is derived per-cluster-id (agent_kv_name), so a lingering
+    # soft-deleted vault never collides with a new cluster, and its 7-day
+    # soft_delete_retention_days auto-purges it. recover_soft_deleted_key_vaults
+    # still recovers a same-named soft-deleted vault on a same-cluster re-apply.
     key_vault {
-      purge_soft_delete_on_destroy    = true
+      purge_soft_delete_on_destroy    = false
       recover_soft_deleted_key_vaults = true
     }
   }
