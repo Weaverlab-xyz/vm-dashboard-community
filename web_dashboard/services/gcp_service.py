@@ -12,7 +12,8 @@ import asyncio
 import hashlib
 import json
 import logging
-from datetime import datetime, timezone
+import time
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -1572,21 +1573,37 @@ async def run_cloud_run_k8s_task(
 
 # ── Export custom image to VHD on GCS (portable artefact) ─────────────────────
 
-def _fetch_cloud_build_log(project_id: str, build_id: str, creds, tail: int = 30) -> str:
+def _fetch_cloud_build_log(project_id: str, build_id: str, creds, tail: int = 30,
+                           since: Optional[datetime] = None) -> str:
     """Return the last `tail` non-empty lines of a Cloud Build's step output from
     Cloud Logging. Used to surface the *real* export failure (e.g. the Daisy
-    `ZONE_RESOURCE_POOL_EXHAUSTED`) instead of the SDK's generic "Build failed;
-    check build logs for details"."""
+    `ZONE_RESOURCE_POOL_EXHAUSTED` or a 503 SERVICE_UNAVAILABLE creating the
+    export worker VM) instead of the SDK's generic "Build failed; check build
+    logs for details".
+
+    A timestamp lower bound is REQUIRED, not optional: Cloud Logging's
+    ``entries:list`` returns *nothing* for an otherwise-correct build_id filter
+    without one (measured live: 0 entries vs 112 with a bound). Omitting it
+    silently defeated this whole surfacing path — the fetch returned empty and
+    the job fell back to the generic "Build failed". Pass the build's create_time
+    as ``since`` for a tight window; otherwise a 24h lookback is used (the exact
+    build_id filter keeps it from matching unrelated builds)."""
     if not build_id:
         return ""
     try:
         from google.auth.transport.requests import AuthorizedSession
     except ImportError:
         return ""
+    floor = since or (datetime.now(timezone.utc) - timedelta(hours=24))
+    if floor.tzinfo is None:
+        floor = floor.replace(tzinfo=timezone.utc)
+    # A few minutes of slack absorbs create_time vs log-ingestion clock skew.
+    ts = (floor - timedelta(minutes=5)).astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     session = AuthorizedSession(creds or _gcp_creds())
     body = {
         "resourceNames": [f"projects/{project_id}"],
-        "filter": f'resource.type="build" resource.labels.build_id="{build_id}"',
+        "filter": (f'resource.type="build" resource.labels.build_id="{build_id}" '
+                   f'timestamp>="{ts}"'),
         "orderBy": "timestamp asc",
         "pageSize": 1000,
     }
@@ -1600,6 +1617,39 @@ def _fetch_cloud_build_log(project_id: str, build_id: str, creds, tail: int = 30
     return "\n".join(lines[-tail:])
 
 
+# Substrings that mark a *transient* Compute capacity/availability failure while
+# Daisy creates the export worker VM — worth an automatic retry, since a fresh
+# build often lands in a zone/pool that has room. Deliberately excludes quota
+# and permission errors, which won't fix themselves on retry.
+_TRANSIENT_EXPORT_MARKERS = (
+    "service unavailable",
+    "httperrorstatuscode:503",
+    "code: 503",
+    "zone_resource_pool_exhausted",
+    "resource_pool_exhausted",
+    "resource pool exhausted",
+    "does not have enough resources",
+    "resource_availability",
+)
+
+
+def _is_transient_export_error(text: str) -> bool:
+    """True if an export failure detail looks like a retryable Compute-capacity blip."""
+    tl = (text or "").lower()
+    return any(m in tl for m in _TRANSIENT_EXPORT_MARKERS)
+
+
+def _export_build_error_detail(project_id, build_id, creds, since, fallback: str) -> str:
+    """Best-effort real error for a failed export build: the Cloud Logging step-log
+    tail if we can read it, else ``fallback`` (usually the SDK's generic message)."""
+    tail = ""
+    try:
+        tail = _fetch_cloud_build_log(project_id, build_id, creds, since=since)
+    except Exception as log_err:
+        logger.warning("Cloud Build export: could not retrieve build log: %s", log_err)
+    return tail.strip() or fallback
+
+
 def _export_custom_image_to_vhd_sync(
     project_id: str,
     image_name: str,
@@ -1609,12 +1659,19 @@ def _export_custom_image_to_vhd_sync(
     subnet: str,
     timeout: int,
     progress_cb,
+    max_attempts: int = 2,
+    retry_delay: int = 45,
 ) -> dict:
     """Trigger the Daisy gce_vm_image_export workflow via Cloud Build.
 
     The container `gcr.io/compute-image-tools/gce_vm_image_export` accepts
     `-format=vpc` to produce a VHD blob written to gs://dest_bucket/dest_object.
     Args also include `-source_image` and `-destination_uri`.
+
+    A transient Compute-capacity failure (503 SERVICE_UNAVAILABLE /
+    ZONE_RESOURCE_POOL_EXHAUSTED while creating the export worker VM) is retried
+    up to ``max_attempts`` times with a fresh build; non-transient failures
+    (quota, permissions, a bad source image) raise immediately.
 
     Returns {gs_url, format, build_id}.
     """
@@ -1656,44 +1713,52 @@ def _export_custom_image_to_vhd_sync(
         ),
     )
 
-    if progress_cb:
-        progress_cb(f"Submitting Cloud Build export for {image_name} → {dest_uri}")
+    last_err: Optional[GCPError] = None
+    for attempt in range(1, max_attempts + 1):
+        if progress_cb:
+            suffix = f" (attempt {attempt}/{max_attempts})" if max_attempts > 1 else ""
+            progress_cb(f"Submitting Cloud Build export for {image_name} → {dest_uri}{suffix}")
 
-    op = client.create_build(project_id=project_id, build=build)
-    metadata = op.metadata
-    build_id = metadata.build.id if metadata and metadata.build else ""
-    if progress_cb and build_id:
-        progress_cb(f"Cloud Build {build_id} started — polling")
+        op = client.create_build(project_id=project_id, build=build)
+        metadata = op.metadata
+        build_id = metadata.build.id if metadata and metadata.build else ""
+        build_create = getattr(metadata.build, "create_time", None) if (metadata and metadata.build) else None
+        if progress_cb and build_id:
+            progress_cb(f"Cloud Build {build_id} started — polling")
 
-    # op.result() blocks until the build finishes and RAISES on failure with a
-    # useless generic "Build failed; check build logs for details". Catch it and
-    # pull the build's own log tail (the Daisy export error — e.g. a
-    # ZONE_RESOURCE_POOL_EXHAUSTED or a permission denial) so the operator sees
-    # the real reason in the job detail instead of having to `gcloud builds log`.
-    try:
-        result = op.result(timeout=timeout)
-    except Exception as build_err:
-        tail = ""
+        # op.result() blocks until the build finishes and RAISES on failure with a
+        # useless generic "Build failed; check build logs for details". Pull the
+        # build's own log tail (the Daisy error — a ZONE_RESOURCE_POOL_EXHAUSTED,
+        # a 503 creating the worker VM, a permission denial) so the operator sees
+        # the real reason instead of having to `gcloud builds log`.
         try:
-            tail = _fetch_cloud_build_log(project_id, build_id, creds)
-        except Exception as log_err:
-            logger.warning("Cloud Build export: could not retrieve build log: %s", log_err)
-        detail = tail.strip() or str(build_err)
-        raise GCPError(f"Cloud Build {build_id or '(unknown)'} export failed:\n{detail}") from build_err
+            result = op.result(timeout=timeout)
+            status = cloudbuild_v1.Build.Status(result.status).name if result.status else "UNKNOWN"
+            if status == "SUCCESS":
+                if progress_cb:
+                    progress_cb(f"Export complete: {dest_uri}")
+                return {"gs_url": dest_uri, "format": "vhd", "build_id": build_id}
+            detail = _export_build_error_detail(
+                project_id, build_id, creds, build_create, result.status_detail or status)
+            err = GCPError(f"Cloud Build {build_id} ended in status {status}:\n{detail}")
+        except Exception as build_err:
+            detail = _export_build_error_detail(
+                project_id, build_id, creds, build_create, str(build_err))
+            err = GCPError(f"Cloud Build {build_id or '(unknown)'} export failed:\n{detail}")
 
-    status = cloudbuild_v1.Build.Status(result.status).name if result.status else "UNKNOWN"
-    if status != "SUCCESS":
-        tail = ""
-        try:
-            tail = _fetch_cloud_build_log(project_id, build_id, creds)
-        except Exception:
-            pass
-        raise GCPError(f"Cloud Build {build_id} ended in status {status}:\n{tail.strip() or result.status_detail}")
+        last_err = err
+        if attempt < max_attempts and _is_transient_export_error(str(err)):
+            logger.warning("Cloud Build export: transient failure (attempt %d/%d), retrying: %s",
+                           attempt, max_attempts, detail.splitlines()[-1] if detail else "")
+            if progress_cb:
+                progress_cb(f"Export hit a transient capacity error; retrying in {retry_delay}s "
+                            f"(attempt {attempt}/{max_attempts})…")
+            time.sleep(retry_delay)
+            continue
+        raise err
 
-    if progress_cb:
-        progress_cb(f"Export complete: {dest_uri}")
-
-    return {"gs_url": dest_uri, "format": "vhd", "build_id": build_id}
+    # Loop only exits here if the last attempt was transient-and-out-of-retries.
+    raise last_err
 
 
 async def export_custom_image_to_vhd(
