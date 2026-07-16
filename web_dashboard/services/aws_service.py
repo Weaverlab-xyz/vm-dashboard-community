@@ -2182,12 +2182,85 @@ async def export_image_to_vhd(
 
 # ── Import VHD from S3 (cross-cloud promote target side) ─────────────────────
 
+def _copy_and_rename_ami_sync(
+    ec2,
+    region: str,
+    source_ami_id: str,
+    name: str,
+    description: str,
+    poll_interval: int,
+    timeout: int,
+    progress_cb,
+) -> str:
+    """Copy `source_ami_id` to a new AMI named `name`, wait for it to become
+    available, then deregister the source AMI + delete its snapshots. Returns
+    the new AMI id.
+
+    ec2:ImportImage can't name the AMI it creates — it auto-generates
+    ``import-ami-…`` — and an AMI's Name is immutable. To give a promoted AMI
+    the same ``{name}-{version}`` identity the Azure/GCP promotes produce, we
+    copy the freshly-imported AMI with the desired Name and drop the temporary
+    one. copy_image makes its own snapshot, so deleting the source's is safe.
+    """
+    import time
+    if progress_cb:
+        progress_cb(f"Renaming imported AMI {source_ami_id} -> '{name}' via copy_image")
+    resp = ec2.copy_image(
+        Name=name,
+        Description=description or f"Promoted AMI (renamed from {source_ami_id})",
+        SourceImageId=source_ami_id,
+        SourceRegion=region,
+    )
+    new_ami_id = resp["ImageId"]
+    ec2.create_tags(
+        Resources=[new_ami_id],
+        Tags=[
+            {"Key": "managed-by", "Value": "vm-dashboard"},
+            {"Key": "PromotedFrom", "Value": source_ami_id},
+            {"Key": "Name", "Value": name},
+        ],
+    )
+    if progress_cb:
+        progress_cb(f"Copy started: {new_ami_id}; waiting for it to become available")
+
+    started = time.time()
+    while True:
+        imgs = ec2.describe_images(ImageIds=[new_ami_id], Owners=["self"]).get("Images", [])
+        state = (imgs[0].get("State") if imgs else "") or ""
+        if state == "available":
+            break
+        if state in ("failed", "error", "invalid", "deregistered"):
+            reason = (imgs[0].get("StateReason", {}) or {}).get("Message", "") if imgs else ""
+            raise AWSError(
+                f"Copy of {source_ami_id} to '{name}' ended in state '{state}': {reason}"
+            )
+        if time.time() - started > timeout:
+            raise AWSError(
+                f"Copy {new_ami_id} (rename of {source_ami_id}) timed out after {timeout}s "
+                f"(last state: {state or 'unknown'})"
+            )
+        time.sleep(poll_interval)
+
+    if progress_cb:
+        progress_cb(f"Renamed AMI available: {new_ami_id}; removing temporary {source_ami_id}")
+    # Drop the temporary import-ami-… AMI + its now-orphaned snapshot(s). The
+    # rename already succeeded, so a leftover temp AMI is non-fatal — log via
+    # the callback and keep the promote green rather than failing on cleanup.
+    try:
+        _deregister_ami_sync(region, source_ami_id)
+    except Exception as e:
+        if progress_cb:
+            progress_cb(f"WARNING: could not clean up temporary AMI {source_ami_id}: {e}")
+    return new_ami_id
+
+
 def _import_image_from_vhd_sync(
     region: str,
     s3_bucket: str,
     s3_key: str,
     role_name: str,
     description: str,
+    name: str,
     disk_format: str,
     poll_interval: int,
     timeout: int,
@@ -2197,6 +2270,12 @@ def _import_image_from_vhd_sync(
     completes. Returns {task_id, image_id, status}. Mirrors
     `_export_image_to_vhd_sync`'s polling shape so the promote-flow Job sees
     matching status lines for both directions.
+
+    If `name` is given, the auto-named ``import-ami-…`` produced by ImportImage
+    is copied to a new AMI with that Name (its immutable Name can't be changed
+    in place) and the temporary one is deregistered, so the promoted AMI ends
+    up named like the Azure/GCP targets ({name}-{version}). `image_id` in the
+    return is then the renamed AMI.
 
     The `vmimport` IAM service role (or whatever `role_name` points at) must
     trust vmie.amazonaws.com and have s3:GetObject on the bucket/key — same
@@ -2239,6 +2318,13 @@ def _import_image_from_vhd_sync(
             image_id = task.get("ImageId")
             if progress_cb:
                 progress_cb(f"Import complete: {image_id}")
+            if name:
+                # Give the AMI its {name}-{version} identity — ImportImage names
+                # it import-ami-… and that Name is immutable, so copy + rename.
+                image_id = _copy_and_rename_ami_sync(
+                    ec2, region, image_id, name, description,
+                    poll_interval, timeout, progress_cb,
+                )
             return {"task_id": task_id, "image_id": image_id, "status": status}
         if status in ("cancelled", "deleted", "cancelling", "deleting"):
             raise AWSError(f"Import task {task_id} ended in state '{status}': {msg}")
@@ -2257,17 +2343,22 @@ async def import_image_from_vhd(
     s3_key: str,
     role_name: str = "vmimport",
     description: str = "",
+    name: str = "",
     disk_format: str = "vhd",
     poll_interval: int = 30,
     timeout: int = 7200,
     progress_cb=None,
 ) -> dict:
     """Import a VHD (or other supported format) from S3 into a new AMI.
-    Returns {task_id, image_id, status}. Polls until terminal state."""
+    Returns {task_id, image_id, status}. Polls until terminal state.
+
+    If `name` is given, the imported AMI is copied to a new AMI with that Name
+    (ImportImage auto-names it import-ami-…, and the Name is immutable) and the
+    temporary one is removed; `image_id` is then the renamed AMI."""
     try:
         return await asyncio.to_thread(
             _import_image_from_vhd_sync,
-            region, s3_bucket, s3_key, role_name, description,
+            region, s3_bucket, s3_key, role_name, description, name,
             disk_format, poll_interval, timeout, progress_cb,
         )
     except AWSError:
