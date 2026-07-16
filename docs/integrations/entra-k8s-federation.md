@@ -189,10 +189,13 @@ Then set the pool on **Settings → Kubernetes**: `gcp_workforce_pool_id=bt-entr
 > **Dashboard service account** needs `roles/gkehub.admin`,
 > `roles/serviceusage.serviceUsageAdmin`, and `roles/resourcemanager.projectIamAdmin`
 > (or equivalent) to register the fleet, enable APIs, and grant the gateway IAM.
-> `scripts/sandbox/Linux/setup-gcp.sh` grants these (and pre-enables the
-> `gkehub`/`connectgateway`/`gkeconnect` APIs) — **re-run it** if you set the sandbox
-> up before this was added, otherwise Enable-federation fails with
-> `403 Forbidden … services:batchEnable`.
+> `scripts/sandbox/Linux/setup-gcp.sh` grants these (and enables the
+> `gkehub`/`connectgateway`/`gkeconnect` **and `cloudresourcemanager`** APIs) —
+> **re-run it** if you set the sandbox up before this was added. Two symptoms of the
+> gap, both surfaced as a bare 403: a missing role → `403 Forbidden … services:batchEnable`;
+> `cloudresourcemanager.googleapis.com` not enabled → `403 Forbidden … :getIamPolicy`
+> (really a `SERVICE_DISABLED`). The dashboard also enables `cloudresourcemanager`
+> itself at Enable-federation time, so a fresh project self-heals.
 
 ### Federate a GKE cluster
 

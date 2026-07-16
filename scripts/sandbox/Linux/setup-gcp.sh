@@ -71,11 +71,15 @@ section "Enable APIs"
 # + Connect Gateway; see docs/integrations/entra-k8s-federation.md) — pre-enabling
 # them here makes the dashboard's Enable-federation step a fast no-op instead of a
 # cold API enable.
+# cloudresourcemanager.googleapis.com backs the project-level get/setIamPolicy the
+# federation's gateway-IAM grant uses (and the project-number lookup for the Connect
+# Gateway URL). It is NOT enabled by default on every project — without it those calls
+# fail with a "403 Forbidden … :getIamPolicy" that is really a SERVICE_DISABLED.
 for api in compute.googleapis.com secretmanager.googleapis.com iam.googleapis.com run.googleapis.com cloudbuild.googleapis.com container.googleapis.com \
-           gkehub.googleapis.com connectgateway.googleapis.com gkeconnect.googleapis.com; do
+           gkehub.googleapis.com connectgateway.googleapis.com gkeconnect.googleapis.com cloudresourcemanager.googleapis.com; do
   gcloud services enable "$api" --project "$PROJECT_ID" --quiet
 done
-ok "Enabled compute, secretmanager, iam, run, cloudbuild, container, gkehub, connectgateway, gkeconnect"
+ok "Enabled compute, secretmanager, iam, run, cloudbuild, container, gkehub, connectgateway, gkeconnect, cloudresourcemanager"
 
 # ── 2. VPC + subnets ─────────────────────────────────────────────────────────
 section "VPC + subnets"
