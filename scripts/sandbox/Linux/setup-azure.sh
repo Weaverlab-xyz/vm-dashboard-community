@@ -292,10 +292,13 @@ fi
 section "Service principal"
 SP_NAME="${NAME}-sp"
 SP_JSON_PATH="$(state_dir azure)/sp.json"
+# Defined unconditionally: later blocks (User Access Administrator grant at §6b)
+# reference it on BOTH the create AND the reuse path, and `set -u` aborts the
+# script with "RG_SCOPE: unbound variable" if only the create branch set it.
+RG_SCOPE="/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RG"
 if [[ -s "$SP_JSON_PATH" ]] && jq -e '.appId' "$SP_JSON_PATH" >/dev/null 2>&1; then
   ok "Reusing service principal from $SP_JSON_PATH"
 else
-  RG_SCOPE="/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RG"
   az ad sp create-for-rbac -n "$SP_NAME" \
     --role Contributor --scopes "$RG_SCOPE" \
     --years 1 -o json > "$SP_JSON_PATH"
