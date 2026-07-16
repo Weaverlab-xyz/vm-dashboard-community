@@ -78,6 +78,9 @@ def test_oidc_login_kubeconfig_swaps_exec_and_carries_no_token():
     assert exec_blk["args"][0:2] == ["oidc-login", "get-token"]
     assert "--oidc-issuer-url=https://login.microsoftonline.com/TENANT/v2.0" in exec_blk["args"]
     assert "--oidc-client-id=CLIENT-GUID" in exec_blk["args"]
+    # device-code grant (not authcode) so the file works on Entra-joined / cross-tenant
+    # / headless machines without hitting the machine's own-tenant browser SSO.
+    assert "--grant-type=device-code" in exec_blk["args"]
     # The cloud-native `aws eks get-token` auth is gone (now the user's Entra identity).
     assert "aws" not in exec_blk["args"] and "eks" not in exec_blk["args"]
     assert exec_blk["command"] != "aws"

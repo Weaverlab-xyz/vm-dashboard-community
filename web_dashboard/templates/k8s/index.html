@@ -106,6 +106,10 @@
                       title="Make the cluster TRUST Entra as an OIDC identity provider so users authenticate as themselves (EKS via associate-identity-provider-config; AKS is native). Pairs with the Entra group binding + the API tunnel."
                       class="text-xs px-2 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded font-medium"
                       x-text="c.entra_federation_enabled ? 'Federated ✓' : 'Entra federation'"></button>
+              <button x-show="(c.status === 'registered' || c.status === 'managed') && c.entra_federation_enabled && c.entra_group_bound" x-cloak
+                      @click="downloadEntraKubeconfig(c)"
+                      title="Download this cluster's real-identity kubeconfig — per-cloud (EKS: kubectl oidc-login / AKS: Azure kubelogin / GKE: Connect Gateway). Enabled once the cluster is federated AND the Entra group is bound. EKS/AKS: connect the API tunnel first; the EKS file uses device-code sign-in."
+                      class="text-xs px-2 py-1 bg-green-600 hover:bg-green-700 text-white rounded font-medium">kubeconfig ⤓</button>
               <button @click="openSecrets(c)"
                       title="In-cluster Password Safe secret delivery (External Secrets Operator, Phase 4)"
                       class="text-xs px-2 py-1 bg-violet-600 hover:bg-violet-700 text-white rounded font-medium">
@@ -573,8 +577,10 @@
               Additive to IAM — node bootstrap and console access are unchanged.
             </p>
             <p class="text-[11px] text-amber-600">
-              End users need <code>kubectl oidc-login</code> (int128 kubelogin) installed. Connect the API tunnel,
-              then use the downloaded Entra kubeconfig. EKS allows one OIDC provider per cluster.
+              End users need the int128 <code>kubectl oidc-login</code> plugin — install with <code>kubectl krew install oidc-login</code>
+              (krew registers the <code>kubectl-oidc_login</code> alias reliably; a plain winget/zip install may not). Connect the API
+              tunnel, then use the downloaded Entra kubeconfig — it uses <strong>device-code</strong> sign-in, so it also works on
+              Entra-joined / cross-tenant machines. EKS allows one OIDC provider per cluster.
             </p>
           </div>
         </template>
@@ -1113,8 +1119,9 @@ function k8sPage() {
       }
     },
 
-    async downloadEntraKubeconfig() {
-      const c = this.fedTarget;
+    async downloadEntraKubeconfig(cluster) {
+      const c = cluster || this.fedTarget;
+      if (!c) return;
       try {
         const token = Alpine.store('auth').token;
         const resp = await fetch(`/api/k8s/clusters/${c.id}/entra-kubeconfig`, {
@@ -1128,7 +1135,9 @@ function k8sPage() {
         a.download = `${c.name || c.id}-entra.kubeconfig`;
         document.body.appendChild(a); a.click(); a.remove();
         URL.revokeObjectURL(url);
-        this.flash('Entra kubeconfig downloaded — connect the API tunnel, then point KUBECONFIG at it.');
+        this.flash(c.cloud === 'gcp'
+          ? 'Connect Gateway kubeconfig downloaded — run "gcloud auth login --login-config" first, then point KUBECONFIG at it.'
+          : 'Entra kubeconfig downloaded — connect the API tunnel, then point KUBECONFIG at it (EKS uses device-code sign-in).');
       } catch (e) {
         this.flash(e.message || 'kubeconfig download failed.', 'error');
       }
