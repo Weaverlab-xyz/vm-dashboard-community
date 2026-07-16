@@ -21,6 +21,7 @@ The source URL is presigned by the dashboard at task-launch time so this
 container never needs source-side credentials.
 """
 import argparse
+import json
 import os
 import shutil
 import subprocess
@@ -232,19 +233,53 @@ def install_gcp_guest_agent(disk_path: str, source_format: str) -> None:
 
 
 def convert_to_fixed_vhd(src: str, dst: str) -> None:
-    """Produce a FIXED-format VHD for Azure. Azure managed-image/disk creation
-    rejects dynamic VHDs ("is of Dynamic VHD type. Please retry with fixed VHD
-    type"), and qemu-img's `vpc` output is dynamic unless subformat=fixed.
-    force_size=on keeps the virtual size exact so the footer size Azure reads
-    back is correct (no CHS-geometry rounding). qemu-img auto-detects the source
-    format, so this works whether the source is a dynamic VHD or raw."""
+    """Produce a FIXED-format VHD for Azure, with an MB-aligned virtual size.
+
+    Azure managed-image/disk creation rejects:
+      * dynamic VHDs — "is of Dynamic VHD type. Please retry with fixed VHD type"
+        (qemu-img's `vpc` output is dynamic unless subformat=fixed); and
+      * a virtual size that isn't a whole number of MB (1 MB = 1024*1024) —
+        "(InvalidParameter) The VHD ... has an unsupported virtual size of
+        N.xxx MB. The size must be a whole number in (MBs)."
+
+    force_size=on writes the source's EXACT virtual size into the footer (no
+    CHS-geometry rounding, which would otherwise change/corrupt the size). But
+    that means a source disk whose size isn't a whole MB — common for foreign
+    images, e.g. a GCP-exported VHD at 20480.41 MB — carries that fractional MB
+    into the footer and Azure rejects it. So first normalise to raw and round the
+    virtual size UP to the next whole MB (the added tail is unpartitioned free
+    space — safe), then wrap the aligned raw as a fixed VHD."""
+    MB = 1024 * 1024
+    raw = "/tmp/azure-aligned.raw"
     log(f"convert to fixed VHD {src} -> {dst}")
+    # 1) Normalise to raw so the size can be resized precisely (raw always
+    #    supports qemu-img resize; vpc/vhd does not reliably).
     subprocess.check_call(
-        ["qemu-img", "convert", "-p", "-O", "vpc", "-o", "subformat=fixed,force_size=on", src, dst],
-        stdout=sys.stdout,
-        stderr=sys.stderr,
+        ["qemu-img", "convert", "-O", "raw", src, raw],
+        stdout=sys.stdout, stderr=sys.stderr,
     )
-    size_mb = os.path.getsize(dst) / (1024 * 1024)
+    # 2) Round the virtual size UP to a whole MB (Azure's requirement).
+    info = json.loads(subprocess.check_output(
+        ["qemu-img", "info", "--output", "json", "-f", "raw", raw]))
+    vsize = int(info["virtual-size"])
+    aligned = ((vsize + MB - 1) // MB) * MB
+    if aligned != vsize:
+        log(f"round virtual size {vsize} B -> {aligned} B ({aligned // MB} MB) for Azure alignment")
+        subprocess.check_call(
+            ["qemu-img", "resize", "-f", "raw", raw, str(aligned)],
+            stdout=sys.stdout, stderr=sys.stderr,
+        )
+    # 3) Wrap the aligned raw as a fixed VHD (force_size keeps our exact MB size).
+    subprocess.check_call(
+        ["qemu-img", "convert", "-p", "-f", "raw", "-O", "vpc",
+         "-o", "subformat=fixed,force_size=on", raw, dst],
+        stdout=sys.stdout, stderr=sys.stderr,
+    )
+    try:
+        os.remove(raw)  # reclaim the intermediate; the runner disk is not large
+    except OSError:
+        pass
+    size_mb = os.path.getsize(dst) / MB
     log(f"fixed VHD done ({size_mb:.1f} MiB)")
 
 
