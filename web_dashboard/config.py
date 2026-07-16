@@ -65,37 +65,40 @@ class Settings(BaseSettings):
     # to these). Read live via config_service.
     k8s_rancher_entitle_bundle: str = ""    # Entitle bundle/role id for time-boxed Rancher RBAC (mgmt_kind=rancher)
     k8s_entitle_duration_minutes: int = 60  # default grant window for the Rancher JIT request
-    # K8s management plane = Rancher (central + import). One Rancher server is
-    # stood up on a designated management cluster; other clusters are imported
-    # (cattle-cluster-agent dials out — fits private clusters). Deployed via the
-    # k8s runner (helm). Read live via config_service.
-    rancher_central_cluster_id: str = ""      # K8sCluster.id hosting the central Rancher ("" = not stood up yet)
-    rancher_server_url: str = ""              # Rancher server-url (stable internal host, e.g. https://rancher.<zone>.internal)
+    # K8s management plane = Rancher (import model). The central Rancher server
+    # runs as a single privileged container on a PUBLIC (source-restricted) GCE
+    # COS VM (see gcp_rancher_* above); every k8s cluster is imported into it
+    # (cattle-cluster-agent dials OUT to the server-url — fits private clusters
+    # on any cloud / on-prem). The dashboard calls the Rancher v3 API directly
+    # over HTTPS with the stored API token. Read live via config_service.
+    rancher_server_url: str = ""              # Rancher server-url = https://<node public IP> (set by the deploy job)
     rancher_api_token: str = ""               # Rancher API bearer token minted at bootstrap; encrypted at rest
     rancher_bootstrap_password: str = ""      # first-run admin bootstrap password; encrypted at rest
-    rancher_namespace: str = "cattle-system"  # namespace the Rancher server installs into
-    rancher_chart_repo: str = "https://releases.rancher.com/server-charts/stable"
-    rancher_chart: str = "rancher"            # chart name within rancher_chart_repo
-    rancher_chart_version: str = ""           # pin the Rancher chart version ("" = latest in the repo)
-    rancher_cert_source: str = "rancher"      # cert-manager mode: rancher (self-signed CA) | letsEncrypt | secret
-    cert_manager_chart_version: str = ""      # pin cert-manager ("" = latest)
-    ingress_nginx_chart_version: str = ""     # pin ingress-nginx ("" = latest)
-    rancher_allowed_source_cidrs: str = ""    # CSV CIDRs allowed to reach the PUBLIC Rancher LB (Service loadBalancerSourceRanges); "" = open (TLS + admin-auth only). Set to the downstream clusters' egress IPs + the operator's IP to restrict.
-    # Rancher UI PRA web-broker: a tunnel_type=tcp jump to the central Rancher's
-    # HTTPS so the operator reaches the UI via the PRA rep console (no public
-    # ingress). Blank jump group/jumpoint fall back to the shared bt_* defaults.
+    rancher_verify_tls: bool = False          # verify the Rancher TLS cert on direct-HTTPS API calls; False = accept the node's self-signed cert
+    rancher_allowed_source_cidrs: str = ""    # CSV CIDRs allowed to reach the node's PUBLIC IP (GCE firewall source_ranges, tcp 80/443). "" = firewall NOT opened (fail closed) unless gcp_rancher_allow_open. Set to the downstream clusters' egress IPs + the operator's IP.
+    # Rancher UI PRA web-broker (OPT-IN): an sra_web_jump to the node's HTTPS so
+    # an operator whose IP is NOT in rancher_allowed_source_cidrs can still reach
+    # the UI via the PRA rep console (zero-trust / session recording). When
+    # disabled, open_console returns the direct server_url deep-link. Blank jump
+    # group/jumpoint fall back to the shared bt_* defaults.
+    rancher_ui_web_jump_enabled: bool = False # gate the sra_web_jump broker; False = use the direct public URL
+    rancher_ui_verify_certificate: bool = False  # sra_web_jump verify_certificate (False for the node's self-signed cert)
     rancher_ui_jump_group: str = ""           # "" = bt_jump_group_name
     rancher_ui_jumpoint_name: str = ""        # "" = bt_jumpoint_name
     rancher_ui_local_port: int = 443          # local listen port (match Rancher 443 for SNI/cert)
     rancher_ui_web_jump_id: str = ""          # PRA Web Jump id for the central Rancher UI (runtime-set)
     rancher_ui_web_jump_tfstate: str = ""     # terraform state for the Web Jump (for teardown)
-    # Entitle Rancher connector registration. The application slug + connection
-    # field names are tenant/connector-specific — confirm against the
-    # entitle_applications catalog before use (defaults are best-effort).
+    # Entitle Rancher connector registration. The application slug is
+    # tenant/connector-specific — confirm against the entitle_applications catalog
+    # before use (default is best-effort). With the PUBLIC source-restricted node,
+    # Entitle's cloud can reach it directly (private=False, no agent token); set
+    # entitle_rancher_private for tenants who lock the node behind CIDRs Entitle
+    # can't traverse.
     entitle_rancher_app_slug: str = "rancher"     # Entitle application catalog slug for the Rancher connector
-    entitle_rancher_url_key: str = "url"          # connection_json key for the Rancher server URL
-    entitle_rancher_token_key: str = "api_token"  # connection_json key for the Rancher API token
-    entitle_rancher_integration_id: str = ""      # set after register_rancher
+    entitle_rancher_private: bool = False         # attach the shared Entitle agent token (node unreachable from Entitle's cloud)
+    entitle_rancher_url_key: str = "url"          # (unused — _generate_rancher_hcl hardcodes connection_json keys) retained for compat
+    entitle_rancher_token_key: str = "api_token"  # (unused — see above)
+    entitle_rancher_integration_id: str = ""      # set by register_rancher_in_entitle
     entitle_rancher_tfstate: str = ""             # terraform state for the Rancher integration (for deregister)
     # K8s Phase 4 (Feature D) — in-cluster Password Safe secret delivery via the
     # External Secrets Operator. The BeyondTrust ClusterSecretStore authenticates
@@ -739,6 +742,19 @@ class Settings(BaseSettings):
     gcp_default_network_tag: str = ""
     gcp_bt_jump_group_name: str = ""     # BT jump group for GCP Shell Jumps (falls back to bt_jump_group_name)
     gcp_jumpoint_name: str = ""          # Jumpoint name for GCP Shell Jumps (falls back to bt_jumpoint_name)
+    # Rancher management node — a single privileged Rancher container on a
+    # Container-Optimized-OS GCE VM with a PUBLIC (source-restricted) IP. Same
+    # COS/konlet mechanism as the Jumpoint. The node is treated as EPHEMERAL: a
+    # stop/recreate reassigns the external IP and wipes /var/lib/rancher (boot
+    # disk auto-deletes), so it must re-bootstrap and downstream clusters must
+    # re-import. Read live via config_service.
+    gcp_rancher_image: str = "rancher/rancher:latest"  # Rancher server container image
+    gcp_rancher_machine_type: str = "e2-medium"        # Rancher needs ≥4 GB RAM; e2-micro/small OOM
+    gcp_rancher_zone: str = ""            # blank → gcp_zone
+    gcp_rancher_name: str = "rancher-server"
+    gcp_rancher_boot_disk_gb: int = 30    # COS boot disk (holds /var/lib/rancher; auto-deletes on stop)
+    gcp_rancher_network_tag: str = "rancher"  # network tag on the VM = firewall target tag
+    gcp_rancher_allow_open: bool = False  # opt-in to open 0.0.0.0/0 when rancher_allowed_source_cidrs is empty; otherwise empty = firewall NOT opened (fail closed)
 
     # Entitle integration — shared API credentials (used by machine-identity
     # JIT, user-JIT, and resource registration below).

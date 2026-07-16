@@ -44,6 +44,15 @@
         On-Premises
       </button>
       {% endif %}
+      {% if k8s_management_enabled %}
+      <button @click="activeTab = 'rancher'; loadRancher()"
+              :class="activeTab === 'rancher'
+                ? 'border-b-2 border-blue-600 text-blue-600 font-semibold'
+                : 'border-b-2 border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'"
+              class="px-4 py-2 text-sm transition whitespace-nowrap">
+        Kubernetes (Rancher)
+      </button>
+      {% endif %}
     </nav>
   </div>
 
@@ -593,6 +602,149 @@
 
   </div><!-- /Cloud panel -->
 
+  {% if k8s_management_enabled %}
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <!-- KUBERNETES (RANCHER) PANEL                                            -->
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <div x-show="activeTab === 'rancher'" x-cloak>
+
+    <div class="mb-4">
+      <h2 class="text-lg font-semibold text-gray-800">Rancher management node</h2>
+      <p class="text-sm text-gray-500 mt-1">
+        A single privileged Rancher container on a public Container-Optimized-OS GCE VM.
+        Import any k8s cluster into it — the cattle-cluster-agent dials <strong>out</strong> to
+        this node, so private clusters on any cloud / on-prem work as long as they have egress.
+        This node is <strong>ephemeral</strong>: a stop/recreate changes its IP and wipes state.
+      </p>
+    </div>
+
+    <!-- Not configured -->
+    <div x-show="!rancherLoading && !rancherConfigured" x-cloak
+         class="bg-amber-50 border border-amber-200 rounded-xl p-5">
+      <p class="text-sm text-amber-800 font-medium">Rancher node isn't configured yet.</p>
+      <p class="text-sm text-amber-700 mt-1">
+        Set a GCP project and a Rancher <strong>bootstrap password</strong> (and allowed source CIDRs)
+        in <a href="/settings" class="underline font-medium">Settings → Kubernetes</a> before deploying.
+      </p>
+    </div>
+
+    <div x-show="rancherError"
+         class="mb-3 px-3 py-2 rounded-lg bg-red-50 border border-red-200 text-sm text-red-700"
+         x-text="rancherError"></div>
+
+    <!-- Configured -->
+    <div x-show="!rancherLoading && rancherConfigured" x-cloak class="space-y-6">
+
+      <!-- Node status -->
+      <div>
+        <div class="flex items-center justify-between mb-3">
+          <h3 class="text-base font-semibold text-gray-800">Node</h3>
+          <div class="flex items-center gap-2">
+            <button @click="loadRancher()" :disabled="rancherLoading"
+                    class="px-2.5 py-1 text-xs font-medium text-gray-600 border border-gray-300 hover:bg-gray-50 rounded-lg transition">
+              Refresh
+            </button>
+            <button @click="deployRancher()" :disabled="rancherDeploying"
+                    class="px-3 py-1.5 text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 rounded-lg transition">
+              <span x-show="!rancherDeploying" x-text="rancherNodes.length ? 'Redeploy' : 'Deploy Rancher node'"></span>
+              <span x-show="rancherDeploying">Deploying…</span>
+            </button>
+          </div>
+        </div>
+
+        <div x-show="rancherNodes.length === 0"
+             class="text-sm text-gray-500 py-6 text-center bg-white rounded-xl border border-gray-200">
+          No Rancher node running. Click <strong>Deploy Rancher node</strong> to stand one up.
+        </div>
+
+        <div x-show="rancherNodes.length > 0"
+             class="bg-white rounded-xl shadow-sm overflow-hidden border border-gray-200">
+          <table class="min-w-full divide-y divide-gray-200">
+            <thead class="bg-gray-50">
+              <tr>
+                <th class="px-4 py-3 text-left text-xs font-semibold uppercase text-gray-500">Name</th>
+                <th class="px-4 py-3 text-left text-xs font-semibold uppercase text-gray-500">Zone</th>
+                <th class="px-4 py-3 text-left text-xs font-semibold uppercase text-gray-500">Machine</th>
+                <th class="px-4 py-3 text-left text-xs font-semibold uppercase text-gray-500">URL</th>
+                <th class="px-4 py-3 text-left text-xs font-semibold uppercase text-gray-500">Status</th>
+                <th class="px-4 py-3 text-right text-xs font-semibold uppercase text-gray-500">Actions</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-gray-100">
+              <template x-for="n in rancherNodes" :key="n.name">
+                <tr class="hover:bg-gray-50">
+                  <td class="px-4 py-3 text-sm font-medium text-gray-900 font-mono" x-text="n.name"></td>
+                  <td class="px-4 py-3 text-sm text-gray-600" x-text="n.zone"></td>
+                  <td class="px-4 py-3 text-sm text-gray-600" x-text="n.machine_type || '—'"></td>
+                  <td class="px-4 py-3 text-sm">
+                    <a x-show="n.url" :href="n.url" target="_blank"
+                       class="text-blue-600 hover:underline font-mono break-all" x-text="n.url"></a>
+                    <span x-show="!n.url" class="text-gray-400">—</span>
+                  </td>
+                  <td class="px-4 py-3 text-sm">
+                    <span :class="n.status === 'RUNNING'
+                      ? 'bg-green-100 text-green-700 ring-1 ring-green-200'
+                      : 'bg-gray-100 text-gray-700 ring-1 ring-gray-200'"
+                          class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium">
+                      <span x-text="n.status"></span>
+                    </span>
+                  </td>
+                  <td class="px-4 py-3 text-sm text-right">
+                    <button @click="stopRancher(n)"
+                            :disabled="rancherActionPending === n.name"
+                            class="text-red-600 hover:underline disabled:opacity-40">Stop</button>
+                  </td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+        </div>
+        <p class="mt-2 text-xs text-gray-400">
+          Reachability is governed by the <code>rancher_allowed_source_cidrs</code> firewall rule (Settings).
+          Stop deletes the VM + firewall and clears the node's runtime config.
+        </p>
+      </div>
+
+      <!-- Import a cluster -->
+      <div class="border-t border-gray-100 pt-5">
+        <h3 class="text-base font-semibold text-gray-800 mb-2">Import a cluster</h3>
+        <p class="text-sm text-gray-500 mb-3">
+          Creates an imported cluster in Rancher and returns a registration command to run against the
+          target cluster's kubeconfig. Works for private clusters anywhere (egress to this node only).
+        </p>
+        <div class="flex gap-2 items-end">
+          <div class="flex-1 max-w-sm">
+            <label class="block text-sm font-medium text-gray-700 mb-1">Cluster name</label>
+            <input type="text" x-model="rancherImportName" placeholder="prod-eks-1"
+                   :disabled="!rancherServerUrl"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+          </div>
+          <button @click="importCluster()" :disabled="rancherImporting || !rancherServerUrl"
+                  class="px-4 py-2 text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 rounded-lg transition">
+            <span x-show="!rancherImporting">Import</span>
+            <span x-show="rancherImporting">Creating…</span>
+          </button>
+        </div>
+        <p x-show="!rancherServerUrl" class="text-[11px] text-gray-400 mt-1">
+          Deploy + bootstrap the node first (it needs a server URL + API token).
+        </p>
+
+        <div x-show="rancherManifestCmd" x-cloak class="mt-3">
+          <label class="block text-sm font-medium text-gray-700 mb-1">Run this on the target cluster</label>
+          <div class="flex gap-2">
+            <code class="flex-1 bg-gray-900 text-gray-100 rounded-lg px-3 py-2 text-xs font-mono break-all"
+                  x-text="rancherManifestCmd"></code>
+            <button @click="copyManifestCmd()"
+                    class="px-3 py-2 text-xs font-medium text-gray-600 border border-gray-300 hover:bg-gray-50 rounded-lg transition">
+              Copy
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div><!-- /Rancher panel -->
+  {% endif %}
+
 
   <!-- ══════════════════════════════════════════════════════════════════════ -->
   <!-- Deploy Container Modal                                                -->
@@ -982,11 +1134,23 @@ function containersDashboard() {
     gceComposeError: null,
     gceComposeActionPending: null,
 
+    // Rancher management node (privileged container on GCE COS)
+    rancherConfigured: false,
+    rancherNodes: [],
+    rancherServerUrl: '',
+    rancherLoading: false,
+    rancherError: null,
+    rancherDeploying: false,
+    rancherActionPending: null,
+    rancherImportName: '',
+    rancherManifestCmd: '',
+    rancherImporting: false,
+
     // ── Lifecycle ──────────────────────────────────────────────────────────
     async init() {
       requireAuth();
       const hash = window.location.hash.slice(1);
-      if (['onprem', 'cloud'].includes(hash)) {
+      if (['onprem', 'cloud', 'rancher'].includes(hash)) {
         this.activeTab = hash;
       }
       const tasks = [
@@ -997,6 +1161,9 @@ function containersDashboard() {
       ];
       {% if portainer_enabled %}
       tasks.push(this.loadEndpoints());
+      {% endif %}
+      {% if k8s_management_enabled %}
+      tasks.push(this.loadRancher());
       {% endif %}
       await Promise.all(tasks);
     },
@@ -1361,6 +1528,68 @@ function containersDashboard() {
         toast(e.message, 'error');
       } finally {
         this.gceComposeActionPending = null;
+      }
+    },
+
+    // ── Rancher management node ──────────────────────────────────────────────
+    async loadRancher() {
+      this.rancherLoading = true;
+      this.rancherError = null;
+      try {
+        const data = await API.get('/api/containers/rancher');
+        this.rancherConfigured = !!data.configured;
+        this.rancherNodes = data.nodes || [];
+        this.rancherServerUrl = data.server_url || '';
+      } catch (e) {
+        this.rancherError = e.message;
+        this.rancherNodes = [];
+      } finally {
+        this.rancherLoading = false;
+      }
+    },
+
+    async deployRancher() {
+      this.rancherDeploying = true;
+      try {
+        const resp = await API.post('/api/containers/rancher/deploy', {});
+        window.location.href = `/jobs/${resp.job_id}`;
+      } catch (e) {
+        toast(e.message, 'error');
+        this.rancherDeploying = false;
+      }
+    },
+
+    async stopRancher(n) {
+      if (!confirm(`Tear down Rancher node "${n.name}"? This deletes the VM + firewall and clears its config. Any imported clusters will be orphaned.`)) return;
+      this.rancherActionPending = n.name;
+      try {
+        const resp = await API.post(`/api/containers/rancher/${encodeURIComponent(n.name)}/stop?zone=${encodeURIComponent(n.zone)}&force=true`);
+        window.location.href = `/jobs/${resp.job_id}`;
+      } catch (e) {
+        toast(e.message, 'error');
+        this.rancherActionPending = null;
+      }
+    },
+
+    async importCluster() {
+      const name = (this.rancherImportName || '').trim();
+      if (!name) { toast('Enter a cluster name', 'error'); return; }
+      this.rancherImporting = true;
+      try {
+        const data = await API.post('/api/containers/rancher/import', { name });
+        this.rancherManifestCmd = data.apply_command;
+        toast(`Import cluster '${name}' created — run the command on the target cluster`, 'success');
+      } catch (e) {
+        toast(e.message, 'error');
+      } finally {
+        this.rancherImporting = false;
+      }
+    },
+
+    copyManifestCmd() {
+      if (this.rancherManifestCmd) {
+        navigator.clipboard.writeText(this.rancherManifestCmd);
+        toast('Copied', 'success');
       }
     },
 

@@ -38,6 +38,7 @@ HANDLED_TYPES = (
     "k8s_provision", "k8s_decommission",
     "k8s_management", "k8s_secret_delivery", "k8s_entitle_agent", "k8s_entitle_register",
     "k8s_tunnel", "k8s_api_tunnel", "k8s_group_binding", "k8s_entra_federation",
+    "rancher_node_deploy", "rancher_node_teardown", "rancher_entitle_register",
     "clouddb_provision", "clouddb_decommission", "clouddb_entitle_register",
     "vdesktop_pool_provision", "vdesktop_pool_teardown",
     "packer_aws_build", "packer_azure_build", "packer_gcp_build",
@@ -142,6 +143,15 @@ async def _dispatch(job_id: str, job_type: str, meta: dict) -> None:
             await k8s_service.run_entra_federation(
                 db, cluster_id=meta["cluster_id"], job_id=job_id,
                 action=meta.get("action", "enable"))
+        elif job_type == "rancher_node_deploy":
+            from .services import rancher_node_service
+            await rancher_node_service.run_deploy(db, job_id=job_id, meta=meta)
+        elif job_type == "rancher_node_teardown":
+            from .services import rancher_node_service
+            await rancher_node_service.run_teardown(db, job_id=job_id, meta=meta)
+        elif job_type == "rancher_entitle_register":
+            await k8s_service.run_rancher_entitle_register(
+                db, job_id=job_id, action=meta.get("action", "register"))
         elif job_type == "clouddb_provision":
             await cloud_database_service.run_provision_apply(
                 db, db_id=meta["db_id"], job_id=job_id,

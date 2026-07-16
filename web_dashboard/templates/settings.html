@@ -1979,6 +1979,72 @@
               <p class="text-[11px] text-gray-400 mt-1">The pool's OIDC provider needs the attribute mapping <code>google.groups=assertion.groups</code> so the Entra group Object IDs reach the token.</p>
             </div>
           </div>
+
+          <!-- Rancher management node (GCE COS) -->
+          <div class="border-t border-gray-100 pt-4">
+            <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-1">Rancher management node <span class="normal-case text-gray-400">(GCE COS)</span></p>
+            <p class="text-[11px] text-gray-400 mb-2">
+              The central Rancher server runs as a single privileged container on a <strong>public</strong> Container-Optimized-OS GCE VM (deployed from the <a href="/containers" class="underline">Containers</a> page). Every k8s cluster is <em>imported</em> into it — the cattle-cluster-agent dials <strong>out</strong> to the node, so private clusters on any cloud / on-prem work as long as they have egress. The node is <strong>ephemeral</strong>: a stop/recreate changes its IP and wipes state.
+            </p>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Bootstrap password</label>
+              <input type="password" x-model="panelCfg.rancher_bootstrap_password" autocomplete="new-password"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     placeholder="first-run admin password (stored encrypted)">
+              <p class="text-[11px] text-gray-400 mt-1">Used once to bootstrap the Rancher admin on first boot; the API token is minted from it and stored encrypted.</p>
+            </div>
+            <div class="mt-3">
+              <label class="block text-sm font-medium text-gray-700 mb-1">Allowed source CIDRs</label>
+              <input type="text" x-model="panelCfg.rancher_allowed_source_cidrs"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     placeholder="203.0.113.4/32, 198.51.100.0/24">
+              <p class="text-[11px] text-amber-600 mt-1">GCE firewall source ranges for the node's public IP (tcp 80/443). <strong>Empty = the firewall is NOT opened</strong> (the node boots but is unreachable) unless you tick "Allow open" below. Set to the downstream clusters' egress IPs + your operator IP.</p>
+            </div>
+            <div class="grid grid-cols-2 gap-3 mt-3">
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Machine type</label>
+                <input type="text" x-model="panelCfg.gcp_rancher_machine_type"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                       placeholder="e2-medium">
+                <p class="text-[11px] text-gray-400 mt-1">Rancher needs ≥4 GB RAM.</p>
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Zone <span class="text-gray-400">(optional)</span></label>
+                <input type="text" x-model="panelCfg.gcp_rancher_zone"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                       placeholder="(blank → GCP default zone)">
+              </div>
+            </div>
+            <div class="grid grid-cols-2 gap-3 mt-3">
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Container image</label>
+                <input type="text" x-model="panelCfg.gcp_rancher_image"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                       placeholder="rancher/rancher:latest">
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Boot disk (GB)</label>
+                <input type="number" min="20" x-model.number="panelCfg.gcp_rancher_boot_disk_gb"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                       placeholder="30">
+              </div>
+            </div>
+            <div class="mt-3 flex items-center gap-2">
+              <input type="checkbox" id="gcp_rancher_allow_open" x-model="panelCfg.gcp_rancher_allow_open"
+                     class="rounded border-gray-300">
+              <label for="gcp_rancher_allow_open" class="text-sm text-gray-700">Allow open <span class="text-gray-400">(open 0.0.0.0/0 when no CIDRs are set — not recommended)</span></label>
+            </div>
+            <div class="mt-2 flex items-center gap-2">
+              <input type="checkbox" id="rancher_verify_tls" x-model="panelCfg.rancher_verify_tls"
+                     class="rounded border-gray-300">
+              <label for="rancher_verify_tls" class="text-sm text-gray-700">Verify TLS certificate <span class="text-gray-400">(leave off for the node's self-signed cert)</span></label>
+            </div>
+            <div class="mt-2 flex items-center gap-2">
+              <input type="checkbox" id="rancher_ui_web_jump_enabled" x-model="panelCfg.rancher_ui_web_jump_enabled"
+                     class="rounded border-gray-300">
+              <label for="rancher_ui_web_jump_enabled" class="text-sm text-gray-700">PRA Web Jump to the Rancher UI <span class="text-gray-400">(opt-in zero-trust access without opening your IP)</span></label>
+            </div>
+          </div>
         </div>
       </template>
 

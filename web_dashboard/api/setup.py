@@ -682,22 +682,27 @@ class K8sManagementFeatureConfig(BaseModel):
     # Optional defaults (blank → the terraform/k8s_cluster/aws_eks module defaults).
     aws_eks_k8s_version: str = ""
     aws_eks_node_instance_type: str = ""
-    # Rancher management plane (central + import). Deploy config for the central
-    # Rancher server; runtime ids (rancher_central_cluster_id / rancher_api_token)
-    # are set by the deploy flow, not entered here.
-    rancher_server_url: str = ""
+    # Rancher management plane (import model). The central Rancher server runs as
+    # a single privileged container on a PUBLIC GCE COS VM (gcp_rancher_* below);
+    # runtime ids (rancher_server_url / rancher_api_token) are set by the deploy
+    # job, not entered here. Only the bootstrap password + node knobs are input.
     rancher_bootstrap_password: str = ""      # first-run admin bootstrap; encrypted at rest
-    rancher_namespace: str = "cattle-system"
-    rancher_chart_repo: str = "https://releases.rancher.com/server-charts/stable"
-    rancher_chart: str = "rancher"
-    rancher_chart_version: str = ""
-    rancher_cert_source: str = "rancher"
-    cert_manager_chart_version: str = ""
-    ingress_nginx_chart_version: str = ""
+    rancher_verify_tls: bool = False          # verify the node's TLS cert on API calls (False = self-signed)
+    rancher_allowed_source_cidrs: str = ""    # CSV CIDRs allowed to reach the node's public IP (GCE firewall, tcp 80/443); "" = NOT opened unless gcp_rancher_allow_open
+    # GCE COS Rancher node deploy knobs (see config.py gcp_rancher_*).
+    gcp_rancher_image: str = "rancher/rancher:latest"
+    gcp_rancher_machine_type: str = "e2-medium"   # ≥4 GB required
+    gcp_rancher_zone: str = ""                # blank → gcp_zone
+    gcp_rancher_name: str = "rancher-server"
+    gcp_rancher_boot_disk_gb: int = 30
+    gcp_rancher_network_tag: str = "rancher"
+    gcp_rancher_allow_open: bool = False      # open 0.0.0.0/0 when allowed_source_cidrs is empty
+    # Rancher UI PRA web-broker (opt-in zero-trust access without opening CIDRs).
+    rancher_ui_web_jump_enabled: bool = False
+    rancher_ui_verify_certificate: bool = False
     rancher_ui_jump_group: str = ""
     rancher_ui_jumpoint_name: str = ""
     rancher_ui_local_port: int = 443
-    rancher_allowed_source_cidrs: str = ""    # CSV CIDRs for the public Rancher LB (loadBalancerSourceRanges); "" = open (TLS + auth only)
     # Entra/IdP group → cluster RBAC (real-identity JIT demo): default group the
     # per-cluster "Entra group" action binds (overridable in the action). Members get
     # entra_rbac_group_role; Entitle's Entra-ID integration JIT-grants membership.

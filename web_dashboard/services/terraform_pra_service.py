@@ -819,10 +819,12 @@ async def remove_api_tunnel(tf_state_json: str) -> None:
 
 
 # ── Web Jump (Rancher management UI) ──────────────────────────────────────────
-# The central Rancher UI is brokered to the operator via a PRA Web Jump (the sra
-# provider's sra_web_jump) — the rep opens it from the PRA representative console;
-# no public ingress. Simpler than the DB tunnel: no credential injection (Rancher
-# does its own login), so no Vault account / no sensitive resource TF_VARs.
+# OPT-IN broker for the central Rancher UI (the sra provider's sra_web_jump): the
+# rep opens it from the PRA representative console. The Rancher node is publicly
+# reachable at its source-restricted server-url, so this isn't required for
+# reachability — it's for brokered/recorded access without adding an operator's IP
+# to the CIDR allowlist. Simpler than the DB tunnel: no credential injection
+# (Rancher does its own login), so no Vault account / no sensitive resource TF_VARs.
 
 def _generate_web_jump_hcl(name: str, url: str, jump_group_name: str,
                            jumpoint_name: str, tag: str = "rancher",
