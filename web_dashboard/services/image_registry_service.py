@@ -495,6 +495,10 @@ async def promote_to_aws_automated(
     target_format = "vhd"  # AWS import_image accepts VHD natively; no conversion if source is VHD.
 
     dest_bucket, dest_key = promote_runner_service.resolve_aws_staging(image["name"], image["version"])
+    # Name the resulting AMI like the Azure/GCP promote targets ({name}-{version}).
+    # ec2:ImportImage can't set an AMI name, so aws_service copies + renames the
+    # auto-named import-ami-… behind this.
+    target_ami_name = f"{image['name']}-{image['version']}"
 
     # progress_cb takes (pct, msg) so the job UI shows real phase progress
     # instead of a pinned number; string-only aws_service callbacks are adapted
@@ -520,18 +524,19 @@ async def promote_to_aws_automated(
     # 3: ec2:ImportImage from the staged S3 object
     from . import config_service
     role_name = config_service.get("aws_vmimport_role_name") or "vmimport"
-    _say(60, f"Calling ec2:ImportImage from s3://{dest_bucket}/{dest_key}")
+    _say(60, f"Calling ec2:ImportImage from s3://{dest_bucket}/{dest_key} (AMI '{target_ami_name}')")
     import_result = await aws_service.import_image_from_vhd(
         region=target_region,
         s3_bucket=dest_bucket,
         s3_key=dest_key,
         role_name=role_name,
         description=f"Promoted from registered image {image['name']}/{image['version']}",
+        name=target_ami_name,
         disk_format=target_format,
         progress_cb=lambda m: _say(60, m),
     )
     new_ami_id = import_result["image_id"]
-    _say(85, f"Import complete: {new_ami_id}")
+    _say(85, f"Import complete: {new_ami_id} ({target_ami_name})")
 
     # 4: cleanup staged S3 blob — only after the AMI is Available (the import
     # poll above already waits for the terminal state, so we can delete now).
