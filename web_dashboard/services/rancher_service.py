@@ -1,33 +1,45 @@
-"""Rancher management-plane client — **runner-executed** (no app-side network).
+"""Rancher management-plane client — **direct HTTPS** to the public COS node.
 
-The dashboard app has no route into the cluster VPC, and the central Rancher is
-exposed only on an INTERNAL endpoint (no public ingress). So every Rancher API
-call is made *from inside the management cluster*: this module builds the shell
-commands and a caller-supplied ``run`` coroutine executes them via the k8s
-runner (``k8s_runner_service.run`` with the mgmt cluster's kubeconfig). Each call
-runs as a throwaway ``kubectl run … curl`` pod that hits Rancher's in-cluster
-service ``https://rancher.<namespace>`` — always reachable from within the
-cluster, independent of the internal-LB / private-DNS wiring the *agents* and the
-*operator* use.
+The central Rancher server runs as a single privileged container on a PUBLIC
+(source-restricted) GCE COS VM (see ``gcp_service.run_gce_rancher`` /
+``services/rancher_node_service.py``). Because it is publicly reachable, the
+dashboard calls the Rancher v3 API directly over HTTPS with the stored API token
+(httpx) — no in-cluster runner / ``kubectl run … curl`` pods.
 
-``run`` signature: ``async def run(command: str) -> str`` — returns the command's
-combined stdout (the curl response body).
+Connection resolves config_service-first (``rancher_server_url`` /
+``rancher_api_token`` / ``rancher_verify_tls``), env fallback. The node ships a
+self-signed cert, so ``verify`` defaults to ``False``.
 
 ⚠️  VERIFICATION GATE: the Rancher v3 API paths/payloads below are the documented
 shapes but have NOT been exercised against a live Rancher in this environment.
 Confirm each against the target Rancher version before relying on it — they're
 isolated here on purpose so corrections are one-liners.
 """
-import json
+import functools
 import logging
-import shlex
-import uuid
+
+import httpx
 
 logger = logging.getLogger(__name__)
 
 
 class RancherError(Exception):
-    """Raised when a Rancher API call (via the runner) fails or returns junk."""
+    """Raised when a Rancher API call fails or returns junk."""
+
+
+class RancherNotConfigured(RancherError):
+    """server_url / api_token missing — an expected state, not a failure."""
+
+
+def _wrap_transport_errors(fn):
+    """Convert httpx transport failures into RancherError for a single contract."""
+    @functools.wraps(fn)
+    async def wrapper(*args, **kwargs):
+        try:
+            return await fn(*args, **kwargs)
+        except httpx.HTTPError as exc:
+            raise RancherError(f"Cannot reach Rancher: {exc}") from exc
+    return wrapper
 
 
 def _cfg(key: str, default: str = "") -> str:
@@ -42,108 +54,126 @@ def _cfg(key: str, default: str = "") -> str:
     return getattr(settings, key, default) or default
 
 
-def _namespace() -> str:
-    return _cfg("rancher_namespace", "cattle-system")
+# ── Direct-HTTPS API ──────────────────────────────────────────────────────────
+
+def _server_url(explicit: str = "") -> str:
+    url = explicit or _cfg("rancher_server_url")
+    if not url:
+        raise RancherNotConfigured(
+            "Rancher server URL is not configured — stand up the Rancher node on the Containers page.")
+    return url.rstrip("/")
 
 
-def _base() -> str:
-    """In-cluster Rancher service base URL (reachable from a pod in the cluster,
-    regardless of the external internal-LB / DNS wiring)."""
-    return f"https://rancher.{_namespace()}"
-
-
-def _curl_pod(curl_args: str, *, ns: str = None) -> str:
-    """Build a ``kubectl run`` one-shot that curls Rancher from inside the cluster
-    and streams the response body to stdout. ``--quiet`` + ``--rm -i`` keep the
-    output to just curl's stdout so the caller can parse JSON. curl ``-sk``:
-    silent + skip TLS verify (Rancher's cert is the cert-manager self-signed CA)."""
-    ns = ns or _namespace()
-    pod = f"rancher-api-{uuid.uuid4().hex[:8]}"
-    return (
-        f"kubectl run {pod} -n {shlex.quote(ns)} --rm -i --restart=Never --quiet "
-        f"--image=curlimages/curl:latest --command -- curl -sk {curl_args}"
-    )
-
-
-def _hdr(token: str = "") -> str:
-    h = "-H 'Content-Type: application/json'"
-    if token:
-        h += f" -H 'Authorization: Bearer {token}'"
-    return h
-
-
-def _body(obj: dict) -> str:
-    # Single-quote the JSON for the shell; the JSON itself uses double quotes.
-    return "-d " + shlex.quote(json.dumps(obj))
-
-
-def _extract_json(output: str) -> dict:
-    """Pull the JSON object out of the runner's stdout. ``kubectl run --quiet``
-    should leave only curl's body, but be defensive: take the last {...} span."""
-    if not output:
-        raise RancherError("empty response from Rancher API pod")
-    s, e = output.find("{"), output.rfind("}")
-    if s == -1 or e == -1 or e < s:
-        raise RancherError(f"no JSON in Rancher API response: {output[:300]}")
+def _verify_tls() -> bool:
     try:
-        return json.loads(output[s:e + 1])
-    except json.JSONDecodeError as exc:
-        raise RancherError(f"bad JSON from Rancher API: {exc}: {output[:300]}") from exc
+        from . import config_service
+        from ..config import settings
+        return config_service.get_bool("rancher_verify_tls", settings.rancher_verify_tls)
+    except Exception:
+        from ..config import settings
+        return getattr(settings, "rancher_verify_tls", False)
 
 
-async def bootstrap(run, *, bootstrap_password: str, server_url: str) -> str:
-    """First-run bootstrap: log in with the bootstrap password, pin the public
-    ``server-url`` (what Rancher hands to imported cluster-agents), and mint a
-    non-expiring API token. Returns the API token (``token-xxxxx:yyyyy``).
-    ``run`` executes each command in the mgmt cluster via the k8s runner."""
-    base = _base()
-    login = _extract_json(await run(_curl_pod(
-        f"-X POST {base}/v3-public/localProviders/local?action=login {_hdr()} "
-        f"{_body({'username': 'admin', 'password': bootstrap_password, 'responseType': 'json'})}")))
-    login_token = login.get("token")
-    if not login_token:
-        raise RancherError(f"Rancher bootstrap login returned no token: {str(login)[:200]}")
-
-    # Pin server-url (idempotent PUT). Agents dial this; must be the stable
-    # internal hostname, NOT the in-cluster service name.
-    await run(_curl_pod(
-        f"-X PUT {base}/v3/settings/server-url {_hdr(login_token)} "
-        f"{_body({'name': 'server-url', 'value': server_url})}"))
-
-    # Mint a non-expiring API token (ttl=0) for subsequent management calls.
-    minted = _extract_json(await run(_curl_pod(
-        f"-X POST {base}/v3/token {_hdr(login_token)} "
-        f"{_body({'type': 'token', 'description': 'vm-dashboard', 'ttl': 0})}")))
-    api_token = minted.get("token")
-    if not api_token:
-        raise RancherError(f"Rancher token mint returned no token: {str(minted)[:200]}")
-    return api_token
+def _api_token(explicit: str = "") -> str:
+    tok = explicit or _cfg("rancher_api_token")
+    if not tok:
+        raise RancherNotConfigured(
+            "Rancher API token is not configured — deploy/bootstrap the Rancher node first.")
+    return tok
 
 
-async def create_import_cluster(run, *, api_token: str, name: str) -> tuple:
+def _client(token: str = "", *, base_url: str = "") -> httpx.AsyncClient:
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return httpx.AsyncClient(
+        base_url=_server_url(base_url), headers=headers, timeout=30.0, verify=_verify_tls())
+
+
+def _raise(resp: httpx.Response, context: str) -> None:
+    try:
+        detail = resp.json()
+        msg = detail.get("message") or detail.get("detail") or resp.text
+    except Exception:
+        msg = resp.text or f"HTTP {resp.status_code}"
+    raise RancherError(f"{context}: {msg}")
+
+
+@_wrap_transport_errors
+async def bootstrap_direct(*, bootstrap_password: str, server_url: str) -> str:
+    """First-run bootstrap over HTTPS: log in with the bootstrap password, pin the
+    public ``server-url`` (what Rancher hands to imported cluster-agents), and mint
+    a non-expiring API token. Returns ``token-xxxxx:yyyyy``. ``server_url`` is
+    passed explicitly because config may not be set yet during first deploy."""
+    async with _client(base_url=server_url) as c:
+        r = await c.post("/v3-public/localProviders/local?action=login",
+                         json={"username": "admin", "password": bootstrap_password,
+                               "responseType": "json"})
+        if r.status_code >= 300:
+            _raise(r, "Rancher bootstrap login failed")
+        login_token = r.json().get("token")
+        if not login_token:
+            raise RancherError("Rancher bootstrap login returned no token")
+
+    async with _client(login_token, base_url=server_url) as c:
+        r = await c.put("/v3/settings/server-url",
+                        json={"name": "server-url", "value": server_url})
+        if r.status_code >= 300:
+            _raise(r, "Rancher set server-url failed")
+        r = await c.post("/v3/token",
+                         json={"type": "token", "description": "vm-dashboard", "ttl": 0})
+        if r.status_code >= 300:
+            _raise(r, "Rancher token mint failed")
+        api_token = r.json().get("token")
+        if not api_token:
+            raise RancherError("Rancher token mint returned no token")
+        return api_token
+
+
+@_wrap_transport_errors
+async def set_server_url_direct(*, server_url: str, api_token: str) -> None:
+    """(Re-)pin the Rancher ``server-url`` using the API token. Used when a reused
+    node's ephemeral IP changed after a stop/start (state on disk survives, so the
+    token is still valid but the server-url is stale — agents dial the new IP)."""
+    async with _client(api_token, base_url=server_url) as c:
+        r = await c.put("/v3/settings/server-url",
+                        json={"name": "server-url", "value": server_url})
+        if r.status_code >= 300:
+            _raise(r, "Rancher set server-url failed")
+
+
+@_wrap_transport_errors
+async def create_import_cluster_direct(*, name: str, api_token: str = "",
+                                       server_url: str = "") -> tuple:
     """Create an *imported* cluster in Rancher + fetch its registration manifest
     URL. Returns ``(rancher_cluster_id, manifest_url)``. The caller applies the
     manifest into the downstream cluster (cattle-cluster-agent dials out)."""
-    base = _base()
-    created = _extract_json(await run(_curl_pod(
-        f"-X POST {base}/v3/cluster {_hdr(api_token)} "
-        f"{_body({'type': 'cluster', 'name': name})}")))
-    cluster_id = created.get("id")
-    if not cluster_id:
-        raise RancherError(f"Rancher cluster create returned no id: {str(created)[:200]}")
+    token = _api_token(api_token)
+    async with _client(token, base_url=server_url) as c:
+        r = await c.post("/v3/cluster", json={"type": "cluster", "name": name})
+        if r.status_code >= 300:
+            _raise(r, "Rancher cluster create failed")
+        cluster_id = r.json().get("id")
+        if not cluster_id:
+            raise RancherError("Rancher cluster create returned no id")
+        r = await c.post("/v3/clusterregistrationtoken",
+                         json={"type": "clusterRegistrationToken", "clusterId": cluster_id})
+        if r.status_code >= 300:
+            _raise(r, "Rancher registration token failed")
+        body = r.json()
+        manifest_url = body.get("manifestUrl") or body.get("manifest_url")
+        if not manifest_url:
+            raise RancherError(
+                f"Rancher registration token for {cluster_id} had no manifestUrl: {str(body)[:200]}")
+        return cluster_id, manifest_url
 
-    reg = _extract_json(await run(_curl_pod(
-        f"-X POST {base}/v3/clusterregistrationtoken {_hdr(api_token)} "
-        f"{_body({'type': 'clusterRegistrationToken', 'clusterId': cluster_id})}")))
-    manifest_url = reg.get("manifestUrl") or reg.get("manifest_url")
-    if not manifest_url:
-        raise RancherError(
-            f"Rancher registration token for {cluster_id} had no manifestUrl: {str(reg)[:200]}")
-    return cluster_id, manifest_url
 
-
-async def delete_cluster(run, *, api_token: str, cluster_id: str) -> None:
+@_wrap_transport_errors
+async def delete_cluster_direct(*, cluster_id: str, api_token: str = "",
+                                server_url: str = "") -> None:
     """Remove an imported cluster from Rancher (best-effort; caller logs errors)."""
-    base = _base()
-    await run(_curl_pod(
-        f"-X DELETE {base}/v3/cluster/{shlex.quote(cluster_id)} {_hdr(api_token)}"))
+    token = _api_token(api_token)
+    async with _client(token, base_url=server_url) as c:
+        r = await c.delete(f"/v3/cluster/{cluster_id}")
+        if r.status_code >= 300 and r.status_code != 404:
+            _raise(r, "Rancher cluster delete failed")

@@ -38,6 +38,10 @@ from ..models.containers import (
     GCEJumpointListResponse,
     PortainerEndpoint,
     PortainerEndpointList,
+    RancherImportRequest,
+    RancherImportResponse,
+    RancherNodeInfo,
+    RancherNodeResponse,
     StackInfo,
     StackListResponse,
 )
@@ -749,3 +753,106 @@ async def stop_gce_compose_endpoint(
         return ContainerActionResponse(ok=True, message="Compose instance deleted")
     except GCPError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
+
+
+# ── Rancher management node (privileged container on GCE COS) ────────────────
+
+@router.get("/rancher", response_model=RancherNodeResponse)
+async def get_rancher_node(
+    current_user: User = Depends(require_permission("containers", "read")),
+):
+    """List the Rancher management-node COS instance(s) (labels.purpose=rancher)
+    and report whether the integration is configured + its pinned server URL."""
+    from ..services import config_service, gcp_service
+    from ..services.gcp_service import GCPError
+
+    project_id = _gcp_project_id()
+    bootstrap = config_service.get("rancher_bootstrap_password")
+    configured = bool(project_id and bootstrap)
+    server_url = config_service.get("rancher_server_url") or ""
+    if not project_id:
+        # Not configured yet — return an empty, not-configured shell (no 503, so
+        # the tab can render the setup card like Portainer does).
+        return RancherNodeResponse(nodes=[], project_id="", count=0,
+                                   configured=False, server_url=server_url)
+    try:
+        raw = await gcp_service.list_gce_rancher(project_id)
+    except GCPError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    nodes = [
+        RancherNodeInfo(
+            name=i.get("name", ""), zone=i.get("zone", ""),
+            status=i.get("status", "UNKNOWN"), machine_type=i.get("machine_type", ""),
+            image=i.get("image", ""), internal_ip=i.get("internal_ip", ""),
+            external_ip=i.get("external_ip", ""), url=i.get("url", ""),
+            created_at=i.get("created_at"),
+        )
+        for i in raw
+    ]
+    return RancherNodeResponse(nodes=nodes, project_id=project_id, count=len(nodes),
+                               configured=configured, server_url=server_url)
+
+
+@router.post("/rancher/deploy", response_model=DeployContainerResponse)
+async def deploy_rancher_node(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("containers", "write")),
+):
+    """Deploy (or reuse) the Rancher management node. Enqueues a durable
+    `rancher_node_deploy` job (VM boot + Rancher bootstrap can take minutes);
+    follow progress at /jobs/{job_id}. The job reads its knobs from Settings."""
+    from ..services import config_service
+
+    if not _gcp_project_id():
+        raise HTTPException(status_code=503, detail="GCP project not configured.")
+    if not config_service.get("rancher_bootstrap_password"):
+        raise HTTPException(
+            status_code=400,
+            detail="Set a Rancher bootstrap password in Settings → Kubernetes before deploying.")
+    job = job_service.create_job(
+        db, job_type="rancher_node_deploy", created_by=current_user.username, metadata={})
+    return DeployContainerResponse(
+        job_id=job.id, status="pending", message="Deploying the Rancher management node…")
+
+
+@router.post("/rancher/{name}/stop", response_model=DeployContainerResponse)
+async def stop_rancher_node(
+    name: str,
+    zone: str = Query("", description="GCE zone (blank → configured Rancher zone)"),
+    force: bool = Query(False, description="Tear down even if clusters are still imported"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("containers", "delete")),
+):
+    """Tear down the Rancher node (VM + firewall) and clean up Entitle / PRA /
+    config. Enqueues a durable `rancher_node_teardown` job. Refuses (unless
+    `force`) while clusters are still imported."""
+    if not _gcp_project_id():
+        raise HTTPException(status_code=503, detail="GCP project not configured.")
+    job = job_service.create_job(
+        db, job_type="rancher_node_teardown", created_by=current_user.username,
+        metadata={"name": name, "zone": zone, "force": force})
+    return DeployContainerResponse(
+        job_id=job.id, status="pending", message=f"Tearing down Rancher node '{name}'…")
+
+
+@router.post("/rancher/import", response_model=RancherImportResponse)
+async def import_cluster_into_rancher(
+    req: RancherImportRequest,
+    current_user: User = Depends(require_permission("containers", "write")),
+):
+    """Create an imported cluster in Rancher and return the registration manifest
+    URL + the `kubectl apply` command to run against the target cluster. The
+    cattle-cluster-agent dials OUT to the public node, so private clusters on any
+    cloud / on-prem work as long as they have egress."""
+    from ..services import rancher_service
+    from ..services.rancher_service import RancherError, RancherNotConfigured
+
+    try:
+        cluster_id, manifest_url = await rancher_service.create_import_cluster_direct(name=req.name)
+    except RancherNotConfigured as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except RancherError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    return RancherImportResponse(
+        cluster_id=cluster_id, manifest_url=manifest_url,
+        apply_command=f"kubectl apply -f {manifest_url}")

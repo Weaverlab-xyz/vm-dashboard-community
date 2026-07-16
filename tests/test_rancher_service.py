@@ -1,9 +1,10 @@
-"""Unit tests for rancher_service — the runner-executed Rancher API client.
+"""Unit tests for rancher_service — the direct-HTTPS Rancher v3 API client.
 
-Every Rancher call runs as a `kubectl run … curl` pod via an injected `run`
-coroutine, so we exercise the orchestration + JSON parsing with a fake `run`
-that returns canned responses — no live Rancher, no cluster. config_service is
-stubbed so `_cfg` never falls through to pydantic settings.
+The central Rancher runs on a public GCE COS node, so the dashboard calls the v3
+API directly over HTTPS (httpx). We exercise the orchestration + JSON parsing
+against an ``httpx.MockTransport`` (no live Rancher, no cluster) by monkeypatching
+``rs._client`` to bind a mock transport. config_service is stubbed so the
+connection resolves without pydantic settings.
 
 Runs under pytest, or standalone: python tests/test_rancher_service.py
 """
@@ -12,17 +13,21 @@ import os
 import sys
 import types
 
+import httpx
+
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 
 def _install_stubs():
-    # Stub only config_service (leave the real web_dashboard.services package so
-    # the real rancher_service submodule resolves) — mirrors test_k8s_tf_vars.py.
     cfg = types.ModuleType("web_dashboard.services.config_service")
-    store = {"rancher_namespace": "cattle-system"}
+    store = {
+        "rancher_server_url": "https://rancher.example",
+        "rancher_api_token": "token-cfg:secret",
+    }
     cfg.get = lambda key, default="", workgroup=None: store.get(key, default)
+    cfg.get_bool = lambda key, default=False: bool(store.get(key, default))
     sys.modules["web_dashboard.services.config_service"] = cfg
 
 
@@ -38,71 +43,91 @@ except Exception as exc:  # pragma: no cover — skip if deps missing
         sys.exit(0)
 
 
-def test_extract_json_from_noisy_output():
-    assert rs._extract_json('pod noise\n{"token":"t-1:secret"}\ndeleted') == {"token": "t-1:secret"}
-    try:
-        rs._extract_json("no json here")
-    except rs.RancherError:
-        pass
-    else:
-        raise AssertionError("expected RancherError on non-JSON output")
+def _mock(handler):
+    """Monkeypatch rs._client to return an AsyncClient wired to a MockTransport,
+    preserving the real Authorization/base_url behaviour so tests can assert them."""
+    def fake_client(token="", *, base_url=""):
+        headers = {"Content-Type": "application/json"}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        url = base_url or rs._server_url()
+        return httpx.AsyncClient(base_url=url, headers=headers,
+                                 transport=httpx.MockTransport(handler))
+    rs._client = fake_client
 
 
-def test_curl_pod_targets_incluster_service():
-    cmd = rs._curl_pod("-X GET https://rancher.cattle-system/v3/x")
-    assert "kubectl run rancher-api-" in cmd
-    assert "curlimages/curl" in cmd
-    assert "curl -sk" in cmd
-    assert "-n cattle-system" in cmd
+def test_bootstrap_direct_orchestration():
+    seen = []
 
+    def handler(request):
+        seen.append((request.method, request.url.path, request.headers.get("authorization", "")))
+        if request.url.path == "/v3-public/localProviders/local":
+            return httpx.Response(201, json={"token": "login-abc"})
+        if request.url.path == "/v3/settings/server-url":
+            return httpx.Response(200, json={"name": "server-url"})
+        if request.url.path == "/v3/token":
+            return httpx.Response(201, json={"token": "token-xyz:secret"})
+        return httpx.Response(404, json={})
 
-def test_bootstrap_orchestration():
-    calls = []
-    responses = [
-        '{"token":"login-abc"}',              # login
-        '{"name":"server-url","value":"x"}',  # PUT server-url (not parsed)
-        '{"token":"token-xyz:secret"}',       # mint api token
-    ]
-
-    async def fake_run(command):
-        calls.append(command)
-        return responses[len(calls) - 1]
-
-    # Non-URL sentinel: keeps the "value flows through" assertion below from
-    # tripping CodeQL's py/incomplete-url-substring-sanitization (it flags a
-    # URL-shaped literal in an `in` check). bootstrap only interpolates the
-    # string, so its format is irrelevant to this test.
-    server_url = "SERVER-URL-SENTINEL"
-    tok = asyncio.run(rs.bootstrap(fake_run, bootstrap_password="bootpw", server_url=server_url))
+    _mock(handler)
+    tok = asyncio.run(rs.bootstrap_direct(bootstrap_password="bootpw",
+                                          server_url="https://rancher.example"))
     assert tok == "token-xyz:secret"
-    assert "/v3-public/localProviders/local?action=login" in calls[0]
-    assert "bootpw" in calls[0]
-    assert "/v3/settings/server-url" in calls[1]
-    assert server_url in calls[1]
-    assert "Authorization: Bearer login-abc" in calls[1]
-    assert "/v3/token" in calls[2]
-    assert "Authorization: Bearer login-abc" in calls[2]
+    # login (no auth) → PUT server-url (session token) → mint token (session token)
+    assert seen[0][:2] == ("POST", "/v3-public/localProviders/local")
+    assert seen[1][:2] == ("PUT", "/v3/settings/server-url")
+    assert seen[1][2] == "Bearer login-abc"
+    assert seen[2][:2] == ("POST", "/v3/token")
 
 
-def test_create_import_cluster_orchestration():
-    calls = []
-    responses = ['{"id":"c-m-abc","type":"cluster"}', '{"manifestUrl":"https://rancher/reg/xyz.yaml"}']
+def test_create_import_cluster_direct():
+    seen = []
 
-    async def fake_run(command):
-        calls.append(command)
-        return responses[len(calls) - 1]
+    def handler(request):
+        seen.append((request.method, request.url.path, request.headers.get("authorization", "")))
+        if request.url.path == "/v3/cluster":
+            return httpx.Response(201, json={"id": "c-m-abc", "type": "cluster"})
+        if request.url.path == "/v3/clusterregistrationtoken":
+            return httpx.Response(201, json={"manifestUrl": "https://rancher.example/reg/xyz.yaml"})
+        return httpx.Response(404, json={})
 
-    cid, url = asyncio.run(rs.create_import_cluster(fake_run, api_token="token-xyz:secret", name="demo"))
+    _mock(handler)
+    cid, url = asyncio.run(rs.create_import_cluster_direct(name="demo"))
     assert cid == "c-m-abc"
-    assert url == "https://rancher/reg/xyz.yaml"
-    assert "/v3/cluster " in calls[0] and '"name": "demo"' in calls[0]
-    assert "Authorization: Bearer token-xyz:secret" in calls[0]
-    assert "/v3/clusterregistrationtoken" in calls[1] and "c-m-abc" in calls[1]
+    assert url == "https://rancher.example/reg/xyz.yaml"
+    assert seen[0][:2] == ("POST", "/v3/cluster")
+    # token falls back to config (token-cfg:secret) when not passed explicitly
+    assert seen[0][2] == "Bearer token-cfg:secret"
+    assert seen[1][:2] == ("POST", "/v3/clusterregistrationtoken")
+
+
+def test_delete_cluster_direct_ignores_404():
+    def handler(request):
+        return httpx.Response(404, json={})
+    _mock(handler)
+    # 404 = already gone → no exception.
+    asyncio.run(rs.delete_cluster_direct(cluster_id="c-m-gone"))
+
+
+def test_not_configured_raises():
+    # Force _cfg to resolve empty (skips the pydantic-settings env fallback, which
+    # isn't importable in this bare test env) so server_url/api_token are missing.
+    orig_cfg = rs._cfg
+    rs._cfg = lambda key, default="": default
+    try:
+        raised = False
+        try:
+            asyncio.run(rs.create_import_cluster_direct(name="x"))
+        except rs.RancherNotConfigured:
+            raised = True
+        assert raised, "expected RancherNotConfigured when server_url/api_token unset"
+    finally:
+        rs._cfg = orig_cfg
 
 
 if __name__ == "__main__":
-    test_extract_json_from_noisy_output()
-    test_curl_pod_targets_incluster_service()
-    test_bootstrap_orchestration()
-    test_create_import_cluster_orchestration()
+    test_bootstrap_direct_orchestration()
+    test_create_import_cluster_direct()
+    test_delete_cluster_direct_ignores_404()
+    test_not_configured_raises()
     print("ok")

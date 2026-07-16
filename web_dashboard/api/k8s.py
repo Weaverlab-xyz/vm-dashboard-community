@@ -610,3 +610,32 @@ async def register_cluster_in_entitle(
     )
     return {"ok": True, "status": "registering" if payload.action == "register" else "deregistering",
             "cluster_id": cluster_id, "action": payload.action, "job_id": job.id}
+
+
+@router.post("/rancher/entitle-register", status_code=202)
+async def register_rancher_node_in_entitle(
+    payload: EntitleClusterRegisterRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Register (or deregister) the central Rancher NODE as an Entitle **Rancher**
+    integration so users request JIT Rancher RBAC in Entitle. Node-scoped (not
+    per-cluster). Async — enqueues a ``rancher_entitle_register`` job; open the job
+    for status/error."""
+    from ..services import config_service
+    if payload.action not in k8s_service.VALID_ENTITLE_CLUSTER_ACTIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown action {payload.action!r} (expected one of {', '.join(k8s_service.VALID_ENTITLE_CLUSTER_ACTIONS)})",
+        )
+    if payload.action == "register" and not (
+            config_service.get("rancher_server_url") and config_service.get("rancher_api_token")):
+        raise HTTPException(
+            status_code=400,
+            detail="Rancher node is not running — deploy it on the Containers page before registering.")
+    job = job_service.create_job(
+        db, job_type="rancher_entitle_register", created_by=current_user.username,
+        metadata={"action": payload.action},
+    )
+    return {"ok": True, "status": "registering" if payload.action == "register" else "deregistering",
+            "action": payload.action, "job_id": job.id}

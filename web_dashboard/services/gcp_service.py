@@ -1187,6 +1187,331 @@ async def list_gce_compose(project_id: str) -> list[dict]:
         raise GCPError(f"Failed to list GCE compose instances: {e}") from e
 
 
+# ── Rancher management node on COS-on-GCE ─────────────────────────────────────
+# The central Rancher server runs as a SINGLE privileged container on a COS GCE
+# VM with a PUBLIC (source-restricted) IP — the same konlet mechanism as the
+# Jumpoint above, and the direct analogue of Rancher's single-node docker
+# install (`docker run -d --privileged -p 80:80 -p 443:443 rancher/rancher`).
+# Privileged is required for Rancher's embedded components; COS runs the
+# container on the HOST network, so 80/443 bind on the VM and reachability is
+# governed by the firewall (see _ensure_rancher_firewall_sync). The node is
+# EPHEMERAL: the boot disk auto-deletes and the IP is ephemeral, so a delete
+# wipes state — acceptable for the disposable-lab posture.
+
+_RANCHER_LABEL = "rancher"
+
+# Shared-core / <4 GB machine types Rancher will OOM on. Best-effort guard; not
+# exhaustive (custom types etc.), but catches the common footguns.
+_RANCHER_TOO_SMALL = {"e2-micro", "e2-small", "f1-micro", "g1-small", "e2-highcpu-2"}
+
+
+def _rancher_container_spec_yaml(container_image: str, bootstrap_password: str) -> str:
+    """Generate the gce-container-declaration konlet YAML for the Rancher server.
+
+    ``securityContext.privileged: true`` mirrors the single-node docker install's
+    ``--privileged``. No port block is needed: COS runs the container on the host
+    network, so Rancher binds host 80/443 directly (firewall-governed). The
+    bootstrap password is injected as ``CATTLE_BOOTSTRAP_PASSWORD`` (Rancher 2.6+
+    first-run admin password)."""
+    import yaml
+    spec = {
+        "spec": {
+            "containers": [{
+                "name": "rancher",
+                "image": container_image,
+                "env": [{"name": "CATTLE_BOOTSTRAP_PASSWORD", "value": bootstrap_password}],
+                "securityContext": {"privileged": True},
+                "stdin": False,
+                "tty": False,
+            }],
+            "restartPolicy": "Always",
+        }
+    }
+    return yaml.safe_dump(spec, default_flow_style=False)
+
+
+def _ensure_rancher_firewall_sync(
+    project_id: str,
+    network: str,
+    tag: str,
+    source_cidrs: list[str],
+    name: str,
+) -> dict:
+    """Get-or-create/patch a source-restricted INGRESS firewall (tcp 80/443)
+    scoped to the Rancher VM's network ``tag``. Idempotent: patches source_ranges
+    on an existing rule so CIDR edits in Settings take effect on redeploy.
+
+    Fail-closed: an EMPTY ``source_cidrs`` opens nothing — if a rule by this name
+    already exists it is DELETED (removing CIDRs closes the node). The caller
+    (rancher_node_service) decides whether an empty list means "closed" or
+    (with gcp_rancher_allow_open) ["0.0.0.0/0"]."""
+    _require_compute()
+    from google.cloud import compute_v1
+    from google.api_core.exceptions import NotFound
+
+    creds = _gcp_creds()
+    client = compute_v1.FirewallsClient(credentials=creds)
+
+    if not source_cidrs:
+        # Fail closed — ensure no rule is left open.
+        try:
+            op = client.delete(project=project_id, firewall=name)
+            op.result(timeout=60)
+            logger.warning("Rancher firewall '%s' deleted — no allowed source CIDRs (node is unreachable)", name)
+        except NotFound:
+            pass
+        return {"name": name, "opened": False}
+
+    fw = compute_v1.Firewall()
+    fw.name = name
+    fw.network = network if "/" in network else f"global/networks/{network or 'default'}"
+    fw.direction = "INGRESS"
+    fw.allowed = [compute_v1.Allowed(I_p_protocol="tcp", ports=["80", "443"])]
+    fw.source_ranges = list(source_cidrs)
+    fw.target_tags = [tag]
+
+    try:
+        client.get(project=project_id, firewall=name)
+        op = client.patch(project=project_id, firewall=name, firewall_resource=fw)
+        op.result(timeout=60)
+        created = False
+    except NotFound:
+        op = client.insert(project=project_id, firewall_resource=fw)
+        op.result(timeout=60)
+        created = True
+    logger.info("Rancher firewall '%s' %s (tcp 80/443, sources=%s, tag=%s)",
+                name, "created" if created else "updated", source_cidrs, tag)
+    return {"name": name, "opened": True, "created": created}
+
+
+def _delete_rancher_firewall_sync(project_id: str, name: str) -> None:
+    """Delete the Rancher ingress firewall rule (quiet no-op if absent)."""
+    _require_compute()
+    from google.cloud import compute_v1
+    from google.api_core.exceptions import NotFound
+    creds = _gcp_creds()
+    client = compute_v1.FirewallsClient(credentials=creds)
+    try:
+        op = client.delete(project=project_id, firewall=name)
+        op.result(timeout=60)
+    except NotFound:
+        pass
+
+
+def _external_ip_of(info) -> str:
+    """Best-effort: pull the ephemeral external IP off a compute instance."""
+    for nic in (info.network_interfaces or []):
+        for ac in (nic.access_configs or []):
+            if ac.nat_i_p:
+                return ac.nat_i_p
+    return ""
+
+
+def _run_gce_rancher_sync(
+    project_id: str,
+    zone: str,
+    name: str,
+    container_image: str,
+    bootstrap_password: str,
+    network: str = "",
+    subnetwork: str = "",
+    machine_type: str = "e2-medium",
+    boot_disk_gb: int = 30,
+    network_tag: str = "rancher",
+    cos_image_family: str = "cos-stable",
+    create_external_ip: bool = True,
+) -> dict:
+    """Launch (or reuse) a COS GCE instance running the Rancher server container.
+    Idempotent on existence: a RUNNING same-named VM is returned as-is; a stopped
+    one is started (COS re-runs the container on boot). Returns the public IP +
+    derived https URL so the caller can pin server-url and bootstrap."""
+    if machine_type in _RANCHER_TOO_SMALL:
+        raise GCPError(
+            f"machine_type '{machine_type}' has <4 GB RAM — Rancher will OOM. "
+            f"Use e2-medium (4 GB) or larger.")
+    _require_compute()
+    from google.cloud import compute_v1
+    from google.api_core.exceptions import NotFound
+
+    creds = _gcp_creds()
+    client = compute_v1.InstancesClient(credentials=creds)
+
+    # Reuse a LIVE node. As with the Jumpoint, a name match isn't enough — a
+    # stopped VM has no Rancher listening, so start it and wait for RUNNING.
+    try:
+        existing = client.get(project=project_id, zone=zone, instance=name)
+        status = existing.status
+        if status != "RUNNING":
+            logger.info("GCE Rancher '%s' exists but status=%s — starting it", name, status)
+            try:
+                start_op = client.start(project=project_id, zone=zone, instance=name)
+                start_op.result(timeout=180)
+                existing = client.get(project=project_id, zone=zone, instance=name)
+                status = existing.status
+            except Exception as start_err:
+                logger.warning("GCE Rancher '%s' start failed (status=%s): %s", name, status, start_err)
+        external_ip = _external_ip_of(existing) if create_external_ip else ""
+        return {
+            "name": name, "zone": zone, "self_link": existing.self_link,
+            "status": status, "external_ip": external_ip,
+            "url": f"https://{external_ip}" if external_ip else "", "reused": True,
+        }
+    except NotFound:
+        pass
+
+    instance = compute_v1.Instance()
+    instance.name = name
+    instance.machine_type = f"zones/{zone}/machineTypes/{machine_type}"
+
+    # Boot disk from Container-Optimised OS. Ephemeral: auto_delete=True — a VM
+    # delete discards /var/lib/rancher (state), matching the disposable posture.
+    disk = compute_v1.AttachedDisk()
+    disk.boot = True
+    disk.auto_delete = True
+    disk.initialize_params = compute_v1.AttachedDiskInitializeParams()
+    disk.initialize_params.source_image = (
+        f"projects/cos-cloud/global/images/family/{cos_image_family}"
+    )
+    disk.initialize_params.disk_size_gb = boot_disk_gb
+    instance.disks = [disk]
+
+    nic = compute_v1.NetworkInterface()
+    if subnetwork:
+        nic.subnetwork = subnetwork
+    elif network:
+        nic.network = network
+    if create_external_ip:
+        nic.access_configs = [compute_v1.AccessConfig(
+            name="External NAT", type_="ONE_TO_ONE_NAT",
+        )]
+    instance.network_interfaces = [nic]
+
+    container_yaml = _rancher_container_spec_yaml(container_image, bootstrap_password)
+    instance.metadata = compute_v1.Metadata(items=[
+        compute_v1.Items(key="gce-container-declaration", value=container_yaml),
+        compute_v1.Items(key="google-logging-enabled", value="true"),
+    ])
+    instance.labels = {"managed-by": "vm-dashboard", "purpose": _RANCHER_LABEL}
+    instance.tags = compute_v1.Tags(items=[network_tag])
+
+    logger.info("Starting GCE COS Rancher '%s' in %s (image=%s, machine=%s)",
+                name, zone, container_image, machine_type)
+    op = client.insert(project=project_id, zone=zone, instance_resource=instance)
+    op.result(timeout=300)
+
+    info = client.get(project=project_id, zone=zone, instance=name)
+    external_ip = _external_ip_of(info) if create_external_ip else ""
+    return {
+        "name": name, "zone": zone, "self_link": info.self_link,
+        "status": info.status, "external_ip": external_ip,
+        "url": f"https://{external_ip}" if external_ip else "", "reused": False,
+    }
+
+
+async def run_gce_rancher(
+    project_id: str,
+    zone: str,
+    name: str,
+    container_image: str,
+    bootstrap_password: str,
+    network: str = "",
+    subnetwork: str = "",
+    machine_type: str = "e2-medium",
+    boot_disk_gb: int = 30,
+    network_tag: str = "rancher",
+    create_external_ip: bool = True,
+) -> dict:
+    """Async wrapper for _run_gce_rancher_sync."""
+    try:
+        return await asyncio.to_thread(
+            _run_gce_rancher_sync,
+            project_id, zone, name, container_image, bootstrap_password,
+            network, subnetwork, machine_type, boot_disk_gb, network_tag,
+            "cos-stable", create_external_ip,
+        )
+    except GCPError:
+        raise
+    except Exception as e:
+        raise GCPError(f"Failed to start GCE Rancher node '{name}': {e}") from e
+
+
+async def ensure_rancher_firewall(project_id: str, network: str, tag: str,
+                                  source_cidrs: list[str], name: str) -> dict:
+    """Async wrapper for _ensure_rancher_firewall_sync."""
+    try:
+        return await asyncio.to_thread(
+            _ensure_rancher_firewall_sync, project_id, network, tag, source_cidrs, name)
+    except GCPError:
+        raise
+    except Exception as e:
+        raise GCPError(f"Failed to configure Rancher firewall '{name}': {e}") from e
+
+
+async def stop_gce_rancher(project_id: str, zone: str, name: str, *,
+                           delete_firewall: bool = False, firewall_name: str = "") -> None:
+    """Delete the Rancher node VM (quiet no-op if absent). Optionally delete its
+    ingress firewall rule too."""
+    try:
+        await asyncio.to_thread(_terminate_instance_sync, project_id, zone, name)
+    except Exception as e:
+        msg = str(e)
+        if not ("404" in msg or "not found" in msg.lower()):
+            raise GCPError(f"Failed to stop GCE Rancher node '{name}': {e}") from e
+    if delete_firewall and firewall_name:
+        try:
+            await asyncio.to_thread(_delete_rancher_firewall_sync, project_id, firewall_name)
+        except Exception as e:
+            logger.warning("Rancher firewall '%s' delete failed (continuing): %s", firewall_name, e)
+
+
+def _list_gce_rancher_sync(project_id: str) -> list[dict]:
+    """List Rancher node COS instances across zones (labels.purpose=rancher)."""
+    _require_compute()
+    from google.cloud import compute_v1
+
+    creds = _gcp_creds()
+    client = compute_v1.InstancesClient(credentials=creds)
+    request = compute_v1.AggregatedListInstancesRequest(
+        project=project_id,
+        filter=f'labels.purpose = "{_RANCHER_LABEL}"',
+    )
+    results = []
+    for zone_path, scoped in client.aggregated_list(request=request):
+        for inst in (scoped.instances or []):
+            labels = dict(inst.labels) if inst.labels else {}
+            if labels.get("purpose") != _RANCHER_LABEL:
+                continue
+            internal_ip = ""
+            external_ip = ""
+            for nic in inst.network_interfaces:
+                internal_ip = nic.network_i_p or internal_ip
+                for ac in nic.access_configs:
+                    if ac.nat_i_p:
+                        external_ip = ac.nat_i_p
+            results.append({
+                "name":         inst.name,
+                "zone":         zone_path.split("/")[-1],
+                "status":       inst.status,
+                "machine_type": inst.machine_type.split("/")[-1] if inst.machine_type else "",
+                "image":        _container_image_from_metadata(inst),
+                "internal_ip":  internal_ip,
+                "external_ip":  external_ip,
+                "url":          f"https://{external_ip}" if external_ip else "",
+                "created_at":   inst.creation_timestamp or "",
+            })
+    return results
+
+
+async def list_gce_rancher(project_id: str) -> list[dict]:
+    """List the Rancher management-node container instances (COS on GCE)."""
+    try:
+        return await asyncio.to_thread(_list_gce_rancher_sync, project_id)
+    except GCPError:
+        raise
+    except Exception as e:
+        raise GCPError(f"Failed to list GCE Rancher node instances: {e}") from e
+
+
 # ── Cloud Run Jobs Ansible runner (mirrors ACI runner in azure_service.py) ───
 
 _ANSIBLE_RUNNER_PREFIX = "ansible-runner"

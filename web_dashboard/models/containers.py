@@ -158,3 +158,35 @@ class GCEJumpointListResponse(BaseModel):
     instances: list[GCEJumpointInfo]
     project_id: str
     count: int
+
+
+# ── GCP Rancher management node (COS on GCE) ────────────────────────────────
+
+class RancherNodeInfo(BaseModel):
+    name: str
+    zone: str
+    status: str  # RUNNING | TERMINATED | STOPPING | PROVISIONING | ...
+    machine_type: str = ""
+    image: str = ""
+    internal_ip: str = ""
+    external_ip: str = ""
+    url: str = ""          # https://<external_ip>
+    created_at: Optional[str] = None
+
+
+class RancherNodeResponse(BaseModel):
+    nodes: list[RancherNodeInfo]
+    project_id: str
+    count: int
+    configured: bool       # GCP project + bootstrap password present
+    server_url: str = ""   # the pinned rancher_server_url (if the node is bootstrapped)
+
+
+class RancherImportRequest(BaseModel):
+    name: str              # cluster name to create in Rancher
+
+
+class RancherImportResponse(BaseModel):
+    cluster_id: str
+    manifest_url: str
+    apply_command: str     # kubectl apply -f <manifest_url> (run against the target cluster)

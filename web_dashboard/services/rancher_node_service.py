@@ -1,0 +1,207 @@
+"""Rancher management-node orchestrator (GCE COS).
+
+Owns the deploy/teardown JOB lifecycle for the central Rancher server that runs
+as a single privileged container on a public (source-restricted) GCE COS VM.
+Keeps ``gcp_service`` pure-GCE and ``rancher_service`` pure-API; this module
+glues them to config + the job queue (mirrors how ``vdesktop_service`` owns its
+own job lifecycle). Dispatched from ``jobs_worker`` (``rancher_node_deploy`` /
+``rancher_node_teardown``) — long ops (VM boot + Rancher bootstrap poll) that the
+durable worker's heartbeat protects.
+
+The node is EPHEMERAL: an ephemeral external IP + auto-delete boot disk. A
+stop/recreate reassigns the IP and wipes ``/var/lib/rancher``, so it must
+re-bootstrap and downstream clusters must re-import.
+"""
+import asyncio
+import logging
+
+import httpx
+
+from ..database import SessionLocal
+from . import config_service, gcp_service, job_service, rancher_service
+
+logger = logging.getLogger(__name__)
+
+# How long to wait for Rancher to start serving after the VM boots.
+_READY_TIMEOUT_S = 360
+_READY_POLL_S = 10
+
+
+def _firewall_name(node_name: str) -> str:
+    return f"{node_name}-allow-mgmt"
+
+
+def _node_params() -> dict:
+    """Resolve the node's deploy knobs from config_service (Settings)."""
+    from ..config import settings
+    zone = (config_service.get("gcp_rancher_zone")
+            or config_service.get("gcp_zone") or settings.gcp_zone or "us-central1-a")
+    try:
+        boot_disk_gb = int(config_service.get("gcp_rancher_boot_disk_gb") or settings.gcp_rancher_boot_disk_gb)
+    except (TypeError, ValueError):
+        boot_disk_gb = settings.gcp_rancher_boot_disk_gb
+    return {
+        "project_id":   config_service.get("gcp_project_id") or settings.gcp_project_id,
+        "zone":         zone,
+        "name":         config_service.get("gcp_rancher_name") or settings.gcp_rancher_name,
+        "image":        config_service.get("gcp_rancher_image") or settings.gcp_rancher_image,
+        "machine_type": config_service.get("gcp_rancher_machine_type") or settings.gcp_rancher_machine_type,
+        "boot_disk_gb": boot_disk_gb,
+        "network":      config_service.get("gcp_network") or settings.gcp_network or "default",
+        "network_tag":  config_service.get("gcp_rancher_network_tag") or settings.gcp_rancher_network_tag,
+    }
+
+
+def _allowed_cidrs() -> list[str]:
+    """Firewall source ranges, fail-closed. Empty CSV → [] unless allow_open."""
+    csv = config_service.get("rancher_allowed_source_cidrs") or ""
+    cidrs = [c.strip() for c in csv.split(",") if c.strip()]
+    if not cidrs:
+        if config_service.get_bool("gcp_rancher_allow_open", False):
+            logger.warning("Rancher node firewall opening 0.0.0.0/0 (gcp_rancher_allow_open=true)")
+            return ["0.0.0.0/0"]
+        logger.warning("Rancher node has NO allowed source CIDRs — firewall stays closed (node unreachable). "
+                       "Set rancher_allowed_source_cidrs in Settings.")
+    return cidrs
+
+
+async def _wait_ready(url: str) -> bool:
+    """Poll the node until Rancher answers (it needs 1-3 min; expect early 5xx)."""
+    deadline = asyncio.get_event_loop().time() + _READY_TIMEOUT_S
+    async with httpx.AsyncClient(verify=False, timeout=10.0) as c:
+        while asyncio.get_event_loop().time() < deadline:
+            try:
+                r = await c.get(f"{url}/ping")
+                if r.status_code < 500:
+                    return True
+            except httpx.HTTPError:
+                pass
+            await asyncio.sleep(_READY_POLL_S)
+    return False
+
+
+async def run_deploy(db, *, job_id: str, meta: dict) -> None:
+    """Deploy (or reuse) the Rancher node: firewall → COS VM → pin server-url →
+    wait ready → bootstrap → mint token → best-effort Entitle register."""
+    try:
+        job_service.set_running(db, job_id)
+        p = _node_params()
+        if not p["project_id"]:
+            job_service.set_failed(db, job_id, "GCP project is not configured.")
+            return
+        bootstrap_password = config_service.get("rancher_bootstrap_password")
+        if not bootstrap_password:
+            job_service.set_failed(db, job_id, "rancher_bootstrap_password is not set (Settings → Kubernetes).")
+            return
+
+        job_service.update_progress(db, job_id, 10, "Configuring firewall")
+        fw = await gcp_service.ensure_rancher_firewall(
+            p["project_id"], p["network"], p["network_tag"], _allowed_cidrs(), _firewall_name(p["name"]))
+
+        job_service.update_progress(db, job_id, 30, "Launching COS VM")
+        res = await gcp_service.run_gce_rancher(
+            p["project_id"], p["zone"], p["name"], p["image"], bootstrap_password,
+            network=p["network"], machine_type=p["machine_type"],
+            boot_disk_gb=p["boot_disk_gb"], network_tag=p["network_tag"],
+            create_external_ip=True)
+        external_ip = res.get("external_ip") or ""
+        url = res.get("url") or ""
+        if not external_ip:
+            job_service.set_failed(db, job_id, "Rancher VM has no external IP — cannot reach it.")
+            return
+        config_service.set("rancher_server_url", url)
+
+        existing_token = config_service.get("rancher_api_token")
+        if res.get("reused") and existing_token and res.get("status") == "RUNNING":
+            # Node already bootstrapped + alive — just re-pin server-url (the
+            # ephemeral IP may have changed across a stop/start).
+            job_service.update_progress(db, job_id, 70, "Re-pinning server-url on the live node")
+            try:
+                await rancher_service.set_server_url_direct(server_url=url, api_token=existing_token)
+            except Exception as exc:
+                logger.warning("Rancher re-pin server-url failed (continuing): %s", exc)
+            token = existing_token
+        else:
+            job_service.update_progress(db, job_id, 55, "Waiting for Rancher to start")
+            if not await _wait_ready(url):
+                job_service.set_failed(db, job_id, f"Rancher did not become ready at {url} within timeout.")
+                return
+            job_service.update_progress(db, job_id, 75, "Bootstrapping Rancher admin")
+            token = await rancher_service.bootstrap_direct(
+                bootstrap_password=bootstrap_password, server_url=url)
+            config_service.set("rancher_api_token", token)
+
+        # Best-effort auto-register in Entitle (never fails the deploy).
+        if config_service.get_bool("entitle_registration_enabled", False):
+            job_service.update_progress(db, job_id, 90, "Registering in Entitle")
+            try:
+                from . import k8s_service
+                await k8s_service.register_rancher_in_entitle("register")
+            except Exception as exc:
+                logger.warning("Rancher auto Entitle-register failed (continuing): %s", exc)
+
+        job_service.set_completed(db, job_id, {
+            "url": url, "external_ip": external_ip, "name": p["name"], "zone": p["zone"],
+            "firewall_opened": fw.get("opened", False), "reused": res.get("reused", False),
+        })
+    except Exception as exc:
+        logger.exception("Rancher node deploy failed (job %s)", job_id)
+        job_service.set_failed(db, job_id, str(exc))
+
+
+async def run_teardown(db, *, job_id: str, meta: dict) -> None:
+    """Tear down the Rancher node: soft-guard on active imports → delete VM +
+    firewall → deregister Entitle → remove PRA web jump → clear runtime config."""
+    try:
+        job_service.set_running(db, job_id)
+        p = _node_params()
+        name = meta.get("name") or p["name"]
+        zone = meta.get("zone") or p["zone"]
+
+        # Soft central-guard: warn about orphaned imports unless forced.
+        if not meta.get("force"):
+            try:
+                from . import k8s_service
+                n = k8s_service.count_rancher_imports(db)
+                if n:
+                    job_service.set_failed(
+                        db, job_id,
+                        f"{n} cluster(s) are imported into this Rancher — decommission or unmanage "
+                        f"them first, or force teardown to orphan them.")
+                    return
+            except Exception as exc:
+                logger.warning("Rancher import count check failed (continuing): %s", exc)
+
+        # Deregister Entitle (best-effort) before the node goes away.
+        if config_service.get("entitle_rancher_tfstate"):
+            job_service.update_progress(db, job_id, 20, "Deregistering from Entitle")
+            try:
+                from . import k8s_service
+                await k8s_service.register_rancher_in_entitle("deregister")
+            except Exception as exc:
+                logger.warning("Rancher Entitle deregister failed (continuing): %s", exc)
+
+        # Remove the PRA web jump (best-effort).
+        if config_service.get("rancher_ui_web_jump_tfstate"):
+            job_service.update_progress(db, job_id, 40, "Removing PRA web jump")
+            try:
+                from . import k8s_service
+                await k8s_service.remove_rancher_ui_web_jump()
+            except Exception as exc:
+                logger.warning("Rancher PRA web-jump removal failed (continuing): %s", exc)
+
+        job_service.update_progress(db, job_id, 70, "Deleting COS VM + firewall")
+        await gcp_service.stop_gce_rancher(
+            p["project_id"], zone, name,
+            delete_firewall=True, firewall_name=_firewall_name(name))
+
+        # Clear runtime config so a fresh deploy re-bootstraps cleanly.
+        for key in ("rancher_server_url", "rancher_api_token",
+                    "rancher_ui_web_jump_id", "rancher_ui_web_jump_tfstate",
+                    "entitle_rancher_integration_id", "entitle_rancher_tfstate"):
+            config_service.set(key, "")
+
+        job_service.set_completed(db, job_id, {"name": name, "zone": zone})
+    except Exception as exc:
+        logger.exception("Rancher node teardown failed (job %s)", job_id)
+        job_service.set_failed(db, job_id, str(exc))
