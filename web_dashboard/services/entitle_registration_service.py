@@ -31,10 +31,16 @@ Optional:
   entitle_agent_token_name   name of an Entitle Agent token for private connectivity
   entitle_allowed_durations  comma list of seconds (default "3600,43200,86400")
 
-⚠️  APPLICATION SLUGS: ``application.name`` is a lowercase slug from Entitle's
-    catalog. ``postgresql`` is confirmed from the provider docs; ``mysql`` /
-    ``mssql`` / ``ssh`` are best-effort — confirm against the ``entitle_applications``
-    data source for your tenant and adjust ``_APP_SLUG`` if they differ.
+⚠️  APPLICATION NAMES: ``application.name`` must match an application in the
+    tenant's Entitle catalog **exactly** (matching is case-insensitive, but the
+    words must be right). Contrary to the generic provider-doc examples (``aws`` /
+    ``postgresql``), this tenant's ``entitle_applications`` data source returns
+    human display names — ``SSH Ephemeral Accounts``, ``Postgres``, ``MySql``,
+    ``Microsoft SQL Server``, ``Kubernetes``, ``Rancher``. A wrong name yields a
+    404 ``{"errorId":"resource.notFound","message":"Application not found"}`` at
+    apply time. Confirm against the ``entitle_applications`` data source for your
+    tenant (note the cloud-specific variants ``RDS`` / ``GCP Postgres`` exist too)
+    and adjust ``_APP_SLUG`` if they differ.
 
     ``connection_json`` keys are application-specific and DIFFER PER DB ENGINE
     (see ``_db_connection_json_hcl``), matching Entitle's connector docs:
@@ -64,15 +70,17 @@ _TERRAFORM = os.environ.get("TERRAFORM_EXECUTABLE", "terraform")
 # download the provider at runtime (same dir the entitleio/sra providers use).
 _PLUGIN_CACHE_DIR = os.environ.get("TF_PLUGIN_CACHE_DIR", "/root/.terraform.d/plugin-cache")
 
-# engine / kind → Entitle application catalog slug (lowercase). `postgresql` is
-# confirmed from provider docs; the rest are best-effort — confirm via the
-# entitle_applications data source for your tenant.
+# engine / kind → Entitle application catalog name. These are the EXACT display
+# names returned by this tenant's `entitle_applications` data source (matching is
+# case-insensitive but the words must match). A wrong name → 404 "Application not
+# found" at apply time. The SSH name is overridable via `entitle_ssh_app_slug`
+# (parallel to `entitle_rancher_app_slug`) for tenants whose catalog differs.
 _APP_SLUG = {
-    "ssh":        "ssh",
-    "postgres":   "postgresql",
-    "mysql":      "mysql",
-    "sqlserver":  "mssql",
-    "kubernetes": "kubernetes",
+    "ssh":        "SSH Ephemeral Accounts",
+    "postgres":   "Postgres",
+    "mysql":      "MySql",
+    "sqlserver":  "Microsoft SQL Server",
+    "kubernetes": "Kubernetes",
 }
 
 _DEFAULT_DURATIONS = "3600,43200,86400"  # 1h, 12h, 24h (all valid Entitle values)
@@ -215,15 +223,18 @@ provider "entitle" {{
 def _generate_ssh_hcl(*, name: str, hostname: str, sudo_user: str, port: int, private: bool) -> str:
     label = _safe_name(name)
     header = _provider_header('variable "ssh_private_key" { sensitive = true }\n')
+    # connection_json for the "SSH Ephemeral Accounts" connector is host/key/user
+    # (see docs.beyondtrust.com/entitle/docs/entitle-integration-ssh_ephemeral_accounts);
+    # the private key is `key`, NOT `privateKey`, and there is no `port` field.
+    app_name = _cfg("entitle_ssh_app_slug") or _APP_SLUG["ssh"]
     return header + f"""
 resource "entitle_integration" {json.dumps(label)} {{
   name        = {json.dumps(name[:50])}
-  application = {{ name = {json.dumps(_APP_SLUG["ssh"])} }}
+  application = {{ name = {json.dumps(app_name)} }}
   connection_json = jsonencode({{
-    host       = {json.dumps(hostname)}
-    port       = {port}
-    user       = {json.dumps(sudo_user)}
-    privateKey = var.ssh_private_key
+    host = {json.dumps(hostname)}
+    user = {json.dumps(sudo_user)}
+    key  = var.ssh_private_key
   }})
 {_common_attrs_hcl(private)}}}
 
