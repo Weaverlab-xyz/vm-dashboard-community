@@ -60,11 +60,16 @@ ENV LIBGUESTFS_BACKEND=direct
 # needs NO guest network or package repo — it installs via the guest's own
 # Python. This matters because foreign images (e.g. an Amazon-Linux AMI) often
 # don't carry waagent in any configured repo. Pin to a stable release tag.
-# Also vendor setuptools into _vendor/: WALinuxAgent's setup.py does
-# `import setuptools`, but minimal cloud images (e.g. Debian 13) ship Python
-# without it. The vendored copy rides along in the --copy-in and is used only
-# when the guest lacks its own (see entrypoint.install_linux_agent). Pin <80:
-# setuptools 80 removed the `setup.py install` command --register-service uses.
+# Vendor two deps into _vendor/ (rides along in the --copy-in, always exposed via
+# PYTHONPATH — see entrypoint.install_linux_agent):
+#   * setuptools<80: WALinuxAgent's setup.py does `import setuptools`, missing on
+#     minimal images (e.g. Debian 13). Pin <80 — setuptools 80 removed the
+#     `setup.py install` command --register-service uses (and prepending pins it
+#     over any newer copy the guest ships).
+#   * distro: WALinuxAgent's future.py falls back to `import distro` on Python
+#     >= 3.8 because platform.linux_distribution()/platform._supported_dists were
+#     removed. A guest whose Python lacks it (e.g. Rocky/RHEL 9 minimal, py3.9)
+#     dies at setup.py import with "NameError: name 'distro' is not defined".
 ARG WALINUXAGENT_VERSION=2.15.0.1
 RUN curl -fsSL \
       "https://github.com/Azure/WALinuxAgent/archive/refs/tags/v${WALINUXAGENT_VERSION}.tar.gz" \
@@ -72,7 +77,7 @@ RUN curl -fsSL \
     && mkdir -p /opt/walinuxagent-src \
     && tar -xzf /tmp/waagent.tar.gz -C /opt/walinuxagent-src --strip-components=1 \
     && rm /tmp/waagent.tar.gz \
-    && pip install --no-cache-dir --target /opt/walinuxagent-src/_vendor "setuptools<80"
+    && pip install --no-cache-dir --target /opt/walinuxagent-src/_vendor "setuptools<80" "distro==1.9.0"
 
 # Bundle the GCE guest agent (built in the stage above) + our arch-selecting
 # launcher + the systemd unit, so the GCS-target promote can inject it offline
