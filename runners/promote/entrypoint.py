@@ -231,6 +231,87 @@ def install_gcp_guest_agent(disk_path: str, source_format: str) -> None:
     log("google-guest-agent injection done")
 
 
+def install_aws_guest_env(disk_path: str, source_format: str) -> None:
+    """Offline-inject an EC2-capable cloud-init into a Linux disk and strip the
+    source cloud's guest environment.
+
+    Foreign images built on GCP (Google's ``rocky-linux-9`` base and friends)
+    ship NO cloud-init — they use google-guest-agent instead. Promoted to AWS and
+    launched, the dashboard's ``#cloud-config`` UserData is delivered but never
+    consumed: the launch keypair is never written to a user, and the SSM-agent
+    install ``runcmd`` never runs (key-based SSH + the Password Safe SSM rotation
+    plugin only work if the agent happens to be baked in some other way). Baking
+    an Ec2-datasource cloud-init in here makes the launch UserData take effect
+    exactly like a natively-built AWS AMI.
+
+    Uses libguestfs virt-customize (unprivileged container) to:
+      1. install cloud-init from the guest's OWN package manager (virt-customize
+         enables appliance networking by default, so the guest repos are reached),
+      2. pin the datasource to Ec2 so cloud-init reads EC2 IMDS + UserData,
+      3. enable cloud-init's boot stages (a generalized/foreign image may not
+         have the package presets applied),
+      4. remove the Google guest environment so it can't fight the Ec2 datasource
+         or re-manage users — oslogin is disabled first so its nsswitch + PAM
+         edits are reverted cleanly (best-effort: cloud-init already wins),
+      5. strip the leftover gcp-user build key (written by the GCE guest agent
+         from build-time ssh-keys metadata) — cloud-init injects the deploy key
+         into the default user fresh at launch. The Password-Safe admin account
+         is left untouched (its seed key must survive for the SSM plugin to
+         rotate in place); build-time key hygiene for it lives in bt-ready,
+      6. clean cloud-init state so it runs fresh on first EC2 boot.
+
+    amazon-ssm-agent is intentionally NOT baked here: once cloud-init runs, the
+    dashboard's existing UserData ``runcmd`` installs it at first boot, matching a
+    native AWS build (that step needs instance egress to the in-region SSM S3
+    bucket, same as any native AWS image).
+
+    Raises on failure of the cloud-init install: a promoted Linux AWS image
+    without cloud-init is broken in exactly the way this fixes, so we must not
+    ship one.
+    """
+    fmt = _LIBGUESTFS_FORMAT.get((source_format or "").lower())
+    log(f"inject EC2 cloud-init + strip foreign guest env into {disk_path} (format={fmt or 'auto'})")
+    cmd = ["virt-customize"]
+    if fmt:
+        cmd += ["--format", fmt]
+    cmd += ["-a", disk_path]
+    cmd += [
+        # 1. cloud-init from the guest's package manager. Distro-agnostic name;
+        #    hard-fails the promote if it can't be installed.
+        "--install", "cloud-init",
+        # 2. Pin the datasource to Ec2 so cloud-init reads EC2 IMDS + UserData.
+        "--run-command",
+        "mkdir -p /etc/cloud/cloud.cfg.d && "
+        "printf 'datasource_list: [ Ec2, None ]\\n' > /etc/cloud/cloud.cfg.d/99-ec2-datasource.cfg",
+        # 3. Enable the boot stages (foreign/generalized images may lack presets).
+        "--run-command",
+        "systemctl enable cloud-init-local.service cloud-init.service "
+        "cloud-config.service cloud-final.service 2>/dev/null || true",
+        # 4. Remove the Google guest env. Disable oslogin FIRST (reverts its
+        #    nsswitch + PAM edits), then remove; best-effort.
+        "--run-command",
+        "command -v google_oslogin_control >/dev/null 2>&1 && google_oslogin_control --disable; "
+        "for s in google-guest-agent google-osconfig-agent google-startup-scripts google-shutdown-scripts; do "
+        "systemctl disable $s 2>/dev/null; done; "
+        "if command -v dnf >/dev/null 2>&1; then "
+        "dnf remove -y google-guest-agent google-osconfig-agent google-compute-engine-oslogin google-compute-engine google-cloud-cli 2>/dev/null; "
+        "elif command -v apt-get >/dev/null 2>&1; then "
+        "apt-get purge -y google-guest-agent google-osconfig-agent google-cloud-sdk 2>/dev/null; fi; true",
+        # 5. Strip the leftover gcp-user build key (cloud-init re-injects the
+        #    deploy key at launch). Targeted so the PS-managed admin account's
+        #    seed key is never removed.
+        "--run-command",
+        "rm -f /home/gcp-user/.ssh/authorized_keys 2>/dev/null; true",
+        # 6. Clean cloud-init state so it runs fresh on first EC2 boot.
+        "--run-command",
+        "cloud-init clean --logs 2>/dev/null || rm -rf /var/lib/cloud/* 2>/dev/null; true",
+        # Fix SELinux labels on everything we touched (no-op on non-SELinux guests).
+        "--selinux-relabel",
+    ]
+    subprocess.check_call(cmd, stdout=sys.stdout, stderr=sys.stderr)
+    log("aws guest-env injection done")
+
+
 def convert_to_fixed_vhd(src: str, dst: str) -> None:
     """Produce a FIXED-format VHD for Azure. Azure managed-image/disk creation
     rejects dynamic VHDs ("is of Dynamic VHD type. Please retry with fixed VHD
@@ -355,6 +436,12 @@ def main() -> int:
     # Linux image applies ssh-keys metadata (key-based SSH + PS rotation plugin).
     ap.add_argument("--install-gcp-guest-agent", action="store_true",
                     help="inject google-guest-agent into a Linux disk (GCS target)")
+    # S3/AWS only: bake an Ec2-datasource cloud-init into the image + strip the
+    # source cloud's guest env, so a promoted foreign Linux image (esp. GCP-built,
+    # which ships no cloud-init) actually consumes the EC2 UserData on AWS (launch
+    # key injection + SSM-agent install). The dashboard sets this for Linux images.
+    ap.add_argument("--install-aws-guest-env", action="store_true",
+                    help="inject EC2 cloud-init + strip foreign guest env into a Linux disk (S3 target)")
     args = ap.parse_args()
 
     src_ext = args.source_format.lower()
@@ -372,6 +459,11 @@ def main() -> int:
             if not (args.dest_s3_bucket and args.dest_s3_key):
                 log("ERROR: --target s3 requires --dest-s3-bucket and --dest-s3-key")
                 return 2
+            # Bake an Ec2-datasource cloud-init into the disk (and strip the foreign
+            # guest env) BEFORE upload, so the promoted image consumes the EC2
+            # UserData on launch. dst_path is the disk we're about to upload.
+            if args.install_aws_guest_env:
+                install_aws_guest_env(dst_path, dst_ext)
             upload_s3(dst_path, args.dest_s3_bucket, args.dest_s3_key, args.dest_s3_region)
         elif args.target == "azure":
             if not (args.dest_azure_account and args.dest_azure_container and args.dest_azure_blob):

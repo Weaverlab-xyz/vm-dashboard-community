@@ -352,6 +352,21 @@ else
   find /var/log -type f -name '*.log' -exec truncate -s 0 {} + 2>/dev/null || true
   rm -f /root/.bash_history
   find /home -maxdepth 2 -name '.bash_history' -exec rm -f {} + 2>/dev/null || true
+  # Strip leftover authorized_keys from build/default cloud users (e.g. the
+  # packer/cloud default user such as gcp-user or ec2-user, whose key the cloud's
+  # guest agent wrote from build-time metadata) so a build-time SSH key never
+  # ships in the image — the deploy key is re-injected at launch (cloud-init /
+  # guest agent). The Password-Safe-managed admin user ($BT_ADMIN_USER) keeps its
+  # seeded key (see BT_SEED_ADMIN_KEY) so the SSM Custom Plugin has a placeholder
+  # to rotate on first Change Password.
+  for _uh in /home/*; do
+    [ -d "$_uh" ] || continue
+    [ "$(basename "$_uh")" = "$BT_ADMIN_USER" ] && continue
+    if [ -f "$_uh/.ssh/authorized_keys" ]; then
+      rm -f "$_uh/.ssh/authorized_keys"
+      log "stripped leftover $_uh/.ssh/authorized_keys (non-admin build/default user)"
+    fi
+  done
 fi
 
 log "bt-ready provisioning complete on $(hostname): user=$BT_USER"

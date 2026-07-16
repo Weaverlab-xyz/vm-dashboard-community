@@ -493,6 +493,7 @@ async def promote_to_aws_automated(
     hub_backend, hub_key = _parse_hub_url(image["artefact_url"])
     source_format = (image.get("artefact_format") or "vhd").lower()
     target_format = "vhd"  # AWS import_image accepts VHD natively; no conversion if source is VHD.
+    os_type = (image.get("os_type") or "Linux")
 
     dest_bucket, dest_key = promote_runner_service.resolve_aws_staging(image["name"], image["version"])
     # Name the resulting AMI like the Azure/GCP promote targets ({name}-{version}).
@@ -519,6 +520,11 @@ async def promote_to_aws_automated(
         dest_bucket=dest_bucket,
         dest_key=dest_key,
         aws_region=target_region,
+        # Linux images built on a foreign cloud (esp. GCP, which ships no
+        # cloud-init) don't consume the EC2 UserData on AWS, so the launch key is
+        # never injected and the SSM agent never installs. Bake an Ec2-datasource
+        # cloud-init in during promotion. Windows brings its own agent.
+        install_aws_guest_env=os_type.lower() != "windows",
     )
 
     # 3: ec2:ImportImage from the staged S3 object

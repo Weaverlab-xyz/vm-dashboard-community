@@ -239,6 +239,7 @@ IAM role or container env overrides).
 | `--dest-gcs-object`    | `--target gcs`   | GCS object name (should end in `.tar.gz`)  |
 | `--install-linux-agent`| optional (Azure) | Bake WALinuxAgent into the disk before upload (Linux images). |
 | `--install-gcp-guest-agent`| optional (GCS) | Bake google-guest-agent into the disk before the tar wrap (Linux images). |
+| `--install-aws-guest-env`| optional (S3) | Bake an Ec2-datasource cloud-init in + strip the foreign guest env before upload (Linux images). |
 
 **Azure Linux-agent injection (`--install-linux-agent`):** a foreign Linux
 image (e.g. an AWS AMI) doesn't carry the Azure Linux Agent (waagent). On Azure
@@ -282,6 +283,29 @@ guest network. The dashboard sets this automatically for Linux images on GCP
 promotions (`os_type != "windows"`); Windows uses the separate GCEWindowsAgent.
 No distro is rejected (the agent runs on any systemd Linux, including Amazon
 Linux — GCP has no waagent-style per-distro handler).
+
+**AWS guest-env injection (`--install-aws-guest-env`):** a foreign Linux image
+built on GCP (Google's `rocky-linux-9` base and friends) ships **no cloud-init**
+— it uses `google-guest-agent` instead. Promoted to AWS and launched, the
+dashboard's `#cloud-config` UserData is *delivered but never consumed*: the
+launch keypair is never written to a user and the SSM-agent install `runcmd`
+never runs, so key-based SSH (and the Password Safe SSM rotation plugin) only
+work if the agent happens to be baked in some other way. When this flag is set
+the runner uses libguestfs `virt-customize` to (1) install cloud-init from the
+guest's own package manager, (2) pin `datasource_list: [ Ec2, None ]` so it reads
+EC2 IMDS + UserData, (3) enable the cloud-init boot stages, (4) remove the Google
+guest env (oslogin disabled first so its nsswitch/PAM edits revert cleanly), (5)
+strip the leftover `gcp-user` build key, and (6) clean cloud-init state so it runs
+fresh on first boot. This makes the launch UserData take effect exactly like a
+native AWS AMI. Unlike the Azure/GCP injectors, cloud-init is installed from the
+guest's repos (so the runner needs egress for the guest package manager, which
+the ECS task already has); `amazon-ssm-agent` is **not** baked here — once
+cloud-init runs, the dashboard's existing UserData `runcmd` installs it at first
+boot (that step needs instance egress to the in-region SSM S3 bucket, same as any
+native AWS image). The dashboard sets this automatically for Linux images on AWS
+promotions (`os_type != "windows"`); Windows brings its own agent. If the
+cloud-init install fails the runner exits non-zero — a Linux AWS image without
+cloud-init is broken, so we don't ship one silently.
 
 **GCP target quirk:** GCP's `compute.images.insert` requires the source object to be a `.tar.gz` containing exactly one entry named `disk.raw`. When `--target gcs` is paired with `--target-format raw` (the dashboard's only supported GCP path today), the runner automatically tar+gzips the converted raw file under that name before upload. The dashboard always passes `--dest-gcs-object` ending in `.tar.gz` for this reason.
 
