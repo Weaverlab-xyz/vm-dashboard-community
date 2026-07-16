@@ -67,10 +67,15 @@ section "Enable APIs"
 # workflow as a Cloud Build job.
 # container.googleapis.com is the Kubernetes Engine API — GKE provisioning
 # (google_container_cluster / node pools) fails SERVICE_DISABLED without it.
-for api in compute.googleapis.com secretmanager.googleapis.com iam.googleapis.com run.googleapis.com cloudbuild.googleapis.com container.googleapis.com; do
+# gkehub/connectgateway/gkeconnect power GKE Entra federation (Workforce Identity
+# + Connect Gateway; see docs/integrations/entra-k8s-federation.md) — pre-enabling
+# them here makes the dashboard's Enable-federation step a fast no-op instead of a
+# cold API enable.
+for api in compute.googleapis.com secretmanager.googleapis.com iam.googleapis.com run.googleapis.com cloudbuild.googleapis.com container.googleapis.com \
+           gkehub.googleapis.com connectgateway.googleapis.com gkeconnect.googleapis.com; do
   gcloud services enable "$api" --project "$PROJECT_ID" --quiet
 done
-ok "Enabled compute, secretmanager, iam, run, cloudbuild, container"
+ok "Enabled compute, secretmanager, iam, run, cloudbuild, container, gkehub, connectgateway, gkeconnect"
 
 # ── 2. VPC + subnets ─────────────────────────────────────────────────────────
 section "VPC + subnets"
@@ -261,15 +266,23 @@ fi
 # logging.viewer lets the dashboard READ Cloud Logging so it can surface the
 # real Cloud Build export failure (the Daisy error, e.g. a zone-capacity or
 # quota message) on the job page instead of a generic "Build failed".
+# The next three roles power GKE Entra federation (Workforce Identity + Connect
+# Gateway; see docs/integrations/entra-k8s-federation.md). serviceusage.serviceUsageAdmin
+# lets the dashboard enable the Connect Gateway APIs (the "403 Forbidden … services:batchEnable"
+# at Enable-federation time otherwise); gkehub.admin lets it register the cluster to the
+# fleet; resourcemanager.projectIamAdmin lets it grant the workforce principalSet the
+# gkehub.gateway* roles (a project-level setIamPolicy).
 for role in roles/compute.admin roles/secretmanager.secretAccessor \
              roles/iam.serviceAccountUser roles/run.admin roles/run.developer \
              roles/run.invoker roles/cloudsql.admin roles/servicenetworking.networksAdmin \
-             roles/cloudbuild.builds.editor roles/container.admin roles/logging.viewer; do
+             roles/cloudbuild.builds.editor roles/container.admin roles/logging.viewer \
+             roles/serviceusage.serviceUsageAdmin roles/gkehub.admin \
+             roles/resourcemanager.projectIamAdmin; do
   retry 8 5 gcloud projects add-iam-policy-binding "$PROJECT_ID" \
     --member "serviceAccount:$SA_EMAIL" --role "$role" \
     --condition=None --quiet >/dev/null
 done
-ok "Granted compute.admin, secretmanager.secretAccessor, iam.serviceAccountUser, run.{admin,developer,invoker}, cloudsql.admin, servicenetworking.networksAdmin, cloudbuild.builds.editor, container.admin, logging.viewer"
+ok "Granted compute.admin, secretmanager.secretAccessor, iam.serviceAccountUser, run.{admin,developer,invoker}, cloudsql.admin, servicenetworking.networksAdmin, cloudbuild.builds.editor, container.admin, logging.viewer, serviceusage.serviceUsageAdmin, gkehub.admin, resourcemanager.projectIamAdmin"
 
 SA_KEY_PATH="$(state_dir gcp)/sa-key.json"
 if [[ ! -s "$SA_KEY_PATH" ]]; then
