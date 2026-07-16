@@ -345,6 +345,33 @@ if ($existingUaaRole) {
     Write-Ok "Granted SP User Access Administrator on the RG (lets AKS self-grant its RBAC Cluster Admin)"
 }
 
+# The Cloud Costs page queries Microsoft.CostManagement at SUBSCRIPTION scope
+# (web_dashboard/services/cost_service.py). Contributor is scoped to the RG only,
+# so the query returns 401 Unauthorized until the SP has a cost-reader role at the
+# subscription. Grant "Cost Management Reader" on the subscription. Best-effort:
+# creating a subscription-scoped assignment needs Owner / User Access Administrator
+# at the subscription — warn (don't abort) if the operator lacks it, since the
+# rest of the sandbox works without cost data.
+$SubScope = "/subscriptions/$SubscriptionId"
+$existingCostRole = (az role assignment list --assignee $SpObjectId --scope $SubScope `
+    --role 'Cost Management Reader' --query '[0].id' -o tsv 2>$null).Trim()
+if ($existingCostRole) {
+    Write-Ok "SP already has Cost Management Reader on the subscription"
+} else {
+    az role assignment create --assignee-object-id $SpObjectId `
+        --assignee-principal-type ServicePrincipal `
+        --role 'Cost Management Reader' --scope $SubScope 2>$null | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+        Write-Ok "Granted SP Cost Management Reader on the subscription (Cloud Costs page)"
+    } else {
+        Write-Warn "Could not grant Cost Management Reader on the subscription — the Cloud Costs"
+        Write-Warn "  page will show Azure as 'unavailable' (401). Grant it with an account that has"
+        Write-Warn "  Owner/User Access Administrator on the subscription:"
+        Write-Warn "    az role assignment create --assignee $SpAppId ``"
+        Write-Warn "      --role 'Cost Management Reader' --scope $SubScope"
+    }
+}
+
 # Register the ACI provider if not already (no-op if registered). The
 # promote runner launches as an ACI container group.
 $AciState = (az provider show --namespace Microsoft.ContainerInstance `

@@ -75,11 +75,13 @@ section "Enable APIs"
 # federation's gateway-IAM grant uses (and the project-number lookup for the Connect
 # Gateway URL). It is NOT enabled by default on every project — without it those calls
 # fail with a "403 Forbidden … :getIamPolicy" that is really a SERVICE_DISABLED.
+# bigquery.googleapis.com powers the Cloud Costs page: GCP has no cost API, so the
+# dashboard queries the Cloud Billing export table in BigQuery (see cost_service.py).
 for api in compute.googleapis.com secretmanager.googleapis.com iam.googleapis.com run.googleapis.com cloudbuild.googleapis.com container.googleapis.com \
-           gkehub.googleapis.com connectgateway.googleapis.com gkeconnect.googleapis.com cloudresourcemanager.googleapis.com; do
+           gkehub.googleapis.com connectgateway.googleapis.com gkeconnect.googleapis.com cloudresourcemanager.googleapis.com bigquery.googleapis.com; do
   gcloud services enable "$api" --project "$PROJECT_ID" --quiet
 done
-ok "Enabled compute, secretmanager, iam, run, cloudbuild, container, gkehub, connectgateway, gkeconnect, cloudresourcemanager"
+ok "Enabled compute, secretmanager, iam, run, cloudbuild, container, gkehub, connectgateway, gkeconnect, cloudresourcemanager, bigquery"
 
 # ── 2. VPC + subnets ─────────────────────────────────────────────────────────
 section "VPC + subnets"
@@ -276,17 +278,22 @@ fi
 # at Enable-federation time otherwise); gkehub.admin lets it register the cluster to the
 # fleet; resourcemanager.projectIamAdmin lets it grant the workforce principalSet the
 # gkehub.gateway* roles (a project-level setIamPolicy).
+# bigquery.jobUser + bigquery.dataViewer power the Cloud Costs page: the dashboard
+# runs a query job (jobUser) against the Cloud Billing export table and reads its
+# rows (dataViewer). Both are granted at project scope — if your billing export
+# dataset lives in a DIFFERENT project, also grant dataViewer on that dataset there.
 for role in roles/compute.admin roles/secretmanager.secretAccessor \
              roles/iam.serviceAccountUser roles/run.admin roles/run.developer \
              roles/run.invoker roles/cloudsql.admin roles/servicenetworking.networksAdmin \
              roles/cloudbuild.builds.editor roles/container.admin roles/logging.viewer \
              roles/serviceusage.serviceUsageAdmin roles/gkehub.admin \
-             roles/resourcemanager.projectIamAdmin; do
+             roles/resourcemanager.projectIamAdmin \
+             roles/bigquery.jobUser roles/bigquery.dataViewer; do
   retry 8 5 gcloud projects add-iam-policy-binding "$PROJECT_ID" \
     --member "serviceAccount:$SA_EMAIL" --role "$role" \
     --condition=None --quiet >/dev/null
 done
-ok "Granted compute.admin, secretmanager.secretAccessor, iam.serviceAccountUser, run.{admin,developer,invoker}, cloudsql.admin, servicenetworking.networksAdmin, cloudbuild.builds.editor, container.admin, logging.viewer, serviceusage.serviceUsageAdmin, gkehub.admin, resourcemanager.projectIamAdmin"
+ok "Granted compute.admin, secretmanager.secretAccessor, iam.serviceAccountUser, run.{admin,developer,invoker}, cloudsql.admin, servicenetworking.networksAdmin, cloudbuild.builds.editor, container.admin, logging.viewer, serviceusage.serviceUsageAdmin, gkehub.admin, resourcemanager.projectIamAdmin, bigquery.jobUser, bigquery.dataViewer"
 
 SA_KEY_PATH="$(state_dir gcp)/sa-key.json"
 if [[ ! -s "$SA_KEY_PATH" ]]; then
@@ -404,6 +411,11 @@ _cfg=(
   "promote_runner_gcp_region=$REGION                         # Cloud Run Job lands here"
   "promote_runner_gcp_service_account=$SA_EMAIL              # Workload-identity SA for the runner"
   "promote_runner_gcp_staging_bucket=$STORAGE_BUCKET"
+  ""
+  "# Cloud Costs page (GCP has no cost API — query the Cloud Billing BigQuery export):"
+  "#   1. Billing → Billing export → enable 'Detailed usage cost' export to a BigQuery dataset."
+  "#   2. Paste the fully-qualified export table below (the SA was granted bigquery.jobUser + dataViewer above)."
+  "gcp_billing_export_table=…   # e.g. ${PROJECT_ID}.billing_export.gcp_billing_export_resource_v1_XXXXXX (paste manually)"
   ""
   "# BeyondTrust deploy key — set in /setup or /secrets:"
   "gcp_cloud_run_docker_deploy_key=…"
