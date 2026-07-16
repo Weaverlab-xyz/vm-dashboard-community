@@ -31,16 +31,20 @@ Optional:
   entitle_agent_token_name   name of an Entitle Agent token for private connectivity
   entitle_allowed_durations  comma list of seconds (default "3600,43200,86400")
 
-⚠️  APPLICATION NAMES: ``application.name`` must match an application in the
-    tenant's Entitle catalog **exactly** (matching is case-insensitive, but the
-    words must be right). Contrary to the generic provider-doc examples (``aws`` /
-    ``postgresql``), this tenant's ``entitle_applications`` data source returns
-    human display names — ``SSH Ephemeral Accounts``, ``Postgres``, ``MySql``,
-    ``Microsoft SQL Server``, ``Kubernetes``, ``Rancher``. A wrong name yields a
-    404 ``{"errorId":"resource.notFound","message":"Application not found"}`` at
-    apply time. Confirm against the ``entitle_applications`` data source for your
-    tenant (note the cloud-specific variants ``RDS`` / ``GCP Postgres`` exist too)
-    and adjust ``_APP_SLUG`` if they differ.
+⚠️  APPLICATION NAMES: ``application.name`` must be the **lowercased** display
+    name of an application in the tenant's Entitle catalog. The entitleio/entitle
+    v3 provider validates this field client-side at plan time — a value with any
+    uppercase letter fails immediately with "Lowercase Validation Failed / value
+    must be all lowercase" (before any API call). At apply time the provider then
+    case-insensitively matches the lowercase value against the catalog, so the
+    words must also be right or you get a 404
+    ``{"errorId":"resource.notFound","message":"Application not found"}``.
+    This tenant's ``entitle_applications`` data source returns human display names
+    (``SSH Ephemeral Accounts``, ``Postgres``, ``MySql``, ``Microsoft SQL Server``,
+    ``Kubernetes``, ``Rancher``) — so ``_APP_SLUG`` holds those names LOWERCASED.
+    Confirm against the ``entitle_applications`` data source for your tenant (note
+    the cloud-specific variants ``SSH Standing Accounts`` / ``GCP Postgres`` exist
+    too) and adjust ``_APP_SLUG`` if they differ.
 
     ``connection_json`` keys are application-specific and DIFFER PER DB ENGINE
     (see ``_db_connection_json_hcl``), matching Entitle's connector docs:
@@ -70,17 +74,21 @@ _TERRAFORM = os.environ.get("TERRAFORM_EXECUTABLE", "terraform")
 # download the provider at runtime (same dir the entitleio/sra providers use).
 _PLUGIN_CACHE_DIR = os.environ.get("TF_PLUGIN_CACHE_DIR", "/root/.terraform.d/plugin-cache")
 
-# engine / kind → Entitle application catalog name. These are the EXACT display
-# names returned by this tenant's `entitle_applications` data source (matching is
-# case-insensitive but the words must match). A wrong name → 404 "Application not
-# found" at apply time. The SSH name is overridable via `entitle_ssh_app_slug`
-# (parallel to `entitle_rancher_app_slug`) for tenants whose catalog differs.
+# engine / kind → Entitle application catalog name, **lowercased**. These are the
+# display names returned by this tenant's `entitle_applications` data source
+# (`SSH Ephemeral Accounts`, `Postgres`, `MySql`, `Microsoft SQL Server`,
+# `Kubernetes`) lowercased, because the entitleio/entitle v3 provider validates
+# `application.name` as all-lowercase at plan time (an uppercase letter → instant
+# "Lowercase Validation Failed") and then case-insensitively matches the catalog
+# at apply time (a wrong name → 404 "Application not found"). The SSH name is
+# overridable via `entitle_ssh_app_slug` (parallel to `entitle_rancher_app_slug`)
+# for tenants whose catalog differs.
 _APP_SLUG = {
-    "ssh":        "SSH Ephemeral Accounts",
-    "postgres":   "Postgres",
-    "mysql":      "MySql",
-    "sqlserver":  "Microsoft SQL Server",
-    "kubernetes": "Kubernetes",
+    "ssh":        "ssh ephemeral accounts",
+    "postgres":   "postgres",
+    "mysql":      "mysql",
+    "sqlserver":  "microsoft sql server",
+    "kubernetes": "kubernetes",
 }
 
 _DEFAULT_DURATIONS = "3600,43200,86400"  # 1h, 12h, 24h (all valid Entitle values)
@@ -136,7 +144,8 @@ def _durations_hcl() -> str:
     return "[" + ", ".join(nums) + "]"
 
 
-def _common_attrs_hcl(private: bool, *, allow_creating_accounts: bool = True) -> str:
+def _common_attrs_hcl(private: bool, *, allow_creating_accounts: bool = True,
+                      allow_changing_account_permissions: Optional[bool] = None) -> str:
     """The required owner/workflow blocks + allowed_durations, plus the
     ``agent_token`` block **only for private targets**.
 
@@ -150,7 +159,13 @@ def _common_attrs_hcl(private: bool, *, allow_creating_accounts: bool = True) ->
     a short-lived account/role on the target per grant. Defaults ``True`` (SSH /
     Kubernetes / Rancher all use it); the MySQL DB path passes ``False`` because
     Entitle's MySQL connector assigns persistent roles rather than ephemeral
-    accounts."""
+    accounts.
+
+    ``allow_changing_account_permissions`` is app-specific and OMITTED by default
+    (``None``) so we don't disturb apps that accept the provider's default of
+    ``true`` — e.g. the Kubernetes connector, live-validated with it unset. The
+    **SSH Ephemeral Accounts** app rejects that default (API 400 "This application
+    restricts changing accounts permissions"), so the SSH path passes ``False``."""
     owner_id = _cfg("entitle_owner_id")
     workflow_id = _cfg("entitle_workflow_id")
     if not owner_id:
@@ -166,12 +181,19 @@ def _common_attrs_hcl(private: bool, *, allow_creating_accounts: bool = True) ->
                 "Entitle agent (Kubernetes) first, or register only public resources"
             )
         agent_block = f"  agent_token = {{ name = {json.dumps(agent)} }}\n"
+    changing_line = ""
+    if allow_changing_account_permissions is not None:
+        changing_line = (
+            f"  allow_changing_account_permissions = "
+            f"{str(bool(allow_changing_account_permissions)).lower()}\n"
+        )
     return (
         f"  owner    = {{ id = {json.dumps(owner_id)} }}\n"
         f"  workflow = {{ id = {json.dumps(workflow_id)} }}\n"
         f"{agent_block}"
         f"  allowed_durations       = {_durations_hcl()}\n"
         f"  allow_creating_accounts = {str(bool(allow_creating_accounts)).lower()}\n"
+        f"{changing_line}"
     )
 
 
@@ -236,7 +258,7 @@ resource "entitle_integration" {json.dumps(label)} {{
     user = {json.dumps(sudo_user)}
     key  = var.ssh_private_key
   }})
-{_common_attrs_hcl(private)}}}
+{_common_attrs_hcl(private, allow_changing_account_permissions=False)}}}
 
 output "integration_id" {{
   value = entitle_integration.{label}.id
