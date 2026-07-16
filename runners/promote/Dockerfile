@@ -24,6 +24,19 @@ RUN apt-get update \
 RUN git clone --depth 1 --branch "${GUEST_AGENT_VERSION}" \
       https://github.com/GoogleCloudPlatform/guest-agent /src
 WORKDIR /src
+# Pre-fetch the modules (and, via GOTOOLCHAIN=auto, the toolchain) in a retried
+# step BEFORE the build. proxy.golang.org intermittently returns a transient
+# HTTP/2 "stream error: INTERNAL_ERROR; received from peer" mid-download, which
+# failed a release build (v26.5.4) and left the runner image unpublished —
+# blocking every Azure/GCP promote. Isolating the network step and retrying it
+# keeps a proxy hiccup from breaking a release; the build then runs from the
+# warm module cache and needs no network.
+RUN for i in 1 2 3 4 5; do \
+      go mod download && exit 0; \
+      echo "go mod download attempt $i/5 failed; retrying in 10s" >&2; \
+      sleep 10; \
+    done; \
+    echo "go mod download failed after 5 attempts" >&2; exit 1
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
       -o /out/amd64/google_guest_agent ./google_guest_agent \
  && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath \
