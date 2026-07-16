@@ -2533,13 +2533,21 @@ def _entra_oidc_login_kubeconfig(kubeconfig: str, oidc: dict) -> str:
     """Pure transform: replace every user's exec block with int128 ``kubectl
     oidc-login`` against the shared Entra app (``oidc`` from _entra_oidc_settings).
     Token-free — no static credential (token / client-key-data) is written; the CA
-    and cluster ``server`` are left untouched (repoint happens before this)."""
+    and cluster ``server`` are left untouched (repoint happens before this).
+
+    Uses the ``device-code`` grant (not the default authcode browser flow) so the
+    downloaded file works unchanged on Entra-joined, cross-tenant and headless
+    machines: the authcode flow SSOs the operator into the *machine's own* tenant,
+    which is the wrong one for a lab/demo tenant. Device-code prints a URL + code the
+    operator completes in any browser (InPrivate) as the correct account. Requires
+    the Entra app's public-client flows (documented in the federation guide §1a)."""
     cfg = yaml.safe_load(kubeconfig) or {}
     exec_args = [
         "oidc-login", "get-token",
         f"--oidc-issuer-url={oidc['issuer']}",
         f"--oidc-client-id={oidc['client_id']}",
         "--oidc-extra-scope=openid", "--oidc-extra-scope=email", "--oidc-extra-scope=profile",
+        "--grant-type=device-code",
     ]
     for u in (cfg.get("users") or []):
         u["user"] = {"exec": {
