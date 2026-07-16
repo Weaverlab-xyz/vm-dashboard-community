@@ -670,6 +670,17 @@ $DashboardPolicy = @"
       "Resource": "*"
     },
     {
+      "Sid": "DashboardCostExplorer",
+      "Effect": "Allow",
+      "Action": [
+        "ce:GetCostAndUsage",
+        "ce:GetCostForecast",
+        "ce:GetDimensionValues",
+        "ce:GetTags"
+      ],
+      "Resource": "*"
+    },
+    {
       "Sid": "DashboardEKS",
       "Effect": "Allow",
       "Action": "eks:*",

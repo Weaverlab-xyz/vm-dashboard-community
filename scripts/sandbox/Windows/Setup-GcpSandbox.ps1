@@ -48,10 +48,21 @@ Write-Section 'Enable APIs'
 # gce_vm_image_export workflow runs as a Cloud Build job).
 # container.googleapis.com is the Kubernetes Engine API — GKE provisioning
 # (google_container_cluster / node pools) fails SERVICE_DISABLED without it.
-foreach ($api in @('compute.googleapis.com','secretmanager.googleapis.com','iam.googleapis.com','run.googleapis.com','cloudbuild.googleapis.com','container.googleapis.com')) {
+# gkehub/connectgateway/gkeconnect power GKE Entra federation (Workforce Identity
+# + Connect Gateway; see docs/integrations/entra-k8s-federation.md) — pre-enabling
+# them here makes the dashboard's Enable-federation step a fast no-op instead of a
+# cold API enable.
+# cloudresourcemanager.googleapis.com backs the project-level get/setIamPolicy the
+# federation's gateway-IAM grant uses (and the project-number lookup for the Connect
+# Gateway URL). It is NOT enabled by default on every project — without it those calls
+# fail with a "403 Forbidden … :getIamPolicy" that is really a SERVICE_DISABLED.
+# bigquery.googleapis.com powers the Cloud Costs page: GCP has no cost API, so the
+# dashboard queries the Cloud Billing export table in BigQuery (see cost_service.py).
+foreach ($api in @('compute.googleapis.com','secretmanager.googleapis.com','iam.googleapis.com','run.googleapis.com','cloudbuild.googleapis.com','container.googleapis.com',
+                   'gkehub.googleapis.com','connectgateway.googleapis.com','gkeconnect.googleapis.com','cloudresourcemanager.googleapis.com','bigquery.googleapis.com')) {
     gcloud services enable $api --project $ProjectId --quiet | Out-Null
 }
-Write-Ok 'Enabled compute, secretmanager, iam, run, cloudbuild, container'
+Write-Ok 'Enabled compute, secretmanager, iam, run, cloudbuild, container, gkehub, connectgateway, gkeconnect, cloudresourcemanager, bigquery'
 
 # ── 2. VPC + subnets ─────────────────────────────────────────────────────────
 Write-Section 'VPC + subnets'
@@ -217,14 +228,26 @@ if ($LASTEXITCODE -ne 0) {
 # (compute.admin covers the module's VPC/subnet/router/NAT but not the cluster).
 # logging.viewer lets the dashboard READ Cloud Logging so it can surface the real
 # Cloud Build export failure on the job page instead of a generic "Build failed".
+# The next three roles power GKE Entra federation (Workforce Identity + Connect
+# Gateway; see docs/integrations/entra-k8s-federation.md). serviceusage.serviceUsageAdmin
+# lets the dashboard enable the Connect Gateway APIs (the "403 Forbidden … services:batchEnable"
+# at Enable-federation time otherwise); gkehub.admin lets it register the cluster to the
+# fleet; resourcemanager.projectIamAdmin lets it grant the workforce principalSet the
+# gkehub.gateway* roles (a project-level setIamPolicy).
+# bigquery.jobUser + bigquery.dataViewer power the Cloud Costs page: the dashboard
+# runs a query job (jobUser) against the Cloud Billing export table and reads its
+# rows (dataViewer). Both are granted at project scope — if your billing export
+# dataset lives in a DIFFERENT project, also grant dataViewer on that dataset there.
 foreach ($role in @('roles/compute.admin','roles/secretmanager.secretAccessor',
                     'roles/iam.serviceAccountUser','roles/run.admin','roles/run.developer',
                     'roles/run.invoker','roles/cloudsql.admin','roles/servicenetworking.networksAdmin',
-                    'roles/cloudbuild.builds.editor','roles/container.admin','roles/logging.viewer')) {
+                    'roles/cloudbuild.builds.editor','roles/container.admin','roles/logging.viewer',
+                    'roles/serviceusage.serviceUsageAdmin','roles/gkehub.admin','roles/resourcemanager.projectIamAdmin',
+                    'roles/bigquery.jobUser','roles/bigquery.dataViewer')) {
     gcloud projects add-iam-policy-binding $ProjectId `
         --member "serviceAccount:$SaEmail" --role $role --condition=None --quiet | Out-Null
 }
-Write-Ok 'Granted compute.admin, secretmanager.secretAccessor, iam.serviceAccountUser, run.{admin,developer,invoker}, cloudsql.admin, servicenetworking.networksAdmin, cloudbuild.builds.editor, container.admin, logging.viewer'
+Write-Ok 'Granted compute.admin, secretmanager.secretAccessor, iam.serviceAccountUser, run.{admin,developer,invoker}, cloudsql.admin, servicenetworking.networksAdmin, cloudbuild.builds.editor, container.admin, logging.viewer, serviceusage.serviceUsageAdmin, gkehub.admin, resourcemanager.projectIamAdmin, bigquery.jobUser, bigquery.dataViewer'
 
 $SaKeyPath = Join-Path (Get-StateDir gcp) 'sa-key.json'
 if (-not (Test-Path $SaKeyPath) -or (Get-Item $SaKeyPath).Length -eq 0) {
@@ -348,6 +371,11 @@ $cfg = @(
     "promote_runner_gcp_region=$Region                         # Cloud Run Job lands here",
     "promote_runner_gcp_service_account=$SaEmail              # Workload-identity SA for the runner",
     "promote_runner_gcp_staging_bucket=$StorageBucket",
+    '',
+    '# Cloud Costs page (GCP has no cost API — query the Cloud Billing BigQuery export):',
+    "#   1. Billing -> Billing export -> enable 'Detailed usage cost' export to a BigQuery dataset.",
+    '#   2. Paste the fully-qualified export table below (the SA was granted bigquery.jobUser + dataViewer above).',
+    "gcp_billing_export_table=…   # e.g. $ProjectId.billing_export.gcp_billing_export_resource_v1_XXXXXX (paste manually)",
     '',
     '# BeyondTrust deploy key — set in /setup or /secrets:',
     'gcp_cloud_run_docker_deploy_key=…'
