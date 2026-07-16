@@ -264,10 +264,13 @@ if (Test-Path $SpPath) {
     } catch { }
 }
 
+# Defined unconditionally: later blocks (User Access Administrator grant) reference
+# it on BOTH the create AND the reuse path, so the reuse path must set it too
+# (else --scope gets an empty value and the role assignment targets the wrong scope).
+$RgScope = "/subscriptions/$SubscriptionId/resourceGroups/$Rg"
 if ($reuse) {
     Write-Ok "Reusing service principal from $SpPath"
 } else {
-    $RgScope = "/subscriptions/$SubscriptionId/resourceGroups/$Rg"
     $spJson  = az ad sp create-for-rbac -n $SpName --role Contributor --scopes $RgScope --years 1 -o json
     Set-Content -Path $SpPath -Value $spJson -Encoding utf8
 
