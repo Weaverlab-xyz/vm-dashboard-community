@@ -165,13 +165,20 @@ def project_number(project: str = "") -> str:
 
 
 def enable_connect_gateway_apis(project: str = "") -> None:
-    """Ensure the APIs Connect Gateway needs are enabled (idempotent)."""
+    """Ensure the APIs GKE Entra federation needs are enabled (idempotent).
+
+    Includes cloudresourcemanager.googleapis.com — not a Connect Gateway API per se,
+    but the project-level get/setIamPolicy the gateway-IAM grant uses (and the
+    project-number lookup) require it, and it is not enabled by default on every
+    project. Without it those calls fail with a "403 Forbidden … :getIamPolicy" that
+    is really a SERVICE_DISABLED. Enabling it here lets a fresh project self-heal."""
     project = project or _gcp_project()
     s = _authed_session()
     r = s.post(
         f"https://serviceusage.googleapis.com/v1/projects/{project}/services:batchEnable",
         json={"serviceIds": ["connectgateway.googleapis.com",
-                             "gkeconnect.googleapis.com", "gkehub.googleapis.com"]})
+                             "gkeconnect.googleapis.com", "gkehub.googleapis.com",
+                             "cloudresourcemanager.googleapis.com"]})
     r.raise_for_status()
     _poll_lro(s, r.json(), "https://serviceusage.googleapis.com/v1")
 
