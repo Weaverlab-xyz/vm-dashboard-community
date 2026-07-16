@@ -110,6 +110,7 @@ async def run_for_aws_target(
     dest_bucket: str,
     dest_key: str,
     aws_region: str,
+    install_aws_guest_env: bool = False,
     presign_expiry_seconds: int = 7200,
 ) -> tuple:
     """Launch the AWS promote-runner ECS task to copy `hub_backend://hub_key`
@@ -135,6 +136,12 @@ async def run_for_aws_target(
         "--dest-s3-key", dest_key,
         "--dest-s3-region", aws_region,
     ]
+    # Foreign Linux images (esp. GCP-built, which ship no cloud-init) don't
+    # consume the EC2 UserData on AWS — no launch-key injection, no SSM-agent
+    # install. Baking an Ec2-datasource cloud-init in during promotion fixes that.
+    # Windows images provision via their own agent, so skip.
+    if install_aws_guest_env:
+        runner_args.append("--install-aws-guest-env")
 
     logger.info(
         "Launching AWS promote-runner ECS task for job %s: hub=%s://%s -> s3://%s/%s",
