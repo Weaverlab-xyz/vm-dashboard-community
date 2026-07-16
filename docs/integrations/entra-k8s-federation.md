@@ -189,6 +189,10 @@ Then set the pool on **Settings → Kubernetes**: `gcp_workforce_pool_id=bt-entr
 > **Dashboard service account** needs `roles/gkehub.admin`,
 > `roles/serviceusage.serviceUsageAdmin`, and `roles/resourcemanager.projectIamAdmin`
 > (or equivalent) to register the fleet, enable APIs, and grant the gateway IAM.
+> `scripts/sandbox/Linux/setup-gcp.sh` grants these (and pre-enables the
+> `gkehub`/`connectgateway`/`gkeconnect` APIs) — **re-run it** if you set the sandbox
+> up before this was added, otherwise Enable-federation fails with
+> `403 Forbidden … services:batchEnable`.
 
 ### Federate a GKE cluster
 
