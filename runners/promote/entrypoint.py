@@ -146,17 +146,22 @@ def install_linux_agent(disk_path: str, source_format: str) -> None:
         "--copy-in", f"{WALINUXAGENT_SRC}:/opt",
         # Install via whatever Python the guest ships (py3 → py2 → py). waagent
         # supports both; --register-service wires up the systemd/init unit.
-        # Minimal cloud images ship Python WITHOUT setuptools (and py3.12+ dropped
-        # stdlib distutils), which setup.py needs — so if the guest has no
-        # setuptools, fall back to the copy vendored beside the source
-        # (SETUPTOOLS_USE_DISTUTILS=local makes it use its own distutils shim on
-        # py3.12+). Guests that already have setuptools use their own.
+        # Always prepend the vendored deps (setuptools<80 + distro) to the guest's
+        # PYTHONPATH:
+        #   * distro is REQUIRED, not optional — WALinuxAgent's future.py falls
+        #     back to `import distro` on py>=3.8 (platform.linux_distribution was
+        #     removed), and a guest without it (e.g. Rocky/RHEL 9 minimal) dies at
+        #     setup.py import with "NameError: name 'distro' is not defined".
+        #   * pinning our setuptools<80 over any newer guest copy keeps the
+        #     `setup.py install` command (--register-service) working (80 removed
+        #     it), and covers minimal images that ship no setuptools at all.
+        # SETUPTOOLS_USE_DISTUTILS=local is a no-op on older guests and makes
+        # py3.12+ (no stdlib distutils) use setuptools' bundled distutils shim.
         "--run-command",
         "cd /opt/walinuxagent-src && "
+        "export PYTHONPATH=/opt/walinuxagent-src/_vendor${PYTHONPATH:+:$PYTHONPATH} SETUPTOOLS_USE_DISTUTILS=local; "
         "for py in python3 python2 python; do "
         "if command -v $py >/dev/null 2>&1; then "
-        "$py -c 'import setuptools' >/dev/null 2>&1 || "
-        "export PYTHONPATH=/opt/walinuxagent-src/_vendor SETUPTOOLS_USE_DISTUTILS=local; "
         "$py setup.py install --register-service && exit 0; exit 1; fi; done; "
         "echo 'no python interpreter in guest for waagent install' >&2; exit 1",
         # Belt-and-suspenders: ensure the unit is enabled under either name.

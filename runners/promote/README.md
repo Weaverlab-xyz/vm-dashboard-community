@@ -248,7 +248,12 @@ dashboard's deploy poller hangs until it times out. When this flag is set the
 runner uses libguestfs `virt-customize` to install + enable waagent and
 deprovision (generalize) the disk before the fixed-VHD conversion. The
 WALinuxAgent source is bundled in the image and installed via the guest's own
-Python, so it's distro-agnostic and needs no guest network or package repo. The
+Python, so it's distro-agnostic and needs no guest network or package repo. Two
+pure-Python deps ride along vendored and are forced onto the guest's
+`PYTHONPATH`: `setuptools<80` (WALinuxAgent's `setup.py install` needs it; 80
+removed that command) and `distro` (WALinuxAgent's `future.py` requires it on
+Python ≥ 3.8 — `platform.linux_distribution()` was removed — so a minimal guest
+that ships neither, e.g. Rocky/RHEL 9, still installs cleanly). The
 dashboard sets this automatically for Linux images on Azure promotions
 (`os_type != "windows"`); Windows images already ship the Azure VM agent. If
 injection fails the runner exits non-zero — a Linux Azure image without waagent
