@@ -2715,11 +2715,13 @@ async def register_rancher_ui_web_jump(db: Session) -> dict:
     Idempotent: returns the stored id if already provisioned. Requires the Rancher
     node running + PRA configured. OPT-IN (``rancher_ui_web_jump_enabled``): lets an
     operator whose IP isn't in ``rancher_allowed_source_cidrs`` reach the node's UI
-    from the PRA representative console (brokered/recorded, no CIDR change)."""
+    from the PRA representative console (brokered/recorded, no CIDR change).
+
+    Re-ensures the dashboard-managed Jumpoint host and refreshes the node firewall
+    on EVERY call (not just first provisioning): AWS/GCP jumpoint egress IPs are
+    ephemeral, so a host reclaim/recreate changes the IP — re-syncing here keeps the
+    firewall's jumpoint /32 current even when the Web Jump itself already exists."""
     from . import config_service, jumpoint_host_service, rancher_node_service, terraform_pra_service as pra
-    existing = _cfg("rancher_ui_web_jump_id")
-    if existing:
-        return {"web_jump_id": existing, "reused": True}
     server_url = _cfg("rancher_server_url")
     if not server_url:
         raise K8sError("Rancher node is not running (no rancher_server_url)")
@@ -2728,12 +2730,22 @@ async def register_rancher_ui_web_jump(db: Session) -> dict:
     # Requirement 2: auto-manage the IP the Web Jump uses to reach the node. A Web
     # Jump connects THROUGH a Jumpoint host, so the source hitting the firewall is
     # that host's egress IP. Ensure the dashboard-managed Jumpoint is up, capture its
-    # egress IP, then refresh the firewall so its /32 is allowed. Best-effort — a
-    # pre-existing operator Jumpoint can't be auto-detected (manual CIDR then).
+    # (possibly changed) egress IP, and refresh the firewall so its /32 is allowed —
+    # BEFORE the reused early-return, so an ephemeral AWS/GCP jumpoint IP is re-synced
+    # on every console open. Best-effort — a pre-existing operator Jumpoint can't be
+    # auto-detected (manual CIDR then).
     try:
         await jumpoint_host_service.ensure_rancher_ui_jumpoint()
     except Exception as exc:
         logger.warning("Rancher UI web-jump: jumpoint egress capture failed (non-fatal): %s", exc)
+    try:
+        await rancher_node_service.refresh_rancher_firewall(db)
+    except Exception as exc:
+        logger.warning("Rancher UI web-jump: firewall refresh failed (non-fatal): %s", exc)
+
+    existing = _cfg("rancher_ui_web_jump_id")
+    if existing:
+        return {"web_jump_id": existing, "reused": True}
     jump_group = _cfg("rancher_ui_jump_group") or _cfg("bt_jump_group_name")
     jumpoint = _cfg("rancher_ui_jumpoint_name") or _cfg("bt_jumpoint_name")
     result = await pra.provision_web_jump(
@@ -2743,10 +2755,6 @@ async def register_rancher_ui_web_jump(db: Session) -> dict:
     config_service.set("rancher_ui_web_jump_id", str(result.get("web_jump_id") or ""))
     if result.get("tf_state_json"):
         config_service.set("rancher_ui_web_jump_tfstate", result["tf_state_json"])
-    try:
-        await rancher_node_service.refresh_rancher_firewall(db)
-    except Exception as exc:
-        logger.warning("Rancher UI web-jump: firewall refresh failed (non-fatal): %s", exc)
     return {"web_jump_id": result.get("web_jump_id"), "jump_group": jump_group,
             "jumpoint": jumpoint, "reused": False}
 
