@@ -196,7 +196,7 @@ function _MakeSG {
         --query 'GroupId' --output text).Trim()
 }
 
-$JumpointSg = _MakeSG "$Name-jumpoint-sg" 'Jumpoint ECS task — outbound to internet, ingress from VPC'
+$JumpointSg = _MakeSG "$Name-jumpoint-sg" 'Jumpoint ECS task — outbound to internet only, no ingress'
 $VmSg       = _MakeSG "$Name-vm-sg" 'Sandbox VMs — egress within VPC only, ingress SSH from Jumpoint SG'
 
 # Wipe default egress so we control rules explicitly.
