@@ -59,8 +59,10 @@ def _patch_unconfigured(monkey):
     from web_dashboard.services import gcp_service
     monkey["gcp_j"] = gcp_service.list_gce_jumpoints
     monkey["gcp_c"] = gcp_service.list_gce_compose
+    monkey["gcp_cr"] = gcp_service.list_cloud_run_jobs
     gcp_service.list_gce_jumpoints = gcp_jumpoints_boom
     gcp_service.list_gce_compose = gcp_jumpoints_boom
+    gcp_service.list_cloud_run_jobs = gcp_jumpoints_boom
     # GCE endpoints first check project config — exercise the "configured but
     # unreachable" path by returning a project id.
     monkey["proj"] = containers._gcp_project_id
@@ -82,8 +84,10 @@ def _patch_configured(monkey):
     from web_dashboard.services import gcp_service
     monkey["gcp_j"] = gcp_service.list_gce_jumpoints
     monkey["gcp_c"] = gcp_service.list_gce_compose
+    monkey["gcp_cr"] = gcp_service.list_cloud_run_jobs
     gcp_service.list_gce_jumpoints = ok_list
     gcp_service.list_gce_compose = ok_list
+    gcp_service.list_cloud_run_jobs = ok_list
     monkey["proj"] = containers._gcp_project_id
     containers._gcp_project_id = lambda: "test-project"
 
@@ -95,6 +99,7 @@ def _restore(monkey):
     containers._aci_rg = monkey["aci_rg"]
     gcp_service.list_gce_jumpoints = monkey["gcp_j"]
     gcp_service.list_gce_compose = monkey["gcp_c"]
+    gcp_service.list_cloud_run_jobs = monkey["gcp_cr"]
     containers._gcp_project_id = monkey["proj"]
 
 
@@ -103,6 +108,7 @@ _CLOUD_ENDPOINTS = [
     "/api/containers/aci-containers",
     "/api/containers/gce-jumpoints",
     "/api/containers/gce-compose",
+    "/api/containers/gce-cloud-run-jobs",
 ]
 
 
@@ -137,7 +143,8 @@ def test_gce_endpoints_503_when_project_missing():
     saved = {"proj": containers._gcp_project_id}
     containers._gcp_project_id = lambda: ""
     try:
-        for path in ("/api/containers/gce-jumpoints", "/api/containers/gce-compose"):
+        for path in ("/api/containers/gce-jumpoints", "/api/containers/gce-compose",
+                     "/api/containers/gce-cloud-run-jobs"):
             r = client.get(path)
             assert r.status_code == 503, f"{path} → {r.status_code}"
     finally:

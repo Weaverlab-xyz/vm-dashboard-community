@@ -24,6 +24,8 @@ from ..database import ContainerStateCache, User, get_db  # noqa: F401
 from ..models.containers import (
     ACIContainerInstanceInfo,
     ACIContainerListResponse,
+    CloudRunJobInfo,
+    CloudRunJobListResponse,
     ContainerActionResponse,
     ContainerInfo,
     ContainerListResponse,
@@ -751,6 +753,41 @@ async def stop_gce_compose_endpoint(
     try:
         await gcp_service.stop_gce_jumpoint(project_id, zone, name)
         return ContainerActionResponse(ok=True, message="Compose instance deleted")
+    except GCPError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
+
+# ── GCP Cloud Run runner jobs (Ansible / promote / k8s) ──────────────────────
+# The runner jobs self-delete on completion, so this is effectively an in-flight
+# view — the GCP analogue of the ECS-tasks / ACI panels. Read-only, 5 most recent.
+
+@router.get("/gce-cloud-run-jobs", response_model=CloudRunJobListResponse)
+async def list_gce_cloud_run_jobs_endpoint(
+    current_user: User = Depends(require_permission("containers", "read")),
+):
+    """List dashboard-managed Cloud Run runner jobs (Ansible / promote / k8s),
+    newest first and capped at 5. These jobs self-delete when they finish, so the
+    list is effectively the ones currently in flight."""
+    from ..services import gcp_service
+    from ..services.gcp_service import GCPError
+
+    project_id = _gcp_project_id()
+    if not project_id:
+        raise HTTPException(status_code=503, detail="GCP project not configured.")
+    try:
+        raw = await gcp_service.list_cloud_run_jobs(project_id, limit=5)
+        jobs = [
+            CloudRunJobInfo(
+                name=j.get("name", ""),
+                region=j.get("region", ""),
+                purpose=j.get("purpose", ""),
+                image=j.get("image", ""),
+                status=j.get("status", ""),
+                created_at=j.get("created_at"),
+            )
+            for j in raw
+        ]
+        return CloudRunJobListResponse(jobs=jobs, project_id=project_id, count=len(jobs))
     except GCPError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
 

@@ -1194,6 +1194,99 @@ async def list_gce_compose(project_id: str) -> list[dict]:
         raise GCPError(f"Failed to list GCE compose instances: {e}") from e
 
 
+# ── Cloud Run Jobs listing (Ansible / promote / k8s runners) ─────────────────
+# The runner jobs (labels.managed-by=vm-dashboard) self-delete when their
+# execution finishes, so a live listing is effectively "in-flight jobs" — the
+# GCP analogue of the ECS-tasks / ACI-container-groups panels. Runner jobs are
+# regional, so we sweep every region a runner can target and cap the result.
+
+def _cloud_run_runner_regions() -> list[str]:
+    """Distinct regions any Cloud Run runner can target (ansible/promote/k8s)."""
+    regions: list[str] = []
+    for r in (_gcp_region(),
+              _cfg("gcp_ansible_cloud_run_region"),
+              _cfg("promote_runner_gcp_region")):
+        if r and r not in regions:
+            regions.append(r)
+    return regions
+
+
+def _cloud_run_job_status(job) -> str:
+    """Best-effort execution state for a Cloud Run Job resource."""
+    try:
+        pb = job._pb
+        if not pb.HasField("latest_created_execution"):
+            return "PENDING"
+        if pb.latest_created_execution.HasField("completion_time"):
+            return "COMPLETED"
+        return "RUNNING"
+    except Exception:
+        # Field shape varies across google-cloud-run versions; a listed runner job
+        # is almost always mid-execution (they self-delete on completion).
+        return "RUNNING"
+
+
+def _list_cloud_run_jobs_sync(project_id: str, limit: int = 5) -> list[dict]:
+    """List dashboard-managed Cloud Run Jobs (newest first, capped at `limit`)."""
+    _require_run()
+    from google.cloud import run_v2
+
+    creds = _gcp_creds()
+    jobs_client = run_v2.JobsClient(credentials=creds)
+
+    results: list[dict] = []
+    errors: list[str] = []
+    regions = _cloud_run_runner_regions()
+    for region in regions:
+        parent = f"projects/{project_id}/locations/{region}"
+        try:
+            for job in jobs_client.list_jobs(parent=parent):
+                labels = dict(job.labels) if job.labels else {}
+                if labels.get("managed-by") != "vm-dashboard":
+                    continue
+                image = ""
+                try:
+                    conts = job.template.template.containers
+                    if conts:
+                        image = conts[0].image
+                except Exception:
+                    pass
+                created_at = ""
+                try:
+                    if job.create_time:
+                        created_at = job.create_time.isoformat()
+                except Exception:
+                    pass
+                results.append({
+                    "name":       job.name.split("/")[-1],
+                    "region":     region,
+                    "purpose":    labels.get("purpose", ""),
+                    "image":      image,
+                    "status":     _cloud_run_job_status(job),
+                    "created_at": created_at,
+                })
+        except Exception as e:  # one region being unavailable shouldn't blank the panel
+            errors.append(f"{region}: {e}")
+            logger.warning("Cloud Run list_jobs failed in %s: %s", region, e)
+
+    # Every region errored (Cloud Run API off / no permission) → surface it.
+    if not results and errors and len(errors) == len(regions):
+        raise GCPError("; ".join(errors))
+
+    results.sort(key=lambda j: j["created_at"] or "", reverse=True)
+    return results[:limit]
+
+
+async def list_cloud_run_jobs(project_id: str, limit: int = 5) -> list[dict]:
+    """List dashboard-managed Cloud Run runner jobs (in-flight / most recent)."""
+    try:
+        return await asyncio.to_thread(_list_cloud_run_jobs_sync, project_id, limit)
+    except GCPError:
+        raise
+    except Exception as e:
+        raise GCPError(f"Failed to list Cloud Run jobs: {e}") from e
+
+
 # ── Rancher management node on COS-on-GCE ─────────────────────────────────────
 # The central Rancher server runs as a SINGLE privileged container on a COS GCE
 # VM with a PUBLIC (source-restricted) IP — the same konlet mechanism as the

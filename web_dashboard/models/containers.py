@@ -160,6 +160,23 @@ class GCEJumpointListResponse(BaseModel):
     count: int
 
 
+# ── GCP Cloud Run runner jobs (Ansible / promote / k8s) ─────────────────────
+
+class CloudRunJobInfo(BaseModel):
+    name: str
+    region: str
+    purpose: str = ""       # ansible-runner | promote-runner | k8s-runner
+    image: str = ""
+    status: str = ""        # RUNNING | PENDING | COMPLETED
+    created_at: Optional[str] = None
+
+
+class CloudRunJobListResponse(BaseModel):
+    jobs: list[CloudRunJobInfo]
+    project_id: str
+    count: int
+
+
 # ── GCP Rancher management node (COS on GCE) ────────────────────────────────
 
 class RancherNodeInfo(BaseModel):

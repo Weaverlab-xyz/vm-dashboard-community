@@ -476,40 +476,41 @@
       </div>
     </div>
 
-    <!-- ── GCP Jumpoint container instances (COS on GCE) ──────────────────── -->
+    <!-- ── GCE Container Instances (COS on GCE — Jumpoints + Compose) ─────── -->
     <div class="mb-8">
       <div class="flex items-center justify-between mb-3">
         <h2 class="text-lg font-semibold text-gray-800">
           GCE Container Instances
           <span class="ml-2 text-sm font-normal text-gray-500"
-                x-text="gceProject ? gceJumpoints.length + ' instances · ' + gceProject : ''"></span>
+                x-text="gceProject ? gceInstances.length + ' instances · ' + gceProject : ''"></span>
         </h2>
-        <button @click="loadGceJumpoints()"
-                :disabled="gceLoading"
+        <button @click="loadGceJumpoints(); loadGceCompose()"
+                :disabled="gceLoading || gceComposeLoading"
                 class="px-3 py-1.5 text-sm rounded-lg border border-gray-300 hover:bg-gray-50 disabled:opacity-50">
-          <span x-text="gceLoading ? 'Loading…' : 'Refresh'"></span>
+          <span x-text="(gceLoading || gceComposeLoading) ? 'Loading…' : 'Refresh'"></span>
         </button>
       </div>
 
-      <div x-show="gceLoading" class="text-sm text-gray-500 py-6 text-center">
+      <div x-show="gceLoading || gceComposeLoading" class="text-sm text-gray-500 py-6 text-center">
         Loading GCE container instances…
       </div>
 
-      <div x-show="!gceLoading && gceError"
+      <div x-show="!(gceLoading || gceComposeLoading) && (gceError || gceComposeError)"
            class="mb-3 px-3 py-2 rounded-lg bg-red-50 border border-red-200 text-sm text-red-700"
-           x-text="gceError"></div>
+           x-text="gceError || gceComposeError"></div>
 
-      <div x-show="!gceLoading && !gceError && gceJumpoints.length === 0"
+      <div x-show="!(gceLoading || gceComposeLoading) && !(gceError || gceComposeError) && gceInstances.length === 0"
            class="text-sm text-gray-500 py-6 text-center bg-white rounded-xl border border-gray-200">
         No GCE container instances.
       </div>
 
-      <div x-show="!gceLoading && gceJumpoints.length > 0"
+      <div x-show="!(gceLoading || gceComposeLoading) && gceInstances.length > 0"
            class="bg-white rounded-xl shadow-sm overflow-hidden border border-gray-200">
         <table class="min-w-full divide-y divide-gray-200">
           <thead class="bg-gray-50">
             <tr>
               <th class="px-4 py-3 text-left text-xs font-semibold uppercase text-gray-500">Name</th>
+              <th class="px-4 py-3 text-left text-xs font-semibold uppercase text-gray-500">Purpose</th>
               <th class="px-4 py-3 text-left text-xs font-semibold uppercase text-gray-500">Zone</th>
               <th class="px-4 py-3 text-left text-xs font-semibold uppercase text-gray-500">Machine</th>
               <th class="px-4 py-3 text-left text-xs font-semibold uppercase text-gray-500">Container Image</th>
@@ -518,9 +519,16 @@
             </tr>
           </thead>
           <tbody class="divide-y divide-gray-100">
-            <template x-for="i in gceJumpoints" :key="i.name">
+            <template x-for="i in gceInstances" :key="i.name">
               <tr class="hover:bg-gray-50">
                 <td class="px-4 py-3 text-sm font-medium text-gray-900 font-mono" x-text="i.name"></td>
+                <td class="px-4 py-3 text-sm">
+                  <span :class="i.purpose === 'Jumpoint'
+                    ? 'bg-indigo-100 text-indigo-700'
+                    : 'bg-teal-100 text-teal-700'"
+                        class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium"
+                        x-text="i.purpose"></span>
+                </td>
                 <td class="px-4 py-3 text-sm text-gray-600" x-text="i.zone"></td>
                 <td class="px-4 py-3 text-sm text-gray-600" x-text="i.machine_type || '—'"></td>
                 <td class="px-4 py-3 text-sm text-gray-600 font-mono break-all" x-text="i.image || '—'"></td>
@@ -533,9 +541,10 @@
                   </span>
                 </td>
                 <td class="px-4 py-3 text-sm text-right">
-                  <button @click="stopGceJumpoint(i)"
-                          :disabled="gceActionPending === i.name"
-                          class="text-red-600 hover:underline disabled:opacity-40">Stop</button>
+                  <button @click="i.purpose === 'Compose' ? stopGceCompose(i) : stopGceJumpoint(i)"
+                          :disabled="gceActionPending === i.name || gceComposeActionPending === i.name"
+                          class="text-red-600 hover:underline disabled:opacity-40"
+                          x-text="i.purpose === 'Compose' ? 'Delete' : 'Stop'"></button>
                 </td>
               </tr>
             </template>
@@ -544,60 +553,69 @@
       </div>
 
       <p class="mt-2 text-xs text-gray-400">
-        GCP Jumpoints run as containers on Container-Optimised OS GCE instances.
-        Stop deletes the instance — it is recreated automatically on the next VM deploy.
+        Both run as containers on Container-Optimised OS GCE instances.
+        <span class="font-medium">Jumpoints</span> are recreated automatically on the next VM deploy;
+        <span class="font-medium">Compose</span> instances are deployed via <em>+ Deploy Compose</em>.
+        Stop / Delete removes the COS instance.
       </p>
     </div>
 
-    <!-- ── GCE compose deployments (COS instances, labels.purpose=compose) ── -->
+    <!-- ── GCP Cloud Run Jobs (Ansible / promote / k8s runners) ───────────── -->
     <div class="mb-8">
       <div class="flex items-center justify-between mb-3">
         <h2 class="text-lg font-semibold text-gray-800">
-          GCE Compose Deployments
+          GCP Cloud Run Jobs
           <span class="ml-2 text-sm font-normal text-gray-400"
-                x-text="gceCompose.length ? gceCompose.length + ' instances' : ''"></span>
+                x-text="cloudRunJobs.length ? cloudRunJobs.length + ' jobs' : ''"></span>
         </h2>
-        <button @click="loadGceCompose()" :disabled="gceComposeLoading"
+        <button @click="loadCloudRunJobs()" :disabled="cloudRunLoading"
                 class="px-2.5 py-1 text-xs font-medium text-gray-600 border border-gray-300 hover:bg-gray-50 rounded-lg transition">
-          <span x-text="gceComposeLoading ? 'Loading…' : 'Refresh'"></span>
+          <span x-text="cloudRunLoading ? 'Loading…' : 'Refresh'"></span>
         </button>
       </div>
 
-      <div x-show="!gceComposeLoading && gceComposeError"
-           class="p-4 bg-red-50 border border-red-200 rounded-lg text-red-600 text-sm" x-text="gceComposeError"></div>
+      <div x-show="!cloudRunLoading && cloudRunError"
+           class="p-4 bg-red-50 border border-red-200 rounded-lg text-red-600 text-sm" x-text="cloudRunError"></div>
 
-      <div x-show="!gceComposeLoading && !gceComposeError && gceCompose.length === 0"
-           class="text-sm text-gray-400 py-4">No compose deployments on GCE.</div>
+      <div x-show="!cloudRunLoading && !cloudRunError && cloudRunJobs.length === 0"
+           class="text-sm text-gray-400 py-4">No Cloud Run runner jobs in flight.</div>
 
-      <div x-show="!gceComposeLoading && gceCompose.length > 0"
+      <div x-show="!cloudRunLoading && cloudRunJobs.length > 0"
            class="bg-white rounded-xl border border-gray-200 overflow-hidden">
         <table class="w-full text-sm">
           <thead class="bg-gray-50 text-left text-xs uppercase text-gray-500">
             <tr>
               <th class="px-4 py-3 font-medium">Name</th>
-              <th class="px-4 py-3 font-medium">Zone</th>
-              <th class="px-4 py-3 font-medium">Machine</th>
+              <th class="px-4 py-3 font-medium">Purpose</th>
+              <th class="px-4 py-3 font-medium">Region</th>
+              <th class="px-4 py-3 font-medium">Image</th>
               <th class="px-4 py-3 font-medium">Status</th>
-              <th class="px-4 py-3 font-medium text-right">Actions</th>
+              <th class="px-4 py-3 font-medium">Created</th>
             </tr>
           </thead>
           <tbody class="divide-y divide-gray-100">
-            <template x-for="i in gceCompose" :key="i.name">
+            <template x-for="j in cloudRunJobs" :key="j.name + '|' + j.region">
               <tr>
-                <td class="px-4 py-3 font-medium text-gray-800" x-text="i.name"></td>
-                <td class="px-4 py-3 text-gray-600" x-text="i.zone"></td>
-                <td class="px-4 py-3 text-gray-600" x-text="i.machine_type"></td>
-                <td class="px-4 py-3 text-gray-600" x-text="i.status"></td>
-                <td class="px-4 py-3 text-sm text-right">
-                  <button @click="stopGceCompose(i)"
-                          :disabled="gceComposeActionPending === i.name"
-                          class="text-red-600 hover:underline disabled:opacity-40">Delete</button>
+                <td class="px-4 py-3 font-mono text-xs text-gray-800" x-text="j.name"></td>
+                <td class="px-4 py-3 text-gray-600" x-text="j.purpose || '—'"></td>
+                <td class="px-4 py-3 text-gray-600" x-text="j.region"></td>
+                <td class="px-4 py-3 text-gray-600 font-mono text-xs break-all" x-text="j.image || '—'"></td>
+                <td class="px-4 py-3">
+                  <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium"
+                        :class="cloudRunStatusBadge(j.status)" x-text="j.status"></span>
                 </td>
+                <td class="px-4 py-3 text-xs text-gray-400"
+                    x-text="j.created_at ? new Date(j.created_at).toLocaleString() : '—'"></td>
               </tr>
             </template>
           </tbody>
         </table>
       </div>
+
+      <p class="mt-2 text-xs text-gray-400">
+        Ansible, image-promote, and Kubernetes runners execute as ephemeral Cloud Run Jobs and are
+        removed when they finish — this shows the 5 most recent (typically the ones in flight).
+      </p>
     </div>
 
   </div><!-- /Cloud panel -->
@@ -1134,6 +1152,19 @@ function containersDashboard() {
     gceComposeError: null,
     gceComposeActionPending: null,
 
+    // GCP Cloud Run runner jobs (ansible / promote / k8s — in-flight, 5 most recent)
+    cloudRunJobs: [],
+    cloudRunLoading: false,
+    cloudRunError: null,
+
+    // Merged view of the two COS instance kinds, tagged by purpose.
+    get gceInstances() {
+      return [
+        ...this.gceJumpoints.map(i => ({ ...i, purpose: 'Jumpoint' })),
+        ...this.gceCompose.map(i => ({ ...i, purpose: 'Compose' })),
+      ];
+    },
+
     // Rancher management node (privileged container on GCE COS)
     rancherConfigured: false,
     rancherNodes: [],
@@ -1158,6 +1189,7 @@ function containersDashboard() {
         this.loadAciContainers(),
         this.loadGceJumpoints(),
         this.loadGceCompose(),
+        this.loadCloudRunJobs(),
       ];
       {% if portainer_enabled %}
       tasks.push(this.loadEndpoints());
@@ -1180,6 +1212,7 @@ function containersDashboard() {
           this.loadAciContainers(),
           this.loadGceJumpoints(),
           this.loadGceCompose(),
+          this.loadCloudRunJobs(),
         ]);
       }
     },
@@ -1531,6 +1564,21 @@ function containersDashboard() {
       }
     },
 
+    // ── GCP Cloud Run runner jobs ──────────────────────────────────────────
+    async loadCloudRunJobs() {
+      this.cloudRunLoading = true;
+      this.cloudRunError = null;
+      try {
+        const data = await API.get('/api/containers/gce-cloud-run-jobs');
+        this.cloudRunJobs = data.jobs || [];
+      } catch (e) {
+        this.cloudRunError = e.message;
+        this.cloudRunJobs = [];
+      } finally {
+        this.cloudRunLoading = false;
+      }
+    },
+
     // ── Rancher management node ──────────────────────────────────────────────
     async loadRancher() {
       this.rancherLoading = true;
@@ -1605,6 +1653,13 @@ function containersDashboard() {
       if (status === 'RUNNING')  return 'bg-green-100 text-green-700';
       if (status === 'STOPPED')  return 'bg-gray-100 text-gray-500';
       if (status === 'PENDING')  return 'bg-yellow-100 text-yellow-700';
+      return 'bg-blue-100 text-blue-600';
+    },
+
+    cloudRunStatusBadge(status) {
+      if (status === 'RUNNING')   return 'bg-green-100 text-green-700';
+      if (status === 'COMPLETED') return 'bg-gray-100 text-gray-500';
+      if (status === 'PENDING')   return 'bg-yellow-100 text-yellow-700';
       return 'bg-blue-100 text-blue-600';
     },
   };
