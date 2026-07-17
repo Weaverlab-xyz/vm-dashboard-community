@@ -43,7 +43,7 @@ HANDLED_TYPES = (
     "vdesktop_pool_provision", "vdesktop_pool_teardown",
     "packer_aws_build", "packer_azure_build", "packer_gcp_build",
     "aws_export_image", "gcp_export_image", "azure_export_image",
-    "image_promote_aws", "image_promote_azure", "image_promote_gcp",
+    "image_promote_aws", "image_promote_azure", "image_promote_gcp", "image_promote_oci",
 )
 
 POLL_INTERVAL = 2.0  # seconds between queue polls when idle
@@ -211,6 +211,10 @@ async def _dispatch(job_id: str, job_type: str, meta: dict) -> None:
         elif job_type == "image_promote_gcp":
             from .api import images as _images
             await _images._run_gcp_automated_promote(
+                meta["image_id"], meta.get("target_region") or "", job_id)
+        elif job_type == "image_promote_oci":
+            from .api import images as _images
+            await _images._run_oci_automated_promote(
                 meta["image_id"], meta.get("target_region") or "", job_id)
         else:  # pragma: no cover — HANDLED_TYPES guards the claim
             logger.warning("job runner: unhandled job_type %s (job %s)", job_type, job_id)

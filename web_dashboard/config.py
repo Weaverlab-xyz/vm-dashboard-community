@@ -642,6 +642,19 @@ class Settings(BaseSettings):
     promote_runner_gcp_staging_prefix: str = "promote-staging"
     promote_runner_gcp_image_family: str = ""            # optional family label on the resulting custom image
 
+    # ── OCI-target promote runner (Container Instances) ──────────────────────
+    # Same image as the other clouds; the dashboard passes `--target oci`. The
+    # runner converts to QCOW2 (OCI's custom-image import format) and uploads to
+    # Object Storage; the dashboard then imports the compute image from it. Falls
+    # back to the primary oci_* config so single-tenant installs need little new.
+    promote_runner_oci_compartment: str = ""             # fallback: oci_compartment_ocid
+    promote_runner_oci_availability_domain: str = ""     # blank → first AD in the compartment
+    promote_runner_oci_subnet_ocid: str = ""             # fallback: oci_default_subnet_ocid (runner VNIC)
+    promote_runner_oci_ocpus: float = 2.0                # qemu-img headroom (CI.Standard.E4.Flex)
+    promote_runner_oci_memory_gbs: float = 16.0          # ~multi-GB image convert
+    promote_runner_oci_staging_bucket: str = ""          # Object Storage bucket the QCOW2 stages in (required for OCI promote)
+    promote_runner_oci_staging_prefix: str = "promote-staging"
+
     ansible_runner: str = "local"              # "local" | "ecs" | "aci" | "gcp" — global default/fallback
     # Per-target-cloud Ansible runner backend. Overrides ansible_runner for that
     # cloud's targets; blank → fall back to ansible_runner. Each cloud's only

@@ -100,12 +100,13 @@ COPY --from=gcp-guest-agent /out/arm64/google_guest_agent /opt/gcp-guest-agent/a
 COPY gcp-guest-agent/launch.sh /opt/gcp-guest-agent/google_guest_agent
 COPY gcp-guest-agent/google-guest-agent.service /opt/gcp-guest-agent/google-guest-agent.service
 
-# Cloud SDKs cover all three targets so a single image works for AWS / Azure / GCP.
+# Cloud SDKs cover all four targets so a single image works for AWS / Azure / GCP / OCI.
 RUN pip install --no-cache-dir \
         "boto3>=1.34" \
         "azure-identity>=1.15" \
         "azure-storage-blob>=12.19" \
-        "google-cloud-storage>=2.14"
+        "google-cloud-storage>=2.14" \
+        "oci>=2.120"
 
 COPY entrypoint.py /entrypoint.py
 RUN chmod +x /entrypoint.py

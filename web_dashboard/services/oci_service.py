@@ -496,3 +496,163 @@ def oke_get_token(cluster_id: str, region: str = "") -> str:
         raise
     except Exception as exc:  # noqa: BLE001
         raise OCIError(f"OKE token mint failed: {exc}") from exc
+
+
+# ── Object Storage + image promotion ──────────────────────────────────────────
+
+def _object_storage_namespace_sync() -> str:
+    import oci
+    client = oci.object_storage.ObjectStorageClient(_oci_config())
+    return client.get_namespace().data
+
+
+async def object_storage_namespace() -> str:
+    """The tenancy's Object Storage namespace (needed to address buckets/objects
+    and to build the image-import source tuple)."""
+    return await asyncio.to_thread(_object_storage_namespace_sync)
+
+
+def _delete_object_sync(namespace: str, bucket: str, object_name: str) -> None:
+    import oci
+    client = oci.object_storage.ObjectStorageClient(_oci_config())
+    client.delete_object(namespace, bucket, object_name)
+
+
+async def delete_object_storage_object(namespace: str, bucket: str, object_name: str) -> None:
+    """Delete a staged Object Storage object (promote-staging cleanup). Best-effort."""
+    await asyncio.to_thread(_delete_object_sync, namespace, bucket, object_name)
+
+
+def _run_ci_promote_runner_sync(
+    *, compartment_id: str, availability_domain: str, subnet_ocid: str,
+    image: str, runner_args: list, env: dict, ocpus: float, memory_gbs: float,
+    assign_public_ip: bool, display_name: str,
+) -> tuple:
+    """Launch the promote-runner image as an OCI Container Instance, wait for the
+    container to exit, and return (exit_code, log_text). Best-effort log capture:
+    Container Instances stream stdout to OCI Logging (not a direct API), so the
+    text is a pointer, not the runner's stdout — the exit code drives success."""
+    import oci
+    from oci.container_instances import models as ci_models
+
+    cfg = _oci_config()
+    ci = oci.container_instances.ContainerInstanceClient(cfg)
+    env_vars = {k: str(v) for k, v in (env or {}).items() if v}
+    details = ci_models.CreateContainerInstanceDetails(
+        display_name=display_name,
+        compartment_id=compartment_id,
+        availability_domain=availability_domain,
+        shape="CI.Standard.E4.Flex",
+        shape_config=ci_models.CreateContainerInstanceShapeConfigDetails(
+            ocpus=float(ocpus), memory_in_gbs=float(memory_gbs)),
+        container_restart_policy="NEVER",
+        containers=[ci_models.CreateContainerDetails(
+            display_name="promote-runner",
+            image_url=image,
+            arguments=list(runner_args),
+            environment_variables=env_vars,
+        )],
+        vnics=[ci_models.CreateContainerVnicDetails(
+            subnet_id=subnet_ocid, is_public_ip_assigned=bool(assign_public_ip))],
+        freeform_tags={"managed-by": "vm-dashboard", "purpose": "promote-runner"},
+    )
+    inst = ci.create_container_instance(details).data
+    inst_id = inst.id
+    try:
+        # Wait until the instance is no longer active (the container has exited);
+        # ~1h ceiling covers a multi-GB convert+upload.
+        oci.wait_until(
+            ci, ci.get_container_instance(inst_id),
+            evaluate_response=lambda r: r.data.lifecycle_state in ("INACTIVE", "FAILED", "DELETED"),
+            max_wait_seconds=3600, max_interval_seconds=20,
+        )
+        inst = ci.get_container_instance(inst_id).data
+        exit_code = 1
+        try:
+            cont_id = inst.containers[0].container_id
+            exit_code = int(ci.get_container(cont_id).data.exit_code or 0)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("OCI promote-runner: could not read container exit code: %s", exc)
+        state = getattr(inst, "lifecycle_state", "")
+        log_text = (f"OCI Container Instance {inst_id} finished (state={state}, "
+                    f"exit_code={exit_code}). Container stdout is in OCI Logging "
+                    "if a log group is configured on the compartment.")
+        return exit_code, log_text
+    finally:
+        try:
+            ci.delete_container_instance(inst_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("OCI promote-runner: cleanup delete of %s failed: %s", inst_id, exc)
+
+
+async def run_container_instance_promote_runner_task(
+    *, compartment_id: str, availability_domain: str, subnet_ocid: str,
+    image: str, runner_args: list, env: dict, job_id: str = "",
+    ocpus: float = 2, memory_gbs: float = 16, assign_public_ip: bool = True,
+) -> tuple:
+    """Async wrapper: run the promote runner as a transient OCI Container Instance.
+    Returns (exit_code, log_text). Mirrors aws_service.run_promote_runner_ecs /
+    gcp_service.run_cloud_run_promote_runner_task."""
+    display_name = f"promote-runner-{(job_id or 'job')[:24]}"
+    try:
+        return await asyncio.to_thread(
+            _run_ci_promote_runner_sync,
+            compartment_id=compartment_id, availability_domain=availability_domain,
+            subnet_ocid=subnet_ocid, image=image, runner_args=runner_args, env=env,
+            ocpus=ocpus, memory_gbs=memory_gbs, assign_public_ip=assign_public_ip,
+            display_name=display_name,
+        )
+    except OCIError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise OCIError(f"OCI promote-runner launch failed: {exc}") from exc
+
+
+def _create_image_from_object_storage_sync(
+    *, compartment_id: str, display_name: str, namespace: str, bucket: str,
+    object_name: str, source_image_type: str, operating_system: str,
+) -> dict:
+    import oci
+    compute = oci.core.ComputeClient(_oci_config())
+    source = oci.core.models.ImageSourceViaObjectStorageTupleDetails(
+        source_type="objectStorageTuple",
+        namespace_name=namespace, bucket_name=bucket, object_name=object_name,
+        source_image_type=source_image_type,  # "QCOW2" | "VMDK" | "OCI"
+        operating_system=operating_system or None,
+    )
+    details = oci.core.models.CreateImageDetails(
+        compartment_id=compartment_id, display_name=display_name,
+        image_source_details=source,
+        freeform_tags={"managed-by": "vm-dashboard"},
+    )
+    img = compute.create_image(details).data
+    # Import is async server-side; wait for AVAILABLE (import + processing is slow).
+    try:
+        img = oci.wait_until(
+            compute, compute.get_image(img.id),
+            "lifecycle_state", "AVAILABLE", max_wait_seconds=3600, max_interval_seconds=30,
+        ).data
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("OCI image %s did not reach AVAILABLE in time: %s", img.id, exc)
+    return {"image_ocid": img.id, "display_name": img.display_name,
+            "lifecycle_state": getattr(img, "lifecycle_state", "")}
+
+
+async def create_image_from_object_storage(
+    *, compartment_id: str = "", display_name: str, namespace: str, bucket: str,
+    object_name: str, source_image_type: str = "QCOW2", operating_system: str = "",
+) -> dict:
+    """Import a custom compute image from a QCOW2 (or VMDK) object staged in OCI
+    Object Storage — the OCI leg of cross-cloud image promotion. Waits for the
+    image to reach AVAILABLE. Returns {image_ocid, display_name, lifecycle_state}."""
+    try:
+        return await asyncio.to_thread(
+            _create_image_from_object_storage_sync,
+            compartment_id=compartment_id or _compartment(), display_name=display_name,
+            namespace=namespace, bucket=bucket, object_name=object_name,
+            source_image_type=source_image_type, operating_system=operating_system,
+        )
+    except OCIError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise OCIError(f"create_image_from_object_storage failed: {exc}") from exc

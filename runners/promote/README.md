@@ -2,10 +2,11 @@
 
 Transient container that powers automated cross-cloud image promotion.
 The dashboard launches one of these as an ECS Fargate task (AWS
-targets), Azure Container Instance (Azure targets), or Cloud Run job
-(GCP targets), passes a presigned URL to the hub artefact, and the
-runner converts + uploads the disk image to the target cloud's storage
-ready for the cloud-native import API.
+targets), Azure Container Instance (Azure targets), Cloud Run job
+(GCP targets), or OCI Container Instance (OCI targets), passes a
+presigned URL to the hub artefact, and the runner converts + uploads
+the disk image to the target cloud's storage ready for the cloud-native
+import API.
 
 For the operator-facing flow (when this fires, where the artefact lives,
 how to read promotion status), see
@@ -30,7 +31,7 @@ dashboard:
 1. Resolves the hub artefact URL on `RegisteredImage.artefact_url` and
    mints a short-lived presigned HTTPS URL via
    `storage_service.presigned_url(...)`.
-2. Enqueues an `image_promote_{aws,azure,gcp}` Job and launches the
+2. Enqueues an `image_promote_{aws,azure,gcp,oci}` Job and launches the
    target cloud's runner with argv (presigned URL + dest coordinates).
 3. Polls the runner until exit, captures its stdout/stderr from the
    cloud-native log stream.
@@ -228,7 +229,7 @@ IAM role or container env overrides).
 | `--source-url`         | always       | Presigned HTTPS URL of the hub artefact        |
 | `--source-format`      | always       | `vhd`, `raw`, `qcow2`, `vmdk`                  |
 | `--target-format`      | always       | Conversion target (skips qemu-img if same)     |
-| `--target`             | always       | `s3` / `azure` / `gcs` — chooses upload path   |
+| `--target`             | always       | `s3` / `azure` / `gcs` / `oci` — chooses upload path |
 | `--dest-s3-bucket`     | `--target s3` | Target S3 bucket                              |
 | `--dest-s3-key`        | `--target s3` | Target S3 key                                 |
 | `--dest-s3-region`     | optional     | Defaults to env `AWS_REGION`                   |
@@ -237,6 +238,10 @@ IAM role or container env overrides).
 | `--dest-azure-blob`    | `--target azure` | Blob name                                  |
 | `--dest-gcs-bucket`    | `--target gcs`   | GCS bucket                                 |
 | `--dest-gcs-object`    | `--target gcs`   | GCS object name (should end in `.tar.gz`)  |
+| `--dest-oci-namespace` | `--target oci`   | OCI Object Storage namespace               |
+| `--dest-oci-bucket`    | `--target oci`   | OCI Object Storage bucket                  |
+| `--dest-oci-object`    | `--target oci`   | OCI object name (`.qcow2` — OCI imports QCOW2) |
+| `--dest-oci-region`    | optional         | Defaults to env `OCI_CLI_REGION`           |
 | `--install-linux-agent`| optional (Azure) | Bake WALinuxAgent into the disk before upload (Linux images). |
 | `--install-gcp-guest-agent`| optional (GCS) | Bake google-guest-agent into the disk before the tar wrap (Linux images). |
 | `--install-aws-guest-env`| optional (S3) | Bake an Ec2-datasource cloud-init in + strip the foreign guest env before upload (Linux images). |
@@ -309,11 +314,14 @@ cloud-init is broken, so we don't ship one silently.
 
 **GCP target quirk:** GCP's `compute.images.insert` requires the source object to be a `.tar.gz` containing exactly one entry named `disk.raw`. When `--target gcs` is paired with `--target-format raw` (the dashboard's only supported GCP path today), the runner automatically tar+gzips the converted raw file under that name before upload. The dashboard always passes `--dest-gcs-object` ending in `.tar.gz` for this reason.
 
+**OCI target quirk:** OCI's custom-image import (`compute.create_image` from an Object Storage tuple) reads **QCOW2** (or VMDK), not VHD/raw. The dashboard always passes `--target-format qcow2` for OCI targets, so the runner converts to QCOW2 before upload; the dashboard then imports the compute image with `source_image_type=QCOW2`.
+
 Credential env vars per target:
 
 - `s3` — task IAM role (preferred) or `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / optional `AWS_SESSION_TOKEN`.
 - `azure` — `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`.
 - `gcs` — `GOOGLE_APPLICATION_CREDENTIALS` path to a service-account JSON.
+- `oci` — `OCI_CLI_TENANCY`, `OCI_CLI_USER`, `OCI_CLI_FINGERPRINT`, `OCI_CLI_KEY_CONTENT`, `OCI_CLI_REGION` (+ optional `OCI_CLI_PASSPHRASE`) — the dashboard's API-key identity.
 
 The source URL is presigned by the dashboard at launch time, so the
 container never sees source-side credentials.
@@ -330,7 +338,9 @@ container never sees source-side credentials.
 
 The orchestrator reads stdout/stderr from CloudWatch (AWS) / Log Analytics
 (Azure) / Cloud Logging (GCP) and surfaces the tail to the operator on the
-Job detail page.
+Job detail page. For OCI (Container Instances), container stdout goes to OCI
+Logging when a log group is configured on the compartment; the exit code drives
+success/failure regardless.
 
 ## What this image deliberately doesn't do
 

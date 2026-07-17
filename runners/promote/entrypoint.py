@@ -416,6 +416,30 @@ def upload_gcs(local: str, bucket: str, object_name: str) -> None:
     log("upload done")
 
 
+def upload_oci(local: str, namespace: str, bucket: str, object_name: str, region: str) -> None:
+    """Upload to OCI Object Storage (the staging area the dashboard's
+    create_image import then reads). Auth via the OCI_CLI_* API-key env vars the
+    dashboard passes as secure env (no source-side creds in the container).
+    Uses UploadManager so multi-GB objects upload multipart."""
+    import oci
+    log(f"upload oci://{namespace}/{bucket}/{object_name} (region={region})")
+    cfg = {
+        "user":        os.environ["OCI_CLI_USER"],
+        "tenancy":     os.environ["OCI_CLI_TENANCY"],
+        "fingerprint": os.environ["OCI_CLI_FINGERPRINT"],
+        "key_content": os.environ["OCI_CLI_KEY_CONTENT"],
+        "region":      region or os.environ.get("OCI_CLI_REGION", ""),
+    }
+    passphrase = os.environ.get("OCI_CLI_PASSPHRASE")
+    if passphrase:
+        cfg["pass_phrase"] = passphrase
+    oci.config.validate_config(cfg)
+    client = oci.object_storage.ObjectStorageClient(cfg)
+    mgr = oci.object_storage.UploadManager(client, allow_multipart_uploads=True)
+    mgr.upload_file(namespace, bucket, object_name, local)
+    log("upload done")
+
+
 def wrap_as_gcp_image_tar(raw_path: str, out_tar_gz_path: str) -> None:
     """GCP custom-image insert requires `rawDisk.source` to point at a
     .tar.gz that contains exactly one file named `disk.raw`. We move the
@@ -450,7 +474,7 @@ def main() -> int:
     ap.add_argument("--source-url", required=True, help="presigned HTTPS URL of the source artefact")
     ap.add_argument("--source-format", required=True, help="vhd, raw, qcow2, vmdk")
     ap.add_argument("--target-format", required=True, help="vhd, raw, qcow2, vmdk")
-    ap.add_argument("--target", required=True, choices=["s3", "azure", "gcs"])
+    ap.add_argument("--target", required=True, choices=["s3", "azure", "gcs", "oci"])
     # S3 target
     ap.add_argument("--dest-s3-bucket")
     ap.add_argument("--dest-s3-key")
@@ -462,6 +486,11 @@ def main() -> int:
     # GCS target
     ap.add_argument("--dest-gcs-bucket")
     ap.add_argument("--dest-gcs-object")
+    # OCI target (Object Storage; OCI custom-image import reads QCOW2/VMDK)
+    ap.add_argument("--dest-oci-namespace")
+    ap.add_argument("--dest-oci-bucket")
+    ap.add_argument("--dest-oci-object")
+    ap.add_argument("--dest-oci-region", default=os.environ.get("OCI_CLI_REGION", ""))
     # Azure only: bake the Azure Linux Agent into the image before upload so a
     # promoted foreign Linux image provisions natively on Azure. The dashboard
     # sets this for Linux images; Windows images bring their own agent.
@@ -546,6 +575,15 @@ def main() -> int:
             else:
                 upload_path = dst_path
             upload_gcs(upload_path, args.dest_gcs_bucket, args.dest_gcs_object)
+        elif args.target == "oci":
+            if not (args.dest_oci_namespace and args.dest_oci_bucket and args.dest_oci_object):
+                log("ERROR: --target oci requires --dest-oci-namespace / --dest-oci-bucket / --dest-oci-object")
+                return 2
+            # OCI custom-image import reads QCOW2 (or VMDK) from Object Storage; the
+            # dashboard tells us --target-format qcow2, so the generic convert above
+            # produced dst_path as the .qcow2 to upload.
+            upload_oci(dst_path, args.dest_oci_namespace, args.dest_oci_bucket,
+                       args.dest_oci_object, args.dest_oci_region)
         log("SUCCESS")
         return 0
     except subprocess.CalledProcessError as e:
