@@ -1476,10 +1476,18 @@ def _run_gce_rancher_sync(
     instance.disks = [disk]
 
     nic = compute_v1.NetworkInterface()
+    # GCE's networkInterfaces fields want partial/full self-links, not bare names
+    # (the sandbox emits bare names like 'dashboard-sandbox-vpc'). Normalize them
+    # so a custom-mode VPC lands in a valid subnetwork instead of failing with
+    # "URL is malformed" — mirrors _ensure_rancher_firewall_sync's network ref.
     if subnetwork:
-        nic.subnetwork = subnetwork
+        if "/" in subnetwork:
+            nic.subnetwork = subnetwork
+        else:
+            region = zone.rsplit("-", 1)[0]
+            nic.subnetwork = f"projects/{project_id}/regions/{region}/subnetworks/{subnetwork}"
     elif network:
-        nic.network = network
+        nic.network = network if "/" in network else f"global/networks/{network}"
     if create_external_ip:
         nic.access_configs = [compute_v1.AccessConfig(
             name="External NAT", type_="ONE_TO_ONE_NAT",

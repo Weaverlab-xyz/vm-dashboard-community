@@ -48,6 +48,10 @@ def _node_params() -> dict:
         "machine_type": config_service.get("gcp_rancher_machine_type") or settings.gcp_rancher_machine_type,
         "boot_disk_gb": boot_disk_gb,
         "network":      config_service.get("gcp_network") or settings.gcp_network or "default",
+        # Custom-mode sandbox VPC needs an explicit subnet. Prefer the jumpoint
+        # subnet (Cloud NAT + infra-facing) over the no-egress user-VM subnet;
+        # gcp_service normalizes a bare name into a regional self-link.
+        "subnetwork":   config_service.get("gcp_jumpoint_subnetwork") or config_service.get("gcp_subnetwork") or "",
         "network_tag":  config_service.get("gcp_rancher_network_tag") or settings.gcp_rancher_network_tag,
     }
 
@@ -169,7 +173,8 @@ async def run_deploy(db, *, job_id: str, meta: dict) -> None:
         job_service.update_progress(db, job_id, 30, "Launching COS VM")
         res = await gcp_service.run_gce_rancher(
             p["project_id"], p["zone"], p["name"], p["image"], bootstrap_password,
-            network=p["network"], machine_type=p["machine_type"],
+            network=p["network"], subnetwork=p["subnetwork"],
+            machine_type=p["machine_type"],
             boot_disk_gb=p["boot_disk_gb"], network_tag=p["network_tag"],
             create_external_ip=True)
         external_ip = res.get("external_ip") or ""
