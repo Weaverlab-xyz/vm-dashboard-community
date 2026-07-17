@@ -134,16 +134,16 @@
             <thead class="bg-gray-50 text-gray-500">
               <tr>
                 <th class="px-3 py-2 text-left font-medium">Section</th>
-                <th class="px-3 py-2 text-center font-medium">Read</th>
-                <th class="px-3 py-2 text-center font-medium">Write</th>
-                <th class="px-3 py-2 text-center font-medium">Delete</th>
+                <template x-for="level in permissionLevels" :key="level">
+                  <th class="px-3 py-2 text-center font-medium capitalize" x-text="level"></th>
+                </template>
               </tr>
             </thead>
             <tbody class="divide-y divide-gray-100">
               <template x-for="scope in permissionScopes" :key="scope">
                 <tr class="hover:bg-gray-50">
                   <td class="px-3 py-2 font-medium text-gray-700 capitalize" x-text="scope.replace('_', ' ')"></td>
-                  <template x-for="level in ['read','write','delete']" :key="level">
+                  <template x-for="level in permissionLevels" :key="level">
                     <td class="px-3 py-2 text-center">
                       <input type="checkbox"
                              :checked="formHasPerm(scope, level)"
@@ -192,13 +192,18 @@
 </div>
 
 <script>
-const PERMISSION_SCOPES_G = ['vms', 'aws', 'azure', 'images', 'containers', 'config_mgmt', 'jobs', 'cloud_database', 'k8s'];
+// Sourced from the backend catalog (api/auth.py PERMISSION_SCOPES /
+// PERMISSION_LEVELS) via the page route context — do not hard-code, or
+// the grid will drift from what require_permission actually enforces.
+const PERMISSION_SCOPES_G = {{ permission_scopes | tojson }};
+const PERMISSION_LEVELS_G = {{ permission_levels | tojson }};
 
 function groupsPage() {
   return {
     mappings: [],
     availableWorkgroups: {{ workgroups | tojson }},
     permissionScopes: PERMISSION_SCOPES_G,
+    permissionLevels: PERMISSION_LEVELS_G,
     loading: true,
     showAdd: false,
     saving: false,

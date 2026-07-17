@@ -779,7 +779,14 @@ async def k8s_page(request: Request):
 async def users_page(request: Request):
     return templates.TemplateResponse(
         "users/list.html",
-        {"request": request, "workgroups": list(settings.workgroups.keys())},
+        {
+            "request": request,
+            "workgroups": list(settings.workgroups.keys()),
+            # Inject the backend permission catalog so the assignment grid
+            # can't drift from api/auth.py (was hard-coded in the template).
+            "permission_scopes": auth.PERMISSION_SCOPES,
+            "permission_levels": auth.PERMISSION_LEVELS,
+        },
     )
 
 
@@ -787,7 +794,14 @@ async def users_page(request: Request):
 async def groups_page(request: Request):
     return templates.TemplateResponse(
         "groups/index.html",
-        {"request": request, "workgroups": list(settings.workgroups.keys())},
+        {
+            "request": request,
+            "workgroups": list(settings.workgroups.keys()),
+            # Inject the backend permission catalog so the assignment grid
+            # can't drift from api/auth.py (was hard-coded in the template).
+            "permission_scopes": auth.PERMISSION_SCOPES,
+            "permission_levels": auth.PERMISSION_LEVELS,
+        },
     )
 
 
