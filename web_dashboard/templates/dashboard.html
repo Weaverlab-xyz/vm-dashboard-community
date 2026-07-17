@@ -281,6 +281,20 @@
           ],
         },
         {
+          // Managed platform services (out of preview → first-class on the
+          // dashboard). Counts are creator-scoped server-side, so a non-admin
+          // sees only their own; the tiles gate on the feature flag like every
+          // other tile (a user without read permission sees "unavailable").
+          id: 'managed',
+          label: 'Managed Services',
+          gridClass: 'grid grid-cols-1 sm:grid-cols-2 gap-4',
+          refreshable: true,
+          tiles: [
+            { key: 'cloud_databases', title: 'Cloud Databases',     href: '/databases', flag: 'cloud_database',  description: 'managed DB instances' },
+            { key: 'k8s_clusters',    title: 'Kubernetes Clusters', href: '/k8s',       flag: 'k8s_management',  description: 'managed clusters' },
+          ],
+        },
+        {
           id: 'hypervisors',
           label: 'Hypervisors',
           gridClass: 'grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4',
@@ -323,6 +337,7 @@
         // Load on-prem stats + jobs in parallel; cloud/hypervisor/containers in background
         await Promise.all([this.loadOnPremStats(), this.loadActiveJobs(), this.loadJobs(), this.loadInventoryCount(), this.loadAttention()]);
         this.refreshSection(this.tileSections.find(s => s.id === 'cloud'));
+        this.refreshSection(this.tileSections.find(s => s.id === 'managed'));
         this.refreshSection(this.tileSections.find(s => s.id === 'hypervisors'));
         this.refreshSection(this.tileSections.find(s => s.id === 'containers'));
 
@@ -377,6 +392,8 @@
         if (f.gcp)     t.push({ label: 'GCE instance', href: '/gcp' });
         if (f.proxmox) t.push({ label: 'Proxmox VM',   href: '/proxmox' });
         if (f.nutanix) t.push({ label: 'Nutanix VM',   href: '/nutanix' });
+        if (f.cloud_database) t.push({ label: 'Cloud database',     href: '/databases' });
+        if (f.k8s_management) t.push({ label: 'Kubernetes cluster', href: '/k8s' });
         return t;
       },
 
@@ -575,6 +592,9 @@
         if (k === 'portainer_endpoints') return this._fetchPortainer();
         if (k === 'ecs_tasks')        return this._fetchListCount('/api/containers/ecs-tasks',  'tasks');
         if (k === 'aci_containers')   return this._fetchListCount('/api/containers/aci-containers', 'containers', c => c.state === 'Running');
+        // Managed services (creator-scoped server-side; no count field → list.length)
+        if (k === 'cloud_databases')  return this._fetchListCount('/api/databases',    'databases');
+        if (k === 'k8s_clusters')     return this._fetchListCount('/api/k8s/clusters',  'clusters');
         return { value: -1 };
       },
 

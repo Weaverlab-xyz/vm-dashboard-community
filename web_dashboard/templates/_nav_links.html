@@ -61,12 +61,12 @@
    {% if request.url.path.startswith('/desktops') %}{{ nav_active }}{% endif %}">Desktops</a>
 {% endif %}
 {% if cloud_database_enabled %}
-<a x-show="$store.auth.isAdmin" href="/databases"
+<a href="/databases"
    class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
    {% if request.url.path.startswith('/databases') %}{{ nav_active }}{% endif %}">Databases</a>
 {% endif %}
 {% if k8s_management_enabled %}
-<a x-show="$store.auth.isAdmin" href="/k8s"
+<a href="/k8s"
    class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
    {% if request.url.path.startswith('/k8s') %}{{ nav_active }}{% endif %}">Kubernetes</a>
 {% endif %}
