@@ -55,6 +55,13 @@ class ProvisionRequest(BaseModel):
     # zone and resource group fall back to the sandbox-emitted azure_db_* config.
     sku_name: Optional[str] = None
     storage_mb: Optional[int] = None
+    # OCI (Autonomous Database) — free-tier by default (public endpoint reached via
+    # the PRA tcp tunnel). Beyond free tier needs oci_is_free_tier=false + a subnet.
+    oci_db_workload: Optional[str] = None       # "OLTP" (ATP) | "DW" (ADW)
+    oci_is_free_tier: Optional[bool] = None
+    oci_cpu_core_count: Optional[int] = None
+    oci_data_storage_tbs: Optional[int] = None
+    oci_subnet_ocid: Optional[str] = None
     # PRA Vault account group the injected credential lands in — an unassigned
     # vault account is injectable by nobody, so the form offers a picker.
     vault_account_group_id: Optional[int] = None
@@ -92,6 +99,11 @@ _AZURE_REGION_RE = re.compile(r"^[a-z]{3,}\d?$")
 # Flexible Server SKUs offered in the Azure provision form (burstable first).
 _AZURE_SKUS = ["B_Standard_B1ms", "B_Standard_B2s",
                "GP_Standard_D2s_v3", "GP_Standard_D4s_v3"]
+# OCI regions: us-ashburn-1, uk-london-1, ap-sydney-1, eu-frankfurt-1 …
+_OCI_REGION_RE = re.compile(r"^[a-z]{2,3}-[a-z]+-\d$")
+# ADB workloads offered in the OCI provision form (ATP first). Free-tier sizing
+# is fixed (1 OCPU / 20 GB), so there's no size picker — just the workload.
+_OCI_WORKLOADS = ["OLTP", "DW"]
 
 
 async def _pra_pickers() -> dict:
@@ -129,6 +141,11 @@ async def provision_database(
         "private_network": payload.private_network,
         "sku_name": payload.sku_name,
         "storage_mb": payload.storage_mb,
+        "oci_db_workload": payload.oci_db_workload,
+        "oci_is_free_tier": payload.oci_is_free_tier,
+        "oci_cpu_core_count": payload.oci_cpu_core_count,
+        "oci_data_storage_tbs": payload.oci_data_storage_tbs,
+        "oci_subnet_ocid": payload.oci_subnet_ocid,
     }.items() if v is not None}
 
     # Pre-action policy gate (inert unless enabled + this action is gated).
@@ -207,6 +224,18 @@ async def database_options(
             raise HTTPException(status_code=400, detail=f"invalid Azure location {region!r}")
         return DatabaseOptions(
             region=region, instance_classes=_AZURE_SKUS,
+            db_subnet_groups=[], security_groups=[],
+            cached_at=None, **(await _pra_pickers()),
+        )
+
+    if cloud == "oci":
+        # Autonomous DB: workload picker (no size — free tier is fixed 1 OCPU/20 GB).
+        # The compartment/subnet come from the sandbox-emitted oci_* config.
+        region = (region or "").strip() or (config_service.get("oci_region") or "us-ashburn-1")
+        if not _OCI_REGION_RE.fullmatch(region):
+            raise HTTPException(status_code=400, detail=f"invalid OCI region {region!r}")
+        return DatabaseOptions(
+            region=region, instance_classes=_OCI_WORKLOADS,
             db_subnet_groups=[], security_groups=[],
             cached_at=None, **(await _pra_pickers()),
         )

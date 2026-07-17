@@ -106,14 +106,15 @@
               <option value="aws">AWS</option>
               <option value="azure">Azure</option>
               <option value="gcp">GCP</option>
+              <option value="oci">OCI</option>
             </select>
           </div>
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">Engine *</label>
             <select x-model="form.engine" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
-              <option value="postgres">PostgreSQL</option>
-              <option value="mysql">MySQL</option>
-              <option value="sqlserver">SQL Server</option>
+              <template x-for="e in engineOptions()" :key="e.value">
+                <option :value="e.value" x-text="e.label"></option>
+              </template>
             </select>
           </div>
         </div>
@@ -166,6 +167,15 @@
               <template x-for="c in options.instance_classes || []" :key="c">
                 <option :value="c" x-text="c"></option>
               </template>
+            </select>
+          </div>
+          <!-- OCI Autonomous DB workload -->
+          <div x-show="form.cloud === 'oci'" x-cloak>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Workload</label>
+            <select x-model="form.oci_db_workload" :disabled="loadingOptions"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500">
+              <option value="OLTP">Transaction Processing (ATP)</option>
+              <option value="DW">Data Warehouse (ADW)</option>
             </select>
           </div>
         </div>
@@ -230,6 +240,33 @@
           </div>
           <div class="flex items-end">
             <p class="text-xs text-gray-400 pb-2">The delegated subnet + private DNS zone come from the configured <code>azure_db_*</code> sandbox settings.</p>
+          </div>
+        </div>
+        <!-- OCI: free-tier note + beyond-free-tier gate -->
+        <div x-show="form.cloud === 'oci'" x-cloak class="space-y-3">
+          <div class="bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2 text-xs text-emerald-800">
+            Provisions an <strong>Always-Free</strong> Autonomous Database (1 OCPU / 20 GB, public
+            endpoint reached via the PRA tunnel). The admin user is <code>ADMIN</code>; the compartment
+            comes from the configured <code>oci_compartment_ocid</code>.
+          </div>
+          <label class="flex items-center gap-2 text-sm text-gray-700">
+            <input type="checkbox" x-model="form.oci_beyond_free"
+                   class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+            Allow beyond free tier (dedicated sizing / private endpoint — <span class="text-amber-700 font-medium">may incur charges</span>)
+          </label>
+          <div x-show="form.oci_beyond_free" x-cloak class="grid grid-cols-3 gap-3">
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">OCPUs</label>
+              <input type="number" min="1" x-model.number="form.oci_cpu_core_count" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" placeholder="1">
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Storage (TB)</label>
+              <input type="number" min="1" x-model.number="form.oci_data_storage_tbs" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" placeholder="1">
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Subnet OCID <span class="text-gray-400">(private endpoint)</span></label>
+              <input type="text" x-model="form.oci_subnet_ocid" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="(oci_default_subnet_ocid)">
+            </div>
           </div>
         </div>
         <div x-show="(options.vault_account_groups || []).length > 0" x-cloak>
@@ -349,6 +386,7 @@ function databasesPage() {
             instance_class: 'db.t3.micro', allocated_storage: null, db_subnet_group_name: '', vpc_security_group_ids: [], vault_account_group_id: null,
             tier: 'db-f1-micro', disk_size: null, private_network: '',
             sku_name: 'B_Standard_B1ms', storage_gb: 32,
+            oci_db_workload: 'OLTP', oci_beyond_free: false, oci_cpu_core_count: 1, oci_data_storage_tbs: 1, oci_subnet_ocid: '',
             jump_group: '', jumpoint_name: '', praCredBackend: '', pra_credential_ref: '' },
 
     _pollTimer: null,
@@ -430,9 +468,24 @@ function databasesPage() {
       this.loadOptions(r);
     },
 
+    // Valid engines per cloud. OCI offers only Oracle Autonomous DB; the others
+    // offer the Postgres/MySQL/SQL-Server matrix.
+    engineOptions() {
+      if (this.form.cloud === 'oci') return [{ value: 'oracle', label: 'Oracle (Autonomous DB)' }];
+      return [
+        { value: 'postgres', label: 'PostgreSQL' },
+        { value: 'mysql', label: 'MySQL' },
+        { value: 'sqlserver', label: 'SQL Server' },
+      ];
+    },
+
     onCloudChange() {
       // Switching cloud in the modal: reset region + cloud-specific fields and reload
       // that cloud's options (instance sizes, subnet/SG pickers, PRA jump groups).
+      // Keep the engine valid for the chosen cloud (oracle ⇄ oci).
+      this.form.engine = this.form.cloud === 'oci'
+        ? 'oracle'
+        : (this.form.engine === 'oracle' ? 'postgres' : this.form.engine);
       this.form.region = '';
       this.form.db_subnet_group_name = '';
       this.form.vpc_security_group_ids = [];
@@ -463,6 +516,14 @@ function databasesPage() {
         } else if (this.form.cloud === 'azure') {
           if (this.form.sku_name) body.sku_name = this.form.sku_name;
           if (this.form.storage_gb) body.storage_mb = this.form.storage_gb * 1024;
+        } else if (this.form.cloud === 'oci') {
+          body.oci_db_workload = this.form.oci_db_workload || 'OLTP';
+          body.oci_is_free_tier = !this.form.oci_beyond_free;
+          if (this.form.oci_beyond_free) {
+            if (this.form.oci_cpu_core_count) body.oci_cpu_core_count = this.form.oci_cpu_core_count;
+            if (this.form.oci_data_storage_tbs) body.oci_data_storage_tbs = this.form.oci_data_storage_tbs;
+            if (this.form.oci_subnet_ocid) body.oci_subnet_ocid = this.form.oci_subnet_ocid;
+          }
         } else {
           if (this.form.instance_class) body.instance_class = this.form.instance_class;
           if (this.form.allocated_storage) body.allocated_storage = this.form.allocated_storage;
