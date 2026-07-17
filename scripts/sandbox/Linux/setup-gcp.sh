@@ -445,7 +445,7 @@ Sandbox topology summary
 
 Service-account JSON cached at $SA_KEY_PATH (mode 600).
 
-The dashboard auto-applies the `bt-jumpoint` network tag to its Jumpoint
+The dashboard auto-applies the ${NETWORK_TAG_JP} network tag to its Jumpoint
 COS GCE instance and reads gcp_default_network_tag from config to attach
 ${NETWORK_TAG_VM} to every user VM it deploys, so the sandbox firewall
 rules take effect automatically — no per-deploy manual tagging needed.

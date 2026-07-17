@@ -9,7 +9,7 @@
       <h1 class="text-2xl font-bold text-gray-900">Cloud Costs</h1>
       <p class="text-sm text-gray-500 mt-1">Month-to-date spend. AWS Cost Explorer + Azure Cost Management.</p>
     </div>
-    <button @click="load()" :disabled="loading"
+    <button @click="load(true)" :disabled="loading"
             class="text-sm bg-white border border-gray-300 hover:bg-gray-50 px-3 py-2 rounded-lg shadow-sm font-medium transition">
       Refresh
     </button>
@@ -123,12 +123,16 @@
         await this.load();
       },
 
-      async load() {
+      async load(force = false) {
         this.loading = true;
+        // The Refresh button forces a cache-busting requery (?refresh=true); the
+        // initial page load (force=false) reads the shared cache so navigation
+        // stays cheap and doesn't re-run the billable Cost Explorer queries.
+        const q = force ? '?refresh=true' : '';
         try {
           const [s, b] = await Promise.all([
-            API.get('/api/costs/summary').catch(() => ({})),
-            API.get('/api/costs/breakdown').catch(() => ({})),
+            API.get('/api/costs/summary' + q).catch(() => ({})),
+            API.get('/api/costs/breakdown' + q).catch(() => ({})),
           ]);
           this.summary = s || {};
           this.breakdown = b || {};
