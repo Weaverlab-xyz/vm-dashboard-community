@@ -19,7 +19,7 @@ from ..database import RegisteredImage
 logger = logging.getLogger(__name__)
 
 
-VALID_CLOUDS = ("aws", "azure", "gcp")
+VALID_CLOUDS = ("aws", "azure", "gcp", "oci")
 
 
 class ImageRegistryError(Exception):
@@ -274,6 +274,8 @@ def _format_compat_check(fmt: str, target: str) -> dict:
         "aws":   {"vhd": "pass", "vmdk": "pass", "raw": "pass", "ova": "pass"},
         "azure": {"vhd": "pass"},
         "gcp":   {"vhd": "pass", "raw": "pass", "vmdk": "warn"},
+        # OCI custom-image import consumes QCOW2/VMDK; the runner converts vhd/raw → qcow2.
+        "oci":   {"vhd": "pass", "raw": "pass", "qcow2": "pass", "vmdk": "warn"},
     }
     status = matrix.get(target, {}).get(fmt) or ("fail" if fmt else "warn")
     if not fmt:
@@ -340,6 +342,21 @@ def _gcp_creds_configured() -> dict:
     }
 
 
+def _oci_creds_configured() -> dict:
+    from . import config_service
+    have = all(config_service.get(k) for k in (
+        "oci_tenancy_ocid", "oci_user_ocid", "oci_fingerprint", "oci_private_key"
+    ))
+    return {
+        "name":   "Target credentials configured",
+        "status": "pass" if have else "fail",
+        "detail": (
+            "OCI API-key credentials present." if have
+            else "oci_tenancy_ocid/user_ocid/fingerprint/private_key not set. Configure in the setup wizard."
+        ),
+    }
+
+
 def compute_preflight_checks(image: dict, target_cloud: str) -> list[dict]:
     """Return a list of {name, status, detail} pre-flight items.
 
@@ -376,6 +393,7 @@ def compute_preflight_checks(image: dict, target_cloud: str) -> list[dict]:
         "aws":   _aws_creds_configured,
         "azure": _azure_creds_configured,
         "gcp":   _gcp_creds_configured,
+        "oci":   _oci_creds_configured,
     }[target_cloud]())
 
     return checks
@@ -834,5 +852,96 @@ async def promote_to_gcp_automated(
         region=target_loc,
         self_link=self_link,
         notes=f"Imported via promote-runner Cloud Run job in {project_id}/{target_loc or '<no-region>'}.",
+    )
+    return updated
+
+
+async def promote_to_oci_automated(
+    db: Session,
+    image_id: str,
+    *,
+    target_region: Optional[str] = None,
+    progress_cb=None,
+) -> dict:
+    """End-to-end OCI promote: kick the OCI Container-Instances runner (converts to
+    QCOW2 + uploads to Object Storage), import a custom compute image from it,
+    clean up staging, record the promotion. Mirrors promote_to_gcp_automated;
+    diffs: runner = OCI Container Instance, SDK call = compute.create_image from an
+    Object Storage QCOW2 tuple, and OCI images are region-scoped (land in oci_region)."""
+    from . import promote_runner_service, oci_service, config_service
+
+    image = get_image(db, image_id)
+    if not image:
+        raise ImageRegistryError(f"Image {image_id} not found.")
+    if not image.get("artefact_url"):
+        raise ImageRegistryError(
+            "Image has no artefact_url. Re-build with Phase 3 export to populate it, "
+            "or fall back to the manual-steps walkthrough."
+        )
+
+    hub_backend, hub_key = _parse_hub_url(image["artefact_url"])
+    source_format = (image.get("artefact_format") or "vhd").lower()
+    compartment = config_service.get("oci_compartment_ocid") or config_service.get("oci_tenancy_ocid")
+    if not compartment:
+        raise ImageRegistryError("oci_compartment_ocid / oci_tenancy_ocid not set — needed to import the image.")
+    target_loc = target_region or config_service.get("oci_region") or ""
+
+    dest_bucket, dest_object = promote_runner_service.resolve_oci_staging(
+        image["name"], image["version"])
+    namespace = await oci_service.object_storage_namespace()
+    target_image_name = f"{image['name']}-{image['version']}"
+
+    def _say(pct: int, msg: str) -> None:
+        logger.info("[promote %s -> oci] %s", image_id, msg)
+        if progress_cb:
+            progress_cb(pct, msg)
+
+    # 1+2: runner converts vhd/raw → QCOW2 and uploads to Object Storage.
+    _say(10, f"Launching promote runner: {hub_backend}://{hub_key} -> oci://{namespace}/{dest_bucket}/{dest_object}")
+    await promote_runner_service.run_for_oci_target(
+        job_id=image_id,
+        hub_backend=hub_backend,
+        hub_key=hub_key,
+        source_format=source_format,
+        dest_namespace=namespace,
+        dest_bucket=dest_bucket,
+        dest_object=dest_object,
+    )
+
+    # 3: import the custom compute image from the staged QCOW2.
+    _say(60, f"Importing compute image '{target_image_name}' from oci://{namespace}/{dest_bucket}/{dest_object}")
+    img_result = await oci_service.create_image_from_object_storage(
+        compartment_id=compartment,
+        display_name=target_image_name,
+        namespace=namespace,
+        bucket=dest_bucket,
+        object_name=dest_object,
+        source_image_type="QCOW2",
+    )
+    image_ocid = img_result["image_ocid"]
+    state = (img_result.get("lifecycle_state") or "").upper()
+    _say(85, f"Image import returned: state={state} ({image_ocid})")
+    if state and state != "AVAILABLE":
+        raise ImageRegistryError(
+            f"create_image finished with state '{state}' — see the OCI console (Custom Images)."
+        )
+
+    # 4: clean up the staged Object Storage object now that the image is AVAILABLE.
+    try:
+        _say(92, f"Cleaning up staged object oci://{namespace}/{dest_bucket}/{dest_object}")
+        await oci_service.delete_object_storage_object(namespace, dest_bucket, dest_object)
+    except Exception as e:
+        logger.warning("Failed to delete staged OCI object %s/%s/%s after promote: %s",
+                       namespace, dest_bucket, dest_object, e)
+
+    # 5: record the promotion (the image OCID goes in the uniform image_id slot).
+    updated = record_promotion(
+        db,
+        image_id,
+        "oci",
+        status="completed",
+        image_id_value=image_ocid,
+        region=target_loc,
+        notes=f"Imported via promote-runner Container Instance in compartment {compartment[:20]}… ({target_loc or '<no-region>'}).",
     )
     return updated

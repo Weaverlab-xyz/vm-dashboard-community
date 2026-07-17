@@ -396,6 +396,7 @@ transient container in the *target* cloud:
 | AWS | ECS Fargate task | `ec2.ImportImage` | None (VHD passthrough) |
 | Azure | ACI container group | `compute.images.begin_create_or_update` | None (VHD passthrough) |
 | GCP | Cloud Run Job | `compute.images.insert` | `qemu-img vhd → raw` + `tar.gz`-wrap with `disk.raw` entry |
+| OCI | Container Instance | `compute.create_image` (Object Storage tuple) | `qemu-img vhd → qcow2` (OCI import reads QCOW2) |
 
 The runner pulls the hub artefact via a short-lived presigned URL
 minted at task-launch time, so it never holds hub-side credentials.

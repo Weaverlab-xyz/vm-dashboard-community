@@ -20,7 +20,7 @@ task-launch time — no source-side credentials live in the container.
 import logging
 from typing import Optional
 
-from . import aws_service, azure_service, config_service, gcp_service, storage_service
+from . import aws_service, azure_service, config_service, gcp_service, oci_service, storage_service
 from ..config import settings
 
 logger = logging.getLogger(__name__)
@@ -306,6 +306,142 @@ async def run_for_azure_target(
         acr_server=cfg["acr_server"],
         acr_username=cfg["acr_username"],
         acr_password=cfg["acr_password"],
+    )
+    if exit_code != 0:
+        raise PromoteRunnerError(
+            f"Promote runner exited with code {exit_code}. See log_output for details.",
+            log_output=output,
+        )
+    return (exit_code, output)
+
+
+# ── OCI target ───────────────────────────────────────────────────────────────
+
+
+def _resolve_oci_runner_config() -> dict:
+    """Resolve OCI Container-Instances + staging knobs for the OCI promote runner.
+    Falls back to the primary oci_* config so single-tenant installs need only set
+    a staging bucket."""
+    compartment = _cfg("promote_runner_oci_compartment") or _cfg("oci_compartment_ocid") or _cfg("oci_tenancy_ocid")
+    subnet_ocid = _cfg("promote_runner_oci_subnet_ocid") or _cfg("oci_default_subnet_ocid")
+    availability_domain = _cfg("promote_runner_oci_availability_domain")
+    image = _cfg("promote_runner_image") or "chrweav/dashboard-promote-runner:latest"
+    region = _cfg("oci_region") or "us-ashburn-1"
+    try:
+        ocpus = float(_cfg("promote_runner_oci_ocpus") or "2")
+        memory_gbs = float(_cfg("promote_runner_oci_memory_gbs") or "16")
+    except ValueError as e:
+        raise PromoteRunnerError(f"Invalid OCPU/memory in OCI promote runner config: {e}")
+
+    staging_bucket = _cfg("promote_runner_oci_staging_bucket")
+    staging_prefix = (_cfg("promote_runner_oci_staging_prefix") or "promote-staging").strip("/")
+
+    missing = []
+    if not compartment:
+        missing.append("promote_runner_oci_compartment (or oci_compartment_ocid)")
+    if not subnet_ocid:
+        missing.append("promote_runner_oci_subnet_ocid (or oci_default_subnet_ocid — the runner VNIC)")
+    if not staging_bucket:
+        missing.append("promote_runner_oci_staging_bucket (Object Storage bucket for the QCOW2)")
+    if missing:
+        raise PromoteRunnerError(
+            "OCI promote runner is not configured. Set on /storage: " + ", ".join(missing) + "."
+        )
+
+    return {
+        "compartment": compartment,
+        "subnet_ocid": subnet_ocid,
+        "availability_domain": availability_domain,
+        "image": image,
+        "region": region,
+        "ocpus": ocpus,
+        "memory_gbs": memory_gbs,
+        "staging_bucket": staging_bucket,
+        "staging_prefix": staging_prefix,
+    }
+
+
+def resolve_oci_staging(image_name: str, version: str) -> tuple[str, str]:
+    """Return (bucket, object_name) for the QCOW2 the OCI promote runner stages in
+    Object Storage before the compute-image import reads it. (The namespace is
+    fetched live by the orchestrator.)"""
+    cfg = _resolve_oci_runner_config()
+    object_name = f"{cfg['staging_prefix']}/{image_name}-{version}.qcow2"
+    return (cfg["staging_bucket"], object_name)
+
+
+async def run_for_oci_target(
+    *,
+    job_id: str,
+    hub_backend: str,
+    hub_key: str,
+    source_format: str,
+    dest_namespace: str,
+    dest_bucket: str,
+    dest_object: str,
+    presign_expiry_seconds: int = 7200,
+) -> tuple:
+    """Launch the OCI promote-runner Container Instance to copy
+    `hub_backend://hub_key` into `oci://<namespace>/<bucket>/<object>`, converting
+    to QCOW2 (OCI's custom-image import format) along the way. Returns
+    (exit_code, log_output).
+
+    OCI API-key credentials are passed to the runner as secure env vars (the
+    OCI_CLI_* names the runner's upload_oci reads) so the container writes to
+    Object Storage as the same identity the dashboard uses."""
+    cfg = _resolve_oci_runner_config()
+
+    source_url = await storage_service.presigned_url(
+        hub_backend, hub_key, expiry_seconds=presign_expiry_seconds, method="GET",
+    )
+
+    runner_args = [
+        "--source-url", source_url,
+        "--source-format", source_format,
+        # OCI custom-image import reads QCOW2 (or VMDK); always hand it QCOW2.
+        "--target-format", "qcow2",
+        "--target", "oci",
+        "--dest-oci-namespace", dest_namespace,
+        "--dest-oci-bucket", dest_bucket,
+        "--dest-oci-object", dest_object,
+        "--dest-oci-region", cfg["region"],
+    ]
+    oci_env = {
+        "OCI_CLI_USER":        _cfg("oci_user_ocid"),
+        "OCI_CLI_TENANCY":     _cfg("oci_tenancy_ocid"),
+        "OCI_CLI_FINGERPRINT": _cfg("oci_fingerprint"),
+        "OCI_CLI_KEY_CONTENT": _cfg("oci_private_key"),
+        "OCI_CLI_REGION":      cfg["region"],
+        "OCI_CLI_PASSPHRASE":  _cfg("oci_private_key_passphrase"),
+    }
+    if not all(oci_env[k] for k in ("OCI_CLI_USER", "OCI_CLI_TENANCY", "OCI_CLI_FINGERPRINT", "OCI_CLI_KEY_CONTENT")):
+        raise PromoteRunnerError(
+            "OCI API-key credentials (oci_tenancy_ocid / oci_user_ocid / oci_fingerprint / "
+            "oci_private_key) must be set so the runner can write to Object Storage."
+        )
+
+    # Resolve the AD if not pinned in config (Container Instances need one).
+    availability_domain = cfg["availability_domain"]
+    if not availability_domain:
+        ads = await oci_service.list_availability_domains(cfg["compartment"])
+        if not ads:
+            raise PromoteRunnerError("No availability domains found for the OCI promote runner compartment.")
+        availability_domain = ads[0]
+
+    logger.info(
+        "Launching OCI promote-runner Container Instance for job %s: hub=%s://%s -> oci://%s/%s/%s",
+        job_id, hub_backend, hub_key, dest_namespace, dest_bucket, dest_object,
+    )
+    exit_code, output = await oci_service.run_container_instance_promote_runner_task(
+        compartment_id=cfg["compartment"],
+        availability_domain=availability_domain,
+        subnet_ocid=cfg["subnet_ocid"],
+        image=cfg["image"],
+        runner_args=runner_args,
+        env=oci_env,
+        job_id=job_id,
+        ocpus=cfg["ocpus"],
+        memory_gbs=cfg["memory_gbs"],
     )
     if exit_code != 0:
         raise PromoteRunnerError(

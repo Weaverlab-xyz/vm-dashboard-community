@@ -178,6 +178,7 @@ flowchart LR
               <option value="aws">AWS</option>
               <option value="azure">Azure</option>
               <option value="gcp">GCP</option>
+              <option value="oci">OCI</option>
             </select>
           </div>
           <div>
@@ -249,7 +250,7 @@ flowchart LR
         <div>
           <label class="block text-sm font-medium text-gray-700 mb-1">Target cloud</label>
           <div class="flex gap-2">
-            <template x-for="c in ['aws','azure','gcp']" :key="c">
+            <template x-for="c in ['aws','azure','gcp','oci']" :key="c">
               <button @click="selectTarget(c)"
                       :disabled="c === promoteImage?.source_cloud"
                       class="flex-1 px-3 py-2 text-sm border rounded-lg transition disabled:opacity-30"
@@ -267,6 +268,7 @@ flowchart LR
             <span class="text-gray-400 font-normal" x-show="promoteTarget === 'aws'" x-cloak>(required for AWS — e.g. us-west-2)</span>
             <span class="text-gray-400 font-normal" x-show="promoteTarget === 'azure'" x-cloak>(Azure location, optional — defaults to your configured location)</span>
             <span class="text-gray-400 font-normal" x-show="promoteTarget === 'gcp'" x-cloak>(informational — GCP custom images are global)</span>
+            <span class="text-gray-400 font-normal" x-show="promoteTarget === 'oci'" x-cloak>(OCI region, optional — defaults to your configured oci_region)</span>
             <span class="text-gray-400 font-normal" x-show="!promoteTarget" x-cloak>(optional)</span>
           </label>
           <input type="text" x-model="promoteRegion"

@@ -147,6 +147,13 @@ async def get_config(current_user: User = Depends(require_permission("admin", "r
         "promote_runner_gcp_staging_bucket",
         "promote_runner_gcp_staging_prefix",
         "promote_runner_gcp_image_family",
+        "promote_runner_oci_compartment",
+        "promote_runner_oci_availability_domain",
+        "promote_runner_oci_subnet_ocid",
+        "promote_runner_oci_ocpus",
+        "promote_runner_oci_memory_gbs",
+        "promote_runner_oci_staging_bucket",
+        "promote_runner_oci_staging_prefix",
     ):
         out[k] = _cfg_get(k)
     return out
@@ -206,6 +213,14 @@ class StorageConfigPatch(BaseModel):
     promote_runner_gcp_staging_bucket:   str | None = None
     promote_runner_gcp_staging_prefix:   str | None = None
     promote_runner_gcp_image_family:     str | None = None
+
+    promote_runner_oci_compartment:          str | None = None
+    promote_runner_oci_availability_domain:  str | None = None
+    promote_runner_oci_subnet_ocid:          str | None = None
+    promote_runner_oci_ocpus:                str | None = None
+    promote_runner_oci_memory_gbs:           str | None = None
+    promote_runner_oci_staging_bucket:       str | None = None
+    promote_runner_oci_staging_prefix:       str | None = None
 
 
 @router.patch("/config")
