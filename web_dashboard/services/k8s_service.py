@@ -675,13 +675,27 @@ async def run_provision_apply(db: Session, *, cluster_id: str, job_id: str,
                 config_service.set(f"entitle_agent_azure_client_id_{cluster_id}", azure_client_id)
             if azure_kv_name:
                 config_service.set(f"entitle_agent_azure_key_vault_name_{cluster_id}", azure_kv_name)
+        # Capture the cluster's stable NAT egress IP (module output) so the Rancher
+        # node firewall can auto-allow it — the private cluster's cattle-cluster-agent
+        # dials OUT from this address to import.
+        egress_ip = str(outputs.get("nat_public_ip") or "").strip()
+        if egress_ip:
+            row.egress_ip = egress_ip
         row.kubeconfig_ref = ref
         row.api_server = endpoint
         row.status = "registered"
         db.commit()
         job_service.set_completed(db, job_id)
-        logger.info("k8s provision complete cluster_id=%s cluster=%s endpoint=%s",
-                    cluster_id, cluster_out_name, endpoint)
+        logger.info("k8s provision complete cluster_id=%s cluster=%s endpoint=%s egress_ip=%s",
+                    cluster_id, cluster_out_name, endpoint, egress_ip or "-")
+        # Best-effort: refresh the Rancher node firewall so this cluster's egress /32
+        # is whitelisted before it's imported. Never fails the provision; no-ops when
+        # the Rancher node isn't configured.
+        try:
+            from . import rancher_node_service
+            await rancher_node_service.refresh_rancher_firewall(db)
+        except Exception as exc:
+            logger.warning("k8s provision: rancher firewall refresh failed (non-fatal): %s", exc)
     except Exception as exc:
         row.status = "failed"
         db.commit()
@@ -827,6 +841,13 @@ async def run_decommission(db: Session, *, cluster_id: str, job_id: str) -> None
             logger.warning("k8s decommission: clearing %s failed: %s", _k, exc)
     db.delete(row)
     db.commit()
+    # Re-tighten the Rancher node firewall now the row is gone — its egress /32 must
+    # drop out of the merged source set. Best-effort (must run AFTER the delete).
+    try:
+        from . import rancher_node_service
+        await rancher_node_service.refresh_rancher_firewall(db)
+    except Exception as exc:
+        logger.warning("k8s decommission: rancher firewall refresh failed (non-fatal): %s", exc)
     job_service.set_completed(db, job_id, {"cluster_id": cluster_id, "deregistered": name})
     logger.info("k8s decommissioned cluster_id=%s", cluster_id)
 
@@ -1233,6 +1254,15 @@ async def _import_into_rancher(db: Session, row, kubeconfig) -> None:
     api_token = _cfg("rancher_api_token")
     if not (server_url and api_token):
         raise K8sError("central Rancher node is not running — stand it up on the Containers page first")
+
+    # Belt-and-suspenders: make sure this cluster's egress /32 is in the node
+    # firewall before the agent tries to dial out (no-op for registered clusters
+    # that have no captured egress_ip, and when the node isn't GCP-configured).
+    try:
+        from . import rancher_node_service
+        await rancher_node_service.refresh_rancher_firewall(db)
+    except Exception as exc:
+        logger.warning("rancher import: firewall refresh failed (non-fatal): %s", exc)
 
     # Direct HTTPS to the public Rancher API (no in-cluster curl pods).
     rancher_cluster_id, manifest_url = await rancher_service.create_import_cluster_direct(name=row.name)
@@ -2685,16 +2715,37 @@ async def register_rancher_ui_web_jump(db: Session) -> dict:
     Idempotent: returns the stored id if already provisioned. Requires the Rancher
     node running + PRA configured. OPT-IN (``rancher_ui_web_jump_enabled``): lets an
     operator whose IP isn't in ``rancher_allowed_source_cidrs`` reach the node's UI
-    from the PRA representative console (brokered/recorded, no CIDR change)."""
-    from . import config_service, terraform_pra_service as pra
-    existing = _cfg("rancher_ui_web_jump_id")
-    if existing:
-        return {"web_jump_id": existing, "reused": True}
+    from the PRA representative console (brokered/recorded, no CIDR change).
+
+    Re-ensures the dashboard-managed Jumpoint host and refreshes the node firewall
+    on EVERY call (not just first provisioning): AWS/GCP jumpoint egress IPs are
+    ephemeral, so a host reclaim/recreate changes the IP — re-syncing here keeps the
+    firewall's jumpoint /32 current even when the Web Jump itself already exists."""
+    from . import config_service, jumpoint_host_service, rancher_node_service, terraform_pra_service as pra
     server_url = _cfg("rancher_server_url")
     if not server_url:
         raise K8sError("Rancher node is not running (no rancher_server_url)")
     if not _pra_configured():
         raise K8sError("PRA is not configured (bt_api_host / bt_client_id / bt_jumpoint_name)")
+    # Requirement 2: auto-manage the IP the Web Jump uses to reach the node. A Web
+    # Jump connects THROUGH a Jumpoint host, so the source hitting the firewall is
+    # that host's egress IP. Ensure the dashboard-managed Jumpoint is up, capture its
+    # (possibly changed) egress IP, and refresh the firewall so its /32 is allowed —
+    # BEFORE the reused early-return, so an ephemeral AWS/GCP jumpoint IP is re-synced
+    # on every console open. Best-effort — a pre-existing operator Jumpoint can't be
+    # auto-detected (manual CIDR then).
+    try:
+        await jumpoint_host_service.ensure_rancher_ui_jumpoint()
+    except Exception as exc:
+        logger.warning("Rancher UI web-jump: jumpoint egress capture failed (non-fatal): %s", exc)
+    try:
+        await rancher_node_service.refresh_rancher_firewall(db)
+    except Exception as exc:
+        logger.warning("Rancher UI web-jump: firewall refresh failed (non-fatal): %s", exc)
+
+    existing = _cfg("rancher_ui_web_jump_id")
+    if existing:
+        return {"web_jump_id": existing, "reused": True}
     jump_group = _cfg("rancher_ui_jump_group") or _cfg("bt_jump_group_name")
     jumpoint = _cfg("rancher_ui_jumpoint_name") or _cfg("bt_jumpoint_name")
     result = await pra.provision_web_jump(

@@ -56,7 +56,7 @@ the downstream cluster only needs outbound reachability to the node's public
 | **GCP configured** | A GCP project + service-account JSON on **Settings → GCP** (or the setup wizard). The node always runs in GCP, regardless of where the imported clusters live. |
 | **Service-account IAM** | The dashboard SA needs `compute.instances.create`, `compute.firewalls.{get,create,update,delete}`, and instance delete. `scripts/sandbox/Linux/setup-gcp.sh` grants `roles/compute.admin`, which covers these. |
 | **A bootstrap password** | Set a Rancher bootstrap (first-run admin) password — see Setup. |
-| **Allowed source CIDRs** | The firewall **fails closed**: with no CIDRs set the node boots but is unreachable. Set the operator IP(s) + downstream clusters' egress IPs. |
+| **Allowed source CIDRs** | The firewall **fails closed**, but dashboard-provisioned clusters' egress IPs (and, when the Web Jump is on, the dashboard-managed Jumpoint's egress IP) are **added automatically** — see [Automatic firewall whitelisting](#automatic-firewall-whitelisting). You only add extra operator IPs and pre-existing operator Jumpoints here. |
 | **A ≥ 4 GB machine type** | Rancher OOMs on shared-core types; the default `e2-medium` (4 GB) is the minimum. |
 
 ---
@@ -76,7 +76,7 @@ COS)** section:
 | Field | Notes |
 |---|---|
 | **Bootstrap password** | First-run admin password. The API token is minted from it and stored encrypted; you never re-enter it. |
-| **Allowed source CIDRs** | Comma-separated CIDRs for the GCE firewall (tcp 80/443). **Empty = the firewall is not opened** (node unreachable) unless *Allow open* is ticked. Include your operator IP and each downstream cluster's egress IP. |
+| **Allowed source CIDRs** | *Optional / additive.* Comma-separated CIDRs for the GCE firewall (tcp 80/443). Dashboard-provisioned clusters and the dashboard-managed Web-Jump Jumpoint are added automatically ([details](#automatic-firewall-whitelisting)); use this only for extra operator IPs and pre-existing operator Jumpoints. If nothing is set here **and** nothing is auto-discovered, the firewall stays closed unless *Allow open* is ticked. The panel shows the effective allow-list read-only. |
 | **Machine type** | Default `e2-medium` (4 GB). Bump to `e2-standard-2` if you'll import several clusters. |
 | **Zone** | Blank → the configured GCP zone. |
 | **Container image** | Default `rancher/rancher:latest`. Pin a version for reproducibility. |
@@ -133,6 +133,48 @@ egress from the cluster to the node's public URL.
 
 ---
 
+## Automatic firewall whitelisting
+
+Private clusters egress through a NAT, so their public source IP isn't knowable
+until the cluster exists — which made the "Allowed source CIDRs" field a chicken-
+and-egg problem. The dashboard now manages the allow-list for you:
+
+- **Provisioned clusters** — each dashboard-provisioned cluster (EKS/AKS/GKE) is
+  given a **stable, reserved egress IP** (an Elastic IP on AWS, a reserved Cloud
+  NAT IP on GCP, a static NAT-gateway IP on Azure). The provision job captures it
+  (module output `nat_public_ip` → `k8s_clusters.egress_ip`) and adds it to the
+  node firewall as a `/32`. Decommissioning the cluster removes it again.
+- **Web-Jump Jumpoint** — when the [PRA Web Jump](#pra-web-jump-optional) is
+  enabled, the dashboard-managed Jumpoint host's egress IP is captured and added
+  as a `/32`. A Web Jump reaches the node **through a Jumpoint**, so this — not the
+  PRA appliance IP — is the source the firewall must allow. `rancher_ui_jumpoint_cloud`
+  (default `gcp`, same cloud as the node) picks which dashboard-managed Jumpoint
+  brokers the UI.
+- **Manual CIDRs** — `rancher_allowed_source_cidrs` is still honoured and **added
+  on top**, for extra operator/human IPs and for **pre-existing operator Jumpoints**
+  (a Jumpoint the dashboard didn't provision has an egress IP the dashboard can't
+  learn — add it here).
+
+The effective set is recomputed and re-applied idempotently on every relevant
+event: node deploy, cluster provision, cluster import, cluster decommission, and
+Web Jump enable. It stays **fail-closed** — if there are no manual CIDRs, no
+provisioned clusters, and no captured Jumpoint IP, the firewall is not opened
+(unless *Allow open* is ticked). The **Settings → Kubernetes** panel shows the
+computed allow-list read-only.
+
+All three dashboard-managed jumpoint hosts expose a knowable egress IP: GCP and AWS
+via the host's public IP, and Azure via a **Standard, secure-by-default public IP**
+on the jumpoint VM's NIC (Standard IPs block all inbound unless an NSG allows it, so
+this is egress-only — no ingress path). The AWS/GCP jumpoint IPs are ephemeral and
+re-captured on each ensure; the Azure one is static.
+
+**Limitations.** A **pre-existing operator Jumpoint** (one the dashboard didn't
+provision) has an egress IP the dashboard can't learn — add it to
+`rancher_allowed_source_cidrs` manually. Registered (not dashboard-provisioned)
+clusters likewise have no captured egress IP and must be added manually.
+
+---
+
 ## Entitle registration
 
 If **Entitle resource registration** is enabled
@@ -158,10 +200,17 @@ resource registration.
 The node is reachable directly at its source-restricted URL, so the BeyondTrust
 PRA Web Jump is **off by default**. Enable **PRA Web Jump to the Rancher UI**
 (`rancher_ui_web_jump_enabled`) to *also* broker the UI through the PRA
-representative console — useful when an operator's IP isn't in the CIDR allowlist
-and you want brokered, session-recorded access without editing the firewall. It
-requires PRA to be configured (Jumpoint + Jump Group). This is independent of the
-Entitle JIT RBAC grant, which continues to work either way.
+representative console — brokered, session-recorded access. It requires PRA to be
+configured (Jumpoint + Jump Group). This is independent of the Entitle JIT RBAC
+grant, which continues to work either way.
+
+When enabled, the dashboard ensures its managed Jumpoint host is up, captures its
+egress IP, and adds it to the node firewall automatically (see [Automatic firewall
+whitelisting](#automatic-firewall-whitelisting)) — so you don't pre-configure that
+address. `rancher_ui_jumpoint_cloud` (default `gcp`) selects which dashboard-managed
+Jumpoint brokers the UI. If you instead point the Web Jump at a **pre-existing**
+operator Jumpoint, add that Jumpoint host's egress IP to `rancher_allowed_source_cidrs`
+manually (the dashboard can't discover an IP for a host it didn't provision).
 
 ---
 
@@ -206,7 +255,7 @@ apply immediately.
 |---|---|---|
 | `k8s_management_enabled` | `false` | Master toggle; surfaces the Rancher tab |
 | `rancher_bootstrap_password` | — | First-run admin password (secret) |
-| `rancher_allowed_source_cidrs` | `""` | GCE firewall source ranges (tcp 80/443); empty = closed |
+| `rancher_allowed_source_cidrs` | `""` | *Additive* manual CIDRs (tcp 80/443); provisioned clusters + the Web-Jump Jumpoint are auto-added. Empty + nothing auto-discovered = closed |
 | `gcp_rancher_allow_open` | `false` | Open `0.0.0.0/0` when no CIDRs set (discouraged) |
 | `gcp_rancher_image` | `rancher/rancher:latest` | Rancher container image |
 | `gcp_rancher_machine_type` | `e2-medium` | VM size (≥ 4 GB enforced) |
@@ -219,6 +268,8 @@ apply immediately.
 | `rancher_api_token` | (runtime) | Minted at bootstrap (secret) |
 | `rancher_ui_web_jump_enabled` | `false` | Opt-in PRA Web Jump broker for the UI |
 | `rancher_ui_verify_certificate` | `false` | Web Jump cert verification |
+| `rancher_ui_jumpoint_cloud` | `gcp` | Which dashboard-managed Jumpoint host brokers the UI (`gcp`\|`aws`\|`azure`); its egress IP is auto-whitelisted |
+| `rancher_ui_jumpoint_egress_ip` | (runtime) | Captured egress IP of the dashboard-managed Web-Jump Jumpoint (auto-added to the firewall) |
 | `entitle_rancher_private` | `false` | Attach the Entitle agent token (node not reachable from Entitle's cloud) |
 
 ---

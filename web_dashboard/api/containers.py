@@ -830,6 +830,19 @@ async def get_rancher_node(
                                configured=configured, server_url=server_url)
 
 
+@router.get("/rancher/firewall")
+async def get_rancher_firewall(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("containers", "read")),
+):
+    """Read-only breakdown of the Rancher node's firewall source set: the manual
+    CIDRs, the auto-discovered provisioned-cluster egress IPs, the dashboard-managed
+    Web-Jump Jumpoint IP, and the effective merged allow-list — so the operator can
+    see exactly which sources reach the node and why."""
+    from ..services import rancher_node_service
+    return rancher_node_service.firewall_status(db)
+
+
 @router.post("/rancher/deploy", response_model=DeployContainerResponse)
 async def deploy_rancher_node(
     db: Session = Depends(get_db),

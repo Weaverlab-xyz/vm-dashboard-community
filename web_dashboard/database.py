@@ -674,6 +674,10 @@ class K8sCluster(Base):
     api_server = Column(String(255), nullable=True)        # cluster API URL (parsed from kubeconfig)
     kubeconfig_ref = Column(Text, nullable=True)           # backend-agnostic ref (resolved via config_service)
     deploy_job_id = Column(String(36), nullable=True)      # provisioning Job id → deploy/state dir (§1.1a destroy)
+    # NAT/outbound public IP of a dashboard-PROVISIONED cluster (from the module's
+    # nat_public_ip output). Auto-added to the Rancher node firewall as a /32 so the
+    # cluster's cattle-cluster-agent can dial out to import. NULL for registered clusters.
+    egress_ip = Column(String(45), nullable=True)
 
     mgmt_kind = Column(String(20), nullable=True)          # portainer | rancher | argocd | headlamp (Phase 2)
     mgmt_endpoint = Column(String(255), nullable=True)     # management-plane URL (Phase 2)
@@ -765,6 +769,9 @@ def init_db():
             "ALTER TABLE k8s_clusters ADD COLUMN source VARCHAR(16) DEFAULT 'registered'",
             "ALTER TABLE k8s_clusters ADD COLUMN deploy_job_id VARCHAR(36)",
             "ALTER TABLE k8s_clusters ADD COLUMN region VARCHAR(40)",
+            # Rancher firewall automation: NAT egress IP of a provisioned cluster,
+            # auto-added to the Rancher node firewall as a /32.
+            "ALTER TABLE k8s_clusters ADD COLUMN egress_ip VARCHAR(45)",
             # Job heartbeat — drives the startup reconcile of restart-orphaned jobs.
             "ALTER TABLE jobs ADD COLUMN updated_at TIMESTAMP",
             # Cloud-db per-DB PRA broker overrides (config defaults as fallback).

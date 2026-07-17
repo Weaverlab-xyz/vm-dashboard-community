@@ -524,3 +524,8 @@ output "vpc_id" {
   value       = aws_vpc.this.id
   description = "The cluster's own VPC id"
 }
+
+output "nat_public_ip" {
+  value       = aws_eip.nat.public_ip
+  description = "Stable NAT egress IP (the source address nodes/agents use outbound; added to the Rancher node firewall as a /32)"
+}

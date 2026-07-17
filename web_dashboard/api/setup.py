@@ -696,7 +696,7 @@ class K8sManagementFeatureConfig(BaseModel):
     # job, not entered here. Only the bootstrap password + node knobs are input.
     rancher_bootstrap_password: str = ""      # first-run admin bootstrap; encrypted at rest
     rancher_verify_tls: bool = False          # verify the node's TLS cert on API calls (False = self-signed)
-    rancher_allowed_source_cidrs: str = ""    # CSV CIDRs allowed to reach the node's public IP (GCE firewall, tcp 80/443); "" = NOT opened unless gcp_rancher_allow_open
+    rancher_allowed_source_cidrs: str = ""    # OPTIONAL/ADDITIVE CSV CIDRs for the node's public-IP GCE firewall (tcp 80/443). Provisioned clusters' egress IPs + the dashboard-managed Web-Jump Jumpoint IP are auto-added; use this only for extra operator IPs + pre-existing operator Jumpoints. Fully empty (manual + auto) = NOT opened unless gcp_rancher_allow_open
     # GCE COS Rancher node deploy knobs (see config.py gcp_rancher_*).
     gcp_rancher_image: str = "rancher/rancher:latest"
     gcp_rancher_machine_type: str = "e2-medium"   # ≥4 GB required
@@ -711,6 +711,7 @@ class K8sManagementFeatureConfig(BaseModel):
     rancher_ui_jump_group: str = ""
     rancher_ui_jumpoint_name: str = ""
     rancher_ui_local_port: int = 443
+    rancher_ui_jumpoint_cloud: str = "gcp"    # which dashboard-managed Jumpoint host brokers the Rancher UI (gcp|aws|azure); its egress IP is auto-whitelisted
     # Entra/IdP group → cluster RBAC (real-identity JIT demo): default group the
     # per-cluster "Entra group" action binds (overridable in the action). Members get
     # entra_rbac_group_role; Entitle's Entra-ID integration JIT-grants membership.

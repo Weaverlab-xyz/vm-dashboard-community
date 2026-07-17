@@ -61,8 +61,75 @@ def _allowed_cidrs() -> list[str]:
             logger.warning("Rancher node firewall opening 0.0.0.0/0 (gcp_rancher_allow_open=true)")
             return ["0.0.0.0/0"]
         logger.warning("Rancher node has NO allowed source CIDRs — firewall stays closed (node unreachable). "
-                       "Set rancher_allowed_source_cidrs in Settings.")
+                       "Set rancher_allowed_source_cidrs in Settings, provision a cluster, or enable the Web Jump.")
     return cidrs
+
+
+def _auto_cluster_cidrs(db) -> list[str]:
+    """/32s for every dashboard-PROVISIONED cluster whose egress IP we captured.
+
+    These are the clusters' NAT/outbound IPs — the source address their
+    cattle-cluster-agent uses to dial out to this node — so they must be allowed
+    for the import to reach ``Active``. Registered clusters have no ``egress_ip``.
+    """
+    from ..database import K8sCluster
+    rows = db.query(K8sCluster).filter(K8sCluster.egress_ip.isnot(None)).all()
+    return [f"{r.egress_ip.strip()}/32" for r in rows if (r.egress_ip or "").strip()]
+
+
+def _jumpoint_cidr() -> list[str]:
+    """/32 for the dashboard-managed Web-Jump Jumpoint host, when known + enabled.
+
+    A PRA Web Jump reaches the node THROUGH a Jumpoint, so the source IP hitting
+    the firewall is the Jumpoint host's egress IP (never the PRA appliance's).
+    Only known when the dashboard provisioned that host (see jumpoint_host_service);
+    empty for a pre-existing operator Jumpoint (add its IP to the CSV manually).
+    """
+    if not config_service.get_bool("rancher_ui_web_jump_enabled", False):
+        return []
+    ip = (config_service.get("rancher_ui_jumpoint_egress_ip") or "").strip()
+    return [f"{ip}/32"] if ip else []
+
+
+async def refresh_rancher_firewall(db) -> dict:
+    """Recompute the node's firewall source set and re-apply it idempotently.
+
+    The merged set is the manual CSV (``_allowed_cidrs``) plus the auto-discovered
+    dashboard-provisioned cluster egress /32s plus the dashboard-managed Web-Jump
+    Jumpoint /32. Called from every lifecycle event that changes the set (node
+    deploy, cluster provision/import/decommission, Web Jump enable). Fail-closed
+    and idempotent behavior is inherited from ``gcp_service.ensure_rancher_firewall``
+    (empty set → rule deleted; ``0.0.0.0/0`` from allow_open dedupes harmlessly).
+    No-op safe: returns early when no GCP project is configured so callers can fire
+    it best-effort even when the Rancher node isn't deployed.
+    """
+    p = _node_params()
+    if not p["project_id"]:
+        return {"skipped": "no gcp project configured"}
+    merged = sorted(set(_allowed_cidrs()) | set(_auto_cluster_cidrs(db)) | set(_jumpoint_cidr()))
+    return await gcp_service.ensure_rancher_firewall(
+        p["project_id"], p["network"], p["network_tag"], merged, _firewall_name(p["name"]))
+
+
+def firewall_status(db) -> dict:
+    """Read-only breakdown of the node's firewall source set (no GCP call) — what
+    :func:`refresh_rancher_firewall` would apply, plus the per-cluster egress IPs so
+    the operator can see exactly which sources are allowed and why."""
+    from ..database import K8sCluster
+    rows = db.query(K8sCluster).filter(K8sCluster.egress_ip.isnot(None)).all()
+    clusters = [{"name": r.name, "cloud": r.cloud, "ip": (r.egress_ip or "").strip()}
+                for r in rows if (r.egress_ip or "").strip()]
+    jump = _jumpoint_cidr()
+    merged = sorted(set(_allowed_cidrs()) | set(_auto_cluster_cidrs(db)) | set(jump))
+    csv = config_service.get("rancher_allowed_source_cidrs") or ""
+    return {
+        "manual_cidrs": [c.strip() for c in csv.split(",") if c.strip()],
+        "cluster_egress_ips": clusters,
+        "jumpoint_egress_ip": jump[0] if jump else "",
+        "merged": merged,
+        "allow_open": config_service.get_bool("gcp_rancher_allow_open", False),
+        "opened": bool(merged),
+    }
 
 
 async def _wait_ready(url: str) -> bool:
@@ -95,8 +162,9 @@ async def run_deploy(db, *, job_id: str, meta: dict) -> None:
             return
 
         job_service.update_progress(db, job_id, 10, "Configuring firewall")
-        fw = await gcp_service.ensure_rancher_firewall(
-            p["project_id"], p["network"], p["network_tag"], _allowed_cidrs(), _firewall_name(p["name"]))
+        # Merge manual CIDRs + provisioned-cluster egress /32s + the Web-Jump
+        # Jumpoint /32 so a (re)deploy always reflects the current cluster set.
+        fw = await refresh_rancher_firewall(db)
 
         job_service.update_progress(db, job_id, 30, "Launching COS VM")
         res = await gcp_service.run_gce_rancher(
@@ -198,6 +266,7 @@ async def run_teardown(db, *, job_id: str, meta: dict) -> None:
         # Clear runtime config so a fresh deploy re-bootstraps cleanly.
         for key in ("rancher_server_url", "rancher_api_token",
                     "rancher_ui_web_jump_id", "rancher_ui_web_jump_tfstate",
+                    "rancher_ui_jumpoint_egress_ip",
                     "entitle_rancher_integration_id", "entitle_rancher_tfstate"):
             config_service.set(key, "")
 

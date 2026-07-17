@@ -31,7 +31,7 @@ try:
     from azure.mgmt.network import NetworkManagementClient
     from azure.mgmt.network.models import (
         NetworkInterface, NetworkInterfaceIPConfiguration,
-        PublicIPAddress,
+        PublicIPAddress, PublicIPAddressSku,
     )
     from azure.mgmt.containerinstance import ContainerInstanceManagementClient
     from azure.mgmt.containerinstance.models import (
@@ -1405,21 +1405,41 @@ def _run_vm_jumpoint_sync(
     container_image: str, deploy_key: str, vm_size: str,
     admin_username: str, admin_password: str,
 ) -> dict:
-    """Find-or-create a private Azure VM (no public IP) running the BT Jumpoint
-    container. Idempotent on name: returns ``reused=True`` when it already exists."""
+    """Find-or-create an Azure VM running the BT Jumpoint container. Idempotent on
+    name: returns ``reused=True`` when it already exists. The NIC carries a
+    **Standard SKU, Static** public IP used solely for a stable, knowable EGRESS
+    address (the dashboard whitelists it in the Rancher node firewall). Standard
+    public IPs are *secure by default* — all inbound is blocked unless an NSG
+    explicitly allows it, and none is attached — so this adds no ingress path."""
     compute = _get_compute(cred, sub_id)
     network = _get_network(cred, sub_id)
+    pip_name = f"{name}-pip"
     try:
         existing = compute.virtual_machines.get(rg, name)
-        return {"vm_id": existing.id, "vm_name": name, "resource_group": rg, "reused": True}
     except Exception:
-        pass
+        existing = None
+    if existing is not None:
+        # Reuse: surface the existing egress (public) IP so callers can whitelist it.
+        public_ip = ""
+        try:
+            public_ip = network.public_ip_addresses.get(rg, pip_name).ip_address or ""
+        except Exception:
+            pass  # older jumpoint without a PIP → caller falls back to a manual CIDR
+        return {"vm_id": existing.id, "vm_name": name, "resource_group": rg,
+                "reused": True, "public_ip": public_ip}
 
     tags = {"managed-by": "vm-dashboard", "purpose": "clouddb-jumpoint"}
+    # Standard + Static = secure-by-default (no inbound) egress IP.
+    pip = network.public_ip_addresses.begin_create_or_update(
+        rg, pip_name,
+        PublicIPAddress(location=location, sku=PublicIPAddressSku(name="Standard"),
+                        public_ip_allocation_method="Static", tags=tags),
+    ).result()
     nic_name = f"{name}-nic"
     ip_config = NetworkInterfaceIPConfiguration(
         name="ipconfig1", subnet={"id": subnet_id},
         private_ip_address_allocation="Dynamic",
+        public_ip_address={"id": pip.id},
     )
     nic = network.network_interfaces.begin_create_or_update(
         rg, nic_name, NetworkInterface(location=location, ip_configurations=[ip_config], tags=tags)
@@ -1449,7 +1469,8 @@ def _run_vm_jumpoint_sync(
         ),
     )
     vm = compute.virtual_machines.begin_create_or_update(rg, name, vm_params).result()
-    return {"vm_id": vm.id, "vm_name": name, "resource_group": rg, "reused": False}
+    return {"vm_id": vm.id, "vm_name": name, "resource_group": rg, "reused": False,
+            "public_ip": (pip.ip_address or "")}
 
 
 async def run_vm_jumpoint(
@@ -1457,8 +1478,10 @@ async def run_vm_jumpoint(
     container_image: str, deploy_key: str, vm_size: str = "Standard_B1s",
     admin_username: str = "jpadmin", admin_password: str = "",
 ) -> dict:
-    """Ensure a private Azure VM Jumpoint (idempotent on name). The VM has no
-    public IP; it egresses via the subnet and phones home to PRA."""
+    """Ensure an Azure VM Jumpoint (idempotent on name). The VM egresses via a
+    Standard, secure-by-default (no inbound) public IP on its NIC, returned as
+    ``public_ip`` so callers can whitelist that stable egress address; it phones
+    home to PRA over egress."""
     try:
         cred, sub_id = await _ensure_creds()
         return await asyncio.to_thread(
