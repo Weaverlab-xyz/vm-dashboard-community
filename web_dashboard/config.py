@@ -75,7 +75,7 @@ class Settings(BaseSettings):
     rancher_api_token: str = ""               # Rancher API bearer token minted at bootstrap; encrypted at rest
     rancher_bootstrap_password: str = ""      # first-run admin bootstrap password; encrypted at rest
     rancher_verify_tls: bool = False          # verify the Rancher TLS cert on direct-HTTPS API calls; False = accept the node's self-signed cert
-    rancher_allowed_source_cidrs: str = ""    # CSV CIDRs allowed to reach the node's PUBLIC IP (GCE firewall source_ranges, tcp 80/443). "" = firewall NOT opened (fail closed) unless gcp_rancher_allow_open. Set to the downstream clusters' egress IPs + the operator's IP.
+    rancher_allowed_source_cidrs: str = ""    # OPTIONAL/ADDITIVE CSV CIDRs for the node's PUBLIC-IP GCE firewall (source_ranges, tcp 80/443). Dashboard-provisioned clusters' egress IPs AND (when the Web Jump is enabled) the dashboard-managed Jumpoint's egress IP are auto-added; use this only for extra operator/human IPs + pre-existing operator Jumpoints. Fully empty (no manual + no auto) = firewall NOT opened (fail closed) unless gcp_rancher_allow_open.
     # Rancher UI PRA web-broker (OPT-IN): an sra_web_jump to the node's HTTPS so
     # an operator whose IP is NOT in rancher_allowed_source_cidrs can still reach
     # the UI via the PRA rep console (zero-trust / session recording). When
@@ -88,6 +88,8 @@ class Settings(BaseSettings):
     rancher_ui_local_port: int = 443          # local listen port (match Rancher 443 for SNI/cert)
     rancher_ui_web_jump_id: str = ""          # PRA Web Jump id for the central Rancher UI (runtime-set)
     rancher_ui_web_jump_tfstate: str = ""     # terraform state for the Web Jump (for teardown)
+    rancher_ui_jumpoint_cloud: str = "gcp"    # which dashboard-managed Jumpoint host brokers the Rancher UI (gcp|aws|azure); its egress IP is auto-whitelisted. gcp = same cloud as the node
+    rancher_ui_jumpoint_egress_ip: str = ""   # dashboard-managed Web-Jump Jumpoint host egress IP (runtime-set; auto-added to the node firewall as a /32). Azure host has no public IP → left blank (add manually)
     # Entitle Rancher connector registration. The application slug is
     # tenant/connector-specific — confirm against the entitle_applications catalog
     # before use (default is best-effort). With the PUBLIC source-restricted node,

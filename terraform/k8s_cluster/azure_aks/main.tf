@@ -154,6 +154,40 @@ resource "azurerm_subnet" "nodes" {
   address_prefixes     = [var.subnet_cidr]
 }
 
+# Deterministic egress: a user-assigned NAT gateway with a static public IP gives
+# the nodes a single, stable, knowable outbound address. The dashboard whitelists
+# it in the Rancher node firewall (a /32) so the imported cluster's cattle-cluster-
+# agent can dial out. The default loadBalancer outbound SNAT hands out managed IPs
+# in the opaque MC_ node RG that can rotate — unusable for a firewall allowlist.
+resource "azurerm_public_ip" "nat" {
+  name                = "${var.cluster_name}-nat-pip"
+  location            = var.location
+  resource_group_name = local.rg_name
+  allocation_method   = "Static"
+  sku                 = "Standard"
+  tags                = var.tags
+  depends_on          = [azurerm_resource_group.this]
+}
+
+resource "azurerm_nat_gateway" "nat" {
+  name                = "${var.cluster_name}-nat"
+  location            = var.location
+  resource_group_name = local.rg_name
+  sku_name            = "Standard"
+  tags                = var.tags
+  depends_on          = [azurerm_resource_group.this]
+}
+
+resource "azurerm_nat_gateway_public_ip_association" "nat" {
+  nat_gateway_id       = azurerm_nat_gateway.nat.id
+  public_ip_address_id = azurerm_public_ip.nat.id
+}
+
+resource "azurerm_subnet_nat_gateway_association" "nat" {
+  subnet_id      = azurerm_subnet.nodes.id
+  nat_gateway_id = azurerm_nat_gateway.nat.id
+}
+
 # ── AKS cluster ──────────────────────────────────────────────────────────────
 
 resource "azurerm_kubernetes_cluster" "this" {
@@ -181,10 +215,12 @@ resource "azurerm_kubernetes_cluster" "this" {
     type = "SystemAssigned"
   }
 
-  # Azure CNI; outbound_type defaults to loadBalancer (managed egress to the
-  # internet) — the Entitle agent's outbound to its SaaS works out of the box.
+  # Azure CNI with a user-assigned NAT gateway for egress (see azurerm_nat_gateway
+  # above) so the cluster's outbound IP is a single static address we can whitelist
+  # in the Rancher firewall. The subnet↔NAT-gateway association wires the data path.
   network_profile {
     network_plugin = "azure"
+    outbound_type  = "userAssignedNATGateway"
   }
 
   # AAD-integrated, Azure RBAC for Kubernetes — the dashboard authenticates with
@@ -202,7 +238,9 @@ resource "azurerm_kubernetes_cluster" "this" {
     }
   }
 
-  depends_on = [azurerm_resource_group.this]
+  # userAssignedNATGateway requires the subnet to already have the NAT gateway
+  # associated before the node pool is created.
+  depends_on = [azurerm_resource_group.this, azurerm_subnet_nat_gateway_association.nat]
 }
 
 # Grant the dashboard's service principal cluster-admin via Azure RBAC so its
@@ -299,4 +337,9 @@ output "agent_key_vault_name" {
 output "agent_identity_tenant_id" {
   value       = data.azurerm_client_config.current.tenant_id
   description = "Tenant id for the agent pod (Helm platform.azure.tenantId)"
+}
+
+output "nat_public_ip" {
+  value       = azurerm_public_ip.nat.ip_address
+  description = "Static NAT gateway egress IP (added to the Rancher node firewall as a /32)"
 }

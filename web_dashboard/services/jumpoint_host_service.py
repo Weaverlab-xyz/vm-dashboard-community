@@ -49,6 +49,49 @@ def _cfg(key: str) -> str:
     return getattr(settings, key, "") or ""
 
 
+def _persist_rancher_jumpoint_egress_ip(ip: Optional[str]) -> None:
+    """Record the dashboard-managed Jumpoint host's egress IP so the Rancher node
+    firewall can auto-allow it (consumed by rancher_node_service._jumpoint_cidr when
+    the Web Jump is enabled). Best-effort; only overwrites when we actually learned
+    an IP, so an Azure ensure (no public IP) never clobbers a good GCP/AWS value."""
+    if not ip:
+        return
+    try:
+        from . import config_service
+        if config_service.get("rancher_ui_jumpoint_egress_ip") != ip:
+            config_service.set("rancher_ui_jumpoint_egress_ip", ip)
+            logger.info("jumpoint-host: recorded Web-Jump Jumpoint egress IP %s for the Rancher firewall", ip)
+    except Exception as exc:
+        logger.warning("jumpoint-host: persisting egress IP failed (non-fatal): %s", exc)
+
+
+def _rancher_ui_jumpoint_region(cloud: str) -> str:
+    if cloud == "gcp":
+        return _cfg("gcp_region") or ""
+    if cloud == "azure":
+        return _cfg("azure_location") or ""
+    return _cfg("aws_region") or _cfg("aws_default_region") or ""
+
+
+async def ensure_rancher_ui_jumpoint() -> Optional[str]:
+    """Best-effort: ensure the dashboard-managed Jumpoint host that brokers the
+    Rancher-UI Web Jump is up, capture its egress IP into
+    ``rancher_ui_jumpoint_egress_ip``, and return it.
+
+    Cloud is picked by ``rancher_ui_jumpoint_cloud`` (default ``gcp`` — same cloud as
+    the Rancher node, and its GCE host exposes a clean external IP). The Azure host
+    has no public IP, so nothing is captured there and the operator must add the IP
+    to ``rancher_allowed_source_cidrs`` manually. A pre-existing operator Jumpoint
+    (not dashboard-provisioned) likewise can't be auto-detected."""
+    from . import config_service
+    cloud = (_cfg("rancher_ui_jumpoint_cloud") or "gcp").lower()
+    try:
+        await ensure_jumpoint_host(cloud, _rancher_ui_jumpoint_region(cloud))
+    except Exception as exc:
+        logger.warning("rancher-ui jumpoint: ensure failed (non-fatal): %s", exc)
+    return config_service.get("rancher_ui_jumpoint_egress_ip") or None
+
+
 async def _resolve_deploy_key() -> str:
     """BeyondTrust Jumpoint Docker deploy key — direct config field first, then
     the legacy Password-Safe title (same resolution as the EC2/RDS paths)."""
@@ -125,6 +168,7 @@ async def _ensure_jumpoint_host_aws(region: str) -> Optional[str]:
         region, name_tag=name, states=["pending", "running"])
     if existing:
         logger.info("jumpoint-host: reusing host %s", existing[0]["instance_id"])
+        _persist_rancher_jumpoint_egress_ip(existing[0].get("public_ip"))
         await _ensure_task(region, deploy_key)
         return existing[0]["instance_id"]
 
@@ -138,6 +182,7 @@ async def _ensure_jumpoint_host_aws(region: str) -> Optional[str]:
     if recheck:
         logger.info("jumpoint-host: host appeared concurrently (%s) — reusing",
                     recheck[0]["instance_id"])
+        _persist_rancher_jumpoint_egress_ip(recheck[0].get("public_ip"))
         await _ensure_task(region, deploy_key)
         return recheck[0]["instance_id"]
 
@@ -166,6 +211,14 @@ async def _ensure_jumpoint_host_aws(region: str) -> Optional[str]:
     else:
         logger.warning("jumpoint-host: host %s did not register within %ds — attempting the "
                        "task anyway", host_id, _REGISTER_TIMEOUT_S)
+    # Capture the freshly-launched host's (ephemeral) public IP for the Rancher
+    # firewall — run_container_instance returns only the id, so look it up by tag.
+    try:
+        fresh = await aws_service.find_instances_by_tag(region, name_tag=name, states=["pending", "running"])
+        if fresh:
+            _persist_rancher_jumpoint_egress_ip(fresh[0].get("public_ip"))
+    except Exception as exc:
+        logger.warning("jumpoint-host: capturing host public IP failed (non-fatal): %s", exc)
     await _ensure_task(region, deploy_key)
     return host_id
 
@@ -339,6 +392,7 @@ async def _ensure_jumpoint_host_gcp(region: str) -> Optional[str]:
         )
         logger.info("jumpoint-host(gcp): jumpoint %s %s in %s",
                     name, "reused" if meta.get("reused") else "started", zone)
+        _persist_rancher_jumpoint_egress_ip(meta.get("external_ip"))
         return name
     except Exception as exc:
         logger.warning("jumpoint-host(gcp): ensure failed (non-fatal): %s", exc)
@@ -385,8 +439,10 @@ async def _resolve_azure_deploy_key() -> str:
 
 def _azure_compliant_password() -> str:
     """A random password meeting Azure's VM complexity rules (3 of 4 categories).
-    The jumpoint VM has no public IP and accepts no inbound SSH — this just
-    satisfies the API; it is never used to log in."""
+    The jumpoint VM's NIC carries a Standard, secure-by-default public IP used only
+    for egress — Standard IPs block all inbound unless an NSG allows it, and none is
+    attached, so no inbound SSH is possible — this just satisfies the API; it is
+    never used to log in."""
     import secrets
     import string
     symbols = "!@#%^*-_"
@@ -424,6 +480,7 @@ async def _ensure_jumpoint_host_azure(region: str) -> Optional[str]:
         )
         logger.info("jumpoint-host(azure): jumpoint VM %s %s in %s",
                     _AZURE_JUMPOINT_VM_NAME, "reused" if meta.get("reused") else "started", location)
+        _persist_rancher_jumpoint_egress_ip(meta.get("public_ip"))
         return _AZURE_JUMPOINT_VM_NAME
     except Exception as exc:
         logger.warning("jumpoint-host(azure): ensure failed (non-fatal): %s", exc)

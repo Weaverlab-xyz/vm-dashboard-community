@@ -715,13 +715,15 @@ def _find_instances_by_tag_sync(region: str, name_tag: str, states: list) -> lis
     out = []
     for r in resp.get("Reservations", []):
         for i in r.get("Instances", []):
-            out.append({"instance_id": i["InstanceId"], "state": i["State"]["Name"]})
+            out.append({"instance_id": i["InstanceId"], "state": i["State"]["Name"],
+                        "public_ip": i.get("PublicIpAddress")})
     return out
 
 
 async def find_instances_by_tag(region: str, *, name_tag: str, states: list) -> list:
-    """Return [{instance_id, state}] for instances with Name=name_tag in the
-    given states. Used to find-or-create the shared Jumpoint host."""
+    """Return [{instance_id, state, public_ip}] for instances with Name=name_tag in
+    the given states. Used to find-or-create the shared Jumpoint host (public_ip is
+    the host's ephemeral egress IP — used to whitelist it in the Rancher firewall)."""
     try:
         return await asyncio.to_thread(_find_instances_by_tag_sync, region, name_tag, states)
     except (ClientError, BotoCoreError) as e:

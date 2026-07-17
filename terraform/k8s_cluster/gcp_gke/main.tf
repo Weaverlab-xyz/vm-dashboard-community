@@ -142,11 +142,21 @@ resource "google_compute_router" "router" {
   network = google_compute_network.vpc.id
 }
 
+# Reserve a static egress IP so the cluster's outbound address is stable and
+# knowable — the dashboard whitelists it in the Rancher node firewall (a /32) so
+# the imported cluster's cattle-cluster-agent can dial out. AUTO_ONLY would hand
+# out ephemeral, possibly-multiple IPs that can rotate and silently break the rule.
+resource "google_compute_address" "nat" {
+  name   = "${var.cluster_name}-nat-ip"
+  region = var.region
+}
+
 resource "google_compute_router_nat" "nat" {
   name                               = "${var.cluster_name}-nat"
   router                             = google_compute_router.router.name
   region                             = var.region
-  nat_ip_allocate_option             = "AUTO_ONLY"
+  nat_ip_allocate_option             = "MANUAL_ONLY"
+  nat_ips                            = [google_compute_address.nat.self_link]
   source_subnetwork_ip_ranges_to_nat = "ALL_SUBNETWORKS_ALL_IP_RANGES"
 }
 
@@ -227,4 +237,9 @@ output "endpoint" {
 output "ca_certificate" {
   value       = google_container_cluster.this.master_auth[0].cluster_ca_certificate
   description = "Cluster CA, base64 PEM (kubeconfig certificate-authority-data)"
+}
+
+output "nat_public_ip" {
+  value       = google_compute_address.nat.address
+  description = "Reserved Cloud NAT egress IP (added to the Rancher node firewall as a /32)"
 }
