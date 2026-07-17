@@ -24,9 +24,10 @@
     </div>
   </div>
   <p class="text-sm text-gray-500 mb-6">
-    Provision a new cluster (<strong>AWS EKS</strong>) or register a reachable one from its
-    kubeconfig, launch the <strong>Rancher</strong> management plane (central server + imported
-    clusters), and open the brokered console. The kubeconfig is stored as a secrets-backend reference, never shown back.
+    Provision a new cluster (<strong>AWS EKS</strong>, <strong>Azure AKS</strong>, or
+    <strong>GCP GKE</strong>) or register a reachable one from its kubeconfig, then broker access —
+    a native <strong>PRA</strong> tunnel for raw <code>kubectl</code> and <strong>Entra</strong>-federated
+    real-identity JIT. The kubeconfig is stored as a secrets-backend reference, never shown back.
   </p>
 
   <div x-show="toast" x-cloak x-transition
