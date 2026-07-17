@@ -149,7 +149,7 @@ def require_admin(current_user: User = Depends(get_current_user)) -> User:
 
 # ── Permission constants ───────────────────────────────────────────────────────
 
-PERMISSION_SCOPES = ["vms", "aws", "azure", "gcp", "images", "containers", "config_mgmt", "jobs", "workgroups", "secrets"]
+PERMISSION_SCOPES = ["vms", "aws", "azure", "gcp", "images", "containers", "config_mgmt", "jobs", "workgroups", "secrets", "cloud_database", "k8s"]
 # "use" grants using a Secrets-Management secret inside an Ansible run without ever
 # seeing its value (scope "secrets"); read/write/delete are unused for that scope.
 PERMISSION_LEVELS = ["read", "write", "delete", "use"]

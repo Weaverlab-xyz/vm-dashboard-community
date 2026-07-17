@@ -33,7 +33,7 @@ from ..models.k8s import (
 from ..services import k8s_service, job_service, cache_service, pra_api_service
 from ..services.aws_service import AWSError
 from ..services.k8s_service import K8sError
-from .auth import require_admin
+from .auth import require_permission
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/k8s", tags=["kubernetes"])
@@ -58,17 +58,24 @@ def phase1_status() -> dict:
 @router.get("/clusters")
 async def list_clusters(
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_permission("k8s", "read")),
 ):
-    """Every managed cluster (newest first)."""
-    return {"clusters": k8s_service.list_clusters(db)}
+    """Every managed cluster (newest first).
+
+    Clusters carry no workgroup — only a creator — so mirror the ownerless branch
+    of inventory_service.visible_to: admins see all, everyone else sees only the
+    clusters they created."""
+    rows = k8s_service.list_clusters(db)
+    if not current_user.is_effective_admin:
+        rows = [r for r in rows if r.get("created_by") == current_user.username]
+    return {"clusters": rows}
 
 
 @router.post("/clusters", status_code=201)
 async def register_cluster(
     payload: ClusterRegisterRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_permission("k8s", "write")),
 ):
     """Register an existing reachable cluster from its kubeconfig. The kubeconfig
     is stored as a secrets-backend reference, never in the row."""
@@ -85,7 +92,7 @@ async def register_cluster(
 async def provision_cluster(
     payload: ClusterProvisionRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_permission("k8s", "write")),
 ):
     """Provision a new cluster with Terraform (§1.1a). Async — records a
     ``provisioning`` row + schedules the apply, which stores the generated
@@ -130,7 +137,7 @@ async def provision_cluster(
 async def provision_options(
     cloud: str = "aws",
     region: str = "",
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_permission("k8s", "read")),
 ):
     """Served pickers for the provision modal (region-scoped). Curated per-cloud
     static lists (regions / node sizes / k8s versions, configured value always
@@ -161,7 +168,7 @@ async def provision_options(
 
 @router.get("/clusters/pra-options")
 async def pra_options(
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_permission("k8s", "read")),
 ):
     """PRA pickers for the per-cluster tunnel modal — Jump Groups, Jumpoints and
     Vault account groups (best-effort, cluster-agnostic). ``configured`` is false
@@ -176,7 +183,7 @@ async def pra_options(
 async def get_cluster(
     cluster_id: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_permission("k8s", "read")),
 ):
     """One cluster's record."""
     try:
@@ -189,7 +196,7 @@ async def get_cluster(
 async def delete_cluster(
     cluster_id: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_permission("k8s", "delete")),
 ):
     """Delete a cluster. A **provisioned** cluster (``source=provisioned``) is torn
     down asynchronously — PRA tunnel, then ``terraform destroy``, then the record
@@ -224,7 +231,7 @@ async def delete_cluster(
 async def cluster_console(
     cluster_id: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_permission("k8s", "read")),
 ):
     """A link to the cluster's management console (Phase 3a). For Portainer-k8s,
     the brokered Portainer endpoint view; for Rancher/Argo, the management URL."""
@@ -239,7 +246,7 @@ async def broker_access(
     cluster_id: str,
     payload: BrokerAccessRequest = BrokerAccessRequest(),
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_permission("k8s", "write")),
 ):
     """Broker access (Phase 3b). When PRA is configured, ensures the sra
     ``tunnel_type=k8s`` jump exists and returns a tunnel descriptor (connect via
@@ -265,7 +272,7 @@ async def register_tunnel(
     cluster_id: str,
     payload: BrokerAccessRequest = BrokerAccessRequest(),
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_permission("k8s", "write")),
 ):
     """Provision the cluster's sra ``tunnel_type=k8s`` jump (Phase 3b) — enqueues a
     ``k8s_tunnel`` job the worker runs (async: the vault-inject path mints an SA token
@@ -294,7 +301,7 @@ async def register_tunnel(
 async def remove_tunnel(
     cluster_id: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_permission("k8s", "delete")),
 ):
     """Destroy the cluster's PRA tunnel jump + clear its state (Phase 3b) — enqueues a
     ``k8s_tunnel`` (action=remove) job the worker runs (the vault path revokes the
@@ -316,7 +323,7 @@ async def register_api_tunnel(
     cluster_id: str,
     payload: BrokerAccessRequest = BrokerAccessRequest(),
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_permission("k8s", "write")),
 ):
     """Provision a generic ``tunnel_type=tcp`` PRA jump straight to the cluster's
     API server (pinned local port) — enqueues a ``k8s_api_tunnel`` job. Unlike the
@@ -345,7 +352,7 @@ async def register_api_tunnel(
 async def remove_api_tunnel(
     cluster_id: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_permission("k8s", "delete")),
 ):
     """Destroy the cluster's API TCP tunnel jump + clear its state — enqueues a
     ``k8s_api_tunnel`` (action=remove) job. Open the returned job for status/logs."""
@@ -365,7 +372,7 @@ async def remove_api_tunnel(
 async def api_tunnel_kubeconfig(
     cluster_id: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_permission("k8s", "read")),
 ):
     """Download a kubeconfig for the cluster's API TCP tunnel: the stored kubeconfig
     repointed at ``https://127.0.0.1:<local_port>`` with ``tls-server-name`` set to
@@ -391,7 +398,7 @@ async def bind_entra_group(
     cluster_id: str,
     payload: EntraGroupRequest = EntraGroupRequest(),
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_permission("k8s", "write")),
 ):
     """Bind an Entra (AAD) group to a ClusterRole on the cluster — enqueues a
     ``k8s_group_binding`` job. Members of the group get the role when they sign in as
@@ -416,7 +423,7 @@ async def bind_entra_group(
 async def unbind_entra_group(
     cluster_id: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_permission("k8s", "delete")),
 ):
     """Remove the cluster's Entra-group ClusterRoleBinding — enqueues a
     ``k8s_group_binding`` (action=unbind) job. Open the returned job for status."""
@@ -436,7 +443,7 @@ async def unbind_entra_group(
 async def enable_entra_federation(
     cluster_id: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_permission("k8s", "write")),
 ):
     """Make the cluster TRUST Entra as an OIDC identity provider so users authenticate
     as themselves (their Entra token's group OIDs match the Entra-group RBAC binding)
@@ -460,7 +467,7 @@ async def enable_entra_federation(
 async def disable_entra_federation(
     cluster_id: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_permission("k8s", "delete")),
 ):
     """Remove the cluster's Entra OIDC trust — enqueues a ``k8s_entra_federation``
     (action=disable) job (EKS disassociates the OIDC IdP; AKS no-op). Open the returned
@@ -481,7 +488,7 @@ async def disable_entra_federation(
 async def entra_kubeconfig(
     cluster_id: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_permission("k8s", "read")),
 ):
     """Download a token-free kubeconfig for real-identity access over the API tunnel,
     authenticating as the USER's own Entra identity. EKS uses ``kubectl oidc-login``
@@ -505,7 +512,7 @@ async def launch_management(
     cluster_id: str,
     payload: ManagementRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_permission("k8s", "write")),
 ):
     """Launch a management plane into the cluster (Phase 2). Async — enqueues a
     ``k8s_management`` job the dedicated worker runs (applies the Portainer Agent via
@@ -529,7 +536,7 @@ async def setup_secret_delivery(
     cluster_id: str,
     payload: SecretDeliveryRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_permission("k8s", "write")),
 ):
     """Install (or remove) in-cluster Password Safe secret delivery (Phase 4 /
     Feature D). ``kind=eso`` Helm-installs the External Secrets Operator + a
@@ -559,7 +566,7 @@ async def setup_entitle_agent(
     cluster_id: str,
     payload: EntitleAgentRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_permission("k8s", "write")),
 ):
     """Install (or remove) the **Entitle agent** in a managed cluster — the
     agent-cluster bootstrap. ``action=install`` resolves the agent token server-side
@@ -588,7 +595,7 @@ async def register_cluster_in_entitle(
     cluster_id: str,
     payload: EntitleClusterRegisterRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_permission("k8s", "write")),
 ):
     """Register (or deregister) the cluster as a generic Entitle **Kubernetes**
     integration (EKS/AKS/GKE) so users request JIT cluster RBAC in Entitle. Uses the
@@ -616,7 +623,7 @@ async def register_cluster_in_entitle(
 async def register_rancher_node_in_entitle(
     payload: EntitleClusterRegisterRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_permission("k8s", "write")),
 ):
     """Register (or deregister) the central Rancher NODE as an Entitle **Rancher**
     integration so users request JIT Rancher RBAC in Entitle. Node-scoped (not

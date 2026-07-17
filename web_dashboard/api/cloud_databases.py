@@ -7,7 +7,9 @@ Cloud database infrastructure API — Phase 1 (gated by ``cloud_database_enabled
   GET    /api/databases/{id}/connection — connection info (the PRA jump is Phase 2)
   DELETE /api/databases/{id}            — decommission
 
-Admin-only. The real Terraform apply and the PRA tunnel (Phase 2, via the
+Permission-gated via the ``cloud_database`` scope (read/write/delete), mirroring
+the AWS/Azure/GCP pages; list results are scoped to the caller's own rows for
+non-admins. The real Terraform apply and the PRA tunnel (Phase 2, via the
 ``beyondtrust/sra`` provider) are later work; Phase 1 records and (with cloud
 creds) drives the apply as a background task.
 """
@@ -23,7 +25,7 @@ from ..config import settings
 from ..database import User, get_db
 from ..services import aws_service, cache_service, cloud_database_service, config_service, job_service
 from ..services.aws_service import AWSError
-from .auth import require_admin
+from .auth import require_permission
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/databases", tags=["cloud-databases"])
@@ -114,7 +116,7 @@ def _default_region() -> str:
 async def provision_database(
     payload: ProvisionRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_permission("cloud_database", "write")),
 ):
     _require_enabled()
     opts = {k: v for k, v in {
@@ -164,17 +166,23 @@ async def provision_database(
 @router.get("")
 async def list_databases(
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_permission("cloud_database", "read")),
 ):
     _require_enabled()
-    return {"databases": cloud_database_service.list_databases(db)}
+    # These rows carry no workgroup — only a creator — so mirror the ownerless
+    # branch of inventory_service.visible_to: admins see all, everyone else sees
+    # only the databases they provisioned.
+    rows = cloud_database_service.list_databases(db)
+    if not current_user.is_effective_admin:
+        rows = [r for r in rows if r.get("created_by") == current_user.username]
+    return {"databases": rows}
 
 
 @router.get("/options", response_model=DatabaseOptions)
 async def database_options(
     region: Optional[str] = None,
     cloud: str = "aws",
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_permission("cloud_database", "read")),
 ):
     """Pickers for the provision form. AWS: instance classes (static) + DB subnet
     groups + security groups, cached per region. GCP: Cloud SQL machine tiers
@@ -226,7 +234,7 @@ async def database_options(
 async def connection(
     db_id: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_permission("cloud_database", "read")),
 ):
     _require_enabled()
     try:
@@ -239,7 +247,7 @@ async def connection(
 async def decommission_database(
     db_id: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_permission("cloud_database", "delete")),
 ):
     _require_enabled()
     try:
@@ -261,7 +269,7 @@ async def register_database_in_entitle(
     db_id: str,
     payload: EntitleDatabaseRegisterRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_permission("cloud_database", "write")),
 ):
     """Register (or deregister) a provisioned database as an Entitle integration
     (PostgreSQL / MySQL / SQL Server) so users request JIT access in Entitle. The
