@@ -129,6 +129,10 @@ class FeaturesSetup(BaseModel):
     hyperv_enabled: bool = False
     nutanix_enabled: bool = False
     xcpng_enabled: bool = False
+    cost_explorer_enabled: bool = False
+    admission_control_enabled: bool = False
+    cloud_database_enabled: bool = False
+    k8s_management_enabled: bool = False
 
 
 class SetupPayload(BaseModel):
@@ -240,6 +244,10 @@ def _apply_config(payload: SetupPayload) -> None:
         "hyperv_enabled":       "1" if payload.features.hyperv_enabled else "0",
         "nutanix_enabled":      "1" if payload.features.nutanix_enabled else "0",
         "xcpng_enabled":        "1" if payload.features.xcpng_enabled else "0",
+        "cost_explorer_enabled":    "1" if payload.features.cost_explorer_enabled else "0",
+        "admission_control_enabled": "1" if payload.features.admission_control_enabled else "0",
+        "cloud_database_enabled":   "1" if payload.features.cloud_database_enabled else "0",
+        "k8s_management_enabled":   "1" if payload.features.k8s_management_enabled else "0",
     })
 
     config_service.set_many(pairs)
