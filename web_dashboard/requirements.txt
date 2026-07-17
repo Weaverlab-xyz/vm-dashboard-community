@@ -78,6 +78,12 @@ google-auth>=2.20.0
 # Azure Blob Storage (Packer template archive)
 azure-storage-blob>=12.19.0,<13
 
+# Oracle Cloud Infrastructure SDK (fourth cloud provider). Compute VM CRUD +
+# Vault secret + Usage API access in services/oci_service.py; the DB/OKE
+# provisioning goes through the oracle/oci Terraform provider. Loose floor per
+# CONTRIBUTING; the package bundles its own signing/crypto deps.
+oci>=2.120.0
+
 # Async HTTP client (Portainer CE API, Ollama)
 # Upper-bounded below 0.28: httpx 0.28 removed the `app=` shortcut that the
 # Starlette TestClient bundled with fastapi 0.109.2 passes to httpx.Client,

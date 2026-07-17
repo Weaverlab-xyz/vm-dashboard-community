@@ -20,6 +20,7 @@ _VM_JOBS = {
     "ec2_deploy":     ("aws",     "/aws#instances"),
     "azure_deploy":   ("azure",   "/azure#vms"),
     "gce_deploy":     ("gcp",     "/gcp"),
+    "oci_deploy":     ("oci",     "/oci"),
     "proxmox_deploy": ("proxmox", "/proxmox"),
     "nutanix_deploy": ("nutanix", "/nutanix"),
 }

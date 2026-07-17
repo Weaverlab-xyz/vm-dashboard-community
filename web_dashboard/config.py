@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     cost_budget_aws: float = 0.0          # optional per-cloud monthly budgets; 0 = disabled
     cost_budget_azure: float = 0.0
     cost_budget_gcp: float = 0.0
+    cost_budget_oci: float = 0.0
     gcp_billing_export_table: str = ""    # BigQuery billing-export table for GCP cost (project.dataset.table); blank = GCP cost off
     # Action-level policy guardrails (pre-action admission control via OPA). Master
     # flag; when off, admission_service.enforce() is a no-op. Which actions are gated
@@ -292,6 +293,7 @@ class Settings(BaseSettings):
     passwordsafe_vm_functional_account_aws: str = ""    # per-cloud functional account override
     passwordsafe_vm_functional_account_azure: str = ""
     passwordsafe_vm_functional_account_gcp: str = ""
+    passwordsafe_vm_functional_account_oci: str = ""    # OCI VMs use the traditional "ssh" method (key pushed)
     passwordsafe_managed_account_name: str = "adminuser"  # the bt-ready account onboarded as managed
     passwordsafe_entity_type_id: int = 1                # BeyondInsight entity type (1 per provider example)
     passwordsafe_ssh_key_enforcement_mode: int = 2      # 0=none, 1=auto, 2=strict (confirm vs tenant) — SSH method only
@@ -757,6 +759,34 @@ class Settings(BaseSettings):
     gcp_rancher_boot_disk_gb: int = 30    # COS boot disk (holds /var/lib/rancher; auto-deletes on stop)
     gcp_rancher_network_tag: str = "rancher"  # network tag on the VM = firewall target tag
     gcp_rancher_allow_open: bool = False  # opt-in to open 0.0.0.0/0 when rancher_allowed_source_cidrs is empty; otherwise empty = firewall NOT opened (fail closed)
+
+    # ── Oracle Cloud Infrastructure (OCI) ─────────────────────────────────────
+    # The fourth cloud provider. Compute VM CRUD is SDK-based (the `oci` Python
+    # SDK), mirroring aws_service / gcp_service; Autonomous DB + OKE go through
+    # Terraform (oracle/oci provider). Auth = OCI API-key signing: tenancy OCID +
+    # user OCID + key fingerprint + the private-key PEM (+ optional passphrase) +
+    # region. Every resource lives in a compartment (oci_compartment_ocid; blank →
+    # the tenancy root). "Configured" (see /api/features) = tenancy + user + key +
+    # region all set. All secrets are stored encrypted via config_service.
+    oci_tenancy_ocid: str = ""            # ocid1.tenancy.oc1..…
+    oci_user_ocid: str = ""               # ocid1.user.oc1..… (the API-signing user)
+    oci_fingerprint: str = ""             # API signing-key fingerprint (aa:bb:cc:…)
+    oci_private_key: str = ""             # API signing private key PEM (encrypted at rest)
+    oci_private_key_passphrase: str = ""  # optional private-key passphrase (encrypted at rest)
+    oci_region: str = "us-ashburn-1"      # home/target region identifier
+    oci_compartment_ocid: str = ""        # target compartment; blank → tenancy root
+    # Deploy defaults (blank → resolved from the compartment / VCN at request time).
+    oci_vcn_ocid: str = ""                # VCN the VM subnets live in
+    oci_default_subnet_ocid: str = ""     # subnet for deployed VM VNICs
+    oci_ssh_key_secret: str = ""          # OCI Vault secret (OCID or name) holding the SSH keypair JSON {public_key, private_key}
+    oci_vault_ocid: str = ""              # Vault the SSH/secret material lives in (for name→OCID lookups)
+    # Free-tier guardrail — the Always-Free envelope the deploy form defaults to
+    # and warns when exceeded (see services/oci_freetier.py). Advisory caps, not
+    # account-wide usage tracking; going beyond needs an explicit acknowledgment.
+    oci_freetier_enforce: bool = True     # surface the warn+confirm gate; False = no free-tier warnings
+    # BeyondTrust PRA per-cloud overrides (fall back to the shared bt_* keys).
+    oci_bt_jump_group_name: str = ""      # BT jump group for OCI Shell Jumps (falls back to bt_jump_group_name)
+    oci_jumpoint_name: str = ""           # Jumpoint name for OCI Shell Jumps (falls back to bt_jumpoint_name)
 
     # Entitle integration — shared API credentials (used by machine-identity
     # JIT, user-JIT, and resource registration below).

@@ -468,7 +468,7 @@ def _feature_flags() -> dict:
 # Settings → Integrations panel takes effect immediately — no restart needed.
 
 from fastapi import Depends  # noqa: E402
-from .api import auth, jobs, websocket, aws, azure, gcp, packer, mfa, tokens, users, groups, setup, secrets, storage, images  # noqa: E402
+from .api import auth, jobs, websocket, aws, azure, gcp, oci, packer, mfa, tokens, users, groups, setup, secrets, storage, images  # noqa: E402
 from .api import cloud_databases  # noqa: E402
 from .api import audit as audit_api  # noqa: E402
 from .api import docs_pages  # noqa: E402
@@ -510,6 +510,7 @@ app.include_router(aws.router)
 app.include_router(cloud_databases.router)
 app.include_router(azure.router)
 app.include_router(gcp.router)
+app.include_router(oci.router)
 app.include_router(packer.router)
 
 # MCP server — mounted as a sub-ASGI app so SSE streams pass through unmodified
@@ -733,6 +734,11 @@ async def gcp_page(request: Request):
     return templates.TemplateResponse("gcp/index.html", {"request": request, **_feature_flags()})
 
 
+@app.get("/oci", response_class=HTMLResponse, include_in_schema=False)
+async def oci_page(request: Request):
+    return templates.TemplateResponse("oci/index.html", {"request": request, **_feature_flags()})
+
+
 @app.get("/settings", response_class=HTMLResponse, include_in_schema=False)
 async def settings_page(request: Request):
     return templates.TemplateResponse("settings.html", {"request": request, **_feature_flags()})
@@ -834,6 +840,14 @@ async def features():
         and (config_service.get("azure_subscription_id") or settings.azure_subscription_id)
     )
     gcp_configured = bool(config_service.get("gcp_project_id") or settings.gcp_project_id)
+    # OCI is "configured" iff the API-key signing quad (tenancy + user + key +
+    # region) is present — mirrors the AWS/Azure/GCP credential-presence check.
+    oci_configured = bool(
+        (config_service.get("oci_tenancy_ocid") or settings.oci_tenancy_ocid)
+        and (config_service.get("oci_user_ocid") or settings.oci_user_ocid)
+        and (config_service.get("oci_private_key") or settings.oci_private_key)
+        and (config_service.get("oci_region") or settings.oci_region)
+    )
     # Portainer needs both the toggle AND a URL — enabled-but-unconfigured should
     # hide the dashboard tile rather than show a permanently "unavailable" one.
     portainer_configured = flags["portainer_enabled"] and bool(
@@ -851,6 +865,7 @@ async def features():
         "aws":          aws_configured,
         "azure":        azure_configured,
         "gcp":          gcp_configured,
+        "oci":          oci_configured,
         "proxmox":      flags["proxmox_enabled"],
         "vsphere":      flags["vsphere_enabled"],
         "hyperv":       flags["hyperv_enabled"],

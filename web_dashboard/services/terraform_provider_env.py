@@ -60,10 +60,32 @@ def azure_env() -> Optional[dict]:
     return env or None
 
 
+def oci_env() -> Optional[dict]:
+    """OCI provider creds for the oracle/oci terraform provider, passed as the
+    ``TF_VAR_*`` inputs the DB/OKE modules declare (tenancy/user/fingerprint/
+    private_key/region [+ passphrase]); ``None`` when unset → terraform falls back
+    to the container env / an ~/.oci/config file / instance principals."""
+    env: dict = {}
+    for cfg_key, tf_var in (
+        ("oci_tenancy_ocid", "TF_VAR_tenancy_ocid"),
+        ("oci_user_ocid", "TF_VAR_user_ocid"),
+        ("oci_fingerprint", "TF_VAR_fingerprint"),
+        ("oci_private_key", "TF_VAR_private_key"),
+        ("oci_private_key_passphrase", "TF_VAR_private_key_passphrase"),
+        ("oci_region", "TF_VAR_region"),
+    ):
+        val = _cfg(cfg_key)
+        if val:
+            env[tf_var] = val
+    return env or None
+
+
 def provider_env(cloud: str) -> Optional[dict]:
     """Dispatch the terraform-subprocess provider credentials by cloud."""
     if cloud == "gcp":
         return gcp_env()
     if cloud == "azure":
         return azure_env()
+    if cloud == "oci":
+        return oci_env()
     return aws_env()

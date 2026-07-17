@@ -276,6 +276,8 @@
             { key: 'azure_images',  title: 'Azure Images',href: '/azure#private', flag: 'azure', description: 'gallery + managed' },
             { key: 'gcp_instances', title: 'GCP Instances', href: '/gcp',         flag: 'gcp',   secondaryLabel: 'running' },
             { key: 'gcp_images',    title: 'GCP Images',  href: '/gcp',           flag: 'gcp',   description: 'custom images' },
+            { key: 'oci_instances', title: 'OCI Instances', href: '/oci',         flag: 'oci',   secondaryLabel: 'running' },
+            { key: 'oci_images',    title: 'OCI Images',  href: '/oci',           flag: 'oci',   description: 'custom images' },
             { key: 'ovas',          title: 'OVA Library', href: '/images',        flag: 'vmware', description: 'local OVA files' },
             { key: 'cloud_cost',    title: 'Cloud Spend (MTD)', href: '/costs',   flag: 'cost',  secondaryRaw: true, valueClass: 'text-orange-600' },
           ],
@@ -390,6 +392,7 @@
         if (f.aws)     t.push({ label: 'EC2 instance', href: '/aws' });
         if (f.azure)   t.push({ label: 'Azure VM',     href: '/azure' });
         if (f.gcp)     t.push({ label: 'GCE instance', href: '/gcp' });
+        if (f.oci)     t.push({ label: 'OCI instance', href: '/oci' });
         if (f.proxmox) t.push({ label: 'Proxmox VM',   href: '/proxmox' });
         if (f.nutanix) t.push({ label: 'Nutanix VM',   href: '/nutanix' });
         if (f.cloud_database) t.push({ label: 'Cloud database',     href: '/databases' });
@@ -549,6 +552,7 @@
         if (this.features.aws)   tasks.push(this._fetchCloudStats('/api/aws/dashboard-stats',   'aws_instances', 'aws_amis'));
         if (this.features.azure) tasks.push(this._fetchCloudStats('/api/azure/dashboard-stats', 'azure_vms',     'azure_images'));
         if (this.features.gcp)   tasks.push(this._fetchCloudStats('/api/gcp/dashboard-stats',   'gcp_instances', 'gcp_images'));
+        if (this.features.oci)   tasks.push(this._fetchCloudStats('/api/oci/dashboard-stats',   'oci_instances', 'oci_images'));
         // ovas + cloud_cost aren't cloud-VM tiles — keep their per-tile fetchers.
         for (const t of this.visibleTiles(section.tiles)) {
           if (t.key === 'ovas' || t.key === 'cloud_cost') {
@@ -580,6 +584,8 @@
         if (k === 'azure_images')     return this._fetchListCount('/api/azure/images',          'images');
         if (k === 'gcp_instances')    return this._fetchListCount('/api/gcp/instances',         'instances', i => (i.status || '').toUpperCase() === 'RUNNING');
         if (k === 'gcp_images')       return this._fetchListCount('/api/gcp/custom-images',     'images');
+        if (k === 'oci_instances')    return this._fetchListCount('/api/oci/instances',         'instances', i => (i.lifecycle_state || '').toUpperCase() === 'RUNNING');
+        if (k === 'oci_images')       return this._fetchOciCustomImages();
         if (k === 'ovas')             return this._fetchListCount('/api/images/ovas',           'ovas');
         if (k === 'cloud_cost')       return this._fetchCost();
         // Hypervisors
@@ -611,6 +617,18 @@
             .filter(c => c.status === 'ok' && c.amount != null)
             .map(c => c.cloud + ' ' + fmt(c.amount));
           return { value: fmt(r.total_mtd), secondary: parts.join(' · ') };
+        } catch (e) {
+          return { value: -1 };
+        }
+      },
+
+      async _fetchOciCustomImages() {
+        // OCI images come from one endpoint tagged source=platform|custom; the
+        // tile counts custom images only (parity with the GCP custom-images tile).
+        try {
+          const r = await API.get('/api/oci/images');
+          if (!r) return { value: -1 };
+          return { value: (r.images || []).filter(i => i.source === 'custom').length };
         } catch (e) {
           return { value: -1 };
         }

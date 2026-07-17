@@ -9,7 +9,7 @@
 # fresh stack, or merging with admin auth if setup is already done).
 #
 # Usage: ./scripts/sandbox/Linux/onboard-sandbox.sh [options]
-#   --cloud LIST          aws,azure,gcp or "all"        (prompted if omitted)
+#   --cloud LIST          aws,azure,gcp,oci or "all"    (prompted if omitted)
 #   --dashboard-url URL   dashboard base URL            (default http://localhost:8001)
 #   --admin-user NAME     admin username to create/login (prompted if needed)
 #   --admin-pass PASS     admin password                 (prompted, hidden, if needed)
@@ -47,13 +47,13 @@ require_cmd jq
 
 # ── Resolve cloud list ──────────────────────────────────────────────────────
 if [[ -z "$CLOUDS" ]]; then
-  read -r -p "Which clouds to provision? [all] (comma list of aws,azure,gcp): " CLOUDS
+  read -r -p "Which clouds to provision? [all] (comma list of aws,azure,gcp,oci): " CLOUDS
   CLOUDS="${CLOUDS:-all}"
 fi
-[[ "$CLOUDS" == "all" ]] && CLOUDS="aws,azure,gcp"
+[[ "$CLOUDS" == "all" ]] && CLOUDS="aws,azure,gcp,oci"
 IFS=',' read -r -a CLOUD_ARR <<<"$CLOUDS"
 for c in "${CLOUD_ARR[@]}"; do
-  case "$c" in aws|azure|gcp) ;; *) die "unknown cloud: '$c' (expected aws|azure|gcp|all)";; esac
+  case "$c" in aws|azure|gcp|oci) ;; *) die "unknown cloud: '$c' (expected aws|azure|gcp|oci|all)";; esac
 done
 
 # ── 1. Provision (unless --push-only) ───────────────────────────────────────
