@@ -43,6 +43,8 @@
    {% if request.url.path == '/azure' %}{{ nav_active }}{% endif %}">Azure</a>
 <a href="/gcp" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
    {% if request.url.path == '/gcp' %}{{ nav_active }}{% endif %}">GCP</a>
+<a href="/oci" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
+   {% if request.url.path == '/oci' %}{{ nav_active }}{% endif %}">OCI</a>
 
 {# ── Workloads / artefacts ────────────────────────────────────────── #}
 {% if portainer_enabled %}

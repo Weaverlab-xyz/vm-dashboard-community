@@ -118,6 +118,20 @@ class GCPSetup(BaseModel):
     packer_gcs_bucket: str = ""
 
 
+class OCISetup(BaseModel):
+    oci_tenancy_ocid: str = ""
+    oci_user_ocid: str = ""
+    oci_fingerprint: str = ""
+    oci_private_key: str = ""             # API signing private key PEM — stored encrypted
+    oci_private_key_passphrase: str = ""  # optional passphrase — stored encrypted
+    oci_region: str = "us-ashburn-1"
+    oci_compartment_ocid: str = ""        # blank → tenancy root
+    oci_vcn_ocid: str = ""
+    oci_default_subnet_ocid: str = ""
+    oci_ssh_key_secret: str = ""          # OCI Vault secret (OCID/name) holding the SSH keypair
+    oci_vault_ocid: str = ""
+
+
 class FeaturesSetup(BaseModel):
     vmware_enabled: bool = False
     beyondtrust_enabled: bool = False
@@ -140,6 +154,7 @@ class SetupPayload(BaseModel):
     aws: AWSSetup
     azure: AzureSetup
     gcp: GCPSetup = GCPSetup()
+    oci: OCISetup = OCISetup()
     features: FeaturesSetup
 
 
@@ -205,6 +220,8 @@ _WIZARD_SECRET_FIELDS = frozenset({
     "azure_client_secret",
     "azure_oauth_client_secret",
     "gcp_service_account_json",
+    "oci_private_key",
+    "oci_private_key_passphrase",
 })
 
 
@@ -228,6 +245,12 @@ def _apply_config(payload: SetupPayload) -> None:
 
     # GCP
     for field, value in payload.gcp.model_dump().items():
+        if field in _WIZARD_SECRET_FIELDS and not value:
+            continue
+        pairs[field] = value
+
+    # OCI
+    for field, value in payload.oci.model_dump().items():
         if field in _WIZARD_SECRET_FIELDS and not value:
             continue
         pairs[field] = value

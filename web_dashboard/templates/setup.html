@@ -566,8 +566,95 @@ gcloud iam service-accounts keys create sa-key.json \
       </div>
     </div>
 
-    <!-- ── Step 5: Feature Flags ── -->
+    <!-- ── Step 5: OCI ── -->
     <div x-show="step === 5" class="px-8 py-6 space-y-5">
+      <div>
+        <h2 class="text-lg font-semibold text-gray-900">Oracle Cloud (OCI) Credentials</h2>
+        <p class="text-gray-500 text-sm mt-1">
+          Optional — used to deploy OCI compute (Always-Free by default). Uses API-key
+          signing. In the OCI console under <em>Identity → Users → your user → API Keys</em>,
+          add a key and copy the shown tenancy/user OCIDs + fingerprint; paste the
+          matching private-key PEM below. All fields may be left blank to skip OCI.
+        </p>
+      </div>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div class="sm:col-span-2">
+          <label class="block text-sm font-medium text-gray-700 mb-1">Tenancy OCID</label>
+          <input type="text" x-model="form.oci.oci_tenancy_ocid"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-red-500"
+                 placeholder="ocid1.tenancy.oc1..aaaa…">
+        </div>
+        <div class="sm:col-span-2">
+          <label class="block text-sm font-medium text-gray-700 mb-1">User OCID</label>
+          <input type="text" x-model="form.oci.oci_user_ocid"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-red-500"
+                 placeholder="ocid1.user.oc1..aaaa…">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Key Fingerprint</label>
+          <input type="text" x-model="form.oci.oci_fingerprint"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-red-500"
+                 placeholder="aa:bb:cc:dd:…">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Region</label>
+          <input type="text" x-model="form.oci.oci_region"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-red-500"
+                 placeholder="us-ashburn-1">
+        </div>
+        <div class="sm:col-span-2">
+          <label class="block text-sm font-medium text-gray-700 mb-1">Compartment OCID
+            <span class="text-gray-400 font-normal">(blank → tenancy root)</span></label>
+          <input type="text" x-model="form.oci.oci_compartment_ocid"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-red-500"
+                 placeholder="ocid1.compartment.oc1..aaaa…">
+        </div>
+      </div>
+
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">API Signing Private Key (PEM)</label>
+        <textarea x-model="form.oci.oci_private_key" rows="5"
+                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-red-500"
+                  :placeholder="isReconfig ? '••••••••  (leave blank to keep current)' : '-----BEGIN PRIVATE KEY-----\n…'"></textarea>
+        <p class="text-xs text-gray-400 mt-1">Stored encrypted in the dashboard database.</p>
+      </div>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Private Key Passphrase (optional)</label>
+          <input type="password" x-model="form.oci.oci_private_key_passphrase" autocomplete="new-password"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-red-500"
+                 :placeholder="isReconfig ? '••••••••  (leave blank to keep current)' : ''">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">SSH Key Vault Secret (optional)</label>
+          <input type="text" x-model="form.oci.oci_ssh_key_secret"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-red-500"
+                 placeholder="ocid1.vaultsecret… or secret name">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">VCN OCID (optional)</label>
+          <input type="text" x-model="form.oci.oci_vcn_ocid"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-red-500"
+                 placeholder="ocid1.vcn.oc1..aaaa…">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Default Subnet OCID (optional)</label>
+          <input type="text" x-model="form.oci.oci_default_subnet_ocid"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-red-500"
+                 placeholder="ocid1.subnet.oc1..aaaa…">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Vault OCID (optional)
+            <span class="text-gray-400 font-normal">— for name→OCID secret lookups</span></label>
+          <input type="text" x-model="form.oci.oci_vault_ocid"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-red-500"
+                 placeholder="ocid1.vault.oc1..aaaa…">
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Step 6: Feature Flags ── -->
+    <div x-show="step === 6" class="px-8 py-6 space-y-5">
       <div>
         <h2 class="text-lg font-semibold text-gray-900">Feature Flags</h2>
         <p class="text-gray-500 text-sm mt-1">
@@ -597,8 +684,8 @@ gcloud iam service-accounts keys create sa-key.json \
       </div>
     </div>
 
-    <!-- ── Step 6: Done ── -->
-    <div x-show="step === 6" class="px-8 py-12 text-center space-y-4">
+    <!-- ── Step 7: Done ── -->
+    <div x-show="step === 7" class="px-8 py-12 text-center space-y-4">
       <div class="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto">
         <svg class="w-8 h-8 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/>
@@ -618,7 +705,7 @@ gcloud iam service-accounts keys create sa-key.json \
     </div>
 
     <!-- Navigation -->
-    <div x-show="step < 6" class="px-8 py-5 border-t border-gray-100 flex items-center justify-between bg-gray-50">
+    <div x-show="step < 7" class="px-8 py-5 border-t border-gray-100 flex items-center justify-between bg-gray-50">
       <button
         @click="prev()"
         x-show="step > 1"
@@ -626,7 +713,7 @@ gcloud iam service-accounts keys create sa-key.json \
       >
         ← Back
       </button>
-      <div x-show="step === 1" class="text-xs text-gray-400">Step 1 of 5</div>
+      <div x-show="step === 1" class="text-xs text-gray-400">Step 1 of 6</div>
 
       <button
         @click="next()"
@@ -637,7 +724,7 @@ gcloud iam service-accounts keys create sa-key.json \
           <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
           <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"></path>
         </svg>
-        <span x-text="step === 5 ? (saving ? 'Saving…' : (isReconfig ? 'Save changes' : 'Complete setup')) : 'Next →'"></span>
+        <span x-text="step === 6 ? (saving ? 'Saving…' : (isReconfig ? 'Save changes' : 'Complete setup')) : 'Next →'"></span>
       </button>
     </div>
 
@@ -665,7 +752,7 @@ function wizard() {
     showGcpSandbox: false,
     authToken: localStorage.getItem('vm_cli_token') || '',
 
-    steps: ['Admin', 'AWS', 'Azure', 'GCP', 'Features'],
+    steps: ['Admin', 'AWS', 'Azure', 'GCP', 'OCI', 'Features'],
 
     form: {
       admin:    { username: 'admin', password: '', confirm: '' },
@@ -689,6 +776,11 @@ function wizard() {
                   gcp_jumpoint_subnetwork: '',
                   gcp_ssh_key_secret_name: '', gcp_ssh_username: 'gcp-user',
                   gcp_cloud_run_docker_deploy_key: '' },
+      oci:      { oci_tenancy_ocid: '', oci_user_ocid: '', oci_fingerprint: '',
+                  oci_private_key: '', oci_private_key_passphrase: '',
+                  oci_region: 'us-ashburn-1', oci_compartment_ocid: '',
+                  oci_vcn_ocid: '', oci_default_subnet_ocid: '',
+                  oci_ssh_key_secret: '', oci_vault_ocid: '' },
       features: { vmware_enabled: false, beyondtrust_enabled: false,
                   portainer_enabled: false, ansible_enabled: false, entitle_enabled: false },
     },
@@ -903,6 +995,13 @@ function wizard() {
             for (const f of gcpAdv) {
               if (cfg[f]) { this.form.gcp[f] = cfg[f]; this.showGcpAdvanced = true; }
             }
+            // OCI non-secret fields (secrets — private key/passphrase — never
+            // hydrated back; left blank means "keep current" on reconfigure)
+            for (const f of ['oci_tenancy_ocid', 'oci_user_ocid', 'oci_fingerprint',
+                             'oci_region', 'oci_compartment_ocid', 'oci_vcn_ocid',
+                             'oci_default_subnet_ocid', 'oci_ssh_key_secret', 'oci_vault_ocid']) {
+              if (cfg[f]) this.form.oci[f] = cfg[f];
+            }
             // Feature flags
             for (const flag of this.featureFlags) {
               if (cfg[flag.key] !== undefined) {
@@ -934,8 +1033,8 @@ function wizard() {
 
     async next() {
       if (!this.validateStep()) return;
-      if (this.step < 5) { this.step++; return; }
-      // Step 5 → submit
+      if (this.step < 6) { this.step++; return; }
+      // Final step → submit
       await this.submit();
     },
 
@@ -956,6 +1055,7 @@ function wizard() {
           aws:      this.form.aws,
           azure:    this.form.azure,
           gcp:      this.form.gcp,
+          oci:      this.form.oci,
           features: this.form.features,
         };
 

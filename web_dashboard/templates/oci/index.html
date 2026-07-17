@@ -1,0 +1,476 @@
+{% extends "base.html" %}
+
+{% block title %}OCI — Infrastructure Management{% endblock %}
+
+{% block content %}
+<div class="max-w-7xl mx-auto py-6 px-4 sm:px-6 lg:px-8"
+     x-data="ociDashboard()"
+     x-init="init()">
+
+  <!-- Page header -->
+  <div class="flex items-center justify-between mb-6">
+    <div>
+      <h1 class="text-2xl font-bold text-gray-800">Oracle Cloud Infrastructure</h1>
+      <p class="text-sm text-gray-500 mt-0.5">Compute instances and images in
+        <span class="font-mono text-gray-700" x-text="region || 'unconfigured'"></span>
+      </p>
+    </div>
+    <button @click="refreshAll()" :disabled="imagesLoading || instancesLoading"
+            class="flex items-center gap-1.5 text-sm text-gray-600 hover:text-gray-800 disabled:opacity-40 transition">
+      <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+              d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+      </svg>
+      Refresh
+    </button>
+  </div>
+
+  <!-- Free-tier note -->
+  <div class="mb-6 bg-emerald-50 border border-emerald-200 rounded-lg px-4 py-3 text-sm text-emerald-800">
+    Defaults stay within the OCI <strong>Always-Free</strong> tier
+    (2× <span class="font-mono">VM.Standard.E2.1.Micro</span>, or
+    <span class="font-mono">VM.Standard.A1.Flex</span> up to ~2 OCPU / 12 GB).
+    Going beyond is allowed with an explicit acknowledgment that charges may apply.
+  </div>
+
+  <!-- Credential error banner -->
+  <div x-show="credError" x-transition x-cloak
+       class="mb-6 bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 flex items-start gap-3">
+    <svg class="w-5 h-5 text-amber-500 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+            d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.538-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
+    </svg>
+    <div>
+      <p class="text-sm font-medium text-amber-800" x-text="credError"></p>
+      <a href="/setup" class="text-xs text-amber-700 underline mt-0.5 block">Open setup wizard →</a>
+    </div>
+  </div>
+
+  <!-- Toast -->
+  <div x-show="toast" x-cloak x-transition
+       :class="toastType === 'error' ? 'bg-red-50 border-red-200 text-red-700' : 'bg-green-50 border-green-200 text-green-700'"
+       class="mb-4 border rounded-lg px-4 py-3 text-sm" x-text="toast"></div>
+
+  <!-- Tab bar -->
+  <div class="border-b border-gray-200 mb-6">
+    <nav class="-mb-px flex gap-6">
+      <button @click="activeTab = 'images'"
+              :class="activeTab === 'images' ? 'border-red-600 text-red-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'"
+              class="py-3 border-b-2 text-sm font-medium transition-colors">
+        Images
+        <span x-show="filteredImages().length" class="ml-1.5 bg-gray-100 text-gray-600 text-xs px-1.5 py-0.5 rounded-full"
+              x-text="filteredImages().length"></span>
+      </button>
+      <button @click="switchToInstances()"
+              :class="activeTab === 'instances' ? 'border-red-600 text-red-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'"
+              class="py-3 border-b-2 text-sm font-medium transition-colors">
+        Compute Instances
+        <span x-show="instances.length" class="ml-1.5 bg-gray-100 text-gray-600 text-xs px-1.5 py-0.5 rounded-full"
+              x-text="instances.length"></span>
+      </button>
+    </nav>
+  </div>
+
+  <!-- ── Images ─────────────────────────────────────────────────────────── -->
+  <div x-show="activeTab === 'images'">
+    <div class="flex flex-wrap gap-2 mb-4">
+      <template x-for="f in ['all','platform','custom']" :key="f">
+        <button @click="imageFilter = f"
+                :class="imageFilter === f ? 'bg-red-600 text-white border-red-600' : 'bg-white text-gray-600 border-gray-300 hover:border-red-400'"
+                class="px-3 py-1.5 rounded-full text-xs font-medium border transition-colors capitalize"
+                x-text="f"></button>
+      </template>
+    </div>
+
+    <div x-show="imagesLoading" class="text-sm text-gray-400">Loading images…</div>
+
+    <div x-show="!imagesLoading" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+      <template x-for="img in filteredImages()" :key="img.ocid">
+        <div class="bg-white rounded-xl border border-gray-200 hover:border-red-300 hover:shadow-sm transition-all p-4 flex flex-col gap-2">
+          <div class="flex items-start justify-between gap-2">
+            <div class="flex-1 min-w-0">
+              <p class="text-sm font-medium text-gray-900 truncate" x-text="img.display_name"></p>
+              <p class="text-xs text-gray-400 mt-0.5" x-text="(img.operating_system + ' ' + img.operating_system_version).trim() || 'Image'"></p>
+            </div>
+            <span class="flex-shrink-0 text-xs px-1.5 py-0.5 rounded font-mono"
+                  :class="img.source === 'custom' ? 'bg-purple-50 text-purple-700 border border-purple-200' : 'bg-blue-50 text-blue-700 border border-blue-200'"
+                  x-text="img.source"></span>
+          </div>
+          <p class="text-xs text-gray-400" x-text="img.time_created ? img.time_created.substring(0,10) : ''"></p>
+          <div class="mt-auto pt-2">
+            <button @click="openDeployModal(img)"
+                    class="w-full text-xs bg-red-700 hover:bg-red-800 text-white px-3 py-1.5 rounded-lg font-medium transition">
+              Deploy Instance
+            </button>
+          </div>
+        </div>
+      </template>
+      <div x-show="!imagesLoading && filteredImages().length === 0 && !credError"
+           class="col-span-full text-center text-sm text-gray-400 py-10">No images found.</div>
+    </div>
+  </div>
+
+  <!-- ── Instances ──────────────────────────────────────────────────────── -->
+  <div x-show="activeTab === 'instances'">
+    <div x-show="instancesLoading" class="text-sm text-gray-400">Loading instances…</div>
+    <div x-show="!instancesLoading" class="space-y-3">
+      <template x-for="inst in instances" :key="inst.ocid">
+        <div class="bg-white rounded-xl border border-gray-200 p-4 flex items-center justify-between gap-4">
+          <div class="min-w-0">
+            <p class="text-sm font-medium text-gray-900 truncate" x-text="inst.display_name"></p>
+            <p class="text-xs text-gray-500 mt-0.5">
+              <span class="font-mono" x-text="inst.shape"></span>
+              <span x-show="inst.ocpus" x-text="' · ' + inst.ocpus + ' OCPU / ' + inst.memory_gb + ' GB'"></span>
+              <span x-show="inst.private_ip" x-text="' · ' + inst.private_ip"></span>
+              <span x-show="inst.public_ip" class="text-gray-700" x-text="' · pub ' + inst.public_ip"></span>
+            </p>
+          </div>
+          <div class="flex items-center gap-3 flex-shrink-0">
+            <span class="text-xs px-2 py-0.5 rounded-full"
+                  :class="(inst.lifecycle_state === 'RUNNING') ? 'bg-green-50 text-green-700' : 'bg-gray-100 text-gray-600'"
+                  x-text="inst.lifecycle_state"></span>
+            <button @click="destroyInstance(inst)"
+                    class="text-xs text-red-600 hover:text-red-800 font-medium">Terminate</button>
+          </div>
+        </div>
+      </template>
+      <div x-show="!instancesLoading && instances.length === 0 && !credError"
+           class="text-center text-sm text-gray-400 py-10">No dashboard-deployed instances.</div>
+    </div>
+  </div>
+
+  <!-- ── Deploy modal ───────────────────────────────────────────────────── -->
+  <div x-show="deployModal" x-cloak x-transition
+       class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+       @click.self="deployModal = false">
+    <div class="bg-white rounded-2xl shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto p-6">
+      <div class="flex items-center justify-between mb-4">
+        <h3 class="text-lg font-semibold text-gray-800">Deploy OCI Instance</h3>
+        <button @click="deployModal = false" class="text-gray-400 hover:text-gray-600 transition">✕</button>
+      </div>
+
+      <p class="text-xs text-gray-500 mb-4 truncate" x-text="'Image: ' + (selectedImage?.display_name || '')"></p>
+
+      <div class="space-y-4">
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Instance name</label>
+          <input type="text" x-model="deployForm.instance_name"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+        </div>
+
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Shape</label>
+          <select x-model="deployForm.shape" @change="onShapeChange()"
+                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            <template x-for="s in networkOpts.shapes" :key="s.shape">
+              <option :value="s.shape" x-text="s.shape + (s.free_tier ? '  (Always-Free)' : '')"></option>
+            </template>
+          </select>
+        </div>
+
+        <!-- Flexible shape sizing (A1.Flex etc.) -->
+        <div x-show="selectedShapeIsFlex()" class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-xs font-medium text-gray-600 mb-1">OCPUs</label>
+            <input type="number" min="1" step="1" x-model.number="deployForm.ocpus"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-gray-600 mb-1">Memory (GB)</label>
+            <input type="number" min="1" step="1" x-model.number="deployForm.memory_gb"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+          </div>
+        </div>
+
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-xs font-medium text-gray-600 mb-1">Availability domain</label>
+            <select x-model="deployForm.availability_domain"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              <option value="">(first available)</option>
+              <template x-for="ad in networkOpts.availability_domains" :key="ad">
+                <option :value="ad" x-text="ad"></option>
+              </template>
+            </select>
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-gray-600 mb-1">Boot volume (GB)</label>
+            <input type="number" min="50" step="10" x-model.number="deployForm.boot_volume_gb"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+          </div>
+        </div>
+
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Subnet</label>
+          <select x-model="deployForm.subnet_ocid"
+                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            <option value="">(configured default)</option>
+            <template x-for="sn in networkOpts.subnets" :key="sn.ocid">
+              <option :value="sn.ocid" x-text="sn.display_name + ' (' + sn.cidr_block + ')'"></option>
+            </template>
+          </select>
+        </div>
+
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-xs font-medium text-gray-600 mb-1">SSH username</label>
+            <input type="text" x-model="deployForm.ssh_username"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-gray-600 mb-1">Workgroup</label>
+            <select x-model="deployForm.workgroup"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              <option value="">(select)</option>
+              <template x-for="wg in availableWorkgroups" :key="wg">
+                <option :value="wg" x-text="wg"></option>
+              </template>
+            </select>
+          </div>
+        </div>
+
+        <label class="flex items-center gap-2 text-sm text-gray-700">
+          <input type="checkbox" x-model="deployForm.assign_public_ip"> Assign public IP
+        </label>
+
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">SSH key secret override (optional)</label>
+          <input type="text" x-model="deployForm.ssh_key_secret_override" placeholder="Vault secret OCID or name"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+        </div>
+
+        <div class="flex flex-col gap-1.5 border-t border-gray-100 pt-3">
+          <label class="flex items-center gap-2 text-sm text-gray-700">
+            <input type="checkbox" x-model="deployForm.register_in_entitle"> Register in Entitle (SSH JIT)
+          </label>
+          <label class="flex items-center gap-2 text-sm text-gray-700">
+            <input type="checkbox" x-model="deployForm.register_in_passwordsafe"> Onboard into Password Safe
+          </label>
+        </div>
+
+        <!-- Free-tier warning + acknowledgment gate -->
+        <div x-show="freeTierWarnings().length || serverGateTripped" x-cloak
+             class="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2.5 text-xs text-amber-800">
+          <p class="font-semibold mb-1">This selection may exceed the Always-Free tier:</p>
+          <ul class="list-disc list-inside space-y-0.5">
+            <template x-for="w in freeTierWarnings()" :key="w"><li x-text="w"></li></template>
+            <li x-show="serverGateTripped && !freeTierWarnings().length"
+                x-text="serverGateMessage"></li>
+          </ul>
+          <label class="flex items-center gap-2 mt-2 font-medium text-amber-900">
+            <input type="checkbox" x-model="deployForm.acknowledge_charges">
+            I understand this may incur charges
+          </label>
+        </div>
+
+        <p x-show="deployError" class="text-xs text-red-600" x-text="deployError"></p>
+      </div>
+
+      <div class="flex justify-end gap-2 mt-6">
+        <button @click="deployModal = false" class="px-4 py-2 text-sm text-gray-600 hover:text-gray-900 font-medium">Cancel</button>
+        <button @click="deploy()" :disabled="deploying || !deployReady()"
+                class="px-4 py-2 text-sm bg-red-700 hover:bg-red-800 disabled:opacity-40 text-white rounded-lg font-medium transition">
+          <span x-text="deploying ? 'Deploying…' : 'Deploy'"></span>
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+function ociDashboard() {
+  return {
+    activeTab: 'images',
+    region: '',
+    imagesLoading: false,
+    instancesLoading: false,
+    credError: '',
+    toast: '',
+    toastType: 'success',
+
+    images: [],
+    instances: [],
+    imageFilter: 'all',
+    networkOpts: { availability_domains: [], shapes: [], subnets: [], region: '', free_tier: {}, ssh_key_configured: false },
+    availableWorkgroups: [],
+
+    deployModal: false,
+    selectedImage: null,
+    deployError: '',
+    deploying: false,
+    serverGateTripped: false,   // backend free-tier 400 (catches cases the client can't, e.g. existing-instance counts)
+    serverGateMessage: '',
+    // Initialised inline (a method-call initializer can't use `this` in an
+    // object literal); openDeployModal() resets it via blankForm().
+    deployForm: {
+      instance_name: '', shape: 'VM.Standard.E2.1.Micro',
+      ocpus: null, memory_gb: null, availability_domain: '',
+      subnet_ocid: '', assign_public_ip: false, ssh_username: 'opc',
+      boot_volume_gb: 50, workgroup: '', acknowledge_charges: false,
+      register_in_entitle: false, register_in_passwordsafe: false,
+      ssh_key_secret_override: '',
+    },
+
+    blankForm() {
+      return {
+        instance_name: '', shape: 'VM.Standard.E2.1.Micro',
+        ocpus: null, memory_gb: null, availability_domain: '',
+        subnet_ocid: '', assign_public_ip: false, ssh_username: 'opc',
+        boot_volume_gb: 50, workgroup: '', acknowledge_charges: false,
+        register_in_entitle: false, register_in_passwordsafe: false,
+        ssh_key_secret_override: '',
+      };
+    },
+
+    async init() {
+      if (typeof requireAuth === 'function') requireAuth();
+      API.get('/api/groups/workgroups')
+        .then(r => { this.availableWorkgroups = r || []; })
+        .catch(() => { this.availableWorkgroups = []; });
+      await Promise.all([this.loadImages(), this.loadNetworkOpts()]);
+    },
+
+    notify(msg, type = 'success') {
+      this.toast = msg; this.toastType = type;
+      setTimeout(() => { this.toast = ''; }, 5000);
+    },
+
+    async loadImages() {
+      this.imagesLoading = true;
+      try {
+        const r = await API.get('/api/oci/images');
+        this.images = r?.images || [];
+        this.credError = '';
+      } catch (e) {
+        this.credError = (e && e.message) ? e.message : 'OCI not configured.';
+      } finally {
+        this.imagesLoading = false;
+      }
+    },
+
+    async loadNetworkOpts() {
+      try {
+        const r = await API.get('/api/oci/network-options');
+        this.networkOpts = r || this.networkOpts;
+        this.region = r?.region || '';
+      } catch (e) { /* credError already surfaced by loadImages */ }
+    },
+
+    async loadInstances(bust = false) {
+      this.instancesLoading = true;
+      try {
+        const r = await API.get('/api/oci/instances' + (bust ? '?bust=true' : ''));
+        this.instances = r?.instances || [];
+      } catch (e) {
+        this.notify('Could not load instances: ' + (e.message || e), 'error');
+      } finally {
+        this.instancesLoading = false;
+      }
+    },
+
+    switchToInstances() { this.activeTab = 'instances'; if (!this.instances.length) this.loadInstances(); },
+
+    async refreshAll() {
+      await Promise.all([this.loadImages(), this.loadNetworkOpts()]);
+      if (this.activeTab === 'instances') await this.loadInstances(true);
+    },
+
+    filteredImages() {
+      if (this.imageFilter === 'all') return this.images;
+      return this.images.filter(i => i.source === this.imageFilter);
+    },
+
+    selectedShapeMeta() {
+      return (this.networkOpts.shapes || []).find(s => s.shape === this.deployForm.shape) || null;
+    },
+    selectedShapeIsFlex() {
+      const m = this.selectedShapeMeta();
+      return m ? !!m.is_flexible : (this.deployForm.shape || '').includes('Flex');
+    },
+
+    onShapeChange() {
+      const ft = this.networkOpts.free_tier || {};
+      if (this.selectedShapeIsFlex()) {
+        // Default a flexible shape to the free A1 budget.
+        this.deployForm.ocpus = this.deployForm.ocpus || ft.a1_max_ocpus || 1;
+        this.deployForm.memory_gb = this.deployForm.memory_gb || ft.a1_max_memory_gb || 6;
+      } else {
+        this.deployForm.ocpus = null;
+        this.deployForm.memory_gb = null;
+      }
+    },
+
+    // Client-side advisory mirror of services/oci_freetier.py (backend enforces).
+    freeTierWarnings() {
+      const ft = this.networkOpts.free_tier || {};
+      const f = this.deployForm;
+      const out = [];
+      const isAmd = f.shape === ft.amd_shape;
+      const isA1 = f.shape === ft.a1_shape;
+      if (ft.amd_shape && !isAmd && !isA1) {
+        out.push('Shape ' + f.shape + ' is not an Always-Free shape.');
+      }
+      if (isA1) {
+        if ((f.ocpus || 0) > (ft.a1_max_ocpus || 0)) out.push('Ampere A1 OCPUs exceed the free budget (~' + ft.a1_max_ocpus + ').');
+        if ((f.memory_gb || 0) > (ft.a1_max_memory_gb || 0)) out.push('Ampere A1 memory exceeds the free budget (~' + ft.a1_max_memory_gb + ' GB).');
+      }
+      if ((f.boot_volume_gb || 0) > (ft.boot_volume_gb || 50)) {
+        out.push('Boot volume above the ' + (ft.boot_volume_gb || 50) + ' GB free default draws down the shared free pool.');
+      }
+      return out;
+    },
+
+    deployReady() {
+      if (!this.deployForm.instance_name || !this.deployForm.workgroup) return false;
+      if ((this.freeTierWarnings().length || this.serverGateTripped) && !this.deployForm.acknowledge_charges) return false;
+      return true;
+    },
+
+    openDeployModal(img) {
+      this.selectedImage = img;
+      this.deployError = '';
+      this.serverGateTripped = false;
+      this.serverGateMessage = '';
+      this.deployForm = this.blankForm();
+      this.deployModal = true;
+    },
+
+    async deploy() {
+      this.deploying = true;
+      this.deployError = '';
+      const body = { ...this.deployForm, image_ocid: this.selectedImage.ocid, image_name: this.selectedImage.display_name };
+      try {
+        const r = await API.post('/api/oci/deploy', body);
+        this.deployModal = false;
+        this.notify('Deploy started (job ' + r.job_id + ').');
+        this.activeTab = 'instances';
+        setTimeout(() => this.loadInstances(true), 1500);
+      } catch (e) {
+        // Surface the backend free-tier gate. app.js copies detail.code onto the
+        // Error and sets e.message from detail.message; reveal the acknowledgment.
+        if (e && e.code === 'free_tier_exceeded') {
+          this.serverGateTripped = true;
+          this.serverGateMessage = e.message || 'Selection exceeds the Always-Free tier.';
+          this.deployError = 'Selection exceeds the Always-Free tier — tick the acknowledgment to proceed.';
+        } else {
+          this.deployError = (e && e.message) ? e.message : 'Deploy failed.';
+        }
+      } finally {
+        this.deploying = false;
+      }
+    },
+
+    async destroyInstance(inst) {
+      if (!confirm('Terminate ' + inst.display_name + '?')) return;
+      try {
+        const r = await API.del('/api/oci/instances/' + encodeURIComponent(inst.ocid));
+        this.notify('Termination started (job ' + r.job_id + ').');
+        setTimeout(() => this.loadInstances(true), 1500);
+      } catch (e) {
+        this.notify('Terminate failed: ' + (e.message || e), 'error');
+      }
+    },
+  };
+}
+</script>
+{% endblock %}

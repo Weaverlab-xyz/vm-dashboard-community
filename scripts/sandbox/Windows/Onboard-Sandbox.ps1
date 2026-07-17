@@ -10,7 +10,7 @@
     /api/setup/import — creating the admin + marking setup complete on a fresh
     stack, or merging with admin auth if setup is already done.
 
-.PARAMETER Cloud         aws,azure,gcp or "all" (prompted if omitted).
+.PARAMETER Cloud         aws,azure,gcp,oci or "all" (prompted if omitted).
 .PARAMETER DashboardUrl  Dashboard base URL (default http://localhost:8001).
 .PARAMETER AdminUser     Admin username to create/login (prompted if needed).
 .PARAMETER AdminPass     Admin password (prompted, hidden, if needed).
@@ -38,12 +38,12 @@ $DashboardUrl = $DashboardUrl.TrimEnd('/')
 
 # ── Resolve cloud list ──────────────────────────────────────────────────────
 if (-not $Cloud) {
-    $Cloud = Read-Host "Which clouds to provision? [all] (comma list of aws,azure,gcp)"
+    $Cloud = Read-Host "Which clouds to provision? [all] (comma list of aws,azure,gcp,oci)"
     if (-not $Cloud) { $Cloud = 'all' }
 }
-if ($Cloud -eq 'all') { $Cloud = 'aws,azure,gcp' }
+if ($Cloud -eq 'all') { $Cloud = 'aws,azure,gcp,oci' }
 $clouds = $Cloud.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }
-foreach ($c in $clouds) { if ($c -notin @('aws','azure','gcp')) { Write-Die "unknown cloud: '$c' (expected aws|azure|gcp|all)" } }
+foreach ($c in $clouds) { if ($c -notin @('aws','azure','gcp','oci')) { Write-Die "unknown cloud: '$c' (expected aws|azure|gcp|oci|all)" } }
 
 # ── 1. Provision (unless -PushOnly) ─────────────────────────────────────────
 if (-not $PushOnly) {

@@ -8,7 +8,8 @@
 #   ./rollback.sh --cloud aws         # tear down AWS sandbox
 #   ./rollback.sh --cloud azure       # tear down Azure sandbox
 #   ./rollback.sh --cloud gcp         # tear down GCP sandbox
-#   ./rollback.sh --cloud all         # tear down all three
+#   ./rollback.sh --cloud oci         # tear down OCI sandbox
+#   ./rollback.sh --cloud all         # tear down all four
 #   ./rollback.sh --cloud aws -y      # skip the confirmation prompt
 #
 # DOES NOT touch user-deployed EC2/VM/GCE instances — only the sandbox
@@ -33,7 +34,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ -n "$CLOUD" ]] || die "Specify --cloud aws|azure|gcp|all"
+[[ -n "$CLOUD" ]] || die "Specify --cloud aws|azure|gcp|oci|all"
 require_supported_os
 
 # ── AWS rollback ─────────────────────────────────────────────────────────────
@@ -446,13 +447,109 @@ rollback_gcp() {
   ok "GCP sandbox state cleared"
 }
 
+# ── OCI rollback ─────────────────────────────────────────────────────────────
+rollback_oci() {
+  require_cmd oci
+  require_cmd jq
+  local profile="${OCI_PROFILE:-DEFAULT}"
+  local cfgfile="${OCI_CLI_CONFIG_FILE:-$HOME/.oci/config}"
+  ensure_logged_in "oci" "oci iam region list --profile $profile" "Run: oci setup config"
+
+  # Tenancy from state or the CLI config (needed to locate the compartment).
+  local tenancy
+  tenancy="${OCI_TENANCY_OCID:-$(awk -v p="[$profile]" '$0==p{i=1;next} /^\[/{i=0} i&&/^tenancy[[:space:]]*=/{sub(/^tenancy[[:space:]]*=[[:space:]]*/,"");print;exit}' "$cfgfile" 2>/dev/null || true)}"
+  local region; region="${OCI_REGION:-$(awk -v p="[$profile]" '$0==p{i=1;next} /^\[/{i=0} i&&/^region[[:space:]]*=/{sub(/^region[[:space:]]*=[[:space:]]*/,"");print;exit}' "$cfgfile" 2>/dev/null || true)}"
+  local OCIC=(oci --profile "$profile")
+  [[ -n "$region" ]] && OCIC+=(--region "$region")
+
+  local prefix="${SANDBOX_NAME_PREFIX}"
+  local compartment; compartment="$(state_read oci compartment)"
+  if [[ -z "$compartment" ]]; then
+    [[ -n "$tenancy" ]] || die "No compartment in state and no tenancy in $cfgfile — cannot locate the OCI sandbox."
+    compartment="$("${OCIC[@]}" iam compartment list --compartment-id "$tenancy" --all \
+      --query "data[?name=='$prefix'].id | [0]" --raw-output 2>/dev/null || true)"
+  fi
+  if [[ -z "$compartment" || "$compartment" == "null" ]]; then
+    info "No OCI sandbox compartment found — nothing to roll back."
+    state_clear oci; return 0
+  fi
+
+  section "OCI rollback in compartment ${compartment:0:20}… (region ${region:-default})"
+  if (( !ASSUME_YES )); then
+    confirm "Delete OCI sandbox VCN, subnets, gateways, security list in this compartment?" || return 0
+  fi
+
+  # Refuse if user VMs are still running (don't auto-terminate lab VMs).
+  local running
+  running="$("${OCIC[@]}" compute instance list --compartment-id "$compartment" --all \
+    --query "data[?\"lifecycle-state\"=='RUNNING'].\"display-name\"" --raw-output 2>/dev/null || true)"
+  if [[ -n "$running" && "$running" != "[]" ]]; then
+    warn "Instances still running: $running"
+    warn "Terminate them via the dashboard first, then re-run rollback. Aborting."
+    return 0
+  fi
+
+  # Helper: find a network resource id by display-name in the compartment.
+  _oci_find() {  # $1=subcommand (space-sep) $2=name
+    # shellcheck disable=SC2086
+    "${OCIC[@]}" $1 list --compartment-id "$compartment" --all \
+      --query "data[?\"display-name\"=='$2' && \"lifecycle-state\"!='TERMINATED'].id | [0]" \
+      --raw-output 2>/dev/null || true
+  }
+  _oci_del() {  # $1=subcommand $2=id-flag $3=id $4=label
+    [[ -z "$3" || "$3" == "null" ]] && return 0
+    # shellcheck disable=SC2086
+    "${OCIC[@]}" $1 delete $2 "$3" --force --wait-for-state TERMINATED >/dev/null 2>&1 \
+      && ok "Deleted $4" || warn "Could not delete $4 (retry rollback if a dependency is still draining)"
+  }
+
+  local vcn; vcn="$(_oci_find "network vcn" "${prefix}-vcn")"
+  if [[ -n "$vcn" && "$vcn" != "null" ]]; then
+    # Subnets first (they hold route-table + security-list references).
+    for sn in "${prefix}-public-subnet" "${prefix}-vm-subnet" "${prefix}-db-subnet"; do
+      _oci_del "network subnet" --subnet-id "$(_oci_find "network subnet" "$sn")" "subnet $sn"
+    done
+    _oci_del "network route-table"   --rt-id            "$(_oci_find "network route-table" "${prefix}-public-rt")"  "public route table"
+    _oci_del "network route-table"   --rt-id            "$(_oci_find "network route-table" "${prefix}-private-rt")" "private route table"
+    _oci_del "network security-list" --security-list-id "$(_oci_find "network security-list" "${prefix}-sl")"       "security list"
+    _oci_del "network nat-gateway"      --nat-gateway-id "$(_oci_find "network nat-gateway" "${prefix}-nat")"        "NAT gateway"
+    _oci_del "network internet-gateway" --ig-id          "$(_oci_find "network internet-gateway" "${prefix}-igw")"  "Internet gateway"
+    _oci_del "network vcn"           --vcn-id "$vcn" "VCN ${prefix}-vcn"
+  else
+    info "No sandbox VCN found in the compartment."
+  fi
+
+  # Vault + secret can only be SCHEDULED for deletion (no hard delete); they're
+  # near-free and self-contained, so we leave them with a note rather than
+  # thread the RFC3339 timestamp + management-endpoint plumbing here.
+  local vault; vault="$(state_read oci vault)"
+  [[ -n "$vault" ]] && warn "Vault $vault + its SSH secret persist — schedule their deletion in the OCI console (KMS → Vaults) if you want them gone."
+
+  # Delete the sandbox compartment we created (best-effort; async + slow). Only
+  # if it carries our freeform tag AND we didn't reuse a caller-supplied one.
+  if [[ -z "${OCI_COMPARTMENT_OCID:-}" ]]; then
+    local tag
+    tag="$("${OCIC[@]}" iam compartment get --compartment-id "$compartment" \
+      --query 'data."freeform-tags"."managed-by"' --raw-output 2>/dev/null || true)"
+    if [[ "$tag" == "dashboard-sandbox" ]]; then
+      "${OCIC[@]}" iam compartment delete --compartment-id "$compartment" --force >/dev/null 2>&1 \
+        && ok "Compartment deletion submitted (async — can take several minutes)" \
+        || warn "Could not delete compartment (must be empty first; re-run after resources drain)"
+    fi
+  fi
+
+  state_clear oci
+  ok "OCI sandbox state cleared"
+}
+
 # ── Dispatch ──────────────────────────────────────────────────────────────────
 case "$CLOUD" in
   aws)   rollback_aws ;;
   azure) rollback_azure ;;
   gcp)   rollback_gcp ;;
-  all)   rollback_aws; rollback_azure; rollback_gcp ;;
-  *) die "Invalid --cloud value: $CLOUD (expected aws|azure|gcp|all)" ;;
+  oci)   rollback_oci ;;
+  all)   rollback_aws; rollback_azure; rollback_gcp; rollback_oci ;;
+  *) die "Invalid --cloud value: $CLOUD (expected aws|azure|gcp|oci|all)" ;;
 esac
 
 ok "Rollback complete."

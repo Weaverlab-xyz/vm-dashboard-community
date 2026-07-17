@@ -70,6 +70,13 @@ async def _resolve_vm_private_key(tag: str, secret_name: str = "") -> str:
             # Available only when the chosen secret is a JSON {public_key, private_key}.
             return await aws_service.get_ssh_private_key_from_secret(
                 _cfg("aws_region") or "us-east-2", secret)
+        if t == "oci":
+            from . import oci_service
+            secret = secret_name or _cfg("oci_ssh_key_secret")
+            if not secret:
+                return ""
+            # Available only when the OCI Vault secret is a JSON {public_key, private_key}.
+            return await oci_service.get_ssh_private_key(secret)
     except Exception as e:  # noqa: BLE001
         logger.warning("Entitle: VM private-key resolve (%s) failed: %s", t, e)
     return ""

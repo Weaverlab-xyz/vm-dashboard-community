@@ -6,13 +6,14 @@
 #   .\Rollback-Sandbox.ps1 -Cloud aws
 #   .\Rollback-Sandbox.ps1 -Cloud azure
 #   .\Rollback-Sandbox.ps1 -Cloud gcp
+#   .\Rollback-Sandbox.ps1 -Cloud oci
 #   .\Rollback-Sandbox.ps1 -Cloud all
 #   .\Rollback-Sandbox.ps1 -Cloud aws -Yes      # skip the confirmation prompt
 
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
-    [ValidateSet('aws','azure','gcp','all')]
+    [ValidateSet('aws','azure','gcp','oci','all')]
     [string]$Cloud,
 
     [switch]$Yes
@@ -403,12 +404,100 @@ function Invoke-GcpRollback {
     Write-Ok 'GCP sandbox state cleared'
 }
 
+# ── OCI rollback ─────────────────────────────────────────────────────────────
+function Invoke-OciRollback {
+    Assert-Command oci
+    $ociProfile    = if ($env:OCI_PROFILE) { $env:OCI_PROFILE } else { 'DEFAULT' }
+    $configFile = if ($env:OCI_CLI_CONFIG_FILE) { $env:OCI_CLI_CONFIG_FILE } else { Join-Path $HOME '.oci/config' }
+    Assert-LoggedIn 'oci' { oci iam region list --profile $ociProfile } 'Run: oci setup config'
+
+    # Tenancy/region from state or the CLI config (to locate the compartment).
+    function Get-OciCfg { param([string]$Key)
+        if (-not (Test-Path $configFile)) { return '' }
+        $inSection = $false
+        foreach ($line in Get-Content $configFile) {
+            if ($line -match '^\s*\[(.+)\]\s*$') { $inSection = ($Matches[1] -eq $ociProfile); continue }
+            if ($inSection -and $line -match "^\s*$Key\s*=\s*(.+?)\s*$") { return $Matches[1] }
+        }
+        return ''
+    }
+    $tenancy = if ($env:OCI_TENANCY_OCID) { $env:OCI_TENANCY_OCID } else { Get-OciCfg 'tenancy' }
+    $region  = if ($env:OCI_REGION) { $env:OCI_REGION } else { Get-OciCfg 'region' }
+    $oci = @('--profile', $ociProfile); if ($region) { $oci += @('--region', $region) }
+
+    function Get-Id { param([string[]]$OciArgs)
+        $out = (& oci @oci @OciArgs 2>$null); if ($out) { $out = "$out".Trim() }
+        if (-not $out -or $out -eq 'null') { return '' } else { return $out }
+    }
+
+    $prefix = $Script:SandboxNamePrefix
+    $compartment = (Get-StateValue oci compartment).Trim()
+    if (-not $compartment) {
+        if (-not $tenancy) { Write-Die "No compartment in state and no tenancy in $configFile — cannot locate the OCI sandbox." }
+        $compartment = Get-Id @('iam','compartment','list','--compartment-id',$tenancy,'--all','--query',"data[?name=='$prefix'].id | [0]",'--raw-output')
+    }
+    if (-not $compartment) { Write-Info 'No OCI sandbox compartment found — nothing to roll back.'; Clear-StateDir oci; return }
+
+    Write-Section "OCI rollback in compartment $($compartment.Substring(0,[Math]::Min(20,$compartment.Length)))… (region $region)"
+    if (-not $Yes) {
+        if (-not (Confirm-Action 'Delete OCI sandbox VCN, subnets, gateways, security list in this compartment?')) { return }
+    }
+
+    $running = Get-Id @('compute','instance','list','--compartment-id',$compartment,'--all','--query',"data[?`"lifecycle-state`"=='RUNNING'].`"display-name`"",'--raw-output')
+    if ($running -and $running -ne '[]') {
+        Write-Warn "Instances still running: $running"
+        Write-Warn 'Terminate them via the dashboard first, then re-run rollback. Aborting.'
+        return
+    }
+
+    function Find-Id { param([string]$Sub, [string]$DisplayName)
+        return Get-Id (($Sub -split ' ') + @('list','--compartment-id',$compartment,'--all','--query',"data[?`"display-name`"=='$DisplayName' && `"lifecycle-state`"!='TERMINATED'].id | [0]",'--raw-output'))
+    }
+    function Remove-Res { param([string]$Sub, [string]$IdFlag, [string]$Id, [string]$Label)
+        if (-not $Id) { return }
+        & oci @oci ($Sub -split ' ') delete $IdFlag $Id --force --wait-for-state TERMINATED *> $null
+        if ($LASTEXITCODE -eq 0) { Write-Ok "Deleted $Label" } else { Write-Warn "Could not delete $Label (retry rollback if a dependency is still draining)" }
+    }
+
+    $vcn = Find-Id 'network vcn' "$prefix-vcn"
+    if ($vcn) {
+        foreach ($sn in @("$prefix-public-subnet","$prefix-vm-subnet","$prefix-db-subnet")) {
+            Remove-Res 'network subnet' '--subnet-id' (Find-Id 'network subnet' $sn) "subnet $sn"
+        }
+        Remove-Res 'network route-table'   '--rt-id'            (Find-Id 'network route-table' "$prefix-public-rt")  'public route table'
+        Remove-Res 'network route-table'   '--rt-id'            (Find-Id 'network route-table' "$prefix-private-rt") 'private route table'
+        Remove-Res 'network security-list' '--security-list-id' (Find-Id 'network security-list' "$prefix-sl")       'security list'
+        Remove-Res 'network nat-gateway'      '--nat-gateway-id' (Find-Id 'network nat-gateway' "$prefix-nat")        'NAT gateway'
+        Remove-Res 'network internet-gateway' '--ig-id'          (Find-Id 'network internet-gateway' "$prefix-igw")   'Internet gateway'
+        Remove-Res 'network vcn'           '--vcn-id' $vcn "VCN $prefix-vcn"
+    } else {
+        Write-Info 'No sandbox VCN found in the compartment.'
+    }
+
+    $vault = (Get-StateValue oci vault).Trim()
+    if ($vault) { Write-Warn "Vault $vault + its SSH secret persist — schedule their deletion in the OCI console (KMS -> Vaults) if you want them gone." }
+
+    # Delete the sandbox compartment we created (best-effort; async + slow).
+    if (-not $env:OCI_COMPARTMENT_OCID) {
+        $tag = Get-Id @('iam','compartment','get','--compartment-id',$compartment,'--query','data."freeform-tags"."managed-by"','--raw-output')
+        if ($tag -eq 'dashboard-sandbox') {
+            & oci @oci iam compartment delete --compartment-id $compartment --force *> $null
+            if ($LASTEXITCODE -eq 0) { Write-Ok 'Compartment deletion submitted (async — can take several minutes)' }
+            else { Write-Warn 'Could not delete compartment (must be empty first; re-run after resources drain)' }
+        }
+    }
+
+    Clear-StateDir oci
+    Write-Ok 'OCI sandbox state cleared'
+}
+
 # ── Dispatch ─────────────────────────────────────────────────────────────────
 switch ($Cloud) {
     'aws'   { Invoke-AwsRollback }
     'azure' { Invoke-AzureRollback }
     'gcp'   { Invoke-GcpRollback }
-    'all'   { Invoke-AwsRollback; Invoke-AzureRollback; Invoke-GcpRollback }
+    'oci'   { Invoke-OciRollback }
+    'all'   { Invoke-AwsRollback; Invoke-AzureRollback; Invoke-GcpRollback; Invoke-OciRollback }
 }
 
 Write-Ok 'Rollback complete.'
