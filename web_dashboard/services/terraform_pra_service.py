@@ -316,9 +316,15 @@ async def remove_jump(tf_state_json: str) -> None:
 _DB_TUNNEL_RESOURCE = {
     "postgres": "sra_postgresql_tunnel_jump",
     "mysql": "sra_my_sql_tunnel_jump",   # schema-identical to the postgres jump (verified vs cached provider)
-    "sqlserver": "sra_protocol_tunnel_jump",   # generic protocol tunnel; needs tunnel_type="mssql" (emitted below)
+    "sqlserver": "sra_protocol_tunnel_jump",   # generic protocol tunnel; needs tunnel_type (emitted below)
+    "oracle": "sra_protocol_tunnel_jump",       # OCI Autonomous DB — generic TCP tunnel to the TLS listener
 }
 _DB_RESOURCE_ENGINE = {v: k for k, v in _DB_TUNNEL_RESOURCE.items()}
+
+# tunnel_type for the GENERIC sra_protocol_tunnel_jump (the dedicated postgres/
+# mysql resources don't take one). SQL Server is TDS-aware ("mssql"); Oracle
+# SQL*Net has no dedicated PRA type, so it rides a raw TCP tunnel ("tcp").
+_DB_TUNNEL_TYPE = {"sqlserver": "mssql", "oracle": "tcp"}
 
 # jump_item_association `jump_items[].type` enum value per engine — confirmed
 # against the cached provider schema, like the resource names above.
@@ -326,6 +332,7 @@ _DB_JUMP_ITEM_TYPE = {
     "postgres": "postgresql_tunnel_jump",
     "mysql": "my_sql_tunnel_jump",   # mirrors the resource (sra_my_sql_tunnel_jump) minus the sra_ prefix
     "sqlserver": "protocol_tunnel_jump",   # sra_protocol_tunnel_jump minus the sra_ prefix
+    "oracle": "protocol_tunnel_jump",      # same generic protocol-tunnel jump-item type
 }
 
 
@@ -370,10 +377,10 @@ def _generate_db_tunnel_hcl(
         extra += f"  username      = {json.dumps(username)}\n"
     if database:
         extra += f"  database      = {json.dumps(database)}\n"
-    # The generic sra_protocol_tunnel_jump (sqlserver) requires an explicit
-    # tunnel_type; the dedicated postgres/mysql resources don't take one.
+    # The generic sra_protocol_tunnel_jump (sqlserver / oracle) requires an
+    # explicit tunnel_type; the dedicated postgres/mysql resources don't take one.
     if resource_type == "sra_protocol_tunnel_jump":
-        extra += '  tunnel_type   = "mssql"\n'
+        extra += f'  tunnel_type   = "{_DB_TUNNEL_TYPE.get(engine, "tcp")}"\n'
 
     var_block = ""
     vault_block = ""

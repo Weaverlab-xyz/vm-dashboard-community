@@ -451,3 +451,48 @@ async def terminate_instance(instance_id: str, preserve_boot_volume: bool = Fals
         raise
     except Exception as exc:  # noqa: BLE001
         raise OCIError(f"terminate_instance failed: {exc}") from exc
+
+
+# ── OKE cluster token (kubeconfig exec auth) ──────────────────────────────────
+
+def oke_get_token(cluster_id: str, region: str = "") -> str:
+    """Mint a short-lived OKE cluster token — the server-side equivalent of
+    ``oci ce cluster generate-token`` — so the transient kubectl/helm runner can
+    authenticate to OKE without the ``oci`` CLI (mirrors aws_service.eks_get_token
+    / gcp_service.gke_get_token). Synchronous (called from the sync runner
+    kubeconfig prep in k8s_service._runner_kubeconfig).
+
+    Modeled on the CLI's algorithm: sign a GET to the ContainerEngine
+    ``/cluster_request/{cluster_id}`` resource with the config's request signer,
+    move the signing headers into the query string, and base64url-encode the
+    resulting URL. Best-effort — verify against a live OKE cluster."""
+    _require_oci()
+    import base64
+    import re as _re
+    from urllib.parse import urlencode
+
+    import oci
+    import requests
+
+    cfg = _oci_config()
+    if region:
+        cfg = {**cfg, "region": region}
+    try:
+        client = oci.container_engine.ContainerEngineClient(cfg)
+        signer = client.base_client.signer
+        # Endpoint is e.g. https://containerengine.<region>.oci.oraclecloud.com/20180222 —
+        # strip the trailing API-version segment for the token's cluster_request URL.
+        base = _re.sub(r"/\d{8}/?$", "", client.base_client.endpoint).rstrip("/")
+        url = f"{base}/cluster_request/{cluster_id}"
+        prepared = requests.Request("GET", url, auth=signer).prepare()
+        params = {}
+        for h in ("authorization", "date", "x-date", "host"):
+            val = prepared.headers.get(h)
+            if val:
+                params[h] = val
+        signed_url = url + "?" + urlencode(params)
+        return base64.urlsafe_b64encode(signed_url.encode("utf-8")).decode("ascii").rstrip("=")
+    except OCIError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise OCIError(f"OKE token mint failed: {exc}") from exc

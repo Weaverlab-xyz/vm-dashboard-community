@@ -88,6 +88,7 @@ _APP_SLUG = {
     "postgres":   "postgres",
     "mysql":      "mysql",
     "sqlserver":  "microsoft sql server",
+    "oracle":     "oracle database",   # OCI Autonomous DB; confirm against the tenant catalog (name varies)
     "kubernetes": "kubernetes",
 }
 

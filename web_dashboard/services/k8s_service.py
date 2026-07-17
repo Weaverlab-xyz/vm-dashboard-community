@@ -31,7 +31,7 @@ from ..database import Job, K8sCluster
 
 logger = logging.getLogger(__name__)
 
-VALID_CLOUDS = ("aws", "azure", "gcp", "local")
+VALID_CLOUDS = ("aws", "azure", "gcp", "oci", "local")
 VALID_MGMT_KINDS = ("rancher", "argocd", "headlamp")
 
 # config_service key that holds a cluster's kubeconfig; the row stores this
@@ -195,9 +195,10 @@ _CLUSTER_TEMPLATE_DIRS = {
     "aws": os.path.join(_REPO_ROOT, "terraform", "k8s_cluster", "aws_eks"),
     "azure": os.path.join(_REPO_ROOT, "terraform", "k8s_cluster", "azure_aks"),
     "gcp": os.path.join(_REPO_ROOT, "terraform", "k8s_cluster", "gcp_gke"),
+    "oci": os.path.join(_REPO_ROOT, "terraform", "k8s_cluster", "oci_oke"),
 }
 _DEPLOYMENTS_DIR = os.path.join(_REPO_ROOT, "terraform", "deployments")
-_PROVISION_IMPLEMENTED = ("aws", "azure", "gcp")
+_PROVISION_IMPLEMENTED = ("aws", "azure", "gcp", "oci")
 
 
 def _deploy_dir(job_id: str) -> str:
@@ -292,6 +293,8 @@ K8S_VERSIONS = {
     "aws":   ["1.36", "1.35", "1.34", "1.33"],
     "azure": ["1.36", "1.35", "1.34", "1.33"],
     "gcp":   ["1.36", "1.35", "1.34", "1.33"],
+    # OKE uses the v-prefixed patch format; confirm live with `oci ce cluster-options get`.
+    "oci":   ["v1.31.1", "v1.30.1", "v1.29.10"],
 }
 K8S_NODE_TYPES = {
     "aws":   ["t3.small", "t3.medium", "t3.large", "t3.xlarge",
@@ -300,6 +303,8 @@ K8S_NODE_TYPES = {
               "Standard_D4s_v3", "Standard_DS2_v2"],
     "gcp":   ["e2-small", "e2-medium", "e2-standard-2", "e2-standard-4",
               "n2-standard-2", "n2-standard-4"],
+    # A1.Flex (Always-Free Ampere) first; the flex shapes take an OCPU/memory config.
+    "oci":   ["VM.Standard.A1.Flex", "VM.Standard.E4.Flex", "VM.Standard.E5.Flex"],
 }
 K8S_REGIONS = {
     "aws":   ["us-east-1", "us-east-2", "us-west-1", "us-west-2", "eu-west-1",
@@ -308,6 +313,8 @@ K8S_REGIONS = {
               "northeurope", "westeurope", "uksouth", "australiaeast"],
     "gcp":   ["us-central1", "us-east1", "us-west1", "europe-west1",
               "europe-west4", "asia-southeast1", "asia-northeast1", "australia-southeast1"],
+    "oci":   ["us-ashburn-1", "us-phoenix-1", "uk-london-1", "eu-frankfurt-1",
+              "ap-sydney-1", "ap-tokyo-1", "ca-toronto-1", "sa-saopaulo-1"],
 }
 
 
@@ -443,6 +450,35 @@ def _build_cluster_tf_variables(*, cloud: str, cluster_id: str, name: str,
             tf["authorized_cidrs"] = cidrs
         return tf
 
+    if cloud == "oci":
+        # OKE (BASIC cluster = free control plane) in a self-contained VCN. The
+        # compartment comes from config; the node pool defaults to a single
+        # Always-Free A1.Flex node (2 OCPU / 12 GB — the whole free Ampere budget).
+        tf = {
+            "compartment_ocid": _cfg("oci_compartment_ocid") or _cfg("oci_tenancy_ocid"),
+            "cluster_name": _gke_name(f"k8s-{name}"),   # OKE names: <=63, DNS-ish; reuse the GKE sanitizer
+            "tags": _tags,
+        }
+        # The provision form reuses the shared `vpc_cidr` field for the VCN CIDR.
+        vcn_cidr = opts.get("vpc_cidr") or opts.get("vcn_cidr") or _cfg("oci_oke_vcn_cidr")
+        if vcn_cidr:
+            tf["vcn_cidr"] = vcn_cidr
+        version = opts.get("k8s_version") or _cfg("oci_oke_k8s_version")
+        if version:
+            tf["k8s_version"] = version
+        shape = opts.get("node_instance_type") or _cfg("oci_oke_node_shape")
+        if shape:
+            tf["node_shape"] = shape
+        if opts.get("node_ocpus"):
+            tf["node_ocpus"] = int(opts["node_ocpus"])
+        if opts.get("node_memory_gbs"):
+            tf["node_memory_gbs"] = int(opts["node_memory_gbs"])
+        if opts.get("node_count"):
+            tf["node_count"] = int(opts["node_count"])
+        if opts.get("node_image_id"):
+            tf["node_image_id"] = opts["node_image_id"]
+        return tf
+
     raise NotImplementedError(f"{cloud} cluster Terraform variables not implemented")
 
 
@@ -457,11 +493,12 @@ async def provision_options(cloud: str, region: str = "") -> dict:
     if cloud not in _PROVISION_IMPLEMENTED:
         raise K8sError(f"unknown cloud {cloud!r} (expected one of {', '.join(_PROVISION_IMPLEMENTED)})")
 
-    cfg_region = {"aws": "aws_region", "azure": "azure_location", "gcp": "gcp_region"}[cloud]
+    cfg_region = {"aws": "aws_region", "azure": "azure_location",
+                  "gcp": "gcp_region", "oci": "oci_region"}[cloud]
     cfg_node = {"aws": "aws_eks_node_instance_type", "azure": "azure_aks_node_vm_size",
-                "gcp": "gcp_gke_machine_type"}[cloud]
+                "gcp": "gcp_gke_machine_type", "oci": "oci_oke_node_shape"}[cloud]
     cfg_ver = {"aws": "aws_eks_k8s_version", "azure": "azure_aks_k8s_version",
-               "gcp": "gcp_gke_k8s_version"}[cloud]
+               "gcp": "gcp_gke_k8s_version", "oci": "oci_oke_k8s_version"}[cloud]
 
     configured_region = _cfg(cfg_region)
     region = (region or "").strip() or configured_region
@@ -564,13 +601,29 @@ def _assemble_gke_kubeconfig(*, cluster_name: str, endpoint: str, ca_b64: str) -
         command="gke-gcloud-auth-plugin", args=[])
 
 
+def _assemble_oke_kubeconfig(*, cluster_name: str, endpoint: str, ca_b64: str,
+                             cluster_ocid: str, region: str) -> str:
+    """An exec (``oci ce cluster generate-token``) kubeconfig for an OKE cluster.
+    The runner swaps the exec for a server-minted OKE token
+    (``oci_service.oke_get_token``)."""
+    return _exec_kubeconfig(
+        cluster_name=cluster_name, endpoint=endpoint, ca_b64=ca_b64,
+        command="oci",
+        args=["ce", "cluster", "generate-token", "--cluster-id", cluster_ocid,
+              "--region", region])
+
+
 def _assemble_cluster_kubeconfig(*, cloud: str, cluster_name: str, endpoint: str,
-                                 ca_b64: str, region: str) -> str:
+                                 ca_b64: str, region: str, cluster_ocid: str = "") -> str:
     """Pick the per-cloud kubeconfig assembler for a freshly provisioned cluster."""
     if cloud == "azure":
         return _assemble_aks_kubeconfig(cluster_name=cluster_name, endpoint=endpoint, ca_b64=ca_b64)
     if cloud == "gcp":
         return _assemble_gke_kubeconfig(cluster_name=cluster_name, endpoint=endpoint, ca_b64=ca_b64)
+    if cloud == "oci":
+        return _assemble_oke_kubeconfig(
+            cluster_name=cluster_name, endpoint=endpoint, ca_b64=ca_b64,
+            cluster_ocid=cluster_ocid, region=region)
     return _assemble_eks_kubeconfig(
         cluster_name=cluster_name, endpoint=endpoint, ca_b64=ca_b64, region=region)
 
@@ -614,6 +667,17 @@ _MILESTONES = [
     ("google_container_cluster.this: destroying",            45, "Destroying the GKE cluster…"),
     ("google_container_cluster.this: still destroying",      60, "Destroying the GKE cluster…"),
     ("google_container_cluster.this: destruction complete",  88, "Cleaning up the VPC + NAT…"),
+    # provision — OCI OKE (cluster, then node pool)
+    ("oci_containerengine_cluster.this: creating",           30, "Creating the OKE cluster (~5-10 min)…"),
+    ("oci_containerengine_cluster.this: still creating",     45, "Creating the OKE cluster (~5-10 min)…"),
+    ("oci_containerengine_cluster.this: creation complete",  75, "Cluster ready; creating the node pool…"),
+    ("oci_containerengine_node_pool.this: creating",         82, "Creating the node pool…"),
+    ("oci_containerengine_node_pool.this: still creating",   88, "Creating the node pool…"),
+    ("oci_containerengine_node_pool.this: creation complete", 95, "Node pool ready; finalizing…"),
+    ("oci_containerengine_node_pool.this: destroying",       25, "Destroying the node pool…"),
+    ("oci_containerengine_cluster.this: destroying",         45, "Destroying the OKE cluster…"),
+    ("oci_containerengine_cluster.this: still destroying",   60, "Destroying the OKE cluster…"),
+    ("oci_containerengine_cluster.this: destruction complete", 88, "Cleaning up the VCN + NAT…"),
 ]
 
 
@@ -662,7 +726,8 @@ async def run_provision_apply(db: Session, *, cluster_id: str, job_id: str,
 
         kubeconfig = _assemble_cluster_kubeconfig(
             cloud=cloud, cluster_name=cluster_out_name, endpoint=endpoint,
-            ca_b64=ca_b64, region=row.region or "")
+            ca_b64=ca_b64, region=row.region or "",
+            cluster_ocid=str(outputs.get("cluster_ocid") or ""))
         ref = _KUBECONFIG_KEY.format(cluster_id=cluster_id)
         config_service.set(ref, kubeconfig)
         # Azure: capture the agent's workload-identity client id + per-cluster Key
@@ -946,6 +1011,12 @@ def _runner_kubeconfig(kubeconfig: str) -> str:
         elif command in ("gke-gcloud-auth-plugin", "gcloud"):
             from . import gcp_service
             token = gcp_service.gke_get_token()
+        elif command == "oci" and "generate-token" in args:
+            from . import oci_service
+            cluster_ocid = _arg("--cluster-id")
+            if not cluster_ocid:
+                return kubeconfig
+            token = oci_service.oke_get_token(cluster_ocid, _arg("--region"))
         else:
             return kubeconfig  # not a cloud exec-auth kubeconfig we mint for — leave as-is
 

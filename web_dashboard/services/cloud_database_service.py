@@ -41,12 +41,16 @@ logger = logging.getLogger(__name__)
 
 # Community supports the three engines the beyondtrust/sra provider can tunnel
 # (no MongoDB resource yet). All engine × cloud combos are wired — see _IMPLEMENTED.
-VALID_ENGINES = {"postgres", "mysql", "sqlserver"}
-VALID_CLOUDS = {"aws", "azure", "gcp"}
+VALID_ENGINES = {"postgres", "mysql", "sqlserver", "oracle"}
+VALID_CLOUDS = {"aws", "azure", "gcp", "oci"}
 _IMPLEMENTED = {
     ("postgres", "aws"), ("postgres", "gcp"), ("postgres", "azure"),
     ("mysql", "aws"), ("mysql", "azure"), ("mysql", "gcp"),
     ("sqlserver", "aws"), ("sqlserver", "gcp"), ("sqlserver", "azure"),
+    # OCI Autonomous Database (ATP/ADW) — a managed PaaS, unlike the RDS/Cloud
+    # SQL/Flexible-Server engines; reached over a generic PRA tcp tunnel (no SSH
+    # jump-host managed-user path — that's AWS-only, gated on cloud=="aws").
+    ("oracle", "oci"),
 }
 _PROVIDER = {
     ("postgres", "aws"): "rds",
@@ -58,6 +62,7 @@ _PROVIDER = {
     ("sqlserver", "aws"): "rds",
     ("sqlserver", "gcp"): "cloudsql",
     ("sqlserver", "azure"): "sql_database",
+    ("oracle", "oci"): "autonomous",
 }
 
 # terraform/<dir> module per (engine, cloud) — relative to repo root (parents[2]).
@@ -72,16 +77,19 @@ _TEMPLATE_DIRS = {
     ("sqlserver", "aws"): os.path.join(_REPO_ROOT, "terraform", "db_sqlserver"),
     ("sqlserver", "gcp"): os.path.join(_REPO_ROOT, "terraform", "db_gcp_sqlserver"),
     ("sqlserver", "azure"): os.path.join(_REPO_ROOT, "terraform", "db_azure_sqlserver"),
+    ("oracle", "oci"): os.path.join(_REPO_ROOT, "terraform", "db_oci_autonomous"),
 }
 _DEPLOYMENTS_DIR = os.path.join(_REPO_ROOT, "terraform", "deployments")
 
-_DEFAULT_PORTS = {"postgres": 5432, "mysql": 3306, "sqlserver": 1433}
+# oracle = the ADB TLS (no-wallet) listener port. mTLS would be 1522.
+_DEFAULT_PORTS = {"postgres": 5432, "mysql": 3306, "sqlserver": 1433, "oracle": 1521}
 
 # tf_variables keys that hold the admin secret — stripped before the -var set is
 # persisted to the job metadata (a secret is never written to jobs.extra_data).
 # run_provision_apply re-injects the password from the secrets backend. aws/gcp
-# use master_password; azure's Flexible Server module uses administrator_password.
-_SECRET_TF_KEYS = ("master_password", "administrator_password")
+# use master_password; azure's Flexible Server module uses administrator_password;
+# OCI Autonomous DB uses admin_password.
+_SECRET_TF_KEYS = ("master_password", "administrator_password", "admin_password")
 
 
 class CloudDatabaseError(Exception):
@@ -105,6 +113,12 @@ def _db_name_from(name: str) -> str:
     if not slug[0].isalpha():
         slug = "db_" + slug
     return slug[:63]
+
+
+def _oracle_db_name(db_id: str) -> str:
+    """OCI Autonomous DB ``db_name``: <=14 chars, alphanumeric, letter-led (no
+    hyphens/underscores). Derived deterministically from the row id."""
+    return ("adb" + re.sub(r"[^a-z0-9]", "", db_id.lower()))[:14]
 
 
 def _build_tf_variables(
@@ -302,6 +316,29 @@ def _build_tf_variables(
             "tags": {"managed-by": "vm-dashboard", "clouddb-id": db_id},
         }
 
+    if (engine, cloud) == ("oracle", "oci"):
+        # OCI Autonomous Database (ATP/ADW). Free-tier (default) is a PUBLIC
+        # endpoint reached over the PRA tcp tunnel from the public-subnet jumpoint
+        # (Always-Free ADB can't sit in a VCN); a private endpoint needs is_free_tier
+        # false + a subnet. The admin login is always ADMIN; only the password is a
+        # variable (mapped from the minted master_password). db_name is ADB-shaped
+        # (<=14 alnum, letter-led) — distinct from the generic db_name arg.
+        is_free = bool(opts.get("oci_is_free_tier", True))
+        return {
+            "compartment_ocid": opts.get("oci_compartment_ocid") or _cfg("oci_compartment_ocid") or _cfg("oci_tenancy_ocid"),
+            "identifier": f"clouddb-{db_id[:8]}",
+            "db_name": _oracle_db_name(db_id),
+            "admin_password": master_password,
+            "db_workload": (opts.get("oci_db_workload") or "OLTP").upper(),
+            "is_free_tier": is_free,
+            "cpu_core_count": int(opts.get("oci_cpu_core_count") or 1),
+            "data_storage_size_in_tbs": int(opts.get("oci_data_storage_tbs") or 1),
+            # Private endpoint only when explicitly paid + a subnet is given.
+            "subnet_ocid": ("" if is_free else (opts.get("oci_subnet_ocid") or _cfg("oci_default_subnet_ocid") or "")),
+            "is_mtls_connection_required": False,
+            "freeform_tags": {"managed-by": "vm-dashboard", "clouddb-id": db_id},
+        }
+
     raise NotImplementedError(f"{engine}/{cloud} Terraform variables not implemented")
 
 
@@ -347,8 +384,14 @@ def provision(
     db.refresh(row)
 
     # Mint the admin master credential and stash it via the encrypted config
-    # store — never returned in plaintext after this point.
-    master_password = secrets.token_urlsafe(24)
+    # store — never returned in plaintext after this point. OCI Autonomous DB
+    # rejects the default token_urlsafe(24) (32 chars > ADB's 30-char cap, and no
+    # guaranteed upper/lower/digit mix), so use the complexity generator there.
+    if engine == "oracle":
+        from . import cloud_db_sql_service as _sql
+        master_password = _sql.generate_password(24)  # 24 chars, guaranteed upper/lower/digit/symbol
+    else:
+        master_password = secrets.token_urlsafe(24)
     config_service.set(f"clouddb/{row.id}/admin", master_password)
     row.credentials_ref = f"config://clouddb/{row.id}/admin"
     db.commit()
@@ -524,9 +567,11 @@ async def _broker_tunnel(db: Session, *, row: CloudDatabase, job_id: str,
         # empty, want_vault is False, and the tunnel comes up with no credential
         # to inject (no warning, since the vault account is never attempted).
         admin_username = (tf_variables.get("master_username")
-                          or tf_variables.get("administrator_login") or "")
+                          or tf_variables.get("administrator_login")
+                          or ("ADMIN" if engine == "oracle" else ""))
         admin_password = (tf_variables.get("master_password")
-                          or tf_variables.get("administrator_password") or "")
+                          or tf_variables.get("administrator_password")
+                          or tf_variables.get("admin_password") or "")
         if override_cred:
             admin_username, admin_password = override_cred
         vault_account_name = f"{jump_name}-admin"
@@ -606,11 +651,14 @@ async def _entitle_register_core(db: Session, *, row: CloudDatabase, engine: str
     # password is never in job metadata (scrubbed) — fall back to the config store
     # (still present until a clean decommission). Cloud SQL SQL Server forces the
     # 'sqlserver' admin login; everything else defaults to 'dbadmin'.
-    default_user = "sqlserver" if (engine == "sqlserver" and row.cloud == "gcp") else "dbadmin"
+    default_user = ("ADMIN" if engine == "oracle"
+                    else "sqlserver" if (engine == "sqlserver" and row.cloud == "gcp")
+                    else "dbadmin")
     admin_username = (tfv.get("master_username")
                       or tfv.get("administrator_login") or default_user)
     admin_password = (tfv.get("master_password")
                       or tfv.get("administrator_password")
+                      or tfv.get("admin_password")
                       or config_service.get(f"clouddb/{row.id}/admin") or "")
     if not admin_password:
         raise CloudDatabaseError(
@@ -738,9 +786,11 @@ async def _store_ps_credentials(db: Session, *, row: CloudDatabase, job_id: str,
     # Per-cloud credential key normalization (see _broker_tunnel): aws/gcp use
     # master_*, azure's Flexible Server module uses administrator_*.
     admin_username = (tf_variables.get("master_username")
-                      or tf_variables.get("administrator_login") or "dbadmin")
+                      or tf_variables.get("administrator_login")
+                      or ("ADMIN" if row.engine == "oracle" else "dbadmin"))
     admin_password = (tf_variables.get("master_password")
-                      or tf_variables.get("administrator_password") or "")
+                      or tf_variables.get("administrator_password")
+                      or tf_variables.get("admin_password") or "")
 
     try:
         from . import ps_api_service
@@ -981,7 +1031,8 @@ async def run_provision_apply(
     # read it back out of tf_variables) expect.
     _pw = config_service.get(f"clouddb/{db_id}/admin") or ""
     if _pw:
-        tf_variables["administrator_password" if row.cloud == "azure" else "master_password"] = _pw
+        _pw_key = {"azure": "administrator_password", "oci": "admin_password"}.get(row.cloud, "master_password")
+        tf_variables[_pw_key] = _pw
     job_service.set_running(db, job_id)
     try:
         # Kick the shared Jumpoint host EARLY (only when PRA is configured) so its

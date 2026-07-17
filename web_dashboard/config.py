@@ -250,6 +250,13 @@ class Settings(BaseSettings):
     gcp_gke_k8s_version: str = ""
     gcp_gke_machine_type: str = ""
     gcp_gke_authorized_cidrs: str = ""
+    # Managed-Kubernetes (OKE) provisioning. Self-contained VCN (own CIDR, distinct
+    # from the sandbox 10.98/16); BASIC cluster = free control plane; the node pool
+    # defaults to a single Always-Free A1.Flex node (2 OCPU / 12 GB). Empty version /
+    # shape → the terraform/k8s_cluster/oci_oke module defaults.
+    oci_oke_k8s_version: str = ""
+    oci_oke_node_shape: str = ""       # e.g. VM.Standard.A1.Flex
+    oci_oke_vcn_cidr: str = "10.96.0.0/16"
 
     # BeyondTrust integration. Two distinct API surfaces:
     #   • PRA (Privileged Remote Access)  — Shell Jump provisioning via the
@@ -701,6 +708,7 @@ class Settings(BaseSettings):
     k8s_runner_aws: str = ""                  # "" | "local" | "ecs"
     k8s_runner_azure: str = ""                # "" | "local" | "aci"
     k8s_runner_gcp: str = ""                  # "" | "local" | "gcp"
+    k8s_runner_oci: str = ""                  # "" | "local"  (an OCI Container-Instance runner is a follow-up; OKE uses in-process kubectl + oke_get_token for now)
     k8s_runner_image: str = "dtzar/helm-kubectl:latest"  # shared default for all clouds
     # Per-target-cluster-cloud image override; blank → k8s_runner_image. Lets Azure
     # pull from an ACR mirror (avoiding Docker Hub) while AWS/GCP use the shared

@@ -62,7 +62,7 @@ def mode(target_cloud: str = "") -> str:
     cluster's cloud (``aws`` / ``azure`` / ``gcp`` from ``K8sCluster.cloud``); a
     blank value uses the global setting (back-compat)."""
     tc = (target_cloud or "").strip().lower()
-    per_cloud = _cfg(f"k8s_runner_{tc}") if tc in ("aws", "azure", "gcp") else ""
+    per_cloud = _cfg(f"k8s_runner_{tc}") if tc in ("aws", "azure", "gcp", "oci") else ""
     return (per_cloud or _cfg("k8s_runner") or "local").strip().lower()
 
 
