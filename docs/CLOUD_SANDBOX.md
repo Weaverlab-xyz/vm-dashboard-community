@@ -173,7 +173,7 @@ RDS:
 Security groups:
   dashboard-sandbox-jumpoint-sg
     egress: 0.0.0.0/0 (so PRA relay is reachable)
-    ingress: from VPC (10.99.0.0/16)
+    ingress: none — egress-only; the Jumpoint dials out, nothing connects in
   dashboard-sandbox-vm-sg
     egress: 10.99.0.0/16 only — no internet
     ingress: tcp/22 from dashboard-sandbox-jumpoint-sg
