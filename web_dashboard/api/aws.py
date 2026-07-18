@@ -925,10 +925,14 @@ async def _run_deploy(
 
         # ── Step 1: Start ECS Jumpoint container first (BeyondTrust only) ─────
         from ..services import config_service as _cfg_svc
+        from ..services.region_config import resolve_region
         # Per-deploy region (falls back to the configured default for older callers).
         _aws_region = region or _aws_cfg("aws_region") or "us-east-2"
+        # Per-region SSH key secret + SSM instance profile (blank fields / the default
+        # region fall back to the flat ec2_* config keys).
+        _rc = resolve_region("aws", _aws_region)
         _meta = (db.query(Job).filter(Job.id == job_id).first().metadata_dict or {})
-        ssh_secret_name = _meta.get("ssh_key_secret_override") or _cfg_svc.get("ec2_ssh_key_secret") or ""
+        ssh_secret_name = _meta.get("ssh_key_secret_override") or _rc["ssh_key_secret"]
         if _cfg_svc.get_bool("beyondtrust_enabled"):
             job_service.update_progress(db, job_id, 15, "Ensuring the shared BeyondTrust Jumpoint host…")
             try:
@@ -1006,7 +1010,7 @@ async def _run_deploy(
                     public_key=public_key,
                     subnet_id=subnet_id,
                     security_group_ids=security_group_ids,
-                    iam_instance_profile=_cfg_svc.get("ec2_ssm_instance_profile") or "",
+                    iam_instance_profile=_rc["ssm_instance_profile"],
                     os_type=os_type,
                     workgroup=workgroup,
                     correlation_tag=_elev.correlation_tag,
@@ -1110,11 +1114,15 @@ async def _run_bulk_deploy(
 
         # Step 1: Start ONE ECS Jumpoint container for the whole batch (BT only)
         from ..services import config_service as _cfg_svc
+        from ..services.region_config import resolve_region
         # Shared per-batch region (falls back to the configured default).
         _aws_region = region or _aws_cfg("aws_region") or "us-east-2"
+        # Per-region SSH key secret + SSM instance profile (flat fallback for the
+        # default region / blank fields).
+        _rc = resolve_region("aws", _aws_region)
         first_job_id = job_items[0][0]
         _bmeta = (db.query(Job).filter(Job.id == first_job_id).first().metadata_dict or {})
-        ssh_secret_name = _bmeta.get("ssh_key_secret_override") or _cfg_svc.get("ec2_ssh_key_secret") or ""
+        ssh_secret_name = _bmeta.get("ssh_key_secret_override") or _rc["ssh_key_secret"]
         ecs_error = None
         jumpoint_host_id = None
         if _cfg_svc.get_bool("beyondtrust_enabled"):
@@ -1196,7 +1204,7 @@ async def _run_bulk_deploy(
                         public_key="" if is_windows else shared_public_key,
                         subnet_id=subnet_id,
                         security_group_ids=security_group_ids,
-                        iam_instance_profile=_cfg_svc.get("ec2_ssm_instance_profile") or "",
+                        iam_instance_profile=_rc["ssm_instance_profile"],
                         workgroup=workgroup,
                         correlation_tag=_bulk_elev.correlation_tag,
                     )

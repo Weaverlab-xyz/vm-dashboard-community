@@ -346,10 +346,14 @@ def _gcp_jumpoint_subnetwork(project: str, zone: str) -> str:
     register). The sandbox emits a bare name, but GCE's networkInterfaces.subnetwork
     needs projects/<p>/regions/<r>/subnetworks/<name>; a value already containing "/"
     is passed through unchanged."""
-    sub = _cfg("gcp_jumpoint_subnetwork") or _cfg("gcp_subnetwork") or ""
+    from . import region_catalog
+    from .region_config import resolve_region
+    # Resolve per the jumpoint's region (derived from its zone). The region-config
+    # jumpoint_subnetwork falls back to gcp_subnetwork, then the flat keys.
+    region = region_catalog.region_from_zone(zone)
+    sub = resolve_region("gcp", region)["jumpoint_subnetwork"]
     if not sub or "/" in sub:
         return sub
-    region = _cfg("gcp_region") or (zone.rsplit("-", 1)[0] if zone else "")
     return f"projects/{project}/regions/{region}/subnetworks/{sub}" if region else sub
 
 
@@ -367,6 +371,7 @@ async def _ensure_jumpoint_host_gcp(region: str) -> Optional[str]:
     """Ensure the shared COS GCE Jumpoint VM is up (idempotent on name); return its
     name. Best-effort — logs and returns None when prerequisites are missing."""
     from . import gcp_service
+    from .region_config import resolve_region
     project = _gcp_project()
     if not project:
         logger.warning("jumpoint-host(gcp): gcp_project not set — cannot start a jumpoint.")
@@ -385,7 +390,8 @@ async def _ensure_jumpoint_host_gcp(region: str) -> Optional[str]:
             name=name,
             container_image=_cfg("gcp_jumpoint_image") or "beyondtrust/sra-jumpoint:latest",
             deploy_key=deploy_key,
-            network=_cfg("gcp_db_network") or _cfg("gcp_network") or "",
+            # Per-region DB network (region-config db_network → gcp_network flat).
+            network=resolve_region("gcp", region)["db_network"],
             subnetwork=_gcp_jumpoint_subnetwork(project, zone),
             machine_type=_cfg("gcp_jumpoint_machine_type") or "e2-micro",
             create_external_ip=True,

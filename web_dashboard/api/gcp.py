@@ -481,7 +481,11 @@ async def deploy_instance(
 
 async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, zone: str) -> None:
     from ..services import config_service as _cfg_svc
+    from ..services.region_config import resolve_region
     db = _get_db_session()
+    # Per-region SSH key secret + default network tag (blank fields / the default
+    # region fall back to the flat gcp_* config keys).
+    _rc = resolve_region("gcp", _region_from_zone(zone))
     bt_enabled = _cfg_svc.get_bool("beyondtrust_enabled")
     jumpoint_name = ""
     jumpoint_zone = zone
@@ -529,8 +533,8 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
                     f"Jumpoint provisioning failed (non-fatal): {e} — continuing with VM launch…"
                 )
 
-        # Retrieve SSH public key (per-launch override wins over the configured default)
-        secret_name = getattr(payload, "ssh_key_secret_override", None) or _cfg_svc.get("gcp_ssh_key_secret_name") or ""
+        # Retrieve SSH public key (per-launch override wins over the region default)
+        secret_name = getattr(payload, "ssh_key_secret_override", None) or _rc["ssh_key_secret"]
         ssh_username = _cfg_svc.get("gcp_ssh_username") or payload.ssh_username or "gcp-user"
         ssh_public_key = ""
         if secret_name:
@@ -546,7 +550,7 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
 
         # Merge config-driven default network tags (used by sandbox firewall
         # rules) with any tags the user supplied on the deploy form.
-        default_tag_csv = _cfg_svc.get("gcp_default_network_tag") or ""
+        default_tag_csv = _rc["default_network_tag"]
         default_tags = [t.strip() for t in default_tag_csv.split(",") if t.strip()]
         merged_tags = list(dict.fromkeys((payload.network_tags or []) + default_tags))
 
