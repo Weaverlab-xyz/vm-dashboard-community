@@ -198,6 +198,51 @@ def test_azure_branches_read_engine_specific_subnet_keys():
         CONF.clear()
 
 
+# ── multi-region: per-region subnet/network resolution (Phase 2b) ─────────────
+
+def test_azure_db_uses_non_default_region_subnet_and_rg():
+    import json
+    CONF.clear()
+    CONF.update({
+        "azure_location": "centralus",                 # configured default region
+        "azure_resource_group": "rg-default",
+        "azure_db_subnet_id": "subnet-default-pg",     # flat = default region
+        "azure_db_mysql_subnet_id": "subnet-default-my",
+        "azure_region_configs": json.dumps({
+            "westus2": {"db_subnet_id": "subnet-west-pg",
+                        "db_mysql_subnet_id": "subnet-west-my",
+                        "resource_group": "rg-west"},
+        }),
+    })
+    try:
+        pg = _build("postgres", "azure", region="westus2")
+        assert pg["delegated_subnet_id"] == "subnet-west-pg"
+        assert pg["resource_group_name"] == "rg-west"
+        my = _build("mysql", "azure", region="westus2")
+        assert my["delegated_subnet_id"] == "subnet-west-my"
+        # The default region still resolves to the flat keys.
+        assert _build("postgres", "azure", region="centralus")["delegated_subnet_id"] == "subnet-default-pg"
+    finally:
+        CONF.clear()
+
+
+def test_gcp_db_uses_non_default_region_network():
+    import json
+    CONF.clear()
+    CONF.update({
+        "gcp_project": "proj-x",
+        "gcp_region": "us-central1",                   # configured default region
+        "gcp_network": "net-default",                  # flat (secondary fallback)
+        "gcp_region_configs": json.dumps({"europe-west1": {"db_network": "net-eu"}}),
+    })
+    try:
+        assert _build("postgres", "gcp", region="europe-west1")["private_network"] == "net-eu"
+        # Default region: db_network unset → secondary fallback to gcp_network.
+        assert _build("postgres", "gcp", region="us-central1")["private_network"] == "net-default"
+    finally:
+        CONF.clear()
+
+
 # ── guard ────────────────────────────────────────────────────────────────────
 
 def test_unsupported_combo_raises_not_implemented():

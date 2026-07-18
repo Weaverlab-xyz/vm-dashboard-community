@@ -95,6 +95,51 @@ class AzureRegionConfig(BaseModel):
     default_vm_size: str = ""
 
 
+class AwsRegionConfig(BaseModel):
+    """One region's AWS resource defaults (multi-region support). Stored inside the
+    ``aws_region_configs`` JSON map; blank fields fall back to the flat keys
+    (``default_subnet_id`` → ``aws_default_subnet_id``, ``ssh_key_secret`` →
+    ``ec2_ssh_key_secret``, …). Fields mirror region_config._SPECS['aws']."""
+    default_subnet_id: str = ""
+    default_security_group_id: str = ""
+    ssh_key_secret: str = ""
+    ssm_instance_profile: str = ""
+    db_subnet_group_name: str = ""
+
+
+class GcpRegionConfig(BaseModel):
+    """One region's GCP resource defaults (multi-region support). Stored inside the
+    ``gcp_region_configs`` JSON map; blank fields fall back to the flat keys
+    (``subnetwork`` → ``gcp_subnetwork``, ``ssh_key_secret`` →
+    ``gcp_ssh_key_secret_name``, …). Fields mirror region_config._SPECS['gcp']."""
+    zone: str = ""
+    network: str = ""
+    subnetwork: str = ""
+    jumpoint_subnetwork: str = ""
+    db_network: str = ""
+    ssh_key_secret: str = ""
+    default_network_tag: str = ""
+
+
+# Cloud → per-region-config model. Drives the /import parser and the /regions/{cloud}
+# editor endpoints. Only these clouds have per-region resource sets (OCI has none).
+_REGION_CONFIG_MODELS: dict[str, type[BaseModel]] = {
+    "azure": AzureRegionConfig,
+    "aws":   AwsRegionConfig,
+    "gcp":   GcpRegionConfig,
+}
+
+
+def _region_config_cloud(key: str) -> "str | None":
+    """Return the cloud for a ``<cloud>_region.<region>.<field>`` import key, else
+    None. Matches only the dotted region-config namespace — flat keys like
+    ``aws_region`` or ``azure_region_configs`` do not match (no trailing dot)."""
+    for c in _REGION_CONFIG_MODELS:
+        if key.startswith(f"{c}_region."):
+            return c
+    return None
+
+
 class GCPSetup(BaseModel):
     gcp_project_id: str = ""
     gcp_region: str = "us-central1"
@@ -403,12 +448,12 @@ def import_config(payload: HeadlessImport, request: Request, background_tasks: B
     # stringify numbers; drop nulls. Strings (incl. embedded JSON like
     # gcp_service_account_json) pass through unchanged.
     #
-    # Multi-region (PR3): keys shaped ``azure_region.<location>.<field>`` are NOT
-    # stored as flat keys — they're collected here and merged into the
-    # ``azure_region_configs`` JSON map below, so running the sandbox in westus2
-    # then centralus populates BOTH region entries without clobbering.
+    # Multi-region: keys shaped ``<cloud>_region.<region>.<field>`` (cloud in
+    # aws/gcp/azure) are NOT stored as flat keys — they're collected per cloud and
+    # merged into that cloud's ``<cloud>_region_configs`` JSON map below, so running
+    # the sandbox in two regions populates BOTH entries without clobbering.
     pairs: dict = {}
-    region_updates: dict[str, dict] = {}
+    region_updates: dict[str, dict[str, dict]] = {}  # cloud -> region -> field -> val
     for key, value in payload.config.items():
         if value is None:
             continue
@@ -417,12 +462,14 @@ def import_config(payload: HeadlessImport, request: Request, background_tasks: B
         else:
             sval = value if isinstance(value, str) else str(value)
 
-        if key.startswith("azure_region."):
-            parts = key.split(".", 2)  # ["azure_region", "<location>", "<field>"]
-            if len(parts) == 3 and parts[1] and parts[2] in AzureRegionConfig.model_fields:
-                region_updates.setdefault(parts[1], {})[parts[2]] = sval
+        cloud = _region_config_cloud(key)
+        if cloud:
+            parts = key.split(".", 2)  # ["<cloud>_region", "<region>", "<field>"]
+            model = _REGION_CONFIG_MODELS[cloud]
+            if len(parts) == 3 and parts[1] and parts[2] in model.model_fields:
+                region_updates.setdefault(cloud, {}).setdefault(parts[1], {})[parts[2]] = sval
                 continue
-            # Malformed azure_region.* key (bad field / shape) — drop it rather
+            # Malformed <cloud>_region.* key (bad field / shape) — drop it rather
             # than persist a stray flat key.
             logger.warning("Import: ignoring unrecognized region key %r", key)
             continue
@@ -435,7 +482,8 @@ def import_config(payload: HeadlessImport, request: Request, background_tasks: B
         config_service.set_many(pairs)
     if region_updates:
         from ..services.region_config import merge_region_fields
-        merge_region_fields(region_updates)
+        for cloud, updates in region_updates.items():
+            merge_region_fields(cloud, updates)
     config_service.invalidate()
     try:
         from ..services import azure_service
@@ -446,18 +494,22 @@ def import_config(payload: HeadlessImport, request: Request, background_tasks: B
     if not already:
         config_service.mark_setup_complete()
 
+    # Flat, deduped list of region names merged across every cloud (keeps the
+    # response shape a single-cloud import always had).
+    merged_regions = sorted({r for regions in region_updates.values() for r in regions})
+
     background_tasks.add_task(_invalidate_data_caches)
     logger.info(
         "Headless import: %d config keys written [%s]%s%s.",
         len(pairs),
         ", ".join(sorted(pairs.keys())),
-        f"; region sets merged: {', '.join(sorted(region_updates))}" if region_updates else "",
+        f"; region sets merged: {', '.join(merged_regions)}" if merged_regions else "",
         "" if already else "; admin created + setup marked complete",
     )
     return {
         "ok": True,
         "keys_written": len(pairs),
-        "regions_merged": sorted(region_updates.keys()),
+        "regions_merged": merged_regions,
     }
 
 
@@ -935,52 +987,90 @@ def patch_feature_config(feature_name: str, payload: dict, request: Request):
 
 # ── Azure per-region config sets (multi-region, Follow-on 6 PR3) ──────────────
 #
-# The region map lives as ONE JSON value (azure_region_configs) rather than flat
-# keys, so it gets its own GET/PUT pair instead of riding the _FEATURE_MODELS
-# panel. The Configure UI lists configured regions and edits a region's fields;
-# blank fields fall back to the flat keys at resolve time (region_config.py).
+# Each cloud's region map lives as ONE JSON value (``<cloud>_region_configs``) rather
+# than flat keys, so it gets its own GET/PUT pair instead of riding the _FEATURE_MODELS
+# panel. The Configure UI lists configured regions and edits a region's fields; blank
+# fields fall back to the flat keys at resolve time (region_config.py).
 
-class AzureRegionConfigsPayload(BaseModel):
-    """Full region map for replace-on-save: {location: AzureRegionConfig}."""
-    regions: dict[str, AzureRegionConfig] = {}
+class RegionConfigsPayload(BaseModel):
+    """Full region map for replace-on-save: {region: {field: value}}."""
+    regions: dict[str, dict] = {}
 
 
-@router.get("/azure-regions")
-def get_azure_regions(request: Request):
-    """Return the configured Azure region map + the default region + the flat-key
-    fallbacks (so the editor can show effective defaults). Admin JWT required."""
-    _require_admin(request)
-    from ..services import config_service
-    from ..services.region_config import load_region_configs, REGION_FIELDS, _FIELD_FALLBACK_KEYS
+def _region_configs_response(cloud: str) -> dict:
+    """Shared body for the region-config editor GET: the stored map (each entry
+    reshaped through the cloud's model so every field key is present), the configured
+    default region, the field list, and each field's flat-key fallback value."""
+    from ..services import config_service, region_catalog
+    from ..services.region_config import load_region_configs, region_fields, field_fallbacks
 
-    stored = load_region_configs()
-    # Re-shape each stored entry through the model so every field key is present.
+    model = _REGION_CONFIG_MODELS[cloud]
+    stored = load_region_configs(cloud)
     regions = {
-        loc: AzureRegionConfig(**{k: v for k, v in fields.items()
-                                  if k in AzureRegionConfig.model_fields}).model_dump()
+        loc: model(**{k: v for k, v in fields.items() if k in model.model_fields}).model_dump()
         for loc, fields in stored.items()
     }
     return {
-        "default_location": config_service.get("azure_location") or "centralus",
-        "fields": list(REGION_FIELDS),
-        # The flat-key value each field falls back to — handy for the UI to show
-        # what an unset field resolves to without re-deriving the mapping.
-        "fallbacks": {field: config_service.get(flat)
-                      for field, flat in _FIELD_FALLBACK_KEYS.items()},
+        "cloud": cloud,
+        "default_region": region_catalog.default_region(cloud),
+        "fields": list(region_fields(cloud)),
+        "fallbacks": {fld: config_service.get(flat)
+                      for fld, flat in field_fallbacks(cloud).items()},
         "regions": regions,
     }
 
 
-@router.put("/azure-regions")
-def put_azure_regions(payload: AzureRegionConfigsPayload, request: Request):
-    """Replace the Azure region map. Admin JWT required. Blank fields are dropped;
-    a region with no non-blank field is omitted (region_config.save_region_configs)."""
-    _require_admin(request)
+def _save_region_configs(cloud: str, payload: RegionConfigsPayload) -> dict:
+    """Shared body for the region-config editor PUT (replace-on-save). Each entry is
+    coerced through the cloud's model so only known fields persist; blank fields and
+    empty regions are dropped by region_config.save_region_configs."""
     from ..services.region_config import save_region_configs
+    model = _REGION_CONFIG_MODELS[cloud]
+    cleaned = {
+        loc: model(**{k: v for k, v in (vals or {}).items() if k in model.model_fields}).model_dump()
+        for loc, vals in payload.regions.items()
+    }
+    save_region_configs(cloud, cleaned)
+    logger.info("%s region config sets updated (%d regions).", cloud, len(payload.regions))
+    return {"ok": True, "cloud": cloud, "regions": sorted(payload.regions.keys())}
 
-    save_region_configs({loc: cfg.model_dump() for loc, cfg in payload.regions.items()})
-    logger.info("Azure region config sets updated (%d regions).", len(payload.regions))
-    return {"ok": True, "regions": sorted(payload.regions.keys())}
+
+@router.get("/regions/{cloud}")
+def get_region_configs(cloud: str, request: Request):
+    """Return the configured per-region map for ``cloud`` + its default region + the
+    flat-key fallbacks (so the editor can show effective defaults). Admin JWT required."""
+    _require_admin(request)
+    cloud = (cloud or "").strip().lower()
+    if cloud not in _REGION_CONFIG_MODELS:
+        raise HTTPException(status_code=404, detail=f"no per-region config for cloud {cloud!r}")
+    return _region_configs_response(cloud)
+
+
+@router.put("/regions/{cloud}")
+def put_region_configs(cloud: str, payload: RegionConfigsPayload, request: Request):
+    """Replace the per-region map for ``cloud``. Admin JWT required."""
+    _require_admin(request)
+    cloud = (cloud or "").strip().lower()
+    if cloud not in _REGION_CONFIG_MODELS:
+        raise HTTPException(status_code=404, detail=f"no per-region config for cloud {cloud!r}")
+    return _save_region_configs(cloud, payload)
+
+
+# Back-compat alias for the original Azure-only editor endpoints (settings.html still
+# calls /azure-regions until the UI is parameterised). GET keeps the original
+# ``default_location`` response key.
+@router.get("/azure-regions")
+def get_azure_regions(request: Request):
+    _require_admin(request)
+    resp = _region_configs_response("azure")
+    resp["default_location"] = resp["default_region"]
+    return resp
+
+
+@router.put("/azure-regions")
+def put_azure_regions(payload: RegionConfigsPayload, request: Request):
+    _require_admin(request)
+    return _save_region_configs("azure", payload)
 
 
 # ── Preview feature flags ─────────────────────────────────────────────────────

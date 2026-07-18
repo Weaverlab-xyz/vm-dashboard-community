@@ -36,6 +36,7 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..database import CloudDatabase, Job
 from . import config_service, job_service, terraform, terraform_provider_env
+from .region_config import resolve_region
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +130,12 @@ def _build_tf_variables(
 
     The module itself hardcodes ``publicly_accessible = false`` — the private-only
     guarantee lives in the .tf, not in a toggle-able variable.
+
+    Per-region resource ids (subnets, DB networks, resource group) resolve through
+    ``region_config.resolve_region(cloud, region)`` so a database provisioned in a
+    non-default region picks up that region's network; a blank field (or the default
+    region) falls back to the flat config keys, so single-region installs are
+    unchanged. An explicit value passed in ``opts`` always wins.
     """
     if (engine, cloud) == ("postgres", "aws"):
         return {
@@ -139,7 +146,8 @@ def _build_tf_variables(
             "master_password": master_password,
             "instance_class": opts.get("instance_class", "db.t3.micro"),
             "allocated_storage": opts.get("allocated_storage", 20),
-            "db_subnet_group_name": opts.get("db_subnet_group_name", ""),
+            "db_subnet_group_name": opts.get("db_subnet_group_name")
+                or resolve_region("aws", region)["db_subnet_group_name"],
             "vpc_security_group_ids": opts.get("vpc_security_group_ids", []),
             # Attach the force_ssl=0 parameter group the sandbox pre-created, so the
             # PRA protocol tunnel's cleartext jumpoint→RDS connection isn't rejected.
@@ -157,7 +165,8 @@ def _build_tf_variables(
             "master_password": master_password,
             "instance_class": opts.get("instance_class", "db.t3.micro"),
             "allocated_storage": opts.get("allocated_storage", 20),
-            "db_subnet_group_name": opts.get("db_subnet_group_name", ""),
+            "db_subnet_group_name": opts.get("db_subnet_group_name")
+                or resolve_region("aws", region)["db_subnet_group_name"],
             "vpc_security_group_ids": opts.get("vpc_security_group_ids", []),
             # MySQL's cleartext knob is require_secure_transport=0 (not
             # rds.force_ssl) — its own mysql8.0-family group the sandbox
@@ -186,7 +195,8 @@ def _build_tf_variables(
             "master_password": master_password,
             "instance_class": sqlserver_class,
             "allocated_storage": opts.get("allocated_storage", 20),
-            "db_subnet_group_name": opts.get("db_subnet_group_name", ""),
+            "db_subnet_group_name": opts.get("db_subnet_group_name")
+                or resolve_region("aws", region)["db_subnet_group_name"],
             "vpc_security_group_ids": opts.get("vpc_security_group_ids", []),
             "tags": {"managed-by": "vm-dashboard", "clouddb-id": db_id},
         }
@@ -205,7 +215,7 @@ def _build_tf_variables(
             "master_password": master_password,
             "tier": opts.get("tier", "db-f1-micro"),
             "disk_size": opts.get("disk_size", 20),
-            "private_network": opts.get("private_network") or _cfg("gcp_db_network") or _cfg("gcp_network"),
+            "private_network": opts.get("private_network") or resolve_region("gcp", region)["db_network"],
             "labels": {"managed-by": "vm-dashboard", "clouddb-id": db_id},
         }
 
@@ -223,7 +233,7 @@ def _build_tf_variables(
             "master_password": master_password,
             "tier": opts.get("tier", "db-f1-micro"),
             "disk_size": opts.get("disk_size", 20),
-            "private_network": opts.get("private_network") or _cfg("gcp_db_network") or _cfg("gcp_network"),
+            "private_network": opts.get("private_network") or resolve_region("gcp", region)["db_network"],
             "labels": {"managed-by": "vm-dashboard", "clouddb-id": db_id},
         }
 
@@ -248,7 +258,7 @@ def _build_tf_variables(
             "master_password": master_password,
             "tier": sqlserver_tier,
             "disk_size": opts.get("disk_size", 20),
-            "private_network": opts.get("private_network") or _cfg("gcp_db_network") or _cfg("gcp_network"),
+            "private_network": opts.get("private_network") or resolve_region("gcp", region)["db_network"],
             "labels": {"managed-by": "vm-dashboard", "clouddb-id": db_id},
         }
 
@@ -256,8 +266,9 @@ def _build_tf_variables(
         # VNet-integrated private Flexible Server. The delegated subnet + private
         # DNS zone are sandbox-created; the module references them. require_secure_
         # transport=OFF (set in the module) is the force_ssl=0 analog for the tunnel.
+        _az = resolve_region("azure", region)
         return {
-            "resource_group_name": opts.get("resource_group_name") or _cfg("azure_resource_group"),
+            "resource_group_name": opts.get("resource_group_name") or _az["resource_group"],
             "location": region,
             "identifier": f"clouddb-{db_id[:8]}",
             "administrator_login": master_username,
@@ -265,8 +276,8 @@ def _build_tf_variables(
             "sku_name": opts.get("sku_name", "B_Standard_B1ms"),
             "storage_mb": opts.get("storage_mb", 32768),
             "db_name": db_name,
-            "delegated_subnet_id": opts.get("delegated_subnet_id") or _cfg("azure_db_subnet_id"),
-            "private_dns_zone_id": opts.get("private_dns_zone_id") or _cfg("azure_db_private_dns_zone_id"),
+            "delegated_subnet_id": opts.get("delegated_subnet_id") or _az["db_subnet_id"],
+            "private_dns_zone_id": opts.get("private_dns_zone_id") or _az["db_private_dns_zone_id"],
             "tags": {"managed-by": "vm-dashboard", "clouddb-id": db_id},
         }
 
@@ -276,8 +287,9 @@ def _build_tf_variables(
         # hosts only one flexible-server type, so MySQL needs its own). The module's
         # require_secure_transport=OFF is the cleartext-tunnel knob; MySQL 8.0's admin
         # defaults to caching_sha2_password, which the PRA tunnel needs.
+        _az = resolve_region("azure", region)
         return {
-            "resource_group_name": opts.get("resource_group_name") or _cfg("azure_resource_group"),
+            "resource_group_name": opts.get("resource_group_name") or _az["resource_group"],
             "location": region,
             "identifier": f"clouddb-{db_id[:8]}",
             "administrator_login": master_username,
@@ -285,7 +297,8 @@ def _build_tf_variables(
             "sku_name": opts.get("sku_name", "B_Standard_B1ms"),
             "storage_mb": opts.get("storage_mb", 32768),
             "db_name": db_name,
-            "delegated_subnet_id": opts.get("delegated_subnet_id") or _cfg("azure_db_mysql_subnet_id"),
+            "delegated_subnet_id": opts.get("delegated_subnet_id") or _az["db_mysql_subnet_id"],
+            # MySQL has its own DNS zone flat key (not a region-config field) — unchanged.
             "private_dns_zone_id": opts.get("private_dns_zone_id") or _cfg("azure_db_mysql_private_dns_zone_id"),
             "tags": {"managed-by": "vm-dashboard", "clouddb-id": db_id},
         }
@@ -304,13 +317,15 @@ def _build_tf_variables(
         if "_Standard_" in sqlserver_sku:
             sqlserver_sku = "Basic"
         return {
-            "resource_group_name": opts.get("resource_group_name") or _cfg("azure_resource_group"),
+            "resource_group_name": opts.get("resource_group_name") or resolve_region("azure", region)["resource_group"],
             "location": region,
             "identifier": f"clouddb-{db_id[:8]}",
             "administrator_login": master_username,
             "administrator_password": master_password,
             "sku_name": sqlserver_sku,
             "db_name": db_name,
+            # SQL Server has its own PE subnet + DNS zone flat keys (not region-config
+            # fields) — unchanged.
             "subnet_id": opts.get("subnet_id") or _cfg("azure_db_sqlserver_subnet_id"),
             "private_dns_zone_id": opts.get("private_dns_zone_id") or _cfg("azure_db_sqlserver_private_dns_zone_id"),
             "tags": {"managed-by": "vm-dashboard", "clouddb-id": db_id},
