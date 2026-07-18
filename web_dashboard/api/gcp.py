@@ -8,7 +8,6 @@ Mirrors the AWS and Azure router patterns:
 """
 import json
 import logging
-import re
 from typing import List, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
@@ -26,7 +25,7 @@ from ..models.gcp import (
     GCPNetworkOptions,
     GCPSSHKeyDetail,
 )
-from ..services import cache_service, cloud_stats, job_service, workgroup_service
+from ..services import cache_service, cloud_stats, job_service, region_catalog, workgroup_service
 from ..services import gcp_service
 from .auth import require_admin, require_permission
 
@@ -59,33 +58,25 @@ def _gcp_region() -> str:
     return parts[0] if len(parts) == 2 else zone
 
 
-# GCP zone format is <region>-<letter> (e.g. us-central1-a, europe-west1-b);
-# region is <geo>-<direction><number> (e.g. us-central1, asia-southeast1).
-_GCP_REGION_RE = re.compile(r"^[a-z]+-[a-z]+\d+$")
-_GCP_ZONE_RE = re.compile(r"^[a-z]+-[a-z]+\d+-[a-z]$")
-
-
 def _resolve_zone(zone: Optional[str]) -> str:
-    """Resolve the effective GCE zone for a request.
-
-    An explicit, well-formed zone wins; a blank/None zone falls back to the
-    configured default (``_gcp_zone()``). A non-blank but malformed zone is
-    rejected with HTTP 400 so a typo can't silently deploy into the default zone.
-    Callers that never pass a zone are unaffected.
-    """
+    """Resolve the effective GCE zone for a request. Format validation is delegated
+    to the shared region catalog; a blank/None zone falls back to the configured
+    default (``_gcp_zone()``); a malformed zone is rejected with HTTP 400 so a typo
+    can't silently deploy into the default zone."""
     if zone is None or not zone.strip():
         return _gcp_zone()
-    z = zone.strip().lower()
-    if not _GCP_ZONE_RE.match(z):
+    z = region_catalog.normalize("gcp", zone)
+    if not region_catalog.validate_zone(z):
         raise HTTPException(status_code=400, detail=f"Invalid GCP zone '{zone}'")
     return z
 
 
 def _region_from_zone(zone: str) -> str:
     """Derive the region a zone belongs to (us-central1-a → us-central1). Falls
-    back to the configured default region if the zone doesn't parse."""
+    back to the configured default region (``_gcp_region()``, which derives from the
+    configured zone when ``gcp_region`` is unset) if the zone doesn't parse."""
     parts = (zone or "").rsplit("-", 1)
-    if len(parts) == 2 and _GCP_REGION_RE.match(parts[0]):
+    if len(parts) == 2 and region_catalog.validate("gcp", parts[0]):
         return parts[0]
     return _gcp_region()
 

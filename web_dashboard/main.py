@@ -468,7 +468,7 @@ def _feature_flags() -> dict:
 # Settings → Integrations panel takes effect immediately — no restart needed.
 
 from fastapi import Depends  # noqa: E402
-from .api import auth, jobs, websocket, aws, azure, gcp, oci, packer, mfa, tokens, users, groups, setup, secrets, storage, images  # noqa: E402
+from .api import auth, jobs, websocket, aws, azure, gcp, oci, packer, mfa, tokens, users, groups, setup, secrets, storage, images, regions as regions_api  # noqa: E402
 from .api import cloud_databases  # noqa: E402
 from .api import audit as audit_api  # noqa: E402
 from .api import docs_pages  # noqa: E402
@@ -496,6 +496,7 @@ app.include_router(cloud_identity_api.router)
 app.include_router(storage.router)
 app.include_router(images.router)
 app.include_router(auth.router)
+app.include_router(regions_api.router)
 app.include_router(mfa.router)
 app.include_router(tokens.router)
 app.include_router(users.router)

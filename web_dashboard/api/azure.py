@@ -13,7 +13,6 @@ Azure API endpoints:
 """
 import asyncio
 import logging
-import re
 from typing import List, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
@@ -37,7 +36,7 @@ from ..models.azure import (
     AzureSSHKeyInfo,
     AzureVMInfo,
 )
-from ..services import azure_service, job_service, cache_service, cloud_stats, workgroup_service
+from ..services import azure_service, job_service, cache_service, cloud_stats, region_catalog, workgroup_service
 from ..services.azure_service import AzureError
 from .auth import get_current_user, require_admin, require_permission
 
@@ -141,24 +140,15 @@ def _rg_for(location: str) -> str:
     return resolve_azure_region(location)["resource_group"] or "vm-cli-rg"
 
 
-# Azure location canonical form: lowercase alphanumeric, no separators
-# (e.g. centralus, eastus2, westeurope). Display names like "East US 2" are
-# normalised to this form before matching.
-_AZURE_LOCATION_RE = re.compile(r"^[a-z0-9]+$")
-
-
 def _resolve_location(location: Optional[str]) -> str:
-    """Resolve the effective Azure location for a request.
-
-    An explicit, well-formed location wins (normalised to the canonical compact
-    form, matching region_config); a blank/None location falls back to the
-    configured default (``_loc()``). A non-blank but malformed location is rejected
-    with HTTP 400 so a typo can't silently deploy into the default region. Callers
-    that never pass a location are unaffected."""
+    """Resolve the effective Azure location for a request. Format validation +
+    normalisation (display names like "East US 2" → the compact form) are delegated
+    to the shared region catalog; a blank/None location falls back to the configured
+    default (``_loc()``); a malformed location is rejected with HTTP 400."""
     if location is None or not location.strip():
         return _loc()
-    loc = location.strip().lower().replace(" ", "")
-    if not _AZURE_LOCATION_RE.match(loc):
+    loc = region_catalog.normalize("azure", location)
+    if not region_catalog.validate("azure", loc):
         raise HTTPException(status_code=400, detail=f"Invalid Azure location '{location}'")
     return loc
 

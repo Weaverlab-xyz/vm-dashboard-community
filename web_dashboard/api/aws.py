@@ -12,7 +12,6 @@ AWS API endpoints:
   DELETE /api/aws/instances/{id}              - Terminate a dashboard-deployed EC2 instance via boto3
 """
 import asyncio
-import re
 from typing import List, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
@@ -40,7 +39,7 @@ from ..models.aws import (
     NetworkOptions,
     SSHKeySecretDetail,
 )
-from ..services import aws_service, job_service, cache_service, cloud_stats, workgroup_service
+from ..services import aws_service, job_service, cache_service, cloud_stats, region_catalog, workgroup_service
 from ..services.aws_service import AWSError
 from .auth import get_current_user, require_admin, require_permission
 
@@ -76,23 +75,15 @@ def _aws_region() -> str:
     return _aws_cfg("aws_region") or "us-east-2"
 
 
-# AWS region format: two-letter geo, area word(s), and a trailing partition digit
-# (e.g. us-east-2, eu-west-1, ap-southeast-3). GovCloud/China (us-gov-*, cn-*) also match.
-_AWS_REGION_RE = re.compile(r"^[a-z]{2}(-gov)?-[a-z]+-\d+$")
-
-
 def _resolve_region(region: Optional[str]) -> str:
-    """Resolve the effective AWS region for a request.
-
-    An explicit, well-formed region wins; a blank/None region falls back to the
-    configured default (``_aws_region()``). A non-blank but malformed region is
-    rejected with HTTP 400 so a typo can't silently deploy into the default region.
-    Single-region callers that never pass a region are unaffected.
-    """
+    """Resolve the effective AWS region for a request. Format validation is
+    delegated to the shared region catalog; a blank/None region falls back to the
+    configured default (``_aws_region()``); a malformed region is rejected with HTTP
+    400 so a typo can't silently deploy into the default region."""
     if region is None or not region.strip():
         return _aws_region()
-    r = region.strip().lower()
-    if not _AWS_REGION_RE.match(r):
+    r = region_catalog.normalize("aws", region)
+    if not region_catalog.validate("aws", r):
         raise HTTPException(status_code=400, detail=f"Invalid AWS region '{region}'")
     return r
 
