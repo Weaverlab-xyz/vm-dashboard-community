@@ -1013,11 +1013,14 @@ def _get_network_options_sync(region: str) -> dict:
     ]
 
     # Deploy-form defaults from the sandbox config so new VMs land on the private
-    # subnet (where the on-demand NAT route applies) + its VM-tier SG. Empty when
-    # unset — the form then leaves the pickers unselected.
-    from . import config_service
-    default_subnet_id = config_service.get("aws_default_subnet_id") or ""
-    default_sg_id = config_service.get("aws_default_security_group_id") or ""
+    # subnet (where the on-demand NAT route applies) + its VM-tier SG. Resolved for
+    # THIS region (per-region config sets fall back to the flat keys), so picking a
+    # non-default region pre-selects that region's subnet/SG. Empty when unset — the
+    # form then leaves the pickers unselected.
+    from .region_config import resolve_region
+    _rc = resolve_region("aws", region)
+    default_subnet_id = _rc["default_subnet_id"]
+    default_sg_id = _rc["default_security_group_id"]
 
     return {
         "subnets": subnets,
