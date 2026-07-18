@@ -19,6 +19,7 @@ class GCPImageInfo(BaseModel):
 class GCPInstanceInfo(BaseModel):
     instance_name: str
     zone: str
+    region: str = ""         # derived from zone (us-central1-a → us-central1)
     machine_type: str = ""
     status: str = ""         # RUNNING | TERMINATED | STAGING | STOPPING | SUSPENDED
     public_ip: Optional[str] = None
