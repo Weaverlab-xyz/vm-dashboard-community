@@ -8,6 +8,7 @@ Mirrors the AWS and Azure router patterns:
 """
 import json
 import logging
+import re
 from typing import List, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
@@ -56,6 +57,37 @@ def _gcp_region() -> str:
         return cfg_region
     parts = zone.rsplit("-", 1)
     return parts[0] if len(parts) == 2 else zone
+
+
+# GCP zone format is <region>-<letter> (e.g. us-central1-a, europe-west1-b);
+# region is <geo>-<direction><number> (e.g. us-central1, asia-southeast1).
+_GCP_REGION_RE = re.compile(r"^[a-z]+-[a-z]+\d+$")
+_GCP_ZONE_RE = re.compile(r"^[a-z]+-[a-z]+\d+-[a-z]$")
+
+
+def _resolve_zone(zone: Optional[str]) -> str:
+    """Resolve the effective GCE zone for a request.
+
+    An explicit, well-formed zone wins; a blank/None zone falls back to the
+    configured default (``_gcp_zone()``). A non-blank but malformed zone is
+    rejected with HTTP 400 so a typo can't silently deploy into the default zone.
+    Callers that never pass a zone are unaffected.
+    """
+    if zone is None or not zone.strip():
+        return _gcp_zone()
+    z = zone.strip().lower()
+    if not _GCP_ZONE_RE.match(z):
+        raise HTTPException(status_code=400, detail=f"Invalid GCP zone '{zone}'")
+    return z
+
+
+def _region_from_zone(zone: str) -> str:
+    """Derive the region a zone belongs to (us-central1-a → us-central1). Falls
+    back to the configured default region if the zone doesn't parse."""
+    parts = (zone or "").rsplit("-", 1)
+    if len(parts) == 2 and _GCP_REGION_RE.match(parts[0]):
+        return parts[0]
+    return _gcp_region()
 
 
 def _jumpoint_name(vm_name: str) -> str:
@@ -157,15 +189,27 @@ async def list_custom_images(
 
 @router.get("/network-options", response_model=GCPNetworkOptions)
 async def network_options(
+    zone: Optional[str] = None,
     bust: bool = Query(False),
     current_user: User = Depends(require_permission("gcp", "read")),
 ):
-    """Return zones, machine types, and subnetworks for the configured project/region."""
+    """Return zones, machine types, and subnetworks for a project/region. ``?zone=``
+    scopes the lookup to a specific zone's region (defaults to the configured
+    zone/region); the cache is keyed per region so regions never collide."""
     project_id = _gcp_project()
     if not project_id:
         raise HTTPException(status_code=400, detail="GCP project ID not configured — run the setup wizard.")
 
-    cache_key = cache_service.key_global("gcp_network_opts")
+    # No zone param → keep the exact historical defaults (honours the gcp_region
+    # config override). An explicit zone derives its own region.
+    if zone:
+        _zone = _resolve_zone(zone)
+        _region = _region_from_zone(_zone)
+    else:
+        _zone = _gcp_zone()
+        _region = _gcp_region()
+
+    cache_key = cache_service.key_param("gcp_network_opts", region=_region)
     if not bust:
         cached = await cache_service.get(cache_key)
         if cached:
@@ -178,8 +222,8 @@ async def network_options(
     try:
         opts = await gcp_service.get_network_options(
             project_id=project_id,
-            region=_gcp_region(),
-            zone=_gcp_zone(),
+            region=_region,
+            zone=_zone,
         )
     except gcp_service.GCPError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
@@ -226,12 +270,14 @@ async def _build_gcp_instances(db, project_id: str) -> list:
 
     instances = []
     for zone, names in by_zone.items():
+        region = _region_from_zone(zone)
         live = await gcp_service.describe_instances(project_id=project_id, zone=zone, instance_names=names)
         for inst in live:
             meta = job_meta.get(inst["instance_name"], {})
             inst["job_id"] = meta.get("job_id")
             inst["deployed_by"] = meta.get("deployed_by")
             inst["workgroup"] = meta.get("workgroup") or inst.get("workgroup")
+            inst["region"] = inst.get("region") or region
             instances.append(inst)
 
     full = GCPInstanceListResponse(instances=instances, project_id=project_id, zone=_gcp_zone())
@@ -383,15 +429,19 @@ async def deploy_instance(
     if not project_id:
         raise HTTPException(status_code=400, detail="GCP project ID not configured — run the setup wizard.")
 
-    zone = payload.zone or _gcp_zone()
+    zone = _resolve_zone(payload.zone)
+    payload.zone = zone            # normalise so the runner uses the resolved zone
+    region = _region_from_zone(zone)
     workgroup = _validate_workgroup(db, current_user, payload.workgroup)
     payload.workgroup = workgroup
 
-    # Pre-action policy gate (inert unless enabled + this action is gated).
+    # Pre-action policy gate (inert unless enabled + this action is gated). The
+    # region must come from the *requested* zone so the allowed-regions guardrail
+    # checks where the VM actually lands, not the global default region.
     from ..services import admission_service
     admission_service.enforce(
         "gcp:gce:deploy",
-        request={"region": _gcp_region(), "zone": zone,
+        request={"region": region, "zone": zone,
                  "instance_type": payload.machine_type, "image": payload.image_self_link,
                  "name": payload.instance_name},
         actor=current_user, db=db,
@@ -418,6 +468,7 @@ async def deploy_instance(
         metadata={
             "project_id":       project_id,
             "zone":             zone,
+            "region":           region,
             "instance_name":    payload.instance_name,
             "machine_type":     payload.machine_type,
             "image_self_link":  payload.image_self_link,
@@ -719,7 +770,7 @@ async def destroy_instance(
     project_id = _gcp_project()
     if not project_id:
         raise HTTPException(status_code=400, detail="GCP project ID not configured.")
-    resolved_zone = zone or _gcp_zone()
+    resolved_zone = _resolve_zone(zone)
 
     # Find the original deploy job so we can retrieve bt_tf_state for Shell Jump removal
     deploy_jobs = (

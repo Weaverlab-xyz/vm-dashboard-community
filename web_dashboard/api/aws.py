@@ -12,6 +12,7 @@ AWS API endpoints:
   DELETE /api/aws/instances/{id}              - Terminate a dashboard-deployed EC2 instance via boto3
 """
 import asyncio
+import re
 from typing import List, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
@@ -73,6 +74,27 @@ def _aws_cfg(key: str, fallback: str = "") -> str:
 
 def _aws_region() -> str:
     return _aws_cfg("aws_region") or "us-east-2"
+
+
+# AWS region format: two-letter geo, area word(s), and a trailing partition digit
+# (e.g. us-east-2, eu-west-1, ap-southeast-3). GovCloud/China (us-gov-*, cn-*) also match.
+_AWS_REGION_RE = re.compile(r"^[a-z]{2}(-gov)?-[a-z]+-\d+$")
+
+
+def _resolve_region(region: Optional[str]) -> str:
+    """Resolve the effective AWS region for a request.
+
+    An explicit, well-formed region wins; a blank/None region falls back to the
+    configured default (``_aws_region()``). A non-blank but malformed region is
+    rejected with HTTP 400 so a typo can't silently deploy into the default region.
+    Single-region callers that never pass a region are unaffected.
+    """
+    if region is None or not region.strip():
+        return _aws_region()
+    r = region.strip().lower()
+    if not _AWS_REGION_RE.match(r):
+        raise HTTPException(status_code=400, detail=f"Invalid AWS region '{region}'")
+    return r
 
 def _ssh_key_secret() -> str:
     return _aws_cfg("ec2_ssh_key_secret") or ""
@@ -148,14 +170,18 @@ async def list_amis(
 
 @router.get("/network-options", response_model=NetworkOptions)
 async def network_options(
+    region: Optional[str] = None,
     current_user: User = Depends(require_permission("aws", "read")),
 ):
-    """Return key pairs, subnets, and security groups for the deploy form. Served from cache (10 min TTL)."""
-    cache_key = cache_service.key_global("aws_network_opts")
+    """Return key pairs, subnets, and security groups for the deploy form. Served from
+    cache (10 min TTL). ``?region=`` scopes the lookup to a specific region (defaults to
+    the configured ``aws_region``); the cache is keyed per region so regions never collide."""
+    _region = _resolve_region(region)
+    cache_key = cache_service.key_param("aws_network_opts", region=_region)
     ttl = cache_service.TTL["aws_network_opts"]
 
     async def _fetch():
-        return await aws_service.get_network_options(_aws_region())
+        return await aws_service.get_network_options(_region)
 
     try:
         opts, cached_at = await cache_service.get_or_refresh(cache_key, ttl, _fetch)
@@ -176,8 +202,13 @@ async def _fetch_instances(db: Session) -> list:
         .order_by(Job.created_at.desc())
         .all()
     )
+    # Group instance IDs by the region recorded on their deploy job so each is
+    # described in the region it actually lives in. Jobs from before multi-region
+    # support carry no region and fall back to the configured default.
+    default_region = _aws_region()
     active_jobs = []
     instance_ids = []
+    ids_by_region: dict[str, list[str]] = {}
     for job in deploy_jobs:
         meta = job.metadata_dict
         if meta.get("destroyed"):
@@ -186,12 +217,17 @@ async def _fetch_instances(db: Session) -> list:
         if iid:
             active_jobs.append(job)
             instance_ids.append(iid)
+            ids_by_region.setdefault(meta.get("region") or default_region, []).append(iid)
 
     if not instance_ids:
         return []
 
-    live_instances = await aws_service.describe_instances(_aws_region(), instance_ids)
-    live_by_id = {inst["instance_id"]: inst for inst in live_instances}
+    live_by_id = {}
+    region_by_id = {}
+    for region, ids in ids_by_region.items():
+        for inst in await aws_service.describe_instances(region, ids):
+            live_by_id[inst["instance_id"]] = inst
+            region_by_id[inst["instance_id"]] = region
     job_by_instance = {job.metadata_dict.get("instance_id"): job for job in active_jobs}
 
     result = []
@@ -204,6 +240,7 @@ async def _fetch_instances(db: Session) -> list:
         result.append({
             **live,
             "key_name": live.get("key_name"),
+            "region": region_by_id.get(iid, default_region),
             "workgroup": wg,
             "job_id": job.id if job else None,
             "deployed_by": job.created_by if job else None,
@@ -386,13 +423,14 @@ async def deploy_ami(
     Returns a job_id trackable at /api/jobs/{job_id} or /api/ws/jobs/{job_id}.
     """
     workgroup = _validate_workgroup(db, current_user, req.workgroup)
+    region = _resolve_region(req.region)
     await _validate_ssh_key_override(req.ssh_key_secret_override)
 
     # Pre-action policy gate (inert unless enabled + this action is gated).
     from ..services import admission_service
     admission_service.enforce(
         "aws:ec2:deploy",
-        request={"region": _aws_region(), "instance_type": req.instance_type,
+        request={"region": region, "instance_type": req.instance_type,
                  "image": req.ami_id, "name": req.instance_name},
         actor=current_user, db=db,
     )
@@ -406,6 +444,7 @@ async def deploy_ami(
             "ami_id": req.ami_id,
             "instance_name": req.instance_name,
             "instance_type": req.instance_type,
+            "region": region,
             "subnet_id": req.subnet_id,
             "security_group_ids": req.security_group_ids,
             "workgroup": workgroup,
@@ -432,6 +471,7 @@ async def deploy_ami(
         req.jump_group,
         req.jumpoint_name,
         req.pra_credential_ref,
+        region,
     )
 
     return DeployResponse(
@@ -460,6 +500,7 @@ async def bulk_deploy_amis(
         raise HTTPException(status_code=400, detail="At least one AMI item is required.")
 
     workgroup = _validate_workgroup(db, current_user, req.workgroup)
+    region = _resolve_region(req.region)
     await _validate_ssh_key_override(req.ssh_key_secret_override)
 
     # Create one job per instance up front so callers get all job IDs immediately
@@ -474,6 +515,7 @@ async def bulk_deploy_amis(
                 "ami_id": item.ami_id,
                 "instance_name": item.instance_name,
                 "instance_type": req.instance_type,
+                "region": region,
                 "subnet_id": req.subnet_id,
                 "security_group_ids": req.security_group_ids,
                 "workgroup": workgroup,
@@ -497,6 +539,7 @@ async def bulk_deploy_amis(
         req.subnet_id,
         req.security_group_ids,
         workgroup,
+        region,
     )
 
     results = [
@@ -641,6 +684,10 @@ async def destroy_instance(
                    "It may have already been terminated or was not deployed from this dashboard.",
         )
 
+    # Terminate in the region the instance was deployed into (fall back to default
+    # for instances deployed before multi-region support recorded a region).
+    region = deploy_job.metadata_dict.get("region") or _aws_region()
+
     destroy_job = job_service.create_job(
         db,
         job_type="ec2_destroy",
@@ -648,6 +695,7 @@ async def destroy_instance(
         metadata={
             "instance_id": instance_id,
             "deploy_job_id": deploy_job.id,
+            "region": region,
         },
     )
 
@@ -656,7 +704,7 @@ async def destroy_instance(
         details={"instance_id": instance_id},
     )
 
-    background_tasks.add_task(_run_destroy, destroy_job.id, deploy_job.id, instance_id)
+    background_tasks.add_task(_run_destroy, destroy_job.id, deploy_job.id, instance_id, region)
 
     return DestroyResponse(
         job_id=destroy_job.id,
@@ -877,6 +925,7 @@ async def _run_deploy(
     jump_group: str = None,
     jumpoint_name: str = None,
     pra_credential_ref: str = None,
+    region: str = "",
 ):
     db = _get_db_session()
     result = {}
@@ -885,7 +934,8 @@ async def _run_deploy(
 
         # ── Step 1: Start ECS Jumpoint container first (BeyondTrust only) ─────
         from ..services import config_service as _cfg_svc
-        _aws_region = _aws_cfg("aws_region") or "us-east-2"
+        # Per-deploy region (falls back to the configured default for older callers).
+        _aws_region = region or _aws_cfg("aws_region") or "us-east-2"
         _meta = (db.query(Job).filter(Job.id == job_id).first().metadata_dict or {})
         ssh_secret_name = _meta.get("ssh_key_secret_override") or _cfg_svc.get("ec2_ssh_key_secret") or ""
         if _cfg_svc.get_bool("beyondtrust_enabled"):
@@ -1053,6 +1103,7 @@ async def _run_bulk_deploy(
     subnet_id: str,
     security_group_ids: list,
     workgroup: str = "",
+    region: str = "",
 ):
     """
     Background task for bulk EC2 deployment.
@@ -1068,7 +1119,8 @@ async def _run_bulk_deploy(
 
         # Step 1: Start ONE ECS Jumpoint container for the whole batch (BT only)
         from ..services import config_service as _cfg_svc
-        _aws_region = _aws_cfg("aws_region") or "us-east-2"
+        # Shared per-batch region (falls back to the configured default).
+        _aws_region = region or _aws_cfg("aws_region") or "us-east-2"
         first_job_id = job_items[0][0]
         _bmeta = (db.query(Job).filter(Job.id == first_job_id).first().metadata_dict or {})
         ssh_secret_name = _bmeta.get("ssh_key_secret_override") or _cfg_svc.get("ec2_ssh_key_secret") or ""
@@ -1229,8 +1281,10 @@ async def _run_bulk_deploy(
         db.close()
 
 
-async def _run_destroy(destroy_job_id: str, deploy_job_id: str, instance_id: str):
+async def _run_destroy(destroy_job_id: str, deploy_job_id: str, instance_id: str, region: str = ""):
     db = _get_db_session()
+    # Region the instance lives in (falls back to the configured default).
+    _region = region or _aws_region()
     try:
         job_service.set_running(db, destroy_job_id)
         job_service.update_progress(db, destroy_job_id, 20, f"Terminating instance {instance_id}…")
@@ -1241,7 +1295,7 @@ async def _run_destroy(destroy_job_id: str, deploy_job_id: str, instance_id: str
         # instance_id) instead of an inline tag.
         from ..services.cloud_identity_service import elevate, CloudIdentityError
         _destroy_job = job_service.get_job(db, destroy_job_id)
-        _terminate_region = _aws_region()
+        _terminate_region = _region
         try:
             async with elevate(
                 "aws", "aws:ec2:terminate",
@@ -1314,7 +1368,7 @@ async def _run_destroy(destroy_job_id: str, deploy_job_id: str, instance_id: str
         # deploy job is now marked destroyed, so it's excluded from the count).
         try:
             from ..services import jumpoint_host_service
-            await jumpoint_host_service.teardown_jumpoint_host_if_idle(db, "aws", _aws_region())
+            await jumpoint_host_service.teardown_jumpoint_host_if_idle(db, "aws", _region)
         except Exception as e:
             result["jumpoint_host_teardown_error"] = str(e)
 
@@ -1322,7 +1376,7 @@ async def _run_destroy(destroy_job_id: str, deploy_job_id: str, instance_id: str
         # (same exclusion — this deploy job is already marked destroyed).
         try:
             from ..services import nat_instance_service
-            await nat_instance_service.reclaim_nat_instance(db, _aws_region())
+            await nat_instance_service.reclaim_nat_instance(db, _region)
         except Exception as e:
             result["nat_teardown_error"] = str(e)
 

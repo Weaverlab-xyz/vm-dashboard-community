@@ -35,6 +35,7 @@ class EC2InstanceInfo(BaseModel):
     ami_id: str = ""
     launch_time: str = ""
     availability_zone: str = ""
+    region: str = ""  # AWS region the instance lives in (recorded on the deploy job)
     key_name: Optional[str] = None
     workgroup: Optional[str] = None  # from Job.workgroup; None = unassigned
     # Dashboard-specific fields (from DB)
@@ -69,6 +70,7 @@ class DeployRequest(BaseModel):
     ami_id: str = Field(..., description="AMI ID to deploy")
     instance_name: str = Field(..., description="Name tag for the instance")
     instance_type: str = Field(default="t3.medium", description="EC2 instance type")
+    region: Optional[str] = Field(default=None, description="AWS region to deploy into (defaults to the configured aws_region). Subnet + security groups must belong to this region.")
     subnet_id: str = Field(..., description="VPC subnet ID")
     security_group_ids: List[str] = Field(..., description="Security group IDs")
     workgroup: str = Field(..., description="Workgroup the instance belongs to (written as Workgroup tag)")
@@ -132,6 +134,7 @@ class BulkDeployItem(BaseModel):
 class BulkDeployRequest(BaseModel):
     items: List[BulkDeployItem] = Field(..., description="List of AMIs to deploy with per-instance names")
     instance_type: str = Field(default="t3.medium", description="EC2 instance type (shared)")
+    region: Optional[str] = Field(default=None, description="AWS region to deploy into (shared; defaults to the configured aws_region). Subnet + security groups must belong to this region.")
     subnet_id: str = Field(..., description="VPC subnet ID (shared)")
     security_group_ids: List[str] = Field(..., description="Security group IDs (shared)")
     workgroup: str = Field(..., description="Workgroup all deployed instances belong to (written as Workgroup tag)")
