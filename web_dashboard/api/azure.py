@@ -13,6 +13,7 @@ Azure API endpoints:
 """
 import asyncio
 import logging
+import re
 from typing import List, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
@@ -140,6 +141,28 @@ def _rg_for(location: str) -> str:
     return resolve_azure_region(location)["resource_group"] or "vm-cli-rg"
 
 
+# Azure location canonical form: lowercase alphanumeric, no separators
+# (e.g. centralus, eastus2, westeurope). Display names like "East US 2" are
+# normalised to this form before matching.
+_AZURE_LOCATION_RE = re.compile(r"^[a-z0-9]+$")
+
+
+def _resolve_location(location: Optional[str]) -> str:
+    """Resolve the effective Azure location for a request.
+
+    An explicit, well-formed location wins (normalised to the canonical compact
+    form, matching region_config); a blank/None location falls back to the
+    configured default (``_loc()``). A non-blank but malformed location is rejected
+    with HTTP 400 so a typo can't silently deploy into the default region. Callers
+    that never pass a location are unaffected."""
+    if location is None or not location.strip():
+        return _loc()
+    loc = location.strip().lower().replace(" ", "")
+    if not _AZURE_LOCATION_RE.match(loc):
+        raise HTTPException(status_code=400, detail=f"Invalid Azure location '{location}'")
+    return loc
+
+
 def _aci_rg():
     return _cfg("azure_aci_resource_group") or _rg()
 
@@ -246,7 +269,7 @@ async def network_options(
     """Return locations, VM sizes, subnets, NSGs. Subnets/NSGs/sizes are scoped to
     ``location`` (default: the configured ``azure_location``); pass ?location= to
     target another region. Served from a per-region cache (10 min); ?bust=true forces a refresh."""
-    loc = location or _loc()
+    loc = _resolve_location(location)
     cache_key = cache_service.key_param("azure_network_opts", location=loc)
     ttl = cache_service.TTL["azure_network_opts"]
 
@@ -610,7 +633,8 @@ async def deploy_vm(
     """
     if req.os_type.lower() != "windows" and not req.ssh_public_key.strip():
         raise HTTPException(status_code=400, detail="ssh_public_key is required for Linux deploys.")
-    loc = req.location or _loc()
+    loc = _resolve_location(req.location)
+    req.location = loc            # normalise so the runner uses the resolved location
     # Resource group resolves through the chosen region's config set (PR3) so a
     # deploy in a non-default region lands in that region's RG; falls back to the
     # flat azure_resource_group for single-region setups.
@@ -686,7 +710,8 @@ async def bulk_deploy_vms(
     if req.os_type.lower() != "windows" and not req.ssh_public_key.strip():
         raise HTTPException(status_code=400, detail="ssh_public_key is required for Linux deploys.")
 
-    loc = req.location or _loc()
+    loc = _resolve_location(req.location)
+    req.location = loc            # normalise so the runner uses the resolved location
     # Region-aware RG resolution (PR3) — see deploy_vm above.
     rg = req.resource_group or _rg_for(loc)
     workgroup = _validate_workgroup(db, current_user, req.workgroup)
