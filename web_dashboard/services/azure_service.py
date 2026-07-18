@@ -17,6 +17,8 @@ import time
 import uuid
 from typing import Optional
 
+from . import region_catalog
+
 logger = logging.getLogger(__name__)
 
 try:
@@ -1578,14 +1580,8 @@ def _get_network_options_sync(cred, sub_id: str, location: str, vnet_rg: str, rg
         sizes = []
         warnings.append(f"VM sizes for location '{location}' could not be listed: {e}.")
 
-    locations = [
-        "eastus", "eastus2", "westus", "westus2", "westus3",
-        "centralus", "northcentralus", "southcentralus",
-        "northeurope", "westeurope", "uksouth", "ukwest",
-        "australiaeast", "australiasoutheast",
-        "japaneast", "japanwest",
-        "canadacentral", "canadaeast",
-    ]
+    # Location dropdown for the Azure deploy form — from the shared region catalog.
+    locations = region_catalog.region_ids("azure")
 
     subnets = []
     search_rg = vnet_rg or rg

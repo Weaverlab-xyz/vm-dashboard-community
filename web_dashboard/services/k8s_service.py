@@ -28,6 +28,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from ..database import Job, K8sCluster
+from . import region_catalog
 
 logger = logging.getLogger(__name__)
 
@@ -306,16 +307,8 @@ K8S_NODE_TYPES = {
     # A1.Flex (Always-Free Ampere) first; the flex shapes take an OCPU/memory config.
     "oci":   ["VM.Standard.A1.Flex", "VM.Standard.E4.Flex", "VM.Standard.E5.Flex"],
 }
-K8S_REGIONS = {
-    "aws":   ["us-east-1", "us-east-2", "us-west-1", "us-west-2", "eu-west-1",
-              "eu-central-1", "ap-southeast-1", "ap-southeast-2", "ap-northeast-1"],
-    "azure": ["eastus", "eastus2", "westus2", "westus3", "centralus",
-              "northeurope", "westeurope", "uksouth", "australiaeast"],
-    "gcp":   ["us-central1", "us-east1", "us-west1", "europe-west1",
-              "europe-west4", "asia-southeast1", "asia-northeast1", "australia-southeast1"],
-    "oci":   ["us-ashburn-1", "us-phoenix-1", "uk-london-1", "eu-frankfurt-1",
-              "ap-sydney-1", "ap-tokyo-1", "ca-toronto-1", "sa-saopaulo-1"],
-}
+# Region lists come from the shared services/region_catalog (region_ids per cloud);
+# the K8s-specific version + node-size catalogs stay here.
 
 
 def _with_configured_first(values: list, configured: str) -> list:
@@ -493,8 +486,7 @@ async def provision_options(cloud: str, region: str = "") -> dict:
     if cloud not in _PROVISION_IMPLEMENTED:
         raise K8sError(f"unknown cloud {cloud!r} (expected one of {', '.join(_PROVISION_IMPLEMENTED)})")
 
-    cfg_region = {"aws": "aws_region", "azure": "azure_location",
-                  "gcp": "gcp_region", "oci": "oci_region"}[cloud]
+    cfg_region = region_catalog.default_region_key(cloud)
     cfg_node = {"aws": "aws_eks_node_instance_type", "azure": "azure_aks_node_vm_size",
                 "gcp": "gcp_gke_machine_type", "oci": "oci_oke_node_shape"}[cloud]
     cfg_ver = {"aws": "aws_eks_k8s_version", "azure": "azure_aks_k8s_version",
@@ -504,7 +496,7 @@ async def provision_options(cloud: str, region: str = "") -> dict:
     region = (region or "").strip() or configured_region
     # configured region first, then the just-picked region, then the curated set.
     regions = _with_configured_first(
-        _with_configured_first(K8S_REGIONS[cloud], region), configured_region)
+        _with_configured_first(region_catalog.region_ids(cloud), region), configured_region)
 
     out = {
         "cloud": cloud,

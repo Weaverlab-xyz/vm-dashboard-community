@@ -14,7 +14,6 @@ non-admins. The real Terraform apply and the PRA tunnel (Phase 2, via the
 creds) drives the apply as a background task.
 """
 import logging
-import re
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -23,7 +22,7 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..database import User, get_db
-from ..services import aws_service, cache_service, cloud_database_service, config_service, job_service
+from ..services import aws_service, cache_service, cloud_database_service, config_service, job_service, region_catalog
 from ..services.aws_service import AWSError
 from .auth import require_permission
 
@@ -86,21 +85,15 @@ class DatabaseOptions(BaseModel):
     cached_at: Optional[str] = None
 
 
-# us-east-2, ap-southeast-3, us-gov-west-1 — checked before boto/caching so junk
-# input can't create unbounded cache keys or hang on a nonexistent endpoint.
-_REGION_RE = re.compile(r"^[a-z]{2}(-[a-z]+)+-\d$")
-# GCP regions: us-central1, europe-west4, asia-southeast1, …
-_GCP_REGION_RE = re.compile(r"^[a-z]+-[a-z]+\d$")
+# Region validation + default resolution is centralised in services/region_catalog
+# (junk input is rejected before boto/caching so it can't create unbounded cache
+# keys or hang on a nonexistent endpoint). These stay: the per-cloud size pickers.
 # Cloud SQL machine tiers offered in the GCP provision form (shared-core first).
 _GCP_TIERS = ["db-f1-micro", "db-g1-small", "db-custom-1-3840",
               "db-custom-2-7680", "db-custom-4-15360"]
-# Azure regions: eastus, westus2, centralus, northeurope, australiaeast …
-_AZURE_REGION_RE = re.compile(r"^[a-z]{3,}\d?$")
 # Flexible Server SKUs offered in the Azure provision form (burstable first).
 _AZURE_SKUS = ["B_Standard_B1ms", "B_Standard_B2s",
                "GP_Standard_D2s_v3", "GP_Standard_D4s_v3"]
-# OCI regions: us-ashburn-1, uk-london-1, ap-sydney-1, eu-frankfurt-1 …
-_OCI_REGION_RE = re.compile(r"^[a-z]{2,3}-[a-z]+-\d$")
 # ADB workloads offered in the OCI provision form (ATP first). Free-tier sizing
 # is fixed (1 OCPU / 20 GB), so there's no size picker — just the workload.
 _OCI_WORKLOADS = ["OLTP", "DW"]
@@ -120,8 +113,13 @@ async def _pra_pickers() -> dict:
         return {"vault_account_groups": [], "jump_groups": [], "jumpoints": []}
 
 
-def _default_region() -> str:
-    return config_service.get("aws_region") or settings.aws_region or "us-east-2"
+def _resolve_db_region(cloud: str, region: Optional[str]) -> str:
+    """Validate + default-resolve a provision-form region through the shared region
+    catalog (blank → configured default; malformed → HTTP 400)."""
+    try:
+        return region_catalog.resolve(cloud, region)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @router.post("")
@@ -209,9 +207,7 @@ async def database_options(
     cloud = (cloud or "aws").strip().lower()
 
     if cloud == "gcp":
-        region = (region or "").strip() or (config_service.get("gcp_region") or "us-central1")
-        if not _GCP_REGION_RE.fullmatch(region):
-            raise HTTPException(status_code=400, detail=f"invalid GCP region {region!r}")
+        region = _resolve_db_region("gcp", region)
         return DatabaseOptions(
             region=region, instance_classes=_GCP_TIERS,
             db_subnet_groups=[], security_groups=[],
@@ -219,9 +215,7 @@ async def database_options(
         )
 
     if cloud == "azure":
-        region = (region or "").strip() or (config_service.get("azure_location") or "eastus")
-        if not _AZURE_REGION_RE.fullmatch(region):
-            raise HTTPException(status_code=400, detail=f"invalid Azure location {region!r}")
+        region = _resolve_db_region("azure", region)
         return DatabaseOptions(
             region=region, instance_classes=_AZURE_SKUS,
             db_subnet_groups=[], security_groups=[],
@@ -231,18 +225,14 @@ async def database_options(
     if cloud == "oci":
         # Autonomous DB: workload picker (no size — free tier is fixed 1 OCPU/20 GB).
         # The compartment/subnet come from the sandbox-emitted oci_* config.
-        region = (region or "").strip() or (config_service.get("oci_region") or "us-ashburn-1")
-        if not _OCI_REGION_RE.fullmatch(region):
-            raise HTTPException(status_code=400, detail=f"invalid OCI region {region!r}")
+        region = _resolve_db_region("oci", region)
         return DatabaseOptions(
             region=region, instance_classes=_OCI_WORKLOADS,
             db_subnet_groups=[], security_groups=[],
             cached_at=None, **(await _pra_pickers()),
         )
 
-    region = (region or "").strip() or _default_region()
-    if not _REGION_RE.fullmatch(region):
-        raise HTTPException(status_code=400, detail=f"invalid AWS region {region!r}")
+    region = _resolve_db_region("aws", region)
 
     cache_key = cache_service.key_param("aws_db_options", region=region)
     ttl = cache_service.TTL["aws_db_options"]
