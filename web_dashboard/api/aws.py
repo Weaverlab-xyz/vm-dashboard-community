@@ -253,8 +253,10 @@ async def aws_dashboard_stats(
             cache_service.key_global("aws_instances"),
             cache_service.TTL["aws_instances"],
             lambda: _fetch_instances(db))
-        out["instances"] = cloud_stats.summarize_instances(
-            raw, _accessible_workgroups(current_user), "state")
+        accessible = _accessible_workgroups(current_user)
+        out["instances"] = cloud_stats.summarize_instances(raw, accessible, "state")
+        out["instances"]["by_region"] = cloud_stats.summarize_by_region(
+            raw, accessible, "state", "region")
     except AWSError:
         pass
     try:

@@ -37,7 +37,19 @@
   <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden mb-6">
     <div class="flex items-center justify-between px-4 py-2 border-b border-gray-100">
       <span class="text-xs text-gray-400">Status flips provisioning → registered → deploying → managed.</span>
-      <button @click="refresh()" class="text-xs text-blue-600 hover:underline">Refresh</button>
+      <div class="flex items-center gap-3">
+        <div class="flex items-center gap-2" x-show="regions().length > 1">
+          <label class="text-xs text-gray-500">Region:</label>
+          <select x-model="filterRegion"
+                  class="text-xs border border-gray-300 rounded px-2 py-1 focus:ring-2 focus:ring-blue-500">
+            <option value="">All</option>
+            <template x-for="r in regions()" :key="r">
+              <option :value="r" x-text="r"></option>
+            </template>
+          </select>
+        </div>
+        <button @click="refresh()" class="text-xs text-blue-600 hover:underline">Refresh</button>
+      </div>
     </div>
     <div x-show="loading" x-cloak class="p-6 text-center text-sm text-gray-400">Loading…</div>
     <div x-show="!loading && clusters.length === 0" x-cloak class="p-10 text-center text-sm text-gray-400">
@@ -48,6 +60,7 @@
         <tr class="text-left text-xs uppercase text-gray-500 bg-gray-50 border-b border-gray-200">
           <th class="px-4 py-3">Name</th>
           <th class="px-4 py-3">Cloud</th>
+          <th class="px-4 py-3">Region</th>
           <th class="px-4 py-3">Status</th>
           <th class="px-4 py-3">Management</th>
           <th class="px-4 py-3">API server</th>
@@ -55,7 +68,7 @@
         </tr>
       </thead>
       <tbody class="divide-y divide-gray-100">
-        <template x-for="c in clusters" :key="c.id">
+        <template x-for="c in filteredClusters()" :key="c.id">
           <tr class="hover:bg-gray-50">
             <td class="px-4 py-3 font-medium text-gray-900">
               <span x-text="c.name"></span>
@@ -66,6 +79,7 @@
             <td class="px-4 py-3">
               <span class="text-[10px] uppercase font-semibold px-1.5 py-0.5 rounded bg-gray-100 text-gray-600" x-text="c.cloud"></span>
             </td>
+            <td class="px-4 py-3 text-xs text-gray-500" x-text="c.region || '–'"></td>
             <td class="px-4 py-3">
               <span class="text-xs font-medium px-1.5 py-0.5 rounded"
                     :class="{
@@ -680,6 +694,7 @@ function k8sPage() {
   return {
     ...secretPickerState(),
     clusters: [], loading: true, toast: '', toastType: 'success',
+    filterRegion: '',
     showRegister: false, saving: false,
     form: { name: '', cloud: 'local', kubeconfig: '', mgmt_kind: '' },
     showProvision: false, provBusy: false,
@@ -710,6 +725,14 @@ function k8sPage() {
       } finally {
         this.loading = false;
       }
+    },
+
+    regions() {
+      return [...new Set(this.clusters.map(c => c.region).filter(Boolean))].sort();
+    },
+
+    filteredClusters() {
+      return this.clusters.filter(c => !this.filterRegion || c.region === this.filterRegion);
     },
 
     openRegister() {

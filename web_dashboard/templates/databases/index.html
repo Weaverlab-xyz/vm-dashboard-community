@@ -31,6 +31,21 @@
   <!-- All cloud databases (unified list) -->
   <div>
     <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+      <div x-show="!loading && regions().length > 1" x-cloak
+           class="flex items-center justify-between px-4 py-2 border-b border-gray-100">
+        <div class="flex items-center gap-2">
+          <label class="text-xs text-gray-500">Region:</label>
+          <select x-model="filterRegion"
+                  class="text-xs border border-gray-300 rounded px-2 py-1 focus:ring-2 focus:ring-blue-500">
+            <option value="">All</option>
+            <template x-for="r in regions()" :key="r">
+              <option :value="r" x-text="r"></option>
+            </template>
+          </select>
+        </div>
+        <span class="text-xs text-gray-400"
+              x-text="filteredDatabases().length + ' of ' + databases.length + ' databases'"></span>
+      </div>
       <div x-show="loading" x-cloak class="p-6 text-center text-sm text-gray-400">Loading…</div>
       <div x-show="!loading && databases.length === 0" x-cloak class="p-10 text-center text-sm text-gray-400">
         No databases yet. Click <strong>Provision database</strong> to create a private managed instance.
@@ -48,7 +63,7 @@
           </tr>
         </thead>
         <tbody class="divide-y divide-gray-100">
-          <template x-for="d in databases" :key="d.id">
+          <template x-for="d in filteredDatabases()" :key="d.id">
             <tr class="hover:bg-gray-50 align-top">
               <td class="px-4 py-3">
                 <div class="font-medium text-gray-900" x-text="d.engine"></div>
@@ -377,6 +392,7 @@ function databasesPage() {
   return {
     ...secretPickerState(),
     databases: [], loading: true,
+    filterRegion: '',
     entitleRegEnabled: {{ entitle_registration_enabled | default(false) | tojson }},
     toast: '', toastType: 'success',
     showForm: false, saving: false, conn: null,
@@ -392,6 +408,16 @@ function databasesPage() {
     _pollTimer: null,
 
     async init() { requireAuth(); this.loadSecretBackends(); await this.refresh(); },
+
+    // Region filter for the list — distinct from options.region, which is the
+    // provision form's target region.
+    regions() {
+      return [...new Set(this.databases.map(d => d.region).filter(Boolean))].sort();
+    },
+
+    filteredDatabases() {
+      return this.databases.filter(d => !this.filterRegion || d.region === this.filterRegion);
+    },
 
     async refresh(quiet = false) {
       if (!quiet) this.loading = true;

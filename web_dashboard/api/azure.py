@@ -546,8 +546,11 @@ async def azure_dashboard_stats(
             cache_service.key_global("azure_vms"),
             cache_service.TTL["azure_vms"],
             lambda: _fetch_vms(db))
-        out["instances"] = cloud_stats.summarize_instances(
-            raw, _accessible_workgroups(current_user), "state")
+        accessible = _accessible_workgroups(current_user)
+        out["instances"] = cloud_stats.summarize_instances(raw, accessible, "state")
+        # Azure keys region as "location" on the VM rows.
+        out["instances"]["by_region"] = cloud_stats.summarize_by_region(
+            raw, accessible, "state", "location")
     except AzureError:
         pass
     try:

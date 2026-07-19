@@ -299,8 +299,10 @@ async def gcp_dashboard_stats(
         return out
     try:
         instances = await _gcp_instances_unfiltered(db, project_id)
-        out["instances"] = cloud_stats.summarize_instances(
-            instances, _accessible_workgroups(current_user), "status")
+        accessible = _accessible_workgroups(current_user)
+        out["instances"] = cloud_stats.summarize_instances(instances, accessible, "status")
+        out["instances"]["by_region"] = cloud_stats.summarize_by_region(
+            instances, accessible, "status", "region")
     except gcp_service.GCPError:
         pass
     try:

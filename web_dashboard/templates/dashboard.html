@@ -118,6 +118,11 @@
               <span class="text-gray-400"
                     x-show="stats[tile.key]?.value === -1">unavailable</span>
             </p>
+            <!-- Per-region breakdown — only once resources span >1 region, so
+                 single-region installs see no extra chrome. -->
+            <p class="text-xs text-gray-400 mt-1 leading-relaxed"
+               x-show="regionBreakdown(stats[tile.key]).length > 1"
+               x-text="regionBreakdown(stats[tile.key]).map(e => e[0] + ' ' + e[1].total).join(' · ')"></p>
           </a>
         </template>
       </div>
@@ -383,6 +388,15 @@
         return val;
       },
 
+      // [[region, {total, running}], …] sorted by descending total, for the
+      // per-region line under a cloud instance tile. Empty for tiles with no
+      // region dimension (images, OVAs, on-prem), which hides the line.
+      regionBreakdown(stat) {
+        const by = stat?.by_region;
+        if (!by) return [];
+        return Object.entries(by).sort((a, b) => b[1].total - a[1].total);
+      },
+
       // Deploy shortcuts for whichever clouds/hypervisors are configured (cloud VMs
       // + the on-prem providers that support dashboard deploys). Each links to that
       // provider's page, where the deploy form lives.
@@ -566,7 +580,10 @@
       async _fetchCloudStats(url, instKey, imgKey) {
         try {
           const r = await API.get(url);
-          this.stats[instKey] = r?.instances ? { value: r.instances.total, secondary: r.instances.running } : { value: -1 };
+          this.stats[instKey] = r?.instances
+            ? { value: r.instances.total, secondary: r.instances.running,
+                by_region: r.instances.by_region || null }
+            : { value: -1 };
           this.stats[imgKey]  = r?.images ? { value: r.images.total } : { value: -1 };
         } catch (e) {
           this.stats[instKey] = { value: -1 };

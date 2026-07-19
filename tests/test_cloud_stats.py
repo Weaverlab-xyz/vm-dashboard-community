@@ -9,7 +9,7 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from web_dashboard.services.cloud_stats import summarize_instances
+from web_dashboard.services.cloud_stats import summarize_by_region, summarize_instances
 
 _AWS = [
     {"workgroup": "hydra", "state": "running"},
@@ -19,6 +19,18 @@ _AWS = [
 _GCP = [
     {"workgroup": "hydra", "status": "RUNNING"},
     {"workgroup": "hydra", "status": "TERMINATED"},
+]
+
+# Multi-region fixtures: same rows as _AWS/_GCP but region-tagged.
+_AWS_REGIONS = [
+    {"workgroup": "hydra", "state": "running", "region": "us-east-2"},
+    {"workgroup": "hydra", "state": "stopped", "region": "us-east-2"},
+    {"workgroup": "weaverlab", "state": "running", "region": "us-west-2"},
+]
+# Azure keys region as "location", not "region".
+_AZURE_REGIONS = [
+    {"workgroup": "hydra", "state": "running", "location": "centralus"},
+    {"workgroup": "hydra", "state": "running", "location": "westus2"},
 ]
 
 
@@ -48,6 +60,58 @@ def test_rows_without_workgroup_are_owner_invisible_to_non_admin():
     rows = [{"state": "running"}]  # no workgroup key
     assert summarize_instances(rows, ["hydra"], "state") == {"total": 0, "running": 0}
     assert summarize_instances(rows, None, "state") == {"total": 1, "running": 1}
+
+
+def test_by_region_groups_total_and_running():
+    assert summarize_by_region(_AWS_REGIONS, None, "state", "region") == {
+        "us-east-2": {"total": 2, "running": 1},
+        "us-west-2": {"total": 1, "running": 1},
+    }
+
+
+def test_by_region_respects_workgroup_visibility():
+    # weaverlab's us-west-2 row drops out entirely, taking its region with it.
+    assert summarize_by_region(_AWS_REGIONS, ["hydra"], "state", "region") == {
+        "us-east-2": {"total": 2, "running": 1},
+    }
+    assert summarize_by_region(_AWS_REGIONS, [], "state", "region") == {}
+
+
+def test_by_region_uses_location_for_azure():
+    assert summarize_by_region(_AZURE_REGIONS, None, "state", "location") == {
+        "centralus": {"total": 1, "running": 1},
+        "westus2": {"total": 1, "running": 1},
+    }
+
+
+def test_by_region_running_value_is_case_insensitive():
+    rows = [{"workgroup": "hydra", "status": "RUNNING", "region": "us-central1"}]
+    assert summarize_by_region(rows, None, "status", "region") == {
+        "us-central1": {"total": 1, "running": 1},
+    }
+
+
+def test_by_region_blank_region_buckets_as_unknown():
+    rows = [
+        {"workgroup": "hydra", "state": "running"},           # region absent
+        {"workgroup": "hydra", "state": "stopped", "region": ""},  # region blank
+    ]
+    assert summarize_by_region(rows, None, "state", "region") == {
+        "unknown": {"total": 2, "running": 1},
+    }
+
+
+def test_by_region_empty_rows_are_safe():
+    assert summarize_by_region([], None, "state", "region") == {}
+    assert summarize_by_region(None, None, "state", "region") == {}
+
+
+def test_by_region_totals_agree_with_summarize_instances():
+    # The breakdown must never disagree with the headline tile.
+    flat = summarize_instances(_AWS_REGIONS, ["hydra"], "state")
+    grouped = summarize_by_region(_AWS_REGIONS, ["hydra"], "state", "region")
+    assert sum(v["total"] for v in grouped.values()) == flat["total"]
+    assert sum(v["running"] for v in grouped.values()) == flat["running"]
 
 
 if __name__ == "__main__":

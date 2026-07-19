@@ -292,9 +292,20 @@
     <div class="flex items-center justify-between mb-4">
       <h2 class="text-lg font-semibold text-gray-800">Deployed EC2 Instances</h2>
       <div class="flex items-center gap-3">
+        <div class="flex items-center gap-2" x-show="regions().length > 1">
+          <label class="text-sm font-medium text-gray-600">Region:</label>
+          <select x-model="filterRegion"
+                  class="text-sm border border-gray-300 rounded-lg px-2 py-1.5 focus:ring-2 focus:ring-blue-500">
+            <option value="">All</option>
+            <template x-for="r in regions()" :key="r">
+              <option :value="r" x-text="r"></option>
+            </template>
+          </select>
+        </div>
         <span x-show="cachedAtInstances" class="text-xs text-gray-400"
               x-text="'Updated ' + timeAgo(cachedAtInstances)"></span>
-        <span class="text-sm text-gray-400" x-text="instances.length + ' instances'"></span>
+        <span class="text-sm text-gray-400"
+              x-text="filteredInstances().length + ' of ' + instances.length + ' instances'"></span>
       </div>
     </div>
 
@@ -318,6 +329,7 @@
             <th class="px-4 py-3 font-semibold text-gray-600">Name</th>
             <th class="px-4 py-3 font-semibold text-gray-600">Instance ID</th>
             <th class="px-4 py-3 font-semibold text-gray-600">Type</th>
+            <th class="px-4 py-3 font-semibold text-gray-600">Region</th>
             <th class="px-4 py-3 font-semibold text-gray-600">Public IP</th>
             <th class="px-4 py-3 font-semibold text-gray-600">Private IP</th>
             <th class="px-4 py-3 font-semibold text-gray-600">Launched</th>
@@ -325,7 +337,12 @@
           </tr>
         </thead>
         <tbody class="divide-y divide-gray-50">
-          <template x-for="inst in instances" :key="inst.instance_id">
+          <tr x-show="filterRegion && filteredInstances().length === 0">
+            <td colspan="9" class="px-4 py-10 text-center text-gray-400">
+              No instances in <span class="font-medium" x-text="filterRegion"></span>.
+            </td>
+          </tr>
+          <template x-for="inst in filteredInstances()" :key="inst.instance_id">
             <tr class="hover:bg-gray-50 transition">
               <td class="px-4 py-3">
                 <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-xs font-medium"
@@ -338,6 +355,7 @@
               <td class="px-4 py-3 font-medium text-gray-800" x-text="inst.name"></td>
               <td class="px-4 py-3 font-mono text-xs text-gray-500" x-text="inst.instance_id"></td>
               <td class="px-4 py-3 text-gray-500 text-xs" x-text="inst.instance_type"></td>
+              <td class="px-4 py-3 text-gray-500 text-xs" x-text="inst.region || '–'"></td>
               <td class="px-4 py-3 font-mono text-xs text-gray-600" x-text="inst.public_ip || '–'"></td>
               <td class="px-4 py-3 font-mono text-xs text-gray-500" x-text="inst.private_ip || '–'"></td>
               <td class="px-4 py-3 text-gray-400 text-xs" x-text="timeAgo(inst.launch_time)"></td>
@@ -1234,6 +1252,7 @@
 
       // Instances
       instances: [],
+      filterRegion: '',
       loadingInstances: true,
       cachedAtInstances: null,
       cachedAtAmis: null,
@@ -1334,6 +1353,7 @@
       async init() {
         requireAuth();
         this.loadSecretBackends();
+        this.loadDefaultRegion();
         const hash = window.location.hash.slice(1);
         if (['community', 'amis', 'instances', 'build'].includes(hash)) {
           this.activeTab = hash;
@@ -1463,6 +1483,24 @@
       async setCommunityFilter(filter) {
         this.communityFilter = filter;
         await this.loadCommunityAmis();
+      },
+
+      regions() {
+        return [...new Set(this.instances.map(i => i.region).filter(Boolean))].sort();
+      },
+
+      filteredInstances() {
+        return this.instances.filter(i =>
+          !this.filterRegion || i.region === this.filterRegion);
+      },
+
+      async loadDefaultRegion() {
+        // The header shows the configured default; instances themselves carry
+        // their own region now that deploys are region-scoped.
+        try {
+          const resp = await API.get('/api/regions?cloud=aws');
+          if (resp && resp.default) this.region = resp.default;
+        } catch (e) { /* header falls back to the built-in default */ }
       },
 
       async loadInstances() {

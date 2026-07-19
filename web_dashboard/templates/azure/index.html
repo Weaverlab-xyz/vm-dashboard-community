@@ -216,6 +216,23 @@
   <!-- ── Tab 3: Azure VMs ───────────────────────────────────────────────────── -->
   <div x-show="activeTab === 'vms'">
     <div class="bg-white shadow-sm rounded-lg border border-gray-200 overflow-hidden">
+      <!-- List filter. Separate from the header location <select>, which scopes
+           the deploy form / network options rather than this table. -->
+      <div x-show="!vmsLoading && vmLocations().length > 1"
+           class="flex items-center justify-between px-4 py-2 border-b border-gray-100">
+        <div class="flex items-center gap-2">
+          <label class="text-xs text-gray-500">Location:</label>
+          <select x-model="filterLocation"
+                  class="text-xs border border-gray-300 rounded px-2 py-1 focus:ring-2 focus:ring-blue-500">
+            <option value="">All</option>
+            <template x-for="loc in vmLocations()" :key="loc">
+              <option :value="loc" x-text="loc"></option>
+            </template>
+          </select>
+        </div>
+        <span class="text-xs text-gray-400"
+              x-text="filteredVms().length + ' of ' + vms.length + ' VMs'"></span>
+      </div>
       <div x-show="vmsLoading" class="p-8 text-center text-gray-400 text-sm">Loading VMs…</div>
       <div x-show="!vmsLoading && vms.length === 0" class="p-8 text-center text-gray-400 text-sm">No dashboard-deployed Azure VMs found.</div>
       <table x-show="!vmsLoading && vms.length > 0" class="min-w-full divide-y divide-gray-200">
@@ -231,7 +248,7 @@
           </tr>
         </thead>
         <tbody class="bg-white divide-y divide-gray-100">
-          <template x-for="vm in vms" :key="vm.vm_id">
+          <template x-for="vm in filteredVms()" :key="vm.vm_id">
             <tr class="hover:bg-gray-50">
               <td class="px-4 py-3 text-sm font-medium text-gray-900" x-text="vm.name"></td>
               <td class="px-4 py-3">
@@ -942,6 +959,7 @@ function azureDashboard() {
     exportingImages: new Set(),
     vms: [],
     vmsLoading: false,
+    filterLocation: '',
     networkOpts: { locations: ['{{ default_location }}'], vm_sizes: [], subnets: [], nsgs: [], ssh_keys: [] },
     networkOptsWarnings: [],
     privateImagesWarnings: [],
@@ -1146,6 +1164,15 @@ function azureDashboard() {
       } finally {
         this.imagesLoading = false;
       }
+    },
+
+    // Distinct locations across the loaded VMs — drives the list filter only.
+    vmLocations() {
+      return [...new Set(this.vms.map(v => v.location).filter(Boolean))].sort();
+    },
+
+    filteredVms() {
+      return this.vms.filter(v => !this.filterLocation || v.location === this.filterLocation);
     },
 
     async loadVMs(bust = false) {
