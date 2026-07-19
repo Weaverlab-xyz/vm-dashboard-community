@@ -39,6 +39,16 @@
           <option value="desktop">Desktop</option>
         </select>
       </div>
+      <div class="flex items-center gap-2">
+        <label class="text-sm font-medium text-gray-600">Region:</label>
+        <select x-model="filterRegion"
+                class="text-sm border border-gray-300 rounded-lg px-2 py-1.5 focus:ring-2 focus:ring-blue-500">
+          <option value="">All</option>
+          <template x-for="r in regions()" :key="r">
+            <option :value="r" x-text="r"></option>
+          </template>
+        </select>
+      </div>
     </div>
   </div>
 
@@ -99,6 +109,7 @@
       loading: true,
       filterProvider: '',
       filterKind: '',
+      filterRegion: '',
 
       async init() {
         requireAuth();
@@ -121,10 +132,15 @@
         return [...new Set(this.items.map(i => i.cloud))].sort();
       },
 
+      regions() {
+        return [...new Set(this.items.map(i => i.region).filter(Boolean))].sort();
+      },
+
       filtered() {
         return this.items.filter(i =>
           (!this.filterProvider || i.cloud === this.filterProvider) &&
-          (!this.filterKind || i.kind === this.filterKind));
+          (!this.filterKind || i.kind === this.filterKind) &&
+          (!this.filterRegion || i.region === this.filterRegion));
       },
 
       kindLabel(k) {
