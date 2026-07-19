@@ -378,7 +378,22 @@ $cfg = @(
     "gcp_billing_export_table=…   # e.g. $ProjectId.billing_export.gcp_billing_export_resource_v1_XXXXXX (paste manually)",
     '',
     '# BeyondTrust deploy key — set in /setup or /secrets:',
-    'gcp_cloud_run_docker_deploy_key=…'
+    'gcp_cloud_run_docker_deploy_key=…',
+    "",
+    "# ── Per-region set for $Region ──────────────────────────────────────────────",
+    "# The flat keys above configure the DEFAULT region. These gcp_region.<region>.*",
+    "# keys land in gcp_region_configs, so re-running with a different -Region MERGES",
+    "# that region in rather than overwriting this one. (Every field falls back to",
+    "# its flat key when blank, so a single-region install is unchanged.)",
+    "gcp_region.${Region}.zone=$Zone",
+    "gcp_region.${Region}.network=$Vpc",
+    "gcp_region.${Region}.subnetwork=$VmSubnet",
+    "gcp_region.${Region}.jumpoint_subnetwork=$JpSubnet",
+    "gcp_region.${Region}.db_network=projects/$ProjectId/global/networks/$Vpc",
+    "gcp_region.${Region}.ssh_key_secret=$SshSecret",
+    "gcp_region.${Region}.default_network_tag=$NetTagVm",
+    "gcp_region.${Region}.router_name=$Router",
+    "gcp_region.${Region}.nat_name=$Nat"
 )
 Write-DashboardConfig 'GCP sandbox configuration' $cfg
 Export-ConfigJson -Cloud gcp -Lines $cfg   # machine-readable twin for Onboard-Sandbox.ps1

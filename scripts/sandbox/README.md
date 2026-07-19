@@ -109,6 +109,84 @@ modify DB instances + subnet groups) and creates a private **DB subnet group**
 spanning two AZs, so the managed-database feature can deploy a private Postgres
 into the sandbox.
 
+## Set up multiple regions
+
+The dashboard can deploy into several regions at once. Each region needs its own
+network-scoped resources (a VPC/VNet and its subnets, security groups, and
+DB subnet groups all live in exactly one region), so the sandbox scripts create
+one region's worth per run.
+
+**Run the script once per region.** Each run emits, alongside the flat keys, a
+per-region block:
+
+```
+aws_region.us-west-2.default_subnet_id=subnet-…
+aws_region.us-west-2.default_security_group_id=sg-…
+aws_region.us-west-2.vpc_id=vpc-…
+…
+```
+
+Those land in the `aws_region_configs` map (`gcp_region_configs`,
+`azure_region_configs` for the others). **The import merges** — a second region's
+block is added next to the first rather than replacing it, so you can add regions
+incrementally without redoing earlier ones.
+
+### Worked example — AWS in two regions
+
+```bash
+# First region. Also creates the account-global resources (IAM user + access
+# keys, the S3 image-hub bucket, IAM roles) — these are find-or-create, so the
+# second run reuses them rather than duplicating.
+AWS_REGION=us-east-2 ./scripts/sandbox/Linux/setup-aws.sh
+
+# Second region.
+AWS_REGION=us-west-2 ./scripts/sandbox/Linux/setup-aws.sh
+```
+
+```powershell
+# PowerShell
+.\scripts\sandbox\Windows\Setup-AwsSandbox.ps1 -Region us-east-2
+.\scripts\sandbox\Windows\Setup-AwsSandbox.ps1 -Region us-west-2
+```
+
+Paste **each** run's config block into `/setup` (or let `onboard-sandbox.sh` post
+it). After both, `aws_region_configs` holds an entry per region, and the deploy
+form's **Region** picker offers both — with the subnet and security-group lists
+re-fetched to match whichever you choose.
+
+The flat keys (`aws_region`, `aws_default_subnet_id`, …) always describe the
+**default** region — the last one you imported wins for those. That's deliberate:
+every per-region field falls back to its flat key when blank, so an install that
+only ever uses one region behaves exactly as it did before multi-region support.
+
+### Adding a region later
+
+Re-run the script with the new region and import its block. Existing entries are
+untouched.
+
+### Verifying
+
+Settings → **Multi-region** lists each cloud's configured regions and the
+resolved value of every field, with the flat-key fallback shown as the
+placeholder. A region you provisioned but never imported won't appear there.
+
+### Tear-down
+
+`rollback.sh` removes one region's resources per run, matching the setup scripts:
+
+```bash
+AWS_REGION=us-west-2 ./scripts/sandbox/Linux/rollback.sh --cloud aws
+AWS_REGION=us-east-2 ./scripts/sandbox/Linux/rollback.sh --cloud aws
+```
+
+Run the region holding your account-global resources **last** — it is the run
+that removes the IAM user and the S3 bucket. Removing a region from the
+dashboard's config is separate: edit it out in Settings → Multi-region.
+
+> **Azure** already worked this way and is unchanged. **OCI** has no per-region
+> config sets, so its sandbox remains single-region — a second OCI region
+> overwrites the first.
+
 ## One-shot: provision and auto-configure (skip the wizard)
 
 Instead of running each `setup-*.sh` and pasting the printed block into the

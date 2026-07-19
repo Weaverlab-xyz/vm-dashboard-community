@@ -105,6 +105,18 @@ class AwsRegionConfig(BaseModel):
     ssh_key_secret: str = ""
     ssm_instance_profile: str = ""
     db_subnet_group_name: str = ""
+    vpc_id: str = ""
+    vpc_cidr: str = ""
+    private_route_table_id: str = ""
+    db_security_group_id: str = ""
+    db_parameter_group_name: str = ""
+    db_mysql_parameter_group_name: str = ""
+    nat_security_group_id: str = ""
+    ecs_subnet_id: str = ""
+    ecs_security_group_ids: str = ""
+    ecs_cluster: str = ""
+    jumpoint_subnet_id: str = ""
+    jumpoint_security_group_id: str = ""
 
 
 class GcpRegionConfig(BaseModel):
@@ -119,6 +131,9 @@ class GcpRegionConfig(BaseModel):
     db_network: str = ""
     ssh_key_secret: str = ""
     default_network_tag: str = ""
+    ecs_subnetwork: str = ""
+    router_name: str = ""
+    nat_name: str = ""
 
 
 # Cloud → per-region-config model. Drives the /import parser and the /regions/{cloud}
