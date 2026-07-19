@@ -174,8 +174,9 @@
         <div class="flex items-center gap-4 px-4 py-3 rounded-xl border transition-colors"
              :class="intg.enabled ? 'border-blue-200 bg-blue-50' : 'border-gray-200 bg-white'">
 
-          <!-- Toggle -->
+          <!-- Toggle (hidden for config-only panels, which have no enable flag) -->
           <button
+            x-show="!intg.configOnly"
             @click="toggleIntegration(intg)"
             :disabled="intg.saving || (intg.key === 'ansible' && !intg.enabled && !ansibleEnableAllowed)"
             :title="intg.key === 'ansible' && !intg.enabled && !ansibleEnableAllowed ? 'Configure storage on /storage first' : ''"
@@ -2120,66 +2121,85 @@
             </div>
           </div>
 
-          <!-- Azure per-region config sets (multi-region — PR3) -->
+          <!-- Azure per-region config sets moved to the Multi-region panel. -->
           <div class="border-t border-gray-100 pt-4">
-            <div class="flex items-center justify-between mb-1">
-              <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide">Azure — per-region config sets</p>
-              <span class="text-[11px] text-gray-400" x-text="'default: ' + (azureRegions.defaultLocation || '—')"></span>
-            </div>
-            <p class="text-[11px] text-gray-400 mb-3">
-              Run ~3 regions in one account? Each region carries its own resource group, VNet RG, subnets,
-              DNS zone, gallery, and default VM size. Blank fields fall back to the flat <code>azure_*</code>
-              keys above (the <strong>default region</strong> always resolves to those, so single-region
-              setups are unchanged). The sandbox auto-populates these — running <code>setup-azure.sh</code>
-              in <code>westus2</code> and <code>centralus</code> seeds both.
+            <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-1">Per-region config sets</p>
+            <p class="text-[11px] text-gray-400">
+              Run several regions in one account? Each region's resource group, subnets, DNS zone,
+              gallery, and default VM size now live in the
+              <button type="button" @click="openPanel(integrations.find(i => i.key === 'multi_region'))"
+                      class="text-blue-600 hover:text-blue-800 underline">Multi-region</button>
+              panel (alongside AWS and GCP). Blank fields fall back to the flat <code>azure_*</code>
+              keys above, so single-region setups are unchanged.
             </p>
-
-            <div x-show="azureRegions.loaded">
-              <template x-if="Object.keys(azureRegions.regions).length === 0">
-                <p class="text-[11px] text-gray-400 italic mb-2">No region sets configured — every region resolves to the flat defaults above.</p>
-              </template>
-
-              <template x-for="(cfg, loc) in azureRegions.regions" :key="loc">
-                <div class="border border-gray-200 rounded-lg p-3 mb-3">
-                  <div class="flex items-center justify-between mb-2">
-                    <span class="text-sm font-semibold text-gray-700 font-mono" x-text="loc"></span>
-                    <button type="button" @click="removeAzureRegion(loc)"
-                            class="text-[11px] text-red-500 hover:text-red-700">Remove</button>
-                  </div>
-                  <div class="grid grid-cols-2 gap-2">
-                    <template x-for="field in azureRegions.fields" :key="field">
-                      <div>
-                        <label class="block text-[11px] font-medium text-gray-500 mb-0.5" x-text="field"></label>
-                        <input type="text" x-model="azureRegions.regions[loc][field]"
-                               class="w-full border border-gray-300 rounded px-2 py-1 text-[11px] font-mono"
-                               :placeholder="azureRegions.fallbacks[field] || '(unset)'">
-                      </div>
-                    </template>
-                  </div>
-                </div>
-              </template>
-
-              <div class="flex items-center gap-2 mt-2">
-                <input type="text" x-model="azureRegions.newLocation"
-                       @keydown.enter.prevent="addAzureRegion()"
-                       class="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
-                       placeholder="add a region (e.g. westus2)">
-                <button type="button" @click="addAzureRegion()"
-                        class="bg-gray-100 hover:bg-gray-200 text-gray-700 text-sm font-medium px-3 py-2 rounded-lg">Add region</button>
-              </div>
-              <div class="flex items-center justify-end mt-3">
-                <button type="button" @click="saveAzureRegions()" :disabled="azureRegions.saving"
-                        class="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-medium px-4 py-2 rounded-lg">
-                  <svg x-show="azureRegions.saving" class="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
-                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"></path>
-                  </svg>
-                  <span x-text="azureRegions.saving ? 'Saving…' : 'Save region sets'"></span>
-                </button>
-              </div>
-              <p x-show="azureRegions.error" class="text-[11px] text-red-500 mt-1" x-text="azureRegions.error"></p>
-            </div>
           </div>
+        </div>
+      </template>
+
+      <!-- Multi-region: per-region config sets for AWS, GCP and Azure -->
+      <template x-if="panel?.key === 'multi_region' && !panelLoading">
+        <div class="space-y-6">
+          <p class="text-xs text-gray-500 leading-snug">
+            Run several regions in one account? Each region carries its own resource ids (subnets,
+            security groups, SSH secrets, networks). Blank fields fall back to the flat config keys, and
+            the <strong>default region</strong> always resolves to those — so single-region setups are
+            unchanged. The sandbox auto-populates these when you run its setup script in more than one region.
+          </p>
+
+          <template x-for="cloud in ['aws', 'gcp', 'azure']" :key="cloud">
+            <div class="border-t border-gray-100 pt-4">
+              <div class="flex items-center justify-between mb-3">
+                <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide" x-text="cloud.toUpperCase() + ' — per-region config sets'"></p>
+                <span class="text-[11px] text-gray-400" x-text="'default: ' + (regionSets[cloud].defaultRegion || '—')"></span>
+              </div>
+
+              <div x-show="regionSets[cloud].loaded">
+                <template x-if="Object.keys(regionSets[cloud].regions).length === 0">
+                  <p class="text-[11px] text-gray-400 italic mb-2">No region sets configured — every region resolves to the flat defaults.</p>
+                </template>
+
+                <template x-for="(cfg, loc) in regionSets[cloud].regions" :key="loc">
+                  <div class="border border-gray-200 rounded-lg p-3 mb-3">
+                    <div class="flex items-center justify-between mb-2">
+                      <span class="text-sm font-semibold text-gray-700 font-mono" x-text="loc"></span>
+                      <button type="button" @click="removeRegion(cloud, loc)"
+                              class="text-[11px] text-red-500 hover:text-red-700">Remove</button>
+                    </div>
+                    <div class="grid grid-cols-2 gap-2">
+                      <template x-for="field in regionSets[cloud].fields" :key="field">
+                        <div>
+                          <label class="block text-[11px] font-medium text-gray-500 mb-0.5" x-text="field"></label>
+                          <input type="text" x-model="regionSets[cloud].regions[loc][field]"
+                                 class="w-full border border-gray-300 rounded px-2 py-1 text-[11px] font-mono"
+                                 :placeholder="regionSets[cloud].fallbacks[field] || '(unset)'">
+                        </div>
+                      </template>
+                    </div>
+                  </div>
+                </template>
+
+                <div class="flex items-center gap-2 mt-2">
+                  <input type="text" x-model="regionSets[cloud].newRegion"
+                         @keydown.enter.prevent="addRegion(cloud)"
+                         class="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                         :placeholder="'add a region (e.g. ' + (cloud === 'gcp' ? 'us-west1' : cloud === 'azure' ? 'westus2' : 'us-west-2') + ')'">
+                  <button type="button" @click="addRegion(cloud)"
+                          class="bg-gray-100 hover:bg-gray-200 text-gray-700 text-sm font-medium px-3 py-2 rounded-lg">Add region</button>
+                </div>
+                <div class="flex items-center justify-end mt-3">
+                  <button type="button" @click="saveRegionSets(cloud)" :disabled="regionSets[cloud].saving"
+                          class="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-medium px-4 py-2 rounded-lg">
+                    <svg x-show="regionSets[cloud].saving" class="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
+                      <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                      <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"></path>
+                    </svg>
+                    <span x-text="(regionSets[cloud].saving ? 'Saving…' : 'Save ' + cloud.toUpperCase() + ' region sets')"></span>
+                  </button>
+                </div>
+                <p x-show="regionSets[cloud].error" class="text-[11px] text-red-500 mt-1" x-text="regionSets[cloud].error"></p>
+              </div>
+            </div>
+          </template>
         </div>
       </template>
 
@@ -2189,6 +2209,7 @@
     <div class="flex items-center justify-between px-6 py-4 border-t border-gray-200 flex-shrink-0 bg-gray-50">
       <button @click="panel = null" class="text-sm text-gray-500 hover:text-gray-700 transition-colors">Cancel</button>
       <button @click="savePanelConfig()"
+              x-show="panel?.key !== 'multi_region'"
               :disabled="panelSaving"
               class="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors">
         <svg x-show="panelSaving" class="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
@@ -2255,6 +2276,8 @@ function settingsPage() {
         desc: 'Private managed databases (PostgreSQL, MySQL, SQL Server) on AWS, Azure and GCP, reached through a PRA tunnel.' },
       { key: 'k8s_management', label: 'Kubernetes',             hasConfig: true,  enabled: false,
         desc: 'Provision (EKS/AKS/GKE), register, and broker Kubernetes clusters — PRA tunnels + Entitle real-identity JIT.' },
+      { key: 'multi_region', label: 'Multi-region',            hasConfig: true,  enabled: true, configOnly: true,
+        desc: 'Per-region resource config sets for AWS, GCP and Azure — subnets, security groups, SSH secrets, networks. Blank fields fall back to the flat defaults.' },
     ],
 
     // ── Slide-over panel state ───────────────────────────────────────────
@@ -2266,17 +2289,13 @@ function settingsPage() {
     entitleAgentToken: '',   // read-only display of the auto-minted Entitle agent token name
     rancherFirewall: null,   // read-only breakdown of the Rancher node firewall allow-list (k8s panel)
 
-    // Azure per-region config sets (multi-region — PR3). Lazy-loaded when the
-    // Virtual Desktops panel opens; saved via PUT /api/setup/azure-regions.
-    azureRegions: {
-      defaultLocation: '',
-      fields: [],
-      fallbacks: {},
-      regions: {},        // { '<loc>': { field: value, … } }
-      newLocation: '',
-      loaded: false,
-      saving: false,
-      error: '',
+    // Cross-cloud per-region config sets — the Multi-region panel. One state block
+    // per cloud, each loaded from / saved to /api/setup/regions/{cloud}. The generic
+    // editor markup is driven by the server-provided fields + fallbacks.
+    regionSets: {
+      aws:   { defaultRegion: '', fields: [], fallbacks: {}, regions: {}, newRegion: '', loaded: false, saving: false, error: '' },
+      gcp:   { defaultRegion: '', fields: [], fallbacks: {}, regions: {}, newRegion: '', loaded: false, saving: false, error: '' },
+      azure: { defaultRegion: '', fields: [], fallbacks: {}, regions: {}, newRegion: '', loaded: false, saving: false, error: '' },
     },
 
     // Cloud-identity JIT matrix state (Phase 3) — lives alongside the
@@ -2543,10 +2562,9 @@ function settingsPage() {
         if (intg.key === 'entitle' && !this.userJit.loaded) {
           await this.loadUserJit();
         }
-        // Multi-region (PR3): load the Azure per-region config sets editor
-        // alongside the VDI defaults (region-specific subnets live here).
-        if (intg.key === 'vdesktops') {
-          await this.loadAzureRegions();
+        // Multi-region: lazy-load all three clouds' per-region config sets.
+        if (intg.key === 'multi_region') {
+          await Promise.all(['aws', 'gcp', 'azure'].map(c => this.loadRegionSets(c)));
         }
         // Kubernetes: lazy-load the read-only Rancher firewall breakdown so the
         // operator can see which sources are auto-whitelisted (clusters + Jumpoint).
@@ -2723,56 +2741,55 @@ function settingsPage() {
       }
     },
 
-    // ── Azure per-region config sets (multi-region — PR3) ────────────────
-    async loadAzureRegions() {
+    // ── Cross-cloud region sets (Multi-region panel) ──────────────────────
+    async loadRegionSets(cloud) {
+      const s = this.regionSets[cloud];
       try {
-        const r = await API.get('/api/setup/azure-regions');
-        this.azureRegions.defaultLocation = r.default_location || '';
-        this.azureRegions.fields = r.fields || [];
-        this.azureRegions.fallbacks = r.fallbacks || {};
-        // Normalise every entry to carry all fields (so x-model bindings exist).
+        const r = await API.get(`/api/setup/regions/${cloud}`);
+        s.defaultRegion = r.default_region || '';
+        s.fields = r.fields || [];
+        s.fallbacks = r.fallbacks || {};
         const regions = {};
         for (const [loc, cfg] of Object.entries(r.regions || {})) {
           const entry = {};
-          for (const f of this.azureRegions.fields) entry[f] = (cfg && cfg[f]) || '';
+          for (const f of s.fields) entry[f] = (cfg && cfg[f]) || '';
           regions[loc] = entry;
         }
-        this.azureRegions.regions = regions;
-        this.azureRegions.error = '';
-        this.azureRegions.loaded = true;
+        s.regions = regions;
+        s.error = '';
+        s.loaded = true;
       } catch (e) {
-        this.azureRegions.error = 'Failed to load region sets: ' + (e.message || e);
-        this.azureRegions.loaded = true;
+        s.error = 'Failed to load region sets: ' + (e.message || e);
+        s.loaded = true;
       }
     },
-
-    addAzureRegion() {
-      const loc = (this.azureRegions.newLocation || '').trim().toLowerCase().replace(/\s+/g, '');
+    addRegion(cloud) {
+      const s = this.regionSets[cloud];
+      const loc = (s.newRegion || '').trim().toLowerCase().replace(/\s+/g, '');
       if (!loc) return;
-      if (!this.azureRegions.regions[loc]) {
+      if (!s.regions[loc]) {
         const entry = {};
-        for (const f of this.azureRegions.fields) entry[f] = '';
-        this.azureRegions.regions[loc] = entry;
+        for (const f of s.fields) entry[f] = '';
+        s.regions[loc] = entry;
       }
-      this.azureRegions.newLocation = '';
+      s.newRegion = '';
     },
-
-    removeAzureRegion(loc) {
-      delete this.azureRegions.regions[loc];
+    removeRegion(cloud, loc) {
+      delete this.regionSets[cloud].regions[loc];
     },
-
-    async saveAzureRegions() {
-      this.azureRegions.saving = true;
-      this.azureRegions.error = '';
+    async saveRegionSets(cloud) {
+      const s = this.regionSets[cloud];
+      s.saving = true;
+      s.error = '';
       try {
-        await API.put('/api/setup/azure-regions', { regions: this.azureRegions.regions });
-        this.showToast('Azure region sets saved.');
+        await API.put(`/api/setup/regions/${cloud}`, { regions: s.regions });
+        this.showToast(`${cloud.toUpperCase()} region sets saved.`);
         // Reload so blank-only regions the server dropped disappear from the editor.
-        await this.loadAzureRegions();
+        await this.loadRegionSets(cloud);
       } catch (e) {
-        this.azureRegions.error = 'Save failed: ' + (e.message || e);
+        s.error = 'Save failed: ' + (e.message || e);
       } finally {
-        this.azureRegions.saving = false;
+        s.saving = false;
       }
     },
 
