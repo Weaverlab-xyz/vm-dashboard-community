@@ -69,4 +69,48 @@ const inv = build('inventory/list.html', 'filtered', {
   filterProvider:'aws', filterKind:'vm', filterRegion:'us-east-2'});
 ok('inventory filtered() ANDs provider+kind+region', inv.filtered().length === 1);
 
+// --- admission allow-list picker (settings.html) ---
+// The gate reads a comma-separated string, so the chips UI must round-trip it
+// without dropping hand-typed entries the catalog doesn't know about.
+const S = 'settings.html';
+const mkPanel = (csv, catalog) => {
+  const o = {};
+  for (const m of ['allowedRegionList','addAllowedRegion','removeAllowedRegion','regionCatalogGroups'])
+    Object.assign(o, eval('({' + extract(S, m) + '})'));
+  o.panelCfg = { admission_allowed_regions: csv };
+  o.regionCatalog = catalog || { aws: [], gcp: [], azure: [], oci: [] };
+  return o;
+};
+
+let p = mkPanel('us-east-1, us-west-2');
+ok('allowedRegionList parses CSV and trims',
+   JSON.stringify(p.allowedRegionList()) === JSON.stringify(['us-east-1','us-west-2']));
+ok('allowedRegionList empty on blank', mkPanel('').allowedRegionList().length === 0);
+ok('allowedRegionList tolerates trailing commas / gaps',
+   JSON.stringify(mkPanel(' us-east-1 , , us-west-2,').allowedRegionList())
+   === JSON.stringify(['us-east-1','us-west-2']));
+
+p = mkPanel('us-east-1');
+p.addAllowedRegion('eastus');
+ok('addAllowedRegion appends', p.panelCfg.admission_allowed_regions === 'us-east-1, eastus');
+p.addAllowedRegion('eastus');
+ok('addAllowedRegion is idempotent', p.panelCfg.admission_allowed_regions === 'us-east-1, eastus');
+p.addAllowedRegion('  ');
+ok('addAllowedRegion ignores blank', p.panelCfg.admission_allowed_regions === 'us-east-1, eastus');
+p.removeAllowedRegion('us-east-1');
+ok('removeAllowedRegion drops only that entry', p.panelCfg.admission_allowed_regions === 'eastus');
+
+// A region typed by hand that isn't in any catalog must survive add/remove.
+p = mkPanel('us-gov-west-1', {aws:[{id:'us-east-1'}], gcp:[], azure:[], oci:[]});
+p.addAllowedRegion('us-east-1');
+ok('hand-typed region outside the catalog is preserved',
+   p.allowedRegionList().includes('us-gov-west-1'));
+
+p = mkPanel('us-east-1', {aws:[{id:'us-east-1'},{id:'us-west-2'}], gcp:[], azure:[{id:'eastus'}], oci:[]});
+const groups = p.regionCatalogGroups();
+ok('regionCatalogGroups hides already-chosen regions',
+   !JSON.stringify(groups).includes('"us-east-1"'));
+ok('regionCatalogGroups drops empty clouds',
+   groups.every(g => g.regions.length > 0) && groups.map(g => g.cloud).sort().join(',') === 'aws,azure');
+
 process.exit(fail ? 1 : 0);

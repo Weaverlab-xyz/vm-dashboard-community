@@ -729,6 +729,21 @@
                    placeholder="e.g. my-vm-deployment">
           </div>
 
+          <!-- Region — changing it refetches subnets/SGs, which are region-scoped -->
+          <div class="mb-4">
+            <label class="block text-sm font-medium text-gray-700 mb-1">Region *</label>
+            <select x-model="deployForm.region" @change="onDeployRegionChange()" required
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm
+                           focus:outline-none focus:ring-2 focus:ring-blue-500">
+              <template x-for="r in regionCatalog" :key="r.id">
+                <option :value="r.id" x-text="r.label ? (r.id + ' — ' + r.label) : r.id"></option>
+              </template>
+            </select>
+            <p class="mt-1 text-[11px] text-gray-400">
+              Subnet and security groups below belong to this region.
+            </p>
+          </div>
+
           <!-- Instance Type -->
           <div class="mb-4">
             <label class="block text-sm font-medium text-gray-700 mb-1">Instance Type *</label>
@@ -953,6 +968,18 @@
                 </div>
               </template>
             </div>
+          </div>
+
+          <!-- Shared: Region — every instance in the batch lands here -->
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Region <span class="text-gray-400 font-normal">(shared)</span></label>
+            <select x-model="deployForm.region" @change="onDeployRegionChange()"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm
+                           focus:outline-none focus:ring-2 focus:ring-green-500">
+              <template x-for="r in regionCatalog" :key="r.id">
+                <option :value="r.id" x-text="r.label ? (r.id + ' — ' + r.label) : r.id"></option>
+              </template>
+            </select>
           </div>
 
           <!-- Shared: Instance Type -->
@@ -1258,7 +1285,9 @@
       cachedAtAmis: null,
 
       // Shared
+      regionCatalog: [],
       networkOpts: {},
+      networkOptsRegion: '',
       loadingNetworkOpts: false,
       loading: false,
       credentialError: '',
@@ -1292,6 +1321,7 @@
       deployForm: {
         instance_name: '',
         instance_type: 't3.medium',
+        region: '',
         sshKeyName: '',
         sshPublicKeyPreview: '',
         sshKeyPreviewLoading: false,
@@ -1496,11 +1526,43 @@
 
       async loadDefaultRegion() {
         // The header shows the configured default; instances themselves carry
-        // their own region now that deploys are region-scoped.
+        // their own region now that deploys are region-scoped. The catalog also
+        // feeds the deploy modal's region picker.
         try {
           const resp = await API.get('/api/regions?cloud=aws');
           if (resp && resp.default) this.region = resp.default;
+          if (resp && resp.regions) this.regionCatalog = resp.regions;
         } catch (e) { /* header falls back to the built-in default */ }
+      },
+
+      // Network options are region-scoped — subnets, security groups and
+      // instance types all differ per region — so this is cached per region and
+      // refetched when the deploy region changes.
+      async loadNetworkOptsFor(region, force = false) {
+        if (!force && this.networkOpts.subnets && region === this.networkOptsRegion) return;
+        this.loadingNetworkOpts = true;
+        try {
+          const q = region ? '?region=' + encodeURIComponent(region) : '';
+          const o = await API.get('/api/aws/network-options' + q);
+          if (o) {
+            this.networkOpts = o;
+            this.networkOptsRegion = region || '';
+            // Preselect the sandbox private subnet + VM SG (where the on-demand NAT
+            // route applies) when the operator hasn't already chosen. Overridable.
+            if (!this.deployForm.subnet_id && o.default_subnet_id) this.deployForm.subnet_id = o.default_subnet_id;
+            if (this.deployForm.security_group_ids.length === 0 && o.default_security_group_id) this.deployForm.security_group_ids = [o.default_security_group_id];
+          }
+        } finally {
+          this.loadingNetworkOpts = false;
+        }
+      },
+
+      // A subnet/SG from the previous region can't be used in the new one, so
+      // drop both rather than letting the operator submit a mismatched pair.
+      async onDeployRegionChange() {
+        this.deployForm.subnet_id = '';
+        this.deployForm.security_group_ids = [];
+        await this.loadNetworkOptsFor(this.deployForm.region, true);
       },
 
       async loadInstances() {
@@ -1564,6 +1626,7 @@
           ami_id: ami ? ami.ami_id : '',
           instance_name: defaultName,
           instance_type: 't3.medium',
+          region: this.region,
           sshKeyName: '',
           sshPublicKeyPreview: '',
           sshKeyPreviewLoading: true,
@@ -1579,17 +1642,7 @@
         this.deployError = '';
         this.showDeployModal = true;
 
-        const fetches = [];
-        if (!this.networkOpts.subnets) {
-          this.loadingNetworkOpts = true;
-          fetches.push(API.get('/api/aws/network-options').then(o => { if (o) {
-            this.networkOpts = o;
-            // Preselect the sandbox private subnet + VM SG (where the on-demand NAT
-            // route applies) when the operator hasn't already chosen. Overridable.
-            if (!this.deployForm.subnet_id && o.default_subnet_id) this.deployForm.subnet_id = o.default_subnet_id;
-            if (this.deployForm.security_group_ids.length === 0 && o.default_security_group_id) this.deployForm.security_group_ids = [o.default_security_group_id];
-          } }));
-        }
+        const fetches = [this.loadNetworkOptsFor(this.deployForm.region)];
         fetches.push(
           API.get('/api/aws/secrets/ssh-key').then(r => {
             this.deployForm.sshKeyName = r?.name || '';
@@ -1673,6 +1726,7 @@
           const body = {
             ami_id: amiId,
             instance_name: this.deployForm.instance_name,
+            region: this.deployForm.region,
             instance_type: this.deployForm.instance_type,
             subnet_id: this.deployForm.subnet_id,
             security_group_ids: this.deployForm.security_group_ids,
@@ -1745,19 +1799,12 @@
         this.bulkDeployResults = [];
         this.deployForm.instance_name = '';
         this.deployForm.sshKeyPreviewLoading = true;
+        // Bulk shares deployForm with the single-deploy modal, which may never
+        // have been opened — seed the region from the configured default.
+        this.deployForm.region = this.deployForm.region || this.region;
         this.showBulkDeployModal = true;
 
-        const fetches = [];
-        if (!this.networkOpts.subnets) {
-          this.loadingNetworkOpts = true;
-          fetches.push(API.get('/api/aws/network-options').then(o => { if (o) {
-            this.networkOpts = o;
-            // Preselect the sandbox private subnet + VM SG (where the on-demand NAT
-            // route applies) when the operator hasn't already chosen. Overridable.
-            if (!this.deployForm.subnet_id && o.default_subnet_id) this.deployForm.subnet_id = o.default_subnet_id;
-            if (this.deployForm.security_group_ids.length === 0 && o.default_security_group_id) this.deployForm.security_group_ids = [o.default_security_group_id];
-          } }));
-        }
+        const fetches = [this.loadNetworkOptsFor(this.deployForm.region)];
         // Fetch configured key preview if not already loaded from a prior modal open
         if (!this.deployForm.sshKeyName) {
           fetches.push(
@@ -1798,6 +1845,7 @@
               ami_id: i.ami_id,
               instance_name: i.instance_name,
             })),
+            region: this.deployForm.region,
             instance_type: this.deployForm.instance_type,
             subnet_id: this.deployForm.subnet_id,
             security_group_ids: this.deployForm.security_group_ids,
