@@ -36,7 +36,8 @@ from ..models.azure import (
     AzureSSHKeyInfo,
     AzureVMInfo,
 )
-from ..services import azure_service, job_service, cache_service, cloud_stats, region_catalog, workgroup_service
+from ..services import (azure_service, azure_listing, job_service, cache_service,
+                        cloud_stats, region_catalog, workgroup_service)
 from ..services.azure_service import AzureError
 from .auth import get_current_user, require_admin, require_permission
 
@@ -485,6 +486,17 @@ async def get_vm_admin_password(
 
 # ── VM listing ────────────────────────────────────────────────────────────────
 
+def _listing_resource_groups(job_meta: dict) -> set:
+    """Resource groups the VM listing must cover — see services.azure_listing."""
+    def _configured_regions():
+        from ..services.region_config import load_region_configs
+        return list(load_region_configs("azure"))
+
+    return azure_listing.listing_resource_groups(
+        job_meta, default_rg=_rg, rg_for=_rg_for,
+        configured_regions=_configured_regions)
+
+
 async def _fetch_vms(db: Session) -> list:
     """Dashboard-deployed Azure VMs (azure_deploy jobs) merged with live power
     state. Shared by /vms and /dashboard-stats. Workgroup is normalized to
@@ -506,8 +518,23 @@ async def _fetch_vms(db: Session) -> list:
         for j in deploy_jobs if j.metadata_dict.get("vm_name")
     }
 
-    live_vms = await azure_service.describe_vms(_rg())
-    live_vm_names = {vm["name"] for vm in live_vms}
+    resource_groups = _listing_resource_groups(job_meta)
+
+    live_vms = []
+    live_vm_names = set()
+    for rg in sorted(resource_groups):
+        try:
+            for vm in await azure_service.describe_vms(rg):
+                if vm["name"] not in live_vm_names:
+                    live_vms.append(vm)
+                    live_vm_names.add(vm["name"])
+        except AzureError:
+            # One unreachable/deleted RG shouldn't blank the whole list.
+            logger.warning("Azure VM listing: describe_vms failed for resource group %s", rg,
+                           exc_info=True)
+
+    # Anything a deploy job knows about but no RG listing returned — e.g. a VM
+    # excluded by tag filtering — is still fetched by name.
     for vm_name, meta in job_meta.items():
         if vm_name not in live_vm_names and not meta["destroyed"]:
             rg = meta["resource_group"] or _rg()
