@@ -19,6 +19,16 @@
 #                      AWS Systems Manager Custom Plugin has one to rotate (private half discarded)
 #   BT_ADMIN_NOPASSWD_ALL=1 grant adminuser full passwordless sudo (NOPASSWD: ALL) instead
 #                      of the scoped set — needed for Ansible config-mgmt `become` (sudo's /bin/sh)
+#   BT_PRA_CA_PUBKEY   PRA Vault SSH CA *public* key; pinned as a `cert-authority` line in
+#                      each PRA account's authorized_keys so that account trusts certificates
+#                      PRA issues. Unset ⇒ feature entirely off.
+#   BT_PRA_USERS       comma-separated accounts to create for certificate login, e.g.
+#                      "svc-app,dbadmin". These must match the USERNAMES OF THE PRA VAULT
+#                      SSH-CA ACCOUNTS targeting this host — a cert is scoped to its vault
+#                      account, so the local account name has to match. Not a list of people.
+#   BT_PRA_PRINCIPAL   optional; require this principal (principals="…" on the cert-authority
+#                      line) instead of the default, where the principal must equal the username
+#   BT_PRA_SUDO=1      grant those accounts NOPASSWD sudo (default: no sudo)
 #   BT_EPML_URL        presigned URL to the EPM-L .deb; set to install (activation is Ansible's job)
 #   BT_AUTOPATCH=1     enable unattended-upgrades on the built image
 #   BT_SKIP_UPDATES=1  skip dist-upgrade (faster iteration builds)
@@ -129,13 +139,131 @@ if [ "${BT_APPLY_CIS:-0}" = "1" ]; then
   fi
 fi
 
+# ── 4e. PRA SSH certificate authority ────────────────────────────────────────
+# PRA's Vault can act as an SSH CA: it issues a short-lived certificate scoped to a
+# specific vaulted account, and the host trusts it by pinning the CA's PUBLIC key.
+# That replaces a shared long-lived authorized_keys entry — revocation and rotation
+# happen in PRA, not by touching every VM.
+#
+# The CA key is a ROOT OF TRUST, not a credential: any certificate it signs can log
+# into the accounts below.
+# The CA is pinned PER ACCOUNT, via a `cert-authority` marker in that account's
+# authorized_keys. Trust is therefore scoped by construction: a certificate is only
+# accepted for accounts that carry the line, unlike a host-wide TrustedUserCAKeys.
+PRA_USERS_CREATED=""
+if [ -n "${BT_PRA_CA_PUBKEY:-}" ]; then
+  log "PRA SSH certificate authority: pinning CA per account"
+
+  # PRA hands you the line already carrying the `cert-authority` prefix (that is how
+  # it appears in the Vault UI and in hand-rolled scripts). Accept either that or a
+  # bare public key, so whatever the operator has on hand pastes in cleanly.
+  PRA_CA_KEY="$(printf '%s' "$BT_PRA_CA_PUBKEY" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+  case "$PRA_CA_KEY" in
+    cert-authority[[:space:],]*)
+      log "stripping the cert-authority prefix from BT_PRA_CA_PUBKEY (re-added below)"
+      PRA_CA_KEY="$(printf '%s' "$PRA_CA_KEY" | sed 's/^cert-authority[^[:space:]]*[[:space:]][[:space:]]*//')"
+      ;;
+  esac
+
+  # Validate before pinning — a bad key here becomes an account nobody can log into.
+  PRA_TMP="$(mktemp)"
+  printf '%s\n' "$PRA_CA_KEY" > "$PRA_TMP"
+  if ! ssh-keygen -l -f "$PRA_TMP" >/dev/null 2>&1; then
+    rm -f "$PRA_TMP"
+    die "BT_PRA_CA_PUBKEY is not a valid SSH public key — expected '<keytype> <base64> [comment]', optionally prefixed with cert-authority"
+  fi
+  log "CA fingerprint: $(ssh-keygen -l -f "$PRA_TMP" 2>/dev/null || echo unavailable)"
+  rm -f "$PRA_TMP"
+  # The comment is kept as-is: PRA puts the tenant hostname there
+  # (e.g. pf50b242.beyondtrustcloud.com), which is worth having on the host.
+
+  # Without a principals= option OpenSSH uses the login username as the required
+  # principal — that is the principal==username default. Setting BT_PRA_PRINCIPAL
+  # constrains the account to certs bearing that principal instead.
+  if [ -n "${BT_PRA_PRINCIPAL:-}" ]; then
+    case "$BT_PRA_PRINCIPAL" in
+      *'"'*|*,*) die "BT_PRA_PRINCIPAL must not contain quotes or commas: '$BT_PRA_PRINCIPAL'" ;;
+    esac
+    PRA_OPTS="cert-authority,principals=\"$BT_PRA_PRINCIPAL\""
+    log "principals mode: certs must bear principal '$BT_PRA_PRINCIPAL'"
+  else
+    PRA_OPTS="cert-authority"
+    log "principals mode: certificate principal must equal the account name"
+  fi
+
+  # Accounts the certificates log into. POSIX sh — no arrays; split on commas.
+  for _pu in $(printf '%s' "${BT_PRA_USERS:-}" | tr ',' ' '); do
+    [ -n "$_pu" ] || continue
+    # These strings reach useradd and a sudoers file — constrain them hard. Uppercase
+    # is allowed: PRA vault account names are commonly capitalised (e.g. "Pathfinder"),
+    # and the local account has to match the vault account exactly.
+    if ! printf '%s' "$_pu" | grep -Eq '^[A-Za-z_][A-Za-z0-9_-]*$'; then
+      die "BT_PRA_USERS contains an invalid account name: '$_pu'"
+    fi
+    if id -u "$_pu" >/dev/null 2>&1; then
+      log "PRA account $_pu already exists — leaving it alone"
+    else
+      log "creating PRA certificate account: $_pu"
+      # Debian's default NAME_REGEX rejects capitalised names, which vault accounts
+      # often are. --badname (shadow-utils >= 4.9) overrides it; older shadow has no
+      # such flag, so fall back to a clear failure rather than a cryptic one.
+      if ! useradd -m -s /bin/bash "$_pu" 2>/dev/null; then
+        if ! useradd --badname -m -s /bin/bash "$_pu" 2>/dev/null; then
+          die "useradd refused '$_pu' (distro name policy). Use a lowercase vault account name, or relax NAME_REGEX in /etc/adduser.conf."
+        fi
+        log "created $_pu via --badname (name is outside the distro's default policy)"
+      fi
+    fi
+
+    _phome="$(getent passwd "$_pu" | cut -d: -f6)"
+    [ -n "$_phome" ] || _phome="/home/$_pu"
+    mkdir -p "$_phome/.ssh"
+    _pak="$_phome/.ssh/authorized_keys"
+    touch "$_pak"
+    # Idempotent: drop a previous bt-ready CA line before re-adding, so a re-run
+    # (or a rotated CA) replaces rather than accumulates.
+    if grep -v ' bt-ready-pra-ca$' "$_pak" > "$_pak.bt-tmp" 2>/dev/null; then :; fi
+    mv "$_pak.bt-tmp" "$_pak" 2>/dev/null || true
+    printf '%s %s bt-ready-pra-ca\n' "$PRA_OPTS" "$PRA_CA_KEY" >> "$_pak"
+    chmod 0700 "$_phome/.ssh"
+    chmod 0600 "$_pak"
+    chown -R "$_pu:$(id -gn "$_pu")" "$_phome/.ssh" 2>/dev/null || true
+    log "pinned CA in $_pak"
+
+    PRA_USERS_CREATED="$PRA_USERS_CREATED $_pu"
+  done
+
+  if [ -z "$PRA_USERS_CREATED" ]; then
+    log "warn: BT_PRA_CA_PUBKEY is set but BT_PRA_USERS is empty — no account was pinned, so no certificate can log in"
+  fi
+
+  if [ "${BT_PRA_SUDO:-0}" = "1" ] && [ -n "$PRA_USERS_CREATED" ]; then
+    PRA_SUDOERS=/etc/sudoers.d/92-bt-pra-users
+    log "writing $PRA_SUDOERS (BT_PRA_SUDO=1)"
+    printf '%s\n' "# Managed by bt-ready provisioner. PRA certificate accounts." > "$PRA_SUDOERS"
+    for _pu in $PRA_USERS_CREATED; do
+      printf '%s ALL=(ALL) NOPASSWD: ALL\n' "$_pu" >> "$PRA_SUDOERS"
+    done
+    chmod 0440 "$PRA_SUDOERS"
+    if ! visudo -c -f "$PRA_SUDOERS" >/dev/null; then
+      rm -f "$PRA_SUDOERS"
+      die "visudo rejected 92-bt-pra-users — sudoers not installed"
+    fi
+  fi
+fi
+
 # ── 5. sshd hardening for PRA Shell Jump ─────────────────────────────────────
-# Written as 00-bt-ready.conf so it's loaded LEX-FIRST by sshd. sshd uses
-# first-occurrence-wins semantics for conflicting directives, so ours win
-# even when CIS drops 00-complianceascode-hardening.conf alongside it.
-log "writing /etc/ssh/sshd_config.d/00-bt-ready.conf"
-mkdir -p /etc/ssh/sshd_config.d
-cat > /etc/ssh/sshd_config.d/00-bt-ready.conf <<'EOF'
+# Normally written as 00-bt-ready.conf so it's loaded LEX-FIRST by sshd — sshd uses
+# first-occurrence-wins semantics for conflicting directives, so ours win even when
+# CIS drops 00-complianceascode-hardening.conf alongside it.
+#
+# BUT the Include directive that pulls in sshd_config.d only exists in OpenSSH >= 8.2.
+# On older sshd (notably Amazon Linux 2, OpenSSH 7.4) a drop-in is parsed by NOTHING
+# and `sshd -t` still passes — the file is simply never read. That silently voids the
+# hardening — including PubkeyAuthentication, which certificate auth depends on. So:
+# detect it, and splice the directives into the TOP of sshd_config instead (top, not
+# bottom — first occurrence wins).
+SSHD_BODY="# BEGIN bt-ready
 # Managed by bt-ready provisioner. PRA Shell Jump connectivity prereqs.
 # Loaded lex-first so these directives win against any 50-* / 99-* drop-ins.
 PasswordAuthentication no
@@ -146,9 +274,28 @@ KbdInteractiveAuthentication no
 UsePAM yes
 ClientAliveInterval 60
 ClientAliveCountMax 3
-EOF
-chmod 0644 /etc/ssh/sshd_config.d/00-bt-ready.conf
-sshd -t || die "sshd config validation failed after writing 00-bt-ready.conf"
+# END bt-ready"
+# No TrustedUserCAKeys here by design: the PRA CA is pinned per account via a
+# cert-authority line in that account's authorized_keys (section 4e), so trust is
+# scoped to those accounts instead of the whole host. PubkeyAuthentication yes above
+# is what enables certificate auth.
+
+if grep -Eq '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/' /etc/ssh/sshd_config 2>/dev/null; then
+  log "writing /etc/ssh/sshd_config.d/00-bt-ready.conf"
+  mkdir -p /etc/ssh/sshd_config.d
+  printf '%s\n' "$SSHD_BODY" > /etc/ssh/sshd_config.d/00-bt-ready.conf
+  chmod 0644 /etc/ssh/sshd_config.d/00-bt-ready.conf
+else
+  log "sshd has no Include for sshd_config.d (OpenSSH < 8.2?) — writing directives into /etc/ssh/sshd_config"
+  SSHD_TMP="$(mktemp)"
+  printf '%s\n\n' "$SSHD_BODY" > "$SSHD_TMP"
+  # Drop any previous block so re-runs stay idempotent, then keep ours first.
+  sed '/^# BEGIN bt-ready$/,/^# END bt-ready$/d' /etc/ssh/sshd_config >> "$SSHD_TMP"
+  cat "$SSHD_TMP" > /etc/ssh/sshd_config
+  rm -f "$SSHD_TMP"
+  chmod 0644 /etc/ssh/sshd_config
+fi
+sshd -t || die "sshd config validation failed after writing the bt-ready directives"
 systemctl enable ssh >/dev/null 2>&1 || systemctl enable sshd >/dev/null 2>&1 || true
 
 # ── 5. Sudoers for the BT target user ────────────────────────────────────────
@@ -326,9 +473,18 @@ else
   # guest agent). The Password-Safe-managed admin user ($BT_ADMIN_USER) keeps its
   # seeded key (see BT_SEED_ADMIN_KEY) so the SSM Custom Plugin has a placeholder
   # to rotate on first Change Password.
+  # PRA certificate accounts are likewise exempt: their authorized_keys holds a
+  # cert-authority line — a reference to a PUBLIC CA key, not a credential — and
+  # shipping it in the image is the entire point of baking cert support in.
   for _uh in /home/*; do
     [ -d "$_uh" ] || continue
-    [ "$(basename "$_uh")" = "$BT_ADMIN_USER" ] && continue
+    _un="$(basename "$_uh")"
+    [ "$_un" = "$BT_ADMIN_USER" ] && continue
+    _skip=0
+    for _pu in $PRA_USERS_CREATED; do
+      [ "$_un" = "$_pu" ] && _skip=1
+    done
+    [ "$_skip" = "1" ] && { log "keeping $_uh/.ssh/authorized_keys (PRA certificate account)"; continue; }
     if [ -f "$_uh/.ssh/authorized_keys" ]; then
       rm -f "$_uh/.ssh/authorized_keys"
       log "stripped leftover $_uh/.ssh/authorized_keys (non-admin build/default user)"

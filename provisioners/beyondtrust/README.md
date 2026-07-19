@@ -136,6 +136,78 @@ Packer outside the dashboard.
 | `BT_SKIP_CLEANUP` | `0` | When `1`, skip the image-reuse cleanup in step 8. Useful when SSHing into the build VM to debug. |
 | `BT_APPLY_CIS` | `0` | When `1`, install OpenSCAP + SCAP Security Guide and apply a CIS/STIG profile. See the "Optional CIS/STIG hardening" section above. |
 | `BT_CIS_PROFILE` | per-distro CIS L1 Server | Override the SCAP profile id. Short names get the `xccdf_org.ssgproject.content_profile_` prefix prepended automatically — e.g. `BT_CIS_PROFILE=stig` works. Common values: `cis_server_l2`, `stig`, `stig_gui` (RPM); `cis_level2_server`, `stig` (Ubuntu). |
+| `BT_PRA_CA_PUBKEY` | (unset) | PRA Vault's SSH CA **public** key. Set = enable certificate login; unset = feature entirely off. See below. |
+| `BT_PRA_USERS` | (unset) | Comma-separated accounts to create for certificate login, e.g. `Pathfinder,svc-app`. |
+| `BT_PRA_PRINCIPAL` | (unset) | Require this principal instead of the default (principal must equal the username). |
+| `BT_PRA_SUDO` | `0` | When `1`, give those accounts `NOPASSWD: ALL` sudo. Default is **no sudo**. |
+
+## PRA SSH certificate authority (`BT_PRA_*`)
+
+PRA's Vault can act as an SSH CA: it issues a short-lived certificate scoped to a
+specific **vaulted account**, and the host trusts it by pinning the CA's *public*
+key. That replaces a shared, long-lived `authorized_keys` entry — revocation and
+rotation happen in PRA rather than by touching every VM.
+
+**The account names are not yours to choose.** A certificate is bound to its vault
+account, so each name in `BT_PRA_USERS` must match the **username of the PRA Vault
+SSH-CA account** that will target these hosts — including capitalisation (vault
+accounts are often capitalised, e.g. `Pathfinder`). A mismatch fails at login as
+"no such user", not as an auth error, which is a confusing way to find out.
+
+The CA key is pinned **per account**, as a `cert-authority` line in that account's
+`~/.ssh/authorized_keys`:
+
+```
+cert-authority ssh-rsa AAAAB3Nza… pf50b242.beyondtrustcloud.com bt-ready-pra-ca
+```
+
+Trust is therefore scoped to exactly those accounts, rather than host-wide via
+`TrustedUserCAKeys`. Paste the value straight from PRA — the script accepts it
+with or without the leading `cert-authority `, and preserves the tenant hostname
+comment. Supply it as a **secret reference** on the build form's Environment
+variables table (tick *secret*), so it reaches Packer as a sensitive variable and
+never lands in the template or the archived copy.
+
+```
+BT_PRA_CA_PUBKEY = aws_sm://pra/vault-ssh-ca      (secret ✓)
+BT_PRA_USERS     = Pathfinder
+```
+
+### Principals — read this before relying on it
+
+By default OpenSSH requires the certificate's principal to equal the login
+username, which matches the vault-account model and needs no extra config.
+
+**But a certificate carrying *no* principals is valid for _any_ user.** That is
+OpenSSH behaviour, not a bug here, and it is verified in our tests: in default mode
+a principal-less cert signed by the pinned CA logs in successfully. If your tenant
+issues such certificates, set `BT_PRA_PRINCIPAL` — it adds `principals="…"` to the
+`cert-authority` line, which constrains the account to certs bearing that principal
+and rejects principal-less ones outright.
+
+Check which case you are in with one command against a real PRA-issued cert:
+
+```
+ssh-keygen -L -f <cert>     # read the Principals: field
+```
+
+The same output line also shows the signing algorithm (`Signing CA: RSA … (using
+rsa-sha2-512)`). Modern OpenSSH excludes legacy SHA-1 `ssh-rsa` from its default
+`CASignatureAlgorithms`, so a CA signing with SHA-1 would be rejected on current
+distros — worth a glance, though current PRA versions sign with rsa-sha2-*.
+
+### Notes
+
+- The image-cleanup step strips `authorized_keys` from build/default users, but
+  **exempts PRA accounts** — the `cert-authority` line is a reference to a public
+  CA key, not a credential, and shipping it in the image is the point.
+- Re-running replaces the pinned line rather than appending, so rotating the CA is
+  just another build.
+- The CA key is a **root of trust**: any certificate it signs can log into these
+  accounts. Anyone who can set `BT_PRA_CA_PUBKEY` on a build can grant themselves
+  access to every image built from it.
+- This is bake-time only. Certificates reach **newly built images**; existing hosts
+  need the equivalent applied post-deploy (e.g. via Ansible).
 
 ## Cross-cloud constraint
 
