@@ -859,6 +859,14 @@ class AdmissionControlFeatureConfig(BaseModel):
     admission_prod_window: str = ""
 
 
+class MultiRegionFeatureConfig(BaseModel):
+    """Config-only panel that hosts the per-region config-set editors for AWS, GCP
+    and Azure. The region maps themselves live under ``<cloud>_region_configs`` and
+    are read/written via GET/PUT ``/api/setup/regions/{cloud}`` — this model carries
+    no flat keys, it just gives the Settings UI a panel to mount those editors in."""
+    enabled: bool = False
+
+
 _FEATURE_MODELS = {
     "vmware":       VMwareFeatureConfig,
     "beyondtrust":  BeyondTrustFeatureConfig,
@@ -875,12 +883,13 @@ _FEATURE_MODELS = {
     "vdesktops":      VirtualDesktopsFeatureConfig,
     "cost_explorer":  CostExplorerFeatureConfig,
     "admission_control": AdmissionControlFeatureConfig,
+    "multi_region":   MultiRegionFeatureConfig,
 }
 
 # Features whose panel carries config but NOT an enable toggle — their on/off
 # lives elsewhere (e.g. a preview flag). _read/_write_feature skip the enabled
 # key for these, so saving config can't flip the feature's flag.
-_CONFIG_ONLY_FEATURES = {"vdesktops"}
+_CONFIG_ONLY_FEATURES = {"vdesktops", "multi_region"}
 
 _SECRET_FEATURE_KEYS = frozenset({
     "pscli_client_secret", "bt_client_secret", "epml_pat",
