@@ -824,7 +824,27 @@ $cfg = @(
     "# Sandbox-provisioned AWS credentials for the dashboard IAM user ($DashboardUserName):",
     "aws_access_key_id=$AwsAccessKeyId",
     "aws_secret_access_key=$AwsSecretAccessKey",
-    'aws_ecs_docker_deploy_key=…   # BeyondTrust SRA Jumpoint deploy key (paste manually)'
+    'aws_ecs_docker_deploy_key=…   # BeyondTrust SRA Jumpoint deploy key (paste manually)',
+    "",
+    "# ── Per-region set for $Region ──────────────────────────────────────────────",
+    "# The flat keys above configure the DEFAULT region. These aws_region.<region>.*",
+    "# keys land in aws_region_configs, so re-running with a different -Region MERGES",
+    "# that region in rather than overwriting this one. (Every field falls back to",
+    "# its flat key when blank, so a single-region install is unchanged.)",
+    "aws_region.${Region}.default_subnet_id=$PrivateSubnetId",
+    "aws_region.${Region}.default_security_group_id=$VmSg",
+    "aws_region.${Region}.ssh_key_secret=$SshSecretName",
+    "aws_region.${Region}.db_subnet_group_name=$DbSubnetGroupName",
+    "aws_region.${Region}.db_security_group_id=$VmSg",
+    "aws_region.${Region}.vpc_id=$VpcId",
+    "aws_region.${Region}.vpc_cidr=10.99.0.0/16",
+    "aws_region.${Region}.private_route_table_id=$PrivateRtId",
+    "aws_region.${Region}.nat_security_group_id=$NatSg",
+    "aws_region.${Region}.ecs_subnet_id=$PublicSubnetId",
+    "aws_region.${Region}.ecs_security_group_ids=$JumpointSg",
+    "aws_region.${Region}.ecs_cluster=$EcsCluster",
+    "aws_region.${Region}.jumpoint_subnet_id=$PublicSubnetId",
+    "aws_region.${Region}.jumpoint_security_group_id=$JumpointSg"
 )
 Write-DashboardConfig 'AWS sandbox configuration' $cfg
 Export-ConfigJson -Cloud aws -Lines $cfg   # machine-readable twin for Onboard-Sandbox.ps1

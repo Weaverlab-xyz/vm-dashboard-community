@@ -83,6 +83,28 @@ _SPECS: dict[str, _Spec] = {
             "ssh_key_secret":             "ec2_ssh_key_secret",
             "ssm_instance_profile":       "ec2_ssm_instance_profile",
             "db_subnet_group_name":       "aws_db_subnet_group_name",
+            # VPC-scoped ids. A VPC lives in exactly one region, so everything
+            # derived from it (route table, DB/NAT security groups, the DB
+            # parameter groups, the Jumpoint/ECS runner subnets) is per-region
+            # too — the sandbox emits all of these.
+            "vpc_id":                     "aws_vpc_id",
+            "vpc_cidr":                   "aws_vpc_cidr",
+            "private_route_table_id":     "aws_private_route_table_id",
+            "db_security_group_id":       "aws_db_security_group_id",
+            "db_parameter_group_name":    "aws_db_parameter_group_name",
+            "db_mysql_parameter_group_name": "aws_db_mysql_parameter_group_name",
+            "nat_security_group_id":      "aws_nat_security_group_id",
+            "ecs_subnet_id":              "ansible_ecs_subnet_id",
+            "ecs_security_group_ids":     "ansible_ecs_security_group_ids",
+            "ecs_cluster":                "bt_ecs_cluster",
+            "jumpoint_subnet_id":         "bt_ecs_jumpoint_subnet_id",
+            "jumpoint_security_group_id": "bt_ecs_jumpoint_security_group_id",
+        },
+        # The Jumpoint host and the ECS runners share the sandbox's public subnet
+        # unless split explicitly.
+        secondary_fallbacks={
+            "jumpoint_subnet_id":         "ansible_ecs_subnet_id",
+            "jumpoint_security_group_id": "ansible_ecs_security_group_ids",
         },
     ),
     "gcp": _Spec(
@@ -96,11 +118,17 @@ _SPECS: dict[str, _Spec] = {
             "db_network":           "gcp_db_network",
             "ssh_key_secret":       "gcp_ssh_key_secret_name",
             "default_network_tag":  "gcp_default_network_tag",
+            # Subnetworks are regional in GCP, so the runner/Jumpoint subnets and
+            # the Cloud Router/NAT the sandbox creates are per-region too.
+            "ecs_subnetwork":       "gcp_runner_subnetwork",
+            "router_name":          "gcp_router_name",
+            "nat_name":             "gcp_nat_name",
         },
         # Historical: jumpoint subnet inherits the VM subnet; DB network the network.
         secondary_fallbacks={
             "jumpoint_subnetwork": "gcp_subnetwork",
             "db_network":          "gcp_network",
+            "ecs_subnetwork":      "gcp_subnetwork",
         },
     ),
 }

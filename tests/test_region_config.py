@@ -160,8 +160,14 @@ def test_azure_wrapper_matches_resolve_region():
 def test_region_fields_and_unknown_cloud():
     assert rc.region_fields("aws") == (
         "default_subnet_id", "default_security_group_id", "ssh_key_secret",
-        "ssm_instance_profile", "db_subnet_group_name")
+        "ssm_instance_profile", "db_subnet_group_name",
+        # VPC-scoped ids the sandbox emits per region.
+        "vpc_id", "vpc_cidr", "private_route_table_id", "db_security_group_id",
+        "db_parameter_group_name", "db_mysql_parameter_group_name",
+        "nat_security_group_id", "ecs_subnet_id", "ecs_security_group_ids",
+        "ecs_cluster", "jumpoint_subnet_id", "jumpoint_security_group_id")
     assert "vnet_resource_group" in rc.region_fields("azure")
+    assert "ecs_subnetwork" in rc.region_fields("gcp")
     for bad in ("oci", "bogus", ""):
         try:
             rc.resolve_region(bad, "us-east-1")
