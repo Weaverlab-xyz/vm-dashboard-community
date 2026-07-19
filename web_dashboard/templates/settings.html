@@ -360,10 +360,33 @@
           </div>
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">Allowed regions</label>
+            <!-- Chips + catalog picker over the same comma-separated value the
+                 gate reads, so a region typed by hand (gov cloud, a region the
+                 catalog doesn't know) is preserved rather than dropped. -->
+            <div class="flex flex-wrap gap-1.5 mb-2" x-show="allowedRegionList().length">
+              <template x-for="r in allowedRegionList()" :key="r">
+                <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-blue-50 text-blue-700 text-xs font-mono">
+                  <span x-text="r"></span>
+                  <button type="button" @click="removeAllowedRegion(r)"
+                          class="text-blue-400 hover:text-blue-700 leading-none">&times;</button>
+                </span>
+              </template>
+            </div>
+            <select @change="addAllowedRegion($event.target.value); $event.target.value = ''"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm mb-2">
+              <option value="">+ Add a region from the catalog…</option>
+              <template x-for="g in regionCatalogGroups()" :key="g.cloud">
+                <optgroup :label="g.cloud.toUpperCase()">
+                  <template x-for="r in g.regions" :key="g.cloud + ':' + r.id">
+                    <option :value="r.id" x-text="r.label ? (r.id + ' — ' + r.label) : r.id"></option>
+                  </template>
+                </optgroup>
+              </template>
+            </select>
             <input type="text" x-model="panelCfg.admission_allowed_regions"
                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
                    placeholder="us-east-1, us-west-2, eastus">
-            <p class="text-[11px] text-gray-400 mt-1">Allow-list of regions/locations/zones. Blank = no region restriction.</p>
+            <p class="text-[11px] text-gray-400 mt-1">Allow-list of regions/locations/zones. Blank = no region restriction. Edit directly or use the picker above.</p>
           </div>
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">Blocked instance types</label>
@@ -2298,6 +2321,9 @@ function settingsPage() {
       azure: { defaultRegion: '', fields: [], fallbacks: {}, regions: {}, newRegion: '', loaded: false, saving: false, error: '' },
     },
 
+    // Region catalog per cloud, for the admission allow-list picker.
+    regionCatalog: { aws: [], gcp: [], azure: [], oci: [] },
+
     // Cloud-identity JIT matrix state (Phase 3) — lives alongside the
     // Entitle integration panel since its config knobs share the same
     // operator mental model.
@@ -2340,6 +2366,7 @@ function settingsPage() {
       await this.loadFeatureFlags();
       await this.loadPreviewFlags();
       await this.loadStorageStatus();   // gates the Ansible enable toggle
+      this.loadRegionCatalog();         // fire-and-forget: feeds the allow-list picker
     },
 
     async loadPreviewFlags() {
@@ -2738,6 +2765,48 @@ function settingsPage() {
         this.storageReady = false;
         this.ansibleEnableAllowed = false;
         this.storageBackendLabel = '';
+      }
+    },
+
+    // ── Admission allow-list region picker ────────────────────────────────
+    // admission_allowed_regions is stored as a comma-separated string (the gate
+    // also accepts a JSON array). These helpers read/write that string so the
+    // chips UI and the raw text input stay in sync.
+    allowedRegionList() {
+      return (this.panelCfg.admission_allowed_regions || '')
+        .split(',').map(s => s.trim()).filter(Boolean);
+    },
+
+    addAllowedRegion(id) {
+      const r = (id || '').trim();
+      if (!r) return;
+      const cur = this.allowedRegionList();
+      if (cur.includes(r)) return;
+      this.panelCfg.admission_allowed_regions = [...cur, r].join(', ');
+    },
+
+    removeAllowedRegion(id) {
+      this.panelCfg.admission_allowed_regions =
+        this.allowedRegionList().filter(r => r !== id).join(', ');
+    },
+
+    // Catalog grouped by cloud, minus regions already on the allow-list.
+    regionCatalogGroups() {
+      const chosen = new Set(this.allowedRegionList());
+      return Object.entries(this.regionCatalog)
+        .map(([cloud, regions]) => ({
+          cloud,
+          regions: (regions || []).filter(r => !chosen.has(r.id)),
+        }))
+        .filter(g => g.regions.length > 0);
+    },
+
+    async loadRegionCatalog() {
+      for (const cloud of Object.keys(this.regionCatalog)) {
+        try {
+          const r = await API.get(`/api/regions?cloud=${cloud}`);
+          this.regionCatalog[cloud] = r?.regions || [];
+        } catch (e) { this.regionCatalog[cloud] = []; }
       }
     },
 

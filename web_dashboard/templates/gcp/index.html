@@ -345,7 +345,7 @@
         <!-- Zone -->
         <div>
           <label class="block text-sm font-medium text-gray-700 mb-1">Zone</label>
-          <select x-model="deployForm.zone"
+          <select x-model="deployForm.zone" @change="onZoneChange()"
                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
             <option value="">— use default zone —</option>
             <template x-for="z in networkOpts.zones" :key="z">
@@ -954,14 +954,23 @@ function gcpDashboard() {
       }
     },
 
-    async loadNetworkOpts() {
+    // Subnetworks and machine types are region-scoped, so the lookup follows the
+    // selected zone rather than always reporting the configured default's.
+    async loadNetworkOpts(zone) {
       try {
-        const res = await API.get('/api/gcp/network-options');
+        const q = zone ? '?zone=' + encodeURIComponent(zone) : '';
+        const res = await API.get('/api/gcp/network-options' + q);
         this.networkOpts = res;
         if (res.machine_types?.length && !this.deployForm.machine_type) {
           this.deployForm.machine_type = res.machine_types.includes('e2-medium') ? 'e2-medium' : res.machine_types[0];
         }
       } catch (_) {}
+    },
+
+    // A subnetwork from the previous zone's region won't exist in the new one.
+    async onZoneChange() {
+      this.deployForm.subnetwork = '';
+      await this.loadNetworkOpts(this.deployForm.zone);
     },
 
     async openDeployModal(img) {
