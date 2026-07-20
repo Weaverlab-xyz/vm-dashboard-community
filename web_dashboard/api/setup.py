@@ -882,6 +882,20 @@ class MultiRegionFeatureConfig(BaseModel):
     enabled: bool = False
 
 
+class OidcFeatureConfig(BaseModel):
+    """Generic OpenID Connect SSO. Config-only: there is no separate enable flag —
+    SSO is live once an issuer and client id are set, which is exactly what
+    ``oidc_service.is_configured()`` checks, so a second source of truth would
+    only be able to disagree with it."""
+    enabled: bool = False
+    oidc_issuer: str = ""
+    oidc_client_id: str = ""
+    oidc_client_secret: str = ""
+    oidc_provider_name: str = ""
+    oidc_scopes: str = ""
+    oidc_groups_claim: str = ""
+
+
 _FEATURE_MODELS = {
     "vmware":       VMwareFeatureConfig,
     "beyondtrust":  BeyondTrustFeatureConfig,
@@ -899,12 +913,13 @@ _FEATURE_MODELS = {
     "cost_explorer":  CostExplorerFeatureConfig,
     "admission_control": AdmissionControlFeatureConfig,
     "multi_region":   MultiRegionFeatureConfig,
+    "oidc":           OidcFeatureConfig,
 }
 
 # Features whose panel carries config but NOT an enable toggle — their on/off
 # lives elsewhere (e.g. a preview flag). _read/_write_feature skip the enabled
 # key for these, so saving config can't flip the feature's flag.
-_CONFIG_ONLY_FEATURES = {"vdesktops", "multi_region"}
+_CONFIG_ONLY_FEATURES = {"vdesktops", "multi_region", "oidc"}
 
 _SECRET_FEATURE_KEYS = frozenset({
     "pscli_client_secret", "bt_client_secret", "epml_pat",
@@ -918,6 +933,7 @@ _SECRET_FEATURE_KEYS = frozenset({
     "xcpng_password",
     "ansible_aci_acr_password",
     "rancher_bootstrap_password", "rancher_api_token",
+    "oidc_client_secret",
 })
 
 
@@ -981,6 +997,15 @@ def _write_feature(feature: str, payload_dict: dict) -> None:
         except Exception:
             pass
 
+    if feature == "oidc":
+        # Discovery + JWKS are cached for an hour; without this an operator who
+        # fixes a typo'd issuer would keep hitting the old one until it expired.
+        try:
+            from ..services import oidc_service
+            oidc_service.clear_cache()
+        except Exception:
+            pass
+
 
 @router.get("/feature/{feature_name}")
 def get_feature_config(feature_name: str, request: Request):
@@ -1007,6 +1032,44 @@ def patch_feature_config(feature_name: str, payload: dict, request: Request):
     _write_feature(feature_name, filtered)
     logger.info("Feature '%s' configuration updated.", feature_name)
     return {"ok": True}
+
+
+# ── OIDC discovery probe ──────────────────────────────────────────────────────
+
+@router.post("/oidc/test")
+def test_oidc_discovery(request: Request):
+    """Fetch the configured issuer's discovery document and report what came back.
+
+    A typo'd issuer is the single most common misconfiguration, and without this
+    the only feedback is a failed login redirect that says nothing useful. Reports
+    the endpoints the provider advertises plus whether it can issue the groups
+    claim the workgroup mapping depends on.
+    """
+    _require_admin(request)
+    from ..services import config_service, oidc_service
+    if not oidc_service.is_configured():
+        raise HTTPException(status_code=400,
+                            detail="Set an issuer and client id first, then save.")
+    oidc_service.clear_cache()   # always probe live, never a cached answer
+    try:
+        doc = oidc_service.discovery()
+    except oidc_service.OIDCError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    supported = doc.get("claims_supported") or []
+    groups_claim = config_service.get("oidc_groups_claim") or "groups"
+    return {
+        "ok": True,
+        "issuer": doc.get("issuer", ""),
+        "authorization_endpoint": doc.get("authorization_endpoint", ""),
+        "token_endpoint": doc.get("token_endpoint", ""),
+        "jwks_uri": doc.get("jwks_uri", ""),
+        "scopes_supported": doc.get("scopes_supported") or [],
+        # Advisory only: many providers omit claims_supported entirely, and some
+        # emit groups without advertising them, so absence is not a failure.
+        "groups_claim": groups_claim,
+        "groups_claim_advertised": (groups_claim in supported) if supported else None,
+    }
 
 
 # ── Azure per-region config sets (multi-region, Follow-on 6 PR3) ──────────────
