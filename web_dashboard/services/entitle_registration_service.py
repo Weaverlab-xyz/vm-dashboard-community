@@ -275,7 +275,7 @@ def _db_connection_json_hcl(*, engine: str, host: str, port: int,
     in the HCL on disk — which is why this is built as an HCL string, not a dict.
 
     Per Entitle's connector docs the key names differ by engine:
-      - postgresql: host, port, username, password, [database]
+      - postgresql: host, port, user,     password        (NO top-level database)
       - mysql:      host, port, user,     password, [mysql_version]
       - mssql:      server (host[,port]), user, password, [database], [version]
     """
@@ -298,12 +298,18 @@ def _db_connection_json_hcl(*, engine: str, host: str, port: int,
         if version:
             lines.append(f"    mysql_version = {json.dumps(version)}")
     else:  # postgres
+        # Entitle's Postgres connector schema is {user, password, host, port}
+        # (+ an optional `options` object). It expects `user` — NOT `username` —
+        # and has NO top-level `database` field; sending either makes the payload
+        # fail schema matching with API 400 "Didn't find matching connection
+        # schema". Scope to specific databases via `options.databases_constraints`,
+        # not a top-level `database`. `database` is accepted here for signature
+        # parity with the other engines but is intentionally unused for postgres.
+        # See docs.beyondtrust.com/entitle/docs/entitle-integration-postgressql
         lines.append(f"    host     = {json.dumps(host)}")
         lines.append(f"    port     = {port}")
-        lines.append(f"    username = {json.dumps(username)}")
+        lines.append(f"    user     = {json.dumps(username)}")
         lines.append("    password = var.db_password")
-        if database:
-            lines.append(f"    database = {json.dumps(database)}")
     body = "\n".join(lines)
     return f"  connection_json = jsonencode({{\n{body}\n  }})\n"
 
