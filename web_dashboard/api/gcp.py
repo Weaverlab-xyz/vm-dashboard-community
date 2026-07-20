@@ -488,6 +488,11 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
     # Per-region SSH key secret + default network tag (blank fields / the default
     # region fall back to the flat gcp_* config keys).
     _rc = resolve_region("gcp", _region_from_zone(zone))
+    # Default the target subnetwork to the sandbox vm-subnet (gcp_subnetwork) when the
+    # form leaves it blank — otherwise GCE silently drops the VM into the project's
+    # `default` VPC, where the peered/co-located Entitle agent has no route to it
+    # (the "Failed to fetch resources / SSH timeout" trap). Explicit form value wins.
+    subnet = payload.subnetwork or _rc["subnetwork"]
     bt_enabled = _cfg_svc.get_bool("beyondtrust_enabled")
     jumpoint_name = ""
     jumpoint_zone = zone
@@ -518,7 +523,7 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
                     name=jumpoint_name,
                     container_image=jumpoint_image,
                     deploy_key=deploy_key,
-                    subnetwork=payload.subnetwork or "",
+                    subnetwork=subnet or "",
                     machine_type=jumpoint_machine,
                     create_external_ip=True,
                 )
@@ -563,7 +568,7 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
             instance_name=payload.instance_name,
             machine_type=payload.machine_type,
             image_self_link=payload.image_self_link,
-            subnetwork=payload.subnetwork,
+            subnetwork=subnet,
             create_external_ip=payload.create_external_ip,
             ssh_username=ssh_username,
             ssh_public_key=ssh_public_key,
