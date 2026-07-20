@@ -1225,13 +1225,16 @@ async def _run_deploy(job_id: str, req: AzureDeployRequest, rg: str, loc: str):
 
         # Step 4: Entitle — register as SSH ephemeral-accounts integration (Linux
         # only; per-build opt-in). Public VM → no agent; private → shared agent.
-        from ..services import entitle_vm_hook
+        from ..services import entitle_vm_hook, config_service
         if (getattr(req, "register_in_entitle", False) and not is_windows
                 and entitle_vm_hook.registration_enabled()):
+            # Resolved login user (config override → request field → cloud default).
+            # config_service.get is store-only so it doesn't shadow a blank request
+            # field via the settings default (see the GCP fix, gcp.py).
             await entitle_vm_hook.register(db, job_id, req.vm_name, hostname,
                                            private=not req.create_public_ip,
                                            result=result, tag="Azure",
-                                           sudo_user=req.ssh_username,
+                                           sudo_user=config_service.get("azure_ssh_username") or req.ssh_username or "azureuser",
                                            ssh_key_secret=req.ssh_key_secret_override or "")
 
         # Step 5: Password Safe — onboard as a managed system + account (Linux only).
@@ -1405,13 +1408,15 @@ async def _run_bulk_deploy(job_items: list, req: AzureBulkDeployRequest, rg: str
                     job_service.update_progress(db, job_id, 90, "VM deployed.")
 
                 # Step 4: Entitle — register as SSH integration (Linux only; opt-in).
-                from ..services import entitle_vm_hook
+                from ..services import entitle_vm_hook, config_service
                 if (getattr(req, "register_in_entitle", False) and not is_windows
                         and entitle_vm_hook.registration_enabled()):
+                    # Resolved login user (config override → request field → cloud
+                    # default); config_service.get is store-only (see the GCP fix).
                     await entitle_vm_hook.register(db, job_id, vm_name, hostname,
                                                    private=not req.create_public_ip,
                                                    result=result, tag="Azure",
-                                                   sudo_user=req.ssh_username,
+                                                   sudo_user=config_service.get("azure_ssh_username") or req.ssh_username or "azureuser",
                                                    ssh_key_secret=req.ssh_key_secret_override or "")
 
                 # Step 5: Password Safe — onboard as a managed system + account.

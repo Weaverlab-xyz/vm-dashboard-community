@@ -390,7 +390,8 @@ def _build_cluster_tf_variables(*, cloud: str, cluster_id: str, name: str,
         # Passing resource_group_name flips the module's RG count to 0 (uses the
         # existing RG); the cluster's VNet/subnet are still self-contained inside it.
         from .region_config import resolve_azure_region
-        rg = (resolve_azure_region(region) or {}).get("resource_group") or "vm-cli-rg"
+        _arc = resolve_azure_region(region) or {}
+        rg = _arc.get("resource_group") or "vm-cli-rg"
         tf = {
             "location": region,
             "cluster_name": _eks_name(f"k8s-{name}"),
@@ -419,18 +420,20 @@ def _build_cluster_tf_variables(*, cloud: str, cluster_id: str, name: str,
         # Peer the AKS VNet back to the sandbox VNet so an in-cluster agent (Entitle
         # SSH ephemeral) can reach the private lab VMs — Azure parity with the aws/gcp
         # branches above. Prefer an explicit azure_vnet_id; else derive it from the
-        # emitted vm-subnet id (…/virtualNetworks/<vnet>/subnets/<subnet>). Read from
-        # config so it also flows through the destroy path (opts={}). No NSG rule is
-        # needed — the sandbox vm-subnet's VirtualNetwork-tag rule covers peered space.
+        # region-resolved vm-subnet id (…/virtualNetworks/<vnet>/subnets/<subnet>).
+        # `_arc` is region-resolved (per-region entry → flat key fallback), so a
+        # non-default-region cluster peers to THAT region's VNet; it's config-backed
+        # so it also flows through the destroy path (opts={}). No NSG rule is needed —
+        # the sandbox vm-subnet's VirtualNetwork-tag rule covers peered space.
         sandbox_vnet_id = _cfg("azure_vnet_id")
         if not sandbox_vnet_id:
-            subnet_id = _cfg("azure_default_subnet_id")
+            subnet_id = _arc.get("default_subnet_id") or ""
             if "/subnets/" in subnet_id:
                 sandbox_vnet_id = subnet_id.split("/subnets/")[0]
         if sandbox_vnet_id:
             tf["sandbox_vnet_id"] = sandbox_vnet_id
             tf["sandbox_vnet_name"] = _cfg("azure_vnet_name") or sandbox_vnet_id.rsplit("/", 1)[-1]
-            tf["sandbox_vnet_rg"] = _cfg("azure_vnet_resource_group")
+            tf["sandbox_vnet_rg"] = _arc.get("vnet_resource_group") or ""
         return tf
 
     if cloud == "gcp":
@@ -458,15 +461,18 @@ def _build_cluster_tf_variables(*, cloud: str, cluster_id: str, name: str,
             tf["authorized_cidrs"] = cidrs
         # Peer the cluster's own VPC back to the sandbox VPC so an in-cluster agent
         # (Entitle SSH ephemeral) can reach the private lab VMs directly — GCP
-        # parity with the aws_eks sandbox_vpc peering above. Reuses the sandbox's
-        # existing config: the VPC name (gcp_network) + the VM network tag
-        # (gcp_default_network_tag). Read from config (not opts) so it also flows
-        # through the destroy path (called with opts={}). Non-transitive peering
-        # doesn't reach Cloud SQL private IPs — DB JIT uses the PRA tunnel.
-        sandbox_net = _cfg("gcp_network")
+        # parity with the aws_eks sandbox_vpc peering above. Region-resolve the VPC
+        # name + VM network tag (per-region entry → flat gcp_network /
+        # gcp_default_network_tag fallback) so a non-default-region cluster peers to
+        # THAT region's network; config-backed, so it also flows through the destroy
+        # path (opts={}). Non-transitive peering doesn't reach Cloud SQL private IPs
+        # — DB JIT uses the PRA tunnel. default_network_tag is a CSV string.
+        from .region_config import resolve_region
+        _grc = resolve_region("gcp", region) or {}
+        sandbox_net = _grc.get("network") or ""
         if sandbox_net and sandbox_net != "default":
             tf["sandbox_network"] = sandbox_net
-            vm_tags = _cfg_list("gcp_default_network_tag")
+            vm_tags = [t.strip() for t in (_grc.get("default_network_tag") or "").split(",") if t.strip()]
             if vm_tags:
                 tf["sandbox_vm_target_tags"] = vm_tags
         return tf

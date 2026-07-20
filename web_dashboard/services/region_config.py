@@ -63,6 +63,7 @@ _SPECS: dict[str, _Spec] = {
         field_fallbacks={
             "resource_group":         "azure_resource_group",
             "vnet_resource_group":    "azure_vnet_resource_group",
+            "default_subnet_id":      "azure_default_subnet_id",
             "desktops_subnet_id":     "azure_desktops_subnet_id",
             "db_subnet_id":           "azure_db_subnet_id",
             "db_mysql_subnet_id":     "azure_db_mysql_subnet_id",

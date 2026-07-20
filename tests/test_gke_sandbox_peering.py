@@ -43,10 +43,28 @@ _cfgsvc_stub = types.ModuleType("web_dashboard.services.config_service")
 _cfgsvc_stub.get = lambda key, default=None: _CONFIG.get(key, "")
 sys.modules.setdefault("web_dashboard.services.config_service", _cfgsvc_stub)
 
-# The azure branch resolves the RG via region_config.resolve_azure_region.
+# A region_config stub mirroring resolve_region: per-region key
+# (<cloud>_region.<region>.<field>) wins, else the flat key. Only the fields the
+# k8s peering branches read are modeled.
+_REGION_FIELDS = {
+    "gcp": {"network": "gcp_network", "default_network_tag": "gcp_default_network_tag"},
+    "azure": {"default_subnet_id": "azure_default_subnet_id",
+              "vnet_resource_group": "azure_vnet_resource_group",
+              "resource_group": "azure_resource_group"},
+}
+
+
+def _stub_resolve_region(cloud, region):
+    out = {}
+    for fld, flat in _REGION_FIELDS.get(cloud, {}).items():
+        out[fld] = _CONFIG.get(f"{cloud}_region.{region}.{fld}") or _CONFIG.get(flat, "")
+    return out
+
+
 _region_stub = types.ModuleType("web_dashboard.services.region_config")
-_region_stub.resolve_azure_region = lambda region: {}
-sys.modules.setdefault("web_dashboard.services.region_config", _region_stub)
+_region_stub.resolve_region = _stub_resolve_region
+_region_stub.resolve_azure_region = lambda region: _stub_resolve_region("azure", region)
+sys.modules["web_dashboard.services.region_config"] = _region_stub
 
 from web_dashboard.services import k8s_service as k  # noqa: E402
 
@@ -138,6 +156,40 @@ def test_azure_omits_peering_without_vnet_or_subnet():
     tf = _azure_vars()
     assert "sandbox_vnet_id" not in tf
     assert "sandbox_vnet_name" not in tf
+
+
+def test_gcp_resolves_per_region_network():
+    # A non-default region picks THAT region's network/tag, not the flat default.
+    _CONFIG.clear()
+    _CONFIG.update({
+        "gcp_project": "sandbox-proj",
+        "gcp_network": "default-region-vpc",
+        "gcp_default_network_tag": "default-tag",
+        "gcp_region.us-east1.network": "east-vpc",
+        "gcp_region.us-east1.default_network_tag": "east-tag",
+    })
+    tf = k._build_cluster_tf_variables(
+        cloud="gcp", cluster_id="c", name="d", region="us-east1", opts={})
+    assert tf["sandbox_network"] == "east-vpc"
+    assert tf["sandbox_vm_target_tags"] == ["east-tag"]
+
+
+def test_azure_resolves_per_region_subnet():
+    # A non-default region derives the VNet from THAT region's vm-subnet.
+    _CONFIG.clear()
+    east_subnet = ("/subscriptions/s/resourceGroups/east-rg/providers/"
+                   "Microsoft.Network/virtualNetworks/east-vnet/subnets/vm-subnet")
+    _CONFIG.update({
+        "azure_default_subnet_id": _AZ_SUBNET_ID,
+        "azure_vnet_resource_group": "vm-cli-rg",
+        "azure_region.eastus2.default_subnet_id": east_subnet,
+        "azure_region.eastus2.vnet_resource_group": "east-rg",
+    })
+    tf = k._build_cluster_tf_variables(
+        cloud="azure", cluster_id="c", name="d", region="eastus2", opts={})
+    assert tf["sandbox_vnet_id"].endswith("/virtualNetworks/east-vnet")
+    assert tf["sandbox_vnet_name"] == "east-vnet"
+    assert tf["sandbox_vnet_rg"] == "east-rg"
 
 
 if __name__ == "__main__":

@@ -493,6 +493,7 @@ class Settings(BaseSettings):
     azure_ssh_keypair_secret_name: str = "azureVM-ssh-keypair"  # Unified secret: JSON {public_key, private_key}
     azure_ssh_key_secret_name: str = ""               # Legacy: separate public-key secret (fallback)
     azure_ssh_private_key_secret_name: str = ""       # Legacy: separate private-key secret (fallback)
+    azure_ssh_username: str = "azureuser"             # Cloud-default login user (Entitle SSH-ephemeral registration; admin override)
 
     # Azure Automation (Hybrid Runbook Worker — set by Container App env vars from Terraform)
     azure_automation_account_name: str = ""
@@ -814,6 +815,7 @@ class Settings(BaseSettings):
     oci_vcn_ocid: str = ""                # VCN the VM subnets live in
     oci_default_subnet_ocid: str = ""     # subnet for deployed VM VNICs
     oci_ssh_key_secret: str = ""          # OCI Vault secret (OCID or name) holding the SSH keypair JSON {public_key, private_key}
+    oci_ssh_username: str = "opc"          # Cloud-default login user (Entitle SSH-ephemeral registration; admin override)
     oci_vault_ocid: str = ""              # Vault the SSH/secret material lives in (for name→OCID lookups)
     # Free-tier guardrail — the Always-Free envelope the deploy form defaults to
     # and warns when exceeded (see services/oci_freetier.py). Advisory caps, not
