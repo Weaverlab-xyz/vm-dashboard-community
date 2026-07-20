@@ -2571,3 +2571,91 @@ async def delete_gcs_object(bucket: str, object_name: str) -> None:
         await asyncio.to_thread(_delete_gcs_object_sync, bucket, object_name)
     except Exception as e:
         raise GCPError(f"Failed to delete gs://{bucket}/{object_name}: {e}") from e
+
+
+# ── Cloud SQL orphan sweep (decommission safety net) ──────────────────────────
+#
+# The google provider drops a Cloud SQL instance from Terraform state when the
+# create *operation-wait* errors — it calls d.SetId("") — even though GCP finishes
+# creating the instance asynchronously. A mid-create `terraform apply` failure
+# (e.g. a transient poll error) therefore leaves a RUNNABLE, billable instance that
+# the follow-up `terraform destroy` (running against the now-empty state) silently
+# no-ops over, orphaning a database the dashboard believes it decommissioned.
+# cloud_database_service calls this after destroy as a direct-API safety net: it
+# deletes the instance by its deterministic name, but ONLY when it carries our
+# `clouddb-id` label, so a name collision or a manually-created instance is never
+# touched. (The AWS/Azure providers taint the resource in state on the same error,
+# so their destroy already reclaims it — only GCP needs this.)
+
+_SQLADMIN_BASE = "https://sqladmin.googleapis.com/sql/v1beta4"
+
+
+def _sweep_orphan_sql_instance_sync(
+    project: str, name: str, clouddb_id: str,
+    *, ready_timeout_s: int = 300, delete_timeout_s: int = 300,
+) -> str:
+    """Delete Cloud SQL instance ``name`` in ``project`` iff it exists AND is labeled
+    ``clouddb-id=<clouddb_id>``. An instance still mid-create (``PENDING_CREATE``)
+    rejects deletion, so wait (bounded by ``ready_timeout_s``) for it to leave that
+    state first. Returns ``"not-found"`` (nothing to reclaim — the normal path after
+    a clean destroy), ``"skipped-unlabeled"`` (an instance by this name exists but
+    isn't ours), or ``"deleted"``. Raises :class:`GCPError` on a real delete failure
+    so the caller can surface the orphan rather than hide it. Synchronous; callers
+    wrap in ``asyncio.to_thread``."""
+    s = _authed_session()
+    inst_url = f"{_SQLADMIN_BASE}/projects/{project}/instances/{name}"
+
+    r = s.get(inst_url)
+    if r.status_code == 404:
+        return "not-found"
+    r.raise_for_status()
+    body = r.json()
+    labels = (body.get("settings") or {}).get("userLabels") or {}
+    if labels.get("clouddb-id") != clouddb_id:
+        logger.info("gcp sql sweep: %s exists but clouddb-id %r != %r — leaving it",
+                    name, labels.get("clouddb-id"), clouddb_id)
+        return "skipped-unlabeled"
+
+    # A create still in flight can't be deleted; wait (bounded) for it to settle.
+    deadline = time.monotonic() + ready_timeout_s
+    state = body.get("state")
+    while state in ("PENDING_CREATE", "SQL_INSTANCE_STATE_UNSPECIFIED", "MAINTENANCE") \
+            and time.monotonic() < deadline:
+        time.sleep(10)
+        r = s.get(inst_url)
+        if r.status_code == 404:
+            return "not-found"
+        r.raise_for_status()
+        state = r.json().get("state")
+
+    d = s.delete(inst_url)
+    if d.status_code == 404:
+        return "not-found"
+    if not d.ok:
+        raise GCPError(f"delete {name} failed: HTTP {d.status_code} {d.text[:300]}")
+
+    # Poll the delete operation to DONE for a definitive result. A slow delete that
+    # hasn't finished by delete_timeout_s is still counted as swept (it was accepted);
+    # only an explicit operation error is treated as a failure.
+    op_name = (d.json() or {}).get("name")
+    if op_name:
+        op_url = f"{_SQLADMIN_BASE}/projects/{project}/operations/{op_name}"
+        op_deadline = time.monotonic() + delete_timeout_s
+        while time.monotonic() < op_deadline:
+            po = s.get(op_url)
+            po.raise_for_status()
+            oj = po.json()
+            if oj.get("status") == "DONE":
+                errs = (oj.get("error") or {}).get("errors")
+                if errs:
+                    raise GCPError(f"delete {name} operation error: {errs}")
+                break
+            time.sleep(5)
+    logger.info("gcp sql sweep: deleted orphaned instance %s (project=%s)", name, project)
+    return "deleted"
+
+
+async def sweep_orphan_sql_instance(project: str, name: str, clouddb_id: str) -> str:
+    """Async wrapper for :func:`_sweep_orphan_sql_instance_sync`."""
+    return await asyncio.to_thread(
+        _sweep_orphan_sql_instance_sync, project, name, clouddb_id)
