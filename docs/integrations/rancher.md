@@ -139,6 +139,15 @@ Private clusters egress through a NAT, so their public source IP isn't knowable
 until the cluster exists — which made the "Allowed source CIDRs" field a chicken-
 and-egg problem. The dashboard now manages the allow-list for you:
 
+- **The dashboard itself** — the dashboard bootstraps the node and mints its API
+  token over the node's **public IP**, so the dashboard's *own* egress IP must be
+  allowed or the deploy can't reach the node it just launched (the readiness poll
+  would time out). On deploy the dashboard **auto-detects its public egress IP**
+  (best-effort, via a plain-HTTP IP-echo) and adds it as a `/32`. If detection can't
+  reach an echo service — e.g. behind a TLS-inspecting corporate proxy — set
+  `rancher_dashboard_egress_cidr` manually. If the firewall would end up **fully
+  closed**, the deploy now **fails fast** with that instruction instead of burning
+  the readiness timeout.
 - **Provisioned clusters** — each dashboard-provisioned cluster (EKS/AKS/GKE) is
   given a **stable, reserved egress IP** (an Elastic IP on AWS, a reserved Cloud
   NAT IP on GCP, a static NAT-gateway IP on Azure). The provision job captures it
@@ -255,7 +264,9 @@ apply immediately.
 |---|---|---|
 | `k8s_management_enabled` | `false` | Master toggle; surfaces the Rancher tab |
 | `rancher_bootstrap_password` | — | First-run admin password (secret) |
-| `rancher_allowed_source_cidrs` | `""` | *Additive* manual CIDRs (tcp 80/443); provisioned clusters + the Web-Jump Jumpoint are auto-added. Empty + nothing auto-discovered = closed |
+| `rancher_allowed_source_cidrs` | `""` | *Additive* manual CIDRs (tcp 80/443); the dashboard's own egress, provisioned clusters + the Web-Jump Jumpoint are auto-added. Empty + nothing auto-discovered = closed |
+| `rancher_dashboard_egress_cidr` | (runtime) | The dashboard's own public egress IP/CIDR, auto-detected + persisted on deploy so the worker can reach the node's public IP. Set manually if auto-detect can't reach an IP-echo service (e.g. behind a TLS-inspecting proxy). Bare IP → `/32` |
+| `rancher_ready_timeout_s` | `360` | Seconds the deploy waits for Rancher to serve after boot; raise for slow disks / large images |
 | `gcp_rancher_allow_open` | `false` | Open `0.0.0.0/0` when no CIDRs set (discouraged) |
 | `gcp_rancher_image` | `rancher/rancher:latest` | Rancher container image |
 | `gcp_rancher_machine_type` | `e2-medium` | VM size (≥ 4 GB enforced) |
@@ -290,9 +301,20 @@ missing `compute.instances.create` or `compute.firewalls.*`. Re-run
 `rancher_allowed_source_cidrs` to include your IP (the node fails closed by
 design) and redeploy to patch the rule.
 
-**Deploy job fails waiting for Rancher** — Rancher needs 1–3 minutes to serve
-after the VM boots. If it never comes up, check the VM's serial console / the
-container's logs in GCP (`google-logging-enabled` is on).
+**Deploy job fails waiting for Rancher** — two common causes, and the error names
+both. (1) **The node is up but the dashboard's egress IP isn't in the firewall** —
+the dashboard talks to the node over its public IP, so its own egress must be
+allowed. Auto-detection usually handles this; if it's blocked (e.g. a TLS-inspecting
+proxy), set `rancher_dashboard_egress_cidr` and redeploy. Compare the node's firewall
+`sourceRanges` (or `GET /api/containers/rancher/firewall`) against the dashboard host's
+public egress IP. (2) **Rancher hasn't come up yet** — it needs 1–3 minutes (longer on
+a cold image pull / slow disk); raise `rancher_ready_timeout_s` and check the VM's
+serial console / the container's logs in GCP (`google-logging-enabled` is on).
+
+**Deploy job fails immediately: "firewall is closed"** — no source CIDRs were set
+and the dashboard couldn't auto-detect its own egress IP, so opening the firewall
+would leave the node unreachable. Set `rancher_dashboard_egress_cidr` or
+`rancher_allowed_source_cidrs` (or enable *Allow open*) and redeploy.
 
 **Machine type rejected** — types under 4 GB (`e2-micro`, `e2-small`, …) are
 refused; use `e2-medium` or larger.

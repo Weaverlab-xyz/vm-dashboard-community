@@ -91,6 +91,7 @@ class Settings(BaseSettings):
     rancher_ui_web_jump_tfstate: str = ""     # terraform state for the Web Jump (for teardown)
     rancher_ui_jumpoint_cloud: str = "gcp"    # which dashboard-managed Jumpoint host brokers the Rancher UI (gcp|aws|azure); its egress IP is auto-whitelisted. gcp = same cloud as the node
     rancher_ui_jumpoint_egress_ip: str = ""   # dashboard-managed Web-Jump Jumpoint host egress IP (runtime-set; auto-added to the node firewall as a /32). Azure host has no public IP → left blank (add manually)
+    rancher_dashboard_egress_cidr: str = ""   # the DASHBOARD's own public egress IP/CIDR — the source the worker uses to bootstrap + poll the node over its PUBLIC IP, so it MUST be in the firewall or the deploy can't reach its own node. Auto-detected + persisted on deploy (best-effort IP-echo); set manually when detection can't reach an echo service (e.g. behind a TLS-inspecting proxy). Bare IP → /32.
     # Entitle Rancher connector registration. The application slug is
     # tenant/connector-specific — confirm against the entitle_applications catalog
     # before use (default is best-effort). With the PUBLIC source-restricted node,
@@ -795,6 +796,7 @@ class Settings(BaseSettings):
     gcp_rancher_boot_disk_gb: int = 30    # COS boot disk (holds /var/lib/rancher; auto-deletes on stop)
     gcp_rancher_network_tag: str = "rancher"  # network tag on the VM = firewall target tag
     gcp_rancher_allow_open: bool = False  # opt-in to open 0.0.0.0/0 when rancher_allowed_source_cidrs is empty; otherwise empty = firewall NOT opened (fail closed)
+    rancher_ready_timeout_s: int = 360    # how long the deploy waits for Rancher to serve after the VM boots (cold rancher/rancher pull + bootstrap); raise for slow disks/large images
 
     # ── Oracle Cloud Infrastructure (OCI) ─────────────────────────────────────
     # The fourth cloud provider. Compute VM CRUD is SDK-based (the `oci` Python
