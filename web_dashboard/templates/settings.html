@@ -340,7 +340,7 @@
           </div>
           <div class="border-t border-gray-100 pt-4">
             <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">Per-cloud budgets <span class="normal-case text-gray-400">(optional)</span></p>
-            <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <div class="grid grid-cols-1 sm:grid-cols-4 gap-3">
               <div>
                 <label class="block text-xs font-medium text-gray-600 mb-1">AWS</label>
                 <input type="number" min="0" step="0.01" x-model.number="panelCfg.cost_budget_aws"
@@ -354,6 +354,11 @@
               <div>
                 <label class="block text-xs font-medium text-gray-600 mb-1">GCP</label>
                 <input type="number" min="0" step="0.01" x-model.number="panelCfg.cost_budget_gcp"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="0">
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-gray-600 mb-1">OCI</label>
+                <input type="number" min="0" step="0.01" x-model.number="panelCfg.cost_budget_oci"
                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="0">
               </div>
             </div>

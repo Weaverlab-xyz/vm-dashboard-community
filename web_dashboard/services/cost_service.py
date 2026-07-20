@@ -23,7 +23,7 @@ from datetime import date, timedelta
 
 import httpx
 
-from . import aws_service, azure_service, config_service, gcp_service
+from . import aws_service, azure_service, config_service, gcp_service, oci_service
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +69,8 @@ def evaluate_budget(total_mtd, currency, limit, today=None) -> dict:
     }
 
 
-_BUDGET_KEYS = {"aws": "cost_budget_aws", "azure": "cost_budget_azure", "gcp": "cost_budget_gcp"}
+_BUDGET_KEYS = {"aws": "cost_budget_aws", "azure": "cost_budget_azure",
+                "gcp": "cost_budget_gcp", "oci": "cost_budget_oci"}
 
 
 def _budget_limit(key: str) -> float:
@@ -383,12 +384,106 @@ async def get_gcp_managed_breakdown() -> dict:
         raise gcp_service.GCPError(f"GCP BigQuery breakdown query failed: {e}") from e
 
 
+# ── OCI (Usage API) ──────────────────────────────────────────────────────────
+# OCI has no Cost Explorer equivalent; the Usage API (request_summarized_usages)
+# returns cost. MONTHLY granularity requires the time range aligned to month
+# boundaries, so we query [first-of-this-month, first-of-next-month) — future
+# usage is $0, so that MONTHLY bucket IS the month-to-date cost.
+
+def _oci_month_bounds():
+    """(month_start_dt, next_month_start_dt) as UTC-midnight datetimes for the
+    Usage API's month-aligned MONTHLY query."""
+    from datetime import datetime, timezone
+    today = date.today()
+    start = today.replace(day=1)
+    nxt = (date(start.year + 1, 1, 1) if start.month == 12
+           else date(start.year, start.month + 1, 1))
+    to_dt = lambda d: datetime(d.year, d.month, d.day, tzinfo=timezone.utc)
+    return to_dt(start), to_dt(nxt)
+
+
+def _oci_tenancy() -> str:
+    return (config_service.get("oci_tenancy_ocid") or "").strip()
+
+
+async def get_oci_mtd_cost() -> tuple:
+    """OCI tenancy month-to-date cost via the Usage API. Returns (amount, currency).
+    Raises ``oci_service.OCIError`` (incl. when OCI isn't configured)."""
+    tenancy = _oci_tenancy()
+    if not tenancy:
+        raise oci_service.OCIError("OCI cost unavailable — oci_tenancy_ocid not configured.")
+
+    def _query() -> tuple:
+        import oci
+        client = oci.usage_api.UsageapiClient(oci_service._oci_config())
+        start, end = _oci_month_bounds()
+        details = oci.usage_api.models.RequestSummarizedUsagesDetails(
+            tenant_id=tenancy, time_usage_started=start, time_usage_ended=end,
+            granularity="MONTHLY", query_type="COST",
+        )
+        resp = client.request_summarized_usages(details)
+        amount, currency = 0.0, "USD"
+        for item in (resp.data.items or []):
+            amount += float(getattr(item, "computed_amount", 0) or 0)
+            currency = getattr(item, "currency", None) or currency
+        return amount, currency
+
+    try:
+        return await asyncio.to_thread(_query)
+    except oci_service.OCIError:
+        raise
+    except Exception as e:  # noqa: BLE001
+        raise oci_service.OCIError(f"OCI Usage API cost query failed: {e}") from e
+
+
+async def get_oci_managed_breakdown() -> dict:
+    """OCI MTD cost for resources tagged ``managed-by=vm-dashboard``, grouped by
+    service. Returns ``{total, currency, services:[...]}``. Raises OCIError.
+
+    NOTE: the OCI Usage API only reports tags that are set up as **cost-tracking
+    tags** — a plain freeform tag isn't filterable, so this returns an empty
+    breakdown unless ``managed-by`` is promoted to a cost-tracking (defined) tag
+    in the tenancy. The account total (get_oci_mtd_cost) is unaffected."""
+    tenancy = _oci_tenancy()
+    if not tenancy:
+        raise oci_service.OCIError("OCI cost unavailable — oci_tenancy_ocid not configured.")
+
+    def _query() -> dict:
+        import oci
+        client = oci.usage_api.UsageapiClient(oci_service._oci_config())
+        start, end = _oci_month_bounds()
+        details = oci.usage_api.models.RequestSummarizedUsagesDetails(
+            tenant_id=tenancy, time_usage_started=start, time_usage_ended=end,
+            granularity="MONTHLY", query_type="COST",
+            group_by=["service"],
+            filter=oci.usage_api.models.Filter(
+                operator="AND",
+                tags=[oci.usage_api.models.Tag(
+                    namespace=None, key=_MANAGED_TAG_KEY, value=_MANAGED_TAG_VALUE)],
+            ),
+        )
+        resp = client.request_summarized_usages(details)
+        services, currency = {}, "USD"
+        for item in (resp.data.items or []):
+            name = getattr(item, "service", None) or "(unknown)"
+            services[name] = services.get(name, 0.0) + float(getattr(item, "computed_amount", 0) or 0)
+            currency = getattr(item, "currency", None) or currency
+        return _breakdown_result(services, currency)
+
+    try:
+        return await asyncio.to_thread(_query)
+    except oci_service.OCIError:
+        raise
+    except Exception as e:  # noqa: BLE001
+        raise oci_service.OCIError(f"OCI Usage API breakdown query failed: {e}") from e
+
+
 async def _breakdown_entry(cloud: str, fetch) -> dict:
     """One cloud's breakdown, degrading any failure to status=unavailable."""
     try:
         res = await fetch()
         return {"cloud": cloud, "status": "ok", "detail": "", **res}
-    except (aws_service.AWSError, azure_service.AzureError, gcp_service.GCPError) as e:
+    except (aws_service.AWSError, azure_service.AzureError, gcp_service.GCPError, oci_service.OCIError) as e:
         return {"cloud": cloud, "status": "unavailable", "detail": str(e),
                 "total": None, "currency": None, "services": []}
     except Exception as e:  # noqa: BLE001 — defensive: unknown errors are still per-cloud
@@ -401,12 +496,13 @@ async def get_cost_breakdown() -> dict:
     """Per-cloud, per-service MTD spend for dashboard-managed resources
     (``managed-by=vm-dashboard``). AWS + Azure live; GCP via BigQuery when configured.
     ``grand_total`` sums only the clouds that returned ``ok``."""
-    aws_entry, azure_entry, gcp_entry = await asyncio.gather(
+    aws_entry, azure_entry, gcp_entry, oci_entry = await asyncio.gather(
         _breakdown_entry("aws", get_aws_managed_breakdown),
         _breakdown_entry("azure", get_azure_managed_breakdown),
         _breakdown_entry("gcp", get_gcp_managed_breakdown),
+        _breakdown_entry("oci", get_oci_managed_breakdown),
     )
-    clouds = [aws_entry, azure_entry, gcp_entry]
+    clouds = [aws_entry, azure_entry, gcp_entry, oci_entry]
     oks = [c for c in clouds if c["status"] == "ok"]
     grand_total = round(sum(c["total"] for c in oks), 2) if oks else None
     currency = oks[0]["currency"] if oks else "USD"
@@ -420,7 +516,7 @@ async def _cloud_entry(cloud: str, fetch) -> dict:
         amount, currency = await fetch()
         return {"cloud": cloud, "amount": round(amount, 2),
                 "currency": currency, "status": "ok", "detail": ""}
-    except (aws_service.AWSError, azure_service.AzureError, gcp_service.GCPError) as e:
+    except (aws_service.AWSError, azure_service.AzureError, gcp_service.GCPError, oci_service.OCIError) as e:
         return {"cloud": cloud, "amount": None, "currency": None,
                 "status": "unavailable", "detail": str(e)}
     except Exception as e:  # noqa: BLE001 — defensive: unknown errors are still per-cloud
@@ -433,12 +529,13 @@ async def get_cost_summary() -> dict:
     """Per-cloud account/subscription MTD spend. AWS + Azure are queried live; GCP
     is queried via the BigQuery billing export when configured. ``total_mtd`` sums
     only the clouds that returned ``ok``."""
-    aws_entry, azure_entry, gcp_entry = await asyncio.gather(
+    aws_entry, azure_entry, gcp_entry, oci_entry = await asyncio.gather(
         _cloud_entry("aws", get_aws_mtd_cost),
         _cloud_entry("azure", get_azure_mtd_cost),
         _cloud_entry("gcp", get_gcp_mtd_cost),
+        _cloud_entry("oci", get_oci_mtd_cost),
     )
-    clouds = [aws_entry, azure_entry, gcp_entry]
+    clouds = [aws_entry, azure_entry, gcp_entry, oci_entry]
     oks = [c for c in clouds if c["status"] == "ok"]
     total = round(sum(c["amount"] for c in oks), 2) if oks else None
     currency = oks[0]["currency"] if oks else "USD"
