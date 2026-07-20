@@ -26,6 +26,7 @@ from ..models.k8s import (
     EntitleAgentRequest,
     EntitleClusterRegisterRequest,
     EntraGroupRequest,
+    ImpersonatorRequest,
     K8sProvisionOptions,
     ManagementRequest,
     SecretDeliveryRequest,
@@ -437,6 +438,53 @@ async def unbind_entra_group(
     )
     return {"ok": True, "status": "unbinding", "cluster_id": cluster_id,
             "action": "unbind", "job_id": job.id}
+
+
+@router.post("/clusters/{cluster_id}/impersonator", status_code=202)
+async def apply_impersonator(
+    cluster_id: str,
+    payload: ImpersonatorRequest = ImpersonatorRequest(),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("k8s", "write")),
+):
+    """Grant the Entra group cluster-wide ``impersonate`` on ``users`` — enqueues a
+    ``k8s_impersonator_binding`` job. This is the fine-grained JIT tier: the group
+    authenticates the user and lets them impersonate, but they have nothing to
+    impersonate as until Entitle's **Kubernetes** integration JIT-binds
+    ``<prefix>:<email>`` → a role on THIS cluster; they then run
+    ``kubectl --as=<prefix>:<email>``. ``group_id`` falls back to entra_rbac_group_id.
+    Open the returned job for status."""
+    try:
+        k8s_service.get_cluster(db, cluster_id)   # 404 if unknown
+    except K8sError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    job = job_service.create_job(
+        db, job_type="k8s_impersonator_binding", created_by=current_user.username,
+        metadata={"cluster_id": cluster_id, "action": "apply",
+                  "group_id": payload.group_id},
+    )
+    return {"ok": True, "status": "applying", "cluster_id": cluster_id,
+            "action": "apply", "job_id": job.id}
+
+
+@router.delete("/clusters/{cluster_id}/impersonator", status_code=202)
+async def remove_impersonator(
+    cluster_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("k8s", "delete")),
+):
+    """Remove the cluster's impersonator ClusterRole + ClusterRoleBinding — enqueues a
+    ``k8s_impersonator_binding`` (action=remove) job. Open the returned job for status."""
+    try:
+        k8s_service.get_cluster(db, cluster_id)   # 404 if unknown
+    except K8sError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    job = job_service.create_job(
+        db, job_type="k8s_impersonator_binding", created_by=current_user.username,
+        metadata={"cluster_id": cluster_id, "action": "remove"},
+    )
+    return {"ok": True, "status": "removing", "cluster_id": cluster_id,
+            "action": "remove", "job_id": job.id}
 
 
 @router.post("/clusters/{cluster_id}/entra-federation", status_code=202)

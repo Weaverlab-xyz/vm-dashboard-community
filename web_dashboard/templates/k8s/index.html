@@ -117,6 +117,10 @@
                       title="Bind an Entra (AAD) group to a ClusterRole — members get real-identity JIT access when Entitle's Entra-ID integration grants them membership (no impersonation)"
                       class="text-xs px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded font-medium"
                       x-text="c.entra_group_bound ? 'Entra group ✓' : 'Entra group'"></button>
+              <button x-show="c.status === 'registered' || c.status === 'managed'" @click="openImpersonator(c)"
+                      title="Grant the Entra group cluster-wide impersonate on users (fine-grained JIT): the group authenticates + can impersonate, but has nothing to impersonate until Entitle's Kubernetes integration JIT-binds entitle:<email> → a role on THIS cluster; the user then runs kubectl --as=<prefix>:<email>"
+                      class="text-xs px-2 py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded font-medium"
+                      x-text="c.impersonator_bound ? 'Impersonation ✓' : 'Impersonation access'"></button>
               <button x-show="c.status === 'registered' || c.status === 'managed'" @click="openEntraFed(c)"
                       title="Make the cluster TRUST Entra as an OIDC identity provider so users authenticate as themselves (EKS via associate-identity-provider-config; AKS is native). Pairs with the Entra group binding + the API tunnel."
                       class="text-xs px-2 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded font-medium"
@@ -565,6 +569,46 @@
     </div>
   </div>
 
+  <!-- Impersonation access modal (fine-grained per-cluster JIT) -->
+  <div x-show="showImpersonator" x-cloak class="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
+       @click.self="showImpersonator = false">
+    <div class="bg-white rounded-xl shadow-xl w-full max-w-lg">
+      <div class="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+        <h3 class="font-semibold text-gray-800">Impersonation access<span x-show="imperTarget" class="text-gray-400 font-normal"> — <span x-text="imperTarget && imperTarget.name"></span></span></h3>
+        <button @click="showImpersonator = false" class="text-gray-400 hover:text-gray-600 text-xl">&times;</button>
+      </div>
+      <div class="px-6 py-4 space-y-4">
+        <p class="text-xs text-gray-500">
+          Grants the Entra group cluster-wide <strong>impersonate</strong> on <strong>users</strong> (never groups —
+          <code>system:masters</code> stays blocked). This is the fine-grained tier: a group member authenticates as
+          themselves <em>and</em> can impersonate, but has <strong>nothing to impersonate as</strong> until Entitle's
+          <strong>Kubernetes</strong> integration JIT-binds <code>&lt;prefix&gt;:&lt;email&gt;</code> → a role on
+          <strong>this</strong> cluster. They then run <code>kubectl --as=&lt;prefix&gt;:&lt;email&gt;</code> (over the
+          <strong>API tunnel</strong> on GKE — the k8s tunnel strips impersonation headers). Reuses the Entra group
+          configured on Settings → Kubernetes; leave blank for that default.
+        </p>
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Entra group Object ID <span class="text-gray-400">(blank = Settings default)</span></label>
+          <input type="text" x-model="imperForm.group_id"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm font-mono"
+                 placeholder="(configured default)">
+        </div>
+      </div>
+      <div class="px-6 py-4 border-t border-gray-100 flex items-center gap-3">
+        <button x-show="imperTarget && imperTarget.impersonator_bound" x-cloak @click="removeImpersonator()" :disabled="imperBusy"
+                class="px-4 py-2 text-sm border border-red-300 text-red-600 hover:bg-red-50 disabled:opacity-50 rounded-lg">Remove</button>
+        <div class="flex justify-end gap-3 ml-auto">
+          <button @click="showImpersonator = false" class="px-4 py-2 text-sm border border-gray-300 rounded-lg">Cancel</button>
+          <button @click="submitImpersonator()" :disabled="imperBusy"
+                  class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-sm font-medium rounded-lg">
+            <span x-show="!imperBusy" x-text="imperTarget && imperTarget.impersonator_bound ? 'Re-apply' : 'Grant impersonation'"></span>
+            <span x-show="imperBusy" x-cloak>Working…</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Entra federation modal (make the cluster TRUST Entra as an OIDC IdP) -->
   <div x-show="showEntraFed" x-cloak class="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
        @click.self="showEntraFed = false">
@@ -711,6 +755,8 @@ function k8sPage() {
     apiTunnelForm: { jump_group: '', jumpoint_name: '', apiTunnelCredBackend: '', pra_credential_ref: '' },
     showEntraGroup: false, entraBusy: false, entraTarget: null,
     entraForm: { group_id: '', role: '' },
+    showImpersonator: false, imperBusy: false, imperTarget: null,
+    imperForm: { group_id: '' },
     showEntraFed: false, fedBusy: false, fedTarget: null,
 
     async init() { requireAuth(); this.loadSecretBackends(); await this.refresh(); },
@@ -1105,6 +1151,44 @@ function k8sPage() {
         this.flash(e.message || 'Entra-group unbind failed.', 'error');
       } finally {
         this.entraBusy = false;
+      }
+    },
+
+    openImpersonator(c) {
+      this.imperTarget = c;
+      this.imperForm = { group_id: '' };
+      this.showImpersonator = true;
+    },
+
+    async submitImpersonator() {
+      this.imperBusy = true;
+      try {
+        const body = { group_id: this.imperForm.group_id || null };
+        const r = await API.post(`/api/k8s/clusters/${this.imperTarget.id}/impersonator`, body);
+        this.showImpersonator = false;
+        this.flash('Impersonation-access job started — opening the job…');
+        if (r && r.job_id) { window.location.href = '/jobs/' + r.job_id; return; }
+        await this.refresh();
+      } catch (e) {
+        this.flash(e.message || 'Impersonation-access grant failed.', 'error');
+      } finally {
+        this.imperBusy = false;
+      }
+    },
+
+    async removeImpersonator() {
+      if (!confirm(`Remove impersonation access from "${this.imperTarget.name}"? This deletes the impersonator ClusterRole + binding.`)) return;
+      this.imperBusy = true;
+      try {
+        const r = await API.del(`/api/k8s/clusters/${this.imperTarget.id}/impersonator`);
+        this.showImpersonator = false;
+        this.flash('Impersonation-access removal job started — opening the job…');
+        if (r && r.job_id) { window.location.href = '/jobs/' + r.job_id; return; }
+        await this.refresh();
+      } catch (e) {
+        this.flash(e.message || 'Impersonation-access removal failed.', 'error');
+      } finally {
+        this.imperBusy = false;
       }
     },
 

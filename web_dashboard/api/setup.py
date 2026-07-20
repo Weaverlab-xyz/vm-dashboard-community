@@ -808,6 +808,10 @@ class K8sManagementFeatureConfig(BaseModel):
     entra_rbac_group_id: str = ""             # Entra group Object ID (GUID)
     entra_rbac_group_name: str = ""           # OPTIONAL friendly name (display only)
     entra_rbac_group_role: str = "cluster-admin"  # ClusterRole the group binds to
+    # Subject prefix Entitle's Kubernetes integration binds for a JIT grant
+    # (<prefix>:<email>) — also what a user passes to `kubectl --as=` when consuming
+    # an "Impersonation access" grant. Default "entitle".
+    entitle_k8s_user_prefix: str = "entitle"
     # Entra OIDC federation for EKS (the "Entra federation" action's AWS leg): a
     # shared Entra app registration associated as the cluster's OIDC IdP so a user's
     # Entra token authenticates and its group OIDs match the binding above.

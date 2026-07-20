@@ -106,6 +106,14 @@ class EntraGroupRequest(BaseModel):
     role: Optional[str] = None                # ClusterRole to bind (else entra_rbac_group_role, default cluster-admin)
 
 
+class ImpersonatorRequest(BaseModel):
+    """Grant an Entra group cluster-wide `impersonate` on `users` (the fine-grained
+    JIT tier — the group authenticates + can impersonate, but has nothing to
+    impersonate as until the Entitle Kubernetes integration binds `<prefix>:<email>`
+    → a role on this cluster). ``group_id`` optional — falls back to entra_rbac_group_id."""
+    group_id: Optional[str] = None            # Entra group Object ID (else entra_rbac_group_id)
+
+
 class ClusterInfo(BaseModel):
     id: str
     cloud: str
