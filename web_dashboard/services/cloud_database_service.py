@@ -1309,6 +1309,29 @@ async def run_decommission(db: Session, *, db_id: str, job_id: str) -> None:
         errors.append("no provisioning job recorded for this database — the instance "
                       "may need manual termination in the cloud console")
 
+    # 4b. Orphan safety net (GCP Cloud SQL only). The google provider drops a Cloud
+    #     SQL instance from Terraform state when the create operation-wait errors
+    #     (d.SetId("")), even though GCP finishes creating it — so a mid-create apply
+    #     failure leaves a RUNNABLE instance the destroy above (empty state) can't
+    #     reclaim. Delete it directly by name, guarded on the clouddb-id label so we
+    #     never touch anything we didn't create. No-ops (404) after a clean destroy.
+    #     (AWS/Azure providers taint the resource in state on the same error, so their
+    #     destroy already covers it; only GCP exhibits the state-drop.)
+    if row.cloud == "gcp":
+        job_service.update_progress(db, job_id, 80, "Checking for an orphaned instance…")
+        try:
+            from . import gcp_service
+            project = _cfg("gcp_project") or _cfg("gcp_project_id")
+            result = await gcp_service.sweep_orphan_sql_instance(
+                project, f"clouddb-{db_id[:8]}", db_id)
+            if result == "deleted":
+                logger.warning("clouddb decommission: swept orphaned GCP instance "
+                               "clouddb-%s (Terraform state was lost to a create-wait "
+                               "failure)", db_id[:8])
+        except Exception as exc:
+            errors.append(f"GCP orphan sweep: {exc}")
+            logger.warning("clouddb GCP orphan sweep for %s failed: %s", db_id, exc)
+
     if errors:
         row.status = "failed"
         db.commit()
