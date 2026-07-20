@@ -366,6 +366,12 @@ app = FastAPI(
     version=settings.api_version,
     description="Web-based dashboard for managing VMware Workstation VMs via browser.",
     lifespan=lifespan,
+    # /docs is the repo documentation browser (api/docs_pages.py), so the API
+    # explorer lives at /swagger. Both are served by custom routes below:
+    # the schema itself requires authentication, which the built-ins can't do.
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
 )
 
 app.state.limiter = limiter
@@ -506,6 +512,65 @@ app.include_router(workgroup_overrides_api.router)
 app.include_router(jobs.router)
 app.include_router(audit_api.router)
 app.include_router(docs_pages.router)
+
+# ── API explorer (/swagger) + authenticated schema ────────────────────────────
+# FastAPI's built-ins are disabled above. The schema is the sensitive part — it
+# enumerates every endpoint — so /openapi.json requires a bearer token. The HTML
+# shells are public loaders that authenticate client-side like every other page
+# (this app keeps its token in localStorage, so a browser navigation carries no
+# Authorization header; Swagger UI attaches it via requestInterceptor).
+
+from .api.auth import get_current_user as _docs_current_user  # noqa: E402
+
+
+@app.get("/openapi.json", include_in_schema=False)
+async def openapi_schema(current_user=Depends(_docs_current_user)):
+    """The OpenAPI schema. Authenticated: it lists the full API surface."""
+    return app.openapi()
+
+
+def _custom_openapi():
+    """Schema with the password grant removed.
+
+    ``get_current_user`` depends on ``OAuth2PasswordBearer`` purely to extract the
+    Authorization header, but declaring it that way makes Swagger's Authorize
+    button collect a **username and password** — which is exactly the credential
+    flow we don't want exercised from a docs page. Runtime behaviour is untouched;
+    only the documented scheme changes, to plain bearer. The explorer attaches the
+    session token itself (see templates/swagger.html), so nothing is lost.
+    """
+    if app.openapi_schema:
+        return app.openapi_schema
+    from fastapi.openapi.utils import get_openapi
+    schema = get_openapi(
+        title=app.title, version=app.version,
+        description=app.description, routes=app.routes,
+    )
+    schemes = schema.setdefault("components", {}).setdefault("securitySchemes", {})
+    for name, defn in list(schemes.items()):
+        if defn.get("type") == "oauth2" and "password" in (defn.get("flows") or {}):
+            schemes[name] = {
+                "type": "http",
+                "scheme": "bearer",
+                "description": (
+                    "Session token (from SSO or local login) or a vmcli_ personal "
+                    "access token. The API explorer attaches your session token "
+                    "automatically."
+                ),
+            }
+    app.openapi_schema = schema
+    return schema
+
+
+app.openapi = _custom_openapi
+
+
+@app.get("/swagger", include_in_schema=False)
+async def swagger_ui(request: Request):
+    """API explorer. Authenticates client-side, then loads the schema with the
+    stored bearer token attached."""
+    return templates.TemplateResponse("swagger.html", {"request": request, **_feature_flags()})
+
 app.include_router(websocket.router)
 app.include_router(aws.router)
 app.include_router(cloud_databases.router)
@@ -620,7 +685,17 @@ async def root(request: Request):
 
 @app.get("/login", response_class=HTMLResponse, include_in_schema=False)
 async def login_page(request: Request):
-    return templates.TemplateResponse("login.html", {"request": request})
+    # Surface the generic-OIDC button only when an issuer is configured, so a
+    # default install doesn't show a button that 501s.
+    try:
+        from .services import oidc_service
+        oidc_enabled, oidc_label = oidc_service.is_configured(), oidc_service.provider_label()
+    except Exception:
+        oidc_enabled, oidc_label = False, "SSO"
+    return templates.TemplateResponse(
+        "login.html",
+        {"request": request, "oidc_enabled": oidc_enabled, "oidc_label": oidc_label},
+    )
 
 
 @app.get("/vms", response_class=HTMLResponse, include_in_schema=False)

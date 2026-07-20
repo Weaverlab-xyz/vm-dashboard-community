@@ -3,8 +3,10 @@ Authentication API endpoints.
 JWT-based login/logout with bcrypt password hashing.
 Supports FIDO2/WebAuthn MFA (second factor) and Azure AD OAuth login.
 """
+import base64
 import hashlib
 import logging
+import os
 import uuid
 from datetime import datetime, timedelta
 from typing import Optional
@@ -405,6 +407,138 @@ async def webauthn_login_begin(
     )
 
 
+
+# ── Shared OAuth/OIDC login completion ────────────────────────────────────────
+# Group mapping, user provisioning and token issue are identical whichever
+# provider authenticated the user, so both the Entra and the generic OIDC
+# callbacks funnel through here. Extracted verbatim from the original Entra
+# callback — behaviour for existing installs is unchanged.
+
+def _complete_oauth_login(db, *, subject, email, display_name, groups, provider):
+    """Map groups → workgroups, find-or-create the user, and return a redirect
+    carrying a freshly minted access token (or an error redirect)."""
+    # ── Group-to-workgroup mapping check ─────────────────────────────────────
+    # Read mappings from DB (managed via /groups admin page).
+    # Falls back to the .env azure_oauth_group_map if DB has no entries.
+    db_mappings = db.query(OAuthGroupMapping).all()
+    import json as _json
+    if db_mappings:
+        group_map = {m.entra_group_id: (m.workgroup, m.default_permissions) for m in db_mappings}
+    else:
+        # .env fallback: no default_permissions support in this path
+        group_map = {gid: (wg, None) for gid, wg in settings.azure_oauth_group_map.items()}
+
+    if group_map:
+        user_group_ids = set(groups or [])
+        matched: list[tuple] = [(wg, dp) for gid, (wg, dp) in group_map.items() if gid in user_group_ids]
+        if not matched:
+            return RedirectResponse(url="/login?error=not_authorized", status_code=302)
+        matched_workgroups = [wg for wg, _ in matched]
+        # Entitle user-JIT Phase 0 (docs/design/entitle-user-jit.md):
+        # union every matched group's default_permissions, not just the
+        # first one's. The result becomes the user's session_permissions
+        # on every login, which is what the require_permission resolver
+        # consults via effective_permissions_dict.
+        # A user in `dashboard-aws-read` + `dashboard-vms-write` ends up
+        # with both — and when Entitle revokes one of those memberships,
+        # the next login drops the matching scope.
+        session_perms: dict = {}
+        for _, dp in matched:
+            if not dp:
+                continue
+            try:
+                parsed = _json.loads(dp)
+            except Exception:
+                logger.warning("Skipping malformed default_permissions JSON in oauth_group_mapping: %r", dp[:80])
+                continue
+            for key, val in parsed.items():
+                if key == "is_admin":
+                    session_perms[key] = session_perms.get(key, False) or bool(val)
+                elif isinstance(val, list):
+                    existing = session_perms.get(key)
+                    if isinstance(existing, list):
+                        session_perms[key] = sorted(set(existing) | set(val))
+                    else:
+                        session_perms[key] = sorted(set(val))
+                else:
+                    session_perms[key] = val
+        matched_session_permissions = session_perms if session_perms else None
+    else:
+        matched_workgroups = None  # no mappings configured — legacy path
+        matched_session_permissions = None
+
+    # ── Find or auto-create user ──────────────────────────────────────────────
+    # Look up by stable subject first, then fall back to email
+    user = None
+    if subject:
+        user = db.query(User).filter(User.oauth_subject == subject).first()
+    if not user:
+        user = db.query(User).filter(User.email == email).first()
+
+    if user:
+        if not user.is_active:
+            return RedirectResponse(url="/login?error=account_disabled", status_code=302)
+        # Sync fields from Entra ID
+        if subject and not user.oauth_subject:
+            user.oauth_subject = subject
+        user.auth_provider = provider
+        if display_name and not user.full_name:
+            user.full_name = display_name
+        # Keep workgroups in sync with current Entra group membership
+        if matched_workgroups is not None:
+            user.workgroups_list = matched_workgroups
+        # Entitle user-JIT Phase 0: re-apply the group-derived permission
+        # union on every login. Overwriting the column with the latest
+        # union is the load-bearing change — Entitle removing a group
+        # membership now actually reduces this user's effective
+        # permissions on their next login. The admin-set baseline
+        # (user.permissions) is untouched, so admin-granted permissions
+        # survive even when no group claims them.
+        user.session_permissions_dict = matched_session_permissions or {}
+        db.commit()
+    elif matched_workgroups is not None:
+        # Auto-create: derive a unique username from the email local-part
+        base = email.split("@")[0].lower().replace(".", "_")
+        username = base
+        suffix = 1
+        while db.query(User).filter(User.username == username).first():
+            username = f"{base}_{suffix}"
+            suffix += 1
+
+        user = User(
+            id=str(uuid.uuid4()),
+            username=username,
+            full_name=display_name,
+            email=email,
+            auth_provider=provider,
+            oauth_subject=subject,
+            is_active=True,
+            is_admin=False,
+        )
+        user.workgroups_list = matched_workgroups
+        # Entitle user-JIT Phase 0: write the union to session_permissions,
+        # NOT to permissions. The admin-baseline permissions column stays
+        # empty for auto-created users so an admin can later hand-grant
+        # something orthogonal to the group-derived set. effective_permissions
+        # = union(empty admin baseline, group-derived session_permissions)
+        # gives the same effective set as before for an auto-created user.
+        user.session_permissions_dict = matched_session_permissions or {}
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+    else:
+        # Group map not configured — require pre-existing account (legacy behaviour)
+        return RedirectResponse(url="/login?error=not_registered", status_code=302)
+
+    token = create_access_token({"sub": user.username})
+
+    # Return JWT via URL fragment (not sent to server on redirect, safe for internal use)
+    return RedirectResponse(
+        url=f"/login#token={token}",
+        status_code=302,
+    )
+
+
 # ── Azure AD OAuth ────────────────────────────────────────────────────────────
 
 def _oauth_cfg() -> tuple:
@@ -518,125 +652,90 @@ async def oauth_azure_callback(
     if not email:
         return RedirectResponse(url="/login?error=no_email", status_code=302)
 
-    # ── Group-to-workgroup mapping check ─────────────────────────────────────
-    # Read mappings from DB (managed via /groups admin page).
-    # Falls back to the .env azure_oauth_group_map if DB has no entries.
-    db_mappings = db.query(OAuthGroupMapping).all()
-    import json as _json
-    if db_mappings:
-        group_map = {m.entra_group_id: (m.workgroup, m.default_permissions) for m in db_mappings}
-    else:
-        # .env fallback: no default_permissions support in this path
-        group_map = {gid: (wg, None) for gid, wg in settings.azure_oauth_group_map.items()}
+    return _complete_oauth_login(
+        db,
+        subject=oid,
+        email=email,
+        display_name=display_name,
+        groups=id_token_claims.get("groups", []),
+        provider="azure_ad",
+    )
 
-    if group_map:
-        user_group_ids = set(id_token_claims.get("groups", []))
-        matched: list[tuple] = [(wg, dp) for gid, (wg, dp) in group_map.items() if gid in user_group_ids]
-        if not matched:
-            return RedirectResponse(url="/login?error=not_authorized", status_code=302)
-        matched_workgroups = [wg for wg, _ in matched]
-        # Entitle user-JIT Phase 0 (docs/design/entitle-user-jit.md):
-        # union every matched group's default_permissions, not just the
-        # first one's. The result becomes the user's session_permissions
-        # on every login, which is what the require_permission resolver
-        # consults via effective_permissions_dict.
-        # A user in `dashboard-aws-read` + `dashboard-vms-write` ends up
-        # with both — and when Entitle revokes one of those memberships,
-        # the next login drops the matching scope.
-        session_perms: dict = {}
-        for _, dp in matched:
-            if not dp:
-                continue
-            try:
-                parsed = _json.loads(dp)
-            except Exception:
-                logger.warning("Skipping malformed default_permissions JSON in oauth_group_mapping: %r", dp[:80])
-                continue
-            for key, val in parsed.items():
-                if key == "is_admin":
-                    session_perms[key] = session_perms.get(key, False) or bool(val)
-                elif isinstance(val, list):
-                    existing = session_perms.get(key)
-                    if isinstance(existing, list):
-                        session_perms[key] = sorted(set(existing) | set(val))
-                    else:
-                        session_perms[key] = sorted(set(val))
-                else:
-                    session_perms[key] = val
-        matched_session_permissions = session_perms if session_perms else None
-    else:
-        matched_workgroups = None  # no mappings configured — legacy path
-        matched_session_permissions = None
 
-    # ── Find or auto-create user ──────────────────────────────────────────────
-    # Look up by stable oid first, then fall back to email
-    user = None
-    if oid:
-        user = db.query(User).filter(User.oauth_subject == oid).first()
-    if not user:
-        user = db.query(User).filter(User.email == email).first()
+# ── Generic OIDC (any compliant provider) ─────────────────────────────────────
+# Additive to the Entra routes above: driven by the issuer's discovery document,
+# so one implementation serves Okta, Auth0, Keycloak, Authentik, Authelia,
+# Google Workspace, JumpCloud, Ping, GitLab. See services/oidc_service.py.
 
-    if user:
-        if not user.is_active:
-            return RedirectResponse(url="/login?error=account_disabled", status_code=302)
-        # Sync fields from Entra ID
-        if oid and not user.oauth_subject:
-            user.oauth_subject = oid
-        user.auth_provider = "azure_ad"
-        if display_name and not user.full_name:
-            user.full_name = display_name
-        # Keep workgroups in sync with current Entra group membership
-        if matched_workgroups is not None:
-            user.workgroups_list = matched_workgroups
-        # Entitle user-JIT Phase 0: re-apply the group-derived permission
-        # union on every login. Overwriting the column with the latest
-        # union is the load-bearing change — Entitle removing a group
-        # membership now actually reduces this user's effective
-        # permissions on their next login. The admin-set baseline
-        # (user.permissions) is untouched, so admin-granted permissions
-        # survive even when no group claims them.
-        user.session_permissions_dict = matched_session_permissions or {}
-        db.commit()
-    elif matched_workgroups is not None:
-        # Auto-create: derive a unique username from the email local-part
-        base = email.split("@")[0].lower().replace(".", "_")
-        username = base
-        suffix = 1
-        while db.query(User).filter(User.username == username).first():
-            username = f"{base}_{suffix}"
-            suffix += 1
+def _oidc_redirect_uri(request: Request) -> str:
+    """Derive the callback from the incoming request, matching the Entra path, so
+    the flow works via localhost, an IP, or a hostname without reconfiguration."""
+    return f"{request.url.scheme}://{request.url.netloc}/api/auth/oauth/oidc/callback"
 
-        user = User(
-            id=str(uuid.uuid4()),
-            username=username,
-            full_name=display_name,
-            email=email,
-            auth_provider="azure_ad",
-            oauth_subject=oid,
-            is_active=True,
-            is_admin=False,
-        )
-        user.workgroups_list = matched_workgroups
-        # Entitle user-JIT Phase 0: write the union to session_permissions,
-        # NOT to permissions. The admin-baseline permissions column stays
-        # empty for auto-created users so an admin can later hand-grant
-        # something orthogonal to the group-derived set. effective_permissions
-        # = union(empty admin baseline, group-derived session_permissions)
-        # gives the same effective set as before for an auto-created user.
-        user.session_permissions_dict = matched_session_permissions or {}
-        db.add(user)
-        db.commit()
-        db.refresh(user)
-    else:
-        # Group map not configured — require pre-existing account (legacy behaviour)
-        return RedirectResponse(url="/login?error=not_registered", status_code=302)
 
-    token = create_access_token({"sub": user.username})
+@router.get("/oauth/oidc/login")
+async def oauth_oidc_login(request: Request):
+    """Redirect to the configured OIDC provider (authorization code + PKCE)."""
+    from ..services import oidc_service
+    if not oidc_service.is_configured():
+        raise HTTPException(status_code=501, detail="OIDC SSO is not configured on this server.")
 
-    # Return JWT via URL fragment (not sent to server on redirect, safe for internal use)
-    return RedirectResponse(
-        url=f"/login#token={token}",
-        status_code=302,
+    redirect_uri = _oidc_redirect_uri(request)
+    state = str(uuid.uuid4())
+    # PKCE verifier: base64url, no padding, per RFC 7636.
+    verifier = base64.urlsafe_b64encode(os.urandom(40)).decode().rstrip("=")
+    challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
+    # The state store holds one string, so pack the verifier alongside the URI.
+    # It never leaves the server and is consumed atomically on callback.
+    store_oauth_state(state, f"{redirect_uri}|{verifier}")
+
+    try:
+        return RedirectResponse(url=oidc_service.authorization_url(redirect_uri, state, challenge),
+                                status_code=302)
+    except oidc_service.OIDCError as e:
+        logger.warning("OIDC login could not start: %s", e)
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@router.get("/oauth/oidc/callback")
+async def oauth_oidc_callback(
+    code: Optional[str] = None,
+    state: Optional[str] = None,
+    error: Optional[str] = None,
+    error_description: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """Handle the OIDC callback: validate the ID token, then log the user in."""
+    from ..services import oidc_service
+
+    if error:
+        return RedirectResponse(
+            url=f"/login?error=oauth_error&detail={error_description or error}", status_code=302)
+
+    stored = verify_and_consume_oauth_state(state) if state else None
+    if not stored:
+        return RedirectResponse(url="/login?error=invalid_state", status_code=302)
+    if not code:
+        return RedirectResponse(url="/login?error=no_code", status_code=302)
+
+    redirect_uri, _, verifier = stored.partition("|")
+
+    try:
+        tokens = oidc_service.exchange_code(code, redirect_uri, verifier)
+        claims = oidc_service.validate_id_token(tokens["id_token"])
+    except oidc_service.OIDCError as e:
+        # Detail is the provider's own message; it carries no token material.
+        logger.warning("OIDC callback failed: %s", e)
+        return RedirectResponse(url="/login?error=token_error", status_code=302)
+
+    subject, email, display_name, groups = oidc_service.claim_identity(claims)
+    if not email:
+        return RedirectResponse(url="/login?error=no_email", status_code=302)
+
+    return _complete_oauth_login(
+        db, subject=subject, email=email, display_name=display_name,
+        groups=groups, provider="oidc",
     )
 
 
