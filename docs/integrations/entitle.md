@@ -51,6 +51,19 @@ with a clear message if no agent is configured. The Entitle agent is the *manage
 plane (it mints/revokes the ephemeral SSH account or DB role); the **PRA tunnel** the
 dashboard already brokers is the separate *access* path the user connects through.
 
+> **Network reachability — the agent must have a route to the private target.**
+> To "fetch resources" for an SSH-ephemeral target, the agent pod SSHes into the host
+> and enumerates accounts, so it needs an IP path to the target on port 22. The
+> dashboard-managed clusters build their **own self-contained VPC**; when the sandbox
+> VPC is configured (`gcp_network` / `aws_vpc_id`), the cluster module **peers back to
+> the sandbox VPC** and opens the lab-VM firewall to the cluster's node+pod ranges so
+> the agent can reach private VMs directly (GCP: `gcp_gke` peering + a
+> `*-allow-ssh-from-k8s` firewall; AWS: `aws_eks` VPC peering + VM-SG ingress). Without
+> that path, the Entitle audit log shows **"Failed to fetch the resources of &lt;target&gt;"**
+> (a connection timeout). **GCP caveat:** VPC peering is non-transitive, so the agent
+> reaches sandbox **VMs** but **not** Cloud SQL private-IP DBs (behind the
+> sandbox↔`servicenetworking` peering) — DB JIT uses the PRA tunnel, not the agent.
+
 > **Provisioning the agent** (dashboard-managed EKS/AKS/GKE cluster + Helm) is a
 > one-time **admin prerequisite** — a designed, deferred phase that lands alongside the
 > EKS build flow. See [`docs/design/entitle-resource-registration.md`](../design/entitle-resource-registration.md).
@@ -164,6 +177,16 @@ still provisions; the job message records why registration was skipped or failed
 **"private target requires entitle_agent_token_name"** — the resource is private and no
 Entitle agent is configured. Either provision the agent (Kubernetes) and set
 `entitle_agent_token_name`, or register only public resources.
+
+**"Failed to fetch the resources of &lt;target&gt;" (SSH ephemeral)** — the agent can't
+reach the private host on port 22. Almost always a **network path**: the agent's cluster
+VPC has no route to the target (e.g. a GKE cluster in its own isolated VPC, and the
+private VM in the sandbox `vm-subnet`). Fix = ensure the cluster module peered back to the
+sandbox VPC — set `gcp_network` (GCP) / `aws_vpc_id` (AWS) **before provisioning** the
+cluster, then re-provision so the peering + lab-VM firewall are created (see *Network
+reachability* above). Verify from a pod: `nc -vz <target-private-ip> 22`. (For the
+*Kubernetes* connector — not SSH — the same message instead means the agent SA lacks
+cluster RBAC; that's handled by the cluster-admin binding `setup_entitle_agent` applies.)
 
 **"entitle_owner_id / entitle_workflow_id is not configured"** — both are required to
 create an integration. Fill them in under Settings → Integrations → Entitle.

@@ -628,7 +628,11 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
             await entitle_vm_hook.register(db, job_id, payload.instance_name, hostname,
                                            private=not payload.create_external_ip,
                                            result=final_meta, tag="GCP",
-                                           sudo_user=payload.ssh_username,
+                                           # Use the RESOLVED login user (gcp_ssh_username →
+                                           # gcp-user default), the same account the VM's launch
+                                           # key was injected for — not the raw (often-blank)
+                                           # payload field, which would register an empty user.
+                                           sudo_user=ssh_username,
                                            ssh_key_secret=secret_name)
 
         # Password Safe — onboard as a managed system + account (per-build opt-in).

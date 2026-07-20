@@ -83,6 +83,33 @@ variable "subnet_cidr" {
   description = "Subnet for the cluster nodes + (Azure CNI) pods — /22 gives ~1k IPs"
 }
 
+# ── Optional VNet peering back to the sandbox VNet (Azure parity with aws_eks/gcp_gke) ──
+# Blank sandbox_vnet_id → the cluster stays fully isolated (Entitle/PRA still
+# broker access). When set, the module peers this cluster's VNet to the sandbox
+# VNet (both directions) so an in-cluster agent (Entitle SSH ephemeral) can reach
+# the private lab VMs. vnet_cidr must NOT overlap the sandbox VNet (10.99.0.0/16);
+# the default 10.96.0.0/16 is clean. No NSG rule is needed: the sandbox vm-subnet
+# NSG already allows the VirtualNetwork service tag, which auto-expands to peered
+# address space, and classic Azure CNI gives pods VNet-routable IPs from the node
+# subnet (no node-vs-pod range juggling).
+variable "sandbox_vnet_id" {
+  type        = string
+  default     = ""
+  description = "ARM id of the sandbox VNet to peer with; blank to skip peering."
+}
+
+variable "sandbox_vnet_name" {
+  type        = string
+  default     = ""
+  description = "Name of the sandbox VNet (reverse peering leg). Empty = derive from sandbox_vnet_id's last path segment."
+}
+
+variable "sandbox_vnet_rg" {
+  type        = string
+  default     = ""
+  description = "Resource group of the sandbox VNet (reverse peering leg). Empty = this cluster's resource group."
+}
+
 # Public API endpoint restricted to these CIDRs. Empty = open to all (AKS does
 # not accept 0.0.0.0/0 as an authorized range, so 'open' is expressed by leaving
 # the access profile unset). Tighten to the dashboard's egress IP in real use.
@@ -152,6 +179,33 @@ resource "azurerm_subnet" "nodes" {
   resource_group_name  = local.rg_name
   virtual_network_name = azurerm_virtual_network.this.name
   address_prefixes     = [var.subnet_cidr]
+}
+
+# ── VNet peering back to the sandbox VNet (optional; Azure parity with EKS/GKE) ──
+# Peering is directional → both legs. Azure auto-programs system routes for peered
+# address spaces (no route resources), and the two legs sit on DIFFERENT VNets, so
+# there's no same-VNet concurrency to serialize. No NSG rule: the sandbox
+# vm-subnet's VirtualNetwork-tag allow rule auto-covers the peered AKS space, and
+# classic Azure CNI pods are VNet-routable (real IPs from the node subnet).
+locals {
+  sandbox_peer_name = var.sandbox_vnet_name != "" ? var.sandbox_vnet_name : element(reverse(split("/", var.sandbox_vnet_id)), 0)
+  sandbox_peer_rg   = var.sandbox_vnet_rg != "" ? var.sandbox_vnet_rg : local.rg_name
+}
+
+resource "azurerm_virtual_network_peering" "aks_to_sandbox" {
+  count                     = var.sandbox_vnet_id == "" ? 0 : 1
+  name                      = "${var.cluster_name}-to-sandbox"
+  resource_group_name       = local.rg_name
+  virtual_network_name      = azurerm_virtual_network.this.name
+  remote_virtual_network_id = var.sandbox_vnet_id
+}
+
+resource "azurerm_virtual_network_peering" "sandbox_to_aks" {
+  count                     = var.sandbox_vnet_id == "" ? 0 : 1
+  name                      = "sandbox-to-${var.cluster_name}"
+  resource_group_name       = local.sandbox_peer_rg
+  virtual_network_name      = local.sandbox_peer_name
+  remote_virtual_network_id = azurerm_virtual_network.this.id
 }
 
 # Deterministic egress: a user-assigned NAT gateway with a static public IP gives

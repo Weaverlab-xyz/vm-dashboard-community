@@ -107,6 +107,30 @@ variable "tags" {
   description = "Resource labels (managed-by, cluster id) — GCP label charset"
 }
 
+# ── Optional VPC peering back to the sandbox VPC (GCP parity with aws_eks) ─────
+# Blank sandbox_network → the cluster is fully isolated (Entitle/PRA still broker
+# access, exactly like today). When set, the module peers this cluster's VPC to
+# the sandbox VPC (both directions) and opens SSH from the cluster's node+pod
+# ranges to the tagged lab VMs, so an in-cluster agent (Entitle SSH ephemeral)
+# can reach the private VMs directly.
+variable "sandbox_network" {
+  type        = string
+  default     = ""
+  description = "Sandbox VPC NAME to peer with (matches the dashboard's gcp_network); blank to skip peering."
+}
+
+variable "sandbox_vm_target_tags" {
+  type        = list(string)
+  default     = []
+  description = "Network tags of the sandbox lab VMs to open SSH to over the peering (the dashboard's gcp_default_network_tag); empty to skip the VM firewall."
+}
+
+variable "vm_ports" {
+  type        = list(number)
+  default     = [22]
+  description = "TCP ports opened from the cluster's node+pod ranges to the sandbox VMs over the peering."
+}
+
 locals {
   location = var.zone != "" ? var.zone : "${var.region}-a"
 }
@@ -158,6 +182,52 @@ resource "google_compute_router_nat" "nat" {
   nat_ip_allocate_option             = "MANUAL_ONLY"
   nat_ips                            = [google_compute_address.nat.self_link]
   source_subnetwork_ip_ranges_to_nat = "ALL_SUBNETWORKS_ALL_IP_RANGES"
+}
+
+# ── VPC peering back to the sandbox VPC (optional; GCP parity with aws_eks) ────
+# GCP peering is symmetric: BOTH networks must declare it, so we create both
+# sides (same project → the provisioning SA's compute.admin covers it). Subnet
+# routes — including the pods/services secondary ranges — are auto-exchanged, so
+# no manual route resources are needed (simpler than the AWS side).
+#
+# NB: GCP peering is NON-transitive. This reaches the sandbox VMs (SSH), NOT
+# Cloud SQL private IPs (those sit behind the sandbox↔servicenetworking peering)
+# — managed-DB JIT uses the PRA protocol tunnel, not the agent.
+resource "google_compute_network_peering" "gke_to_sandbox" {
+  count        = var.sandbox_network == "" ? 0 : 1
+  name         = "${var.cluster_name}-to-sandbox"
+  network      = google_compute_network.vpc.self_link
+  peer_network = "projects/${var.project}/global/networks/${var.sandbox_network}"
+}
+
+# The reverse leg. Serialize after the first (GCP rejects concurrent peering ops
+# on the same network pair — "There is a peering operation in progress").
+resource "google_compute_network_peering" "sandbox_to_gke" {
+  count        = var.sandbox_network == "" ? 0 : 1
+  name         = "sandbox-to-${var.cluster_name}"
+  network      = "projects/${var.project}/global/networks/${var.sandbox_network}"
+  peer_network = google_compute_network.vpc.self_link
+  depends_on   = [google_compute_network_peering.gke_to_sandbox]
+}
+
+# Open SSH from the cluster's node + pod ranges to the tagged sandbox VMs, in the
+# SANDBOX network. GKE may or may not masquerade pod IPs to the node IP for
+# RFC1918 destinations, so allow BOTH the node subnet and the pod range. GCP
+# firewalls are stateful → this single ingress rule covers the return traffic.
+resource "google_compute_firewall" "sandbox_allow_ssh_from_gke" {
+  count     = (var.sandbox_network == "" || length(var.sandbox_vm_target_tags) == 0) ? 0 : 1
+  name      = "${var.cluster_name}-allow-ssh-from-k8s"
+  network   = "projects/${var.project}/global/networks/${var.sandbox_network}"
+  direction = "INGRESS"
+  priority  = 1000
+
+  allow {
+    protocol = "tcp"
+    ports    = [for p in var.vm_ports : tostring(p)]
+  }
+
+  source_ranges = [var.subnet_cidr, var.pods_cidr]
+  target_tags   = var.sandbox_vm_target_tags
 }
 
 # ── GKE cluster + node pool ───────────────────────────────────────────────────

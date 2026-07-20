@@ -414,10 +414,13 @@ async def _run_deploy(job_id: str, payload: OCIDeployRequest, compartment: str) 
         # Entitle — register as SSH ephemeral-accounts integration (per-build opt-in).
         from ..services import entitle_vm_hook
         if payload.register_in_entitle and entitle_vm_hook.registration_enabled():
+            # Resolved login user (config override → request field → opc default);
+            # _cfg_svc.get is store-only so a blank request field falls through.
             await entitle_vm_hook.register(db, job_id, payload.instance_name, hostname,
                                            private=not payload.assign_public_ip,
                                            result=final_meta, tag="OCI",
-                                           sudo_user=payload.ssh_username, ssh_key_secret=secret)
+                                           sudo_user=_cfg_svc.get("oci_ssh_username") or payload.ssh_username or "opc",
+                                           ssh_key_secret=secret)
 
         # Password Safe — onboard as a managed system + account (per-build opt-in).
         # OCI uses the traditional "ssh" method (no cloud-native plugin), so the
