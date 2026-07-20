@@ -60,6 +60,7 @@ def test_docs_is_the_documentation_index_not_swagger():
 def test_doc_pages_still_render():
     c = _client()
     assert c.get("/docs/integrations/rancher").status_code == 200
+    assert c.get("/docs/integrations/oidc").status_code == 200
 
 
 def test_oidc_routes_fail_cleanly_when_unconfigured():
