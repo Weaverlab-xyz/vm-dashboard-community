@@ -680,6 +680,19 @@ async def _entitle_register_core(db: Session, *, row: CloudDatabase, engine: str
             f"no admin credential available for db_id={row.id} "
             f"(provisioning job pruned?) — cannot register in Entitle")
 
+    # Entitle's Microsoft SQL Server connector requires a `version` field — its
+    # connection schema lists version/user/password/server/database as mandatory,
+    # so omitting it fails schema matching with API 400 "Didn't find matching
+    # connection schema" (the same class of failure the postgres `username`/
+    # `database` bug caused). Entitle documents 2017/2019; default to "2019", which
+    # is compatible with the SQL Server 2022 Cloud SQL provisions for the login/role
+    # DDL the connector runs. Override per-tenant via the `entitle_sqlserver_version`
+    # config key. Postgres/MySQL don't take a version on this path (postgres has no
+    # version field; MySQL registration isn't a current target — see note below).
+    version = ""
+    if engine == "sqlserver":
+        version = _cfg("entitle_sqlserver_version") or "2019"
+
     result = await ent.register_database(
         engine=engine,
         name=tfv.get("identifier") or f"clouddb-{row.id[:8]}",
@@ -688,6 +701,7 @@ async def _entitle_register_core(db: Session, *, row: CloudDatabase, engine: str
         username=admin_username,
         password=admin_password,
         database=("master" if engine == "sqlserver" else tfv.get("db_name", "")),
+        version=version,
         private=True,   # dashboard-built DBs are private (publicly_accessible=false)
         tag="clouddb",
     )
