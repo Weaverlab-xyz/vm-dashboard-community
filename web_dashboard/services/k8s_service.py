@@ -99,6 +99,7 @@ def _serialize(r: K8sCluster) -> dict:
         "entitle_agent_installed": config_service.get("entitle_agent_cluster_id") == r.id,
         "api_tunnel_jump":       bool(config_service.get(f"k8s_api_tunnel_jump_{r.id}")),
         "entra_group_bound":     bool(config_service.get(f"k8s_entra_group_{r.id}")),
+        "impersonator_bound":    bool(config_service.get(f"k8s_impersonator_{r.id}")),
         # AKS is natively Entra-integrated (always federated); EKS/GKE are federated
         # once the "Entra federation" action runs (tracked in config).
         "entra_federation_enabled": (r.cloud == "azure")
@@ -2505,6 +2506,111 @@ async def run_group_binding(db: Session, *, cluster_id: str, job_id: str, action
     except Exception as exc:
         job_service.set_failed(db, job_id, str(exc))
         logger.exception("k8s Entra-group job failed cluster=%s action=%s", cluster_id, action)
+        return
+    job_service.set_completed(db, job_id)
+
+
+# ── Entitle impersonation access (fine-grained per-cluster JIT) ───────────────
+#
+# Grant the Entra group cluster-wide `impersonate` on `users` ONLY. This is the
+# authN/authZ split: the group (federation) authenticates the user AND lets them
+# impersonate, but they have nothing to impersonate as until the Entitle
+# **Kubernetes** integration JIT-binds `<prefix>:<email>` → a role on THIS cluster.
+# They then run `kubectl --as=<prefix>:<email>` (over the TCP/API tunnel on GKE —
+# the tunnel_type=k8s tunnel strips Impersonate-*). Because the JIT grant is
+# per-cluster, one standing group gives login everywhere but admin only where a
+# grant exists — finer-grained than one group bound straight to cluster-admin.
+#
+# GUARDRAIL: impersonate `users` only — NEVER `groups` (`--as-group=system:masters`
+# would bypass RBAC entirely) and never serviceaccounts/uids/userextras. No
+# `resourceNames` — RBAC can't wildcard them (there is no way to express
+# "entitle:*@domain"), so the target is any User subject; in a group-federated
+# cluster only Entitle's JIT `entitle:` subjects are ever bound to a User, so the
+# effective blast radius is those time-boxed grants. Tracked in config
+# (k8s_impersonator_{cid}); fixed names → `kubectl apply` is idempotent.
+
+_IMPERSONATOR_NAME = "entitle-impersonator"
+
+
+def _entitle_impersonator_manifest(group_subject: str) -> str:
+    """ClusterRole (impersonate `users` only) + a ClusterRoleBinding of the Entra
+    group to it. ``group_subject`` is the cloud-aware RBAC subject (workforce
+    ``principalSet`` URI on GKE, bare group OID on EKS/AKS)."""
+    return (
+        "apiVersion: rbac.authorization.k8s.io/v1\nkind: ClusterRole\nmetadata:\n"
+        f"  name: {_IMPERSONATOR_NAME}\n"
+        "rules:\n"
+        '- apiGroups: [""]\n  resources: ["users"]\n  verbs: ["impersonate"]\n---\n'
+        "apiVersion: rbac.authorization.k8s.io/v1\nkind: ClusterRoleBinding\nmetadata:\n"
+        f"  name: {_IMPERSONATOR_NAME}\n"
+        "roleRef:\n  apiGroup: rbac.authorization.k8s.io\n  kind: ClusterRole\n"
+        f"  name: {_IMPERSONATOR_NAME}\n"
+        "subjects:\n"
+        "- apiGroup: rbac.authorization.k8s.io\n  kind: Group\n"
+        f"  name: {_yaml_quote(group_subject)}\n"
+    )
+
+
+async def apply_impersonator_binding(db: Session, cluster_id: str, *,
+                                     group_id: str = None) -> dict:
+    """Grant the Entra group cluster-wide ``impersonate`` on ``users``. Reuses the
+    federation group id (config ``entra_rbac_group_id``, per-call overridable) and
+    the cloud-aware subject. Idempotent (fixed names, ``kubectl apply``). Tracked in
+    config ``k8s_impersonator_{cluster_id}``."""
+    row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
+    if row is None:
+        raise K8sError(f"cluster {cluster_id} not found")
+    gid = (group_id or "").strip() or _cfg("entra_rbac_group_id")
+    if not gid:
+        raise K8sError("no Entra group configured — set entra_rbac_group_id on Settings "
+                       "(k8s panel) or pass a group Object ID")
+    subject = _workforce_principalset(gid) if row.cloud == "gcp" else gid
+    kubeconfig = resolve_kubeconfig(db, cluster_id)
+    await _apply_manifest_via_runner(
+        kubeconfig, _entitle_impersonator_manifest(subject), target_cloud=row.cloud)
+    from . import config_service
+    config_service.set(f"k8s_impersonator_{cluster_id}", gid)
+    logger.info("Applied Entitle impersonator binding (group %s) on cluster %s", gid, row.name)
+    return {"group_id": gid}
+
+
+async def remove_impersonator_binding(db: Session, cluster_id: str) -> dict:
+    """Delete the impersonator ClusterRole + ClusterRoleBinding + clear its config
+    key (best-effort, idempotent)."""
+    row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
+    from . import config_service
+    gid = config_service.get(f"k8s_impersonator_{cluster_id}")
+    if row is None or not gid:
+        return {"ok": True, "removed": False}
+    try:
+        # Delete matches by kind+name, so the subject value is irrelevant here —
+        # pass the raw gid (skip _workforce_principalset's pool-config dependency).
+        await _delete_manifest_via_runner(
+            resolve_kubeconfig(db, cluster_id),
+            _entitle_impersonator_manifest(gid), target_cloud=row.cloud)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Entitle impersonator unbind for %s failed (non-fatal): %s", cluster_id, exc)
+    config_service.set(f"k8s_impersonator_{cluster_id}", "")
+    return {"ok": True, "removed": True}
+
+
+async def run_impersonator_binding(db: Session, *, cluster_id: str, job_id: str,
+                                   action: str = "apply", group_id: str = None) -> None:
+    """Worker entry for a ``k8s_impersonator_binding`` job: apply/remove the Entitle
+    impersonator binding (the apply drives the cloud runner)."""
+    from . import job_service
+    from ..api.websocket import broadcast_progress
+    job_service.set_running(db, job_id)
+    try:
+        if action == "remove":
+            await broadcast_progress(job_id, 20, "Removing the impersonation binding…")
+            await remove_impersonator_binding(db, cluster_id)
+        else:
+            await broadcast_progress(job_id, 20, "Granting the Entra group impersonation access…")
+            await apply_impersonator_binding(db, cluster_id, group_id=group_id)
+    except Exception as exc:
+        job_service.set_failed(db, job_id, str(exc))
+        logger.exception("k8s impersonator job failed cluster=%s action=%s", cluster_id, action)
         return
     job_service.set_completed(db, job_id)
 

@@ -1976,6 +1976,13 @@
                      placeholder="cluster-admin">
               <p class="text-[11px] text-gray-400 mt-1">e.g. <code>cluster-admin</code>, <code>admin</code>, <code>view</code>, or a custom ClusterRole — the action lets you pick per-bind.</p>
             </div>
+            <div class="mt-3">
+              <label class="block text-sm font-medium text-gray-700 mb-1">Entitle k8s user prefix</label>
+              <input type="text" x-model="panelCfg.entitle_k8s_user_prefix"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     placeholder="entitle">
+              <p class="text-[11px] text-gray-400 mt-1">Subject Entitle's <strong>Kubernetes</strong> integration binds for a JIT grant (<code>&lt;prefix&gt;:&lt;email&gt;</code>) — and what a user passes to <code>kubectl --as=</code> with the <strong>Impersonation access</strong> action.</p>
+            </div>
           </div>
 
           <!-- Entra OIDC federation (EKS) -->
