@@ -32,6 +32,12 @@ router = APIRouter(tags=["docs"])
 # and is COPYed into the image — see Dockerfile).
 _DOCS_DIR = (Path(__file__).resolve().parents[2] / "docs").resolve()
 
+# Only these sections are surfaced on the /docs index. Other subdirectories
+# (design/, notes/, runbooks/) still render if you know the path — they're just
+# internal enough that we don't want them cluttering the operator-facing index.
+# "General" is the synthetic name for docs that live at the docs/ root.
+_INDEX_SECTIONS = {"General", "integrations"}
+
 _SHELL = """<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8">
@@ -75,6 +81,8 @@ async def doc_index() -> HTMLResponse:
         rel = path.relative_to(_DOCS_DIR).with_suffix("")
         section = str(rel.parent).replace("\\", "/")
         section = "General" if section == "." else section
+        if section not in _INDEX_SECTIONS:
+            continue
         title = rel.name.replace("-", " ").replace("_", " ").title()
         groups.setdefault(section, []).append((title, str(rel).replace("\\", "/")))
 
