@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 # GCP sandbox bootstrap for the VM Dashboard.
 #
+# Multi-region: re-run for a second region with a DISTINCT subnet prefix, e.g.
+#   GCP_REGION=us-east1 GCP_CIDR_PREFIX=10.102 GCP_SANDBOX_SUPERNET=10.96.0.0/12 ./setup-gcp.sh
+# The subnets join the SAME shared VPC (so the GKE↔sandbox VPC peering, which is
+# VPC-wide + cross-region, automatically covers VMs in the new region), and the
+# per-region config keys (gcp_region.<region>.*) are emitted for the dashboard.
+#
 # GCP equivalent of the AWS / Azure sandbox isolation pattern:
 #
 #   • Custom VPC with two subnets:
@@ -39,6 +45,19 @@ NAME="${SANDBOX_NAME_PREFIX}"
 PROJECT_ID="${GCP_PROJECT_ID:-$(gcloud config get-value project 2>/dev/null || true)}"
 REGION="${GCP_REGION:-us-central1}"
 ZONE="${GCP_ZONE:-${REGION}-a}"
+
+# Per-region subnet CIDR base. Subnets are ${GCP_CIDR_PREFIX}.1/2/3.0/24
+# (jumpoint / vm / k8s). The VPC is shared across regions, so when ADDING a second
+# region set a DISTINCT prefix or GCP rejects the overlapping range. Avoid the GKE
+# cluster ranges (10.98.0.0/22 nodes, 10.100.0.0/16 pods, 10.101.0.0/20 svcs), the
+# Cloud SQL PSA range, and any other region's prefix. Default keeps region 1 on 10.99.
+GCP_CIDR_PREFIX="${GCP_CIDR_PREFIX:-10.99}"
+# Supernet spanned by the two VPC-wide, CIDR-based firewall rules — allow-internal
+# (ingress source) and allow-vm-egress-vpc (egress dest). Single-region default is
+# the /16; when running multi-region widen it to cover every region's prefix
+# (e.g. GCP_SANDBOX_SUPERNET=10.96.0.0/12 covers 10.96–10.111). The rules are
+# created-or-updated each run, so a later region widens them in place.
+GCP_SANDBOX_SUPERNET="${GCP_SANDBOX_SUPERNET:-10.99.0.0/16}"
 
 [[ -n "$PROJECT_ID" && "$PROJECT_ID" != "(unset)" ]] || \
   die "No GCP project set. Run: gcloud config set project YOUR-PROJECT  (or export GCP_PROJECT_ID=…)"
@@ -96,8 +115,8 @@ fi
 if ! gcloud compute networks subnets describe "$JP_SUBNET" --project "$PROJECT_ID" --region "$REGION" >/dev/null 2>&1; then
   gcloud compute networks subnets create "$JP_SUBNET" \
     --project "$PROJECT_ID" --network "$VPC" --region "$REGION" \
-    --range 10.99.1.0/24 --quiet >/dev/null
-  ok "Created jumpoint subnet $JP_SUBNET (10.99.1.0/24)"
+    --range "${GCP_CIDR_PREFIX}.1.0/24" --quiet >/dev/null
+  ok "Created jumpoint subnet $JP_SUBNET (${GCP_CIDR_PREFIX}.1.0/24)"
 else
   ok "Reusing jumpoint subnet $JP_SUBNET"
 fi
@@ -105,8 +124,8 @@ fi
 if ! gcloud compute networks subnets describe "$VM_SUBNET" --project "$PROJECT_ID" --region "$REGION" >/dev/null 2>&1; then
   gcloud compute networks subnets create "$VM_SUBNET" \
     --project "$PROJECT_ID" --network "$VPC" --region "$REGION" \
-    --range 10.99.2.0/24 --quiet >/dev/null
-  ok "Created VM subnet $VM_SUBNET (10.99.2.0/24)"
+    --range "${GCP_CIDR_PREFIX}.2.0/24" --quiet >/dev/null
+  ok "Created VM subnet $VM_SUBNET (${GCP_CIDR_PREFIX}.2.0/24)"
 else
   ok "Reusing VM subnet $VM_SUBNET"
 fi
@@ -115,23 +134,23 @@ fi
 # VM subnets above. Gets Cloud NAT egress (below) so a CO-LOCATED GKE cluster's
 # nodes can pull images / reach the Entitle SaaS. The gke-pods / gke-services
 # secondary ranges are the VPC-native pod & service ranges a co-located cluster
-# uses (carved from the free 10.99.128.0/17 block so they don't collide with the
-# /24 subnets or the PSA range). See docs — GKE co-location for Cloud SQL reach.
+# uses (carved from the free ${GCP_CIDR_PREFIX}.128.0/17 block so they don't
+# collide with the /24 subnets or the PSA range). See docs — GKE co-location.
 if ! gcloud compute networks subnets describe "$K8S_SUBNET" --project "$PROJECT_ID" --region "$REGION" >/dev/null 2>&1; then
   gcloud compute networks subnets create "$K8S_SUBNET" \
     --project "$PROJECT_ID" --network "$VPC" --region "$REGION" \
-    --range 10.99.3.0/24 \
-    --secondary-range gke-pods=10.99.128.0/18,gke-services=10.99.192.0/20 \
+    --range "${GCP_CIDR_PREFIX}.3.0/24" \
+    --secondary-range "gke-pods=${GCP_CIDR_PREFIX}.128.0/18,gke-services=${GCP_CIDR_PREFIX}.192.0/20" \
     --quiet >/dev/null
-  ok "Created K8s subnet $K8S_SUBNET (10.99.3.0/24; pods 10.99.128.0/18, services 10.99.192.0/20)"
+  ok "Created K8s subnet $K8S_SUBNET (${GCP_CIDR_PREFIX}.3.0/24; pods ${GCP_CIDR_PREFIX}.128.0/18, services ${GCP_CIDR_PREFIX}.192.0/20)"
 elif ! gcloud compute networks subnets describe "$K8S_SUBNET" --project "$PROJECT_ID" --region "$REGION" \
        --format 'value(secondaryIpRanges[].rangeName)' 2>/dev/null | grep -q 'gke-pods'; then
   # Existing sandbox created before co-location — add the secondary ranges idempotently.
   gcloud compute networks subnets update "$K8S_SUBNET" \
     --project "$PROJECT_ID" --region "$REGION" \
-    --add-secondary-ranges gke-pods=10.99.128.0/18,gke-services=10.99.192.0/20 \
+    --add-secondary-ranges "gke-pods=${GCP_CIDR_PREFIX}.128.0/18,gke-services=${GCP_CIDR_PREFIX}.192.0/20" \
     --quiet >/dev/null 2>&1 \
-    && ok "Added GKE secondary ranges to $K8S_SUBNET (pods 10.99.128.0/18, services 10.99.192.0/20)" \
+    && ok "Added GKE secondary ranges to $K8S_SUBNET (pods ${GCP_CIDR_PREFIX}.128.0/18, services ${GCP_CIDR_PREFIX}.192.0/20)" \
     || ok "Could not add GKE secondary ranges to $K8S_SUBNET (check perms)"
 else
   ok "Reusing K8s subnet $K8S_SUBNET (GKE secondary ranges present)"
@@ -182,12 +201,16 @@ NETWORK_TAG_VM="${NAME}-vm"         # tag deployed user VMs (advisory; dashboard
 NETWORK_TAG_K8S="${NAME}-k8s"       # tag CO-LOCATED GKE nodes (drives the k8s→DB
                                     # egress rule below; nodes reach VMs via allow-internal).
 
-# Allow internal communication anywhere in the VPC.
+# Allow internal communication anywhere in the sandbox supernet (spans every
+# region's prefix). Create-or-update so a later region widens it in place.
 gcloud compute firewall-rules create "${NAME}-allow-internal" \
   --project "$PROJECT_ID" --network "$VPC" \
   --direction INGRESS --priority 65534 \
-  --allow all --source-ranges 10.99.0.0/16 \
-  --quiet >/dev/null 2>&1 || true
+  --allow all --source-ranges "$GCP_SANDBOX_SUPERNET" \
+  --quiet >/dev/null 2>&1 \
+  || gcloud compute firewall-rules update "${NAME}-allow-internal" \
+       --project "$PROJECT_ID" --source-ranges "$GCP_SANDBOX_SUPERNET" \
+       --quiet >/dev/null 2>&1 || true
 
 # Allow SSH from Jumpoint → user VMs.
 gcloud compute firewall-rules create "${NAME}-allow-ssh-from-jumpoint" \
@@ -208,14 +231,18 @@ gcloud compute firewall-rules create "${NAME}-deny-vm-egress" \
   --target-tags "$NETWORK_TAG_VM" \
   --destination-ranges 0.0.0.0/0 \
   --quiet >/dev/null 2>&1 || true
-# …but allow them to reach back into the VPC (so SSH replies work).
+# …but allow them to reach back into the sandbox supernet (so SSH replies work,
+# across regions). Create-or-update so a later region widens it in place.
 gcloud compute firewall-rules create "${NAME}-allow-vm-egress-vpc" \
   --project "$PROJECT_ID" --network "$VPC" \
   --direction EGRESS --priority 999 \
   --action ALLOW --rules all \
   --target-tags "$NETWORK_TAG_VM" \
-  --destination-ranges 10.99.0.0/16 \
-  --quiet >/dev/null 2>&1 || true
+  --destination-ranges "$GCP_SANDBOX_SUPERNET" \
+  --quiet >/dev/null 2>&1 \
+  || gcloud compute firewall-rules update "${NAME}-allow-vm-egress-vpc" \
+       --project "$PROJECT_ID" --destination-ranges "$GCP_SANDBOX_SUPERNET" \
+       --quiet >/dev/null 2>&1 || true
 
 ok "Firewall rules: allow-internal, allow-ssh-from-jumpoint, deny-vm-egress, allow-vm-egress-vpc"
 
@@ -496,18 +523,18 @@ fi
 cat <<EOF
 Sandbox topology summary
 
-  VPC $VPC
-    ├─ $JP_SUBNET (10.99.1.0/24) → Cloud NAT → internet  [Jumpoint COS]
-    ├─ $VM_SUBNET (10.99.2.0/24) → no NAT → no internet  [user VMs]
-    └─ $K8S_SUBNET (10.99.3.0/24) → Cloud NAT → internet  [co-located GKE nodes]
-         pods 10.99.128.0/18 · services 10.99.192.0/20 (VPC-native secondary ranges)
+  VPC $VPC  (region $REGION, subnet prefix ${GCP_CIDR_PREFIX})
+    ├─ $JP_SUBNET (${GCP_CIDR_PREFIX}.1.0/24) → Cloud NAT → internet  [Jumpoint COS]
+    ├─ $VM_SUBNET (${GCP_CIDR_PREFIX}.2.0/24) → no NAT → no internet  [user VMs]
+    └─ $K8S_SUBNET (${GCP_CIDR_PREFIX}.3.0/24) → Cloud NAT → internet  [co-located GKE nodes]
+         pods ${GCP_CIDR_PREFIX}.128.0/18 · services ${GCP_CIDR_PREFIX}.192.0/20 (VPC-native secondary ranges)
     + servicenetworking PSA /20 (Cloud SQL private IP), reachable from jumpoint + co-located k8s
 
   Firewall:
-    • allow-internal      : within 10.99.0.0/16 (covers k8s nodes/pods → VMs)
+    • allow-internal      : within $GCP_SANDBOX_SUPERNET (covers k8s nodes/pods → VMs)
     • allow-ssh-from-jumpoint : tag $NETWORK_TAG_JP → tag $NETWORK_TAG_VM, tcp/22
     • deny-vm-egress      : tag $NETWORK_TAG_VM → 0.0.0.0/0 (any proto)
-    • allow-vm-egress-vpc : tag $NETWORK_TAG_VM → 10.99.0.0/16
+    • allow-vm-egress-vpc : tag $NETWORK_TAG_VM → $GCP_SANDBOX_SUPERNET
     • allow-db-from-jumpoint : tag $NETWORK_TAG_JP → PSA range, tcp/5432,3306,1433
     • allow-db-from-k8s   : tag $NETWORK_TAG_K8S → PSA range, tcp/5432,3306,1433
 
