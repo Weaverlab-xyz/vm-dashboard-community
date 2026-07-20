@@ -326,15 +326,6 @@ _DB_RESOURCE_ENGINE = {v: k for k, v in _DB_TUNNEL_RESOURCE.items()}
 # SQL*Net has no dedicated PRA type, so it rides a raw TCP tunnel ("tcp").
 _DB_TUNNEL_TYPE = {"sqlserver": "mssql", "oracle": "tcp"}
 
-# jump_item_association `jump_items[].type` enum value per engine — confirmed
-# against the cached provider schema, like the resource names above.
-_DB_JUMP_ITEM_TYPE = {
-    "postgres": "postgresql_tunnel_jump",
-    "mysql": "my_sql_tunnel_jump",   # mirrors the resource (sra_my_sql_tunnel_jump) minus the sra_ prefix
-    "sqlserver": "protocol_tunnel_jump",   # sra_protocol_tunnel_jump minus the sra_ prefix
-    "oracle": "protocol_tunnel_jump",      # same generic protocol-tunnel jump-item type
-}
-
 
 def _generate_db_tunnel_hcl(
     engine: str,
@@ -385,13 +376,21 @@ def _generate_db_tunnel_hcl(
     var_block = ""
     vault_block = ""
     if vault_account_name:
-        jump_item_type = _DB_JUMP_ITEM_TYPE[engine]
         var_block = 'variable "db_password"      { sensitive = true }\n'
         group_line = (f"  account_group_id = {int(vault_account_group_id)}\n"
                       if vault_account_group_id else "")
-        # Schema (provider v1.3.0): jump_item_association is a SINGLE nested
-        # attribute (`= { ... }` syntax); jump_items is a set of {id, type};
-        # criteria arrays must be present (empty) or the PRA API 4xxes.
+        # Associate the Vault account to the tunnel jump's Jump GROUP via
+        # criteria.shared_jump_groups — NOT jump_items[].type. The PRA backend
+        # 422s ("jump_items.0.type: The selected value is invalid") for the DB
+        # protocol-tunnel jump-item types (postgresql_tunnel_jump / my_sql_tunnel_jump
+        # / protocol_tunnel_jump), even though the sra provider accepts the string
+        # client-side — so the apply failed and the caller silently fell back to a
+        # tunnel with no vaulted credential. The k8s tunnel path hit the identical
+        # wall; see _generate_k8s_vault_account_hcl / test_pra_k8s_vault. (The VDI
+        # Remote-RDP path keeps jump_items[].type because the backend DOES accept
+        # "remote_rdp".) Group-level association mirrors k8s: the account is reachable
+        # from every jump in the tunnel's group. criteria arrays must all be present
+        # (empty) or the API 4xxes.
         vault_block = f"""
 resource "sra_vault_username_password_account" "db_admin" {{
   name        = {json.dumps(vault_account_name)}
@@ -401,16 +400,13 @@ resource "sra_vault_username_password_account" "db_admin" {{
 {group_line}  jump_item_association = {{
     filter_type = "criteria"
     criteria = {{
-      shared_jump_groups = []
+      shared_jump_groups = [tonumber(data.sra_jump_group_list.jg.items[0].id)]
       host               = []
       name               = []
       tag                = []
       comment            = []
     }}
-    jump_items = [{{
-      id   = tonumber({resource_type}.{safe_name}.id)
-      type = {json.dumps(jump_item_type)}
-    }}]
+    jump_items = []
   }}
 }}
 
