@@ -1,7 +1,7 @@
 """Unit test: rancher_node_service.refresh_rancher_firewall must apply the MERGED
 firewall source set — manual CSV CIDRs + dashboard-provisioned cluster egress /32s
-+ the dashboard-managed Web-Jump Jumpoint /32 — deduped and sorted, while staying
-fail-closed and no-op safe.
++ the dashboard-managed Web-Jump Jumpoint /32 + the dashboard's OWN egress /32 —
+deduped and sorted, while staying fail-closed and no-op safe.
 
 This pins the Rancher firewall automation: private clusters egress through a NAT
 whose public IP the operator can't know ahead of time, so the dashboard captures
@@ -154,6 +154,19 @@ def test_merge_dedup_and_sorted():
     _run_refresh(rows=[_Row("eks-a", "aws", "1.2.3.4"), _Row("gke-b", "gcp", "5.6.7.8")])
     assert _APPLIED["source_cidrs"] == sorted([
         "203.0.113.4/32", "10.0.0.0/24", "1.2.3.4/32", "5.6.7.8/32", "9.9.9.9/32"])
+
+
+def test_dashboard_egress_cidr_merged():
+    # The dashboard's own egress IP (bare) is normalized to /32 and merged in, so
+    # the worker can reach the node's public IP to bootstrap + poll it.
+    _reset(rancher_dashboard_egress_cidr="198.51.100.7")
+    _run_refresh(rows=[_Row("eks-a", "aws", "1.2.3.4")])
+    assert _APPLIED["source_cidrs"] == sorted(["198.51.100.7/32", "1.2.3.4/32"])
+
+    # An explicit CIDR is honored as-is (not re-suffixed).
+    _reset(rancher_dashboard_egress_cidr="198.51.100.0/24")
+    _run_refresh(rows=[])
+    assert _APPLIED["source_cidrs"] == ["198.51.100.0/24"]
 
 
 def test_fail_closed_when_empty():
