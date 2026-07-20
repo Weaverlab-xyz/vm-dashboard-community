@@ -39,6 +39,7 @@ $Nat       = "$Name-nat"
 
 $NetTagJp  = 'bt-jumpoint'      # the dashboard's Jumpoint COS VM gets this tag
 $NetTagVm  = "$Name-vm"         # the dashboard auto-attaches this to user VMs
+$NetTagK8s = "$Name-k8s"        # co-located GKE nodes (drives allow-db-from-k8s)
 
 # ── 1. Enable required APIs ───────────────────────────────────────────────────
 Write-Section 'Enable APIs'
@@ -96,15 +97,26 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 # Dedicated subnet for managed Kubernetes (GKE) — separate from the jumpoint and
-# VM subnets above.
+# VM subnets above. Gets Cloud NAT egress (below) so a CO-LOCATED GKE cluster can
+# pull images / reach the Entitle SaaS. gke-pods / gke-services are the VPC-native
+# pod & service secondary ranges (carved from the free 10.99.128.0/17 block).
 & gcloud compute networks subnets describe $K8sSubnet --project $ProjectId --region $Region *> $null
 if ($LASTEXITCODE -ne 0) {
     gcloud compute networks subnets create $K8sSubnet `
         --project $ProjectId --network $Vpc --region $Region `
-        --range 10.99.3.0/24 --quiet | Out-Null
-    Write-Ok "Created K8s subnet $K8sSubnet (10.99.3.0/24)"
+        --range 10.99.3.0/24 `
+        --secondary-range gke-pods=10.99.128.0/18,gke-services=10.99.192.0/20 --quiet | Out-Null
+    Write-Ok "Created K8s subnet $K8sSubnet (10.99.3.0/24; pods 10.99.128.0/18, services 10.99.192.0/20)"
 } else {
-    Write-Ok "Reusing K8s subnet $K8sSubnet"
+    $k8sRanges = & gcloud compute networks subnets describe $K8sSubnet --project $ProjectId --region $Region --format 'value(secondaryIpRanges[].rangeName)' 2>$null
+    if ($k8sRanges -notmatch 'gke-pods') {
+        gcloud compute networks subnets update $K8sSubnet `
+            --project $ProjectId --region $Region `
+            --add-secondary-ranges gke-pods=10.99.128.0/18,gke-services=10.99.192.0/20 --quiet 2>$null | Out-Null
+        Write-Ok "Added GKE secondary ranges to $K8sSubnet (pods 10.99.128.0/18, services 10.99.192.0/20)"
+    } else {
+        Write-Ok "Reusing K8s subnet $K8sSubnet (GKE secondary ranges present)"
+    }
 }
 
 Set-StateValue gcp vpc        $Vpc
@@ -112,8 +124,8 @@ Set-StateValue gcp jp_subnet  $JpSubnet
 Set-StateValue gcp vm_subnet  $VmSubnet
 Set-StateValue gcp k8s_subnet $K8sSubnet
 
-# ── 3. Cloud Router + Cloud NAT (only the jumpoint subnet) ───────────────────
-Write-Section 'Cloud Router + Cloud NAT (jumpoint subnet only)'
+# ── 3. Cloud Router + Cloud NAT (jumpoint + k8s subnets) ─────────────────────
+Write-Section 'Cloud Router + Cloud NAT (jumpoint + k8s subnets)'
 & gcloud compute routers describe $Router --project $ProjectId --region $Region *> $null
 if ($LASTEXITCODE -ne 0) {
     gcloud compute routers create $Router `
@@ -123,15 +135,21 @@ if ($LASTEXITCODE -ne 0) {
     Write-Ok "Reusing router $Router"
 }
 
+# jumpoint-subnet + k8s-subnet (node primary) get NAT egress; co-located GKE pods
+# egress via SNAT to the node IP (ip-masq). vm-subnet stays OFF NAT (isolation).
+$NatRanges = "$JpSubnet,$K8sSubnet"
 & gcloud compute routers nats describe $Nat --project $ProjectId --router $Router --router-region $Region *> $null
 if ($LASTEXITCODE -ne 0) {
     gcloud compute routers nats create $Nat `
         --project $ProjectId --router $Router --router-region $Region `
-        --nat-custom-subnet-ip-ranges $JpSubnet `
+        --nat-custom-subnet-ip-ranges $NatRanges `
         --auto-allocate-nat-external-ips --quiet | Out-Null
-    Write-Ok "Created NAT $Nat (NAT'd subnets: $JpSubnet only)"
+    Write-Ok "Created NAT $Nat (NAT'd subnets: jumpoint + k8s)"
 } else {
-    Write-Ok "Reusing NAT $Nat"
+    gcloud compute routers nats update $Nat `
+        --project $ProjectId --router $Router --router-region $Region `
+        --nat-custom-subnet-ip-ranges $NatRanges --quiet 2>$null | Out-Null
+    Write-Ok "Reusing NAT $Nat (ensured jumpoint + k8s ranges)"
 }
 Set-StateValue gcp router $Router
 Set-StateValue gcp nat    $Nat
@@ -204,8 +222,15 @@ if ($PsaCidr -match '^\d') {
         --action ALLOW --rules tcp:5432,tcp:3306,tcp:1433 `
         --target-tags $NetTagJp --destination-ranges $PsaCidr --quiet 2>$null | Out-Null
     Write-Ok "Firewall: allow-db-from-jumpoint (tcp:5432,tcp:3306,tcp:1433 -> $PsaCidr)"
+    # Parity for a CO-LOCATED GKE cluster: the Entitle agent's nodes (tagged
+    # $NetTagK8s) reach Cloud SQL directly (pods SNAT to the node IP via ip-masq).
+    gcloud compute firewall-rules create "$Name-allow-db-from-k8s" `
+        --project $ProjectId --network $Vpc --direction EGRESS --priority 998 `
+        --action ALLOW --rules tcp:5432,tcp:3306,tcp:1433 `
+        --target-tags $NetTagK8s --destination-ranges $PsaCidr --quiet 2>$null | Out-Null
+    Write-Ok "Firewall: allow-db-from-k8s (tcp:5432,tcp:3306,tcp:1433 -> $PsaCidr)"
 } else {
-    Write-Ok 'PSA CIDR not resolvable yet — skipping explicit DB egress rule (jumpoint default egress still reaches the DB)'
+    Write-Ok 'PSA CIDR not resolvable yet — skipping explicit DB egress rules (default egress still reaches the DB)'
 }
 
 # ── 5. Service account ──────────────────────────────────────────────────────
@@ -363,6 +388,14 @@ $cfg = @(
     '# Managed databases (Cloud SQL private IP via the PRA tunnel):',
     "gcp_db_network=projects/$ProjectId/global/networks/$Vpc   # Cloud SQL private_network (private-services-access peered on it)",
     '',
+    '# CO-LOCATE GKE in the sandbox VPC (in-cluster Entitle agent reaches VMs AND',
+    '# Cloud SQL — peering is non-transitive and cannot reach the PSA range). Set',
+    '# gcp_k8s_subnetwork to enable co-located mode; blank = self-contained + peering.',
+    "gcp_k8s_subnetwork=projects/$ProjectId/regions/$Region/subnetworks/$K8sSubnet   # GKE nodes land here (Cloud NAT egress)",
+    'gcp_k8s_pods_range_name=gke-pods                          # VPC-native pods secondary range on the k8s subnet',
+    'gcp_k8s_services_range_name=gke-services                  # VPC-native services secondary range on the k8s subnet',
+    "gcp_k8s_node_tag=$NetTagK8s                              # Network tag on co-located GKE nodes (drives allow-db-from-k8s)",
+    '',
     '# Image-registry hub + automated cross-cloud promote:',
     "storage_gcs_bucket=$StorageBucket                       # Image hub + promote staging",
     'storage_active_backend=gcs                                # Active asset backend',
@@ -393,7 +426,11 @@ $cfg = @(
     "gcp_region.${Region}.ssh_key_secret=$SshSecret",
     "gcp_region.${Region}.default_network_tag=$NetTagVm",
     "gcp_region.${Region}.router_name=$Router",
-    "gcp_region.${Region}.nat_name=$Nat"
+    "gcp_region.${Region}.nat_name=$Nat",
+    "gcp_region.${Region}.k8s_subnetwork=projects/$ProjectId/regions/$Region/subnetworks/$K8sSubnet",
+    "gcp_region.${Region}.k8s_pods_range=gke-pods",
+    "gcp_region.${Region}.k8s_services_range=gke-services",
+    "gcp_region.${Region}.k8s_node_tag=$NetTagK8s"
 )
 Write-DashboardConfig 'GCP sandbox configuration' $cfg
 Export-ConfigJson -Cloud gcp -Lines $cfg   # machine-readable twin for Onboard-Sandbox.ps1
@@ -411,13 +448,18 @@ Sandbox topology summary
 
   VPC $Vpc
     ├─ $JpSubnet (10.99.1.0/24) → Cloud NAT → internet  [Jumpoint COS]
-    └─ $VmSubnet (10.99.2.0/24) → no NAT → no internet  [user VMs]
+    ├─ $VmSubnet (10.99.2.0/24) → no NAT → no internet  [user VMs]
+    └─ $K8sSubnet (10.99.3.0/24) → Cloud NAT → internet  [co-located GKE nodes]
+         pods 10.99.128.0/18 · services 10.99.192.0/20 (VPC-native secondary ranges)
+    + servicenetworking PSA /20 (Cloud SQL private IP), reachable from jumpoint + co-located k8s
 
   Firewall:
-    • allow-internal      : within 10.99.0.0/16
+    • allow-internal      : within 10.99.0.0/16 (covers k8s nodes/pods → VMs)
     • allow-ssh-from-jumpoint : tag $NetTagJp → tag $NetTagVm, tcp/22
     • deny-vm-egress      : tag $NetTagVm → 0.0.0.0/0 (any proto)
     • allow-vm-egress-vpc : tag $NetTagVm → 10.99.0.0/16
+    • allow-db-from-jumpoint : tag $NetTagJp → PSA range, tcp/5432,3306,1433
+    • allow-db-from-k8s   : tag $NetTagK8s → PSA range, tcp/5432,3306,1433
 
 Service-account JSON cached at $SaKeyPath (owner-only).
 

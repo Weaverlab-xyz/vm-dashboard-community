@@ -135,6 +135,10 @@ class GcpRegionConfig(BaseModel):
     ecs_subnetwork: str = ""
     router_name: str = ""
     nat_name: str = ""
+    k8s_subnetwork: str = ""
+    k8s_pods_range: str = ""
+    k8s_services_range: str = ""
+    k8s_node_tag: str = ""
 
 
 # Cloud → per-region-config model. Drives the /import parser and the /regions/{cloud}
