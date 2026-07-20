@@ -2193,6 +2193,109 @@
         </div>
       </template>
 
+      <!-- Single sign-on (OIDC): generic OpenID Connect, discovery-driven -->
+      <template x-if="panel?.key === 'oidc' && !panelLoading">
+        <div class="space-y-5">
+          <p class="text-xs text-gray-500 leading-snug">
+            Point this at any OpenID Connect provider — the authorize, token and JWKS endpoints are
+            read from the issuer's discovery document, so there is nothing else to fill in. SSO goes
+            live as soon as an issuer and client id are saved; clear the issuer to turn it off.
+            Sign-in with Microsoft is configured separately under Azure and is unaffected.
+          </p>
+
+          <!-- Redirect URI is the thing operators most often get wrong, and the
+               provider rejects the login before we ever see it — so show the exact
+               value to register, derived from the current origin. -->
+          <div class="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2.5">
+            <p class="text-[11px] font-medium text-blue-900 mb-1">Register this redirect URI with your provider</p>
+            <code class="text-[11px] text-blue-800 break-all" x-text="window.location.origin + '/api/auth/oauth/oidc/callback'"></code>
+          </div>
+
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Issuer URL</label>
+            <input type="text" x-model="panelCfg.oidc_issuer"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                   placeholder="https://keycloak.example.com/realms/main">
+            <p class="text-[11px] text-gray-400 mt-1">
+              Base URL only — <code>/.well-known/openid-configuration</code> is appended automatically.
+            </p>
+          </div>
+
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Client ID</label>
+            <input type="text" x-model="panelCfg.oidc_client_id"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+          </div>
+
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Client secret</label>
+            <input type="password" x-model="panelCfg.oidc_client_secret"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                   placeholder="leave blank for a public client">
+            <p class="text-[11px] text-gray-400 mt-1">
+              Optional — PKCE is always sent, so a public client works. Leave the dots untouched to keep the stored value.
+            </p>
+          </div>
+
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Button label</label>
+            <input type="text" x-model="panelCfg.oidc_provider_name"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                   placeholder="defaults to the issuer host">
+            <p class="text-[11px] text-gray-400 mt-1">Shown on the login page as “Sign in with …”.</p>
+          </div>
+
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Scopes</label>
+            <input type="text" x-model="panelCfg.oidc_scopes"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                   placeholder="openid profile email groups">
+            <p class="text-[11px] text-gray-400 mt-1"><code>openid</code> is always included.</p>
+          </div>
+
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Groups claim</label>
+            <input type="text" x-model="panelCfg.oidc_groups_claim"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                   placeholder="groups">
+            <p class="text-[11px] text-gray-400 mt-1">
+              Claim carrying the user's groups, matched against the mappings on
+              <a href="/groups" class="underline text-blue-600">Groups</a> to assign workgroups.
+              Usually <code>groups</code>; some Okta setups use <code>roles</code>.
+            </p>
+          </div>
+
+          <!-- Discovery probe: a typo'd issuer otherwise only shows up as a
+               failed login redirect that explains nothing. -->
+          <div class="border-t border-gray-100 pt-4">
+            <button type="button" @click="testOidc()" :disabled="oidcTest.running"
+                    class="text-sm border border-gray-300 hover:bg-gray-50 disabled:opacity-50 px-3 py-2 rounded-lg font-medium transition-colors">
+              <span x-show="!oidcTest.running">Test connection</span>
+              <span x-show="oidcTest.running" x-cloak>Contacting provider…</span>
+            </button>
+            <p class="text-[11px] text-gray-400 mt-1">Save first — the probe reads the stored issuer.</p>
+
+            <div x-show="oidcTest.ok === false" x-cloak
+                 class="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[11px] text-red-700"
+                 x-text="oidcTest.error"></div>
+
+            <div x-show="oidcTest.ok === true" x-cloak
+                 class="mt-3 rounded-lg border border-green-200 bg-green-50 px-3 py-2.5 text-[11px] text-green-900 space-y-1">
+              <p class="font-medium">Discovery succeeded</p>
+              <p>Issuer: <code class="break-all" x-text="oidcTest.doc?.issuer"></code></p>
+              <p>Authorize: <code class="break-all" x-text="oidcTest.doc?.authorization_endpoint"></code></p>
+              <p>Token: <code class="break-all" x-text="oidcTest.doc?.token_endpoint"></code></p>
+              <p x-show="oidcTest.doc?.groups_claim_advertised === false" class="text-amber-800">
+                The provider does not advertise a
+                <code x-text="oidcTest.doc?.groups_claim"></code> claim. Group→workgroup mapping may
+                not work until it is configured to emit one — some providers emit claims they do not
+                advertise, so this is worth checking rather than assuming broken.
+              </p>
+            </div>
+          </div>
+        </div>
+      </template>
+
       <!-- Multi-region: per-region config sets for AWS, GCP and Azure -->
       <template x-if="panel?.key === 'multi_region' && !panelLoading">
         <div class="space-y-6">
@@ -2335,7 +2438,12 @@ function settingsPage() {
         desc: 'Provision (EKS/AKS/GKE), register, and broker Kubernetes clusters — PRA tunnels + Entitle real-identity JIT.' },
       { key: 'multi_region', label: 'Multi-region',            hasConfig: true,  enabled: true, configOnly: true,
         desc: 'Per-region resource config sets for AWS, GCP and Azure — subnets, security groups, SSH secrets, networks. Blank fields fall back to the flat defaults.' },
+      { key: 'oidc',         label: 'Single sign-on (OIDC)',   hasConfig: true,  enabled: true, configOnly: true,
+        desc: 'Sign in with any OpenID Connect provider — Okta, Auth0, Keycloak, Authentik, Authelia, Google Workspace, JumpCloud, Ping, GitLab. Configured from the issuer URL; endpoints are discovered automatically.' },
     ],
+
+    // OIDC discovery probe result (Test connection in the SSO panel).
+    oidcTest: { running: false, ok: null, error: '', doc: null },
 
     // ── Slide-over panel state ───────────────────────────────────────────
     panel: null,
@@ -2893,6 +3001,18 @@ function settingsPage() {
         s.error = 'Save failed: ' + (e.message || e);
       } finally {
         s.saving = false;
+      }
+    },
+
+    // Probe the saved issuer's discovery document. Deliberately reads the stored
+    // value rather than the form, so it tests what a login would actually use.
+    async testOidc() {
+      this.oidcTest = { running: true, ok: null, error: '', doc: null };
+      try {
+        const doc = await API.post('/api/setup/oidc/test', {});
+        this.oidcTest = { running: false, ok: true, error: '', doc };
+      } catch (e) {
+        this.oidcTest = { running: false, ok: false, error: e.message || String(e), doc: null };
       }
     },
 
