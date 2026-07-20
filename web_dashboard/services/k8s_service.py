@@ -460,18 +460,34 @@ def _build_cluster_tf_variables(*, cloud: str, cluster_id: str, name: str,
         cidrs = opts.get("authorized_cidrs") or _cfg_list("gcp_gke_authorized_cidrs")
         if cidrs:
             tf["authorized_cidrs"] = cidrs
-        # Peer the cluster's own VPC back to the sandbox VPC so an in-cluster agent
-        # (Entitle SSH ephemeral) can reach the private lab VMs directly — GCP
-        # parity with the aws_eks sandbox_vpc peering above. Region-resolve the VPC
-        # name + VM network tag (per-region entry → flat gcp_network /
-        # gcp_default_network_tag fallback) so a non-default-region cluster peers to
-        # THAT region's network; config-backed, so it also flows through the destroy
-        # path (opts={}). Non-transitive peering doesn't reach Cloud SQL private IPs
-        # — DB JIT uses the PRA tunnel. default_network_tag is a CSV string.
+        # Reach the private lab resources from an in-cluster agent. Two modes,
+        # region-resolved (per-region entry → flat gcp_* fallback) so they also flow
+        # through the destroy path (opts={}):
+        #   1. CO-LOCATION (preferred, gcp_k8s_subnetwork set): provision the cluster
+        #      DIRECTLY in the sandbox VPC. Its nodes then reach BOTH the lab VMs
+        #      (intra-VPC) AND the Cloud SQL private IP — the sandbox VPC owns the
+        #      servicenetworking/PSA peering, and GCP peering is non-transitive so a
+        #      separate cluster VPC never could. ip-masq (applied at agent install)
+        #      SNATs pod→Cloud SQL to the node IP.
+        #   2. PEERING (fallback, gcp_k8s_subnetwork blank): self-contained VPC peered
+        #      to the sandbox VPC — reaches lab VMs (SSH) only; DB JIT stays on the PRA
+        #      tunnel. GCP parity with the aws_eks sandbox_vpc peering.
         from .region_config import resolve_region
         _grc = resolve_region("gcp", region) or {}
         sandbox_net = _grc.get("network") or ""
-        if sandbox_net and sandbox_net != "default":
+        k8s_subnet = _grc.get("k8s_subnetwork") or ""
+        if k8s_subnet and sandbox_net and sandbox_net != "default":
+            tf["existing_network"] = sandbox_net
+            tf["existing_subnetwork"] = k8s_subnet
+            tf["pods_range_name"] = _grc.get("k8s_pods_range") or "gke-pods"
+            tf["services_range_name"] = _grc.get("k8s_services_range") or "gke-services"
+            node_tag = _grc.get("k8s_node_tag") or ""
+            if node_tag:
+                tf["node_network_tags"] = [node_tag]
+            nat_ip = _cfg("gcp_nat_ip")
+            if nat_ip:
+                tf["nat_public_ip"] = nat_ip
+        elif sandbox_net and sandbox_net != "default":
             tf["sandbox_network"] = sandbox_net
             vm_tags = [t.strip() for t in (_grc.get("default_network_tag") or "").split(",") if t.strip()]
             if vm_tags:
@@ -1543,6 +1559,45 @@ def _entitle_agent_clusterrolebinding_manifest(namespace: str, sa: str) -> str:
     )
 
 
+# Default nonMasqueradeCIDRs for a CO-LOCATED GKE cluster in the sandbox VPC
+# (10.99.0.0/16). These are the ranges we keep DIRECT (no SNAT): the jumpoint /
+# vm / k8s subnets + the VPC-native pod & service ranges (so pod→VM stays direct)
+# and link-local (metadata server / Workload Identity). Everything else — the
+# Cloud SQL PSA range (wherever GCP allocated it) and the internet — is
+# masqueraded to the node IP. Overridable via config `gcp_k8s_nonmasq_cidrs` (CSV)
+# for a non-standard sandbox. Kept as SPECIFIC ranges (not the whole /16) so it's
+# robust even if the PSA /20 happens to land inside 10.99.0.0/16.
+_GKE_COLOCATE_NONMASQ_CIDRS = [
+    "10.99.1.0/24", "10.99.2.0/24", "10.99.3.0/24",
+    "10.99.128.0/18", "10.99.192.0/20", "169.254.0.0/16",
+]
+
+
+def _gke_ip_masq_configmap(nonmasq_cidrs: list) -> str:
+    """A ``kube-system/ip-masq-agent`` ConfigMap for a co-located GKE cluster.
+
+    Pod alias IPs are NOT re-advertised across the sandbox↔servicenetworking (PSA)
+    peering, so pod→Cloud SQL replies are unroutable unless the pod's source IP is
+    SNAT'd to the node IP (which IS a subnet route the PSA peering propagates).
+    ip-masq-agent masquerades everything EXCEPT ``nonMasqueradeCIDRs`` — we exempt
+    the in-VPC ranges (pod→VM stays direct) so only the Cloud SQL range + internet
+    get SNAT'd. Applied after the agent install via the same runner as the CRB.
+    NB GKE honours this only if the managed ip-masq-agent DaemonSet is running
+    (verify on first bring-up; apply the upstream DaemonSet if absent)."""
+    import yaml as _yaml
+    cfg_text = _yaml.safe_dump(
+        {"nonMasqueradeCIDRs": list(nonmasq_cidrs), "masqLinkLocal": False,
+         "resyncInterval": "60s"},
+        default_flow_style=False)
+    manifest = {
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": {"name": "ip-masq-agent", "namespace": "kube-system"},
+        "data": {"config": cfg_text},
+    }
+    return _yaml.safe_dump(manifest, default_flow_style=False)
+
+
 async def setup_entitle_agent(cluster_id: str, action: str = "install") -> None:
     """Install (or remove) the Entitle agent in a managed cluster. Background task.
 
@@ -1670,6 +1725,21 @@ async def setup_entitle_agent(cluster_id: str, action: str = "install") -> None:
         await _apply_manifest_via_runner(
             kubeconfig, _entitle_agent_clusterrolebinding_manifest(namespace, agent_sa),
             target_cloud=row.cloud)
+        # Co-located GKE (in the sandbox VPC): SNAT pod→Cloud SQL to the node IP so
+        # the PSA peering routes replies back — otherwise the agent's DB resource
+        # Sync times out even though nodes can reach the DB. Only for a GCP cluster
+        # provisioned in co-location mode (gcp_k8s_subnetwork set). Best-effort.
+        if row.cloud == "gcp":
+            from .region_config import resolve_region
+            if (resolve_region("gcp", row.region) or {}).get("k8s_subnetwork"):
+                nonmasq = _cfg_list("gcp_k8s_nonmasq_cidrs") or _GKE_COLOCATE_NONMASQ_CIDRS
+                try:
+                    await _apply_manifest_via_runner(
+                        kubeconfig, _gke_ip_masq_configmap(nonmasq), target_cloud=row.cloud)
+                    logger.info("Applied ip-masq-agent ConfigMap on co-located GKE cluster %s", row.name)
+                except Exception as exc:
+                    logger.warning("ip-masq-agent ConfigMap apply failed on %s "
+                                   "(pod→Cloud SQL reachability may need it): %s", row.name, exc)
         config_service.set("entitle_agent_cluster_id", cluster_id)
         logger.info("Entitle agent installed on cluster %s (ns=%s)", row.name, namespace)
         # If a k8s connector was already registered for this cluster (before the agent

@@ -47,7 +47,11 @@ sys.modules.setdefault("web_dashboard.services.config_service", _cfgsvc_stub)
 # (<cloud>_region.<region>.<field>) wins, else the flat key. Only the fields the
 # k8s peering branches read are modeled.
 _REGION_FIELDS = {
-    "gcp": {"network": "gcp_network", "default_network_tag": "gcp_default_network_tag"},
+    "gcp": {"network": "gcp_network", "default_network_tag": "gcp_default_network_tag",
+            "k8s_subnetwork": "gcp_k8s_subnetwork",
+            "k8s_pods_range": "gcp_k8s_pods_range_name",
+            "k8s_services_range": "gcp_k8s_services_range_name",
+            "k8s_node_tag": "gcp_k8s_node_tag"},
     "azure": {"default_subnet_id": "azure_default_subnet_id",
               "vnet_resource_group": "azure_vnet_resource_group",
               "resource_group": "azure_resource_group"},
@@ -112,6 +116,44 @@ def test_gcp_peers_network_but_omits_firewall_without_tag():
     tf = _gcp_vars()
     assert tf["sandbox_network"] == "dashboard-sandbox-vpc"
     assert "sandbox_vm_target_tags" not in tf
+
+
+def test_gcp_colocates_when_k8s_subnet_configured():
+    # gcp_k8s_subnetwork set → provision the cluster IN the sandbox VPC
+    # (co-location, so the agent reaches VMs AND Cloud SQL): emit existing_network/
+    # subnetwork + pod/service range names + node tag, and NOT the peering vars.
+    _CONFIG.clear()
+    _CONFIG.update({
+        "gcp_project": "sandbox-proj",
+        "gcp_network": "dashboard-sandbox-vpc",
+        "gcp_default_network_tag": "bt-vm",
+        "gcp_k8s_subnetwork": "projects/p/regions/us-central1/subnetworks/sb-k8s-subnet",
+        "gcp_k8s_pods_range_name": "gke-pods",
+        "gcp_k8s_services_range_name": "gke-services",
+        "gcp_k8s_node_tag": "sb-k8s",
+    })
+    tf = _gcp_vars()
+    assert tf["existing_network"] == "dashboard-sandbox-vpc"
+    assert tf["existing_subnetwork"].endswith("/sb-k8s-subnet")
+    assert tf["pods_range_name"] == "gke-pods"
+    assert tf["services_range_name"] == "gke-services"
+    assert tf["node_network_tags"] == ["sb-k8s"]
+    # Co-located → the self-contained-VPC peering vars are NOT emitted.
+    assert "sandbox_network" not in tf
+    assert "sandbox_vm_target_tags" not in tf
+
+
+def test_gcp_peering_still_used_when_k8s_subnet_unset():
+    # No gcp_k8s_subnetwork → self-contained VPC + peering (unchanged fallback).
+    _CONFIG.clear()
+    _CONFIG.update({
+        "gcp_project": "sandbox-proj",
+        "gcp_network": "dashboard-sandbox-vpc",
+        "gcp_default_network_tag": "bt-vm",
+    })
+    tf = _gcp_vars()
+    assert tf["sandbox_network"] == "dashboard-sandbox-vpc"
+    assert "existing_network" not in tf
 
 
 _AZ_SUBNET_ID = ("/subscriptions/s/resourceGroups/vm-cli-rg/providers/"

@@ -131,21 +131,76 @@ variable "vm_ports" {
   description = "TCP ports opened from the cluster's node+pod ranges to the sandbox VMs over the peering."
 }
 
+# ── Optional CO-LOCATION inside the sandbox VPC ───────────────────────────────
+# Peering (above) is NON-transitive, so it can reach sandbox VMs but never a
+# Cloud SQL private IP (that sits behind the sandbox↔servicenetworking peering).
+# To let an in-cluster agent reach BOTH VMs and Cloud SQL, provision the cluster
+# DIRECTLY in the sandbox VPC instead. When existing_network + existing_subnetwork
+# are set, the module skips creating its own VPC/subnet/router/NAT (and the
+# peering/firewall above — unnecessary when co-located) and uses the sandbox
+# network. The pod/service secondary ranges must already exist on the subnet
+# (created by the sandbox script); pass their NAMES here. Blank = the default
+# self-contained path, unchanged.
+variable "existing_network" {
+  type        = string
+  default     = ""
+  description = "Existing VPC self-link/name to place the cluster in (co-location). Blank = create own VPC."
+}
+
+variable "existing_subnetwork" {
+  type        = string
+  default     = ""
+  description = "Existing subnetwork self-link/name for the nodes (co-location). Blank = create own subnet."
+}
+
+variable "pods_range_name" {
+  type        = string
+  default     = "pods"
+  description = "Name of the pods secondary range on the (existing) subnet."
+}
+
+variable "services_range_name" {
+  type        = string
+  default     = "services"
+  description = "Name of the services secondary range on the (existing) subnet."
+}
+
+variable "node_network_tags" {
+  type        = list(string)
+  default     = []
+  description = "Network tags applied to the nodes (co-location: drives the sandbox k8s→DB egress firewall)."
+}
+
+variable "nat_public_ip" {
+  type        = string
+  default     = ""
+  description = "Co-location egress IP to surface as nat_public_ip (the sandbox Cloud NAT provides egress; blank if none reserved)."
+}
+
 locals {
-  location = var.zone != "" ? var.zone : "${var.region}-a"
+  location  = var.zone != "" ? var.zone : "${var.region}-a"
+  colocated = var.existing_network != "" && var.existing_subnetwork != ""
+
+  # Own-VPC resources are count-gated on !colocated, so reference them via [0].
+  network_id          = local.colocated ? var.existing_network : google_compute_network.vpc[0].id
+  subnetwork_id       = local.colocated ? var.existing_subnetwork : google_compute_subnetwork.subnet[0].id
+  pods_range_name     = local.colocated ? var.pods_range_name : "pods"
+  services_range_name = local.colocated ? var.services_range_name : "services"
 }
 
 # ── Networking (self-contained VPC + subnet; egress via Cloud NAT) ────────────
 
 resource "google_compute_network" "vpc" {
+  count                   = local.colocated ? 0 : 1
   name                    = "${var.cluster_name}-vpc"
   auto_create_subnetworks = false
 }
 
 resource "google_compute_subnetwork" "subnet" {
+  count         = local.colocated ? 0 : 1
   name          = "${var.cluster_name}-subnet"
   region        = var.region
-  network       = google_compute_network.vpc.id
+  network       = google_compute_network.vpc[0].id
   ip_cidr_range = var.subnet_cidr
 
   secondary_ip_range {
@@ -161,9 +216,10 @@ resource "google_compute_subnetwork" "subnet" {
 # Cloud NAT gives the private nodes outbound internet (so the Entitle agent can
 # reach its SaaS) without assigning them public IPs.
 resource "google_compute_router" "router" {
+  count   = local.colocated ? 0 : 1
   name    = "${var.cluster_name}-router"
   region  = var.region
-  network = google_compute_network.vpc.id
+  network = google_compute_network.vpc[0].id
 }
 
 # Reserve a static egress IP so the cluster's outbound address is stable and
@@ -171,16 +227,18 @@ resource "google_compute_router" "router" {
 # the imported cluster's cattle-cluster-agent can dial out. AUTO_ONLY would hand
 # out ephemeral, possibly-multiple IPs that can rotate and silently break the rule.
 resource "google_compute_address" "nat" {
+  count  = local.colocated ? 0 : 1
   name   = "${var.cluster_name}-nat-ip"
   region = var.region
 }
 
 resource "google_compute_router_nat" "nat" {
+  count                              = local.colocated ? 0 : 1
   name                               = "${var.cluster_name}-nat"
-  router                             = google_compute_router.router.name
+  router                             = google_compute_router.router[0].name
   region                             = var.region
   nat_ip_allocate_option             = "MANUAL_ONLY"
-  nat_ips                            = [google_compute_address.nat.self_link]
+  nat_ips                            = [google_compute_address.nat[0].self_link]
   source_subnetwork_ip_ranges_to_nat = "ALL_SUBNETWORKS_ALL_IP_RANGES"
 }
 
@@ -193,20 +251,22 @@ resource "google_compute_router_nat" "nat" {
 # NB: GCP peering is NON-transitive. This reaches the sandbox VMs (SSH), NOT
 # Cloud SQL private IPs (those sit behind the sandbox↔servicenetworking peering)
 # — managed-DB JIT uses the PRA protocol tunnel, not the agent.
+# Skipped when co-located (local.colocated) — the cluster is already IN the
+# sandbox VPC, so there is nothing to peer.
 resource "google_compute_network_peering" "gke_to_sandbox" {
-  count        = var.sandbox_network == "" ? 0 : 1
+  count        = (local.colocated || var.sandbox_network == "") ? 0 : 1
   name         = "${var.cluster_name}-to-sandbox"
-  network      = google_compute_network.vpc.self_link
+  network      = google_compute_network.vpc[0].self_link
   peer_network = "projects/${var.project}/global/networks/${var.sandbox_network}"
 }
 
 # The reverse leg. Serialize after the first (GCP rejects concurrent peering ops
 # on the same network pair — "There is a peering operation in progress").
 resource "google_compute_network_peering" "sandbox_to_gke" {
-  count        = var.sandbox_network == "" ? 0 : 1
+  count        = (local.colocated || var.sandbox_network == "") ? 0 : 1
   name         = "sandbox-to-${var.cluster_name}"
   network      = "projects/${var.project}/global/networks/${var.sandbox_network}"
-  peer_network = google_compute_network.vpc.self_link
+  peer_network = google_compute_network.vpc[0].self_link
   depends_on   = [google_compute_network_peering.gke_to_sandbox]
 }
 
@@ -215,7 +275,7 @@ resource "google_compute_network_peering" "sandbox_to_gke" {
 # RFC1918 destinations, so allow BOTH the node subnet and the pod range. GCP
 # firewalls are stateful → this single ingress rule covers the return traffic.
 resource "google_compute_firewall" "sandbox_allow_ssh_from_gke" {
-  count     = (var.sandbox_network == "" || length(var.sandbox_vm_target_tags) == 0) ? 0 : 1
+  count     = (local.colocated || var.sandbox_network == "" || length(var.sandbox_vm_target_tags) == 0) ? 0 : 1
   name      = "${var.cluster_name}-allow-ssh-from-k8s"
   network   = "projects/${var.project}/global/networks/${var.sandbox_network}"
   direction = "INGRESS"
@@ -243,12 +303,12 @@ resource "google_container_cluster" "this" {
 
   min_master_version = var.k8s_version != "" ? var.k8s_version : null
 
-  network    = google_compute_network.vpc.id
-  subnetwork = google_compute_subnetwork.subnet.id
+  network    = local.network_id
+  subnetwork = local.subnetwork_id
 
   ip_allocation_policy {
-    cluster_secondary_range_name  = "pods"
-    services_secondary_range_name = "services"
+    cluster_secondary_range_name  = local.pods_range_name
+    services_secondary_range_name = local.services_range_name
   }
 
   # Private nodes (egress via Cloud NAT), public control-plane endpoint.
@@ -286,6 +346,7 @@ resource "google_container_node_pool" "this" {
     disk_type    = var.disk_type
     oauth_scopes = ["https://www.googleapis.com/auth/cloud-platform"]
     labels       = var.tags
+    tags         = var.node_network_tags
   }
 }
 
@@ -310,6 +371,6 @@ output "ca_certificate" {
 }
 
 output "nat_public_ip" {
-  value       = google_compute_address.nat.address
-  description = "Reserved Cloud NAT egress IP (added to the Rancher node firewall as a /32)"
+  value       = local.colocated ? var.nat_public_ip : google_compute_address.nat[0].address
+  description = "Reserved Cloud NAT egress IP (added to the Rancher node firewall as a /32). Co-located: egress is via the sandbox Cloud NAT (pass-through var, may be blank)."
 }

@@ -124,6 +124,13 @@ _SPECS: dict[str, _Spec] = {
             "ecs_subnetwork":       "gcp_runner_subnetwork",
             "router_name":          "gcp_router_name",
             "nat_name":             "gcp_nat_name",
+            # GKE co-location (provision the cluster IN the sandbox VPC so the
+            # in-cluster Entitle agent reaches VMs + Cloud SQL). Blank k8s_subnetwork
+            # → self-contained-VPC + peering (unchanged). See docs / setup-gcp.sh.
+            "k8s_subnetwork":       "gcp_k8s_subnetwork",
+            "k8s_pods_range":       "gcp_k8s_pods_range_name",
+            "k8s_services_range":   "gcp_k8s_services_range_name",
+            "k8s_node_tag":         "gcp_k8s_node_tag",
         },
         # Historical: jumpoint subnet inherits the VM subnet; DB network the network.
         secondary_fallbacks={
