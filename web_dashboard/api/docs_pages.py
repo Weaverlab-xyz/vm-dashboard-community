@@ -2,9 +2,12 @@
 
 Backs the "guide" links in Settings (Action Guardrails, and the integration
 guides) so an operator doesn't need the GitHub repo open. Public + read-only;
-renders Markdown server-side (no CDN, works air-gapped). Swagger UI keeps the
-exact ``/docs`` path — this only handles subpaths like ``/docs/policy-guardrails``
-and ``/docs/integrations/hyperv``.
+renders Markdown server-side (no CDN, works air-gapped).
+
+``/docs`` is now wholly the documentation browser: an index at ``/docs`` plus the
+rendered pages beneath it. The API explorer moved to ``/swagger`` (see main.py) —
+previously FastAPI owned the exact ``/docs`` path, which made the two collide
+confusingly.
 """
 import html as _html
 from pathlib import Path
@@ -55,6 +58,35 @@ _SHELL = """<!doctype html>
 <p class="back"><a href="/settings">← Back to dashboard</a></p>
 {body}
 </main></body></html>"""
+
+
+@router.get("/docs", response_class=HTMLResponse)
+async def doc_index() -> HTMLResponse:
+    """Index of every shipped doc, grouped by directory.
+
+    Without this, ``/docs`` 404s and the guides are only reachable if you already
+    know the exact path — which was the whole discoverability problem.
+    """
+    if not _DOCS_DIR.is_dir():
+        raise HTTPException(status_code=404, detail="docs directory not found")
+
+    groups: dict = {}
+    for path in sorted(_DOCS_DIR.rglob("*.md")):
+        rel = path.relative_to(_DOCS_DIR).with_suffix("")
+        section = str(rel.parent).replace("\\", "/")
+        section = "General" if section == "." else section
+        title = rel.name.replace("-", " ").replace("_", " ").title()
+        groups.setdefault(section, []).append((title, str(rel).replace("\\", "/")))
+
+    parts = ["<h1>Documentation</h1>",
+             '<p>Shipped with this build. The API explorer lives at '
+             '<a href="/swagger">/swagger</a>.</p>']
+    for section in sorted(groups):
+        parts.append(f"<h2>{_html.escape(section)}</h2><ul>")
+        for title, href in groups[section]:
+            parts.append(f'<li><a href="/docs/{_html.escape(href)}">{_html.escape(title)}</a></li>')
+        parts.append("</ul>")
+    return HTMLResponse(_SHELL.format(title="Documentation", body="".join(parts)))
 
 
 @router.get("/docs/{page:path}", response_class=HTMLResponse)

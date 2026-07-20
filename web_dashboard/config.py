@@ -516,6 +516,20 @@ class Settings(BaseSettings):
     azure_oauth_client_secret: str = ""
     azure_oauth_tenant_id: str = ""
     azure_oauth_redirect_uri: str = "http://localhost:8001/api/auth/oauth/azure/callback"
+
+    # ── Generic OIDC SSO (any compliant provider) ─────────────────────────────
+    # Driven entirely by the issuer's .well-known/openid-configuration, so one
+    # implementation covers Okta, Auth0, Keycloak, Authentik, Authelia, Google
+    # Workspace, JumpCloud, Ping, GitLab — and Entra, if you prefer it over the
+    # azure_oauth_* path above. Additive: leaving these blank changes nothing.
+    # Redirect URI to register with the provider:
+    #   <dashboard-base-url>/api/auth/oauth/oidc/callback
+    oidc_issuer: str = ""            # e.g. https://keycloak.example.com/realms/main
+    oidc_client_id: str = ""
+    oidc_client_secret: str = ""     # omit for a public client (PKCE is always sent)
+    oidc_provider_name: str = ""     # login-button label; defaults to the issuer host
+    oidc_scopes: str = "openid profile email groups"
+    oidc_groups_claim: str = "groups"  # claim holding group names/ids for workgroup mapping
     # Group-to-workgroup mapping: JSON dict of { "entra_group_object_id": "WorkgroupName" }
     # Users are matched against their group claims and assigned the corresponding workgroups.
     # Members of any listed group are auto-created on first login — no pre-registration needed.

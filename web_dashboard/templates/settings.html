@@ -210,6 +210,40 @@
     </div>
   </div>
 
+  <!-- ── Reference: docs + API explorer ───────────────────────────────── -->
+  <!-- Both ship with the app but were previously only reachable if you already
+       knew the URL, which made them effectively invisible. -->
+  <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
+    <div class="mb-4">
+      <h2 class="text-base font-semibold text-gray-700">Reference</h2>
+      <p class="text-xs text-gray-400 mt-0.5">Documentation and API tooling shipped with this build — no internet access required for the docs.</p>
+    </div>
+    <div class="grid gap-3 sm:grid-cols-2">
+      <a href="/docs" target="_blank"
+         class="flex items-start gap-3 p-4 rounded-xl border border-gray-200 hover:border-blue-300 hover:bg-blue-50/40 transition-colors">
+        <svg class="w-5 h-5 text-blue-600 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"/>
+        </svg>
+        <div>
+          <p class="text-sm font-medium text-gray-900">Documentation</p>
+          <p class="text-xs text-gray-500 leading-snug">Integration and operations guides for this version, rendered in-app.</p>
+        </div>
+      </a>
+      <a href="/swagger" target="_blank"
+         class="flex items-start gap-3 p-4 rounded-xl border border-gray-200 hover:border-blue-300 hover:bg-blue-50/40 transition-colors">
+        <svg class="w-5 h-5 text-blue-600 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"/>
+        </svg>
+        <div>
+          <p class="text-sm font-medium text-gray-900">API explorer</p>
+          <p class="text-xs text-gray-500 leading-snug">Browse and try every endpoint. Signs in with your current session — no token to paste.</p>
+        </div>
+      </a>
+    </div>
+  </div>
+
   <!-- ── Preview features (admin only) ────────────────────────────────── -->
   <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6"
        x-show="isAdmin" x-cloak>

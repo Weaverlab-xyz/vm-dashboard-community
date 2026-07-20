@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>API explorer – VM Dashboard</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css">
+  <style>
+    body { margin: 0; background: #fafafa; }
+    .topbar { display: none; }               /* hide Swagger's own URL bar */
+    #authgate { font: 14px system-ui, sans-serif; padding: 3rem; color: #555; }
+    #backlink { font: 13px system-ui, sans-serif; padding: .75rem 1.25rem; background: #fff;
+                border-bottom: 1px solid #e5e7eb; }
+    #backlink a { color: #2563eb; text-decoration: none; }
+  </style>
+</head>
+<body>
+  <div id="backlink"><a href="/settings">← Back to dashboard</a> &nbsp;·&nbsp; <a href="/docs">Documentation</a></div>
+  <div id="authgate">Checking authentication…</div>
+  <div id="swagger-ui"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+  <script>
+    // This app keeps its access token in localStorage, so a plain browser
+    // navigation carries no Authorization header — /openapi.json would 401.
+    // Gate client-side (same as every other page), then have Swagger attach the
+    // token to the schema fetch and to every "Try it out" request.
+    (function () {
+      var token = localStorage.getItem('vm_cli_token');
+      if (!token) { window.location.href = '/login'; return; }
+      document.getElementById('authgate').style.display = 'none';
+
+      window.ui = SwaggerUIBundle({
+        url: '/openapi.json',
+        dom_id: '#swagger-ui',
+        deepLinking: true,
+        presets: [SwaggerUIBundle.presets.apis],
+        layout: 'BaseLayout',
+        persistAuthorization: true,
+        requestInterceptor: function (req) {
+          // Same token for the schema fetch and for Try-it-out calls, so the
+          // explorer works without anyone pasting a credential.
+          req.headers['Authorization'] = 'Bearer ' + token;
+          return req;
+        },
+        responseInterceptor: function (res) {
+          if (res.status === 401) {
+            // Token expired while the page was open.
+            localStorage.removeItem('vm_cli_token');
+            window.location.href = '/login';
+          }
+          return res;
+        }
+      });
+    })();
+  </script>
+</body>
+</html>
