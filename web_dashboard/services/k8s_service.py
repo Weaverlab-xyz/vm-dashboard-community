@@ -416,6 +416,21 @@ def _build_cluster_tf_variables(*, cloud: str, cluster_id: str, name: str,
         tf["cluster_id"] = cluster_id
         tf["agent_namespace"] = _cfg("entitle_agent_namespace", "entitle")
         tf["agent_service_account"] = _cfg("entitle_agent_service_account", "entitle-agent-sa")
+        # Peer the AKS VNet back to the sandbox VNet so an in-cluster agent (Entitle
+        # SSH ephemeral) can reach the private lab VMs — Azure parity with the aws/gcp
+        # branches above. Prefer an explicit azure_vnet_id; else derive it from the
+        # emitted vm-subnet id (…/virtualNetworks/<vnet>/subnets/<subnet>). Read from
+        # config so it also flows through the destroy path (opts={}). No NSG rule is
+        # needed — the sandbox vm-subnet's VirtualNetwork-tag rule covers peered space.
+        sandbox_vnet_id = _cfg("azure_vnet_id")
+        if not sandbox_vnet_id:
+            subnet_id = _cfg("azure_default_subnet_id")
+            if "/subnets/" in subnet_id:
+                sandbox_vnet_id = subnet_id.split("/subnets/")[0]
+        if sandbox_vnet_id:
+            tf["sandbox_vnet_id"] = sandbox_vnet_id
+            tf["sandbox_vnet_name"] = _cfg("azure_vnet_name") or sandbox_vnet_id.rsplit("/", 1)[-1]
+            tf["sandbox_vnet_rg"] = _cfg("azure_vnet_resource_group")
         return tf
 
     if cloud == "gcp":
@@ -441,6 +456,19 @@ def _build_cluster_tf_variables(*, cloud: str, cluster_id: str, name: str,
         cidrs = opts.get("authorized_cidrs") or _cfg_list("gcp_gke_authorized_cidrs")
         if cidrs:
             tf["authorized_cidrs"] = cidrs
+        # Peer the cluster's own VPC back to the sandbox VPC so an in-cluster agent
+        # (Entitle SSH ephemeral) can reach the private lab VMs directly — GCP
+        # parity with the aws_eks sandbox_vpc peering above. Reuses the sandbox's
+        # existing config: the VPC name (gcp_network) + the VM network tag
+        # (gcp_default_network_tag). Read from config (not opts) so it also flows
+        # through the destroy path (called with opts={}). Non-transitive peering
+        # doesn't reach Cloud SQL private IPs — DB JIT uses the PRA tunnel.
+        sandbox_net = _cfg("gcp_network")
+        if sandbox_net and sandbox_net != "default":
+            tf["sandbox_network"] = sandbox_net
+            vm_tags = _cfg_list("gcp_default_network_tag")
+            if vm_tags:
+                tf["sandbox_vm_target_tags"] = vm_tags
         return tf
 
     if cloud == "oci":
