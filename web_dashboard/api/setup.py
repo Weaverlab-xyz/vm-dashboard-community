@@ -86,6 +86,7 @@ class AzureRegionConfig(BaseModel):
     """
     resource_group: str = ""
     vnet_resource_group: str = ""
+    default_subnet_id: str = ""
     desktops_subnet_id: str = ""
     db_subnet_id: str = ""
     db_mysql_subnet_id: str = ""

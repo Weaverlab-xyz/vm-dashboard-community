@@ -45,9 +45,12 @@ def _install_stubs():
     cfg.get = lambda key: CONF.get(key, "")
     sys.modules["web_dashboard.services.config_service"] = cfg
 
-    # The AKS branch resolves the dashboard's resource group for the region.
+    # The AKS branch resolves the dashboard's resource group for the region; the
+    # GKE branch resolves the sandbox network via resolve_region (peering — empty
+    # here, so no sandbox_* vars are added).
     rc = types.ModuleType("web_dashboard.services.region_config")
     rc.resolve_azure_region = lambda region: {"resource_group": "rg-test"}
+    rc.resolve_region = lambda cloud, region: {}
     sys.modules["web_dashboard.services.region_config"] = rc
 
 
