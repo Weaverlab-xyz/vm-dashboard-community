@@ -48,6 +48,7 @@ sys.modules.setdefault("web_dashboard.services.config_service", _cfgsvc_stub)
 # k8s peering branches read are modeled.
 _REGION_FIELDS = {
     "gcp": {"network": "gcp_network", "default_network_tag": "gcp_default_network_tag",
+            "zone": "gcp_zone",
             "k8s_subnetwork": "gcp_k8s_subnetwork",
             "k8s_pods_range": "gcp_k8s_pods_range_name",
             "k8s_services_range": "gcp_k8s_services_range_name",
@@ -141,6 +142,62 @@ def test_gcp_colocates_when_k8s_subnet_configured():
     # Co-located → the self-contained-VPC peering vars are NOT emitted.
     assert "sandbox_network" not in tf
     assert "sandbox_vm_target_tags" not in tf
+
+
+def test_gcp_zone_from_region_config():
+    # Multi-region: the per-region zone (gcp_region.<region>.zone) flows into the
+    # module. Regression for the us-east1 "-a" trap — the form left zone blank and
+    # the module fabricated us-east1-a, a zone that doesn't exist.
+    _CONFIG.clear()
+    _CONFIG.update({
+        "gcp_project": "sandbox-proj",
+        "gcp_zone": "us-central1-a",
+        "gcp_region.us-east1.zone": "us-east1-b",
+    })
+    tf = k._build_cluster_tf_variables(
+        cloud="gcp", cluster_id="c-123", name="gke-demo",
+        region="us-east1", opts={})
+    assert tf["zone"] == "us-east1-b"
+
+
+def test_gcp_zone_form_value_wins_over_region_config():
+    _CONFIG.clear()
+    _CONFIG.update({
+        "gcp_project": "sandbox-proj",
+        "gcp_region.us-east1.zone": "us-east1-b",
+    })
+    tf = k._build_cluster_tf_variables(
+        cloud="gcp", cluster_id="c-123", name="gke-demo",
+        region="us-east1", opts={"zone": "us-east1-d"})
+    assert tf["zone"] == "us-east1-d"
+
+
+def test_gcp_zone_cross_region_flat_fallback_is_rejected():
+    # A region with no region-config entry resolves zone to the flat gcp_zone —
+    # which belongs to the DEFAULT region. Emitting it would provision the cluster
+    # cross-region, so it must be dropped (module then picks a real zone itself).
+    _CONFIG.clear()
+    _CONFIG.update({
+        "gcp_project": "sandbox-proj",
+        "gcp_zone": "us-central1-a",
+    })
+    tf = k._build_cluster_tf_variables(
+        cloud="gcp", cluster_id="c-123", name="gke-demo",
+        region="us-east1", opts={})
+    assert "zone" not in tf
+
+
+def test_gcp_zone_default_region_uses_flat_key():
+    # Default region: the flat gcp_zone matches the region prefix and flows through.
+    _CONFIG.clear()
+    _CONFIG.update({
+        "gcp_project": "sandbox-proj",
+        "gcp_zone": "us-central1-a",
+    })
+    tf = k._build_cluster_tf_variables(
+        cloud="gcp", cluster_id="c-123", name="gke-demo",
+        region="us-central1", opts={})
+    assert tf["zone"] == "us-central1-a"
 
 
 def test_gcp_peering_still_used_when_k8s_subnet_unset():

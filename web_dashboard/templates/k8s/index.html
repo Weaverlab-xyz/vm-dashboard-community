@@ -284,8 +284,8 @@
         <div x-show="provForm.cloud === 'gcp'" x-cloak>
           <label class="block text-sm font-medium text-gray-700 mb-1">Zone <span class="text-gray-400">(optional)</span></label>
           <input type="text" x-model="provForm.zone"
-                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="(region)-a">
-          <p class="text-[11px] text-gray-400 mt-1">Zonal cluster (cheaper than regional). Blank uses <code>&lt;region&gt;-a</code>.</p>
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="us-central1-a">
+          <p class="text-[11px] text-gray-400 mt-1">Zonal cluster (cheaper than regional). Blank uses the region's configured zone (Settings → Multi-region), else the region's first available zone.</p>
         </div>
         <!-- API endpoint exposure (all clouds) -->
         <div>

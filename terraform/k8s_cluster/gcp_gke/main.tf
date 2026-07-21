@@ -32,7 +32,7 @@ variable "region" {
 variable "zone" {
   type        = string
   default     = ""
-  description = "Zone for a zonal cluster (cheaper than regional). Empty = '<region>-a'."
+  description = "Zone for a zonal cluster (cheaper than regional). Empty = the region's first available zone."
 }
 
 variable "cluster_name" {
@@ -177,8 +177,18 @@ variable "nat_public_ip" {
   description = "Co-location egress IP to surface as nat_public_ip (the sandbox Cloud NAT provides egress; blank if none reserved)."
 }
 
+# Not every region has an "-a" zone (us-east1 / europe-west1 start at -b), and a
+# nonexistent zone fails the apply with a misleading 403 LOCATION_POLICY_VIOLATED
+# ("Permission denied on 'locations/<region>-a' (or it may not exist)"). The
+# blank-zone fallback picks the region's alphabetically-first UP zone — identical
+# to the old "<region>-a" wherever -a exists, valid everywhere else.
+data "google_compute_zones" "up" {
+  region = var.region
+  status = "UP"
+}
+
 locals {
-  location  = var.zone != "" ? var.zone : "${var.region}-a"
+  location  = var.zone != "" ? var.zone : sort(data.google_compute_zones.up.names)[0]
   colocated = var.existing_network != "" && var.existing_subnetwork != ""
 
   # Own-VPC resources are count-gated on !colocated, so reference them via [0].
