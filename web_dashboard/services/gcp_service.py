@@ -961,6 +961,206 @@ async def stop_gce_jumpoint(project_id: str, zone: str, name: str) -> None:
         raise GCPError(f"Failed to stop GCE Jumpoint '{name}': {e}") from e
 
 
+# ── On-demand TCP forwarder (COS-on-GCE) for Entitle DB reachability ──────────
+# A private Cloud SQL instance's PSA IP is reachable ONLY from the sandbox VPC,
+# and GCP VPC peering is non-transitive — so the Entitle agent (in its own GKE
+# VPC, one peering hop away) can't route to it. This runs a tiny socat relay in
+# the sandbox VPC that the agent CAN reach over the GKE↔sandbox peering; socat
+# forwards to the Cloud SQL private IP. Driven by entitle_db_proxy_service.
+
+_DB_FORWARDER_LABEL = "bt-db-forwarder"
+
+
+def _socat_container_spec_yaml(image: str, listen_port: int,
+                               target_host: str, target_port: int) -> str:
+    """gce-container-declaration YAML for a one-container socat TCP relay
+    (``listen_port`` → ``target_host:target_port``). COS containers share the host
+    network, so the listener binds the VM's NIC directly. socat is transparent L4 —
+    the DB negotiates TLS/auth end-to-end with the client through it, so no protocol
+    handling is needed here."""
+    import yaml
+    spec = {
+        "spec": {
+            "containers": [{
+                "name": "socat",
+                "image": image,
+                # image ENTRYPOINT is `socat`; args become its CMD.
+                "args": [
+                    "-dd",
+                    f"TCP-LISTEN:{listen_port},fork,reuseaddr",
+                    f"TCP:{target_host}:{target_port}",
+                ],
+                "stdin": False,
+                "tty": False,
+            }],
+            "restartPolicy": "Always",
+        }
+    }
+    return yaml.safe_dump(spec, default_flow_style=False)
+
+
+def _run_gce_db_forwarder_sync(
+    project_id: str, zone: str, name: str,
+    listen_port: int, target_host: str, target_port: int, image: str,
+    network: str = "", subnetwork: str = "", machine_type: str = "e2-micro",
+    cos_image_family: str = "cos-stable", create_external_ip: bool = True,
+) -> dict:
+    """Launch (or reuse) a small COS GCE instance running a socat TCP relay to a
+    private DB. Idempotent on name; returns the instance's internal IP so the caller
+    can point Entitle's connection host at it. Tags: ``bt-jumpoint`` (inherits the
+    sandbox egress-allow to the Cloud SQL PSA range) + ``bt-db-forwarder`` (target of
+    the runtime ingress rule from the GKE agent)."""
+    _require_compute()
+    from google.cloud import compute_v1
+    from google.api_core.exceptions import NotFound
+
+    creds = _gcp_creds()
+    client = compute_v1.InstancesClient(credentials=creds)
+
+    def _internal_ip(info) -> str:
+        for nic in info.network_interfaces:
+            if nic.network_i_p:
+                return nic.network_i_p
+        return ""
+
+    # Reuse a RUNNING relay; start a stopped one (COS re-runs the container on boot).
+    try:
+        existing = client.get(project=project_id, zone=zone, instance=name)
+        if existing.status != "RUNNING":
+            try:
+                client.start(project=project_id, zone=zone, instance=name).result(timeout=180)
+                existing = client.get(project=project_id, zone=zone, instance=name)
+            except Exception as start_err:
+                logger.warning("db-forwarder '%s' start failed (status=%s): %s",
+                               name, existing.status, start_err)
+        return {"name": name, "zone": zone, "internal_ip": _internal_ip(existing),
+                "status": existing.status, "reused": True}
+    except NotFound:
+        pass
+
+    instance = compute_v1.Instance()
+    instance.name = name
+    instance.machine_type = f"zones/{zone}/machineTypes/{machine_type}"
+
+    disk = compute_v1.AttachedDisk()
+    disk.boot = True
+    disk.auto_delete = True
+    disk.initialize_params = compute_v1.AttachedDiskInitializeParams()
+    disk.initialize_params.source_image = (
+        f"projects/cos-cloud/global/images/family/{cos_image_family}")
+    disk.initialize_params.disk_size_gb = 10
+    instance.disks = [disk]
+
+    nic = compute_v1.NetworkInterface()
+    if subnetwork:
+        nic.subnetwork = subnetwork
+    elif network:
+        nic.network = network
+    if create_external_ip:
+        nic.access_configs = [compute_v1.AccessConfig(
+            name="External NAT", type_="ONE_TO_ONE_NAT")]
+    instance.network_interfaces = [nic]
+
+    instance.metadata = compute_v1.Metadata(items=[
+        compute_v1.Items(key="gce-container-declaration",
+                         value=_socat_container_spec_yaml(image, listen_port, target_host, target_port)),
+        compute_v1.Items(key="google-logging-enabled", value="true"),
+    ])
+    instance.labels = {"managed-by": "vm-dashboard", "purpose": _DB_FORWARDER_LABEL}
+    instance.tags = compute_v1.Tags(items=[_JUMPOINT_LABEL, _DB_FORWARDER_LABEL])
+
+    logger.info("Starting GCE socat db-forwarder '%s' in %s (%s → %s:%s, image=%s)",
+                name, zone, listen_port, target_host, target_port, image)
+    client.insert(project=project_id, zone=zone, instance_resource=instance).result(timeout=300)
+    info = client.get(project=project_id, zone=zone, instance=name)
+    return {"name": name, "zone": zone, "internal_ip": _internal_ip(info),
+            "status": info.status, "reused": False}
+
+
+async def run_gce_db_forwarder(
+    project_id: str, zone: str, name: str,
+    listen_port: int, target_host: str, target_port: int, image: str,
+    network: str = "", subnetwork: str = "", machine_type: str = "e2-micro",
+    create_external_ip: bool = True,
+) -> dict:
+    """Async wrapper for :func:`_run_gce_db_forwarder_sync`."""
+    try:
+        return await asyncio.to_thread(
+            _run_gce_db_forwarder_sync, project_id, zone, name,
+            listen_port, target_host, target_port, image,
+            network, subnetwork, machine_type, "cos-stable", create_external_ip)
+    except GCPError:
+        raise
+    except Exception as e:
+        raise GCPError(f"Failed to start GCE db-forwarder '{name}': {e}") from e
+
+
+async def stop_gce_db_forwarder(project_id: str, zone: str, name: str) -> None:
+    """Delete the forwarder instance. Quiet no-op if it doesn't exist."""
+    try:
+        await asyncio.to_thread(_terminate_instance_sync, project_id, zone, name)
+    except Exception as e:
+        msg = str(e)
+        if "404" in msg or "not found" in msg.lower():
+            return
+        raise GCPError(f"Failed to stop GCE db-forwarder '{name}': {e}") from e
+
+
+def _ensure_firewall_rule_sync(project: str, name: str, network: str,
+                               source_ranges: list, target_tags: list,
+                               protocol: str, ports: list) -> None:
+    """Idempotently create an INGRESS allow firewall rule (leave it if it already
+    exists). ``network`` may be a bare name or a self-link."""
+    _require_compute()
+    from google.cloud import compute_v1
+    from google.api_core.exceptions import NotFound
+
+    creds = _gcp_creds()
+    client = compute_v1.FirewallsClient(credentials=creds)
+    try:
+        client.get(project=project, firewall=name)
+        return  # already present — assume correct
+    except NotFound:
+        pass
+    net = network if "/" in network else f"projects/{project}/global/networks/{network}"
+    rule = compute_v1.Firewall(
+        name=name, network=net, direction="INGRESS",
+        source_ranges=list(source_ranges), target_tags=list(target_tags),
+        allowed=[compute_v1.Allowed(I_p_protocol=protocol, ports=[str(p) for p in ports])],
+        description="dashboard: allow the Entitle agent (GKE) to reach on-demand DB forwarders",
+    )
+    client.insert(project=project, firewall_resource=rule).result(timeout=120)
+
+
+async def ensure_firewall_rule(*, project: str, name: str, network: str,
+                               source_ranges: list, target_tags: list,
+                               protocol: str = "tcp", ports: Optional[list] = None) -> None:
+    """Async wrapper: idempotently ensure an INGRESS allow firewall rule."""
+    try:
+        await asyncio.to_thread(_ensure_firewall_rule_sync, project, name, network,
+                                source_ranges, target_tags, protocol, ports or [])
+    except GCPError:
+        raise
+    except Exception as e:
+        raise GCPError(f"Failed to ensure firewall rule '{name}': {e}") from e
+
+
+async def delete_firewall_rule(project: str, name: str) -> None:
+    """Delete a firewall rule; quiet no-op if it doesn't exist."""
+    def _sync():
+        _require_compute()
+        from google.cloud import compute_v1
+        client = compute_v1.FirewallsClient(credentials=_gcp_creds())
+        client.delete(project=project, firewall=name).result()
+    try:
+        await asyncio.to_thread(_sync)
+    except Exception as e:
+        msg = str(e)
+        if "404" in msg or "not found" in msg.lower():
+            return
+        raise GCPError(f"Failed to delete firewall rule '{name}': {e}") from e
+
+
 def _container_image_from_metadata(info) -> str:
     """Best-effort: pull the container image out of the gce-container-declaration
     metadata COS boots from. Returns "" on any parse failure."""

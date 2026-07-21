@@ -798,6 +798,16 @@ class Settings(BaseSettings):
     gcp_default_network_tag: str = ""
     gcp_bt_jump_group_name: str = ""     # BT jump group for GCP Shell Jumps (falls back to bt_jump_group_name)
     gcp_jumpoint_name: str = ""          # Jumpoint name for GCP Shell Jumps (falls back to bt_jumpoint_name)
+    # On-demand Entitle DB forwarder (GCP-only). A private Cloud SQL PSA IP is
+    # unreachable from the Entitle agent's own GKE VPC (non-transitive peering);
+    # when a GCP DB is registered in Entitle the dashboard stands up a tiny socat
+    # relay (COS-on-GCE) in the sandbox VPC that the agent CAN reach over the
+    # GKE↔sandbox peering, and tears it down on deregister/decommission. OFF by
+    # default. See services/entitle_db_proxy_service.py.
+    gcp_entitle_db_proxy_enabled: bool = False
+    gcp_entitle_db_proxy_source_ranges: str = "10.98.0.0/22,10.100.0.0/16"  # GKE agent node+pod ranges allowed into the forwarder (terraform/k8s_cluster/gcp_gke defaults)
+    gcp_entitle_db_proxy_image: str = "alpine/socat:latest"                 # socat relay container image (pulled over Cloud NAT)
+    gcp_entitle_db_proxy_machine_type: str = "e2-micro"                     # forwarder VM size (free-tier eligible in us-central1)
     # Rancher management node — a single privileged Rancher container on a
     # Container-Optimized-OS GCE VM with a PUBLIC (source-restricted) IP. Same
     # COS/konlet mechanism as the Jumpoint. The node is treated as EPHEMERAL: a

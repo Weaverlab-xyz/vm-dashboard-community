@@ -693,11 +693,23 @@ async def _entitle_register_core(db: Session, *, row: CloudDatabase, engine: str
     if engine == "sqlserver":
         version = _cfg("entitle_sqlserver_version") or "2019"
 
+    # GCP Cloud SQL's private IP is unreachable from the Entitle agent's own GKE VPC
+    # (non-transitive peering). Stand up an on-demand socat forwarder in the sandbox
+    # VPC and point Entitle at it. Returns None (no override) for non-GCP DBs or when
+    # gcp_entitle_db_proxy_enabled is off; AWS RDS is reachable directly. Raises on a
+    # hard failure so a post-hoc register job fails clearly (the provision-path
+    # wrapper swallows it).
+    from . import entitle_db_proxy_service
+    reg_host, reg_port = row.private_host, row.port or 0
+    fwd = await entitle_db_proxy_service.ensure_db_forwarder(db, row)
+    if fwd:
+        reg_host, reg_port = fwd
+
     result = await ent.register_database(
         engine=engine,
         name=tfv.get("identifier") or f"clouddb-{row.id[:8]}",
-        host=row.private_host,
-        port=row.port or 0,
+        host=reg_host,
+        port=reg_port,
         username=admin_username,
         password=admin_password,
         database=("master" if engine == "sqlserver" else tfv.get("db_name", "")),
@@ -733,28 +745,32 @@ async def _deregister_entitle_core(db: Session, *, row: CloudDatabase) -> None:
     """Destroy the DB's Entitle integration using the state stashed on its
     provisioning job, then clear ``entitle_integration_id`` + the state key.
     **Raises** on a real destroy failure."""
-    from . import entitle_registration_service as ent
+    from . import entitle_registration_service as ent, entitle_db_proxy_service
     prov_job = _provision_job_for(db, row.id)
     ent_state = ((prov_job.metadata_dict or {}).get("entitle_registration_tf_state")
                  if prov_job else None)
-    if not ent_state:
+    if ent_state:
+        await ent.deregister(ent_state)   # raises on a real failure — surfaced by the caller
+        row.entitle_integration_id = None
+        db.commit()
+        j = db.query(Job).filter(Job.id == prov_job.id).first()
+        if j is not None:
+            meta = j.metadata_dict or {}
+            meta.pop("entitle_registration_tf_state", None)
+            j.metadata_dict = meta
+            db.commit()
+        logger.info("clouddb Entitle integration deregistered db_id=%s", row.id)
+    else:
         # Nothing recorded to destroy — just clear any stale id so the UI recovers.
         if row.entitle_integration_id:
             row.entitle_integration_id = None
             db.commit()
         logger.info("clouddb Entitle deregister: no stored state for db_id=%s "
                     "(nothing to destroy)", row.id)
-        return
-    await ent.deregister(ent_state)
-    row.entitle_integration_id = None
-    db.commit()
-    j = db.query(Job).filter(Job.id == prov_job.id).first()
-    if j is not None:
-        meta = j.metadata_dict or {}
-        meta.pop("entitle_registration_tf_state", None)
-        j.metadata_dict = meta
-        db.commit()
-    logger.info("clouddb Entitle integration deregistered db_id=%s", row.id)
+    # Tear down the on-demand GCP reachability forwarder (best-effort; no-op for
+    # non-GCP DBs or when none was created). Only reached after a successful
+    # deregister above, so a failed destroy leaves the forwarder for retry.
+    await entitle_db_proxy_service.teardown_db_forwarder(db, row)
 
 
 async def run_entitle_register(db: Session, *, db_id: str, job_id: str,
@@ -1270,6 +1286,14 @@ async def run_decommission(db: Session, *, db_id: str, job_id: str) -> None:
         except Exception as exc:
             warnings.append(f"Entitle integration removal: {exc}")
             logger.warning("clouddb Entitle deregister for %s failed (non-fatal): %s", db_id, exc)
+
+    # 1c. On-demand Entitle DB reachability forwarder (GCP-only; no-op otherwise / if none).
+    try:
+        from . import entitle_db_proxy_service
+        await entitle_db_proxy_service.teardown_db_forwarder(db, row)
+    except Exception as exc:
+        warnings.append(f"Entitle DB forwarder teardown: {exc}")
+        logger.warning("clouddb forwarder teardown for %s failed (non-fatal): %s", db_id, exc)
 
     # 2. Password Safe functional account.
     fa_id = meta.get("ps_functional_account_id")
