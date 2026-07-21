@@ -147,7 +147,16 @@ and-egg problem. The dashboard now manages the allow-list for you:
   reach an echo service — e.g. behind a TLS-inspecting corporate proxy — set
   `rancher_dashboard_egress_cidr` manually. If the firewall would end up **fully
   closed**, the deploy now **fails fast** with that instruction instead of burning
-  the readiness timeout.
+  the readiness timeout. **Corp proxy pools:** proxies like Cloudflare WARP egress
+  from a **pool** of IPs (consecutive requests can leave from different addresses),
+  so a single detected `/32` isn't reliable there — set the pool's CIDR (e.g.
+  `104.28.182.0/24`) in `rancher_dashboard_egress_cidr`; detection keeps a stored
+  CIDR that already contains the detected IP instead of clobbering it.
+- **API runner (VPC connector)** — when `rancher_api_transport=runner` (see
+  [Corp TLS inspection](#corp-tls-inspection-api-transport)), the Cloud Run
+  runner's VPC-connector range (`rancher_runner_source_cidr`) is auto-added so the
+  runner's internal-IP traffic is admitted (GCE ingress rules apply to internal
+  traffic too). Private RFC1918 range — no public exposure.
 - **Provisioned clusters** — each dashboard-provisioned cluster (EKS/AKS/GKE) is
   given a **stable, reserved egress IP** (an Elastic IP on AWS, a reserved Cloud
   NAT IP on GCP, a static NAT-gateway IP on Azure). The provision job captures it
@@ -181,6 +190,47 @@ re-captured on each ensure; the Azure one is static.
 provision) has an egress IP the dashboard can't learn — add it to
 `rancher_allowed_source_cidrs` manually. Registered (not dashboard-provisioned)
 clusters likewise have no captured egress IP and must be added manually.
+
+---
+
+## Corp TLS inspection (API transport)
+
+Corporate networks that **TLS-inspect** outbound traffic (e.g. Cloudflare
+Gateway/WARP) verify the *origin's* certificate at the proxy — and the Rancher
+node ships a **self-signed cert**, so the proxy kills every HTTPS handshake to it
+in transit. The dashboard's `verify=False` can't help: the block happens at the
+proxy, not the client. The symptom is a deploy that fails with *"Rancher IS up …
+but the HTTPS handshake is being terminated in transit"* (the readiness probe
+falls back to plain-HTTP `/ping` to detect exactly this), while `curl -k` to the
+node dies after ClientHello.
+
+Two ways out:
+
+1. **Proxy exception** — add a *Do Not Inspect* rule for the node's IP (or your
+   GCP ranges) in the proxy policy. Zero dashboard changes, but the node's IP is
+   ephemeral, and you may not control corp policy.
+2. **`rancher_api_transport = runner`** — the dashboard executes every Rancher
+   API call (readiness, bootstrap, server-url pin, cluster import/delete) as
+   `curl` inside a **one-shot GCP Cloud Run job**, which egresses from GCP with
+   no inspecting proxy in the path — the same corp-CA-dodging pattern as the
+   Ansible/k8s cloud runners. The job targets the node's **internal IP**
+   (`rancher_internal_url`, captured at deploy) through the Cloud Run **VPC
+   connector** (its egress is private-ranges-only). Requirements:
+   - the k8s runner's GCP knobs: `gcp_project_id`, `gcp_region` (or
+     `gcp_ansible_cloud_run_region`), and `gcp_ansible_vpc_connector`;
+   - `rancher_runner_source_cidr` = the connector's `/28`, so the firewall admits
+     the runner (auto-merged into the allow-list while the transport is `runner`).
+
+   Request payloads (API token, bootstrap password) travel to the job as a curl
+   config over stdin — never in the container's argv. Note each API call costs a
+   Cloud Run job cold-start (~20-40 s), which is fine for the deploy/import flows
+   this covers.
+
+**Downstream clusters are unaffected** either way — cattle-cluster-agents dial out
+from their cloud NAT, not through your corp proxy. The Rancher **UI** in your
+browser rides the same inspected path though: if the proxy blocks the self-signed
+UI too, use the [PRA Web Jump](#pra-web-jump-optional) (the Jumpoint egresses from
+the cloud, cleanly) or a proxy exception.
 
 ---
 
@@ -265,8 +315,11 @@ apply immediately.
 | `k8s_management_enabled` | `false` | Master toggle; surfaces the Rancher tab |
 | `rancher_bootstrap_password` | — | First-run admin password (secret) |
 | `rancher_allowed_source_cidrs` | `""` | *Additive* manual CIDRs (tcp 80/443); the dashboard's own egress, provisioned clusters + the Web-Jump Jumpoint are auto-added. Empty + nothing auto-discovered = closed |
-| `rancher_dashboard_egress_cidr` | (runtime) | The dashboard's own public egress IP/CIDR, auto-detected + persisted on deploy so the worker can reach the node's public IP. Set manually if auto-detect can't reach an IP-echo service (e.g. behind a TLS-inspecting proxy). Bare IP → `/32` |
+| `rancher_dashboard_egress_cidr` | (runtime) | The dashboard's own public egress IP/CIDR, auto-detected + persisted on deploy so the worker can reach the node's public IP. Behind a corp proxy pool set the pool's CIDR — a stored CIDR containing the detected IP is kept, not clobbered. Bare IP → `/32` |
 | `rancher_ready_timeout_s` | `360` | Seconds the deploy waits for Rancher to serve after boot; raise for slow disks / large images |
+| `rancher_api_transport` | `direct` | `direct` \| `runner` — run the Rancher API calls as curl in a GCP Cloud Run job when this network's TLS inspection blocks the node's self-signed cert ([details](#corp-tls-inspection-api-transport)) |
+| `rancher_internal_url` | (runtime) | `https://<node internal IP>` captured at deploy — what the runner transport dials |
+| `rancher_runner_source_cidr` | `""` | The Cloud Run VPC connector's `/28`; auto-added to the firewall while the transport is `runner` |
 | `gcp_rancher_allow_open` | `false` | Open `0.0.0.0/0` when no CIDRs set (discouraged) |
 | `gcp_rancher_image` | `rancher/rancher:latest` | Rancher container image |
 | `gcp_rancher_machine_type` | `e2-medium` | VM size (≥ 4 GB enforced) |
@@ -315,6 +368,17 @@ serial console / the container's logs in GCP (`google-logging-enabled` is on).
 and the dashboard couldn't auto-detect its own egress IP, so opening the firewall
 would leave the node unreachable. Set `rancher_dashboard_egress_cidr` or
 `rancher_allowed_source_cidrs` (or enable *Allow open*) and redeploy.
+
+**"Rancher IS up … but the HTTPS handshake is being terminated in transit"** —
+this network TLS-inspects and rejects the node's self-signed cert at the proxy
+(plain-HTTP `/ping` answered, so the node itself is fine). Set
+`rancher_api_transport=runner` and redeploy, or add a proxy *Do Not Inspect*
+exception for the node — see [Corp TLS inspection](#corp-tls-inspection-api-transport).
+
+**Readiness flip-flops / works one minute, times out the next** — a corp proxy
+pool (e.g. Cloudflare WARP) egresses from multiple IPs while the firewall pins one
+`/32`. Set the pool's CIDR in `rancher_dashboard_egress_cidr` (e.g.
+`104.28.182.0/24`); detection keeps a containing CIDR intact.
 
 **Machine type rejected** — types under 4 GB (`e2-micro`, `e2-small`, …) are
 refused; use `e2-medium` or larger.

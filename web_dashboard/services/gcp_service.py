@@ -1407,6 +1407,16 @@ def _external_ip_of(info) -> str:
     return ""
 
 
+def _internal_ip_of(info) -> str:
+    """Best-effort: pull the primary internal (VPC) IP off a compute instance —
+    the address in-cloud runners reach it at (VPC-connector egress is
+    private-ranges-only, so the public IP is unroutable from them)."""
+    for nic in (info.network_interfaces or []):
+        if nic.network_i_p:
+            return nic.network_i_p
+    return ""
+
+
 def _run_gce_rancher_sync(
     project_id: str,
     zone: str,
@@ -1454,6 +1464,7 @@ def _run_gce_rancher_sync(
         return {
             "name": name, "zone": zone, "self_link": existing.self_link,
             "status": status, "external_ip": external_ip,
+            "internal_ip": _internal_ip_of(existing),
             "url": f"https://{external_ip}" if external_ip else "", "reused": True,
         }
     except NotFound:
@@ -1512,6 +1523,7 @@ def _run_gce_rancher_sync(
     return {
         "name": name, "zone": zone, "self_link": info.self_link,
         "status": info.status, "external_ip": external_ip,
+        "internal_ip": _internal_ip_of(info),
         "url": f"https://{external_ip}" if external_ip else "", "reused": False,
     }
 

@@ -2085,7 +2085,25 @@
               <input type="text" x-model="panelCfg.rancher_dashboard_egress_cidr"
                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
                      placeholder="auto-detected on deploy (e.g. 198.51.100.7/32)">
-              <p class="text-[11px] text-gray-400 mt-1">The dashboard reaches the node over its <strong>public IP</strong> to bootstrap it, so its own egress must be allowed. Auto-detected + saved on deploy; set it manually only if detection can't reach an IP-echo service (e.g. behind a TLS-inspecting proxy). Bare IP → <code>/32</code>.</p>
+              <p class="text-[11px] text-gray-400 mt-1">The dashboard reaches the node over its <strong>public IP</strong> to bootstrap it, so its own egress must be allowed. Auto-detected + saved on deploy. Corp proxies (Cloudflare WARP) egress from a <strong>pool</strong> of IPs — set the pool's CIDR (e.g. <code>104.28.182.0/24</code>) and it is kept as long as the detected IP falls inside it. Bare IP → <code>/32</code>.</p>
+            </div>
+            <div class="grid grid-cols-2 gap-3 mt-3">
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">API transport</label>
+                <select x-model="panelCfg.rancher_api_transport"
+                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                  <option value="direct">direct — HTTPS from the dashboard</option>
+                  <option value="runner">runner — curl via a GCP Cloud Run job</option>
+                </select>
+                <p class="text-[11px] text-gray-400 mt-1">Pick <strong>runner</strong> when this network TLS-inspects and blocks the node's self-signed cert (deploy fails with "HTTPS handshake terminated in transit"). Reuses the k8s runner's GCP region + VPC connector; calls target the node's internal IP.</p>
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Runner source CIDR <span class="text-gray-400">(runner only)</span></label>
+                <input type="text" x-model="panelCfg.rancher_runner_source_cidr"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                       placeholder="10.8.0.0/28 (the VPC connector range)">
+                <p class="text-[11px] text-gray-400 mt-1">The Cloud Run VPC connector's /28 — auto-added to the node firewall so the runner's internal traffic is admitted.</p>
+              </div>
             </div>
             <!-- Auto-discovered allow-list (read-only) -->
             <template x-if="rancherFirewall">
@@ -2108,6 +2126,10 @@
                 <div class="mb-1" x-show="rancherFirewall.jumpoint_egress_ip">
                   <span class="text-gray-500">Web-Jump Jumpoint:</span>
                   <span class="ml-1 font-mono text-gray-700" x-text="rancherFirewall.jumpoint_egress_ip"></span>
+                </div>
+                <div class="mb-1" x-show="rancherFirewall.runner_source_cidr">
+                  <span class="text-gray-500">API runner (VPC connector):</span>
+                  <span class="ml-1 font-mono text-gray-700" x-text="rancherFirewall.runner_source_cidr"></span>
                 </div>
                 <div class="mb-1" x-show="rancherFirewall.manual_cidrs && rancherFirewall.manual_cidrs.length">
                   <span class="text-gray-500">Manual:</span>

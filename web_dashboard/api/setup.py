@@ -796,6 +796,10 @@ class K8sManagementFeatureConfig(BaseModel):
     rancher_bootstrap_password: str = ""      # first-run admin bootstrap; encrypted at rest
     rancher_verify_tls: bool = False          # verify the node's TLS cert on API calls (False = self-signed)
     rancher_allowed_source_cidrs: str = ""    # OPTIONAL/ADDITIVE CSV CIDRs for the node's public-IP GCE firewall (tcp 80/443). Provisioned clusters' egress IPs + the dashboard-managed Web-Jump Jumpoint IP are auto-added; use this only for extra operator IPs + pre-existing operator Jumpoints. Fully empty (manual + auto) = NOT opened unless gcp_rancher_allow_open
+    rancher_dashboard_egress_cidr: str = ""   # the dashboard's own egress IP/CIDR (auto-detected; a manually-set pool CIDR that contains the detected IP is kept)
+    rancher_ready_timeout_s: int = 360        # deploy readiness poll budget
+    rancher_api_transport: str = "direct"     # direct | runner (in-cloud Cloud Run curl — for corp networks whose TLS inspection blocks the node's self-signed cert)
+    rancher_runner_source_cidr: str = ""      # VPC connector /28 auto-added to the node firewall when transport=runner
     # GCE COS Rancher node deploy knobs (see config.py gcp_rancher_*).
     gcp_rancher_image: str = "rancher/rancher:latest"
     gcp_rancher_machine_type: str = "e2-medium"   # ≥4 GB required
