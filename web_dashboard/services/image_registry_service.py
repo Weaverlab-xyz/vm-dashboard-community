@@ -11,6 +11,7 @@ import json
 import logging
 from datetime import datetime, timezone
 from typing import Optional
+from urllib.parse import urlparse
 
 from sqlalchemy.orm import Session
 
@@ -463,10 +464,13 @@ def _parse_hub_url(artefact_url: str) -> tuple[str, str]:
         rest = url[len("gs://"):]
         _, _, key = rest.partition("/")
         return ("gcs", key)
-    if url.startswith("https://") and ".blob.core.windows.net/" in url:
+    parsed = urlparse(url)
+    if parsed.scheme == "https" and (parsed.hostname or "").endswith(".blob.core.windows.net"):
         # https://<account>.blob.core.windows.net/<container>/<key>
-        after_host = url.split(".blob.core.windows.net/", 1)[1]
-        _, _, key = after_host.partition("/")
+        # Match on the parsed hostname (not a substring) so a host like
+        # evil.com/.blob.core.windows.net/ can't slip through. The account is
+        # discarded — the key is everything past the container segment.
+        _, _, key = parsed.path.lstrip("/").partition("/")
         return ("azure_blob", key)
     raise ImageRegistryError(
         f"artefact_url '{url}' isn't on a recognised hub backend (s3/azure_blob/gcs). "

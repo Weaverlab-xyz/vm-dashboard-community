@@ -605,7 +605,7 @@ async def oauth_azure_callback(
     """Handle the OAuth callback from Azure AD."""
     if error:
         return RedirectResponse(
-            url=f"/login?error=oauth_error&detail={error_description or error}",
+            url="/login?" + urlencode({"error": "oauth_error", "detail": error_description or error}),
             status_code=302,
         )
 
@@ -636,7 +636,7 @@ async def oauth_azure_callback(
 
     if "error" in result:
         return RedirectResponse(
-            url=f"/login?error=token_error&detail={result.get('error_description', '')}",
+            url="/login?" + urlencode({"error": "token_error", "detail": result.get("error_description", "")}),
             status_code=302,
         )
 
@@ -711,7 +711,8 @@ async def oauth_oidc_callback(
 
     if error:
         return RedirectResponse(
-            url=f"/login?error=oauth_error&detail={error_description or error}", status_code=302)
+            url="/login?" + urlencode({"error": "oauth_error", "detail": error_description or error}),
+            status_code=302)
 
     stored = verify_and_consume_oauth_state(state) if state else None
     if not stored:
