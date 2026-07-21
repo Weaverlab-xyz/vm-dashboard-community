@@ -200,6 +200,15 @@ async def network_options(
         _zone = _gcp_zone()
         _region = _gcp_region()
 
+    # The Zone dropdown must offer zones across every configured region, not just
+    # the current one — otherwise multi-region setups (gcp_region_configs) can't
+    # deploy outside the default region. Collect the default region plus every
+    # per-region config set so the returned zone list spans all of them.
+    from ..services import region_config
+    _zone_regions = set(region_config.load_region_configs("gcp").keys())
+    _zone_regions.add(_gcp_region())
+    _zone_regions.add(_region)
+
     cache_key = cache_service.key_param("gcp_network_opts", region=_region)
     if not bust:
         cached = await cache_service.get(cache_key)
@@ -215,6 +224,7 @@ async def network_options(
             project_id=project_id,
             region=_region,
             zone=_zone,
+            zone_regions=sorted(_zone_regions),
         )
     except gcp_service.GCPError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
