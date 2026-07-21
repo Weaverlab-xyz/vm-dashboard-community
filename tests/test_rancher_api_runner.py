@@ -28,15 +28,19 @@ async def _fake_run_cloud_run_k8s_task(**kw):
     return _JOB_RESULT.get("exit_code", 0), _JOB_RESULT.get("output", "")
 
 
+_RESOLVED = {"project_id": "proj-test", "region": "us-central1",
+             "image": "dtzar/helm-kubectl:latest",
+             "vpc_connector": "runner-conn",
+             "vpc_network": "sandbox-vpc", "vpc_subnetwork": "sandbox-subnet"}
+
+
 def _install_stubs():
     gcp = types.ModuleType("web_dashboard.services.gcp_service")
     gcp.run_cloud_run_k8s_task = _fake_run_cloud_run_k8s_task
     sys.modules["web_dashboard.services.gcp_service"] = gcp
 
     krs = types.ModuleType("web_dashboard.services.k8s_runner_service")
-    krs._resolve_gcp = lambda: {"project_id": "proj-test", "region": "us-central1",
-                                "image": "dtzar/helm-kubectl:latest",
-                                "vpc_connector": "runner-conn"}
+    krs._resolve_gcp = lambda: dict(_RESOLVED)
     sys.modules["web_dashboard.services.k8s_runner_service"] = krs
 
 
@@ -89,9 +93,32 @@ def test_request_parses_status_and_body():
     # The call rode the stubbed Cloud Run task with the config on stdin (not argv).
     kw = _CALLS[0]
     assert kw["vpc_connector"] == "runner-conn"
+    # Direct-VPC-egress fields pass through so the job NIC lands in the subnet.
+    assert kw["vpc_network"] == "sandbox-vpc"
+    assert kw["vpc_subnetwork"] == "sandbox-subnet"
     stdin = base64.b64decode(kw["stdin_b64"]).decode()
     assert "Authorization: Bearer t" in stdin
     assert "Authorization" not in kw["command"]  # secrets not in argv
+
+
+def test_resolve_requires_vpc_reach():
+    """No connector AND no direct-egress subnet → fail fast with the exact keys
+    (a VPC-less job launches fine but can't route to the internal IP, silently
+    burning the readiness budget — the failure mode this guard prevents)."""
+    global _RESOLVED
+    saved = dict(_RESOLVED)
+    _RESOLVED.update(vpc_connector="", vpc_network="", vpc_subnetwork="")
+    try:
+        try:
+            asyncio.run(rar.request("GET", "https://10.1.2.3/ping"))
+            raised = False
+        except rar.RancherRunnerError as exc:
+            raised = True
+            assert "gcp_run_network" in str(exc)
+        assert raised
+    finally:
+        _RESOLVED.clear()
+        _RESOLVED.update(saved)
 
 
 def test_request_no_marker_raises():

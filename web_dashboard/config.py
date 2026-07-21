@@ -719,6 +719,12 @@ class Settings(BaseSettings):
     gcp_ansible_cloud_run_region: str = ""   # defaults to gcp_region if blank
     gcp_ansible_image: str = "chrweav/ansible-winrm:latest"
     gcp_ansible_vpc_connector: str = ""      # e.g. "projects/proj/locations/region/connectors/name" (optional, for private host access)
+    # Direct VPC egress for Cloud Run runner jobs — the job's NIC lands straight in
+    # the subnet (no Serverless-VPC-Access connector: no standing cost, and immune
+    # to the connector's shared-core zonal stockouts). Set BOTH; wins over
+    # gcp_ansible_vpc_connector when set. Egress stays private-ranges-only.
+    gcp_run_network: str = ""                # VPC name, e.g. "dashboard-sandbox-vpc"
+    gcp_run_subnetwork: str = ""             # subnet in the runner's region, e.g. "dashboard-sandbox-jumpoint-subnet"
 
     # Ephemeral cloud secrets for managed-account checkout on the ECS / Cloud Run
     # runners. OFF by default: a checked-out Password Safe credential is written to

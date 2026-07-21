@@ -1880,7 +1880,7 @@ _K8S_RUNNER_PREFIX = "k8s-runner"
 def _run_cloud_run_k8s_sync(
     project_id: str, region: str, image: str,
     command: str, kubeconfig_b64: str, stdin_b64: str, job_id: str,
-    vpc_connector: str = "",
+    vpc_connector: str = "", vpc_network: str = "", vpc_subnetwork: str = "",
 ) -> tuple:
     """
     Create a Cloud Run Job that runs a single kubectl/helm command against a
@@ -1891,6 +1891,13 @@ def _run_cloud_run_k8s_sync(
     cleanup shape. The stock kubectl+helm `image`, the generic shell `command`,
     and the kubeconfig (decoded from the ``KUBECONFIG_B64`` env into
     ``$KUBECONFIG``) are the only differences.
+
+    VPC reach (for private targets, e.g. the Rancher node's internal IP), two
+    mutually exclusive modes — **direct VPC egress** (``vpc_network`` /
+    ``vpc_subnetwork``: the task gets a NIC in the subnet; serverless, no standing
+    infra, immune to the Serverless-VPC-Access connector's shared-core zonal
+    stockouts) wins over the legacy **connector** (``vpc_connector`` annotation)
+    when both are set. Either way egress stays private-ranges-only.
     """
     import time
     _require_run()
@@ -1939,8 +1946,19 @@ def _run_cloud_run_k8s_sync(
         timeout="1200s",
     )
 
+    if vpc_network or vpc_subnetwork:
+        ni_kwargs = {}
+        if vpc_network:
+            ni_kwargs["network"] = vpc_network
+        if vpc_subnetwork:
+            ni_kwargs["subnetwork"] = vpc_subnetwork
+        task_template.vpc_access = run_v2.VpcAccess(
+            network_interfaces=[run_v2.VpcAccess.NetworkInterface(**ni_kwargs)],
+            egress=run_v2.VpcAccess.VpcEgress.PRIVATE_RANGES_ONLY,
+        )
+
     exec_template = run_v2.ExecutionTemplate(template=task_template)
-    if vpc_connector:
+    if vpc_connector and not (vpc_network or vpc_subnetwork):
         exec_template.annotations = {
             "run.googleapis.com/vpc-access-connector": vpc_connector,
             "run.googleapis.com/vpc-access-egress": "private-ranges-only",
@@ -2009,18 +2027,19 @@ async def run_cloud_run_k8s_task(
     *,
     project_id: str, region: str, image: str,
     command: str, kubeconfig_b64: str, stdin_b64: str = "", job_id: str,
-    vpc_connector: str = "",
+    vpc_connector: str = "", vpc_network: str = "", vpc_subnetwork: str = "",
 ) -> tuple:
     """
     Run a kubectl/helm command against a cluster's API via a GCP Cloud Run Job.
-    Returns (exit_code, output_log).
+    Returns (exit_code, output_log). ``vpc_network``/``vpc_subnetwork`` enable
+    direct VPC egress (preferred over the ``vpc_connector`` annotation).
     """
     try:
         return await asyncio.to_thread(
             _run_cloud_run_k8s_sync,
             project_id, region, image,
             command, kubeconfig_b64, stdin_b64, job_id,
-            vpc_connector,
+            vpc_connector, vpc_network, vpc_subnetwork,
         )
     except GCPError:
         raise
