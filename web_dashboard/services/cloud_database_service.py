@@ -1043,6 +1043,48 @@ def _job_stream(job_id: str, start_pct: int, start_msg: str):
     return on_line
 
 
+async def _reclaim_gcp_create_wait_instance(
+    *, row: CloudDatabase, job_id: str, engine: str, tf_variables: dict, exc: Exception,
+) -> Optional[dict]:
+    """GCP-only self-heal for the transient Cloud SQL *create-wait* failure. The
+    google provider clears the resource id (``d.SetId("")``) when the create
+    operation-wait errors, so the instance is dropped from Terraform state even
+    though GCP finishes creating it — the apply raises "Error waiting for Create
+    Instance:" and, left alone, orphans a RUNNABLE instance (which
+    :func:`run_decommission` later has to sweep, wasting the instance and blocking
+    the name for ~a week).
+
+    Instead: poll GCP for the instance (guarded on our ``clouddb-id`` label) until
+    it is RUNNABLE, ``terraform import`` it back into state, then re-apply to
+    converge (create the database + user, read outputs). Returns the outputs dict
+    on success, or ``None`` when this isn't that failure or the instance can't be
+    reclaimed — the caller then fails the job as before."""
+    if row.cloud != "gcp" or "error waiting for create instance" not in str(exc).lower():
+        return None
+    from . import gcp_service
+    project = (tf_variables.get("project")
+               or _cfg("gcp_project") or _cfg("gcp_project_id"))
+    name = tf_variables.get("identifier") or f"clouddb-{row.id[:8]}"
+    logger.warning("clouddb apply: transient GCP create-wait error for %s — checking "
+                   "whether GCP created the instance anyway", name)
+    body = await gcp_service.wait_sql_instance_runnable(project, name, row.id)
+    if not body:
+        logger.warning("clouddb apply: %s not reclaimable (absent / not ours / not "
+                       "RUNNABLE) — failing the provision", name)
+        return None
+    logger.warning("clouddb apply: %s is RUNNABLE despite the create-wait error — "
+                   "importing it into state and re-applying to converge", name)
+    await terraform.import_resource(
+        _deploy_dir(job_id), "google_sql_database_instance.this", f"{project}/{name}",
+        env=terraform_provider_env.provider_env(row.cloud),
+        template_dir=template_dir(engine, row.cloud), variables=tf_variables)
+    return await terraform.apply(
+        _deploy_dir(job_id), tf_variables, template_dir=template_dir(engine, row.cloud),
+        env=terraform_provider_env.provider_env(row.cloud),
+        on_line=_job_stream(job_id, 40, "Reclaiming the created instance…"),
+    )
+
+
 async def run_provision_apply(
     db: Session, *, db_id: str, job_id: str, engine: str, tf_variables: dict,
 ) -> None:
@@ -1073,11 +1115,20 @@ async def run_provision_apply(
             except Exception as exc:
                 logger.warning("clouddb: ensure jumpoint host (pre-apply) failed (non-fatal): %s", exc)
 
-        outputs = await terraform.apply(
-            _deploy_dir(job_id), tf_variables, template_dir=template_dir(engine, row.cloud),
-            env=terraform_provider_env.provider_env(row.cloud),
-            on_line=_job_stream(job_id, 5, "Provisioning the database…"),
-        )
+        try:
+            outputs = await terraform.apply(
+                _deploy_dir(job_id), tf_variables, template_dir=template_dir(engine, row.cloud),
+                env=terraform_provider_env.provider_env(row.cloud),
+                on_line=_job_stream(job_id, 5, "Provisioning the database…"),
+            )
+        except terraform.TerraformError as exc:
+            # GCP Cloud SQL create-wait self-heal: on the transient "Error waiting for
+            # Create Instance" the google provider drops the (still-created) instance
+            # from state. Try to reclaim it via import + re-apply rather than failing.
+            outputs = await _reclaim_gcp_create_wait_instance(
+                row=row, job_id=job_id, engine=engine, tf_variables=tf_variables, exc=exc)
+            if outputs is None:
+                raise
         row.instance_id = str(outputs.get("instance_id") or "")
         row.private_host = str(outputs.get("private_host") or "")
         if outputs.get("port"):

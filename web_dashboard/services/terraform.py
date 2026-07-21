@@ -245,6 +245,14 @@ def _destroy_sync(deploy_dir: str, env: Optional[dict] = None,
         raise TerraformError(f"terraform destroy failed:\n{r.stderr}\n{r.stdout}")
 
 
+def _import_sync(deploy_dir: str, address: str, resource_id: str,
+                 var_args: Optional[list] = None, env: Optional[dict] = None) -> None:
+    cmd = ["import", "-no-color", "-input=false"] + (var_args or []) + [address, resource_id]
+    r = _run(cmd, deploy_dir, timeout=300, env=env)
+    if r.returncode != 0:
+        raise TerraformError(f"terraform import failed:\n{r.stderr}\n{r.stdout}")
+
+
 def _build_var_args(variables: dict) -> list:
     """Convert a variables dict to a list of -var flags for the CLI."""
     args = []
@@ -412,3 +420,37 @@ async def destroy(deploy_dir: str, env: Optional[dict] = None,
         deploy_dir, merged_env, on_line)
     if rc != 0:
         raise TerraformError(f"terraform destroy failed:\n{out}")
+
+
+async def import_resource(deploy_dir: str, address: str, resource_id: str,
+                          env: Optional[dict] = None,
+                          template_dir: Optional[str] = None,
+                          variables: Optional[dict] = None) -> None:
+    """Adopt an already-created cloud resource into this deployment's state via
+    ``terraform import <address> <resource_id>``.
+
+    Used to recover from a provider that dropped a resource from state on a
+    transient create-wait error even though the cloud finished creating it (the
+    GCP Cloud SQL create-wait bug): after the import, re-applying converges the
+    rest of the module instead of failing on a name collision. Init + module-
+    rebuild logic mirrors :func:`destroy`; ``variables`` must be the module's -var
+    set because ``import`` evaluates the provider config (same reason destroy needs
+    it). Non-streamed — import output is brief and not user-interesting.
+    """
+    backend_type, backend_config, backend_env = _backend_settings(deploy_dir)
+    merged_env = {**backend_env, **(env or {})}
+    var_args = _build_var_args(variables) if variables else []
+
+    # Rebuild the module if the deploy dir was lost (only possible with a remote
+    # backend); mirrors destroy. The common caller (a failed apply retrying) still
+    # has the materialized dir, so this is just a safety net.
+    if not os.path.exists(os.path.join(deploy_dir, "main.tf")):
+        if template_dir and os.path.isdir(template_dir) and backend_type != "local":
+            _materialize(deploy_dir, template_dir)
+        else:
+            raise TerraformError(
+                f"Cannot import into {deploy_dir}: no main.tf and the module template "
+                f"{template_dir!r} is unavailable or the backend is local.")
+
+    await asyncio.to_thread(_init_sync, deploy_dir, merged_env, backend_type, backend_config)
+    await asyncio.to_thread(_import_sync, deploy_dir, address, resource_id, var_args, merged_env)

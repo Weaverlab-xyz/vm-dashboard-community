@@ -2659,3 +2659,54 @@ async def sweep_orphan_sql_instance(project: str, name: str, clouddb_id: str) ->
     """Async wrapper for :func:`_sweep_orphan_sql_instance_sync`."""
     return await asyncio.to_thread(
         _sweep_orphan_sql_instance_sync, project, name, clouddb_id)
+
+
+def _wait_sql_instance_runnable_sync(
+    project: str, name: str, clouddb_id: str, *, ready_timeout_s: int = 900,
+) -> Optional[dict]:
+    """Return the Cloud SQL instance body once it is ``RUNNABLE`` and labeled
+    ``clouddb-id=<clouddb_id>``; ``None`` if no such instance exists, it isn't ours,
+    it lands in a terminal non-runnable state (e.g. ``FAILED``), or it doesn't settle
+    within ``ready_timeout_s``.
+
+    This is the read-side companion to :func:`_sweep_orphan_sql_instance_sync`: the
+    google provider drops a mid-create Cloud SQL instance from Terraform state when
+    the create operation-wait errors (``d.SetId("")``) even though GCP finishes the
+    create. The provisioner uses this to detect that the instance came up anyway so
+    it can ``terraform import`` it back rather than orphan it. The label guard means
+    we never adopt an instance we didn't create. Synchronous; callers wrap in
+    ``asyncio.to_thread``."""
+    s = _authed_session()
+    inst_url = f"{_SQLADMIN_BASE}/projects/{project}/instances/{name}"
+    deadline = time.monotonic() + ready_timeout_s
+    while True:
+        r = s.get(inst_url)
+        if r.status_code == 404:
+            return None
+        r.raise_for_status()
+        body = r.json()
+        labels = (body.get("settings") or {}).get("userLabels") or {}
+        if labels.get("clouddb-id") != clouddb_id:
+            logger.info("gcp sql reclaim: %s exists but clouddb-id %r != %r — not ours",
+                        name, labels.get("clouddb-id"), clouddb_id)
+            return None
+        state = body.get("state")
+        if state == "RUNNABLE":
+            return body
+        if state in ("PENDING_CREATE", "SQL_INSTANCE_STATE_UNSPECIFIED", "MAINTENANCE"):
+            if time.monotonic() >= deadline:
+                logger.warning("gcp sql reclaim: %s still %s after %ss — giving up",
+                               name, state, ready_timeout_s)
+                return None
+            time.sleep(10)
+            continue
+        # Terminal non-runnable (FAILED, SUSPENDED, PENDING_DELETE, …) — not reclaimable.
+        logger.warning("gcp sql reclaim: %s in non-runnable state %s — not reclaiming",
+                       name, state)
+        return None
+
+
+async def wait_sql_instance_runnable(project: str, name: str, clouddb_id: str) -> Optional[dict]:
+    """Async wrapper for :func:`_wait_sql_instance_runnable_sync`."""
+    return await asyncio.to_thread(
+        _wait_sql_instance_runnable_sync, project, name, clouddb_id)
