@@ -91,7 +91,16 @@ class Settings(BaseSettings):
     rancher_ui_web_jump_tfstate: str = ""     # terraform state for the Web Jump (for teardown)
     rancher_ui_jumpoint_cloud: str = "gcp"    # which dashboard-managed Jumpoint host brokers the Rancher UI (gcp|aws|azure); its egress IP is auto-whitelisted. gcp = same cloud as the node
     rancher_ui_jumpoint_egress_ip: str = ""   # dashboard-managed Web-Jump Jumpoint host egress IP (runtime-set; auto-added to the node firewall as a /32). Azure host has no public IP → left blank (add manually)
-    rancher_dashboard_egress_cidr: str = ""   # the DASHBOARD's own public egress IP/CIDR — the source the worker uses to bootstrap + poll the node over its PUBLIC IP, so it MUST be in the firewall or the deploy can't reach its own node. Auto-detected + persisted on deploy (best-effort IP-echo); set manually when detection can't reach an echo service (e.g. behind a TLS-inspecting proxy). Bare IP → /32.
+    rancher_dashboard_egress_cidr: str = ""   # the DASHBOARD's own public egress IP/CIDR — the source the worker uses to bootstrap + poll the node over its PUBLIC IP, so it MUST be in the firewall or the deploy can't reach its own node. Auto-detected + persisted on deploy (best-effort IP-echo); a manually-set CIDR that CONTAINS the detected IP is kept (corp proxies egress from an IP pool — set the pool's CIDR, e.g. 104.28.182.0/24). Bare IP → /32.
+    # Dashboard→Rancher API transport. Corp networks that TLS-inspect (e.g.
+    # Cloudflare Gateway) reject the node's self-signed cert IN TRANSIT, killing
+    # every direct HTTPS call (readiness, bootstrap, import API) — verify=False
+    # can't bypass a proxy-side block. "runner" executes each call as curl in a
+    # one-shot GCP Cloud Run job targeting the node's INTERNAL IP via the VPC
+    # connector (reuses the k8s runner's gcp_region / gcp_ansible_vpc_connector).
+    rancher_api_transport: str = "direct"     # direct | runner
+    rancher_internal_url: str = ""            # https://<node internal IP> (runtime-set at deploy; what the runner dials)
+    rancher_runner_source_cidr: str = ""      # the VPC connector's /28 — auto-added to the node firewall when transport=runner (GCE ingress rules apply to internal traffic too)
     # Entitle Rancher connector registration. The application slug is
     # tenant/connector-specific — confirm against the entitle_applications catalog
     # before use (default is best-effort). With the PUBLIC source-restricted node,

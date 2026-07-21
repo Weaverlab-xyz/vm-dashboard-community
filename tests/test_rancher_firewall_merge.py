@@ -215,6 +215,53 @@ def test_noop_when_no_project():
     assert _APPLIED == {}  # ensure_rancher_firewall NOT called
 
 
+def test_runner_source_cidr_merged_only_when_runner_transport():
+    # transport=runner → the VPC connector's range joins the merge (GCE ingress
+    # rules apply to internal traffic too, so the in-cloud API runner needs it).
+    _reset(rancher_api_transport="runner", rancher_runner_source_cidr="10.8.0.0/28")
+    _run_refresh(rows=[_Row("eks-a", "aws", "1.2.3.4")])
+    assert _APPLIED["source_cidrs"] == sorted(["1.2.3.4/32", "10.8.0.0/28"])
+    # direct transport → the connector range stays out.
+    _reset(rancher_api_transport="direct", rancher_runner_source_cidr="10.8.0.0/28")
+    _run_refresh(rows=[_Row("eks-a", "aws", "1.2.3.4")])
+    assert _APPLIED["source_cidrs"] == ["1.2.3.4/32"]
+
+
+def _run_ensure_egress(detected_ip: str):
+    """Drive _ensure_dashboard_egress_cidr with a stubbed detector."""
+    orig = svc._detect_egress_ip
+
+    async def fake():
+        return detected_ip
+    svc._detect_egress_ip = fake
+    try:
+        return asyncio.run(svc._ensure_dashboard_egress_cidr())
+    finally:
+        svc._detect_egress_ip = orig
+
+
+def test_egress_containment_keeps_operator_pool():
+    # Corp proxies egress from a POOL: an operator-set CIDR that CONTAINS the
+    # detected IP must be kept — clobbering it with this connection's /32 would
+    # drop the next connection (per-destination pool hashing).
+    _reset(rancher_dashboard_egress_cidr="104.28.182.0/24")
+    assert _run_ensure_egress("104.28.182.70") == "104.28.182.0/24"
+    assert _CFG["rancher_dashboard_egress_cidr"] == "104.28.182.0/24"  # unchanged
+
+
+def test_egress_detection_outside_pool_replaces():
+    # A detected IP OUTSIDE the stored CIDR = the egress genuinely moved → track it.
+    _reset(rancher_dashboard_egress_cidr="104.28.182.0/24")
+    assert _run_ensure_egress("9.9.9.9") == "9.9.9.9/32"
+    assert _CFG["rancher_dashboard_egress_cidr"] == "9.9.9.9/32"
+
+
+def test_egress_detection_failure_keeps_existing():
+    _reset(rancher_dashboard_egress_cidr="104.28.182.0/24")
+    assert _run_ensure_egress("") == "104.28.182.0/24"
+    assert _CFG["rancher_dashboard_egress_cidr"] == "104.28.182.0/24"
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0

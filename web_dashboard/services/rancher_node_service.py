@@ -118,6 +118,24 @@ def _dashboard_cidr() -> list[str]:
     return [val if "/" in val else f"{val}/32"]
 
 
+def _runner_cidr() -> list[str]:
+    """Source range for the in-cloud API runner (``rancher_api_transport=runner``).
+
+    The Cloud Run runner reaches the node's INTERNAL IP through the VPC connector,
+    and GCE ingress firewalls apply to internal traffic too — so the connector's
+    /28 (``rancher_runner_source_cidr``) must be admitted. Private RFC1918 range;
+    adds no public exposure. Empty when the transport is direct."""
+    if (config_service.get("rancher_api_transport") or "direct").strip().lower() != "runner":
+        return []
+    val = (config_service.get("rancher_runner_source_cidr") or "").strip()
+    if not val:
+        logger.warning("rancher_api_transport=runner but rancher_runner_source_cidr is unset — "
+                       "the runner can only reach the node if the VPC's default internal-allow "
+                       "rule covers the connector range. Set it in Settings → Kubernetes.")
+        return []
+    return [val if "/" in val else f"{val}/32"]
+
+
 def _ready_timeout_s() -> int:
     """Readiness poll budget (config ``rancher_ready_timeout_s``, default 360s)."""
     from ..config import settings
@@ -151,18 +169,31 @@ async def _detect_egress_ip() -> str:
 
 
 async def _ensure_dashboard_egress_cidr() -> str:
-    """Refresh + persist the dashboard's own egress /32 so the firewall admits the
-    worker. Detection wins when it succeeds (tracks a changed dynamic IP); on failure
-    any operator-set ``rancher_dashboard_egress_cidr`` is left intact. Returns the
-    CIDR now in effect (``""`` if still unknown)."""
+    """Refresh + persist the dashboard's own egress CIDR so the firewall admits the
+    worker. Detection tracks a changed dynamic IP, but an operator-set CIDR that
+    already CONTAINS the detected IP is kept as-is: corp proxies (Cloudflare WARP)
+    egress from a per-connection POOL of IPs, so pinning whichever /32 detection saw
+    this time would still drop the next connection — the operator sets the pool's
+    CIDR once (e.g. ``104.28.182.0/24``) and detection must not clobber it. On
+    detection failure any operator-set value is left intact. Returns the CIDR now
+    in effect (``""`` if still unknown)."""
+    import ipaddress
     ip = await _detect_egress_ip()
+    existing = (config_service.get("rancher_dashboard_egress_cidr") or "").strip()
     if ip:
+        if existing:
+            try:
+                net = ipaddress.ip_network(existing if "/" in existing else f"{existing}/32",
+                                           strict=False)
+                if ipaddress.ip_address(ip) in net:
+                    return existing  # detected IP already covered — keep the broader pin
+            except ValueError:
+                pass  # malformed stored value — fall through and replace it
         cidr = f"{ip}/32"
-        if (config_service.get("rancher_dashboard_egress_cidr") or "").strip() != cidr:
+        if existing != cidr:
             config_service.set("rancher_dashboard_egress_cidr", cidr)
             logger.info("Rancher firewall: dashboard egress IP detected as %s", cidr)
         return cidr
-    existing = (config_service.get("rancher_dashboard_egress_cidr") or "").strip()
     if not existing:
         logger.warning("Rancher firewall: could not auto-detect the dashboard's public egress IP "
                        "and rancher_dashboard_egress_cidr is unset — the worker may be unable to "
@@ -186,7 +217,7 @@ async def refresh_rancher_firewall(db) -> dict:
     if not p["project_id"]:
         return {"skipped": "no gcp project configured"}
     merged = sorted(set(_allowed_cidrs()) | set(_auto_cluster_cidrs(db))
-                    | set(_jumpoint_cidr()) | set(_dashboard_cidr()))
+                    | set(_jumpoint_cidr()) | set(_dashboard_cidr()) | set(_runner_cidr()))
     return await gcp_service.ensure_rancher_firewall(
         p["project_id"], p["network"], p["network_tag"], merged, _firewall_name(p["name"]))
 
@@ -201,32 +232,54 @@ def firewall_status(db) -> dict:
                 for r in rows if (r.egress_ip or "").strip()]
     jump = _jumpoint_cidr()
     dash = _dashboard_cidr()
-    merged = sorted(set(_allowed_cidrs()) | set(_auto_cluster_cidrs(db)) | set(jump) | set(dash))
+    runner = _runner_cidr()
+    merged = sorted(set(_allowed_cidrs()) | set(_auto_cluster_cidrs(db))
+                    | set(jump) | set(dash) | set(runner))
     csv = config_service.get("rancher_allowed_source_cidrs") or ""
     return {
         "manual_cidrs": [c.strip() for c in csv.split(",") if c.strip()],
         "cluster_egress_ips": clusters,
         "jumpoint_egress_ip": jump[0] if jump else "",
         "dashboard_egress_ip": dash[0] if dash else "",
+        "runner_source_cidr": runner[0] if runner else "",
         "merged": merged,
         "allow_open": config_service.get_bool("gcp_rancher_allow_open", False),
         "opened": bool(merged),
     }
 
 
-async def _wait_ready(url: str, timeout_s: int = _READY_TIMEOUT_S) -> bool:
-    """Poll the node until Rancher answers (it needs 1-3 min; expect early 5xx)."""
+async def _wait_ready(url: str, timeout_s: int = _READY_TIMEOUT_S) -> str:
+    """Poll the node until Rancher answers (it needs 1-3 min; expect early 5xx).
+
+    Returns ``"ready"`` when HTTPS ``/ping`` answers. On budget exhaustion it
+    probes plain-HTTP ``/ping`` (port 80, no certificates involved) once to
+    DISCRIMINATE the failure: ``"tls_blocked"`` = the node is UP and serving but
+    the HTTPS handshake never completes — the classic corp TLS-inspection
+    signature (an inspecting proxy, e.g. Cloudflare Gateway, rejects the node's
+    self-signed cert at ITS origin-side verification, which ``verify=False``
+    cannot bypass); ``"timeout"`` = nothing answered at all (container still
+    initialising, or the firewall doesn't admit this worker's egress).
+    """
     deadline = asyncio.get_event_loop().time() + timeout_s
     async with httpx.AsyncClient(verify=False, timeout=10.0) as c:
         while asyncio.get_event_loop().time() < deadline:
             try:
                 r = await c.get(f"{url}/ping")
                 if r.status_code < 500:
-                    return True
+                    return "ready"
             except httpx.HTTPError:
                 pass
             await asyncio.sleep(_READY_POLL_S)
-    return False
+    # HTTPS never made it — is the node actually up? /ping carries no secrets,
+    # so a plain-HTTP probe is safe and passes TLS inspection untouched.
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as c:
+            r = await c.get(f"{url.replace('https://', 'http://', 1)}/ping")
+            if r.status_code == 200:
+                return "tls_blocked"
+    except httpx.HTTPError:
+        pass
+    return "timeout"
 
 
 async def run_deploy(db, *, job_id: str, meta: dict) -> None:
@@ -277,6 +330,13 @@ async def run_deploy(db, *, job_id: str, meta: dict) -> None:
             job_service.set_failed(db, job_id, "Rancher VM has no external IP — cannot reach it.")
             return
         config_service.set("rancher_server_url", url)
+        # Internal URL: what the in-cloud API runner dials (rancher_api_transport=
+        # runner) — its VPC-connector egress is private-ranges-only, so the public
+        # IP is unroutable from it. Persist unconditionally so flipping the
+        # transport later doesn't need a redeploy.
+        internal_ip = res.get("internal_ip") or ""
+        if internal_ip:
+            config_service.set("rancher_internal_url", f"https://{internal_ip}")
 
         existing_token = config_service.get("rancher_api_token")
         if res.get("reused") and existing_token and res.get("status") == "RUNNING":
@@ -291,7 +351,29 @@ async def run_deploy(db, *, job_id: str, meta: dict) -> None:
         else:
             ready_timeout = _ready_timeout_s()
             job_service.update_progress(db, job_id, 55, "Waiting for Rancher to start")
-            if not await _wait_ready(url, ready_timeout):
+            transport = (config_service.get("rancher_api_transport") or "direct").strip().lower()
+            if transport == "runner":
+                # The runner probes from INSIDE GCP (internal IP) — the whole point
+                # is that the worker's own path may be TLS-inspected/blocked.
+                from . import rancher_api_runner
+                ready = await rancher_api_runner.wait_ready(
+                    f"https://{internal_ip}" if internal_ip else url, ready_timeout, job_id=job_id)
+            else:
+                ready = await _wait_ready(url, ready_timeout)
+            if ready == "tls_blocked":
+                # The node IS serving (plain-HTTP /ping answered) but the HTTPS
+                # handshake never completes from here — a TLS-inspecting corp proxy
+                # (e.g. Cloudflare Gateway) rejecting the node's self-signed cert.
+                # Nothing on the node/firewall side will fix that path.
+                job_service.set_failed(
+                    db, job_id,
+                    f"Rancher IS up at {url} (plain-HTTP /ping answers) but the HTTPS handshake "
+                    f"is being terminated in transit — this network TLS-inspects and rejects the "
+                    f"node's self-signed certificate. Set rancher_api_transport=runner in "
+                    f"Settings → Kubernetes (runs the API calls from an in-cloud runner) and "
+                    f"redeploy, or add a Do-Not-Inspect rule for the node in your proxy.")
+                return
+            if ready != "ready":
                 # Two common causes, so name both: (a) the node is up but the worker's
                 # egress isn't actually permitted (auto-detect missed / stale IP), or
                 # (b) the container is still initialising (cold image pull).
@@ -375,7 +457,7 @@ async def run_teardown(db, *, job_id: str, meta: dict) -> None:
             delete_firewall=True, firewall_name=_firewall_name(name))
 
         # Clear runtime config so a fresh deploy re-bootstraps cleanly.
-        for key in ("rancher_server_url", "rancher_api_token",
+        for key in ("rancher_server_url", "rancher_internal_url", "rancher_api_token",
                     "rancher_ui_web_jump_id", "rancher_ui_web_jump_tfstate",
                     "rancher_ui_jumpoint_egress_ip",
                     "entitle_rancher_integration_id", "entitle_rancher_tfstate"):
