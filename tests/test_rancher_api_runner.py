@@ -79,13 +79,16 @@ def test_curl_config_marshalling():
     assert "Authorization" not in bare and "data =" not in bare
 
 
+def _b64_line(body: str, code: str = "201") -> str:
+    return f"RANCHER_B64:{base64.b64encode(body.encode()).decode()}:RC:{code}\n"
+
+
 def test_request_parses_status_and_body():
-    _reset(output=(
-        "some cloud logging preamble\n"
-        "RANCHER_RESP_BEGIN\n"
-        '{"token": "token-xyz:secret"}\n'
-        "RANCHER_STATUS:201\n"
-    ))
+    # The response travels as ONE atomic RANCHER_B64 line: Cloud Logging ingests a
+    # raw-JSON stdout line as jsonPayload (it VANISHES from textPayload assembly)
+    # and can reorder same-instant lines — both bit live 2026-07-21.
+    _reset(output=("some cloud logging preamble\n"
+                   + _b64_line('{"token": "token-xyz:secret"}', "201")))
     status, body = asyncio.run(rar.request(
         "POST", "https://10.1.2.3/v3/token", token="t", json_body={"ttl": 0}))
     assert status == 201
@@ -102,30 +105,39 @@ def test_request_parses_status_and_body():
 
 
 def test_command_pipes_stdin_into_curl():
-    """Regression: the runner shell prepends ``printf %s "$STDIN_B64" | base64 -d |``
-    to the command, and a pipe binds to the FIRST simple command only. The command
-    must therefore be ONE brace group so `curl -K -` (not the leading echo) receives
-    the decoded config — the ungrouped version fed it to echo and curl died with
-    "no URL specified" (caught live). Executes the real composition under sh with a
-    curl shim to prove the config text reaches curl's stdin."""
+    """Regression + protocol round-trip: the runner shell prepends
+    ``printf %s "$STDIN_B64" | base64 -d |`` to the command, and a pipe binds to
+    the FIRST simple command only — the command must be ONE brace group with curl
+    first so `curl -K -` receives the decoded config (the ungrouped version fed
+    it to echo → "no URL specified", caught live). Executes the real composition
+    under sh with a curl shim that honours ``-o`` and emits a 201, then feeds the
+    stdout through the real ``_parse_response`` — proving stdin reaches curl AND
+    the single-line RANCHER_B64 protocol survives the shell round trip."""
     import os
     import shutil
     import subprocess
-    _reset(output="RANCHER_RESP_BEGIN\nok\nRANCHER_STATUS:200\n")
+    _reset(output=_b64_line("ok"))
     asyncio.run(rar.request("GET", "https://10.1.2.3/ping", token="tok-x"))
     kw = _CALLS[0]
-    assert kw["command"].lstrip().startswith("{"), "command must be a single brace group"
+    assert kw["command"].lstrip().startswith("{ curl"), "curl must lead the brace group"
     sh = shutil.which("sh") or shutil.which("bash")
     if not sh:  # pragma: no cover — no POSIX shell on this host; shape assert above still ran
         return
-    # Mirror gcp_service._run_cloud_run_k8s_sync's stdin composition exactly,
-    # shimming curl as a function that just echoes its stdin back.
-    full = ('curl() { cat; }; printf %s "$STDIN_B64" | base64 -d | ' + kw["command"])
+    # curl shim: write stdin (the config) to the -o file, print the http code to
+    # stdout like `-w %{http_code}` would.
+    shim = (
+        'curl() { out=""; prev=""; '
+        'for a in "$@"; do if [ "$prev" = "-o" ]; then out="$a"; fi; prev="$a"; done; '
+        'cat > "$out"; printf 201; }; '
+    )
+    full = shim + 'printf %s "$STDIN_B64" | base64 -d | ' + kw["command"]
     r = subprocess.run([sh, "-c", full], capture_output=True, text=True,
                        env={**os.environ, "STDIN_B64": kw["stdin_b64"]})
     assert r.returncode == 0, r.stderr
-    assert 'url = "https://10.1.2.3/ping"' in r.stdout, r.stdout
-    assert "Authorization: Bearer tok-x" in r.stdout
+    status, body = rar._parse_response(r.stdout)
+    assert status == 201
+    assert 'url = "https://10.1.2.3/ping"' in body, body
+    assert "Authorization: Bearer tok-x" in body
 
 
 def test_resolve_requires_vpc_reach():
@@ -159,7 +171,9 @@ def test_request_no_marker_raises():
 
 
 def test_request_no_status_raises():
-    _reset(output="RANCHER_RESP_BEGIN\ncurl: (7) connection refused\n")
+    # Marker line present but the code slot is empty = curl died before an HTTP
+    # status (network failure) — must raise, not return a bogus status.
+    _reset(output="RANCHER_B64::RC:\ncurl: (7) connection refused\n")
     try:
         asyncio.run(rar.request("GET", "https://10.1.2.3/ping"))
         raised = False
@@ -190,9 +204,7 @@ def test_rancher_service_runner_routing():
     sys.modules["web_dashboard.services.config_service"] = cfgmod
     from web_dashboard.services import rancher_service as rs
 
-    _reset(output="RANCHER_RESP_BEGIN\n"
-                  '{"id": "c-m-abc"}\n'
-                  "RANCHER_STATUS:201\n")
+    _reset(output=_b64_line('{"id": "c-m-abc"}', "201"))
     status, body = asyncio.run(rs._call("POST", "/v3/cluster",
                                         token="token-cfg:secret",
                                         json={"type": "cluster", "name": "demo"}))

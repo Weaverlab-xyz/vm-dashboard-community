@@ -28,8 +28,14 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-_BEGIN = "RANCHER_RESP_BEGIN"
-_STATUS = "RANCHER_STATUS:"
+# The whole HTTP response travels as ONE atomic text line:
+#   RANCHER_B64:<base64 body>:RC:<http code>
+# Two Cloud Logging behaviours force this shape (both bit live 2026-07-21): a log
+# line that parses as JSON is ingested as structured jsonPayload — so a raw JSON
+# response body VANISHES from textPayload-based log assembly — and lines emitted
+# within the same instant can come back reordered. One base64 (never valid JSON,
+# no ':' in its alphabet) line sidesteps both.
+_B64_MARK = "RANCHER_B64:"
 _READY = "RANCHER_READY"
 _NOT_READY = "RANCHER_NOT_READY"
 
@@ -84,7 +90,6 @@ def _curl_config(method: str, url: str, *, token: str = "",
         "silent",
         "show-error",
         f"max-time = {int(timeout_s)}",
-        f'write-out = "\\n{_STATUS}%{{http_code}}"',
     ]
     if token:
         lines.append(f"header = {_q(f'Authorization: Bearer {token}')}")
@@ -94,31 +99,34 @@ def _curl_config(method: str, url: str, *, token: str = "",
     return "\n".join(lines) + "\n"
 
 
+_B64_LINE_RE = None  # compiled lazily (keeps `re` out of the module's hot import)
+
+
 def _parse_response(output: str) -> tuple:
     """Extract ``(status_code, body_text)`` from the job's combined log output.
 
-    The response sits between the LAST ``RANCHER_RESP_BEGIN`` line and the
-    ``RANCHER_STATUS:<code>`` write-out (last occurrence wins — Cloud Logging can
-    interleave unrelated lines around, but not inside, the curl output)."""
-    text = output or ""
-    begin = text.rfind(_BEGIN)
-    if begin < 0:
+    The response is ONE ``RANCHER_B64:<b64 body>:RC:<code>`` line (last occurrence
+    wins). A missing line = curl never produced a response (transport failure);
+    a present line with an empty code = the request died before an HTTP status."""
+    global _B64_LINE_RE
+    import re
+    if _B64_LINE_RE is None:
+        _B64_LINE_RE = re.compile(r"RANCHER_B64:([A-Za-z0-9+/=]*):RC:(\d{3})")
+    matches = _B64_LINE_RE.findall(output or "")
+    if not matches:
+        if _B64_MARK in (output or ""):
+            raise RancherRunnerError(
+                "Rancher API runner returned no HTTP status — transport failure between "
+                f"the runner and the node. Log tail:\n{(output or '').strip()[-1500:]}")
         raise RancherRunnerError(
             "Rancher API runner produced no response marker — the curl call likely "
-            f"failed before reaching the node. Log tail:\n{text.strip()[-1500:]}")
-    chunk = text[begin + len(_BEGIN):]
-    at = chunk.rfind(_STATUS)
-    if at < 0:
-        raise RancherRunnerError(
-            "Rancher API runner returned no HTTP status — transport failure between "
-            f"the runner and the node. Log tail:\n{chunk.strip()[-1500:]}")
-    status_str = chunk[at + len(_STATUS):].strip().split()[0] if chunk[at + len(_STATUS):].strip() else ""
+            f"failed before reaching the node. Log tail:\n{(output or '').strip()[-1500:]}")
+    b64_body, code = matches[-1]
     try:
-        status = int(status_str[:3])
-    except ValueError:
-        raise RancherRunnerError(f"Rancher API runner emitted a malformed status: {status_str!r}")
-    body = chunk[:at].strip("\n")
-    return status, body
+        body = base64.b64decode(b64_body).decode("utf-8", "replace") if b64_body else ""
+    except Exception:
+        raise RancherRunnerError("Rancher API runner emitted a malformed response body line.")
+    return int(code), body
 
 
 async def request(method: str, url: str, *, token: str = "",
@@ -133,10 +141,15 @@ async def request(method: str, url: str, *, token: str = "",
     cfg = _resolve()
     # The runner shell prepends `printf %s "$STDIN_B64" | base64 -d | ` to this
     # command, and a pipe binds to the FIRST simple command only — so the whole
-    # thing must be ONE brace group: echo doesn't read stdin, leaving the piped
-    # curl config for `curl -K -`. The earlier `echo && { curl ...; }` chain fed
-    # the config to echo and curl got nothing ("no URL specified") — caught live.
-    command = "{ " + f"echo {_BEGIN}; " + "curl -sS -K - || true; echo; }"
+    # thing must be ONE brace group with curl first, so `curl -K -` receives the
+    # piped config (an earlier `echo && { curl ...; }` chain fed it to echo —
+    # "no URL specified", caught live). The response is then re-emitted as the
+    # single atomic RANCHER_B64 line (see the sentinel comment up top).
+    command = (
+        "{ curl -sS -K - -o /tmp/rancher_body -w '%{http_code}' > /tmp/rancher_code || true; "
+        'printf "RANCHER_B64:%s:RC:%s\\n" "$(base64 -w0 /tmp/rancher_body 2>/dev/null)" '
+        '"$(cat /tmp/rancher_code)"; }'
+    )
     stdin_b64 = base64.b64encode(
         _curl_config(method, url, token=token, json_body=json_body,
                      timeout_s=timeout_s).encode()).decode()
