@@ -1,0 +1,28 @@
+# Create a SQL Server database.
+# Target: a managed SQL Server cloud database. Admin connection vars (db_login_*) are
+# auto-injected — the admin logs in with SQL auth against 'master' (db_name is 'master'
+# for SQL Server). This is a localhost play connecting OUT to the private endpoint.
+# Requires pymssql (ships in the ansible-cloud runner image).
+#
+# extra_vars:
+#   target_db_name: appdb    # required
+- name: Create a SQL Server database
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    target_db_name: ""
+  tasks:
+    - name: Validate required vars
+      ansible.builtin.assert:
+        that: target_db_name | length > 0
+        fail_msg: "Set target_db_name via extra vars (e.g. target_db_name=appdb)."
+
+    - name: Ensure the database exists
+      community.general.mssql_db:
+        name: "{{ target_db_name }}"
+        state: present
+        login_host: "{{ db_login_host }}"
+        login_port: "{{ db_login_port }}"
+        login_user: "{{ db_login_user }}"
+        login_password: "{{ db_login_password }}"

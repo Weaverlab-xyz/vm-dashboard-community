@@ -437,6 +437,12 @@ class Settings(BaseSettings):
     portainer_agent_image: str = "portainer/agent:latest"
     portainer_agent_port: int = 9001
     ansible_local_image: str = "chrweav/ansible-winrm:latest"
+    # Ansible runner image for Kubernetes-cluster / cloud-database config-management
+    # targets (localhost plays that reach out via kubeconfig / DB login vars). Carries
+    # kubernetes.core + community.postgresql/mysql/general and their client libs; see
+    # runners/ansible-cloud/. Used for ALL cloud runners (ECS/ACI/Cloud Run) on k8s/DB
+    # targets — never the winrm image (it lacks these collections).
+    ansible_cloud_image: str = "chrweav/ansible-cloud:latest"
 
     # Azure resource-management credentials.
     # Preferred: set the four direct env vars below (community edition / simple

@@ -1,0 +1,29 @@
+# Create a MySQL database.
+# Target: a managed MySQL cloud database. Admin connection vars (db_login_*) are
+# auto-injected; this is a localhost play connecting OUT to the private endpoint.
+#
+# Note: Azure MySQL Flexible Server enforces TLS. If your target requires it, add the
+# community.mysql SSL params (e.g. ca_cert: /path/to/ca.pem) — see the module docs.
+#
+# extra_vars:
+#   target_db_name: appdb    # required
+- name: Create a MySQL database
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    target_db_name: ""
+  tasks:
+    - name: Validate required vars
+      ansible.builtin.assert:
+        that: target_db_name | length > 0
+        fail_msg: "Set target_db_name via extra vars (e.g. target_db_name=appdb)."
+
+    - name: Ensure the database exists
+      community.mysql.mysql_db:
+        name: "{{ target_db_name }}"
+        state: present
+        login_host: "{{ db_login_host }}"
+        login_port: "{{ db_login_port }}"
+        login_user: "{{ db_login_user }}"
+        login_password: "{{ db_login_password }}"

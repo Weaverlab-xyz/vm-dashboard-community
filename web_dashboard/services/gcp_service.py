@@ -2004,6 +2004,138 @@ async def run_cloud_run_k8s_task(
         raise GCPError(f"Failed to run Cloud Run k8s task: {e}") from e
 
 
+# ── Cloud Run Ansible localhost runner (Kubernetes-cluster / cloud-database) ──
+
+def _run_cloud_run_ansible_local_sync(
+    project_id: str, region: str, image: str,
+    playbook_b64: str, conn_vars_b64: str, kubeconfig_b64: str, job_id: str,
+    vpc_connector: str = "", service_account: str = "",
+) -> tuple:
+    """Create a Cloud Run Job that runs a **localhost** Ansible play (the k8s/DB
+    path — Ansible reaches OUT to the cluster API / DB endpoint instead of SSHing to
+    a VM), wait for it, return (exit_code, log_output), and delete the job. Mirrors
+    ``_run_cloud_run_ansible_sync``; the command is localhost (no SSH key) and the
+    connection material rides the ephemeral job env. Uses the ansible-cloud image."""
+    import time
+    import uuid
+    _require_run()
+    from google.cloud import run_v2
+    from .ansible_localhost_cmd import build_localhost_command
+
+    creds = _gcp_creds()
+    jobs_client = run_v2.JobsClient(credentials=creds)
+    executions_client = run_v2.ExecutionsClient(credentials=creds)
+
+    _suffix = job_id[:8] if job_id else uuid.uuid4().hex[:8]
+    job_name = f"{_ANSIBLE_RUNNER_PREFIX}-local-{_suffix}"
+    parent = f"projects/{project_id}/locations/{region}"
+    job_resource_name = f"{parent}/jobs/{job_name}"
+
+    cmd = build_localhost_command(
+        with_conn_vars=bool(conn_vars_b64), with_kubeconfig=bool(kubeconfig_b64))
+
+    env = [run_v2.EnvVar(name="PLAYBOOK_B64", value=playbook_b64)]
+    if conn_vars_b64:
+        env.append(run_v2.EnvVar(name="CONN_VARS_B64", value=conn_vars_b64))
+    if kubeconfig_b64:
+        env.append(run_v2.EnvVar(name="KUBECONFIG_B64", value=kubeconfig_b64))
+
+    task_template = run_v2.TaskTemplate(
+        containers=[
+            run_v2.Container(
+                image=image,
+                command=["sh", "-c", cmd],
+                env=env,
+                resources=run_v2.ResourceRequirements(
+                    limits={"cpu": "1000m", "memory": "512Mi"},
+                ),
+            )
+        ],
+        max_retries=0,
+        timeout="1200s",
+        **({"service_account": service_account} if service_account else {}),
+    )
+
+    exec_template = run_v2.ExecutionTemplate(template=task_template)
+    if vpc_connector:
+        exec_template.annotations = {
+            "run.googleapis.com/vpc-access-connector": vpc_connector,
+            "run.googleapis.com/vpc-access-egress": "private-ranges-only",
+        }
+
+    job = run_v2.Job(
+        template=exec_template,
+        labels={"managed-by": "vm-dashboard", "purpose": "ansible-runner"},
+    )
+
+    # Remove any leftover of the same name first (best-effort; NotFound is normal).
+    try:
+        jobs_client.delete_job(name=job_resource_name).result()
+        logger.info("Cloud Run ansible-local: removed a pre-existing job %s before create", job_name)
+    except Exception as stale_err:
+        logger.debug("Cloud Run ansible-local: no pre-existing job %s to remove (%s)", job_name, stale_err)
+
+    logger.info("Cloud Run ansible-local: creating job %s in %s/%s", job_name, project_id, region)
+    create_op = jobs_client.create_job(parent=parent, job_id=job_name, job=job)
+    create_op.result()
+
+    output = ""
+    exit_code = 1
+    execution_name = None
+
+    try:
+        run_op = jobs_client.run_job(name=job_resource_name)
+        execution = run_op.result()
+        execution_name = execution.name
+
+        for _ in range(120):
+            exec_info = executions_client.get_execution(name=execution_name)
+            if exec_info.completion_time and not exec_info.reconciling:
+                succeeded = exec_info.succeeded_count or 0
+                failed = exec_info.failed_count or 0
+                exit_code = 0 if (succeeded > 0 and failed == 0) else 1
+                break
+            time.sleep(10)
+
+        try:
+            _ct = getattr(execution, "create_time", None)
+            _floor = _ct.isoformat().replace("+00:00", "Z") if hasattr(_ct, "isoformat") else ""
+            output = _fetch_cloud_run_job_logs(project_id, job_name, execution_name, creds, start_rfc3339=_floor)
+        except Exception as log_err:
+            logger.warning("Cloud Run ansible-local: could not retrieve logs: %s", log_err)
+
+    finally:
+        try:
+            del_op = jobs_client.delete_job(name=job_resource_name)
+            del_op.result()
+            logger.info("Cloud Run ansible-local: deleted job %s", job_name)
+        except Exception as del_err:
+            logger.warning("Cloud Run ansible-local: could not delete job %s: %s", job_name, del_err)
+
+    return exit_code, output
+
+
+async def run_cloud_run_ansible_local_task(
+    *,
+    project_id: str, region: str, image: str,
+    playbook_b64: str, conn_vars_b64: str = "", kubeconfig_b64: str = "", job_id: str,
+    vpc_connector: str = "", service_account: str = "",
+) -> tuple:
+    """Run a localhost Ansible play (k8s/DB target) via a GCP Cloud Run Job.
+    Returns (exit_code, output_log)."""
+    try:
+        return await asyncio.to_thread(
+            _run_cloud_run_ansible_local_sync,
+            project_id, region, image,
+            playbook_b64, conn_vars_b64, kubeconfig_b64, job_id,
+            vpc_connector, service_account,
+        )
+    except GCPError:
+        raise
+    except Exception as e:
+        raise GCPError(f"Failed to run Cloud Run ansible-local task: {e}") from e
+
+
 # ── Export custom image to VHD on GCS (portable artefact) ─────────────────────
 
 def _fetch_cloud_build_log(project_id: str, build_id: str, creds, tail: int = 30,

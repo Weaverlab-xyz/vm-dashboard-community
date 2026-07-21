@@ -182,6 +182,42 @@ async def get_cloud_targets(
     }
 
 
+# ── Localhost targets (Kubernetes clusters + cloud databases) ───────────────────
+
+@router.get("/localhost-targets")
+async def get_localhost_targets(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Kubernetes clusters + cloud databases selectable as **localhost** Ansible
+    targets (the run reaches out via kubeconfig / DB login vars). Ids + display fields
+    only — never a secret. Parallels ``/cloud-targets`` for VMs, and is served here so
+    the Config-Management page doesn't need the separate k8s / cloud_database feature
+    permissions just to populate its picker.
+
+    Only aws/azure/gcp resources with a supported engine appear — the ones an in-cloud
+    Ansible runner can actually reach + configure.
+
+    Response shape:
+        {"k8s": [{id, name, cloud, status}, …],
+         "databases": [{id, engine, cloud, status}, …]}
+    """
+    from ..database import K8sCluster, CloudDatabase
+    from ..services import ansible_cloud_run_service as acr
+
+    clusters = []
+    for c in db.query(K8sCluster).order_by(K8sCluster.created_at.desc()).all():
+        if (c.cloud or "").lower() in ("aws", "azure", "gcp"):
+            clusters.append({"id": c.id, "name": c.name, "cloud": c.cloud,
+                             "status": c.status})
+    databases = []
+    for d in db.query(CloudDatabase).order_by(CloudDatabase.created_at.desc()).all():
+        if (d.cloud or "").lower() in ("aws", "azure", "gcp") and d.engine in acr.ANSIBLE_DB_ENGINES:
+            databases.append({"id": d.id, "engine": d.engine, "cloud": d.cloud,
+                              "status": d.status})
+    return {"k8s": clusters, "databases": databases}
+
+
 # ── Playbook / asset run ───────────────────────────────────────────────────────
 
 class ManagedAccountRef(BaseModel):
@@ -196,9 +232,16 @@ class ManagedAccountRef(BaseModel):
 
 class RunRequest(BaseModel):
     asset: str           # filename of any supported type (.yml, .sh, .deb, .rpm)
-    target: str          # on-prem group key OR bare IP/hostname for cloud/ad-hoc
+    target: str = ""     # on-prem group key OR bare IP/hostname for cloud/ad-hoc (unused for k8s/database)
     cloud: str = ""      # "" | "aws" | "azure" | "gcp" — drives SSH key retrieval
     ansible_user: str = ""  # SSH user for cloud runner targets; falls back to ansible_default_user
+    # Target family. "vm" (default) = the SSH/WinRM path below (target is an IP/host
+    # or on-prem group key). "k8s"/"database" = a Kubernetes cluster / cloud database:
+    # a localhost play whose connection material is auto-injected server-side and which
+    # ALWAYS runs on the in-cloud transient runner (see ansible_cloud_run_service). For
+    # those, target/cloud/ansible_user/secret_ssh_key_source/managed_account are ignored.
+    target_kind: str = "vm"  # "vm" | "k8s" | "database"
+    target_id: str = ""      # K8sCluster.id / CloudDatabase.id when target_kind != "vm"
     extra_vars: dict = {}
     # Use Secrets-Management secrets in the run WITHOUT ever seeing the value.
     # Requires the `secrets:use` permission (admins bypass). A "source" is a
@@ -787,6 +830,102 @@ async def _dispatch_cloud_runner(
     raise ValueError(f"Unknown ansible_runner: {runner!r}")
 
 
+async def _run_cloud_localhost(payload: "RunRequest", db, current_user):
+    """Enqueue a Kubernetes-cluster / cloud-database Config-Management run.
+
+    These are localhost plays that reach out via a kubeconfig / DB login vars, so
+    the SSH-oriented request fields are ignored. Connection material is resolved
+    server-side at launch (never here, never stored on the job) and the run always
+    executes on the in-cloud transient runner (jobs_worker → ansible_cloud_run_service).
+    Returns ``{job_id, status: "queued"}``; the client polls /api/jobs/{id}."""
+    from ..services import (k8s_service, cloud_database_service,
+                            ansible_cloud_run_service as acr)
+
+    kind = payload.target_kind
+    if not payload.target_id:
+        raise HTTPException(status_code=400, detail=f"target_id is required for a {kind} run.")
+
+    # A localhost play must be a real playbook — no auto-wrapped script/rpm/deb.
+    if ansible_local_service.asset_type(payload.asset) != "playbook":
+        raise HTTPException(
+            status_code=400,
+            detail=f"{kind} targets run a localhost play — supply a .yml/.yaml playbook.")
+
+    # Resolve the target row (→ 404) and derive its cloud.
+    if kind == "k8s":
+        try:
+            cluster = k8s_service.get_cluster(db, payload.target_id)
+        except k8s_service.K8sError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        cloud = (cluster.get("cloud") or "").lower()
+        target_label = cluster.get("name") or payload.target_id[:8]
+    else:  # database
+        try:
+            info = cloud_database_service.connection_info(db, payload.target_id)
+        except cloud_database_service.CloudDatabaseError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        cloud = (info.get("cloud") or "").lower()
+        engine = info.get("engine")
+        if engine not in acr.ANSIBLE_DB_ENGINES:
+            raise HTTPException(
+                status_code=400,
+                detail=(f"engine {engine!r} is not supported for Ansible runs "
+                        f"(supported: {', '.join(acr.ANSIBLE_DB_ENGINES)})."))
+        if not info.get("private_host"):
+            raise HTTPException(
+                status_code=400,
+                detail="database has no endpoint yet — wait for provisioning to finish.")
+        target_label = f"{engine}/{payload.target_id[:8]}"
+
+    if cloud not in ("aws", "azure", "gcp"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"cloud {cloud!r} has no in-cloud Ansible runner (supported: aws/azure/gcp).")
+
+    # The cloud runner can't read the dashboard's local filesystem storage.
+    asset_backend = payload.asset_backend or storage_service.active_backend()
+    if asset_backend == "local":
+        raise HTTPException(
+            status_code=400,
+            detail=(f"Asset '{payload.asset}' lives on local filesystem storage, which the "
+                    f"in-cloud runner cannot reach. Move it to a cloud backend (S3 / Azure "
+                    f"Blob / GCS) on the Storage page, then re-run."))
+
+    # Only operator-picked named secret_vars apply to a localhost play (no SSH key /
+    # become / managed-account). Using one requires the secrets:use permission.
+    wants_secret = bool(payload.secret_vars)
+    if wants_secret and not _can_use_secrets(current_user):
+        raise HTTPException(
+            status_code=403,
+            detail="Using a Secrets-Management secret in a run requires the 'secrets:use' permission.")
+
+    description = f"Ansible ({kind}): {payload.asset} → {target_label}"
+    job = job_service.create_job(
+        db,
+        job_type="ansible_cloud_run",
+        created_by=current_user.username,
+        workgroup="ansible",
+        # Refs only — no resolved credential is ever written to job metadata.
+        metadata={
+            "description": description,
+            "target_kind": kind,
+            "target_id": payload.target_id,
+            "cloud": cloud,
+            "asset": payload.asset,
+            "asset_backend": asset_backend,
+            "extra_vars": payload.extra_vars or {},
+            "secret_vars": payload.secret_vars or {},
+        },
+    )
+    if wants_secret:
+        job_service.log_audit(
+            db, current_user.username, "ansible_secret_use",
+            details={"kinds": [f"{len(payload.secret_vars)} var(s)"],
+                     "vars": sorted(payload.secret_vars.keys()),
+                     "asset": payload.asset, "target": f"{kind}:{payload.target_id}"})
+    return {"job_id": job.id, "status": "queued"}
+
+
 @router.post("/run")
 async def run_playbook(
     payload: RunRequest,
@@ -800,7 +939,14 @@ async def run_playbook(
     target must be one of the configured hypervisor group keys returned by
     /api/config-mgmt/inventory, or a bare IP / hostname for ad-hoc cloud runs.
     For cloud targets, set cloud="aws"|"azure"|"gcp" to enable SSH key retrieval.
+
+    When target_kind is "k8s" or "database", target_id selects a managed Kubernetes
+    cluster / cloud database; the run is a localhost play on the in-cloud runner and
+    the SSH-oriented fields are ignored (see _run_cloud_localhost).
     """
+    if payload.target_kind in ("k8s", "database"):
+        return await _run_cloud_localhost(payload, db, current_user)
+
     targets = ansible_local_service.get_configured_targets()
     valid_keys = {t["key"] for t in targets}
 

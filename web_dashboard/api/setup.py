@@ -659,6 +659,10 @@ class AnsibleFeatureConfig(BaseModel):
     k8s_runner_image_aws: str = ""    # per-cloud override; blank → k8s_runner_image
     k8s_runner_image_azure: str = ""  # e.g. an ACR mirror, to avoid Docker Hub pulls
     k8s_runner_image_gcp: str = ""
+    # Ansible image for Kubernetes-cluster / cloud-database targets (localhost plays;
+    # carries kubernetes.core + community.postgresql/mysql/general + client libs).
+    # Used for ALL cloud runners on k8s/DB targets — never the winrm image.
+    ansible_cloud_image: str = "chrweav/ansible-cloud:latest"
     # Image-promote runner — always runs as a one-shot task in the target cloud
     # (ECS / ACI / Cloud Run); no per-cloud selector. Blank → the public Docker
     # Hub image; set a full registry path to use a private mirror (e.g. an ACR

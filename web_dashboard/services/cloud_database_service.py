@@ -1381,6 +1381,62 @@ def connection_info(db: Session, db_id: str) -> dict:
     }
 
 
+def ansible_connection_vars(db: Session, db_id: str) -> dict:
+    """Connection variables an Ansible ``localhost`` play uses to reach this managed
+    DB over the network. Resolved server-side and injected as **scrubbed secret
+    extra-vars** — the operator never sees them.
+
+    The per-cloud admin-credential normalization mirrors :func:`_broker_tunnel` /
+    :func:`_entitle_register_core` exactly:
+      - user     — ``master_username`` | ``administrator_login`` from the provisioning
+                   job's tf_variables, with the Cloud SQL SQL Server (``sqlserver``) /
+                   Oracle (``ADMIN``) overrides, else ``dbadmin``.
+      - password — the encrypted config store (``clouddb/{id}/admin``); tf_variables
+                   never carry it (scrubbed).
+      - db_name  — ``master`` for SQL Server (you connect to ``master``; RDS omits a
+                   db_name), the ADB name for Oracle, else the provisioned db_name.
+
+    The returned keys are engine-independent so one sample playbook maps them onto any
+    module's args (``login_host: "{{ db_login_host }}"`` …). Raises
+    :class:`CloudDatabaseError` when the row or its admin credential can't be resolved."""
+    row = db.query(CloudDatabase).filter(CloudDatabase.id == db_id).first()
+    if not row:
+        raise CloudDatabaseError(f"cloud database {db_id} not found")
+    engine = row.engine
+    prov_job = _provision_job_for(db, db_id)
+    tfv = ((prov_job.metadata_dict or {}).get("tf_variables") if prov_job else None) or {}
+
+    default_user = ("ADMIN" if engine == "oracle"
+                    else "sqlserver" if (engine == "sqlserver" and row.cloud == "gcp")
+                    else "dbadmin")
+    admin_username = (tfv.get("master_username")
+                      or tfv.get("administrator_login") or default_user)
+    admin_password = (tfv.get("master_password")
+                      or tfv.get("administrator_password")
+                      or tfv.get("admin_password")
+                      or config_service.get(f"clouddb/{row.id}/admin") or "")
+    if not admin_password:
+        raise CloudDatabaseError(
+            f"no admin credential available for db_id={row.id} "
+            f"(provisioning job pruned?) — cannot build Ansible connection vars")
+
+    if engine == "sqlserver":
+        db_name = "master"
+    elif engine == "oracle":
+        db_name = _oracle_db_name(row.id)
+    else:
+        db_name = tfv.get("db_name", "")
+
+    return {
+        "db_engine": engine,
+        "db_login_host": row.private_host or "",
+        "db_login_port": row.port or _DEFAULT_PORTS.get(engine),
+        "db_login_user": admin_username,
+        "db_login_password": admin_password,
+        "db_name": db_name,
+    }
+
+
 def _serialize(r: CloudDatabase) -> dict:
     return {
         "id": r.id, "engine": r.engine, "provider": r.provider, "cloud": r.cloud,

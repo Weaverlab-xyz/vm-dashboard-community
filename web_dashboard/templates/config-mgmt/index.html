@@ -149,6 +149,24 @@
                 </optgroup>
               </template>
 
+              <!-- Kubernetes clusters (localhost play via kubeconfig) -->
+              <template x-if="k8sClusters.length > 0">
+                <optgroup label="Kubernetes Clusters">
+                  <template x-for="c in k8sClusters" :key="`k8s:${c.id}`">
+                    <option :value="`k8s:${c.id}`" x-text="`${c.name} (${c.cloud}${c.status ? ' · '+c.status : ''})`"></option>
+                  </template>
+                </optgroup>
+              </template>
+
+              <!-- Cloud databases (localhost play via DB login vars) -->
+              <template x-if="cloudDatabases.length > 0">
+                <optgroup label="Cloud Databases">
+                  <template x-for="d in cloudDatabases" :key="`db:${d.id}`">
+                    <option :value="`db:${d.id}`" x-text="`${d.engine} · ${d.cloud} (${d.id.slice(0,8)}${d.status ? ' · '+d.status : ''})`"></option>
+                  </template>
+                </optgroup>
+              </template>
+
               <!-- Ad-hoc on-prem host (bare IP / hostname) -->
               <optgroup label="Other">
                 <option value="__host__">On-prem host (IP / hostname)…</option>
@@ -161,6 +179,11 @@
                    placeholder="10.0.0.5 or host.example.com"
                    class="w-full mt-2 border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono
                           focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <p x-show="targetKind !== 'vm'" x-cloak class="text-xs text-blue-600 mt-1">
+              Runs a localhost play on the in-cloud runner; connection details
+              (kubeconfig / DB admin credentials) are injected automatically — no SSH
+              user or key.
+            </p>
             <p class="text-xs text-gray-400 mt-1">
               Cloud VMs are read from the instance lists on the AWS / Azure / GCP tabs.
             </p>
@@ -225,8 +248,9 @@
                     class="block mt-1 text-amber-600"></span>
             </p>
 
-            <!-- As credentials -->
-            <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 border-t border-gray-100 pt-3">
+            <!-- As credentials (SSH become / key — VM targets only; k8s/DB use no SSH) -->
+            <div x-show="targetKind === 'vm'" x-cloak
+                 class="grid grid-cols-1 sm:grid-cols-2 gap-2 border-t border-gray-100 pt-3">
               <div>
                 <label class="block text-xs font-medium text-gray-600 mb-1">Become / sudo password <span class="text-gray-400">(local + cloud)</span></label>
                 <select x-model="secretBecomeSource"
@@ -248,7 +272,7 @@
                 </select>
               </div>
             </div>
-            <p class="text-[11px] text-gray-400">
+            <p x-show="targetKind === 'vm'" x-cloak class="text-[11px] text-gray-400">
               Credentials are handed to Ansible as the connection/become secret — Ansible <code>no_log</code>s
               these, so they can't be printed. Become and SSH-key secrets also work on the cloud runner.
               <span x-show="targetCloud" x-cloak class="block mt-1">
@@ -468,6 +492,9 @@ function configMgmt() {
     assets: [],
     assetsLoading: true,
     cloudTargets: { aws: [], azure: [], gcp: [] },
+    // Managed-service localhost targets (Kubernetes clusters + cloud databases).
+    k8sClusters: [],
+    cloudDatabases: [],
     jobsLoading: true,
     recentJobs: [],
     running: false,
@@ -523,6 +550,16 @@ function configMgmt() {
       if (t.startsWith('azure:')) return 'azure';
       if (t.startsWith('gcp:'))   return 'gcp';
       return '';
+    },
+
+    // Target family for the selected option: k8s / database (localhost plays on the
+    // in-cloud runner) or vm (everything else — SSH/WinRM). Drives which form fields
+    // and secret sub-panels are relevant.
+    get targetKind() {
+      const t = this.form.target;
+      if (t.startsWith('k8s:')) return 'k8s';
+      if (t.startsWith('db:'))  return 'database';
+      return 'vm';
     },
 
     // Store-residency hint for variable/become secrets on the selected cloud
@@ -681,10 +718,22 @@ function configMgmt() {
         this.loadInventory(),
         this.loadAssets(),
         this.loadCloudTargets(),
+        this.loadLocalhostTargets(),
         this.loadJobs(),
         this.loadSecretOptions(),
       ]);
       this.loading = false;
+    },
+
+    async loadLocalhostTargets() {
+      try {
+        const data = await API.get('/api/config-mgmt/localhost-targets') || {};
+        this.k8sClusters = data.k8s || [];
+        this.cloudDatabases = data.databases || [];
+      } catch (e) {
+        this.k8sClusters = [];
+        this.cloudDatabases = [];
+      }
     },
 
     async loadSecretOptions() {
@@ -740,7 +789,8 @@ function configMgmt() {
       this.jobsLoading = true;
       try {
         const all = await API.get('/api/jobs?limit=20');
-        this.recentJobs = (all.jobs || []).filter(j => j.job_type === 'ansible_local');
+        this.recentJobs = (all.jobs || []).filter(
+          j => j.job_type === 'ansible_local' || j.job_type === 'ansible_cloud_run');
       } catch (e) {
         this.recentJobs = [];
       } finally {
@@ -762,14 +812,6 @@ function configMgmt() {
         }
       }
 
-      // Decode cloud prefix from target value; __host__ is a free-text on-prem host.
-      let target = this.form.target === '__host__' ? (this.customHost || '').trim() : this.form.target;
-      let cloud = '';
-      if (target.startsWith('aws:'))   { cloud = 'aws';   target = target.slice(4); }
-      else if (target.startsWith('azure:')) { cloud = 'azure'; target = target.slice(6); }
-      else if (target.startsWith('gcp:'))   { cloud = 'gcp';   target = target.slice(4); }
-      if (!target) { this.runError = 'Enter a target host.'; return; }
-
       // Split the composite asset_key (e.g. "s3|deploy.yml") into name +
       // backend so the API can fetch from the exact backend the user picked.
       if (!this.form.asset_key) {
@@ -779,6 +821,47 @@ function configMgmt() {
       }
       const [assetBackend, ...rest] = this.form.asset_key.split('|');
       const assetName = rest.join('|');
+
+      // Kubernetes-cluster / cloud-database targets: a localhost play on the in-cloud
+      // runner. Send target_kind + target_id; the SSH-oriented fields don't apply, and
+      // connection material is injected server-side. Named secret_vars still apply.
+      if (this.targetKind !== 'vm') {
+        const kind = this.targetKind;
+        const target_id = this.form.target.slice(this.form.target.indexOf(':') + 1);
+        const secret_vars = {};
+        if (this.canUseSecrets) {
+          for (const r of this.secretRows) {
+            const v = (r.var || '').trim(), s = (r.source || '').trim();
+            if (v && s) secret_vars[v] = s;
+          }
+        }
+        this.running = true;
+        try {
+          const result = await API.post('/api/config-mgmt/run', {
+            asset: assetName,
+            asset_backend: assetBackend,
+            target_kind: kind,
+            target_id,
+            extra_vars,
+            secret_vars,
+          });
+          toast(`Queued — job ${result.job_id.slice(0, 8)}…`, 'success');
+          window.location.href = '/jobs/' + result.job_id;
+        } catch (e) {
+          this.runError = e.message || 'Failed to queue run.';
+        } finally {
+          this.running = false;
+        }
+        return;
+      }
+
+      // Decode cloud prefix from target value; __host__ is a free-text on-prem host.
+      let target = this.form.target === '__host__' ? (this.customHost || '').trim() : this.form.target;
+      let cloud = '';
+      if (target.startsWith('aws:'))   { cloud = 'aws';   target = target.slice(4); }
+      else if (target.startsWith('azure:')) { cloud = 'azure'; target = target.slice(6); }
+      else if (target.startsWith('gcp:'))   { cloud = 'gcp';   target = target.slice(4); }
+      if (!target) { this.runError = 'Enter a target host.'; return; }
 
       // Build secret bindings (never the values) — only if the user may use secrets.
       const secret_vars = {};
