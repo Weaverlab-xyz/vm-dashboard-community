@@ -417,15 +417,26 @@ async def create_image_from_instance(
 
 # ── Network options ───────────────────────────────────────────────────────────
 
-def _get_network_options_sync(project_id: str, region: str, zone: str) -> dict:
+def _get_network_options_sync(project_id: str, region: str, zone: str,
+                              zone_regions: Optional[list] = None) -> dict:
     _require_compute()
     from google.cloud import compute_v1
 
     creds = _gcp_creds()
 
-    # Zones in region
+    # Zones — offered across every region the picker should expose: the current
+    # ``region`` plus any additional multi-region regions in ``zone_regions``
+    # (derived from gcp_region_configs). ZonesClient.list returns the whole
+    # project in a single call, so filtering to the wanted set costs nothing
+    # extra and keeps the Zone dropdown complete regardless of which zone is
+    # currently selected (otherwise only the default region's zones show).
+    wanted = {r for r in (zone_regions or []) if r}
+    wanted.add(region)
     zones_client = compute_v1.ZonesClient(credentials=creds)
-    zones = [z.name for z in zones_client.list(project=project_id) if z.region.endswith(f"/{region}")]
+    zones = sorted(
+        z.name for z in zones_client.list(project=project_id)
+        if any(z.region.endswith(f"/{r}") for r in wanted)
+    )
     if not zones:
         zones = [zone]
 
@@ -462,8 +473,9 @@ def _get_network_options_sync(project_id: str, region: str, zone: str) -> dict:
     }
 
 
-async def get_network_options(project_id: str, region: str, zone: str) -> dict:
-    return await asyncio.to_thread(_get_network_options_sync, project_id, region, zone)
+async def get_network_options(project_id: str, region: str, zone: str,
+                              zone_regions: Optional[list] = None) -> dict:
+    return await asyncio.to_thread(_get_network_options_sync, project_id, region, zone, zone_regions)
 
 
 # ── Secret Manager ────────────────────────────────────────────────────────────
