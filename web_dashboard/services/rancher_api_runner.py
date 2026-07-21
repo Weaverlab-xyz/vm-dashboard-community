@@ -131,7 +131,12 @@ async def request(method: str, url: str, *, token: str = "",
     callers keep their own status handling, same as the direct path)."""
     from . import gcp_service
     cfg = _resolve()
-    command = (f"echo {_BEGIN} && " + "{ curl -sS -K - || true; } && echo")
+    # The runner shell prepends `printf %s "$STDIN_B64" | base64 -d | ` to this
+    # command, and a pipe binds to the FIRST simple command only — so the whole
+    # thing must be ONE brace group: echo doesn't read stdin, leaving the piped
+    # curl config for `curl -K -`. The earlier `echo && { curl ...; }` chain fed
+    # the config to echo and curl got nothing ("no URL specified") — caught live.
+    command = "{ " + f"echo {_BEGIN}; " + "curl -sS -K - || true; echo; }"
     stdin_b64 = base64.b64encode(
         _curl_config(method, url, token=token, json_body=json_body,
                      timeout_s=timeout_s).encode()).decode()

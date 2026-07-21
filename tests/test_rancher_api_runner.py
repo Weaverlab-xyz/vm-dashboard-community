@@ -101,6 +101,33 @@ def test_request_parses_status_and_body():
     assert "Authorization" not in kw["command"]  # secrets not in argv
 
 
+def test_command_pipes_stdin_into_curl():
+    """Regression: the runner shell prepends ``printf %s "$STDIN_B64" | base64 -d |``
+    to the command, and a pipe binds to the FIRST simple command only. The command
+    must therefore be ONE brace group so `curl -K -` (not the leading echo) receives
+    the decoded config — the ungrouped version fed it to echo and curl died with
+    "no URL specified" (caught live). Executes the real composition under sh with a
+    curl shim to prove the config text reaches curl's stdin."""
+    import os
+    import shutil
+    import subprocess
+    _reset(output="RANCHER_RESP_BEGIN\nok\nRANCHER_STATUS:200\n")
+    asyncio.run(rar.request("GET", "https://10.1.2.3/ping", token="tok-x"))
+    kw = _CALLS[0]
+    assert kw["command"].lstrip().startswith("{"), "command must be a single brace group"
+    sh = shutil.which("sh") or shutil.which("bash")
+    if not sh:  # pragma: no cover — no POSIX shell on this host; shape assert above still ran
+        return
+    # Mirror gcp_service._run_cloud_run_k8s_sync's stdin composition exactly,
+    # shimming curl as a function that just echoes its stdin back.
+    full = ('curl() { cat; }; printf %s "$STDIN_B64" | base64 -d | ' + kw["command"])
+    r = subprocess.run([sh, "-c", full], capture_output=True, text=True,
+                       env={**os.environ, "STDIN_B64": kw["stdin_b64"]})
+    assert r.returncode == 0, r.stderr
+    assert 'url = "https://10.1.2.3/ping"' in r.stdout, r.stdout
+    assert "Authorization: Bearer tok-x" in r.stdout
+
+
 def test_resolve_requires_vpc_reach():
     """No connector AND no direct-egress subnet → fail fast with the exact keys
     (a VPC-less job launches fine but can't route to the internal IP, silently
