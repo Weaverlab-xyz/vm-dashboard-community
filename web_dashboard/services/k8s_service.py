@@ -447,8 +447,24 @@ def _build_cluster_tf_variables(*, cloud: str, cluster_id: str, name: str,
             "cluster_name": _gke_name(f"k8s-{name}"),
             "tags": _tags,
         }
-        if opts.get("zone"):
-            tf["zone"] = opts["zone"]
+        # Zone: an explicit form value wins, else the region-config zone (Settings →
+        # Multi-region / gcp_region.<region>.zone; flat gcp_zone for the default
+        # region). The config fallback only applies when the zone actually sits in
+        # the target region — resolve_region falls back to the flat gcp_zone for
+        # regions without an entry, and leaking the default region's zone would
+        # provision cross-region. Left blank, the module picks the region's first
+        # available zone (NOT "<region>-a": us-east1/europe-west1 have no -a zone,
+        # and GKE reports a nonexistent zone as a misleading 403
+        # LOCATION_POLICY_VIOLATED "Permission denied on 'locations/…'").
+        from .region_config import resolve_region
+        _grc = resolve_region("gcp", region) or {}
+        zone = str(opts.get("zone") or "").strip()
+        if not zone:
+            rc_zone = (_grc.get("zone") or "").strip()
+            if rc_zone.startswith(f"{region}-"):
+                zone = rc_zone
+        if zone:
+            tf["zone"] = zone
         version = opts.get("k8s_version") or _cfg("gcp_gke_k8s_version")
         if version:
             tf["k8s_version"] = version
@@ -472,8 +488,7 @@ def _build_cluster_tf_variables(*, cloud: str, cluster_id: str, name: str,
         #   2. PEERING (fallback, gcp_k8s_subnetwork blank): self-contained VPC peered
         #      to the sandbox VPC — reaches lab VMs (SSH) only; DB JIT stays on the PRA
         #      tunnel. GCP parity with the aws_eks sandbox_vpc peering.
-        from .region_config import resolve_region
-        _grc = resolve_region("gcp", region) or {}
+        # (_grc is resolved above, alongside the zone.)
         sandbox_net = _grc.get("network") or ""
         k8s_subnet = _grc.get("k8s_subnetwork") or ""
         if k8s_subnet and sandbox_net and sandbox_net != "default":
