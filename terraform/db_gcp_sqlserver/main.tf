@@ -99,6 +99,13 @@ locals {
   # caller passed a path/URL (contains "/") use it as-is; otherwise qualify the bare
   # name (the common sandbox config) with this module's project.
   private_network_id = can(regex("/", var.private_network)) ? var.private_network : "projects/${var.project}/global/networks/${var.private_network}"
+
+  # Every Cloud SQL SQL Server instance ships with these built-in system databases.
+  # Asking google_sql_database to CREATE one fails ("database exists") and aborts the
+  # apply. When db_name collides with a built-in, skip creating it — the database
+  # already exists (and the PRA tunnel targets `master` regardless).
+  reserved_db_names = ["master", "model", "msdb", "tempdb"]
+  create_database   = !contains(local.reserved_db_names, lower(var.db_name))
 }
 
 # ── Resource — always private (no public IP) ─────────────────────────────────
@@ -134,6 +141,7 @@ resource "google_sql_database_instance" "this" {
 }
 
 resource "google_sql_database" "this" {
+  count    = local.create_database ? 1 : 0
   name     = var.db_name
   project  = var.project
   instance = google_sql_database_instance.this.name
