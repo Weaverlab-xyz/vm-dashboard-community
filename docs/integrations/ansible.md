@@ -751,6 +751,46 @@ extra vars).
 
 ---
 
+## Kubernetes-cluster & cloud-database targets (localhost runs)
+
+Registered Kubernetes clusters and provisioned cloud databases are selectable
+Config-Management targets too, but they don't SSH anywhere — Ansible's
+`kubernetes.core` and `community.postgresql`/`mysql`/`general` modules run a
+`hosts: localhost, connection: local` play and connect *out* to the API server
+(via a kubeconfig) or the DB endpoint (via login vars).
+
+- **Dedicated runner image.** These runs use `chrweav/ansible-cloud` (config key
+  `ansible_cloud_image`) — Debian-based, carrying `kubernetes.core`,
+  `community.postgresql`, `community.mysql`, `community.general`, the `helm`/`kubectl`
+  binaries, and `psycopg2`/`PyMySQL`/`pymssql`. Build/push it from
+  [`runners/ansible-cloud/`](../../runners/ansible-cloud/) (multi-arch recommended)
+  and, if you don't use public Docker Hub, mirror it to ECR/ACR/Artifact Registry.
+  The winrm VM image is never used for these targets.
+- **Always the in-cloud runner.** These resources are private, so the run executes
+  on a transient ECS / ACI / Cloud Run task in-subnet — reusing the same
+  `ansible_ecs_subnet_id` / `ansible_aci_subnet_id` / `gcp_ansible_vpc_connector`
+  network config as the VM cloud runner. The local runner is rejected for these kinds
+  (it can't reach RFC1918 endpoints and its egress hits the corporate TLS proxy). The
+  backend is `ansible_runner_<cloud>` for the resource's cloud, defaulting to that
+  cloud's native runner.
+- **Auto-injected, scrubbed connection material.** The kubeconfig is token-prepped
+  server-side (a short-lived bearer token replaces the cloud exec-auth block) and
+  delivered via `K8S_AUTH_KUBECONFIG`/`KUBECONFIG`; the DB admin credential is
+  resolved from the encrypted config store and delivered as `db_login_*` extra-vars.
+  Both ride the runner task's ephemeral env and are redacted from job output. An
+  operator can still bind extra Secrets-Management **named vars** (e.g. a new role's
+  password) via **Use a secret**; SSH-only options (become password, SSH key,
+  managed-account) don't apply.
+- **Durability.** Dispatched by the job worker as an `ansible_cloud_run` job (it
+  launches a cloud task that can outlive a request worker's recycle).
+
+Starters: [`examples/playbooks/k8s/`](../../examples/playbooks/k8s/) and
+[`examples/playbooks/database/`](../../examples/playbooks/database/). Smoke-test the
+image directly with `docker run … chrweav/ansible-cloud ansible-playbook -i 'localhost,'
+-c local …` against a kind/k3d cluster or a throwaway Postgres/MySQL container.
+
+---
+
 ## Troubleshooting
 
 ### Ansible — local Docker runner

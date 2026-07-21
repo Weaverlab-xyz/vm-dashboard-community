@@ -2113,6 +2113,126 @@ async def run_aci_k8s_task(
         raise AzureError(f"Failed to run ACI k8s task: {e}") from e
 
 
+# ── ACI Ansible localhost runner (Kubernetes-cluster / cloud-database targets) ──
+
+def _run_aci_ansible_local_sync(
+    cred, sub_id: str, rg: str, location: str, subnet_id: str,
+    image: str, playbook_b64: str, conn_vars_b64: str, kubeconfig_b64: str,
+    job_id: str,
+    acr_server: str = "", acr_username: str = "", acr_password: str = "",
+) -> tuple:
+    """Create an ACI container group that runs a **localhost** Ansible play (the
+    k8s/DB path — Ansible reaches OUT to the cluster API / DB endpoint instead of
+    SSHing to a VM), wait for it, return (exit_code, log_output), and delete the
+    group. Mirrors ``_run_aci_ansible_sync``; the command is localhost (no SSH key)
+    and the connection material rides ``secure_value`` env vars (hidden in the
+    portal). Uses the ansible-cloud image (k8s/DB collections + client libs)."""
+    import time
+    from .ansible_localhost_cmd import build_localhost_command
+
+    aci = _get_aci(cred, sub_id)
+    group_name = f"{_ANSIBLE_RUNNER_PREFIX}-{job_id[:8]}" if job_id else f"{_ANSIBLE_RUNNER_PREFIX}-adhoc"
+
+    cmd = build_localhost_command(
+        with_conn_vars=bool(conn_vars_b64), with_kubeconfig=bool(kubeconfig_b64))
+
+    env_vars = [EnvironmentVariable(name="PLAYBOOK_B64", value=playbook_b64)]
+    if conn_vars_b64:
+        env_vars.append(EnvironmentVariable(name="CONN_VARS_B64", secure_value=conn_vars_b64))
+    if kubeconfig_b64:
+        env_vars.append(EnvironmentVariable(name="KUBECONFIG_B64", secure_value=kubeconfig_b64))
+
+    container = Container(
+        name="ansible",
+        image=image,
+        resources=ResourceRequirements(requests=ResourceRequests(cpu=1.0, memory_in_gb=1.0)),
+        command=["sh", "-c", cmd],
+        environment_variables=env_vars,
+    )
+
+    group_params = ContainerGroup(
+        location=location,
+        containers=[container],
+        os_type=OperatingSystemTypes.LINUX,
+        restart_policy="Never",
+        tags={"managed-by": "vm-dashboard", "Purpose": "ansible-runner"},
+    )
+
+    if subnet_id:
+        from azure.mgmt.containerinstance.models import ContainerGroupSubnetId
+        group_params.subnet_ids = [ContainerGroupSubnetId(id=subnet_id)]
+
+    if acr_server and acr_username and acr_password:
+        from azure.mgmt.containerinstance.models import ImageRegistryCredential
+        group_params.image_registry_credentials = [
+            ImageRegistryCredential(server=acr_server, username=acr_username, password=acr_password)
+        ]
+
+    output = ""
+    exit_code = 1
+    state = ""
+    try:
+        logger.info("ACI ansible-local: creating container group %s in %s", group_name, rg)
+        aci.container_groups.begin_create_or_update(rg, group_name, group_params).result()
+
+        for _ in range(120):
+            cg = aci.container_groups.get(rg, group_name)
+            state = (cg.instance_view.state if cg.instance_view else "") or ""
+            if state in ("Succeeded", "Failed", "Stopped"):
+                break
+            time.sleep(10)
+
+        try:
+            log_resp = aci.containers.list_logs(rg, group_name, "ansible")
+            output = log_resp.content or ""
+        except Exception as log_err:
+            logger.warning("ACI ansible-local: could not retrieve logs: %s", log_err)
+
+        try:
+            cg = aci.container_groups.get(rg, group_name)
+            for c in (cg.containers or []):
+                if c.name == "ansible" and c.instance_view and c.instance_view.current_state:
+                    ec = c.instance_view.current_state.exit_code
+                    exit_code = ec if ec is not None else (0 if state == "Succeeded" else 1)
+                    break
+            else:
+                exit_code = 0 if state == "Succeeded" else 1
+        except Exception as ec_err:
+            logger.warning("ACI ansible-local: could not get exit code: %s", ec_err)
+            exit_code = 0 if state == "Succeeded" else 1
+
+    finally:
+        try:
+            aci.container_groups.begin_delete(rg, group_name).result()
+            logger.info("ACI ansible-local: deleted container group %s", group_name)
+        except Exception as del_err:
+            logger.warning("ACI ansible-local: could not delete group %s: %s", group_name, del_err)
+
+    return exit_code, output
+
+
+async def run_aci_ansible_local_task(
+    *,
+    rg: str, location: str, subnet_id: str, image: str,
+    playbook_b64: str, conn_vars_b64: str = "", kubeconfig_b64: str = "", job_id: str,
+    acr_server: str = "", acr_username: str = "", acr_password: str = "",
+) -> tuple:
+    """Run a localhost Ansible play (k8s/DB target) inside the Azure VNet via ACI.
+    Returns (exit_code, output_log)."""
+    try:
+        cred, sub_id = await _ensure_creds()
+        return await asyncio.to_thread(
+            _run_aci_ansible_local_sync,
+            cred, sub_id, rg, location, subnet_id, image,
+            playbook_b64, conn_vars_b64, kubeconfig_b64, job_id,
+            acr_server, acr_username, acr_password,
+        )
+    except AzureError:
+        raise
+    except Exception as e:
+        raise AzureError(f"Failed to run ACI ansible-local task: {e}") from e
+
+
 # ── Generic Docker Compose → ACI container group ─────────────────────────────
 
 # Map compose restart policies onto the single group-level ACI policy.

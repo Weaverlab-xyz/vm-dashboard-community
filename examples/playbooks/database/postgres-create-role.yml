@@ -1,0 +1,35 @@
+# Create a PostgreSQL login role.
+# Target: a managed PostgreSQL cloud database. Admin connection vars (db_login_*) are
+# auto-injected. Supply the new role's own password via a Secrets-Management secret
+# (run form → "Use a secret", mapped to target_role_password) so it's never in plaintext.
+#
+# extra_vars:
+#   target_role: appuser              # required
+#   target_role_password: <secret>    # bind via "Use a secret" (recommended)
+- name: Create a PostgreSQL role
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    target_role: ""
+    target_role_password: ""
+  tasks:
+    - name: Validate required vars
+      ansible.builtin.assert:
+        that:
+          - target_role | length > 0
+          - target_role_password | length > 0
+        fail_msg: "Set target_role and target_role_password (bind the password via 'Use a secret')."
+
+    - name: Ensure the role exists
+      community.postgresql.postgresql_user:
+        name: "{{ target_role }}"
+        password: "{{ target_role_password }}"
+        state: present
+        login_host: "{{ db_login_host }}"
+        login_port: "{{ db_login_port }}"
+        login_user: "{{ db_login_user }}"
+        login_password: "{{ db_login_password }}"
+        # Postgres has no per-role login DB; the module connects to the maintenance DB.
+        login_db: "{{ db_name | default(omit, true) }}"
+      no_log: true   # the role password is a secret

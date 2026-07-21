@@ -1,0 +1,37 @@
+# Create a MySQL user with minimal privileges.
+# Target: a managed MySQL cloud database. Admin connection vars (db_login_*) are
+# auto-injected. Supply the new user's password via a Secrets-Management secret
+# (run form → "Use a secret", mapped to target_user_password).
+#
+# extra_vars:
+#   target_user: appuser              # required
+#   target_user_password: <secret>    # bind via "Use a secret" (recommended)
+#   target_user_priv: "appdb.*:ALL"   # optional; default USAGE only
+- name: Create a MySQL user
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    target_user: ""
+    target_user_password: ""
+    target_user_priv: "*.*:USAGE"
+  tasks:
+    - name: Validate required vars
+      ansible.builtin.assert:
+        that:
+          - target_user | length > 0
+          - target_user_password | length > 0
+        fail_msg: "Set target_user and target_user_password (bind the password via 'Use a secret')."
+
+    - name: Ensure the user exists
+      community.mysql.mysql_user:
+        name: "{{ target_user }}"
+        password: "{{ target_user_password }}"
+        host: "%"
+        priv: "{{ target_user_priv }}"
+        state: present
+        login_host: "{{ db_login_host }}"
+        login_port: "{{ db_login_port }}"
+        login_user: "{{ db_login_user }}"
+        login_password: "{{ db_login_password }}"
+      no_log: true   # the user password is a secret

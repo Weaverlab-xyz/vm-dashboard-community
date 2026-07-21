@@ -1,7 +1,8 @@
-# Sample Ansible playbooks (cloud VM starters)
+# Sample Ansible playbooks (managed-service starters)
 
-Ready-to-adapt playbooks for configuring **Linux** and **Windows** cloud VMs via
-the dashboard's **Config Management** feature
+Ready-to-adapt playbooks for configuring **Linux** and **Windows** cloud VMs, plus
+**Kubernetes clusters** and **cloud databases**, via the dashboard's **Config
+Management** feature
 (see [docs/integrations/ansible.md](../../docs/integrations/ansible.md)). They are
 the Ansible counterpart to [`examples/compose/`](../compose/) — upload one, edit
 the placeholders, and run.
@@ -83,13 +84,53 @@ SSH connection, so a WinRM run on ACI is now workable. It's newer than the local
 path, so validate it end-to-end for your image before relying on it. (The ECS /
 Cloud Run runners are for Linux SSH targets.)
 
+## Kubernetes (`k8s/`)
+
+Localhost plays (`- hosts: localhost`, `connection: local`) using `kubernetes.core`.
+Pick a registered/provisioned cluster as the target (Config Management → target kind
+**Kubernetes cluster**). The dashboard token-preps the cluster's kubeconfig and injects
+it into the runner (`K8S_AUTH_KUBECONFIG` / `KUBECONFIG`) — you supply nothing for the
+connection. These **always run on the in-cloud runner** (ECS / ACI / Cloud Run) so they
+reach a private API server and bypass the corporate TLS-inspecting proxy; they use the
+`chrweav/ansible-cloud` image (kubernetes.core + the helm CLI), not `ansible-winrm`.
+
+| File | Purpose |
+|---|---|
+| `list-nodes.yml` | Read-only smoke test — list node names via `k8s_info` |
+| `namespace-ensure.yml` | Create a namespace (`k8s_namespace`) |
+| `deployment-apply.yml` | Apply a sample nginx Deployment + Service |
+| `helm-install.yml` | `helm upgrade --install` a chart (`helm_release`/`helm_chart`/…) |
+
+## Cloud databases (`database/`)
+
+Localhost plays using `community.postgresql` / `community.mysql` / `community.general`
+(mssql). Pick a provisioned database as the target (Config Management → target kind
+**Cloud database**). The dashboard resolves the admin credential server-side and injects
+it as **scrubbed** extra-vars — `db_login_host`, `db_login_port`, `db_login_user`,
+`db_login_password` (and `db_name`) — so you never see or type it. Like the k8s plays,
+these run on the in-cloud runner (in-subnet with line-of-sight to the private endpoint)
+using the `ansible-cloud` image. For a new **role/user** password, bind a
+Secrets-Management secret via **Use a secret** (mapped to `target_role_password` /
+`target_user_password`) rather than a plaintext extra var.
+
+| File | Purpose |
+|---|---|
+| `postgres-create-database.yml` | Create a PostgreSQL database (`target_db_name`) |
+| `postgres-create-role.yml` | Create a PostgreSQL login role (`target_role` + secret pw) |
+| `mysql-create-database.yml` | Create a MySQL database (`target_db_name`) |
+| `mysql-create-user.yml` | Create a MySQL user (`target_user` + secret pw) |
+| `sqlserver-create-database.yml` | Create a SQL Server database (`target_db_name`) |
+
 ## Notes
 
 - These are starting points — review and adapt before running against real hosts.
   `ssh-hardening.yml` disables SSH password auth, so confirm key access first.
-- Playbooks use fully-qualified module names; the default runner image
+- Playbooks use fully-qualified module names. The VM runner image
   (`chrweav/ansible-winrm` — upstream `willhallonline/ansible` + `pywinrm`) ships the
   `ansible.builtin`, `ansible.posix`, `ansible.windows`, and `community.windows`
-  collections, so WinRM/Windows works out of the box.
+  collections, so WinRM/Windows works out of the box. The **k8s/database** plays use a
+  separate image (`chrweav/ansible-cloud`) carrying `kubernetes.core`,
+  `community.postgresql`, `community.mysql`, and `community.general` (+ the helm CLI and
+  DB client libs) — selected automatically for those target kinds.
 - `tests/test_playbook_samples.py` validates every file here is a well-formed play
   list, so a malformed sample can't ship.

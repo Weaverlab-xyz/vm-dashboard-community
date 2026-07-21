@@ -1868,6 +1868,170 @@ async def run_ecs_k8s_task(
         raise AWSError("AWS credentials not configured.")
 
 
+# ── ECS Ansible localhost runner (Kubernetes-cluster / cloud-database targets) ──
+
+def _run_ecs_ansible_local_sync(
+    region: str,
+    cluster: str,
+    task_family: str,
+    image: str,
+    cpu: str,
+    memory: str,
+    subnet_id: str,
+    security_group_ids: list,
+    execution_role_arn: str,
+    playbook_b64: str,
+    conn_vars_b64: str,
+    kubeconfig_b64: str,
+    job_id: str,
+) -> tuple:
+    """ECS Fargate task that runs a **localhost** Ansible play — the k8s/DB path,
+    where Ansible reaches OUT to the cluster API / DB endpoint instead of SSHing to
+    a VM. Mirrors ``_run_ecs_ansible_sync`` (register / run / poll / pull logs); the
+    only differences are the localhost command (no ``-i '<ip>,'``, no SSH key) and
+    the connection material riding the ephemeral override env. Uses the ansible-cloud
+    image, which carries the k8s/DB collections + client libs."""
+    import time
+    from .ansible_localhost_cmd import build_localhost_command
+    ecs = _get_ecs(region)
+    logs_client = boto3.client("logs", **_aws_kwargs(region))
+    log_group = "/ecs/ansible-runner"
+    log_stream_prefix = f"ansible-local/{job_id[:8]}" if job_id else "ansible-local/adhoc"
+
+    try:
+        logs_client.create_log_group(logGroupName=log_group)
+    except ClientError as e:
+        if e.response["Error"]["Code"] != "ResourceAlreadyExistsException":
+            raise
+
+    cmd = build_localhost_command(
+        with_conn_vars=bool(conn_vars_b64), with_kubeconfig=bool(kubeconfig_b64))
+
+    td_kwargs: dict = dict(
+        family=task_family,
+        networkMode="awsvpc",
+        requiresCompatibilities=["FARGATE"],
+        cpu=str(cpu),
+        memory=str(memory),
+        containerDefinitions=[{
+            "name": "ansible",
+            "image": image,
+            "essential": True,
+            "command": ["sh", "-c", cmd],
+            # The playbook rides the task-def env (it isn't a credential). The
+            # connection material (DB password / kubeconfig bearer token) stays an
+            # ephemeral RunTask override so it isn't retained in task-def history.
+            "environment": [{"name": "PLAYBOOK_B64", "value": playbook_b64}],
+            "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                    "awslogs-group": log_group,
+                    "awslogs-region": region,
+                    "awslogs-stream-prefix": log_stream_prefix,
+                },
+            },
+        }],
+    )
+    if execution_role_arn:
+        td_kwargs["executionRoleArn"] = execution_role_arn
+
+    td_resp = ecs.register_task_definition(**td_kwargs)
+    task_def_arn = td_resp["taskDefinition"]["taskDefinitionArn"]
+
+    ecs.create_cluster(clusterName=cluster)
+
+    override_env = []
+    if conn_vars_b64:
+        override_env.append({"name": "CONN_VARS_B64", "value": conn_vars_b64})
+    if kubeconfig_b64:
+        override_env.append({"name": "KUBECONFIG_B64", "value": kubeconfig_b64})
+
+    run_resp = ecs.run_task(
+        cluster=cluster,
+        taskDefinition=task_def_arn,
+        launchType="FARGATE",
+        networkConfiguration={"awsvpcConfiguration": {
+            "subnets": [subnet_id] if subnet_id else [],
+            "securityGroups": security_group_ids or [],
+            "assignPublicIp": "ENABLED",  # public-subnet egress via IGW (sandbox has no NAT; runner needs egress, not inbound)
+        }},
+        overrides={"containerOverrides": [{
+            "name": "ansible",
+            "environment": override_env,
+        }]},
+        count=1,
+    )
+
+    tasks = run_resp.get("tasks", [])
+    if not tasks:
+        raise AWSError(f"ECS ansible-local task failed to start: {run_resp.get('failures', [])}")
+
+    task_arn = tasks[0]["taskArn"]
+    task_id = task_arn.split("/")[-1]
+
+    # Poll until stopped (max 20 min)
+    exit_code = 1
+    for _ in range(120):
+        desc = ecs.describe_tasks(cluster=cluster, tasks=[task_arn])
+        t = desc.get("tasks", [{}])[0]
+        if t.get("lastStatus") == "STOPPED":
+            for c in t.get("containers", []):
+                if c.get("name") == "ansible":
+                    ec = c.get("exitCode")
+                    exit_code = ec if ec is not None else 1
+                    break
+            break
+        time.sleep(10)
+
+    # Retrieve CloudWatch logs
+    output = ""
+    try:
+        log_stream = f"{log_stream_prefix}/ansible/{task_id}"
+        log_resp = logs_client.get_log_events(
+            logGroupName=log_group,
+            logStreamName=log_stream,
+            startFromHead=True,
+        )
+        output = "\n".join(e["message"] for e in log_resp.get("events", []))
+    except Exception as log_err:
+        logger.warning("ECS ansible-local: could not retrieve logs: %s", log_err)
+
+    return exit_code, output
+
+
+async def run_ecs_ansible_local_task(
+    *,
+    region: str,
+    cluster: str,
+    task_family: str,
+    image: str,
+    cpu: str,
+    memory: str,
+    subnet_id: str,
+    security_group_ids: list,
+    execution_role_arn: str,
+    playbook_b64: str,
+    conn_vars_b64: str = "",
+    kubeconfig_b64: str = "",
+    job_id: str,
+) -> tuple:
+    """Run a localhost Ansible play (k8s/DB target) via ECS Fargate.
+    Returns (exit_code, output)."""
+    try:
+        return await asyncio.to_thread(
+            _run_ecs_ansible_local_sync,
+            region, cluster, task_family, image, cpu, memory,
+            subnet_id, security_group_ids, execution_role_arn,
+            playbook_b64, conn_vars_b64, kubeconfig_b64, job_id,
+        )
+    except AWSError:
+        raise
+    except (ClientError, BotoCoreError) as e:
+        raise AWSError(f"Failed to run ECS ansible-local task: {e}") from e
+    except NoCredentialsError:
+        raise AWSError("AWS credentials not configured.")
+
+
 def _describe_ami_sync(region: str, ami_id: str) -> dict:
     ec2 = _get_ec2(region)
     resp = ec2.describe_images(ImageIds=[ami_id])

@@ -52,10 +52,11 @@ into 20 unique playbooks.
 
 ---
 
-## The two paths
+## The execution paths
 
-The dashboard surfaces two distinct execution paths, both reaching the
-same `Config Management` page.
+The dashboard surfaces three distinct execution paths, all reaching the
+same `Config Management` page. The first two SSH/WinRM *to* a host; the
+third runs a `localhost` play that reaches *out* to a managed service.
 
 ### On-premises hypervisors
 
@@ -99,6 +100,47 @@ Cloud runs can use any of the four runners — the choice mostly affects
 *where the Ansible process executes*, not the playbook semantics. See
 the runner section below.
 
+### Kubernetes clusters & cloud databases (localhost plays)
+
+Registered/provisioned **Kubernetes clusters** and provisioned **cloud
+databases** appear in the same target dropdown, under their own groups.
+These are *not* SSH targets — Ansible's `kubernetes.core` and
+`community.postgresql`/`mysql`/`general` modules run on the controller
+(`hosts: localhost, connection: local`) and reach *out* to the API
+server (via a kubeconfig) or the DB endpoint (via login vars). So the
+model is inverted from the VM paths, and three things follow:
+
+- **Connection material is injected automatically.** Pick a cluster and
+  the dashboard token-preps its stored kubeconfig (swapping the cloud
+  exec-auth block for a short-lived bearer token) and hands it to the
+  runner via `K8S_AUTH_KUBECONFIG`/`KUBECONFIG`. Pick a database and it
+  resolves the admin credential server-side and injects
+  `db_login_host`/`_port`/`_user`/`_password` (+ `db_name`) as **scrubbed**
+  extra-vars. The operator never sees or types either. No SSH user or key
+  field is shown.
+- **They always run on a remote in-cloud runner.** Both resources are
+  private-only, so the run executes in-cloud, in-subnet (ECS / ACI /
+  Cloud Run — the same infra the VM cloud runners use), never the local
+  sibling-Docker path. This is mandatory: the dashboard host can't reach
+  an RFC1918 endpoint, and its egress traverses the corporate
+  TLS-inspecting proxy. Running in-cloud keeps the Ansible→endpoint data
+  path entirely within the cloud. (`ansible_runner_<cloud>` selects the
+  backend; `local` is rejected for these kinds.)
+- **A different runner image.** k8s/DB runs use `chrweav/ansible-cloud`
+  (kubernetes.core + the DB collections + client libs + the helm CLI),
+  selected via `ansible_cloud_image` — never the winrm VM image, which
+  lacks those collections.
+
+Runs are dispatched by the durable job worker (`ansible_cloud_run` job
+type) rather than an in-process background task, since they launch a
+cloud task that can outlive a request worker's recycle.
+
+**Scope note:** the stored kubeconfig is cluster-admin and the database
+credential is the admin/master login — a localhost play has full rights.
+Treat these playbooks accordingly. Starters live in
+[`examples/playbooks/k8s/`](../examples/playbooks/k8s/) and
+[`examples/playbooks/database/`](../examples/playbooks/database/).
+
 ---
 
 ## Asset types
@@ -116,8 +158,8 @@ substitute for proper playbook authoring. If you find yourself writing
 the same `.sh` script three times with different targets, that's a
 signal to write a real `.yml` playbook with `vars` and `when` clauses.
 
-Need a starting point? Ready-to-adapt Linux and Windows playbooks live in
-[`examples/playbooks/`](../examples/playbooks/).
+Need a starting point? Ready-to-adapt Linux, Windows, Kubernetes, and
+cloud-database playbooks live in [`examples/playbooks/`](../examples/playbooks/).
 
 ---
 
