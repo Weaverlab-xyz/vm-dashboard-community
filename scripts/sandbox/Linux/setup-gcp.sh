@@ -3,6 +3,8 @@
 #
 # Multi-region: re-run for a second region with a DISTINCT subnet prefix, e.g.
 #   GCP_REGION=us-east1 GCP_CIDR_PREFIX=10.102 GCP_SANDBOX_SUPERNET=10.96.0.0/12 ./setup-gcp.sh
+# The zone defaults to the region's first available zone (override with GCP_ZONE);
+# some regions, us-east1 included, have no "-a" zone.
 # The subnets join the SAME shared VPC (so the GKE↔sandbox VPC peering, which is
 # VPC-wide + cross-region, automatically covers VMs in the new region), and the
 # per-region config keys (gcp_region.<region>.*) are emitted for the dashboard.
@@ -44,7 +46,7 @@ require_cmd ssh-keygen
 NAME="${SANDBOX_NAME_PREFIX}"
 PROJECT_ID="${GCP_PROJECT_ID:-$(gcloud config get-value project 2>/dev/null || true)}"
 REGION="${GCP_REGION:-us-central1}"
-ZONE="${GCP_ZONE:-${REGION}-a}"
+ZONE="${GCP_ZONE:-}"   # resolved after login — not every region has an "-a" zone
 
 # Per-region subnet CIDR base. Subnets are ${GCP_CIDR_PREFIX}.1/2/3.0/24
 # (jumpoint / vm / k8s). The VPC is shared across regions, so when ADDING a second
@@ -64,6 +66,22 @@ GCP_SANDBOX_SUPERNET="${GCP_SANDBOX_SUPERNET:-10.99.0.0/16}"
 
 ensure_logged_in "gcloud" "gcloud auth print-access-token --quiet" \
   "Run: gcloud auth login && gcloud auth application-default login"
+
+# Not every region has an "-a" zone (us-east1 / europe-west1 only have b/c/d),
+# and an invalid zone emitted into gcp_region.<region>.zone surfaces later on
+# deploy as a misleading LOCATION_POLICY_VIOLATED 403. Default to the region's
+# first real zone, and validate an explicit GCP_ZONE against the same list.
+REGION_ZONES="$(gcloud compute zones list --project "$PROJECT_ID" \
+  --filter="region:${REGION}" --format="value(name)" 2>/dev/null || true)"
+if [[ -z "$ZONE" ]]; then
+  ZONE="$(head -n1 <<<"$REGION_ZONES")"
+  if [[ -z "$ZONE" ]]; then
+    ZONE="${REGION}-a"
+    warn "Could not list zones for region $REGION — assuming $ZONE exists (set GCP_ZONE to override)"
+  fi
+elif [[ -n "$REGION_ZONES" ]] && ! grep -qxF "$ZONE" <<<"$REGION_ZONES"; then
+  die "GCP_ZONE=$ZONE is not a zone in region $REGION. Valid zones: ${REGION_ZONES//$'\n'/ }"
+fi
 
 section "GCP sandbox in project $PROJECT_ID, region $REGION ($ZONE)"
 

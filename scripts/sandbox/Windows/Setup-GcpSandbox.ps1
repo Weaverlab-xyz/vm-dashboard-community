@@ -16,13 +16,15 @@ $ProjectId = if ($env:GCP_PROJECT_ID) { $env:GCP_PROJECT_ID } else {
     (gcloud config get-value project 2>$null).Trim()
 }
 $Region    = if ($env:GCP_REGION) { $env:GCP_REGION } else { 'us-central1' }
-$Zone      = if ($env:GCP_ZONE)   { $env:GCP_ZONE }   else { "$Region-a" }
+$Zone      = $env:GCP_ZONE   # resolved after login — not every region has an "-a" zone
 
 # Per-region subnet CIDR base. Subnets are ${CidrPrefix}.1/2/3.0/24. The VPC is
 # shared across regions, so when ADDING a second region set a DISTINCT prefix or
 # GCP rejects the overlapping range. Avoid the GKE ranges (10.98/10.100/10.101),
 # the Cloud SQL PSA range, and other regions' prefixes. Multi-region example:
 #   $env:GCP_REGION='us-east1'; $env:GCP_CIDR_PREFIX='10.102'; $env:GCP_SANDBOX_SUPERNET='10.96.0.0/12'
+# (the zone defaults to the region's first available zone — us-east1 has no "-a" —
+# override with $env:GCP_ZONE)
 $CidrPrefix = if ($env:GCP_CIDR_PREFIX) { $env:GCP_CIDR_PREFIX } else { '10.99' }
 # Supernet the two VPC-wide firewall rules span (allow-internal / allow-vm-egress-vpc);
 # widen to cover every region's prefix when running multi-region. Rules are
@@ -35,6 +37,22 @@ if (-not $ProjectId -or $ProjectId -eq '(unset)') {
 
 Assert-LoggedIn 'gcloud' { gcloud auth print-access-token --quiet } `
     'Run: gcloud auth login && gcloud auth application-default login'
+
+# Not every region has an "-a" zone (us-east1 / europe-west1 only have b/c/d),
+# and an invalid zone emitted into gcp_region.<region>.zone surfaces later on
+# deploy as a misleading LOCATION_POLICY_VIOLATED 403. Default to the region's
+# first real zone, and validate an explicit GCP_ZONE against the same list.
+$RegionZones = @(gcloud compute zones list --project $ProjectId --filter="region:$Region" --format="value(name)" 2>$null | Where-Object { $_ })
+if (-not $Zone) {
+    if ($RegionZones.Count -gt 0) {
+        $Zone = $RegionZones[0]
+    } else {
+        $Zone = "$Region-a"
+        Write-Warn "Could not list zones for region $Region - assuming $Zone exists (set `$env:GCP_ZONE to override)"
+    }
+} elseif ($RegionZones.Count -gt 0 -and $RegionZones -notcontains $Zone) {
+    Write-Die "GCP_ZONE=$Zone is not a zone in region ${Region}. Valid zones: $($RegionZones -join ', ')"
+}
 
 Write-Section "GCP sandbox in project $ProjectId, region $Region ($Zone)"
 
