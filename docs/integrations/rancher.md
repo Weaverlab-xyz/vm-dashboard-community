@@ -214,12 +214,22 @@ Two ways out:
    `curl` inside a **one-shot GCP Cloud Run job**, which egresses from GCP with
    no inspecting proxy in the path — the same corp-CA-dodging pattern as the
    Ansible/k8s cloud runners. The job targets the node's **internal IP**
-   (`rancher_internal_url`, captured at deploy) through the Cloud Run **VPC
-   connector** (its egress is private-ranges-only). Requirements:
-   - the k8s runner's GCP knobs: `gcp_project_id`, `gcp_region` (or
-     `gcp_ansible_cloud_run_region`), and `gcp_ansible_vpc_connector`;
-   - `rancher_runner_source_cidr` = the connector's `/28`, so the firewall admits
-     the runner (auto-merged into the allow-list while the transport is `runner`).
+   (`rancher_internal_url`, captured at deploy), so it needs VPC reach —
+   **either** of:
+   - **Direct VPC egress (recommended)** — `gcp_run_network` +
+     `gcp_run_subnetwork`: the job's NIC lands straight in the subnet. No
+     standing infrastructure or cost, and immune to the Serverless-VPC-Access
+     connector's shared-core zonal stockouts (`ZONE_RESOURCE_POOL_EXHAUSTED`
+     killed connector creation across three `us-central1` zones when this was
+     validated live). Set `rancher_runner_source_cidr` to the subnet's CIDR.
+   - **Serverless VPC Access connector** — `gcp_ansible_vpc_connector` (a
+     standing `/28` connector, ~$10-15/mo). Set `rancher_runner_source_cidr` to
+     the connector's `/28`.
+
+   Plus the k8s runner's base GCP knobs: `gcp_project_id` and `gcp_region` (or
+   `gcp_ansible_cloud_run_region`). `rancher_runner_source_cidr` is auto-merged
+   into the firewall allow-list while the transport is `runner`. The runner
+   fails fast with the exact keys when neither VPC option is configured.
 
    Request payloads (API token, bootstrap password) travel to the job as a curl
    config over stdin — never in the container's argv. Note each API call costs a
@@ -319,7 +329,8 @@ apply immediately.
 | `rancher_ready_timeout_s` | `360` | Seconds the deploy waits for Rancher to serve after boot; raise for slow disks / large images |
 | `rancher_api_transport` | `direct` | `direct` \| `runner` — run the Rancher API calls as curl in a GCP Cloud Run job when this network's TLS inspection blocks the node's self-signed cert ([details](#corp-tls-inspection-api-transport)) |
 | `rancher_internal_url` | (runtime) | `https://<node internal IP>` captured at deploy — what the runner transport dials |
-| `rancher_runner_source_cidr` | `""` | The Cloud Run VPC connector's `/28`; auto-added to the firewall while the transport is `runner` |
+| `rancher_runner_source_cidr` | `""` | The runner's source range — the direct-egress subnet's CIDR (or the connector's `/28`); auto-added to the firewall while the transport is `runner` |
+| `gcp_run_network` / `gcp_run_subnetwork` | `""` | Direct VPC egress for Cloud Run runner jobs (preferred over `gcp_ansible_vpc_connector`; no standing infra) |
 | `gcp_rancher_allow_open` | `false` | Open `0.0.0.0/0` when no CIDRs set (discouraged) |
 | `gcp_rancher_image` | `rancher/rancher:latest` | Rancher container image |
 | `gcp_rancher_machine_type` | `e2-medium` | VM size (≥ 4 GB enforced) |

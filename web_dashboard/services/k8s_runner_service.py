@@ -143,11 +143,17 @@ def _resolve_aci() -> dict:
 
 def _resolve_gcp() -> dict:
     """Resolve the GCP Cloud Run knobs for the k8s runner, reusing the existing
-    gcp_* and Ansible runner Cloud Run keys as fallbacks."""
+    gcp_* and Ansible runner Cloud Run keys as fallbacks. VPC reach for private
+    targets comes as EITHER direct VPC egress (``gcp_run_network`` /
+    ``gcp_run_subnetwork`` — the job NIC lands in the subnet; no standing infra)
+    or the legacy Serverless-VPC-Access connector (``gcp_ansible_vpc_connector``);
+    direct wins when both are set."""
     project_id = _cfg("gcp_project_id")
     region = _cfg("gcp_region") or _cfg("gcp_ansible_cloud_run_region")
     image = _cfg("k8s_runner_image_gcp") or _cfg("k8s_runner_image") or "dtzar/helm-kubectl:latest"
     vpc_connector = _cfg("gcp_ansible_vpc_connector")
+    vpc_network = _cfg("gcp_run_network")
+    vpc_subnetwork = _cfg("gcp_run_subnetwork")
 
     missing = []
     if not project_id:
@@ -165,6 +171,8 @@ def _resolve_gcp() -> dict:
         "region": region,
         "image": image,
         "vpc_connector": vpc_connector,
+        "vpc_network": vpc_network,
+        "vpc_subnetwork": vpc_subnetwork,
     }
 
 
@@ -250,6 +258,8 @@ async def run(
             stdin_b64=stdin_b64,
             job_id=job_id,
             vpc_connector=cfg["vpc_connector"],
+            vpc_network=cfg["vpc_network"],
+            vpc_subnetwork=cfg["vpc_subnetwork"],
         )
     else:
         raise K8sRunnerError(f"Unknown k8s_runner mode: {m!r}")

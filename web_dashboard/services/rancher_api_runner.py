@@ -48,13 +48,24 @@ class RancherRunnerError(Exception):
 
 def _resolve():
     """GCP Cloud Run knobs — reuse the k8s runner's resolution (same project /
-    region / image / VPC-connector keys) so runner installs need nothing new."""
+    region / image / VPC keys) so runner installs need nothing new. Unlike the
+    generic k8s runner (which reaches PUBLIC cluster endpoints), the Rancher
+    runner dials the node's INTERNAL IP — so VPC reach is REQUIRED: fail fast
+    with the exact keys when neither direct VPC egress nor a connector is set
+    (without it the job launches, can't route, and burns the whole readiness
+    budget before dying with a generic timeout — lived it live 2026-07-21)."""
     from . import k8s_runner_service
     try:
-        return k8s_runner_service._resolve_gcp()
+        cfg = k8s_runner_service._resolve_gcp()
     except Exception as exc:
         raise RancherRunnerError(
             f"Rancher API runner (Cloud Run) is not configured: {exc}") from exc
+    if not (cfg.get("vpc_network") or cfg.get("vpc_subnetwork") or cfg.get("vpc_connector")):
+        raise RancherRunnerError(
+            "rancher_api_transport=runner needs VPC reach to the node's internal IP: set "
+            "gcp_run_network + gcp_run_subnetwork (direct VPC egress — recommended, no "
+            "standing infra) or gcp_ansible_vpc_connector (Serverless VPC Access connector).")
+    return cfg
 
 
 def _q(val: str) -> str:
@@ -127,7 +138,8 @@ async def request(method: str, url: str, *, token: str = "",
     exit_code, output = await gcp_service.run_cloud_run_k8s_task(
         project_id=cfg["project_id"], region=cfg["region"], image=cfg["image"],
         command=command, kubeconfig_b64=_DUMMY_KUBECONFIG_B64,
-        stdin_b64=stdin_b64, job_id=job_id, vpc_connector=cfg["vpc_connector"])
+        stdin_b64=stdin_b64, job_id=job_id, vpc_connector=cfg["vpc_connector"],
+        vpc_network=cfg.get("vpc_network", ""), vpc_subnetwork=cfg.get("vpc_subnetwork", ""))
     # curl is ||-guarded so the job exits 0 even on transport failure; the parse
     # below is what distinguishes an HTTP response from a dead transport.
     if exit_code != 0:
@@ -152,7 +164,8 @@ async def wait_ready(url: str, timeout_s: int, *, job_id: str = "") -> str:
     exit_code, output = await gcp_service.run_cloud_run_k8s_task(
         project_id=cfg["project_id"], region=cfg["region"], image=cfg["image"],
         command=command, kubeconfig_b64=_DUMMY_KUBECONFIG_B64,
-        stdin_b64="", job_id=job_id, vpc_connector=cfg["vpc_connector"])
+        stdin_b64="", job_id=job_id, vpc_connector=cfg["vpc_connector"],
+        vpc_network=cfg.get("vpc_network", ""), vpc_subnetwork=cfg.get("vpc_subnetwork", ""))
     if _READY in (output or ""):
         return "ready"
     if exit_code != 0 and _NOT_READY not in (output or ""):
