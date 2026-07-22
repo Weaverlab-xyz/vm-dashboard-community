@@ -65,15 +65,19 @@ def _node_params() -> dict:
 
 
 def _allowed_cidrs() -> list[str]:
-    """Firewall source ranges, fail-closed. Empty CSV → [] unless allow_open."""
+    """MANUAL firewall source ranges (CSV), fail-closed. Empty CSV → [] unless allow_open.
+
+    Deliberately quiet: the CSV is only ONE input to the merged set (cluster
+    egress /32s, Jumpoint /32, dashboard + runner CIDRs join it), so an empty
+    CSV usually does NOT mean the firewall stays closed. The applied-outcome
+    warnings live in :func:`refresh_rancher_firewall`, which sees the FINAL set.
+    """
     csv = config_service.get("rancher_allowed_source_cidrs") or ""
     cidrs = [c.strip() for c in csv.split(",") if c.strip()]
     if not cidrs:
         if config_service.get_bool("gcp_rancher_allow_open", False):
-            logger.warning("Rancher node firewall opening 0.0.0.0/0 (gcp_rancher_allow_open=true)")
             return ["0.0.0.0/0"]
-        logger.warning("Rancher node has NO allowed source CIDRs — firewall stays closed (node unreachable). "
-                       "Set rancher_allowed_source_cidrs in Settings, provision a cluster, or enable the Web Jump.")
+        logger.debug("rancher_allowed_source_cidrs is empty — relying on auto-discovered sources")
     return cidrs
 
 
@@ -218,6 +222,14 @@ async def refresh_rancher_firewall(db) -> dict:
         return {"skipped": "no gcp project configured"}
     merged = sorted(set(_allowed_cidrs()) | set(_auto_cluster_cidrs(db))
                     | set(_jumpoint_cidr()) | set(_dashboard_cidr()) | set(_runner_cidr()))
+    # Warn on the FINAL merged set only — an empty manual CSV alone is normal
+    # (auto-discovered sources usually populate the set on their own).
+    if not merged:
+        logger.warning("Rancher node has NO allowed source CIDRs — firewall stays closed (node unreachable). "
+                       "Set rancher_allowed_source_cidrs in Settings, provision a cluster, or enable the Web Jump.")
+    elif "0.0.0.0/0" in merged:
+        logger.warning("Rancher node firewall opening 0.0.0.0/0 — node reachable from anywhere "
+                       "(gcp_rancher_allow_open or a manual CSV entry)")
     return await gcp_service.ensure_rancher_firewall(
         p["project_id"], p["network"], p["network_tag"], merged, _firewall_name(p["name"]))
 
