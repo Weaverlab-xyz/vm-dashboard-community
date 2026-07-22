@@ -75,7 +75,8 @@ class Settings(BaseSettings):
     rancher_server_url: str = ""              # Rancher server-url = https://<node public IP> (set by the deploy job)
     rancher_api_token: str = ""               # Rancher API bearer token minted at bootstrap; encrypted at rest
     rancher_bootstrap_password: str = ""      # first-run admin bootstrap password; encrypted at rest
-    rancher_admin_password: str = ""          # OPTIONAL admin UI password set during auto first-run; blank = reuse the bootstrap password. Rancher requires ≥12 chars. encrypted at rest
+    rancher_admin_password: str = ""          # admin UI password set during auto first-run. Rancher FORBIDS reusing the bootstrap password, so blank = auto-generate a distinct one (persisted here + surfaced in the Containers panel + job result). ≥12 chars. encrypted at rest
+    rancher_admin_password_generated: bool = False  # marker: rancher_admin_password was auto-generated (→ echo it in the login hint; cleared on teardown)
     rancher_auto_first_run: bool = True        # on a FRESH deploy, auto-complete Rancher's first-run wizard (change admin password from bootstrap + accept EULA + telemetry-opt out) so the operator lands on a logged-in UI; off = leave the manual "Welcome" wizard
     rancher_verify_tls: bool = False          # verify the Rancher TLS cert on direct-HTTPS API calls; False = accept the node's self-signed cert
     rancher_allowed_source_cidrs: str = ""    # OPTIONAL/ADDITIVE CSV CIDRs for the node's PUBLIC-IP GCE firewall (source_ranges, tcp 80/443). Dashboard-provisioned clusters' egress IPs AND (when the Web Jump is enabled) the dashboard-managed Jumpoint's egress IP are auto-added; use this only for extra operator/human IPs + pre-existing operator Jumpoints. Fully empty (no manual + no auto) = firewall NOT opened (fail closed) unless gcp_rancher_allow_open.

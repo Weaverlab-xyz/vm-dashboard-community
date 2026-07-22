@@ -807,14 +807,19 @@ async def get_rancher_node(
     bootstrap = config_service.get("rancher_bootstrap_password")
     configured = bool(project_id and bootstrap)
     server_url = config_service.get("rancher_server_url") or ""
-    # How to log in — shown once the node is bootstrapped. Never echo the secret;
-    # just the username + which configured password to use.
+    # How to log in — shown once the node is bootstrapped. An AUTO-GENERATED admin
+    # password is echoed (the operator has no other way to learn it — accepted
+    # trade-off); an operator-set or bootstrap password is only named, never echoed.
     login_hint = ""
     if config_service.get("rancher_api_token"):
-        which = ("your configured Rancher admin password"
-                 if config_service.get("rancher_admin_password")
-                 else "your Rancher bootstrap password")
-        login_hint = f"Log in as admin with {which}."
+        if config_service.get_bool("rancher_admin_password_generated", False):
+            pw = config_service.get("rancher_admin_password") or ""
+            login_hint = (f"Log in as admin / {pw}  (auto-generated — "
+                          f"change it in Rancher after first login).")
+        elif config_service.get("rancher_admin_password"):
+            login_hint = "Log in as admin with your configured Rancher admin password."
+        else:
+            login_hint = "Log in as admin with your Rancher bootstrap password."
     if not project_id:
         # Not configured yet — return an empty, not-configured shell (no 503, so
         # the tab can render the setup card like Portainer does).

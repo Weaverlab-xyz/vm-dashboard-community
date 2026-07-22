@@ -111,21 +111,22 @@ bootstrap password"** wizard (set a new admin password, accept the EULA, answer
 telemetry). On a **fresh** deploy the dashboard completes that for you
 (`rancher_auto_first_run`, on by default) using the API token it just minted:
 
-- **Sets the admin password.** By default it **reuses your bootstrap password** as
-  the permanent admin password, so you log in with the one password you already
-  configured — no second secret. Rancher enforces a **12-character minimum**, so
-  set the bootstrap password to ≥12 chars, or set a separate
-  `rancher_admin_password` (≥12) to use instead.
+- **Sets the admin password.** Rancher **forbids reusing the bootstrap password**
+  as the new admin password (*"must not be the same as the current password"*), so
+  a distinct one is required. Set `rancher_admin_password` (≥12 chars) to choose it,
+  **or leave it blank and the dashboard auto-generates a strong one**, stores it
+  encrypted, and **surfaces it** in the Containers → Rancher panel's *Access* line
+  and the deploy job result.
 - **Accepts the EULA and opts out of telemetry**, and clears the `first-login`
   flag — best-effort, version-tolerant.
 
 The result: the operator opens the URL and lands straight on the cluster list.
-**Log in as `admin` with your bootstrap password** (or `rancher_admin_password` if
-you set one). This runs **only on a fresh deploy** — a reused/already-set-up node
-is left untouched. If it can't complete (e.g. the password is <12 chars), the
-deploy still succeeds and you simply finish the wizard by hand once; the job note
-says what happened. Turn it off with `rancher_auto_first_run=false` to always get
-the manual wizard.
+**Log in as `admin`** with the password shown in the *Access* hint (change the
+auto-generated one after first login). This runs **only on a fresh deploy** — a
+reused/already-set-up node is left untouched; a generated password is cleared on
+teardown so the next fresh deploy makes a new one. If it can't complete, the deploy
+still succeeds and you finish the wizard by hand once (the job note says what
+happened). Turn it off with `rancher_auto_first_run=false` for the manual wizard.
 
 ---
 
@@ -348,8 +349,8 @@ apply immediately.
 | Key | Default | Purpose |
 |---|---|---|
 | `k8s_management_enabled` | `false` | Master toggle; surfaces the Rancher tab |
-| `rancher_bootstrap_password` | — | First-run admin password (secret); becomes the admin UI password unless `rancher_admin_password` is set. Rancher requires ≥12 chars |
-| `rancher_admin_password` | `""` | Optional admin UI password for auto first-run (secret); blank = reuse the bootstrap password |
+| `rancher_bootstrap_password` | — | First-run bootstrap password (secret; transient — Rancher requires the admin password to differ). ≥12 chars |
+| `rancher_admin_password` | `""` | Admin UI password for auto first-run (secret); blank = auto-generate a distinct one, surfaced in the panel + job result |
 | `rancher_auto_first_run` | `true` | Auto-complete Rancher's first-run wizard on a fresh deploy (password + EULA + telemetry) |
 | `rancher_allowed_source_cidrs` | `""` | *Additive* manual CIDRs (tcp 80/443); the dashboard's own egress, provisioned clusters + the Web-Jump Jumpoint are auto-added. Empty + nothing auto-discovered = closed |
 | `rancher_dashboard_egress_cidr` | (runtime) | The dashboard's own public egress IP/CIDR, auto-detected + persisted on deploy so the worker can reach the node's public IP. Behind a corp proxy pool set the pool's CIDR — a stored CIDR containing the detected IP is kept, not clobbered. Bare IP → `/32` |

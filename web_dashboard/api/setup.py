@@ -794,7 +794,7 @@ class K8sManagementFeatureConfig(BaseModel):
     # runtime ids (rancher_server_url / rancher_api_token) are set by the deploy
     # job, not entered here. Only the bootstrap password + node knobs are input.
     rancher_bootstrap_password: str = ""      # first-run admin bootstrap; encrypted at rest
-    rancher_admin_password: str = ""          # OPTIONAL admin UI password set during auto first-run; blank = reuse the bootstrap password (Rancher requires ≥12 chars); encrypted at rest
+    rancher_admin_password: str = ""          # admin UI password for auto first-run; blank = auto-generate a distinct one (Rancher forbids reusing the bootstrap password), surfaced in the Containers panel + job result; ≥12 chars; encrypted at rest
     rancher_auto_first_run: bool = True       # auto-complete Rancher's first-run wizard on a fresh deploy (change admin password + accept EULA/telemetry); off = leave the manual Welcome wizard
     rancher_verify_tls: bool = False          # verify the node's TLS cert on API calls (False = self-signed)
     rancher_allowed_source_cidrs: str = ""    # OPTIONAL/ADDITIVE CSV CIDRs for the node's public-IP GCE firewall (tcp 80/443). Provisioned clusters' egress IPs + the dashboard-managed Web-Jump Jumpoint IP are auto-added; use this only for extra operator IPs + pre-existing operator Jumpoints. Fully empty (manual + auto) = NOT opened unless gcp_rancher_allow_open

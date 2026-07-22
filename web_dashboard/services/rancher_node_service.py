@@ -39,6 +39,23 @@ def _firewall_name(node_name: str) -> str:
     return f"{node_name}-allow-mgmt"
 
 
+def _generate_admin_password() -> str:
+    """A strong admin UI password for Rancher first-run when the operator didn't
+    set ``rancher_admin_password``. Rancher enforces ≥12 chars and forbids reusing
+    the bootstrap password, so this is a fresh 24-char mix of upper/lower/digits/
+    symbols. Persisted + surfaced (job result + login hint) so the operator can
+    retrieve it."""
+    import secrets
+    import string
+    symbols = "!@#%^*-_=+"
+    alphabet = string.ascii_letters + string.digits + symbols
+    while True:
+        pw = "".join(secrets.choice(alphabet) for _ in range(24))
+        if (any(c.islower() for c in pw) and any(c.isupper() for c in pw)
+                and any(c.isdigit() for c in pw) and any(c in symbols for c in pw)):
+            return pw
+
+
 def _node_params() -> dict:
     """Resolve the node's deploy knobs from config_service (Settings)."""
     from ..config import settings
@@ -412,7 +429,16 @@ async def run_deploy(db, *, job_id: str, meta: dict) -> None:
             # FRESH-deploy only; best-effort (the node is usable regardless).
             if config_service.get_bool("rancher_auto_first_run", True):
                 job_service.update_progress(db, job_id, 85, "Completing Rancher first-run")
-                new_pw = config_service.get("rancher_admin_password") or bootstrap_password
+                # Rancher FORBIDS reusing the bootstrap password ("must not be the
+                # same as the current password"), so the admin password must differ.
+                # Use the operator's rancher_admin_password if set, else auto-generate
+                # a strong one and persist it so it can be surfaced (login hint + job
+                # result) — the operator logs in with it.
+                new_pw = config_service.get("rancher_admin_password")
+                if not new_pw:
+                    new_pw = _generate_admin_password()
+                    config_service.set("rancher_admin_password", new_pw)
+                    config_service.set("rancher_admin_password_generated", "1")
                 try:
                     fr = await rancher_service.complete_first_run_direct(
                         api_token=token, server_url=url,
@@ -430,12 +456,20 @@ async def run_deploy(db, *, job_id: str, meta: dict) -> None:
             except Exception as exc:
                 logger.warning("Rancher auto Entitle-register failed (continuing): %s", exc)
 
-        job_service.set_completed(db, job_id, {
+        completion = {
             "url": url, "external_ip": external_ip, "name": p["name"], "zone": p["zone"],
             "firewall_opened": fw.get("opened", False), "reused": res.get("reused", False),
             "first_run_completed": bool(fr and fr.get("password_changed")),
             "first_run_note": (fr or {}).get("reason", ""),
-        })
+        }
+        # Surface the admin login once, in the job result, when first-run set an
+        # AUTO-GENERATED password (the operator has no other way to learn it). If
+        # they set rancher_admin_password themselves, they already know it.
+        if (fr and fr.get("password_changed")
+                and config_service.get_bool("rancher_admin_password_generated", False)):
+            completion["admin_username"] = "admin"
+            completion["admin_password"] = config_service.get("rancher_admin_password")
+        job_service.set_completed(db, job_id, completion)
     except Exception as exc:
         logger.exception("Rancher node deploy failed (job %s)", job_id)
         job_service.set_failed(db, job_id, str(exc))
@@ -493,6 +527,12 @@ async def run_teardown(db, *, job_id: str, meta: dict) -> None:
                     "rancher_ui_jumpoint_egress_ip",
                     "entitle_rancher_integration_id", "entitle_rancher_tfstate"):
             config_service.set(key, "")
+        # An AUTO-GENERATED admin password belongs to the torn-down node instance —
+        # clear it (+ the marker) so the next fresh deploy generates a new one. An
+        # operator-set rancher_admin_password (no marker) is preserved.
+        if config_service.get_bool("rancher_admin_password_generated", False):
+            config_service.set("rancher_admin_password", "")
+            config_service.set("rancher_admin_password_generated", "")
 
         job_service.set_completed(db, job_id, {"name": name, "zone": zone})
     except Exception as exc:
