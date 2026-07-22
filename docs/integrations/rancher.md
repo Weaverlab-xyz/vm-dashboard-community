@@ -89,18 +89,64 @@ Settings apply immediately — no restart.
 
 ### Step 3 — Deploy the node
 
-On **Containers → Kubernetes (Rancher)**, click **Deploy Rancher node**. This
-enqueues a background job (follow it at `/jobs/{job_id}`) that:
+On **Containers → Kubernetes (Rancher)**, optionally fill the **PRA access**
+fieldset (see below), then click **Deploy Rancher node**. This enqueues a
+background job (follow it at `/jobs/{job_id}`) that:
 
 1. Creates/updates the source-restricted firewall rule (`<node>-allow-mgmt`, tcp 80/443).
 2. Launches the COS VM with the privileged Rancher container and an external IP.
 3. Pins the node's public IP as Rancher's `server-url`.
 4. Waits for Rancher to come up, then bootstraps it and mints the API token.
-5. If Entitle registration is enabled, registers the node in Entitle (best-effort).
+5. **Completes Rancher's first-run wizard** (see below) so the UI is ready to log into.
+6. If a PRA Web Jump was chosen, provisions it + vaults the admin credential.
+7. If Entitle registration is enabled, registers the node in Entitle (best-effort).
 
-When the job completes, the tab shows the node with a **RUNNING** status and a
-clickable **URL**. Open it (from an allowlisted IP) and log in as `admin` with
-your bootstrap password.
+When the job completes, the tab shows the node with a **RUNNING** status, a
+clickable **URL**, and an **Access** hint. Open it (from an allowlisted IP, or via
+the [PRA Web Jump](#pra-web-jump-optional)) and log in as `admin` with your
+password (see below).
+
+#### PRA access (chosen at deploy)
+
+Like the database and cloud-VM deploys, the deploy form offers **PRA pickers**
+(populated from your PRA appliance) so you choose access at deploy/redeploy time:
+
+- **Broker the Rancher UI via a PRA Web Jump** — tick to create a `rancher-ui`
+  Web Jump. Then pick:
+  - **Jump Group** and **Jumpoint** — where/through-what the Web Jump routes
+    (blank → the `bt_*` / `rancher_ui_*` config defaults).
+  - **Vault Account Group** — the PRA Vault group the generated **admin
+    credential is stored in**, so PRA **injects** it into the Rancher login (you
+    click the Web Jump and you're already logged in — the password never appears
+    in the dashboard). Leave blank to skip vaulting (the password is surfaced in
+    the *Access* hint instead).
+
+The picks are persisted to config, so they're reused by later console opens.
+
+### Automatic first-run
+
+A stock Rancher greets its first visitor with a **"Welcome to Rancher — enter your
+bootstrap password"** wizard (set a new admin password, accept the EULA, answer
+telemetry). On a **fresh** deploy the dashboard completes that for you
+(`rancher_auto_first_run`, on by default) using the API token it just minted:
+
+- **Sets the admin password.** Rancher **forbids reusing the bootstrap password**
+  as the new admin password (*"must not be the same as the current password"*), so
+  a distinct one is required. Set `rancher_admin_password` (≥12 chars) to choose it,
+  **or leave it blank and the dashboard auto-generates a strong one**, stores it
+  encrypted. When you chose a **Vault Account Group** at deploy, that credential is
+  **stored in the PRA Vault** and injected by the Web Jump (never shown); otherwise
+  it is **surfaced** in the Containers → Rancher panel's *Access* line + the job result.
+- **Accepts the EULA and opts out of telemetry**, and clears the `first-login`
+  flag — best-effort, version-tolerant.
+
+The result: the operator opens the URL and lands straight on the cluster list.
+**Log in as `admin`** with the password shown in the *Access* hint (change the
+auto-generated one after first login). This runs **only on a fresh deploy** — a
+reused/already-set-up node is left untouched; a generated password is cleared on
+teardown so the next fresh deploy makes a new one. If it can't complete, the deploy
+still succeeds and you finish the wizard by hand once (the job note says what
+happened). Turn it off with `rancher_auto_first_run=false` for the manual wizard.
 
 ---
 
@@ -323,7 +369,9 @@ apply immediately.
 | Key | Default | Purpose |
 |---|---|---|
 | `k8s_management_enabled` | `false` | Master toggle; surfaces the Rancher tab |
-| `rancher_bootstrap_password` | — | First-run admin password (secret) |
+| `rancher_bootstrap_password` | — | First-run bootstrap password (secret; transient — Rancher requires the admin password to differ). ≥12 chars |
+| `rancher_admin_password` | `""` | Admin UI password for auto first-run (secret); blank = auto-generate a distinct one, surfaced in the panel + job result |
+| `rancher_auto_first_run` | `true` | Auto-complete Rancher's first-run wizard on a fresh deploy (password + EULA + telemetry) |
 | `rancher_allowed_source_cidrs` | `""` | *Additive* manual CIDRs (tcp 80/443); the dashboard's own egress, provisioned clusters + the Web-Jump Jumpoint are auto-added. Empty + nothing auto-discovered = closed |
 | `rancher_dashboard_egress_cidr` | (runtime) | The dashboard's own public egress IP/CIDR, auto-detected + persisted on deploy so the worker can reach the node's public IP. Behind a corp proxy pool set the pool's CIDR — a stored CIDR containing the detected IP is kept, not clobbered. Bare IP → `/32` |
 | `rancher_ready_timeout_s` | `360` | Seconds the deploy waits for Rancher to serve after boot; raise for slow disks / large images |
@@ -345,6 +393,8 @@ apply immediately.
 | `rancher_ui_verify_certificate` | `false` | Web Jump cert verification |
 | `rancher_ui_jumpoint_cloud` | `gcp` | Which dashboard-managed Jumpoint host brokers the UI (`gcp`\|`aws`\|`azure`); its egress IP is auto-whitelisted |
 | `rancher_ui_jumpoint_egress_ip` | (runtime) | Captured egress IP of the dashboard-managed Web-Jump Jumpoint (auto-added to the firewall) |
+| `rancher_ui_vault_account_group_id` | `""` | PRA Vault account group (numeric id) the admin credential is vaulted into for Web-Jump injection; usually chosen per-deploy |
+| `rancher_ui_vault_account_id` | (runtime) | PRA Vault account id created for the admin credential; cleared on teardown |
 | `entitle_rancher_private` | `false` | Attach the Entitle agent token (node not reachable from Entitle's cloud) |
 
 ---

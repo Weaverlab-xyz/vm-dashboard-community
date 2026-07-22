@@ -321,6 +321,17 @@ def test_egress_detection_failure_keeps_existing():
     assert _CFG["rancher_dashboard_egress_cidr"] == "104.28.182.0/24"
 
 
+def test_generate_admin_password_strong_and_distinct():
+    # Rancher requires ≥12 chars + forbids reusing the bootstrap password, so the
+    # generated one must be long, mixed-class, and different every call.
+    import string
+    a = svc._generate_admin_password()
+    b = svc._generate_admin_password()
+    assert len(a) >= 12 and a != b
+    assert any(c.islower() for c in a) and any(c.isupper() for c in a)
+    assert any(c.isdigit() for c in a) and any(c in string.punctuation for c in a)
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0

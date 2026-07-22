@@ -75,6 +75,9 @@ class Settings(BaseSettings):
     rancher_server_url: str = ""              # Rancher server-url = https://<node public IP> (set by the deploy job)
     rancher_api_token: str = ""               # Rancher API bearer token minted at bootstrap; encrypted at rest
     rancher_bootstrap_password: str = ""      # first-run admin bootstrap password; encrypted at rest
+    rancher_admin_password: str = ""          # admin UI password set during auto first-run. Rancher FORBIDS reusing the bootstrap password, so blank = auto-generate a distinct one (persisted here + surfaced in the Containers panel + job result). ≥12 chars. encrypted at rest
+    rancher_admin_password_generated: bool = False  # marker: rancher_admin_password was auto-generated (→ echo it in the login hint; cleared on teardown)
+    rancher_auto_first_run: bool = True        # on a FRESH deploy, auto-complete Rancher's first-run wizard (change admin password from bootstrap + accept EULA + telemetry-opt out) so the operator lands on a logged-in UI; off = leave the manual "Welcome" wizard
     rancher_verify_tls: bool = False          # verify the Rancher TLS cert on direct-HTTPS API calls; False = accept the node's self-signed cert
     rancher_allowed_source_cidrs: str = ""    # OPTIONAL/ADDITIVE CSV CIDRs for the node's PUBLIC-IP GCE firewall (source_ranges, tcp 80/443). Dashboard-provisioned clusters' egress IPs AND (when the Web Jump is enabled) the dashboard-managed Jumpoint's egress IP are auto-added; use this only for extra operator/human IPs + pre-existing operator Jumpoints. Fully empty (no manual + no auto) = firewall NOT opened (fail closed) unless gcp_rancher_allow_open.
     # Rancher UI PRA web-broker (OPT-IN): an sra_web_jump to the node's HTTPS so
@@ -89,6 +92,8 @@ class Settings(BaseSettings):
     rancher_ui_local_port: int = 443          # local listen port (match Rancher 443 for SNI/cert)
     rancher_ui_web_jump_id: str = ""          # PRA Web Jump id for the central Rancher UI (runtime-set)
     rancher_ui_web_jump_tfstate: str = ""     # terraform state for the Web Jump (for teardown)
+    rancher_ui_vault_account_group_id: str = ""  # PRA Vault account group (numeric id) the admin credential is vaulted into for Web-Jump injection; chosen at deploy. "" = no vault (fall back to bt_vault_account_group_id, else surface the password)
+    rancher_ui_vault_account_id: str = ""     # PRA Vault account id created for the Rancher admin credential (runtime-set; cleared on teardown)
     rancher_ui_jumpoint_cloud: str = "gcp"    # which dashboard-managed Jumpoint host brokers the Rancher UI (gcp|aws|azure); its egress IP is auto-whitelisted. gcp = same cloud as the node
     rancher_ui_jumpoint_egress_ip: str = ""   # dashboard-managed Web-Jump Jumpoint host egress IP (runtime-set; auto-added to the node firewall as a /32). Azure host has no public IP → left blank (add manually)
     rancher_dashboard_egress_cidr: str = ""   # the DASHBOARD's own public egress IP/CIDR — the source the worker uses to bootstrap + poll the node over its PUBLIC IP, so it MUST be in the firewall or the deploy can't reach its own node. Auto-detected + persisted on deploy (best-effort IP-echo); a manually-set CIDR that CONTAINS the detected IP is kept (corp proxies egress from an IP pool — set the pool's CIDR, e.g. 104.28.182.0/24). Bare IP → /32.

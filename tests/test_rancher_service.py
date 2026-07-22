@@ -109,6 +109,43 @@ def test_delete_cluster_direct_ignores_404():
     asyncio.run(rs.delete_cluster_direct(cluster_id="c-m-gone"))
 
 
+def test_complete_first_run_direct():
+    seen = []
+    bodies = {}
+
+    def handler(request):
+        seen.append((request.method, request.url.path))
+        import json as _j
+        bodies[request.url.path] = _j.loads(request.content or b"{}")
+        return httpx.Response(200, json={})
+
+    _mock(handler)
+    result = asyncio.run(rs.complete_first_run_direct(
+        api_token="token-cfg:secret", server_url="https://rancher.example",
+        current_password="bootpw-123456", new_password="adminpw-123456"))
+    assert result["password_changed"] is True
+    # changepassword first (clears the Welcome gate), then the 3 wizard settings.
+    assert ("POST", "/v3/users") in seen
+    assert bodies["/v3/users"] == {"currentPassword": "bootpw-123456", "newPassword": "adminpw-123456"}
+    for s in ("eula-agreed", "telemetry-opt", "first-login"):
+        assert ("PUT", f"/v3/settings/{s}") in seen
+
+
+def test_complete_first_run_changepassword_failure_is_non_fatal():
+    def handler(request):
+        if request.url.path == "/v3/users":
+            return httpx.Response(422, json={"message": "Password must be at least 12 characters"})
+        return httpx.Response(200, json={})  # settings still succeed
+
+    _mock(handler)
+    # Must NOT raise — the node is usable regardless; the reason is surfaced.
+    result = asyncio.run(rs.complete_first_run_direct(
+        api_token="t", server_url="https://rancher.example",
+        current_password="short", new_password="short"))
+    assert result["password_changed"] is False
+    assert "12 characters" in result["reason"]
+
+
 def test_not_configured_raises():
     # Force _cfg to resolve empty (skips the pydantic-settings env fallback, which
     # isn't importable in this bare test env) so server_url/api_token are missing.
@@ -128,6 +165,8 @@ def test_not_configured_raises():
 if __name__ == "__main__":
     test_bootstrap_direct_orchestration()
     test_create_import_cluster_direct()
+    test_complete_first_run_direct()
+    test_complete_first_run_changepassword_failure_is_non_fatal()
     test_delete_cluster_direct_ignores_404()
     test_not_configured_raises()
     print("ok")

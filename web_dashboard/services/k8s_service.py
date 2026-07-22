@@ -3036,15 +3036,31 @@ async def register_rancher_ui_web_jump(db: Session) -> dict:
         return {"web_jump_id": existing, "reused": True}
     jump_group = _cfg("rancher_ui_jump_group") or _cfg("bt_jump_group_name")
     jumpoint = _cfg("rancher_ui_jumpoint_name") or _cfg("bt_jumpoint_name")
+    # Vault the admin credential for injection when a Vault account group is chosen
+    # (deploy form) — the operator never sees the password; PRA injects it into the
+    # Rancher login. Falls back to a plain (non-injected) Web Jump when no group is
+    # set. The generated/operator-set admin password comes from auto-first-run.
+    vault_group = (_cfg("rancher_ui_vault_account_group_id")
+                   or _cfg("bt_vault_account_group_id") or "").strip()
+    admin_password = _cfg("rancher_admin_password") if vault_group else ""
+    try:
+        vault_group_id = int(vault_group) if vault_group else None
+    except ValueError:
+        vault_group_id = None
     result = await pra.provision_web_jump(
         name="rancher-ui", url=server_url,
         jump_group_name=jump_group, jumpoint_name=jumpoint,
-        verify_certificate=config_service.get_bool("rancher_ui_verify_certificate", False))
+        verify_certificate=config_service.get_bool("rancher_ui_verify_certificate", False),
+        client_secret=_cfg("bt_client_secret"),
+        admin_password=admin_password,
+        vault_account_name="rancher-ui-admin" if (admin_password and vault_group_id) else "",
+        vault_username="admin", vault_account_group_id=vault_group_id)
     config_service.set("rancher_ui_web_jump_id", str(result.get("web_jump_id") or ""))
+    config_service.set("rancher_ui_vault_account_id", str(result.get("vault_account_id") or ""))
     if result.get("tf_state_json"):
         config_service.set("rancher_ui_web_jump_tfstate", result["tf_state_json"])
-    return {"web_jump_id": result.get("web_jump_id"), "jump_group": jump_group,
-            "jumpoint": jumpoint, "reused": False}
+    return {"web_jump_id": result.get("web_jump_id"), "vault_account_id": result.get("vault_account_id"),
+            "jump_group": jump_group, "jumpoint": jumpoint, "reused": False}
 
 
 async def remove_rancher_ui_web_jump() -> None:
@@ -3059,6 +3075,7 @@ async def remove_rancher_ui_web_jump() -> None:
             logger.warning("Rancher UI web-jump removal failed (non-fatal): %s", exc)
     config_service.set("rancher_ui_web_jump_id", "")
     config_service.set("rancher_ui_web_jump_tfstate", "")
+    config_service.set("rancher_ui_vault_account_id", "")
 
 
 async def open_console(db: Session, cluster_id: str, username: str = "system", *,

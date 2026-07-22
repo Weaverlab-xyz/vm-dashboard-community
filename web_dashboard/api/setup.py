@@ -794,6 +794,8 @@ class K8sManagementFeatureConfig(BaseModel):
     # runtime ids (rancher_server_url / rancher_api_token) are set by the deploy
     # job, not entered here. Only the bootstrap password + node knobs are input.
     rancher_bootstrap_password: str = ""      # first-run admin bootstrap; encrypted at rest
+    rancher_admin_password: str = ""          # admin UI password for auto first-run; blank = auto-generate a distinct one (Rancher forbids reusing the bootstrap password), surfaced in the Containers panel + job result; ≥12 chars; encrypted at rest
+    rancher_auto_first_run: bool = True       # auto-complete Rancher's first-run wizard on a fresh deploy (change admin password + accept EULA/telemetry); off = leave the manual Welcome wizard
     rancher_verify_tls: bool = False          # verify the node's TLS cert on API calls (False = self-signed)
     rancher_allowed_source_cidrs: str = ""    # OPTIONAL/ADDITIVE CSV CIDRs for the node's public-IP GCE firewall (tcp 80/443). Provisioned clusters' egress IPs + the dashboard-managed Web-Jump Jumpoint IP are auto-added; use this only for extra operator IPs + pre-existing operator Jumpoints. Fully empty (manual + auto) = NOT opened unless gcp_rancher_allow_open
     rancher_dashboard_egress_cidr: str = ""   # the dashboard's own egress IP/CIDR (auto-detected; a manually-set pool CIDR that contains the detected IP is kept)
@@ -815,6 +817,7 @@ class K8sManagementFeatureConfig(BaseModel):
     rancher_ui_jumpoint_name: str = ""
     rancher_ui_local_port: int = 443
     rancher_ui_jumpoint_cloud: str = "gcp"    # which dashboard-managed Jumpoint host brokers the Rancher UI (gcp|aws|azure); its egress IP is auto-whitelisted
+    rancher_ui_vault_account_group_id: str = ""  # default PRA Vault account group (numeric id) for the vaulted admin credential; usually chosen per-deploy instead
     # Entra/IdP group → cluster RBAC (real-identity JIT demo): default group the
     # per-cluster "Entra group" action binds (overridable in the action). Members get
     # entra_rbac_group_role; Entitle's Entra-ID integration JIT-grants membership.
@@ -949,7 +952,7 @@ _SECRET_FEATURE_KEYS = frozenset({
     "nutanix_password",
     "xcpng_password",
     "ansible_aci_acr_password",
-    "rancher_bootstrap_password", "rancher_api_token",
+    "rancher_bootstrap_password", "rancher_admin_password", "rancher_api_token",
     "oidc_client_secret",
 })
 

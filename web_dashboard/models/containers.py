@@ -197,6 +197,17 @@ class RancherNodeResponse(BaseModel):
     count: int
     configured: bool       # GCP project + bootstrap password present
     server_url: str = ""   # the pinned rancher_server_url (if the node is bootstrapped)
+    login_hint: str = ""   # how to log in (username + which configured password); never the secret itself
+
+
+class RancherDeployRequest(BaseModel):
+    # Deploy-time PRA choices (parity with DB/VM deploys). All optional — omitted
+    # fields fall back to Settings/config. jump_group + jumpoint by NAME, vault
+    # account group by numeric id (the list_pickers() contract).
+    web_jump_enabled: bool = False           # broker the Rancher UI via a PRA Web Jump
+    jump_group: Optional[str] = None         # PRA Jump Group name
+    jumpoint_name: Optional[str] = None      # PRA Jumpoint name
+    vault_account_group_id: Optional[int] = None  # PRA Vault account group for the admin credential
 
 
 class RancherImportRequest(BaseModel):

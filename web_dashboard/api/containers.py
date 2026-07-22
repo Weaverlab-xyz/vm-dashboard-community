@@ -40,6 +40,7 @@ from ..models.containers import (
     GCEJumpointListResponse,
     PortainerEndpoint,
     PortainerEndpointList,
+    RancherDeployRequest,
     RancherImportRequest,
     RancherImportResponse,
     RancherNodeInfo,
@@ -807,6 +808,24 @@ async def get_rancher_node(
     bootstrap = config_service.get("rancher_bootstrap_password")
     configured = bool(project_id and bootstrap)
     server_url = config_service.get("rancher_server_url") or ""
+    # How to log in — shown once the node is bootstrapped. An AUTO-GENERATED admin
+    # password is echoed (the operator has no other way to learn it — accepted
+    # trade-off); an operator-set or bootstrap password is only named, never echoed.
+    login_hint = ""
+    if config_service.get("rancher_api_token"):
+        if config_service.get("rancher_ui_vault_account_id"):
+            grp = config_service.get("rancher_ui_vault_account_group_id") or ""
+            grp_txt = f" (account group {grp})" if grp else ""
+            login_hint = (f"admin credential is stored in the PRA Vault{grp_txt} — open the "
+                          f"'rancher-ui' Web Jump for injected login.")
+        elif config_service.get_bool("rancher_admin_password_generated", False):
+            pw = config_service.get("rancher_admin_password") or ""
+            login_hint = (f"Log in as admin / {pw}  (auto-generated — "
+                          f"change it in Rancher after first login).")
+        elif config_service.get("rancher_admin_password"):
+            login_hint = "Log in as admin with your configured Rancher admin password."
+        else:
+            login_hint = "Log in as admin with your Rancher bootstrap password."
     if not project_id:
         # Not configured yet — return an empty, not-configured shell (no 503, so
         # the tab can render the setup card like Portainer does).
@@ -827,7 +846,8 @@ async def get_rancher_node(
         for i in raw
     ]
     return RancherNodeResponse(nodes=nodes, project_id=project_id, count=len(nodes),
-                               configured=configured, server_url=server_url)
+                               configured=configured, server_url=server_url,
+                               login_hint=login_hint)
 
 
 @router.get("/rancher/firewall")
@@ -843,14 +863,30 @@ async def get_rancher_firewall(
     return rancher_node_service.firewall_status(db)
 
 
+@router.get("/rancher/pra-options")
+async def get_rancher_pra_options(
+    current_user: User = Depends(require_permission("containers", "read")),
+):
+    """PRA pickers for the Rancher deploy form — Jump Groups, Jumpoints and Vault
+    account groups (best-effort). ``configured`` is false when PRA OAuth isn't set,
+    so the form shows a note instead of empty dropdowns. Mirrors
+    ``/api/k8s/clusters/pra-options``."""
+    from ..services import pra_api_service
+    pickers = await pra_api_service.list_pickers()
+    return {"configured": pra_api_service.configured(), **pickers}
+
+
 @router.post("/rancher/deploy", response_model=DeployContainerResponse)
 async def deploy_rancher_node(
+    req: RancherDeployRequest = RancherDeployRequest(),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("containers", "write")),
 ):
     """Deploy (or reuse) the Rancher management node. Enqueues a durable
     `rancher_node_deploy` job (VM boot + Rancher bootstrap can take minutes);
-    follow progress at /jobs/{job_id}. The job reads its knobs from Settings."""
+    follow progress at /jobs/{job_id}. Deploy-time PRA choices (Web Jump + Jump
+    Group / Jumpoint / Vault Account Group) ride the job metadata; anything omitted
+    falls back to Settings."""
     from ..services import config_service
 
     if not _gcp_project_id():
@@ -859,8 +895,16 @@ async def deploy_rancher_node(
         raise HTTPException(
             status_code=400,
             detail="Set a Rancher bootstrap password in Settings → Kubernetes before deploying.")
+    # Only carry fields the operator actually set, so blanks fall back to config.
+    meta: dict = {"web_jump_enabled": bool(req.web_jump_enabled)}
+    if req.jump_group:
+        meta["jump_group"] = req.jump_group.strip()
+    if req.jumpoint_name:
+        meta["jumpoint_name"] = req.jumpoint_name.strip()
+    if req.vault_account_group_id:
+        meta["vault_account_group_id"] = int(req.vault_account_group_id)
     job = job_service.create_job(
-        db, job_type="rancher_node_deploy", created_by=current_user.username, metadata={})
+        db, job_type="rancher_node_deploy", created_by=current_user.username, metadata=meta)
     return DeployContainerResponse(
         job_id=job.id, status="pending", message="Deploying the Rancher management node…")
 
