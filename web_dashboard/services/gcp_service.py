@@ -1922,12 +1922,21 @@ def _run_cloud_run_ansible_sync(
     target_ip: str, ansible_user: str,
     playbook_b64: str, ssh_key_b64: str, job_id: str,
     vpc_connector: str = "",
+    vpc_network: str = "", vpc_subnetwork: str = "",
     secret_entries: list | None = None, manifest_b64: str = "",
     service_account: str = "",
 ) -> tuple:
     """
     Create a Cloud Run Job that runs a single Ansible playbook, wait for it to
     finish, return (exit_code, log_output), and delete the job.
+
+    VPC reach for a private SSH target (e.g. a sandbox VM's internal IP), two
+    mutually exclusive modes mirroring the k8s runner — **direct VPC egress**
+    (``vpc_network`` / ``vpc_subnetwork``: the task gets a NIC in the subnet;
+    serverless, no standing infra, immune to the Serverless-VPC-Access
+    connector's shared-core zonal stockouts) wins over the legacy **connector**
+    (``vpc_connector`` annotation) when both are set. Either way egress stays
+    private-ranges-only.
     """
     import time
     _require_run()
@@ -1993,8 +2002,19 @@ def _run_cloud_run_ansible_sync(
         **({"service_account": service_account} if service_account else {}),
     )
 
+    if vpc_network or vpc_subnetwork:
+        ni_kwargs = {}
+        if vpc_network:
+            ni_kwargs["network"] = vpc_network
+        if vpc_subnetwork:
+            ni_kwargs["subnetwork"] = vpc_subnetwork
+        task_template.vpc_access = run_v2.VpcAccess(
+            network_interfaces=[run_v2.VpcAccess.NetworkInterface(**ni_kwargs)],
+            egress=run_v2.VpcAccess.VpcEgress.PRIVATE_RANGES_ONLY,
+        )
+
     exec_template = run_v2.ExecutionTemplate(template=task_template)
-    if vpc_connector:
+    if vpc_connector and not (vpc_network or vpc_subnetwork):
         exec_template.annotations = {
             "run.googleapis.com/vpc-access-connector": vpc_connector,
             "run.googleapis.com/vpc-access-egress": "private-ranges-only",
@@ -2049,12 +2069,14 @@ async def run_cloud_run_ansible_task(
     target_ip: str, ansible_user: str,
     playbook_b64: str, ssh_key_b64: str, job_id: str,
     vpc_connector: str = "",
+    vpc_network: str = "", vpc_subnetwork: str = "",
     service_account: str = "",
     secret_entries: list | None = None, manifest_b64: str = "",
 ) -> tuple:
     """
     Run an Ansible playbook via a GCP Cloud Run Job.
-    Returns (exit_code, output_log).
+    Returns (exit_code, output_log). ``vpc_network``/``vpc_subnetwork`` enable
+    direct VPC egress (preferred over the ``vpc_connector`` annotation).
     """
     try:
         return await asyncio.to_thread(
@@ -2063,6 +2085,7 @@ async def run_cloud_run_ansible_task(
             target_ip, ansible_user,
             playbook_b64, ssh_key_b64, job_id,
             vpc_connector,
+            vpc_network, vpc_subnetwork,
             secret_entries, manifest_b64,
             service_account,
         )
