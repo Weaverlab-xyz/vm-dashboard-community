@@ -363,64 +363,134 @@ rollback_gcp() {
     "Run: gcloud auth login"
 
   local project_id="${GCP_PROJECT_ID:-$(gcloud config get-value project 2>/dev/null || true)}"
-  local region="${GCP_REGION:-us-central1}"
   [[ -n "$project_id" && "$project_id" != "(unset)" ]] || die "No GCP project set."
 
-  section "GCP rollback in $project_id, region $region"
+  section "GCP rollback in $project_id (all regions on the shared sandbox VPC)"
 
   if (( !ASSUME_YES )); then
-    confirm "Delete GCP sandbox network, NAT, firewall rules, SA, secret in $project_id?" || return 0
+    confirm "Delete the GCP sandbox VPC across ALL regions — subnets, routers/NAT, firewall rules (incl. orphaned rancher/GKE rules), serverless egress IPs, PSA range + peering, SA, secret in $project_id?" || return 0
   fi
 
   local prefix="${SANDBOX_NAME_PREFIX}"
   local vpc="${prefix}-vpc"
-  local jp_subnet="${prefix}-jumpoint-subnet"
-  local vm_subnet="${prefix}-vm-subnet"
   local router="${prefix}-router"
   local nat="${prefix}-nat"
+
+  # Guard: a LIVE Rancher management node (VM tagged `rancher` / named rancher-server)
+  # owns firewall rules on this VPC. Don't force-delete under a running node — tear it
+  # down via the dashboard first so its runtime state stays consistent (AWS-parity, cf.
+  # the active-peering guard in rollback_aws).
+  local rancher_nodes
+  rancher_nodes="$(gcloud compute instances list --project "$project_id" \
+    --filter="tags.items=rancher OR name=rancher-server" --format="value(name)" 2>/dev/null || true)"
+  if [[ -n "$rancher_nodes" ]]; then
+    warn "Rancher management node(s) present: ${rancher_nodes//$'\n'/ }"
+    warn "Tear the Rancher node down via the dashboard (Kubernetes → Rancher) first, then re-run rollback. Aborting."
+    return 0
+  fi
+
+  # Guard: an ACTIVE GKE↔sandbox VPC peering (a non-co-located cluster lives in its own
+  # VPC and only the peering touches this one — no sandbox instance to catch). The
+  # servicenetworking peering is ours and is torn down below.
+  local gke_peers
+  gke_peers="$(gcloud compute networks peerings list --network "$vpc" --project "$project_id" \
+    --format="value(name)" 2>/dev/null | grep -vx 'servicenetworking-googleapis-com' || true)"
+  if [[ -n "$gke_peers" ]]; then
+    warn "Active non-servicenetworking VPC peering(s) on $vpc: ${gke_peers//$'\n'/ }"
+    warn "A GKE cluster is still peered to this VPC. Decommission it via the dashboard first, then re-run rollback. Aborting."
+    return 0
+  fi
 
   # Refuse to tear down if user VMs are still running in the VPC.
   local instances
   instances="$(gcloud compute instances list --project "$project_id" \
     --filter "networkInterfaces.network:$vpc" --format="value(name)" 2>/dev/null || true)"
   if [[ -n "$instances" ]]; then
-    warn "Instances still running in $vpc: $instances"
+    warn "Instances still running in $vpc: ${instances//$'\n'/ }"
     warn "Terminate them via the dashboard first, then re-run rollback. Aborting."
     return 0
   fi
 
-  # 1. NAT + Router (NAT first since it's a child of the router).
-  gcloud compute routers nats delete "$nat" --router "$router" --router-region "$region" \
-    --project "$project_id" --quiet >/dev/null 2>&1 && ok "Deleted NAT $nat" || true
-  gcloud compute routers delete "$router" --region "$region" --project "$project_id" \
-    --quiet >/dev/null 2>&1 && ok "Deleted router $router" || true
+  # Every region that still has a sandbox subnet or router on the shared VPC. The VPC is
+  # global but subnets/router/NAT are regional (same fixed names in each region), so a
+  # multi-region sandbox must be torn down per region or the shared-VPC delete blocks.
+  local regions
+  regions="$({ gcloud compute networks subnets list --project "$project_id" \
+                 --filter="network~/${vpc}\$" --format="value(region.basename())" 2>/dev/null
+               gcloud compute routers list --project "$project_id" \
+                 --filter="network~/${vpc}\$" --format="value(region.basename())" 2>/dev/null; } | sort -u || true)"
 
-  # 2. Firewall rules (any rule whose name starts with prefix-).
+  # 1. Release Cloud Run direct-VPC-egress serverless IPs (purpose=SERVERLESS). GCP
+  # auto-reserves these in the jumpoint subnet on each ansible/k8s run and never frees
+  # them, so they pin the subnet unless released before the subnet delete.
+  local addr_rows
+  addr_rows="$(gcloud compute addresses list --project "$project_id" \
+    --filter="purpose=SERVERLESS AND subnetwork~/${prefix}-" \
+    --format="csv[no-heading](name,region.basename())" 2>/dev/null || true)"
+  while IFS=, read -r addr areg; do
+    [[ -n "$addr" ]] || continue
+    gcloud compute addresses delete "$addr" --region "$areg" --project "$project_id" --quiet >/dev/null 2>&1 \
+      && ok "Released serverless egress IP $addr ($areg)" \
+      || warn "Could not release serverless egress IP $addr ($areg)"
+  done <<< "$addr_rows"
+
+  # 2. NAT + Router per region (deleting the router also removes its child Cloud NAT).
+  for reg in $regions; do
+    gcloud compute routers nats delete "$nat" --router "$router" --router-region "$reg" \
+      --project "$project_id" --quiet >/dev/null 2>&1 && ok "Deleted NAT $nat ($reg)" || true
+    gcloud compute routers delete "$router" --region "$reg" --project "$project_id" \
+      --quiet >/dev/null 2>&1 && ok "Deleted router $router ($reg)" || true
+  done
+
+  # 3. Firewall rules. First the sandbox-owned rules (name prefix), then any rule still
+  # attached to the VPC — the guards above already refused under a live owner, so what
+  # remains (e.g. rancher-server-allow-mgmt, <cluster>-allow-ssh-from-k8s) is orphaned.
   local rules
   rules="$(gcloud compute firewall-rules list --project "$project_id" \
-    --filter "name~^${prefix}-" --format="value(name)")"
+    --filter "name~^${prefix}-" --format="value(name)" 2>/dev/null || true)"
   for r in $rules; do
-    gcloud compute firewall-rules delete "$r" --project "$project_id" --quiet >/dev/null \
-      && ok "Deleted firewall rule $r"
+    gcloud compute firewall-rules delete "$r" --project "$project_id" --quiet >/dev/null 2>&1 \
+      && ok "Deleted firewall rule $r" || true
+  done
+  local vpc_rules
+  vpc_rules="$(gcloud compute firewall-rules list --project "$project_id" \
+    --filter="network~/${vpc}\$" --format="value(name)" 2>/dev/null || true)"
+  for r in $vpc_rules; do
+    gcloud compute firewall-rules delete "$r" --project "$project_id" --quiet >/dev/null 2>&1 \
+      && ok "Deleted orphaned firewall rule $r" || true
   done
 
-  # 3. Subnets, then VPC.
-  for sn in "$jp_subnet" "$vm_subnet"; do
-    if gcloud compute networks subnets describe "$sn" --region "$region" --project "$project_id" >/dev/null 2>&1; then
-      gcloud compute networks subnets delete "$sn" --region "$region" --project "$project_id" --quiet >/dev/null \
-        && ok "Deleted subnet $sn"
-    fi
-  done
+  # 4. Subnets — every sandbox subnet (jumpoint/vm/k8s) across every region on the VPC.
+  local subnet_rows
+  subnet_rows="$(gcloud compute networks subnets list --project "$project_id" \
+    --filter="network~/${vpc}\$" --format="csv[no-heading](name,region.basename())" 2>/dev/null || true)"
+  while IFS=, read -r sn sreg; do
+    [[ -n "$sn" ]] || continue
+    gcloud compute networks subnets delete "$sn" --region "$sreg" --project "$project_id" --quiet >/dev/null 2>&1 \
+      && ok "Deleted subnet $sn ($sreg)" \
+      || warn "Could not delete subnet $sn ($sreg)"
+  done <<< "$subnet_rows"
+
+  # 5. servicenetworking peering + reserved PSA range (Cloud SQL private-IP path) — both
+  # are VPC-scoped and pin the network delete.
+  gcloud compute networks peerings delete servicenetworking-googleapis-com \
+    --network "$vpc" --project "$project_id" --quiet >/dev/null 2>&1 \
+    && ok "Removed servicenetworking peering on $vpc" || true
+  gcloud compute addresses delete "${prefix}-psa-range" --global --project "$project_id" --quiet >/dev/null 2>&1 \
+    && ok "Deleted PSA range ${prefix}-psa-range" || true
+
+  # 6. VPC.
   if gcloud compute networks describe "$vpc" --project "$project_id" >/dev/null 2>&1; then
-    gcloud compute networks delete "$vpc" --project "$project_id" --quiet >/dev/null \
-      && ok "Deleted VPC $vpc"
+    gcloud compute networks delete "$vpc" --project "$project_id" --quiet >/dev/null 2>&1 \
+      && ok "Deleted VPC $vpc" \
+      || warn "Could not delete VPC $vpc (check for lingering attachments)"
   fi
 
-  # 4. Secret.
+  # 7. Secret.
   gcloud secrets delete "${prefix}-ssh-keypair" --project "$project_id" --quiet >/dev/null 2>&1 \
     && ok "Deleted secret ${prefix}-ssh-keypair" || true
 
-  # 5. Storage / promote-staging GCS bucket — empty then delete. (Bucket-scoped
+  # 8. Storage / promote-staging GCS bucket — empty then delete. (Bucket-scoped
   # IAM bindings go with the bucket; no separate cleanup step needed.)
   local storage_bucket="${project_id}-${prefix}-storage"
   if gcloud storage buckets describe "gs://$storage_bucket" --project "$project_id" >/dev/null 2>&1; then
@@ -429,7 +499,7 @@ rollback_gcp() {
       || warn "Could not delete bucket gs://$storage_bucket (may have retained objects)"
   fi
 
-  # 6. Service account (revoke role bindings + delete the SA).
+  # 9. Service account (revoke role bindings + delete the SA).
   local sa_email="${prefix}-sa@${project_id}.iam.gserviceaccount.com"
   if gcloud iam service-accounts describe "$sa_email" --project "$project_id" >/dev/null 2>&1; then
     for role in roles/compute.admin roles/secretmanager.secretAccessor \

@@ -451,6 +451,15 @@ What rollback does:
 Azure rollback uses `az group delete --no-wait` (cascade) — the entire RG
 goes away in one call. AWS and GCP delete resource-by-resource.
 
+For **GCP**, a single run tears down the shared VPC across **all** regions:
+it discovers every region that still has a subnet or router on the VPC and
+removes each region's subnets/router/NAT, releases orphaned Cloud Run
+serverless egress IPs, removes the PSA range + `servicenetworking` peering,
+and sweeps any leftover VPC firewall rules before deleting the global VPC.
+Like the running-VM guard, it also **refuses** if a live Rancher management
+node or an active GKE↔sandbox-VPC peering is still attached — decommission
+those via the dashboard first.
+
 Service principals (Azure) and service accounts (GCP) are also deleted.
 The AWS `ecsTaskExecutionRole` is only deleted if it was tagged by us; an
 existing role created outside the sandbox is preserved.

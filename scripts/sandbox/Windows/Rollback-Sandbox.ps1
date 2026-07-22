@@ -319,64 +319,125 @@ function Invoke-GcpRollback {
     $projectId = if ($env:GCP_PROJECT_ID) { $env:GCP_PROJECT_ID } else {
         (gcloud config get-value project 2>$null).Trim()
     }
-    $region = if ($env:GCP_REGION) { $env:GCP_REGION } else { 'us-central1' }
     if (-not $projectId -or $projectId -eq '(unset)') { Write-Die 'No GCP project set.' }
 
-    Write-Section "GCP rollback in $projectId, region $region"
+    Write-Section "GCP rollback in $projectId (all regions on the shared sandbox VPC)"
     if (-not $Yes) {
-        if (-not (Confirm-Action "Delete GCP sandbox network, NAT, firewall rules, SA, secret in $projectId?")) { return }
+        if (-not (Confirm-Action "Delete the GCP sandbox VPC across ALL regions — subnets, routers/NAT, firewall rules (incl. orphaned rancher/GKE rules), serverless egress IPs, PSA range + peering, SA, secret in $projectId?")) { return }
     }
 
-    $prefix   = $Script:SandboxNamePrefix
-    $vpc      = "$prefix-vpc"
-    $jpSubnet = "$prefix-jumpoint-subnet"
-    $vmSubnet = "$prefix-vm-subnet"
-    $router   = "$prefix-router"
-    $nat      = "$prefix-nat"
+    $prefix = $Script:SandboxNamePrefix
+    $vpc    = "$prefix-vpc"
+    $router = "$prefix-router"
+    $nat    = "$prefix-nat"
+
+    # Guard: a LIVE Rancher management node (VM tagged `rancher` / named rancher-server)
+    # owns firewall rules on this VPC. Refuse rather than force-delete under a running
+    # node — tear it down via the dashboard first (AWS-parity active-owner guard).
+    $rancherNodes = @(gcloud compute instances list --project $projectId `
+        --filter="tags.items=rancher OR name=rancher-server" --format='value(name)' 2>$null) | Where-Object { $_ }
+    if ($rancherNodes) {
+        Write-Warn "Rancher management node(s) present: $($rancherNodes -join ', ')"
+        Write-Warn 'Tear the Rancher node down via the dashboard (Kubernetes -> Rancher) first, then re-run rollback. Aborting.'
+        return
+    }
+
+    # Guard: an ACTIVE GKE<->sandbox VPC peering (a non-co-located cluster lives in its
+    # own VPC and only the peering touches this one). servicenetworking is ours (below).
+    $gkePeers = @(gcloud compute networks peerings list --network $vpc --project $projectId `
+        --format='value(name)' 2>$null) | Where-Object { $_ -and $_ -ne 'servicenetworking-googleapis-com' }
+    if ($gkePeers) {
+        Write-Warn "Active non-servicenetworking VPC peering(s) on $vpc : $($gkePeers -join ', ')"
+        Write-Warn 'A GKE cluster is still peered to this VPC. Decommission it via the dashboard first, then re-run rollback. Aborting.'
+        return
+    }
 
     # Refuse if user VMs are still in the VPC.
-    $instances = (gcloud compute instances list --project $projectId `
-        --filter "networkInterfaces.network:$vpc" --format='value(name)' 2>$null).Trim()
+    $instances = @(gcloud compute instances list --project $projectId `
+        --filter "networkInterfaces.network:$vpc" --format='value(name)' 2>$null) | Where-Object { $_ }
     if ($instances) {
-        Write-Warn "Instances still running in $vpc : $instances"
+        Write-Warn "Instances still running in $vpc : $($instances -join ', ')"
         Write-Warn 'Terminate them via the dashboard first, then re-run rollback. Aborting.'
         return
     }
 
-    # 1. NAT + Router.
-    & gcloud compute routers nats delete $nat --router $router --router-region $region `
-        --project $projectId --quiet *> $null
-    if ($LASTEXITCODE -eq 0) { Write-Ok "Deleted NAT $nat" }
-    & gcloud compute routers delete $router --region $region --project $projectId --quiet *> $null
-    if ($LASTEXITCODE -eq 0) { Write-Ok "Deleted router $router" }
+    # Every region that still has a sandbox subnet or router on the shared VPC. The VPC
+    # is global but subnets/router/NAT are regional (same fixed names in each region), so
+    # a multi-region sandbox must be torn down per region or the shared-VPC delete blocks.
+    $regions = @(
+        (gcloud compute networks subnets list --project $projectId --filter="network~/$vpc`$" --format='value(region.basename())' 2>$null)
+        (gcloud compute routers list          --project $projectId --filter="network~/$vpc`$" --format='value(region.basename())' 2>$null)
+    ) | Where-Object { $_ } | Sort-Object -Unique
 
-    # 2. Firewall rules.
-    $rulesText = (gcloud compute firewall-rules list --project $projectId `
-        --filter "name~^$prefix-" --format='value(name)').Trim()
-    foreach ($r in $rulesText.Split([Environment]::NewLine, [StringSplitOptions]::RemoveEmptyEntries)) {
-        gcloud compute firewall-rules delete $r --project $projectId --quiet | Out-Null
-        Write-Ok "Deleted firewall rule $r"
+    # 1. Release Cloud Run direct-VPC-egress serverless IPs (purpose=SERVERLESS). GCP
+    # auto-reserves these in the jumpoint subnet on each ansible/k8s run and never frees
+    # them, so they pin the subnet unless released before the subnet delete.
+    $addrRows = @(gcloud compute addresses list --project $projectId `
+        --filter="purpose=SERVERLESS AND subnetwork~/$prefix-" `
+        --format='csv[no-heading](name,region.basename())' 2>$null) | Where-Object { $_ }
+    foreach ($row in $addrRows) {
+        $parts = $row.Split(','); $addr = $parts[0]; $areg = $parts[1]
+        & gcloud compute addresses delete $addr --region $areg --project $projectId --quiet *> $null
+        if ($LASTEXITCODE -eq 0) { Write-Ok "Released serverless egress IP $addr ($areg)" }
+        else { Write-Warn "Could not release serverless egress IP $addr ($areg)" }
     }
 
-    # 3. Subnets, then VPC.
-    foreach ($sn in @($jpSubnet, $vmSubnet)) {
-        & gcloud compute networks subnets describe $sn --region $region --project $projectId *> $null
-        if ($LASTEXITCODE -eq 0) {
-            gcloud compute networks subnets delete $sn --region $region --project $projectId --quiet | Out-Null
-            Write-Ok "Deleted subnet $sn"
-        }
+    # 2. NAT + Router per region (deleting the router also removes its child Cloud NAT).
+    foreach ($reg in $regions) {
+        & gcloud compute routers nats delete $nat --router $router --router-region $reg `
+            --project $projectId --quiet *> $null
+        if ($LASTEXITCODE -eq 0) { Write-Ok "Deleted NAT $nat ($reg)" }
+        & gcloud compute routers delete $router --region $reg --project $projectId --quiet *> $null
+        if ($LASTEXITCODE -eq 0) { Write-Ok "Deleted router $router ($reg)" }
     }
+
+    # 3. Firewall rules: sandbox-owned (name prefix) then any rule still on the VPC —
+    # the guards above already refused under a live owner, so what remains (e.g.
+    # rancher-server-allow-mgmt, <cluster>-allow-ssh-from-k8s) is orphaned.
+    $rulesText = @(gcloud compute firewall-rules list --project $projectId `
+        --filter "name~^$prefix-" --format='value(name)' 2>$null) | Where-Object { $_ }
+    foreach ($r in $rulesText) {
+        & gcloud compute firewall-rules delete $r --project $projectId --quiet *> $null
+        if ($LASTEXITCODE -eq 0) { Write-Ok "Deleted firewall rule $r" }
+    }
+    $vpcRules = @(gcloud compute firewall-rules list --project $projectId `
+        --filter="network~/$vpc`$" --format='value(name)' 2>$null) | Where-Object { $_ }
+    foreach ($r in $vpcRules) {
+        & gcloud compute firewall-rules delete $r --project $projectId --quiet *> $null
+        if ($LASTEXITCODE -eq 0) { Write-Ok "Deleted orphaned firewall rule $r" }
+    }
+
+    # 4. Subnets — every sandbox subnet (jumpoint/vm/k8s) across every region on the VPC.
+    $subnetRows = @(gcloud compute networks subnets list --project $projectId `
+        --filter="network~/$vpc`$" --format='csv[no-heading](name,region.basename())' 2>$null) | Where-Object { $_ }
+    foreach ($row in $subnetRows) {
+        $parts = $row.Split(','); $sn = $parts[0]; $sreg = $parts[1]
+        & gcloud compute networks subnets delete $sn --region $sreg --project $projectId --quiet *> $null
+        if ($LASTEXITCODE -eq 0) { Write-Ok "Deleted subnet $sn ($sreg)" }
+        else { Write-Warn "Could not delete subnet $sn ($sreg)" }
+    }
+
+    # 5. servicenetworking peering + reserved PSA range (Cloud SQL private-IP path) —
+    # both are VPC-scoped and pin the network delete.
+    & gcloud compute networks peerings delete servicenetworking-googleapis-com `
+        --network $vpc --project $projectId --quiet *> $null
+    if ($LASTEXITCODE -eq 0) { Write-Ok "Removed servicenetworking peering on $vpc" }
+    & gcloud compute addresses delete "$prefix-psa-range" --global --project $projectId --quiet *> $null
+    if ($LASTEXITCODE -eq 0) { Write-Ok "Deleted PSA range $prefix-psa-range" }
+
+    # 6. VPC.
     & gcloud compute networks describe $vpc --project $projectId *> $null
     if ($LASTEXITCODE -eq 0) {
-        gcloud compute networks delete $vpc --project $projectId --quiet | Out-Null
-        Write-Ok "Deleted VPC $vpc"
+        & gcloud compute networks delete $vpc --project $projectId --quiet *> $null
+        if ($LASTEXITCODE -eq 0) { Write-Ok "Deleted VPC $vpc" }
+        else { Write-Warn "Could not delete VPC $vpc (check for lingering attachments)" }
     }
 
-    # 4. Secret.
+    # 7. Secret.
     & gcloud secrets delete "$prefix-ssh-keypair" --project $projectId --quiet *> $null
     if ($LASTEXITCODE -eq 0) { Write-Ok "Deleted secret $prefix-ssh-keypair" }
 
-    # 5. Storage / promote-staging GCS bucket — empty then delete. (Bucket-scoped
+    # 8. Storage / promote-staging GCS bucket — empty then delete. (Bucket-scoped
     # IAM bindings go with the bucket; no separate cleanup step needed.)
     $storageBucket = "$projectId-$prefix-storage"
     & gcloud storage buckets describe "gs://$storageBucket" --project $projectId *> $null
@@ -386,7 +447,7 @@ function Invoke-GcpRollback {
         else { Write-Warn "Could not delete bucket gs://$storageBucket (may have retained objects)" }
     }
 
-    # 6. Service account.
+    # 9. Service account.
     $saEmail = "$prefix-sa@$projectId.iam.gserviceaccount.com"
     & gcloud iam service-accounts describe $saEmail --project $projectId *> $null
     if ($LASTEXITCODE -eq 0) {
