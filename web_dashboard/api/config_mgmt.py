@@ -821,7 +821,12 @@ async def _dispatch_cloud_runner(
             playbook_b64=playbook_b64,
             ssh_key_b64=ssh_key_b64,
             job_id=job_id,
+            # Reach a private SSH target via direct VPC egress (the job NIC lands
+            # in the subnet — no standing infra) when configured, else the legacy
+            # Serverless-VPC-Access connector. Direct wins when both are set.
             vpc_connector=_cfg("gcp_ansible_vpc_connector") or "",
+            vpc_network=_cfg("gcp_run_network") or "",
+            vpc_subnetwork=_cfg("gcp_run_subnetwork") or "",
             service_account=_cfg("gcp_ansible_runner_service_account") or "",
             secret_entries=secret_entries,
             manifest_b64=manifest_b64,

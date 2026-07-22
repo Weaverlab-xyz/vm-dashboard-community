@@ -641,6 +641,11 @@ class AnsibleFeatureConfig(BaseModel):
     gcp_ansible_cloud_run_region: str = ""
     gcp_ansible_image: str = "chrweav/ansible-winrm:latest"
     gcp_ansible_vpc_connector: str = ""
+    # Direct VPC egress (preferred over the connector — no standing infra; the
+    # Cloud Run job's NIC lands straight in the subnet). Set BOTH; wins over
+    # gcp_ansible_vpc_connector. Egress stays private-ranges-only.
+    gcp_run_network: str = ""
+    gcp_run_subnetwork: str = ""
     gcp_ansible_runner_service_account: str = ""   # SA the Cloud Run job runs as (required for GCP ephemeral secrets)
     # Ephemeral cloud secrets — managed-account checkout on ECS / Cloud Run. OFF by
     # default; copies a PAM credential into the cloud store (RBAC-locked) for the run.

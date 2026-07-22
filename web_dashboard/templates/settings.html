@@ -1124,7 +1124,19 @@
                          placeholder="us-central1">
                 </div>
                 <div>
-                  <label class="block text-sm font-medium text-gray-700 mb-1">VPC Connector <span class="text-gray-400 font-normal">(optional, for private egress)</span></label>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Direct VPC Egress — Network <span class="text-gray-400 font-normal">(preferred; reaches private targets with no standing infra)</span></label>
+                  <input type="text" x-model="panelCfg.gcp_run_network"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="dashboard-sandbox-vpc">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Direct VPC Egress — Subnetwork <span class="text-gray-400 font-normal">(subnet in the Cloud Run region; set with Network — wins over Connector)</span></label>
+                  <input type="text" x-model="panelCfg.gcp_run_subnetwork"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="dashboard-sandbox-vm-subnet">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">VPC Connector <span class="text-gray-400 font-normal">(legacy alternative to Direct VPC Egress)</span></label>
                   <input type="text" x-model="panelCfg.gcp_ansible_vpc_connector"
                          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
                          placeholder="projects/proj/locations/region/connectors/name">

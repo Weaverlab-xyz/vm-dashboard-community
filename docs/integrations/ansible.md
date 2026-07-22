@@ -357,16 +357,32 @@ backends need nothing beyond the Docker socket (Ansible) or in-container
   | `roles/logging.viewer` | Retrieve job output from Cloud Logging |
   | `roles/iam.serviceAccountUser` | Act as a service account when submitting jobs |
 
-- **VPC connector** (`gcp_ansible_vpc_connector`) when the job must reach
-  private RFC-1918 targets — Cloud Run Jobs run in a Google-managed VPC by
-  default and can't reach private addresses without one. Create one with:
+- **VPC reach** when the job must SSH to a private RFC-1918 target — Cloud Run
+  Jobs run in a Google-managed VPC by default and can't reach private addresses
+  without one of the two modes below (otherwise SSH times out and the play fails
+  `UNREACHABLE`, container exit code 4). Direct VPC egress wins when both are set.
 
-  ```bash
-  gcloud compute networks vpc-access connectors create ansible-runner \
-    --region us-central1 --network default --range 10.8.0.0/28
-  ```
+  - **Direct VPC egress (preferred — no standing infra):** set both
+    `gcp_run_network` (VPC name) and `gcp_run_subnetwork` (a subnet in the Cloud
+    Run region). The job's NIC lands straight in the subnet — no connector to
+    provision or pay for, and immune to the connector's shared-core zonal
+    stockouts. Egress stays private-ranges-only. Ensure a firewall rule allows
+    `tcp:22` from the subnet range to the target VM.
 
-  then set `gcp_ansible_vpc_connector=projects/PROJECT_ID/locations/us-central1/connectors/ansible-runner`.
+    ```
+    gcp_run_network=dashboard-sandbox-vpc
+    gcp_run_subnetwork=dashboard-sandbox-vm-subnet
+    ```
+
+  - **VPC connector (legacy):** create a Serverless VPC Access connector and set
+    `gcp_ansible_vpc_connector`:
+
+    ```bash
+    gcloud compute networks vpc-access connectors create ansible-runner \
+      --region us-central1 --network default --range 10.8.0.0/28
+    ```
+
+    then set `gcp_ansible_vpc_connector=projects/PROJECT_ID/locations/us-central1/connectors/ansible-runner`.
 
 ---
 
@@ -878,8 +894,13 @@ gcloud projects add-iam-policy-binding PROJECT_ID \
   --role="roles/logging.viewer"
 ```
 
-**GCP: Cloud Run job can't reach target host** — set `gcp_ansible_vpc_connector`
-to a Serverless VPC Access connector in the same region as your GCE instances.
+**GCP: Cloud Run job can't reach target host** (play fails `UNREACHABLE`, "ssh:
+connect to host … port 22: Operation timed out", container exit code 4) — give
+the runner VPC reach: set `gcp_run_network` + `gcp_run_subnetwork` for direct VPC
+egress (preferred, no standing infra), or `gcp_ansible_vpc_connector` for a
+Serverless VPC Access connector — matching the Cloud Run region to the target's
+region. Also confirm a firewall rule permits `tcp:22` from the runner's subnet
+range to the VM.
 
 **Azure: ACI runner UNREACHABLE / `ssh: connect to host <ip> port 22: Operation
 timed out`** — the ACI container has no route to the target VM's private IP. Set
