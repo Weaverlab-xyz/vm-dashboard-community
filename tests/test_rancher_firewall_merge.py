@@ -15,6 +15,7 @@ needed. Runs under pytest, or standalone:
     python tests/test_rancher_firewall_merge.py
 """
 import asyncio
+import logging
 import os
 import sys
 import types
@@ -225,6 +226,64 @@ def test_runner_source_cidr_merged_only_when_runner_transport():
     _reset(rancher_api_transport="direct", rancher_runner_source_cidr="10.8.0.0/28")
     _run_refresh(rows=[_Row("eks-a", "aws", "1.2.3.4")])
     assert _APPLIED["source_cidrs"] == ["1.2.3.4/32"]
+
+
+class _LogCapture(logging.Handler):
+    def __init__(self):
+        super().__init__(level=logging.DEBUG)
+        self.records = []
+
+    def emit(self, record):
+        self.records.append(record)
+
+
+def _capture_warnings(fn):
+    """Run fn while capturing rancher_node_service log records; return warnings+."""
+    h = _LogCapture()
+    old_level = svc.logger.level
+    svc.logger.addHandler(h)
+    svc.logger.setLevel(logging.DEBUG)
+    try:
+        fn()
+    finally:
+        svc.logger.setLevel(old_level)
+        svc.logger.removeHandler(h)
+    return [r for r in h.records if r.levelno >= logging.WARNING]
+
+
+def test_no_stays_closed_warning_when_merged_nonempty():
+    # Regression: an empty manual CSV used to make _allowed_cidrs() warn
+    # "firewall stays closed" on EVERY refresh, even when the MERGED set
+    # (cluster /32s, Jumpoint, dashboard egress) was non-empty and the firewall
+    # actually opened. The warning must key on the FINAL merged set.
+    _reset()  # manual CSV empty, allow_open off
+    warnings = _capture_warnings(lambda: _run_refresh(rows=[_Row("eks-a", "aws", "1.2.3.4")]))
+    assert _APPLIED["source_cidrs"] == ["1.2.3.4/32"]
+    assert not any("stays closed" in r.getMessage() for r in warnings)
+
+
+def test_stays_closed_warning_when_merged_empty():
+    # The warning still fires when the merged set really IS empty (fail-closed).
+    _reset()
+    warnings = _capture_warnings(lambda: _run_refresh(rows=[]))
+    assert _APPLIED["source_cidrs"] == []
+    assert any("stays closed" in r.getMessage() for r in warnings)
+
+
+def test_world_open_warning_fires_from_refresh():
+    _reset(gcp_rancher_allow_open="1")
+    warnings = _capture_warnings(lambda: _run_refresh(rows=[]))
+    assert _APPLIED["source_cidrs"] == ["0.0.0.0/0"]
+    assert any("0.0.0.0/0" in r.getMessage() for r in warnings)
+
+
+def test_firewall_status_logs_no_warnings():
+    # Read-only status must stay silent (it used to warn via _allowed_cidrs()).
+    _reset()
+    out = {}
+    warnings = _capture_warnings(lambda: out.update(svc.firewall_status(_FakeDB([]))))
+    assert out["merged"] == [] and out["opened"] is False
+    assert not warnings
 
 
 def _run_ensure_egress(detected_ip: str):
