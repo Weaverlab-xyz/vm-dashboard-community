@@ -172,7 +172,8 @@ placeholder. A region you provisioned but never imported won't appear there.
 
 ### Tear-down
 
-`rollback.sh` removes one region's resources per run, matching the setup scripts:
+For **AWS**, `rollback.sh` removes one region's resources per run, matching the
+setup scripts:
 
 ```bash
 AWS_REGION=us-west-2 ./scripts/sandbox/Linux/rollback.sh --cloud aws
@@ -183,9 +184,18 @@ Run the region holding your account-global resources **last** — it is the run
 that removes the IAM user and the S3 bucket. Removing a region from the
 dashboard's config is separate: edit it out in Settings → Multi-region.
 
-> **Azure** already worked this way and is unchanged. **OCI** has no per-region
-> config sets, so its sandbox remains single-region — a second OCI region
-> overwrites the first.
+> **GCP** tears down in a single run — it discovers every region that still has
+> a subnet or router on the shared VPC and removes each region's subnets,
+> router, and NAT before deleting the global VPC, so `GCP_REGION` is not needed.
+> The run also releases orphaned Cloud Run serverless egress IPs and the PSA
+> range/peering, and sweeps any leftover VPC firewall rules. If a Rancher
+> management node is still running or a GKE cluster is still peered to the
+> sandbox VPC, rollback refuses and asks you to decommission it via the
+> dashboard first (the resource belongs to that live feature).
+>
+> **Azure** already worked per-region and is unchanged. **OCI** has no
+> per-region config sets, so its sandbox remains single-region — a second OCI
+> region overwrites the first.
 
 ## One-shot: provision and auto-configure (skip the wizard)
 
