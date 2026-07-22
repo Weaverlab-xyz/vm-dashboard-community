@@ -817,6 +817,7 @@ class K8sManagementFeatureConfig(BaseModel):
     rancher_ui_jumpoint_name: str = ""
     rancher_ui_local_port: int = 443
     rancher_ui_jumpoint_cloud: str = "gcp"    # which dashboard-managed Jumpoint host brokers the Rancher UI (gcp|aws|azure); its egress IP is auto-whitelisted
+    rancher_ui_vault_account_group_id: str = ""  # default PRA Vault account group (numeric id) for the vaulted admin credential; usually chosen per-deploy instead
     # Entra/IdP group → cluster RBAC (real-identity JIT demo): default group the
     # per-cluster "Entra group" action binds (overridable in the action). Members get
     # entra_rbac_group_role; Entitle's Entra-ID integration JIT-grants membership.

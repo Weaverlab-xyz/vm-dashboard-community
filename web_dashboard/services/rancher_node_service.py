@@ -325,6 +325,20 @@ async def run_deploy(db, *, job_id: str, meta: dict) -> None:
             job_service.set_failed(db, job_id, "rancher_bootstrap_password is not set (Settings → Kubernetes).")
             return
 
+        # Persist the deploy-form PRA choices to config FIRST, so the firewall
+        # merge (_jumpoint_cidr gates on rancher_ui_web_jump_enabled) and the later
+        # Web-Jump provisioning (register_rancher_ui_web_jump reads _cfg) all honor
+        # this deploy's picks. Only keys the operator actually sent are written, so a
+        # bare redeploy keeps the existing Settings.
+        if "web_jump_enabled" in meta:
+            config_service.set("rancher_ui_web_jump_enabled", "1" if meta["web_jump_enabled"] else "0")
+        if meta.get("jump_group"):
+            config_service.set("rancher_ui_jump_group", str(meta["jump_group"]))
+        if meta.get("jumpoint_name"):
+            config_service.set("rancher_ui_jumpoint_name", str(meta["jumpoint_name"]))
+        if meta.get("vault_account_group_id"):
+            config_service.set("rancher_ui_vault_account_group_id", str(meta["vault_account_group_id"]))
+
         job_service.update_progress(db, job_id, 10, "Configuring firewall")
         # Learn (best-effort) + persist the dashboard's OWN public egress IP first:
         # the worker bootstraps + polls the node over its public IP, so that source
@@ -447,6 +461,19 @@ async def run_deploy(db, *, job_id: str, meta: dict) -> None:
                     logger.warning("Rancher first-run completion failed (non-fatal): %s", exc)
                     fr = {"password_changed": False, "reason": str(exc)}
 
+        # Eagerly provision the PRA Web Jump (+ vault the admin credential into the
+        # chosen account group) NOW, when it's enabled — so it's ready the moment
+        # deploy finishes, using this deploy's Jump Group / Jumpoint / Vault group.
+        # Best-effort (a PRA hiccup must not fail the node deploy); the lazy
+        # open_console path is the fallback. Runs on fresh + reused.
+        if config_service.get_bool("rancher_ui_web_jump_enabled", False):
+            job_service.update_progress(db, job_id, 92, "Provisioning PRA Web Jump")
+            try:
+                from . import k8s_service
+                await k8s_service.register_rancher_ui_web_jump(db)
+            except Exception as exc:
+                logger.warning("Rancher Web Jump provisioning failed (non-fatal): %s", exc)
+
         # Best-effort auto-register in Entitle (never fails the deploy).
         if config_service.get_bool("entitle_registration_enabled", False):
             job_service.update_progress(db, job_id, 90, "Registering in Entitle")
@@ -463,12 +490,16 @@ async def run_deploy(db, *, job_id: str, meta: dict) -> None:
             "first_run_note": (fr or {}).get("reason", ""),
         }
         # Surface the admin login once, in the job result, when first-run set an
-        # AUTO-GENERATED password (the operator has no other way to learn it). If
-        # they set rancher_admin_password themselves, they already know it.
+        # AUTO-GENERATED password AND it wasn't vaulted (the operator has no other
+        # way to learn it). If it's vaulted for Web-Jump injection, or they set
+        # rancher_admin_password themselves, don't echo the secret.
         if (fr and fr.get("password_changed")
-                and config_service.get_bool("rancher_admin_password_generated", False)):
+                and config_service.get_bool("rancher_admin_password_generated", False)
+                and not config_service.get("rancher_ui_vault_account_id")):
             completion["admin_username"] = "admin"
             completion["admin_password"] = config_service.get("rancher_admin_password")
+        elif config_service.get("rancher_ui_vault_account_id"):
+            completion["admin_credential"] = "stored in PRA Vault — use the rancher-ui Web Jump"
         job_service.set_completed(db, job_id, completion)
     except Exception as exc:
         logger.exception("Rancher node deploy failed (job %s)", job_id)
@@ -524,6 +555,7 @@ async def run_teardown(db, *, job_id: str, meta: dict) -> None:
         # Clear runtime config so a fresh deploy re-bootstraps cleanly.
         for key in ("rancher_server_url", "rancher_internal_url", "rancher_api_token",
                     "rancher_ui_web_jump_id", "rancher_ui_web_jump_tfstate",
+                    "rancher_ui_vault_account_id",
                     "rancher_ui_jumpoint_egress_ip",
                     "entitle_rancher_integration_id", "entitle_rancher_tfstate"):
             config_service.set(key, "")

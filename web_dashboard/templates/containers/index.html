@@ -670,6 +670,51 @@
           </div>
         </div>
 
+        <!-- PRA access (chosen at deploy/redeploy, like DB/VM deploys) -->
+        <div x-show="praOpts.configured" x-cloak
+             class="bg-white rounded-xl border border-gray-200 p-3 mb-3 text-sm">
+          <label class="flex items-center gap-2 font-medium text-gray-700">
+            <input type="checkbox" x-model="deployForm.web_jump_enabled" class="rounded border-gray-300">
+            Broker the Rancher UI via a PRA Web Jump
+          </label>
+          <p class="text-[11px] text-gray-400 mt-1 ml-6">
+            Creates a <code>rancher-ui</code> Web Jump and stores the generated admin credential in the chosen
+            PRA Vault account group for injected login — the password never appears here. Applied on Deploy/Redeploy.
+          </p>
+          <div x-show="deployForm.web_jump_enabled" x-cloak class="grid grid-cols-3 gap-3 mt-3 ml-6">
+            <div>
+              <label class="block text-xs font-medium text-gray-600 mb-1">Jump Group</label>
+              <select x-model="deployForm.jump_group"
+                      class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
+                <option value="">(configured default)</option>
+                <template x-for="g in praOpts.jump_groups || []" :key="g.id">
+                  <option :value="g.name" x-text="g.name"></option>
+                </template>
+              </select>
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-gray-600 mb-1">Jumpoint</label>
+              <select x-model="deployForm.jumpoint_name"
+                      class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
+                <option value="">(configured default)</option>
+                <template x-for="j in praOpts.jumpoints || []" :key="j.id">
+                  <option :value="j.name" x-text="j.name"></option>
+                </template>
+              </select>
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-gray-600 mb-1">Vault Account Group</label>
+              <select x-model.number="deployForm.vault_account_group_id"
+                      class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
+                <option :value="null">(none — show password instead)</option>
+                <template x-for="v in praOpts.vault_account_groups || []" :key="v.id">
+                  <option :value="v.id" x-text="v.name"></option>
+                </template>
+              </select>
+            </div>
+          </div>
+        </div>
+
         <div x-show="rancherNodes.length === 0"
              class="text-sm text-gray-500 py-6 text-center bg-white rounded-xl border border-gray-200">
           No Rancher node running. Click <strong>Deploy Rancher node</strong> to stand one up.
@@ -1176,6 +1221,9 @@ function containersDashboard() {
     rancherLoading: false,
     rancherError: null,
     rancherDeploying: false,
+    // Deploy-time PRA picks (parity with DB/VM deploys)
+    praOpts: { configured: false, jump_groups: [], jumpoints: [], vault_account_groups: [] },
+    deployForm: { web_jump_enabled: false, jump_group: '', jumpoint_name: '', vault_account_group_id: null },
     rancherActionPending: null,
     rancherImportName: '',
     rancherManifestCmd: '',
@@ -1599,12 +1647,22 @@ function containersDashboard() {
       } finally {
         this.rancherLoading = false;
       }
+      // PRA pickers for the deploy form (best-effort; empty when PRA unconfigured).
+      try {
+        this.praOpts = await API.get('/api/containers/rancher/pra-options');
+      } catch (e) { /* leave defaults — the fieldset just stays hidden */ }
     },
 
     async deployRancher() {
       this.rancherDeploying = true;
       try {
-        const resp = await API.post('/api/containers/rancher/deploy', {});
+        const body = { web_jump_enabled: this.deployForm.web_jump_enabled };
+        if (this.deployForm.web_jump_enabled) {
+          if (this.deployForm.jump_group) body.jump_group = this.deployForm.jump_group;
+          if (this.deployForm.jumpoint_name) body.jumpoint_name = this.deployForm.jumpoint_name;
+          if (this.deployForm.vault_account_group_id) body.vault_account_group_id = this.deployForm.vault_account_group_id;
+        }
+        const resp = await API.post('/api/containers/rancher/deploy', body);
         window.location.href = `/jobs/${resp.job_id}`;
       } catch (e) {
         toast(e.message, 'error');

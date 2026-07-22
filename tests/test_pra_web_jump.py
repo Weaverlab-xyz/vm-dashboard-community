@@ -51,8 +51,40 @@ def test_web_jump_hcl():
     assert 'name = "jp-1"' in hcl                           # jumpoint data source
     assert "verify_certificate = false" in hcl             # self-signed Rancher CA
     assert 'output "web_jump_id"' in hcl
+    # No vault account when none requested (default) — bare web jump only.
+    assert "sra_vault_username_password_account" not in hcl
+    assert "rancher_password" not in hcl
+
+
+def test_web_jump_hcl_with_vault_account():
+    hcl = tps._generate_web_jump_hcl(
+        "rancher-ui", URL_SENTINEL, "jg-1", "jp-1", tag="rancher",
+        vault_account_name="rancher-ui-admin", vault_username="admin",
+        vault_account_group_id=7)
+    # The web jump is still there …
+    assert 'resource "sra_web_jump" "rancher_ui"' in hcl
+    # … plus a Vault username/password account for injection.
+    assert 'resource "sra_vault_username_password_account" "rancher_admin"' in hcl
+    assert 'name        = "rancher-ui-admin"' in hcl
+    assert 'username    = "admin"' in hcl
+    assert "password    = var.rancher_password" in hcl
+    assert 'variable "rancher_password"' in hcl            # sensitive TF_VAR (not in HCL)
+    assert "account_group_id = 7" in hcl                   # scoped to the chosen group
+    # Associated to the jump's Jump GROUP via shared_jump_groups (not jump_items[].type).
+    assert "shared_jump_groups = [tonumber(data.sra_jump_group_list.jg.items[0].id)]" in hcl
+    assert 'output "vault_account_id"' in hcl
+
+
+def test_web_jump_hcl_vault_without_group_omits_account_group_id():
+    hcl = tps._generate_web_jump_hcl(
+        "rancher-ui", URL_SENTINEL, "jg-1", "jp-1",
+        vault_account_name="rancher-ui-admin")
+    assert 'resource "sra_vault_username_password_account" "rancher_admin"' in hcl
+    assert "account_group_id" not in hcl                   # omitted → provider default group
 
 
 if __name__ == "__main__":
     test_web_jump_hcl()
+    test_web_jump_hcl_with_vault_account()
+    test_web_jump_hcl_vault_without_group_omits_account_group_id()
     print("ok")

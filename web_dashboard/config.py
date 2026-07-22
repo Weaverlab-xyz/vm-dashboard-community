@@ -92,6 +92,8 @@ class Settings(BaseSettings):
     rancher_ui_local_port: int = 443          # local listen port (match Rancher 443 for SNI/cert)
     rancher_ui_web_jump_id: str = ""          # PRA Web Jump id for the central Rancher UI (runtime-set)
     rancher_ui_web_jump_tfstate: str = ""     # terraform state for the Web Jump (for teardown)
+    rancher_ui_vault_account_group_id: str = ""  # PRA Vault account group (numeric id) the admin credential is vaulted into for Web-Jump injection; chosen at deploy. "" = no vault (fall back to bt_vault_account_group_id, else surface the password)
+    rancher_ui_vault_account_id: str = ""     # PRA Vault account id created for the Rancher admin credential (runtime-set; cleared on teardown)
     rancher_ui_jumpoint_cloud: str = "gcp"    # which dashboard-managed Jumpoint host brokers the Rancher UI (gcp|aws|azure); its egress IP is auto-whitelisted. gcp = same cloud as the node
     rancher_ui_jumpoint_egress_ip: str = ""   # dashboard-managed Web-Jump Jumpoint host egress IP (runtime-set; auto-added to the node firewall as a /32). Azure host has no public IP → left blank (add manually)
     rancher_dashboard_egress_cidr: str = ""   # the DASHBOARD's own public egress IP/CIDR — the source the worker uses to bootstrap + poll the node over its PUBLIC IP, so it MUST be in the firewall or the deploy can't reach its own node. Auto-detected + persisted on deploy (best-effort IP-echo); a manually-set CIDR that CONTAINS the detected IP is kept (corp proxies egress from an IP pool — set the pool's CIDR, e.g. 104.28.182.0/24). Bare IP → /32.
