@@ -197,6 +197,7 @@ class RancherNodeResponse(BaseModel):
     count: int
     configured: bool       # GCP project + bootstrap password present
     server_url: str = ""   # the pinned rancher_server_url (if the node is bootstrapped)
+    login_hint: str = ""   # how to log in (username + which configured password); never the secret itself
 
 
 class RancherImportRequest(BaseModel):

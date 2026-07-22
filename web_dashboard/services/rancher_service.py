@@ -204,6 +204,60 @@ async def set_server_url_direct(*, server_url: str, api_token: str) -> None:
         _raise_status(status, body, "Rancher set server-url failed")
 
 
+async def complete_first_run_direct(*, api_token: str, server_url: str,
+                                    current_password: str, new_password: str) -> dict:
+    """Finish Rancher's interactive first-run so the operator lands on a ready,
+    logged-in UI instead of the "Welcome — enter your bootstrap password" wizard.
+
+    ``bootstrap_direct`` authenticates + pins server-url + mints the token, but
+    Rancher still considers setup unfinished until the bootstrap password is
+    replaced and the EULA/telemetry/first-login prompts are answered. Runs, using
+    the admin ``api_token`` (self-service):
+      1. ``POST /v3/users?action=changepassword`` — the step that clears the
+         Welcome gate. Rancher enforces ≥12 chars (and may reject new==current).
+      2. ``PUT /v3/settings/eula-agreed`` / ``telemetry-opt`` / ``first-login`` —
+         dismiss the rest of the wizard (version-tolerant; ignored if absent).
+
+    **Best-effort by contract:** the node is already usable (token minted), so a
+    failure here NEVER raises — worst case the operator still sees the wizard
+    (today's behavior). Returns ``{"password_changed": bool, "reason": str}`` for
+    the caller to surface. Call ONLY on a fresh bootstrap (a reused, already-set-up
+    node would have the wrong ``current_password``)."""
+    import datetime
+
+    result = {"password_changed": False, "reason": ""}
+    try:
+        status, body = await _call(
+            "POST", "/v3/users?action=changepassword", token=api_token, base_url=server_url,
+            json={"currentPassword": current_password, "newPassword": new_password})
+        if status < 300:
+            result["password_changed"] = True
+        else:
+            msg = body.get("message") if isinstance(body, dict) else str(body)
+            result["reason"] = f"changepassword {status}: {str(msg)[:200]}"
+            logger.warning("Rancher first-run: admin password not changed (%s) — the operator "
+                           "may still see the Welcome wizard. Rancher requires ≥12 chars and may "
+                           "reject reusing the bootstrap password; set rancher_admin_password.",
+                           result["reason"])
+    except Exception as exc:  # transport wrapped by the decorator normally; belt-and-suspenders
+        result["reason"] = f"changepassword error: {exc}"
+        logger.warning("Rancher first-run: changepassword failed (non-fatal): %s", exc)
+
+    # Dismiss the remaining wizard steps — each independently best-effort so an
+    # older/newer Rancher missing one setting doesn't block the others.
+    today = datetime.date.today().isoformat()
+    for name, value in (("eula-agreed", today), ("telemetry-opt", "out"), ("first-login", "false")):
+        try:
+            status, body = await _call(
+                "PUT", f"/v3/settings/{name}", token=api_token, base_url=server_url,
+                json={"name": name, "value": value})
+            if status >= 300:
+                logger.info("Rancher first-run: setting %s not applied (%s) — non-fatal.", name, status)
+        except Exception as exc:
+            logger.info("Rancher first-run: setting %s failed (non-fatal): %s", name, exc)
+    return result
+
+
 @_wrap_transport_errors
 async def create_import_cluster_direct(*, name: str, api_token: str = "",
                                        server_url: str = "") -> tuple:

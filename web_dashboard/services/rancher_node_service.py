@@ -350,6 +350,7 @@ async def run_deploy(db, *, job_id: str, meta: dict) -> None:
         if internal_ip:
             config_service.set("rancher_internal_url", f"https://{internal_ip}")
 
+        fr = None  # first-run completion result (fresh deploy only)
         existing_token = config_service.get("rancher_api_token")
         if res.get("reused") and existing_token and res.get("status") == "RUNNING":
             # Node already bootstrapped + alive — just re-pin server-url (the
@@ -402,7 +403,23 @@ async def run_deploy(db, *, job_id: str, meta: dict) -> None:
             job_service.update_progress(db, job_id, 75, "Bootstrapping Rancher admin")
             token = await rancher_service.bootstrap_direct(
                 bootstrap_password=bootstrap_password, server_url=url)
+            # Store the token FIRST: a retry then takes the reuse branch above and
+            # won't re-run first-run (which would fail on the now-changed password).
             config_service.set("rancher_api_token", token)
+
+            # Complete Rancher's first-run wizard so the operator lands on a
+            # ready, logged-in UI (not the "enter your bootstrap password" screen).
+            # FRESH-deploy only; best-effort (the node is usable regardless).
+            if config_service.get_bool("rancher_auto_first_run", True):
+                job_service.update_progress(db, job_id, 85, "Completing Rancher first-run")
+                new_pw = config_service.get("rancher_admin_password") or bootstrap_password
+                try:
+                    fr = await rancher_service.complete_first_run_direct(
+                        api_token=token, server_url=url,
+                        current_password=bootstrap_password, new_password=new_pw)
+                except Exception as exc:
+                    logger.warning("Rancher first-run completion failed (non-fatal): %s", exc)
+                    fr = {"password_changed": False, "reason": str(exc)}
 
         # Best-effort auto-register in Entitle (never fails the deploy).
         if config_service.get_bool("entitle_registration_enabled", False):
@@ -416,6 +433,8 @@ async def run_deploy(db, *, job_id: str, meta: dict) -> None:
         job_service.set_completed(db, job_id, {
             "url": url, "external_ip": external_ip, "name": p["name"], "zone": p["zone"],
             "firewall_opened": fw.get("opened", False), "reused": res.get("reused", False),
+            "first_run_completed": bool(fr and fr.get("password_changed")),
+            "first_run_note": (fr or {}).get("reason", ""),
         })
     except Exception as exc:
         logger.exception("Rancher node deploy failed (job %s)", job_id)

@@ -717,6 +717,9 @@
             </tbody>
           </table>
         </div>
+        <p x-show="rancherLoginHint" class="mt-2 text-xs text-gray-600" x-cloak>
+          <span class="font-medium text-gray-700">Access:</span> <span x-text="rancherLoginHint"></span>
+        </p>
         <p class="mt-2 text-xs text-gray-400">
           Reachability is governed by the <code>rancher_allowed_source_cidrs</code> firewall rule (Settings).
           Stop deletes the VM + firewall and clears the node's runtime config.
@@ -1169,6 +1172,7 @@ function containersDashboard() {
     rancherConfigured: false,
     rancherNodes: [],
     rancherServerUrl: '',
+    rancherLoginHint: '',
     rancherLoading: false,
     rancherError: null,
     rancherDeploying: false,
@@ -1588,6 +1592,7 @@ function containersDashboard() {
         this.rancherConfigured = !!data.configured;
         this.rancherNodes = data.nodes || [];
         this.rancherServerUrl = data.server_url || '';
+        this.rancherLoginHint = data.login_hint || '';
       } catch (e) {
         this.rancherError = e.message;
         this.rancherNodes = [];
