@@ -201,6 +201,11 @@ class RancherNodeResponse(BaseModel):
 
 
 class RancherDeployRequest(BaseModel):
+    # Deploy-time region pick (multi-region). Blank → the persisted node region, else
+    # the configured default. zone is optional within the region (blank → the region's
+    # first available zone, with same-region capacity fallback).
+    region: Optional[str] = None             # GCP region for the Rancher node
+    zone: Optional[str] = None               # optional GCP zone within `region`
     # Deploy-time PRA choices (parity with DB/VM deploys). All optional — omitted
     # fields fall back to Settings/config. jump_group + jumpoint by NAME, vault
     # account group by numeric id (the list_pickers() contract).

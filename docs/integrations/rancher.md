@@ -89,9 +89,10 @@ Settings apply immediately — no restart.
 
 ### Step 3 — Deploy the node
 
-On **Containers → Kubernetes (Rancher)**, optionally fill the **PRA access**
-fieldset (see below), then click **Deploy Rancher node**. This enqueues a
-background job (follow it at `/jobs/{job_id}`) that:
+On **Containers → Kubernetes (Rancher)**, optionally choose a **Region / Zone**
+([placement](#placement-multi-region)) and fill the **PRA access** fieldset (see
+below), then click **Deploy Rancher node**. This enqueues a background job (follow
+it at `/jobs/{job_id}`) that:
 
 1. Creates/updates the source-restricted firewall rule (`<node>-allow-mgmt`, tcp 80/443).
 2. Launches the COS VM with the privileged Rancher container and an external IP.
@@ -122,6 +123,28 @@ Like the database and cloud-VM deploys, the deploy form offers **PRA pickers**
     the *Access* hint instead).
 
 The picks are persisted to config, so they're reused by later console opens.
+
+#### Placement (multi-region)
+
+The deploy form also offers a **Region** (and optional **Zone**) picker so the
+single Rancher node can run in a region other than the GCP default:
+
+- **Region** — the dropdown lists only regions that have a configured subnet (the
+  default region plus any region seeded into `gcp_region_configs` via **Settings →
+  Multi-region** / a per-region sandbox run). The node's subnet is regional, so a
+  region with no subnet can't host it. Blank keeps the node's **current** region
+  (or the configured default).
+- **Zone** — optional, within the chosen region. Blank uses the region's **first
+  available** zone (which correctly skips regions with no `-a` zone, e.g. `us-east1`
+  starts at `-b`). If that zone is out of capacity
+  (`ZONE_RESOURCE_POOL_EXHAUSTED`), the deploy **automatically retries a sibling
+  zone in the same region** rather than failing.
+
+Rancher stays a **single** management plane: redeploying to a **different** region
+**relocates** the node — the old-region VM is deleted first so no duplicate
+`rancher-server` is stranded (the node is ephemeral, so state re-bootstraps and
+imported clusters re-import). The chosen zone is persisted to `gcp_rancher_zone`, so
+teardown and later bare redeploys stay in that region.
 
 ### Automatic first-run
 
@@ -382,7 +405,7 @@ apply immediately.
 | `gcp_rancher_allow_open` | `false` | Open `0.0.0.0/0` when no CIDRs set (discouraged) |
 | `gcp_rancher_image` | `rancher/rancher:latest` | Rancher container image |
 | `gcp_rancher_machine_type` | `e2-medium` | VM size (≥ 4 GB enforced) |
-| `gcp_rancher_zone` | `""` | Blank → GCP default zone |
+| `gcp_rancher_zone` | `""` | Zone the node runs in. Set/overwritten on deploy to the **actual** launched zone (so teardown + bare redeploys stay in that region). Blank → the deploy-form region's first available zone, else the GCP default zone. Pick a region/zone per-deploy on the Rancher tab |
 | `gcp_rancher_name` | `rancher-server` | VM + firewall base name |
 | `gcp_rancher_boot_disk_gb` | `30` | Boot disk size |
 | `gcp_rancher_network_tag` | `rancher` | Network tag = firewall target |
