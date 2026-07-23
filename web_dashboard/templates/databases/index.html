@@ -2,10 +2,13 @@
 {% from "partials/secret_picker.html" import secret_picker %}
 {% block title %}Databases – Infrastructure Management{% endblock %}
 
-{# Cloud database infrastructure page. PostgreSQL on AWS is the live engine/cloud
-   (provision → private RDS → BeyondTrust PRA tunnel → decommission); other
-   engines/clouds are "coming soon" (Phase 3) and the API returns 501 for them.
-   Backed by /api/databases (gated by cloud_database_enabled). #}
+{# Cloud database infrastructure page. Postgres/MySQL/SQL Server on AWS/Azure/GCP
+   and Oracle Autonomous DB on OCI are all wired (provision → private managed DB →
+   BeyondTrust PRA tunnel → decommission). Backed by /api/databases (gated by
+   cloud_database_enabled). The "Register in Entitle" button is additionally gated
+   on d.entitle_viable — managed SQL Server (Cloud SQL / RDS-standard / Azure SQL
+   Database) can't satisfy Entitle's MSSQL connector (needs sysadmin/CONTROL SERVER),
+   so it's hidden there; see _entitle_viable in cloud_database_service.py. #}
 
 {% block content %}
 <div class="max-w-6xl mx-auto py-8 px-4" x-data="databasesPage()" x-init="init()">
@@ -87,7 +90,7 @@
               <td class="px-4 py-3 text-right whitespace-nowrap">
                 <button @click="showConnection(d)" class="text-xs px-2 py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded font-medium">Connection</button>
                 <button @click="entitleRegister(d)"
-                        x-show="entitleRegEnabled && d.status === 'available' && !d.entitle_integration_id"
+                        x-show="entitleRegEnabled && d.status === 'available' && !d.entitle_integration_id && d.entitle_viable"
                         title="Register this database as an Entitle integration so users request JIT access (ephemeral accounts)"
                         class="text-xs px-2 py-1 bg-fuchsia-600 hover:bg-fuchsia-700 text-white rounded font-medium ml-1">Register in Entitle</button>
                 <button @click="entitleDeregister(d)"
