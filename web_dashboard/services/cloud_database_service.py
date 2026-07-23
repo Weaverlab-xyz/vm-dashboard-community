@@ -66,6 +66,27 @@ _PROVIDER = {
     ("oracle", "oci"): "autonomous",
 }
 
+# SQL Server managed offerings that CAN satisfy Entitle's Microsoft SQL Server
+# connector, which requires sysadmin (standard mode) or CONTROL SERVER + a fixed
+# permission set (least-privilege mode). NONE of the managed SQL Server flavors this
+# dashboard provisions today qualify: GCP Cloud SQL (provider "cloudsql") and AWS RDS
+# (provider "rds") reserve sysadmin/CONTROL SERVER for the platform, and Azure SQL
+# Database (provider "sql_database") is a logical server with no server-level grants.
+# Empty today; PR2's Entitle-compatible offerings add "rds_custom" (AWS RDS Custom)
+# and "sql_managed_instance" (Azure SQL Managed Instance), which DO grant sysadmin.
+_ENTITLE_VIABLE_SQLSERVER_PROVIDERS: frozenset = frozenset()
+
+
+def _entitle_viable(engine: str, provider: Optional[str]) -> bool:
+    """Whether a cloud DB's (engine, provider) can be managed by its Entitle DB
+    connector. Only SQL Server is constrained: its connector needs sysadmin/CONTROL
+    SERVER, which managed Cloud SQL / RDS-standard / Azure SQL Database can't grant
+    (see ``_ENTITLE_VIABLE_SQLSERVER_PROVIDERS``). Every other engine is viable."""
+    if engine != "sqlserver":
+        return True
+    return (provider or "") in _ENTITLE_VIABLE_SQLSERVER_PROVIDERS
+
+
 # terraform/<dir> module per (engine, cloud) — relative to repo root (parents[2]).
 _REPO_ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))
 _TEMPLATE_DIRS = {
@@ -657,6 +678,19 @@ async def _entitle_register_core(db: Session, *, row: CloudDatabase, engine: str
     ``tf_variables`` is supplied on the provision path (password already re-injected);
     the post-hoc path passes ``None`` and we reconstruct the admin credential from
     the provisioning job metadata + the encrypted config store."""
+    # Entitle's Microsoft SQL Server connector needs sysadmin/CONTROL SERVER, which
+    # managed Cloud SQL / RDS-standard / Azure SQL Database can't grant — registering
+    # would create an integration that then fails Entitle's resource sync ("missing
+    # required server permissions"). Refuse up front with a clear error. On the
+    # provision path _register_entitle swallows this, so non-viable engines simply
+    # never auto-register; on the user-initiated path run_entitle_register surfaces it
+    # as a failed job.
+    if not _entitle_viable(engine, row.provider):
+        raise CloudDatabaseError(
+            f"Entitle's Microsoft SQL Server connector requires sysadmin/CONTROL SERVER, "
+            f"which managed {row.provider or row.cloud} SQL Server does not grant. Register "
+            f"is only supported on Entitle-compatible SQL Server "
+            f"(Azure SQL Managed Instance / AWS RDS Custom).")
     from . import entitle_registration_service as ent
     prov_job = _provision_job_for(db, row.id)
     tfv = tf_variables if tf_variables is not None else \
@@ -1451,6 +1485,7 @@ def connection_info(db: Session, db_id: str) -> dict:
     # private DB (populated once the tunnel is brokered; null if PRA is unset).
     return {
         "db_id": row.id, "engine": row.engine, "cloud": row.cloud,
+        "provider": row.provider,
         "status": row.status, "private_host": row.private_host, "port": row.port,
         "jump_item_id": row.jump_item_id,
     }
@@ -1518,6 +1553,7 @@ def _serialize(r: CloudDatabase) -> dict:
         "region": r.region, "instance_id": r.instance_id, "private_host": r.private_host,
         "port": r.port, "status": r.status, "jump_item_id": r.jump_item_id,
         "entitle_integration_id": r.entitle_integration_id,
+        "entitle_viable": _entitle_viable(r.engine, r.provider),
         "created_by": r.created_by,
         "created_at": r.created_at.isoformat() if r.created_at else None,
     }

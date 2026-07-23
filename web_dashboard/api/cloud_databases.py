@@ -331,9 +331,21 @@ async def register_database_in_entitle(
             status_code=409,
             detail="Entitle registration is disabled (set entitle_registration_enabled)")
     try:
-        cloud_database_service.connection_info(db, db_id)   # 404 if unknown
+        info = cloud_database_service.connection_info(db, db_id)   # 404 if unknown
     except cloud_database_service.CloudDatabaseError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    # Fast, clear rejection for managed SQL Server flavors Entitle's MSSQL connector
+    # can't manage (needs sysadmin/CONTROL SERVER). The service enforces this too, but
+    # a 400 here beats a queued-then-failed job. Deregister is always allowed so a
+    # previously-created integration can still be cleaned up.
+    if payload.action == "register" and not cloud_database_service._entitle_viable(
+            info["engine"], info.get("provider")):
+        raise HTTPException(
+            status_code=400,
+            detail=(f"Entitle's Microsoft SQL Server connector requires sysadmin/CONTROL "
+                    f"SERVER, which managed {info.get('provider') or info['cloud']} SQL "
+                    f"Server does not grant. Register is only supported on Entitle-compatible "
+                    f"SQL Server (Azure SQL Managed Instance / AWS RDS Custom)."))
     job = job_service.create_job(
         db, job_type="clouddb_entitle_register", created_by=current_user.username,
         metadata={"db_id": db_id, "action": payload.action},
