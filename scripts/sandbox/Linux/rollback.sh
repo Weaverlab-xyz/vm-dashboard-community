@@ -393,8 +393,11 @@ rollback_gcp() {
   # VPC and only the peering touches this one — no sandbox instance to catch). The
   # servicenetworking peering is ours and is torn down below.
   local gke_peers
+  # NB: `peerings list` returns the NETWORK object with its peerings nested, so a bare
+  # `value(name)` yields the VPC name (always non-empty when any peering — incl. our own
+  # servicenetworking — exists) and misfires this guard. Flatten to the peering rows.
   gke_peers="$(gcloud compute networks peerings list --network "$vpc" --project "$project_id" \
-    --format="value(name)" 2>/dev/null | grep -vx 'servicenetworking-googleapis-com' || true)"
+    --flatten="peerings[]" --format="value(peerings.name)" 2>/dev/null | grep -vx 'servicenetworking-googleapis-com' || true)"
   if [[ -n "$gke_peers" ]]; then
     warn "Active non-servicenetworking VPC peering(s) on $vpc: ${gke_peers//$'\n'/ }"
     warn "A GKE cluster is still peered to this VPC. Decommission it via the dashboard first, then re-run rollback. Aborting."
