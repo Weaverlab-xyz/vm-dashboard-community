@@ -396,7 +396,8 @@ trap 'rm -rf "$TMPDIR"' EXIT
 if aws secretsmanager describe-secret --region "$REGION" --secret-id "$SSH_SECRET_NAME" >/dev/null 2>&1; then
   ok "Reusing existing secret $SSH_SECRET_NAME"
 else
-  ssh-keygen -t rsa -b 4096 -N "" -C "dashboard-sandbox" -f "$TMPDIR/key" >/dev/null
+  # ed25519 — avoids the ssh-rsa (SHA-1) rejection on hardened images (OpenSSH 8.8+/crypto-policy).
+  ssh-keygen -t ed25519 -N "" -C "dashboard-sandbox" -f "$TMPDIR/key" >/dev/null
   PUB="$(cat "$TMPDIR/key.pub")"
   PRIV="$(cat "$TMPDIR/key")"
   jq -n --arg pub "$PUB" --arg priv "$PRIV" \

@@ -249,7 +249,8 @@ if [[ "${OCI_SKIP_VAULT:-0}" != "1" ]]; then
       --query "data[?\"secret-name\"=='$SSH_SECRET_NAME' && \"lifecycle-state\"=='ACTIVE'].id | [0]" --raw-output 2>/dev/null || true)"
     if [[ -z "$SSH_SECRET_OCID" || "$SSH_SECRET_OCID" == "null" ]]; then
       TMPDIR="$(mktemp -d)"; trap 'rm -rf "$TMPDIR"' EXIT
-      ssh-keygen -t rsa -b 4096 -N "" -C "dashboard-sandbox" -f "$TMPDIR/key" >/dev/null
+      # ed25519 — avoids the ssh-rsa (SHA-1) rejection on hardened images (OpenSSH 8.8+/crypto-policy).
+      ssh-keygen -t ed25519 -N "" -C "dashboard-sandbox" -f "$TMPDIR/key" >/dev/null
       B64="$(jq -n --arg pub "$(cat "$TMPDIR/key.pub")" --arg priv "$(cat "$TMPDIR/key")" \
         '{public_key:$pub, private_key:$priv}' | base64 | tr -d '\n')"
       SSH_SECRET_OCID="$("${OCI[@]}" vault secret create-base64 --compartment-id "$COMPARTMENT" \

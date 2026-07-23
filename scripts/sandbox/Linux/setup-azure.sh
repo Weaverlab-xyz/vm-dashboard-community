@@ -276,7 +276,8 @@ state_write azure kv_name "$KV_NAME"
 SSH_SECRET="azureVM-ssh-keypair"
 if ! az keyvault secret show --vault-name "$KV_NAME" -n "$SSH_SECRET" >/dev/null 2>&1; then
   TMPDIR="$(mktemp -d)"; trap 'rm -rf "$TMPDIR"' EXIT
-  ssh-keygen -t rsa -b 4096 -N "" -C "dashboard-sandbox" -f "$TMPDIR/key" >/dev/null
+  # ed25519 — avoids the ssh-rsa (SHA-1) rejection on hardened images (OpenSSH 8.8+/crypto-policy).
+  ssh-keygen -t ed25519 -N "" -C "dashboard-sandbox" -f "$TMPDIR/key" >/dev/null
   PUB="$(cat "$TMPDIR/key.pub")"
   PRIV="$(cat "$TMPDIR/key")"
   jq -n --arg pub "$PUB" --arg priv "$PRIV" \

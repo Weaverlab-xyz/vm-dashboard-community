@@ -475,7 +475,8 @@ SSH_SECRET="dashboard-sandbox-ssh-keypair"
 
 if ! gcloud secrets describe "$SSH_SECRET" --project "$PROJECT_ID" >/dev/null 2>&1; then
   TMPDIR="$(mktemp -d)"; trap 'rm -rf "$TMPDIR"' EXIT
-  ssh-keygen -t rsa -b 4096 -N "" -C "dashboard-sandbox" -f "$TMPDIR/key" >/dev/null
+  # ed25519 — avoids the ssh-rsa (SHA-1) rejection on hardened images (OpenSSH 8.8+/crypto-policy).
+  ssh-keygen -t ed25519 -N "" -C "dashboard-sandbox" -f "$TMPDIR/key" >/dev/null
   PUB="$(cat "$TMPDIR/key.pub")"
   PRIV="$(cat "$TMPDIR/key")"
   jq -n --arg pub "$PUB" --arg priv "$PRIV" \

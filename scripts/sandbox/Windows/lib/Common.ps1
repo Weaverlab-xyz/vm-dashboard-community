@@ -133,7 +133,8 @@ function New-SshKeyPairJson {
     $tmp = New-Item -ItemType Directory -Path (Join-Path ([System.IO.Path]::GetTempPath()) ([guid]::NewGuid())) -Force
     try {
         $keyPath = Join-Path $tmp.FullName 'key'
-        & ssh-keygen -t rsa -b 4096 -N '""' -C $Comment -f $keyPath *> $null
+        # ed25519 — avoids the ssh-rsa (SHA-1) rejection on hardened images (OpenSSH 8.8+/crypto-policy).
+        & ssh-keygen -t ed25519 -N '""' -C $Comment -f $keyPath *> $null
         if ($LASTEXITCODE -ne 0) { throw "ssh-keygen failed (exit $LASTEXITCODE). Install OpenSSH client." }
         $pub  = Get-Content "$keyPath.pub" -Raw
         $priv = Get-Content $keyPath       -Raw
