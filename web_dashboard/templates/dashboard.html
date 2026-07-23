@@ -317,12 +317,15 @@
         {
           id: 'containers',
           label: 'Containers',
-          gridClass: 'grid grid-cols-1 sm:grid-cols-3 gap-4',
+          gridClass: 'grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4',
           refreshable: true,
           tiles: [
             { key: 'portainer_endpoints', title: 'Portainer Endpoints', href: '/containers',       flag: 'portainer_configured', secondaryLabel: 'online' },
             { key: 'ecs_tasks',           title: 'ECS Tasks',           href: '/containers#cloud', flag: 'aws',       description: 'running tasks' },
             { key: 'aci_containers',      title: 'ACI Containers',      href: '/containers#cloud', flag: 'azure',     secondaryLabel: 'running' },
+            { key: 'gce_containers',      title: 'GCE Containers',      href: '/containers#cloud', flag: 'gcp',       secondaryLabel: 'running' },
+            { key: 'cloud_run_jobs',      title: 'Cloud Run Jobs',      href: '/containers#cloud', flag: 'gcp',       description: 'in-flight jobs' },
+            { key: 'rancher_nodes',       title: 'Rancher Node',        href: '/containers#rancher', flag: 'k8s_management', secondaryLabel: 'running' },
           ],
         },
       ],
@@ -615,6 +618,9 @@
         if (k === 'portainer_endpoints') return this._fetchPortainer();
         if (k === 'ecs_tasks')        return this._fetchListCount('/api/containers/ecs-tasks',  'tasks');
         if (k === 'aci_containers')   return this._fetchListCount('/api/containers/aci-containers', 'containers', c => c.state === 'Running');
+        if (k === 'gce_containers')   return this._fetchGceInstances();
+        if (k === 'cloud_run_jobs')   return this._fetchListCount('/api/containers/gce-cloud-run-jobs', 'jobs');
+        if (k === 'rancher_nodes')    return this._fetchListCount('/api/containers/rancher', 'nodes', n => (n.status || '').toUpperCase() === 'RUNNING');
         // Managed services (creator-scoped server-side; no count field → list.length)
         if (k === 'cloud_databases')  return this._fetchListCount('/api/databases',    'databases');
         if (k === 'k8s_clusters')     return this._fetchListCount('/api/k8s/clusters',  'clusters');
@@ -659,6 +665,25 @@
           const out = { value: r.count ?? list.length };
           if (runningPredicate) out.secondary = list.filter(runningPredicate).length;
           return out;
+        } catch (e) {
+          return { value: -1 };
+        }
+      },
+
+      async _fetchGceInstances() {
+        // GCE COS instances = jumpoints + compose (mirrors the merged
+        // "GCE Container Instances" table on the Containers page).
+        try {
+          const [jp, cp] = await Promise.all([
+            API.get('/api/containers/gce-jumpoints').catch(() => null),
+            API.get('/api/containers/gce-compose').catch(() => null),
+          ]);
+          if (!jp && !cp) return { value: -1 };
+          const all = [...(jp?.instances || []), ...(cp?.instances || [])];
+          return {
+            value: all.length,
+            secondary: all.filter(i => (i.status || '').toUpperCase() === 'RUNNING').length,
+          };
         } catch (e) {
           return { value: -1 };
         }
