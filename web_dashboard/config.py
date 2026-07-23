@@ -467,6 +467,18 @@ class Settings(BaseSettings):
     aws_nat_subnet_id: str = ""
     aws_nat_ami_id: str = ""
 
+    # Shared, on-demand SSM interface VPC endpoints (ssm, ssmmessages, ec2messages)
+    # for the private-subnet SSM path (Password Safe SSM VM onboarding, cloud-DB
+    # dbssm). When enabled, the dashboard creates the three interface endpoints
+    # (private DNS) in the sandbox private subnet on the first EC2 deploy / AWS
+    # cloud-DB provision and deletes them when the last such resource is
+    # decommissioned — so private-subnet SSM works with zero standing cost (each
+    # interface endpoint bills ~$7/mo while up). Set by scripts/sandbox/Linux/
+    # setup-aws.sh. See services/ssm_endpoint_service.py. Blank SG → find-or-create
+    # dashboard-sandbox-ssm-vpce-sg.
+    aws_ssm_endpoints_enabled: bool = False
+    aws_ssm_vpce_security_group_id: str = ""
+
     # Portainer CE integration — a single connection, configured via
     # Settings → Integrations → Portainer CE (config_service); these env vars
     # are the fallback for compose-file-driven installs.

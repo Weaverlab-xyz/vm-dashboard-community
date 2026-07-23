@@ -399,7 +399,7 @@ three cloud free tiers cover most of this.
 
 | Cloud | Idle / month | Why |
 |---|--:|---|
-| AWS   | ~$0     | VPC, subnets, IGW, SGs, IAM are free; ECS cluster has no charge until a task runs. Secrets Manager: ~$0.40. |
+| AWS   | ~$0     | VPC, subnets, IGW, SGs, IAM are free; ECS cluster has no charge until a task runs. Secrets Manager: ~$0.40. SSM interface VPC endpoints are created on-demand per running EC2/DB (~$7/mo each, ~$22/mo for all three) and removed automatically when the last one is decommissioned — nothing while idle. |
 | Azure | ~$5     | RG, VNet, NSGs, Key Vault, SP free. Storage account file share: ~$0.05. Container registry (Basic): ~$5/mo — opt out with `SANDBOX_SKIP_ACR=1`. |
 | GCP   | ~$1.50  | Cloud NAT bills hourly even when idle. VPC, subnets, firewall rules, Secret Manager are free. |
 
@@ -447,8 +447,10 @@ What rollback does:
 - **Refuses to delete** if user VMs are still running in the sandbox network
   — terminate them via the dashboard first. This is intentional; the
   rollback won't silently destroy lab work in progress.
-- Deletes resources in dependency order (Secrets/secrets first, then SGs,
-  RTs, subnets, IGW, VPC) so each delete succeeds.
+- Deletes resources in dependency order (Secrets/secrets first, then DB subnet
+  groups, VPC endpoints, SGs, RTs, NAT, subnets, IGW, VPC) so each delete
+  succeeds. (VPC endpoints hold ENIs that pin the subnet/SG, so they're swept
+  before those — and any left behind keep billing.)
 - Wipes the local state directory (`~/.dashboard-sandbox/<cloud>/`) on
   success.
 

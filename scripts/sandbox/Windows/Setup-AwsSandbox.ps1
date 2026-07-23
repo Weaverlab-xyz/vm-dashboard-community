@@ -225,38 +225,14 @@ Set-StateValue aws jumpoint_sg $JumpointSg
 Set-StateValue aws vm_sg       $VmSg
 Set-StateValue aws nat_sg      $NatSg
 
-# ── 5b. SSM interface VPC endpoints (private SSM path for onboarded VMs) ───────
-# Twin of setup-aws.sh: the VM SG egresses to the VPC only, so an onboarded VM
-# reaches the SSM control plane only through interface endpoints. Create the three
-# the agent needs (ssm, ssmmessages, ec2messages) with private DNS — no NAT/public
-# IP needed. Set SANDBOX_SSM_ENDPOINTS=0 to skip (small hourly cost per endpoint).
-if ($env:SANDBOX_SSM_ENDPOINTS -ne '0') {
-    Write-Section 'SSM VPC endpoints'
-    $SsmVpceSg = _MakeSG "$Name-ssm-vpce-sg" 'SSM interface endpoints — HTTPS ingress from the VPC'
-    $vpceIngress = "[{`"IpProtocol`":`"tcp`",`"FromPort`":443,`"ToPort`":443,`"IpRanges`":[{`"CidrIp`":`"10.99.0.0/16`"}]}]"
-    aws ec2 authorize-security-group-ingress --region $Region --group-id $SsmVpceSg `
-        --ip-permissions $vpceIngress 2>$null | Out-Null
-    foreach ($svc in @('ssm', 'ssmmessages', 'ec2messages')) {
-        $svcName = "com.amazonaws.$Region.$svc"
-        $existing = (aws ec2 describe-vpc-endpoints --region $Region `
-            --filters "Name=vpc-id,Values=$VpcId" "Name=service-name,Values=$svcName" `
-            --query 'VpcEndpoints[0].VpcEndpointId' --output text 2>$null)
-        if ($existing -and $existing -ne 'None') {
-            Write-Ok "Reusing $svc endpoint $existing"
-            continue
-        }
-        $epid = (aws ec2 create-vpc-endpoint --region $Region `
-            --vpc-id $VpcId --vpc-endpoint-type Interface --service-name $svcName `
-            --subnet-ids $PrivateSubnetId --security-group-ids $SsmVpceSg `
-            --private-dns-enabled `
-            --tag-specifications (_TagSpec 'vpc-endpoint' "$Name-$svc") `
-            --query 'VpcEndpoint.VpcEndpointId' --output text).Trim()
-        Write-Ok "Created $svc endpoint $epid"
-    }
-    Set-StateValue aws ssm_vpce_sg $SsmVpceSg
-} else {
-    Write-Ok 'SSM VPC endpoints skipped (SANDBOX_SSM_ENDPOINTS=0)'
-}
+# ── 5b. SSM interface VPC endpoints — created ON-DEMAND by the dashboard ───────
+# Twin of setup-aws.sh: the three SSM interface endpoints (ssm/ssmmessages/
+# ec2messages) a private-subnet target needs for Password Safe SSM onboarding used
+# to be stood up here, but each bills ~$7/mo even when idle (~$22/mo for all three).
+# The dashboard now creates them on the first EC2 deploy / AWS cloud-DB provision
+# and deletes them with the last one, so an idle sandbox costs ~$0. Enabled via the
+# aws_ssm_endpoints_enabled config emitted below — see
+# web_dashboard/services/ssm_endpoint_service.py.
 
 # ── 6. SSH keypair JSON in Secrets Manager ────────────────────────────────────
 Write-Section 'SSH keypair (Secrets Manager)'
@@ -808,6 +784,9 @@ $cfg = @(
     "aws_nat_security_group_id=$NatSg                    # SG for the on-demand NAT instance",
     "aws_nat_instance_type=t4g.nano                       # NAT size (arm64); subnet defaults to the public/IGW subnet, AMI to newest AL2023",
     "aws_nat_instance_name=$Name-nat                      # EC2 Name tag (find-or-create key)",
+    "",
+    "# On-demand SSM interface endpoints — created on the first EC2 deploy / AWS cloud-DB provision, removed with the last one (private-subnet SSM reach for Password Safe onboarding; ~`$7/mo each while up, `$0 idle):",
+    "aws_ssm_endpoints_enabled=true",
     "",
     "# Image-registry hub + automated cross-cloud promote:",
     "storage_s3_bucket=$StorageBucket                                       # Image hub + promote staging",

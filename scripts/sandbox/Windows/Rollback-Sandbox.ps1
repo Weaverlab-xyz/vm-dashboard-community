@@ -87,6 +87,26 @@ function Invoke-AwsRollback {
             else { Write-Warn "Could not delete DB subnet group $g (a DB may still be provisioned — decommission it first)" }
         }
 
+        # Interface VPC endpoints (SSM: ssm/ssmmessages/ec2messages). Created on-demand
+        # by the dashboard (or by older setup scripts). Each holds an ENI in the private
+        # subnet and references the ssm-vpce SG, so they MUST go before the SG and subnet
+        # sweeps or those deletes fail — and each keeps billing (~$7/mo) if left behind.
+        $vpces = (aws ec2 describe-vpc-endpoints --region $region `
+            --filters "Name=vpc-id,Values=$vpcId" `
+            --query 'VpcEndpoints[].VpcEndpointId' --output text 2>$null).Trim()
+        if ($vpces -and $vpces -ne 'None') {
+            $vpceIds = $vpces.Split()
+            & aws ec2 delete-vpc-endpoints --region $region --vpc-endpoint-ids $vpceIds *> $null
+            if ($LASTEXITCODE -eq 0) { Write-Ok "Deleting VPC endpoints $vpces (waiting for ENIs to detach…)" }
+            else { Write-Warn "Could not delete VPC endpoints $vpces" }
+            for ($i = 0; $i -lt 24; $i++) {  # ~60s budget; no AWS waiter for endpoints
+                $left = (aws ec2 describe-vpc-endpoints --region $region --vpc-endpoint-ids $vpceIds `
+                    --query "VpcEndpoints[?State!='deleted'].VpcEndpointId" --output text 2>$null)
+                if (-not $left -or $left.Trim() -eq '' -or $left.Trim() -eq 'None') { break }
+                Start-Sleep -Milliseconds 2500
+            }
+        }
+
         # Security groups (skip default).
         $sgs = (aws ec2 describe-security-groups --region $region `
             --filters $filter "Name=vpc-id,Values=$vpcId" `

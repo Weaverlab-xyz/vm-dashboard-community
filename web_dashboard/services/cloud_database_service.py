@@ -1287,6 +1287,16 @@ async def run_provision_apply(
             except Exception as exc:
                 logger.warning("clouddb: ensure jumpoint host (pre-apply) failed (non-fatal): %s", exc)
 
+        # On-demand SSM interface endpoints for the AWS dbssm onboarding path so a
+        # private-subnet target reaches the SSM control plane. Ref-counted; torn
+        # down with the last EC2/DB. Independent of PRA. Best-effort.
+        if row.cloud == "aws":
+            try:
+                from . import ssm_endpoint_service
+                await ssm_endpoint_service.ensure_ssm_endpoints(_cfg(row.cloud + "_region") or row.region)
+            except Exception as exc:
+                logger.warning("clouddb: ensure SSM endpoints (pre-apply) failed (non-fatal): %s", exc)
+
         try:
             outputs = await terraform.apply(
                 _deploy_dir(job_id), tf_variables, template_dir=template_dir(engine, row.cloud),
@@ -1588,6 +1598,16 @@ async def run_decommission(db: Session, *, db_id: str, job_id: str) -> None:
     except Exception as exc:
         warnings.append(f"Jumpoint host teardown: {exc}")
         logger.warning("clouddb: jumpoint host idle-teardown failed (non-fatal): %s", exc)
+
+    # Reclaim the shared SSM interface endpoints if no EC2 instance / AWS cloud DB
+    # is left (this row is already inactive, so it's excluded from the count).
+    if row.cloud == "aws":
+        try:
+            from . import ssm_endpoint_service
+            await ssm_endpoint_service.reclaim_ssm_endpoints(db, _cfg(row.cloud + "_region") or row.region)
+        except Exception as exc:
+            warnings.append(f"SSM endpoints teardown: {exc}")
+            logger.warning("clouddb: SSM endpoints idle-teardown failed (non-fatal): %s", exc)
 
     job_service.set_completed(db, job_id, {"db_id": db_id, **({"warnings": warnings} if warnings else {})})
     logger.info("clouddb decommissioned db_id=%s", db_id)
