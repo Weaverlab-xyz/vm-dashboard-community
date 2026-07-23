@@ -489,6 +489,38 @@ built-in on-prem SSH path). The lookup and checkout go through `ps-cli`,
 authenticated by the configured Password Safe OAuth client (`pscli_api_url` /
 `pscli_client_id` / `pscli_client_secret`).
 
+### In-playbook Password Safe lookup (`beyondtrust.secrets_safe`)
+
+The managed-account checkout above is **out-of-band**: the dashboard fetches the
+credential and injects it. The **complementary** pattern is an *in-playbook* lookup —
+the play fetches its own secrets from Password Safe at runtime via the
+[`beyondtrust.secrets_safe`](https://galaxy.ansible.com/ui/repo/published/beyondtrust/secrets_safe/)
+Galaxy collection's `secrets_safe_lookup` plugin (and the `beyondtrust.password_safe`
+management modules). Use it for **app** secrets, API tokens, or DB credentials a task
+consumes — as opposed to the **connection** credential, which the checkout path handles.
+
+Ready-to-run starters live in
+[`examples/playbooks/password-safe/`](../../examples/playbooks/password-safe/).
+
+**Auto-injected credentials.** The lookup runs on the Ansible controller (the runner
+container) and reads `PASSWORD_SAFE_API_URL` / `PASSWORD_SAFE_CLIENT_ID` /
+`PASSWORD_SAFE_CLIENT_SECRET`. When **BeyondTrust is enabled** (`beyondtrust_enabled`)
+and the ps-cli OAuth client is configured, the dashboard **auto-injects** those three env
+vars into **every** runner (Local, ECS, ACI, Cloud Run) — reusing the same
+`pscli_api_url` / `pscli_client_id` / `pscli_client_secret` config as the checkout path,
+so there's nothing extra to set per run.
+
+- The client secret rides the **same per-run env channel each runner already uses for the
+  SSH private key** — the ECS `runTask` override (not the task-def revision history), the
+  Cloud Run job env, an ACI `secure_value`, or a `0600` `--env-file` locally — never on a
+  command line, and scrubbed from job output. **No `ansible_cloud_ephemeral_secrets_enabled`
+  gate is required** (that gate is only for the checked-out managed-account path).
+- Both runner images (`chrweav/ansible-winrm`, `chrweav/ansible-cloud`) ship the two
+  collections (via `beyondtrust-bips-library`), so the lookup resolves on either — rebuild
+  + push them before relying on it.
+- The OAuth client needs the usual API-registration permissions (Secrets → Read,
+  Requests → Create, Credentials → Read, plus scope for the paths the play touches).
+
 ---
 
 ## Storage prerequisite (Ansible runner)

@@ -1,0 +1,93 @@
+# MANAGEMENT example — create a Secrets Safe folder + safe + secret, and (optionally) a
+# Password Safe managed account, using the beyondtrust.secrets_safe / beyondtrust.password_safe
+# collections. This is the write/onboard counterpart to the read/lookup examples: create a
+# safe here, then retrieve from it later with lookup-secret.yml.
+#
+# Target: On-prem host / localhost (hosts: localhost). Credentials are auto-injected
+# (PASSWORD_SAFE_* env) when BeyondTrust is enabled. The API user must have create rights
+# for the resources below (Secrets Safe safe/folder management, and — for the managed
+# account — the relevant Password Safe scope).
+#
+# ADAPT BEFORE USE: the management modules' argument names vary by BeyondInsight/Password
+# Safe version. Verify each module's parameters against the collection docs
+# (https://galaxy.ansible.com/ui/repo/published/beyondtrust/) before running. The auth
+# params (api_url / api_version / client_id / client_secret / verify_ca) are consistent
+# across the collection; the resource params below are a starting point.
+#
+# extra_vars:
+#   safe_name:   "Automation"
+#   folder_name: "app-secrets"
+#   secret_title: "appuser-password"
+- name: Onboard a Secrets Safe safe and seed a secret
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    ps_api_url: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_API_URL') }}"
+    ps_client_id: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_CLIENT_ID') }}"
+    ps_client_secret: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_CLIENT_SECRET') }}"
+    ps_verify_ca: true
+    safe_name: "Automation"
+    folder_name: "app-secrets"
+    secret_title: "appuser-password"
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - ps_api_url | length > 0
+          - ps_client_id | length > 0
+          - ps_client_secret | length > 0
+          - safe_name | length > 0
+          - folder_name | length > 0
+        fail_msg: "Password Safe creds (PASSWORD_SAFE_* env), safe_name and folder_name are required."
+
+    - name: Ensure the safe exists
+      beyondtrust.secrets_safe.safes_create:
+        api_url: "{{ ps_api_url }}"
+        api_version: "3.1"
+        client_id: "{{ ps_client_id }}"
+        client_secret: "{{ ps_client_secret }}"
+        verify_ca: "{{ ps_verify_ca }}"
+        name: "{{ safe_name }}"
+        description: "Created by the VM dashboard via Ansible"
+
+    - name: Ensure the folder exists in the safe
+      beyondtrust.secrets_safe.folders_create:
+        api_url: "{{ ps_api_url }}"
+        api_version: "3.1"
+        client_id: "{{ ps_client_id }}"
+        client_secret: "{{ ps_client_secret }}"
+        verify_ca: "{{ ps_verify_ca }}"
+        name: "{{ folder_name }}"
+        safe_name: "{{ safe_name }}"
+
+    # Seed a text secret. Provide the value via a Secrets-Management binding ("Use a
+    # secret" → mapped to seed_secret_value) rather than committing it here in plaintext.
+    - name: Create a text secret in the folder
+      beyondtrust.secrets_safe.secrets_create:
+        api_url: "{{ ps_api_url }}"
+        api_version: "3.1"
+        client_id: "{{ ps_client_id }}"
+        client_secret: "{{ ps_client_secret }}"
+        verify_ca: "{{ ps_verify_ca }}"
+        safe_name: "{{ safe_name }}"
+        folder_name: "{{ folder_name }}"
+        title: "{{ secret_title }}"
+        secret_type: "text"
+        text: "{{ seed_secret_value | default('change-me') }}"
+      no_log: true
+      when: seed_secret_value is defined
+
+    # OPTIONAL — the "account" half: register a Password Safe managed account. The
+    # parameters (managed_system_id / workgroup, account_name, credentials, etc.) are
+    # version-dependent; uncomment and complete against the collection's module docs.
+    #
+    # - name: Create a managed account
+    #   beyondtrust.password_safe.managed_accounts_create:
+    #     api_url: "{{ ps_api_url }}"
+    #     api_version: "3.1"
+    #     client_id: "{{ ps_client_id }}"
+    #     client_secret: "{{ ps_client_secret }}"
+    #     verify_ca: "{{ ps_verify_ca }}"
+    #     # ... managed_system_id, account_name, password, and rotation settings ...
+    #   no_log: true

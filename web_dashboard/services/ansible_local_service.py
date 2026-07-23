@@ -376,6 +376,7 @@ async def run_playbook(
     asset_name: str = "playbook.yml",
     ssh_key_pem: str | None = None,
     secret_extra_vars: dict | None = None,
+    ps_env: dict | None = None,
 ) -> tuple[str, int]:
     """
     Run an Ansible playbook or provisioning asset in a sibling Docker container.
@@ -385,6 +386,9 @@ async def run_playbook(
     extra_vars   — optional dict forwarded as --extra-vars JSON
     asset_name   — original filename; drives whether to generate a wrapper playbook
     ssh_key_pem  — PEM private key for cloud targets; written to tmpdir/id_rsa
+    ps_env       — optional PASSWORD_SAFE_* env for an in-playbook beyondtrust.secrets_safe
+                   lookup; written to a 0600 --env-file so the client secret never lands
+                   on the command line (see services/password_safe_runner.py)
 
     Returns (combined_output, returncode).  Non-zero rc means Ansible failed;
     the output text contains the error details.
@@ -444,6 +448,21 @@ async def run_playbook(
             except OSError:
                 pass  # Windows NTFS — the file is in the per-run tmpdir either way
 
+        # ── write PASSWORD_SAFE_* to a 0600 docker env-file (never on the cmd line) ──
+        # Fed to `docker run --env-file`; only the file *path* appears in the argv, and
+        # the file is deleted with the per-run tmpdir. Docker env-file lines are literal
+        # KEY=VALUE (no shell interpolation), so a client secret is carried verbatim.
+        has_ps_env = bool(ps_env)
+        if has_ps_env:
+            ps_env_path = os.path.join(tmpdir, "ps_env")
+            with open(ps_env_path, "w", newline="\n") as f:
+                for k, v in ps_env.items():
+                    f.write(f"{k}={v}\n")
+            try:
+                os.chmod(ps_env_path, 0o600)
+            except OSError:
+                pass  # Windows NTFS — the file is in the per-run tmpdir either way
+
         # ── build ansible-playbook args ───────────────────────────────────────
         ansible_args: list[str] = [
             "ansible-playbook",
@@ -472,15 +491,15 @@ async def run_playbook(
         else:
             shell_cmd = ansible_cmd_str
 
-        cmd: list[str] = [
-            "docker", "run", "--rm",
-            "-v", f"{tmpdir}:/ansible",
-            image,
-            "sh", "-c", shell_cmd,
-        ]
+        cmd: list[str] = ["docker", "run", "--rm", "-v", f"{tmpdir}:/ansible"]
+        if has_ps_env:
+            # --env-file is read by the docker CLI (client-side) from this process's
+            # filesystem, so pass the local tmpdir path — not the /ansible bind-mount path.
+            cmd += ["--env-file", ps_env_path]
+        cmd += [image, "sh", "-c", shell_cmd]
 
         logger.info(
-            "ansible-local: target=%s image=%s is_group=%s atype=%s has_key=%s",
-            target, image, is_group, atype, has_key,
+            "ansible-local: target=%s image=%s is_group=%s atype=%s has_key=%s ps_env=%s",
+            target, image, is_group, atype, has_key, has_ps_env,
         )
         return await asyncio.to_thread(_run_sync, cmd)

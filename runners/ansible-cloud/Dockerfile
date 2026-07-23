@@ -60,20 +60,27 @@ RUN curl -fsSL -o /usr/local/bin/kubectl \
 # ansible-core + the DB/k8s client libraries. psycopg2-binary / PyMySQL /
 # kubernetes ship pure-python or manylinux wheels; pymssql builds against the
 # FreeTDS headers above when a wheel isn't available for the target arch.
+# beyondtrust-bips-library backs the beyondtrust.secrets_safe lookup plugin (below)
+# — it pulls requests/urllib3/cryptography/Cerberus, all pure-python or manylinux wheels.
 RUN pip install --no-cache-dir \
         "ansible-core>=2.16" \
         "kubernetes>=29.0.0" \
         "psycopg2-binary>=2.9" \
         "PyMySQL>=1.1" \
-        "pymssql>=2.2"
+        "pymssql>=2.2" \
+        "beyondtrust-bips-library>=2.0.0,<3.0.0"
 
 # Ansible collections for the localhost k8s/DB plays. community.general carries
-# the mssql_* modules. Install to a system path so any container user finds them.
+# the mssql_* modules. beyondtrust.secrets_safe / beyondtrust.password_safe back the
+# in-playbook Password Safe lookup + management examples (examples/playbooks/password-safe/).
+# Install to a system path so any container user finds them.
 RUN ansible-galaxy collection install \
         kubernetes.core \
         community.postgresql \
         community.mysql \
         community.general \
+        beyondtrust.secrets_safe \
+        beyondtrust.password_safe \
         -p /usr/share/ansible/collections \
  && ansible-galaxy collection list -p /usr/share/ansible/collections
 
@@ -84,4 +91,5 @@ RUN python -c "import kubernetes, psycopg2, pymysql, pymssql; print('client libs
  && ansible-doc community.postgresql.postgresql_db >/dev/null \
  && ansible-doc community.mysql.mysql_db      >/dev/null \
  && ansible-doc community.general.mssql_db    >/dev/null \
+ && ansible-doc beyondtrust.secrets_safe.secrets_safe_lookup >/dev/null \
  && echo "ansible-cloud collections + client libs OK"

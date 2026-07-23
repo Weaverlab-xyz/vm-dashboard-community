@@ -32,6 +32,13 @@ do not have a PRA deployment.
 - **SSH key checkout for cloud VMs** — the Ansible config-management runner and
   BeyondTrust Jumpoint container retrieve SSH keys from Password Safe managed
   accounts, so the private key never touches the host filesystem.
+- **In-playbook secret lookup (Ansible)** — a config-management playbook can fetch
+  its own secrets/managed-account passwords from Password Safe at runtime via the
+  `beyondtrust.secrets_safe` Galaxy collection. The dashboard reuses this same OAuth
+  client (`pscli_*`) — auto-injecting it into the runner as `PASSWORD_SAFE_*` — so no
+  separate credential is needed. See
+  [integrations/ansible.md](ansible.md#in-playbook-password-safe-lookup-beyondtrustsecrets_safe)
+  and [examples/playbooks/password-safe/](../../examples/playbooks/password-safe/).
 
 ---
 

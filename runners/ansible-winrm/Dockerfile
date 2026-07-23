@@ -27,3 +27,19 @@ RUN pip install --no-cache-dir \
         "pywinrm>=0.4.3" \
         "requests-ntlm>=1.2.0" \
  && python -c "import winrm, requests_ntlm; print('pywinrm', winrm.__version__, 'OK')"
+
+# BeyondTrust Password Safe Ansible collections — back the in-playbook secret/managed-account
+# lookup + management examples (examples/playbooks/password-safe/). The lookup plugin runs on
+# the Ansible controller (this runner), so it lives here even for SSH/WinRM VM plays. The
+# dashboard auto-injects PASSWORD_SAFE_* env at run time (see docs/integrations/ansible.md).
+# beyondtrust-bips-library pulls requests/urllib3/cryptography/Cerberus — all publish
+# musllinux wheels, so no build toolchain is needed on Alpine. Install collections to a
+# system path so any container user resolves them. The final line fails the build early if
+# the lookup can't be resolved.
+RUN pip install --no-cache-dir "beyondtrust-bips-library>=2.0.0,<3.0.0" \
+ && ansible-galaxy collection install \
+        beyondtrust.secrets_safe \
+        beyondtrust.password_safe \
+        -p /usr/share/ansible/collections \
+ && ansible-doc beyondtrust.secrets_safe.secrets_safe_lookup >/dev/null \
+ && echo "beyondtrust collections OK"
