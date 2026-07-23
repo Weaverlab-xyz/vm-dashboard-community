@@ -576,6 +576,27 @@ async def get_ssh_private_key(project_id: str, secret_name: str) -> str:
 
 # ── Instance operations ───────────────────────────────────────────────────────
 
+def _qualify_subnetwork(subnetwork: str, project_id: str, zone: str) -> str:
+    """Normalize a subnetwork ref for GCE's ``networkInterfaces[].subnetwork``,
+    which wants a partial/full self-link — a bare name (the sandbox emits
+    ``dashboard-sandbox-vm-subnet``) is rejected with "The URL is malformed".
+    Subnets are region-scoped, so the region is derived from the instance zone.
+    Already-qualified values (containing a "/") pass through untouched."""
+    if not subnetwork or "/" in subnetwork:
+        return subnetwork
+    region = zone.rsplit("-", 1)[0]
+    return f"projects/{project_id}/regions/{region}/subnetworks/{subnetwork}"
+
+
+def _qualify_network(network: str) -> str:
+    """Normalize a VPC network ref for GCE's ``networkInterfaces[].network``.
+    A bare name (``dashboard-sandbox-vpc``) is likewise rejected as a malformed
+    URL, so wrap it as a global partial self-link when it isn't already a path."""
+    if not network or "/" in network:
+        return network
+    return f"global/networks/{network}"
+
+
 def _launch_instance_sync(
     project_id: str,
     zone: str,
@@ -624,7 +645,7 @@ def _launch_instance_sync(
     # Network interface
     nic = compute_v1.NetworkInterface()
     if subnetwork:
-        nic.subnetwork = subnetwork
+        nic.subnetwork = _qualify_subnetwork(subnetwork, project_id, zone)
     else:
         nic.name = "default"
     if create_external_ip:
@@ -889,9 +910,9 @@ def _run_gce_jumpoint_sync(
     # Network
     nic = compute_v1.NetworkInterface()
     if subnetwork:
-        nic.subnetwork = subnetwork
+        nic.subnetwork = _qualify_subnetwork(subnetwork, project_id, zone)
     elif network:
-        nic.network = network
+        nic.network = _qualify_network(network)
     if create_external_ip:
         nic.access_configs = [compute_v1.AccessConfig(
             name="External NAT", type_="ONE_TO_ONE_NAT",
@@ -1053,9 +1074,9 @@ def _run_gce_db_forwarder_sync(
 
     nic = compute_v1.NetworkInterface()
     if subnetwork:
-        nic.subnetwork = subnetwork
+        nic.subnetwork = _qualify_subnetwork(subnetwork, project_id, zone)
     elif network:
-        nic.network = network
+        nic.network = _qualify_network(network)
     if create_external_ip:
         nic.access_configs = [compute_v1.AccessConfig(
             name="External NAT", type_="ONE_TO_ONE_NAT")]
@@ -1306,9 +1327,9 @@ def _deploy_compose_gce_sync(
 
     nic = compute_v1.NetworkInterface()
     if subnetwork:
-        nic.subnetwork = subnetwork
+        nic.subnetwork = _qualify_subnetwork(subnetwork, project_id, zone)
     elif network:
-        nic.network = network
+        nic.network = _qualify_network(network)
     if create_external_ip:
         nic.access_configs = [compute_v1.AccessConfig(
             name="External NAT", type_="ONE_TO_ONE_NAT",
