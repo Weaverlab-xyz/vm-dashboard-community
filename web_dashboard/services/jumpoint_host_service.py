@@ -476,6 +476,14 @@ async def _ensure_jumpoint_host_azure(region: str) -> Optional[str]:
         logger.warning("jumpoint-host(azure): jumpoint deploy key not set "
                        "(azure_aci_deploy_key) — tunnels unavailable until configured.")
         return None
+    # Bake the native DB clients into the VM when Password Safe cloud-DB onboarding
+    # is enabled (the "{engine} Azure Run Command Plugin" invokes them in-guest at
+    # rotation time). Only takes effect on a fresh VM; the onboarding also ensures
+    # them idempotently over Run Command, covering a reused VM.
+    from . import config_service
+    install_db_clients = (
+        config_service.get_bool("clouddb_ps_onboarding_enabled", False)
+        and (_cfg("passwordsafe_azure_db_registration_method") or "runcommand").lower() != "off")
     try:
         meta = await azure_service.run_vm_jumpoint(
             rg=rg, location=location, subnet_id=subnet, name=_AZURE_JUMPOINT_VM_NAME,
@@ -483,6 +491,7 @@ async def _ensure_jumpoint_host_azure(region: str) -> Optional[str]:
             deploy_key=deploy_key,
             vm_size=_cfg("azure_jumpoint_vm_size") or "Standard_B1s",
             admin_password=_azure_compliant_password(),
+            install_db_clients=install_db_clients,
         )
         logger.info("jumpoint-host(azure): jumpoint VM %s %s in %s",
                     _AZURE_JUMPOINT_VM_NAME, "reused" if meta.get("reused") else "started", location)

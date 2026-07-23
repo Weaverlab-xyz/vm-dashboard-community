@@ -76,12 +76,13 @@ _REDACTED = "**REDACTED-BY-DASHBOARD**"
 # ``dns_name``/``host_name``, uses a placeholder ip, omits the SSH-only fields
 # (remote_client_type / ssh_key_enforcement_mode), and pushes no private key. ``ssh``
 # is the traditional method. ``ssm``/``azurevm``/``gcpvm`` are SSH-key-managed (dss
-# auto-management on); ``dbssm`` (cloud-DB via the "{engine} SSM Custom Plugin") and
-# ``pravault`` (the "PRA Vault Username Password" plugin) are PASSWORD-managed, so their
-# account emits dss_auto_management_flag = false.
-_PLUGIN_METHODS = frozenset({"ssm", "azurevm", "gcpvm", "dbssm", "pravault"})
+# auto-management on); ``dbssm`` (cloud-DB via the "{engine} SSM Custom Plugin"),
+# ``dbazure`` (cloud-DB via the "{engine} Azure Run Command Plugin") and ``pravault``
+# (the "PRA Vault Username Password" plugin) are PASSWORD-managed, so their account
+# emits dss_auto_management_flag = false.
+_PLUGIN_METHODS = frozenset({"ssm", "azurevm", "gcpvm", "dbssm", "dbazure", "pravault"})
 # Methods whose managed account is password-managed (no SSH DSS key auto-management).
-_PASSWORD_MANAGED_METHODS = frozenset({"dbssm", "pravault"})
+_PASSWORD_MANAGED_METHODS = frozenset({"dbssm", "dbazure", "pravault"})
 
 
 class PSResourceError(Exception):
@@ -363,6 +364,12 @@ async def register_managed_system(*, name: str, host_name: str, private_key: str
     parts), ``port`` is the real DB port, ``managed_account_name`` is the dedicated DB user,
     and the account is password-managed (no SSH DSS key).
 
+    ``method="dbazure"`` uses the cloud-DB "{engine} Azure Run Command Plugin": ``dns_name``
+    must be ``vmName;resourceGroup;subscriptionId;tenantId;dbHost;dbName;certPath;sslTRUE|sslFALSE``
+    (eight ``;``-separated parts — the jump VM identity plus the DB host/name and the broker
+    cert path/SSL flag), ``port`` is the real DB port, ``managed_account_name`` is the dedicated
+    DB user the functional-account DB login rotates, and the account is password-managed.
+
     ``method="pravault"`` uses the "PRA Vault Username Password" plugin: ``host_name`` must be
     the PRA appliance URL and ``managed_account_name`` the exact PRA Vault account name; the
     account is password-managed.
@@ -428,6 +435,26 @@ async def register_managed_system(*, name: str, host_name: str, private_key: str
             ssh_key_enforcement_mode=ssh_key_enforcement_mode,
             application_host_id=application_host_id,
             method="dbssm", dns_name=dns_name, emit_private_key=False,
+            dss_auto_management=False)
+    elif method == "dbazure":
+        # Cloud-DB via the "{engine} Azure Run Command Plugin": Password Safe reaches
+        # the private Azure DB by running the DB client on a jump VM over Azure VM Run
+        # Command. dns_name is eight ``;``-separated fields the plugin parses, ip is a
+        # placeholder, the real DB port applies, and the account is PASSWORD-managed
+        # (a dedicated managed user the functional-account DB login rotates).
+        if not dns_name or dns_name.count(";") != 7:
+            raise PSResourceError(
+                "DB Azure Run Command onboarding requires a dns_name of the form "
+                "'vmName;resourceGroup;subscriptionId;tenantId;dbHost;dbName;certPath;"
+                "sslTRUE|sslFALSE'")
+        hcl = _generate_managed_system_hcl(
+            name=name, host_name=host_name, ip_address=ip_address or "127.0.0.1", port=port,
+            functional_account_id=functional_account_id, platform_id=platform_id,
+            entity_type_id=entity_type_id, workgroup_id=workgroup_id,
+            managed_account_name=managed_account_name,
+            ssh_key_enforcement_mode=ssh_key_enforcement_mode,
+            application_host_id=application_host_id,
+            method="dbazure", dns_name=dns_name, emit_private_key=False,
             dss_auto_management=False)
     elif method == "pravault":
         # "PRA Vault Username Password" plugin: Password Safe PATCHes the rotated

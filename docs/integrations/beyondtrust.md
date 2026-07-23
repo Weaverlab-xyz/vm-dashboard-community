@@ -321,7 +321,7 @@ in sync. Turn it on under **Settings → Integrations → BeyondTrust → Cloud 
 
 | Key | Default | Notes |
 |---|---|---|
-| `clouddb_ps_onboarding_enabled` | `false` | Master toggle (AWS only) |
+| `clouddb_ps_onboarding_enabled` | `false` | Master toggle (AWS **and** Azure) |
 | `clouddb_ps_platform_postgres` / `_mysql` / `_sqlserver` | `psql/mysql/mssql SSM Custom Plugin` | Custom-plugin platform names (as uploaded) |
 | `clouddb_ps_pravault_platform` | `PRA Vault Username Password` | PRA Vault plugin platform name |
 | `clouddb_ps_workgroup` | — | Workgroup; blank falls back to `passwordsafe_workgroup` |
@@ -336,6 +336,76 @@ Off-boarding is automatic: decommissioning the DB deregisters both managed syste
 both functional accounts (before the RDS instance is destroyed — the managed DB user goes with
 it). Every onboarding step is **non-fatal**: any failure logs a warning and falls back to the
 legacy admin-credential staging, leaving the database up.
+
+## Password Safe cloud-database onboarding (Azure)
+
+The Azure counterpart of the AWS path above — the default credential-management mechanism for
+Azure databases (Postgres / MySQL / SQL Server). It is gated by the same master toggle
+(`clouddb_ps_onboarding_enabled`) and reuses the same PRA-Vault sync; only the plugin, the jump
+transport, and the functional-account model differ. Instead of AWS SSM, the three **`{engine}
+Azure Run Command Plugin`** custom plugins reach the private DB by sending an **Azure VM Run
+Command** to the shared **`clouddb-jumpoint`** VM (an in-VNet Ubuntu host with the Azure VM agent
+and line-of-sight to every private Azure DB). Set the method to `off`
+(`passwordsafe_azure_db_registration_method`) to keep the master toggle on for AWS but skip Azure.
+
+**What the dashboard does, per provisioned Azure DB:**
+
+1. Ensures `clouddb-jumpoint` is up and **prepares it for the plugin** over Run Command: installs
+   the native DB clients (`psql` / `mysql` / `sqlcmd`) if missing and drops the plugin's RSA key
+   material (`private.pem` + `passphrase.txt`) to `/root/psplugin` from the configured secrets.
+2. Creates a **dedicated managed DB user** (the rotation target) from the minted admin credential,
+   by running the DB client as a `docker run` on `clouddb-jumpoint` over Run Command.
+3. Points the **PRA tunnel's injected Vault credential** at this managed user.
+4. Onboards the DB as a **managed system + managed account** on the **`{engine} Azure Run Command
+   Plugin`** platform. The managed system's network address is the eight-field
+   `vmName;resourceGroup;subscriptionId;tenantId;dbHost;dbName;certPath;sslTRUE|sslFALSE`, the port
+   is the real DB port, and — unlike the AWS path — the **functional account is a privileged DB
+   login** (the minted admin) bundled with the Azure control-plane service principal:
+   username `SP:<admin>` (or `MSI:<admin>`), password `clientId:clientSecret:adminPassword` (or
+   `-:-:adminPassword` for MSI). Password Safe uses that functional account to rotate the managed
+   user.
+5. Onboards the PRA Vault account on the **`PRA Vault Username Password`** plugin exactly as the
+   AWS path does, so rotations propagate into the tunnel-injected credential.
+
+**Prerequisites (one-time, admin — the dashboard cannot automate these):**
+
+- Upload the three **`{engine} Azure Run Command Plugin`** `.PSPLUGIN`s in BeyondInsight and set
+  the platform-name fields in Settings to match. Plugin internals are documented in the Beekeeper
+  articles (`Beekeeper-AzurePostgresRunCommand.docx`, `Beekeeper-AzureMssqlRunCommand.docx`,
+  `Beekeeper-AzureMySqlRunCommand.docx`).
+- Generate the plugin **RSA-4096 key pair** (`scripts/make-plugin-cert.sh` in the plugin repo):
+  copy `public_cert.cer` to every Password Safe **Resource Broker** at the path set in
+  `clouddb_ps_azure_cert_path`, and paste `private.pem` + its passphrase into
+  `clouddb_ps_azure_plugin_private_key` / `_passphrase` so the dashboard can provision them onto
+  the jump VM (they are stored encrypted at rest).
+- Grant the Azure **service principal** used for the functional account
+  (`clouddb_ps_azure_sp_client_id`, or the dashboard's `azure_client_id` when blank) the
+  **Virtual Machine Contributor** role (or `Microsoft.Compute/virtualMachines/read` +
+  `.../runCommand/action`) on the jump-VM resource group. The dashboard's own SP already manages
+  that resource group, so this usually already holds.
+- Create a **PRA Configuration-API account** as in the AWS section (for the PRA-Vault sync).
+
+> **Checkout prerequisite.** As with any managed account, the `pscli` API account needs
+> **Requestor** access (Smart Rule → Access Policy) to the new managed account before a
+> credential checkout / rotation-on-request will succeed.
+
+### Configuration keys (Azure cloud-DB onboarding)
+
+| Key | Default | Notes |
+|---|---|---|
+| `passwordsafe_azure_db_registration_method` | `runcommand` | `runcommand` (Azure Run Command plugins) or `off` to skip Azure |
+| `clouddb_ps_platform_azure_postgres` / `_mysql` / `_sqlserver` | `PostgreSQL/MySQL/MSSQL Azure Run Command Plugin` | Custom-plugin platform names (as uploaded) |
+| `clouddb_ps_azure_auth_mode` | `SP` | `SP` (service principal) or `MSI` (managed identity) — the functional-account username prefix |
+| `clouddb_ps_azure_cert_path` | `C:\BeyondTrust\certs\public_cert.cer` | Public-cert path on the Resource Broker (address field 7) |
+| `clouddb_ps_azure_ssl` | `true` | `sslTRUE` (Azure flex servers require TLS) or `sslFALSE` (address field 8) |
+| `clouddb_ps_azure_sp_client_id` / `_client_secret` | — | Azure SP for the functional account; blank → reuse `azure_client_id` / `azure_client_secret` |
+| `clouddb_ps_azure_plugin_private_key` / `_passphrase` | — | Plugin RSA key material the dashboard drops on the jump VM (encrypted at rest) |
+
+The PRA-Vault sync, the workgroup, and the DB-client images are shared with the AWS section
+(`clouddb_ps_pravault_platform`, `clouddb_ps_workgroup`, `clouddb_db_client_image_*`). Off-boarding
+is automatic and identical: decommissioning deregisters both managed systems and deletes both
+functional accounts; the managed DB user goes with the database. Every step is **non-fatal** and
+falls back to the legacy admin-credential staging.
 
 ---
 

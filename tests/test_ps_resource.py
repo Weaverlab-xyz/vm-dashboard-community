@@ -330,6 +330,59 @@ def test_pravault_register_rejects_empty_host_name():
         pass
 
 
+# ── Azure cloud-DB onboarding shape (dbazure = "{engine} Azure Run Command Plugin")
+# — eight ;-separated address fields, real port, password-managed (no SSH key). ──
+
+_DBAZURE_DNS = (
+    "clouddb-jumpoint;rg-net-prod;11111111-2222-3333-4444-555555555555;"
+    "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee;mydb.postgres.database.azure.com;"
+    "postgres;C:\\BeyondTrust\\certs\\public_cert.cer;sslTRUE")
+_DBAZURE = dict(name="clouddb-pg", host_name="mydb.postgres.database.azure.com",
+                ip_address="127.0.0.1", port=5432, functional_account_id=42, platform_id=30,
+                entity_type_id=1, workgroup_id="55", managed_account_name="psafe_ab12cd34ef56",
+                ssh_key_enforcement_mode=2, method="dbazure", dns_name=_DBAZURE_DNS,
+                emit_private_key=False, dss_auto_management=False)
+
+
+def test_dbazure_system_block_uses_eight_field_dns_placeholder_ip_and_no_ssh():
+    hcl = ps._generate_managed_system_hcl(**_DBAZURE)
+    assert ps._line("dns_name", json.dumps(_DBAZURE_DNS)) in hcl
+    assert _DBAZURE_DNS.count(";") == 7          # eight ;-separated fields
+    assert ps._line("ip_address", '"127.0.0.1"') in hcl
+    assert ps._line("platform_id", 30) in hcl
+    assert ps._line("port", 5432) in hcl
+    assert "remote_client_type" not in hcl
+    assert "ssh_key_enforcement_mode" not in hcl
+
+
+def test_dbazure_account_is_password_managed_no_key_no_dss():
+    hcl = ps._generate_managed_system_hcl(**_DBAZURE)
+    assert ps._line("account_name", '"psafe_ab12cd34ef56"') in hcl
+    assert "private_key" not in hcl
+    assert ps._line("password", "var.ps_account_password") in hcl
+    assert ps._line("dss_auto_management_flag", "false") in hcl
+    assert ps._line("auto_management_flag", "true") in hcl
+    assert 'variable "ps_account_private_key"' not in hcl
+
+
+def test_dbazure_register_rejects_dns_name_without_eight_parts():
+    import asyncio
+    for bad in ("", "a;b;c", "a;b;c;d;e;f",                    # too few
+                "a;b;c;d;e;f;g;h;i", "no-semicolons"):         # too many / none
+        try:
+            asyncio.run(ps.register_managed_system(
+                name="pg", host_name="pg", functional_account_id=1, platform_id=30,
+                workgroup_id="wg", method="dbazure", dns_name=bad))
+            raise AssertionError("expected PSResourceError for dns_name=%r" % bad)
+        except ps.PSResourceError:
+            pass
+
+
+def test_dbazure_is_a_recognised_password_managed_plugin_method():
+    assert "dbazure" in ps._PLUGIN_METHODS
+    assert "dbazure" in ps._PASSWORD_MANAGED_METHODS
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0

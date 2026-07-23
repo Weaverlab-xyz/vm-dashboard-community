@@ -746,7 +746,7 @@
             <label class="flex items-center gap-2 mb-3 text-sm text-gray-700">
               <input type="checkbox" x-model="panelCfg.clouddb_ps_onboarding_enabled"
                      class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
-              Enable Password Safe onboarding for AWS cloud databases
+              Enable Password Safe onboarding for AWS &amp; Azure cloud databases
             </label>
             <div x-show="panelCfg.clouddb_ps_onboarding_enabled" class="space-y-3">
               <div class="grid grid-cols-3 gap-3">
@@ -851,6 +851,90 @@
                   <input type="text" x-model="panelCfg.clouddb_db_client_image_sqlserver"
                          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
                          placeholder="mcr.microsoft.com/mssql-tools18">
+                </div>
+              </div>
+
+              <!-- Azure (Run Command plugins) -->
+              <div class="border-t border-gray-100 pt-3 mt-1 space-y-3">
+                <p class="text-xs font-medium text-gray-500 uppercase tracking-wide">Azure (Run Command plugins)</p>
+                <p class="text-xs text-gray-400">
+                  For Azure databases the DB is onboarded onto the <code class="bg-gray-100 px-1 rounded">{engine} Azure Run Command Plugin</code>,
+                  whose plugin reaches the private DB by running the DB client on the shared <code class="bg-gray-100 px-1 rounded">clouddb-jumpoint</code> VM
+                  via Azure VM Run Command. The functional account is the minted DB admin bundled with an Azure service principal; it rotates a dedicated
+                  managed user. The three custom plugins + the RSA keypair (public cert on the Resource Broker, private key below) are one-time manual setup.
+                </p>
+                <div class="grid grid-cols-3 gap-3">
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">PostgreSQL Platform</label>
+                    <input type="text" x-model="panelCfg.clouddb_ps_platform_azure_postgres"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                           placeholder="PostgreSQL Azure Run Command Plugin">
+                  </div>
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">MySQL Platform</label>
+                    <input type="text" x-model="panelCfg.clouddb_ps_platform_azure_mysql"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                           placeholder="MySQL Azure Run Command Plugin">
+                  </div>
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">SQL Server Platform</label>
+                    <input type="text" x-model="panelCfg.clouddb_ps_platform_azure_sqlserver"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                           placeholder="MSSQL Azure Run Command Plugin">
+                  </div>
+                </div>
+                <div class="grid grid-cols-3 gap-3">
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Auth Mode</label>
+                    <select x-model="panelCfg.clouddb_ps_azure_auth_mode"
+                            class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                      <option value="SP">SP (service principal)</option>
+                      <option value="MSI">MSI (managed identity)</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Broker Cert Path</label>
+                    <input type="text" x-model="panelCfg.clouddb_ps_azure_cert_path"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                           placeholder="C:\BeyondTrust\certs\public_cert.cer">
+                  </div>
+                  <div class="flex items-end">
+                    <label class="flex items-center gap-2 text-sm text-gray-700 pb-2">
+                      <input type="checkbox" x-model="panelCfg.clouddb_ps_azure_ssl"
+                             class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+                      Require TLS (sslTRUE)
+                    </label>
+                  </div>
+                </div>
+                <p class="text-xs text-gray-400">Azure service principal for the functional account — leave blank to reuse the dashboard's Azure credentials. It needs Virtual Machine Contributor on the jump-VM resource group.</p>
+                <div class="grid grid-cols-2 gap-3">
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">SP Client ID</label>
+                    <input type="text" x-model="panelCfg.clouddb_ps_azure_sp_client_id"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                           placeholder="(blank = reuse azure_client_id)">
+                  </div>
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">SP Client Secret</label>
+                    <input type="password" x-model="panelCfg.clouddb_ps_azure_sp_client_secret"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                           placeholder="••••••••">
+                  </div>
+                </div>
+                <p class="text-xs text-gray-400">Plugin RSA private key + passphrase the dashboard drops onto the jump VM at <code class="bg-gray-100 px-1 rounded">/root/psplugin</code> (matches the public cert on the Resource Broker).</p>
+                <div class="grid grid-cols-2 gap-3">
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Plugin Private Key (PEM)</label>
+                    <textarea x-model="panelCfg.clouddb_ps_azure_plugin_private_key" rows="3"
+                              class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                              placeholder="-----BEGIN ENCRYPTED PRIVATE KEY-----"></textarea>
+                  </div>
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Plugin Key Passphrase</label>
+                    <input type="password" x-model="panelCfg.clouddb_ps_azure_plugin_passphrase"
+                           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                           placeholder="••••••••">
+                  </div>
                 </div>
               </div>
             </div>
