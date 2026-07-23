@@ -2,7 +2,10 @@
 # GCP sandbox bootstrap for the VM Dashboard.
 #
 # Multi-region: re-run for a second region with a DISTINCT subnet prefix, e.g.
-#   GCP_REGION=us-east1 GCP_CIDR_PREFIX=10.102 GCP_SANDBOX_SUPERNET=10.96.0.0/12 ./setup-gcp.sh
+#   GCP_REGION=us-east1 GCP_CIDR_PREFIX=10.102 ./setup-gcp.sh
+# The VPC-wide firewall rules' supernet is auto-widened to span every region's
+# prefix, so GCP_SANDBOX_SUPERNET no longer needs to be hand-computed (pin it only
+# to force a specific block).
 # The zone defaults to the region's first available zone (override with GCP_ZONE);
 # some regions, us-east1 included, have no "-a" zone.
 # The subnets join the SAME shared VPC (so the GKE↔sandbox VPC peering, which is
@@ -57,11 +60,72 @@ ZONE="${GCP_ZONE:-}"   # resolved after login — not every region has an "-a" z
 # Cloud SQL PSA range, and any other region's prefix. Default keeps region 1 on 10.99.
 GCP_CIDR_PREFIX="${GCP_CIDR_PREFIX:-10.99}"
 # Supernet spanned by the two VPC-wide, CIDR-based firewall rules — allow-internal
-# (ingress source) and allow-vm-egress-vpc (egress dest). Single-region default is
-# the /16; when running multi-region widen it to cover every region's prefix
-# (e.g. GCP_SANDBOX_SUPERNET=10.96.0.0/12 covers 10.96–10.111). The rules are
-# created-or-updated each run, so a later region widens them in place.
-GCP_SANDBOX_SUPERNET="${GCP_SANDBOX_SUPERNET:-10.99.0.0/16}"
+# (ingress source) and allow-vm-egress-vpc (egress dest). Left BLANK (the default)
+# it is auto-widened by _compute_sandbox_supernet (called in the firewall section)
+# to the minimal block enclosing every sandbox subnet across all regions — so
+# adding a region never needs a hand-computed supernet. Set it explicitly only to
+# pin a specific block (e.g. GCP_SANDBOX_SUPERNET=10.96.0.0/12 for 10.96–10.111).
+GCP_SANDBOX_SUPERNET="${GCP_SANDBOX_SUPERNET:-}"
+
+# ── CIDR helpers: auto-widen the sandbox supernet ────────────────────────────
+# The VPC is shared across regions, so the two VPC-wide firewall rules must span
+# every region's prefix. Rather than make the operator hand-compute the supernet,
+# derive the minimal CIDR block enclosing every sandbox subnet (all regions, this
+# run included) plus the current allow-internal range (so a re-run never NARROWS a
+# wider block someone pinned). PSA peering ranges are NOT subnets, so they're
+# correctly excluded — user VMs must stay unable to reach the managed-DB range.
+_ip_to_int() {                       # dotted-quad → 32-bit int
+  local a b c d IFS=.
+  read -r a b c d <<<"$1"
+  printf '%s' "$(( (a<<24) | (b<<16) | (c<<8) | d ))"
+}
+_int_to_ip() {                       # 32-bit int → dotted-quad
+  local n="$1"
+  printf '%d.%d.%d.%d' "$(( (n>>24)&255 ))" "$(( (n>>16)&255 ))" "$(( (n>>8)&255 ))" "$(( n&255 ))"
+}
+# Minimal enclosing CIDR ("a.b.c.d/p") covering every CIDR/IP arg (bare IP = /32).
+_min_enclosing_cidr() {
+  local lo=4294967295 hi=0 arg ip plen start end mask p m
+  for arg in "$@"; do
+    [[ -n "$arg" ]] || continue
+    ip="${arg%%/*}"
+    plen="${arg#*/}"; [[ "$plen" != "$arg" ]] || plen=32
+    start="$(_ip_to_int "$ip")"
+    if (( plen == 0 )); then mask=0; else mask=$(( (0xFFFFFFFF << (32 - plen)) & 0xFFFFFFFF )); fi
+    start=$(( start & mask ))
+    end=$(( start | (~mask & 0xFFFFFFFF) ))
+    if (( start < lo )); then lo=$start; fi
+    if (( end   > hi )); then hi=$end;   fi
+  done
+  if (( hi < lo )); then return 1; fi          # nothing to enclose
+  for (( p = 32; p >= 0; p-- )); do
+    if (( p == 0 )); then m=0; else m=$(( (0xFFFFFFFF << (32 - p)) & 0xFFFFFFFF )); fi
+    if (( (lo & m) == (hi & m) )); then
+      printf '%s/%d' "$(_int_to_ip "$(( lo & m ))")" "$p"
+      return 0
+    fi
+  done
+  printf '0.0.0.0/0'
+}
+# Derive the sandbox supernet from what exists (+ this region). Call AFTER the
+# subnets are created so this run's region is represented.
+_compute_sandbox_supernet() {
+  local ranges=() r existing
+  existing="$(gcloud compute firewall-rules describe "${NAME}-allow-internal" \
+      --project "$PROJECT_ID" --format='value(sourceRanges.list())' 2>/dev/null || true)"
+  existing="${existing//,/ }"
+  for r in $existing; do ranges+=("$r"); done
+  # Reduce each subnet to its enclosing /16 (covers the primary /24 AND the k8s
+  # secondary pod/service ranges, which share the region's prefix).
+  while IFS= read -r r; do
+    [[ -n "$r" ]] || continue
+    r="${r%%/*}"                       # a.b.c.d
+    ranges+=("${r%.*.*}.0.0/16")       # → a.b.0.0/16
+  done < <(gcloud compute networks subnets list --network "$VPC" \
+             --project "$PROJECT_ID" --format='value(ipCidrRange)' 2>/dev/null || true)
+  ranges+=("${GCP_CIDR_PREFIX}.0.0/16")  # belt-and-suspenders against listing lag
+  _min_enclosing_cidr "${ranges[@]}"
+}
 
 [[ -n "$PROJECT_ID" && "$PROJECT_ID" != "(unset)" ]] || \
   die "No GCP project set. Run: gcloud config set project YOUR-PROJECT  (or export GCP_PROJECT_ID=…)"
@@ -221,6 +285,15 @@ NETWORK_TAG_VM="${NAME}-vm"         # tag deployed user VMs (advisory; dashboard
 NETWORK_TAG_K8S="${NAME}-k8s"       # tag CO-LOCATED GKE nodes (drives the k8s→DB
                                     # egress rule below; the k8s→VM:22 ingress rule
                                     # is CIDR-sourced — see allow-ssh-from-k8s).
+
+# Resolve the sandbox supernet now that the subnets exist (so it can enclose this
+# region). Blank GCP_SANDBOX_SUPERNET → auto-widen; otherwise honour the pinned block.
+if [[ -z "$GCP_SANDBOX_SUPERNET" ]]; then
+  GCP_SANDBOX_SUPERNET="$(_compute_sandbox_supernet)"
+  ok "Sandbox supernet (auto-widened): $GCP_SANDBOX_SUPERNET"
+else
+  ok "Sandbox supernet (pinned via GCP_SANDBOX_SUPERNET): $GCP_SANDBOX_SUPERNET"
+fi
 
 # Allow internal communication anywhere in the sandbox supernet (spans every
 # region's prefix). Create-or-update so a later region widens it in place.

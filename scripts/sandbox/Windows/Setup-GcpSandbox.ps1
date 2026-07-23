@@ -22,14 +22,73 @@ $Zone      = $env:GCP_ZONE   # resolved after login — not every region has an 
 # shared across regions, so when ADDING a second region set a DISTINCT prefix or
 # GCP rejects the overlapping range. Avoid the GKE ranges (10.98/10.100/10.101),
 # the Cloud SQL PSA range, and other regions' prefixes. Multi-region example:
-#   $env:GCP_REGION='us-east1'; $env:GCP_CIDR_PREFIX='10.102'; $env:GCP_SANDBOX_SUPERNET='10.96.0.0/12'
-# (the zone defaults to the region's first available zone — us-east1 has no "-a" —
-# override with $env:GCP_ZONE)
+#   $env:GCP_REGION='us-east1'; $env:GCP_CIDR_PREFIX='10.102'
+# (the supernet auto-widens — see below; the zone defaults to the region's first
+# available zone — us-east1 has no "-a" — override with $env:GCP_ZONE)
 $CidrPrefix = if ($env:GCP_CIDR_PREFIX) { $env:GCP_CIDR_PREFIX } else { '10.99' }
-# Supernet the two VPC-wide firewall rules span (allow-internal / allow-vm-egress-vpc);
-# widen to cover every region's prefix when running multi-region. Rules are
-# created-or-updated each run, so a later region widens them in place.
-$Supernet   = if ($env:GCP_SANDBOX_SUPERNET) { $env:GCP_SANDBOX_SUPERNET } else { '10.99.0.0/16' }
+# Supernet the two VPC-wide firewall rules span (allow-internal / allow-vm-egress-vpc).
+# Left blank (the default) it is auto-widened by Get-SandboxSupernet (called in the
+# firewall section) to the minimal block enclosing every sandbox subnet across all
+# regions — so adding a region never needs a hand-computed supernet. Set it only to
+# pin a specific block (e.g. '10.96.0.0/12' for 10.96-10.111 headroom).
+$Supernet   = if ($env:GCP_SANDBOX_SUPERNET) { $env:GCP_SANDBOX_SUPERNET } else { '' }
+
+# ── CIDR helpers: auto-widen the sandbox supernet ────────────────────────────
+# Functional twin of setup-gcp.sh's _compute_sandbox_supernet. Derive the minimal
+# CIDR block enclosing every sandbox subnet (all regions, this run included) plus
+# the current allow-internal range (so a re-run never NARROWS a wider pinned block).
+# PSA peering ranges aren't subnets → correctly excluded (VMs must not reach the DB).
+function ConvertTo-Ip32([string]$Ip) {
+    $b = ([ipaddress]$Ip.Trim()).GetAddressBytes()
+    return ([long]$b[0] -shl 24) -bor ([long]$b[1] -shl 16) -bor ([long]$b[2] -shl 8) -bor [long]$b[3]
+}
+function ConvertFrom-Ip32([long]$N) {
+    return '{0}.{1}.{2}.{3}' -f (($N -shr 24) -band 255), (($N -shr 16) -band 255), (($N -shr 8) -band 255), ($N -band 255)
+}
+function Get-MinEnclosingCidr([string[]]$Cidrs) {
+    [long]$lo = 4294967295L
+    [long]$hi = 0L
+    foreach ($c in $Cidrs) {
+        if ([string]::IsNullOrWhiteSpace($c)) { continue }
+        $parts = $c.Split('/')
+        [long]$start = ConvertTo-Ip32 $parts[0]
+        $plen = if ($parts.Count -gt 1) { [int]$parts[1] } else { 32 }
+        [long]$mask = if ($plen -eq 0) { 0L } else { (4294967295L -shl (32 - $plen)) -band 4294967295L }
+        $start = $start -band $mask
+        [long]$end = $start -bor ((-bnot $mask) -band 4294967295L)
+        if ($start -lt $lo) { $lo = $start }
+        if ($end   -gt $hi) { $hi = $end }
+    }
+    if ($hi -lt $lo) { return $null }
+    for ($p = 32; $p -ge 0; $p--) {
+        [long]$m = if ($p -eq 0) { 0L } else { (4294967295L -shl (32 - $p)) -band 4294967295L }
+        if (($lo -band $m) -eq ($hi -band $m)) {
+            return ('{0}/{1}' -f (ConvertFrom-Ip32 ($lo -band $m)), $p)
+        }
+    }
+    return '0.0.0.0/0'
+}
+function Get-SandboxSupernet {
+    $ranges = New-Object System.Collections.Generic.List[string]
+    # Current allow-internal source ranges (never narrow a wider pinned block).
+    $existing = & gcloud compute firewall-rules describe "$Name-allow-internal" `
+        --project $ProjectId --format='value(sourceRanges.list())' 2>$null
+    if ($LASTEXITCODE -eq 0 -and $existing) {
+        foreach ($r in ("$existing" -split ',')) { if ($r.Trim()) { $ranges.Add($r.Trim()) } }
+    }
+    # Reduce each subnet to its enclosing /16 (covers primary /24 + k8s secondary ranges).
+    $subnets = & gcloud compute networks subnets list --network $Vpc `
+        --project $ProjectId --format='value(ipCidrRange)' 2>$null
+    if ($LASTEXITCODE -eq 0 -and $subnets) {
+        foreach ($s in $subnets) {
+            $t = "$s".Trim(); if (-not $t) { continue }
+            $o = $t.Split('/')[0].Split('.')
+            $ranges.Add("$($o[0]).$($o[1]).0.0/16")
+        }
+    }
+    $ranges.Add("$CidrPrefix.0.0/16")   # belt-and-suspenders against listing lag
+    return Get-MinEnclosingCidr $ranges.ToArray()
+}
 
 if (-not $ProjectId -or $ProjectId -eq '(unset)') {
     Write-Die 'No GCP project set. Run: gcloud config set project YOUR-PROJECT  (or set $env:GCP_PROJECT_ID)'
@@ -186,6 +245,15 @@ Set-StateValue gcp nat    $Nat
 
 # ── 4. Firewall rules ────────────────────────────────────────────────────────
 Write-Section 'Firewall rules'
+
+# Resolve the sandbox supernet now the subnets exist (so it can enclose this region).
+# Blank $Supernet → auto-widen; otherwise honour the pinned block.
+if (-not $Supernet) {
+    $Supernet = Get-SandboxSupernet
+    Write-Ok "Sandbox supernet (auto-widened): $Supernet"
+} else {
+    Write-Ok "Sandbox supernet (pinned via GCP_SANDBOX_SUPERNET): $Supernet"
+}
 
 # Idempotent — gcloud returns non-zero if the rule already exists; swallow.
 gcloud compute firewall-rules create "$Name-allow-internal" `
