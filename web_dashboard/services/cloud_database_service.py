@@ -68,13 +68,14 @@ _PROVIDER = {
 
 # SQL Server managed offerings that CAN satisfy Entitle's Microsoft SQL Server
 # connector, which requires sysadmin (standard mode) or CONTROL SERVER + a fixed
-# permission set (least-privilege mode). NONE of the managed SQL Server flavors this
-# dashboard provisions today qualify: GCP Cloud SQL (provider "cloudsql") and AWS RDS
-# (provider "rds") reserve sysadmin/CONTROL SERVER for the platform, and Azure SQL
-# Database (provider "sql_database") is a logical server with no server-level grants.
-# Empty today; PR2's Entitle-compatible offerings add "rds_custom" (AWS RDS Custom)
-# and "sql_managed_instance" (Azure SQL Managed Instance), which DO grant sysadmin.
-_ENTITLE_VIABLE_SQLSERVER_PROVIDERS: frozenset = frozenset()
+# permission set (least-privilege mode): AWS RDS Custom ("rds_custom") and Azure SQL
+# Managed Instance ("sql_managed_instance") — both grant sysadmin. The three DEFAULT
+# managed flavors are deliberately absent because they can't: GCP Cloud SQL ("cloudsql")
+# and AWS RDS-standard ("rds") reserve sysadmin/CONTROL SERVER for the platform, and
+# Azure SQL Database ("sql_database") is a logical server with no server-level grants.
+# See _SQLSERVER_OFFERINGS (provisioning) + docs/design/entitle-compatible-sqlserver.md.
+_ENTITLE_VIABLE_SQLSERVER_PROVIDERS: frozenset = frozenset(
+    {"rds_custom", "sql_managed_instance"})
 
 
 def _entitle_viable(engine: str, provider: Optional[str]) -> bool:
@@ -126,6 +127,55 @@ def template_dir(engine: str, cloud: str) -> str:
     return _TEMPLATE_DIRS[(engine, cloud)]
 
 
+# --- Entitle-compatible SQL Server offerings (opt-in via opts["sqlserver_tier"]) -----
+# The three managed SQL Server flavors keyed in _TEMPLATE_DIRS/_PROVIDER above (Cloud
+# SQL / RDS-standard / Azure SQL Database) can't satisfy Entitle's MSSQL connector — it
+# needs sysadmin/CONTROL SERVER (see _entitle_viable). These two offerings CAN: AWS RDS
+# Custom for SQL Server (grants sysadmin + OS access) and Azure SQL Managed Instance
+# (admin login is a sysadmin member). Each has its own terraform module and a distinct
+# `provider` label recorded on the row, so the apply/decommission paths resolve the
+# right module from row.provider (they don't carry the tier). The default tier
+# "standard" leaves every existing (engine, cloud) mapping untouched.
+#   (cloud, tier) -> (provider, terraform-module-dirname)
+_SQLSERVER_OFFERINGS = {
+    ("aws", "rds_custom"):         ("rds_custom",           "db_aws_sqlserver_custom"),
+    ("azure", "managed_instance"): ("sql_managed_instance", "db_azure_sqlserver_mi"),
+}
+# Reverse lookups for the post-provision paths, which only have row.provider.
+_PROVIDER_TEMPLATE_DIRS = {prov: dirn for (prov, dirn) in _SQLSERVER_OFFERINGS.values()}
+_PROVIDER_TIERS = {prov: tier for (cloud, tier), (prov, _d) in _SQLSERVER_OFFERINGS.items()}
+
+
+def _resolve_provider(engine: str, cloud: str, opts: dict) -> Optional[str]:
+    """The `provider` label to record on the row. SQL Server honors an optional
+    opts["sqlserver_tier"] to select an Entitle-compatible offering; every other case
+    (and the default "standard" tier) keeps the historical _PROVIDER value."""
+    tier = (opts or {}).get("sqlserver_tier") or "standard"
+    if engine == "sqlserver" and tier != "standard":
+        if (cloud, tier) not in _SQLSERVER_OFFERINGS:
+            raise CloudDatabaseError(
+                f"unsupported SQL Server tier {tier!r} for cloud {cloud!r} (supported: "
+                f"{sorted(t for (c, t) in _SQLSERVER_OFFERINGS if c == cloud) or ['(none)']})")
+        return _SQLSERVER_OFFERINGS[(cloud, tier)][0]
+    return _PROVIDER.get((engine, cloud))
+
+
+def _module_dir(engine: str, cloud: str, provider: Optional[str] = None) -> str:
+    """Resolve the terraform module dir. Entitle-compatible SQL Server offerings carry
+    a distinct provider and live in their own module; everything else uses the
+    (engine, cloud) map. Post-provision callers pass row.provider so a re-provision /
+    decommission targets the same module the create used."""
+    if provider and provider in _PROVIDER_TEMPLATE_DIRS:
+        return os.path.join(_REPO_ROOT, "terraform", _PROVIDER_TEMPLATE_DIRS[provider])
+    return _TEMPLATE_DIRS[(engine, cloud)]
+
+
+def _tier_for_provider(provider: Optional[str]) -> str:
+    """Recover the sqlserver_tier from a recorded provider (for the decommission
+    reconstruction, which only has row.provider). Defaults to "standard"."""
+    return _PROVIDER_TIERS.get(provider or "", "standard")
+
+
 def _deploy_dir(job_id: str) -> str:
     return os.path.join(_DEPLOYMENTS_DIR, job_id)
 
@@ -157,7 +207,63 @@ def _build_tf_variables(
     non-default region picks up that region's network; a blank field (or the default
     region) falls back to the flat config keys, so single-region installs are
     unchanged. An explicit value passed in ``opts`` always wins.
+
+    SQL Server additionally honors opts["sqlserver_tier"] to select an Entitle-
+    compatible offering (RDS Custom / Azure SQL MI); these are checked first so they
+    intercept before the standard (engine, cloud) branches. The default tier
+    "standard" leaves every existing branch untouched.
     """
+    tier = (opts or {}).get("sqlserver_tier") or "standard"
+
+    if (engine, cloud, tier) == ("sqlserver", "aws", "rds_custom"):
+        # AWS RDS Custom for SQL Server — Entitle-compatible (the master user can be
+        # granted sysadmin). SCAFFOLD: these keys map 1:1 to terraform/
+        # db_aws_sqlserver_custom; live provisioning is deferred (needs a pre-built
+        # Custom Engine Version + installation-media S3 bucket + the RDS Custom IAM
+        # instance profile — see docs/design/entitle-compatible-sqlserver.md). RDS
+        # Custom does NOT support db.t3.* — default to a supported class.
+        rc_class = opts.get("instance_class") or "db.r5.large"
+        return {
+            "region": region,
+            "identifier": f"clouddb-{db_id[:8]}",
+            "master_username": master_username,
+            "master_password": master_password,
+            # A Custom Engine Version (custom-sqlserver-*) built from your media; the
+            # module has no default (there is no AWS-provided CEV) — set the config key.
+            "engine_version": opts.get("engine_version") or _cfg("aws_rds_custom_sqlserver_cev"),
+            "instance_class": rc_class,
+            "allocated_storage": opts.get("allocated_storage", 20),
+            "db_subnet_group_name": opts.get("db_subnet_group_name")
+                or resolve_region("aws", region)["db_subnet_group_name"],
+            "vpc_security_group_ids": opts.get("vpc_security_group_ids", []),
+            "custom_iam_instance_profile": opts.get("custom_iam_instance_profile")
+                or _cfg("aws_rds_custom_instance_profile"),
+            "kms_key_id": opts.get("kms_key_id") or _cfg("aws_rds_custom_kms_key_id"),
+            "tags": {"managed-by": "vm-dashboard", "clouddb-id": db_id},
+        }
+
+    if (engine, cloud, tier) == ("sqlserver", "azure", "managed_instance"):
+        # Azure SQL Managed Instance — Entitle-compatible (the deployment admin login is
+        # a member of the sysadmin server role). SCAFFOLD: these keys map 1:1 to
+        # terraform/db_azure_sqlserver_mi; live provisioning is deferred (MI needs a
+        # delegated subnet + NSG + route table and takes ~hours to create — see
+        # docs/design/entitle-compatible-sqlserver.md).
+        _az = resolve_region("azure", region)
+        return {
+            "resource_group_name": opts.get("resource_group_name") or _az["resource_group"],
+            "location": region,
+            "identifier": f"clouddb-{db_id[:8]}",
+            "administrator_login": master_username,
+            "administrator_password": master_password,
+            "sku_name": opts.get("sku_name") or "GP_Gen5",
+            "vcores": int(opts.get("vcores") or 4),
+            "storage_size_in_gb": int(opts.get("storage_size_in_gb") or 32),
+            # A subnet delegated to Microsoft.Sql/managedInstances (its own NSG + route
+            # table). Not a region-config field yet — set the flat config key.
+            "subnet_id": opts.get("subnet_id") or _cfg("azure_sqlmi_subnet_id"),
+            "tags": {"managed-by": "vm-dashboard", "clouddb-id": db_id},
+        }
+
     if (engine, cloud) == ("postgres", "aws"):
         return {
             "region": region,
@@ -404,7 +510,7 @@ def provision(
 
     row = CloudDatabase(
         engine=engine,
-        provider=_PROVIDER.get((engine, cloud)),
+        provider=_resolve_provider(engine, cloud, opts),
         cloud=cloud,
         region=region,
         port=_DEFAULT_PORTS.get(engine),
@@ -1127,9 +1233,9 @@ async def _reclaim_gcp_create_wait_instance(
     await terraform.import_resource(
         _deploy_dir(job_id), "google_sql_database_instance.this", f"{project}/{name}",
         env=terraform_provider_env.provider_env(row.cloud),
-        template_dir=template_dir(engine, row.cloud), variables=tf_variables)
+        template_dir=_module_dir(engine, row.cloud, row.provider), variables=tf_variables)
     return await terraform.apply(
-        _deploy_dir(job_id), tf_variables, template_dir=template_dir(engine, row.cloud),
+        _deploy_dir(job_id), tf_variables, template_dir=_module_dir(engine, row.cloud, row.provider),
         env=terraform_provider_env.provider_env(row.cloud),
         on_line=_job_stream(job_id, 40, "Reclaiming the created instance…"),
     )
@@ -1167,7 +1273,7 @@ async def run_provision_apply(
 
         try:
             outputs = await terraform.apply(
-                _deploy_dir(job_id), tf_variables, template_dir=template_dir(engine, row.cloud),
+                _deploy_dir(job_id), tf_variables, template_dir=_module_dir(engine, row.cloud, row.provider),
                 env=terraform_provider_env.provider_env(row.cloud),
                 on_line=_job_stream(job_id, 5, "Provisioning the database…"),
             )
@@ -1399,7 +1505,11 @@ async def run_decommission(db: Session, *, db_id: str, job_id: str) -> None:
                 db_name=_db_name_from(meta.get("name") or "appdb"),
                 master_username="dbadmin",
                 master_password=config_service.get(f"clouddb/{db_id}/admin") or "unused-on-destroy",
-                opts={},
+                # Recover the SQL Server offering tier from the recorded provider so the
+                # destroy -var set matches the module the create used (standard for all
+                # existing rows). row.provider is the discriminator both here and in
+                # _module_dir below.
+                opts={"sqlserver_tier": _tier_for_provider(row.provider)},
             )
             # State lives in the active storage backend, so destroy recovers even
             # if the deploy dir was lost to a container recreate — pass template_dir
@@ -1407,7 +1517,7 @@ async def run_decommission(db: Session, *, db_id: str, job_id: str) -> None:
             await terraform.destroy(
                 _deploy_dir(deploy_job.id), variables=destroy_vars,
                 env=terraform_provider_env.provider_env(row.cloud),
-                template_dir=template_dir(row.engine, row.cloud),
+                template_dir=_module_dir(row.engine, row.cloud, row.provider),
                 on_line=_job_stream(job_id, 60, "Destroying the database…"),
             )
             logger.info("clouddb instance destroyed db_id=%s cloud=%s", db_id, row.cloud)

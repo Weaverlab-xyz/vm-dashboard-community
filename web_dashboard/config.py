@@ -349,6 +349,11 @@ class Settings(BaseSettings):
     # one-time MANUAL setup (see docs); the platform names below are how the dashboard
     # finds them.
     clouddb_ps_onboarding_enabled: bool = False
+    # Exposes the Entitle-compatible SQL Server offering tiers (AWS RDS Custom / Azure
+    # SQL Managed Instance) in the cloud-DB provision form. Off by default: those
+    # modules need real prereqs (RDS Custom CEV/media/IAM; MI delegated subnet) and
+    # aren't live-validated yet. See docs/design/entitle-compatible-sqlserver.md.
+    clouddb_sqlserver_entitle_tiers_enabled: bool = False
     clouddb_ps_platform_postgres: str = "psql SSM Custom Plugin"
     clouddb_ps_platform_mysql: str = "mysql SSM Custom Plugin"
     clouddb_ps_platform_sqlserver: str = "mssql SSM Custom Plugin"

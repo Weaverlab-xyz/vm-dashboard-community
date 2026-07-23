@@ -54,6 +54,20 @@ class ProvisionRequest(BaseModel):
     # zone and resource group fall back to the sandbox-emitted azure_db_* config.
     sku_name: Optional[str] = None
     storage_mb: Optional[int] = None
+    # SQL Server offering tier. "standard" (default) = the managed flavor per cloud
+    # (RDS-standard / Cloud SQL / Azure SQL Database) — none Entitle-compatible. The
+    # Entitle-compatible tiers select a dedicated module: "rds_custom" (AWS) /
+    # "managed_instance" (Azure). GCP has no Entitle-compatible managed SQL Server.
+    # See services/cloud_database_service._SQLSERVER_OFFERINGS.
+    sqlserver_tier: Optional[str] = None
+    # Azure SQL Managed Instance sizing (only read for sqlserver_tier=managed_instance);
+    # the delegated subnet falls back to the azure_sqlmi_subnet_id config key.
+    vcores: Optional[int] = None
+    storage_size_in_gb: Optional[int] = None
+    subnet_id: Optional[str] = None
+    # AWS RDS Custom for SQL Server (only read for sqlserver_tier=rds_custom); the
+    # Custom Engine Version / IAM instance profile / KMS key fall back to config keys.
+    engine_version: Optional[str] = None
     # OCI (Autonomous Database) — free-tier by default (public endpoint reached via
     # the PRA tcp tunnel). Beyond free tier needs oci_is_free_tier=false + a subnet.
     oci_db_workload: Optional[str] = None       # "OLTP" (ATP) | "DW" (ADW)
@@ -158,6 +172,11 @@ async def provision_database(
         "private_network": payload.private_network,
         "sku_name": payload.sku_name,
         "storage_mb": payload.storage_mb,
+        "sqlserver_tier": payload.sqlserver_tier,
+        "vcores": payload.vcores,
+        "storage_size_in_gb": payload.storage_size_in_gb,
+        "subnet_id": payload.subnet_id,
+        "engine_version": payload.engine_version,
         "oci_db_workload": payload.oci_db_workload,
         "oci_is_free_tier": payload.oci_is_free_tier,
         "oci_cpu_core_count": payload.oci_cpu_core_count,
