@@ -476,6 +476,7 @@ def _feature_flags() -> dict:
 from fastapi import Depends  # noqa: E402
 from .api import auth, jobs, websocket, aws, azure, gcp, oci, packer, mfa, tokens, users, groups, setup, secrets, storage, images, regions as regions_api  # noqa: E402
 from .api import cloud_databases  # noqa: E402
+from .api import pra as pra_api  # noqa: E402
 from .api import audit as audit_api  # noqa: E402
 from .api import docs_pages  # noqa: E402
 from .api import workgroups as workgroups_api  # noqa: E402
@@ -503,6 +504,7 @@ app.include_router(storage.router)
 app.include_router(images.router)
 app.include_router(auth.router)
 app.include_router(regions_api.router)
+app.include_router(pra_api.router)
 app.include_router(mfa.router)
 app.include_router(tokens.router)
 app.include_router(users.router)

@@ -610,8 +610,10 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
         # ── BeyondTrust PRA — Shell Jump (optional) ───────────────────────────
         if _cfg_svc.get_bool("beyondtrust_enabled"):
             from ..services import terraform_pra_service
-            jump_group = _cfg_svc.get("gcp_bt_jump_group_name") or _cfg_svc.get("bt_jump_group_name") or settings.bt_jump_group_name
-            jumpoint_name = _cfg_svc.get("gcp_jumpoint_name") or _cfg_svc.get("bt_jumpoint_name") or settings.bt_jumpoint_name
+            jump_group = ((payload.jump_group or "").strip() or _cfg_svc.get("gcp_bt_jump_group_name")
+                          or _cfg_svc.get("bt_jump_group_name") or settings.bt_jump_group_name)
+            jumpoint_name = ((payload.jumpoint_name or "").strip() or _cfg_svc.get("gcp_jumpoint_name")
+                             or _cfg_svc.get("bt_jumpoint_name") or settings.bt_jumpoint_name)
             job_service.update_progress(db, job_id, 90, f"Instance launched ({hostname}), provisioning Shell Jump…")
             try:
                 bt_result = await terraform_pra_service.provision_jump(
