@@ -43,6 +43,7 @@ Tools needed regardless of which variant you run:
 - `aws` CLI v2
 - `az` CLI
 - `gcloud` SDK
+- `oci` CLI
 - `docker` + `docker compose v2` (for running the dashboard itself)
 - `jq`, `curl`, `ssh-keygen`
 
@@ -65,6 +66,7 @@ Then authenticate each CLI you plan to use:
 aws configure                                            # or: aws sso login
 az login
 gcloud auth login && gcloud auth application-default login
+oci setup config
 ```
 
 ## Provisioning
@@ -77,6 +79,7 @@ and reuses any existing resources tagged `managed-by=dashboard-sandbox`.
 ./scripts/sandbox/Linux/setup-aws.sh
 ./scripts/sandbox/Linux/setup-azure.sh
 ./scripts/sandbox/Linux/setup-gcp.sh
+./scripts/sandbox/Linux/setup-oci.sh
 ```
 
 ```powershell
@@ -84,6 +87,7 @@ and reuses any existing resources tagged `managed-by=dashboard-sandbox`.
 .\scripts\sandbox\Windows\Setup-AwsSandbox.ps1
 .\scripts\sandbox\Windows\Setup-AzureSandbox.ps1
 .\scripts\sandbox\Windows\Setup-GcpSandbox.ps1
+.\scripts\sandbox\Windows\Setup-OciSandbox.ps1
 ```
 
 Each script ends with a config block to paste into the dashboard's `/setup`
