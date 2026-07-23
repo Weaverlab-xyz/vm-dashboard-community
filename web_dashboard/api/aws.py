@@ -967,6 +967,19 @@ async def _run_deploy(
                     db, job_id, 36,
                     f"NAT ensure failed (non-fatal): {e} — VM may lack outbound internet…")
 
+        # ── Step 1c: Ensure the shared on-demand SSM interface endpoints so a
+        # private-subnet VM can reach the SSM control plane (Password Safe SSM
+        # onboarding). Best-effort — a failure never blocks the deploy. ─────────
+        if _cfg_svc.get_bool("aws_ssm_endpoints_enabled"):
+            try:
+                from ..services import ssm_endpoint_service
+                ssm_eps = await ssm_endpoint_service.ensure_ssm_endpoints(_aws_region)
+                if ssm_eps:
+                    result["ssm_endpoint_ids"] = ssm_eps
+                    job_service.update_progress(db, job_id, 37, "SSM interface endpoints ready…")
+            except Exception as e:
+                result["ssm_endpoint_error"] = str(e)
+
         # ── Step 2: Fetch SSH public key from Secrets Manager ──────────────────
         job_service.update_progress(db, job_id, 38, "Fetching SSH public key from Secrets Manager…")
         ami_info = await aws_service.describe_ami(_aws_region, ami_id)
@@ -1154,6 +1167,17 @@ async def _run_bulk_deploy(
             except Exception as e:
                 nat_error = str(e)
 
+        # Step 1c: Ensure ONE shared set of SSM interface endpoints for the batch
+        # (private-subnet SSM reach). Best-effort — never blocks the deploy.
+        ssm_endpoint_ids = None
+        ssm_endpoint_error = None
+        if _cfg_svc.get_bool("aws_ssm_endpoints_enabled"):
+            try:
+                from ..services import ssm_endpoint_service
+                ssm_endpoint_ids = await ssm_endpoint_service.ensure_ssm_endpoints(_aws_region)
+            except Exception as e:
+                ssm_endpoint_error = str(e)
+
         # Step 2: Fetch SSH public key once for the whole batch
         job_service.update_progress(db, first_job_id, 18, "Fetching SSH public key from Secrets Manager…")
         key_detail = await aws_service.get_ssh_public_key_from_secret(_aws_region, ssh_secret_name)
@@ -1170,6 +1194,10 @@ async def _run_bulk_deploy(
                 result["nat_instance_id"] = nat_instance_id
             elif nat_error:
                 result["nat_error"] = nat_error
+            if ssm_endpoint_ids:
+                result["ssm_endpoint_ids"] = ssm_endpoint_ids
+            elif ssm_endpoint_error:
+                result["ssm_endpoint_error"] = ssm_endpoint_error
 
             try:
                 job_service.update_progress(
@@ -1380,6 +1408,14 @@ async def _run_destroy(destroy_job_id: str, deploy_job_id: str, instance_id: str
             await nat_instance_service.reclaim_nat_instance(db, _region)
         except Exception as e:
             result["nat_teardown_error"] = str(e)
+
+        # Reclaim the shared SSM interface endpoints if no EC2 instance / AWS cloud
+        # DB is left (same exclusion — this deploy job is already marked destroyed).
+        try:
+            from ..services import ssm_endpoint_service
+            await ssm_endpoint_service.reclaim_ssm_endpoints(db, _region)
+        except Exception as e:
+            result["ssm_endpoint_teardown_error"] = str(e)
 
         job_service.set_completed(db, destroy_job_id, result)
         await cache_service.invalidate(cache_service.key_global("aws_instances"))

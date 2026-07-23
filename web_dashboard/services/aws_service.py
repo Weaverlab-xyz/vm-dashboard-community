@@ -953,6 +953,182 @@ async def ensure_nat_security_group(region: str, *, vpc_id: str, vpc_cidr: str, 
         raise AWSError("AWS credentials not configured.")
 
 
+# ── SSM interface VPC-endpoint primitives (on-demand private-subnet SSM; see
+#    ssm_endpoint_service). Interface endpoints bill hourly, so the dashboard
+#    creates them on the first EC2/DB deploy and deletes them with the last. ─────
+
+def _ensure_ssm_vpce_security_group_sync(region: str, vpc_id: str, vpc_cidr: str, name: str) -> str:
+    ec2 = _get_ec2(region)
+    resp = ec2.describe_security_groups(Filters=[
+        {"Name": "group-name", "Values": [name]},
+        {"Name": "vpc-id", "Values": [vpc_id]},
+    ])
+    if resp.get("SecurityGroups"):
+        return resp["SecurityGroups"][0]["GroupId"]
+    sg = ec2.create_security_group(
+        GroupName=name,
+        Description="SSM interface endpoints - HTTPS ingress from this VPC",
+        VpcId=vpc_id,
+        TagSpecifications=[{
+            "ResourceType": "security-group",
+            "Tags": [{"Key": "Name", "Value": name},
+                     {"Key": "managed-by", "Value": "dashboard-sandbox"}],
+        }],
+    )
+    sg_id = sg["GroupId"]
+    # SSM agents reach the endpoints over HTTPS only, from anywhere in the VPC.
+    ec2.authorize_security_group_ingress(
+        GroupId=sg_id,
+        IpPermissions=[{"IpProtocol": "tcp", "FromPort": 443, "ToPort": 443,
+                        "IpRanges": [{"CidrIp": vpc_cidr}]}],
+    )
+    return sg_id
+
+
+async def ensure_ssm_vpce_security_group(region: str, *, vpc_id: str, vpc_cidr: str, name: str) -> str:
+    """Find-or-create the SSM-endpoint SG (443 ingress from ``vpc_cidr``)."""
+    try:
+        return await asyncio.to_thread(_ensure_ssm_vpce_security_group_sync, region, vpc_id, vpc_cidr, name)
+    except (ClientError, BotoCoreError) as e:
+        raise AWSError(f"Failed to ensure SSM endpoint security group: {e}") from e
+    except NoCredentialsError:
+        raise AWSError("AWS credentials not configured.")
+
+
+def _find_security_group_id_sync(region: str, vpc_id: str, name: str) -> Optional[str]:
+    ec2 = _get_ec2(region)
+    resp = ec2.describe_security_groups(Filters=[
+        {"Name": "group-name", "Values": [name]},
+        {"Name": "vpc-id", "Values": [vpc_id]},
+    ])
+    sgs = resp.get("SecurityGroups")
+    return sgs[0]["GroupId"] if sgs else None
+
+
+async def find_security_group_id(region: str, *, vpc_id: str, name: str) -> Optional[str]:
+    """Return the id of the SG named ``name`` in ``vpc_id`` (or None)."""
+    try:
+        return await asyncio.to_thread(_find_security_group_id_sync, region, vpc_id, name)
+    except (ClientError, BotoCoreError) as e:
+        raise AWSError(f"Failed to look up security group {name}: {e}") from e
+    except NoCredentialsError:
+        raise AWSError("AWS credentials not configured.")
+
+
+def _find_ssm_endpoints_sync(region: str, vpc_id: str, service_names: list) -> dict:
+    ec2 = _get_ec2(region)
+    resp = ec2.describe_vpc_endpoints(Filters=[
+        {"Name": "vpc-id", "Values": [vpc_id]},
+        {"Name": "service-name", "Values": service_names},
+    ])
+    out: dict = {}
+    for ep in resp.get("VpcEndpoints", []):
+        out[ep["ServiceName"]] = {"endpoint_id": ep["VpcEndpointId"], "state": ep.get("State")}
+    return out
+
+
+async def find_ssm_endpoints(region: str, *, vpc_id: str, service_names: list) -> dict:
+    """Return {service_name: {endpoint_id, state}} for the given VPC + service names."""
+    try:
+        return await asyncio.to_thread(_find_ssm_endpoints_sync, region, vpc_id, service_names)
+    except (ClientError, BotoCoreError) as e:
+        raise AWSError(f"Failed to list VPC endpoints: {e}") from e
+    except NoCredentialsError:
+        raise AWSError("AWS credentials not configured.")
+
+
+def _create_ssm_endpoint_sync(region: str, vpc_id: str, service_name: str, subnet_id: str,
+                              security_group_ids: list, name_tag: str) -> str:
+    ec2 = _get_ec2(region)
+    resp = ec2.create_vpc_endpoint(
+        VpcEndpointType="Interface",
+        VpcId=vpc_id,
+        ServiceName=service_name,
+        SubnetIds=[subnet_id],
+        SecurityGroupIds=security_group_ids,
+        PrivateDnsEnabled=True,
+        TagSpecifications=[{
+            "ResourceType": "vpc-endpoint",
+            "Tags": [{"Key": "Name", "Value": name_tag},
+                     {"Key": "managed-by", "Value": "dashboard-sandbox"}],
+        }],
+    )
+    return resp["VpcEndpoint"]["VpcEndpointId"]
+
+
+async def create_ssm_endpoint(region: str, *, vpc_id: str, service_name: str, subnet_id: str,
+                              security_group_ids: list, name_tag: str) -> str:
+    """Create one Interface VPC endpoint (private DNS enabled) — mirrors the sandbox
+    script's ``aws ec2 create-vpc-endpoint``."""
+    try:
+        return await asyncio.to_thread(
+            _create_ssm_endpoint_sync, region, vpc_id, service_name, subnet_id,
+            security_group_ids, name_tag)
+    except (ClientError, BotoCoreError) as e:
+        raise AWSError(f"Failed to create VPC endpoint {service_name}: {e}") from e
+    except NoCredentialsError:
+        raise AWSError("AWS credentials not configured.")
+
+
+def _delete_ssm_endpoints_sync(region: str, endpoint_ids: list) -> None:
+    if not endpoint_ids:
+        return
+    ec2 = _get_ec2(region)
+    ec2.delete_vpc_endpoints(VpcEndpointIds=endpoint_ids)
+    # Interface-endpoint ENIs linger briefly after delete; wait so a follow-up SG
+    # delete doesn't hit DependencyViolation and the subnet/VPC can be torn down.
+    import time
+    for _ in range(24):  # ~60s budget
+        resp = ec2.describe_vpc_endpoints(
+            Filters=[{"Name": "vpc-endpoint-id", "Values": endpoint_ids}])
+        remaining = [e for e in resp.get("VpcEndpoints", [])
+                     if e.get("State") not in ("deleted", None)]
+        if not remaining:
+            return
+        time.sleep(2.5)
+
+
+async def delete_ssm_endpoints(region: str, endpoint_ids: list) -> None:
+    """Delete VPC endpoints and wait for their ENIs to clear."""
+    try:
+        await asyncio.to_thread(_delete_ssm_endpoints_sync, region, endpoint_ids)
+    except (ClientError, BotoCoreError) as e:
+        raise AWSError(f"Failed to delete VPC endpoints: {e}") from e
+    except NoCredentialsError:
+        raise AWSError("AWS credentials not configured.")
+
+
+def _delete_security_group_sync(region: str, sg_id: str) -> None:
+    ec2 = _get_ec2(region)
+    import time
+    last_err = None
+    for _ in range(6):  # ~15s: ENIs from a just-deleted endpoint may still detach
+        try:
+            ec2.delete_security_group(GroupId=sg_id)
+            return
+        except ClientError as e:
+            msg = str(e)
+            if "InvalidGroup.NotFound" in msg:
+                return
+            if "DependencyViolation" not in msg:
+                raise
+            last_err = e
+        time.sleep(2.5)
+    if last_err:
+        raise last_err
+
+
+async def delete_security_group(region: str, sg_id: str) -> None:
+    """Delete a security group (no-op if already gone; retries past a transient
+    DependencyViolation while endpoint ENIs finish detaching)."""
+    try:
+        await asyncio.to_thread(_delete_security_group_sync, region, sg_id)
+    except (ClientError, BotoCoreError) as e:
+        raise AWSError(f"Failed to delete security group {sg_id}: {e}") from e
+    except NoCredentialsError:
+        raise AWSError("AWS credentials not configured.")
+
+
 def _set_workgroup_tag_sync(region: str, instance_id: str, workgroup: str) -> None:
     """Overwrite the `Workgroup` tag on an existing instance."""
     ec2 = _get_ec2(region)

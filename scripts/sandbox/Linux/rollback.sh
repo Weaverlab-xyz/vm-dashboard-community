@@ -105,6 +105,29 @@ rollback_aws() {
         || warn "Could not delete DB subnet group $g (a DB may still be provisioned — decommission it first)"
     done
 
+    # 2a-vpce. Interface VPC endpoints (SSM: ssm/ssmmessages/ec2messages). Created
+    # on-demand by the dashboard (or by older setup scripts). Each holds an ENI in
+    # the private subnet and references the ssm-vpce SG, so they MUST go before the
+    # SG (2b) and subnet (2d) sweeps or those deletes fail — and each keeps billing
+    # (~$7/mo) if left behind. There's no AWS waiter, so poll until they clear.
+    local vpces
+    vpces="$(aws ec2 describe-vpc-endpoints --region "$region" \
+      --filters "Name=vpc-id,Values=$vpc_id" \
+      --query 'VpcEndpoints[].VpcEndpointId' --output text 2>/dev/null || true)"
+    if [[ -n "$vpces" && "$vpces" != "None" ]]; then
+      aws ec2 delete-vpc-endpoints --region "$region" --vpc-endpoint-ids $vpces >/dev/null 2>&1 \
+        && ok "Deleting VPC endpoints $vpces (waiting for ENIs to detach…)" \
+        || warn "Could not delete VPC endpoints $vpces"
+      for _ in $(seq 1 24); do  # ~60s budget
+        local left
+        left="$(aws ec2 describe-vpc-endpoints --region "$region" \
+          --vpc-endpoint-ids $vpces \
+          --query "VpcEndpoints[?State!='deleted'].VpcEndpointId" --output text 2>/dev/null || true)"
+        [[ -z "$left" || "$left" == "None" ]] && break
+        sleep 2.5
+      done
+    fi
+
     # 2b. Security groups (delete sandbox-tagged, but skip the default SG).
     local sgs
     sgs="$(aws ec2 describe-security-groups --region "$region" \
