@@ -922,11 +922,20 @@ async def _store_ps_credentials(db: Session, *, row: CloudDatabase, job_id: str,
 # ── Optional Password Safe DB onboarding (AWS-only, opt-in) ───────────────────
 
 def _ps_db_onboarding_enabled(row: CloudDatabase) -> bool:
-    """Gate for the full Password Safe DB onboarding: AWS-only, the Password Safe
-    OAuth client configured, and the operator opt-in flag set. When off, the DB
-    still provisions and the legacy admin-credential staging runs instead."""
-    return (row.cloud == "aws" and _pscli_configured()
-            and config_service.get_bool("clouddb_ps_onboarding_enabled", False))
+    """Gate for the full Password Safe DB onboarding: the Password Safe OAuth
+    client configured, the operator opt-in flag set, and a supported cloud —
+    AWS (SSM plugin) or Azure (Run Command plugins, unless the Azure method is set
+    to "off"). When off, the DB still provisions and the legacy admin-credential
+    staging runs instead."""
+    if not (_pscli_configured()
+            and config_service.get_bool("clouddb_ps_onboarding_enabled", False)):
+        return False
+    if row.cloud == "aws":
+        return True
+    if row.cloud == "azure":
+        return (config_service.get("passwordsafe_azure_db_registration_method")
+                or "runcommand").lower() != "off"
+    return False
 
 
 def _managed_user_name(db_id: str) -> str:
@@ -975,50 +984,163 @@ async def _create_db_managed_user(db: Session, *, row: CloudDatabase, job_id: st
             "client_image": image, "port": port}
 
 
+def _azure_jump_prep_commands() -> list:
+    """Shell commands (run as root on the jump VM over Azure Run Command) that make
+    it plugin-ready: ensure the native DB clients are installed — idempotent, so an
+    already-prepped or fresh (cloud-init) VM is a fast no-op, and a reused VM the
+    head start missed gets them — and drop the plugin RSA key material to
+    /root/psplugin so the "{engine} Azure Run Command Plugin" can decrypt the
+    RSA-wrapped login password. The key/passphrase are base64-encoded here and
+    decoded on the VM so no PEM/newline/quote ever hits the shell literally."""
+    import base64
+    cmds = [
+        "command -v psql >/dev/null 2>&1 || { apt-get update && apt-get install -y postgresql-client; }",
+        "command -v mysql >/dev/null 2>&1 || { apt-get update && apt-get install -y mysql-client; }",
+        "[ -x /opt/mssql-tools18/bin/sqlcmd ] || { "
+        "curl -fsSL https://packages.microsoft.com/keys/microsoft.asc -o /etc/apt/trusted.gpg.d/microsoft.asc; "
+        "curl -fsSL https://packages.microsoft.com/config/ubuntu/22.04/prod.list -o /etc/apt/sources.list.d/mssql-release.list; "
+        "apt-get update; ACCEPT_EULA=Y apt-get install -y mssql-tools18 unixodbc-dev; }",
+    ]
+    priv = config_service.get("clouddb_ps_azure_plugin_private_key") or ""
+    if priv:
+        passphrase = config_service.get("clouddb_ps_azure_plugin_passphrase") or ""
+        kdir = "/root/psplugin"
+        b64key = base64.b64encode(priv.encode()).decode()
+        b64pass = base64.b64encode(passphrase.encode()).decode()
+        cmds += [
+            f"mkdir -p {kdir}",
+            f"chmod 700 {kdir}",
+            f"printf '%s' '{b64key}' | base64 -d > {kdir}/private.pem",
+            f"printf '%s' '{b64pass}' | base64 -d > {kdir}/passphrase.txt",
+            f"chmod 600 {kdir}/private.pem {kdir}/passphrase.txt",
+        ]
+    return cmds
+
+
+async def _create_db_managed_user_azure(db: Session, *, row: CloudDatabase, job_id: str,
+                                        engine: str, tf_variables: dict) -> dict:
+    """Azure counterpart of :func:`_create_db_managed_user`: prep the shared
+    ``clouddb-jumpoint`` VM for the plugin (native clients + RSA key material) and
+    create the dedicated managed DB user from the admin credential by running the DB
+    client there over Azure VM Run Command. Returns the onboarding context. Raises
+    on failure so the caller falls back to admin staging."""
+    from . import azure_service, jumpoint_host_service
+    from . import cloud_db_sql_service as sql
+    region = _cfg(row.cloud + "_region") or row.region
+    host = await jumpoint_host_service.ensure_jumpoint_host(row.cloud, region)
+    if not host:
+        raise CloudDatabaseError(
+            "no Azure jump VM available — the shared clouddb-jumpoint VM must be up to "
+            "run the DB client (check azure_aci_deploy_key + azure_jumpoint_subnet_id)")
+    rg = _cfg("azure_resource_group")
+    admin_username = (tf_variables.get("administrator_login")
+                      or tf_variables.get("master_username") or "dbadmin")
+    admin_password = (config_service.get(f"clouddb/{row.id}/admin")
+                      or tf_variables.get("administrator_password") or "")
+    db_name = "master" if engine == "sqlserver" else tf_variables.get("db_name", "")
+    managed_user = _managed_user_name(row.id)
+    managed_pw = sql.generate_password()
+    image = _cfg(f"clouddb_db_client_image_{engine}") or sql.default_client_image(engine)
+    port = row.port or sql.default_port(engine)
+    # Make the jump VM plugin-ready (clients + key material). Longer timeout: a first
+    # run on a VM the cloud-init head start missed installs packages.
+    prep = _azure_jump_prep_commands()
+    prep_res = await azure_service.vm_run_command(rg, host, prep, timeout=600)
+    if prep_res.get("status") != "Success":
+        detail = (prep_res.get("stderr") or prep_res.get("stdout") or "")[:400]
+        raise CloudDatabaseError(
+            f"jump-VM plugin prep failed (status={prep_res.get('status')}, "
+            f"rc={prep_res.get('response_code')}): {detail}")
+    cmds = sql.onboard_commands(
+        engine, host=row.private_host, port=port,
+        database=db_name, admin_user=admin_username, admin_password=admin_password,
+        managed_user=managed_user, managed_password=managed_pw, client_image=image)
+    result = await azure_service.vm_run_command(rg, host, cmds, timeout=300)
+    if result.get("status") != "Success" or int(result.get("response_code", -1)) != 0:
+        detail = (result.get("stderr") or result.get("stdout") or "")[:400]
+        raise CloudDatabaseError(
+            f"managed-user creation on the jump VM failed "
+            f"(status={result.get('status')}, rc={result.get('response_code')}): {detail}")
+    logger.info("clouddb: managed DB user %r created via Azure Run Command on %s db_id=%s",
+                managed_user, host, row.id)
+    return {"managed_user": managed_user, "managed_pw": managed_pw, "jump_vm_name": host,
+            "resource_group": rg, "region": region, "db_name": db_name,
+            "admin_username": admin_username, "client_image": image, "port": port}
+
+
 async def _onboard_ps_managed_systems(db: Session, *, row: CloudDatabase, job_id: str,
                                       engine: str, tf_variables: dict, ctx: dict) -> None:
     """Onboard the DB into Password Safe: a managed system + managed account on the
-    "{engine} SSM Custom Plugin" platform (functional account = the AWS IAM user for
-    SSM), and — when a PRA Vault account exists for this DB — a managed system +
-    managed account on the "PRA Vault Username Password" platform so Password Safe
-    propagates rotations into the vaulted credential the tunnel injects. Ids +
-    teardown state are stashed on the provisioning job's metadata. Best-effort."""
+    cloud-specific DB plugin platform — AWS "{engine} SSM Custom Plugin" (functional
+    account = the AWS IAM user for SSM) or Azure "{engine} Azure Run Command Plugin"
+    (functional account = the Azure SP + the privileged DB admin login) — and, when a
+    PRA Vault account exists for this DB, a managed system + managed account on the
+    "PRA Vault Username Password" platform so Password Safe propagates rotations into
+    the vaulted credential the tunnel injects. Ids + teardown state are stashed on the
+    provisioning job's metadata. Best-effort."""
     from . import ps_api_service, ps_resource_service
     name = tf_variables.get("identifier") or f"clouddb-{row.id[:8]}"
     workgroup_id = await ps_api_service.get_workgroup_id(
         _cfg("clouddb_ps_workgroup") or _cfg("passwordsafe_workgroup"))
     stash: dict = {
         "ps_db_managed_user": ctx["managed_user"],
-        "ps_db_jump_host_id": ctx["jump_host_id"],
+        "ps_db_jump_host_id": ctx.get("jump_host_id") or ctx.get("jump_vm_name"),
         "ps_db_region": ctx["region"],
         "ps_db_admin_username": ctx["admin_username"],
         "ps_db_client_image": ctx["client_image"],
         "ps_db_name": ctx["db_name"],
     }
 
-    # ── DB managed system (dbssm) ──
-    db_platform_id = await ps_api_service.get_platform_id(_cfg(f"clouddb_ps_platform_{engine}"))
-    iam_user = _cfg("clouddb_ps_ssm_iam_username")
-    akid = _cfg("clouddb_ps_ssm_access_key_id")
-    secret = _cfg("clouddb_ps_ssm_secret_access_key")
-    if iam_user and akid and secret:
-        fa_username, fa_password = iam_user, f"{akid}:{secret}"   # IAM-user mode
+    # ── DB managed system (cloud-specific custom plugin) ──
+    if row.cloud == "azure":
+        # "{engine} Azure Run Command Plugin": the functional account bundles the
+        # Azure control-plane SP with a privileged DB login (the minted admin), which
+        # rotates the dedicated managed user. Address is eight ;-separated fields.
+        db_platform_id = await ps_api_service.get_platform_id(
+            _cfg(f"clouddb_ps_platform_azure_{engine}"))
+        auth_mode = (_cfg("clouddb_ps_azure_auth_mode") or "SP").upper()
+        admin_password = config_service.get(f"clouddb/{row.id}/admin") or ""
+        fa_username = f"{auth_mode}:{ctx['admin_username']}"
+        if auth_mode == "MSI":
+            fa_password = f"-:-:{admin_password}"
+        else:
+            client_id = _cfg("clouddb_ps_azure_sp_client_id") or _cfg("azure_client_id")
+            client_secret = (_cfg("clouddb_ps_azure_sp_client_secret")
+                             or _cfg("azure_client_secret"))
+            fa_password = f"{client_id}:{client_secret}:{admin_password}"
+        fa_label, db_method = "azure", "dbazure"
+        ssl_flag = "sslTRUE" if config_service.get_bool("clouddb_ps_azure_ssl", True) else "sslFALSE"
+        # Address: vmName;resourceGroup;subscriptionId;tenantId;dbHost;dbName;certPath;ssl
+        dns_name = ";".join([
+            ctx["jump_vm_name"], ctx["resource_group"], _cfg("azure_subscription_id"),
+            _cfg("azure_tenant_id"), row.private_host, ctx["db_name"] or "",
+            _cfg("clouddb_ps_azure_cert_path"), ssl_flag])
     else:
-        fa_username, fa_password = "EC2", secrets.token_urlsafe(16)  # EC2 mode: role-based; PS still stores a value
+        # "{engine} SSM Custom Plugin": functional account = the AWS IAM user (SSM
+        # transport); the managed account self-rotates. Address is six ;-separated fields.
+        db_platform_id = await ps_api_service.get_platform_id(_cfg(f"clouddb_ps_platform_{engine}"))
+        iam_user = _cfg("clouddb_ps_ssm_iam_username")
+        akid = _cfg("clouddb_ps_ssm_access_key_id")
+        secret = _cfg("clouddb_ps_ssm_secret_access_key")
+        if iam_user and akid and secret:
+            fa_username, fa_password = iam_user, f"{akid}:{secret}"   # IAM-user mode
+        else:
+            fa_username, fa_password = "EC2", secrets.token_urlsafe(16)  # EC2 mode: role-based; PS still stores a value
+        fa_label, db_method = "ssm", "dbssm"
+        # DNS name: {instance};{region};{db endpoint};{db name};{public key path};{suffix}
+        dns_name = ";".join([
+            ctx["jump_host_id"], ctx["region"], row.private_host, ctx["db_name"] or "",
+            _cfg("clouddb_ps_ssm_public_key_path"), _cfg("clouddb_ps_ssm_account_suffix") or "local"])
     db_fa_id = await ps_api_service.create_functional_account_on_platform(
         platform_id=db_platform_id, account_name=fa_username,
-        display_name=f"{name}-ssm-fa", password=fa_password,
-        description=f"AWS SSM functional account for dashboard database {name} (db_id={row.id})")
+        display_name=f"{name}-{fa_label}-fa", password=fa_password,
+        description=f"Cloud-DB functional account for dashboard database {name} (db_id={row.id})")
     stash["ps_db_functional_account_id"] = db_fa_id
-    # DNS name: {instance};{region};{db endpoint};{db name};{public key path};{suffix}
-    dns_name = ";".join([
-        ctx["jump_host_id"], ctx["region"], row.private_host, ctx["db_name"] or "",
-        _cfg("clouddb_ps_ssm_public_key_path"), _cfg("clouddb_ps_ssm_account_suffix") or "local"])
     reg = await ps_resource_service.register_managed_system(
         name=f"{name}-db", host_name=row.private_host, ip_address="127.0.0.1",
         port=ctx["port"], functional_account_id=db_fa_id, platform_id=db_platform_id,
         workgroup_id=workgroup_id, managed_account_name=ctx["managed_user"],
-        method="dbssm", dns_name=dns_name)
+        method=db_method, dns_name=dns_name)
     stash["ps_db_registration_tf_state"] = reg.get("tf_state_json")
     stash["ps_db_system_id"] = reg.get("managed_system_id")
     stash["ps_db_account_id"] = reg.get("managed_account_id")
@@ -1192,8 +1314,12 @@ async def run_provision_apply(
         onboard_ctx = None
         if row.private_host and _ps_db_onboarding_enabled(row):
             try:
-                onboard_ctx = await _create_db_managed_user(
-                    db, row=row, job_id=job_id, engine=engine, tf_variables=tf_variables)
+                if row.cloud == "azure":
+                    onboard_ctx = await _create_db_managed_user_azure(
+                        db, row=row, job_id=job_id, engine=engine, tf_variables=tf_variables)
+                else:
+                    onboard_ctx = await _create_db_managed_user(
+                        db, row=row, job_id=job_id, engine=engine, tf_variables=tf_variables)
             except Exception as exc:
                 logger.warning("clouddb: PS managed-user creation failed db_id=%s "
                                "(falling back to admin staging): %s", db_id, exc)
@@ -1356,8 +1482,8 @@ async def run_decommission(db: Session, *, db_id: str, job_id: str) -> None:
     # 3b. Password Safe DB onboarding artifacts (managed systems + functional
     #     accounts). Deregister each managed system BEFORE deleting its functional
     #     account — a managed system that still references the functional account
-    #     blocks the delete. The managed DB user itself dies with the RDS instance
-    #     (step 4), so no DB-side drop is needed here.
+    #     blocks the delete. The managed DB user itself dies with the database
+    #     instance (step 4), so no DB-side drop is needed here.
     if any(meta.get(k) for k in ("ps_db_registration_tf_state", "ps_pravault_registration_tf_state",
                                  "ps_db_functional_account_id", "ps_pravault_functional_account_id")):
         job_service.update_progress(db, job_id, 50, "Removing Password Safe managed systems…")

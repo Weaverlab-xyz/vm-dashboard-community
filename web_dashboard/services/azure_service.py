@@ -13,6 +13,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 import time
 import uuid
 from typing import Optional
@@ -28,7 +29,7 @@ try:
         VirtualMachine, HardwareProfile, StorageProfile, ImageReference,
         OSDisk, DiskCreateOptionTypes, OSProfile, LinuxConfiguration,
         SshConfiguration, SshPublicKey, NetworkProfile, NetworkInterfaceReference,
-        WindowsConfiguration, SecurityProfile, UefiSettings,
+        WindowsConfiguration, SecurityProfile, UefiSettings, RunCommandInput,
     )
     from azure.mgmt.network import NetworkManagementClient
     from azure.mgmt.network.models import (
@@ -1382,30 +1383,48 @@ async def terminate_vm(rg: str, vm_name: str) -> None:
 # the Jumpoint runs as a PRIVILEGED container on a real Azure VM (cloud-init runs
 # `docker run --privileged --device /dev/net/tun …`). One shared, ref-counted VM.
 
-def _vm_jumpoint_cloud_init(container_image: str, deploy_key: str) -> str:
+def _vm_jumpoint_cloud_init(container_image: str, deploy_key: str,
+                            install_db_clients: bool = False) -> str:
     """Base64 cloud-init: install Docker, then run the BT Jumpoint container
     privileged with /dev/net/tun (the caps a protocol tunnel needs). The deploy
-    key is an opaque token, single-quoted for the shell."""
+    key is an opaque token, single-quoted for the shell.
+
+    When ``install_db_clients`` is set (for the Password Safe Azure cloud-DB
+    onboarding) it also installs the native DB clients the "{engine} Azure Run
+    Command Plugin" invokes on this VM at rotation time: psql (/usr/bin/psql),
+    mysql (/usr/bin/mysql) and sqlcmd (/opt/mssql-tools18/bin/sqlcmd, from the
+    Microsoft apt repo). This is a fresh-VM head start — the onboarding also
+    ensures the clients idempotently over Run Command, covering a reused VM."""
     import base64
-    cloud_init = (
-        "#cloud-config\n"
-        "package_update: true\n"
-        "packages:\n"
-        "  - docker.io\n"
-        "runcmd:\n"
-        "  - modprobe tun || true\n"
-        "  - systemctl enable --now docker\n"
-        "  - [ sh, -c, \"docker run -d --restart always --name jumpoint "
+    packages = ["docker.io"]
+    runcmd = ["modprobe tun || true", "systemctl enable --now docker"]
+    if install_db_clients:
+        packages += ["postgresql-client", "mysql-client", "curl",
+                     "gnupg", "apt-transport-https"]
+        runcmd += [
+            "curl -fsSL https://packages.microsoft.com/keys/microsoft.asc "
+            "-o /etc/apt/trusted.gpg.d/microsoft.asc",
+            "curl -fsSL https://packages.microsoft.com/config/ubuntu/22.04/prod.list "
+            "-o /etc/apt/sources.list.d/mssql-release.list",
+            "apt-get update",
+            "ACCEPT_EULA=Y apt-get install -y mssql-tools18 unixodbc-dev",
+        ]
+    runcmd.append(
+        "docker run -d --restart always --name jumpoint "
         "--privileged --device /dev/net/tun --cap-add NET_ADMIN --cap-add NET_RAW "
-        f"-e DEPLOY_KEY='{deploy_key}' {container_image}\" ]\n"
-    )
+        f"-e DEPLOY_KEY='{deploy_key}' {container_image}")
+    lines = ["#cloud-config", "package_update: true", "packages:"]
+    lines += [f"  - {p}" for p in packages]
+    lines.append("runcmd:")
+    lines += [f"  - [ sh, -c, {json.dumps(c)} ]" for c in runcmd]
+    cloud_init = "\n".join(lines) + "\n"
     return base64.b64encode(cloud_init.encode()).decode()
 
 
 def _run_vm_jumpoint_sync(
     cred, sub_id: str, rg: str, location: str, subnet_id: str, name: str,
     container_image: str, deploy_key: str, vm_size: str,
-    admin_username: str, admin_password: str,
+    admin_username: str, admin_password: str, install_db_clients: bool = False,
 ) -> dict:
     """Find-or-create an Azure VM running the BT Jumpoint container. Idempotent on
     name: returns ``reused=True`` when it already exists. The NIC carries a
@@ -1456,7 +1475,7 @@ def _run_vm_jumpoint_sync(
         admin_username=admin_username,
         admin_password=admin_password,
         linux_configuration=LinuxConfiguration(disable_password_authentication=False),
-        custom_data=_vm_jumpoint_cloud_init(container_image, deploy_key),
+        custom_data=_vm_jumpoint_cloud_init(container_image, deploy_key, install_db_clients),
     )
     vm_params = VirtualMachine(
         location=location, tags=tags,
@@ -1479,16 +1498,19 @@ async def run_vm_jumpoint(
     rg: str, location: str, subnet_id: str, name: str,
     container_image: str, deploy_key: str, vm_size: str = "Standard_B1s",
     admin_username: str = "jpadmin", admin_password: str = "",
+    install_db_clients: bool = False,
 ) -> dict:
     """Ensure an Azure VM Jumpoint (idempotent on name). The VM egresses via a
     Standard, secure-by-default (no inbound) public IP on its NIC, returned as
     ``public_ip`` so callers can whitelist that stable egress address; it phones
-    home to PRA over egress."""
+    home to PRA over egress. ``install_db_clients`` bakes the native DB clients
+    into the VM for the Password Safe cloud-DB Run Command plugin (fresh-VM only)."""
     try:
         cred, sub_id = await _ensure_creds()
         return await asyncio.to_thread(
             _run_vm_jumpoint_sync, cred, sub_id, rg, location, subnet_id, name,
             container_image, deploy_key, vm_size, admin_username, admin_password,
+            install_db_clients,
         )
     except AzureError:
         raise
@@ -1505,6 +1527,81 @@ async def stop_vm_jumpoint(rg: str, name: str) -> None:
         raise
     except Exception as e:
         raise AzureError(f"Failed to stop Azure VM Jumpoint {name}: {e}") from e
+
+
+# ── Azure VM Run Command (in-guest shell over the control plane) ──────────────
+# The control-plane analog of aws_service.ssm_send_command: run a shell script in
+# a VM's guest via the Azure VM agent (waagent) without any inbound path to the
+# VM. Used to run the DB client on the shared jump VM for the Password Safe
+# cloud-DB onboarding (managed-user creation + plugin key material).
+
+_RUN_CMD_MARKER = "__PSRC__"
+
+
+def _parse_run_command_output(result) -> tuple:
+    """Pull (stdout, stderr) out of a RunCommandResult's InstanceViewStatus list."""
+    stdout = stderr = ""
+    for st in (getattr(result, "value", None) or []):
+        code = (getattr(st, "code", "") or "").lower()
+        msg = getattr(st, "message", "") or ""
+        if "stdout" in code:
+            stdout = msg
+        elif "stderr" in code:
+            stderr = msg
+    return stdout, stderr
+
+
+def _run_command_script(commands: list) -> list:
+    """Wrap the caller's commands so the in-guest shell surfaces the real exit code
+    despite Azure reporting ARM-level success even when the script fails: ``set -e``
+    aborts on the first failure (marker never prints → response_code stays -1); on
+    full success the trailing marker prints the exit status."""
+    return ["set -e"] + list(commands) + [f'echo "{_RUN_CMD_MARKER}=$?"']
+
+
+def _finalize_run_result(stdout: str, stderr: str) -> dict:
+    """Turn parsed (stdout, stderr) into the ssm_send_command-shaped result: pull the
+    exit-code marker out of stdout so callers get a real {status, response_code} and
+    treat both clouds identically."""
+    response_code = -1
+    m = re.search(rf"{_RUN_CMD_MARKER}=(\d+)", stdout or "")
+    if m:
+        response_code = int(m.group(1))
+        stdout = stdout.replace(m.group(0), "").rstrip()
+    return {
+        "status": "Success" if response_code == 0 else "Failed",
+        "response_code": response_code,
+        "stdout": stdout,
+        "stderr": stderr or "",
+    }
+
+
+def _run_vm_command_sync(cred, sub_id: str, rg: str, vm_name: str,
+                         commands: list, timeout: int) -> dict:
+    compute = _get_compute(cred, sub_id)
+    poller = compute.virtual_machines.begin_run_command(
+        rg, vm_name, RunCommandInput(command_id="RunShellScript",
+                                     script=_run_command_script(commands)))
+    result = poller.result(timeout=timeout)
+    stdout, stderr = _parse_run_command_output(result)
+    return _finalize_run_result(stdout, stderr)
+
+
+async def vm_run_command(rg: str, vm_name: str, commands: list, *,
+                         timeout: int = 300) -> dict:
+    """Run shell ``commands`` in a VM's guest via Azure VM Run Command and wait for
+    the result. Returns ``{status, response_code, stdout, stderr}`` — the same shape
+    as :func:`aws_service.ssm_send_command`: a non-Success status (or non-zero
+    response_code) is surfaced to the caller rather than raised, so callers decide
+    whether an in-guest failure is fatal. Only a transport/SDK error raises."""
+    try:
+        cred, sub_id = await _ensure_creds()
+        return await asyncio.to_thread(
+            _run_vm_command_sync, cred, sub_id, rg, vm_name, commands, timeout)
+    except AzureError:
+        raise
+    except Exception as e:
+        raise AzureError(f"Azure VM Run Command on {vm_name} failed: {e}") from e
 
 
 def _create_image_from_vm_sync(cred, sub_id: str, rg: str, vm_name: str, image_name: str, generalize: bool) -> dict:

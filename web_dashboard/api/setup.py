@@ -590,6 +590,19 @@ class BeyondTrustFeatureConfig(BaseModel):
     clouddb_ps_ssm_public_key_path: str = ""         # public key path on the PS node/broker
     pra_config_api_client_id: str = ""              # blank → reuse bt_client_id
     pra_config_api_client_secret: str = ""          # encrypted at rest; blank → reuse bt_client_secret
+    # Azure cloud-DATABASE Password Safe onboarding (Run Command plugins) — see config.py.
+    # The three custom plugins + the RSA keypair are one-time MANUAL setup.
+    passwordsafe_azure_db_registration_method: str = "runcommand"  # "runcommand" (Azure Run Command plugins) | "off"
+    clouddb_ps_platform_azure_postgres: str = "PostgreSQL Azure Run Command Plugin"
+    clouddb_ps_platform_azure_mysql: str = "MySQL Azure Run Command Plugin"
+    clouddb_ps_platform_azure_sqlserver: str = "MSSQL Azure Run Command Plugin"
+    clouddb_ps_azure_auth_mode: str = "SP"          # "SP" (service principal) | "MSI" (managed identity)
+    clouddb_ps_azure_cert_path: str = r"C:\BeyondTrust\certs\public_cert.cer"  # public cert path on the Resource Broker
+    clouddb_ps_azure_ssl: bool = True               # sslTRUE (Azure flex servers require TLS) | sslFALSE
+    clouddb_ps_azure_sp_client_id: str = ""         # blank → reuse azure_client_id
+    clouddb_ps_azure_sp_client_secret: str = ""     # encrypted at rest; blank → reuse azure_client_secret
+    clouddb_ps_azure_plugin_private_key: str = ""   # PEM, encrypted at rest; dropped on the jump VM
+    clouddb_ps_azure_plugin_passphrase: str = ""    # encrypted at rest
     # Azure-specific overrides (leave blank to fall back to the AWS values above)
     azure_bt_jump_group_name: str = ""
     azure_jumpoint_name: str = ""
@@ -949,6 +962,8 @@ _CONFIG_ONLY_FEATURES = {"vdesktops", "multi_region", "oidc"}
 _SECRET_FEATURE_KEYS = frozenset({
     "pscli_client_secret", "bt_client_secret", "epml_pat",
     "clouddb_ps_ssm_secret_access_key", "pra_config_api_client_secret",
+    "clouddb_ps_azure_sp_client_secret", "clouddb_ps_azure_plugin_private_key",
+    "clouddb_ps_azure_plugin_passphrase",
     "portainer_pat",
     "entitle_api_token", "entitle_api_key",
     "proxmox_token_secret", "proxmox_password",

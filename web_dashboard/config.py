@@ -370,6 +370,32 @@ class Settings(BaseSettings):
     pra_config_api_client_id: str = ""
     pra_config_api_client_secret: str = ""          # encrypted at rest
 
+    # ── Azure cloud-DATABASE Password Safe onboarding (Run Command plugins) ───
+    # The Azure counterpart of the SSM path above: when enabled, provisioning an
+    # AZURE DB onboards it onto the "{engine} Azure Run Command Plugin", whose
+    # custom plugin reaches the private DB by running the DB client on the shared
+    # clouddb-jumpoint VM via Azure VM Run Command. Unlike SSM, the functional
+    # account is a PRIVILEGED DB login (the minted admin) bundled with an Azure
+    # service principal — "SP:<admin>" / "clientId:clientSecret:adminPassword" —
+    # which rotates a dedicated managed DB user. The three plugins + the RSA
+    # keypair are one-time MANUAL setup (see docs); the platform names below are
+    # how the dashboard finds them. Default method when enabled; "off" disables it.
+    passwordsafe_azure_db_registration_method: str = "runcommand"  # runcommand | off
+    clouddb_ps_platform_azure_postgres: str = "PostgreSQL Azure Run Command Plugin"
+    clouddb_ps_platform_azure_mysql: str = "MySQL Azure Run Command Plugin"
+    clouddb_ps_platform_azure_sqlserver: str = "MSSQL Azure Run Command Plugin"
+    clouddb_ps_azure_auth_mode: str = "SP"          # SP (service principal) | MSI (managed identity)
+    clouddb_ps_azure_cert_path: str = r"C:\BeyondTrust\certs\public_cert.cer"  # address field 7: public cert path on the Resource Broker
+    clouddb_ps_azure_ssl: bool = True               # address field 8: sslTRUE (Azure flex servers require TLS) | sslFALSE
+    # Azure SP for the DB functional account (blank → reuse azure_client_id/secret).
+    clouddb_ps_azure_sp_client_id: str = ""
+    clouddb_ps_azure_sp_client_secret: str = ""     # encrypted at rest
+    # Plugin RSA key material the dashboard drops onto clouddb-jumpoint (/root/psplugin)
+    # so the plugin can decrypt the RSA-wrapped login password; the matching public
+    # cert lives on the Resource Broker at clouddb_ps_azure_cert_path.
+    clouddb_ps_azure_plugin_private_key: str = ""   # PEM, encrypted at rest
+    clouddb_ps_azure_plugin_passphrase: str = ""    # encrypted at rest
+
     # EPM for Linux (EPM-L) — Pathfinder public API gateway.
     # The gateway base is api.beyondtrust.io (NOT app.beyondtrust.io — that host
     # only accepts browser session cookies and 401s every Bearer request). The
