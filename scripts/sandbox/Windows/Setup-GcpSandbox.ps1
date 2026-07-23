@@ -68,7 +68,8 @@ $Nat       = "$Name-nat"
 
 $NetTagJp  = 'bt-jumpoint'      # the dashboard's Jumpoint COS VM gets this tag
 $NetTagVm  = "$Name-vm"         # the dashboard auto-attaches this to user VMs
-$NetTagK8s = "$Name-k8s"        # co-located GKE nodes (drives allow-db-from-k8s)
+$NetTagK8s = "$Name-k8s"        # co-located GKE nodes (drives allow-db-from-k8s;
+                                # the k8s->VM:22 ingress rule is CIDR-sourced)
 
 # ── 1. Enable required APIs ───────────────────────────────────────────────────
 Write-Section 'Enable APIs'
@@ -199,6 +200,21 @@ gcloud compute firewall-rules create "$Name-allow-ssh-from-jumpoint" `
     --project $ProjectId --network $Vpc --direction INGRESS --priority 1000 `
     --action ALLOW --rules tcp:22 `
     --source-tags $NetTagJp --target-tags $NetTagVm --quiet 2>$null | Out-Null
+
+# Parity for a CO-LOCATED GKE cluster (PR #370): let the Entitle agent (pods AND nodes)
+# SSH sandbox VMs on :22. Pod IPs aren't masqueraded to RFC1918 dests, so source by BOTH
+# the k8s node subnet and the GKE pod secondary range (pod IPs carry no tag).
+gcloud compute firewall-rules create "$Name-allow-ssh-from-k8s" `
+    --project $ProjectId --network $Vpc --direction INGRESS --priority 1000 `
+    --action ALLOW --rules tcp:22 `
+    --source-ranges "${CidrPrefix}.3.0/24,${CidrPrefix}.128.0/18" `
+    --target-tags $NetTagVm --quiet 2>$null | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    gcloud compute firewall-rules update "$Name-allow-ssh-from-k8s" `
+        --project $ProjectId `
+        --source-ranges "${CidrPrefix}.3.0/24,${CidrPrefix}.128.0/18" --quiet 2>$null | Out-Null
+}
+Write-Ok "Firewall: allow-ssh-from-k8s (tcp:22 <- ${CidrPrefix}.3.0/24,${CidrPrefix}.128.0/18 -> $NetTagVm)"
 
 gcloud compute firewall-rules create "$Name-deny-vm-egress" `
     --project $ProjectId --network $Vpc --direction EGRESS --priority 1000 `
@@ -491,8 +507,9 @@ Sandbox topology summary
     + servicenetworking PSA /20 (Cloud SQL private IP), reachable from jumpoint + co-located k8s
 
   Firewall:
-    • allow-internal      : within $Supernet (covers k8s nodes/pods → VMs)
+    • allow-internal      : within $Supernet
     • allow-ssh-from-jumpoint : tag $NetTagJp → tag $NetTagVm, tcp/22
+    • allow-ssh-from-k8s  : ${CidrPrefix}.3.0/24,${CidrPrefix}.128.0/18 (co-located GKE nodes+pods) → tag $NetTagVm, tcp/22
     • deny-vm-egress      : tag $NetTagVm → 0.0.0.0/0 (any proto)
     • allow-vm-egress-vpc : tag $NetTagVm → $Supernet
     • allow-db-from-jumpoint : tag $NetTagJp → PSA range, tcp/5432,3306,1433

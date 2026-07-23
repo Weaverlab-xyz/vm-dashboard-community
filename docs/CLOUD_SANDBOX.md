@@ -283,12 +283,16 @@ Firewall rules:
     ingress, all protos, source 10.99.0.0/16
   dashboard-sandbox-allow-ssh-from-jumpoint
     ingress tcp/22, source-tag bt-jumpoint, target-tag dashboard-sandbox-vm
+  dashboard-sandbox-allow-ssh-from-k8s                   [co-located GKE agent]
+    ingress tcp/22, source = k8s node subnet + GKE pod range, target-tag dashboard-sandbox-vm
   dashboard-sandbox-deny-vm-egress
     egress, all protos, target-tag dashboard-sandbox-vm, dest 0.0.0.0/0
   dashboard-sandbox-allow-vm-egress-vpc
     egress, all protos, target-tag dashboard-sandbox-vm, dest 10.99.0.0/16
   dashboard-sandbox-allow-db-from-jumpoint              [managed databases]
     egress tcp/5432, target-tag bt-jumpoint, dest = PSA range
+  dashboard-sandbox-allow-db-from-k8s                   [co-located GKE agent]
+    egress tcp/5432,3306,1433, target-tag dashboard-sandbox-k8s, dest = PSA range
 
 Private Services Access (managed databases):
   dashboard-sandbox-psa-range  (/20 VPC_PEERING address)

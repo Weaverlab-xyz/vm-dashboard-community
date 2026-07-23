@@ -24,6 +24,8 @@
 #   • Firewall rules:
 #     - allow-internal: any-protocol within VPC
 #     - allow-ssh-from-jumpoint: TCP 22 from jumpoint-subnet → vm-subnet
+#     - allow-ssh-from-k8s: TCP 22 from co-located GKE node+pod ranges → vm-subnet
+#       (the in-cluster Entitle agent SSHes VMs to enumerate ephemeral accounts)
 #     - block-egress-vm: explicit egress deny on vm-subnet (belt-and-suspenders;
 #       Cloud NAT absence already prevents internet, but the rule makes it
 #       observable and audit-friendly).
@@ -217,7 +219,8 @@ NETWORK_TAG_JP="bt-jumpoint"        # tag the dashboard's COS Jumpoint VM
 NETWORK_TAG_VM="${NAME}-vm"         # tag deployed user VMs (advisory; dashboard
                                     # doesn't auto-tag, but firewall scopes by tag).
 NETWORK_TAG_K8S="${NAME}-k8s"       # tag CO-LOCATED GKE nodes (drives the k8s→DB
-                                    # egress rule below; nodes reach VMs via allow-internal).
+                                    # egress rule below; the k8s→VM:22 ingress rule
+                                    # is CIDR-sourced — see allow-ssh-from-k8s).
 
 # Allow internal communication anywhere in the sandbox supernet (spans every
 # region's prefix). Create-or-update so a later region widens it in place.
@@ -237,6 +240,25 @@ gcloud compute firewall-rules create "${NAME}-allow-ssh-from-jumpoint" \
   --action ALLOW --rules tcp:22 \
   --source-tags "$NETWORK_TAG_JP" --target-tags "$NETWORK_TAG_VM" \
   --quiet >/dev/null 2>&1 || true
+
+# Parity for a CO-LOCATED GKE cluster (PR #370): let the Entitle agent (pods AND
+# nodes) SSH sandbox VMs on :22 to enumerate accounts. Pod IPs aren't masqueraded to
+# RFC1918 dests, so source by BOTH the k8s node subnet and the GKE pod secondary range
+# (pod IPs carry no network tag, so a source-tag won't match). Explicit/auditable and
+# robust even if allow-internal's supernet wasn't widened for this region. Create-or-
+# update so a re-run with a different prefix refreshes the ranges in place.
+gcloud compute firewall-rules create "${NAME}-allow-ssh-from-k8s" \
+  --project "$PROJECT_ID" --network "$VPC" \
+  --direction INGRESS --priority 1000 \
+  --action ALLOW --rules tcp:22 \
+  --source-ranges "${GCP_CIDR_PREFIX}.3.0/24,${GCP_CIDR_PREFIX}.128.0/18" \
+  --target-tags "$NETWORK_TAG_VM" \
+  --quiet >/dev/null 2>&1 \
+  || gcloud compute firewall-rules update "${NAME}-allow-ssh-from-k8s" \
+       --project "$PROJECT_ID" \
+       --source-ranges "${GCP_CIDR_PREFIX}.3.0/24,${GCP_CIDR_PREFIX}.128.0/18" \
+       --quiet >/dev/null 2>&1 || true
+ok "Firewall: allow-ssh-from-k8s (tcp:22 <- ${GCP_CIDR_PREFIX}.3.0/24,${GCP_CIDR_PREFIX}.128.0/18 -> $NETWORK_TAG_VM)"
 
 # Belt-and-suspenders: explicit deny on egress from VM-tagged hosts to anything
 # outside the VPC. (Cloud NAT absence already prevents internet, but this
@@ -262,7 +284,7 @@ gcloud compute firewall-rules create "${NAME}-allow-vm-egress-vpc" \
        --project "$PROJECT_ID" --destination-ranges "$GCP_SANDBOX_SUPERNET" \
        --quiet >/dev/null 2>&1 || true
 
-ok "Firewall rules: allow-internal, allow-ssh-from-jumpoint, deny-vm-egress, allow-vm-egress-vpc"
+ok "Firewall rules: allow-internal, allow-ssh-from-jumpoint, allow-ssh-from-k8s, deny-vm-egress, allow-vm-egress-vpc"
 
 # ── 4b. Private Services Access + Cloud SQL reachability (managed databases) ──
 # The cloud-database feature provisions a PRIVATE Cloud SQL Postgres instance
@@ -549,8 +571,9 @@ Sandbox topology summary
     + servicenetworking PSA /20 (Cloud SQL private IP), reachable from jumpoint + co-located k8s
 
   Firewall:
-    • allow-internal      : within $GCP_SANDBOX_SUPERNET (covers k8s nodes/pods → VMs)
+    • allow-internal      : within $GCP_SANDBOX_SUPERNET
     • allow-ssh-from-jumpoint : tag $NETWORK_TAG_JP → tag $NETWORK_TAG_VM, tcp/22
+    • allow-ssh-from-k8s  : ${GCP_CIDR_PREFIX}.3.0/24,${GCP_CIDR_PREFIX}.128.0/18 (co-located GKE nodes+pods) → tag $NETWORK_TAG_VM, tcp/22
     • deny-vm-egress      : tag $NETWORK_TAG_VM → 0.0.0.0/0 (any proto)
     • allow-vm-egress-vpc : tag $NETWORK_TAG_VM → $GCP_SANDBOX_SUPERNET
     • allow-db-from-jumpoint : tag $NETWORK_TAG_JP → PSA range, tcp/5432,3306,1433
