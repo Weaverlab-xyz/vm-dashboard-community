@@ -670,6 +670,33 @@
           </div>
         </div>
 
+        <!-- Placement (multi-region): where the single node runs. Redeploying to a
+             different region relocates it. -->
+        <div class="bg-white rounded-xl border border-gray-200 p-3 mb-3 text-sm">
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="block text-xs font-medium text-gray-600 mb-1">Region</label>
+              <select x-model="deployForm.region"
+                      class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm font-mono">
+                <option value="">(current / default)</option>
+                <template x-for="r in praOpts.regions || []" :key="r">
+                  <option :value="r" x-text="r"></option>
+                </template>
+              </select>
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-gray-600 mb-1">Zone <span class="text-gray-400">(optional)</span></label>
+              <input type="text" x-model="deployForm.zone"
+                     class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm font-mono" placeholder="us-east1-b">
+            </div>
+          </div>
+          <p class="text-[11px] text-gray-400 mt-1">
+            Blank region keeps the node's current region (or the configured default). Blank zone uses the region's
+            first available zone; a capacity-exhausted zone auto-falls back to a sibling in the same region.
+            Only regions with a configured subnet are listed. Redeploying to a different region <strong>relocates</strong> the node.
+          </p>
+        </div>
+
         <!-- PRA access (chosen at deploy/redeploy, like DB/VM deploys) -->
         <div x-show="praOpts.configured" x-cloak
              class="bg-white rounded-xl border border-gray-200 p-3 mb-3 text-sm">
@@ -1221,9 +1248,9 @@ function containersDashboard() {
     rancherLoading: false,
     rancherError: null,
     rancherDeploying: false,
-    // Deploy-time PRA picks (parity with DB/VM deploys)
-    praOpts: { configured: false, jump_groups: [], jumpoints: [], vault_account_groups: [] },
-    deployForm: { web_jump_enabled: false, jump_group: '', jumpoint_name: '', vault_account_group_id: null },
+    // Deploy-time region + PRA picks (parity with DB/VM deploys)
+    praOpts: { configured: false, regions: [], jump_groups: [], jumpoints: [], vault_account_groups: [] },
+    deployForm: { region: '', zone: '', web_jump_enabled: false, jump_group: '', jumpoint_name: '', vault_account_group_id: null },
     rancherActionPending: null,
     rancherImportName: '',
     rancherManifestCmd: '',
@@ -1657,6 +1684,8 @@ function containersDashboard() {
       this.rancherDeploying = true;
       try {
         const body = { web_jump_enabled: this.deployForm.web_jump_enabled };
+        if (this.deployForm.region) body.region = this.deployForm.region;
+        if ((this.deployForm.zone || '').trim()) body.zone = this.deployForm.zone.trim();
         if (this.deployForm.web_jump_enabled) {
           if (this.deployForm.jump_group) body.jump_group = this.deployForm.jump_group;
           if (this.deployForm.jumpoint_name) body.jumpoint_name = this.deployForm.jumpoint_name;

@@ -1629,6 +1629,53 @@ def _internal_ip_of(info) -> str:
     return ""
 
 
+def _is_zone_capacity_error(e) -> bool:
+    """True when a GCE insert failed because the *zone* is out of capacity —
+    ``ZONE_RESOURCE_POOL_EXHAUSTED`` / "does not have enough resources". These are
+    the only errors worth retrying in a sibling zone; anything else (quota, bad
+    subnet, permission) would fail identically elsewhere, so we re-raise those."""
+    msg = str(e).upper()
+    return ("ZONE_RESOURCE_POOL_EXHAUSTED" in msg
+            or "DOES NOT HAVE ENOUGH RESOURCES" in msg)
+
+
+def _rancher_candidate_zones(project_id: str, region: str, preferred_zone: str,
+                             creds, limit: int = 8) -> list:
+    """Ordered UP zones to try for the Rancher node, **within one region**.
+
+    The node's subnet is region-scoped, so we never cross regions here (unlike the
+    image-export worker's :func:`_export_candidate_zones`, whose source image is
+    global). Order: the preferred zone first (tried even if not listed UP — a zone
+    can be UP yet capacity-exhausted), then the region's other UP zones sorted. This
+    also picks a valid zone when ``preferred_zone`` is blank, sidestepping the
+    "region has no -a zone" trap (us-east1 starts at -b). Best-effort: falls back to
+    ``[preferred_zone]`` (or ``[]``) if zones can't be enumerated."""
+    pref = (preferred_zone or "").strip()
+    region = (region or "").strip()
+    try:
+        from google.auth.transport.requests import AuthorizedSession
+        session = AuthorizedSession(creds or _gcp_creds())
+        resp = session.get(
+            f"https://compute.googleapis.com/compute/v1/projects/{project_id}/zones",
+            timeout=30,
+        )
+        resp.raise_for_status()
+        up = sorted(z["name"] for z in resp.json().get("items", [])
+                    if z.get("status") == "UP" and z.get("name")
+                    and z["name"].rsplit("-", 1)[0] == region)
+    except Exception as e:
+        logger.warning("rancher: could not enumerate zones (%s); no zone fallback", e)
+        return [pref] if pref else []
+
+    ordered: list = []
+    if pref:
+        ordered.append(pref)
+    for z in up:
+        if z not in ordered:
+            ordered.append(z)
+    return ordered[:limit] or ([pref] if pref else [])
+
+
 def _run_gce_rancher_sync(
     project_id: str,
     zone: str,
@@ -1642,11 +1689,17 @@ def _run_gce_rancher_sync(
     network_tag: str = "rancher",
     cos_image_family: str = "cos-stable",
     create_external_ip: bool = True,
+    region: str = "",
 ) -> dict:
     """Launch (or reuse) a COS GCE instance running the Rancher server container.
     Idempotent on existence: a RUNNING same-named VM is returned as-is; a stopped
     one is started (COS re-runs the container on boot). Returns the public IP +
-    derived https URL so the caller can pin server-url and bootstrap."""
+    derived https URL so the caller can pin server-url and bootstrap.
+
+    ``zone`` may be blank — the launcher then auto-picks a valid zone in ``region``
+    (falling back to ``region_of(zone)`` when only a zone is given). On a fresh
+    launch it tries sibling zones in the same region on ``ZONE_RESOURCE_POOL_EXHAUSTED``
+    so a single capacity-exhausted zone doesn't fail the deploy."""
     if machine_type in _RANCHER_TOO_SMALL:
         raise GCPError(
             f"machine_type '{machine_type}' has <4 GB RAM — Rancher will OOM. "
@@ -1657,34 +1710,43 @@ def _run_gce_rancher_sync(
 
     creds = _gcp_creds()
     client = compute_v1.InstancesClient(credentials=creds)
+    region = (region or (zone.rsplit("-", 1)[0] if zone else "")).strip()
 
-    # Reuse a LIVE node. As with the Jumpoint, a name match isn't enough — a
-    # stopped VM has no Rancher listening, so start it and wait for RUNNING.
-    try:
-        existing = client.get(project=project_id, zone=zone, instance=name)
-        status = existing.status
-        if status != "RUNNING":
-            logger.info("GCE Rancher '%s' exists but status=%s — starting it", name, status)
-            try:
-                start_op = client.start(project=project_id, zone=zone, instance=name)
-                start_op.result(timeout=180)
-                existing = client.get(project=project_id, zone=zone, instance=name)
-                status = existing.status
-            except Exception as start_err:
-                logger.warning("GCE Rancher '%s' start failed (status=%s): %s", name, status, start_err)
-        external_ip = _external_ip_of(existing) if create_external_ip else ""
-        return {
-            "name": name, "zone": zone, "self_link": existing.self_link,
-            "status": status, "external_ip": external_ip,
-            "internal_ip": _internal_ip_of(existing),
-            "url": f"https://{external_ip}" if external_ip else "", "reused": True,
-        }
-    except NotFound:
-        pass
+    # Reuse a LIVE node when an exact zone is known. As with the Jumpoint, a name
+    # match isn't enough — a stopped VM has no Rancher listening, so start it and
+    # wait for RUNNING. (Skipped for a blank zone: a fresh launch has nothing to
+    # reuse, and the caller relocates any node that lives in a different region.)
+    if zone:
+        try:
+            existing = client.get(project=project_id, zone=zone, instance=name)
+            status = existing.status
+            if status != "RUNNING":
+                logger.info("GCE Rancher '%s' exists but status=%s — starting it", name, status)
+                try:
+                    start_op = client.start(project=project_id, zone=zone, instance=name)
+                    start_op.result(timeout=180)
+                    existing = client.get(project=project_id, zone=zone, instance=name)
+                    status = existing.status
+                except Exception as start_err:
+                    logger.warning("GCE Rancher '%s' start failed (status=%s): %s", name, status, start_err)
+            external_ip = _external_ip_of(existing) if create_external_ip else ""
+            return {
+                "name": name, "zone": zone, "self_link": existing.self_link,
+                "status": status, "external_ip": external_ip,
+                "internal_ip": _internal_ip_of(existing),
+                "url": f"https://{external_ip}" if external_ip else "", "reused": True,
+            }
+        except NotFound:
+            pass
+
+    candidate_zones = _rancher_candidate_zones(project_id, region, zone, creds)
+    if not candidate_zones:
+        raise GCPError(
+            f"No available zone found in region '{region or '(unknown)'}' for the "
+            f"Rancher node — check the region has a configured subnet and UP zones.")
 
     instance = compute_v1.Instance()
     instance.name = name
-    instance.machine_type = f"zones/{zone}/machineTypes/{machine_type}"
 
     # Boot disk from Container-Optimised OS. Ephemeral: auto_delete=True — a VM
     # delete discards /var/lib/rancher (state), matching the disposable posture.
@@ -1703,11 +1765,12 @@ def _run_gce_rancher_sync(
     # (the sandbox emits bare names like 'dashboard-sandbox-vpc'). Normalize them
     # so a custom-mode VPC lands in a valid subnetwork instead of failing with
     # "URL is malformed" — mirrors _ensure_rancher_firewall_sync's network ref.
+    # The subnet is region-scoped and every candidate zone shares one region, so
+    # this is computed once.
     if subnetwork:
         if "/" in subnetwork:
             nic.subnetwork = subnetwork
         else:
-            region = zone.rsplit("-", 1)[0]
             nic.subnetwork = f"projects/{project_id}/regions/{region}/subnetworks/{subnetwork}"
     elif network:
         nic.network = network if "/" in network else f"global/networks/{network}"
@@ -1725,15 +1788,33 @@ def _run_gce_rancher_sync(
     instance.labels = {"managed-by": "vm-dashboard", "purpose": _RANCHER_LABEL}
     instance.tags = compute_v1.Tags(items=[network_tag])
 
-    logger.info("Starting GCE COS Rancher '%s' in %s (image=%s, machine=%s)",
-                name, zone, container_image, machine_type)
-    op = client.insert(project=project_id, zone=zone, instance_resource=instance)
-    op.result(timeout=300)
+    # Insert into the first candidate zone with capacity; on
+    # ZONE_RESOURCE_POOL_EXHAUSTED fall through to the region's sibling zones.
+    launch_zone = ""
+    last_err = None
+    for cand in candidate_zones:
+        instance.machine_type = f"zones/{cand}/machineTypes/{machine_type}"
+        logger.info("Starting GCE COS Rancher '%s' in %s (image=%s, machine=%s)",
+                    name, cand, container_image, machine_type)
+        try:
+            op = client.insert(project=project_id, zone=cand, instance_resource=instance)
+            op.result(timeout=300)
+            launch_zone = cand
+            break
+        except Exception as e:
+            if _is_zone_capacity_error(e) and cand != candidate_zones[-1]:
+                logger.warning("Rancher zone %s is out of capacity (%s) — trying the "
+                               "next zone in %s", cand, e, region)
+                last_err = e
+                continue
+            raise
+    if not launch_zone:
+        raise GCPError(f"Failed to launch Rancher node in region '{region}': {last_err}")
 
-    info = client.get(project=project_id, zone=zone, instance=name)
+    info = client.get(project=project_id, zone=launch_zone, instance=name)
     external_ip = _external_ip_of(info) if create_external_ip else ""
     return {
-        "name": name, "zone": zone, "self_link": info.self_link,
+        "name": name, "zone": launch_zone, "self_link": info.self_link,
         "status": info.status, "external_ip": external_ip,
         "internal_ip": _internal_ip_of(info),
         "url": f"https://{external_ip}" if external_ip else "", "reused": False,
@@ -1752,6 +1833,7 @@ async def run_gce_rancher(
     boot_disk_gb: int = 30,
     network_tag: str = "rancher",
     create_external_ip: bool = True,
+    region: str = "",
 ) -> dict:
     """Async wrapper for _run_gce_rancher_sync."""
     try:
@@ -1759,7 +1841,7 @@ async def run_gce_rancher(
             _run_gce_rancher_sync,
             project_id, zone, name, container_image, bootstrap_password,
             network, subnetwork, machine_type, boot_disk_gb, network_tag,
-            "cos-stable", create_external_ip,
+            "cos-stable", create_external_ip, region,
         )
     except GCPError:
         raise

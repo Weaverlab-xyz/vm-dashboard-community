@@ -18,7 +18,8 @@ import logging
 import httpx
 
 from ..database import SessionLocal
-from . import config_service, gcp_service, job_service, rancher_service
+from . import (config_service, gcp_service, job_service, rancher_service,
+               region_catalog, region_config)
 
 logger = logging.getLogger(__name__)
 
@@ -56,27 +57,84 @@ def _generate_admin_password() -> str:
             return pw
 
 
-def _node_params() -> dict:
-    """Resolve the node's deploy knobs from config_service (Settings)."""
+def _node_params(region=None, zone=None) -> dict:
+    """Resolve the node's deploy knobs, region-aware.
+
+    ``region`` (the operator's pick, else derived from an explicit ``zone`` or the
+    persisted node zone, else the configured default) selects the network / subnet /
+    zone through :func:`region_config.resolve_region`. For the DEFAULT region this
+    returns the flat ``gcp_*`` keys unchanged, so single-region installs behave
+    exactly as before. The effective zone may be blank — the launcher then auto-picks
+    a valid zone in the region and retries siblings on capacity exhaustion.
+    """
     from ..config import settings
-    zone = (config_service.get("gcp_rancher_zone")
-            or config_service.get("gcp_zone") or settings.gcp_zone or "us-central1-a")
+
+    default_region = region_catalog.normalize("gcp", region_catalog.default_region("gcp"))
+
+    # Effective region: explicit pick → derived from an explicit zone → derived from
+    # the persisted node zone (gcp_rancher_zone / gcp_zone) → configured default.
+    if region:
+        eff_region = region_catalog.normalize("gcp", region)
+    elif zone:
+        eff_region = region_catalog.region_from_zone(zone)
+    else:
+        persisted = config_service.get("gcp_rancher_zone") or config_service.get("gcp_zone")
+        eff_region = (region_catalog.region_from_zone(persisted) if persisted
+                      else default_region)
+
+    rc = region_config.resolve_region("gcp", eff_region) or {}
+    is_default = (eff_region == default_region)
+
+    def _in_region(z) -> bool:
+        z = (z or "").strip()
+        return bool(z) and region_catalog.region_from_zone(z) == eff_region
+
+    # Effective zone precedence:
+    #   explicit request zone (kept only if it sits in the region) →
+    #   for a region pick: the region's configured zone (only if in-region — never
+    #     inherit the default region's flat gcp_zone) →
+    #   for a bare redeploy: the persisted node zone, else the region-config zone →
+    #   "" so the launcher auto-picks the region's first available zone.
+    eff_zone = ""
+    if zone and _in_region(zone):
+        eff_zone = region_catalog.normalize("gcp", zone)
+    elif region:
+        if _in_region(rc.get("zone")):
+            eff_zone = region_catalog.normalize("gcp", rc.get("zone"))
+    else:
+        for cand in (config_service.get("gcp_rancher_zone"), rc.get("zone")):
+            if _in_region(cand):
+                eff_zone = region_catalog.normalize("gcp", cand)
+                break
+
+    # Network is a global VPC name (region-agnostic); the SUBNET is regional. For a
+    # non-default region take the subnet from the region entry only — never fall back
+    # to the default region's flat subnet name (it wouldn't exist in this region).
+    network = rc.get("network") or settings.gcp_network or "default"
+    if is_default:
+        subnetwork = rc.get("jumpoint_subnetwork") or rc.get("subnetwork") or ""
+    else:
+        entry = region_config.load_region_configs("gcp").get(eff_region, {})
+        subnetwork = (str(entry.get("jumpoint_subnetwork") or "").strip()
+                      or str(entry.get("subnetwork") or "").strip()
+                      or rc.get("jumpoint_subnetwork") or rc.get("subnetwork") or "")
+
     try:
         boot_disk_gb = int(config_service.get("gcp_rancher_boot_disk_gb") or settings.gcp_rancher_boot_disk_gb)
     except (TypeError, ValueError):
         boot_disk_gb = settings.gcp_rancher_boot_disk_gb
     return {
         "project_id":   config_service.get("gcp_project_id") or settings.gcp_project_id,
-        "zone":         zone,
+        "region":       eff_region,
+        "zone":         eff_zone,
         "name":         config_service.get("gcp_rancher_name") or settings.gcp_rancher_name,
         "image":        config_service.get("gcp_rancher_image") or settings.gcp_rancher_image,
         "machine_type": config_service.get("gcp_rancher_machine_type") or settings.gcp_rancher_machine_type,
         "boot_disk_gb": boot_disk_gb,
-        "network":      config_service.get("gcp_network") or settings.gcp_network or "default",
-        # Custom-mode sandbox VPC needs an explicit subnet. Prefer the jumpoint
-        # subnet (Cloud NAT + infra-facing) over the no-egress user-VM subnet;
-        # gcp_service normalizes a bare name into a regional self-link.
-        "subnetwork":   config_service.get("gcp_jumpoint_subnetwork") or config_service.get("gcp_subnetwork") or "",
+        "network":      network,
+        # gcp_service normalizes a bare subnet name into a regional self-link using
+        # the launch zone's region, so a region-correct bare name is all we need.
+        "subnetwork":   subnetwork,
         "network_tag":  config_service.get("gcp_rancher_network_tag") or settings.gcp_rancher_network_tag,
     }
 
@@ -316,7 +374,9 @@ async def run_deploy(db, *, job_id: str, meta: dict) -> None:
     wait ready → bootstrap → mint token → best-effort Entitle register."""
     try:
         job_service.set_running(db, job_id)
-        p = _node_params()
+        # Deploy-time region/zone pick (blank → the persisted node region, else the
+        # configured default). Selects the node's region-specific subnet/zone.
+        p = _node_params(region=meta.get("region"), zone=meta.get("zone"))
         if not p["project_id"]:
             job_service.set_failed(db, job_id, "GCP project is not configured.")
             return
@@ -360,18 +420,48 @@ async def run_deploy(db, *, job_id: str, meta: dict) -> None:
                 "gcp_rancher_allow_open — then redeploy.")
             return
 
+        # Single relocatable node. If a node already lives in the TARGET region,
+        # reuse that exact zone (launcher starts/returns it). If one lives in a
+        # DIFFERENT region, delete it first so we never strand a duplicate
+        # "rancher-server" there (the node is ephemeral — state re-bootstraps).
+        target_region = p["region"]
+        try:
+            existing_nodes = await gcp_service.list_gce_rancher(p["project_id"])
+        except Exception as exc:
+            logger.warning("Rancher relocation check failed (continuing): %s", exc)
+            existing_nodes = []
+        for node in existing_nodes:
+            nzone = node.get("zone") or ""
+            if region_catalog.region_from_zone(nzone) == target_region:
+                p["zone"] = nzone   # reuse the live in-region node's exact zone
+            else:
+                logger.info("Relocating Rancher: deleting node '%s' in %s → region %s",
+                            node.get("name"), nzone, target_region)
+                job_service.update_progress(
+                    db, job_id, 25, f"Relocating to {target_region}")
+                try:
+                    await gcp_service.stop_gce_rancher(
+                        p["project_id"], nzone, node.get("name") or p["name"])
+                except Exception as exc:
+                    logger.warning("Failed to delete old-region Rancher node (continuing): %s", exc)
+
         job_service.update_progress(db, job_id, 30, "Launching COS VM")
         res = await gcp_service.run_gce_rancher(
             p["project_id"], p["zone"], p["name"], p["image"], bootstrap_password,
             network=p["network"], subnetwork=p["subnetwork"],
             machine_type=p["machine_type"],
             boot_disk_gb=p["boot_disk_gb"], network_tag=p["network_tag"],
-            create_external_ip=True)
+            create_external_ip=True, region=p["region"])
         external_ip = res.get("external_ip") or ""
         url = res.get("url") or ""
         if not external_ip:
             job_service.set_failed(db, job_id, "Rancher VM has no external IP — cannot reach it.")
             return
+        # Persist the ACTUAL deployed zone so teardown + bare redeploys stay sticky to
+        # the (possibly relocated / auto-picked) region.
+        deployed_zone = res.get("zone") or p["zone"]
+        if deployed_zone:
+            config_service.set("gcp_rancher_zone", deployed_zone)
         config_service.set("rancher_server_url", url)
         # Internal URL: what the in-cloud API runner dials (rancher_api_transport=
         # runner) — its VPC-connector egress is private-ranges-only, so the public
@@ -484,7 +574,8 @@ async def run_deploy(db, *, job_id: str, meta: dict) -> None:
                 logger.warning("Rancher auto Entitle-register failed (continuing): %s", exc)
 
         completion = {
-            "url": url, "external_ip": external_ip, "name": p["name"], "zone": p["zone"],
+            "url": url, "external_ip": external_ip, "name": p["name"],
+            "zone": deployed_zone, "region": target_region,
             "firewall_opened": fw.get("opened", False), "reused": res.get("reused", False),
             "first_run_completed": bool(fr and fr.get("password_changed")),
             "first_run_note": (fr or {}).get("reason", ""),
