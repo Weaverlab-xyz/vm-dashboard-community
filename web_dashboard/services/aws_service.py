@@ -1531,6 +1531,7 @@ def _run_ecs_ansible_sync(
     job_id: str,
     secret_entries: list | None = None,
     manifest_b64: str = "",
+    ps_env: dict | None = None,
 ) -> tuple:
     """Create an ECS Fargate task that runs one Ansible playbook, wait for it to
     finish, retrieve CloudWatch logs, and return (exit_code, output)."""
@@ -1616,14 +1617,16 @@ def _run_ecs_ansible_sync(
             "securityGroups": security_group_ids or [],
             "assignPublicIp": "ENABLED",  # public-subnet egress via IGW (sandbox has no NAT; runner needs egress, not inbound)
         }},
-        # Only the SSH key rides the RunTask override (ephemeral, ~4.5 KB base64 —
-        # comfortably under the 8192-byte overrides cap); everything else is on the
-        # task def above.
+        # The SSH key and the PASSWORD_SAFE_* creds ride the RunTask override
+        # (ephemeral, tiny — comfortably under the 8192-byte overrides cap), so the
+        # client secret is never retained in task-def revision history; everything
+        # non-secret is on the task def above.
         overrides={"containerOverrides": [{
             "name": "ansible",
-            "environment": [
-                {"name": "SSH_KEY_B64", "value": ssh_key_b64},
-            ],
+            "environment": (
+                [{"name": "SSH_KEY_B64", "value": ssh_key_b64}]
+                + [{"name": k, "value": v} for k, v in (ps_env or {}).items()]
+            ),
         }]},
         count=1,
     )
@@ -1682,6 +1685,7 @@ async def run_ecs_ansible_task(
     job_id: str,
     secret_entries: list | None = None,
     manifest_b64: str = "",
+    ps_env: dict | None = None,
 ) -> tuple:
     """Run an Ansible playbook via ECS Fargate. Returns (exit_code, output)."""
     try:
@@ -1690,7 +1694,7 @@ async def run_ecs_ansible_task(
             region, cluster, task_family, image, cpu, memory,
             subnet_id, security_group_ids, execution_role_arn,
             target_ip, ansible_user, playbook_b64, ssh_key_b64, job_id,
-            secret_entries, manifest_b64,
+            secret_entries, manifest_b64, ps_env,
         )
     except AWSError:
         raise
@@ -1884,6 +1888,7 @@ def _run_ecs_ansible_local_sync(
     conn_vars_b64: str,
     kubeconfig_b64: str,
     job_id: str,
+    ps_env: dict | None = None,
 ) -> tuple:
     """ECS Fargate task that runs a **localhost** Ansible play — the k8s/DB path,
     where Ansible reaches OUT to the cluster API / DB endpoint instead of SSHing to
@@ -1945,6 +1950,10 @@ def _run_ecs_ansible_local_sync(
         override_env.append({"name": "CONN_VARS_B64", "value": conn_vars_b64})
     if kubeconfig_b64:
         override_env.append({"name": "KUBECONFIG_B64", "value": kubeconfig_b64})
+    # PASSWORD_SAFE_* for an in-playbook beyondtrust.secrets_safe lookup — rides the same
+    # ephemeral override env as the connection material, so the client secret is never in
+    # task-def revision history.
+    override_env += [{"name": k, "value": v} for k, v in (ps_env or {}).items()]
 
     run_resp = ecs.run_task(
         cluster=cluster,
@@ -2014,6 +2023,7 @@ async def run_ecs_ansible_local_task(
     conn_vars_b64: str = "",
     kubeconfig_b64: str = "",
     job_id: str,
+    ps_env: dict | None = None,
 ) -> tuple:
     """Run a localhost Ansible play (k8s/DB target) via ECS Fargate.
     Returns (exit_code, output)."""
@@ -2022,7 +2032,7 @@ async def run_ecs_ansible_local_task(
             _run_ecs_ansible_local_sync,
             region, cluster, task_family, image, cpu, memory,
             subnet_id, security_group_ids, execution_role_arn,
-            playbook_b64, conn_vars_b64, kubeconfig_b64, job_id,
+            playbook_b64, conn_vars_b64, kubeconfig_b64, job_id, ps_env,
         )
     except AWSError:
         raise

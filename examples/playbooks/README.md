@@ -121,6 +121,26 @@ Secrets-Management secret via **Use a secret** (mapped to `target_role_password`
 | `mysql-create-user.yml` | Create a MySQL user (`target_user` + secret pw) |
 | `sqlserver-create-database.yml` | Create a SQL Server database (`target_db_name`) |
 
+## Password Safe (`password-safe/`)
+
+Playbooks that fetch their **own** secrets from BeyondTrust Password Safe at runtime via the
+`beyondtrust.secrets_safe` Ansible Galaxy collection's `secrets_safe_lookup` plugin — the
+*in-playbook* counterpart to the dashboard's out-of-band **Use a secret → managed account**
+checkout. When BeyondTrust is enabled, the dashboard **auto-injects** the OAuth credentials
+as `PASSWORD_SAFE_*` env into every runner, so the lookups just work (no per-run setup, no
+ephemeral-secrets gate). Both runner images ship the collection.
+
+| File | Purpose |
+|---|---|
+| `lookup-managed-account.yml` | Retrieve a rotated managed-account password (`system/account`) |
+| `lookup-secret.yml` | Retrieve a stored secret (`folder/title`) and write it to a `0600` file |
+| `vm-secret-to-host.yml` | Fetch a secret on the runner, deliver it to a Linux VM target |
+| `db-credential-from-ps.yml` | Fetch a DB role password from PS, then create the Postgres role |
+| `onboard-safe-and-account.yml` | Management — create a safe/folder/secret via `beyondtrust.password_safe` |
+
+See [password-safe/README.md](password-safe/README.md) for the credential contract, path
+formats, and a standalone `docker run` smoke test.
+
 ## Notes
 
 - These are starting points — review and adapt before running against real hosts.

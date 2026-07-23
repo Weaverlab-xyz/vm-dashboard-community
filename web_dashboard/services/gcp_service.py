@@ -1925,6 +1925,7 @@ def _run_cloud_run_ansible_sync(
     vpc_network: str = "", vpc_subnetwork: str = "",
     secret_entries: list | None = None, manifest_b64: str = "",
     service_account: str = "",
+    ps_env: dict | None = None,
 ) -> tuple:
     """
     Create a Cloud Run Job that runs a single Ansible playbook, wait for it to
@@ -1988,7 +1989,10 @@ def _run_cloud_run_ansible_sync(
                 env=[
                     run_v2.EnvVar(name="PLAYBOOK_B64", value=playbook_b64),
                     run_v2.EnvVar(name="SSH_KEY_B64", value=ssh_key_b64),
-                ] + _secret_env,
+                ] + _secret_env
+                # PASSWORD_SAFE_* for an in-playbook beyondtrust.secrets_safe lookup —
+                # plain env, same channel as SSH_KEY_B64 (no Secret Manager needed).
+                + [run_v2.EnvVar(name=k, value=v) for k, v in (ps_env or {}).items()],
                 resources=run_v2.ResourceRequirements(
                     limits={"cpu": "1000m", "memory": "512Mi"},
                 ),
@@ -2072,6 +2076,7 @@ async def run_cloud_run_ansible_task(
     vpc_network: str = "", vpc_subnetwork: str = "",
     service_account: str = "",
     secret_entries: list | None = None, manifest_b64: str = "",
+    ps_env: dict | None = None,
 ) -> tuple:
     """
     Run an Ansible playbook via a GCP Cloud Run Job.
@@ -2088,6 +2093,7 @@ async def run_cloud_run_ansible_task(
             vpc_network, vpc_subnetwork,
             secret_entries, manifest_b64,
             service_account,
+            ps_env,
         )
     except GCPError:
         raise
@@ -2276,6 +2282,7 @@ def _run_cloud_run_ansible_local_sync(
     project_id: str, region: str, image: str,
     playbook_b64: str, conn_vars_b64: str, kubeconfig_b64: str, job_id: str,
     vpc_connector: str = "", service_account: str = "",
+    ps_env: dict | None = None,
 ) -> tuple:
     """Create a Cloud Run Job that runs a **localhost** Ansible play (the k8s/DB
     path — Ansible reaches OUT to the cluster API / DB endpoint instead of SSHing to
@@ -2305,6 +2312,10 @@ def _run_cloud_run_ansible_local_sync(
         env.append(run_v2.EnvVar(name="CONN_VARS_B64", value=conn_vars_b64))
     if kubeconfig_b64:
         env.append(run_v2.EnvVar(name="KUBECONFIG_B64", value=kubeconfig_b64))
+    # PASSWORD_SAFE_* for an in-playbook beyondtrust.secrets_safe lookup — plain env,
+    # same channel as the connection material above.
+    for k, v in (ps_env or {}).items():
+        env.append(run_v2.EnvVar(name=k, value=v))
 
     task_template = run_v2.TaskTemplate(
         containers=[
@@ -2386,6 +2397,7 @@ async def run_cloud_run_ansible_local_task(
     project_id: str, region: str, image: str,
     playbook_b64: str, conn_vars_b64: str = "", kubeconfig_b64: str = "", job_id: str,
     vpc_connector: str = "", service_account: str = "",
+    ps_env: dict | None = None,
 ) -> tuple:
     """Run a localhost Ansible play (k8s/DB target) via a GCP Cloud Run Job.
     Returns (exit_code, output_log)."""
@@ -2394,7 +2406,7 @@ async def run_cloud_run_ansible_local_task(
             _run_cloud_run_ansible_local_sync,
             project_id, region, image,
             playbook_b64, conn_vars_b64, kubeconfig_b64, job_id,
-            vpc_connector, service_account,
+            vpc_connector, service_account, ps_env,
         )
     except GCPError:
         raise

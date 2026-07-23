@@ -1831,6 +1831,7 @@ def _run_aci_ansible_sync(
     playbook_b64: str, ssh_key_b64: str, job_id: str,
     acr_server: str = "", acr_username: str = "", acr_password: str = "",
     secret_entries: list | None = None, manifest_b64: str = "",
+    ps_env: dict | None = None,
 ) -> tuple:
     """
     Create an ACI container group that runs a single Ansible playbook, wait for
@@ -1877,6 +1878,9 @@ def _run_aci_ansible_sync(
                if manifest_b64 else [])
             + [EnvironmentVariable(name=e["env"], secure_value=e["value"])
                for e in (secret_entries or [])]
+            # PASSWORD_SAFE_* for an in-playbook beyondtrust.secrets_safe lookup — all
+            # passed as secure_value (hidden from the portal); harmless for URL/ID.
+            + [EnvironmentVariable(name=k, secure_value=v) for k, v in (ps_env or {}).items()]
         ),
     )
 
@@ -1954,6 +1958,7 @@ async def run_aci_ansible_task(
     playbook_b64: str, ssh_key_b64: str, job_id: str,
     acr_server: str = "", acr_username: str = "", acr_password: str = "",
     secret_entries: list | None = None, manifest_b64: str = "",
+    ps_env: dict | None = None,
 ) -> tuple:
     """
     Run an Ansible playbook inside the Azure VNet via ACI.
@@ -1966,7 +1971,7 @@ async def run_aci_ansible_task(
             cred, sub_id, rg, location, subnet_id, image,
             target_ip, ansible_user, playbook_b64, ssh_key_b64, job_id,
             acr_server, acr_username, acr_password,
-            secret_entries, manifest_b64,
+            secret_entries, manifest_b64, ps_env,
         )
     except AzureError:
         raise
@@ -2120,6 +2125,7 @@ def _run_aci_ansible_local_sync(
     image: str, playbook_b64: str, conn_vars_b64: str, kubeconfig_b64: str,
     job_id: str,
     acr_server: str = "", acr_username: str = "", acr_password: str = "",
+    ps_env: dict | None = None,
 ) -> tuple:
     """Create an ACI container group that runs a **localhost** Ansible play (the
     k8s/DB path — Ansible reaches OUT to the cluster API / DB endpoint instead of
@@ -2141,6 +2147,9 @@ def _run_aci_ansible_local_sync(
         env_vars.append(EnvironmentVariable(name="CONN_VARS_B64", secure_value=conn_vars_b64))
     if kubeconfig_b64:
         env_vars.append(EnvironmentVariable(name="KUBECONFIG_B64", secure_value=kubeconfig_b64))
+    # PASSWORD_SAFE_* for an in-playbook beyondtrust.secrets_safe lookup — secure_value.
+    for k, v in (ps_env or {}).items():
+        env_vars.append(EnvironmentVariable(name=k, secure_value=v))
 
     container = Container(
         name="ansible",
@@ -2216,6 +2225,7 @@ async def run_aci_ansible_local_task(
     rg: str, location: str, subnet_id: str, image: str,
     playbook_b64: str, conn_vars_b64: str = "", kubeconfig_b64: str = "", job_id: str,
     acr_server: str = "", acr_username: str = "", acr_password: str = "",
+    ps_env: dict | None = None,
 ) -> tuple:
     """Run a localhost Ansible play (k8s/DB target) inside the Azure VNet via ACI.
     Returns (exit_code, output_log)."""
@@ -2225,7 +2235,7 @@ async def run_aci_ansible_local_task(
             _run_aci_ansible_local_sync,
             cred, sub_id, rg, location, subnet_id, image,
             playbook_b64, conn_vars_b64, kubeconfig_b64, job_id,
-            acr_server, acr_username, acr_password,
+            acr_server, acr_username, acr_password, ps_env,
         )
     except AzureError:
         raise

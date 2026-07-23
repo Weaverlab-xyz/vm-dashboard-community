@@ -580,6 +580,16 @@ async def _run_job(
         is_adhoc = "." in target or ":" in target
         is_playbook = ansible_local_service.asset_type(asset) == "playbook"
 
+        # Auto-inject the configured Password Safe OAuth creds as PASSWORD_SAFE_* env so
+        # an in-playbook beyondtrust.secrets_safe lookup works with no per-run setup. Rides
+        # the same connection-credential channel as the SSH key on each runner (no cloud
+        # store). {} when BeyondTrust is disabled / unconfigured. Scrub the client secret.
+        from ..services import password_safe_runner as _psr
+        ps_env = _psr.runner_env()
+        _ps_secret = ps_env.get(_psr.SECRET_KEY)
+        if _ps_secret and _ps_secret not in secret_values:
+            secret_values.append(_ps_secret)
+
         # Cloud runners only support bare-IP targets and .yml playbooks.
         # Fall back to local for group targets or non-playbook assets.
         if runner != "local" and is_adhoc and is_playbook:
@@ -672,6 +682,7 @@ async def _run_job(
                     job_id=job_id,
                     secret_entries=cloud_secret_entries,
                     manifest_b64=cloud_manifest_b64,
+                    ps_env=ps_env,
                 )
             finally:
                 # Value already fetched by the task identity at launch — safe to reap
@@ -715,6 +726,7 @@ async def _run_job(
             asset_name=asset,
             ssh_key_pem=ssh_key_pem,
             secret_extra_vars=secret_extra_vars or None,
+            ps_env=ps_env or None,
         )
 
         output = _scrub_secrets(output, secret_values)
@@ -751,12 +763,17 @@ async def _dispatch_cloud_runner(
     job_id: str,
     secret_entries: list | None = None,
     manifest_b64: str = "",
+    ps_env: dict | None = None,
 ) -> tuple:
     """Route to the configured cloud Ansible runner. Returns (exit_code, output).
 
     secret_entries/manifest_b64 (when present) carry per-provider secret refs — the
     runner injects each via the provider's secret channel and the container builds a
-    0600 vars file from the manifest before running ansible-playbook."""
+    0600 vars file from the manifest before running ansible-playbook.
+
+    ps_env (when present) is the PASSWORD_SAFE_* env for an in-playbook
+    beyondtrust.secrets_safe lookup; it rides the same connection-credential channel as
+    the SSH key on each runner (no cloud store)."""
     if runner == "ecs":
         from ..services import aws_service
         region = _cfg("aws_region") or "us-east-1"
@@ -779,6 +796,7 @@ async def _dispatch_cloud_runner(
             job_id=job_id,
             secret_entries=secret_entries,
             manifest_b64=manifest_b64,
+            ps_env=ps_env,
         )
 
     if runner == "aci":
@@ -807,6 +825,7 @@ async def _dispatch_cloud_runner(
             acr_password=_cfg("ansible_aci_acr_password") or "",
             secret_entries=secret_entries,
             manifest_b64=manifest_b64,
+            ps_env=ps_env,
         )
 
     if runner == "gcp":
@@ -830,6 +849,7 @@ async def _dispatch_cloud_runner(
             service_account=_cfg("gcp_ansible_runner_service_account") or "",
             secret_entries=secret_entries,
             manifest_b64=manifest_b64,
+            ps_env=ps_env,
         )
 
     raise ValueError(f"Unknown ansible_runner: {runner!r}")

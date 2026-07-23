@@ -95,12 +95,17 @@ def resolve_runner(cloud: str) -> str:
 async def _dispatch_cloud_localhost_runner(
     *, runner: str, image: str, job_id: str,
     playbook_b64: str, conn_vars_b64: str, kubeconfig_b64: str,
+    ps_env: dict | None = None,
 ) -> tuple:
     """Route to the configured transient cloud runner, reusing the k8s runner's infra
     resolution+validation (subnet / role / VPC connector — shared with the VM Ansible
     runner config) but overriding the image with ``ansible_cloud_image`` and the ECS
     task family. Returns ``(exit_code, output)``; a ``K8sRunnerError`` from the infra
-    validation (missing subnet/role/…) propagates to the caller's ``set_failed``."""
+    validation (missing subnet/role/…) propagates to the caller's ``set_failed``.
+
+    ``ps_env`` (when present) is the PASSWORD_SAFE_* env for an in-playbook
+    beyondtrust.secrets_safe lookup; it rides the runner's connection-material env
+    channel (no cloud store)."""
     if runner == "ecs":
         from . import aws_service
         cfg = k8s_runner_service._resolve_ecs()
@@ -110,7 +115,7 @@ async def _dispatch_cloud_localhost_runner(
             subnet_id=cfg["subnet_id"], security_group_ids=cfg["security_group_ids"],
             execution_role_arn=cfg["execution_role_arn"],
             playbook_b64=playbook_b64, conn_vars_b64=conn_vars_b64,
-            kubeconfig_b64=kubeconfig_b64, job_id=job_id,
+            kubeconfig_b64=kubeconfig_b64, job_id=job_id, ps_env=ps_env,
         )
     if runner == "aci":
         from . import azure_service
@@ -120,7 +125,7 @@ async def _dispatch_cloud_localhost_runner(
             playbook_b64=playbook_b64, conn_vars_b64=conn_vars_b64,
             kubeconfig_b64=kubeconfig_b64, job_id=job_id,
             acr_server=cfg["acr_server"], acr_username=cfg["acr_username"],
-            acr_password=cfg["acr_password"],
+            acr_password=cfg["acr_password"], ps_env=ps_env,
         )
     if runner == "gcp":
         from . import gcp_service
@@ -130,7 +135,7 @@ async def _dispatch_cloud_localhost_runner(
             playbook_b64=playbook_b64, conn_vars_b64=conn_vars_b64,
             kubeconfig_b64=kubeconfig_b64, job_id=job_id,
             vpc_connector=cfg["vpc_connector"],
-            service_account=_cfg("gcp_ansible_runner_service_account"),
+            service_account=_cfg("gcp_ansible_runner_service_account"), ps_env=ps_env,
         )
     raise AnsibleCloudRunError(f"unknown runner {runner!r}")
 
@@ -205,12 +210,23 @@ async def run(db: Session, *, job_id: str, meta: dict) -> None:
 
         runner = resolve_runner(cloud)
         image = _cfg("ansible_cloud_image") or "chrweav/ansible-cloud:latest"
+
+        # Auto-inject the configured Password Safe OAuth creds as PASSWORD_SAFE_* env so
+        # an in-playbook beyondtrust.secrets_safe lookup works with no per-run setup. Rides
+        # the runner's connection-material env channel (no cloud store). {} when BeyondTrust
+        # is disabled / unconfigured. Scrub the client secret from output.
+        from . import password_safe_runner as _psr
+        ps_env = _psr.runner_env()
+        _ps_secret = ps_env.get(_psr.SECRET_KEY)
+        if _ps_secret and _ps_secret not in scrub_values:
+            scrub_values.append(_ps_secret)
+
         job_service.update_progress(
             db, job_id, 20, f"Launching {runner.upper()} runner ({target_kind})…")
         exit_code, output = await _dispatch_cloud_localhost_runner(
             runner=runner, image=image, job_id=job_id,
             playbook_b64=playbook_b64, conn_vars_b64=conn_vars_b64,
-            kubeconfig_b64=kubeconfig_b64,
+            kubeconfig_b64=kubeconfig_b64, ps_env=ps_env or None,
         )
         output = _scrub(output, scrub_values)
         if exit_code == 0:

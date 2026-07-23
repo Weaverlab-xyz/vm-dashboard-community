@@ -41,6 +41,13 @@ override without pywinrm breaks Windows targets):
 
 ## Notes
 
+- **BeyondTrust Password Safe collections.** This image also ships
+  `beyondtrust.secrets_safe` + `beyondtrust.password_safe` (backed by
+  `beyondtrust-bips-library`), so a VM play can fetch its own secrets from Password Safe
+  in-play via the `secrets_safe_lookup` plugin — see
+  [`examples/playbooks/password-safe/`](../../examples/playbooks/password-safe/). The lookup
+  runs on this runner (the Ansible controller), and the dashboard auto-injects the
+  `PASSWORD_SAFE_*` credentials at run time.
 - **NTLM vs CredSSP.** The sample Windows plays set `ansible_winrm_transport: ntlm`,
   covered by `requests-ntlm`. If you need CredSSP, add `pywinrm[credssp]` to the
   Dockerfile's `pip install`.

@@ -13,8 +13,12 @@ image ships what those plays import:
 | `community.postgresql` | `psycopg2` | `postgresql_db`, `postgresql_user` |
 | `community.mysql` | `PyMySQL` | `mysql_db`, `mysql_user` |
 | `community.general` | `pymssql` | `mssql_db` |
+| `beyondtrust.secrets_safe` / `beyondtrust.password_safe` | `beyondtrust-bips-library` | `secrets_safe_lookup`, `safes_create`, `managed_accounts_create` |
 
-`kubectl` is also included for ad-hoc `command:`/`shell:` tasks.
+`kubectl` is also included for ad-hoc `command:`/`shell:` tasks. The BeyondTrust
+collections back the in-playbook Password Safe lookup + management examples in
+[`examples/playbooks/password-safe/`](../../examples/playbooks/password-safe/); the
+dashboard auto-injects the `PASSWORD_SAFE_*` credentials at run time.
 
 ## Why a separate image (not `chrweav/ansible-winrm`)
 The winrm image is Alpine-based and carries only the SSH/WinRM collections.
