@@ -62,9 +62,10 @@ class GCPDeployRequest(BaseModel):
     register_in_entitle: bool = False  # opt in to registering this VM as an Entitle SSH integration
     register_in_passwordsafe: bool = False  # opt in to onboarding this VM into Password Safe (managed system + account)
     ssh_key_secret_override: Optional[str] = None  # optional Secret Manager secret to use for the SSH key (must be JSON with a public_key)
-    # Per-deploy override — config default is the fallback. A secrets-backend
-    # reference (e.g. gcp_sm://…) for the GCE Jumpoint deploy key. (GCP uses a
-    # per-VM Jumpoint container, not a shell-jump, so there's no jump_group here.)
+    # PRA per-deploy overrides — the configured defaults are the fallback when blank.
+    jump_group: Optional[str] = None             # PRA Jump Group name override (else gcp_bt_jump_group_name / bt_jump_group_name)
+    jumpoint_name: Optional[str] = None          # PRA Jumpoint name override (else gcp_jumpoint_name / bt_jumpoint_name)
+    # A secrets-backend reference (e.g. gcp_sm://…) for the GCE Jumpoint deploy key.
     docker_deploy_key_ref: Optional[str] = None  # else gcp_cloud_run_docker_deploy_key
 
 

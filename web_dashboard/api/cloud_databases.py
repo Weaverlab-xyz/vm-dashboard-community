@@ -74,6 +74,10 @@ class ProvisionRequest(BaseModel):
 
 class DatabaseOptions(BaseModel):
     region: str
+    # Selectable region ids for the provision-form dropdown (configured/picked
+    # region first) — mirrors the k8s provision form so both draw from the shared
+    # region catalog instead of a free-text box. Empty only on an unknown cloud.
+    regions: list[str] = []
     instance_classes: list[str]
     db_subnet_groups: list[dict]
     security_groups: list[dict]
@@ -120,6 +124,21 @@ def _resolve_db_region(cloud: str, region: Optional[str]) -> str:
         return region_catalog.resolve(cloud, region)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+def _region_choices(cloud: str, resolved_region: str) -> list[str]:
+    """Region ids for the provision-form dropdown, with ``resolved_region`` (the
+    configured default or the just-picked region) guaranteed present and first
+    (order-preserving, de-duplicated). Draws from the shared ``region_catalog`` so
+    the DB form mirrors the k8s form; the catalog is a convenience list, not an
+    allow-list, so a custom region still shows up (it's forced in first)."""
+    seen, out = set(), []
+    for r in [resolved_region, *region_catalog.region_ids(cloud)]:
+        r = (r or "").strip()
+        if r and r not in seen:
+            seen.add(r)
+            out.append(r)
+    return out
 
 
 @router.post("")
@@ -209,7 +228,8 @@ async def database_options(
     if cloud == "gcp":
         region = _resolve_db_region("gcp", region)
         return DatabaseOptions(
-            region=region, instance_classes=_GCP_TIERS,
+            region=region, regions=_region_choices("gcp", region),
+            instance_classes=_GCP_TIERS,
             db_subnet_groups=[], security_groups=[],
             cached_at=None, **(await _pra_pickers()),
         )
@@ -217,7 +237,8 @@ async def database_options(
     if cloud == "azure":
         region = _resolve_db_region("azure", region)
         return DatabaseOptions(
-            region=region, instance_classes=_AZURE_SKUS,
+            region=region, regions=_region_choices("azure", region),
+            instance_classes=_AZURE_SKUS,
             db_subnet_groups=[], security_groups=[],
             cached_at=None, **(await _pra_pickers()),
         )
@@ -227,7 +248,8 @@ async def database_options(
         # The compartment/subnet come from the sandbox-emitted oci_* config.
         region = _resolve_db_region("oci", region)
         return DatabaseOptions(
-            region=region, instance_classes=_OCI_WORKLOADS,
+            region=region, regions=_region_choices("oci", region),
+            instance_classes=_OCI_WORKLOADS,
             db_subnet_groups=[], security_groups=[],
             cached_at=None, **(await _pra_pickers()),
         )
@@ -246,7 +268,8 @@ async def database_options(
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     return DatabaseOptions(
-        **opts, cached_at=cached_at, **(await _pra_pickers()))
+        **opts, regions=_region_choices("aws", region),
+        cached_at=cached_at, **(await _pra_pickers()))
 
 
 @router.get("/{db_id}/connection")

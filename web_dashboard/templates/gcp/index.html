@@ -411,8 +411,35 @@
           <p class="mt-1 text-xs text-gray-400">Any Secret Manager secret. Must be JSON with a <code>public_key</code> — validated on launch.</p>
         </div>
 
-        <!-- BeyondTrust Jumpoint deploy key (optional override) -->
-        <div class="pt-1">
+        <!-- BeyondTrust PRA options (optional per-deploy overrides) -->
+        <div class="pt-1 space-y-3 p-3 bg-gray-50 rounded-lg border border-gray-200">
+          <p class="text-xs font-semibold text-gray-600">BeyondTrust PRA options
+            <span class="font-normal text-gray-400">— optional; fall back to the configured defaults.</span>
+          </p>
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="block text-xs font-medium text-gray-600 mb-1">Jump group</label>
+              <select x-model="deployForm.jump_group" :disabled="!praPickers.jump_groups.length"
+                      class="w-full border border-gray-300 rounded-md px-3 py-1.5 text-sm">
+                <option value="">(configured default)</option>
+                <template x-for="g in praPickers.jump_groups || []" :key="g.id">
+                  <option :value="g.name" x-text="g.name"></option>
+                </template>
+              </select>
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-gray-600 mb-1">Jumpoint</label>
+              <select x-model="deployForm.jumpoint_name" :disabled="!praPickers.jumpoints.length"
+                      class="w-full border border-gray-300 rounded-md px-3 py-1.5 text-sm">
+                <option value="">(configured default)</option>
+                <template x-for="j in praPickers.jumpoints || []" :key="j.id">
+                  <option :value="j.name" x-text="j.name"></option>
+                </template>
+              </select>
+            </div>
+          </div>
+          <p x-show="praPickers.loaded && !praPickers.jump_groups.length && !praPickers.jumpoints.length" x-cloak
+             class="text-xs text-gray-400">No PRA jump groups/jumpoints returned — the shell jump falls back to the configured defaults.</p>
           {{ secret_picker("deployForm", "dockerKeyBackend", "docker_deploy_key_ref",
                            "Jumpoint deploy key",
                            "Overrides the configured GCE Jumpoint deploy key for this deploy (BeyondTrust only).") }}
@@ -750,6 +777,10 @@ function gcpDashboard() {
     deploying:     false,
     sshKeyPreview: '',
     sshKeyLoading: false,
+    // BeyondTrust PRA Jump Group / Jumpoint pickers for the deploy-form dropdowns
+    // (shared /api/pra/pickers, fetched once). Empty when PRA isn't configured →
+    // dropdowns show only "(configured default)" and the backend falls back.
+    praPickers: { configured: false, jump_groups: [], jumpoints: [], loaded: false },
     deployForm: {
       instance_name:     '',
       machine_type:      'e2-medium',
@@ -973,6 +1004,17 @@ function gcpDashboard() {
       await this.loadNetworkOpts(this.deployForm.zone);
     },
 
+    async loadPraPickers() {
+      // BeyondTrust PRA Jump Group / Jumpoint pickers for the deploy-form
+      // dropdowns (shared /api/pra/pickers). Fetched once, best-effort: on any
+      // failure the dropdowns just show "(configured default)".
+      if (this.praPickers.loaded) return;
+      try {
+        const r = await API.get('/api/pra/pickers');
+        if (r) this.praPickers = { configured: !!r.configured, jump_groups: r.jump_groups || [], jumpoints: r.jumpoints || [], loaded: true };
+      } catch (e) { /* non-fatal */ }
+    },
+
     async openDeployModal(img) {
       // img may be null when invoked from "Deploy from Image URI…" — user pastes
       // a Compute Engine source_image reference (full URL, projects/PROJECT/...
@@ -990,6 +1032,7 @@ function gcpDashboard() {
         disk_size_gb:       Math.max(img?.disk_size_gb || 20, 20),
         network_tags:       [],
         workgroup:          this._defaultWorkgroup(),
+        jump_group: '', jumpoint_name: '',
         register_in_entitle: false,
         register_in_passwordsafe: false,
         ssh_key_secret_override: '',
@@ -998,6 +1041,7 @@ function gcpDashboard() {
       this.sshKeyPreview = '';
       this.sshKeyLoading = true;
       this.deployModal   = true;
+      this.loadPraPickers();
 
       // Load the SSH-key-secret override candidate list (best-effort)
       API.get('/api/gcp/secrets/ssh-keys')
@@ -1040,6 +1084,8 @@ function gcpDashboard() {
           disk_size_gb:       this.deployForm.disk_size_gb,
           network_tags:       this.deployForm.network_tags,
           workgroup:          this.deployForm.workgroup,
+          jump_group:         this.deployForm.jump_group || null,
+          jumpoint_name:      this.deployForm.jumpoint_name || null,
           docker_deploy_key_ref: this.deployForm.docker_deploy_key_ref || null,
           register_in_entitle: this.deployForm.register_in_entitle,
           register_in_passwordsafe: this.deployForm.register_in_passwordsafe,

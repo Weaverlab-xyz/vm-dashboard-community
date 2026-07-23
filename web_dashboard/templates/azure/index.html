@@ -466,16 +466,28 @@
         </p>
         <div class="grid grid-cols-2 gap-3">
           <div>
-            <label class="block text-xs font-medium text-gray-600 mb-1">Jump group <span class="text-gray-400">(name)</span></label>
-            <input type="text" x-model="deployModal.jump_group" placeholder="(configured default)"
-                   class="w-full border border-gray-300 rounded-md px-3 py-1.5 text-sm">
+            <label class="block text-xs font-medium text-gray-600 mb-1">Jump group</label>
+            <select x-model="deployModal.jump_group" :disabled="!praPickers.jump_groups.length"
+                    class="w-full border border-gray-300 rounded-md px-3 py-1.5 text-sm">
+              <option value="">(configured default)</option>
+              <template x-for="g in praPickers.jump_groups || []" :key="g.id">
+                <option :value="g.name" x-text="g.name"></option>
+              </template>
+            </select>
           </div>
           <div>
-            <label class="block text-xs font-medium text-gray-600 mb-1">Jumpoint <span class="text-gray-400">(name)</span></label>
-            <input type="text" x-model="deployModal.jumpoint_name" placeholder="(configured default)"
-                   class="w-full border border-gray-300 rounded-md px-3 py-1.5 text-sm">
+            <label class="block text-xs font-medium text-gray-600 mb-1">Jumpoint</label>
+            <select x-model="deployModal.jumpoint_name" :disabled="!praPickers.jumpoints.length"
+                    class="w-full border border-gray-300 rounded-md px-3 py-1.5 text-sm">
+              <option value="">(configured default)</option>
+              <template x-for="j in praPickers.jumpoints || []" :key="j.id">
+                <option :value="j.name" x-text="j.name"></option>
+              </template>
+            </select>
           </div>
         </div>
+        <p x-show="praPickers.loaded && !praPickers.jump_groups.length && !praPickers.jumpoints.length" x-cloak
+           class="text-xs text-gray-400">No PRA jump groups/jumpoints returned — the shell jump falls back to the configured defaults.</p>
         {{ secret_picker("deployModal", "praCredBackend", "pra_credential_ref",
                          "PRA credential", "Overrides bt_client_secret for this deploy's shell jump.") }}
         {{ secret_picker("deployModal", "dockerKeyBackend", "docker_deploy_key_ref",
@@ -964,6 +976,10 @@ function azureDashboard() {
     networkOptsWarnings: [],
     privateImagesWarnings: [],
     keyvaultAvailable: false,
+    // BeyondTrust PRA Jump Group / Jumpoint pickers for the deploy-form dropdowns
+    // (shared, cloud-agnostic; fetched once). Empty when PRA isn't configured, so
+    // the dropdowns show only "(configured default)" and the backend falls back.
+    praPickers: { configured: false, jump_groups: [], jumpoints: [], loaded: false },
 
     // Modals
     deployModal: {
@@ -1201,6 +1217,17 @@ function azureDashboard() {
       return !!(img && img.source === 'gallery' && img.os_type === 'Windows');
     },
 
+    async loadPraPickers() {
+      // BeyondTrust PRA Jump Group / Jumpoint pickers for the deploy-form
+      // dropdowns (shared /api/pra/pickers). Fetched once, best-effort: on any
+      // failure the dropdowns just show "(configured default)".
+      if (this.praPickers.loaded) return;
+      try {
+        const r = await API.get('/api/pra/pickers');
+        if (r) this.praPickers = { configured: !!r.configured, jump_groups: r.jump_groups || [], jumpoints: r.jumpoints || [], loaded: true };
+      } catch (e) { /* non-fatal */ }
+    },
+
     async openDeployModal(img) {
       // img may be null when invoked from "Deploy from URN/ID…" — user pastes
       // a marketplace URN (publisher:offer:sku:version) or a full ARM resource
@@ -1219,8 +1246,10 @@ function azureDashboard() {
         register_in_entitle: false,
         register_in_passwordsafe: false,
         ssh_key_secret_override: '', sshKeySecrets: [],
+        jump_group: '', jumpoint_name: '',
       };
       await this.loadNetworkOpts();
+      this.loadPraPickers();
       API.get('/api/azure/secrets/ssh-keys')
         .then(r => { this.deployModal.sshKeySecrets = r?.secrets || []; })
         .catch(() => { this.deployModal.sshKeySecrets = []; });

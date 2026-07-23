@@ -853,16 +853,28 @@
             </p>
             <div class="grid grid-cols-2 gap-3">
               <div>
-                <label class="block text-xs font-medium text-gray-600 mb-1">Jump group <span class="text-gray-400">(name)</span></label>
-                <input type="text" x-model="deployForm.jump_group" placeholder="(configured default)"
-                       class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
+                <label class="block text-xs font-medium text-gray-600 mb-1">Jump group</label>
+                <select x-model="deployForm.jump_group" :disabled="!praPickers.jump_groups.length"
+                        class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
+                  <option value="">(configured default)</option>
+                  <template x-for="g in praPickers.jump_groups || []" :key="g.id">
+                    <option :value="g.name" x-text="g.name"></option>
+                  </template>
+                </select>
               </div>
               <div>
-                <label class="block text-xs font-medium text-gray-600 mb-1">Jumpoint <span class="text-gray-400">(name)</span></label>
-                <input type="text" x-model="deployForm.jumpoint_name" placeholder="(configured default)"
-                       class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
+                <label class="block text-xs font-medium text-gray-600 mb-1">Jumpoint</label>
+                <select x-model="deployForm.jumpoint_name" :disabled="!praPickers.jumpoints.length"
+                        class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
+                  <option value="">(configured default)</option>
+                  <template x-for="j in praPickers.jumpoints || []" :key="j.id">
+                    <option :value="j.name" x-text="j.name"></option>
+                  </template>
+                </select>
               </div>
             </div>
+            <p x-show="praPickers.loaded && !praPickers.jump_groups.length && !praPickers.jumpoints.length" x-cloak
+               class="text-xs text-gray-400">No PRA jump groups/jumpoints returned — the shell jump falls back to the configured defaults.</p>
             {{ secret_picker("deployForm", "praCredBackend", "pra_credential_ref",
                              "PRA credential", "Overrides bt_client_secret for this deploy's shell jump.") }}
           </div>
@@ -1318,6 +1330,10 @@
       // Deploy modal (single)
       showDeployModal: false,
       selectedAmi: null,
+      // BeyondTrust PRA Jump Group / Jumpoint pickers for the deploy-form
+      // dropdowns (shared /api/pra/pickers, fetched once). Empty when PRA isn't
+      // configured → dropdowns show only "(configured default)".
+      praPickers: { configured: false, jump_groups: [], jumpoints: [], loaded: false },
       deployForm: {
         instance_name: '',
         instance_type: 't3.medium',
@@ -1615,6 +1631,17 @@
         }
       },
 
+      async loadPraPickers() {
+        // BeyondTrust PRA Jump Group / Jumpoint pickers for the deploy-form
+        // dropdowns (shared /api/pra/pickers). Fetched once, best-effort: on any
+        // failure the dropdowns just show "(configured default)".
+        if (this.praPickers.loaded) return;
+        try {
+          const r = await API.get('/api/pra/pickers');
+          if (r) this.praPickers = { configured: !!r.configured, jump_groups: r.jump_groups || [], jumpoints: r.jumpoints || [], loaded: true };
+        } catch (e) { /* non-fatal */ }
+      },
+
       async openDeployModal(ami) {
         // ami may be null when invoked from "Deploy from AMI ID…" — user pastes
         // an arbitrary AMI ID into deployForm.ami_id and we skip ENA checks.
@@ -1634,6 +1661,7 @@
           security_group_ids: [],
           workgroup: this.availableWorkgroups.includes('default') ? 'default' :
                      (this.availableWorkgroups[0] || ''),
+          jump_group: '', jumpoint_name: '',
           register_in_entitle: false,
           register_in_passwordsafe: false,
           ssh_key_secret_override: '',
@@ -1641,6 +1669,7 @@
         };
         this.deployError = '';
         this.showDeployModal = true;
+        this.loadPraPickers();
 
         const fetches = [this.loadNetworkOptsFor(this.deployForm.region)];
         fetches.push(
