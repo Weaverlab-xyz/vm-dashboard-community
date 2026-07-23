@@ -202,6 +202,16 @@
               <option value="DW">Data Warehouse (ADW)</option>
             </select>
           </div>
+          <!-- Entitle-compatible SQL Server offering (flag-gated; AWS RDS Custom / Azure SQL MI) -->
+          <div x-show="sqlserverTiersEnabled && form.engine === 'sqlserver' && (form.cloud === 'aws' || form.cloud === 'azure')" x-cloak>
+            <label class="block text-sm font-medium text-gray-700 mb-1">SQL Server tier</label>
+            <select x-model="form.sqlserver_tier"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+              <template x-for="t in sqlServerTierOptions()" :key="t.value">
+                <option :value="t.value" x-text="t.label"></option>
+              </template>
+            </select>
+          </div>
         </div>
         <!-- AWS: storage + DB subnet group -->
         <div class="grid grid-cols-2 gap-3" x-show="form.cloud === 'aws'">
@@ -403,6 +413,11 @@ function databasesPage() {
     databases: [], loading: true,
     filterRegion: '',
     entitleRegEnabled: {{ entitle_registration_enabled | default(false) | tojson }},
+    // Off by default: exposes the Entitle-compatible SQL Server tiers (AWS RDS Custom /
+    // Azure SQL MI) in the provision form. Gated because those modules need real
+    // prereqs (CEV/media/IAM for RDS Custom; delegated subnet for MI) and aren't
+    // live-validated yet — see docs/design/entitle-compatible-sqlserver.md.
+    sqlserverTiersEnabled: {{ clouddb_sqlserver_entitle_tiers_enabled | default(false) | tojson }},
     toast: '', toastType: 'success',
     showForm: false, saving: false, conn: null,
     options: { cloud: '', region: '', regions: [], instance_classes: [], db_subnet_groups: [], security_groups: [], vault_account_groups: [], jump_groups: [], jumpoints: [] },
@@ -411,6 +426,7 @@ function databasesPage() {
             instance_class: 'db.t3.micro', allocated_storage: null, db_subnet_group_name: '', vpc_security_group_ids: [], vault_account_group_id: null,
             tier: 'db-f1-micro', disk_size: null, private_network: '',
             sku_name: 'B_Standard_B1ms', storage_gb: 32,
+            sqlserver_tier: 'standard', vcores: 4, storage_size_in_gb: 32, subnet_id: '', engine_version: '',
             oci_db_workload: 'OLTP', oci_beyond_free: false, oci_cpu_core_count: 1, oci_data_storage_tbs: 1, oci_subnet_ocid: '',
             jump_group: '', jumpoint_name: '', praCredBackend: '', pra_credential_ref: '' },
 
@@ -461,6 +477,8 @@ function databasesPage() {
                     instance_class: 'db.t3.micro', allocated_storage: null, db_subnet_group_name: '', vpc_security_group_ids: [], vault_account_group_id: null,
                     tier: 'db-f1-micro', disk_size: null, private_network: '',
                     sku_name: 'B_Standard_B1ms', storage_gb: 32,
+                    sqlserver_tier: 'standard', vcores: 4, storage_size_in_gb: 32, subnet_id: '', engine_version: '',
+                    oci_db_workload: 'OLTP', oci_beyond_free: false, oci_cpu_core_count: 1, oci_data_storage_tbs: 1, oci_subnet_ocid: '',
                     jump_group: '', jumpoint_name: '', praCredBackend: '', pra_credential_ref: '' };
       this.options = { cloud: '', region: '', regions: [], instance_classes: [], db_subnet_groups: [], security_groups: [], vault_account_groups: [], jump_groups: [], jumpoints: [] };
       this.optionsError = '';
@@ -514,6 +532,23 @@ function databasesPage() {
       ];
     },
 
+    // SQL Server offering tiers per cloud. "standard" = the managed flavor the
+    // dashboard has always built (not Entitle-compatible — its admin can't reach
+    // sysadmin/CONTROL SERVER). The Entitle-compatible tier is cloud-specific: AWS
+    // RDS Custom, Azure SQL Managed Instance. GCP has none. Only shown when the
+    // clouddb_sqlserver_entitle_tiers_enabled flag is on.
+    sqlServerTierOptions() {
+      if (this.form.cloud === 'aws') return [
+        { value: 'standard', label: 'RDS (standard) — not Entitle-compatible' },
+        { value: 'rds_custom', label: 'RDS Custom — Entitle-compatible' },
+      ];
+      if (this.form.cloud === 'azure') return [
+        { value: 'standard', label: 'Azure SQL Database — not Entitle-compatible' },
+        { value: 'managed_instance', label: 'SQL Managed Instance — Entitle-compatible' },
+      ];
+      return [{ value: 'standard', label: 'Standard' }];
+    },
+
     onCloudChange() {
       // Switching cloud in the modal: reset region + cloud-specific fields and reload
       // that cloud's options (instance sizes, subnet/SG pickers, PRA jump groups).
@@ -564,6 +599,19 @@ function databasesPage() {
           if (this.form.allocated_storage) body.allocated_storage = this.form.allocated_storage;
           if (this.form.db_subnet_group_name) body.db_subnet_group_name = this.form.db_subnet_group_name;
           if (this.form.vpc_security_group_ids.length) body.vpc_security_group_ids = this.form.vpc_security_group_ids;
+        }
+        // Entitle-compatible SQL Server tier (flag-gated). "standard" is implicit —
+        // only send an override, and drop cloud fields that don't apply to it.
+        if (this.form.engine === 'sqlserver' && this.form.sqlserver_tier && this.form.sqlserver_tier !== 'standard') {
+          body.sqlserver_tier = this.form.sqlserver_tier;
+          if (this.form.sqlserver_tier === 'managed_instance') {
+            delete body.sku_name;   // Flexible-Server SKU picker doesn't apply to MI
+            if (this.form.vcores) body.vcores = this.form.vcores;
+            if (this.form.storage_size_in_gb) body.storage_size_in_gb = this.form.storage_size_in_gb;
+            if (this.form.subnet_id) body.subnet_id = this.form.subnet_id;
+          } else if (this.form.sqlserver_tier === 'rds_custom') {
+            if (this.form.engine_version) body.engine_version = this.form.engine_version;
+          }
         }
         if (this.form.vault_account_group_id) body.vault_account_group_id = this.form.vault_account_group_id;
         if (this.form.jump_group) body.jump_group = this.form.jump_group;

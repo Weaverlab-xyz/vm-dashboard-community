@@ -52,8 +52,13 @@ def test_managed_sqlserver_flavors_are_blocked_today():
     assert svc._entitle_viable("sqlserver", None) is False
 
 
-def test_viable_set_is_empty_today():
-    assert svc._ENTITLE_VIABLE_SQLSERVER_PROVIDERS == frozenset()
+def test_viable_set_is_the_two_entitle_compatible_offerings():
+    # Once the RDS Custom / Azure SQL MI offerings exist, their providers are viable;
+    # the three default managed flavors never are.
+    assert svc._ENTITLE_VIABLE_SQLSERVER_PROVIDERS == frozenset(
+        {"rds_custom", "sql_managed_instance"})
+    assert svc._entitle_viable("sqlserver", "rds_custom") is True
+    assert svc._entitle_viable("sqlserver", "sql_managed_instance") is True
 
 
 def test_adding_a_provider_flips_viability():
