@@ -30,7 +30,9 @@
 #
 # Env overrides: OCI_PROFILE (default DEFAULT), OCI_COMPARTMENT_OCID (use an
 # existing compartment instead of creating one), OCI_REGION, OCI_SKIP_VAULT=1,
-# OCI_SKIP_DASHBOARD_USER=1.
+# OCI_SKIP_DASHBOARD_USER=1, OCI_DASHBOARD_USER_EMAIL (primary email for the
+# dashboard IAM user; required by Identity-Domain tenancies, defaults to a
+# non-deliverable .invalid address).
 
 set -Eeuo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -148,11 +150,19 @@ if [[ "${OCI_SKIP_DASHBOARD_USER:-0}" != "1" ]]; then
 
   # User (tenancy-root; reuse by name).
   DASHBOARD_USER_NAME="${NAME}-app"
+  # Identity-Domain (IDCS-backed) tenancies reject create_user without a primary
+  # email ("primaryEmailNotSpecified"); legacy IAM tenancies ignore it. Always
+  # send one. Default to a deterministic, non-deliverable address (RFC 2606
+  # .invalid TLD) so this service identity never triggers an activation email to
+  # a real inbox; override with OCI_DASHBOARD_USER_EMAIL if your domain enforces
+  # a routable address.
+  DASHBOARD_USER_EMAIL="${OCI_DASHBOARD_USER_EMAIL:-${DASHBOARD_USER_NAME}@dashboard-sandbox.invalid}"
   DASHBOARD_USER_OCID="$("${OCI_IAM[@]}" iam user list --compartment-id "$TENANCY" --all \
     --query "data[?name=='$DASHBOARD_USER_NAME']|[0].id" --raw-output 2>/dev/null || true)"
   if [[ -z "$DASHBOARD_USER_OCID" || "$DASHBOARD_USER_OCID" == "null" ]]; then
     DASHBOARD_USER_OCID="$("${OCI_IAM[@]}" iam user create --compartment-id "$TENANCY" \
       --name "$DASHBOARD_USER_NAME" --description "VM Dashboard service identity" \
+      --email "$DASHBOARD_USER_EMAIL" \
       --freeform-tags "$FREEFORM" --query 'data.id' --raw-output)"
     ok "Created IAM user $DASHBOARD_USER_NAME"
   else
