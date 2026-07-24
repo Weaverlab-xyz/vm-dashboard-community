@@ -1104,6 +1104,62 @@
                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
                      placeholder="chrweav/dashboard-promote-runner:latest">
             </div>
+
+            <!-- OCI — Container Instances (image-promote target). Unlike AWS/Azure/GCP,
+                 OCI has no Ansible/K8s runner to inherit config from, so its promote
+                 staging config is set here. Shown unconditionally alongside the runner
+                 image (the OCI region catalog is static, so it can't gate on "OCI
+                 configured"). Fields bind to promote_runner_oci_* on AnsibleFeatureConfig. -->
+            <div class="rounded-lg border border-gray-200 p-3 space-y-3">
+              <p class="text-sm font-semibold text-gray-700">OCI — Container Instances</p>
+              <p class="text-xs text-gray-400 -mt-1">OCI's only remote-worker task is the image-promote runner. The staging bucket is required; the rest fall back to your OCI configuration.</p>
+              <div class="grid grid-cols-2 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Staging bucket <span class="text-gray-400 font-normal">(Object Storage bucket for the QCOW2 — required)</span></label>
+                  <input type="text" x-model="panelCfg.promote_runner_oci_staging_bucket"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="my-promote-bucket">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Staging prefix</label>
+                  <input type="text" x-model="panelCfg.promote_runner_oci_staging_prefix"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="promote-staging">
+                </div>
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Compartment OCID <span class="text-gray-400 font-normal">(blank → uses oci_compartment_ocid)</span></label>
+                <input type="text" x-model="panelCfg.promote_runner_oci_compartment"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="ocid1.compartment.oc1..…">
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Subnet OCID <span class="text-gray-400 font-normal">(runner VNIC; blank → uses oci_default_subnet_ocid)</span></label>
+                <input type="text" x-model="panelCfg.promote_runner_oci_subnet_ocid"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="ocid1.subnet.oc1..…">
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Availability domain <span class="text-gray-400 font-normal">(blank → first AD in the compartment)</span></label>
+                <input type="text" x-model="panelCfg.promote_runner_oci_availability_domain"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="Uocm:PHX-AD-1">
+              </div>
+              <div class="grid grid-cols-2 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">OCPUs</label>
+                  <input type="number" min="1" step="1" x-model="panelCfg.promote_runner_oci_ocpus"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="2">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Memory (GB)</label>
+                  <input type="number" min="1" step="1" x-model="panelCfg.promote_runner_oci_memory_gbs"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="16">
+                </div>
+              </div>
+            </div>
           </div>
 
           <!-- ── Shared cloud infrastructure (only when a cloud runner is selected) ── -->
