@@ -549,7 +549,12 @@ rollback_oci() {
   require_cmd jq
   local profile="${OCI_PROFILE:-DEFAULT}"
   local cfgfile="${OCI_CLI_CONFIG_FILE:-$HOME/.oci/config}"
-  ensure_logged_in "oci" "oci iam region list --profile $profile" "Run: oci setup config"
+  # A browser/SSO login (`oci session authenticate`) writes a security_token_file
+  # and needs --auth security_token on every call; an API-key profile does not.
+  local sectok=""
+  [[ -f "$cfgfile" ]] && sectok="$(awk -v p="[$profile]" '$0==p{i=1;next} /^\[/{i=0} i&&/^security_token_file[[:space:]]*=/{print;exit}' "$cfgfile" 2>/dev/null || true)"
+  local authflag=""; [[ -n "$sectok" ]] && authflag="--auth security_token"
+  ensure_logged_in "oci" "oci $authflag iam region list --profile $profile" "Run: oci session authenticate  or  oci setup config"
 
   # Tenancy from state or the CLI config (needed to locate the compartment).
   local tenancy
@@ -557,6 +562,7 @@ rollback_oci() {
   local region; region="${OCI_REGION:-$(awk -v p="[$profile]" '$0==p{i=1;next} /^\[/{i=0} i&&/^region[[:space:]]*=/{sub(/^region[[:space:]]*=[[:space:]]*/,"");print;exit}' "$cfgfile" 2>/dev/null || true)}"
   local OCIC=(oci --profile "$profile")
   [[ -n "$region" ]] && OCIC+=(--region "$region")
+  [[ -n "$sectok" ]] && OCIC+=(--auth security_token)
 
   local prefix="${SANDBOX_NAME_PREFIX}"
   local compartment; compartment="$(state_read oci compartment)"
@@ -572,7 +578,7 @@ rollback_oci() {
 
   section "OCI rollback in compartment ${compartment:0:20}… (region ${region:-default})"
   if (( !ASSUME_YES )); then
-    confirm "Delete OCI sandbox VCN, subnets, gateways, security list in this compartment?" || return 0
+    confirm "Delete OCI sandbox VCN/subnets/gateways/security list + the dashboard IAM user, group & policy?" || return 0
   fi
 
   # Refuse if user VMs are still running (don't auto-terminate lab VMs).
@@ -620,6 +626,80 @@ rollback_oci() {
   # thread the RFC3339 timestamp + management-endpoint plumbing here.
   local vault; vault="$(state_read oci vault)"
   [[ -n "$vault" ]] && warn "Vault $vault + its SSH secret persist — schedule their deletion in the OCI console (KMS → Vaults) if you want them gone."
+
+  # ── Dedicated dashboard IAM user + group + policy (tenancy root) ─────────────
+  # These live at the tenancy root, not in the compartment, so they don't block
+  # the compartment delete — but we remove them here (children before parent) and
+  # only when they carry our managed-by tag. IAM writes must target the home
+  # region, and IAM identity deletes are synchronous (no --wait-for-state), so we
+  # can't reuse the network _oci_find/_oci_del helpers.
+  if [[ -n "$tenancy" ]]; then
+    local home_region
+    home_region="$("${OCIC[@]}" iam region-subscription list \
+      --query "data[?\"is-home-region\"]|[0].\"region-name\"" --raw-output 2>/dev/null || true)"
+    [[ -n "$home_region" && "$home_region" != "null" ]] || home_region="$region"
+    local OCIC_IAM=(oci --profile "$profile")
+    [[ -n "$home_region" ]] && OCIC_IAM+=(--region "$home_region")
+    [[ -n "$sectok" ]] && OCIC_IAM+=(--auth security_token)
+
+    local du_name="${prefix}-app" dg_name="${prefix}-app-group" dp_name="${prefix}-app-policy"
+
+    # Helper: is this identity resource ours? ($1=subcommand $2=id-flag $3=id)
+    _oci_iam_ours() {
+      # shellcheck disable=SC2086
+      [[ "$("${OCIC_IAM[@]}" $1 get $2 "$3" --query 'data."freeform-tags"."managed-by"' \
+        --raw-output 2>/dev/null || true)" == "dashboard-sandbox" ]]
+    }
+
+    # User: delete its API keys, drop group membership, then the user itself.
+    local du_id; du_id="$(state_read oci dashboard_user)"
+    [[ -z "$du_id" || "$du_id" == "null" ]] && du_id="$("${OCIC_IAM[@]}" iam user list \
+      --compartment-id "$tenancy" --all --query "data[?name=='$du_name']|[0].id" --raw-output 2>/dev/null || true)"
+    if [[ -n "$du_id" && "$du_id" != "null" ]]; then
+      if _oci_iam_ours "iam user" --user-id "$du_id"; then
+        local fps_json fp
+        fps_json="$("${OCIC_IAM[@]}" iam user api-key list --user-id "$du_id" 2>/dev/null || echo '{"data":[]}')"
+        for fp in $(echo "$fps_json" | jq -r '.data[].fingerprint' 2>/dev/null); do
+          "${OCIC_IAM[@]}" iam user api-key delete --user-id "$du_id" --fingerprint "$fp" --force >/dev/null 2>&1 || true
+        done
+        local dg_id; dg_id="$(state_read oci dashboard_group)"
+        [[ -z "$dg_id" || "$dg_id" == "null" ]] && dg_id="$("${OCIC_IAM[@]}" iam group list \
+          --compartment-id "$tenancy" --all --query "data[?name=='$dg_name']|[0].id" --raw-output 2>/dev/null || true)"
+        [[ -n "$dg_id" && "$dg_id" != "null" ]] && \
+          "${OCIC_IAM[@]}" iam group remove-user --user-id "$du_id" --group-id "$dg_id" --force >/dev/null 2>&1 || true
+        "${OCIC_IAM[@]}" iam user delete --user-id "$du_id" --force >/dev/null 2>&1 \
+          && ok "Deleted IAM user $du_name" || warn "Could not delete IAM user $du_name"
+      else
+        warn "IAM user $du_name lacks the managed-by tag — leaving it untouched."
+      fi
+    fi
+
+    # Policy (root-level).
+    local dp_id; dp_id="$(state_read oci dashboard_policy)"
+    [[ -z "$dp_id" || "$dp_id" == "null" ]] && dp_id="$("${OCIC_IAM[@]}" iam policy list \
+      --compartment-id "$tenancy" --all --query "data[?name=='$dp_name']|[0].id" --raw-output 2>/dev/null || true)"
+    if [[ -n "$dp_id" && "$dp_id" != "null" ]]; then
+      if _oci_iam_ours "iam policy" --policy-id "$dp_id"; then
+        "${OCIC_IAM[@]}" iam policy delete --policy-id "$dp_id" --force >/dev/null 2>&1 \
+          && ok "Deleted IAM policy $dp_name" || warn "Could not delete IAM policy $dp_name"
+      else
+        warn "IAM policy $dp_name lacks the managed-by tag — leaving it untouched."
+      fi
+    fi
+
+    # Group (after its members + policy are gone).
+    local dg_id2; dg_id2="$(state_read oci dashboard_group)"
+    [[ -z "$dg_id2" || "$dg_id2" == "null" ]] && dg_id2="$("${OCIC_IAM[@]}" iam group list \
+      --compartment-id "$tenancy" --all --query "data[?name=='$dg_name']|[0].id" --raw-output 2>/dev/null || true)"
+    if [[ -n "$dg_id2" && "$dg_id2" != "null" ]]; then
+      if _oci_iam_ours "iam group" --group-id "$dg_id2"; then
+        "${OCIC_IAM[@]}" iam group delete --group-id "$dg_id2" --force >/dev/null 2>&1 \
+          && ok "Deleted IAM group $dg_name" || warn "Could not delete IAM group $dg_name"
+      else
+        warn "IAM group $dg_name lacks the managed-by tag — leaving it untouched."
+      fi
+    fi
+  fi
 
   # Delete the sandbox compartment we created (best-effort; async + slow). Only
   # if it carries our freeform tag AND we didn't reuse a caller-supplied one.

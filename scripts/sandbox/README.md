@@ -66,8 +66,13 @@ Then authenticate each CLI you plan to use:
 aws configure                                            # or: aws sso login
 az login
 gcloud auth login && gcloud auth application-default login
-oci setup config
+oci session authenticate                                 # or: oci setup config (API key)
 ```
+
+Like the other three, the OCI script runs under whichever login you already
+use — a browser/SSO session token (`oci session authenticate`) or an API-key
+profile (`oci setup config`) — and mints a dedicated dashboard identity itself,
+so your operator credentials never become the dashboard's credential.
 
 ## Provisioning
 
@@ -288,12 +293,12 @@ fastest tear-down. AWS and GCP delete each resource individually.
 ## State files
 
 Each setup script writes a small per-cloud state directory to
-`~/.dashboard-sandbox/{aws,azure,gcp}/` with the IDs it created. This is a
+`~/.dashboard-sandbox/{aws,azure,gcp,oci}/` with the IDs it created. This is a
 fast-path hint — rollback doesn't depend on it; tag-based discovery is
 authoritative.
 
 Sensitive files (Azure SP creds, GCP SA key, AWS dashboard-user access-key
-secret) are written with mode 600.
+secret, OCI dashboard-user private key) are written with mode 600.
 
 ### AWS dashboard IAM user
 
@@ -314,6 +319,33 @@ Rollback deletes the user, its access keys, and the cached secret in
 one step — but only if the user carries the `managed-by=dashboard-sandbox`
 tag the setup script applied. Operator-created users with the same
 name are left alone.
+
+### OCI dashboard IAM user
+
+The OCI setup script (`setup-oci.sh`) follows the same model: it mints an
+IAM user `dashboard-sandbox-app` in a group `dashboard-sandbox-app-group`,
+with a tenancy-root policy `dashboard-sandbox-app-policy` granting
+`manage all-resources` scoped to the sandbox compartment, and generates an
+API key for the user. The `/setup` block carries that user's OCID,
+fingerprint, and private key — not your operator identity. Because the
+keypair is generated locally, the private half is always cached at
+`~/.dashboard-sandbox/oci/dashboard_private_key` (mode 0600); re-runs reuse
+it while its fingerprint is still live, otherwise a fresh key is minted
+(pruning the oldest if the per-user 3-key cap is hit).
+
+Set `OCI_SKIP_DASHBOARD_USER=1` to skip minting and reuse your operator
+API key instead (valid only when you logged in with `oci setup config` — a
+session token has no long-lived key to hand off). IAM writes target the
+tenancy home region automatically.
+
+Rollback deletes the API key(s), group membership, user, policy, and group
+— gated on the `managed-by=dashboard-sandbox` freeform tag, so identities
+you created yourself are never touched.
+
+> **Corp TLS note:** behind an SSL-inspecting proxy the OCI CLI (Python)
+> needs `export REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt`
+> (the system bundle that already carries your corp root CA) before it can
+> reach OCI endpoints.
 
 ## Customising
 

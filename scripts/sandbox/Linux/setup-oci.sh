@@ -15,13 +15,22 @@
 #   • A Vault + AES key + SSH-keypair secret (JSON {public_key, private_key})
 #     the dashboard reads for every deploy (best-effort — see OCI_SKIP_VAULT).
 #
-# Credentials for the dashboard come from your OCI CLI config (~/.oci/config,
-# DEFAULT profile) — the same API key the CLI authenticates with. This script
-# reads the tenancy/user/fingerprint/region + private-key PEM from there and
-# emits them so the dashboard signs API calls as the same user.
+# Operator auth: run this under whichever OCI CLI login you already use — an
+# API-key profile (`oci setup config`) OR a browser/SSO session token
+# (`oci session authenticate`). The script auto-detects the profile type and
+# adds `--auth security_token` for session-token logins, so you never need a
+# dedicated API user just to run it (parity with the AWS/Azure/GCP scripts).
+#
+# The dashboard does NOT reuse your operator identity. This script mints a
+# dedicated IAM user (dashboard-sandbox-app) in a group with a compartment-
+# scoped policy, generates an API key for it, and emits THAT key so the
+# dashboard signs API calls as its own service identity. Set
+# OCI_SKIP_DASHBOARD_USER=1 to instead reuse your operator API key (API-key
+# operator login only — a session token has no long-lived key to hand off).
 #
 # Env overrides: OCI_PROFILE (default DEFAULT), OCI_COMPARTMENT_OCID (use an
-# existing compartment instead of creating one), OCI_REGION, OCI_SKIP_VAULT=1.
+# existing compartment instead of creating one), OCI_REGION, OCI_SKIP_VAULT=1,
+# OCI_SKIP_DASHBOARD_USER=1.
 
 set -Eeuo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -32,6 +41,7 @@ require_supported_os
 require_cmd oci
 require_cmd jq
 require_cmd ssh-keygen
+require_cmd openssl
 
 NAME="${SANDBOX_NAME_PREFIX}"
 OCI_PROFILE="${OCI_PROFILE:-DEFAULT}"
@@ -39,14 +49,12 @@ OCI_CONFIG_FILE="${OCI_CLI_CONFIG_FILE:-$HOME/.oci/config}"
 FREEFORM='{"managed-by":"dashboard-sandbox"}'
 
 [[ -f "$OCI_CONFIG_FILE" ]] || \
-  die "No OCI CLI config at $OCI_CONFIG_FILE. Run: oci setup config  (creates an API key + profile)."
+  die "No OCI CLI config at $OCI_CONFIG_FILE. Run: oci session authenticate  (browser/SSO) or oci setup config  (API key)."
 
-ensure_logged_in "oci" "oci iam region list --profile $OCI_PROFILE" \
-  "Run: oci setup config  (and add the public key to your user under Identity → Users → API Keys)."
-
-# ── Read the API-key credentials from the CLI config (DEFAULT profile) ────────
-# Parse the requested profile section: everything from '[PROFILE]' to the next
-# '[' header. `oci setup config` writes tenancy/user/fingerprint/region/key_file.
+# ── Read a single key from the [$OCI_PROFILE] INI section ─────────────────────
+# Everything from '[PROFILE]' to the next '[' header. Works for both an API-key
+# profile (tenancy/user/fingerprint/region/key_file) and a session-token profile
+# (tenancy/region/security_token_file/key_file, no user/fingerprint).
 _profile_val() {
   awk -v prof="[$OCI_PROFILE]" -v key="$1" '
     $0==prof {inp=1; next}
@@ -56,6 +64,22 @@ _profile_val() {
     }' "$OCI_CONFIG_FILE"
 }
 
+# ── Detect operator auth mode ─────────────────────────────────────────────────
+# A browser/SSO login (`oci session authenticate`) writes a `security_token_file`
+# and needs `--auth security_token` on every call; an API-key profile
+# (`oci setup config`) has user/fingerprint/key_file and needs no auth flag.
+if [[ -n "$(_profile_val security_token_file)" ]]; then
+  AUTH_MODE="session"
+else
+  AUTH_MODE="apikey"
+fi
+AUTH_ARG=""
+[[ "$AUTH_MODE" == "session" ]] && AUTH_ARG="--auth security_token"
+
+ensure_logged_in "oci" "oci $AUTH_ARG iam region list --profile $OCI_PROFILE" \
+  "Run: oci session authenticate  (browser/SSO) or oci setup config  (API key)."
+
+# ── Read the operator credentials from the CLI config ─────────────────────────
 TENANCY="${OCI_TENANCY_OCID:-$(_profile_val tenancy)}"
 USER_OCID="$(_profile_val user)"
 FINGERPRINT="$(_profile_val fingerprint)"
@@ -65,13 +89,19 @@ PASSPHRASE="$(_profile_val pass_phrase || true)"
 # Expand a leading ~ in key_file (oci setup writes an absolute path, but be safe).
 KEY_FILE="${KEY_FILE/#\~/$HOME}"
 
-[[ -n "$TENANCY" ]]     || die "Could not read 'tenancy' from $OCI_CONFIG_FILE [$OCI_PROFILE]."
-[[ -n "$USER_OCID" ]]   || die "Could not read 'user' from $OCI_CONFIG_FILE [$OCI_PROFILE]."
-[[ -n "$FINGERPRINT" ]] || die "Could not read 'fingerprint' from $OCI_CONFIG_FILE [$OCI_PROFILE]."
-[[ -n "$REGION" ]]      || die "Could not read 'region' from $OCI_CONFIG_FILE [$OCI_PROFILE]."
-[[ -f "$KEY_FILE" ]]    || die "API signing key file '$KEY_FILE' (key_file in [$OCI_PROFILE]) not found."
+# Tenancy + region are required in both modes.
+[[ -n "$TENANCY" ]] || die "Could not read 'tenancy' from $OCI_CONFIG_FILE [$OCI_PROFILE]."
+[[ -n "$REGION" ]]  || die "Could not read 'region' from $OCI_CONFIG_FILE [$OCI_PROFILE]."
+# user/fingerprint/key_file exist only in an API-key profile — a session-token
+# profile omits them (the dashboard user minted below supplies the real signer).
+if [[ "$AUTH_MODE" == "apikey" ]]; then
+  [[ -n "$USER_OCID" ]]   || die "Could not read 'user' from $OCI_CONFIG_FILE [$OCI_PROFILE]."
+  [[ -n "$FINGERPRINT" ]] || die "Could not read 'fingerprint' from $OCI_CONFIG_FILE [$OCI_PROFILE]."
+  [[ -f "$KEY_FILE" ]]    || die "API signing key file '$KEY_FILE' (key_file in [$OCI_PROFILE]) not found."
+fi
 
 OCI=(oci --profile "$OCI_PROFILE" --region "$REGION")
+[[ "$AUTH_MODE" == "session" ]] && OCI+=(--auth security_token)
 
 section "OCI sandbox in tenancy ${TENANCY:0:20}…, region $REGION"
 
@@ -95,6 +125,123 @@ else
   fi
 fi
 state_write oci compartment "$COMPARTMENT"
+
+# ── 1b. Dedicated dashboard IAM user + group + policy + API key ────────────────
+# Mint a service identity for the dashboard instead of reusing the operator's
+# credentials (parity with the AWS IAM user / Azure SP / GCP SA). The operator's
+# login (API key OR session token) is used only to create it here; the dashboard
+# then signs its own API calls with the API key we generate for this user.
+# Skippable with OCI_SKIP_DASHBOARD_USER=1 (API-key operator login only).
+DASHBOARD_USER_NAME=""
+DASHBOARD_USER_OCID=""
+DASHBOARD_FINGERPRINT=""
+DASHBOARD_PRIVATE_KEY_PEM=""
+if [[ "${OCI_SKIP_DASHBOARD_USER:-0}" != "1" ]]; then
+  section "Dashboard IAM user"
+
+  # IAM control-plane writes must target the tenancy home region.
+  HOME_REGION="$("${OCI[@]}" iam region-subscription list \
+    --query "data[?\"is-home-region\"]|[0].\"region-name\"" --raw-output 2>/dev/null || true)"
+  [[ -n "$HOME_REGION" && "$HOME_REGION" != "null" ]] || HOME_REGION="$REGION"
+  OCI_IAM=(oci --profile "$OCI_PROFILE" --region "$HOME_REGION")
+  [[ "$AUTH_MODE" == "session" ]] && OCI_IAM+=(--auth security_token)
+
+  # User (tenancy-root; reuse by name).
+  DASHBOARD_USER_NAME="${NAME}-app"
+  DASHBOARD_USER_OCID="$("${OCI_IAM[@]}" iam user list --compartment-id "$TENANCY" --all \
+    --query "data[?name=='$DASHBOARD_USER_NAME']|[0].id" --raw-output 2>/dev/null || true)"
+  if [[ -z "$DASHBOARD_USER_OCID" || "$DASHBOARD_USER_OCID" == "null" ]]; then
+    DASHBOARD_USER_OCID="$("${OCI_IAM[@]}" iam user create --compartment-id "$TENANCY" \
+      --name "$DASHBOARD_USER_NAME" --description "VM Dashboard service identity" \
+      --freeform-tags "$FREEFORM" --query 'data.id' --raw-output)"
+    ok "Created IAM user $DASHBOARD_USER_NAME"
+  else
+    ok "Reusing IAM user $DASHBOARD_USER_NAME"
+  fi
+
+  # Group (tenancy-root; reuse by name) + idempotent membership.
+  DASHBOARD_GROUP_NAME="${NAME}-app-group"
+  DASHBOARD_GROUP_OCID="$("${OCI_IAM[@]}" iam group list --compartment-id "$TENANCY" --all \
+    --query "data[?name=='$DASHBOARD_GROUP_NAME']|[0].id" --raw-output 2>/dev/null || true)"
+  if [[ -z "$DASHBOARD_GROUP_OCID" || "$DASHBOARD_GROUP_OCID" == "null" ]]; then
+    DASHBOARD_GROUP_OCID="$("${OCI_IAM[@]}" iam group create --compartment-id "$TENANCY" \
+      --name "$DASHBOARD_GROUP_NAME" --description "VM Dashboard service group" \
+      --freeform-tags "$FREEFORM" --query 'data.id' --raw-output)"
+    ok "Created IAM group $DASHBOARD_GROUP_NAME"
+  else
+    ok "Reusing IAM group $DASHBOARD_GROUP_NAME"
+  fi
+  _member="$("${OCI_IAM[@]}" iam group list-users --group-id "$DASHBOARD_GROUP_OCID" --all \
+    --query "data[?id=='$DASHBOARD_USER_OCID']|[0].id" --raw-output 2>/dev/null || true)"
+  if [[ -z "$_member" || "$_member" == "null" ]]; then
+    retry 6 5 "${OCI_IAM[@]}" iam group add-user \
+      --user-id "$DASHBOARD_USER_OCID" --group-id "$DASHBOARD_GROUP_OCID" >/dev/null
+    ok "Added $DASHBOARD_USER_NAME to $DASHBOARD_GROUP_NAME"
+  else
+    ok "$DASHBOARD_USER_NAME already in $DASHBOARD_GROUP_NAME"
+  fi
+
+  # Policy at the tenancy root so it can reference the sandbox compartment by
+  # name. Compartment-admin scope, confined to that one compartment. (The name
+  # is a direct child of root; a nested compartment would need a parent:child
+  # path here.)
+  DASHBOARD_POLICY_NAME="${NAME}-app-policy"
+  _comp_name="$("${OCI_IAM[@]}" iam compartment get --compartment-id "$COMPARTMENT" \
+    --query 'data.name' --raw-output 2>/dev/null || true)"
+  [[ -n "$_comp_name" && "$_comp_name" != "null" ]] || _comp_name="$COMPARTMENT_NAME"
+  DASHBOARD_POLICY_OCID="$("${OCI_IAM[@]}" iam policy list --compartment-id "$TENANCY" --all \
+    --query "data[?name=='$DASHBOARD_POLICY_NAME']|[0].id" --raw-output 2>/dev/null || true)"
+  if [[ -z "$DASHBOARD_POLICY_OCID" || "$DASHBOARD_POLICY_OCID" == "null" ]]; then
+    _stmt="Allow group $DASHBOARD_GROUP_NAME to manage all-resources in compartment $_comp_name"
+    DASHBOARD_POLICY_OCID="$("${OCI_IAM[@]}" iam policy create --compartment-id "$TENANCY" \
+      --name "$DASHBOARD_POLICY_NAME" --description "VM Dashboard sandbox access" \
+      --statements "[\"$_stmt\"]" --freeform-tags "$FREEFORM" --query 'data.id' --raw-output)"
+    ok "Created IAM policy $DASHBOARD_POLICY_NAME (manage all-resources in compartment $_comp_name)"
+  else
+    ok "Reusing IAM policy $DASHBOARD_POLICY_NAME"
+  fi
+
+  # API key: we generate the keypair locally, so we always hold the private half
+  # (unlike AWS's server-minted secret). Reuse the cached key if it still matches
+  # a live fingerprint; otherwise mint a fresh one (pruning the oldest if the
+  # per-user 3-key cap is hit).
+  DASHBOARD_FINGERPRINT="$(state_read oci dashboard_fingerprint)"
+  DASHBOARD_PRIVATE_KEY_PEM="$(state_read oci dashboard_private_key)"
+  # Parse the full JSON with jq (OCI's --raw-output formatting of an array
+  # projection is ambiguous across CLI versions).
+  _keys_json="$("${OCI_IAM[@]}" iam user api-key list --user-id "$DASHBOARD_USER_OCID" 2>/dev/null || echo '{"data":[]}')"
+  _have_fp="$(echo "$_keys_json" | jq -r --arg fp "$DASHBOARD_FINGERPRINT" '[.data[].fingerprint] | index($fp) // empty' 2>/dev/null || true)"
+  if [[ -n "$DASHBOARD_FINGERPRINT" && -n "$DASHBOARD_PRIVATE_KEY_PEM" && -n "$_have_fp" ]]; then
+    ok "Reusing cached API key for $DASHBOARD_USER_NAME (fingerprint ${DASHBOARD_FINGERPRINT:0:11}…)"
+  else
+    if [[ "$(echo "$_keys_json" | jq '.data | length' 2>/dev/null || echo 0)" -ge 3 ]]; then
+      _oldest_fp="$(echo "$_keys_json" | jq -r '.data | sort_by(."time-created") | .[0].fingerprint // empty' 2>/dev/null || true)"
+      [[ -n "$_oldest_fp" ]] && \
+        "${OCI_IAM[@]}" iam user api-key delete --user-id "$DASHBOARD_USER_OCID" \
+          --fingerprint "$_oldest_fp" --force >/dev/null 2>&1 || true
+    fi
+    _keydir="$(mktemp -d)"
+    openssl genrsa -out "$_keydir/api_key.pem" 2048 >/dev/null 2>&1
+    openssl rsa -pubout -in "$_keydir/api_key.pem" -out "$_keydir/api_key_public.pem" >/dev/null 2>&1
+    DASHBOARD_PRIVATE_KEY_PEM="$(cat "$_keydir/api_key.pem")"
+    DASHBOARD_FINGERPRINT="$(retry 6 5 "${OCI_IAM[@]}" iam user api-key upload \
+      --user-id "$DASHBOARD_USER_OCID" --key-file "$_keydir/api_key_public.pem" \
+      --query 'data.fingerprint' --raw-output)"
+    rm -rf "$_keydir"
+    state_write oci dashboard_private_key "$DASHBOARD_PRIVATE_KEY_PEM"
+    state_write oci dashboard_fingerprint "$DASHBOARD_FINGERPRINT"
+    chmod 0600 "$(state_dir oci)/dashboard_private_key" 2>/dev/null || true
+    chmod 0700 "$(state_dir oci)" 2>/dev/null || true
+    ok "Minted API key for $DASHBOARD_USER_NAME (fingerprint ${DASHBOARD_FINGERPRINT:0:11}…)"
+  fi
+  state_write oci dashboard_user   "$DASHBOARD_USER_OCID"
+  state_write oci dashboard_group  "$DASHBOARD_GROUP_OCID"
+  state_write oci dashboard_policy "$DASHBOARD_POLICY_OCID"
+elif [[ "$AUTH_MODE" == "session" ]]; then
+  die "OCI_SKIP_DASHBOARD_USER=1 needs an API-key operator login — a session token has no long-lived key to hand the dashboard. Re-run without the flag, or use 'oci setup config'."
+else
+  warn "OCI_SKIP_DASHBOARD_USER=1 — the dashboard will reuse your operator API key ($USER_OCID)."
+fi
 
 # Helper: find a resource id by display-name in the compartment (AVAILABLE only).
 _find() {  # $1=oci-subcommand (space-sep), $2=display-name
@@ -270,18 +417,32 @@ else
 fi
 
 # ── 7. Print config to paste into /setup + write config.json twin ─────────────
-PRIVATE_KEY_PEM="$(cat "$KEY_FILE")"
+# By default the dashboard uses the dedicated IAM user minted above; with
+# OCI_SKIP_DASHBOARD_USER=1 it falls back to the operator's own API key.
+if [[ "${OCI_SKIP_DASHBOARD_USER:-0}" != "1" ]]; then
+  CFG_USER_OCID="$DASHBOARD_USER_OCID"
+  CFG_FINGERPRINT="$DASHBOARD_FINGERPRINT"
+  CFG_PRIVATE_KEY_PEM="$DASHBOARD_PRIVATE_KEY_PEM"
+  CFG_PASSPHRASE=""                       # generated key has no passphrase
+  CFG_IDENTITY="dedicated IAM user $DASHBOARD_USER_NAME (its own API key)"
+else
+  CFG_USER_OCID="$USER_OCID"
+  CFG_FINGERPRINT="$FINGERPRINT"
+  CFG_PRIVATE_KEY_PEM="$(cat "$KEY_FILE")"
+  CFG_PASSPHRASE="$PASSPHRASE"
+  CFG_IDENTITY="your operator API key ($USER_OCID)"
+fi
 _cfg=(
   "oci_tenancy_ocid=$TENANCY"
-  "oci_user_ocid=$USER_OCID"
-  "oci_fingerprint=$FINGERPRINT"
+  "oci_user_ocid=$CFG_USER_OCID"
+  "oci_fingerprint=$CFG_FINGERPRINT"
   "oci_region=$REGION"
   "oci_compartment_ocid=$COMPARTMENT"
   "oci_vcn_ocid=$VCN"
   "oci_default_subnet_ocid=$VM_SUBNET                       # User VMs land here (NAT egress, no public IP)"
   "oci_private_key=…                                         # PEM injected into config.json below"
 )
-[[ -n "$PASSPHRASE" ]] && _cfg+=("oci_private_key_passphrase=$PASSPHRASE")
+[[ -n "$CFG_PASSPHRASE" ]] && _cfg+=("oci_private_key_passphrase=$CFG_PASSPHRASE")
 if [[ -n "$SSH_SECRET_OCID" ]]; then
   _cfg+=("oci_ssh_key_secret=$SSH_SECRET_OCID                # Vault secret: JSON {public_key, private_key}")
   _cfg+=("oci_vault_ocid=$VAULT_OCID")
@@ -294,7 +455,7 @@ write_config_json oci "${_cfg[@]}"   # machine-readable twin for onboard-sandbox
 # Inject the real private-key PEM into config.json (kept off the printed block).
 if command -v jq >/dev/null 2>&1; then
   _oci_cfg="$(state_dir oci)/config.json"
-  jq -c --arg pk "$PRIVATE_KEY_PEM" '.oci_private_key = $pk' "$_oci_cfg" > "$_oci_cfg.tmp" \
+  jq -c --arg pk "$CFG_PRIVATE_KEY_PEM" '.oci_private_key = $pk' "$_oci_cfg" > "$_oci_cfg.tmp" \
     && mv "$_oci_cfg.tmp" "$_oci_cfg"
 fi
 
@@ -307,7 +468,7 @@ Sandbox topology summary
     ├─ ${NAME}-vm-subnet      (10.98.2.0/24) → NAT Gateway       [user VMs]
     └─ ${NAME}-db-subnet      (10.98.3.0/24) → NAT (private)     [managed DBs]
 
-The dashboard signs API calls with your ~/.oci/config [$OCI_PROFILE] API key.
+The dashboard signs API calls as $CFG_IDENTITY.
 Deploy VMs into the vm-subnet; the free tier defaults to VM.Standard.E2.1.Micro.
 
 To tear it down:
