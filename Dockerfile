@@ -197,8 +197,12 @@ RUN ARCH=$(dpkg --print-architecture) \
 # (Client.Timeout exceeded while awaiting headers)") and init fails even though
 # the provider exists. Resolving four providers (sra/aws/azurerm/google) in one
 # init multiplies the registry round-trips, so a single slow response is enough.
+# The registry also proxies provider signatures/checksums from github.com, so a
+# GitHub blip surfaces here as "504 Gateway Timeout returned from github.com"
+# (this failed release v26.6.5). Such blips can outlast a short retry window, so
+# the loop runs 8 attempts with escalating backoff (~2.5min total).
 # Fix: raise the registry client timeout to 30s AND keep a retry loop (fresh
-# attempt each time), hard-failing after 5 tries so a genuinely unreachable
+# attempt each time), hard-failing after 8 tries so a genuinely unreachable
 # registry never ships an image missing a cached provider.
 ENV TF_PLUGIN_CACHE_DIR=/root/.terraform.d/plugin-cache
 RUN ARCH=$(dpkg --print-architecture) \
@@ -210,10 +214,10 @@ RUN ARCH=$(dpkg --print-architecture) \
     && mkdir -p /tmp/tf_provider_init \
     && printf 'terraform {\n  required_providers {\n    sra = { source = "beyondtrust/sra", version = "~> 1.0" }\n    passwordsafe = { source = "BeyondTrust/passwordsafe", version = "~> 1.0" }\n    entitle = { source = "entitleio/entitle", version = "~> 3.0" }\n    aws = { source = "hashicorp/aws", version = "~> 5.0" }\n    azurerm = { source = "hashicorp/azurerm", version = "~> 3.0" }\n    google = { source = "hashicorp/google", version = "~> 5.0" }\n    oci = { source = "oracle/oci", version = "~> 5.0" }\n  }\n}\n' \
        > /tmp/tf_provider_init/main.tf \
-    && for attempt in 1 2 3 4 5; do \
+    && for attempt in 1 2 3 4 5 6 7 8; do \
            TF_REGISTRY_CLIENT_TIMEOUT=30 terraform -chdir=/tmp/tf_provider_init init && break; \
-           if [ "$attempt" = 5 ]; then \
-               echo "terraform init failed to cache providers (sra/passwordsafe/entitle/aws/azurerm/google/oci) after 5 attempts" >&2; \
+           if [ "$attempt" = 8 ]; then \
+               echo "terraform init failed to cache providers (sra/passwordsafe/entitle/aws/azurerm/google/oci) after 8 attempts" >&2; \
                exit 1; \
            fi; \
            echo "terraform init attempt $attempt failed (transient registry error); retrying in $((attempt * 5))s..." >&2; \
@@ -222,10 +226,10 @@ RUN ARCH=$(dpkg --print-architecture) \
     && mkdir -p /tmp/tf_provider_init_az4 \
     && printf 'terraform {\n  required_providers {\n    azurerm = { source = "hashicorp/azurerm", version = ">= 4.55.0, < 5.0" }\n  }\n}\n' \
        > /tmp/tf_provider_init_az4/main.tf \
-    && for attempt in 1 2 3 4 5; do \
+    && for attempt in 1 2 3 4 5 6 7 8; do \
            TF_REGISTRY_CLIENT_TIMEOUT=30 terraform -chdir=/tmp/tf_provider_init_az4 init && break; \
-           if [ "$attempt" = 5 ]; then \
-               echo "failed to cache azurerm 4.x (db_azure_mysql needs >= 4.55 for MySQL 8.4) after 5 attempts" >&2; \
+           if [ "$attempt" = 8 ]; then \
+               echo "failed to cache azurerm 4.x (db_azure_mysql needs >= 4.55 for MySQL 8.4) after 8 attempts" >&2; \
                exit 1; \
            fi; \
            echo "azurerm 4.x init attempt $attempt failed (transient registry error); retrying in $((attempt * 5))s..." >&2; \
@@ -234,10 +238,10 @@ RUN ARCH=$(dpkg --print-architecture) \
     && mkdir -p /tmp/tf_provider_init_g6 \
     && printf 'terraform {\n  required_providers {\n    google = { source = "hashicorp/google", version = "~> 6.0" }\n  }\n}\n' \
        > /tmp/tf_provider_init_g6/main.tf \
-    && for attempt in 1 2 3 4 5; do \
+    && for attempt in 1 2 3 4 5 6 7 8; do \
            TF_REGISTRY_CLIENT_TIMEOUT=30 terraform -chdir=/tmp/tf_provider_init_g6 init && break; \
-           if [ "$attempt" = 5 ]; then \
-               echo "failed to cache google 6.x (db_gcp_mysql needs >= 6.x for MYSQL_8_4) after 5 attempts" >&2; \
+           if [ "$attempt" = 8 ]; then \
+               echo "failed to cache google 6.x (db_gcp_mysql needs >= 6.x for MYSQL_8_4) after 8 attempts" >&2; \
                exit 1; \
            fi; \
            echo "google 6.x init attempt $attempt failed (transient registry error); retrying in $((attempt * 5))s..." >&2; \
@@ -258,7 +262,8 @@ RUN ARCH=$(dpkg --print-architecture) \
         -o /usr/local/bin/kubectl \
     && chmod +x /usr/local/bin/kubectl \
     && kubectl version --client \
-    && curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash \
+    && curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors \
+        https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash \
     && helm version
 
 # Entrypoint fixes SSH key permissions when the Windows override
