@@ -686,6 +686,23 @@ class AnsibleFeatureConfig(BaseModel):
     # Hub image; set a full registry path to use a private mirror (e.g. an ACR
     # copy that dodges Docker Hub pull limits). Read by promote_runner_service.
     promote_runner_image: str = ""
+    # OCI-target promote runner (Container Instances). OCI's only remote-worker
+    # task is the image-promote runner (no Ansible/K8s OCI runner), so — unlike
+    # AWS/Azure/GCP, which inherit the ansible_*/storage_* keys above — its
+    # per-target config has no other home and lives here. staging_bucket is
+    # required (no fallback); compartment/subnet fall back to the primary oci_*
+    # config. Mirrors promote_runner_oci_* in config.py + StorageConfigPatch.
+    # ocpus/memory_gbs are str (config.py has them as float) to survive the
+    # _read_feature round-trip — it only coerces bool/int, so a float field
+    # would fail validation on an unset "" PATCH. Same trick StorageConfigPatch
+    # uses. Read by promote_runner_service._resolve_oci_runner_config.
+    promote_runner_oci_staging_bucket: str = ""
+    promote_runner_oci_staging_prefix: str = "promote-staging"
+    promote_runner_oci_compartment: str = ""
+    promote_runner_oci_subnet_ocid: str = ""
+    promote_runner_oci_availability_domain: str = ""
+    promote_runner_oci_ocpus: str = "2"
+    promote_runner_oci_memory_gbs: str = "16"
 
 class EntitleFeatureConfig(BaseModel):
     enabled: bool = False
