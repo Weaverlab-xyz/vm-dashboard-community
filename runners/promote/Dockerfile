@@ -83,8 +83,15 @@ ENV LIBGUESTFS_BACKEND=direct
 #     >= 3.8 because platform.linux_distribution()/platform._supported_dists were
 #     removed. A guest whose Python lacks it (e.g. Rocky/RHEL 9 minimal, py3.9)
 #     dies at setup.py import with "NameError: name 'distro' is not defined".
+# --retry/--retry-all-errors: the tarball is served by github.com, which
+# intermittently returns a transient 5xx mid-release (observed as
+# `curl: (22) The requested URL returned error: 504` during a GitHub blip,
+# which failed release v26.6.5 and left this runner image unpublished —
+# blocking every Azure/GCP promote). A bare curl has no retry, so a single
+# 504 kills the build; retrying on all errors survives the blip the same way
+# the go-mod-download and terraform-init steps already do.
 ARG WALINUXAGENT_VERSION=2.15.0.1
-RUN curl -fsSL \
+RUN curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors \
       "https://github.com/Azure/WALinuxAgent/archive/refs/tags/v${WALINUXAGENT_VERSION}.tar.gz" \
       -o /tmp/waagent.tar.gz \
     && mkdir -p /opt/walinuxagent-src \
