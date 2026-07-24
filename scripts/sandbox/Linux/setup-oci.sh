@@ -390,35 +390,56 @@ if [[ "${OCI_SKIP_VAULT:-0}" != "1" ]]; then
     ok "Vault $VAULT_NAME ready"
     MGMT_EP="$("${OCI[@]}" kms management vault get --vault-id "$VAULT_OCID" \
       --query 'data."management-endpoint"' --raw-output)"
-    KEY_OCID="$("${OCI[@]}" kms management key list --compartment-id "$COMPARTMENT" \
-      --endpoint "$MGMT_EP" --all \
-      --query "data[?\"display-name\"=='${NAME}-key' && \"lifecycle-state\"=='ENABLED'].id | [0]" --raw-output 2>/dev/null || true)"
-    if [[ -z "$KEY_OCID" || "$KEY_OCID" == "null" ]]; then
-      KEY_OCID="$("${OCI[@]}" kms management key create --compartment-id "$COMPARTMENT" \
-        --endpoint "$MGMT_EP" --display-name "${NAME}-key" \
-        --key-shape '{"algorithm":"AES","length":32}' --freeform-tags "$FREEFORM" \
-        --wait-for-state ENABLED --query 'data.id' --raw-output)"
+    # A vault reports ACTIVE before its dedicated management endpoint (a per-vault
+    # hostname, distinct from the regional control plane) starts answering. The
+    # first call against it otherwise fails with "connection to endpoint timed
+    # out" for a minute or two while the endpoint provisions — and because the
+    # CLI's own retry logic makes a single call hang ~90s before giving up, the
+    # unguarded `key create` below dies under `set -e`. Poll a cheap, fast-failing
+    # read (retries disabled, short timeouts) until the endpoint responds first.
+    MGMT_READY=0
+    if [[ -n "$MGMT_EP" && "$MGMT_EP" != "null" ]]; then
+      info "Waiting for the Vault management endpoint to come online…"
+      if retry 20 10 "${OCI[@]}" --no-retry --connection-timeout 10 --read-timeout 20 \
+           kms management key list --compartment-id "$COMPARTMENT" \
+           --endpoint "$MGMT_EP" --limit 1 >/dev/null; then
+        MGMT_READY=1
+      fi
     fi
-    ok "KMS key ready"
-
-    SSH_SECRET_NAME="dashboard-sandbox-ssh-keypair"
-    SSH_SECRET_OCID="$("${OCI[@]}" vault secret list --compartment-id "$COMPARTMENT" --all \
-      --query "data[?\"secret-name\"=='$SSH_SECRET_NAME' && \"lifecycle-state\"=='ACTIVE'].id | [0]" --raw-output 2>/dev/null || true)"
-    if [[ -z "$SSH_SECRET_OCID" || "$SSH_SECRET_OCID" == "null" ]]; then
-      TMPDIR="$(mktemp -d)"; trap 'rm -rf "$TMPDIR"' EXIT
-      ssh-keygen -t rsa -b 4096 -N "" -C "dashboard-sandbox" -f "$TMPDIR/key" >/dev/null
-      B64="$(jq -n --arg pub "$(cat "$TMPDIR/key.pub")" --arg priv "$(cat "$TMPDIR/key")" \
-        '{public_key:$pub, private_key:$priv}' | base64 | tr -d '\n')"
-      SSH_SECRET_OCID="$("${OCI[@]}" vault secret create-base64 --compartment-id "$COMPARTMENT" \
-        --secret-name "$SSH_SECRET_NAME" --vault-id "$VAULT_OCID" --key-id "$KEY_OCID" \
-        --secret-content-content "$B64" --freeform-tags "$FREEFORM" \
-        --query 'data.id' --raw-output)"
-      ok "Created SSH keypair secret $SSH_SECRET_NAME"
+    if [[ "$MGMT_READY" != "1" ]]; then
+      warn "Vault management endpoint not reachable yet — skipping the SSH secret. Re-run in a few minutes (the vault is reused) to finish it, or set oci_ssh_key_secret manually."
+      state_write oci vault "$VAULT_OCID"
     else
-      ok "Reusing SSH keypair secret $SSH_SECRET_NAME"
+      KEY_OCID="$("${OCI[@]}" kms management key list --compartment-id "$COMPARTMENT" \
+        --endpoint "$MGMT_EP" --all \
+        --query "data[?\"display-name\"=='${NAME}-key' && \"lifecycle-state\"=='ENABLED'].id | [0]" --raw-output 2>/dev/null || true)"
+      if [[ -z "$KEY_OCID" || "$KEY_OCID" == "null" ]]; then
+        KEY_OCID="$("${OCI[@]}" kms management key create --compartment-id "$COMPARTMENT" \
+          --endpoint "$MGMT_EP" --display-name "${NAME}-key" \
+          --key-shape '{"algorithm":"AES","length":32}' --freeform-tags "$FREEFORM" \
+          --wait-for-state ENABLED --query 'data.id' --raw-output)"
+      fi
+      ok "KMS key ready"
+
+      SSH_SECRET_NAME="dashboard-sandbox-ssh-keypair"
+      SSH_SECRET_OCID="$("${OCI[@]}" vault secret list --compartment-id "$COMPARTMENT" --all \
+        --query "data[?\"secret-name\"=='$SSH_SECRET_NAME' && \"lifecycle-state\"=='ACTIVE'].id | [0]" --raw-output 2>/dev/null || true)"
+      if [[ -z "$SSH_SECRET_OCID" || "$SSH_SECRET_OCID" == "null" ]]; then
+        TMPDIR="$(mktemp -d)"; trap 'rm -rf "$TMPDIR"' EXIT
+        ssh-keygen -t rsa -b 4096 -N "" -C "dashboard-sandbox" -f "$TMPDIR/key" >/dev/null
+        B64="$(jq -n --arg pub "$(cat "$TMPDIR/key.pub")" --arg priv "$(cat "$TMPDIR/key")" \
+          '{public_key:$pub, private_key:$priv}' | base64 | tr -d '\n')"
+        SSH_SECRET_OCID="$("${OCI[@]}" vault secret create-base64 --compartment-id "$COMPARTMENT" \
+          --secret-name "$SSH_SECRET_NAME" --vault-id "$VAULT_OCID" --key-id "$KEY_OCID" \
+          --secret-content-content "$B64" --freeform-tags "$FREEFORM" \
+          --query 'data.id' --raw-output)"
+        ok "Created SSH keypair secret $SSH_SECRET_NAME"
+      else
+        ok "Reusing SSH keypair secret $SSH_SECRET_NAME"
+      fi
+      state_write oci vault "$VAULT_OCID"
+      state_write oci ssh_secret "$SSH_SECRET_OCID"
     fi
-    state_write oci vault "$VAULT_OCID"
-    state_write oci ssh_secret "$SSH_SECRET_OCID"
   else
     warn "Vault creation failed/unavailable — skipping the SSH secret (set oci_ssh_key_secret manually, or re-run)."
   fi

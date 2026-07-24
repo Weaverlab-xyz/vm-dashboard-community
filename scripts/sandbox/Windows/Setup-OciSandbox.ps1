@@ -376,28 +376,53 @@ try {
         if ($Vault) {
             Write-Ok "Vault $VaultName ready"
             $MgmtEp = Get-OciId @('kms','management','vault','get','--vault-id',$Vault,'--query','data."management-endpoint"','--raw-output')
-            $KeyOcid = Get-OciId @('kms','management','key','list','--compartment-id',$Compartment,'--endpoint',$MgmtEp,'--all',
-                '--query',"data[?`"display-name`"=='$Name-key' && `"lifecycle-state`"=='ENABLED'].id | [0]",'--raw-output')
-            if (-not $KeyOcid) {
-                $KeyOcid = Get-OciId @('kms','management','key','create','--compartment-id',$Compartment,'--endpoint',$MgmtEp,
-                    '--display-name',"$Name-key",'--key-shape',(New-OciJsonArg '{"algorithm":"AES","length":32}'),
-                    '--freeform-tags',(New-OciJsonArg $Freeform),'--wait-for-state','ENABLED','--query','data.id','--raw-output')
+            # A vault reports ACTIVE before its dedicated management endpoint (a
+            # per-vault hostname, distinct from the regional control plane) starts
+            # answering. The first call against it otherwise fails with "connection
+            # to endpoint timed out" for a minute or two while the endpoint
+            # provisions (the CLI's own retry logic makes one call hang ~90s before
+            # giving up). Poll a cheap, fast-failing read (retries off, short
+            # timeouts) until it responds before the key ops below.
+            $MgmtReady = $false
+            if ($MgmtEp) {
+                Write-Info 'Waiting for the Vault management endpoint to come online…'
+                try {
+                    Invoke-OciRetry -Tries 20 -DelaySec 10 -Action {
+                        & oci @Oci --no-retry --connection-timeout 10 --read-timeout 20 `
+                            kms management key list --compartment-id $Compartment `
+                            --endpoint $MgmtEp --limit 1 2>$null | Out-Null
+                        if ($LASTEXITCODE -ne 0) { throw "management endpoint not ready (exit $LASTEXITCODE)" }
+                    }
+                    $MgmtReady = $true
+                } catch { $MgmtReady = $false }
             }
-            Write-Ok 'KMS key ready'
-            $SshSecretName = 'dashboard-sandbox-ssh-keypair'
-            $SshSecret = Get-OciId @('vault','secret','list','--compartment-id',$Compartment,'--all',
-                '--query',"data[?`"secret-name`"=='$SshSecretName' && `"lifecycle-state`"=='ACTIVE'].id | [0]",'--raw-output')
-            if (-not $SshSecret) {
-                $kpJson = New-SshKeyPairJson
-                $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($kpJson))
-                $SshSecret = Get-OciId @('vault','secret','create-base64','--compartment-id',$Compartment,
-                    '--secret-name',$SshSecretName,'--vault-id',$Vault,'--key-id',$KeyOcid,
-                    '--secret-content-content',$b64,'--freeform-tags',(New-OciJsonArg $Freeform),
-                    '--query','data.id','--raw-output')
-                Write-Ok "Created SSH keypair secret $SshSecretName"
-            } else { Write-Ok "Reusing SSH keypair secret $SshSecretName" }
-            Set-StateValue oci vault $Vault
-            Set-StateValue oci ssh_secret $SshSecret
+            if (-not $MgmtReady) {
+                Write-Warn 'Vault management endpoint not reachable yet — skipping the SSH secret. Re-run in a few minutes (the vault is reused) to finish it, or set oci_ssh_key_secret manually.'
+                Set-StateValue oci vault $Vault
+            } else {
+                $KeyOcid = Get-OciId @('kms','management','key','list','--compartment-id',$Compartment,'--endpoint',$MgmtEp,'--all',
+                    '--query',"data[?`"display-name`"=='$Name-key' && `"lifecycle-state`"=='ENABLED'].id | [0]",'--raw-output')
+                if (-not $KeyOcid) {
+                    $KeyOcid = Get-OciId @('kms','management','key','create','--compartment-id',$Compartment,'--endpoint',$MgmtEp,
+                        '--display-name',"$Name-key",'--key-shape',(New-OciJsonArg '{"algorithm":"AES","length":32}'),
+                        '--freeform-tags',(New-OciJsonArg $Freeform),'--wait-for-state','ENABLED','--query','data.id','--raw-output')
+                }
+                Write-Ok 'KMS key ready'
+                $SshSecretName = 'dashboard-sandbox-ssh-keypair'
+                $SshSecret = Get-OciId @('vault','secret','list','--compartment-id',$Compartment,'--all',
+                    '--query',"data[?`"secret-name`"=='$SshSecretName' && `"lifecycle-state`"=='ACTIVE'].id | [0]",'--raw-output')
+                if (-not $SshSecret) {
+                    $kpJson = New-SshKeyPairJson
+                    $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($kpJson))
+                    $SshSecret = Get-OciId @('vault','secret','create-base64','--compartment-id',$Compartment,
+                        '--secret-name',$SshSecretName,'--vault-id',$Vault,'--key-id',$KeyOcid,
+                        '--secret-content-content',$b64,'--freeform-tags',(New-OciJsonArg $Freeform),
+                        '--query','data.id','--raw-output')
+                    Write-Ok "Created SSH keypair secret $SshSecretName"
+                } else { Write-Ok "Reusing SSH keypair secret $SshSecretName" }
+                Set-StateValue oci vault $Vault
+                Set-StateValue oci ssh_secret $SshSecret
+            }
         } else {
             Write-Warn 'Vault creation failed/unavailable — skipping the SSH secret (set oci_ssh_key_secret manually, or re-run).'
         }
