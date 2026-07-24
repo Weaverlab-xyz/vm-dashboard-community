@@ -52,6 +52,35 @@ class RancherRunnerError(Exception):
     """The runner job could not be launched, or its output had no HTTP response."""
 
 
+def _node_region() -> str:
+    """The GCP region the Rancher node lives in, from the persisted node zone.
+
+    Set on every deploy (``gcp_rancher_zone``, e.g. ``us-east1-b`` → ``us-east1``)
+    BEFORE the readiness poll, so it's the authoritative node region at every
+    runner call. ``""`` when unknown (no node deployed yet, or config unreadable) —
+    the caller then keeps the default ``gcp_region``."""
+    try:
+        from . import config_service
+        zone = (config_service.get("gcp_rancher_zone") or "").strip()
+    except Exception:
+        return ""
+    # A zone is region-plus-a-suffix (two hyphens: "us-east1-b"); anything else
+    # (a bare region, junk) is not safely splittable → fall back.
+    return zone.rsplit("-", 1)[0] if zone.count("-") >= 2 else ""
+
+
+def _retarget_region(subnet_ref: str, region: str) -> str:
+    """Point a subnetwork ref at ``region``. A bare name (``dashboard-sandbox-…``)
+    is region-agnostic — Cloud Run resolves it in the job's region — so it's
+    returned as-is. A regional self-link (``…/regions/<X>/subnetworks/<name>``) has
+    its region segment rewritten so the job's NIC lands in a subnet that actually
+    exists in the runner's region."""
+    import re
+    if not subnet_ref or "/regions/" not in subnet_ref:
+        return subnet_ref
+    return re.sub(r"/regions/[^/]+/", f"/regions/{region}/", subnet_ref, count=1)
+
+
 def _resolve():
     """GCP Cloud Run knobs — reuse the k8s runner's resolution (same project /
     region / image / VPC keys) so runner installs need nothing new. Unlike the
@@ -59,7 +88,19 @@ def _resolve():
     runner dials the node's INTERNAL IP — so VPC reach is REQUIRED: fail fast
     with the exact keys when neither direct VPC egress nor a connector is set
     (without it the job launches, can't route, and burns the whole readiness
-    budget before dying with a generic timeout — lived it live 2026-07-21)."""
+    budget before dying with a generic timeout — lived it live 2026-07-21).
+
+    Cloud Run **Direct VPC egress** reaches only **same-region** internal IPs: a
+    runner in the primary ``gcp_region`` cannot reach a node deployed in another
+    region — the SYN to the node's internal IP is silently dropped and the probe
+    just times out (diagnosed live 2026-07-24: a us-central1 runner timed out on a
+    us-east1 node's 10.102.x IP, while the same probe from a us-east1 runner
+    handshook instantly). Multi-region Rancher (#398) puts the node in any region,
+    so PIN the direct-egress runner to the NODE's region. The bare subnet name
+    resolves per-region, and the VPC's internal-allow rule (the /12 supernet) admits
+    whichever regional jumpoint subnet the runner then lands in. A **VPC Access
+    connector** is left on ``gcp_region`` — a connector can reach any region in the
+    VPC, and it must stay co-located with the Cloud Run job's region."""
     from . import k8s_runner_service
     try:
         cfg = k8s_runner_service._resolve_gcp()
@@ -71,6 +112,15 @@ def _resolve():
             "rancher_api_transport=runner needs VPC reach to the node's internal IP: set "
             "gcp_run_network + gcp_run_subnetwork (direct VPC egress — recommended, no "
             "standing infra) or gcp_ansible_vpc_connector (Serverless VPC Access connector).")
+    # Direct VPC egress wins over a connector in run_cloud_run_k8s_task (it's used
+    # whenever a network/subnet is set), so mirror that test here before overriding.
+    using_direct = bool(cfg.get("vpc_network") or cfg.get("vpc_subnetwork"))
+    node_region = _node_region()
+    if using_direct and node_region and node_region != cfg.get("region"):
+        logger.info("Rancher runner: pinning Cloud Run region to the node's region %s "
+                    "(was %s) — direct VPC egress is region-locked", node_region, cfg.get("region"))
+        cfg = {**cfg, "region": node_region,
+               "vpc_subnetwork": _retarget_region(cfg.get("vpc_subnetwork", ""), node_region)}
     return cfg
 
 
@@ -174,10 +224,16 @@ async def wait_ready(url: str, timeout_s: int, *, job_id: str = "") -> str:
     cfg = _resolve()
     tries = max(1, min(int(timeout_s), _MAX_READY_S) // _POLL_S)
     ping = f"{url.rstrip('/')}/ping"
+    # On exhaustion, run one VERBOSE probe whose stderr is kept — so a timeout log
+    # shows the ACTUAL reason (e.g. "Connection timed out" = no route/dropped SYN,
+    # the cross-region direct-egress signature; "Connection refused" = reachable but
+    # not yet serving; a TLS line = up). Without it a runner timeout is silent and
+    # indistinguishable from the node merely being slow to boot.
     command = (
         f"for i in $(seq 1 {tries}); do "
         f"curl -sk -m 5 {ping} >/dev/null 2>&1 && {{ echo {_READY}; exit 0; }}; "
-        f"sleep {_POLL_S}; done; echo {_NOT_READY}"
+        f"sleep {_POLL_S}; done; "
+        f"echo {_NOT_READY}; echo '--- final probe ---'; curl -sk -m 8 -v {ping} 2>&1 | tail -8"
     )
     exit_code, output = await gcp_service.run_cloud_run_k8s_task(
         project_id=cfg["project_id"], region=cfg["region"], image=cfg["image"],
@@ -189,4 +245,6 @@ async def wait_ready(url: str, timeout_s: int, *, job_id: str = "") -> str:
     if exit_code != 0 and _NOT_READY not in (output or ""):
         raise RancherRunnerError(
             f"Rancher readiness runner job exited {exit_code}. Log tail:\n{(output or '').strip()[-1500:]}")
+    logger.warning("Rancher runner readiness timed out from region %s against %s — probe tail:\n%s",
+                   cfg.get("region"), ping, (output or "").strip()[-800:])
     return "timeout"

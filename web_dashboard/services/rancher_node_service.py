@@ -508,9 +508,27 @@ async def run_deploy(db, *, job_id: str, meta: dict) -> None:
                     f"redeploy, or add a Do-Not-Inspect rule for the node in your proxy.")
                 return
             if ready != "ready":
-                # Two common causes, so name both: (a) the node is up but the worker's
-                # egress isn't actually permitted (auto-detect missed / stale IP), or
-                # (b) the container is still initialising (cold image pull).
+                # Name the causes for the transport actually used — the two paths fail
+                # for different reasons, so a one-size message misleads (the runner path
+                # never touches the dashboard's egress IP, yet the old message blamed it).
+                if transport == "runner":
+                    internal = config_service.get("rancher_internal_url") or (
+                        f"https://{internal_ip}" if internal_ip else "(unknown internal IP)")
+                    job_service.set_failed(
+                        db, job_id,
+                        f"Rancher did not become ready within {ready_timeout}s. The in-cloud runner "
+                        f"probes the node's INTERNAL address {internal} from region {p['region']} "
+                        f"(Cloud Run direct VPC egress reaches only SAME-region internal IPs, so the "
+                        f"runner is pinned there). Likely causes: the container is still initialising "
+                        f"(cold rancher/rancher pull — raise rancher_ready_timeout_s and redeploy), or "
+                        f"the runner can't route to the internal IP (confirm gcp_run_network / "
+                        f"gcp_run_subnetwork reach the node's VPC and that a subnet of that name exists "
+                        f"in {p['region']}). See the worker log's runner probe tail for the exact curl "
+                        f"error, or the node's container logs in GCP (google-logging-enabled is on).")
+                    return
+                # Direct transport: the worker dials the node's PUBLIC IP, so its own
+                # egress must be in the node firewall (auto-detect can miss a pooled /
+                # stale IP), else the container may still be initialising.
                 dash = (config_service.get("rancher_dashboard_egress_cidr") or "").strip() or "unknown"
                 allowed = ", ".join(firewall_status(db).get("merged") or []) or "none"
                 job_service.set_failed(

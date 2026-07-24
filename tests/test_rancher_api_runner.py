@@ -32,6 +32,7 @@ _RESOLVED = {"project_id": "proj-test", "region": "us-central1",
              "image": "dtzar/helm-kubectl:latest",
              "vpc_connector": "runner-conn",
              "vpc_network": "sandbox-vpc", "vpc_subnetwork": "sandbox-subnet"}
+_CONFIG_STORE = {}   # backs the default config_service stub
 
 
 def _install_stubs():
@@ -42,6 +43,17 @@ def _install_stubs():
     krs = types.ModuleType("web_dashboard.services.k8s_runner_service")
     krs._resolve_gcp = lambda: dict(_RESOLVED)
     sys.modules["web_dashboard.services.k8s_runner_service"] = krs
+
+    # Stub config_service at load so the REAL one is never imported: _resolve now
+    # reads gcp_rancher_zone (to pin the runner to the node's region), and if the
+    # real module gets imported here it sets the package attribute
+    # web_dashboard.services.config_service, which then defeats a later
+    # sys.modules-only stub (from . import config_service resolves the attribute
+    # first) — a hermetic default stub keeps the suite DB-free.
+    cs = types.ModuleType("web_dashboard.services.config_service")
+    cs.get = lambda key, default="", workgroup=None: _CONFIG_STORE.get(key, default)
+    cs.get_bool = lambda key, default=False: bool(_CONFIG_STORE.get(key, default))
+    sys.modules["web_dashboard.services.config_service"] = cs
 
 
 _install_stubs()
@@ -158,6 +170,77 @@ def test_resolve_requires_vpc_reach():
     finally:
         _RESOLVED.clear()
         _RESOLVED.update(saved)
+
+
+def _stub_config(store):
+    """Install a config_service stub returning from ``store``; return a restore fn."""
+    prev = sys.modules.get("web_dashboard.services.config_service")
+    cfgmod = types.ModuleType("web_dashboard.services.config_service")
+    cfgmod.get = lambda key, default="", workgroup=None: store.get(key, default)
+    cfgmod.get_bool = lambda key, default=False: bool(store.get(key, default))
+    sys.modules["web_dashboard.services.config_service"] = cfgmod
+
+    def _restore():
+        if prev is not None:
+            sys.modules["web_dashboard.services.config_service"] = prev
+        else:
+            sys.modules.pop("web_dashboard.services.config_service", None)
+    return _restore
+
+
+def test_resolve_pins_direct_runner_to_node_region():
+    """Direct VPC egress reaches only SAME-region internal IPs, so the runner must
+    run in the NODE's region (from gcp_rancher_zone) — else a cross-region node's
+    internal IP is unreachable (SYN dropped → readiness timeout, diagnosed live
+    2026-07-24: us-central1 runner vs us-east1 node). A bare subnet name is
+    region-agnostic and stays as-is (Cloud Run resolves it in the job's region)."""
+    global _RESOLVED
+    saved = dict(_RESOLVED)
+    _RESOLVED.update(region="us-central1", vpc_connector="",
+                     vpc_network="sandbox-vpc", vpc_subnetwork="jump-subnet")
+    restore = _stub_config({"gcp_rancher_zone": "us-east1-b"})
+    try:
+        cfg = rar._resolve()
+        assert cfg["region"] == "us-east1", cfg["region"]
+        assert cfg["vpc_subnetwork"] == "jump-subnet", cfg["vpc_subnetwork"]
+    finally:
+        restore()
+        _RESOLVED.clear(); _RESOLVED.update(saved)
+
+
+def test_resolve_retargets_subnet_selflink_region():
+    """A region-qualified subnet self-link has its region segment rewritten to the
+    node region so the job NIC lands in a subnet that exists there."""
+    global _RESOLVED
+    saved = dict(_RESOLVED)
+    _RESOLVED.update(region="us-central1", vpc_connector="", vpc_network="sandbox-vpc",
+                     vpc_subnetwork="projects/p/regions/us-central1/subnetworks/jump")
+    restore = _stub_config({"gcp_rancher_zone": "us-east1-b"})
+    try:
+        cfg = rar._resolve()
+        assert cfg["region"] == "us-east1"
+        assert cfg["vpc_subnetwork"] == "projects/p/regions/us-east1/subnetworks/jump", \
+            cfg["vpc_subnetwork"]
+    finally:
+        restore()
+        _RESOLVED.clear(); _RESOLVED.update(saved)
+
+
+def test_resolve_connector_only_keeps_gcp_region():
+    """A VPC Access connector can reach any region in the VPC and must stay
+    co-located with the Cloud Run region, so the node-region override is
+    direct-egress-only — a connector-only config keeps gcp_region."""
+    global _RESOLVED
+    saved = dict(_RESOLVED)
+    _RESOLVED.update(region="us-central1", vpc_connector="runner-conn",
+                     vpc_network="", vpc_subnetwork="")
+    restore = _stub_config({"gcp_rancher_zone": "us-east1-b"})
+    try:
+        cfg = rar._resolve()
+        assert cfg["region"] == "us-central1", cfg["region"]
+    finally:
+        restore()
+        _RESOLVED.clear(); _RESOLVED.update(saved)
 
 
 def test_request_no_marker_raises():
