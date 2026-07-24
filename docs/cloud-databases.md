@@ -1,30 +1,33 @@
 # Cloud Databases
 
-The dashboard can provision **managed cloud databases** and broker private access to
-them through a BeyondTrust Privileged Remote Access (PRA) tunnel. Optionally, it can
-also **onboard the database into BeyondTrust Password Safe** so Password Safe owns
-credential rotation.
+The dashboard provisions **managed cloud databases** and layers the BeyondTrust PAM
+stack on top of them. The feature is **provisioning + three stacked layers**, each
+solving a different privileged-access problem (this is the same model used across the
+[Cloud VMs](cloud-vms.md) and [Kubernetes](kubernetes.md) docs):
 
-There are **two layers**, and the biggest source of confusion is not keeping them
-straight — so read this section first.
+- **Provisioning** — stand up a **private** database (AWS RDS / Azure Flexible Server +
+  SQL DB / GCP Cloud SQL / OCI Autonomous DB). The dashboard mints the admin credential
+  and stores it encrypted.
+- **Layer 1 — PRA** *(reach it)* — a BeyondTrust Privileged Remote Access protocol
+  tunnel brokers private access to the DB; the admin credential is vaulted in PRA for
+  injection. This is what makes the private database usable.
+- **Layer 2 — Password Safe** *(manage its secrets)* — *optional.* Password Safe owns
+  rotation of a dedicated managed DB user and keeps the PRA-vaulted credential in sync.
+- **Layer 3 — Entitle** *(grant time-boxed access)* — *optional.* Register the DB as an
+  Entitle integration so users request just-in-time access; Entitle mints **ephemeral
+  accounts** (or assigns persistent roles) per engine.
 
-| | Layer 1 — provision + PRA tunnel | Layer 2 — Password Safe onboarding |
-|---|---|---|
-| **AWS** | ✅ postgres / mysql / sqlserver (RDS) | ✅ `dbssm` (SSM → ECS-on-EC2 jumpoint) |
-| **Azure** | ✅ postgres / mysql (Flexible Server) + sqlserver (SQL DB + Private Endpoint) | ✅ `dbazure` (Azure VM Run Command) |
-| **GCP** | ✅ postgres / mysql / sqlserver (Cloud SQL, private IP) | ❌ not onboarded |
-| **OCI** | ✅ **oracle only** (Autonomous DB) | ❌ not onboarded |
+The layers stack — stop after Provisioning + PRA, or add Password Safe and/or Entitle.
+Coverage differs by cloud/engine:
 
-- **Layer 1 — base cloud database.** Provisions a **private** database and reaches it
-  only through a PRA protocol-tunnel jump. The dashboard mints an admin credential,
-  stores it encrypted, and (when PRA is configured) puts it in a PRA Vault account so
-  the tunnel can inject it. Supported on **all four clouds**. This is all you need for
-  a human (or an app) to connect to the DB through PRA.
-- **Layer 2 — Password Safe onboarding.** *Optional.* Creates a dedicated managed DB
-  user, hands it to Password Safe as a **managed system + managed account**, and keeps
-  the PRA-vaulted credential in sync as Password Safe rotates it. Supported on **AWS and
-  Azure only** — GCP and OCI databases provision and get a tunnel, but are not onboarded
-  into Password Safe.
+| Cloud | Provisioning | L1 PRA | L2 Password Safe | L3 Entitle |
+|---|---|---|---|---|
+| **AWS** | postgres / mysql / sqlserver (RDS) | ✅ tunnel | ✅ `dbssm` | ✅ register + JIT |
+| **Azure** | postgres / mysql (Flexible Server) + sqlserver (SQL DB + Private Endpoint) | ✅ tunnel | ✅ `dbazure` | ✅ register + JIT |
+| **GCP** | postgres / mysql / sqlserver (Cloud SQL, private IP) | ✅ tunnel | ❌ | ✅ postgres / mysql (via forwarder) |
+| **OCI** | **oracle only** (Autonomous DB) | ✅ tunnel¹ | ❌ | ❌ |
+
+¹ OCI has no dashboard-provisioned jumpoint — you supply your own (see the OCI section).
 
 Everything is driven by Terraform from the job worker; deploy state is written to the
 active [storage backend](storage-management.md).
@@ -76,7 +79,7 @@ because their tunnels terminate/forward TLS themselves.
 
 ---
 
-## Shared prerequisites (all clouds)
+## Layer 1 — PRA access (shared prerequisites, all clouds)
 
 Before any cloud database will get a working tunnel, configure PRA once under
 **Settings → Integrations → BeyondTrust**:
@@ -98,7 +101,7 @@ Also enable the **Cloud Databases** feature toggle (`cloud_database_enabled`).
 
 ---
 
-## Layer 1 — base cloud database, per cloud
+## Provisioning — per cloud
 
 ### AWS (RDS)
 
@@ -245,7 +248,7 @@ OCI has no per-region config sets.
 
 ---
 
-## Layer 2 — Password Safe onboarding (AWS + Azure)
+## Layer 2 — Password Safe (AWS + Azure)
 
 *Optional.* When enabled (`clouddb_ps_onboarding_enabled`), provisioning an **AWS** or
 **Azure** database additionally hands rotation of a database credential to Password Safe
@@ -358,15 +361,49 @@ AWS keys above):
 
 ---
 
-## Provisioning & decommission
+## Layer 3 — Entitle (just-in-time access)
+
+*Optional.* Register a managed database as a BeyondTrust **Entitle** integration so users
+request **just-in-time** access to it instead of holding a standing credential. Gated by
+`entitle_registration_enabled` plus a per-provision **"Register in Entitle"** toggle, and
+there is a post-provision **Register** button (job `clouddb_entitle_register`) to onboard
+an existing DB. Teardown deregisters on decommission. Full Entitle setup (owner, workflow,
+durations, the agent) lives in the [Entitle integration](integrations/entitle.md) doc.
+
+The account model is **per engine**:
+
+| Engine | Entitle account model | Notes |
+|---|---|---|
+| **PostgreSQL** | **Ephemeral (JIT) accounts** — *proven* | Entitle mints a short-lived role per grant. The connector config uses `user` (not `username`) + a required `options{}` block, no top-level `database`. |
+| **SQL Server** | Ephemeral accounts | **Only on Entitle-viable providers** — Azure SQL Managed Instance / AWS RDS Custom. Managed Cloud SQL / RDS-standard / Azure SQL Database are refused (`_entitle_viable`) because the connector needs sysadmin/CONTROL SERVER they can't grant. Requires a `version` field (default `2019`, `entitle_sqlserver_version`). |
+| **MySQL** | **Persistent roles** (not ephemeral) | Entitle's MySQL connector assigns persistent roles rather than minting accounts. |
+| **Oracle (OCI)** | — | Not supported by the Entitle DB connector. |
+
+**Reachability.** Because dashboard DBs are private, Entitle reaches them through the
+**shared Entitle agent** (`entitle_agent_token_name`; provisioned on Kubernetes, one per
+VPC) — registration raises if it isn't configured for a private target. **AWS RDS** is
+reachable directly from the agent; **GCP Cloud SQL** is not (the agent's GKE VPC can't
+reach Cloud SQL's private IP over non-transitive peering), so the dashboard stands up an
+on-demand **socat forwarder** in the sandbox VPC and points Entitle at it — enable it with
+`gcp_entitle_db_proxy_enabled`.
+
+> Entitle here is independent of Password Safe (Layer 2): a DB can be registered in Entitle
+> whether or not Password Safe manages its credential. The two solve different problems —
+> Entitle governs *who gets in and for how long*; Password Safe governs *the credential's
+> lifecycle*.
+
+---
+
+## Lifecycle (provisioning & decommission)
 
 - **Provision:** from the Cloud Databases page, pick engine + cloud + region and (when
   PRA is configured) a Jump Group / Jumpoint. The record + admin credential are created
   synchronously; the `terraform apply`, tunnel brokering, and any Password Safe onboarding
   run in the **job worker** as a background job.
 - **Decommission:** tears down the PRA tunnel + Vault account, any Layer-2 Password Safe
-  managed systems + functional accounts, and finally the database instance — accumulating
-  (not swallowing) errors so an orphaned tunnel/vault/instance is visible.
+  managed systems + functional accounts, any Layer-3 Entitle integration (+ the GCP
+  forwarder), and finally the database instance — accumulating (not swallowing) errors so
+  an orphaned tunnel/vault/instance is visible.
 
 ---
 

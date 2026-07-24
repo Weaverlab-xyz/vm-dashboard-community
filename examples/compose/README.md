@@ -3,7 +3,7 @@
 Ready-to-adapt compose files for deploying common apps to **AWS ECS**, **Azure
 ACI**, and **GCE (Container-Optimized OS)** via the dashboard's
 **Containers → Cloud → Deploy Compose** feature
-(see [docs/integrations/cloud-compose.md](../../docs/integrations/cloud-compose.md)).
+(see [docs/cloud-containers.md](../../docs/cloud-containers.md)).
 
 These are the community-edition answer to an application catalog: instead of a
 one-click catalog (a SaaS-edition feature), you upload one of these files, edit
