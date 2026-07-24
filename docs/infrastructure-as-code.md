@@ -139,8 +139,8 @@ Terraform state is the canonical record of what a deploy created — lose
 it and the destroy path can no longer target those resources. The
 dashboard keeps state in **two places, by design**.
 
-**Most state lives in your active storage backend.** Cloud VM,
-[cloud-database](cloud-databases.md), and Kubernetes-cluster deploys write their state to the
+**Most state lives in your active storage backend.** [Cloud VM](cloud-vms.md),
+[cloud-database](cloud-databases.md), and [Kubernetes-cluster](kubernetes.md) deploys write their state to the
 same backend the [/storage](storage-management.md) system uses (AWS S3 /
 Azure Blob / GCS), keyed per job at
 `terraform-state/{job_id}/terraform.tfstate`, authenticated with the same

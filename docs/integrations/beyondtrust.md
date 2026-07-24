@@ -135,6 +135,9 @@ Integrations → BeyondTrust → Resource registration (VMs)** (`passwordsafe_re
 The functional account + workgroup must already exist in Password Safe; the dashboard
 resolves them over the public API and creates the managed system/account with Terraform.
 
+> This section is the authoritative reference for **VM** onboarding methods. For the full
+> cloud-VM deploy story (provisioning, PRA Shell Jump, Entitle) see [Cloud VMs](../cloud-vms.md).
+
 Three onboarding methods, chosen per cloud:
 
 ### AWS — AWS Systems Manager custom plugin (cloud-native, default)
