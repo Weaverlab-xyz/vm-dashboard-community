@@ -46,7 +46,7 @@ A consistent topology across all three clouds:
 |---|---|---|
 | **Jumpoint segment** | Hosts the BeyondTrust SRA Jumpoint container so it can phone home to PRA's relay. | ✅ Yes |
 | **VM segment** | Hosts the lab VMs you deploy via the dashboard. | ❌ No — only the Jumpoint can reach them, and they cannot reach the internet directly. |
-| **DB segment** (AWS only) | Dedicated private subnets for managed RDS databases (2 AZs — RDS spans ≥2). | ❌ No — brokered only through the PRA tunnel. |
+| **DB segment** | Dedicated private subnets for [managed cloud databases](cloud-databases.md) (AWS shown; Azure/GCP/OCI have their own DB subnets below). | ❌ No — brokered only through the PRA tunnel. |
 | **Managed Kubernetes** | Clusters build their **own** network — the dashboard's Terraform creates each cluster's VPC/VNet + subnets + egress (AWS: a small NAT instance) and destroys it on decommission. No sandbox k8s subnet. The AWS EKS build additionally VPC-peers back to the sandbox VPC and opens the DB/VM SGs for direct access. | Cluster-owned (per-cluster NAT). Management-plane access via Entitle/PRA + the AWS peering. |
 | **Desktops segment** (Azure) | Dedicated **non-delegated** subnet (`10.99.6.0/24`) for VDI desktop pools, separate from the VM segment because the RS jump client must register with the appliance at first boot. | ⚠️ **443 only** — the NSG allows outbound HTTPS (jump-client registration + Windows activation/updates) but denies other Internet; RDP brokered in via the Jumpoint. |
 
