@@ -488,11 +488,10 @@ function Invoke-GcpRollback {
 # ── OCI rollback ─────────────────────────────────────────────────────────────
 function Invoke-OciRollback {
     Assert-Command oci
-    $ociProfile    = if ($env:OCI_PROFILE) { $env:OCI_PROFILE } else { 'DEFAULT' }
+    $ociProfile = if ($env:OCI_PROFILE) { $env:OCI_PROFILE } else { 'DEFAULT' }
     $configFile = if ($env:OCI_CLI_CONFIG_FILE) { $env:OCI_CLI_CONFIG_FILE } else { Join-Path $HOME '.oci/config' }
-    Assert-LoggedIn 'oci' { oci iam region list --profile $ociProfile } 'Run: oci setup config'
 
-    # Tenancy/region from state or the CLI config (to locate the compartment).
+    # Read a single key from the [$ociProfile] INI section (tenancy/region/token).
     function Get-OciCfg { param([string]$Key)
         if (-not (Test-Path $configFile)) { return '' }
         $inSection = $false
@@ -502,12 +501,22 @@ function Invoke-OciRollback {
         }
         return ''
     }
+
+    # A browser/SSO login (oci session authenticate) writes a security_token_file
+    # and needs --auth security_token on every call; an API-key profile does not.
+    $sectok   = Get-OciCfg 'security_token_file'
+    $authArgs = @(); if ($sectok) { $authArgs = @('--auth', 'security_token') }
+    Assert-LoggedIn 'oci' { oci @authArgs iam region list --profile $ociProfile } 'Run: oci session authenticate  or  oci setup config'
+
+    # Tenancy/region from state or the CLI config (to locate the compartment).
     $tenancy = if ($env:OCI_TENANCY_OCID) { $env:OCI_TENANCY_OCID } else { Get-OciCfg 'tenancy' }
     $region  = if ($env:OCI_REGION) { $env:OCI_REGION } else { Get-OciCfg 'region' }
     $oci = @('--profile', $ociProfile); if ($region) { $oci += @('--region', $region) }
+    if ($sectok) { $oci += @('--auth', 'security_token') }
 
-    function Get-Id { param([string[]]$OciArgs)
-        $out = (& oci @oci @OciArgs 2>$null); if ($out) { $out = "$out".Trim() }
+    function Get-Id { param([string[]]$OciArgs, [string[]]$Base)
+        if (-not $Base) { $Base = $oci }
+        $out = (& oci @Base @OciArgs 2>$null); if ($out) { $out = "$out".Trim() }
         if (-not $out -or $out -eq 'null') { return '' } else { return $out }
     }
 
@@ -521,7 +530,7 @@ function Invoke-OciRollback {
 
     Write-Section "OCI rollback in compartment $($compartment.Substring(0,[Math]::Min(20,$compartment.Length)))… (region $region)"
     if (-not $Yes) {
-        if (-not (Confirm-Action 'Delete OCI sandbox VCN, subnets, gateways, security list in this compartment?')) { return }
+        if (-not (Confirm-Action 'Delete OCI sandbox VCN/subnets/gateways/security list + the dashboard IAM user, group & policy?')) { return }
     }
 
     $running = Get-Id @('compute','instance','list','--compartment-id',$compartment,'--all','--query',"data[?`"lifecycle-state`"=='RUNNING'].`"display-name`"",'--raw-output')
@@ -557,6 +566,67 @@ function Invoke-OciRollback {
 
     $vault = (Get-StateValue oci vault).Trim()
     if ($vault) { Write-Warn "Vault $vault + its SSH secret persist — schedule their deletion in the OCI console (KMS -> Vaults) if you want them gone." }
+
+    # ── Dedicated dashboard IAM user + group + policy (tenancy root) ─────────────
+    # These live at the tenancy root, not in the compartment, so they don't block
+    # the compartment delete — but we remove them here (children before parent) and
+    # only when they carry our managed-by tag. IAM writes must target the home
+    # region, and IAM identity deletes are synchronous (no --wait-for-state), so we
+    # can't reuse the network Find-Id/Remove-Res helpers.
+    if ($tenancy) {
+        $homeRegion = Get-Id @('iam','region-subscription','list',
+            '--query',"data[?`"is-home-region`"]|[0].`"region-name`"",'--raw-output')
+        if (-not $homeRegion) { $homeRegion = $region }
+        $ociIam = @('--profile', $ociProfile); if ($homeRegion) { $ociIam += @('--region', $homeRegion) }
+        if ($sectok) { $ociIam += @('--auth', 'security_token') }
+
+        $duName = "$prefix-app"; $dgName = "$prefix-app-group"; $dpName = "$prefix-app-policy"
+
+        # Helper: is this identity resource ours? (carries the managed-by tag)
+        function Test-OciIamOurs { param([string]$Sub, [string]$IdFlag, [string]$Id)
+            $tag = Get-Id (($Sub -split ' ') + @('get',$IdFlag,$Id,'--query','data."freeform-tags"."managed-by"','--raw-output')) -Base $ociIam
+            return ($tag -eq 'dashboard-sandbox')
+        }
+
+        # User: delete its API keys, drop group membership, then the user itself.
+        $duId = (Get-StateValue oci dashboard_user).Trim()
+        if (-not $duId) { $duId = Get-Id @('iam','user','list','--compartment-id',$tenancy,'--all','--query',"data[?name=='$duName']|[0].id",'--raw-output') -Base $ociIam }
+        if ($duId) {
+            if (Test-OciIamOurs 'iam user' '--user-id' $duId) {
+                $fpsJson = & oci @ociIam iam user api-key list --user-id $duId 2>$null
+                $fps = @()
+                if ($fpsJson) { try { $fps = @(($fpsJson | ConvertFrom-Json).data.fingerprint) } catch { $fps = @() } }
+                foreach ($fp in $fps) {
+                    if ($fp) { & oci @ociIam iam user api-key delete --user-id $duId --fingerprint $fp --force *> $null }
+                }
+                $dgId = (Get-StateValue oci dashboard_group).Trim()
+                if (-not $dgId) { $dgId = Get-Id @('iam','group','list','--compartment-id',$tenancy,'--all','--query',"data[?name=='$dgName']|[0].id",'--raw-output') -Base $ociIam }
+                if ($dgId) { & oci @ociIam iam group remove-user --user-id $duId --group-id $dgId --force *> $null }
+                & oci @ociIam iam user delete --user-id $duId --force *> $null
+                if ($LASTEXITCODE -eq 0) { Write-Ok "Deleted IAM user $duName" } else { Write-Warn "Could not delete IAM user $duName" }
+            } else { Write-Warn "IAM user $duName lacks the managed-by tag — leaving it untouched." }
+        }
+
+        # Policy (root-level).
+        $dpId = (Get-StateValue oci dashboard_policy).Trim()
+        if (-not $dpId) { $dpId = Get-Id @('iam','policy','list','--compartment-id',$tenancy,'--all','--query',"data[?name=='$dpName']|[0].id",'--raw-output') -Base $ociIam }
+        if ($dpId) {
+            if (Test-OciIamOurs 'iam policy' '--policy-id' $dpId) {
+                & oci @ociIam iam policy delete --policy-id $dpId --force *> $null
+                if ($LASTEXITCODE -eq 0) { Write-Ok "Deleted IAM policy $dpName" } else { Write-Warn "Could not delete IAM policy $dpName" }
+            } else { Write-Warn "IAM policy $dpName lacks the managed-by tag — leaving it untouched." }
+        }
+
+        # Group (after its members + policy are gone).
+        $dgId2 = (Get-StateValue oci dashboard_group).Trim()
+        if (-not $dgId2) { $dgId2 = Get-Id @('iam','group','list','--compartment-id',$tenancy,'--all','--query',"data[?name=='$dgName']|[0].id",'--raw-output') -Base $ociIam }
+        if ($dgId2) {
+            if (Test-OciIamOurs 'iam group' '--group-id' $dgId2) {
+                & oci @ociIam iam group delete --group-id $dgId2 --force *> $null
+                if ($LASTEXITCODE -eq 0) { Write-Ok "Deleted IAM group $dgName" } else { Write-Warn "Could not delete IAM group $dgName" }
+            } else { Write-Warn "IAM group $dgName lacks the managed-by tag — leaving it untouched." }
+        }
+    }
 
     # Delete the sandbox compartment we created (best-effort; async + slow).
     if (-not $env:OCI_COMPARTMENT_OCID) {
