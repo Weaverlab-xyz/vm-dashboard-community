@@ -159,6 +159,7 @@ on release:
 |---|---|
 | [`chrweav/infra-dashboard`](https://hub.docker.com/r/chrweav/infra-dashboard) | The dashboard application container (pulled by `docker-compose.hub.yml`). |
 | [`chrweav/ansible-winrm`](https://hub.docker.com/r/chrweav/ansible-winrm) | Default Ansible config-management runner — upstream `willhallonline/ansible` **+ `pywinrm`**, so both Linux SSH and Windows WinRM targets work out of the box. Built from [`runners/ansible-winrm/`](runners/ansible-winrm/). |
+| [`chrweav/ansible-cloud`](https://hub.docker.com/r/chrweav/ansible-cloud) | Ansible runner for **Kubernetes cluster / cloud database** targets — `kubernetes.core` + the helm CLI + the DB collections and client libs, for `hosts: localhost` plays on an in-cloud runner. Built from [`runners/ansible-cloud/`](runners/ansible-cloud/). |
 | [`chrweav/dashboard-promote-runner`](https://hub.docker.com/r/chrweav/dashboard-promote-runner) | One-shot cross-cloud image-promote runner (ECS / ACI / Cloud Run). Built from [`runners/promote/`](runners/promote/). |
 
 ## License
