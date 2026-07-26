@@ -1,0 +1,78 @@
+# Reclaim disk on a Docker host: prune stopped containers, and optionally dangling
+# images and unused volumes, through Portainer's Docker API proxy.
+#
+# Target: any target — this is a `hosts: localhost` play that reaches OUT to the
+# Portainer REST API. Nothing is installed on the target.
+#
+# Connection is auto-injected when Portainer is configured (PORTAINER_URL /
+# PORTAINER_PAT / PORTAINER_VERIFY_SSL); override with extra vars to use another server.
+#
+# DESTRUCTIVE: pruning removes stopped containers permanently, and prune_volumes
+# removes any volume not attached to a container — that is real data. Volumes are
+# OFF by default for that reason; turn them on deliberately.
+#
+# extra_vars:
+#   endpoint_id:    1      # required — see list-endpoints.yml
+#   prune_images:   true   # also remove dangling images
+#   prune_volumes:  false  # also remove unused volumes (DATA LOSS — opt in)
+- name: Prune a Docker host through Portainer
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    portainer_url: "{{ lookup('ansible.builtin.env', 'PORTAINER_URL') }}"
+    portainer_pat: "{{ lookup('ansible.builtin.env', 'PORTAINER_PAT') }}"
+    portainer_verify_ssl: "{{ lookup('ansible.builtin.env', 'PORTAINER_VERIFY_SSL') | default('1', true) }}"
+    endpoint_id: ""
+    prune_images: true
+    prune_volumes: false
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - portainer_url | length > 0
+          - portainer_pat | length > 0
+          - endpoint_id | string | length > 0
+        fail_msg: >-
+          Set endpoint_id, and make sure a Portainer connection is configured
+          (or passed as extra vars).
+
+    - name: Prune stopped containers
+      ansible.builtin.uri:
+        url: "{{ portainer_url | regex_replace('/$', '') }}/api/endpoints/{{ endpoint_id }}/docker/containers/prune"
+        method: POST
+        headers:
+          X-API-Key: "{{ portainer_pat }}"
+        validate_certs: "{{ portainer_verify_ssl | bool }}"
+        status_code: 200
+      register: containers_pruned
+
+    - name: Prune dangling images
+      ansible.builtin.uri:
+        url: "{{ portainer_url | regex_replace('/$', '') }}/api/endpoints/{{ endpoint_id }}/docker/images/prune"
+        method: POST
+        headers:
+          X-API-Key: "{{ portainer_pat }}"
+        validate_certs: "{{ portainer_verify_ssl | bool }}"
+        status_code: 200
+      register: images_pruned
+      when: prune_images | bool
+
+    - name: Prune unused volumes
+      ansible.builtin.uri:
+        url: "{{ portainer_url | regex_replace('/$', '') }}/api/endpoints/{{ endpoint_id }}/docker/volumes/prune"
+        method: POST
+        headers:
+          X-API-Key: "{{ portainer_pat }}"
+        validate_certs: "{{ portainer_verify_ssl | bool }}"
+        status_code: 200
+      register: volumes_pruned
+      when: prune_volumes | bool
+
+    - name: Reclaimed
+      ansible.builtin.debug:
+        msg: >-
+          containers: {{ (containers_pruned.json.ContainersDeleted | default([]) | length) }} removed,
+          {{ (containers_pruned.json.SpaceReclaimed | default(0) / 1048576) | round(1) }} MiB —
+          images: {{ ((images_pruned.json.SpaceReclaimed | default(0)) / 1048576) | round(1) }} MiB —
+          volumes: {{ ((volumes_pruned.json.SpaceReclaimed | default(0)) / 1048576) | round(1) }} MiB

@@ -142,6 +142,52 @@
           </p>
         </div>
 
+        <!-- PRA access (chosen at deploy/redeploy, like the Rancher node) -->
+        <div x-show="portainerDeployOpts.configured" x-cloak
+             class="bg-white rounded-xl border border-gray-200 p-3 mb-3 text-sm">
+          <label class="flex items-center gap-2 font-medium text-gray-700">
+            <input type="checkbox" x-model="portainerDeployForm.web_jump_enabled" class="rounded border-gray-300">
+            Broker the Portainer UI via a PRA Web Jump
+          </label>
+          <p class="text-[11px] text-gray-400 mt-1 ml-6">
+            Creates a <code>portainer-ui</code> Web Jump and stores the generated admin credential in the chosen
+            PRA Vault account group for injected login — the password never appears here. The Jumpoint's egress IP
+            is auto-added to the node firewall. Applied on Deploy/Redeploy.
+          </p>
+          <div x-show="portainerDeployForm.web_jump_enabled" x-cloak class="grid grid-cols-3 gap-3 mt-3 ml-6">
+            <div>
+              <label class="block text-xs font-medium text-gray-600 mb-1">Jump Group</label>
+              <select x-model="portainerDeployForm.jump_group"
+                      class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
+                <option value="">(configured default)</option>
+                <template x-for="g in portainerDeployOpts.jump_groups || []" :key="g.id">
+                  <option :value="g.name" x-text="g.name"></option>
+                </template>
+              </select>
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-gray-600 mb-1">Jumpoint</label>
+              <select x-model="portainerDeployForm.jumpoint_name"
+                      class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
+                <option value="">(configured default)</option>
+                <template x-for="j in portainerDeployOpts.jumpoints || []" :key="j.id">
+                  <option :value="j.name" x-text="j.name"></option>
+                </template>
+              </select>
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-gray-600 mb-1">Vault Account Group</label>
+              <select x-model.number="portainerDeployForm.vault_account_group_id"
+                      class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
+                <option :value="null">(none — show password instead)</option>
+                <template x-for="v in portainerDeployOpts.vault_account_groups || []" :key="v.id">
+                  <option :value="v.id" x-text="v.name"></option>
+                </template>
+              </select>
+            </div>
+          </div>
+        </div>
+
         <div x-show="portainerNodes.length === 0"
              class="text-sm text-gray-500 py-6 text-center bg-white rounded-xl border border-gray-200">
           No managed Portainer server running. Click <strong>Deploy Portainer server</strong> to stand one up.
@@ -1414,7 +1460,9 @@ function containersDashboard() {
     portainerNodeDeploying: false,
     portainerNodeActionPending: null,
     portainerRegions: [],
-    portainerDeployForm: { region: '', zone: '' },
+    // Deploy-form options: regions + the PRA pickers (same shape as praOpts).
+    portainerDeployOpts: { configured: false, regions: [], jump_groups: [], jumpoints: [], vault_account_groups: [] },
+    portainerDeployForm: { region: '', zone: '', web_jump_enabled: false, jump_group: '', jumpoint_name: '', vault_account_group_id: null },
 
     // ── Lifecycle ──────────────────────────────────────────────────────────
     async init() {
@@ -1914,9 +1962,11 @@ function containersDashboard() {
       } finally {
         this.portainerNodeLoading = false;
       }
-      // Region list for the deploy form (best-effort; empty just leaves the default).
+      // Regions + PRA pickers for the deploy form (best-effort; empty just leaves the
+      // defaults and keeps the PRA fieldset hidden).
       try {
         const opts = await API.get('/api/containers/portainer/node/deploy-options');
+        this.portainerDeployOpts = opts;
         this.portainerRegions = opts.regions || [];
       } catch (e) { /* leave defaults — the select still offers "(current / default)" */ }
     },
@@ -1924,9 +1974,14 @@ function containersDashboard() {
     async deployPortainerNode() {
       this.portainerNodeDeploying = true;
       try {
-        const body = {};
+        const body = { web_jump_enabled: this.portainerDeployForm.web_jump_enabled };
         if (this.portainerDeployForm.region) body.region = this.portainerDeployForm.region;
         if ((this.portainerDeployForm.zone || '').trim()) body.zone = this.portainerDeployForm.zone.trim();
+        if (this.portainerDeployForm.web_jump_enabled) {
+          if (this.portainerDeployForm.jump_group) body.jump_group = this.portainerDeployForm.jump_group;
+          if (this.portainerDeployForm.jumpoint_name) body.jumpoint_name = this.portainerDeployForm.jumpoint_name;
+          if (this.portainerDeployForm.vault_account_group_id) body.vault_account_group_id = this.portainerDeployForm.vault_account_group_id;
+        }
         const resp = await API.post('/api/containers/portainer/node/deploy', body);
         window.location.href = `/jobs/${resp.job_id}`;
       } catch (e) {

@@ -1,0 +1,116 @@
+# Create-or-update a standalone Docker Compose stack on a Portainer environment.
+# Idempotent: an existing stack of the same name is UPDATED in place, otherwise a
+# new one is created. Pairs with the compose files in examples/compose/.
+#
+# Target: any target — this is a `hosts: localhost` play that reaches OUT to the
+# Portainer REST API. Nothing is installed on the target.
+#
+# Connection is auto-injected when Portainer is configured (PORTAINER_URL /
+# PORTAINER_PAT / PORTAINER_VERIFY_SSL); override with extra vars to use another server.
+#
+# The compose content comes from EITHER stack_file (a path readable by the runner)
+# or stack_content (an inline string). Anything sensitive inside it should come from
+# the run form's "Use a secret" panel rather than being written in plaintext here.
+#
+# extra_vars:
+#   stack_name:   my-stack             # required
+#   endpoint_id:  1                    # required — see list-endpoints.yml
+#   stack_file:   /path/to/compose.yml # either this…
+#   stack_content: "services: {...}"   # …or this
+#   stack_env:    {KEY: value}         # optional env for the stack
+#   prune:        false                # remove services no longer in the compose file
+- name: Deploy or update a Portainer stack
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    portainer_url: "{{ lookup('ansible.builtin.env', 'PORTAINER_URL') }}"
+    portainer_pat: "{{ lookup('ansible.builtin.env', 'PORTAINER_PAT') }}"
+    portainer_verify_ssl: "{{ lookup('ansible.builtin.env', 'PORTAINER_VERIFY_SSL') | default('1', true) }}"
+    stack_name: ""
+    endpoint_id: ""
+    stack_file: ""
+    stack_content: ""
+    stack_env: {}
+    prune: false
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - portainer_url | length > 0
+          - portainer_pat | length > 0
+          - stack_name | length > 0
+          - endpoint_id | string | length > 0
+          - (stack_file | length > 0) or (stack_content | length > 0)
+        fail_msg: >-
+          Set stack_name, endpoint_id and one of stack_file / stack_content, and make
+          sure a Portainer connection is configured (or passed as extra vars).
+
+    - name: Read the compose file
+      ansible.builtin.slurp:
+        src: "{{ stack_file }}"
+      register: compose_raw
+      when: stack_file | length > 0
+
+    - name: Resolve the compose content
+      ansible.builtin.set_fact:
+        compose_body: >-
+          {{ (compose_raw.content | b64decode) if (stack_file | length > 0) else stack_content }}
+
+    - name: List existing stacks
+      ansible.builtin.uri:
+        url: "{{ portainer_url | regex_replace('/$', '') }}/api/stacks"
+        method: GET
+        headers:
+          X-API-Key: "{{ portainer_pat }}"
+        validate_certs: "{{ portainer_verify_ssl | bool }}"
+        status_code: 200
+      register: stacks
+
+    - name: Find this stack
+      ansible.builtin.set_fact:
+        existing: "{{ (stacks.json | selectattr('Name', 'equalto', stack_name) | list | first) | default({}, true) }}"
+
+    # Portainer wants env as a list of {name, value} pairs.
+    - name: Shape the stack env
+      ansible.builtin.set_fact:
+        env_pairs: "{{ stack_env | dict2items(key_name='name', value_name='value') }}"
+
+    - name: Create the stack
+      ansible.builtin.uri:
+        url: "{{ portainer_url | regex_replace('/$', '') }}/api/stacks/create/standalone/string?endpointId={{ endpoint_id }}"
+        method: POST
+        headers:
+          X-API-Key: "{{ portainer_pat }}"
+        body_format: json
+        body:
+          name: "{{ stack_name }}"
+          stackFileContent: "{{ compose_body }}"
+          env: "{{ env_pairs }}"
+        validate_certs: "{{ portainer_verify_ssl | bool }}"
+        status_code: [200, 201]
+      register: created
+      when: not existing
+
+    - name: Update the stack
+      ansible.builtin.uri:
+        url: "{{ portainer_url | regex_replace('/$', '') }}/api/stacks/{{ existing.Id }}?endpointId={{ endpoint_id }}"
+        method: PUT
+        headers:
+          X-API-Key: "{{ portainer_pat }}"
+        body_format: json
+        body:
+          stackFileContent: "{{ compose_body }}"
+          env: "{{ env_pairs }}"
+          prune: "{{ prune | bool }}"
+        validate_certs: "{{ portainer_verify_ssl | bool }}"
+        status_code: 200
+      register: updated
+      when: existing | length > 0
+
+    - name: Result
+      ansible.builtin.debug:
+        msg: >-
+          Stack '{{ stack_name }}'
+          {{ 'updated (id=' ~ existing.Id ~ ')' if existing else 'created' }}
+          on endpoint {{ endpoint_id }}.

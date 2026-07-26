@@ -103,7 +103,8 @@ async def _dispatch_cloud_localhost_runner(
     task family. Returns ``(exit_code, output)``; a ``K8sRunnerError`` from the infra
     validation (missing subnet/role/…) propagates to the caller's ``set_failed``.
 
-    ``ps_env`` (when present) is the PASSWORD_SAFE_* env for an in-playbook
+    ``ps_env`` (when present) is the auto-injected credential env — PASSWORD_SAFE_*
+    and/or PORTAINER_* — for an in-playbook
     beyondtrust.secrets_safe lookup; it rides the runner's connection-material env
     channel (no cloud store)."""
     if runner == "ecs":
@@ -220,6 +221,15 @@ async def run(db: Session, *, job_id: str, meta: dict) -> None:
         _ps_secret = ps_env.get(_psr.SECRET_KEY)
         if _ps_secret and _ps_secret not in scrub_values:
             scrub_values.append(_ps_secret)
+
+        # Same treatment for the Portainer connection (PORTAINER_* env), merged into
+        # the same runner env channel. {} when Portainer is disabled / unconfigured.
+        from . import portainer_runner as _ptr
+        _pt_env = _ptr.runner_env()
+        _pt_secret = _pt_env.get(_ptr.SECRET_KEY)
+        if _pt_secret and _pt_secret not in scrub_values:
+            scrub_values.append(_pt_secret)
+        ps_env = {**ps_env, **_pt_env}
 
         job_service.update_progress(
             db, job_id, 20, f"Launching {runner.upper()} runner ({target_kind})…")

@@ -494,6 +494,21 @@ class Settings(BaseSettings):
     portainer_admin_password: str = ""         # first-run admin password; auto-generated when unset
     portainer_admin_password_generated: bool = False  # marks the password above as dashboard-generated (so it can be surfaced once)
     portainer_ready_timeout_s: int = 300       # how long the deploy waits for Portainer to serve after the VM boots (cold image pull); raise for slow disks
+    # Managed Portainer node — optional PRA Web Jump brokering its UI (mirrors the
+    # rancher_ui_* block above). Opt-in: lets an operator whose IP isn't in
+    # portainer_allowed_source_cidrs reach the UI from the PRA representative console
+    # (brokered + recorded, no CIDR change), with the admin credential injected from
+    # the PRA Vault instead of being shown.
+    portainer_ui_web_jump_enabled: bool = False   # gate the sra_web_jump broker; False = use the direct public URL
+    portainer_ui_verify_certificate: bool = False # sra_web_jump verify_certificate (False for the node's self-signed cert on :9443)
+    portainer_ui_jump_group: str = ""             # "" = bt_jump_group_name
+    portainer_ui_jumpoint_name: str = ""          # "" = bt_jumpoint_name
+    portainer_ui_web_jump_id: str = ""            # PRA Web Jump id for the Portainer UI (runtime-set)
+    portainer_ui_web_jump_tfstate: str = ""       # terraform state for the Web Jump (for teardown)
+    portainer_ui_vault_account_group_id: str = "" # PRA Vault account group (numeric id) the admin credential is vaulted into for Web-Jump injection; chosen at deploy. "" = no vault (fall back to bt_vault_account_group_id, else surface the password)
+    portainer_ui_vault_account_id: str = ""       # PRA Vault account id created for the Portainer admin credential (runtime-set; cleared on teardown)
+    portainer_ui_jumpoint_cloud: str = "gcp"      # which dashboard-managed Jumpoint host brokers the Portainer UI (gcp|aws|azure); its egress IP is auto-whitelisted. gcp = same cloud as the node
+    portainer_ui_jumpoint_egress_ip: str = ""     # dashboard-managed Web-Jump Jumpoint host egress IP (runtime-set; auto-added to the node firewall as a /32). Azure host has no public IP → left blank (add manually)
     ansible_local_image: str = "chrweav/ansible-winrm:latest"
     # Ansible runner image for Kubernetes-cluster / cloud-database config-management
     # targets (localhost plays that reach out via kubeconfig / DB login vars). Carries

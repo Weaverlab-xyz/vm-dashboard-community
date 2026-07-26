@@ -159,6 +159,36 @@ def test_manual_cidrs_and_dashboard_cidr_merge_dedup_sorted():
     assert st["manual_cidrs"] == ["10.0.0.0/8", "203.0.113.5/32", "10.0.0.0/8"], st
 
 
+def test_jumpoint_cidr_requires_the_web_jump_to_be_enabled():
+    # An egress IP left over from a previous deploy must NOT open the firewall while
+    # the Web Jump is off — the /32 is only justified by an active broker.
+    _reset(gcp_project_id="proj", gcp_zone="us-central1-a",
+           portainer_ui_jumpoint_egress_ip="198.51.100.9")
+    assert portainer_node_service._jumpoint_cidr() == []
+    _CONFIG["portainer_ui_web_jump_enabled"] = "1"
+    assert portainer_node_service._jumpoint_cidr() == ["198.51.100.9/32"]
+
+
+def test_jumpoint_cidr_absent_when_ip_unknown():
+    # A pre-existing operator Jumpoint can't be auto-detected — enabled but no IP
+    # must stay empty rather than emitting a bogus "/32".
+    _reset(gcp_project_id="proj", gcp_zone="us-central1-a",
+           portainer_ui_web_jump_enabled="1")
+    assert portainer_node_service._jumpoint_cidr() == []
+
+
+def test_jumpoint_cidr_joins_the_merged_firewall_set():
+    _reset(gcp_project_id="proj", gcp_zone="us-central1-a",
+           portainer_ui_web_jump_enabled="1",
+           portainer_ui_jumpoint_egress_ip="198.51.100.9",
+           portainer_allowed_source_cidrs="10.0.0.0/8",
+           portainer_dashboard_egress_cidr="203.0.113.5")
+    st = portainer_node_service.firewall_status()
+    assert st["merged"] == ["10.0.0.0/8", "198.51.100.9/32", "203.0.113.5/32"], st
+    assert st["jumpoint_egress_ip"] == "198.51.100.9/32", st
+    assert st["opened"] is True, st
+
+
 def test_manual_cidrs_beat_allow_open():
     # allow_open only applies when the CSV is empty; an explicit list wins.
     _reset(gcp_project_id="proj", gcp_zone="us-central1-a",

@@ -151,6 +151,19 @@ def _allowed_cidrs() -> list[str]:
     return cidrs
 
 
+def _jumpoint_cidr() -> list[str]:
+    """/32 for the dashboard-managed Web-Jump Jumpoint host, when known + enabled.
+
+    A PRA Web Jump reaches the node THROUGH a Jumpoint, so the source IP hitting the
+    firewall is the Jumpoint host's egress IP (never the PRA appliance's). Only known
+    when the dashboard provisioned that host (see jumpoint_host_service); empty for a
+    pre-existing operator Jumpoint (add its IP to the CSV manually)."""
+    if not config_service.get_bool("portainer_ui_web_jump_enabled", False):
+        return []
+    ip = (config_service.get("portainer_ui_jumpoint_egress_ip") or "").strip()
+    return [f"{ip}/32"] if ip else []
+
+
 def _dashboard_cidr() -> list[str]:
     """/32 for the DASHBOARD's own public egress IP.
 
@@ -230,17 +243,18 @@ async def refresh_portainer_firewall(db=None) -> dict:
     """Recompute the node's firewall source set and re-apply it idempotently.
 
     The merged set is the manual CSV (``_allowed_cidrs``) plus the dashboard's own
-    egress /32. Fail-closed and idempotent behavior is inherited from
-    ``gcp_service.ensure_portainer_firewall`` (empty set → rule deleted; ``0.0.0.0/0``
-    from allow_open dedupes harmlessly). No-op safe: returns early when no GCP project
-    is configured, so callers can fire it best-effort even when no node is deployed.
+    egress /32 plus the Web-Jump Jumpoint's /32. Fail-closed and idempotent behavior
+    is inherited from ``gcp_service.ensure_portainer_firewall`` (empty set → rule
+    deleted; ``0.0.0.0/0`` from allow_open dedupes harmlessly). No-op safe: returns
+    early when no GCP project is configured, so callers can fire it best-effort even
+    when no node is deployed.
 
     ``db`` is accepted (and unused) to match ``refresh_rancher_firewall``'s signature —
     Portainer has no per-cluster egress IPs to fold in."""
     p = _node_params()
     if not p["project_id"]:
         return {"skipped": "no gcp project configured"}
-    merged = sorted(set(_allowed_cidrs()) | set(_dashboard_cidr()))
+    merged = sorted(set(_allowed_cidrs()) | set(_dashboard_cidr()) | set(_jumpoint_cidr()))
     if not merged:
         logger.warning("Portainer node has NO allowed source CIDRs — firewall stays closed "
                        "(node unreachable). Set portainer_allowed_source_cidrs in Settings.")
@@ -256,16 +270,109 @@ def firewall_status(db=None) -> dict:
     :func:`refresh_portainer_firewall` would apply, so the operator can see exactly
     which sources are allowed and why."""
     dash = _dashboard_cidr()
-    merged = sorted(set(_allowed_cidrs()) | set(dash))
+    jump = _jumpoint_cidr()
+    merged = sorted(set(_allowed_cidrs()) | set(dash) | set(jump))
     csv = config_service.get("portainer_allowed_source_cidrs") or ""
     return {
         "manual_cidrs": [c.strip() for c in csv.split(",") if c.strip()],
         "dashboard_egress_ip": dash[0] if dash else "",
+        "jumpoint_egress_ip": jump[0] if jump else "",
         "merged": merged,
         "allow_open": config_service.get_bool("gcp_portainer_allow_open", False),
         "opened": bool(merged),
         "ports": ["9443", "8000"],
     }
+
+
+def _pra_configured() -> bool:
+    """PRA is usable when the API host, an OAuth client and a Jumpoint are set."""
+    return all((config_service.get("bt_api_host"), config_service.get("bt_client_id"),
+                config_service.get("bt_jumpoint_name")))
+
+
+async def register_portainer_ui_web_jump(db) -> dict:
+    """Ensure a PRA **Web Jump** to the managed Portainer UI exists. Idempotent:
+    returns the stored id if already provisioned. OPT-IN
+    (``portainer_ui_web_jump_enabled``): lets an operator whose IP isn't in
+    ``portainer_allowed_source_cidrs`` reach the node's UI from the PRA
+    representative console — brokered and recorded, with no CIDR change.
+
+    Re-ensures the dashboard-managed Jumpoint host and refreshes the node firewall on
+    EVERY call (not just first provisioning): AWS/GCP jumpoint egress IPs are
+    ephemeral, so a host reclaim/recreate changes the IP — re-syncing here keeps the
+    firewall's jumpoint /32 current even when the Web Jump itself already exists.
+
+    Mirrors ``k8s_service.register_rancher_ui_web_jump``."""
+    from . import jumpoint_host_service, terraform_pra_service as pra
+
+    url = config_service.get("portainer_url")
+    if not url:
+        raise RuntimeError("Portainer node is not running (no portainer_url)")
+    if not _pra_configured():
+        raise RuntimeError("PRA is not configured (bt_api_host / bt_client_id / bt_jumpoint_name)")
+
+    # The Web Jump connects THROUGH a Jumpoint, so the source hitting the node's
+    # firewall is that host's egress IP. Ensure the host is up, capture its (possibly
+    # changed) IP, and refresh the firewall so its /32 is allowed — BEFORE the reused
+    # early-return, so an ephemeral IP is re-synced on every call.
+    try:
+        await jumpoint_host_service.ensure_portainer_ui_jumpoint()
+    except Exception as exc:
+        logger.warning("Portainer UI web-jump: jumpoint egress capture failed (non-fatal): %s", exc)
+    try:
+        await refresh_portainer_firewall(db)
+    except Exception as exc:
+        logger.warning("Portainer UI web-jump: firewall refresh failed (non-fatal): %s", exc)
+
+    existing = config_service.get("portainer_ui_web_jump_id")
+    if existing:
+        return {"web_jump_id": existing, "reused": True}
+
+    jump_group = config_service.get("portainer_ui_jump_group") or config_service.get("bt_jump_group_name")
+    jumpoint = config_service.get("portainer_ui_jumpoint_name") or config_service.get("bt_jumpoint_name")
+    # Vault the admin credential for injection when a Vault account group is chosen
+    # (deploy form) — the operator never sees the password; PRA injects it into the
+    # Portainer login. Falls back to a plain (non-injected) Web Jump when no group is
+    # set. The password comes from first-run bootstrap.
+    vault_group = (config_service.get("portainer_ui_vault_account_group_id")
+                   or config_service.get("bt_vault_account_group_id") or "").strip()
+    admin_password = config_service.get("portainer_admin_password") if vault_group else ""
+    try:
+        vault_group_id = int(vault_group) if vault_group else None
+    except ValueError:
+        vault_group_id = None
+
+    result = await pra.provision_web_jump(
+        name="portainer-ui", url=url,
+        jump_group_name=jump_group, jumpoint_name=jumpoint, tag="portainer",
+        verify_certificate=config_service.get_bool("portainer_ui_verify_certificate", False),
+        client_secret=config_service.get("bt_client_secret"),
+        admin_password=admin_password,
+        vault_account_name="portainer-ui-admin" if (admin_password and vault_group_id) else "",
+        vault_username=_ADMIN_USERNAME, vault_account_group_id=vault_group_id)
+
+    config_service.set("portainer_ui_web_jump_id", str(result.get("web_jump_id") or ""))
+    config_service.set("portainer_ui_vault_account_id", str(result.get("vault_account_id") or ""))
+    if result.get("tf_state_json"):
+        config_service.set("portainer_ui_web_jump_tfstate", result["tf_state_json"])
+    return {"web_jump_id": result.get("web_jump_id"),
+            "vault_account_id": result.get("vault_account_id"),
+            "jump_group": jump_group, "jumpoint": jumpoint, "reused": False}
+
+
+async def remove_portainer_ui_web_jump() -> None:
+    """Destroy the Portainer-UI PRA Web Jump (best-effort) and clear its config.
+    Called from node teardown."""
+    from . import terraform_pra_service as pra
+    state = config_service.get("portainer_ui_web_jump_tfstate")
+    if state:
+        try:
+            await pra.remove_web_jump(state)
+        except Exception as exc:
+            logger.warning("Portainer UI web-jump removal failed (non-fatal): %s", exc)
+    config_service.set("portainer_ui_web_jump_id", "")
+    config_service.set("portainer_ui_web_jump_tfstate", "")
+    config_service.set("portainer_ui_vault_account_id", "")
 
 
 async def _bootstrap(db, job_id: str, url: str) -> tuple[str, str]:
@@ -311,6 +418,21 @@ async def run_deploy(db, *, job_id: str, meta: dict) -> None:
         if not p["project_id"]:
             job_service.set_failed(db, job_id, "GCP project is not configured.")
             return
+
+        # Persist the deploy-form PRA choices to config FIRST, so the firewall merge
+        # (_jumpoint_cidr gates on portainer_ui_web_jump_enabled) and the later
+        # Web-Jump provisioning all honor this deploy's picks. Only keys the operator
+        # actually sent are written, so a bare redeploy keeps the existing Settings.
+        if "web_jump_enabled" in meta:
+            config_service.set("portainer_ui_web_jump_enabled",
+                               "1" if meta["web_jump_enabled"] else "0")
+        if meta.get("jump_group"):
+            config_service.set("portainer_ui_jump_group", str(meta["jump_group"]))
+        if meta.get("jumpoint_name"):
+            config_service.set("portainer_ui_jumpoint_name", str(meta["jumpoint_name"]))
+        if meta.get("vault_account_group_id"):
+            config_service.set("portainer_ui_vault_account_group_id",
+                               str(meta["vault_account_group_id"]))
 
         job_service.update_progress(db, job_id, 10, "Configuring firewall")
         # Learn (best-effort) + persist the dashboard's OWN public egress IP first:
@@ -399,6 +521,16 @@ async def run_deploy(db, *, job_id: str, meta: dict) -> None:
         if pat:
             config_service.set("portainer_pat", pat)
 
+        # Provision the PRA Web Jump AFTER bootstrap, so the admin password exists to
+        # vault. Best-effort — a PRA hiccup must not fail the node deploy. Runs on
+        # fresh + reused nodes so an ephemeral jumpoint IP is re-synced either way.
+        if config_service.get_bool("portainer_ui_web_jump_enabled", False):
+            job_service.update_progress(db, job_id, 92, "Provisioning PRA Web Jump")
+            try:
+                await register_portainer_ui_web_jump(db)
+            except Exception as exc:
+                logger.warning("Portainer Web Jump provisioning failed (non-fatal): %s", exc)
+
         completion = {
             "url": url,
             "external_ip": external_ip,
@@ -409,7 +541,12 @@ async def run_deploy(db, *, job_id: str, meta: dict) -> None:
             "reused": bool(res.get("reused")),
             "token_configured": bool(pat),
         }
-        if pat and config_service.get_bool("portainer_admin_password_generated", False):
+        # Surface the generated password ONLY when it isn't vaulted — with a PRA Vault
+        # account the operator uses the portainer-ui Web Jump and never sees it.
+        if config_service.get("portainer_ui_vault_account_id"):
+            completion["admin_credential"] = (
+                "stored in PRA Vault — use the portainer-ui Web Jump")
+        elif pat and config_service.get_bool("portainer_admin_password_generated", False):
             completion["admin_username"] = _ADMIN_USERNAME
             completion["admin_password"] = config_service.get("portainer_admin_password") or ""
         if note:
@@ -439,6 +576,15 @@ async def run_teardown(db, *, job_id: str, meta: dict) -> None:
                 "No zone is known for the Portainer node — pass ?zone= to the stop call.")
             return
 
+        # Remove the PRA Web Jump first (best-effort) — it points at a URL that is
+        # about to stop existing.
+        if config_service.get("portainer_ui_web_jump_tfstate"):
+            job_service.update_progress(db, job_id, 15, "Removing PRA Web Jump")
+            try:
+                await remove_portainer_ui_web_jump()
+            except Exception as exc:
+                logger.warning("Portainer PRA web-jump removal failed (continuing): %s", exc)
+
         job_service.update_progress(db, job_id, 30, f"Deleting {name} in {zone}")
         await gcp_service.stop_gce_portainer(
             p["project_id"], zone, name,
@@ -448,7 +594,9 @@ async def run_teardown(db, *, job_id: str, meta: dict) -> None:
         # Drop everything the deploy populated. The URL/PAT go too: leaving them would
         # point the Containers page at a VM that no longer exists.
         for key in ("portainer_url", "portainer_pat", "gcp_portainer_zone",
-                    "portainer_admin_password", "portainer_admin_password_generated"):
+                    "portainer_admin_password", "portainer_admin_password_generated",
+                    "portainer_ui_web_jump_id", "portainer_ui_web_jump_tfstate",
+                    "portainer_ui_vault_account_id", "portainer_ui_jumpoint_egress_ip"):
             try:
                 config_service.set(key, "")
             except Exception as exc:

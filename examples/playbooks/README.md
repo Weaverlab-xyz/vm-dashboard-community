@@ -121,6 +121,33 @@ Secrets-Management secret via **Use a secret** (mapped to `target_role_password`
 | `mysql-create-user.yml` | Create a MySQL user (`target_user` + secret pw) |
 | `sqlserver-create-database.yml` | Create a SQL Server database (`target_db_name`) |
 
+## Portainer (`portainer/`)
+
+Localhost plays that reach **out** to the Portainer REST API with
+`ansible.builtin.uri` — they configure your Docker hosts *through* Portainer rather
+than SSHing to them, so the target you pick is irrelevant (nothing is installed on it).
+
+The connection is **auto-injected** when Portainer is configured — from Settings →
+Integrations → Portainer CE, or written by a managed-node deploy. `PORTAINER_URL`,
+`PORTAINER_PAT` and `PORTAINER_VERIFY_SSL` arrive as environment variables on the
+runner (the same channel as the `PASSWORD_SAFE_*` vars), so you supply nothing for the
+connection and the token never appears in a job's output — it's added to the scrub set.
+Override `portainer_url` / `portainer_pat` as extra vars to target a different server.
+
+`PORTAINER_VERIFY_SSL` is worth honouring rather than hard-coding `validate_certs: true`:
+a dashboard-deployed node serves a **self-signed** certificate on :9443, so the deploy
+turns verification off and these plays follow suit.
+
+| File | Purpose |
+|---|---|
+| `list-endpoints.yml` | Read-only smoke test — list environments and their online status |
+| `deploy-stack.yml` | Create **or update** a compose stack (`stack_name`, `endpoint_id`, `stack_file`/`stack_content`) |
+| `stack-remove.yml` | Remove a stack; a missing stack is a no-op, not a failure |
+| `prune-containers.yml` | Reclaim disk — prune stopped containers, optionally images/volumes |
+
+> `prune-containers.yml` is destructive, and `prune_volumes: true` deletes any volume
+> not attached to a container. It is off by default; opt in deliberately.
+
 ## Password Safe (`password-safe/`)
 
 Playbooks that fetch their **own** secrets from BeyondTrust Password Safe at runtime via the

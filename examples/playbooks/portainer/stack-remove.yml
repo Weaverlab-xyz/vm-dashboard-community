@@ -1,0 +1,68 @@
+# Remove a Docker Compose stack from a Portainer environment — the teardown
+# counterpart to deploy-stack.yml. Idempotent: a stack that doesn't exist is a no-op,
+# not a failure, so this is safe to run in a cleanup pipeline.
+#
+# Target: any target — this is a `hosts: localhost` play that reaches OUT to the
+# Portainer REST API. Nothing is installed on the target.
+#
+# Connection is auto-injected when Portainer is configured (PORTAINER_URL /
+# PORTAINER_PAT / PORTAINER_VERIFY_SSL); override with extra vars to use another server.
+#
+# extra_vars:
+#   stack_name:  my-stack   # required
+#   endpoint_id: 1          # required — see list-endpoints.yml
+- name: Remove a Portainer stack
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    portainer_url: "{{ lookup('ansible.builtin.env', 'PORTAINER_URL') }}"
+    portainer_pat: "{{ lookup('ansible.builtin.env', 'PORTAINER_PAT') }}"
+    portainer_verify_ssl: "{{ lookup('ansible.builtin.env', 'PORTAINER_VERIFY_SSL') | default('1', true) }}"
+    stack_name: ""
+    endpoint_id: ""
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - portainer_url | length > 0
+          - portainer_pat | length > 0
+          - stack_name | length > 0
+          - endpoint_id | string | length > 0
+        fail_msg: >-
+          Set stack_name and endpoint_id, and make sure a Portainer connection is
+          configured (or passed as extra vars).
+
+    - name: List existing stacks
+      ansible.builtin.uri:
+        url: "{{ portainer_url | regex_replace('/$', '') }}/api/stacks"
+        method: GET
+        headers:
+          X-API-Key: "{{ portainer_pat }}"
+        validate_certs: "{{ portainer_verify_ssl | bool }}"
+        status_code: 200
+      register: stacks
+
+    - name: Find this stack
+      ansible.builtin.set_fact:
+        existing: "{{ (stacks.json | selectattr('Name', 'equalto', stack_name) | list | first) | default({}, true) }}"
+
+    - name: Nothing to do
+      ansible.builtin.debug:
+        msg: "Stack '{{ stack_name }}' is not present on this server — nothing to remove."
+      when: not existing
+
+    - name: Delete the stack
+      ansible.builtin.uri:
+        url: "{{ portainer_url | regex_replace('/$', '') }}/api/stacks/{{ existing.Id }}?endpointId={{ endpoint_id }}"
+        method: DELETE
+        headers:
+          X-API-Key: "{{ portainer_pat }}"
+        validate_certs: "{{ portainer_verify_ssl | bool }}"
+        status_code: [200, 204]
+      when: existing | length > 0
+
+    - name: Result
+      ansible.builtin.debug:
+        msg: "Stack '{{ stack_name }}' (id={{ existing.Id }}) removed from endpoint {{ endpoint_id }}."
+      when: existing | length > 0

@@ -590,6 +590,17 @@ async def _run_job(
         if _ps_secret and _ps_secret not in secret_values:
             secret_values.append(_ps_secret)
 
+        # Same treatment for the Portainer connection (PORTAINER_* env), so an
+        # in-playbook API call works with no per-run setup. Merged into the same
+        # runner env channel — it's an opaque key/value dict at every backend. {} when
+        # Portainer is disabled / no server configured. Scrub the PAT.
+        from ..services import portainer_runner as _ptr
+        _pt_env = _ptr.runner_env()
+        _pt_secret = _pt_env.get(_ptr.SECRET_KEY)
+        if _pt_secret and _pt_secret not in secret_values:
+            secret_values.append(_pt_secret)
+        ps_env = {**ps_env, **_pt_env}
+
         # Cloud runners only support bare-IP targets and .yml playbooks.
         # Fall back to local for group targets or non-playbook assets.
         if runner != "local" and is_adhoc and is_playbook:
@@ -771,7 +782,8 @@ async def _dispatch_cloud_runner(
     runner injects each via the provider's secret channel and the container builds a
     0600 vars file from the manifest before running ansible-playbook.
 
-    ps_env (when present) is the PASSWORD_SAFE_* env for an in-playbook
+    ps_env (when present) is the auto-injected credential env (PASSWORD_SAFE_* and/or
+    PORTAINER_*) for an in-playbook
     beyondtrust.secrets_safe lookup; it rides the same connection-credential channel as
     the SSH key on each runner (no cloud store)."""
     if runner == "ecs":
