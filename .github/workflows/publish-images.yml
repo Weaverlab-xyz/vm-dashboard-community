@@ -13,6 +13,7 @@ name: Publish images
 #   chrweav/infra-dashboard            (context: .)
 #   chrweav/dashboard-promote-runner   (context: runners/promote)
 #   chrweav/ansible-winrm              (context: runners/ansible-winrm)
+#   chrweav/ansible-cloud              (context: runners/ansible-cloud)
 
 on:
   push:
@@ -39,6 +40,12 @@ jobs:
           - image: chrweav/ansible-winrm
             context: runners/ansible-winrm
             dockerfile: runners/ansible-winrm/Dockerfile
+          # The k8s / cloud-database localhost runner. config.py defaults
+          # ansible_cloud_image to chrweav/ansible-cloud:latest, so this must be
+          # published alongside the others or that default points at a stale tag.
+          - image: chrweav/ansible-cloud
+            context: runners/ansible-cloud
+            dockerfile: runners/ansible-cloud/Dockerfile
     steps:
       - name: Checkout
         uses: actions/checkout@v4
