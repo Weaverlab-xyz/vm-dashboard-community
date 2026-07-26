@@ -27,3 +27,4 @@
         login_port: "{{ db_login_port }}"
         login_user: "{{ db_login_user }}"
         login_password: "{{ db_login_password }}"
+      no_log: true   # the admin connection password is a secret

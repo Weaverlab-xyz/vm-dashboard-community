@@ -502,6 +502,30 @@ consumes — as opposed to the **connection** credential, which the checkout pat
 Ready-to-run starters live in
 [`examples/playbooks/password-safe/`](../../examples/playbooks/password-safe/).
 
+**Several shipped samples support this optionally.** Rather than only living in the
+dedicated demos, the plays that consume an app secret each declare an optional
+`…_secret` var — set it to a SECRET path (`folder/title`) and the value is fetched
+mid-run; leave it blank and the play behaves exactly as before:
+
+| Playbook | Optional var |
+|---|---|
+| `windows/win-create-local-admin.yml` | `new_admin_password_secret` |
+| `database/postgres-create-role.yml` | `target_role_password_secret` |
+| `database/mysql-create-user.yml` | `target_user_password_secret` |
+| `portainer/*.yml` | `portainer_pat_secret` |
+
+Two implementation notes that matter if you adapt the pattern:
+
+- The fetch writes to a private `_ps_*` fact and is resolved at the use site, **never**
+  back onto the caller-supplied variable. Ansible extra vars outrank `set_fact`, so
+  writing back would be *silently ignored* whenever the value was also supplied via an
+  extra var or a "Use a secret" binding — the play would quietly use the wrong one.
+  When both are set, the Password Safe path wins.
+- Connection credentials (`ansible_password`, become, SSH keys) deliberately stay with
+  the run-form panel, which covers cases a lookup can't (SSH keys, `sshpass`, ephemeral
+  cloud secrets). `tests/test_playbook_ps_lookup.py` pins these invariants across the
+  samples.
+
 **Auto-injected credentials.** The lookup runs on the Ansible controller (the runner
 container) and reads `PASSWORD_SAFE_API_URL` / `PASSWORD_SAFE_CLIENT_ID` /
 `PASSWORD_SAFE_CLIENT_SECRET`. When **BeyondTrust is enabled** (`beyondtrust_enabled`)
