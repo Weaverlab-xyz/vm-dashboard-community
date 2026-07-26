@@ -175,17 +175,35 @@ Set `node_token_secret` / `kubeconfig_secret` on both halves to route the token 
 kubeconfig through Password Safe instead of job output — the same pattern as
 `swarm/`, and the write side needs create rights on the safe.
 
-### Two things that will bite you otherwise
+### Running playbooks against the cluster you just built
 
-- **A `cloud=local` cluster can't be a Config Management target.** The runner gate
-  (`api/config_mgmt.py`) accepts only `aws`/`azure`/`gcp` for `target_kind="k8s"`, so
-  a registered on-prem cluster **cannot run the [`k8s/`](k8s/) sample playbooks
-  through the dashboard**, even though it registers and imports into Rancher fine.
+Once registered, a `cloud=local` cluster is a Config Management target like any other:
+pick it under **Kubernetes Clusters** and run the [`k8s/`](k8s/) samples against it.
+
+It runs differently from a cloud cluster, though, and the difference is the reason it
+works at all. An EKS/AKS/GKE run is dispatched to a transient runner *inside* that cloud,
+because the control plane is private to its VPC. Your on-prem cluster is the opposite
+case — an ECS task has no route to your LAN — so the run happens in a sibling container
+**on the dashboard host**, which is the only thing with line-of-sight. Two consequences:
+
+- The dashboard host needs a working `docker` CLI and network reach to the cluster's API
+  address. A dashboard deployed *in* a cloud has neither and will refuse the run with a
+  message saying so.
+- Local filesystem storage works fine for these runs. The "move it to S3 first" rule
+  exists because in-cloud runners can't read the dashboard's disk; the local runner is
+  the dashboard's disk.
+
+### One thing that will bite you otherwise
+
 - **The registered kubeconfig is stored and used verbatim, as standing cluster-admin.**
   The dashboard only rewrites *cloud* exec-auth kubeconfigs; anything else is used
   as-is. k3s's admin kubeconfig is a client certificate you can't revoke without
   re-issuing the cluster CA. For anything past a lab, mint a dedicated ServiceAccount
   with a scoped ClusterRole and register a kubeconfig built from its token.
+
+  This matters more now that the cluster is a Config Management target: that credential
+  is no longer just stored, it's what every playbook run authenticates with. Registering
+  cluster-admin means anyone who can start a run has cluster-admin.
 
 Importing into Rancher works — the agent dials *outbound*, so no inbound opening is
 needed — but the Rancher node's firewall only auto-whitelists clusters the dashboard

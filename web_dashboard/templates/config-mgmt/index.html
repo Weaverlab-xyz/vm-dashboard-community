@@ -823,8 +823,10 @@ function configMgmt() {
       const assetName = rest.join('|');
 
       // Kubernetes-cluster / cloud-database targets: a localhost play on the in-cloud
-      // runner. Send target_kind + target_id; the SSH-oriented fields don't apply, and
-      // connection material is injected server-side. Named secret_vars still apply.
+      // runner — or, for a cloud="local" cluster (on-prem), the dashboard's local
+      // runner; the server picks. Send target_kind + target_id; the SSH-oriented
+      // fields don't apply, and connection material is injected server-side. Named
+      // secret_vars still apply.
       if (this.targetKind !== 'vm') {
         const kind = this.targetKind;
         const target_id = this.form.target.slice(this.form.target.indexOf(':') + 1);

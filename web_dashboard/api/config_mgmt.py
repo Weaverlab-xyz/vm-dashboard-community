@@ -195,8 +195,9 @@ async def get_localhost_targets(
     the Config-Management page doesn't need the separate k8s / cloud_database feature
     permissions just to populate its picker.
 
-    Only aws/azure/gcp resources with a supported engine appear — the ones an in-cloud
-    Ansible runner can actually reach + configure.
+    Only resources an Ansible runner can actually reach + configure appear: aws/azure/gcp
+    (in-cloud runner), plus — for Kubernetes only — clusters registered with cloud="local",
+    which run on the dashboard's local runner. Databases stay cloud-only.
 
     Response shape:
         {"k8s": [{id, name, cloud, status}, …],
@@ -207,12 +208,12 @@ async def get_localhost_targets(
 
     clusters = []
     for c in db.query(K8sCluster).order_by(K8sCluster.created_at.desc()).all():
-        if (c.cloud or "").lower() in ("aws", "azure", "gcp"):
+        if (c.cloud or "").lower() in acr.K8S_TARGET_CLOUDS:
             clusters.append({"id": c.id, "name": c.name, "cloud": c.cloud,
                              "status": c.status})
     databases = []
     for d in db.query(CloudDatabase).order_by(CloudDatabase.created_at.desc()).all():
-        if (d.cloud or "").lower() in ("aws", "azure", "gcp") and d.engine in acr.ANSIBLE_DB_ENGINES:
+        if (d.cloud or "").lower() in acr.DB_TARGET_CLOUDS and d.engine in acr.ANSIBLE_DB_ENGINES:
             databases.append({"id": d.id, "engine": d.engine, "cloud": d.cloud,
                               "status": d.status})
     return {"k8s": clusters, "databases": databases}
@@ -872,8 +873,10 @@ async def _run_cloud_localhost(payload: "RunRequest", db, current_user):
 
     These are localhost plays that reach out via a kubeconfig / DB login vars, so
     the SSH-oriented request fields are ignored. Connection material is resolved
-    server-side at launch (never here, never stored on the job) and the run always
-    executes on the in-cloud transient runner (jobs_worker → ansible_cloud_run_service).
+    server-side at launch (never here, never stored on the job). The run executes on
+    the in-cloud transient runner, or — for a cloud="local" Kubernetes cluster, which
+    only this host can reach — the local sibling container (jobs_worker →
+    ansible_cloud_run_service.resolve_runner).
     Returns ``{job_id, status: "queued"}``; the client polls /api/jobs/{id}."""
     from ..services import (k8s_service, cloud_database_service,
                             ansible_cloud_run_service as acr)
@@ -914,19 +917,12 @@ async def _run_cloud_localhost(payload: "RunRequest", db, current_user):
                 detail="database has no endpoint yet — wait for provisioning to finish.")
         target_label = f"{engine}/{payload.target_id[:8]}"
 
-    if cloud not in ("aws", "azure", "gcp"):
-        raise HTTPException(
-            status_code=400,
-            detail=f"cloud {cloud!r} has no in-cloud Ansible runner (supported: aws/azure/gcp).")
-
-    # The cloud runner can't read the dashboard's local filesystem storage.
+    # Targetable cloud + reachable asset storage. Both conditions turn on where the
+    # runner executes, so they're resolved together in the service (unit-tested there).
     asset_backend = payload.asset_backend or storage_service.active_backend()
-    if asset_backend == "local":
-        raise HTTPException(
-            status_code=400,
-            detail=(f"Asset '{payload.asset}' lives on local filesystem storage, which the "
-                    f"in-cloud runner cannot reach. Move it to a cloud backend (S3 / Azure "
-                    f"Blob / GCS) on the Storage page, then re-run."))
+    problem = acr.check_target(kind, cloud, asset_backend, payload.asset)
+    if problem:
+        raise HTTPException(status_code=400, detail=problem)
 
     # Only operator-picked named secret_vars apply to a localhost play (no SSH key /
     # become / managed-account). Using one requires the secrets:use permission.
