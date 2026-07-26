@@ -40,6 +40,7 @@ whole set.
 | `app-secret.yaml` | Secret · Deployment | Secret-as-env (prefer ESO/Password Safe for real creds) |
 | `app-externalsecret.yaml` | ExternalSecret · Deployment | Secret synced from Password Safe via ESO (real-use counterpart to `app-secret.yaml`; needs the ESO add-on) |
 | `redis-statefulset.yaml` | StatefulSet · Service · PVC | Persistence via a `volumeClaimTemplate` |
+| `redis-eso-statefulset.yaml` | ExternalSecret · StatefulSet · Service · PVC | Password-protected Redis with `requirepass` synced from Password Safe via ESO (needs the ESO add-on) |
 | `cronjob-housekeeping.yaml` | CronJob | Scheduled one-shot task |
 | `namespace-guardrails.yaml` | ResourceQuota · LimitRange | Cap namespace usage; default container requests/limits |
 | `network-policy.yaml` | NetworkPolicy | Default-deny ingress + targeted allows |
@@ -53,10 +54,11 @@ whole set.
   rejects it — the samples double as a hardened-pod template.
 - **Some samples need a cluster add-on.** `nginx-ingress.yaml` needs an ingress
   controller, `nginx-hpa.yaml` needs metrics-server, `network-policy.yaml`
-  needs a policy-enforcing CNI, and `app-externalsecret.yaml` needs the External
-  Secrets Operator + `beyondtrust-store` ClusterSecretStore installed by the
-  dashboard's secret-delivery action (`POST /clusters/{id}/secret-delivery`,
-  kind `eso`; see [docs/kubernetes.md](../../docs/kubernetes.md)). Each file's
+  needs a policy-enforcing CNI, and `app-externalsecret.yaml` /
+  `redis-eso-statefulset.yaml` need the External Secrets Operator +
+  `beyondtrust-store` ClusterSecretStore installed by the dashboard's
+  secret-delivery action (`POST /clusters/{id}/secret-delivery`, kind `eso`; see
+  [docs/kubernetes.md](../../docs/kubernetes.md)). Each file's
   header comment calls out its prerequisite and what happens without it. Managed
   EKS/AKS/GKE clusters vary in what ships by default — check before relying on one.
 
