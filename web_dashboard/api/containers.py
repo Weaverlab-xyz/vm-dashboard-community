@@ -1060,10 +1060,19 @@ async def get_portainer_node_firewall(
 async def get_portainer_node_deploy_options(
     current_user: User = Depends(require_permission("containers", "read")),
 ):
-    """Deploy-form options for the Portainer node: the GCP regions it can be placed
-    in (the default plus every region with a configured subnet — the node's subnet is
-    regional). Mirrors /api/containers/rancher/pra-options' regions list."""
-    return {"regions": _portainer_deploy_regions()}
+    """Deploy-form options for the Portainer node: the GCP regions it can be placed in
+    (the default plus every region with a configured subnet — the node's subnet is
+    regional), plus the PRA pickers (Jump Groups, Jumpoints, Vault account groups;
+    best-effort). ``configured`` is false when PRA OAuth isn't set, so the form shows
+    a note instead of empty dropdowns. Same payload shape as
+    /api/containers/rancher/pra-options."""
+    from ..services import pra_api_service
+    pickers = await pra_api_service.list_pickers()
+    return {
+        "configured": pra_api_service.configured(),
+        "regions": _portainer_deploy_regions(),
+        **pickers,
+    }
 
 
 def _portainer_deploy_regions() -> list[str]:
@@ -1092,7 +1101,7 @@ async def deploy_portainer_node(
     if not _gcp_project_id():
         raise HTTPException(status_code=503, detail="GCP project not configured.")
     # Only carry fields the operator actually set, so blanks fall back to config.
-    meta: dict = {}
+    meta: dict = {"web_jump_enabled": bool(req.web_jump_enabled)}
     if req.region:
         if not region_catalog.validate("gcp", req.region):
             raise HTTPException(status_code=400, detail=f"Invalid GCP region: {req.region!r}")
@@ -1107,6 +1116,12 @@ async def deploy_portainer_node(
                 status_code=400,
                 detail=f"Zone {zone!r} is not in region {meta['region']!r}.")
         meta["zone"] = zone
+    if req.jump_group:
+        meta["jump_group"] = req.jump_group.strip()
+    if req.jumpoint_name:
+        meta["jumpoint_name"] = req.jumpoint_name.strip()
+    if req.vault_account_group_id:
+        meta["vault_account_group_id"] = int(req.vault_account_group_id)
     job = job_service.create_job(
         db, job_type="portainer_node_deploy", created_by=current_user.username, metadata=meta)
     return DeployContainerResponse(

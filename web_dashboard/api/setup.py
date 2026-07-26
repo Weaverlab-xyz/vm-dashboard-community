@@ -634,6 +634,14 @@ class PortainerFeatureConfig(BaseModel):
     gcp_portainer_boot_disk_gb: int = 20
     gcp_portainer_network_tag: str = "portainer"
     gcp_portainer_allow_open: bool = False     # open 0.0.0.0/0 when the CIDR list is empty (fail-open opt-in)
+    # Optional PRA Web Jump brokering the node's UI (chosen per-deploy on the form;
+    # these are the Settings-level defaults)
+    portainer_ui_web_jump_enabled: bool = False
+    portainer_ui_verify_certificate: bool = False
+    portainer_ui_jump_group: str = ""
+    portainer_ui_jumpoint_name: str = ""
+    portainer_ui_vault_account_group_id: str = ""
+    portainer_ui_jumpoint_cloud: str = "gcp"
 
 class AnsibleFeatureConfig(BaseModel):
     enabled: bool = False

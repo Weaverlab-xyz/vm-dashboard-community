@@ -255,3 +255,10 @@ class PortainerDeployRequest(BaseModel):
     # first available zone, with same-region capacity fallback).
     region: Optional[str] = None             # GCP region for the Portainer node
     zone: Optional[str] = None               # optional GCP zone within `region`
+    # Deploy-time PRA choices (parity with the Rancher node). All optional — omitted
+    # fields fall back to Settings/config. jump_group + jumpoint by NAME, vault
+    # account group by numeric id (the list_pickers() contract).
+    web_jump_enabled: bool = False           # broker the Portainer UI via a PRA Web Jump
+    jump_group: Optional[str] = None         # PRA Jump Group name
+    jumpoint_name: Optional[str] = None      # PRA Jumpoint name
+    vault_account_group_id: Optional[int] = None  # PRA Vault account group for the admin credential
