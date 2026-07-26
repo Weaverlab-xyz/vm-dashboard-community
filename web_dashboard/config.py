@@ -486,8 +486,6 @@ class Settings(BaseSettings):
     portainer_pat: str = ""                          # API token; Settings stores it encrypted in the DB
     portainer_pat_secret_title: str = "Portainer_PAT"  # legacy fallback: BeyondTrust Password Safe secret title
     portainer_verify_ssl: bool = True                # Set False for self-signed certs
-    portainer_agent_image: str = "portainer/agent:latest"
-    portainer_agent_port: int = 9001
     # Managed Portainer node (deploy/teardown lifecycle; see gcp_portainer_* below).
     # A successful deploy writes portainer_url / portainer_pat / portainer_verify_ssl
     # above, so the integration wires itself up. Read live via config_service.

@@ -242,7 +242,7 @@
                 </button>
               </template>
               <template x-if="runningPaths.has(vm.vmx_path) && vm.ip_address && !['Windows', 'FreeBSD'].some(os => (vm.os_type || '').includes(os)) && !['Kemp'].includes(vm.vm_name)">
-                <a :href="'/config-mgmt?portainer_ip=' + encodeURIComponent(vm.ip_address) + '&portainer_name=' + encodeURIComponent(vm.vm_name || '')"
+                <a :href="'/config-mgmt?linux_ip=' + encodeURIComponent(vm.ip_address) + '&linux_name=' + encodeURIComponent(vm.vm_name || '')"
                    class="inline-flex items-center gap-1 px-3 py-1.5 bg-purple-600 hover:bg-purple-700
                           text-white text-xs font-medium rounded-lg transition">
                   Config Linux

@@ -2,8 +2,8 @@
 
 Gated on ``k8s_management_enabled`` (feature-gate dependency). Phase 1
 registers/lists managed clusters via ``k8s_service`` and stores the kubeconfig
-as a backend reference; Phase 2 launches a management plane (Portainer-k8s) into
-a registered cluster. See docs/saas-kubernetes-management-plan.md.
+as a backend reference; Phase 2 launches a management plane (Rancher) into a
+registered cluster. See docs/saas-kubernetes-management-plan.md.
 
   GET    /api/k8s/__phase1__               — health check (router-mounted probe)
   GET    /api/k8s/clusters                 — list managed clusters
@@ -49,9 +49,9 @@ def phase1_status() -> dict:
         "note": (
             "Kubernetes management Phase 1 — register/list managed clusters + "
             "kubeconfig-as-reference. Phase 2 launches a management plane "
-            "(Portainer-k8s first, then Rancher), Phase 3 brokers access (native "
-            "PRA tunnel_type=k8s + Entitle-Rancher JIT), Phase 4 installs "
-            "in-cluster Password Safe secret delivery."
+            "(Rancher), Phase 3 brokers access (native PRA tunnel_type=k8s + "
+            "Entitle-Rancher JIT), Phase 4 installs in-cluster Password Safe "
+            "secret delivery."
         ),
     }
 
@@ -234,8 +234,8 @@ async def cluster_console(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("k8s", "read")),
 ):
-    """A link to the cluster's management console (Phase 3a). For Portainer-k8s,
-    the brokered Portainer endpoint view; for Rancher/Argo, the management URL."""
+    """A link to the cluster's management console (Phase 3a) — for Rancher, the
+    imported cluster's dashboard URL; for Argo/Headlamp, the management URL."""
     try:
         return k8s_service.console_url(db, cluster_id)
     except K8sError as e:
@@ -563,10 +563,11 @@ async def launch_management(
     current_user: User = Depends(require_permission("k8s", "write")),
 ):
     """Launch a management plane into the cluster (Phase 2). Async — enqueues a
-    ``k8s_management`` job the dedicated worker runs (applies the Portainer Agent via
-    a transient kubectl container, then registers it in the brokered Portainer
-    server). Returns 202 + job_id; poll the cluster status (deploying → managed /
-    failed), or open the job to see the error if it fails."""
+    ``k8s_management`` job the dedicated worker runs (imports the cluster into the
+    central Rancher server and stores the registration manifest). Returns 202 +
+    job_id; poll the cluster status (deploying → managed / failed), or open the job
+    to see the error if it fails. Valid kinds: see ``VALID_MGMT_KINDS`` — only
+    ``rancher`` is wired today."""
     try:
         k8s_service.get_cluster(db, cluster_id)   # 404 if unknown
     except K8sError as e:

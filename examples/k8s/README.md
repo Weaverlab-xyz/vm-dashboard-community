@@ -1,9 +1,9 @@
 # Sample Kubernetes manifests (managed-cluster starters)
 
 Ready-to-adapt manifests for the **EKS / AKS / GKE clusters the dashboard
-manages** — provision or register a cluster, install the Portainer management
-plane, and broker access via BeyondTrust PRA
-(see [docs/integrations/portainer.md](../../docs/integrations/portainer.md) and
+manages** — provision or register a cluster, import it into the Rancher
+management plane, and broker access via BeyondTrust PRA
+(see [docs/integrations/rancher.md](../../docs/integrations/rancher.md) and
 [docs/integrations/beyondtrust.md](../../docs/integrations/beyondtrust.md)).
 
 They are the Kubernetes counterpart to [`examples/compose/`](../compose/) and
@@ -19,8 +19,8 @@ jobs, and namespace guardrails.
 The dashboard doesn't apply raw manifests for you — you deploy them into a
 managed cluster through the access it brokers:
 
-1. **Portainer** (the management plane the dashboard installs) → your cluster's
-   environment → **Applications → Create from manifest**, paste a file, deploy.
+1. **Rancher** (the management plane the dashboard installs) → your imported
+   cluster → **Import YAML**, paste a file, deploy.
 2. **kubectl through the PRA tunnel** — open the brokered session to the cluster
    (Kubernetes jump), then `kubectl apply -f <file>` from your workstation.
 
