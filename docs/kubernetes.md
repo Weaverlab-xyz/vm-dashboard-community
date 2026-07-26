@@ -113,7 +113,8 @@ Kubernetes" row in [Cloud Sandbox](CLOUD_SANDBOX.md).
   (auth via the `pscli_*` OAuth client). This is the Kubernetes expression of the **Password
   Safe (Layer 2)** problem. Config: `eso_namespace` (`external-secrets`),
   `eso_bt_credentials_secret`, `eso_bt_clustersecretstore`, `eso_bt_api_url`,
-  `eso_bt_retrieval_type` (`SECRET`), `eso_bt_api_version` (`3.1`).
+  `eso_bt_retrieval_type` (`SECRET`), `eso_bt_api_version` (`3.1`). See the **Secret
+  delivery walkthrough** below for end-to-end usage with the `examples/k8s/` manifests.
 
 Cluster-API operations (`kubectl apply`, `helm`, secret reads) run as **transient runner
 Jobs** on the job worker — in-process by default (`k8s_runner=local`) or as a one-shot cloud
@@ -121,6 +122,42 @@ task (ECS / ACI / Cloud Run) using stock `dtzar/helm-kubectl:latest`. The cloud 
 side-step a TLS-inspecting corporate proxy rejecting direct kubectl to a private-CA API.
 Config: `k8s_runner` (`local|ecs|aci|gcp`), `k8s_runner_aws`/`_azure`/`_gcp`/`_oci`,
 `k8s_runner_image`.
+
+### Secret delivery walkthrough (ESO)
+
+Installing ESO only stands up the *plumbing* — the operator plus the
+`beyondtrust-store` ClusterSecretStore. Nothing syncs until a workload declares an
+`ExternalSecret` naming a Password Safe entry. End to end:
+
+1. **Install the plumbing (once per cluster).** Run the secret-delivery action —
+   `POST /clusters/{id}/secret-delivery` (kind `eso`), or the **Secrets** button on
+   the cluster. It Helm-installs ESO into `external-secrets` and applies the
+   BeyondTrust `ClusterSecretStore` (`beyondtrust-store`), authenticated with the
+   `pscli_*` OAuth client. (Prerequisite: Password Safe OAuth must be configured.)
+2. **Store the credential in Password Safe.** Create it in Secrets Safe (or a managed
+   account) and note its path — that becomes the `ExternalSecret`'s `remoteRef.key`.
+   The path format follows `eso_bt_retrieval_type`: `SECRET` → `folder/title`,
+   `MANAGED_ACCOUNT` → `system/account`.
+3. **Declare an `ExternalSecret`.** Apply a manifest referencing
+   `secretStoreRef: { kind: ClusterSecretStore, name: beyondtrust-store }` that maps
+   Password Safe entries → keys in a `target` Secret. ESO reconciles it and creates a
+   native Kubernetes `Secret` — no secret value ever lives in the manifest, only the
+   pointer.
+4. **Consume the Secret** from your Deployment/StatefulSet like any other Secret —
+   `secretKeyRef` for a single key, or `envFrom.secretRef` to load every key as an
+   env var.
+
+Ready-to-adapt starters in [`examples/k8s/`](../examples/k8s/):
+
+- [`app-externalsecret.yaml`](../examples/k8s/app-externalsecret.yaml) — the minimal
+  case: one key (`DB_PASSWORD`) → env via `secretKeyRef`.
+- [`app-db-externalsecret.yaml`](../examples/k8s/app-db-externalsecret.yaml) — a
+  multi-key connection bundle loaded wholesale with `envFrom.secretRef`.
+- [`redis-eso-statefulset.yaml`](../examples/k8s/redis-eso-statefulset.yaml) — a
+  stateful example: Redis `requirepass` sourced from Password Safe.
+
+(`app-secret.yaml` ships the inline-`Secret` anti-pattern these replace — a literal
+credential in the manifest, landing in git and etcd in clear text.)
 
 ---
 
