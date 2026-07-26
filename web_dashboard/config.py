@@ -488,6 +488,14 @@ class Settings(BaseSettings):
     portainer_verify_ssl: bool = True                # Set False for self-signed certs
     portainer_agent_image: str = "portainer/agent:latest"
     portainer_agent_port: int = 9001
+    # Managed Portainer node (deploy/teardown lifecycle; see gcp_portainer_* below).
+    # A successful deploy writes portainer_url / portainer_pat / portainer_verify_ssl
+    # above, so the integration wires itself up. Read live via config_service.
+    portainer_allowed_source_cidrs: str = ""   # CSV of manual firewall source ranges; empty = rely on the auto-detected dashboard egress CIDR (fail closed unless gcp_portainer_allow_open)
+    portainer_dashboard_egress_cidr: str = ""  # the dashboard's own public egress CIDR (auto-detected + persisted on deploy); the worker bootstraps the node over its public IP
+    portainer_admin_password: str = ""         # first-run admin password; auto-generated when unset
+    portainer_admin_password_generated: bool = False  # marks the password above as dashboard-generated (so it can be surfaced once)
+    portainer_ready_timeout_s: int = 300       # how long the deploy waits for Portainer to serve after the VM boots (cold image pull); raise for slow disks
     ansible_local_image: str = "chrweav/ansible-winrm:latest"
     # Ansible runner image for Kubernetes-cluster / cloud-database config-management
     # targets (localhost plays that reach out via kubeconfig / DB login vars). Carries
@@ -871,6 +879,18 @@ class Settings(BaseSettings):
     gcp_rancher_network_tag: str = "rancher"  # network tag on the VM = firewall target tag
     gcp_rancher_allow_open: bool = False  # opt-in to open 0.0.0.0/0 when rancher_allowed_source_cidrs is empty; otherwise empty = firewall NOT opened (fail closed)
     rancher_ready_timeout_s: int = 360    # how long the deploy waits for Rancher to serve after the VM boots (cold rancher/rancher pull + bootstrap); raise for slow disks/large images
+    # Managed Portainer CE server — a single (unprivileged) Portainer container on a
+    # Container-Optimized-OS GCE VM with a PUBLIC (source-restricted) IP. Same
+    # COS/konlet mechanism as the Rancher node above, and equally EPHEMERAL: the boot
+    # disk auto-deletes, so a teardown/recreate wipes /var/lib/portainer (users,
+    # environments, settings). Serves 9443 (HTTPS UI/API) + 8000 (Edge agent tunnel).
+    gcp_portainer_image: str = "portainer/portainer-ce:latest"  # Portainer server container image
+    gcp_portainer_machine_type: str = "e2-small"   # Portainer is light; e2-small is ample
+    gcp_portainer_zone: str = ""          # blank → gcp_zone / auto-picked in the region
+    gcp_portainer_name: str = "portainer-server"
+    gcp_portainer_boot_disk_gb: int = 20  # COS boot disk (holds /var/lib/portainer; auto-deletes on delete)
+    gcp_portainer_network_tag: str = "portainer"  # network tag on the VM = firewall target tag
+    gcp_portainer_allow_open: bool = False  # opt-in to open 0.0.0.0/0 when portainer_allowed_source_cidrs is empty; otherwise empty = firewall NOT opened (fail closed)
 
     # ── Oracle Cloud Infrastructure (OCI) ─────────────────────────────────────
     # The fourth cloud provider. Compute VM CRUD is SDK-based (the `oci` Python

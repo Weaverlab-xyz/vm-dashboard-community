@@ -1661,8 +1661,8 @@ def _is_zone_capacity_error(e) -> bool:
 
 
 def _rancher_candidate_zones(project_id: str, region: str, preferred_zone: str,
-                             creds, limit: int = 8) -> list:
-    """Ordered UP zones to try for the Rancher node, **within one region**.
+                             creds, limit: int = 8, *, log_label: str = "rancher") -> list:
+    """Ordered UP zones to try for a COS management node, **within one region**.
 
     The node's subnet is region-scoped, so we never cross regions here (unlike the
     image-export worker's :func:`_export_candidate_zones`, whose source image is
@@ -1685,7 +1685,7 @@ def _rancher_candidate_zones(project_id: str, region: str, preferred_zone: str,
                     if z.get("status") == "UP" and z.get("name")
                     and z["name"].rsplit("-", 1)[0] == region)
     except Exception as e:
-        logger.warning("rancher: could not enumerate zones (%s); no zone fallback", e)
+        logger.warning("%s: could not enumerate zones (%s); no zone fallback", log_label, e)
         return [pref] if pref else []
 
     ordered: list = []
@@ -1945,6 +1945,378 @@ async def list_gce_rancher(project_id: str) -> list[dict]:
         raise
     except Exception as e:
         raise GCPError(f"Failed to list GCE Rancher node instances: {e}") from e
+
+
+# ── Portainer CE server on COS-on-GCE ────────────────────────────────────────
+# The managed Portainer server runs as a single container on a COS GCE VM with a
+# PUBLIC (source-restricted) IP — the same konlet mechanism as the Rancher node
+# above, and the direct analogue of the documented docker install
+# (`docker run -d -p 9443:9443 -v portainer_data:/data portainer/portainer-ce`).
+# Unlike Rancher this container is NOT privileged: the server only talks to remote
+# Docker hosts over the API, so it needs neither the host Docker socket nor extra
+# capabilities. COS runs it on the HOST network, so 9443 (HTTPS UI) and 8000 (Edge
+# agent tunnel) bind on the VM and reachability is governed by the firewall.
+#
+# The node is EPHEMERAL like Rancher's: /data lives on the auto-delete boot disk,
+# so a teardown wipes users, endpoints and settings — a disposable-lab posture.
+
+_PORTAINER_LABEL = "portainer"
+
+# Host path backing the container's /data volume (Portainer's whole state dir).
+_PORTAINER_DATA_HOSTPATH = "/var/lib/portainer"
+
+
+def _portainer_container_spec_yaml(container_image: str) -> str:
+    """Generate the gce-container-declaration konlet YAML for the Portainer server.
+
+    No ``privileged`` and no Docker-socket mount — the managed server administers
+    REMOTE Docker hosts through the Portainer API, so it needs neither. ``/data`` is
+    bind-mounted to a host path on the boot disk so a container restart (COS re-runs
+    it on every boot) keeps state; a VM delete still discards it. No port block is
+    needed: COS runs the container on the host network, so Portainer binds host
+    9443/8000 directly (firewall-governed)."""
+    import yaml
+    spec = {
+        "spec": {
+            "containers": [{
+                "name": "portainer",
+                "image": container_image,
+                "volumeMounts": [{
+                    "name": "portainer-data",
+                    "mountPath": "/data",
+                    "readOnly": False,
+                }],
+                "stdin": False,
+                "tty": False,
+            }],
+            "volumes": [{
+                "name": "portainer-data",
+                "hostPath": {"path": _PORTAINER_DATA_HOSTPATH},
+            }],
+            "restartPolicy": "Always",
+        }
+    }
+    return yaml.safe_dump(spec, default_flow_style=False)
+
+
+def _ensure_portainer_firewall_sync(
+    project_id: str,
+    network: str,
+    tag: str,
+    source_cidrs: list[str],
+    name: str,
+) -> dict:
+    """Get-or-create/patch a source-restricted INGRESS firewall (tcp 9443/8000)
+    scoped to the Portainer VM's network ``tag``. Idempotent: patches source_ranges
+    on an existing rule so CIDR edits in Settings take effect on redeploy.
+
+    9443 is the HTTPS UI/API; 8000 is the Edge agent tunnel. The legacy plain-HTTP
+    9000 port is deliberately NOT opened.
+
+    Fail-closed: an EMPTY ``source_cidrs`` opens nothing — if a rule by this name
+    already exists it is DELETED (removing CIDRs closes the node). The caller
+    (portainer_node_service) decides whether an empty list means "closed" or
+    (with gcp_portainer_allow_open) ["0.0.0.0/0"]."""
+    _require_compute()
+    from google.cloud import compute_v1
+    from google.api_core.exceptions import NotFound
+
+    creds = _gcp_creds()
+    client = compute_v1.FirewallsClient(credentials=creds)
+
+    if not source_cidrs:
+        # Fail closed — ensure no rule is left open.
+        try:
+            op = client.delete(project=project_id, firewall=name)
+            op.result(timeout=60)
+            logger.warning("Portainer firewall '%s' deleted — no allowed source CIDRs "
+                           "(node is unreachable)", name)
+        except NotFound:
+            pass
+        return {"name": name, "opened": False}
+
+    fw = compute_v1.Firewall()
+    fw.name = name
+    fw.network = network if "/" in network else f"global/networks/{network or 'default'}"
+    fw.direction = "INGRESS"
+    fw.allowed = [compute_v1.Allowed(I_p_protocol="tcp", ports=["9443", "8000"])]
+    fw.source_ranges = list(source_cidrs)
+    fw.target_tags = [tag]
+
+    try:
+        client.get(project=project_id, firewall=name)
+        op = client.patch(project=project_id, firewall=name, firewall_resource=fw)
+        op.result(timeout=60)
+        created = False
+    except NotFound:
+        op = client.insert(project=project_id, firewall_resource=fw)
+        op.result(timeout=60)
+        created = True
+    logger.info("Portainer firewall '%s' %s (tcp 9443/8000, sources=%s, tag=%s)",
+                name, "created" if created else "updated", source_cidrs, tag)
+    return {"name": name, "opened": True, "created": created}
+
+
+def _delete_portainer_firewall_sync(project_id: str, name: str) -> None:
+    """Delete the Portainer ingress firewall rule (quiet no-op if absent)."""
+    _require_compute()
+    from google.cloud import compute_v1
+    from google.api_core.exceptions import NotFound
+    creds = _gcp_creds()
+    client = compute_v1.FirewallsClient(credentials=creds)
+    try:
+        op = client.delete(project=project_id, firewall=name)
+        op.result(timeout=60)
+    except NotFound:
+        pass
+
+
+def _portainer_url(external_ip: str) -> str:
+    """The HTTPS UI/API URL for a Portainer node (self-signed cert on :9443)."""
+    return f"https://{external_ip}:9443" if external_ip else ""
+
+
+def _run_gce_portainer_sync(
+    project_id: str,
+    zone: str,
+    name: str,
+    container_image: str,
+    network: str = "",
+    subnetwork: str = "",
+    machine_type: str = "e2-small",
+    boot_disk_gb: int = 20,
+    network_tag: str = "portainer",
+    cos_image_family: str = "cos-stable",
+    create_external_ip: bool = True,
+    region: str = "",
+) -> dict:
+    """Launch (or reuse) a COS GCE instance running the Portainer CE server.
+    Idempotent on existence: a RUNNING same-named VM is returned as-is; a stopped
+    one is started (COS re-runs the container on boot). Returns the public IP +
+    derived https URL so the caller can pin portainer_url and bootstrap.
+
+    ``zone`` may be blank — the launcher then auto-picks a valid zone in ``region``
+    (falling back to ``region_of(zone)`` when only a zone is given). On a fresh
+    launch it tries sibling zones in the same region on ``ZONE_RESOURCE_POOL_EXHAUSTED``
+    so a single capacity-exhausted zone doesn't fail the deploy."""
+    _require_compute()
+    from google.cloud import compute_v1
+    from google.api_core.exceptions import NotFound
+
+    creds = _gcp_creds()
+    client = compute_v1.InstancesClient(credentials=creds)
+    region = (region or (zone.rsplit("-", 1)[0] if zone else "")).strip()
+
+    # Reuse a LIVE node when an exact zone is known — a stopped VM has no Portainer
+    # listening, so start it and wait for RUNNING. (Skipped for a blank zone: a fresh
+    # launch has nothing to reuse, and the caller relocates an out-of-region node.)
+    if zone:
+        try:
+            existing = client.get(project=project_id, zone=zone, instance=name)
+            status = existing.status
+            if status != "RUNNING":
+                logger.info("GCE Portainer '%s' exists but status=%s — starting it", name, status)
+                try:
+                    start_op = client.start(project=project_id, zone=zone, instance=name)
+                    start_op.result(timeout=180)
+                    existing = client.get(project=project_id, zone=zone, instance=name)
+                    status = existing.status
+                except Exception as start_err:
+                    logger.warning("GCE Portainer '%s' start failed (status=%s): %s",
+                                   name, status, start_err)
+            external_ip = _external_ip_of(existing) if create_external_ip else ""
+            return {
+                "name": name, "zone": zone, "self_link": existing.self_link,
+                "status": status, "external_ip": external_ip,
+                "internal_ip": _internal_ip_of(existing),
+                "url": _portainer_url(external_ip), "reused": True,
+            }
+        except NotFound:
+            pass
+
+    candidate_zones = _rancher_candidate_zones(project_id, region, zone, creds,
+                                               log_label="portainer")
+    if not candidate_zones:
+        raise GCPError(
+            f"No available zone found in region '{region or '(unknown)'}' for the "
+            f"Portainer node — check the region has a configured subnet and UP zones.")
+
+    instance = compute_v1.Instance()
+    instance.name = name
+
+    # Boot disk from Container-Optimised OS. Ephemeral: auto_delete=True — a VM
+    # delete discards /var/lib/portainer (state), matching the disposable posture.
+    disk = compute_v1.AttachedDisk()
+    disk.boot = True
+    disk.auto_delete = True
+    disk.initialize_params = compute_v1.AttachedDiskInitializeParams()
+    disk.initialize_params.source_image = (
+        f"projects/cos-cloud/global/images/family/{cos_image_family}"
+    )
+    disk.initialize_params.disk_size_gb = boot_disk_gb
+    instance.disks = [disk]
+
+    nic = compute_v1.NetworkInterface()
+    # Bare names must be normalized to partial self-links (see the Rancher launcher).
+    # The subnet is region-scoped and every candidate zone shares one region, so
+    # this is computed once.
+    if subnetwork:
+        if "/" in subnetwork:
+            nic.subnetwork = subnetwork
+        else:
+            nic.subnetwork = f"projects/{project_id}/regions/{region}/subnetworks/{subnetwork}"
+    elif network:
+        nic.network = network if "/" in network else f"global/networks/{network}"
+    if create_external_ip:
+        nic.access_configs = [compute_v1.AccessConfig(
+            name="External NAT", type_="ONE_TO_ONE_NAT",
+        )]
+    instance.network_interfaces = [nic]
+
+    container_yaml = _portainer_container_spec_yaml(container_image)
+    instance.metadata = compute_v1.Metadata(items=[
+        compute_v1.Items(key="gce-container-declaration", value=container_yaml),
+        compute_v1.Items(key="google-logging-enabled", value="true"),
+    ])
+    instance.labels = {"managed-by": "vm-dashboard", "purpose": _PORTAINER_LABEL}
+    instance.tags = compute_v1.Tags(items=[network_tag])
+
+    # Insert into the first candidate zone with capacity; on
+    # ZONE_RESOURCE_POOL_EXHAUSTED fall through to the region's sibling zones.
+    launch_zone = ""
+    last_err = None
+    for cand in candidate_zones:
+        instance.machine_type = f"zones/{cand}/machineTypes/{machine_type}"
+        logger.info("Starting GCE COS Portainer '%s' in %s (image=%s, machine=%s)",
+                    name, cand, container_image, machine_type)
+        try:
+            op = client.insert(project=project_id, zone=cand, instance_resource=instance)
+            op.result(timeout=300)
+            launch_zone = cand
+            break
+        except Exception as e:
+            if _is_zone_capacity_error(e) and cand != candidate_zones[-1]:
+                logger.warning("Portainer zone %s is out of capacity (%s) — trying the "
+                               "next zone in %s", cand, e, region)
+                last_err = e
+                continue
+            raise
+    if not launch_zone:
+        raise GCPError(f"Failed to launch Portainer node in region '{region}': {last_err}")
+
+    info = client.get(project=project_id, zone=launch_zone, instance=name)
+    external_ip = _external_ip_of(info) if create_external_ip else ""
+    return {
+        "name": name, "zone": launch_zone, "self_link": info.self_link,
+        "status": info.status, "external_ip": external_ip,
+        "internal_ip": _internal_ip_of(info),
+        "url": _portainer_url(external_ip), "reused": False,
+    }
+
+
+async def run_gce_portainer(
+    project_id: str,
+    zone: str,
+    name: str,
+    container_image: str,
+    network: str = "",
+    subnetwork: str = "",
+    machine_type: str = "e2-small",
+    boot_disk_gb: int = 20,
+    network_tag: str = "portainer",
+    create_external_ip: bool = True,
+    region: str = "",
+) -> dict:
+    """Async wrapper for _run_gce_portainer_sync."""
+    try:
+        return await asyncio.to_thread(
+            _run_gce_portainer_sync,
+            project_id, zone, name, container_image,
+            network, subnetwork, machine_type, boot_disk_gb, network_tag,
+            "cos-stable", create_external_ip, region,
+        )
+    except GCPError:
+        raise
+    except Exception as e:
+        raise GCPError(f"Failed to start GCE Portainer node '{name}': {e}") from e
+
+
+async def ensure_portainer_firewall(project_id: str, network: str, tag: str,
+                                    source_cidrs: list[str], name: str) -> dict:
+    """Async wrapper for _ensure_portainer_firewall_sync."""
+    try:
+        return await asyncio.to_thread(
+            _ensure_portainer_firewall_sync, project_id, network, tag, source_cidrs, name)
+    except GCPError:
+        raise
+    except Exception as e:
+        raise GCPError(f"Failed to configure Portainer firewall '{name}': {e}") from e
+
+
+async def stop_gce_portainer(project_id: str, zone: str, name: str, *,
+                             delete_firewall: bool = False, firewall_name: str = "") -> None:
+    """Delete the Portainer node VM (quiet no-op if absent). Optionally delete its
+    ingress firewall rule too."""
+    try:
+        await asyncio.to_thread(_terminate_instance_sync, project_id, zone, name)
+    except Exception as e:
+        msg = str(e)
+        if not ("404" in msg or "not found" in msg.lower()):
+            raise GCPError(f"Failed to stop GCE Portainer node '{name}': {e}") from e
+    if delete_firewall and firewall_name:
+        try:
+            await asyncio.to_thread(_delete_portainer_firewall_sync, project_id, firewall_name)
+        except Exception as e:
+            logger.warning("Portainer firewall '%s' delete failed (continuing): %s",
+                           firewall_name, e)
+
+
+def _list_gce_portainer_sync(project_id: str) -> list[dict]:
+    """List Portainer server COS instances across zones (labels.purpose=portainer)."""
+    _require_compute()
+    from google.cloud import compute_v1
+
+    creds = _gcp_creds()
+    client = compute_v1.InstancesClient(credentials=creds)
+    request = compute_v1.AggregatedListInstancesRequest(
+        project=project_id,
+        filter=f'labels.purpose = "{_PORTAINER_LABEL}"',
+    )
+    results = []
+    for zone_path, scoped in client.aggregated_list(request=request):
+        for inst in (scoped.instances or []):
+            labels = dict(inst.labels) if inst.labels else {}
+            if labels.get("purpose") != _PORTAINER_LABEL:
+                continue
+            internal_ip = ""
+            external_ip = ""
+            for nic in inst.network_interfaces:
+                internal_ip = nic.network_i_p or internal_ip
+                for ac in nic.access_configs:
+                    if ac.nat_i_p:
+                        external_ip = ac.nat_i_p
+            results.append({
+                "name":         inst.name,
+                "zone":         zone_path.split("/")[-1],
+                "status":       inst.status,
+                "machine_type": inst.machine_type.split("/")[-1] if inst.machine_type else "",
+                "image":        _container_image_from_metadata(inst),
+                "internal_ip":  internal_ip,
+                "external_ip":  external_ip,
+                "url":          _portainer_url(external_ip),
+                "created_at":   inst.creation_timestamp or "",
+            })
+    return results
+
+
+async def list_gce_portainer(project_id: str) -> list[dict]:
+    """List the managed Portainer server container instances (COS on GCE)."""
+    try:
+        return await asyncio.to_thread(_list_gce_portainer_sync, project_id)
+    except GCPError:
+        raise
+    except Exception as e:
+        raise GCPError(f"Failed to list GCE Portainer node instances: {e}") from e
 
 
 # ── Cloud Run Jobs Ansible runner (mirrors ACI runner in azure_service.py) ───
