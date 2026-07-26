@@ -11,8 +11,8 @@
       <p class="text-sm text-gray-500 mt-1">Manage Docker containers and cloud workloads</p>
     </div>
     <div class="flex items-center gap-2 flex-wrap">
-      <!-- Show all / running only toggle (on-prem only) -->
-      <label x-show="activeTab === 'onprem'"
+      <!-- Show all / running only toggle (Portainer tab only) -->
+      <label x-show="activeTab === 'portainer'"
              class="flex items-center gap-1.5 text-sm text-gray-600 cursor-pointer">
         <input type="checkbox" x-model="showAll" @change="loadContainers()"
                class="rounded text-blue-600 focus:ring-blue-500">
@@ -25,7 +25,7 @@
     </div>
   </div>
 
-  <!-- ── Top-level tabs: Cloud | On-Premises ───────────────────────────── -->
+  <!-- ── Top-level tabs: Cloud | Portainer | Kubernetes (Rancher) ──────── -->
   <div class="mb-6 border-b border-gray-200">
     <nav class="flex gap-1 -mb-px">
       <button @click="activeTab = 'cloud'"
@@ -36,12 +36,12 @@
         Cloud
       </button>
       {% if portainer_enabled %}
-      <button @click="activeTab = 'onprem'"
-              :class="activeTab === 'onprem'
+      <button @click="activeTab = 'portainer'"
+              :class="activeTab === 'portainer'
                 ? 'border-b-2 border-blue-600 text-blue-600 font-semibold'
                 : 'border-b-2 border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'"
               class="px-4 py-2 text-sm transition whitespace-nowrap">
-        On-Premises
+        Portainer
       </button>
       {% endif %}
       {% if k8s_management_enabled %}
@@ -57,23 +57,23 @@
   </div>
 
 
-  <!-- ── Indeterminate progress bar (any on-prem loading) ────────────────── -->
-  <div x-show="activeTab === 'onprem' && (endpointsLoading || loading)" x-cloak
+  <!-- ── Indeterminate progress bar (any Portainer loading) ─────────────── -->
+  <div x-show="activeTab === 'portainer' && (endpointsLoading || loading)" x-cloak
        class="fixed top-0 left-0 right-0 z-50 h-0.5 bg-gray-200 overflow-hidden">
     <div class="h-full bg-blue-500 animate-[loading-bar_1.4s_ease-in-out_infinite]"
          style="width: 40%"></div>
   </div>
 
   <!-- ══════════════════════════════════════════════════════════════════════ -->
-  <!-- ON-PREMISES PANEL                                                     -->
+  <!-- PORTAINER PANEL                                                       -->
   <!-- ══════════════════════════════════════════════════════════════════════ -->
-  <div x-show="activeTab === 'onprem'">
+  <div x-show="activeTab === 'portainer'">
 
     {% if portainer_enabled %}
     <!-- ── Managed Portainer server (Portainer CE container on GCE COS) ──── -->
     <!-- Jinja-gated as well as Alpine-hidden: with the feature off the deploy
-         surface must not render at all, even though the surrounding on-prem panel
-         can still be reached via the #onprem hash. -->
+         surface must not render at all, even though the surrounding Portainer
+         panel can still be reached via the #portainer hash. -->
     <div class="mb-6">
       <div class="flex items-center justify-between mb-3">
         <div>
@@ -245,9 +245,9 @@
       </svg>
       <p class="text-base font-semibold text-gray-800 mb-1">Portainer is not configured</p>
       <p class="text-sm text-gray-500 max-w-md mx-auto mb-4">
-        Manage on-prem Docker containers from this page by either deploying a managed
-        Portainer CE server above, or connecting one you already run — set its URL and API
-        token in <span class="font-medium text-gray-700">Settings → Integrations → Portainer CE</span>.
+        Manage Docker hosts — cloud or on-prem — from this page by either deploying a
+        managed Portainer CE server above, or connecting one you already run — set its URL
+        and API token in <span class="font-medium text-gray-700">Settings → Integrations → Portainer CE</span>.
       </p>
       <div class="flex items-center justify-center gap-2">
         {% if portainer_enabled %}
@@ -428,7 +428,7 @@
       </div>
     </div>
 
-  </div><!-- /On-Premises panel -->
+  </div><!-- /Portainer panel -->
 
 
   <!-- ══════════════════════════════════════════════════════════════════════ -->
@@ -1292,8 +1292,8 @@
 <script>
 function containersDashboard() {
   return {
-    // Top-level tab — Cloud is the primary view; On-Premises needs Portainer
-    activeTab: 'cloud',  // 'cloud' | 'onprem'
+    // Top-level tab — Cloud is the primary view; the Portainer tab needs Portainer
+    activeTab: 'cloud',  // 'cloud' | 'portainer' | 'rancher'
 
     // Portainer state
     endpoints: [],
@@ -1420,8 +1420,11 @@ function containersDashboard() {
     async init() {
       requireAuth();
       const hash = window.location.hash.slice(1);
-      if (['onprem', 'cloud', 'rancher'].includes(hash)) {
-        this.activeTab = hash;
+      // 'onprem' is this tab's former id — kept as an alias so older links and
+      // bookmarks still land on the Portainer tab.
+      const tab = hash === 'onprem' ? 'portainer' : hash;
+      if (['portainer', 'cloud', 'rancher'].includes(tab)) {
+        this.activeTab = tab;
       }
       const tasks = [
         this.loadEcsTasks(),
@@ -1441,7 +1444,7 @@ function containersDashboard() {
     },
 
     async refresh() {
-      if (this.activeTab === 'onprem') {
+      if (this.activeTab === 'portainer') {
         await this.loadEndpoints();
         if (this.selectedEndpointId) {
           await Promise.all([this.loadContainers(), this.loadStacks()]);

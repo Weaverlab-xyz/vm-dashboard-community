@@ -44,7 +44,8 @@ def _install_config_stub():
 
 _install_config_stub()
 try:
-    from web_dashboard.api.setup import _read_feature, AnsibleFeatureConfig
+    from web_dashboard.api.setup import (_read_feature, AnsibleFeatureConfig,
+                                         PortainerFeatureConfig)
 except Exception as exc:  # pragma: no cover — skip if fastapi/pydantic/app deps missing
     try:
         import pytest
@@ -96,8 +97,43 @@ def test_per_cloud_runner_image_keys_round_trip():
         CONF.clear()
 
 
+def test_portainer_managed_node_fields_round_trip():
+    """The Portainer panel grew managed-node deploy knobs, including two int fields
+    (ready timeout, boot disk). An all-unset read must return real ints — not "" —
+    and re-validate, or saving the panel 422s the same way the ansible one did."""
+    CONF.clear()
+    data = _read_feature("portainer", PortainerFeatureConfig)
+    assert data["portainer_ready_timeout_s"] == 300
+    assert data["gcp_portainer_boot_disk_gb"] == 20
+    assert isinstance(data["portainer_ready_timeout_s"], int)
+    assert isinstance(data["gcp_portainer_boot_disk_gb"], int)
+    # Bools must be real bools (an unset bool would otherwise render the toggle wrong).
+    assert data["gcp_portainer_allow_open"] is False
+    # String fields are NOT coerced to the model default — an unset one reads back as
+    # "". That's fine here because portainer_node_service resolves every string knob as
+    # `config_service.get(k) or settings.k`, so a blank config value falls through to
+    # the settings default rather than deploying with an empty image/name.
+    assert data["gcp_portainer_image"] == ""
+    # patch_feature_config does exactly this on save — it must not raise.
+    PortainerFeatureConfig(**data)
+
+
+def test_portainer_set_int_is_preserved():
+    """A configured int survives the GET->PATCH cycle as that int."""
+    CONF.clear()
+    CONF["portainer_ready_timeout_s"] = "600"
+    try:
+        data = _read_feature("portainer", PortainerFeatureConfig)
+        assert data["portainer_ready_timeout_s"] == 600
+        PortainerFeatureConfig(**data)
+    finally:
+        CONF.clear()
+
+
 if __name__ == "__main__":
     test_unset_int_fields_round_trip()
     test_set_int_field_is_preserved()
     test_per_cloud_runner_image_keys_round_trip()
+    test_portainer_managed_node_fields_round_trip()
+    test_portainer_set_int_is_preserved()
     print("ok")

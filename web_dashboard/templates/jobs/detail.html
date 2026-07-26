@@ -150,12 +150,11 @@
     // Config management
     ansible_run:               { href: '/config-mgmt', label: 'Configuration' },
     ansible_local:             { href: '/config-mgmt', label: 'Configuration' },
-    portainer_agent_install:   { href: '/config-mgmt', label: 'Configuration' },
     // Containers
     container_deploy:         { href: '/containers', label: 'Containers' },
     stack_deploy:             { href: '/containers', label: 'Containers' },
-    portainer_node_deploy:    { href: '/containers#onprem', label: 'Containers' },
-    portainer_node_teardown:  { href: '/containers#onprem', label: 'Containers' },
+    portainer_node_deploy:    { href: '/containers#portainer', label: 'Containers' },
+    portainer_node_teardown:  { href: '/containers#portainer', label: 'Containers' },
     // Hypervisors
     nutanix_deploy:        { href: '/nutanix', label: 'Nutanix' },
     nutanix_import_image:  { href: '/nutanix', label: 'Nutanix' },

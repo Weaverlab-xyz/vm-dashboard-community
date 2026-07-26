@@ -16,8 +16,8 @@ dashboard runs across AWS, Azure, and GCP.
 > tunnel, Password Safe onboarding, or Entitle registration for it. This doc is about
 > *provisioning* container workloads and *monitoring* the dashboard's container fleet.
 
-Related surfaces on the same page live in their own docs: the **On-Premises** tab
-(Portainer) → [Portainer integration](integrations/portainer.md); the **Kubernetes
+Related surfaces on the same page live in their own docs: the **Portainer** tab
+→ [Portainer integration](integrations/portainer.md); the **Kubernetes
 (Rancher)** tab → [Kubernetes](kubernetes.md) and [Rancher integration](integrations/rancher.md).
 Note the **"Containers" nav link is gated on `portainer_enabled`** (default on) even though
 the Cloud tab works regardless — a cloud-only operator who disables Portainer reaches it via

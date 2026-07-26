@@ -6,8 +6,8 @@ privileged access on top — the same **provisioning + stacked layers** model as
 
 - **Provision / register** *(stand it up)* — Terraform-build a new cluster, or register an
   existing/local one from a kubeconfig.
-- **Management plane** — import the cluster into central **Rancher**, or install the
-  **Portainer** agent; optionally install **External Secrets Operator** for secret delivery.
+- **Management plane** — import the cluster into central **Rancher**; optionally install
+  **External Secrets Operator** for secret delivery.
 - **Access & identity** — the PAM story for clusters: **PRA tunnels** *(Layer 1 — reach it)*,
   **ESO / PRA vault token** *(Layer 2 — secrets)*, and **Entitle k8s JIT + Entra→RBAC
   federation** *(Layer 3 — time-boxed access)*.
@@ -105,9 +105,6 @@ Kubernetes" row in [Cloud Sandbox](CLOUD_SANDBOX.md).
   (Rancher)**. Every managed cluster is **imported** — `cattle-cluster-agent` dials *out* to
   the node's public, source-restricted URL, so private clusters on any cloud/on-prem work with
   no inbound opening. Full setup + config table: [Rancher integration](integrations/rancher.md).
-- **Portainer agent** — `POST /clusters/{id}/management` (kind `portainer`) applies the
-  Portainer Agent via a transient kubectl container and registers it in the brokered Portainer
-  server. See [Portainer integration](integrations/portainer.md).
 - **External Secrets Operator (ESO)** — `POST /clusters/{id}/secret-delivery` Helm-installs
   ESO + a BeyondTrust `ClusterSecretStore` that syncs **Password Safe → Kubernetes Secrets**
   (auth via the `pscli_*` OAuth client). This is the Kubernetes expression of the **Password

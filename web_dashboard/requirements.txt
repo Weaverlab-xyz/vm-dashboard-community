@@ -107,7 +107,7 @@ pywinrm>=0.4.3
 # Required by Azure SDK async clients (azure-mgmt-automation.aio, azure-identity.aio)
 aiohttp>=3.9.0
 
-# SSH client (direct VM access, Portainer agent install)
+# SSH client (direct VM access)
 # asyncssh is used instead of paramiko because paramiko 3+ dropped DSA key support,
 # and BeyondTrust Password Safe releases DSS private keys for managed SSH accounts.
 asyncssh>=2.14.0
