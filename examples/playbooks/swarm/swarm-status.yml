@@ -1,0 +1,73 @@
+# Read-only smoke test for a Docker Swarm node
+# Target: any swarm node. Reports this host's role and state; on a manager it also
+# lists the nodes, services and stacks. Changes nothing.
+#
+# Run this first to confirm a cluster is healthy, and after swarm-join.yml to check a
+# node actually arrived.
+#
+# extra_vars: none
+- name: Report Docker Swarm status
+  hosts: all
+  become: true
+  tasks:
+    - name: Detect swarm state
+      ansible.builtin.command: docker info --format '{% raw %}{{.Swarm.LocalNodeState}}{% endraw %}'
+      register: swarm_state
+      changed_when: false
+
+    - name: Report a node that is not in a swarm
+      ansible.builtin.debug:
+        msg: >-
+          This host is not part of a swarm (state '{{ swarm_state.stdout }}').
+          Run swarm-init.yml to start one, or swarm-join.yml to join an existing one.
+      when: swarm_state.stdout != "active"
+
+    - name: Detect whether this node is a manager
+      ansible.builtin.command: docker info --format '{% raw %}{{.Swarm.ControlAvailable}}{% endraw %}'
+      register: is_manager
+      changed_when: false
+      when: swarm_state.stdout == "active"
+
+    - name: Report this node's role
+      ansible.builtin.debug:
+        msg: >-
+          Swarm state '{{ swarm_state.stdout }}' —
+          this node is a {{ 'MANAGER' if is_manager.stdout == 'true' else 'WORKER' }}.
+      when: swarm_state.stdout == "active"
+
+    # ── Manager-only views ───────────────────────────────────────────────────
+    # `docker node ls` / `stack ls` only work on a manager; a worker would error.
+    - name: List swarm nodes
+      ansible.builtin.command: docker node ls
+      register: node_ls
+      changed_when: false
+      when:
+        - swarm_state.stdout == "active"
+        - is_manager.stdout == "true"
+
+    - name: List services
+      ansible.builtin.command: docker service ls
+      register: service_ls
+      changed_when: false
+      when:
+        - swarm_state.stdout == "active"
+        - is_manager.stdout == "true"
+
+    - name: List stacks
+      ansible.builtin.command: docker stack ls
+      register: stack_ls
+      changed_when: false
+      when:
+        - swarm_state.stdout == "active"
+        - is_manager.stdout == "true"
+
+    - name: Cluster overview
+      ansible.builtin.debug:
+        msg:
+          - "── nodes ──"
+          - "{{ node_ls.stdout_lines | default(['(not a manager)']) }}"
+          - "── services ──"
+          - "{{ service_ls.stdout_lines | default(['(not a manager)']) }}"
+          - "── stacks ──"
+          - "{{ stack_ls.stdout_lines | default(['(not a manager)']) }}"
+      when: swarm_state.stdout == "active"

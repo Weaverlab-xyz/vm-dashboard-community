@@ -78,6 +78,69 @@ as the per-cloud user with the key the dashboard injected at deploy) or the loca
 | `node-exporter.yml` | Install Prometheus node_exporter as a systemd unit (:9100) |
 | `nginx-web.yml` | Install + enable nginx, serve a sample page (:80) |
 
+## Docker Swarm (`swarm/`)
+
+`hosts: all`, `become: true` plays that stand up and operate a Swarm on **on-prem
+Linux hosts** — Swarm's natural home. Prerequisite: Docker, via
+[`linux/install-docker.yml`](linux/install-docker.yml).
+
+| File | Purpose |
+|---|---|
+| `swarm-init.yml` | Initialise a manager; prints the worker + manager join commands |
+| `swarm-join.yml` | Join a node as worker (default) or manager |
+| `swarm-open-ports.yml` | Open 2377/tcp, 7946/tcp+udp, 4789/udp (firewalld or ufw) |
+| `swarm-stack-deploy.yml` | `docker stack deploy` a compose file on a manager |
+| `swarm-status.yml` | Read-only — node role, and on a manager the nodes/services/stacks |
+| `swarm-leave.yml` | Remove a node from the swarm (guarded; `confirm: true` required) |
+
+### Bootstrapping a cluster
+
+Config Management runs against **one target per run**, so a cluster is built one node
+at a time with the join token relayed between runs:
+
+1. `swarm-open-ports.yml` on every node (skip if your network already allows it).
+2. `swarm-init.yml` on the first manager → its output contains `manager_addr` and
+   `join_token`.
+3. `swarm-join.yml` on each remaining node, passing those two as extra vars
+   (`join_role: manager` for additional managers, using the manager token).
+4. `swarm-status.yml` on the manager to confirm everyone arrived.
+
+**Use the local runner.** Cloud runners don't forward plaintext extra vars, and the
+relay depends on them.
+
+### Keeping the token out of job output
+
+Set `join_token_secret` on **both** halves and the token is never printed anywhere:
+
+```
+swarm-init.yml   join_token_secret: infra/swarm-worker-token   # writes it
+swarm-join.yml   join_token_secret: infra/swarm-worker-token   # reads it back
+```
+
+`swarm-init.yml` stores the token with `beyondtrust.secrets_safe.secrets_create` and
+prints only the path; `swarm-join.yml` fetches it with the lookup. Both use the
+auto-injected `PASSWORD_SAFE_*` credentials, so there's nothing extra to configure —
+but the **write side needs create rights** on `token_safe` (default `Automation`),
+which is more than the read scope the other samples need, and the safe and folder must
+already exist ([`password-safe/onboard-safe-and-account.yml`](password-safe/onboard-safe-and-account.yml)
+creates them).
+
+Three things worth knowing:
+
+- **Without those paths set, the join token is printed** by `swarm-init.yml` —
+  deliberately, since the relay needs you to read it. Anyone who can see the job and
+  reach `:2377` can then join the swarm, so rotate it when you're done
+  (`docker swarm join-token --rotate worker`) or use the Password Safe route above.
+- **These drive the `docker` CLI, not `community.docker`.** That collection isn't in
+  the runner image's documented set, and its modules would additionally need the
+  Docker SDK for Python on every target, which `install-docker.yml` doesn't install.
+  Idempotency is hand-rolled off a `docker info` state probe and pinned by
+  `tests/test_playbook_swarm.py`.
+- **Swarm honours the compose `deploy:` block** — `replicas`, `placement`,
+  `update_config` — so the [`examples/compose/`](../compose/) files work here and can
+  be extended with them. That's the opposite of the dashboard's *cloud* compose deploy
+  (Containers → Cloud), which targets ECS/ACI/GCE and rejects those keys outright.
+
 ## Windows (`windows/`)
 
 WinRM playbooks using `ansible.windows` / `community.windows`. The static

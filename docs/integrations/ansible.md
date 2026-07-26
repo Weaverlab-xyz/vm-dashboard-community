@@ -816,7 +816,13 @@ Ready-to-adapt starters for Linux and Windows cloud VMs live in
 admin-user creation, Docker, node_exporter, nginx (Linux); Windows updates,
 firewall, Chocolatey, local admin, and IIS (Windows). See
 [examples/playbooks/README.md](../../examples/playbooks/README.md) for how to run
-each. **Linux** samples run via the cloud or local runner; **Windows** (WinRM)
+each. There is also a **Docker Swarm** set
+([`examples/playbooks/swarm/`](../../examples/playbooks/swarm/)) — init, join, open
+ports, stack deploy, status, leave — for on-prem hosts; because a run targets one host
+at a time, a cluster is built node-by-node with the join token relayed between runs,
+so those need the **local runner** (see that README for the walkthrough and the
+token-visibility caveat). **Linux** samples run via the cloud or local runner;
+**Windows** (WinRM)
 samples run via the **local runner**, which forwards the `ansible_password` extra
 var the WinRM connection needs (the cloud runner is SSH-only and doesn't forward
 extra vars).

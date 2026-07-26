@@ -128,9 +128,10 @@ def test_api_version_and_decrypt_flags():
 
 
 def test_no_playbook_templates_a_secret_without_no_log():
-    """Any task interpolating a *_password / *_pat variable into a module must
-    no_log. Catches the class of bug fixed alongside the lookup rollout."""
-    pat = re.compile(r"\{\{\s*_?[a-z_]*(password|pat)\b")
+    """Any task interpolating a *_password / *_pat / *_token variable into a module
+    must no_log. Catches the class of bug fixed alongside the lookup rollout, and the
+    swarm join/store tasks that carry a cluster join token."""
+    pat = re.compile(r"\{\{\s*_?[a-z_]*(password|pat|token)\b")
     offenders = []
     for path in _PLAYBOOKS:
         for play in (yaml.safe_load(open(path).read()) or []):
