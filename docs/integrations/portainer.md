@@ -67,7 +67,7 @@ with a public, source-restricted IP (the konlet mechanism, same as the Rancher n
 
 ### Deploy
 
-1. Open **Containers → On-Premises**. The **Managed Portainer server** panel is at
+1. Open **Containers → Portainer**. The **Managed Portainer server** panel is at
    the top.
 2. Optionally pick a **Region** and **Zone**. Blank region keeps the node's current
    region (or the configured default); blank zone auto-picks the region's first
