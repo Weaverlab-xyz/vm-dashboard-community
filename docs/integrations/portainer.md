@@ -190,6 +190,21 @@ list loads.
 
 ---
 
+## Automating Portainer with Ansible
+
+Config Management ships localhost playbooks that drive the Portainer API — see
+[`examples/playbooks/portainer/`](../../examples/playbooks/portainer/): list
+environments, create-or-update a compose stack, remove one, and prune a Docker host.
+
+They need no per-run setup: whenever a Portainer server is configured (typed in below,
+or written by a managed-node deploy) the dashboard injects `PORTAINER_URL`,
+`PORTAINER_PAT` and `PORTAINER_VERIFY_SSL` into the Ansible runner as environment
+variables — the same channel that carries the `PASSWORD_SAFE_*` credentials. The token
+is added to the run's scrub set, so it can't leak into job output.
+
+Because they're `hosts: localhost` plays that reach out over HTTPS, the target you pick
+on the run form is irrelevant — nothing is installed on it.
+
 ## Configuration reference
 
 | Key | Default | Purpose |

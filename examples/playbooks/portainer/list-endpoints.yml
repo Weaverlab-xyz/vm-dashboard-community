@@ -1,0 +1,57 @@
+# Read-only smoke test: list the environments (Docker hosts) your Portainer server
+# manages, with their online/offline status.
+#
+# Target: any target — this is a `hosts: localhost` play that reaches OUT to the
+# Portainer REST API. Nothing is installed on the target.
+#
+# Connection is auto-injected when Portainer is configured (Settings → Integrations →
+# Portainer CE, or a managed-node deploy): PORTAINER_URL / PORTAINER_PAT /
+# PORTAINER_VERIFY_SSL arrive as environment variables, so you supply nothing. To
+# point at a DIFFERENT server, override portainer_url / portainer_pat as extra vars.
+#
+# extra_vars (all optional):
+#   portainer_url: https://1.2.3.4:9443
+#   portainer_pat: <api token>
+- name: List Portainer environments
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    portainer_url: "{{ lookup('ansible.builtin.env', 'PORTAINER_URL') }}"
+    portainer_pat: "{{ lookup('ansible.builtin.env', 'PORTAINER_PAT') }}"
+    # A dashboard-deployed node serves a self-signed cert on :9443, so the deploy
+    # turns verification off. Honour that rather than hard-coding `true`.
+    portainer_verify_ssl: "{{ lookup('ansible.builtin.env', 'PORTAINER_VERIFY_SSL') | default('1', true) }}"
+  tasks:
+    - name: Validate connection
+      ansible.builtin.assert:
+        that:
+          - portainer_url | length > 0
+          - portainer_pat | length > 0
+        fail_msg: >-
+          No Portainer connection. Configure one in Settings → Integrations → Portainer CE
+          (or deploy a managed server), or pass portainer_url / portainer_pat as extra vars.
+
+    - name: GET /api/endpoints
+      ansible.builtin.uri:
+        url: "{{ portainer_url | regex_replace('/$', '') }}/api/endpoints"
+        method: GET
+        headers:
+          X-API-Key: "{{ portainer_pat }}"
+        validate_certs: "{{ portainer_verify_ssl | bool }}"
+        return_content: true
+        status_code: 200
+      register: endpoints
+
+    - name: Show environments
+      ansible.builtin.debug:
+        msg: >-
+          {{ item.Name }} (id={{ item.Id }}) —
+          {{ 'up' if item.Status | default(0) == 1 else 'down' }}
+      loop: "{{ endpoints.json }}"
+      loop_control:
+        label: "{{ item.Name }}"
+
+    - name: Summary
+      ansible.builtin.debug:
+        msg: "{{ endpoints.json | length }} environment(s); online: {{ endpoints.json | selectattr('Status', 'equalto', 1) | list | length }}"

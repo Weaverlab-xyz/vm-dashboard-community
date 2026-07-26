@@ -386,7 +386,8 @@ async def run_playbook(
     extra_vars   — optional dict forwarded as --extra-vars JSON
     asset_name   — original filename; drives whether to generate a wrapper playbook
     ssh_key_pem  — PEM private key for cloud targets; written to tmpdir/id_rsa
-    ps_env       — optional PASSWORD_SAFE_* env for an in-playbook beyondtrust.secrets_safe
+    ps_env       — optional auto-injected credential env (PASSWORD_SAFE_* and/or
+                   PORTAINER_*) for an in-playbook beyondtrust.secrets_safe
                    lookup; written to a 0600 --env-file so the client secret never lands
                    on the command line (see services/password_safe_runner.py)
 
