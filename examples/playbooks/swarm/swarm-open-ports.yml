@@ -1,0 +1,82 @@
+# Open the Docker Swarm ports on a node
+# Target: an on-prem Linux host. Run this on EVERY node (managers and workers) before
+# swarm-join.yml, unless your network already allows the traffic. Idempotent.
+#
+# Swarm needs three things open between nodes:
+#   2377/tcp          cluster management (managers only listen, but workers must reach it)
+#   7946/tcp + /udp   node-to-node gossip / discovery
+#   4789/udp          overlay network traffic (VXLAN)
+#
+# Handles firewalld (RHEL/Rocky/Alma) and ufw (Debian/Ubuntu). A host running neither
+# is reported and skipped — nothing else is touched, and iptables/nftables rules are
+# never written directly.
+#
+# SCOPE: by default the rules are open to any source, matching how these ports are
+# usually handled on a trusted LAN. Set swarm_source_cidr to restrict them to your
+# node subnet, which is strongly preferable if the hosts share a network with anything
+# untrusted — 2377 is the cluster control plane.
+#
+# extra_vars (optional, via the local runner):
+#   swarm_source_cidr: 10.0.0.0/24   # restrict the rules to this source range
+- name: Open the Docker Swarm ports
+  hosts: all
+  become: true
+  vars:
+    swarm_source_cidr: ""
+  tasks:
+    - name: Detect firewalld
+      ansible.builtin.command: systemctl is-active firewalld
+      register: firewalld_active
+      changed_when: false
+      failed_when: false
+
+    - name: Detect ufw
+      ansible.builtin.command: ufw status
+      register: ufw_status
+      changed_when: false
+      failed_when: false
+
+    - name: Report when no supported firewall is running
+      ansible.builtin.debug:
+        msg: >-
+          Neither firewalld nor ufw is active here — nothing to do. Make sure
+          2377/tcp, 7946/tcp+udp and 4789/udp are permitted between the swarm nodes
+          by whatever does control this host's traffic.
+      when:
+        - firewalld_active.stdout != "active"
+        - ufw_status.rc != 0 or 'inactive' in ufw_status.stdout
+
+    # ── firewalld (RHEL / Rocky / Alma) ──────────────────────────────────────
+    - name: Open the swarm ports (firewalld)
+      ansible.posix.firewalld:
+        port: "{{ item }}"
+        permanent: true
+        immediate: true
+        state: enabled
+        source: "{{ swarm_source_cidr | default(omit, true) }}"
+      loop:
+        - 2377/tcp
+        - 7946/tcp
+        - 7946/udp
+        - 4789/udp
+      when: firewalld_active.stdout == "active"
+
+    # ── ufw (Debian / Ubuntu) ────────────────────────────────────────────────
+    # community.general.ufw is not in the runner image's documented collection set,
+    # so this shells out. `ufw allow` is itself idempotent — a duplicate rule reports
+    # "Skipping adding existing rule" — which the changed_when below reflects.
+    - name: Open the swarm ports (ufw)
+      ansible.builtin.command: >-
+        ufw allow {{ ('from ' ~ swarm_source_cidr ~ ' to any port ' ~ item.port ~ ' proto ' ~ item.proto)
+                     if swarm_source_cidr | length > 0
+                     else (item.port ~ '/' ~ item.proto) }}
+      register: ufw_rule
+      changed_when: "'existing rule' not in ufw_rule.stdout"
+      loop:
+        - { port: 2377, proto: tcp }
+        - { port: 7946, proto: tcp }
+        - { port: 7946, proto: udp }
+        - { port: 4789, proto: udp }
+      when:
+        - ufw_status.rc == 0
+        - "'inactive' not in ufw_status.stdout"

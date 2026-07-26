@@ -1,0 +1,91 @@
+# Deploy (or update) a stack on a Docker Swarm
+# Target: a swarm MANAGER node. `docker stack deploy` is idempotent — re-running it
+# converges services to the compose file, so this doubles as the update path.
+#
+# Unlike the dashboard's cloud-compose deploy (which targets ECS/ACI/GCE and rejects
+# orchestration directives), Swarm honours the compose `deploy:` block — replicas,
+# placement constraints, update_config, restart_policy. Compose v3 files from
+# examples/compose/ work here, and can be extended with those keys.
+#
+# The compose content comes from EITHER stack_file (a path on the ANSIBLE CONTROLLER,
+# copied up) or stack_content (an inline string). Anything sensitive inside it should
+# come from the run form's "Use a secret" panel rather than plaintext — or better, use
+# `docker secret` and reference it from the compose file.
+#
+# extra_vars:
+#   stack_name:    my-stack              # required
+#   stack_file:    /path/to/compose.yml  # either this…
+#   stack_content: "services: {...}"     # …or this
+#   remote_path:   /opt/stacks           # where the file lands on the manager
+#   prune:         false                 # remove services no longer in the file
+#   with_registry_auth: false            # push the local registry creds to the nodes
+- name: Deploy a stack to a Docker Swarm
+  hosts: all
+  become: true
+  vars:
+    stack_name: ""
+    stack_file: ""
+    stack_content: ""
+    remote_path: /opt/stacks
+    prune: false
+    with_registry_auth: false
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - stack_name | length > 0
+          - (stack_file | length > 0) or (stack_content | length > 0)
+        fail_msg: "Set stack_name and one of stack_file / stack_content."
+
+    - name: Confirm this host is a swarm manager
+      ansible.builtin.command: docker info --format '{% raw %}{{.Swarm.ControlAvailable}}{% endraw %}'
+      register: is_manager
+      changed_when: false
+
+    - name: Fail if this is not a manager
+      ansible.builtin.fail:
+        msg: >-
+          `docker stack deploy` only runs on a manager, and this host reports
+          ControlAvailable={{ is_manager.stdout | default('?') }}. Target a manager node.
+      when: is_manager.stdout != "true"
+
+    # ── Put the compose file on the manager ──────────────────────────────────
+    - name: Ensure the stack directory exists
+      ansible.builtin.file:
+        path: "{{ remote_path }}"
+        state: directory
+        mode: "0750"
+
+    - name: Copy the compose file from the controller
+      ansible.builtin.copy:
+        src: "{{ stack_file }}"
+        dest: "{{ remote_path }}/{{ stack_name }}.yml"
+        mode: "0640"
+      when: stack_file | length > 0
+
+    - name: Write the inline compose content
+      ansible.builtin.copy:
+        content: "{{ stack_content }}"
+        dest: "{{ remote_path }}/{{ stack_name }}.yml"
+        mode: "0640"
+      when: stack_file | length == 0
+
+    # ── Deploy ───────────────────────────────────────────────────────────────
+    - name: Deploy the stack
+      ansible.builtin.command: >-
+        docker stack deploy
+        -c {{ remote_path }}/{{ stack_name }}.yml
+        {{ '--prune' if prune | bool else '' }}
+        {{ '--with-registry-auth' if with_registry_auth | bool else '' }}
+        {{ stack_name }}
+      register: stack_deploy
+      changed_when: stack_deploy.rc == 0
+
+    - name: List the stack's services
+      ansible.builtin.command: docker stack services {{ stack_name }}
+      register: stack_services
+      changed_when: false
+
+    - name: Result
+      ansible.builtin.debug:
+        msg: "{{ stack_services.stdout_lines }}"

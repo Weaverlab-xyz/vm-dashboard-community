@@ -1,0 +1,80 @@
+# Initialise a Docker Swarm manager
+# Target: an on-prem Linux host that already has Docker (run linux/install-docker.yml
+# first). Idempotent — a host that is already an active swarm node is left alone.
+#
+# This is step 1 of 2. It prints the `docker swarm join` commands for workers and for
+# additional managers; feed the token into swarm-join.yml on each other node.
+#
+# TOKEN VISIBILITY: the worker join token is printed to the job output on purpose —
+# the relay model depends on you being able to read it. Anyone who can see the job
+# and reach :2377 can join the swarm. Rotate it afterwards if that is not acceptable:
+#   docker swarm join-token --rotate worker
+# For the join half, swarm-join.yml can pull the token from Password Safe instead.
+#
+# Ports must be reachable between nodes — see swarm-open-ports.yml.
+#
+# extra_vars (optional, via the local runner):
+#   advertise_addr: 10.0.0.11   # which address other nodes reach this manager on;
+#                               # default = the host's primary IPv4. Set it explicitly
+#                               # on multi-NIC hosts, where autodetect guesses wrong.
+#   default_addr_pool: ""       # e.g. 10.20.0.0/16 — overlay subnet pool
+- name: Initialise a Docker Swarm manager
+  hosts: all
+  become: true
+  vars:
+    advertise_addr: ""
+    default_addr_pool: ""
+  tasks:
+    - name: Check Docker is present
+      ansible.builtin.command: docker --version
+      register: docker_version
+      changed_when: false
+      failed_when: docker_version.rc != 0
+
+    - name: Detect swarm state
+      ansible.builtin.command: docker info --format '{% raw %}{{.Swarm.LocalNodeState}}{% endraw %}'
+      register: swarm_state
+      changed_when: false
+
+    - name: Report an already-initialised node
+      ansible.builtin.debug:
+        msg: >-
+          This host is already an active swarm node — leaving it untouched.
+          Run swarm-status.yml to inspect it, or swarm-leave.yml to remove it first.
+      when: swarm_state.stdout == "active"
+
+    # ── Initialise ───────────────────────────────────────────────────────────
+    - name: Initialise the swarm
+      ansible.builtin.command: >-
+        docker swarm init
+        --advertise-addr {{ advertise_addr | default(ansible_facts['default_ipv4']['address'], true) }}
+        {{ ('--default-addr-pool ' ~ default_addr_pool) if default_addr_pool | length > 0 else '' }}
+      register: swarm_init
+      changed_when: swarm_init.rc == 0
+      when: swarm_state.stdout != "active"
+
+    # ── Join commands for the other nodes ────────────────────────────────────
+    - name: Read the worker join token
+      ansible.builtin.command: docker swarm join-token -q worker
+      register: worker_token
+      changed_when: false
+
+    - name: Read the manager join token
+      ansible.builtin.command: docker swarm join-token -q manager
+      register: manager_token
+      changed_when: false
+
+    - name: Resolve this manager's advertised address
+      ansible.builtin.set_fact:
+        _manager_addr: "{{ advertise_addr | default(ansible_facts['default_ipv4']['address'], true) }}"
+
+    - name: Join commands
+      ansible.builtin.debug:
+        msg:
+          - "Swarm ready on {{ _manager_addr }}."
+          - "Run swarm-join.yml against each WORKER with:"
+          - "  manager_addr: {{ _manager_addr }}"
+          - "  join_token:   {{ worker_token.stdout }}"
+          - "For an additional MANAGER, use join_role: manager and:"
+          - "  join_token:   {{ manager_token.stdout }}"
+          - "Rotate with `docker swarm join-token --rotate worker` when you are done."
