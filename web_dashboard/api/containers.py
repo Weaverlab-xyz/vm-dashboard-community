@@ -38,8 +38,11 @@ from ..models.containers import (
     ECSTaskListResponse,
     GCEJumpointInfo,
     GCEJumpointListResponse,
+    PortainerDeployRequest,
     PortainerEndpoint,
     PortainerEndpointList,
+    PortainerNodeInfo,
+    PortainerNodeResponse,
     RancherDeployRequest,
     RancherImportRequest,
     RancherImportResponse,
@@ -984,3 +987,146 @@ async def import_cluster_into_rancher(
     return RancherImportResponse(
         cluster_id=cluster_id, manifest_url=manifest_url,
         apply_command=f"kubectl apply -f {manifest_url}")
+
+
+# ── Managed Portainer node (Portainer CE container on GCE COS) ───────────────
+# These are the DEPLOY-side routes for a dashboard-managed Portainer server. The
+# /endpoints, /{container_id} and /stacks routes above talk to whatever Portainer
+# is configured — a managed node once deployed, or the operator's own server.
+# Paths are nested under /portainer/node/ so they can't collide with those.
+
+@router.get("/portainer/node", response_model=PortainerNodeResponse)
+async def get_portainer_node(
+    current_user: User = Depends(require_permission("containers", "read")),
+):
+    """List the managed Portainer server COS instance(s) (labels.purpose=portainer)
+    and report whether a deploy is possible + the pinned server URL."""
+    from ..services import config_service, gcp_service
+    from ..services.gcp_service import GCPError
+
+    project_id = _gcp_project_id()
+    # A deploy needs nothing but a GCP project — unlike Rancher there's no bootstrap
+    # password to pre-set; the admin credential is generated during first-run.
+    configured = bool(project_id)
+    server_url = config_service.get("portainer_url") or ""
+    token_configured = bool(config_service.get("portainer_pat"))
+    # How to log in. An AUTO-GENERATED admin password is echoed (the operator has no
+    # other way to learn it — accepted trade-off, same as Rancher); an operator-set
+    # one is only named, never echoed.
+    login_hint = ""
+    if token_configured:
+        if config_service.get_bool("portainer_admin_password_generated", False):
+            pw = config_service.get("portainer_admin_password") or ""
+            login_hint = (f"Log in as admin / {pw}  (auto-generated — "
+                          f"change it in Portainer after first login).")
+        elif config_service.get("portainer_admin_password"):
+            login_hint = "Log in as admin with your configured Portainer admin password."
+    if not project_id:
+        # Not configured yet — return an empty, not-configured shell (no 503, so the
+        # tab can render the setup card).
+        return PortainerNodeResponse(nodes=[], project_id="", count=0, configured=False,
+                                     server_url=server_url, token_configured=token_configured)
+    try:
+        raw = await gcp_service.list_gce_portainer(project_id)
+    except GCPError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    nodes = [
+        PortainerNodeInfo(
+            name=i.get("name", ""), zone=i.get("zone", ""),
+            status=i.get("status", "UNKNOWN"), machine_type=i.get("machine_type", ""),
+            image=i.get("image", ""), internal_ip=i.get("internal_ip", ""),
+            external_ip=i.get("external_ip", ""), url=i.get("url", ""),
+            created_at=i.get("created_at"),
+        )
+        for i in raw
+    ]
+    return PortainerNodeResponse(
+        nodes=nodes, project_id=project_id, count=len(nodes), configured=configured,
+        server_url=server_url, token_configured=token_configured, login_hint=login_hint)
+
+
+@router.get("/portainer/node/firewall")
+async def get_portainer_node_firewall(
+    current_user: User = Depends(require_permission("containers", "read")),
+):
+    """Read-only breakdown of the Portainer node's firewall source set: the manual
+    CIDRs, the auto-discovered dashboard egress IP, and the effective merged
+    allow-list (tcp 9443/8000) — so the operator can see which sources reach it."""
+    from ..services import portainer_node_service
+    return portainer_node_service.firewall_status()
+
+
+@router.get("/portainer/node/deploy-options")
+async def get_portainer_node_deploy_options(
+    current_user: User = Depends(require_permission("containers", "read")),
+):
+    """Deploy-form options for the Portainer node: the GCP regions it can be placed
+    in (the default plus every region with a configured subnet — the node's subnet is
+    regional). Mirrors /api/containers/rancher/pra-options' regions list."""
+    return {"regions": _portainer_deploy_regions()}
+
+
+def _portainer_deploy_regions() -> list[str]:
+    """Regions the Portainer node can be deployed into: the configured default region
+    plus every region that has a per-region config set (`gcp_region_configs`), default
+    first. Restricting to configured regions keeps the operator from picking a region
+    with no subnet. Mirrors :func:`_rancher_deploy_regions`."""
+    default = region_catalog.normalize("gcp", region_catalog.default_region("gcp"))
+    out = [default]
+    for r in sorted(region_config.load_region_configs("gcp").keys()):
+        if r and r not in out:
+            out.append(r)
+    return out
+
+
+@router.post("/portainer/node/deploy", response_model=DeployContainerResponse)
+async def deploy_portainer_node(
+    req: PortainerDeployRequest = PortainerDeployRequest(),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("containers", "write")),
+):
+    """Deploy (or reuse) the managed Portainer server. Enqueues a durable
+    `portainer_node_deploy` job (VM boot + first-run bootstrap can take minutes);
+    follow progress at /jobs/{job_id}. On success the job writes portainer_url +
+    portainer_pat, so the Containers tab starts working with no manual setup."""
+    if not _gcp_project_id():
+        raise HTTPException(status_code=503, detail="GCP project not configured.")
+    # Only carry fields the operator actually set, so blanks fall back to config.
+    meta: dict = {}
+    if req.region:
+        if not region_catalog.validate("gcp", req.region):
+            raise HTTPException(status_code=400, detail=f"Invalid GCP region: {req.region!r}")
+        meta["region"] = region_catalog.normalize("gcp", req.region)
+    if req.zone:
+        if not region_catalog.validate_zone(req.zone):
+            raise HTTPException(status_code=400, detail=f"Invalid GCP zone: {req.zone!r}")
+        zone = region_catalog.normalize("gcp", req.zone)
+        # A zone must sit inside the chosen region (when a region was also given).
+        if meta.get("region") and region_catalog.region_from_zone(zone) != meta["region"]:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Zone {zone!r} is not in region {meta['region']!r}.")
+        meta["zone"] = zone
+    job = job_service.create_job(
+        db, job_type="portainer_node_deploy", created_by=current_user.username, metadata=meta)
+    return DeployContainerResponse(
+        job_id=job.id, status="pending", message="Deploying the managed Portainer server…")
+
+
+@router.post("/portainer/node/{name}/stop", response_model=DeployContainerResponse)
+async def stop_portainer_node(
+    name: str,
+    zone: str = Query("", description="GCE zone (blank → configured Portainer zone)"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("containers", "delete")),
+):
+    """Tear down the Portainer node (VM + firewall) and clear the URL/token config.
+    Enqueues a durable `portainer_node_teardown` job. The node is EPHEMERAL — this
+    discards all Portainer state (users, environments, settings)."""
+    if not _gcp_project_id():
+        raise HTTPException(status_code=503, detail="GCP project not configured.")
+    job = job_service.create_job(
+        db, job_type="portainer_node_teardown", created_by=current_user.username,
+        metadata={"name": name, "zone": zone})
+    return DeployContainerResponse(
+        job_id=job.id, status="pending", message=f"Tearing down Portainer node '{name}'…")

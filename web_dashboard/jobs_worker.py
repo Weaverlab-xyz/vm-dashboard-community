@@ -40,6 +40,7 @@ HANDLED_TYPES = (
     "k8s_tunnel", "k8s_api_tunnel", "k8s_group_binding", "k8s_impersonator_binding",
     "k8s_entra_federation",
     "rancher_node_deploy", "rancher_node_teardown", "rancher_entitle_register",
+    "portainer_node_deploy", "portainer_node_teardown",
     "clouddb_provision", "clouddb_decommission", "clouddb_entitle_register",
     "ansible_cloud_run",
     "vdesktop_pool_provision", "vdesktop_pool_teardown",
@@ -159,6 +160,12 @@ async def _dispatch(job_id: str, job_type: str, meta: dict) -> None:
         elif job_type == "rancher_entitle_register":
             await k8s_service.run_rancher_entitle_register(
                 db, job_id=job_id, action=meta.get("action", "register"))
+        elif job_type == "portainer_node_deploy":
+            from .services import portainer_node_service
+            await portainer_node_service.run_deploy(db, job_id=job_id, meta=meta)
+        elif job_type == "portainer_node_teardown":
+            from .services import portainer_node_service
+            await portainer_node_service.run_teardown(db, job_id=job_id, meta=meta)
         elif job_type == "clouddb_provision":
             await cloud_database_service.run_provision_apply(
                 db, db_id=meta["db_id"], job_id=job_id,

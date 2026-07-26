@@ -614,10 +614,26 @@ class BeyondTrustFeatureConfig(BaseModel):
     epml_pat: str = ""              # encrypted at rest; Bearer token for EPML API
 
 class PortainerFeatureConfig(BaseModel):
+    """Portainer CE — both the connection to a server and the knobs for deploying a
+    MANAGED one. ``portainer_url`` / ``portainer_pat`` are either typed in (bring your
+    own server) or written by a ``portainer_node_deploy`` job, which is why the deploy
+    knobs live on the same panel. ``enabled`` owns ``portainer_enabled``."""
     enabled: bool = False
     portainer_url: str = ""
     portainer_pat: str = ""             # encrypted at rest; token or vault ref (bt_safe:// etc.)
     portainer_verify_ssl: bool = True
+    # Managed-node deploy knobs (COS on GCE; mirrors the Rancher node's panel)
+    portainer_allowed_source_cidrs: str = ""   # CSV of manual firewall source ranges (9443/8000)
+    portainer_dashboard_egress_cidr: str = ""  # the dashboard's own egress CIDR; auto-detected on deploy
+    portainer_admin_password: str = ""         # encrypted at rest; blank → auto-generated on first run
+    portainer_ready_timeout_s: int = 300       # readiness poll budget after the VM boots
+    gcp_portainer_image: str = "portainer/portainer-ce:latest"
+    gcp_portainer_machine_type: str = "e2-small"
+    gcp_portainer_zone: str = ""
+    gcp_portainer_name: str = "portainer-server"
+    gcp_portainer_boot_disk_gb: int = 20
+    gcp_portainer_network_tag: str = "portainer"
+    gcp_portainer_allow_open: bool = False     # open 0.0.0.0/0 when the CIDR list is empty (fail-open opt-in)
 
 class AnsibleFeatureConfig(BaseModel):
     enabled: bool = False
@@ -981,7 +997,7 @@ _SECRET_FEATURE_KEYS = frozenset({
     "clouddb_ps_ssm_secret_access_key", "pra_config_api_client_secret",
     "clouddb_ps_azure_sp_client_secret", "clouddb_ps_azure_plugin_private_key",
     "clouddb_ps_azure_plugin_passphrase",
-    "portainer_pat",
+    "portainer_pat", "portainer_admin_password",
     "entitle_api_token", "entitle_api_key",
     "proxmox_token_secret", "proxmox_password",
     "vsphere_password",
