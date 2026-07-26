@@ -128,6 +128,34 @@ def test_leave_is_gated_on_confirmation():
         raise AssertionError("no `docker swarm leave` task found")
 
 
+def test_beyondtrust_modules_are_delegated_to_the_controller():
+    """`beyondtrust.*` MODULES (unlike the lookup plugin) execute on the target, which
+    has no beyondtrust-bips-library — only the runner container does. Any such task in
+    a `hosts: all` play must delegate to localhost or it fails with an import error."""
+    offenders = []
+    for path, play in _plays():
+        for task in _tasks(play):
+            mod = next((k for k in task if k.startswith("beyondtrust.")), None)
+            if not mod:
+                continue
+            if task.get("delegate_to") != "localhost":
+                offenders.append(f"{_rel(path)}: {task.get('name')!r} ({mod})")
+    assert not offenders, (
+        "beyondtrust module not delegated to localhost:\n  " + "\n  ".join(offenders))
+
+
+def test_stored_tokens_are_not_logged():
+    """A task writing a join token into Password Safe carries the token in its args."""
+    offenders = []
+    for path, play in _plays():
+        for task in _tasks(play):
+            if not any(k.startswith("beyondtrust.") for k in task):
+                continue
+            if task.get("no_log") is not True:
+                offenders.append(f"{_rel(path)}: {task.get('name')!r}")
+    assert not offenders, "beyondtrust write task without no_log:\n  " + "\n  ".join(offenders)
+
+
 def test_join_token_is_not_echoed():
     """The join token is a cluster credential. swarm-join.yml puts it on a command
     line, so that task must no_log."""

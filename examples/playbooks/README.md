@@ -108,13 +108,29 @@ at a time with the join token relayed between runs:
 **Use the local runner.** Cloud runners don't forward plaintext extra vars, and the
 relay depends on them.
 
+### Keeping the token out of job output
+
+Set `join_token_secret` on **both** halves and the token is never printed anywhere:
+
+```
+swarm-init.yml   join_token_secret: infra/swarm-worker-token   # writes it
+swarm-join.yml   join_token_secret: infra/swarm-worker-token   # reads it back
+```
+
+`swarm-init.yml` stores the token with `beyondtrust.secrets_safe.secrets_create` and
+prints only the path; `swarm-join.yml` fetches it with the lookup. Both use the
+auto-injected `PASSWORD_SAFE_*` credentials, so there's nothing extra to configure —
+but the **write side needs create rights** on `token_safe` (default `Automation`),
+which is more than the read scope the other samples need, and the safe and folder must
+already exist ([`password-safe/onboard-safe-and-account.yml`](password-safe/onboard-safe-and-account.yml)
+creates them).
+
 Three things worth knowing:
 
-- **The join token appears in `swarm-init.yml`'s job output** — deliberately, since
-  you need to read it. Anyone who can see the job and reach `:2377` can join the
-  swarm. Rotate it when you're done (`docker swarm join-token --rotate worker`), or
-  store it in Password Safe and have `swarm-join.yml` fetch it via
-  `join_token_secret` instead of passing it in plaintext.
+- **Without those paths set, the join token is printed** by `swarm-init.yml` —
+  deliberately, since the relay needs you to read it. Anyone who can see the job and
+  reach `:2377` can then join the swarm, so rotate it when you're done
+  (`docker swarm join-token --rotate worker`) or use the Password Safe route above.
 - **These drive the `docker` CLI, not `community.docker`.** That collection isn't in
   the runner image's documented set, and its modules would additionally need the
   Docker SDK for Python on every target, which `install-docker.yml` doesn't install.
