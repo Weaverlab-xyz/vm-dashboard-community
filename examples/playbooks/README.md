@@ -32,6 +32,37 @@ shown, never stored on the job, and is scrubbed from the job output (requires th
 See [Using a Secrets-Management secret in a run](../../docs/integrations/ansible.md#using-a-secrets-management-secret-in-a-run).
 Plaintext extra vars still work for non-sensitive parameters.
 
+### Optional: fetch a secret from Password Safe inside the play
+
+Several samples can source their secret **directly from BeyondTrust Password Safe**
+instead, without any run-form interaction. Each such play declares an optional
+`…_secret` var — set it to a SECRET path (`folder/title`) and the value is fetched
+mid-run; leave it blank and the play behaves exactly as before:
+
+| Playbook | Optional var |
+|---|---|
+| `windows/win-create-local-admin.yml` | `new_admin_password_secret` |
+| `database/postgres-create-role.yml` | `target_role_password_secret` |
+| `database/mysql-create-user.yml` | `target_user_password_secret` |
+| `portainer/*.yml` | `portainer_pat_secret` |
+
+The `PASSWORD_SAFE_*` credentials are auto-injected into every runner, so nothing else
+is needed. The lookup runs on the **controller** (the runner container), so a remote
+target never needs Password Safe reachability — that's why it works in the Windows
+play too. [`password-safe/`](password-safe/) has the full treatment, including the
+managed-account variant and the write-side modules.
+
+Two things to know:
+
+- **The Password Safe path wins** when both it and a directly-supplied value are set.
+  The fetch writes to a private `_ps_*` fact rather than back onto the caller's
+  variable — Ansible extra vars outrank `set_fact`, so writing back would be silently
+  ignored whenever the value was also supplied.
+- **Connection credentials stay with the run form.** Binding the SSH key, become
+  password or `ansible_password` through **Use a secret** covers cases an in-playbook
+  lookup can't (SSH keys, `sshpass`, ephemeral cloud secrets). These `…_secret` vars
+  are for secrets a *task* consumes.
+
 ## Linux (`linux/`)
 
 `- hosts: all`, `become: yes`, generic modules so they span Debian/Ubuntu and
@@ -147,6 +178,11 @@ turns verification off and these plays follow suit.
 
 > `prune-containers.yml` is destructive, and `prune_volumes: true` deletes any volume
 > not attached to a container. It is off by default; opt in deliberately.
+
+The API tasks set `no_log: true` because the token rides the request headers — a
+PS-fetched token is never seen by the dashboard, so it can't be scrubbed from job
+output the way the injected one is. That also masks API error bodies; drop the
+`no_log` on a single task temporarily if you need to debug a failing call.
 
 ## Password Safe (`password-safe/`)
 

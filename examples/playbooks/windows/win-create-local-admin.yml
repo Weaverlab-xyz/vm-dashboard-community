@@ -6,9 +6,16 @@
 # password via Use a secret (recommended) or as an extra_var:
 #   ansible_user: azureuser
 #   ansible_password: <bind via Use a secret, or the existing admin password>
-# Plus the new account's details (new_admin_password is best bound via Use a secret):
+# Plus the new account's details:
 #   new_admin_username: opsadmin
 #   new_admin_password: <strong password for the new account>
+#
+# OPTIONAL — fetch the new account's password from BeyondTrust Password Safe instead
+# of supplying it, by setting a SECRET path (folder/title):
+#   new_admin_password_secret: app-secrets/opsadmin-password
+# The PASSWORD_SAFE_* credentials are auto-injected into every runner, so nothing else
+# is needed. The lookup runs on the CONTROLLER (the runner), so this Windows host never
+# needs Password Safe reachability. See examples/playbooks/password-safe/.
 - name: Create a local administrator
   hosts: all
   gather_facts: false
@@ -19,20 +26,52 @@
     ansible_winrm_server_cert_validation: ignore
     new_admin_username: ""
     new_admin_password: ""
+    # Optional Password Safe source for the password above (blank = don't use it).
+    new_admin_password_secret: ""
+    ps_api_url: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_API_URL') }}"
+    ps_client_id: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_CLIENT_ID') }}"
+    ps_client_secret: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_CLIENT_SECRET') }}"
+    ps_verify_ca: true          # set false only for a self-signed Password Safe
   tasks:
+    # Fetched into its OWN fact, never onto new_admin_password: extra vars outrank
+    # set_fact, so writing back to that name would be silently ignored whenever the
+    # password was also supplied as an extra var / "Use a secret" binding.
+    - name: Fetch the new account's password from Password Safe
+      ansible.builtin.set_fact:
+        _ps_new_admin_password: "{{ lookup('beyondtrust.secrets_safe.secrets_safe_lookup',
+          api_url=ps_api_url,
+          api_version='3.1',
+          retrieval_type='SECRET',
+          client_id=ps_client_id,
+          client_secret=ps_client_secret,
+          secret_list=new_admin_password_secret,
+          decrypt=True,
+          verify_ca=ps_verify_ca,
+          wantlist=False) }}"
+      no_log: true
+      when: new_admin_password_secret | length > 0
+
+    - name: Resolve the effective password (Password Safe wins when a path was given)
+      ansible.builtin.set_fact:
+        _admin_password: "{{ _ps_new_admin_password | default(new_admin_password, true) }}"
+      no_log: true
+
     - name: Fail early if required vars are missing
       ansible.builtin.assert:
         that:
           - new_admin_username | length > 0
-          - new_admin_password | length >= 12
-        fail_msg: "Set new_admin_username and a new_admin_password (>= 12 chars)."
+          - _admin_password | length >= 12
+        fail_msg: >-
+          Set new_admin_username, and a password >= 12 chars — either new_admin_password
+          (extra var / Use a secret) or new_admin_password_secret (a Password Safe path).
 
     - name: Create the local user
       ansible.windows.win_user:
         name: "{{ new_admin_username }}"
-        password: "{{ new_admin_password }}"
+        password: "{{ _admin_password }}"
         password_never_expires: true
         state: present
+      no_log: true              # the password is a secret
 
     - name: Add the user to Administrators
       ansible.windows.win_group_membership:

@@ -6,6 +6,13 @@
 # extra_vars:
 #   target_role: appuser              # required
 #   target_role_password: <secret>    # bind via "Use a secret" (recommended)
+#
+# OPTIONAL — fetch the role's password from BeyondTrust Password Safe instead, by
+# setting a SECRET path (folder/title):
+#   target_role_password_secret: app-secrets/appuser-password
+# The PASSWORD_SAFE_* credentials are auto-injected into every runner, so nothing else
+# is needed. See examples/playbooks/password-safe/db-credential-from-ps.yml for the
+# standalone version of this pattern.
 - name: Create a PostgreSQL role
   hosts: localhost
   connection: local
@@ -13,18 +20,49 @@
   vars:
     target_role: ""
     target_role_password: ""
+    # Optional Password Safe source for the password above (blank = don't use it).
+    target_role_password_secret: ""
+    ps_api_url: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_API_URL') }}"
+    ps_client_id: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_CLIENT_ID') }}"
+    ps_client_secret: "{{ lookup('ansible.builtin.env', 'PASSWORD_SAFE_CLIENT_SECRET') }}"
+    ps_verify_ca: true          # set false only for a self-signed Password Safe
   tasks:
+    # Fetched into its OWN fact, never onto target_role_password: extra vars outrank
+    # set_fact, so writing back to that name would be silently ignored whenever the
+    # password was also supplied as an extra var / "Use a secret" binding.
+    - name: Fetch the role password from Password Safe
+      ansible.builtin.set_fact:
+        _ps_target_role_password: "{{ lookup('beyondtrust.secrets_safe.secrets_safe_lookup',
+          api_url=ps_api_url,
+          api_version='3.1',
+          retrieval_type='SECRET',
+          client_id=ps_client_id,
+          client_secret=ps_client_secret,
+          secret_list=target_role_password_secret,
+          decrypt=True,
+          verify_ca=ps_verify_ca,
+          wantlist=False) }}"
+      no_log: true
+      when: target_role_password_secret | length > 0
+
+    - name: Resolve the effective password (Password Safe wins when a path was given)
+      ansible.builtin.set_fact:
+        _role_password: "{{ _ps_target_role_password | default(target_role_password, true) }}"
+      no_log: true
+
     - name: Validate required vars
       ansible.builtin.assert:
         that:
           - target_role | length > 0
-          - target_role_password | length > 0
-        fail_msg: "Set target_role and target_role_password (bind the password via 'Use a secret')."
+          - _role_password | length > 0
+        fail_msg: >-
+          Set target_role, and a password — either target_role_password (bind it via
+          'Use a secret') or target_role_password_secret (a Password Safe path).
 
     - name: Ensure the role exists
       community.postgresql.postgresql_user:
         name: "{{ target_role }}"
-        password: "{{ target_role_password }}"
+        password: "{{ _role_password }}"
         state: present
         login_host: "{{ db_login_host }}"
         login_port: "{{ db_login_port }}"
