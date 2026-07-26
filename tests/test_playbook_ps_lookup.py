@@ -146,6 +146,48 @@ def test_no_playbook_templates_a_secret_without_no_log():
     assert not offenders, "secret templated into a module without no_log:\n  " + "\n  ".join(offenders)
 
 
+
+def _all_plays():
+    for path in _PLAYBOOKS:
+        for play in (yaml.safe_load(open(path).read()) or []):
+            yield path, play
+
+
+def _beyondtrust_module_tasks(play):
+    """Tasks invoking a beyondtrust MODULE (not the lookup plugin)."""
+    for task in (play.get("tasks") or []):
+        if any(k.startswith("beyondtrust.") for k in task):
+            yield task
+
+
+def test_beyondtrust_modules_are_delegated_to_the_controller():
+    """The lookup PLUGIN runs on the controller, but beyondtrust MODULES run on the
+    target — which has no beyondtrust-bips-library; only the runner container does.
+    Any such task in a `hosts: all` play must delegate to localhost or it dies with an
+    import error. (A `hosts: localhost` play is already on the controller.)"""
+    offenders = []
+    for path, play in _all_plays():
+        if play.get("hosts") == "localhost":
+            continue
+        for task in _beyondtrust_module_tasks(play):
+            if task.get("delegate_to") != "localhost":
+                offenders.append(f"{_rel(path)}: {task.get('name')!r}")
+    assert not offenders, (
+        "beyondtrust module in a remote play without delegate_to: localhost:\n  "
+        + "\n  ".join(offenders))
+
+
+def test_beyondtrust_write_tasks_are_not_logged():
+    """EVERY beyondtrust module call passes the OAuth `client_secret` as a module
+    arg — not just the ones writing a payload secret — so they all need no_log."""
+    offenders = []
+    for path, play in _all_plays():
+        for task in _beyondtrust_module_tasks(play):
+            if task.get("no_log") is not True:
+                offenders.append(f"{_rel(path)}: {task.get('name')!r}")
+    assert not offenders, "beyondtrust write task without no_log:\n  " + "\n  ".join(offenders)
+
+
 if __name__ == "__main__":
     _tests = [v for k, v in sorted(globals().items())
               if k.startswith("test_") and callable(v)]

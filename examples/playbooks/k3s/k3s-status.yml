@@ -1,0 +1,68 @@
+# Read-only smoke test for a k3s node
+# Target: any k3s node. Reports the service state and version; on a SERVER it also
+# lists the cluster's nodes and system pods. Changes nothing.
+#
+# Run this after k3s-join.yml to confirm a node actually registered.
+#
+# extra_vars: none
+- name: Report k3s status
+  hosts: all
+  become: true
+  tasks:
+    - name: Detect the k3s server service
+      ansible.builtin.command: systemctl is-active k3s
+      register: server_state
+      changed_when: false
+      failed_when: false
+
+    - name: Detect the k3s agent service
+      ansible.builtin.command: systemctl is-active k3s-agent
+      register: agent_state
+      changed_when: false
+      failed_when: false
+
+    - name: Report a host with no k3s
+      ansible.builtin.debug:
+        msg: >-
+          No k3s service is active here. Run k3s-server-init.yml to start a cluster,
+          or k3s-join.yml to join an existing one.
+      when:
+        - server_state.stdout != "active"
+        - agent_state.stdout != "active"
+
+    - name: Report this node's role
+      ansible.builtin.debug:
+        msg: >-
+          k3s is active — this node is a
+          {{ 'SERVER (control plane)' if server_state.stdout == 'active' else 'AGENT (worker)' }}.
+      when: server_state.stdout == "active" or agent_state.stdout == "active"
+
+    - name: Read the k3s version
+      ansible.builtin.command: k3s --version
+      register: k3s_version_out
+      changed_when: false
+      failed_when: false
+
+    # ── Server-only views ────────────────────────────────────────────────────
+    # `k3s kubectl` only works on a server; an agent has no kubeconfig or API access.
+    - name: List cluster nodes
+      ansible.builtin.command: k3s kubectl get nodes -o wide
+      register: node_list
+      changed_when: false
+      when: server_state.stdout == "active"
+
+    - name: List system pods
+      ansible.builtin.command: k3s kubectl get pods -n kube-system
+      register: system_pods
+      changed_when: false
+      when: server_state.stdout == "active"
+
+    - name: Cluster overview
+      ansible.builtin.debug:
+        msg:
+          - "{{ k3s_version_out.stdout_lines | default(['(version unavailable)']) }}"
+          - "── nodes ──"
+          - "{{ node_list.stdout_lines | default(['(not a server node)']) }}"
+          - "── kube-system pods ──"
+          - "{{ system_pods.stdout_lines | default(['(not a server node)']) }}"
+      when: server_state.stdout == "active" or agent_state.stdout == "active"

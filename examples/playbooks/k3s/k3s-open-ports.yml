@@ -1,0 +1,90 @@
+# Open the k3s ports on a node
+# Target: an on-prem Linux host. Run this on EVERY node before k3s-join.yml, unless
+# your network already allows the traffic. Idempotent.
+#
+# k3s needs:
+#   6443/tcp    Kubernetes API (servers listen; agents and kubectl clients reach it)
+#   8472/udp    flannel VXLAN — node-to-node pod traffic
+#   10250/tcp   kubelet metrics (needed by metrics-server and `kubectl top`)
+#   2379-2380/tcp  embedded etcd, only for HA clusters (cluster_init / multiple servers)
+#
+# Handles firewalld (RHEL/Rocky/Alma) and ufw (Debian/Ubuntu). A host running neither
+# is reported and skipped — nothing else is touched, and iptables/nftables rules are
+# never written directly.
+#
+# NOTE: k3s's own docs suggest disabling firewalld entirely on RHEL-family hosts,
+# because its default zone handling can interfere with flannel and the pod network.
+# This playbook takes the narrower approach of opening the required ports; if pod
+# networking misbehaves on a firewalld host, that upstream guidance is the next thing
+# to try.
+#
+# SCOPE: the rules are open to any source by default, which suits a trusted LAN. Set
+# k3s_source_cidr to restrict them to your node subnet — worth doing, since 6443 is
+# the cluster API.
+#
+# extra_vars (optional, via the local runner):
+#   k3s_source_cidr: 10.0.0.0/24   # restrict the rules to this source range
+#   ha_etcd: false                 # also open 2379-2380/tcp for embedded etcd
+- name: Open the k3s ports
+  hosts: all
+  become: true
+  vars:
+    k3s_source_cidr: ""
+    ha_etcd: false
+  tasks:
+    - name: Detect firewalld
+      ansible.builtin.command: systemctl is-active firewalld
+      register: firewalld_active
+      changed_when: false
+      failed_when: false
+
+    - name: Detect ufw
+      ansible.builtin.command: ufw status
+      register: ufw_status
+      changed_when: false
+      failed_when: false
+
+    - name: Build the port list
+      ansible.builtin.set_fact:
+        _k3s_ports: >-
+          {{ [{'port': 6443, 'proto': 'tcp'},
+              {'port': 8472, 'proto': 'udp'},
+              {'port': 10250, 'proto': 'tcp'}]
+             + ([{'port': '2379-2380', 'proto': 'tcp'}] if ha_etcd | bool else []) }}
+
+    - name: Report when no supported firewall is running
+      ansible.builtin.debug:
+        msg: >-
+          Neither firewalld nor ufw is active here — nothing to do. Make sure
+          6443/tcp, 8472/udp and 10250/tcp (plus 2379-2380/tcp for HA etcd) are
+          permitted between the nodes by whatever does control this host's traffic.
+      when:
+        - firewalld_active.stdout != "active"
+        - ufw_status.rc != 0 or 'inactive' in ufw_status.stdout
+
+    # ── firewalld (RHEL / Rocky / Alma) ──────────────────────────────────────
+    - name: Open the k3s ports (firewalld)
+      ansible.posix.firewalld:
+        port: "{{ item.port }}/{{ item.proto }}"
+        permanent: true
+        immediate: true
+        state: enabled
+        source: "{{ k3s_source_cidr | default(omit, true) }}"
+      loop: "{{ _k3s_ports }}"
+      when: firewalld_active.stdout == "active"
+
+    # ── ufw (Debian / Ubuntu) ────────────────────────────────────────────────
+    # community.general.ufw is not in the runner image's documented collection set,
+    # so this shells out. `ufw allow` is itself idempotent — a duplicate rule reports
+    # "Skipping adding existing rule" — which the changed_when below reflects.
+    - name: Open the k3s ports (ufw)
+      ansible.builtin.command: >-
+        ufw allow {{ ('from ' ~ k3s_source_cidr ~ ' to any port ' ~ item.port ~ ' proto ' ~ item.proto)
+                     if k3s_source_cidr | length > 0
+                     else (item.port ~ '/' ~ item.proto) }}
+      register: ufw_rule
+      changed_when: "'existing rule' not in ufw_rule.stdout"
+      loop: "{{ _k3s_ports }}"
+      when:
+        - ufw_status.rc == 0
+        - "'inactive' not in ufw_status.stdout"

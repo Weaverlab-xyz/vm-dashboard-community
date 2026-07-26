@@ -24,7 +24,12 @@ page + `/api/k8s`; permission scope `k8s`).
 | **OCI OKE** | ⚠️ **experimental** — implemented in the service, **not surfaced** in the UI/Settings | — | — |
 
 You can also **register/import** an existing or local cluster (`cloud = aws|azure|gcp|local`,
-e.g. kind/k3s) from a full kubeconfig — no provisioning required.
+e.g. kind/k3s) from a full kubeconfig — no provisioning required. To *build* that on-prem
+cluster in the first place, [`examples/playbooks/k3s/`](../examples/playbooks/k3s/) stands
+up k3s over SSH and emits a registration-ready kubeconfig. Two caveats documented there:
+a `cloud=local` cluster **cannot be a Config Management target** (the runner gate accepts
+only aws/azure/gcp), and a registered kubeconfig is stored and used verbatim — no token is
+minted for it — so it is standing cluster-admin.
 
 > **OCI OKE status.** The service layer implements OKE provisioning
 > (`terraform/k8s_cluster/oci_oke`, `_PROVISION_IMPLEMENTED` includes `oci`), but it is not

@@ -141,6 +141,57 @@ Three things worth knowing:
   be extended with them. That's the opposite of the dashboard's *cloud* compose deploy
   (Containers → Cloud), which targets ECS/ACI/GCE and rejects those keys outright.
 
+## Kubernetes: k3s (`k3s/`)
+
+`hosts: all`, `become: true` plays that **build** an on-prem Kubernetes cluster —
+something the dashboard otherwise can't do (its Terraform modules are cloud-only and
+Rancher is import-only). k3s: single binary, bundled CNI, and a join token that's just
+a file read.
+
+| File | Purpose |
+|---|---|
+| `k3s-server-init.yml` | Install the first control-plane node; store or print the node token |
+| `k3s-join.yml` | Join a node as `agent` (default) or additional `server` |
+| `k3s-open-ports.yml` | Open 6443/tcp, 8472/udp, 10250/tcp (+ etcd for HA) |
+| `k3s-kubeconfig.yml` | Fetch the admin kubeconfig, rewrite its server address, print or store |
+| `k3s-status.yml` | Read-only — service state, version, and on a server the nodes/pods |
+| `k3s-uninstall.yml` | Run k3s's uninstall script (guarded; `confirm: true` required) |
+
+### Building a cluster
+
+Same node-by-node shape as `swarm/`, since a run targets one host:
+
+1. `k3s-open-ports.yml` on every node (skip if your network already allows it).
+2. `k3s-server-init.yml` on the first server → gives you `server_url` and the node token.
+3. `k3s-join.yml` on each remaining node (`node_role: server` for extra control-plane
+   nodes — the first server must have been started with `cluster_init: true`).
+4. `k3s-status.yml` on a server to confirm everyone registered.
+5. `k3s-kubeconfig.yml` on a server to collect the kubeconfig for registration.
+
+**Use the local runner**, and note the install fetches `get.k3s.io` over HTTPS, so the
+nodes need egress. Air-gapped installs are out of scope.
+
+Set `node_token_secret` / `kubeconfig_secret` on both halves to route the token and
+kubeconfig through Password Safe instead of job output — the same pattern as
+`swarm/`, and the write side needs create rights on the safe.
+
+### Two things that will bite you otherwise
+
+- **A `cloud=local` cluster can't be a Config Management target.** The runner gate
+  (`api/config_mgmt.py`) accepts only `aws`/`azure`/`gcp` for `target_kind="k8s"`, so
+  a registered on-prem cluster **cannot run the [`k8s/`](k8s/) sample playbooks
+  through the dashboard**, even though it registers and imports into Rancher fine.
+- **The registered kubeconfig is stored and used verbatim, as standing cluster-admin.**
+  The dashboard only rewrites *cloud* exec-auth kubeconfigs; anything else is used
+  as-is. k3s's admin kubeconfig is a client certificate you can't revoke without
+  re-issuing the cluster CA. For anything past a lab, mint a dedicated ServiceAccount
+  with a scoped ClusterRole and register a kubeconfig built from its token.
+
+Importing into Rancher works — the agent dials *outbound*, so no inbound opening is
+needed — but the Rancher node's firewall only auto-whitelists clusters the dashboard
+*provisioned*. A registered cluster has no known egress IP, so add your site's NAT
+address to `rancher_allowed_source_cidrs` by hand.
+
 ## Windows (`windows/`)
 
 WinRM playbooks using `ansible.windows` / `community.windows`. The static
