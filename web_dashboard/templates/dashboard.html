@@ -326,6 +326,7 @@
             { key: 'gce_containers',      title: 'GCE Containers',      href: '/containers#cloud', flag: 'gcp',       secondaryLabel: 'running' },
             { key: 'cloud_run_jobs',      title: 'Cloud Run Jobs',      href: '/containers#cloud', flag: 'gcp',       description: 'in-flight jobs' },
             { key: 'rancher_nodes',       title: 'Rancher Node',        href: '/containers#rancher', flag: 'k8s_management', secondaryLabel: 'running' },
+            { key: 'portainer_node',      title: 'Portainer Server',    href: '/containers#onprem',  flag: 'gcp',            secondaryLabel: 'running' },
           ],
         },
       ],
@@ -621,6 +622,7 @@
         if (k === 'gce_containers')   return this._fetchGceInstances();
         if (k === 'cloud_run_jobs')   return this._fetchListCount('/api/containers/gce-cloud-run-jobs', 'jobs');
         if (k === 'rancher_nodes')    return this._fetchListCount('/api/containers/rancher', 'nodes', n => (n.status || '').toUpperCase() === 'RUNNING');
+        if (k === 'portainer_node')   return this._fetchListCount('/api/containers/portainer/node', 'nodes', n => (n.status || '').toUpperCase() === 'RUNNING');
         // Managed services (creator-scoped server-side; no count field → list.length)
         if (k === 'cloud_databases')  return this._fetchListCount('/api/databases',    'databases');
         if (k === 'k8s_clusters')     return this._fetchListCount('/api/k8s/clusters',  'clusters');

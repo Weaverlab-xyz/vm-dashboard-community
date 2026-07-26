@@ -975,8 +975,10 @@
         <div class="space-y-4">
           <p class="text-sm text-gray-500">
             Containers are shown for every configured cloud provider (AWS ECS, Azure ACI,
-            GCP Cloud Run) automatically. Optionally connect a Portainer CE server below to
-            also manage on-prem Docker hosts.
+            GCP Cloud Run) automatically. To also manage on-prem Docker hosts, either
+            <strong>deploy a managed Portainer CE server</strong> from
+            <a href="/containers#onprem" class="underline font-medium">Containers → On-Premises</a>
+            (which fills in the URL and token below for you), or connect one you already run.
           </p>
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">Portainer URL</label>
@@ -1005,6 +1007,137 @@
                     :class="panelCfg.portainer_verify_ssl ? 'translate-x-6' : 'translate-x-1'"></span>
             </button>
             <span class="text-sm text-gray-700">Verify SSL certificate</span>
+          </div>
+          <p class="text-xs text-gray-400 -mt-2">
+            A dashboard-deployed node serves a self-signed certificate, so deploying one
+            turns this off automatically.
+          </p>
+
+          <!-- ── Managed node (deploy knobs) ── -->
+          <div class="pt-4 border-t border-gray-200">
+            <h4 class="text-sm font-semibold text-gray-800 mb-1">Managed Portainer server</h4>
+            <p class="text-xs text-gray-500 mb-3">
+              Settings for a Portainer CE container the dashboard runs on a GCE
+              Container-Optimized-OS VM. The node is <strong>ephemeral</strong> — a teardown
+              wipes its users, environments and settings.
+            </p>
+
+            <div class="space-y-4">
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Allowed source CIDRs</label>
+                <input type="text" x-model="panelCfg.portainer_allowed_source_cidrs"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="203.0.113.0/24, 198.51.100.7/32">
+                <p class="text-xs text-gray-400 mt-1">
+                  Comma-separated. Opens tcp <code class="bg-gray-100 px-1 rounded">9443</code> (UI/API) and
+                  <code class="bg-gray-100 px-1 rounded">8000</code> (Edge agent) to these sources only.
+                  Empty is <strong>fail-closed</strong> unless "Allow open" below is on — the dashboard's own
+                  egress IP is added automatically so a deploy can reach its node.
+                </p>
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Dashboard egress CIDR</label>
+                <input type="text" x-model="panelCfg.portainer_dashboard_egress_cidr"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="auto-detected on deploy">
+                <p class="text-xs text-gray-400 mt-1">
+                  The dashboard's own public egress range. Auto-detected and saved on each deploy;
+                  set it by hand if you egress from a proxy <em>pool</em> (detection won't clobber a
+                  broader range that already contains the detected IP).
+                </p>
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Admin password</label>
+                <input type="password" x-model="panelCfg.portainer_admin_password"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="••••••••">
+                <p class="text-xs text-gray-400 mt-1">
+                  First-run password for the <code class="bg-gray-100 px-1 rounded">admin</code> user.
+                  Leave blank to auto-generate one (it is shown once on the Containers page).
+                  Stored encrypted.
+                </p>
+              </div>
+
+              <div class="grid grid-cols-2 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Container image</label>
+                  <input type="text" x-model="panelCfg.gcp_portainer_image"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Machine type</label>
+                  <input type="text" x-model="panelCfg.gcp_portainer_machine_type"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">VM name</label>
+                  <input type="text" x-model="panelCfg.gcp_portainer_name"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Zone</label>
+                  <input type="text" x-model="panelCfg.gcp_portainer_zone"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                         placeholder="(auto-picked in the region)">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Boot disk (GB)</label>
+                  <input type="number" x-model.number="panelCfg.gcp_portainer_boot_disk_gb"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Network tag</label>
+                  <input type="text" x-model="panelCfg.gcp_portainer_network_tag"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Ready timeout (s)</label>
+                  <input type="number" x-model.number="panelCfg.portainer_ready_timeout_s"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+                </div>
+              </div>
+
+              <div class="flex items-center gap-3">
+                <button @click="panelCfg.gcp_portainer_allow_open = !panelCfg.gcp_portainer_allow_open"
+                        class="relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors"
+                        :class="panelCfg.gcp_portainer_allow_open ? 'bg-red-600' : 'bg-gray-300'">
+                  <span class="inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform"
+                        :class="panelCfg.gcp_portainer_allow_open ? 'translate-x-6' : 'translate-x-1'"></span>
+                </button>
+                <span class="text-sm text-gray-700">
+                  Allow open (<code class="bg-gray-100 px-1 rounded">0.0.0.0/0</code>) when no CIDRs are set
+                </span>
+              </div>
+
+              <!-- Live firewall breakdown (read-only) -->
+              <template x-if="portainerFirewall">
+                <div class="bg-gray-50 border border-gray-200 rounded-lg p-3 text-xs">
+                  <p class="font-semibold text-gray-700 mb-2">
+                    Effective firewall sources
+                    <span x-show="!portainerFirewall.opened" class="ml-1 text-red-600">(closed — node unreachable)</span>
+                  </p>
+                  <div class="space-y-1 text-gray-600">
+                    <p>
+                      <span class="text-gray-500">Dashboard egress:</span>
+                      <code class="bg-white px-1 rounded" x-text="portainerFirewall.dashboard_egress_ip || '(not detected)'"></code>
+                    </p>
+                    <p>
+                      <span class="text-gray-500">Merged allow-list:</span>
+                      <span x-show="!(portainerFirewall.merged || []).length" class="text-red-600">none</span>
+                      <template x-for="c in portainerFirewall.merged || []" :key="c">
+                        <code class="bg-white px-1 rounded mr-1" x-text="c"></code>
+                      </template>
+                    </p>
+                    <p>
+                      <span class="text-gray-500">Ports:</span>
+                      <template x-for="p in portainerFirewall.ports || []" :key="p">
+                        <code class="bg-white px-1 rounded mr-1" x-text="p"></code>
+                      </template>
+                    </p>
+                  </div>
+                </div>
+              </template>
+            </div>
           </div>
         </div>
       </template>
@@ -2670,6 +2803,7 @@ function settingsPage() {
     panelCfg: {},
     entitleAgentToken: '',   // read-only display of the auto-minted Entitle agent token name
     rancherFirewall: null,   // read-only breakdown of the Rancher node firewall allow-list (k8s panel)
+    portainerFirewall: null, // same for the managed Portainer node (Containers panel)
 
     // Cross-cloud per-region config sets — the Multi-region panel. One state block
     // per cloud, each loaded from / saved to /api/setup/regions/{cloud}. The generic
@@ -2958,6 +3092,14 @@ function settingsPage() {
           this.rancherFirewall = null;
           try {
             this.rancherFirewall = await API.get('/api/containers/rancher/firewall');
+          } catch (e) { /* node/GCP not configured yet — panel just omits the box */ }
+        }
+        // Containers: same read-only breakdown for the managed Portainer node, so the
+        // operator can see whether the node is actually reachable and from where.
+        if (intg.key === 'portainer') {
+          this.portainerFirewall = null;
+          try {
+            this.portainerFirewall = await API.get('/api/containers/portainer/node/firewall');
           } catch (e) { /* node/GCP not configured yet — panel just omits the box */ }
         }
       } catch (e) {
