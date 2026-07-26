@@ -1,0 +1,74 @@
+# Remove k3s from a node
+# Target: the k3s node you want to wipe. Idempotent — a host with no k3s is a no-op,
+# not a failure. Uses k3s's own uninstall script, picking the server or agent variant
+# by which one is present.
+#
+# DESTRUCTIVE, and requires confirm: true to do anything.
+#   * On an AGENT: the node is removed; its pods are rescheduled by the control plane.
+#   * On a SERVER: this DESTROYS the cluster's data on this node — etcd/SQLite state,
+#     all workload manifests, secrets and persistent volume data under
+#     /var/lib/rancher/k3s. On a single-server cluster the whole cluster is gone.
+#
+# After a node is wiped, the control plane still lists it as NotReady. Remove it there:
+#   k3s kubectl delete node <node-name>
+#
+# extra_vars:
+#   confirm: true       # required — nothing happens without it
+- name: Uninstall k3s from this node
+  hosts: all
+  become: true
+  vars:
+    confirm: false
+  tasks:
+    - name: Look for the server uninstall script
+      ansible.builtin.stat:
+        path: /usr/local/bin/k3s-uninstall.sh
+      register: server_uninstall
+
+    - name: Look for the agent uninstall script
+      ansible.builtin.stat:
+        path: /usr/local/bin/k3s-agent-uninstall.sh
+      register: agent_uninstall
+
+    - name: Nothing to do
+      ansible.builtin.debug:
+        msg: "No k3s uninstall script found — k3s does not appear to be installed here."
+      when:
+        - not server_uninstall.stat.exists
+        - not agent_uninstall.stat.exists
+
+    - name: Require explicit confirmation
+      ansible.builtin.assert:
+        that: confirm | bool
+        fail_msg: >-
+          Refusing to uninstall k3s without confirm: true. This wipes the node's k3s
+          state{{ ' — and this is a SERVER, so on a single-server cluster that destroys
+          the entire cluster, including its secrets and volume data' if server_uninstall.stat.exists else '' }}.
+      when: server_uninstall.stat.exists or agent_uninstall.stat.exists
+
+    # ── Uninstall ────────────────────────────────────────────────────────────
+    - name: Uninstall the k3s server
+      ansible.builtin.command: /usr/local/bin/k3s-uninstall.sh
+      register: server_removed
+      changed_when: server_removed.rc == 0
+      when:
+        - server_uninstall.stat.exists
+        - confirm | bool
+
+    - name: Uninstall the k3s agent
+      ansible.builtin.command: /usr/local/bin/k3s-agent-uninstall.sh
+      register: agent_removed
+      changed_when: agent_removed.rc == 0
+      when:
+        - not server_uninstall.stat.exists
+        - agent_uninstall.stat.exists
+        - confirm | bool
+
+    - name: Result
+      ansible.builtin.debug:
+        msg: >-
+          k3s removed from this node. A remaining control plane will still list it as
+          NotReady — delete it there with `k3s kubectl delete node <node-name>`.
+      when:
+        - server_uninstall.stat.exists or agent_uninstall.stat.exists
+        - confirm | bool

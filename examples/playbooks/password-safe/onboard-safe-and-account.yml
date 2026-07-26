@@ -50,6 +50,7 @@
         verify_ca: "{{ ps_verify_ca }}"
         name: "{{ safe_name }}"
         description: "Created by the VM dashboard via Ansible"
+      no_log: true              # the OAuth client_secret is a module arg
 
     - name: Ensure the folder exists in the safe
       beyondtrust.secrets_safe.folders_create:
@@ -60,6 +61,7 @@
         verify_ca: "{{ ps_verify_ca }}"
         name: "{{ folder_name }}"
         safe_name: "{{ safe_name }}"
+      no_log: true              # the OAuth client_secret is a module arg
 
     # Seed a text secret. Provide the value via a Secrets-Management binding ("Use a
     # secret" → mapped to seed_secret_value) rather than committing it here in plaintext.
