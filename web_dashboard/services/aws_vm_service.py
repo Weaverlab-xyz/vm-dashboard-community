@@ -367,9 +367,13 @@ async def _run_bulk_deploy(
     """
     db = _get_db_session()
     try:
-        # Mark all jobs running
-        for job_id, _ in job_items:
-            job_service.set_running(db, job_id)
+        # NB: children are deliberately NOT all marked running up front. They deploy
+        # sequentially, so the last one in a large batch would sit `running` with no
+        # progress write for the whole run — and reconcile_stale_jobs fails any
+        # `running` job whose heartbeat is 10 minutes cold, so an app restart mid-batch
+        # would fail it out from under this parent, which then deploys it anyway.
+        # Left `queued` until its turn, reconcile skips it. set_running now happens at
+        # the top of the loop below.
 
         # Step 1: Start ONE ECS Jumpoint container for the whole batch (BT only)
         from ..services import config_service as _cfg_svc
@@ -429,6 +433,8 @@ async def _run_bulk_deploy(
 
         # Step 3: Deploy each instance, all sharing the same ECS task ARN
         for job_id, item in job_items:
+            # Claim this child only as its turn comes — see the note above.
+            job_service.set_running(db, job_id)
             result: dict = {"ssh_secret_name": ssh_secret_name}
             if jumpoint_host_id:
                 result["jumpoint_host_id"] = jumpoint_host_id

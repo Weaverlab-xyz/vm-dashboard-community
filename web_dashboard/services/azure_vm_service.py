@@ -339,9 +339,13 @@ async def _run_bulk_deploy(job_items: list, req: AzureBulkDeployRequest, rg: str
     aci_group_name = None
     is_windows = req.os_type.lower() == "windows"
     try:
-        for job_id, _ in job_items:
-            job_service.set_running(db, job_id)
-
+        # NB: children are deliberately NOT all marked running up front. They deploy
+        # sequentially, so the last one in a large batch would sit `running` with no
+        # progress write for the whole run — and reconcile_stale_jobs fails any
+        # `running` job whose heartbeat is 10 minutes cold, so an app restart mid-batch
+        # would fail it out from under this parent, which then deploys it anyway.
+        # Left `queued` until its turn, reconcile skips it. set_running now happens at
+        # the top of the per-VM loop below.
         first_job_id = job_items[0][0]
 
         # Step 0: Quota check — fail fast before any resources are created
@@ -397,6 +401,8 @@ async def _run_bulk_deploy(job_items: list, req: AzureBulkDeployRequest, rg: str
             )
 
         for job_id, vm_name in job_items:
+            # Claim this child only as its turn comes — see the note above.
+            job_service.set_running(db, job_id)
             result: dict = {}
             if aci_group_name:
                 result["aci_group_name"] = aci_group_name
