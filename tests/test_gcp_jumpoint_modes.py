@@ -201,6 +201,64 @@ def test_a_failed_ensure_holds_no_reference():
     assert jhs._active_gce_count(db) == 0
 
 
+# ── which jumpoint a SINGLE deploy gets ──────────────────────────────────────
+
+class _Payload:
+    def __init__(self, docker_deploy_key_ref=None):
+        self.docker_deploy_key_ref = docker_deploy_key_ref
+
+
+def _with_mode(mode):
+    """Point gcp_vm_service._gcp_cfg at a fixed gcp_vm_jumpoint_mode."""
+    original = gvs._gcp_cfg
+    gvs._gcp_cfg = lambda key, fallback="": (mode if key == "gcp_vm_jumpoint_mode"
+                                             else original(key, fallback))
+    return original
+
+
+def test_singles_default_to_the_shared_host():
+    original = _with_mode("")          # unset — the common case
+    try:
+        assert gvs._paired_requested(_Payload()) is False
+    finally:
+        gvs._gcp_cfg = original
+
+
+def test_paired_mode_is_honoured():
+    original = _with_mode("paired")
+    try:
+        assert gvs._paired_requested(_Payload()) is True
+    finally:
+        gvs._gcp_cfg = original
+
+
+def test_mode_parsing_is_forgiving():
+    for raw in ("PAIRED", " paired ", "Paired"):
+        original = _with_mode(raw)
+        try:
+            assert gvs._paired_requested(_Payload()) is True, raw
+        finally:
+            gvs._gcp_cfg = original
+    for raw in ("shared", "", "nonsense"):
+        original = _with_mode(raw)
+        try:
+            assert gvs._paired_requested(_Payload()) is False, raw
+        finally:
+            gvs._gcp_cfg = original
+
+
+def test_a_per_deploy_key_forces_paired_even_in_shared_mode():
+    """The shared host is one VM serving many resources and resolves its deploy key
+    from config, so there is nowhere to honour a per-deploy override on it. The GCP
+    deploy form exposes that override as a secret picker — letting shared mode swallow
+    it would make a visible field silently do nothing."""
+    original = _with_mode("shared")
+    try:
+        assert gvs._paired_requested(_Payload(docker_deploy_key_ref="gcp_sm://k")) is True
+    finally:
+        gvs._gcp_cfg = original
+
+
 def test_the_gcp_teardown_actually_consults_the_gce_count():
     """The regression guard for the real bug: the GCP teardown summed databases, k8s
     and VDI but not GCE VMs, so a cloud-database decommission would delete the shared

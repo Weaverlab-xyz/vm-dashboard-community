@@ -271,9 +271,10 @@ def _active_gce_count(db) -> int:
 
     Deliberately asymmetric with ``_active_ec2_count``, which counts *all* live
     ec2_deploy rows: on AWS every EC2 deploy uses the shared host, so "all" is right
-    there. On GCP only batch deploys opt in — single deploys still start their own
-    paired ``bt-jumpoint-<vm>`` — so counting all of them would let one paired VM pin
-    the shared host forever and block a cloud-database reclaim.
+    there. On GCP both shapes coexist — singles follow ``gcp_vm_jumpoint_mode`` (shared
+    by default), batches always share, and a deploy carrying its own Jumpoint deploy key
+    is always paired — so counting all of them would let one paired VM pin the shared
+    host forever and block a cloud-database reclaim.
 
     Keys on ``jumpoint_host_id`` (what the deploy actually used) rather than
     ``jumpoint_mode`` (what it intended), so a row whose ensure failed and never

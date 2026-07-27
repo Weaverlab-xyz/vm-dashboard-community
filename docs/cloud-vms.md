@@ -155,14 +155,27 @@ SSH keypair, and a service account. The dashboard **auto-attaches** `gcp_default
 | `gcp_network` / `gcp_subnetwork` | `default` / — | VPC + VM subnet |
 | `gcp_ssh_key_secret_name` | — | Secret Manager keypair secret |
 | `gcp_ssh_username` | `gcp-user` | default Linux login |
-| `gcp_jumpoint_subnetwork` / `gcp_cloud_run_docker_deploy_key` | — | per-VM COS jumpoint (Layer 1) |
+| `gcp_jumpoint_subnetwork` / `gcp_cloud_run_docker_deploy_key` | — | COS jumpoint subnet + deploy key (Layer 1) |
+| `gcp_vm_jumpoint_mode` | `shared` | `shared` (one ref-counted host) or `paired` (an `e2-micro` per VM) |
 
-A **single** GCP deploy spins up a **per-VM paired COS jumpoint** `bt-jumpoint-<vmname>`.
-A **batch** (Count > 1) instead borrows the shared, ref-counted jumpoint host that cloud
-databases, k8s tunnels and VDI seats already use — one for the whole batch rather than N
-extra `e2-micro` VMs. Which one a VM used is recorded as `jumpoint_mode` on its deploy job,
-and destroy handles both: a paired jumpoint is deleted once no sibling VM references it, a
-shared one only has its reference released.
+GCP deploys borrow the **shared, ref-counted jumpoint host** that cloud databases, k8s
+tunnels and VDI seats already use — one host, rather than an `e2-micro` per VM. Batches
+always share. Single deploys follow `gcp_vm_jumpoint_mode` (`shared` by default,
+`paired` for the pre-2026-07 behaviour of a dedicated `bt-jumpoint-<vmname>`), editable
+under **Settings → BeyondTrust → GCP overrides** so the choice is reversible without a
+redeploy.
+
+Two things override the mode. A deploy that supplies its own **Jumpoint deploy key** is
+always paired — the shared host resolves its key from config, so there is nowhere to
+honour a per-deploy override on it. And the shared host lands on the
+`jumpoint_subnetwork` (the only sandbox subnet with Cloud NAT) rather than the VM
+subnet; reachability is unaffected either way, because the sandbox SSH rule is
+tag-based (`--source-tags bt-jumpoint`) and so applies VPC-wide.
+
+Which shape a VM used is recorded as `jumpoint_mode` on its deploy job, and destroy
+handles both: a paired jumpoint is deleted once no sibling VM references it, a shared
+one only has its reference released. Rows predating the field are inferred as paired,
+so no migration is needed.
 
 ### OCI (Compute) — read the caveats
 
