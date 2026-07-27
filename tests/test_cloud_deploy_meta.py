@@ -28,6 +28,8 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _PAIRS = [
     ("aws_vm_service.py", "aws.py"),
     ("oci_vm_service.py", "oci.py"),
+    ("azure_vm_service.py", "azure.py"),
+    ("gcp_vm_service.py", "gcp.py"),
 ]
 
 
