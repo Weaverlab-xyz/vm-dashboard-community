@@ -42,7 +42,7 @@ HANDLED_TYPES = (
     "rancher_node_deploy", "rancher_node_teardown", "rancher_entitle_register",
     "portainer_node_deploy", "portainer_node_teardown",
     "clouddb_provision", "clouddb_decommission", "clouddb_entitle_register",
-    "ansible_cloud_run",
+    "ansible_cloud_run", "ansible_local",
     "vdesktop_pool_provision", "vdesktop_pool_teardown",
     "packer_aws_build", "packer_azure_build", "packer_gcp_build",
     "aws_export_image", "gcp_export_image", "azure_export_image",
@@ -182,6 +182,19 @@ async def _dispatch(job_id: str, job_type: str, meta: dict) -> None:
             # cloud database — always executes on a transient in-cloud runner.
             from .services import ansible_cloud_run_service
             await ansible_cloud_run_service.run(db, job_id=job_id, meta=meta)
+        elif job_type == "ansible_local":
+            # Config-Management SSH/WinRM run against a VM or hypervisor group.
+            # _run_job owns its own SessionLocal + the job lifecycle, so it doesn't
+            # take this dispatcher's `db`; its arguments are reconstructed from the
+            # metadata the endpoint persisted (services/ansible_run_meta).
+            #
+            # The import reaches into the api package, which is backwards for a
+            # worker. _run_job still lives there for now: relocating it means moving
+            # ~660 lines of credential handling, which is a separate change from
+            # making the job durable.
+            from .api.config_mgmt import _run_job
+            from .services import ansible_run_meta
+            await _run_job(job_id, **ansible_run_meta.run_kwargs(meta))
         elif job_type == "vdesktop_pool_provision":
             # provision_seats / teardown_seats own their own SessionLocal + the
             # job lifecycle (set_running/set_completed) when given a job_id, so they

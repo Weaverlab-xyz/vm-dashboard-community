@@ -2,20 +2,32 @@
 
 ## What is it?
 
-The BeyondTrust integration connects the dashboard to two BeyondTrust products:
+The dashboard integrates with four BeyondTrust products. **This page covers the first
+two**; the others have their own pages and are listed here so the whole surface is
+discoverable from one place.
 
-- **Password Safe (ps-cli)** — on-demand checkout of SSH keys and passwords
-  stored in BeyondTrust Secrets Safe. Target credentials (AWS keys, Azure
-  service principal secrets, SSH private keys) are fetched from Password Safe
-  at the moment the dashboard needs them and discarded after use, rather than
-  being stored in the dashboard's encrypted database.
-- **Privileged Remote Access (btapi)** — optional session-metadata callbacks
-  to BeyondTrust PRA during remote access operations (Shell Jump / session
-  recording context).
+- **Password Safe / Secrets Safe** — on-demand checkout of SSH keys and passwords.
+  Target credentials (AWS keys, Azure service principal secrets, SSH private keys) are
+  fetched at the moment the dashboard needs them and discarded after use, rather than
+  stored in the dashboard's encrypted database. It also **onboards** resources the
+  dashboard builds — VMs, cloud databases — as managed systems + accounts. Driven by
+  `ps-cli`.
+- **Privileged Remote Access (PRA/SRA)** — brokered access to everything the dashboard
+  builds. The dashboard creates and tears down **Shell Jump**, **Web Jump**, **Remote
+  RDP** and **Protocol Tunnel** jump items, plus PRA Vault accounts, so operators reach
+  VMs, container UIs, databases and Kubernetes API servers through PRA rather than
+  direct network exposure. Driven by the `sra` Terraform provider plus a small REST
+  client for the few calls the provider can't make.
+- **Endpoint Privilege Management for Linux (EPM-L)** — agent package builds, sync to
+  asset storage, and installation tokens. Gated by the **same** `beyondtrust_enabled`
+  flag as the two above. See [EPM-L](epml.md).
+- **Entitle** — just-in-time cloud identity and access requests. A **separate**
+  `entitle_enabled` flag, so it can be turned on and off independently. See
+  [Entitle](entitle.md).
 
-Both are controlled by the single `BEYONDTRUST_ENABLED` flag. You can
-configure only Password Safe (ps-cli) and leave the btapi block blank if you
-do not have a PRA deployment.
+Password Safe and PRA are controlled by the single `beyondtrust_enabled` flag. You can
+configure only Password Safe and leave the PRA fields blank if you do not have a PRA
+deployment.
 
 ---
 
@@ -47,9 +59,9 @@ do not have a PRA deployment.
 | Requirement | Notes |
 |---|---|
 | BeyondTrust Password Safe | Secrets Safe licence; hosted or on-prem |
-| `ps-cli` binary inside the container | BeyondTrust BIPS CLI; baked into the `app` Docker image |
-| BeyondTrust PRA (optional) | Required only if using session recording via btapi |
-| `btapi` binary inside the container | BeyondTrust API CLI; baked into the `app` Docker image |
+| `ps-cli` | Ships as the `beyondtrust-bips-cli` **pip dependency** (`web_dashboard/requirements.txt`), so it is present in any image built from this repo — there is no separate binary install step |
+| BeyondTrust PRA (optional) | Required for jump items, protocol tunnels and PRA Vault accounts |
+| Terraform + the `sra` provider | How PRA jump items are created and destroyed; fetched by the dashboard's Terraform flow. No CLI to install |
 
 ---
 
@@ -73,17 +85,28 @@ grant.
    Add Managed System / Managed Account scope for any accounts the dashboard
    will check out SSH keys from.
 
-### Part 2 — btapi credentials (PRA session recording — optional)
+### Part 2 — PRA Config API credentials (optional)
 
-btapi authenticates to the BeyondTrust PRA API with its own client credentials.
+The `sra` Terraform provider and the REST client both authenticate to the BeyondTrust
+PRA Configuration API with an OAuth 2.0 client-credentials pair.
 
 1. In **BeyondTrust PRA** → **Configuration** → **API Configuration** →
    **Add API Account**. Copy the **Client ID** and **Client Secret**.
 2. The API host is the hostname of your PRA appliance, e.g.
    `https://pra.company.com`.
 
+Grant the account permission to manage **Jump Items** and **Jump Groups**, and — if you
+use the cloud-database or Kubernetes tunnels — read access to **Vault Accounts** (the
+dashboard enumerates account groups to populate the provision form).
+
 > If your PRA appliance and Password Safe are the same host, the credentials
 > from Part 1 and Part 2 may be identical.
+
+**Optional second credential.** Onboarding a database's PRA Vault account into Password
+Safe creates a functional account whose username/password *is* a PRA Config API client
+pair. Set `pra_config_api_client_id` / `pra_config_api_client_secret` to use a separate,
+narrower client for that; left blank, the dashboard falls back to the main
+`bt_client_id` / `bt_client_secret`.
 
 ### Part 3 — Enable and configure in the dashboard
 
@@ -103,7 +126,7 @@ fill in the fields.
    | OAuth Client ID | (from API Registration) |
    | OAuth Client Secret | (from API Registration) |
 
-3. Fill in the **btapi** section (leave blank if not using PRA):
+3. Fill in the **Privileged Remote Access** section (leave blank if not using PRA):
 
    | Field | Example |
    |---|---|
@@ -121,8 +144,33 @@ fill in the fields.
 |---|---|
 | **Vault-backed cloud credentials** | AWS, Azure, and SSH credentials resolved from Password Safe at runtime rather than stored in the application database |
 | **SSH key checkout** | Ansible and BT Jumpoint tasks retrieve SSH private keys from Managed Accounts on demand |
-| **PRA session context** | Shell Jump sessions opened by the dashboard are tagged with job metadata in BeyondTrust PRA |
+| **Managed-account checkout for playbook runs** | A Config-Management run can use a Password Safe managed account as its login identity — the operator picks an account from a live list and the credential is checked out **just-in-time** at run time, never shown and scrubbed from job output. See [below](#managed-account-checkout-for-config-management-runs) |
+| **Resource onboarding** | VMs and cloud databases the dashboard builds are registered as Password Safe managed systems + accounts, and removed again on destroy |
+| **PRA jump items** | Shell Jump (VMs), Web Jump (Portainer / Rancher UIs), Remote RDP (virtual desktops) and Protocol Tunnel (databases, Kubernetes API) — created and torn down with the resource |
+| **PRA Vault accounts** | Tunnel credentials are minted as PRA Vault accounts, which can themselves be onboarded into Password Safe for rotation |
+| **EPM-L agent lifecycle** | Package builds, sync to asset storage, and installation tokens — same feature flag ([EPM-L](epml.md)) |
 | **Secret audit log** | Every checkout creates an immutable record in Password Safe |
+
+### Managed-account checkout for Config-Management runs
+
+Instead of referencing a *stored* secret, an operator running a playbook can pick a
+Password Safe **managed account** and have its credential checked out just-in-time. Two
+details are worth knowing because they are not obvious:
+
+- **Across many hosts, the account is matched by name.** A managed account reference
+  pins a system id *and* an account id, both specific to one managed system — reusing
+  one across a fleet would check out a single machine's credential and connect to every
+  host with it. A [bulk run](../config-management.md#bulk-runs-from-the-inventory)
+  therefore sends the account **name**, and each job resolves it against the host it is
+  configuring, so every host checks out its own credential.
+- **On the ECS / Cloud Run runners it needs an opt-in.** Those runners *reference* a
+  store secret rather than taking a value inline, which a just-in-time credential has
+  no place in — so they are rejected unless **Ephemeral cloud secrets** is enabled, at
+  which point the credential is briefly written to that cloud's store as a short-lived,
+  RBAC-locked secret and force-deleted after the run.
+
+Full walkthrough in
+[Ansible → Managed-account checkout](ansible.md#managed-account-checkout-beyondtrust-password-safe).
 
 ---
 
@@ -297,7 +345,7 @@ What they deliberately don't do (covered in the script README):
 
 - No new local accounts (sudoers wired to the existing cloud-default user).
 - No Password Safe Managed Account creation (those are admin-managed in PS).
-- No EPM-L agent install (registration tokens expire 8h after issue; needs a first-boot hook, separate effort).
+- No EPM-L agent install — registration tokens expire 8h after issue, so baking one into an image doesn't work. The dashboard instead builds agent packages, syncs them to asset storage and issues a token at install time; see [EPM-L](epml.md).
 - No host firewall (cloud security groups are the source of truth).
 
 **Cross-cloud constraint**: Azure's Packer builder invokes scripts as `sudo -E sh '{{ .Path }}'`, forcing `/bin/sh` regardless of shebang. Both scripts are strict POSIX `sh` (verified with `dash -n`) so they behave identically on AWS, Azure, and GCP.
@@ -308,55 +356,49 @@ What they deliberately don't do (covered in the script README):
 
 ## Advanced configuration
 
-### Jump group and policy (PRA Shell Jump routing)
+These are **Settings keys**, not environment variables — set them under **Settings →
+Integrations → BeyondTrust**. The dashboard's config store reads from the database
+only; exporting an equivalently-named env var has no effect.
 
-If your PRA deployment uses multiple jump groups, set:
+| Key | Notes |
+|---|---|
+| `bt_api_host` | PRA appliance hostname, e.g. `tenant.beyondtrustcloud.com` |
+| `bt_client_id` / `bt_client_secret` | PRA Config API OAuth client-credentials pair |
+| `pra_config_api_client_id` / `pra_config_api_client_secret` | Optional narrower client used only for the PRA Vault functional account; falls back to `bt_client_id` / `bt_client_secret` |
+| `bt_jump_group_name` | Jump group new jump items land in |
+| `bt_jumpoint_name` | The Jumpoint to route through, **by name** — the pickers in Settings enumerate both from the PRA Config API |
+| `azure_bt_jump_group_name` | Azure-specific jump-group override; blank falls back to `bt_jump_group_name` |
+| `bt_vault_account_group_id` | Vault account group new tunnel credentials are created in |
+| `bt_ps_deploy_key_title` | Title of the Password Safe secret holding the Docker deploy key — the dashboard looks secrets up by title |
+| `bt_shell_jump_id` | Recorded per-VM so the jump item can be torn down with the VM; not operator-set |
 
-```
-BT_JUMP_GROUP_NAME=us-east-2
-BT_GROUP_POLICY_NAME=BeyondTrust IT User
-BT_JUMPOINT_ID=7
-```
-
-`BT_JUMPOINT_ID` is the numeric ID of the Jumpoint the dashboard will use for
-cloud instances (visible in PRA → **Jump** → **Jumpoints** → edit a jumpoint).
-
-### Azure-specific jump group override
-
-```
-AZURE_BT_JUMP_GROUP_NAME=azure-east
-AZURE_BT_GROUP_POLICY_NAME=BeyondTrust IT User
-AZURE_JUMPOINT_ID=9
-```
-
-Leave blank to fall back to the global `BT_JUMP_GROUP_NAME` / `BT_GROUP_POLICY_NAME`.
-
-### Password Safe secret titles
-
-The dashboard looks up secrets by **title** in Password Safe. The defaults work
-for a standard deployment; override in **Settings → Integrations → BeyondTrust**
-if your titles differ:
-
-```
-BT_PS_DEPLOY_KEY_TITLE=Docker Deploy Key
-```
+**Self-hosted Jumpoint (AWS).** A separate `bt_ecs_*` block provisions a Jumpoint host
+as an ECS task or EC2 instance (`bt_ecs_launch_type`, `bt_ecs_cluster`,
+`bt_ecs_jumpoint_subnet_id`, `bt_ecs_image`, and the CPU/memory/role keys). Configure it
+in the same Settings panel; it exists so a cloud VPC can have a Jumpoint with
+line-of-sight to private instances without one being run by hand.
 
 ---
 
 ## Troubleshooting
 
-**"ps-cli not found"** — the `ps-cli` binary must be on `PATH` inside the
-container. Verify the Dockerfile includes the BIPS CLI installation step and
-rebuild the image.
+**"ps-cli not found"** — `ps-cli` comes from the `beyondtrust-bips-cli` pip package in
+`web_dashboard/requirements.txt`, so this means the image was built without installing
+requirements, or something is shadowing `PATH`. Confirm with
+`docker compose exec app ps-cli --version`; rebuild the image if it is genuinely absent.
 
 **"Authentication failed" from ps-cli** — verify the Client ID and Client Secret
 in **Settings → Integrations → BeyondTrust** match the API Registration in
-Password Safe and that the registration has not expired. Run
-`docker compose exec app ps-cli --version` to confirm the binary is present.
+Password Safe and that the registration has not expired.
 
-**"btapi command failed"** — confirm `BT_API_HOST` is reachable from inside the
-container: `docker compose exec app curl -Is "$BT_API_HOST"`. If the host uses
-a self-signed certificate you may need to add it to the container's CA store.
+**PRA jump item wasn't created** — the jump item is created by Terraform with the `sra`
+provider as part of the resource's own job, so the failure is in that job's log, not a
+separate one. Check that `bt_api_host` is reachable from the container
+(`docker compose exec app curl -Is "https://<bt_api_host>"`), that the PRA Config API
+account may manage Jump Items, and that `bt_jump_group_name` / `bt_jumpoint_name` match
+entries that exist in PRA — they are matched by **name**, so a rename in PRA breaks
+them silently. A self-signed appliance certificate may need adding to the container's
+CA store.
 
 **Secrets retrieved are empty** — check that the API Registration has **Secrets →
 Read** and **Credentials → Read** permissions, and that the specific secret is

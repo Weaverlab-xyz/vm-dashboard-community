@@ -18,7 +18,7 @@ Target types:
 import logging
 import uuid
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, model_validator
 from sqlalchemy.orm import Session
 
@@ -28,6 +28,7 @@ from ..services import job_service
 from ..services import storage_service
 from ..services.storage_service import StorageError
 from ..services import ansible_local_service
+from ..services import ansible_run_meta
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/config-mgmt", tags=["config-mgmt"])
@@ -537,14 +538,23 @@ async def _run_job(
     managed_account: dict | None = None,
     managed_become: dict | None = None,
 ) -> None:
+    """Execute one VM (SSH/WinRM) Config-Management run.
+
+    Dispatched by ``jobs_worker`` from the job's persisted metadata — NOT from a
+    request. It owns its own ``SessionLocal`` and the job lifecycle, so the runner
+    hands it no session. Arguments are reconstructed by
+    ``services.ansible_run_meta.run_kwargs``; that module's key set is asserted
+    against this signature by tests/test_ansible_local_meta.py, because a name that
+    drifts is a TypeError inside a background worker where nobody is watching.
+    """
     import base64
     from ..database import SessionLocal
     db = SessionLocal()
     try:
-        # Flip to 'running' up front so this in-process BackgroundTask is visible to
-        # reconcile_stale_jobs. It only reconciles 'running' jobs; a config-mgmt run
-        # left at 'pending' after an app restart orphaned its task would otherwise
-        # hang forever at partial progress instead of being failed on next startup.
+        # Re-stamp 'running' (the runner's atomic claim already set it) so the row
+        # heartbeats from the moment work actually starts — reconcile_stale_jobs
+        # only reconciles 'running' jobs, and uses that heartbeat to tell a live run
+        # from one whose worker died. Mirrors ansible_cloud_run_service.run.
         job_service.set_running(db, job_id)
         job_service.update_progress(db, job_id, 5, f"Fetching asset '{asset}'…")
         try:
@@ -1047,7 +1057,6 @@ async def _run_cloud_localhost(payload: "RunRequest", db, current_user):
 @router.post("/run")
 async def run_playbook(
     payload: RunRequest,
-    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -1155,12 +1164,15 @@ async def run_playbook(
                         "secret is locked to it."))
     description = f"Ansible ({atype}): {payload.asset} → {payload.target}"
 
+    # Everything the run needs, persisted so the durable runner can reconstruct it.
+    # Refs and ids only — see services/ansible_run_meta for what may go in here.
     job = job_service.create_job(
         db,
         job_type="ansible_local",
         created_by=current_user.username,
         workgroup="ansible",
-        metadata={"description": description},
+        metadata=ansible_run_meta.run_meta(
+            payload, description=description, asset_backend=asset_backend),
         batch_id=payload.batch_id,
     )
     if wants_secret:
@@ -1189,13 +1201,9 @@ async def run_playbook(
             details={"kinds": kinds, "vars": sorted(payload.secret_vars.keys()),
                      "managed_accounts": managed_accts,
                      "asset": payload.asset, "target": payload.target})
-    background_tasks.add_task(
-        _run_job, job.id, payload.asset, payload.target, payload.cloud,
-        payload.ansible_user, payload.extra_vars, asset_backend, payload.secret_vars,
-        payload.secret_become_source, payload.secret_ssh_key_source,
-        payload.managed_account.model_dump() if payload.managed_account else None,
-        payload.managed_become.model_dump() if payload.managed_become else None,
-    )
+    # No background task: the job is a queued row now, claimed by jobs_worker. Its
+    # parameters live in the metadata written above, so a worker restart resumes it
+    # instead of stranding it — see services/ansible_run_meta.py.
     return {"job_id": job.id, "status": "queued"}
 
 
@@ -1220,7 +1228,6 @@ class BulkRunRequest(BaseModel):
 @router.post("/run-bulk")
 async def run_playbook_bulk(
     payload: BulkRunRequest,
-    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -1289,7 +1296,7 @@ async def run_playbook_bulk(
             **target["spec"],
         )
         try:
-            result = await run_playbook(req, background_tasks, db, current_user)
+            result = await run_playbook(req, db, current_user)
         except HTTPException as e:
             failed.append({"inventory_id": target["id"], "name": target["name"],
                            "error": str(e.detail)})
