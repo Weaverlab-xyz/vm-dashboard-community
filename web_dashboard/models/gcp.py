@@ -76,6 +76,35 @@ class GCPDeployRequest(BaseModel):
                     "auto-numbers the names (web -> web-01, web-02, …).")
 
 
+class GCPBulkDeployItem(BaseModel):
+    """One VM in a multi-select bulk request: its own image, its own name.
+
+    This is the other axis from ``GCPDeployRequest.count``. Count deploys N copies of
+    ONE image; bulk deploys one VM per SELECTED image. Everything else on the request
+    is shared, exactly as on the AWS and Azure bulk routes."""
+    image_self_link: str
+    image_name: str = ""        # display/tracking only
+    instance_name: str
+
+
+class GCPBulkDeployRequest(BaseModel):
+    items: List[GCPBulkDeployItem]
+    machine_type: str = "e2-medium"
+    zone: str = ""
+    subnetwork: str = ""
+    create_external_ip: bool = False
+    ssh_username: str = "gcp-user"
+    disk_size_gb: int = 20
+    network_tags: List[str] = []
+    workgroup: str
+    register_in_entitle: bool = False
+    register_in_passwordsafe: bool = False
+    ssh_key_secret_override: Optional[str] = None
+    jump_group: Optional[str] = None
+    jumpoint_name: Optional[str] = None
+    docker_deploy_key_ref: Optional[str] = None
+
+
 class GCPDeployResponse(BaseModel):
     job_id: str          # for a batch (count > 1) this is the PARENT job
     status: str
@@ -85,6 +114,19 @@ class GCPDeployResponse(BaseModel):
     batch_id: Optional[str] = None
     job_ids: List[str] = []   # child job ids, in name order
     names: List[str] = []     # the expanded names actually used, post-truncation
+
+
+class GCPBulkDeployJobResult(BaseModel):
+    image_self_link: str
+    instance_name: str
+    job_id: str
+    status: str
+
+
+class GCPBulkDeployResponse(BaseModel):
+    jobs: List[GCPBulkDeployJobResult]
+    count: int
+    batch_id: Optional[str] = None
 
 
 class GCPCreateImageRequest(BaseModel):

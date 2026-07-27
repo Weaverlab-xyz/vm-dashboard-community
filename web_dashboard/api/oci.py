@@ -22,6 +22,9 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..database import Job, User, get_db
 from ..models.oci import (
+    OCIBulkDeployJobResult,
+    OCIBulkDeployRequest,
+    OCIBulkDeployResponse,
     OCIDeployRequest,
     OCIDeployResponse,
     OCIImageListResponse,
@@ -363,6 +366,140 @@ async def _fan_out_batch(
         job_ids=[c["job_id"] for c in children],
         names=names,
     )
+
+
+# ── Bulk Deploy (multi-select: one instance per selected image) ───────────────
+
+@router.post("/bulk-deploy", response_model=OCIBulkDeployResponse)
+async def bulk_deploy_instances(
+    req: OCIBulkDeployRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("oci", "write")),
+):
+    """Launch one OCI instance per selected image.
+
+    The other axis from the deploy form's Count: that launches N copies of one image,
+    this launches one instance per image the operator ticked. The runner needs no
+    changes — ``oci_bulk_deploy`` already rebuilds a full ``OCIDeployRequest`` per child
+    from ``children[].req``, so a per-child image is just a different value in a field
+    it already reads.
+    """
+    if not req.items:
+        raise HTTPException(status_code=400, detail="At least one image is required.")
+    if not _configured():
+        raise HTTPException(status_code=400, detail="OCI not configured — run the setup wizard.")
+
+    compartment = _compartment()
+    workgroup = _validate_workgroup(db, current_user, req.workgroup)
+
+    names = [i.instance_name for i in req.items]
+    for name in names:
+        deploy_batch.validate_name(name, "oci")
+    deploy_batch.reject_name_collisions(db, "oci_deploy", names)
+
+    # ── Free-tier guardrail over the WHOLE selection ──────────────────────────
+    # Shape/OCPUs/memory are request-level, so N selected images means N instances of
+    # the same shape — exactly what instance_count expresses.
+    free_tier_warnings = []
+    if _oci_cfg("oci_freetier_enforce", "1") not in ("0", "false", "False", ""):
+        usage = _existing_freetier_usage(db)
+        within, free_tier_warnings = oci_freetier.evaluate(
+            shape=req.shape, ocpus=req.ocpus, memory_gb=req.memory_gb,
+            boot_volume_gb=req.boot_volume_gb, instance_count=len(req.items), **usage,
+        )
+        if not within and not req.acknowledge_charges:
+            raise HTTPException(status_code=400, detail={
+                "code": "free_tier_exceeded",
+                "message": "This selection is outside the OCI Always-Free tier and may incur charges: "
+                           + " ".join(free_tier_warnings),
+                "warnings": free_tier_warnings,
+            })
+
+    await deploy_batch.enforce_admission(
+        "oci:compute:deploy",
+        requests=[{"region": _region(), "instance_type": req.shape,
+                   "image": item.image_ocid, "name": item.instance_name,
+                   "count": len(req.items), "batch": True}
+                  for item in req.items],
+        actor=current_user, db=db,
+    )
+
+    batch_id = uuid.uuid4().hex[:12]
+    children, results = [], []
+    for item in req.items:
+        child_req = OCIDeployRequest(
+            image_ocid=item.image_ocid,
+            image_name=item.image_name,
+            instance_name=item.instance_name,
+            shape=req.shape,
+            ocpus=req.ocpus,
+            memory_gb=req.memory_gb,
+            availability_domain=req.availability_domain,
+            subnet_ocid=req.subnet_ocid,
+            assign_public_ip=req.assign_public_ip,
+            ssh_username=req.ssh_username,
+            boot_volume_gb=req.boot_volume_gb,
+            workgroup=workgroup,
+            acknowledge_charges=req.acknowledge_charges,
+            register_in_entitle=req.register_in_entitle,
+            register_in_passwordsafe=req.register_in_passwordsafe,
+            ssh_key_secret_override=req.ssh_key_secret_override,
+            jump_group=req.jump_group,
+            jumpoint_name=req.jumpoint_name,
+            count=1,
+        )
+        job = job_service.create_job(
+            db,
+            job_type="oci_deploy",
+            created_by=current_user.username,
+            workgroup=workgroup,
+            # `queued`, not `pending`: the runner claims on status='pending', so a
+            # pending child would be launched a second time alongside its parent.
+            status="queued",
+            batch_id=batch_id,
+            metadata={
+                "compartment_ocid": compartment,
+                "instance_name":    item.instance_name,
+                # shape/ocpus/memory_gb are load-bearing on the child, not decoration:
+                # _existing_freetier_usage reads exactly these three off deploy rows.
+                "shape":            req.shape,
+                "ocpus":            req.ocpus,
+                "memory_gb":        req.memory_gb,
+                "image_ocid":       item.image_ocid,
+                "image_name":       item.image_name,
+                "region":           _region(),
+                "workgroup":        workgroup,
+                "bulk":             True,
+                "req":              child_req.model_dump(),
+            },
+        )
+        job_service.set_cloud_resource_id(db, job.id, item.instance_name)
+        job_service.log_audit(
+            db, current_user.username, "oci_deploy",
+            details={"instance_name": item.instance_name, "shape": req.shape,
+                     "workgroup": workgroup, "bulk": True},
+        )
+        children.append({"job_id": job.id, "instance_name": item.instance_name,
+                         "req": child_req.model_dump()})
+        results.append(OCIBulkDeployJobResult(
+            image_ocid=item.image_ocid, instance_name=item.instance_name,
+            job_id=job.id, status="queued"))
+
+    job_service.create_job(
+        db,
+        job_type="oci_bulk_deploy",
+        created_by=current_user.username,
+        workgroup=workgroup,
+        batch_id=batch_id,
+        metadata={
+            "compartment_ocid": compartment,
+            "region":           _region(),
+            "workgroup":        workgroup,
+            "children":         children,
+        },
+    )
+    return OCIBulkDeployResponse(jobs=results, count=len(results), batch_id=batch_id,
+                                 free_tier_warnings=free_tier_warnings)
 
 
 @router.post("/deploy", response_model=OCIDeployResponse)

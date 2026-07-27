@@ -108,9 +108,23 @@ clash returns **409** rather than creating anything. That matters because Azure,
 resolve a destroy by first match on name, so duplicates would make a later teardown
 ambiguous.
 
-**AWS and Azure additionally** have a *Bulk Deploy* button on their image tables. That is a
-different operation: one VM **per selected image**, with per-VM names you type. Use Count for
-N copies of one image; use Bulk Deploy for one each of several images.
+### The two ways to deploy several VMs
+
+All four clouds offer both, and they are different operations:
+
+| | **Count** (on the deploy form) | **Bulk Deploy** (on the image list) |
+|---|---|---|
+| What it makes | N copies of **one** image | one VM **per selected image** |
+| Names | auto-numbered from a base | typed per VM |
+| Where | the deploy modal | tick images, then the *Bulk Deploy (n)* button |
+
+Both produce the same job shape — one `*_bulk_deploy` parent plus one `queued` child per
+VM, sharing a `batch_id` — so both land on the `/jobs?batch_id=` rollup and both share a
+single Jumpoint for the run.
+
+Use Count for "five identical lab boxes"; use Bulk Deploy for "one each of these three
+images". GCP and OCI gained Bulk Deploy after AWS and Azure, so older screenshots may show
+their image lists without checkboxes.
 
 Policy guardrails ([Policy Guardrails](policy-guardrails.md)) are enforced **per VM** on every
 path — count batches and multi-select bulk included — before any job row is created.
