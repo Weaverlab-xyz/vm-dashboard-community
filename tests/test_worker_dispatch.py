@@ -187,7 +187,13 @@ def test_children_of_a_parent_job_are_created_unclaimable():
     caught by nothing, and every VM in the batch gets created twice.
 
     Checked structurally against any endpoint that names child job ids in a parent's
-    metadata, so a future bulk endpoint is covered the day it is written."""
+    metadata, so a future bulk endpoint is covered the day it is written.
+
+    Because the walk is per FUNCTION, the count>1 fan-out has to live in its own
+    module-level `_fan_out_batch` rather than as an `if` inside the deploy route: a
+    runtime branch is invisible here, so the single deploy's `pending` create_job in
+    the same function would read as a violation. Nesting the helper doesn't help
+    either — ast.walk descends into nested defs and re-attributes them to the parent."""
     found, violations = 0, []
     for module, fn_name, parents, others in _parent_child_endpoints():
         found += 1
@@ -196,9 +202,10 @@ def test_children_of_a_parent_job_are_created_unclaimable():
                 violations.append(
                     f"{module}:{fn_name} creates {job_type} as {status!r} while also "
                     "creating a parent that lists it as a child")
-    assert found >= 2, (
-        f"expected the AWS and Azure bulk endpoints to match this shape, found {found} — "
-        "the rule may have stopped matching rather than started passing")
+    assert found >= 6, (
+        f"expected the four count-batch paths plus the AWS and Azure multi-select bulk "
+        f"endpoints to match this shape, found {found} — the rule may have stopped "
+        "matching rather than started passing")
     assert not violations, "; ".join(violations)
 
 

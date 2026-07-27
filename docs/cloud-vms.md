@@ -64,6 +64,41 @@ Each cloud reads its credentials + a default subnet + an SSH-keypair secret from
 (emitted by the sandbox setup script). The **admin/SSH keypair** is stored in the cloud's
 own secret store and retrievable per instance from the UI.
 
+### Deploying more than one VM
+
+Every deploy form has a **Count** (1–20). Leave it at 1 and nothing changes. Set it higher
+and the base name is expanded into a numbered series — `web` × 3 becomes `web-01`,
+`web-02`, `web-03` — with the form previewing the exact names before you submit.
+
+A count above 1 creates one `*_bulk_deploy` **parent** job plus one `queued` child per VM,
+all sharing a `batch_id`; the browser lands on `/jobs?batch_id=…`, which rolls the batch up
+into total / running / failed. The children deploy **sequentially** inside a single worker
+slot, so a batch of N takes roughly N × the single-deploy time and occupies one of the
+`WORKER_REPLICAS` slots for the duration — that, plus default cloud vCPU quotas, is why the
+ceiling is 20 (`MAX_DEPLOY_COUNT` in [`services/vm_naming.py`](../web_dashboard/services/vm_naming.py)).
+
+Names are expanded by truncating the *base*, never the numeric suffix, so a series stays
+unique at any provider's length limit. Two limits are worth knowing:
+
+* **Azure batches are budgeted to 15 characters**, not the 64-char ARM limit, because the
+  in-guest hostname is derived as `vm_name[:15]`. A longer base would give every VM in the
+  batch the same hostname, which breaks Entitle and Password Safe onboarding — both key off
+  hostname. Single deploys are unaffected.
+* **GCP names must be RFC1035** (lowercase, leading letter, hyphens); a base that isn't is
+  rejected with a 400 rather than silently rewritten.
+
+Names are checked against VMs the dashboard has already deployed *or is deploying*, and a
+clash returns **409** rather than creating anything. That matters because Azure, GCP and OCI
+resolve a destroy by first match on name, so duplicates would make a later teardown
+ambiguous.
+
+**AWS and Azure additionally** have a *Bulk Deploy* button on their image tables. That is a
+different operation: one VM **per selected image**, with per-VM names you type. Use Count for
+N copies of one image; use Bulk Deploy for one each of several images.
+
+Policy guardrails ([Policy Guardrails](policy-guardrails.md)) are enforced **per VM** on every
+path — count batches and multi-select bulk included — before any job row is created.
+
 ### AWS (EC2)
 
 Sandbox: [`scripts/sandbox/Linux/setup-aws.sh`](../scripts/sandbox/Linux/setup-aws.sh).
@@ -122,7 +157,12 @@ SSH keypair, and a service account. The dashboard **auto-attaches** `gcp_default
 | `gcp_ssh_username` | `gcp-user` | default Linux login |
 | `gcp_jumpoint_subnetwork` / `gcp_cloud_run_docker_deploy_key` | — | per-VM COS jumpoint (Layer 1) |
 
-Each GCP deploy spins up a **per-VM paired COS jumpoint** `bt-jumpoint-<vmname>`.
+A **single** GCP deploy spins up a **per-VM paired COS jumpoint** `bt-jumpoint-<vmname>`.
+A **batch** (Count > 1) instead borrows the shared, ref-counted jumpoint host that cloud
+databases, k8s tunnels and VDI seats already use — one for the whole batch rather than N
+extra `e2-micro` VMs. Which one a VM used is recorded as `jumpoint_mode` on its deploy job,
+and destroy handles both: a paired jumpoint is deleted once no sibling VM references it, a
+shared one only has its reference released.
 
 ### OCI (Compute) — read the caveats
 
@@ -144,7 +184,10 @@ user + API keypair, and (best-effort) a KMS vault SSH-keypair secret.
 > `oci_bt_jump_group_name` / `oci_jumpoint_name` (or `bt_*`) at it. (2) **Region is fixed to
 > `oci_region`.** (3) **Free-tier gate** — the form defaults to Always-Free
 > (`VM.Standard.E2.1.Micro` / `A1.Flex`); a larger shape is rejected (HTTP 400) unless the
-> request sets `acknowledge_charges=true`. (4) **SDK-only** (no Terraform VM module),
+> request sets `acknowledge_charges=true`. The gate is evaluated over the whole request,
+> so a **Count** that would exceed the envelope trips it even when each VM is individually
+> free — three free micros is one more than the tier allows. Changing the count clears any
+> acknowledgment you had already ticked. (4) **SDK-only** (no Terraform VM module),
 > Linux-only, no per-region config sets.
 
 ---
@@ -228,7 +271,15 @@ in [image-management.md](image-management.md).
 - **Can't SSH the VM** — the VM SG/NSG only allows SSH from the jumpoint; reach it through the
   PRA Shell Jump, not directly.
 - **OCI deploy rejected (HTTP 400)** — a non-free-tier shape without `acknowledge_charges`;
-  tick the acknowledge box or pick a free-tier shape.
+  tick the acknowledge box or pick a free-tier shape. With a **Count**, the whole batch is
+  measured against the envelope, so this can fire on a shape that is free on its own.
+- **Deploy rejected (HTTP 409, `vm_name_collision`)** — the names this deploy would create
+  are already taken by VMs the dashboard deployed or is deploying. Pick a different base
+  name, or destroy the existing VMs first. The check is deliberately strict: Azure, GCP and
+  OCI resolve a destroy by first match on name, so duplicates make teardown ambiguous.
+- **A batch child is stuck `queued`** — children are created unclaimable on purpose and are
+  driven by their `*_bulk_deploy` parent. Check the parent (same `batch_id`): if it failed
+  or was reconciled away, its children have nothing to drive them.
 
 For the sandbox network topology see [Cloud Sandbox](CLOUD_SANDBOX.md); for day-2 Ansible
 against deployed VMs see [Config Management](config-management.md).
