@@ -888,6 +888,9 @@ def _run_gce_jumpoint_sync(
         return {
             "name": name, "zone": zone, "self_link": existing.self_link,
             "status": status, "reused": True,
+            # Surface the ephemeral egress IP even on reuse: the Web-Jump firewall
+            # (_jumpoint_cidr) needs it, and a reclaimed VM's IP may have changed.
+            "external_ip": _external_ip_of(existing),
         }
     except NotFound:
         pass
@@ -943,6 +946,9 @@ def _run_gce_jumpoint_sync(
     return {
         "name": name, "zone": zone, "self_link": info.self_link,
         "status": info.status, "reused": False,
+        # The Web-Jump firewall (_jumpoint_cidr) whitelists this /32 so the Jumpoint
+        # host can reach a source-restricted Rancher/Portainer node.
+        "external_ip": _external_ip_of(info),
     }
 
 
