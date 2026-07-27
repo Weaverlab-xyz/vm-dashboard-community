@@ -26,8 +26,16 @@ Terraform provider:
 | Linux cloud VM | **SSH ephemeral accounts** ([docs](https://docs.beyondtrust.com/entitle/docs/entitle-integration-ssh_ephemeral_accounts)) |
 | PostgreSQL database | **PostgreSQL** ([docs](https://docs.beyondtrust.com/entitle/docs/entitle-integration-postgressql)) |
 | MySQL database | **MySQL** ([docs](https://docs.beyondtrust.com/entitle/docs/entitle-integration-mysql)) |
-| SQL Server database | **Microsoft SQL Server** ([docs](https://docs.beyondtrust.com/entitle/docs/entitle-integration-microsoft-sql-server)) |
-| _(future)_ EKS / AKS / GKE cluster | **Kubernetes** — wired in as those build flows ship |
+| SQL Server database | **Microsoft SQL Server** ([docs](https://docs.beyondtrust.com/entitle/docs/entitle-integration-microsoft-sql-server)) — **not currently registerable on any managed flavor**, see below |
+| Kubernetes cluster (EKS / AKS / GKE, and Rancher-managed) | **Kubernetes** ([docs](https://docs.beyondtrust.com/entitle/docs/entitle-integration-kubernetes)) — see [Kubernetes clusters](#kubernetes-clusters) |
+
+> **Managed SQL Server is gated off.** The Entitle SQL Server connector needs
+> `sysadmin` / `CONTROL SERVER`, which RDS-standard, Azure SQL Database and Cloud SQL
+> for SQL Server cannot grant. `_ENTITLE_VIABLE_SQLSERVER_PROVIDERS` in
+> `cloud_database_service` is empty today, so all three managed flavors are refused up
+> front — the API returns an error before touching the database, and the UI hides the
+> checkbox via the row's `entitle_viable` flag. Adding a provider to that set flips it
+> back on; the truth table is pinned by `tests/test_entitle_viability.py`.
 
 Registration is done by [`entitle_registration_service.py`](../../web_dashboard/services/entitle_registration_service.py),
 mirroring `terraform_pra_service`: it generates HCL, runs `terraform apply`, records
@@ -64,18 +72,50 @@ dashboard already brokers is the separate *access* path the user connects throug
 > reaches sandbox **VMs** but **not** Cloud SQL private-IP DBs (behind the
 > sandbox↔`servicenetworking` peering) — DB JIT uses the PRA tunnel, not the agent.
 
-> **Provisioning the agent** (dashboard-managed EKS/AKS/GKE cluster + Helm) is a
-> one-time **admin prerequisite** — a designed, deferred phase that lands alongside the
-> EKS build flow. See [`docs/design/entitle-resource-registration.md`](../design/entitle-resource-registration.md).
+> **Provisioning the agent** is a one-time, per-environment admin step, and it is
+> **wired up**: `POST /api/k8s/clusters/{id}/entitle-agent` Helm-installs the agent into
+> a dashboard-managed cluster as a `k8s_entitle_agent` job, mints its token via the
+> provider, stashes the value in the secrets backend and records
+> `entitle_agent_token_name` for later private registrations. See
+> [`docs/design/entitle-resource-registration.md`](../design/entitle-resource-registration.md).
 
-### Per-build opt-in
+### Kubernetes clusters
 
-Registration is **opt-in per build**. The build forms (AWS deploy / bulk deploy) show a
+Cluster registration is **not** a build-form checkbox — a cluster is registered on
+demand, after it exists, from the Kubernetes page:
+
+| Call | Job type | What it does |
+|---|---|---|
+| `POST /api/k8s/clusters/{id}/entitle-register` | `k8s_entitle_register` | Registers the cluster as an Entitle **Kubernetes** integration |
+| `POST /api/k8s/rancher/entitle-register` | `rancher_entitle_register` | The same for the Rancher-managed cluster |
+| `POST /api/k8s/clusters/{id}/entitle-agent` | `k8s_entitle_agent` | Helm-installs the Entitle agent (the one-time per-environment step above) |
+
+A **public** cluster registers directly, with the API server host, a token and the CA
+cert passed as Terraform variables. A **private** cluster registers through the agent
+instead and passes no credentials — the same public/private split as every other
+resource type.
+
+**The fine-grained tier is the impersonator model.** Rather than Entitle minting cluster
+credentials, `POST /api/k8s/clusters/{id}/impersonator` grants the Entra group
+cluster-wide `impersonate` on `users`. Entitle then JIT-binds `<prefix>:<email>` to a
+role, and the operator runs `kubectl --as=<prefix>:<email>` over the
+[API tunnel](../kubernetes.md). The prefix is `entitle_k8s_user_prefix` (default
+`entitle`).
+
+Note that impersonation needs the **API (TCP) tunnel**, not the Web Jump — a browser
+jump can't carry impersonation headers. Full context in
+[Kubernetes](../kubernetes.md).
+
+### Per-build opt-in (VMs and databases)
+
+For **VMs and databases** — the resources the dashboard builds — registration is
+**opt-in per build**. The build forms (AWS deploy / bulk deploy) show a
 **"Register in Entitle for just-in-time SSH access"** checkbox; cloud-database provisioning
 takes a `register_in_entitle` flag on `POST /api/databases`. Registration runs only when
 **both** the global `entitle_registration_enabled` capability **and** the per-build choice
 are on. Default off everywhere — nothing is registered until an operator and a builder both
-opt in.
+opt in. Clusters differ: they are registered on demand after the fact
+([above](#kubernetes-clusters)), so there is no build-time checkbox for them.
 
 ### Setup
 
