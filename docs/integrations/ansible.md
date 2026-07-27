@@ -132,6 +132,12 @@ selector writes a per-cloud key; the global keys remain as a fallback (see
 | _(fallback)_ Ansible runner | `ansible_runner` | `ANSIBLE_RUNNER` | `local` | Global default used when a per-cloud key above is blank: `local` \| `ecs` \| `aci` \| `gcp`. |
 | _(fallback)_ Kubernetes runner | `k8s_runner` | `K8S_RUNNER` | `local` | Global default used when a per-cloud key above is blank. |
 
+> **There is no `ansible_runner_local`.** A Config-Management run against an on-prem
+> Kubernetes cluster (`cloud = local`) always uses the local runner — it is the only
+> backend with a route to your LAN — so there is no key to set, and a stray one is
+> ignored rather than honored. See
+> [Kubernetes-cluster & cloud-database targets](#kubernetes-cluster--cloud-database-targets-localhost-runs).
+
 ### Shared cloud infrastructure — AWS / ECS
 
 These knobs are reused by the Ansible runner, the Kubernetes runner, **and**
@@ -473,6 +479,32 @@ picker (each tagged **[SSH key]** or **[password]**). Selecting one:
 - optionally, a **second** managed account can be picked for the become/sudo
   password (`ansible_become_password`).
 
+**Across many hosts (bulk runs).** The picker above pins `system_id` **and**
+`account_id`, and both belong to one managed system — so the same reference cannot be
+reused across a fleet: it would check out a *single machine's* credential and connect
+to every host with it. Correct only if the account happens to be domain-linked, wrong
+for a local account, and nothing would report which. A [bulk run](#bulk-runs-one-asset-many-targets)
+therefore sends the account **name**, and each job resolves it against the host it is
+actually configuring before checking anything out. Consequences:
+
+- Each host checks out **its own** credential. Because the resolved reference replaces
+  the submitted one wholesale, that host's own **[SSH key] / [password]** nature
+  decides the checkout mode — the sample host's flag is never trusted.
+- A host with no account by that name fails **only its own job**, with a message
+  naming the host and the account.
+- Matching accepts the `{user};{suffix}` form that cloud-native onboarding registers
+  (the AWS Systems Manager plugin appends a scope suffix), so picking `svc-ansible`
+  matches `svc-ansible;local`. Domain-linked accounts resolve too.
+- The account list you choose from is read from one selected target as a **sample** —
+  it supplies the names, not the ids.
+
+**Not available for Kubernetes / database batches.** Those run a `localhost` play with
+no SSH connection to authenticate, and the run path silently ignores the
+connection-identity fields. A single run can absorb that quietly; a batch would leave
+you believing a credential had been applied to every cluster — so `managed_account`,
+`managed_become`, `secret_ssh_key_source` and `secret_become_source` are **refused**
+outright for a non-VM batch. Named `secret_vars` are honored there and stay available.
+
 **Local and Azure (ACI) runners** inject the credential inline — the local runner
 via a `0600` vars file, ACI via `secure_value` — so a checked-out managed account
 works on either out of the box.
@@ -544,6 +576,49 @@ so there's nothing extra to set per run.
   + push them before relying on it.
 - The OAuth client needs the usual API-registration permissions (Secrets → Read,
   Requests → Create, Credentials → Read, plus scope for the paths the play touches).
+
+---
+
+## Bulk runs (one asset, many targets)
+
+`/config-mgmt` runs one asset against one target. To apply a playbook across a fleet,
+select rows on the **Inventory** page (`/inventory`) — filter to what you want, tick
+them, and a run panel appears. Each selected resource becomes its **own job**, all
+tagged with a shared `batch_id`, dispatched through the ordinary run path so every
+permission check, secret-store validation and runner decision behaves exactly as it
+does for a single run.
+
+**One kind per run.** Selecting a VM locks the checkboxes on Kubernetes clusters and
+databases, and vice versa. The kinds aren't interchangeable at any level: a VM run
+SSHes to a host, while k8s/database runs are `localhost` plays reaching *out* over a
+kubeconfig or DB login — different request fields, a different runner, and a playbook
+written for one is meaningless against the other.
+
+Rows that can never be a target are disabled with the reason on hover: **virtual
+desktops** (no Ansible target exists behind a seat), **Proxmox / Nutanix VMs** (their
+deploy records a node + VMID rather than an address — target them through their
+hypervisor *group* instead), and databases whose engine or cloud has no runner. Those
+reasons are computed server-side by the same rule the endpoint enforces, so the page
+can't offer a checkbox the API would reject.
+
+Two limits worth knowing:
+
+- **50 targets per batch.** Each is a job, so an unbounded "select all" against a
+  large estate would fan out unbounded work.
+- **Selection problems refuse the whole request; per-target failures don't.** A mixed
+  selection or an untargetable row is caught before any job exists. But several checks
+  in the run path turn on the *target's cloud*, so a mixed-cloud VM batch can be valid
+  for one host and not another — those come back in the response's `failed` list and
+  are named in the toast, while the rest still run.
+
+**Secrets and managed accounts.** The inventory panel covers asset / SSH user / extra
+vars. For a run needing a Secrets-Management secret or a Password Safe managed
+account, use **Continue on the Config Management page →**, which carries the selection
+over and applies the full run form to it — see [Managed-account
+checkout](#managed-account-checkout-beyondtrust-password-safe) for how an account is
+matched across many hosts.
+
+Full treatment in [docs/config-management.md](../config-management.md#bulk-runs-from-the-inventory).
 
 ---
 
@@ -816,12 +891,22 @@ Ready-to-adapt starters for Linux and Windows cloud VMs live in
 admin-user creation, Docker, node_exporter, nginx (Linux); Windows updates,
 firewall, Chocolatey, local admin, and IIS (Windows). See
 [examples/playbooks/README.md](../../examples/playbooks/README.md) for how to run
-each. There is also a **Docker Swarm** set
-([`examples/playbooks/swarm/`](../../examples/playbooks/swarm/)) — init, join, open
-ports, stack deploy, status, leave — for on-prem hosts; because a run targets one host
-at a time, a cluster is built node-by-node with the join token relayed between runs,
-so those need the **local runner** (see that README for the walkthrough and the
-token-visibility caveat). **Linux** samples run via the cloud or local runner;
+each. There are also two **cluster-building** sets for on-prem hosts — **Docker Swarm**
+([`examples/playbooks/swarm/`](../../examples/playbooks/swarm/)): init, join, open
+ports, stack deploy, status, leave; and **k3s**
+([`examples/playbooks/k3s/`](../../examples/playbooks/k3s/)): server-init, join, open
+ports, kubeconfig, status, uninstall. Both work the same way: because a run targets one
+host at a time, the cluster is built node-by-node with the join token relayed between
+runs, so they need the **local runner** (see that README for the walkthrough and the
+token-visibility caveat — either token can be routed through Password Safe instead of
+job output).
+
+The k3s set closes the loop with the section below: `k3s-kubeconfig.yml` rewrites k3s's
+loopback API address to the node's real one and prints a registration-ready payload, so
+the cluster you just built can be registered (`cloud = local`) and then become a
+Config-Management target itself.
+
+**Linux** samples run via the cloud or local runner;
 **Windows** (WinRM)
 samples run via the **local runner**, which forwards the `ansible_password` extra
 var the WinRM connection needs (the cloud runner is SSH-only and doesn't forward
@@ -844,13 +929,28 @@ Config-Management targets too, but they don't SSH anywhere — Ansible's
   [`runners/ansible-cloud/`](../../runners/ansible-cloud/) (multi-arch recommended)
   and, if you don't use public Docker Hub, mirror it to ECR/ACR/Artifact Registry.
   The winrm VM image is never used for these targets.
-- **Always the in-cloud runner.** These resources are private, so the run executes
-  on a transient ECS / ACI / Cloud Run task in-subnet — reusing the same
-  `ansible_ecs_subnet_id` / `ansible_aci_subnet_id` / `gcp_ansible_vpc_connector`
-  network config as the VM cloud runner. The local runner is rejected for these kinds
-  (it can't reach RFC1918 endpoints and its egress hits the corporate TLS proxy). The
-  backend is `ansible_runner_<cloud>` for the resource's cloud, defaulting to that
-  cloud's native runner.
+- **The runner follows line-of-sight to the endpoint.** Not a preference — the two
+  cases point in opposite directions:
+  - **Cloud-hosted (aws / azure / gcp).** The control plane / DB endpoint is private
+    to its VPC, so the run executes on a transient ECS / ACI / Cloud Run task
+    in-subnet, reusing the same `ansible_ecs_subnet_id` / `ansible_aci_subnet_id` /
+    `gcp_ansible_vpc_connector` network config as the VM cloud runner. The local
+    runner can't reach those RFC1918 endpoints and its egress hits the corporate TLS
+    proxy, so an `ansible_runner_<cloud>: local` override is **rejected**. The
+    backend is `ansible_runner_<cloud>`, defaulting to that cloud's native runner.
+  - **On-prem (`cloud = local`).** A Kubernetes cluster registered from a kubeconfig
+    — see [`examples/playbooks/k3s/`](../../examples/playbooks/k3s/) for building one
+    — sits on your LAN, where an in-cloud task has **no route at all**. Those runs
+    execute in a sibling container **on the dashboard host**, which is the only thing
+    that can reach the cluster: same `ansible_cloud_image`, same localhost play, same
+    scrubbing. Two consequences — the dashboard host needs a working `docker` CLI and
+    network reach to the cluster's API address (a dashboard deployed *in* a cloud has
+    neither, and the run is refused with a message saying so), and local filesystem
+    assets work fine, because the "move it to S3 first" rule exists only for the
+    in-cloud runners that can't read this host's disk.
+
+  Cloud databases are always cloud-hosted — a `CloudDatabase` is provisioned into a
+  cloud and never carries `cloud = local`, so the on-prem case is Kubernetes-only.
 - **Auto-injected, scrubbed connection material.** The kubeconfig is token-prepped
   server-side (a short-lived bearer token replaces the cloud exec-auth block) and
   delivered via `K8S_AUTH_KUBECONFIG`/`KUBECONFIG`; the DB admin credential is
