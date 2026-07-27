@@ -194,6 +194,22 @@ async def _acquire_paired_jumpoint(db, job_id: str, payload: GCPDeployRequest,
         return _JumpointRef("paired", error=str(e))
 
 
+def _paired_requested(payload: GCPDeployRequest) -> bool:
+    """Whether this single deploy should start its own ``bt-jumpoint-<vm>`` VM.
+
+    True when the operator asked for paired mode, and — regardless of mode — when the
+    request carries its own Jumpoint deploy key. The shared host is one VM serving many
+    resources and resolves its key from config, so there is nowhere to honour a
+    per-deploy override on it. Silently ignoring the form field would be the
+    "succeeds with a side effect missing" failure this codebase keeps writing tests
+    against, so the override wins and that VM gets its own jumpoint."""
+    if getattr(payload, "docker_deploy_key_ref", None):
+        logger.info("GCP deploy carries a docker_deploy_key_ref — using a paired "
+                    "Jumpoint so the per-deploy key is honoured")
+        return True
+    return (_gcp_cfg("gcp_vm_jumpoint_mode", "shared") or "shared").strip().lower() == "paired"
+
+
 async def _acquire_shared_jumpoint(region: str) -> _JumpointRef:
     """Borrow the ref-counted COS Jumpoint host that cloud databases, k8s tunnels and
     VDI seats already share — one for a whole batch instead of one per VM.
@@ -242,6 +258,7 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
         # ── Step 1: Start BT Jumpoint on COS-on-GCE first (BeyondTrust only) ──
         if bt_enabled:
             if jumpoint is not None:
+                # Injected by _run_bulk_deploy — one shared host for the whole batch.
                 jp = jumpoint
                 job_service.update_progress(
                     db, job_id, 15,
@@ -249,9 +266,21 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
                     if jp.name else
                     f"Shared Jumpoint unavailable ({jp.error}) — continuing with VM launch…"
                 )
-            else:
+            elif _paired_requested(payload):
                 jp = await _acquire_paired_jumpoint(
                     db, job_id, payload, project_id, zone, subnet)
+            else:
+                # Default: borrow the same ref-counted host cloud databases, k8s
+                # tunnels and VDI seats use, instead of a per-VM e2-micro.
+                job_service.update_progress(
+                    db, job_id, 5, "Ensuring the shared BeyondTrust Jumpoint host…")
+                jp = await _acquire_shared_jumpoint(_region_from_zone(zone))
+                job_service.update_progress(
+                    db, job_id, 15,
+                    f"Using the shared BeyondTrust Jumpoint {jp.name}, launching VM…"
+                    if jp.name else
+                    f"Shared Jumpoint unavailable ({jp.error}) — continuing with VM launch…"
+                )
 
         # Retrieve SSH public key (per-launch override wins over the region default)
         secret_name = getattr(payload, "ssh_key_secret_override", None) or _rc["ssh_key_secret"]
@@ -361,7 +390,12 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
         if getattr(payload, "register_in_passwordsafe", False) and ps_vm_hook.registration_enabled():
             await ps_vm_hook.register(db, job_id, payload.instance_name, hostname,
                                       result=final_meta, tag="GCP", ssh_key_secret=secret_name,
-                                      project=_gcp_project(), zone=result["zone"])
+                                      # The job's project, not _gcp_project() — see this
+                                      # module's run() docstring. The managed-system
+                                      # address is projectId/zone/instanceName, so
+                                      # reading the CURRENT default would onboard the VM
+                                      # under an address that resolves to nothing.
+                                      project=project_id, zone=result["zone"])
 
         job_service.set_completed(db, job_id, final_meta)
         await cache_service.invalidate(cache_service.key_global("gcp_instances"))

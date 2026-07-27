@@ -37,11 +37,26 @@ Terraform. (Terraform VM modules exist under `terraform/ec2_instance`, `terrafor
 `terraform/gce_instance` for a separate CLI-oriented path, but `/api/*/deploy` does **not**
 use them.)
 
+There is exactly **one** `_run_deploy` per cloud, and it is the only place that cloud's
+SDK is asked to create a VM. A batch does not repeat it: `_run_bulk_deploy` acquires
+whatever is genuinely shared for the run — the jumpoint, and on AWS the NAT instance,
+SSM endpoints and SSH key; on Azure the quota check, ACI container and Key Vault key —
+then loops calling `_run_deploy` with those injected. Each instance still owns its own
+job row, so one failure fails that row and the batch carries on.
+
+That shape is load-bearing rather than tidy. When the batch path was a second copy of
+the deploy body it drifted, and every divergence was invisible because a batch still
+reported success: AWS batches stopped passing `os_type` and booted Linux VMs with no SSM
+agent, and Azure batches ignored the per-deploy Jumpoint key. `tests/test_deploy_runner_parity.py`
+asserts no `_run_bulk_deploy` calls its cloud's launch function directly.
+
 Ordered steps (each Layer-1/2/3 step is **non-fatal** — a failure logs a warning and the
 deploy still succeeds):
 
-1. **Ensure the jumpoint host** (only when `beyondtrust_enabled`) — AWS/Azure/GCP each
-   bring up their shared/ paired jumpoint; **OCI does nothing here** (bring your own).
+1. **Ensure the jumpoint host** (only when `beyondtrust_enabled`) — AWS uses a shared
+   ref-counted ECS host, Azure an ACI container group, GCP the shared COS host (see
+   `gcp_vm_jumpoint_mode`); **OCI does nothing here** (bring your own). In a batch this
+   happens once for the whole run.
 2. **AWS only** — ensure the shared on-demand **NAT instance** (`aws_nat_instance_enabled`)
    and **SSM interface endpoints** (`aws_ssm_endpoints_enabled`).
 3. **Fetch the SSH public key** from the cloud's secret store and inject it (Linux via
@@ -155,14 +170,27 @@ SSH keypair, and a service account. The dashboard **auto-attaches** `gcp_default
 | `gcp_network` / `gcp_subnetwork` | `default` / — | VPC + VM subnet |
 | `gcp_ssh_key_secret_name` | — | Secret Manager keypair secret |
 | `gcp_ssh_username` | `gcp-user` | default Linux login |
-| `gcp_jumpoint_subnetwork` / `gcp_cloud_run_docker_deploy_key` | — | per-VM COS jumpoint (Layer 1) |
+| `gcp_jumpoint_subnetwork` / `gcp_cloud_run_docker_deploy_key` | — | COS jumpoint subnet + deploy key (Layer 1) |
+| `gcp_vm_jumpoint_mode` | `shared` | `shared` (one ref-counted host) or `paired` (an `e2-micro` per VM) |
 
-A **single** GCP deploy spins up a **per-VM paired COS jumpoint** `bt-jumpoint-<vmname>`.
-A **batch** (Count > 1) instead borrows the shared, ref-counted jumpoint host that cloud
-databases, k8s tunnels and VDI seats already use — one for the whole batch rather than N
-extra `e2-micro` VMs. Which one a VM used is recorded as `jumpoint_mode` on its deploy job,
-and destroy handles both: a paired jumpoint is deleted once no sibling VM references it, a
-shared one only has its reference released.
+GCP deploys borrow the **shared, ref-counted jumpoint host** that cloud databases, k8s
+tunnels and VDI seats already use — one host, rather than an `e2-micro` per VM. Batches
+always share. Single deploys follow `gcp_vm_jumpoint_mode` (`shared` by default,
+`paired` for the pre-2026-07 behaviour of a dedicated `bt-jumpoint-<vmname>`), editable
+under **Settings → BeyondTrust → GCP overrides** so the choice is reversible without a
+redeploy.
+
+Two things override the mode. A deploy that supplies its own **Jumpoint deploy key** is
+always paired — the shared host resolves its key from config, so there is nowhere to
+honour a per-deploy override on it. And the shared host lands on the
+`jumpoint_subnetwork` (the only sandbox subnet with Cloud NAT) rather than the VM
+subnet; reachability is unaffected either way, because the sandbox SSH rule is
+tag-based (`--source-tags bt-jumpoint`) and so applies VPC-wide.
+
+Which shape a VM used is recorded as `jumpoint_mode` on its deploy job, and destroy
+handles both: a paired jumpoint is deleted once no sibling VM references it, a shared
+one only has its reference released. Rows predating the field are inferred as paired,
+so no migration is needed.
 
 ### OCI (Compute) — read the caveats
 
