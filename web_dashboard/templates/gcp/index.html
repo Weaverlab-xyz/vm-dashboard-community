@@ -333,13 +333,28 @@
           </select>
         </div>
 
-        <!-- Instance name -->
+        <!-- Instance name + count -->
         <div>
-          <label class="block text-sm font-medium text-gray-700 mb-1">Instance Name <span class="text-red-500">*</span></label>
-          <input type="text" x-model="deployForm.instance_name"
-                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                 placeholder="my-vm-01">
-          <p class="text-xs text-gray-400 mt-1">Lowercase letters, numbers, and hyphens only.</p>
+          <div class="grid grid-cols-3 gap-3">
+            <div class="col-span-2">
+              <label class="block text-sm font-medium text-gray-700 mb-1">Instance Name <span class="text-red-500">*</span></label>
+              <input type="text" x-model="deployForm.instance_name"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                     placeholder="my-vm">
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Count <span class="text-red-500">*</span></label>
+              <input type="number" min="1" :max="countMax" step="1" x-model.number="deployForm.count"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+            </div>
+          </div>
+          <p class="text-xs text-gray-400 mt-1">
+            Lowercase letters, numbers, and hyphens only. More than one deploys copies of
+            the same image, numbered automatically, behind a shared Jumpoint.
+          </p>
+          <p x-show="(deployForm.count || 1) > 1" x-cloak class="text-xs font-mono mt-1"
+             :class="namePreviewFor().truncated ? 'text-amber-600' : 'text-gray-500'"
+             x-text="namePreviewFor().text"></p>
         </div>
 
         <!-- Zone -->
@@ -750,6 +765,7 @@
 function gcpDashboard() {
   return {
     ...secretPickerState(),
+    ...deployNameState(),
     // State
     activeTab:       'public',
     projectId:       '',
@@ -795,6 +811,7 @@ function gcpDashboard() {
     praPickers: { configured: false, jump_groups: [], jumpoints: [], loaded: false },
     deployForm: {
       instance_name:     '',
+      count:              1,
       machine_type:      'e2-medium',
       zone:              '',
       subnetwork:        '',
@@ -1038,6 +1055,7 @@ function gcpDashboard() {
       this.deployForm    = {
         image_self_link:    img ? (img.self_link || '') : '',
         instance_name:      '',
+        count:              1,
         machine_type:       this.networkOpts.machine_types?.includes('e2-medium') ? 'e2-medium' : (this.networkOpts.machine_types?.[0] || 'e2-medium'),
         zone:               '',
         subnetwork:         '',
@@ -1072,9 +1090,21 @@ function gcpDashboard() {
       }
     },
 
+    // Preview of the names a count > 1 deploy will create. GCE names are RFC1035, so
+    // preview the lowercasing submitDeploy already applies below.
+    namePreviewFor() {
+      return this.namePreview(this.deployForm.instance_name, this.deployForm.count,
+                              window.NAME_LIMITS.gcp, { lower: true });
+    },
+
     async submitDeploy() {
       if (!this.deployForm.instance_name.trim()) {
         this.deployError = 'Instance name is required.';
+        return;
+      }
+      const count = this.deployForm.count || 1;
+      if (!(count >= 1 && count <= this.countMax)) {
+        this.deployError = `Count must be between 1 and ${this.countMax}.`;
         return;
       }
       const imageRef = (this.deployForm.image_self_link || this.selectedImage?.self_link || '').trim();
@@ -1090,6 +1120,7 @@ function gcpDashboard() {
           image_self_link:    imageRef,
           image_name:         imageDisplayName,
           instance_name:      this.deployForm.instance_name.trim().toLowerCase(),
+          count:              count,
           machine_type:       this.deployForm.machine_type,
           zone:               this.deployForm.zone,
           subnetwork:         this.deployForm.subnetwork,
@@ -1106,6 +1137,9 @@ function gcpDashboard() {
         };
         const res = await API.post('/api/gcp/deploy', body);
         this.deployModal = false;
+        // A batch lands on the /jobs rollup; a single deploy keeps its own path.
+        if (window.afterDeploy(res, { label: 'GCE deploy',
+                                      notify: (m, t) => this.showToast(m, t) })) return;
         this.showToast(`Deployment started — Job ${res.job_id}`);
         window.location.href = '/jobs/' + res.job_id;
       } catch (e) {
