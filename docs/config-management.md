@@ -151,6 +151,12 @@ tick the rows, and a run panel appears. Each selected resource becomes its **own
 job**, all tagged with a shared `batch_id` — so one host failing doesn't roll back
 the others, and each job keeps its own log and output scrubbing.
 
+Runs are **queued work**, not request-side work: the endpoint writes a job row and the
+job runner claims it. So a batch survives a dashboard restart mid-flight, and its jobs
+spread across `WORKER_REPLICAS` (default 3) instead of executing one at a time. Worth
+knowing before firing a large batch — three playbooks run against three hosts at once,
+and raising `WORKER_REPLICAS` raises that concurrency.
+
 Queueing a batch lands you on **`/jobs?batch_id=…`**, filtered to just that run, with
 a rollup across the whole batch — *N total · N running · N failed* — rather than the
 one page of rows the table happens to show. The URL is shareable, and any job that

@@ -589,6 +589,12 @@ permission check, secret-store validation and runner decision behaves exactly as
 does for a single run. Queueing lands you on `/jobs?batch_id=…` — the batch filtered
 out of the job list, with a status rollup across all of it.
 
+Every run is claimed from the `jobs` table by the **job runner** (the `worker` service
+in the compose files), the same way Kubernetes and cloud-database runs are. A batch
+therefore survives a dashboard restart, and its jobs execute concurrently across
+`WORKER_REPLICAS` (default 3) rather than one at a time — that number is the ceiling
+on how many hosts a batch touches simultaneously.
+
 **One kind per run.** Selecting a VM locks the checkboxes on Kubernetes clusters and
 databases, and vice versa. The kinds aren't interchangeable at any level: a VM run
 SSHes to a host, while k8s/database runs are `localhost` plays reaching *out* over a
