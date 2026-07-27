@@ -375,6 +375,11 @@ async def _run_deploy(job_id: str, req: AzureDeployRequest, rg: str, loc: str):
         db.close()
 async def _run_bulk_deploy(job_items: list, req: AzureBulkDeployRequest, rg: str, loc: str):
     """Start ONE ACI Jumpoint for the batch, then deploy each VM sequentially."""
+    # `job_items[0]` below is otherwise an IndexError on an empty batch, which the
+    # setup handler would then swallow into a loop over nothing — leaving the parent
+    # job running with no explanation. Matches oci_vm_service._run_bulk_deploy.
+    if not job_items:
+        return
     db = _get_db_session()
     aci_group_name = None
     # NB: no batch-level is_windows. Bulk means one VM per selected image, so a
@@ -404,7 +409,15 @@ async def _run_bulk_deploy(job_items: list, req: AzureBulkDeployRequest, rg: str
             )
             try:
                 try:
-                    deploy_key = await _resolve_azure_aci_deploy_key()
+                    # Honour the per-request override, as the single path does. Both
+                    # AzureBulkDeployRequest and _fan_out_batch already carry
+                    # docker_deploy_key_ref; only this resolution ignored it, so a
+                    # batch quietly built its ACI with the configured default key.
+                    if getattr(req, "docker_deploy_key_ref", None):
+                        from ..services import config_service as _cs
+                        deploy_key = _cs.resolve_reference(req.docker_deploy_key_ref.strip())
+                    else:
+                        deploy_key = await _resolve_azure_aci_deploy_key()
                 except Exception as key_err:
                     logger.warning("ACI deploy key fetch failed (%s) — creating ACI without deploy key", key_err)
                     deploy_key = ""
@@ -433,9 +446,21 @@ async def _run_bulk_deploy(job_items: list, req: AzureBulkDeployRequest, rg: str
                     storage_account_rg=_cfg("azure_aci_storage_account_rg") or settings.azure_aci_storage_account_rg,
                     file_share=_cfg("azure_aci_file_share") or settings.azure_aci_file_share,
                 )
+                # Surface the outcome, as the single path does. Without this the batch
+                # went straight from "starting" to launching VMs, so a keyless ACI —
+                # deploy_key_note was assigned and never read — left no trace anywhere
+                # an operator would look.
+                job_service.update_progress(
+                    db, first_job_id, 15,
+                    f"ACI Jumpoint started ({aci_group_name}){deploy_key_note}, deploying VMs…"
+                )
             except Exception as e:
                 aci_error = str(e)
                 aci_group_name = None
+                job_service.update_progress(
+                    db, first_job_id, 15,
+                    f"ACI Jumpoint failed (non-fatal): {e}{deploy_key_note} — continuing with the batch…"
+                )
         else:
             job_service.update_progress(
                 db, first_job_id, 10,

@@ -380,6 +380,11 @@ async def _run_bulk_deploy(
     while _run_deploy honoured the per-deploy overrides — so a batch silently ignored
     them and reported success with the VM registered against the wrong jump group.
     """
+    # `job_items[0]` below is otherwise an IndexError on an empty batch, which the
+    # setup handler would then swallow into a loop over nothing — leaving the parent
+    # job running with no explanation. Matches oci_vm_service._run_bulk_deploy.
+    if not job_items:
+        return
     db = _get_db_session()
     try:
         # NB: children are deliberately NOT all marked running up front. They deploy
