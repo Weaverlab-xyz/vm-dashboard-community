@@ -112,6 +112,37 @@ def test_a_batch_recovery_handler_cannot_reach_children_it_already_deployed():
     assert not violations, "\n".join(violations)
 
 
+def test_the_gcp_runners_use_the_jobs_project_and_zone_not_current_config():
+    """`gcp_vm_service.run()`'s docstring states the rule: project and zone come from
+    the job, never from `_gcp_project()` / `_gcp_zone()`, because those return whatever
+    is configured *now*. A default changed after a deploy would then aim the work at the
+    wrong project.
+
+    It has been broken twice. First for destroy and capture; then, after that fix, the
+    Password Safe onboarding call still read the live default — and there it is worse
+    than aiming wrong, because the managed-system address is
+    `projectId/zone/instanceName`, so the VM gets onboarded under an address that
+    resolves to nothing and rotation silently targets a non-existent instance.
+
+    The docstring could not enforce itself. This can."""
+    tree = _tree("gcp_vm_service.py")
+    checked, violations = 0, []
+    for node in ast.walk(tree):
+        if not (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name.startswith("_run_")):
+            continue
+        checked += 1
+        for call in ast.walk(node):
+            if (isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+                    and call.func.id in ("_gcp_project", "_gcp_zone")):
+                violations.append(
+                    f"gcp_vm_service.py:{call.lineno} {node.name}() calls "
+                    f"{call.func.id}() — use the project/zone persisted on the job")
+    assert checked >= 3, (
+        f"expected several _run_* functions in gcp_vm_service, found {checked}")
+    assert not violations, "\n".join(violations)
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0

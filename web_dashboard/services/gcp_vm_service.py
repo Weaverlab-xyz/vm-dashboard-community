@@ -361,7 +361,12 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
         if getattr(payload, "register_in_passwordsafe", False) and ps_vm_hook.registration_enabled():
             await ps_vm_hook.register(db, job_id, payload.instance_name, hostname,
                                       result=final_meta, tag="GCP", ssh_key_secret=secret_name,
-                                      project=_gcp_project(), zone=result["zone"])
+                                      # The job's project, not _gcp_project() — see this
+                                      # module's run() docstring. The managed-system
+                                      # address is projectId/zone/instanceName, so
+                                      # reading the CURRENT default would onboard the VM
+                                      # under an address that resolves to nothing.
+                                      project=project_id, zone=result["zone"])
 
         job_service.set_completed(db, job_id, final_meta)
         await cache_service.invalidate(cache_service.key_global("gcp_instances"))
