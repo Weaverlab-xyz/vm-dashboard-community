@@ -169,25 +169,16 @@ def test_default_dict_is_not_shared_between_reconstructions():
 
 def test_ansible_local_is_dispatched_by_the_job_runner():
     """Without this, jobs sit `pending` forever — reconcile_stale_jobs skips pending
-    on purpose, so nothing would ever fail them either."""
+    on purpose, so nothing would ever fail them either.
+
+    The run path itself lives in services/, so the worker never reaches into the API
+    package for it. That direction is now asserted repo-wide in
+    tests/test_worker_dispatch.py; here we only pin that ansible_local is the service
+    the branch reaches for."""
     src = open(os.path.join(_ROOT, "web_dashboard", "jobs_worker.py")).read()
     handled = re.search(r"HANDLED_TYPES = \((.*?)\)", src, re.S).group(1)
     assert '"ansible_local"' in handled, "ansible_local is not in HANDLED_TYPES"
     assert 'job_type == "ansible_local"' in src, "no dispatch branch for ansible_local"
-
-
-def test_the_runner_reaches_the_run_path_through_services():
-    """The Ansible execution path lives in services/, so the worker doesn't reach into
-    the API package for it — an api import works but inverts the dependency, and it's
-    the kind of shortcut that quietly returns under time pressure.
-
-    Scoped to config_mgmt on purpose: `jobs_worker` still imports `api.packer` and
-    `api.images` for the image-build job types. Those have the same shape and the same
-    fix available, but they predate this and asserting a repo-wide rule the codebase
-    doesn't hold would just be a failing test nobody trusts."""
-    src = open(os.path.join(_ROOT, "web_dashboard", "jobs_worker.py")).read()
-    assert "from .api.config_mgmt import" not in src, (
-        "jobs_worker imports the run path from the api package")
     assert "ansible_local_run_service" in src, (
         "jobs_worker should dispatch ansible_local through the service")
 

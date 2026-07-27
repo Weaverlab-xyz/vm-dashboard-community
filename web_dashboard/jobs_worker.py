@@ -208,46 +208,19 @@ async def _dispatch(job_id: str, job_type: str, meta: dict) -> None:
             from .services import vdesktop_service
             await vdesktop_service.teardown_seats(meta["seat_ids"], job_id=job_id)
         elif job_type in ("packer_aws_build", "packer_azure_build", "packer_gcp_build"):
-            # The build runners live in api/packer.py and own their full lifecycle
-            # + the nested auto-export; reconstruct the Pydantic request from the
-            # metadata the endpoint stored (secret refs only — resolved at launch).
-            from .api import packer as _packer
-            from .models.packer import (
-                AWSPackerBuildRequest, AzurePackerBuildRequest, GCPPackerBuildRequest,
-            )
-            created_by = meta.get("created_by", "system")
-            if job_type == "packer_aws_build":
-                await _packer._run_aws_build(job_id, AWSPackerBuildRequest(**meta["req"]), created_by)
-            elif job_type == "packer_azure_build":
-                await _packer._run_azure_build(job_id, AzurePackerBuildRequest(**meta["req"]), created_by)
-            else:
-                await _packer._run_gcp_build(job_id, GCPPackerBuildRequest(**meta["req"]), created_by)
-        elif job_type == "aws_export_image":
-            from .api import packer as _packer
-            await _packer.run_export_aws(job_id, meta)
-        elif job_type == "gcp_export_image":
-            from .api import packer as _packer
-            await _packer.run_export_gcp(job_id, meta)
-        elif job_type == "azure_export_image":
-            from .api import packer as _packer
-            await _packer.run_export_azure(job_id, meta)
-        elif job_type == "image_promote_aws":
-            from .api import images as _images
-            await _images._run_aws_automated_promote(
-                meta["image_id"], meta.get("target_region") or "", job_id)
-        elif job_type == "image_promote_azure":
-            from .api import images as _images
-            await _images._run_azure_automated_promote(
-                meta["image_id"], meta.get("target_resource_group") or "",
-                meta.get("target_region") or "", job_id)
-        elif job_type == "image_promote_gcp":
-            from .api import images as _images
-            await _images._run_gcp_automated_promote(
-                meta["image_id"], meta.get("target_region") or "", job_id)
-        elif job_type == "image_promote_oci":
-            from .api import images as _images
-            await _images._run_oci_automated_promote(
-                meta["image_id"], meta.get("target_region") or "", job_id)
+            # Packer image build (+ the nested auto-export). The service rebuilds the
+            # request from the metadata the endpoint stored — secret refs only,
+            # resolved at build launch.
+            from .services import packer_build_service
+            await packer_build_service.run_build(job_id, job_type, meta)
+        elif job_type in ("aws_export_image", "gcp_export_image", "azure_export_image"):
+            from .services import packer_build_service
+            await packer_build_service.run_export(job_id, job_type, meta)
+        elif job_type in ("image_promote_aws", "image_promote_azure",
+                          "image_promote_gcp", "image_promote_oci"):
+            # SDK-driven automated promote to a target cloud.
+            from .services import image_promote_service
+            await image_promote_service.run(job_id, job_type, meta)
         else:  # pragma: no cover — HANDLED_TYPES guards the claim
             logger.warning("job runner: unhandled job_type %s (job %s)", job_type, job_id)
     finally:
