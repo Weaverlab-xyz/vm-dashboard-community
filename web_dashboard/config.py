@@ -557,6 +557,11 @@ class Settings(BaseSettings):
     azure_image_storage_account: str = ""         # Storage account for temp VHD upload during OVA→Azure image import
     azure_aci_file_share: str = "jpt"             # Azure File Share name for /jpt mount
     azure_jumpoint_name: str = ""                 # name of the pre-existing Jumpoint for Azure Shell Jumps
+    # How a SINGLE Azure VM deploy reaches its Jumpoint. "shared" (default) borrows the
+    # ref-counted clouddb-jumpoint VM — tunnel-capable, and no shared /jpt identity store
+    # to corrupt. "aci" starts a dedicated ACI container group per deploy (Shell Jump
+    # only; ACI cannot protocol-tunnel). Batches always share one ACI group.
+    azure_vm_jumpoint_mode: str = "shared"        # "shared" | "aci"
     # ACR credentials (leave empty to pull from Docker Hub without auth).
     # Direct fields are preferred; values are stored encrypted in the DB and
     # transparently resolved through the chosen secrets backend (PS / AWS SM /
