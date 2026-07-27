@@ -202,10 +202,10 @@ def test_children_of_a_parent_job_are_created_unclaimable():
                 violations.append(
                     f"{module}:{fn_name} creates {job_type} as {status!r} while also "
                     "creating a parent that lists it as a child")
-    assert found >= 6, (
-        f"expected the four count-batch paths plus the AWS and Azure multi-select bulk "
-        f"endpoints to match this shape, found {found} — the rule may have stopped "
-        "matching rather than started passing")
+    assert found >= 8, (
+        f"expected all eight batch paths to match this shape — a count fan-out and a "
+        f"multi-select bulk route for each of the four clouds — found {found}; the rule "
+        "may have stopped matching rather than started passing")
     assert not violations, "; ".join(violations)
 
 

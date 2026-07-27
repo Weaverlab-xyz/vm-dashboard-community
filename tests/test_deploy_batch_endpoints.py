@@ -101,10 +101,10 @@ def test_every_endpoint_that_creates_a_vm_enforces_admission():
             violations.append(
                 f"{mod}:{fn.name} creates a VM deploy job but never calls "
                 "admission_service.enforce — policy guardrails do not apply to it")
-    # Four single-deploy routes plus four batch paths plus the two multi-select bulk
-    # routes. A floor guards against the walk silently stopping to match.
-    assert found >= 6, (
-        f"expected the cloud routers to have at least 6 VM-creating functions, "
+    # Four single-deploy routes, four count fan-outs, four multi-select bulk routes.
+    # A floor guards against the walk silently stopping to match.
+    assert found >= 12, (
+        f"expected the cloud routers to have at least 12 VM-creating functions, "
         f"found {found} — the walk may have stopped matching rather than started passing")
     assert not violations, "\n".join(violations)
 
@@ -141,8 +141,9 @@ def test_every_batch_parent_tags_its_batch():
                     violations.append(
                         f"{mod}:{fn.name} creates parent {job_type} with children but "
                         "no batch_id — the jobs page cannot roll it up")
-    assert found >= 4, (
-        f"expected at least 4 batch parents (AWS, Azure, GCP, OCI), found {found}")
+    assert found >= 8, (
+        f"expected 8 batch parents — a count fan-out and a multi-select bulk route per "
+        f"cloud — found {found}")
     assert not violations, "\n".join(violations)
 
 
