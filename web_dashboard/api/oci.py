@@ -13,6 +13,7 @@ outside the envelope (services/oci_freetier.py) is rejected with HTTP 400 unless
 the request carries acknowledge_charges=true (warn-and-confirm).
 """
 import logging
+import uuid
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -28,7 +29,10 @@ from ..models.oci import (
     OCINetworkOptions,
     OCISSHKeyDetail,
 )
-from ..services import cache_service, cloud_stats, job_service, oci_freetier, oci_service, workgroup_service
+from ..services import (
+    cache_service, cloud_stats, deploy_batch, job_service, oci_freetier, oci_service,
+    workgroup_service,
+)
 from .auth import require_permission
 
 logger = logging.getLogger(__name__)
@@ -77,14 +81,21 @@ def _accessible_workgroups(user: User) -> Optional[List[str]]:
 # ── Free-tier usage from this dashboard's own deploys ─────────────────────────
 
 def _existing_freetier_usage(db: Session, exclude_job_id: str = "") -> dict:
-    """Sum the free-tier footprint of live (completed, non-destroyed) OCI VMs this
-    dashboard deployed, so the guardrail can flag 'this would exceed the free
-    count/budget'. Best-effort (reads job metadata; not account-wide usage)."""
+    """Sum the free-tier footprint of OCI VMs this dashboard has committed to, so the
+    guardrail can flag 'this would exceed the free count/budget'. Best-effort (reads
+    job metadata; not account-wide usage).
+
+    Counts in-flight rows as well as completed ones, using the same status set as the
+    name-collision pre-flight. Scoped to `completed` alone, a second batch submitted
+    while the first was still running would see none of the first batch's VMs and wave
+    a double overage straight through."""
+    from ..services.inventory_service import _NAME_HOLDING_STATUSES
     amd = 0
     a1_ocpus = 0.0
     a1_mem = 0.0
     jobs = (db.query(Job)
-            .filter(Job.job_type == "oci_deploy", Job.status == "completed").all())
+            .filter(Job.job_type == "oci_deploy",
+                    Job.status.in_(_NAME_HOLDING_STATUSES)).all())
     for j in jobs:
         if j.id == exclude_job_id:
             continue
@@ -266,14 +277,103 @@ async def get_configured_ssh_key(
     return OCISSHKeyDetail(secret_name=secret, public_key_preview=pub[:80])
 
 
+async def _fan_out_batch(
+    payload: OCIDeployRequest, db: Session, current_user: User, *, compartment: str,
+) -> OCIDeployResponse:
+    """Fan a ``count > 1`` deploy out into one ``oci_bulk_deploy`` parent plus N
+    ``queued`` ``oci_deploy`` children sharing a batch_id.
+
+    A separate module-level function, NOT an ``if`` inside ``deploy_instance``:
+    ``test_worker_dispatch``'s children-are-unclaimable rule walks the AST per
+    function, so a ``children``-carrying create_job alongside the single deploy's
+    ``pending`` one reads as a violation regardless of the runtime branch.
+
+    The free-tier gate is *not* repeated here — ``deploy_instance`` runs it once for
+    the whole batch before dispatching, because "would these N together exceed the
+    envelope" is inherently a batch question.
+    """
+    names = deploy_batch.expand_names(payload.instance_name, payload.count, "oci")
+    deploy_batch.reject_name_collisions(db, "oci_deploy", names)
+    await deploy_batch.enforce_admission(
+        "oci:compute:deploy",
+        requests=deploy_batch.batch_request_docs(
+            {"region": _region(), "instance_type": payload.shape,
+             "image": payload.image_ocid},
+            names),
+        actor=current_user, db=db,
+    )
+
+    batch_id = uuid.uuid4().hex[:12]
+    children = []
+    for name in names:
+        child_req = payload.model_copy(update={"instance_name": name, "count": 1})
+        job = job_service.create_job(
+            db,
+            job_type="oci_deploy",
+            created_by=current_user.username,
+            workgroup=payload.workgroup,
+            # `queued`, not `pending`: the runner claims on status='pending', so a
+            # pending child would be deployed a second time alongside its parent.
+            status="queued",
+            batch_id=batch_id,
+            metadata={
+                "compartment_ocid": compartment,
+                "instance_name":    name,
+                # shape/ocpus/memory_gb are load-bearing on the child, not decoration:
+                # _existing_freetier_usage reads exactly these three off deploy rows.
+                "shape":            payload.shape,
+                "ocpus":            payload.ocpus,
+                "memory_gb":        payload.memory_gb,
+                "image_ocid":       payload.image_ocid,
+                "image_name":       payload.image_name,
+                "region":           _region(),
+                "workgroup":        payload.workgroup,
+                "bulk":             True,
+                "req":              child_req.model_dump(),
+            },
+        )
+        job_service.set_cloud_resource_id(db, job.id, name)
+        job_service.log_audit(
+            db, current_user.username, "oci_deploy",
+            details={"instance_name": name, "shape": payload.shape,
+                     "workgroup": payload.workgroup, "bulk": True},
+        )
+        children.append({"job_id": job.id, "instance_name": name,
+                         "req": child_req.model_dump()})
+
+    parent = job_service.create_job(
+        db,
+        job_type="oci_bulk_deploy",
+        created_by=current_user.username,
+        workgroup=payload.workgroup,
+        batch_id=batch_id,
+        metadata={
+            "compartment_ocid": compartment,
+            "region":           _region(),
+            "workgroup":        payload.workgroup,
+            "children":         children,
+        },
+    )
+    return OCIDeployResponse(
+        job_id=parent.id,
+        status="pending",
+        message=f"Deploying {len(names)} instances ({names[0]} … {names[-1]})…",
+        count=len(names),
+        batch_id=batch_id,
+        job_ids=[c["job_id"] for c in children],
+        names=names,
+    )
+
+
 @router.post("/deploy", response_model=OCIDeployResponse)
 async def deploy_instance(
     payload: OCIDeployRequest,
     current_user: User = Depends(require_permission("oci", "write")),
     db: Session = Depends(get_db),
 ):
-    """Deploy an OCI compute instance from an image. Runs in background; returns a
-    job id immediately. Enforces the free-tier warn-and-confirm gate."""
+    """Deploy one or more OCI compute instances from an image. Runs in background;
+    returns a job id immediately. Enforces the free-tier warn-and-confirm gate over
+    the whole request, so ``count`` is factored into the envelope."""
     if not _configured():
         raise HTTPException(status_code=400, detail="OCI not configured — run the setup wizard.")
 
@@ -282,11 +382,15 @@ async def deploy_instance(
     payload.workgroup = workgroup
 
     # ── Free-tier guardrail (warn + confirm) ──────────────────────────────────
+    # Evaluated once for the whole request, count included: three Always-Free micros
+    # is two more than the envelope allows even though each one on its own is free.
+    # oci_freetier.evaluate has always taken instance_count; nothing passed it until
+    # counts existed.
     if _oci_cfg("oci_freetier_enforce", "1") not in ("0", "false", "False", ""):
         usage = _existing_freetier_usage(db)
         within, warnings = oci_freetier.evaluate(
             shape=payload.shape, ocpus=payload.ocpus, memory_gb=payload.memory_gb,
-            boot_volume_gb=payload.boot_volume_gb, **usage,
+            boot_volume_gb=payload.boot_volume_gb, instance_count=payload.count, **usage,
         )
         if not within and not payload.acknowledge_charges:
             # `code` is preserved onto the Error by the frontend API helper
@@ -298,12 +402,16 @@ async def deploy_instance(
                 "warnings": warnings,
             })
 
+    if payload.count > 1:
+        return await _fan_out_batch(payload, db, current_user, compartment=compartment)
+
     # Pre-action policy gate (inert unless enabled + this action is gated).
     from ..services import admission_service
     admission_service.enforce(
         "oci:compute:deploy",
         request={"region": _region(), "instance_type": payload.shape,
-                 "image": payload.image_ocid, "name": payload.instance_name},
+                 "image": payload.image_ocid, "name": payload.instance_name,
+                 "count": 1, "batch": False},
         actor=current_user, db=db,
     )
 

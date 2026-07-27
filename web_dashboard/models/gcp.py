@@ -1,6 +1,8 @@
 """Pydantic models for GCP (Google Cloud Platform) API endpoints."""
 from typing import List, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+from ..services.vm_naming import MAX_DEPLOY_COUNT
 
 
 class GCPImageInfo(BaseModel):
@@ -67,12 +69,22 @@ class GCPDeployRequest(BaseModel):
     jumpoint_name: Optional[str] = None          # PRA Jumpoint name override (else gcp_jumpoint_name / bt_jumpoint_name)
     # A secrets-backend reference (e.g. gcp_sm://…) for the GCE Jumpoint deploy key.
     docker_deploy_key_ref: Optional[str] = None  # else gcp_cloud_run_docker_deploy_key
+    count: int = Field(
+        default=1, ge=1, le=MAX_DEPLOY_COUNT,
+        description="Number of identical instances to launch. 1 is a plain single "
+                    "deploy; >1 fans out into a batch that shares one Jumpoint and "
+                    "auto-numbers the names (web -> web-01, web-02, …).")
 
 
 class GCPDeployResponse(BaseModel):
-    job_id: str
+    job_id: str          # for a batch (count > 1) this is the PARENT job
     status: str
     message: str
+    # Batch fields, defaulted so a count-1 response is unchanged for existing callers.
+    count: int = 1
+    batch_id: Optional[str] = None
+    job_ids: List[str] = []   # child job ids, in name order
+    names: List[str] = []     # the expanded names actually used, post-truncation
 
 
 class GCPCreateImageRequest(BaseModel):

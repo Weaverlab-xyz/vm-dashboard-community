@@ -266,6 +266,25 @@ def _active_ec2_count(db) -> int:
     return sum(1 for j in jobs if not (j.metadata_dict or {}).get("destroyed"))
 
 
+def _active_gce_count(db) -> int:
+    """Live GCE VMs that borrowed the SHARED host.
+
+    Deliberately asymmetric with ``_active_ec2_count``, which counts *all* live
+    ec2_deploy rows: on AWS every EC2 deploy uses the shared host, so "all" is right
+    there. On GCP only batch deploys opt in — single deploys still start their own
+    paired ``bt-jumpoint-<vm>`` — so counting all of them would let one paired VM pin
+    the shared host forever and block a cloud-database reclaim.
+
+    Keys on ``jumpoint_host_id`` (what the deploy actually used) rather than
+    ``jumpoint_mode`` (what it intended), so a row whose ensure failed and never
+    touched the host doesn't hold a phantom reference."""
+    from ..database import Job
+    jobs = db.query(Job).filter(Job.job_type == "gce_deploy", Job.status == "completed").all()
+    return sum(1 for j in jobs
+               if not (j.metadata_dict or {}).get("destroyed")
+               and (j.metadata_dict or {}).get("jumpoint_host_id"))
+
+
 def _active_k8s_count(db, cloud: Optional[str] = None) -> int:
     # A managed cluster needs the shared Jumpoint while it has EITHER a live PRA
     # k8s tunnel (pra_jump_id set) OR a live API TCP tunnel (config key
@@ -432,12 +451,17 @@ async def _ensure_jumpoint_host_gcp(region: str) -> Optional[str]:
 
 
 async def _teardown_jumpoint_host_if_idle_gcp(db, region: str) -> None:
-    """Delete the shared GCE Jumpoint VM iff no active GCP cloud database is left
-    using it. Best-effort; logs and returns on error."""
+    """Delete the shared GCE Jumpoint VM iff nothing is left using it — no active GCP
+    cloud database, k8s tunnel, VDI seat, or batch-deployed GCE VM. Best-effort; logs
+    and returns on error."""
     from . import gcp_service
     try:
+        # _active_gce_count is load-bearing, not tidiness: without it a cloud-database
+        # decommission would delete the host out from under every running GCE VM that
+        # borrowed it. The AWS counterpart has always included its _active_ec2_count
+        # term for exactly this reason.
         active = (_active_db_count(db, "gcp") + _active_k8s_count(db, "gcp")
-                  + _active_vdesktop_count(db, "gcp"))
+                  + _active_vdesktop_count(db, "gcp") + _active_gce_count(db))
         if active > 0:
             logger.info("jumpoint-host(gcp): keeping jumpoint (%d active resource(s))", active)
             return

@@ -31,6 +31,17 @@ def _aws_cfg(key: str, fallback: str = "") -> str:
     return config_service.get(key) or getattr(settings, key, None) or fallback
 
 
+def _aws_region() -> str:
+    """The configured default region, for the paths that don't carry one on the job.
+
+    Own copy for the same reason as ``_aws_cfg`` above — and it has to exist here at
+    all because ``_run_create_image`` and ``_run_ami_copy`` call it. ``_run_deploy``
+    and ``_run_bulk_deploy`` instead bind a *local* ``_aws_region`` string from the
+    job's persisted region, which is why they were unaffected while these two were
+    raising NameError."""
+    return _aws_cfg("aws_region") or "us-east-2"
+
+
 # ── Job-runner entry point ────────────────────────────────────────────────────
 
 async def run(job_id: str, job_type: str, meta: dict) -> None:
@@ -62,6 +73,12 @@ async def run(job_id: str, job_type: str, meta: dict) -> None:
             meta.get("security_group_ids") or [],
             meta["workgroup"],
             meta["region"],
+            # `.get`, not `[...]`: parent rows created before these were threaded
+            # through carry none of them and must stay runnable. Same deliberate
+            # optionality tests/test_cloud_deploy_meta documents for the single path.
+            meta.get("jump_group") or "",
+            meta.get("jumpoint_name") or "",
+            meta.get("pra_credential_ref") or "",
         )
     elif job_type == "ec2_destroy":
         await _run_destroy(job_id, meta.get("deploy_job_id") or "",
@@ -347,18 +364,31 @@ async def _run_bulk_deploy(
     security_group_ids: list,
     workgroup: str = "",
     region: str = "",
+    jump_group: str = "",
+    jumpoint_name: str = "",
+    pra_credential_ref: str = "",
 ):
     """
     Background task for bulk EC2 deployment.
     Ensures the shared Jumpoint host is up once for the whole batch, then deploys
     each instance sequentially. The host is ref-counted across all EC2 instances
     and databases and reclaimed when the last one is removed.
+
+    The three PRA arguments default to blank and fall through to config, which is what
+    the multi-select bulk route passed implicitly before it could send them. They exist
+    because this function resolved the jump group and jumpoint from config *only*,
+    while _run_deploy honoured the per-deploy overrides — so a batch silently ignored
+    them and reported success with the VM registered against the wrong jump group.
     """
     db = _get_db_session()
     try:
-        # Mark all jobs running
-        for job_id, _ in job_items:
-            job_service.set_running(db, job_id)
+        # NB: children are deliberately NOT all marked running up front. They deploy
+        # sequentially, so the last one in a large batch would sit `running` with no
+        # progress write for the whole run — and reconcile_stale_jobs fails any
+        # `running` job whose heartbeat is 10 minutes cold, so an app restart mid-batch
+        # would fail it out from under this parent, which then deploys it anyway.
+        # Left `queued` until its turn, reconcile skips it. set_running now happens at
+        # the top of the loop below.
 
         # Step 1: Start ONE ECS Jumpoint container for the whole batch (BT only)
         from ..services import config_service as _cfg_svc
@@ -416,8 +446,19 @@ async def _run_bulk_deploy(
         key_detail = await aws_service.get_ssh_public_key_from_secret(_aws_region, ssh_secret_name)
         shared_public_key = key_detail["public_key"]
 
+        # PRA targets are batch-wide, so resolve them once rather than per instance —
+        # in particular pra_credential_ref, which is a secrets-backend lookup.
+        _bulk_jump_group = ((jump_group or "").strip()
+                            or _cfg_svc.get("bt_jump_group_name") or settings.bt_jump_group_name)
+        _bulk_jumpoint_name = ((jumpoint_name or "").strip()
+                               or _cfg_svc.get("bt_jumpoint_name") or settings.bt_jumpoint_name)
+        _bulk_client_secret = (_cfg_svc.resolve_reference(pra_credential_ref.strip())
+                               if pra_credential_ref else "")
+
         # Step 3: Deploy each instance, all sharing the same ECS task ARN
         for job_id, item in job_items:
+            # Claim this child only as its turn comes — see the note above.
+            job_service.set_running(db, job_id)
             result: dict = {"ssh_secret_name": ssh_secret_name}
             if jumpoint_host_id:
                 result["jumpoint_host_id"] = jumpoint_host_id
@@ -489,9 +530,13 @@ async def _run_bulk_deploy(
                         bt_result = await terraform_pra_service.provision_jump(
                             vm_name=item.instance_name,
                             hostname=hostname,
-                            jump_group_name=_cfg_svc.get("bt_jump_group_name") or settings.bt_jump_group_name,
-                            jumpoint_name=_cfg_svc.get("bt_jumpoint_name") or settings.bt_jumpoint_name,
+                            # Override-then-config, matching _run_deploy. This read
+                            # config only, so a batch silently ignored the jump group
+                            # and jumpoint the operator picked on the form.
+                            jump_group_name=_bulk_jump_group,
+                            jumpoint_name=_bulk_jumpoint_name,
                             tag="AWS",
+                            client_secret=_bulk_client_secret,
                         )
                         result["bt_shell_jump_id"] = bt_result.get("shell_jump_id")
                         result["bt_jump_group_name"] = bt_result.get("jump_group_name")

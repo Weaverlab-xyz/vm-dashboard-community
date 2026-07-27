@@ -153,9 +153,24 @@
 
       <div class="space-y-4">
         <div>
-          <label class="block text-xs font-medium text-gray-600 mb-1">Instance name</label>
-          <input type="text" x-model="deployForm.instance_name"
-                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+          <div class="grid grid-cols-3 gap-3">
+            <div class="col-span-2">
+              <label class="block text-xs font-medium text-gray-600 mb-1">Instance name</label>
+              <input type="text" x-model="deployForm.instance_name"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-gray-600 mb-1">Count</label>
+              <!-- Clearing the acknowledgment on change is deliberate: a free-tier
+                   warning accepted at count 1 must not carry silently into count 10. -->
+              <input type="number" min="1" :max="countMax" step="1"
+                     x-model.number="deployForm.count"
+                     @change="deployForm.acknowledge_charges = false"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            </div>
+          </div>
+          <p x-show="(deployForm.count || 1) > 1" x-cloak
+             class="text-xs font-mono text-gray-500 mt-1" x-text="namePreviewFor().text"></p>
         </div>
 
         <div>
@@ -311,6 +326,7 @@
 <script>
 function ociDashboard() {
   return {
+    ...deployNameState(),
     activeTab: 'images',
     region: '',
     imagesLoading: false,
@@ -338,7 +354,7 @@ function ociDashboard() {
     // Initialised inline (a method-call initializer can't use `this` in an
     // object literal); openDeployModal() resets it via blankForm().
     deployForm: {
-      instance_name: '', shape: 'VM.Standard.E2.1.Micro',
+      instance_name: '', count: 1, shape: 'VM.Standard.E2.1.Micro',
       ocpus: null, memory_gb: null, availability_domain: '',
       subnet_ocid: '', assign_public_ip: false, ssh_username: 'opc',
       boot_volume_gb: 50, workgroup: '', acknowledge_charges: false,
@@ -349,7 +365,7 @@ function ociDashboard() {
 
     blankForm() {
       return {
-        instance_name: '', shape: 'VM.Standard.E2.1.Micro',
+        instance_name: '', count: 1, shape: 'VM.Standard.E2.1.Micro',
         ocpus: null, memory_gb: null, availability_domain: '',
         subnet_ocid: '', assign_public_ip: false, ssh_username: 'opc',
         boot_volume_gb: 50, workgroup: '', acknowledge_charges: false,
@@ -438,27 +454,48 @@ function ociDashboard() {
     },
 
     // Client-side advisory mirror of services/oci_freetier.py (backend enforces).
+    // Client mirror of services/oci_freetier.evaluate, so the acknowledgment checkbox
+    // appears before submit rather than after a 400. Count-aware: a selection that is
+    // free once is not free N times, and the AMD instance cap is the rule a count
+    // trips first — it was missing here entirely.
     freeTierWarnings() {
       const ft = this.networkOpts.free_tier || {};
       const f = this.deployForm;
+      const n = Math.max(1, f.count || 1);
       const out = [];
       const isAmd = f.shape === ft.amd_shape;
       const isA1 = f.shape === ft.a1_shape;
       if (ft.amd_shape && !isAmd && !isA1) {
         out.push('Shape ' + f.shape + ' is not an Always-Free shape.');
       }
-      if (isA1) {
-        if ((f.ocpus || 0) > (ft.a1_max_ocpus || 0)) out.push('Ampere A1 OCPUs exceed the free budget (~' + ft.a1_max_ocpus + ').');
-        if ((f.memory_gb || 0) > (ft.a1_max_memory_gb || 0)) out.push('Ampere A1 memory exceeds the free budget (~' + ft.a1_max_memory_gb + ' GB).');
+      if (isAmd && n > (ft.amd_max_instances || 2)) {
+        out.push('Launching ' + n + ' × ' + ft.amd_shape + ' exceeds the free tier’s '
+                 + (ft.amd_max_instances || 2) + ' instances.');
       }
-      if ((f.boot_volume_gb || 0) > (ft.boot_volume_gb || 50)) {
+      if (isA1) {
+        if ((f.ocpus || 0) * n > (ft.a1_max_ocpus || 0)) out.push('Ampere A1 OCPUs (' + ((f.ocpus || 0) * n) + ') exceed the free budget (~' + ft.a1_max_ocpus + ').');
+        if ((f.memory_gb || 0) * n > (ft.a1_max_memory_gb || 0)) out.push('Ampere A1 memory (' + ((f.memory_gb || 0) * n) + ' GB) exceeds the free budget (~' + ft.a1_max_memory_gb + ' GB).');
+      }
+      const bv = f.boot_volume_gb || 0;
+      if (bv * n > (ft.block_storage_gb || 200)) {
+        out.push('Boot storage (' + bv + ' GB × ' + n + ') exceeds the '
+                 + (ft.block_storage_gb || 200) + ' GB free block-storage allotment.');
+      } else if (bv > (ft.boot_volume_gb || 50)) {
         out.push('Boot volume above the ' + (ft.boot_volume_gb || 50) + ' GB free default draws down the shared free pool.');
       }
       return out;
     },
 
+    // Preview of the names a count > 1 deploy will create.
+    namePreviewFor() {
+      return this.namePreview(this.deployForm.instance_name, this.deployForm.count,
+                              window.NAME_LIMITS.oci);
+    },
+
     deployReady() {
       if (!this.deployForm.instance_name || !this.deployForm.workgroup) return false;
+      const n = this.deployForm.count || 1;
+      if (!(n >= 1 && n <= this.countMax)) return false;
       if ((this.freeTierWarnings().length || this.serverGateTripped) && !this.deployForm.acknowledge_charges) return false;
       return true;
     },
@@ -491,6 +528,9 @@ function ociDashboard() {
       try {
         const r = await API.post('/api/oci/deploy', body);
         this.deployModal = false;
+        // A batch lands on the /jobs rollup; a single deploy keeps its own path.
+        if (window.afterDeploy(r, { label: 'OCI deploy',
+                                    notify: (m, t) => this.notify(m, t) })) return;
         this.notify('Deploy started (job ' + r.job_id + ').');
         this.activeTab = 'instances';
         setTimeout(() => this.loadInstances(true), 1500);

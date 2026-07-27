@@ -8,6 +8,7 @@ Mirrors the AWS and Azure router patterns:
 """
 import json
 import logging
+import uuid
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -25,7 +26,7 @@ from ..models.gcp import (
     GCPNetworkOptions,
     GCPSSHKeyDetail,
 )
-from ..services import cache_service, cloud_stats, job_service, region_catalog, workgroup_service
+from ..services import cache_service, cloud_stats, deploy_batch, job_service, region_catalog, workgroup_service
 from ..services import gcp_service
 from .auth import require_admin, require_permission
 
@@ -402,13 +403,125 @@ async def list_ssh_key_secret_names(
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
+async def _validate_gcp_ssh_override(project_id: str, payload: GCPDeployRequest) -> None:
+    """Validate an optional per-launch SSH-key-secret override: must be a JSON object
+    carrying a public_key, else the VM would be unreachable. Shared by the single and
+    batch paths so a batch can't skip a check the single deploy makes."""
+    if not payload.ssh_key_secret_override:
+        return
+    from ..services import ssh_key_secret
+    try:
+        raw = await gcp_service.get_secret(project_id, payload.ssh_key_secret_override)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=f"SSH key secret '{payload.ssh_key_secret_override}' could not be read: {e}")
+    try:
+        ssh_key_secret.validate_public_key_secret(raw, secret_name=payload.ssh_key_secret_override)
+    except ssh_key_secret.SshKeySecretError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+async def _fan_out_batch(
+    payload: GCPDeployRequest, db: Session, current_user: User,
+    *, project_id: str, zone: str, region: str,
+) -> GCPDeployResponse:
+    """Fan a ``count > 1`` deploy out into one ``gce_bulk_deploy`` parent plus N
+    ``queued`` ``gce_deploy`` children sharing a batch_id.
+
+    A separate module-level function, NOT an ``if`` inside ``deploy_instance``, and
+    that is load-bearing rather than stylistic: ``test_worker_dispatch``'s
+    children-are-unclaimable rule walks the AST **per function**, so a create_job with
+    ``children`` in its metadata sitting in the same function as the single deploy's
+    ``pending`` create_job reads as a violation — the runtime branch that keeps them
+    apart is invisible to a static walk. Nested defs don't help either; ast.walk
+    descends into them.
+    """
+    names = deploy_batch.expand_names(payload.instance_name, payload.count, "gcp")
+    deploy_batch.reject_name_collisions(db, "gce_deploy", names)
+    # Policy gate every VM in the batch before creating a single row — a denial partway
+    # through would strand queued children that nothing can claim or reconcile.
+    await deploy_batch.enforce_admission(
+        "gcp:gce:deploy",
+        requests=deploy_batch.batch_request_docs(
+            {"region": region, "zone": zone, "instance_type": payload.machine_type,
+             "image": payload.image_self_link},
+            names),
+        actor=current_user, db=db,
+    )
+    await _validate_gcp_ssh_override(project_id, payload)
+
+    batch_id = uuid.uuid4().hex[:12]
+    children = []
+    for name in names:
+        # Each child carries its own complete request, with count reset to 1 so the
+        # runner rebuilds a plain single deploy from it.
+        child_req = payload.model_copy(update={"instance_name": name, "count": 1})
+        job = job_service.create_job(
+            db,
+            job_type="gce_deploy",
+            created_by=current_user.username,
+            workgroup=payload.workgroup,
+            # `queued`, not `pending`: the runner claims on status='pending', so a
+            # pending child would be deployed a second time alongside its parent.
+            status="queued",
+            batch_id=batch_id,
+            metadata={
+                "project_id":      project_id,
+                "zone":            zone,
+                "region":          region,
+                "instance_name":   name,
+                "machine_type":    payload.machine_type,
+                "image_self_link": payload.image_self_link,
+                "image_name":      payload.image_name,
+                "workgroup":       payload.workgroup,
+                "bulk":            True,
+                "req":             child_req.model_dump(),
+            },
+        )
+        job_service.set_cloud_resource_id(db, job.id, name)
+        job_service.log_audit(
+            db, current_user.username, "gce_deploy",
+            details={"instance_name": name, "zone": zone,
+                     "machine_type": payload.machine_type,
+                     "workgroup": payload.workgroup, "bulk": True},
+        )
+        children.append({"job_id": job.id, "instance_name": name,
+                         "req": child_req.model_dump()})
+
+    # One parent for the batch — this is the row the runner claims, and it drives the
+    # queued children above behind a single shared Jumpoint.
+    parent = job_service.create_job(
+        db,
+        job_type="gce_bulk_deploy",
+        created_by=current_user.username,
+        workgroup=payload.workgroup,
+        batch_id=batch_id,
+        metadata={
+            "project_id": project_id,
+            "zone":       zone,
+            "region":     region,
+            "workgroup":  payload.workgroup,
+            "children":   children,
+        },
+    )
+    return GCPDeployResponse(
+        job_id=parent.id,
+        status="pending",
+        message=f"Deploying {len(names)} instances ({names[0]} … {names[-1]})…",
+        count=len(names),
+        batch_id=batch_id,
+        job_ids=[c["job_id"] for c in children],
+        names=names,
+    )
+
+
 @router.post("/deploy", response_model=GCPDeployResponse)
 async def deploy_instance(
     payload: GCPDeployRequest,
     current_user: User = Depends(require_permission("gcp", "write")),
     db: Session = Depends(get_db),
 ):
-    """Deploy a GCE instance from an image. Runs in background; returns job ID immediately."""
+    """Deploy one or more GCE instances from an image. Runs in background; returns the
+    job ID immediately. ``count > 1`` fans out into a batch (see ``_fan_out_batch``)."""
     project_id = _gcp_project()
     if not project_id:
         raise HTTPException(status_code=400, detail="GCP project ID not configured — run the setup wizard.")
@@ -419,6 +532,10 @@ async def deploy_instance(
     workgroup = _validate_workgroup(db, current_user, payload.workgroup)
     payload.workgroup = workgroup
 
+    if payload.count > 1:
+        return await _fan_out_batch(payload, db, current_user,
+                                    project_id=project_id, zone=zone, region=region)
+
     # Pre-action policy gate (inert unless enabled + this action is gated). The
     # region must come from the *requested* zone so the allowed-regions guardrail
     # checks where the VM actually lands, not the global default region.
@@ -427,22 +544,11 @@ async def deploy_instance(
         "gcp:gce:deploy",
         request={"region": region, "zone": zone,
                  "instance_type": payload.machine_type, "image": payload.image_self_link,
-                 "name": payload.instance_name},
+                 "name": payload.instance_name, "count": 1, "batch": False},
         actor=current_user, db=db,
     )
 
-    # Validate an optional per-launch SSH-key-secret override: must be a JSON object
-    # carrying a public_key, else the VM would be unreachable.
-    if payload.ssh_key_secret_override:
-        from ..services import ssh_key_secret
-        try:
-            raw = await gcp_service.get_secret(project_id, payload.ssh_key_secret_override)
-        except Exception as e:  # noqa: BLE001
-            raise HTTPException(status_code=400, detail=f"SSH key secret '{payload.ssh_key_secret_override}' could not be read: {e}")
-        try:
-            ssh_key_secret.validate_public_key_secret(raw, secret_name=payload.ssh_key_secret_override)
-        except ssh_key_secret.SshKeySecretError as e:
-            raise HTTPException(status_code=400, detail=str(e))
+    await _validate_gcp_ssh_override(project_id, payload)
 
     job = job_service.create_job(
         db,

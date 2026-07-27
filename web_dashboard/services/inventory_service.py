@@ -8,6 +8,7 @@ inventory tables. Each row is normalized to one dict shape. RBAC filtering is th
 API layer's job (see :func:`visible_to`), not the collector's.
 """
 import logging
+from typing import Optional, Set
 
 from sqlalchemy.orm import Session
 
@@ -58,6 +59,54 @@ def _vm_item(job) -> dict:
         "ip": meta.get("public_ip") or meta.get("private_ip") or "",
         "detail_href": href,
     }
+
+
+# ── VM name claims (the pre-flight behind count-based deploys) ────────────────
+#
+# Statuses that mean "this name is spoken for". `completed` minus `destroyed` is the
+# live-VM rule collect() uses; the in-flight three are here because a batch submitted
+# while another batch is still running would otherwise check against nothing and
+# collide at launch. This is also why the check can't just reuse collect(), which
+# returns completed rows only (and scans three unrelated tables besides).
+_NAME_HOLDING_STATUSES = ("completed", "pending", "queued", "running")
+
+
+def _name_claimed_by(job) -> Optional[str]:
+    """The VM name a deploy Job lays claim to, or None if it claims none.
+
+    Same key-resolution order as :func:`_vm_item` — deliberately shared, so the
+    pre-flight and the inventory page can never disagree about what a VM is called.
+    Kept free of the Session so it is unit-testable against plain stand-ins."""
+    meta = job.metadata_dict or {}
+    if meta.get("destroyed"):
+        return None
+    name = (meta.get("instance_name") or meta.get("vm_name") or meta.get("name")
+            or job.cloud_resource_id or "")
+    return name.strip() or None
+
+
+def live_or_pending_vm_names(db: Session, job_type: str) -> Set[str]:
+    """Casefolded names one provider's deploy jobs currently claim.
+
+    Casefolded because the comparison has to err toward a false positive: EC2 Name
+    tags are case-sensitive, Azure resource names are not, and GCE names are
+    lowercase-only, so the insensitive comparison is the only one safe for all three.
+
+    Honest about its limits — the jobs table is not authoritative for cloud state, so
+    this catches collisions with VMs *this dashboard* created or is creating. A VM
+    made outside the dashboard with the same name still collides at launch. That is
+    the same fidelity collect() and api/oci._existing_freetier_usage already work at.
+    """
+    rows = (db.query(Job)
+            .filter(Job.job_type == job_type,
+                    Job.status.in_(_NAME_HOLDING_STATUSES))
+            .all())
+    names = set()
+    for job in rows:
+        claimed = _name_claimed_by(job)
+        if claimed:
+            names.add(claimed.casefold())
+    return names
 
 
 def _db_item(row) -> dict:

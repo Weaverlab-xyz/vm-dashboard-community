@@ -25,6 +25,7 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..database import Job, User, VirtualDesktop, get_db
 from ..models.azure import (
+    AzureBulkDeployItem,
     AzureBulkDeployRequest,
     AzureBulkDeployResponse,
     AzureCreateImageRequest,
@@ -37,8 +38,8 @@ from ..models.azure import (
     AzureSSHKeyInfo,
     AzureVMInfo,
 )
-from ..services import (azure_service, azure_listing, job_service, cache_service,
-                        cloud_stats, region_catalog, workgroup_service)
+from ..services import (azure_service, azure_listing, deploy_batch, job_service,
+                        cache_service, cloud_stats, region_catalog, workgroup_service)
 from ..services.azure_service import AzureError
 from .auth import require_admin, require_permission
 
@@ -576,6 +577,102 @@ async def list_vms(
 
 # ── Deploy ────────────────────────────────────────────────────────────────────
 
+async def _fan_out_batch(
+    req: AzureDeployRequest, db: Session, current_user: User,
+    *, loc: str, rg: str, workgroup: str,
+) -> AzureDeployResponse:
+    """Fan a ``count > 1`` deploy out into one ``azure_bulk_deploy`` parent plus N
+    ``queued`` ``azure_deploy`` children — the same parent type the multi-select bulk
+    route uses, with every child built from the one image.
+
+    A separate module-level function, NOT an ``if`` inside ``deploy_vm``:
+    ``test_worker_dispatch``'s children-are-unclaimable rule walks the AST per
+    function, so a ``children``-carrying create_job in the same function as the single
+    deploy's ``pending`` one reads as a violation whatever the runtime branch does.
+    """
+    names = deploy_batch.expand_names(req.vm_name, req.count, "azure")
+    deploy_batch.reject_name_collisions(db, "azure_deploy", names)
+    await deploy_batch.enforce_admission(
+        "azure:vm:deploy",
+        requests=deploy_batch.batch_request_docs(
+            {"region": loc, "instance_type": req.vm_size, "image": req.image_id},
+            names),
+        actor=current_user, db=db,
+    )
+
+    # The runner reconstructs an AzureBulkDeployRequest from the parent, so build one
+    # here from the single request. Fields the bulk model doesn't declare (vm_name,
+    # count) are dropped; everything it shares — including the PRA overrides — carries.
+    bulk = AzureBulkDeployRequest(
+        items=[AzureBulkDeployItem(vm_name=n) for n in names],
+        **{k: v for k, v in req.model_dump().items()
+           if k in AzureBulkDeployRequest.model_fields and k != "items"},
+    )
+
+    batch_id = uuid.uuid4().hex[:12]
+    children = []
+    for name in names:
+        job = job_service.create_job(
+            db,
+            job_type="azure_deploy",
+            created_by=current_user.username,
+            workgroup=workgroup,
+            # `queued`, not `pending`: the runner claims on status='pending', so a
+            # pending child would be created a second time alongside its parent.
+            status="queued",
+            batch_id=batch_id,
+            metadata={
+                "image_id": req.image_id,
+                "vm_name": name,
+                "vm_size": req.vm_size,
+                "location": loc,
+                "resource_group": rg,
+                "subnet_id": req.subnet_id,
+                "nsg_ids": req.nsg_ids,
+                "create_public_ip": req.create_public_ip,
+                "os_type": req.os_type,
+                "trusted_launch": req.trusted_launch,
+                "ssh_username": req.ssh_username,
+                "workgroup": workgroup,
+                "bulk": True,
+                "register_in_entitle": req.register_in_entitle,
+                "register_in_passwordsafe": req.register_in_passwordsafe,
+                "ssh_key_secret_override": req.ssh_key_secret_override,
+            },
+        )
+        job_service.set_cloud_resource_id(db, job.id, name)
+        job_service.log_audit(
+            db, current_user.username, "azure_deploy",
+            details={"image_id": req.image_id, "vm_name": name,
+                     "workgroup": workgroup, "bulk": True},
+        )
+        children.append({"job_id": job.id, "vm_name": name})
+
+    parent = job_service.create_job(
+        db,
+        job_type="azure_bulk_deploy",
+        created_by=current_user.username,
+        workgroup=workgroup,
+        batch_id=batch_id,
+        metadata={
+            "location": loc,
+            "resource_group": rg,
+            "workgroup": workgroup,
+            "req": bulk.model_dump(),
+            "children": children,
+        },
+    )
+    return AzureDeployResponse(
+        job_id=parent.id,
+        vm_name=names[0],
+        message=f"Azure deployment queued for {len(names)} VMs ({names[0]} … {names[-1]})",
+        count=len(names),
+        batch_id=batch_id,
+        job_ids=[c["job_id"] for c in children],
+        names=names,
+    )
+
+
 @router.post("/deploy", response_model=AzureDeployResponse)
 async def deploy_vm(
     req: AzureDeployRequest,
@@ -583,8 +680,9 @@ async def deploy_vm(
     current_user: User = Depends(require_permission("azure", "write")),
 ):
     """
-    Deploy an Azure VM from a private image (gallery, managed, or marketplace).
-    Returns a job_id trackable at /api/jobs/{job_id} or /ws/jobs/{job_id}.
+    Deploy one or more Azure VMs from a private image (gallery, managed, or
+    marketplace). Returns a job_id trackable at /api/jobs/{job_id} or /ws/jobs/{job_id}.
+    ``count > 1`` fans out into a batch (see ``_fan_out_batch``).
     """
     if req.os_type.lower() != "windows" and not req.ssh_public_key.strip():
         raise HTTPException(status_code=400, detail="ssh_public_key is required for Linux deploys.")
@@ -598,12 +696,17 @@ async def deploy_vm(
     req.workgroup = workgroup
     await _validate_ssh_key_override(req.ssh_key_secret_override)
 
+    if req.count > 1:
+        return await _fan_out_batch(req, db, current_user,
+                                    loc=loc, rg=rg, workgroup=workgroup)
+
     # Pre-action policy gate (inert unless enabled + this action is gated).
     from ..services import admission_service
     admission_service.enforce(
         "azure:vm:deploy",
         request={"region": loc, "instance_type": req.vm_size,
-                 "image": req.image_id, "name": req.vm_name},
+                 "image": req.image_id, "name": req.vm_name,
+                 "count": 1, "batch": False},
         actor=current_user, db=db,
     )
 
@@ -674,6 +777,32 @@ async def bulk_deploy_vms(
     req.workgroup = workgroup
     await _validate_ssh_key_override(req.ssh_key_secret_override)
 
+    # Bulk means one VM per selected IMAGE, so every item has to resolve to one —
+    # either its own or the batch-level default.
+    for item in req.items:
+        if not (item.image_id or req.image_id):
+            raise HTTPException(
+                status_code=400,
+                detail=f"VM '{item.vm_name}' has no image: set image_id on the item "
+                       "or supply a request-level image_id.")
+
+    # Names here are hand-typed per row in the bulk modal, so unlike the count path
+    # they can genuinely repeat. Checked before anything is created.
+    deploy_batch.reject_name_collisions(
+        db, "azure_deploy", [i.vm_name for i in req.items])
+
+    # Policy gate every item BEFORE the first create_job. This route had no gate at
+    # all, so allowed_regions / instance_size_caps / prod_window silently did not
+    # apply to batches. Per item because each carries its own image.
+    await deploy_batch.enforce_admission(
+        "azure:vm:deploy",
+        requests=[{"region": loc, "instance_type": req.vm_size,
+                   "image": item.image_id or req.image_id, "name": item.vm_name,
+                   "count": len(req.items), "batch": True}
+                  for item in req.items],
+        actor=current_user, db=db,
+    )
+
     # One job row per VM so callers get all job IDs immediately.
     #
     # Created ``queued``, not ``pending``: the parent azure_bulk_deploy job below drives
@@ -682,7 +811,19 @@ async def bulk_deploy_vms(
     # the parent — every VM created twice.
     batch_id = uuid.uuid4().hex[:12]
     job_items = []
+    children = []
     for item in req.items:
+        # Resolve the per-item image once, here, so the runner never has to re-derive
+        # the fallback and the child row records what was actually used.
+        resolved = {
+            "image_id":        item.image_id or req.image_id,
+            "image_publisher": item.image_publisher if item.image_publisher is not None else req.image_publisher,
+            "image_offer":     item.image_offer if item.image_offer is not None else req.image_offer,
+            "image_sku":       item.image_sku if item.image_sku is not None else req.image_sku,
+            "image_version":   item.image_version if item.image_version is not None else req.image_version,
+            "os_type":         item.os_type or req.os_type,
+            "trusted_launch":  req.trusted_launch if item.trusted_launch is None else item.trusted_launch,
+        }
         job = job_service.create_job(
             db,
             job_type="azure_deploy",
@@ -691,7 +832,7 @@ async def bulk_deploy_vms(
             status="queued",
             batch_id=batch_id,
             metadata={
-                "image_id": req.image_id,
+                "image_id": resolved["image_id"],
                 "vm_name": item.vm_name,
                 "vm_size": req.vm_size,
                 "location": loc,
@@ -699,19 +840,27 @@ async def bulk_deploy_vms(
                 "subnet_id": req.subnet_id,
                 "nsg_ids": req.nsg_ids,
                 "create_public_ip": req.create_public_ip,
-                "os_type": req.os_type,
-                "trusted_launch": req.trusted_launch,
+                "os_type": resolved["os_type"],
+                "trusted_launch": resolved["trusted_launch"],
                 "ssh_username": req.ssh_username,
                 "workgroup": workgroup,
                 "bulk": True,
+                # Parity with the AWS children. The runner reads these off the parent's
+                # req blob today, so this changes no behaviour — it is what the jobs UI
+                # and any future per-child rerun would read.
+                "register_in_entitle": req.register_in_entitle,
+                "register_in_passwordsafe": req.register_in_passwordsafe,
+                "ssh_key_secret_override": req.ssh_key_secret_override,
             },
         )
         job_service.set_cloud_resource_id(db, job.id, item.vm_name)
         job_service.log_audit(
             db, current_user.username, "azure_deploy",
-            details={"image_id": req.image_id, "vm_name": item.vm_name, "workgroup": workgroup, "bulk": True},
+            details={"image_id": resolved["image_id"], "vm_name": item.vm_name,
+                     "workgroup": workgroup, "bulk": True},
         )
         job_items.append((job.id, item.vm_name))
+        children.append({"job_id": job.id, "vm_name": item.vm_name, **resolved})
 
     # One parent job for the whole batch — the runner claims this, and it drives the
     # queued children above, sharing a single ACI Jumpoint container across them.
@@ -726,12 +875,13 @@ async def bulk_deploy_vms(
             "resource_group": rg,
             "workgroup": workgroup,
             "req": req.model_dump(),
-            "children": [{"job_id": jid, "vm_name": vn} for jid, vn in job_items],
+            "children": children,
         },
     )
 
     return AzureBulkDeployResponse(
-        jobs=[AzureDeployResponse(job_id=jid, vm_name=vn) for jid, vn in job_items]
+        jobs=[AzureDeployResponse(job_id=jid, vm_name=vn) for jid, vn in job_items],
+        batch_id=batch_id,
     )
 
 

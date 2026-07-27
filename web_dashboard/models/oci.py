@@ -1,6 +1,8 @@
 """Pydantic models for OCI (Oracle Cloud Infrastructure) API endpoints."""
 from typing import List, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+from ..services.vm_naming import MAX_DEPLOY_COUNT
 
 
 class OCIImageInfo(BaseModel):
@@ -79,15 +81,26 @@ class OCIDeployRequest(BaseModel):
     # PRA per-launch overrides (fall back to oci_bt_* / bt_* config).
     jump_group: Optional[str] = None
     jumpoint_name: Optional[str] = None
+    count: int = Field(
+        default=1, ge=1, le=MAX_DEPLOY_COUNT,
+        description="Number of identical instances to launch. 1 is a plain single "
+                    "deploy; >1 fans out into a batch and auto-numbers the names. The "
+                    "free-tier gate is evaluated against the whole batch, so a count "
+                    "that would exceed the Always-Free envelope needs acknowledge_charges.")
 
 
 class OCIDeployResponse(BaseModel):
-    job_id: str
+    job_id: str          # for a batch (count > 1) this is the PARENT job
     status: str
     message: str
     # Populated (with status="warning") when the selection exceeds the free tier
     # and acknowledge_charges was not set — the form surfaces these + the checkbox.
     free_tier_warnings: List[str] = []
+    # Batch fields, defaulted so a count-1 response is unchanged for existing callers.
+    count: int = 1
+    batch_id: Optional[str] = None
+    job_ids: List[str] = []   # child job ids, in name order
+    names: List[str] = []     # the expanded names actually used, post-truncation
 
 
 class OCISSHKeyDetail(BaseModel):

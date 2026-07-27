@@ -48,9 +48,9 @@ HANDLED_TYPES = (
     "aws_export_image", "gcp_export_image", "azure_export_image",
     "image_promote_aws", "image_promote_azure", "image_promote_gcp", "image_promote_oci",
     "ec2_deploy", "ec2_bulk_deploy", "ec2_destroy", "ec2_create_image", "ami_copy",
-    "oci_deploy", "oci_destroy",
+    "oci_deploy", "oci_bulk_deploy", "oci_destroy",
     "azure_deploy", "azure_bulk_deploy", "azure_destroy", "azure_create_image",
-    "gce_deploy", "gce_capture_image", "gce_destroy",
+    "gce_deploy", "gce_bulk_deploy", "gce_capture_image", "gce_destroy",
 )
 
 POLL_INTERVAL = 2.0  # seconds between queue polls when idle
@@ -231,7 +231,9 @@ async def _dispatch(job_id: str, job_type: str, meta: dict) -> None:
             # query above cannot pick them up alongside their ec2_bulk_deploy parent.
             from .services import aws_vm_service
             await aws_vm_service.run(job_id, job_type, meta)
-        elif job_type in ("oci_deploy", "oci_destroy"):
+        elif job_type in ("oci_deploy", "oci_bulk_deploy", "oci_destroy"):
+            # OCI compute lifecycle. Same parent/child split as EC2: a count > 1 deploy
+            # creates `queued` children driven by the oci_bulk_deploy parent.
             from .services import oci_vm_service
             await oci_vm_service.run(job_id, job_type, meta)
         elif job_type in ("azure_deploy", "azure_bulk_deploy", "azure_destroy",
@@ -240,7 +242,11 @@ async def _dispatch(job_id: str, job_type: str, meta: dict) -> None:
             # created `queued` so only the azure_bulk_deploy parent is claimable.
             from .services import azure_vm_service
             await azure_vm_service.run(job_id, job_type, meta)
-        elif job_type in ("gce_deploy", "gce_capture_image", "gce_destroy"):
+        elif job_type in ("gce_deploy", "gce_bulk_deploy", "gce_capture_image",
+                          "gce_destroy"):
+            # GCE lifecycle. Same parent/child split as EC2, and the gce_bulk_deploy
+            # parent additionally acquires ONE shared Jumpoint for the whole batch
+            # instead of a paired bt-jumpoint-<vm> per instance.
             from .services import gcp_vm_service
             await gcp_vm_service.run(job_id, job_type, meta)
         else:  # pragma: no cover — HANDLED_TYPES guards the claim
