@@ -479,9 +479,10 @@ async def _run_bulk_deploy(
                 )
                 ami_info = await aws_service.describe_ami(_aws_region, item.ami_id)
                 is_windows = "windows" in (ami_info.get("platform", "") or "").lower()
+                os_type = ""
                 if not is_windows:
                     from ..services.os_detection import detect_os_type
-                    _, result["ssh_user"] = detect_os_type(ami_info.get("name", ""))
+                    os_type, result["ssh_user"] = detect_os_type(ami_info.get("name", ""))
                 # Cloud-identity JIT Phase 2: per-instance elevation in
                 # the bulk batch. One Entitle activation per EC2 launch
                 # so a denial of one row doesn't poison the others.
@@ -509,6 +510,12 @@ async def _run_bulk_deploy(
                         subnet_id=subnet_id,
                         security_group_ids=security_group_ids,
                         iam_instance_profile=_rc["ssm_instance_profile"],
+                        # Load-bearing, and it was missing: _build_userdata branches
+                        # entirely on os_type, so "" emits no runcmd and the instance
+                        # comes up with NO SSM agent — no Session Manager, and the
+                        # Password Safe SSM plugin this same path onboards it into has
+                        # nothing to talk to.
+                        os_type=os_type,
                         workgroup=workgroup,
                         correlation_tag=_bulk_elev.correlation_tag,
                     )
