@@ -70,6 +70,33 @@ def test_every_aws_launch_passes_os_type():
         "installed — Session Manager and the Password Safe SSM plugin both break silently.")
 
 
+def test_the_batch_runner_delegates_rather_than_launching():
+    """A `_run_bulk_deploy` that calls the cloud SDK itself is a second implementation
+    of `_run_deploy`, and it will drift. That is not a prediction — it is what happened.
+    The AWS copy dropped `os_type`; the Azure copy ignored `docker_deploy_key_ref`,
+    swallowed a failed deploy-key fetch and emitted no ACI outcome. Each was found
+    separately, long after it shipped, because a batch still reported success.
+
+    The batch runner should acquire whatever is genuinely shared, then loop calling
+    `_run_deploy` with it injected — the shape `gcp_vm_service` and `oci_vm_service`
+    established and the other two now follow."""
+    checked, violations = 0, []
+    for module, launcher in _LAUNCHERS.items():
+        bulk = _function(_tree(module), "_run_bulk_deploy")
+        if bulk is None:
+            continue          # not every provider has a batch path
+        checked += 1
+        hits = _calls_named(bulk, launcher)
+        if hits:
+            violations.append(
+                f"{module}:_run_bulk_deploy calls {launcher}() directly at line(s) "
+                f"{[h.lineno for h in hits]} instead of delegating to _run_deploy")
+    assert checked >= 4, (
+        f"expected all four providers to have a _run_bulk_deploy, found {checked} — "
+        "the walk may have stopped matching rather than started passing")
+    assert not violations, "\n".join(violations)
+
+
 def test_a_batch_recovery_handler_cannot_reach_children_it_already_deployed():
     """`job_service.set_failed` does not check the current status.
 
