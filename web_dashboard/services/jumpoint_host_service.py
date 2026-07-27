@@ -312,6 +312,25 @@ def _active_gce_count(db) -> int:
                and (j.metadata_dict or {}).get("jumpoint_host_id"))
 
 
+def _active_azure_vm_count(db) -> int:
+    """Live Azure VMs that borrowed the SHARED host.
+
+    Shaped like ``_active_gce_count``, not ``_active_ec2_count``, for the same reason:
+    on Azure both shapes coexist — singles follow ``azure_vm_jumpoint_mode`` (shared by
+    default), and a deploy that asked for ACI or carried its own Jumpoint deploy key got
+    its own container group instead — so counting all ``azure_deploy`` rows would let one
+    ACI-brokered VM pin the shared VM forever and block a cloud-database reclaim.
+
+    Keys on ``jumpoint_host_id`` (what the deploy actually used) rather than
+    ``jumpoint_mode`` (what it intended), so a row whose ensure failed and never touched
+    the host doesn't hold a phantom reference."""
+    from ..database import Job
+    jobs = db.query(Job).filter(Job.job_type == "azure_deploy", Job.status == "completed").all()
+    return sum(1 for j in jobs
+               if not (j.metadata_dict or {}).get("destroyed")
+               and (j.metadata_dict or {}).get("jumpoint_host_id"))
+
+
 def _active_k8s_count(db, cloud: Optional[str] = None) -> int:
     # A managed cluster needs the shared Jumpoint while it has EITHER a live PRA
     # k8s tunnel (pra_jump_id set) OR a live API TCP tunnel (config key
@@ -580,12 +599,17 @@ async def _ensure_jumpoint_host_azure(region: str) -> Optional[str]:
 
 
 async def _teardown_jumpoint_host_if_idle_azure(db, region: str) -> None:
-    """Delete the shared Azure Jumpoint VM iff no active Azure cloud database is
-    left using it. Best-effort; logs and returns on error."""
+    """Delete the shared Azure Jumpoint VM iff nothing is left using it — no active Azure
+    cloud database, k8s tunnel, VDI seat, or Azure VM that borrowed it. Best-effort; logs
+    and returns on error."""
     from . import azure_service
     try:
+        # _active_azure_vm_count is load-bearing, not tidiness: without it a
+        # cloud-database decommission would delete the host out from under every Azure VM
+        # that borrowed it. The AWS and GCP counterparts carry their _active_ec2_count /
+        # _active_gce_count terms for exactly this reason.
         active = (_active_db_count(db, "azure") + _active_k8s_count(db, "azure")
-                  + _active_vdesktop_count(db, "azure"))
+                  + _active_vdesktop_count(db, "azure") + _active_azure_vm_count(db))
         if active > 0:
             logger.info("jumpoint-host(azure): keeping jumpoint (%d active resource(s))", active)
             return

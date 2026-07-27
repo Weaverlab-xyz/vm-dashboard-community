@@ -54,9 +54,10 @@ Ordered steps (each Layer-1/2/3 step is **non-fatal** — a failure logs a warni
 deploy still succeeds):
 
 1. **Ensure the jumpoint host** (only when `beyondtrust_enabled`) — AWS uses a shared
-   ref-counted ECS host, Azure an ACI container group, GCP the shared COS host (see
-   `gcp_vm_jumpoint_mode`); **OCI does nothing here** (bring your own). In a batch this
-   happens once for the whole run.
+   ref-counted ECS host, Azure the shared `clouddb-jumpoint` VM (see
+   `azure_vm_jumpoint_mode`), GCP the shared COS host (see `gcp_vm_jumpoint_mode`);
+   **OCI does nothing here** (bring your own). In a batch this happens once for the
+   whole run.
 2. **AWS only** — ensure the shared on-demand **NAT instance** (`aws_nat_instance_enabled`)
    and **SSM interface endpoints** (`aws_ssm_endpoints_enabled`).
 3. **Fetch the SSH public key** from the cloud's secret store and inject it (Linux via
@@ -151,6 +152,34 @@ and a service principal with **Contributor** on the RG.
 | `azure_key_vault_url` / `azure_ssh_keypair_secret_name` | — / `azureVM-ssh-keypair` | SSH keypair secret |
 | `azure_ssh_username` | `azureuser` | default Linux login |
 | `azure_aci_subnet_id` / `azure_aci_docker_deploy_key` | — | ACI jumpoint (Layer 1) |
+| `azure_jumpoint_subnet_id` | — | subnet for the shared VM jumpoint (falls back to `azure_aci_subnet_id`) |
+| `azure_vm_jumpoint_mode` | `shared` | `shared` (the ref-counted `clouddb-jumpoint` VM) or `aci` (a container group per VM) |
+
+Azure single deploys borrow the **shared, ref-counted jumpoint VM** that cloud databases,
+k8s tunnels and VDI seats already use, following `azure_vm_jumpoint_mode` (editable under
+**Settings → BeyondTrust → Azure overrides**, so the choice is reversible without a
+redeploy). Batches still share one ACI container group. Two things override the mode: a
+deploy supplying its own **Jumpoint deploy key** always gets ACI (the shared host resolves
+its key from config, so there is nowhere to honour a per-deploy override), and `aci` mode
+restores the pre-2026-07 per-deploy container.
+
+`shared` is the default because ACI has two limits a real VM does not:
+
+* **No protocol tunneling.** ACI is serverless and cannot grant `NET_ADMIN` / `NET_RAW` /
+  `IPC_LOCK` or `/dev/net/tun`, so an ACI-brokered VM gets a Shell Jump but never a
+  Protocol Tunnel. The shared VM runs the container privileged (`azure_service.run_vm_jumpoint`).
+* **One shared identity store.** Every ACI group gets a random name
+  (`bt-jumpoint-azure-<uuid8>`) but they all mount the same `/jpt` Azure File share, which
+  is where the Jumpoint persists its identity. Successive groups contend over that one
+  install, and once the `.installed-<key-hash>` marker disagrees with what is on disk the
+  container **crash-loops** (`ExitCode 1`, no log output) and never registers with PRA. The
+  Containers page still shows it *Running*, because that is the ACI **group** state — check
+  `containers[0].instanceView.currentState` for `CrashLoopBackOff`. Recovery: empty the
+  `jpt` share so the next container reinstalls clean.
+
+Which shape a VM used is recorded as `jumpoint_mode` on its deploy job; destroy releases a
+shared reference and lets `jumpoint_host_service` decide, or stops the ACI group when no
+sibling VM still references it.
 
 Windows is supported: the dashboard generates + vaults a local-admin password, retrievable
 via `GET /api/azure/vms/{name}/admin-password`. Windows VMs use an **RDP jump**, not the
