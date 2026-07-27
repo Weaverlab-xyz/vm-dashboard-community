@@ -1,0 +1,192 @@
+"""OCI compute deploy / destroy execution, run by the job runner.
+
+Dispatched by ``jobs_worker`` as ``oci_deploy`` and ``oci_destroy``. ``api/oci`` keeps
+the route handlers, which validate, persist the request on the job and return; the
+worker reconstructs the call from that metadata and runs it here, so a gunicorn recycle
+mid-deploy no longer strands the job or orphans the instance.
+
+Lives in ``services/`` because the job runner has to import it, and a worker reaching
+into the API package is backwards (see services/aws_vm_service for the AWS counterpart).
+"""
+import logging
+from typing import Optional
+
+from ..config import settings
+from ..models.oci import OCIDeployRequest
+from . import cache_service, job_service, oci_service
+
+logger = logging.getLogger(__name__)
+
+
+def _oci_cfg(key: str, fallback: str = "") -> str:
+    """Own copy rather than an import from ``api.oci`` — that is the dependency this
+    module exists to remove."""
+    from ..services import config_service
+    return config_service.get(key) or getattr(settings, key, None) or fallback
+
+
+def _region() -> str:
+    return _oci_cfg("oci_region") or "us-ashburn-1"
+
+
+def _get_db_session():
+    from ..database import SessionLocal
+    return SessionLocal()
+
+
+# ── Job-runner entry point ────────────────────────────────────────────────────
+
+async def run(job_id: str, job_type: str, meta: dict) -> None:
+    """Run one OCI job. Every argument comes from the metadata the endpoint persisted."""
+    if job_type == "oci_deploy":
+        await _run_deploy(job_id, OCIDeployRequest(**meta["req"]), meta["compartment_ocid"])
+    elif job_type == "oci_destroy":
+        await _run_destroy(job_id, meta["instance_ocid"], meta.get("deploy_job_id"))
+
+
+async def _run_deploy(job_id: str, payload: OCIDeployRequest, compartment: str) -> None:
+    from ..services import config_service as _cfg_svc
+    db = _get_db_session()
+    try:
+        job_service.set_running(db, job_id)
+
+        # Resolve the SSH public key (per-launch override wins over the default).
+        secret = (payload.ssh_key_secret_override or _cfg_svc.get("oci_ssh_key_secret") or "")
+        ssh_public_key = ""
+        if secret:
+            job_service.update_progress(db, job_id, 15, "Retrieving SSH public key from OCI Vault…")
+            try:
+                ssh_public_key = await oci_service.get_ssh_public_key(secret)
+            except Exception as exc:
+                logger.warning("Could not fetch OCI SSH key: %s", exc)
+
+        job_service.update_progress(db, job_id, 25, "Launching compute instance…")
+        result = await oci_service.launch_instance(
+            compartment_id=compartment,
+            availability_domain=payload.availability_domain,
+            instance_name=payload.instance_name,
+            shape=payload.shape,
+            image_ocid=payload.image_ocid,
+            subnet_ocid=payload.subnet_ocid or _cfg_svc.get("oci_default_subnet_ocid") or "",
+            assign_public_ip=payload.assign_public_ip,
+            ssh_public_key=ssh_public_key,
+            ocpus=payload.ocpus,
+            memory_gb=payload.memory_gb,
+            boot_volume_gb=payload.boot_volume_gb,
+            workgroup=payload.workgroup,
+        )
+
+        hostname = result.get("public_ip") or result.get("private_ip") or payload.instance_name
+        final_meta = {
+            "instance_ocid":  result["ocid"],
+            "instance_name":  result["display_name"],
+            "shape":          result.get("shape"),
+            "ocpus":          result.get("ocpus"),
+            "memory_gb":      result.get("memory_gb"),
+            "lifecycle_state": result.get("lifecycle_state"),
+            "public_ip":      result.get("public_ip"),
+            "private_ip":     result.get("private_ip"),
+            "availability_domain": result.get("availability_domain"),
+            "image_ocid":     payload.image_ocid,
+            "image_name":     payload.image_name,
+            "region":         _region(),
+        }
+
+        # ── BeyondTrust PRA — Shell Jump (optional) ───────────────────────────
+        if _cfg_svc.get_bool("beyondtrust_enabled"):
+            from ..services import terraform_pra_service
+            jump_group = (payload.jump_group or _cfg_svc.get("oci_bt_jump_group_name")
+                          or _cfg_svc.get("bt_jump_group_name") or settings.bt_jump_group_name)
+            jumpoint_name = (payload.jumpoint_name or _cfg_svc.get("oci_jumpoint_name")
+                             or _cfg_svc.get("bt_jumpoint_name") or settings.bt_jumpoint_name)
+            job_service.update_progress(db, job_id, 90, f"Instance launched ({hostname}), provisioning Shell Jump…")
+            try:
+                bt_result = await terraform_pra_service.provision_jump(
+                    vm_name=payload.instance_name, hostname=hostname,
+                    jump_group_name=jump_group, jumpoint_name=jumpoint_name, tag="OCI",
+                )
+                final_meta["bt_shell_jump_id"] = bt_result.get("shell_jump_id")
+                final_meta["bt_jump_group_name"] = bt_result.get("jump_group_name")
+                final_meta["bt_tf_state"] = bt_result.get("tf_state_json")
+                job_service.update_progress(db, job_id, 95,
+                    f"Shell Jump created (ID: {bt_result.get('shell_jump_id')}, group: {jump_group})")
+            except Exception as bt_exc:
+                final_meta["bt_error"] = str(bt_exc)
+                job_service.update_progress(db, job_id, 95,
+                    f"Instance deployed but Shell Jump provisioning failed: {bt_exc}")
+        else:
+            job_service.update_progress(db, job_id, 95, "Instance launched.")
+
+        # Entitle — register as SSH ephemeral-accounts integration (per-build opt-in).
+        from ..services import entitle_vm_hook
+        if payload.register_in_entitle and entitle_vm_hook.registration_enabled():
+            # Resolved login user (config override → request field → opc default);
+            # _cfg_svc.get is store-only so a blank request field falls through.
+            await entitle_vm_hook.register(db, job_id, payload.instance_name, hostname,
+                                           private=not payload.assign_public_ip,
+                                           result=final_meta, tag="OCI",
+                                           sudo_user=_cfg_svc.get("oci_ssh_username") or payload.ssh_username or "opc",
+                                           ssh_key_secret=secret)
+
+        # Password Safe — onboard as a managed system + account (per-build opt-in).
+        # OCI uses the traditional "ssh" method (no cloud-native plugin), so the
+        # chosen key secret must carry the VM's private key.
+        from ..services import ps_vm_hook
+        if payload.register_in_passwordsafe and ps_vm_hook.registration_enabled():
+            await ps_vm_hook.register(db, job_id, payload.instance_name, hostname,
+                                      result=final_meta, tag="OCI", ssh_key_secret=secret)
+
+        job_service.set_completed(db, job_id, final_meta)
+        await cache_service.invalidate(cache_service.key_global("oci_instances"))
+    except Exception as exc:
+        logger.error("OCI deploy failed for job %s: %s", job_id, exc)
+        job_service.set_failed(db, job_id, str(exc))
+    finally:
+        db.close()
+
+async def _run_destroy(job_id: str, instance_ocid: str, deploy_job_id: Optional[str] = None) -> None:
+    db = _get_db_session()
+    try:
+        job_service.set_running(db, job_id)
+        result = {"instance_ocid": instance_ocid}
+
+        deploy_meta = {}
+        if deploy_job_id:
+            deploy_job = job_service.get_job(db, deploy_job_id)
+            if deploy_job:
+                deploy_meta = deploy_job.metadata_dict
+
+        # Remove the BeyondTrust Shell Jump before terminating the instance.
+        if deploy_meta.get("bt_tf_state"):
+            job_service.update_progress(db, job_id, 20, "Removing BeyondTrust Shell Jump…")
+            try:
+                from ..services import terraform_pra_service
+                await terraform_pra_service.remove_jump(deploy_meta["bt_tf_state"])
+                result["bt_shell_jump_removed"] = deploy_meta.get("bt_shell_jump_id")
+            except Exception as e:
+                result["bt_error"] = str(e)
+                logger.error("OCI Shell Jump removal failed: %s", e)
+
+        if deploy_meta.get("entitle_registration_tf_state"):
+            from ..services import entitle_vm_hook
+            await entitle_vm_hook.deregister(deploy_meta, result)
+
+        if deploy_meta.get("ps_registration_tf_state"):
+            from ..services import ps_vm_hook
+            await ps_vm_hook.deregister(deploy_meta, result)
+
+        job_service.update_progress(db, job_id, 50, "Terminating instance…")
+        await oci_service.terminate_instance(instance_ocid)
+
+        if deploy_job_id:
+            deploy_meta["destroyed"] = True
+            if job_service.get_job(db, deploy_job_id):
+                job_service.set_completed(db, deploy_job_id, deploy_meta)
+
+        job_service.set_completed(db, job_id, result)
+        await cache_service.invalidate(cache_service.key_global("oci_instances"))
+    except Exception as exc:
+        logger.error("OCI destroy failed for job %s: %s", job_id, exc)
+        job_service.set_failed(db, job_id, str(exc))
+    finally:
+        db.close()

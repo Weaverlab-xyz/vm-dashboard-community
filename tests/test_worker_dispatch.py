@@ -97,6 +97,84 @@ def test_the_worker_imports_nothing_from_the_api_package():
         "jobs_worker imports from the api package: " + "; ".join(offenders))
 
 
+# ── exactly one thing may drive a job row ─────────────────────────────────────
+
+def _api_modules():
+    api = os.path.join(_ROOT, "web_dashboard", "api")
+    for name in sorted(os.listdir(api)):
+        if name.endswith(".py"):
+            yield os.path.join(api, name)
+
+
+def _create_job_calls(fn):
+    """(job_type, status) for every create_job call inside one function, with status
+    defaulting to what create_job defaults to."""
+    for n in ast.walk(fn):
+        if isinstance(n, ast.Call) and getattr(n.func, "attr", "") == "create_job":
+            def kw(name, default=None):
+                for k in n.keywords:
+                    if k.arg == name and isinstance(k.value, ast.Constant):
+                        return k.value.value
+                return default
+            yield kw("job_type"), kw("status", "pending")
+
+
+def test_no_handled_type_is_both_claimable_and_dispatched_in_request():
+    """The double-execution bug this guards is not hypothetical — it is what bulk
+    deploy would have done the moment `ec2_deploy` entered HANDLED_TYPES.
+
+    The bulk endpoint creates one job row per instance and drives all of them from a
+    single parent. Those rows carry a handled job_type, so if they are also created
+    `pending`, `_claim_one` picks each one up and deploys it a second time, in parallel
+    with the parent. Every instance launched twice, and nothing in the job record shows
+    why. Children a parent owns must be created `queued`."""
+    handled = _handled_types()
+    violations = []
+    for path in _api_modules():
+        tree = ast.parse(open(path).read(), path)
+        for fn in ast.walk(tree):
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            drives_it_itself = any(
+                isinstance(n, ast.Call) and getattr(n.func, "attr", "") == "add_task"
+                for n in ast.walk(fn)
+            )
+            if not drives_it_itself:
+                continue
+            for job_type, status in _create_job_calls(fn):
+                if job_type in handled and status == "pending":
+                    violations.append(f"{os.path.basename(path)}:{fn.name} -> {job_type}")
+    assert not violations, (
+        "job rows that both the runner and an in-request task would execute: "
+        + "; ".join(violations))
+
+
+def test_bulk_deploy_children_are_created_unclaimable():
+    """The specific instance of the rule above, pinned by name so a later edit to the
+    bulk endpoint can't quietly drop the status and reintroduce the double launch."""
+    src = open(os.path.join(_ROOT, "web_dashboard", "api", "aws.py")).read()
+    tree = ast.parse(src)
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+              and n.name == "bulk_deploy_amis")
+    children = [(t, s) for t, s in _create_job_calls(fn) if t == "ec2_deploy"]
+    assert children, "bulk_deploy_amis no longer creates ec2_deploy children"
+    for job_type, status in children:
+        assert status == "queued", (
+            f"bulk ec2_deploy children are created {status!r} — the runner will claim "
+            "them alongside their ec2_bulk_deploy parent and deploy each instance twice")
+
+
+def test_queued_is_outside_the_claim_query():
+    """`queued` only protects anything because _claim_one filters on status='pending'
+    exactly. A change to `!= 'completed'` or an `in_` would silently re-open it."""
+    src = _src()
+    claim = re.search(r"def _claim_one\(.*?\n(.*?)\n\ndef ", src, re.S).group(1)
+    assert 'Job.status == "pending"' in claim, (
+        "_claim_one no longer filters status == 'pending'; queued children are "
+        "unprotected and bulk deploys would double-execute")
+
+
 def test_the_worker_does_not_import_request_models_either():
     """Reconstructing a pydantic request model is the service's job — the worker hands
     it the stored metadata and nothing else. (`models.packer` was the last one.)"""
