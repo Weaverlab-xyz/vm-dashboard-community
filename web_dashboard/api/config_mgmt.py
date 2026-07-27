@@ -279,8 +279,8 @@ class RunRequest(BaseModel):
     # multiple backends.
     asset_backend: str = ""
     # Groups the jobs of one bulk run (see /run-bulk). A descriptive label only —
-    # nothing authorizes off it — carried on job metadata so the batch can be
-    # identified in the job list.
+    # nothing authorizes off it — stored on the job's indexed `batch_id` column so
+    # /jobs can filter to the batch and roll up its status.
     batch_id: str = ""
     # BeyondTrust Password Safe managed-account checkout (LOCAL runner only). The
     # credential is checked out just-in-time at run time — the operator never sees
@@ -1032,8 +1032,8 @@ async def _run_cloud_localhost(payload: "RunRequest", db, current_user):
             "asset_backend": asset_backend,
             "extra_vars": payload.extra_vars or {},
             "secret_vars": payload.secret_vars or {},
-            **({"batch_id": payload.batch_id} if payload.batch_id else {}),
         },
+        batch_id=payload.batch_id,
     )
     if wants_secret:
         job_service.log_audit(
@@ -1155,15 +1155,13 @@ async def run_playbook(
                         "secret is locked to it."))
     description = f"Ansible ({atype}): {payload.asset} → {payload.target}"
 
-    job_meta = {"description": description}
-    if payload.batch_id:
-        job_meta["batch_id"] = payload.batch_id
     job = job_service.create_job(
         db,
         job_type="ansible_local",
         created_by=current_user.username,
         workgroup="ansible",
-        metadata=job_meta,
+        metadata={"description": description},
+        batch_id=payload.batch_id,
     )
     if wants_secret:
         # Audit the use — kinds + var names only, never the source refs or values.
@@ -1243,7 +1241,7 @@ async def run_playbook_bulk(
     Each target is dispatched through the ordinary ``/run`` path, so every permission
     check, secret-store validation and runner decision behaves exactly as it does for
     a single run — this endpoint adds selection, not a second code path. Jobs share a
-    ``batch_id`` in their metadata.
+    ``batch_id``, so /jobs can filter to the batch and roll up how it is going.
 
     Returns ``{batch_id, kind, count, jobs: [...], failed: [...]}``; 400 if every
     target failed.

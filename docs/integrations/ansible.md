@@ -586,7 +586,8 @@ select rows on the **Inventory** page (`/inventory`) — filter to what you want
 them, and a run panel appears. Each selected resource becomes its **own job**, all
 tagged with a shared `batch_id`, dispatched through the ordinary run path so every
 permission check, secret-store validation and runner decision behaves exactly as it
-does for a single run.
+does for a single run. Queueing lands you on `/jobs?batch_id=…` — the batch filtered
+out of the job list, with a status rollup across all of it.
 
 **One kind per run.** Selecting a VM locks the checkboxes on Kubernetes clusters and
 databases, and vice versa. The kinds aren't interchangeable at any level: a VM run

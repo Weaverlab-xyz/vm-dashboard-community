@@ -22,6 +22,7 @@ def _job_to_response(job) -> JobResponse:
         workgroup=job.workgroup,
         vm_path=job.vm_path,
         description=job.metadata_dict.get("description"),
+        batch_id=job.batch_id,
         status=job.status,
         progress_pct=job.progress_pct,
         progress_message=job.progress_message,
@@ -40,6 +41,7 @@ async def list_jobs(
     page_size: int = Query(20, ge=1, le=100),
     status: Optional[str] = Query(None),
     workgroup: Optional[str] = Query(None),
+    batch_id: Optional[str] = Query(None, description="Only jobs from one bulk run"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -55,6 +57,7 @@ async def list_jobs(
         status=status,
         created_by=owner_filter,
         workgroup=workgroup,
+        batch_id=batch_id,
     )
     return JobListResponse(
         jobs=[_job_to_response(j) for j in jobs],
@@ -62,6 +65,25 @@ async def list_jobs(
         page=page,
         page_size=page_size,
     )
+
+
+# Declared BEFORE /{job_id}: FastAPI matches in declaration order, so the catch-all
+# path param would otherwise swallow /batches/... and 404 on a missing "job".
+@router.get("/batches/{batch_id}")
+async def get_batch_summary(
+    batch_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Status rollup for one bulk-run batch — `{batch_id, total, by_status}`.
+
+    Scoped exactly like the list endpoint: a user without `jobs:read` sees counts of
+    their own jobs only, so this can't reveal that someone else's jobs exist. An
+    unknown batch is not a 404 — it reports zeros, which is what a batch whose jobs
+    the caller cannot see looks like anyway, and avoids turning the endpoint into an
+    existence oracle."""
+    owner_filter = None if can_audit_jobs(current_user) else current_user.username
+    return job_service.batch_summary(db, batch_id, created_by=owner_filter)
 
 
 @router.get("/{job_id}", response_model=JobResponse)

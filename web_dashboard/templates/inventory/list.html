@@ -323,6 +323,9 @@
           }
           this.clearSelection();
           this.runExtraVars = '';
+          // Land on the batch, the way a single run lands on its job — otherwise the
+          // only reference to this batch disappears with the toast.
+          window.location.href = '/jobs?batch_id=' + encodeURIComponent(resp.batch_id);
         } catch (e) {
           toast('Bulk run failed: ' + e.message, 'error');
         } finally {
