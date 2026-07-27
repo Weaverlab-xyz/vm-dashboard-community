@@ -110,6 +110,47 @@ def test_every_underscore_helper_called_in_a_runner_service_exists():
     assert not violations, "\n".join(violations)
 
 
+def test_every_bulk_branch_closes_out_its_parent_job():
+    """A `*_bulk_deploy` parent has to be given a terminal status by its own branch.
+
+    The worker sets a job `running` when it claims it and only marks it failed when
+    dispatch RAISES — nothing marks a job that returns normally. The bulk runners drive
+    their children and each child owns its own status, so for a long time no one closed
+    the parent: a batch whose VMs all deployed cleanly left an `ec2_bulk_deploy` /
+    `azure_bulk_deploy` row sitting at `running` 0% until reconcile_stale_jobs
+    eventually failed a batch that had actually succeeded.
+
+    Checked per dispatch branch rather than per module, because the mistake is
+    per-provider: three clouds can be right and the fourth silently wrong.
+    """
+    found, violations = 0, []
+    for mod in _MODULES:
+        path = os.path.join(_SERVICES, mod)
+        tree = ast.parse(open(path, encoding="utf-8").read(), path)
+        run = next((n for n in tree.body
+                    if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and n.name == "run"), None)
+        if run is None:
+            continue
+        for branch in [n for n in ast.walk(run) if isinstance(n, ast.If)]:
+            test = branch.test
+            if not (isinstance(test, ast.Compare)
+                    and isinstance(test.comparators[0], ast.Constant)
+                    and str(test.comparators[0].value).endswith("_bulk_deploy")):
+                continue
+            found += 1
+            job_type = test.comparators[0].value
+            calls = {n.func.id for n in ast.walk(branch)
+                     if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+            if "_finish_parent" not in calls:
+                violations.append(
+                    f"{mod}: the {job_type} branch never calls _finish_parent — the "
+                    "parent job will sit at running 0% until reconcile fails it")
+    assert found >= 4, (
+        f"expected a bulk-deploy branch in all four runner services, found {found}")
+    assert not violations, "\n".join(violations)
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0

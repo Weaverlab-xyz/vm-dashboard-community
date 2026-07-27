@@ -172,6 +172,37 @@ async def ensure_jumpoint_host(cloud: str, region: str) -> Optional[str]:
     return await _ensure_jumpoint_host_aws(region)
 
 
+async def _await_ecs_registration(region: str, host_id: str) -> None:
+    """Block until the cluster has an ACTIVE container instance, or the timeout.
+
+    Both the create and the REUSE path need this. A tag lookup matches instances in
+    `pending` as well as `running`, and an EC2 host that is merely running has not
+    necessarily had its ECS agent join the cluster yet — so "found a host" is not the
+    same as "the cluster can place a task". Calling RunTask in that window fails with
+    `InvalidParameterException: No Container Instances were found in your cluster`,
+    which the caller records as `ecs_error` and the deploy then proceeds without a
+    Jumpoint. Reuse skipped this wait and was the common way to hit it: any deploy
+    landing while another had just launched the host got no Jumpoint at all.
+
+    Costs nothing on the healthy path — an already-registered host returns ACTIVE on
+    the first poll.
+    """
+    from . import aws_service
+    cluster = _cfg("bt_ecs_cluster")
+    deadline = time.monotonic() + _REGISTER_TIMEOUT_S
+    while time.monotonic() < deadline:
+        try:
+            ci = await aws_service.list_container_instances(region, cluster)
+        except Exception as exc:  # noqa: BLE001 — best-effort, same as the caller
+            logger.warning("jumpoint-host: listing container instances failed: %s", exc)
+            return
+        if any(c.get("status") == "ACTIVE" for c in ci):
+            return
+        await asyncio.sleep(_REGISTER_POLL_S)
+    logger.warning("jumpoint-host: host %s did not register within %ds — attempting the "
+                   "task anyway", host_id, _REGISTER_TIMEOUT_S)
+
+
 async def _ensure_jumpoint_host_aws(region: str) -> Optional[str]:
     """Ensure the shared AWS Jumpoint host (and its task) is up; return its
     instance id (or None on the FARGATE escape hatch / when nothing was created).
@@ -195,6 +226,9 @@ async def _ensure_jumpoint_host_aws(region: str) -> Optional[str]:
     if existing:
         logger.info("jumpoint-host: reusing host %s", existing[0]["instance_id"])
         _persist_jumpoint_egress_ip(existing[0].get("public_ip"))
+        # The tag match includes `pending`, and a running host may still be mid-ECS
+        # registration — wait, or RunTask 400s with "No Container Instances".
+        await _await_ecs_registration(region, existing[0]["instance_id"])
         await _ensure_task(region, deploy_key)
         return existing[0]["instance_id"]
 
@@ -209,6 +243,8 @@ async def _ensure_jumpoint_host_aws(region: str) -> Optional[str]:
         logger.info("jumpoint-host: host appeared concurrently (%s) — reusing",
                     recheck[0]["instance_id"])
         _persist_jumpoint_egress_ip(recheck[0].get("public_ip"))
+        # Losing the race means the winner may still be booting — same wait as above.
+        await _await_ecs_registration(region, recheck[0]["instance_id"])
         await _ensure_task(region, deploy_key)
         return recheck[0]["instance_id"]
 
@@ -226,17 +262,7 @@ async def _ensure_jumpoint_host_aws(region: str) -> Optional[str]:
     logger.info("jumpoint-host: launched host %s (%s) — awaiting ECS registration",
                 host_id, _cfg("bt_ecs_host_instance_type") or "t3.small")
 
-    # Wait for the instance to register with the cluster before running the task.
-    cluster = _cfg("bt_ecs_cluster")
-    deadline = time.monotonic() + _REGISTER_TIMEOUT_S
-    while time.monotonic() < deadline:
-        ci = await aws_service.list_container_instances(region, cluster)
-        if any(c.get("status") == "ACTIVE" for c in ci):
-            break
-        await asyncio.sleep(_REGISTER_POLL_S)
-    else:
-        logger.warning("jumpoint-host: host %s did not register within %ds — attempting the "
-                       "task anyway", host_id, _REGISTER_TIMEOUT_S)
+    await _await_ecs_registration(region, host_id)
     # Capture the freshly-launched host's (ephemeral) public IP for the Rancher
     # firewall — run_container_instance returns only the id, so look it up by tag.
     try:
