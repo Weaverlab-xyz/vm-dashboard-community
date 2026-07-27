@@ -242,6 +242,7 @@ async def _run_job(
     secret_ssh_key_source: str = "",
     managed_account: dict | None = None,
     managed_become: dict | None = None,
+    epml_token_var: str = "",
 ) -> None:
     """Execute one VM (SSH/WinRM) Config-Management run.
 
@@ -301,6 +302,21 @@ async def _run_job(
                 secret_ssh_pem = _resolve_source(secret_ssh_key_source) or None
             secret_values = [v for v in list(secret_extra_vars.values())
                              + ([secret_ssh_pem] if secret_ssh_pem else []) if v]
+
+        # EPM-L installation token — minted here, at run time, and bound to the var
+        # the operator named. Registration tokens are short-lived (hours), so one
+        # fetched earlier and stored would already be dead; and the job metadata
+        # carries only the var NAME, so the token never reaches the database or the
+        # browser. Rides the same scrubbed channel as everything above.
+        if epml_token_var:
+            from ..services import epml_service
+            try:
+                _tok = await epml_service.get_installation_token()
+            except epml_service.EpmlError as e:
+                job_service.set_failed(db, job_id, f"EPM-L token request failed: {e}")
+                return
+            secret_extra_vars[epml_token_var] = _tok
+            secret_values.append(_tok)
 
         # Managed-account checkout (BeyondTrust Password Safe) — check out the
         # credential just-in-time. The account is the connection identity;

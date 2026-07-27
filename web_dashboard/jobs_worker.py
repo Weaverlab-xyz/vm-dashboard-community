@@ -42,7 +42,7 @@ HANDLED_TYPES = (
     "rancher_node_deploy", "rancher_node_teardown", "rancher_entitle_register",
     "portainer_node_deploy", "portainer_node_teardown",
     "clouddb_provision", "clouddb_decommission", "clouddb_entitle_register",
-    "ansible_cloud_run", "ansible_local",
+    "ansible_cloud_run", "ansible_local", "epml_sync",
     "vdesktop_pool_provision", "vdesktop_pool_teardown",
     "packer_aws_build", "packer_azure_build", "packer_gcp_build",
     "aws_export_image", "gcp_export_image", "azure_export_image",
@@ -182,6 +182,12 @@ async def _dispatch(job_id: str, job_type: str, meta: dict) -> None:
             # cloud database — always executes on a transient in-cloud runner.
             from .services import ansible_cloud_run_service
             await ansible_cloud_run_service.run(db, job_id=job_id, meta=meta)
+        elif job_type == "epml_sync":
+            # EPM-L: download the agent packages from BeyondTrust and upload them to
+            # asset storage. A job because the packages are large and BeyondTrust's
+            # download links expire ~30 min after listing.
+            from .services import epml_sync_service
+            await epml_sync_service.run(db, job_id=job_id, meta=meta)
         elif job_type == "ansible_local":
             # Config-Management SSH/WinRM run against a VM or hypervisor group — the
             # counterpart of ansible_cloud_run above. The service owns its own

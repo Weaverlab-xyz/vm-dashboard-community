@@ -15,8 +15,9 @@ active when they were created, so the configured site id must match.
 PAT and site id are read from config_service (DB-encrypted) with .env
 fallback (EPML_PAT / EPML_SITE_ID / EPML_BASE_URL). Package download links
 are pre-signed S3 URLs (~30 min) fetched WITHOUT the Authorization header.
-sync_packages_to_storage() uploads packages via ansible_storage — whichever
-backend is configured (S3, Azure Blob Storage, or GCS).
+sync_packages_to_storage() uploads packages via storage_service, into the named
+backend or the active one — so they land beside playbooks and scripts and appear
+on the Storage page like any other asset.
 """
 import asyncio
 import logging
@@ -290,14 +291,17 @@ async def download_package(url: str) -> bytes:
         return resp.content
 
 
-async def sync_packages_to_storage() -> dict:
-    """Ensure packages exist, download each, upload to the configured asset storage backend.
+async def sync_packages_to_storage(backend: str = "") -> dict:
+    """Ensure packages exist, download each, upload to an asset storage backend.
 
-    Storage backend is determined by ansible_storage (S3 > Azure Blob > GCS).
+    ``backend`` names one of the configured storage backends; empty uses the active
+    one. ``.rpm``/``.deb`` are already accepted asset extensions, so the packages land
+    beside playbooks and scripts and show up on /storage like any other asset.
+
     Returns {"rpm_uploaded": bool, "deb_uploaded": bool, "packages": [...]}
     """
-    from . import ansible_storage
-    from .ansible_storage import AnsibleStorageError
+    from . import storage_service
+    from .storage_service import StorageError
 
     pkgs = await ensure_packages()
     uploaded_rpm = False
@@ -319,10 +323,13 @@ async def sync_packages_to_storage() -> dict:
         data = await download_package(url)
 
         try:
-            await ansible_storage.upload_asset(filename, data)
-        except AnsibleStorageError as exc:
+            if backend:
+                await storage_service.upload_asset_to(backend, filename, data)
+            else:
+                await storage_service.upload_asset(filename, data)
+        except StorageError as exc:
             raise EpmlError(str(exc)) from exc
-        logger.info("Uploaded %s to asset storage", filename)
+        logger.info("Uploaded %s to asset storage (%s)", filename, backend or "active")
 
         if is_rpm:
             uploaded_rpm = True

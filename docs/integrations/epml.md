@@ -91,7 +91,18 @@ EPML_BASE_URL=https://api.beyondtrust.io
 
 ## Syncing packages to asset storage
 
-`POST /api/epml/sync-packages` runs a background job that:
+**In the GUI:** open **Storage** → **BeyondTrust EPM-L packages**. *Check BeyondTrust*
+lists what's built (with a *Build packages* button when there's nothing yet), and
+*Sync to storage* queues the download-and-upload as a job you're taken straight to.
+The section only appears when the BeyondTrust integration is enabled.
+
+The packages land as ordinary assets in the active backend — `.rpm` and `.deb` are
+already accepted asset types — so they show up in the asset list beside your playbooks.
+
+**Via the API:** `POST /api/epml/sync-packages` (optionally `{"backend": "s3"}`) queues
+the same job and returns `{"job_id": …}`. It runs a job rather than blocking the
+request because the packages are large and BeyondTrust's download links expire about
+30 minutes after listing. The job:
 
 1. Calls `GET …/epml/clientpkg` to list available packages
 2. If no packages are available, triggers a build and polls
@@ -137,10 +148,40 @@ BeyondTrust releases a new agent version.
 
 ---
 
+## Installing the package at image-build time
+
+On the AWS / Azure / GCP **Build Image** pages, **Install EPM-L** selects the package
+family (`.deb` / `.rpm`) and **EPM-L package from** selects where it comes from:
+
+| Source | Behavior |
+|---|---|
+| **BeyondTrust** (default) | A fresh download link resolved at build launch. Always current; needs BeyondTrust reachable from the build. |
+| **Asset storage** | The copy you synced above, presigned from your storage backend. Pins the version you tested and doesn't depend on BeyondTrust at build time — but goes stale until you re-sync. Not offered on local-filesystem storage, which has no presignable URL and which a cloud builder couldn't reach anyway. |
+
+Either way the URL arrives as `BT_EPML_URL` and the `bt-ready` provisioner installs the
+package. It does **not** activate it — see below.
+
 ## Getting an installation token
 
 Installation tokens register a new Linux endpoint with EPM-L (the agent is
 activated with `pbactivate -t <token>`). The API returns `{"token": "<JWT>"}`.
+
+### In a Config Management run (recommended)
+
+Because the package is installed at build time but activation can't be — a token
+expires hours after issue, so one baked into an image is already dead — activation is a
+post-deploy step, and the run form does the token handling for you.
+
+On **Configuration**, set **EPM-L installation token → variable** to a variable name
+(e.g. `epml_installation_token`). The run mints a fresh token **server-side at execution
+time**, binds it to that variable, and scrubs it from the job output. The token never
+reaches the browser, and the job stores only the variable *name* — not the token — so
+nothing expired or sensitive is left behind in the job record.
+
+[`examples/playbooks/linux/epml-activate.yml`](../../examples/playbooks/linux/epml-activate.yml)
+is the matching playbook: it checks the agent is installed, refuses with an actionable
+message if no token was bound, and skips `pbactivate` when the host is already
+activated.
 
 **Via the dashboard API:**
 

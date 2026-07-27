@@ -283,6 +283,10 @@ class RunRequest(BaseModel):
     # passes the backend explicitly because the same asset name may exist on
     # multiple backends.
     asset_backend: str = ""
+    # Bind a freshly-minted BeyondTrust EPM-L installation token to this Ansible
+    # variable. The NAME only — the token is minted server-side at run time and rides
+    # the scrubbed secret channel, so it never reaches the browser or job metadata.
+    epml_token_var: str = ""
     # Groups the jobs of one bulk run (see /run-bulk). A descriptive label only —
     # nothing authorizes off it — stored on the job's indexed `batch_id` column so
     # /jobs can filter to the batch and roll up its status.

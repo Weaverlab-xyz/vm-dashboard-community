@@ -38,6 +38,10 @@ RUN_META_KEYS = (
     "secret_ssh_key_source",
     "managed_account",
     "managed_become",
+    # The NAME of the var an EPM-L installation token is bound to, never the token.
+    # The token is minted at run time and only ever exists in the run's scrubbed
+    # secret channel — see ansible_local_run_service.
+    "epml_token_var",
 )
 
 # Defaults matching _run_job's own signature, so a run reconstructed from metadata
@@ -56,6 +60,7 @@ _DEFAULTS = {
     "secret_ssh_key_source": "",
     "managed_account": None,
     "managed_become": None,
+    "epml_token_var": "",
 }
 
 

@@ -1250,6 +1250,32 @@ async def head_image_in(backend: str, key: str) -> Optional[dict]:
         raise StorageError(f"Failed to head image '{key}' on {backend}: {e}") from e
 
 
+# Per-backend prefix an ASSET is stored under. presigned_url() takes a raw key, so a
+# caller wanting to presign an asset has to address it by the same key upload_asset
+# wrote — guessing it produces a URL that 404s at fetch time, which is invisible until
+# something downstream tries to use it.
+_ASSET_PREFIX_FN = {
+    "s3":         _s3_prefix,
+    "azure_blob": _azure_prefix,
+    "gcs":        _gcs_prefix,
+}
+
+
+def asset_key(backend: str, name: str) -> str:
+    """The storage key ``upload_asset`` writes ``name`` to on ``backend``.
+
+    Pair with :func:`presigned_url` to hand an asset's URL to something outside the
+    dashboard — e.g. a Packer build installing an EPM-L package it can't otherwise
+    reach. Raises for ``local``, which has no presignable key space."""
+    _validate_backend(backend)
+    fn = _ASSET_PREFIX_FN.get(backend)
+    if fn is None:
+        raise StorageError(
+            f"Backend '{backend}' stores assets on a filesystem, not under a "
+            f"presignable key. Use a cloud backend (S3 / Azure Blob / GCS) for this.")
+    return f"{fn()}/{name}"
+
+
 async def presigned_url(
     backend: str,
     key: str,
