@@ -4,6 +4,8 @@ Pydantic models for AWS/Terraform API endpoints.
 from typing import List, Optional
 from pydantic import BaseModel, Field
 
+from ..services.vm_naming import MAX_DEPLOY_COUNT
+
 
 class AMIInfo(BaseModel):
     ami_id: str
@@ -84,12 +86,23 @@ class DeployRequest(BaseModel):
     pra_credential_ref: Optional[str] = None     # secret ref → bt_client_secret override for the shell jump
     # (No per-deploy ECS deploy-key override: community uses a SHARED jumpoint
     # host via jumpoint_host_service, so aws_ecs_docker_deploy_key is global.)
+    count: int = Field(
+        default=1, ge=1, le=MAX_DEPLOY_COUNT,
+        description="Number of identical instances to launch. 1 is a plain single "
+                    "deploy; >1 fans out into a batch and auto-numbers the names "
+                    "(web -> web-01, web-02, …).")
 
 
 class DeployResponse(BaseModel):
-    job_id: str
+    job_id: str          # for a batch (count > 1) this is the PARENT job
     status: str
     message: str
+    # Batch fields, all left at their defaults for a single deploy so a count-1
+    # response is byte-identical to what callers saw before counts existed.
+    count: int = 1
+    batch_id: Optional[str] = None
+    job_ids: List[str] = []   # child job ids, in name order
+    names: List[str] = []     # the expanded names actually used, post-truncation
 
 
 class DestroyResponse(BaseModel):
@@ -153,6 +166,9 @@ class BulkDeployJobResult(BaseModel):
 class BulkDeployResponse(BaseModel):
     jobs: List[BulkDeployJobResult]
     count: int
+    # The endpoint has always minted a batch_id; it just never returned one, so the
+    # page had no way to link to the /jobs?batch_id= rollup that already exists.
+    batch_id: Optional[str] = None
 
 
 class CreateImageRequest(BaseModel):

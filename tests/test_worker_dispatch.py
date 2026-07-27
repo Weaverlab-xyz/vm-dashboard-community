@@ -33,7 +33,7 @@ _WORKER = os.path.join(_ROOT, "web_dashboard", "jobs_worker.py")
 
 
 def _src():
-    return open(_WORKER).read()
+    return open(_WORKER, encoding="utf-8").read()
 
 
 def _handled_types():
@@ -131,7 +131,7 @@ def test_no_handled_type_is_both_claimable_and_dispatched_in_request():
     handled = _handled_types()
     violations = []
     for path in _api_modules():
-        tree = ast.parse(open(path).read(), path)
+        tree = ast.parse(open(path, encoding="utf-8").read(), path)
         for fn in ast.walk(tree):
             if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
@@ -156,7 +156,7 @@ def _parent_child_endpoints():
     parent's metadata *is* the declaration that something other than the runner will
     drive them."""
     for path in _api_modules():
-        tree = ast.parse(open(path).read(), path)
+        tree = ast.parse(open(path, encoding="utf-8").read(), path)
         for fn in ast.walk(tree):
             if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
