@@ -45,6 +45,7 @@ class AWSPackerBuildRequest(BaseModel):
     # BeyondTrust provisioner knobs — passed to the bt-ready provisioner as env vars.
     bt_admin_user: Optional[str] = None        # → BT_ADMIN_USER (Password-Safe-managed bootstrap account)
     bt_epml: Optional[str] = None              # "deb" | "rpm" — install EPM-L package of this family (else skip)
+    bt_epml_source: Optional[str] = None       # "beyondtrust" (default) | "storage" — where BT_EPML_URL points
 
 
 class AzurePackerBuildRequest(BaseModel):
@@ -71,6 +72,7 @@ class AzurePackerBuildRequest(BaseModel):
     # BeyondTrust provisioner knobs — passed to the bt-ready provisioner as env vars.
     bt_admin_user: Optional[str] = None        # → BT_ADMIN_USER (Password-Safe-managed bootstrap account)
     bt_epml: Optional[str] = None              # "deb" | "rpm" — install EPM-L package of this family (else skip)
+    bt_epml_source: Optional[str] = None       # "beyondtrust" (default) | "storage" — where BT_EPML_URL points
 
 
 class GCPPackerBuildRequest(BaseModel):
@@ -92,6 +94,7 @@ class GCPPackerBuildRequest(BaseModel):
     # BeyondTrust provisioner knobs — passed to the bt-ready provisioner as env vars.
     bt_admin_user: Optional[str] = None        # → BT_ADMIN_USER (Password-Safe-managed bootstrap account)
     bt_epml: Optional[str] = None              # "deb" | "rpm" — install EPM-L package of this family (else skip)
+    bt_epml_source: Optional[str] = None       # "beyondtrust" (default) | "storage" — where BT_EPML_URL points
 
     @field_validator("disk_type")
     @classmethod

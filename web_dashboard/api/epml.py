@@ -7,14 +7,17 @@ POST /api/epml/trigger-build   — trigger a package build
 POST /api/epml/sync-packages   — download from BT + upload to asset storage (background job)
 GET  /api/epml/token           — fetch a fresh installation token
 """
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from .auth import get_current_user
 from ..database import User, get_db
 from ..services import job_service
 from ..services import epml_service
+from ..services import storage_service
 from ..services.epml_service import EpmlError
+from ..services.storage_service import StorageError
 
 router = APIRouter(prefix="/api/epml", tags=["epml"])
 
@@ -55,39 +58,36 @@ async def get_token(
         raise HTTPException(status_code=502, detail=str(e))
 
 
-async def _run_sync(job_id: str):
-    from ..database import SessionLocal
-    db = SessionLocal()
-    try:
-        job_service.update_progress(db, job_id, 10, "Checking available EPM-L packages…")
-        result = await epml_service.sync_packages_to_storage()
-        summary = []
-        if result["rpm_uploaded"]:
-            summary.append("RPM uploaded")
-        if result["deb_uploaded"]:
-            summary.append("DEB uploaded")
-        if not summary:
-            summary.append("no new packages uploaded")
-        job_service.update_progress(db, job_id, 90, f"Storage sync complete — {', '.join(summary)}")
-        job_service.set_completed(db, job_id, result)
-    except Exception as e:
-        job_service.set_failed(db, job_id, str(e))
-    finally:
-        db.close()
+class SyncPackagesRequest(BaseModel):
+    # Which storage backend to upload into; empty = the active one.
+    backend: str = ""
 
 
 @router.post("/sync-packages")
 async def sync_packages(
-    background_tasks: BackgroundTasks,
+    payload: SyncPackagesRequest | None = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    """Queue a download-from-BeyondTrust → upload-to-storage sync.
+
+    The packages are large and the BeyondTrust links expire, so this is a job rather
+    than a request-blocking call: the client gets a job_id and polls /api/jobs/{id}.
+    Execution belongs to the job runner (``services.epml_sync_service``)."""
+    backend = (payload.backend if payload else "") or ""
+    if backend:
+        try:
+            storage_service._validate_backend(backend)
+        except StorageError as e:
+            raise HTTPException(status_code=400, detail=str(e))
     job = job_service.create_job(
         db,
         job_type="epml_sync",
-        description="EPM-L: sync packages from BeyondTrust to asset storage",
-        workgroup="",
-        owner_id=current_user.id,
+        created_by=current_user.username,
+        workgroup="ansible",
+        metadata={
+            "description": "EPM-L: sync packages from BeyondTrust to asset storage",
+            "backend": backend,
+        },
     )
-    background_tasks.add_task(_run_sync, job.id)
     return {"job_id": job.id, "status": "queued"}

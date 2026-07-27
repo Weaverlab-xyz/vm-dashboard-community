@@ -30,6 +30,7 @@ from ..services import (
     storage_service,
 )
 from ..services.packer_service import PackerError, PackerCancelled
+from ..services.epml_service import EpmlError
 from .auth import get_current_user, require_permission
 
 logger = logging.getLogger(__name__)
@@ -63,20 +64,53 @@ def _cancel_checker(job_id: str):
     return _check
 
 
+async def _epml_package_url(family: str, source: str) -> str:
+    """A download URL for the EPM-L package of ``family`` ('deb'|'rpm'), from either
+    source. Both ends are presigned HTTPS the bt-ready provisioner just curls.
+
+    * ``beyondtrust`` (default) — a fresh link from the EPM-L integration. Always
+      current, but BeyondTrust expires them ~30 min after listing, so it is resolved
+      at build launch, close to when the provisioner runs.
+    * ``storage`` — the copy synced to the asset backend (Storage page → *Sync to
+      storage*). Pins the version you tested and doesn't depend on BeyondTrust being
+      reachable from the build, at the cost of going stale until you re-sync.
+    """
+    from ..services import epml_service
+    if source != "storage":
+        return await epml_service.package_download_url(family)
+
+    from ..services import storage_service
+    backend = storage_service.active_backend()
+    if not backend:
+        raise EpmlError("No active storage backend — pick one on the Storage page.")
+    assets = await storage_service.list_assets_in(backend)
+    suffix = "." + family
+    names = sorted(a["name"] for a in assets if a.get("name", "").lower().endswith(suffix))
+    if not names:
+        raise EpmlError(
+            f"No {suffix} package found on the '{backend}' storage backend. Use "
+            f"Storage → BeyondTrust EPM-L packages → Sync to storage first, or set "
+            f"the package source back to BeyondTrust.")
+    # Newest by name — the EPM-L filenames carry their version, so lexical order
+    # tracks release order for a given family.
+    key = storage_service.asset_key(backend, names[-1])
+    return await storage_service.presigned_url(backend, key, expiry_seconds=3600)
+
+
 async def _bt_provisioner_env(req) -> dict:
     """BeyondTrust provisioner env (BT_*) built from a build request, injected into
     the shell provisioner's ``environment_vars``. For ``bt_epml`` in ('deb','rpm')
-    a fresh EPM-L package download URL is resolved from the EPM-L integration
-    (BeyondTrust presigned, ~30-min expiry) → ``BT_EPML_URL``. Raises ``EpmlError``
-    if the package can't be resolved."""
+    an EPM-L package download URL is resolved → ``BT_EPML_URL``, from BeyondTrust or
+    from asset storage per ``bt_epml_source``. Raises ``EpmlError`` if the package
+    can't be resolved."""
     env: dict = {}
     admin = (getattr(req, "bt_admin_user", None) or "").strip()
     if admin:
         env["BT_ADMIN_USER"] = admin
     fam = (getattr(req, "bt_epml", None) or "").strip().lower()
     if fam in ("deb", "rpm"):
-        from ..services import epml_service
-        env["BT_EPML_URL"] = await epml_service.package_download_url(fam)
+        source = (getattr(req, "bt_epml_source", None) or "beyondtrust").strip().lower()
+        env["BT_EPML_URL"] = await _epml_package_url(fam, source)
     return env
 
 

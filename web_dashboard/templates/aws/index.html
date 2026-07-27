@@ -1209,6 +1209,18 @@
                 <option value="rpm">RPM (.rpm)</option>
               </select>
             </div>
+            <div x-show="packerForm.bt_epml" x-cloak>
+              <label class="block text-xs font-medium text-gray-600 mb-1">EPM-L package from</label>
+              <select x-model="packerForm.bt_epml_source" class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
+                <option value="beyondtrust">BeyondTrust (always current)</option>
+                <option value="storage">Asset storage (the synced copy)</option>
+              </select>
+              <p class="text-[11px] text-gray-400 mt-1">
+                Storage pins the version you synced and doesn't need BeyondTrust reachable
+                from the build — sync it first on the Storage page. Not available on
+                local-filesystem storage.
+              </p>
+            </div>
           </div>
           <div>
             <p class="text-[11px] text-gray-400">EPM-L is installed at build; activation runs post-deploy via the EPM-L integration.</p>
@@ -1381,6 +1393,7 @@
         provisioner_env_vars: [],  // [{name, value, is_secret_ref}] → provisioner environment_vars
         bt_admin_user: '',      // → BT_ADMIN_USER (bt-ready provisioner)
         bt_epml: '',            // '' | 'deb' | 'rpm' → BT_EPML_URL (EPM-L install)
+        bt_epml_source: 'beyondtrust',  // 'beyondtrust' | 'storage' → where BT_EPML_URL points
       },
       packerBuilding: false,
       packerError: '',

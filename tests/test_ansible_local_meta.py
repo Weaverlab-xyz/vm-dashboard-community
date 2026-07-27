@@ -42,6 +42,7 @@ def _payload(**over):
                 secret_become_source="cfg:become_key",
                 secret_ssh_key_source="bt_safe://prod/key",
                 managed_account=None, managed_become=None,
+                epml_token_var="epml_installation_token",
                 asset_backend="s3")
     base.update(over)
     return types.SimpleNamespace(**base)
@@ -56,12 +57,37 @@ def test_metadata_keys_are_a_closed_set():
     assert set(meta) == set(arm.RUN_META_KEYS) | {"description"}
 
 
+# Suffixes that mark a key as holding a REFERENCE — a source ref, a variable name, an
+# account name — rather than the secret itself. The distinction this module exists to
+# hold, and the naming convention that makes it checkable.
+_REFERENCE_SUFFIXES = ("_source", "_var", "_vars", "_name")
+
+
 def test_no_credential_shaped_key_is_persisted():
-    """Refs and ids only. `*_source` names a secret; `*_password`/`*_key` would BE
-    one — the distinction this module exists to hold."""
-    banned = re.compile(r"(password|passwd|private_key|ssh_key$|token|credential)", re.I)
-    offenders = [k for k in arm.RUN_META_KEYS if banned.search(k)]
+    """Refs and ids only. `secret_become_source` NAMES a secret and `epml_token_var`
+    names the variable one is bound to; `become_password` or `epml_token` would BE
+    one. A credential-shaped name is only allowed through if it carries a reference
+    suffix, so adding a bare `*_token` key still fails here."""
+    banned = re.compile(r"(password|passwd|private_key|ssh_key|token|credential|secret)", re.I)
+    offenders = [k for k in arm.RUN_META_KEYS
+                 if banned.search(k) and not k.endswith(_REFERENCE_SUFFIXES)]
     assert not offenders, f"credential-shaped key in the metadata allowlist: {offenders}"
+
+
+def test_the_reference_suffix_exemption_is_not_a_loophole():
+    """Guard the guard: the exemption above must not let a bare credential name pass,
+    or the allowlist stops meaning anything."""
+    banned = re.compile(r"(password|passwd|private_key|ssh_key|token|credential|secret)", re.I)
+
+    def allowed(key):
+        return not (banned.search(key) and not key.endswith(_REFERENCE_SUFFIXES))
+
+    for bad in ("epml_token", "become_password", "ssh_private_key", "api_credential",
+                "client_secret"):
+        assert not allowed(bad), f"{bad!r} should be rejected by the allowlist guard"
+    for ok in ("epml_token_var", "secret_become_source", "account_name",
+               "secret_vars"):   # {var: source-ref} — a mapping of references
+        assert allowed(ok), f"{ok!r} is a reference and should be permitted"
 
 
 # ── the round-trip ────────────────────────────────────────────────────────────
@@ -118,6 +144,7 @@ def test_missing_keys_fall_back_rather_than_raising():
     assert kwargs["secret_vars"] is None
     assert kwargs["managed_account"] is None
     assert kwargs["extra_vars"] == {}
+    assert kwargs["epml_token_var"] == ""
 
 
 def test_empty_meta_is_survivable():

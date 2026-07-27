@@ -303,6 +303,23 @@
               </span>
             </p>
 
+            <!-- EPM-L installation token — minted at run time, bound to a var. -->
+            <div x-show="targetKind === 'vm'" x-cloak class="border-t border-gray-100 pt-3">
+              <label class="block text-xs font-medium text-gray-600 mb-1">
+                EPM-L installation token → variable
+                <span class="text-gray-400 font-normal">(optional)</span>
+              </label>
+              <input x-model="epmlTokenVar" type="text" placeholder="epml_installation_token"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500">
+              <p class="text-[11px] text-gray-400 mt-1">
+                Name a variable and the run mints a fresh BeyondTrust EPM-L installation
+                token for it. The token is fetched server-side at run time, never shown
+                and never stored on the job — registration tokens are short-lived, so one
+                saved anywhere would already be dead. See
+                <code class="bg-gray-100 px-1 rounded">examples/playbooks/linux/epml-activate.yml</code>.
+              </p>
+            </div>
+
             <!-- Managed account (BeyondTrust Password Safe) — live list, JIT checkout.
                  Shown for a specific host (on-prem free-text or a cloud VM IP), or in
                  bulk mode for the sample host. Kind-gated too: a k8s/database run is a
@@ -557,6 +574,7 @@ function configMgmt() {
     secretRows: [],
     secretBecomeSource: '',
     secretSshKeySource: '',
+    epmlTokenVar: '',   // bind a minted EPM-L installation token to this Ansible var
     // Managed-account checkout (BeyondTrust Password Safe). customHost backs the
     // free-text "On-prem host" target. On target change we look up the live
     // account list (ids/names only) for that host; the operator picks a connection
@@ -927,6 +945,7 @@ function configMgmt() {
             secret_vars: s.secret_vars,
             secret_become_source: s.secret_become_source,
             secret_ssh_key_source: s.secret_ssh_key_source,
+            epml_token_var: this.canUseSecrets ? (this.epmlTokenVar || '').trim() : '',
             // Name-only: system_id/account_id belong to the sample host, so sending
             // them would point every job at that one machine's credential.
             managed_account: this.bulkManagedRef(this.managedAccountKey),
@@ -1015,6 +1034,7 @@ function configMgmt() {
           secret_vars,
           secret_become_source,
           secret_ssh_key_source,
+          epml_token_var: this.canUseSecrets ? (this.epmlTokenVar || '').trim() : '',
           managed_account,
           managed_become,
         });
