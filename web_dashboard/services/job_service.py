@@ -18,6 +18,11 @@ from . import audit_chain
 # 20260101). No-op on SQLite, whose whole-DB write lock already serializes.
 _AUDIT_LOCK_ID = 20260102
 
+# A job is "active" while its work is still ahead of it. ``queued`` is a child row
+# a parent job will drive (see create_job); ``pending`` is waiting for the runner to
+# claim it. Neither has started, but neither is finished either.
+ACTIVE_STATUSES = ("queued", "pending", "running")
+
 
 def create_job(
     db: Session,
@@ -27,17 +32,25 @@ def create_job(
     workgroup: Optional[str] = None,
     metadata: Optional[dict] = None,
     batch_id: Optional[str] = None,
+    status: str = "pending",
 ) -> Job:
-    """Create a new job record with status 'pending'.
+    """Create a new job record, ``pending`` by default.
 
     ``batch_id`` groups the jobs of one bulk Config-Management run; it is a plain
-    label (nothing authorizes off it) that makes the batch filterable on /jobs."""
+    label (nothing authorizes off it) that makes the batch filterable on /jobs.
+
+    ``status`` exists for one case: a job row that a *parent* job drives rather than
+    the runner. The runner claims on ``status='pending' AND job_type IN
+    HANDLED_TYPES`` (jobs_worker._claim_one), so a child created ``pending`` under a
+    handled type would be claimed and run a second time, concurrently with its
+    parent. Creating such children ``queued`` keeps them out of the claim query while
+    still showing on /jobs. Only pass it when something else owns the execution."""
     job = Job(
         id=str(uuid.uuid4()),
         job_type=job_type,
         vm_path=vm_path,
         workgroup=workgroup,
-        status="pending",
+        status=status,
         progress_pct=0,
         created_at=datetime.utcnow(),
         created_by=created_by,
@@ -216,10 +229,13 @@ def batch_summary(db: Session, batch_id: str, created_by: Optional[str] = None) 
 
 
 def has_active_job_for_vm(db: Session, vmx_path: str) -> bool:
-    """Return True if a pending/running job already targets this VM."""
+    """Return True if a queued/pending/running job already targets this VM.
+
+    ``queued`` counts as active: the row is waiting on a parent job rather than the
+    runner, but the work is still coming."""
     count = (
         db.query(Job)
-        .filter(Job.vm_path == vmx_path, Job.status.in_(["pending", "running"]))
+        .filter(Job.vm_path == vmx_path, Job.status.in_(ACTIVE_STATUSES))
         .count()
     )
     return count > 0
