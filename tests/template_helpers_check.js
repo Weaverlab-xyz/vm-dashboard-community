@@ -113,4 +113,51 @@ ok('regionCatalogGroups hides already-chosen regions',
 ok('regionCatalogGroups drops empty clouds',
    groups.every(g => g.regions.length > 0) && groups.map(g => g.cloud).sort().join(',') === 'aws,azure');
 
+// ── deploy count: the name preview ───────────────────────────────────────────
+// The browser previews the series the SERVER will generate, so these fixtures are a
+// contract with services/vm_naming.py. The same table is asserted on the Python side
+// in tests/test_vm_naming.py::test_shared_fixtures_with_the_js_preview — change one
+// and the other fails.
+global.window = global.window || {};
+window.DEPLOY_COUNT_MAX = 20;
+const N = build('../static/js/app.js', 'nameSeries', {});
+Object.assign(N, eval('({' + extract('../static/js/app.js', 'namePreview') + '})'));
+
+const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+ok('nameSeries numbers from 01',
+   eq(N.nameSeries('web', 3, 63), ['web-01', 'web-02', 'web-03']));
+ok('nameSeries leaves a count of 1 unsuffixed',
+   eq(N.nameSeries('web', 1, 63), ['web']));
+ok('nameSeries matches the server on a long azure base',
+   eq(N.nameSeries('verylongbasename', 2, 15), ['verylongbase-01', 'verylongbase-02']));
+ok('nameSeries lowercases for gcp when asked',
+   eq(N.nameSeries('Web-Server', 2, 63, {lower: true}), ['web-server-01', 'web-server-02']));
+
+// The property the whole feature rests on: N names in, N DISTINCT names out. Azure is
+// the case that bites — azure_service truncates the guest hostname to 15 characters,
+// so a series that only differs past there yields two VMs with one hostname.
+const azure = N.nameSeries('web-server-vm-cluster', 4, 15);
+ok('azure names fit 15 characters', azure.every(n => n.length <= 15));
+ok('azure names stay distinct within the 15-char guest truncation',
+   new Set(azure.map(n => n.slice(0, 15))).size === 4);
+
+ok('truncation trims the base, never the suffix',
+   N.nameSeries('w'.repeat(100), 3, 63).every(n => n.length === 63 && /-0\d$/.test(n)));
+ok('truncation leaves no doubled separator',
+   !N.nameSeries('web-server-x-', 2, 15)[0].includes('--'));
+ok('count is clamped to the shared ceiling',
+   N.nameSeries('web', 999, 63).length === window.DEPLOY_COUNT_MAX);
+
+ok('namePreview stays silent for a single deploy',
+   N.namePreview('web', 1, 63).text === '');
+ok('namePreview lists a short series in full',
+   N.namePreview('web', 3, 63).text === 'will create: web-01, web-02, web-03');
+ok('namePreview elides a long series',
+   N.namePreview('web', 12, 63).text === 'will create: web-01, web-02, web-03 … web-12 (12 total)');
+ok('namePreview flags a truncated base',
+   N.namePreview('verylongbasename', 2, 15).truncated === true);
+ok('namePreview does not flag a base that fits',
+   N.namePreview('web', 2, 15).truncated === false);
+
 process.exit(fail ? 1 : 0);
