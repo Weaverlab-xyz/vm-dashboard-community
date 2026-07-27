@@ -31,6 +31,17 @@ def _aws_cfg(key: str, fallback: str = "") -> str:
     return config_service.get(key) or getattr(settings, key, None) or fallback
 
 
+def _aws_region() -> str:
+    """The configured default region, for the paths that don't carry one on the job.
+
+    Own copy for the same reason as ``_aws_cfg`` above — and it has to exist here at
+    all because ``_run_create_image`` and ``_run_ami_copy`` call it. ``_run_deploy``
+    and ``_run_bulk_deploy`` instead bind a *local* ``_aws_region`` string from the
+    job's persisted region, which is why they were unaffected while these two were
+    raising NameError."""
+    return _aws_cfg("aws_region") or "us-east-2"
+
+
 # ── Job-runner entry point ────────────────────────────────────────────────────
 
 async def run(job_id: str, job_type: str, meta: dict) -> None:
