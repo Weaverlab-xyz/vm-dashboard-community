@@ -112,8 +112,11 @@ def test_asset_key_refuses_local_with_a_reason():
 
 
 def test_package_source_helper_handles_both_sources():
-    """'beyondtrust' keeps today's behavior; 'storage' presigns the synced copy."""
-    src = _read("web_dashboard", "api", "packer.py")
+    """'beyondtrust' keeps today's behavior; 'storage' presigns the synced copy.
+
+    Lives in services/ with the rest of the build path — api/packer.py is the three
+    enqueue-only route handlers now, and the worker is what runs this."""
+    src = _read("web_dashboard", "services", "packer_build_service.py")
     body = re.search(r"async def _epml_package_url\(.*?\n(.*?)\nasync def ", src, re.S).group(1)
     assert "package_download_url" in body, "the BeyondTrust path is missing"
     assert "presigned_url" in body and "asset_key" in body, "the storage path is missing"
@@ -123,9 +126,9 @@ def test_package_source_helper_handles_both_sources():
 def test_epml_error_is_imported_where_it_is_raised():
     """_epml_package_url raises EpmlError; an unimported name would be a NameError on
     the storage path only — the branch a test environment least often exercises."""
-    src = _read("web_dashboard", "api", "packer.py")
-    assert re.search(r"from \.\.services\.epml_service import .*EpmlError", src), (
-        "packer.py raises EpmlError without importing it")
+    src = _read("web_dashboard", "services", "packer_build_service.py")
+    assert re.search(r"from \.epml_service import .*EpmlError", src), (
+        "packer_build_service raises EpmlError without importing it")
 
 
 # ── the UI sends what the API reads ───────────────────────────────────────────
