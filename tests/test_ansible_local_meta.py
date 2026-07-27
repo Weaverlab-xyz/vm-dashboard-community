@@ -79,7 +79,8 @@ def test_run_kwargs_match_the_run_job_signature():
     """The worker calls _run_job(job_id, **run_kwargs(meta)), so a name that drifts
     from the parameter list is a TypeError at dispatch — in a background worker,
     where nobody is watching."""
-    src = open(os.path.join(_ROOT, "web_dashboard", "api", "config_mgmt.py")).read()
+    src = open(os.path.join(_ROOT, "web_dashboard", "services",
+                            "ansible_local_run_service.py")).read()
     sig = re.search(r"async def _run_job\((.*?)\) -> None:", src, re.S).group(1)
     params = set(re.findall(r"^\s*(\w+)\s*[:=]", sig, re.M)) - {"job_id"}
     assert set(arm.RUN_META_KEYS) == params, (
@@ -146,6 +147,31 @@ def test_ansible_local_is_dispatched_by_the_job_runner():
     handled = re.search(r"HANDLED_TYPES = \((.*?)\)", src, re.S).group(1)
     assert '"ansible_local"' in handled, "ansible_local is not in HANDLED_TYPES"
     assert 'job_type == "ansible_local"' in src, "no dispatch branch for ansible_local"
+
+
+def test_the_runner_reaches_the_run_path_through_services():
+    """The Ansible execution path lives in services/, so the worker doesn't reach into
+    the API package for it — an api import works but inverts the dependency, and it's
+    the kind of shortcut that quietly returns under time pressure.
+
+    Scoped to config_mgmt on purpose: `jobs_worker` still imports `api.packer` and
+    `api.images` for the image-build job types. Those have the same shape and the same
+    fix available, but they predate this and asserting a repo-wide rule the codebase
+    doesn't hold would just be a failing test nobody trusts."""
+    src = open(os.path.join(_ROOT, "web_dashboard", "jobs_worker.py")).read()
+    assert "from .api.config_mgmt import" not in src, (
+        "jobs_worker imports the run path from the api package")
+    assert "ansible_local_run_service" in src, (
+        "jobs_worker should dispatch ansible_local through the service")
+
+
+def test_run_execution_is_not_defined_in_the_api_module():
+    """_run_job and its helpers belong to the service. Defining them in the request
+    module is what forced the worker's backwards import in the first place."""
+    src = open(os.path.join(_ROOT, "web_dashboard", "api", "config_mgmt.py")).read()
+    for name in ("_run_job", "_dispatch_cloud_runner", "_resolve_managed_ref",
+                 "_resolve_cloud_ssh_key", "_delete_ephemeral"):
+        assert f"def {name}(" not in src, f"{name} is still defined in api/config_mgmt.py"
 
 
 def test_endpoint_no_longer_dispatches_in_process():

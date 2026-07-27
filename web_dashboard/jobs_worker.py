@@ -183,18 +183,12 @@ async def _dispatch(job_id: str, job_type: str, meta: dict) -> None:
             from .services import ansible_cloud_run_service
             await ansible_cloud_run_service.run(db, job_id=job_id, meta=meta)
         elif job_type == "ansible_local":
-            # Config-Management SSH/WinRM run against a VM or hypervisor group.
-            # _run_job owns its own SessionLocal + the job lifecycle, so it doesn't
-            # take this dispatcher's `db`; its arguments are reconstructed from the
-            # metadata the endpoint persisted (services/ansible_run_meta).
-            #
-            # The import reaches into the api package, which is backwards for a
-            # worker. _run_job still lives there for now: relocating it means moving
-            # ~660 lines of credential handling, which is a separate change from
-            # making the job durable.
-            from .api.config_mgmt import _run_job
-            from .services import ansible_run_meta
-            await _run_job(job_id, **ansible_run_meta.run_kwargs(meta))
+            # Config-Management SSH/WinRM run against a VM or hypervisor group — the
+            # counterpart of ansible_cloud_run above. The service owns its own
+            # SessionLocal and the job lifecycle, and reconstructs the run's arguments
+            # from the metadata the endpoint persisted (services/ansible_run_meta).
+            from .services import ansible_local_run_service
+            await ansible_local_run_service.run(db, job_id=job_id, meta=meta)
         elif job_type == "vdesktop_pool_provision":
             # provision_seats / teardown_seats own their own SessionLocal + the
             # job lifecycle (set_running/set_completed) when given a job_id, so they
