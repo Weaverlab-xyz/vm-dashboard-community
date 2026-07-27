@@ -51,11 +51,10 @@ async def run(job_id: str, job_type: str, meta: dict) -> None:
         await _run_deploy(job_id, req, meta["resource_group"], meta["location"])
     elif job_type == "azure_bulk_deploy":
         # Children were created ``queued`` so the runner cannot claim them alongside
-        # this parent; _run_bulk_deploy drives them and owns their status. It unpacks
-        # each entry as a plain (job_id, vm_name) pair — unlike the AWS runner, which
-        # takes an object per item.
+        # this parent; _run_bulk_deploy drives them and owns their status.
         req = AzureBulkDeployRequest(**meta["req"])
-        job_items = [(c["job_id"], c["vm_name"]) for c in meta["children"]]
+        job_items = [(c["job_id"], _AzureBulkItem.from_child(c, req))
+                     for c in meta["children"]]
         await _run_bulk_deploy(job_items, req, meta["resource_group"], meta["location"])
     elif job_type == "azure_destroy":
         await _run_destroy(job_id, meta.get("deploy_job_id") or "",
@@ -68,6 +67,47 @@ async def run(job_id: str, job_type: str, meta: dict) -> None:
                                     name=meta["image_name"],
                                     description=meta.get("description") or "",
                                     generalize=meta.get("generalize", False)))
+
+
+class _AzureBulkItem:
+    """The per-VM fields ``_run_bulk_deploy`` reads off each child.
+
+    Mirrors ``aws_vm_service._BulkItem``. An object rather than a widened tuple
+    because ``(job_id, vm_name)`` was unpacked in four places, and because bulk now
+    genuinely means one VM *per selected image* — the image is per item, not per batch.
+    """
+    __slots__ = ("vm_name", "image_id", "image_publisher", "image_offer",
+                 "image_sku", "image_version", "os_type", "trusted_launch")
+
+    def __init__(self, vm_name: str, image_id: str = "", image_publisher=None,
+                 image_offer=None, image_sku=None, image_version=None,
+                 os_type: str = "Linux", trusted_launch: bool = False):
+        self.vm_name, self.image_id = vm_name, image_id
+        self.image_publisher, self.image_offer = image_publisher, image_offer
+        self.image_sku, self.image_version = image_sku, image_version
+        self.os_type, self.trusted_launch = os_type, trusted_launch
+
+    @classmethod
+    def from_child(cls, child: dict, req) -> "_AzureBulkItem":
+        """Build from a child metadata entry, falling back to the batch-level request.
+
+        The fallbacks are the back-compat hinge: an ``azure_bulk_deploy`` parent
+        created before per-item images existed carries children with only ``vm_name``,
+        and those still resolve every field off ``req`` and run to completion."""
+        def pick(key, default=None):
+            value = child.get(key)
+            return getattr(req, key, default) if value is None else value
+
+        return cls(
+            vm_name=child["vm_name"],
+            image_id=pick("image_id", "") or "",
+            image_publisher=pick("image_publisher"),
+            image_offer=pick("image_offer"),
+            image_sku=pick("image_sku"),
+            image_version=pick("image_version"),
+            os_type=pick("os_type", "Linux") or "Linux",
+            trusted_launch=bool(pick("trusted_launch", False)),
+        )
 
 
 async def _resolve_azure_aci_deploy_key() -> str:
@@ -337,7 +377,9 @@ async def _run_bulk_deploy(job_items: list, req: AzureBulkDeployRequest, rg: str
     """Start ONE ACI Jumpoint for the batch, then deploy each VM sequentially."""
     db = _get_db_session()
     aci_group_name = None
-    is_windows = req.os_type.lower() == "windows"
+    # NB: no batch-level is_windows. Bulk means one VM per selected image, so a
+    # selection can span both OS types — and Windows changes the whole per-VM flow
+    # (generated admin password, no Shell Jump). Decided per item inside the loop.
     try:
         # NB: children are deliberately NOT all marked running up front. They deploy
         # sequentially, so the last one in a large batch would sit `running` with no
@@ -400,9 +442,24 @@ async def _run_bulk_deploy(job_items: list, req: AzureBulkDeployRequest, rg: str
                 f"Preparing {len(job_items)}-VM batch…"
             )
 
-        for job_id, vm_name in job_items:
+        # One Key Vault round trip for the batch, not one per VM.
+        batch_ssh_public_key = await _effective_ssh_public_key(req)
+
+        # PRA targets are batch-wide, so resolve them once — in particular
+        # pra_credential_ref, which is a secrets-backend lookup.
+        from ..services import config_service as _pra_cfg
+        batch_jump_group = ((getattr(req, "jump_group", "") or "").strip()
+                            or _cfg("azure_bt_jump_group_name") or _cfg("bt_jump_group_name"))
+        batch_jumpoint_name = ((getattr(req, "jumpoint_name", "") or "").strip()
+                               or _cfg("azure_jumpoint_name") or _cfg("bt_jumpoint_name"))
+        _pra_ref = (getattr(req, "pra_credential_ref", "") or "").strip()
+        batch_client_secret = _pra_cfg.resolve_reference(_pra_ref) if _pra_ref else ""
+
+        for job_id, item in job_items:
             # Claim this child only as its turn comes — see the note above.
             job_service.set_running(db, job_id)
+            vm_name = item.vm_name
+            is_windows = (item.os_type or "Linux").lower() == "windows"
             result: dict = {}
             if aci_group_name:
                 result["aci_group_name"] = aci_group_name
@@ -428,20 +485,23 @@ async def _run_bulk_deploy(job_items: list, req: AzureBulkDeployRequest, rg: str
                     location=loc,
                     vm_name=vm_name,
                     vm_size=req.vm_size,
-                    image_id=req.image_id,
+                    # Image fields come from the ITEM: a multi-select batch is one VM
+                    # per selected image. They fall back to the batch request for
+                    # parents created before per-item images existed.
+                    image_id=item.image_id,
                     subnet_id=req.subnet_id,
                     nsg_ids=req.nsg_ids,
                     create_public_ip=req.create_public_ip,
                     ssh_username=req.ssh_username,
-                    ssh_public_key=await _effective_ssh_public_key(req),
-                    image_publisher=req.image_publisher,
-                    image_offer=req.image_offer,
-                    image_sku=req.image_sku,
-                    image_version=req.image_version,
+                    ssh_public_key=batch_ssh_public_key,
+                    image_publisher=item.image_publisher,
+                    image_offer=item.image_offer,
+                    image_sku=item.image_sku,
+                    image_version=item.image_version,
                     workgroup=getattr(req, "workgroup", "") or "",
-                    os_type=req.os_type,
+                    os_type=item.os_type,
                     admin_password=admin_password,
-                    trusted_launch=getattr(req, "trusted_launch", False),
+                    trusted_launch=item.trusted_launch,
                 )
                 result.update(vm_result)
 
@@ -460,8 +520,6 @@ async def _run_bulk_deploy(job_items: list, req: AzureBulkDeployRequest, rg: str
                     )
                 elif settings.beyondtrust_enabled:
                     from ..services import terraform_pra_service
-                    jump_group = _cfg("azure_bt_jump_group_name") or _cfg("bt_jump_group_name")
-                    jumpoint_name = _cfg("azure_jumpoint_name") or _cfg("bt_jumpoint_name")
                     aci_note = f" (ACI: {result['aci_group_name']})" if result.get("aci_group_name") else (
                         f" (ACI failed: {result['aci_error']})" if result.get("aci_error") else " (no ACI)"
                     )
@@ -469,9 +527,13 @@ async def _run_bulk_deploy(job_items: list, req: AzureBulkDeployRequest, rg: str
                         bt_result = await terraform_pra_service.provision_jump(
                             vm_name=vm_name,
                             hostname=hostname,
-                            jump_group_name=jump_group,
-                            jumpoint_name=jumpoint_name,
+                            # Override-then-config, matching _run_deploy. This read
+                            # config only, so a batch ignored the jump group and
+                            # jumpoint the operator picked on the form.
+                            jump_group_name=batch_jump_group,
+                            jumpoint_name=batch_jumpoint_name,
                             tag="Azure",
+                            client_secret=batch_client_secret,
                         )
                         result["bt_shell_jump_id"] = bt_result.get("shell_jump_id")
                         result["bt_jump_group_name"] = bt_result.get("jump_group_name")
@@ -479,7 +541,7 @@ async def _run_bulk_deploy(job_items: list, req: AzureBulkDeployRequest, rg: str
                         job_service.update_progress(
                             db, job_id, 90,
                             f"Shell Jump created (ID: {bt_result.get('shell_jump_id')}, "
-                            f"group: {jump_group}){aci_note}"
+                            f"group: {batch_jump_group}){aci_note}"
                         )
                     except Exception as e:
                         result["bt_error"] = str(e)

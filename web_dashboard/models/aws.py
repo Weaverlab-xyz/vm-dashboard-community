@@ -154,6 +154,13 @@ class BulkDeployRequest(BaseModel):
     register_in_entitle: bool = Field(default=False, description="Opt in to registering each VM as an Entitle SSH integration (requires entitle_registration_enabled + a provisioned agent)")
     register_in_passwordsafe: bool = Field(default=False, description="Opt in to onboarding each VM into Password Safe as a managed system + account (requires passwordsafe_registration_enabled)")
     ssh_key_secret_override: Optional[str] = Field(default=None, description="Optional Secrets Manager secret name to use for the SSH key instead of the configured default (must be JSON with a public_key)")
+    # PRA/jumpoint overrides, mirroring DeployRequest. The bulk runner resolved these
+    # from config only, so a batch quietly registered every VM against the configured
+    # jump group even when the form said otherwise. Optional, so a client posting the
+    # old shape still falls through to config exactly as before.
+    jump_group: Optional[str] = None             # PRA Jump Group name override (else bt_jump_group_name)
+    jumpoint_name: Optional[str] = None          # PRA Jumpoint name override (else bt_jumpoint_name)
+    pra_credential_ref: Optional[str] = None     # secret ref → bt_client_secret override for the shell jump
 
 
 class BulkDeployJobResult(BaseModel):

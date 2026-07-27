@@ -119,12 +119,29 @@ class AzureDeployRequest(BaseModel):
 
 
 class AzureBulkDeployItem(BaseModel):
+    """One VM in a bulk request.
+
+    The image fields are per item because bulk means one VM *per selected image* —
+    the UI multi-selects images, and previously every VM was built from the first
+    one. All of them are optional and fall back to the request-level value, so a
+    client posting the old shape (names only, one top-level image_id) is unchanged.
+    """
     vm_name: str
+    image_id: Optional[str] = None
+    image_publisher: Optional[str] = None
+    image_offer: Optional[str] = None
+    image_sku: Optional[str] = None
+    image_version: Optional[str] = None
+    os_type: Optional[str] = None          # falls back to the request-level os_type
+    trusted_launch: Optional[bool] = None
 
 
 class AzureBulkDeployRequest(BaseModel):
     items: List[AzureBulkDeployItem]
-    image_id: str
+    # Batch-level default for items that don't carry their own image. Relaxed from a
+    # required field so per-item images are expressible; the endpoint still rejects a
+    # request where any item resolves to no image at all.
+    image_id: str = ""
     vm_size: str = "Standard_B2s"
     location: str = ""
     resource_group: str = ""
@@ -144,6 +161,12 @@ class AzureBulkDeployRequest(BaseModel):
     image_offer: Optional[str] = None
     image_sku: Optional[str] = None
     image_version: Optional[str] = None
+    # PRA/jumpoint overrides, mirroring AzureDeployRequest. The bulk runner resolved
+    # these from config only, so a batch ignored whatever the form's pickers said.
+    jump_group: Optional[str] = None             # else azure_bt_jump_group_name / bt_jump_group_name
+    jumpoint_name: Optional[str] = None          # else azure_jumpoint_name / bt_jumpoint_name
+    pra_credential_ref: Optional[str] = None     # secret ref → bt_client_secret for the shell jump
+    docker_deploy_key_ref: Optional[str] = None  # secret ref → ACI Jumpoint deploy key
 
 
 class AzureDeployResponse(BaseModel):
