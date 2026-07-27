@@ -37,11 +37,26 @@ Terraform. (Terraform VM modules exist under `terraform/ec2_instance`, `terrafor
 `terraform/gce_instance` for a separate CLI-oriented path, but `/api/*/deploy` does **not**
 use them.)
 
+There is exactly **one** `_run_deploy` per cloud, and it is the only place that cloud's
+SDK is asked to create a VM. A batch does not repeat it: `_run_bulk_deploy` acquires
+whatever is genuinely shared for the run — the jumpoint, and on AWS the NAT instance,
+SSM endpoints and SSH key; on Azure the quota check, ACI container and Key Vault key —
+then loops calling `_run_deploy` with those injected. Each instance still owns its own
+job row, so one failure fails that row and the batch carries on.
+
+That shape is load-bearing rather than tidy. When the batch path was a second copy of
+the deploy body it drifted, and every divergence was invisible because a batch still
+reported success: AWS batches stopped passing `os_type` and booted Linux VMs with no SSM
+agent, and Azure batches ignored the per-deploy Jumpoint key. `tests/test_deploy_runner_parity.py`
+asserts no `_run_bulk_deploy` calls its cloud's launch function directly.
+
 Ordered steps (each Layer-1/2/3 step is **non-fatal** — a failure logs a warning and the
 deploy still succeeds):
 
-1. **Ensure the jumpoint host** (only when `beyondtrust_enabled`) — AWS/Azure/GCP each
-   bring up their shared/ paired jumpoint; **OCI does nothing here** (bring your own).
+1. **Ensure the jumpoint host** (only when `beyondtrust_enabled`) — AWS uses a shared
+   ref-counted ECS host, Azure an ACI container group, GCP the shared COS host (see
+   `gcp_vm_jumpoint_mode`); **OCI does nothing here** (bring your own). In a batch this
+   happens once for the whole run.
 2. **AWS only** — ensure the shared on-demand **NAT instance** (`aws_nat_instance_enabled`)
    and **SSM interface endpoints** (`aws_ssm_endpoints_enabled`).
 3. **Fetch the SSH public key** from the cloud's secret store and inject it (Linux via
