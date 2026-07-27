@@ -940,7 +940,8 @@ function configMgmt() {
             toast(`Queued ${result.count} job(s) — batch ${result.batch_id}`, 'success');
           }
           this.bulk = null;
-          await this.loadJobs();
+          // Land on the batch, mirroring the single-run path's jump to its job.
+          window.location.href = '/jobs?batch_id=' + encodeURIComponent(result.batch_id);
         } catch (e) {
           this.runError = e.message || 'Failed to queue bulk run.';
         } finally {

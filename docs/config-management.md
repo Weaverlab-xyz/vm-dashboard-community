@@ -151,6 +151,12 @@ tick the rows, and a run panel appears. Each selected resource becomes its **own
 job**, all tagged with a shared `batch_id` — so one host failing doesn't roll back
 the others, and each job keeps its own log and output scrubbing.
 
+Queueing a batch lands you on **`/jobs?batch_id=…`**, filtered to just that run, with
+a rollup across the whole batch — *N total · N running · N failed* — rather than the
+one page of rows the table happens to show. The URL is shareable, and any job that
+belongs to a batch carries a **batch** badge linking back to its siblings, so you can
+still find a run after the toast is gone.
+
 **One kind per run.** Selecting a VM locks the checkboxes on Kubernetes clusters and
 databases, and vice versa. This isn't a UI convenience — the kinds are not
 interchangeable at any level. A VM run SSHes to a host; k8s and database runs are

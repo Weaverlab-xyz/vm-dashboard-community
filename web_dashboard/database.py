@@ -206,6 +206,12 @@ class Job(Base):
     # cloud-deploy jobs. Indexed so the reassign endpoints can find the originating
     # Job row when an admin rewrites a resource's Workgroup tag/label.
     cloud_resource_id = Column(String(255), index=True, nullable=True)
+    # Groups the jobs of one bulk Config-Management run (api/config_mgmt.run_playbook_bulk
+    # fans a single asset out to N targets, one job each). A column rather than a key in
+    # extra_data for the same reason as cloud_resource_id above: extra_data is a Text
+    # column holding a JSON string, so there is no operator that filters it portably
+    # across SQLite and PostgreSQL — only a LIKE scan.
+    batch_id = Column(String(32), index=True, nullable=True)
     status = Column(String(20), nullable=False, default="pending", index=True)  # pending, running, completed, failed, cancelled
     progress_pct = Column(Integer, default=0)
     progress_message = Column(Text)
@@ -785,6 +791,10 @@ def init_db():
             "ALTER TABLE audit_log ADD COLUMN prev_hash VARCHAR(64)",
             "ALTER TABLE audit_log ADD COLUMN entry_hash VARCHAR(64)",
             "CREATE UNIQUE INDEX IF NOT EXISTS ix_audit_log_seq ON audit_log(seq)",
+            # Bulk Config-Management runs: group the N jobs of one run so the jobs
+            # page can filter to a batch and roll up its status.
+            "ALTER TABLE jobs ADD COLUMN batch_id VARCHAR(32)",
+            "CREATE INDEX ix_jobs_batch_id ON jobs(batch_id)",
         ]
         for stmt in _migrations:
             if _is_sqlite:

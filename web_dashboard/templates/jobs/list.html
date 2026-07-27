@@ -31,6 +31,29 @@
         </select>
       </div>
     </div>
+
+    <!-- Batch rollup — shown when filtered to one bulk run -->
+    <template x-if="filterBatch">
+      <div class="mt-3 pt-3 border-t border-gray-100 flex flex-wrap items-center gap-3">
+        <span class="text-sm font-medium text-gray-700">
+          Bulk run <code class="bg-gray-100 px-1.5 py-0.5 rounded text-xs" x-text="filterBatch"></code>
+        </span>
+        <template x-if="batchSummary">
+          <div class="flex flex-wrap items-center gap-2 text-xs">
+            <span class="text-gray-500"><span x-text="batchSummary.total"></span> job(s)</span>
+            <template x-for="s in batchCounters()" :key="s.name">
+              <span class="inline-flex items-center px-2 py-0.5 rounded font-medium"
+                    :class="statusBadge(s.name)">
+                <span x-text="s.count"></span>&nbsp;<span x-text="s.name"></span>
+              </span>
+            </template>
+          </div>
+        </template>
+        <button @click="clearBatch()" class="text-xs text-blue-600 hover:underline ml-auto">
+          Show all jobs
+        </button>
+      </div>
+    </template>
   </div>
 
   <!-- Jobs table -->
@@ -60,7 +83,17 @@
               <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium"
                     :class="statusBadge(job.status)" x-text="job.status"></span>
             </td>
-            <td class="px-4 py-3 font-medium text-gray-800" x-text="jobLabel(job)"></td>
+            <td class="px-4 py-3 font-medium text-gray-800">
+              <span x-text="jobLabel(job)"></span>
+              <!-- One of N jobs from a bulk run — click to see its siblings. -->
+              <button x-show="job.batch_id && job.batch_id !== filterBatch" x-cloak
+                      @click="showBatch(job.batch_id)"
+                      class="ml-2 align-middle inline-flex items-center px-1.5 py-0.5 rounded
+                             bg-blue-50 text-blue-700 text-[10px] font-medium hover:bg-blue-100"
+                      :title="'Show the other jobs in bulk run ' + job.batch_id">
+                batch
+              </button>
+            </td>
             <td class="px-4 py-3 text-gray-500 max-w-[200px] truncate"
                 x-text="job.vm_path ? vmName(job.vm_path) : (job.workgroup || '–')"></td>
             <td class="px-4 py-3">
@@ -112,9 +145,14 @@
       pageSize: 20,
       loading: true,
       filterStatus: '',
+      // One bulk Config-Management run. Seeded from ?batch_id= so a run can link
+      // straight here, and so the URL stays shareable/bookmarkable.
+      filterBatch: '',
+      batchSummary: null,
 
       async init() {
         requireAuth();
+        this.filterBatch = new URLSearchParams(window.location.search).get('batch_id') || '';
         await this.loadJobs();
         // Poll every 5s for running job updates
         setInterval(() => this.loadJobs(), 5000);
@@ -125,6 +163,7 @@
         try {
           let url = `/api/jobs?page=${this.page}&page_size=${this.pageSize}`;
           if (this.filterStatus) url += `&status=${this.filterStatus}`;
+          if (this.filterBatch) url += `&batch_id=${encodeURIComponent(this.filterBatch)}`;
           const resp = await API.get(url);
           if (!resp) return;
           this.jobs = resp.jobs || [];
@@ -134,6 +173,51 @@
         } finally {
           this.loading = false;
         }
+        // Rollup is a separate count query — the page only shows one page of rows,
+        // so "3 failed" can't be derived from `jobs` once a batch exceeds pageSize.
+        await this.loadBatchSummary();
+      },
+
+      async loadBatchSummary() {
+        if (!this.filterBatch) { this.batchSummary = null; return; }
+        try {
+          this.batchSummary = await API.get(
+            `/api/jobs/batches/${encodeURIComponent(this.filterBatch)}`);
+        } catch (e) {
+          this.batchSummary = null;   // rollup is additive; the table still works
+        }
+      },
+
+      // Non-zero counters only — a row of zeros is noise, but "0 failed" still
+      // matters, so failed is kept even at zero once the batch has any job.
+      batchCounters() {
+        const by = (this.batchSummary && this.batchSummary.by_status) || {};
+        return Object.keys(by)
+          .filter(name => by[name] > 0 || (name === 'failed' && this.batchSummary.total > 0))
+          .map(name => ({ name, count: by[name] }));
+      },
+
+      showBatch(batchId) {
+        this.filterBatch = batchId;
+        this.page = 1;
+        this._syncBatchToUrl();
+        this.loadJobs();
+      },
+
+      clearBatch() {
+        this.filterBatch = '';
+        this.batchSummary = null;
+        this.page = 1;
+        this._syncBatchToUrl();
+        this.loadJobs();
+      },
+
+      // Keep the address bar in step without a reload, so back/refresh behave.
+      _syncBatchToUrl() {
+        const u = new URL(window.location);
+        if (this.filterBatch) u.searchParams.set('batch_id', this.filterBatch);
+        else u.searchParams.delete('batch_id');
+        window.history.replaceState({}, '', u);
       },
 
       async cancelJob(job) {

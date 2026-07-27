@@ -26,8 +26,12 @@ def create_job(
     vm_path: Optional[str] = None,
     workgroup: Optional[str] = None,
     metadata: Optional[dict] = None,
+    batch_id: Optional[str] = None,
 ) -> Job:
-    """Create a new job record with status 'pending'."""
+    """Create a new job record with status 'pending'.
+
+    ``batch_id`` groups the jobs of one bulk Config-Management run; it is a plain
+    label (nothing authorizes off it) that makes the batch filterable on /jobs."""
     job = Job(
         id=str(uuid.uuid4()),
         job_type=job_type,
@@ -37,6 +41,7 @@ def create_job(
         progress_pct=0,
         created_at=datetime.utcnow(),
         created_by=created_by,
+        batch_id=batch_id or None,
     )
     if metadata:
         job.metadata_dict = metadata
@@ -145,6 +150,7 @@ def list_jobs(
     status: Optional[str] = None,
     created_by: Optional[str] = None,
     workgroup: Optional[str] = None,
+    batch_id: Optional[str] = None,
 ) -> tuple[List[Job], int]:
     """
     List jobs with optional filters.
@@ -159,6 +165,8 @@ def list_jobs(
         query = query.filter(Job.created_by == created_by)
     if workgroup:
         query = query.filter(Job.workgroup == workgroup)
+    if batch_id:
+        query = query.filter(Job.batch_id == batch_id)
 
     total = query.count()
     jobs = (
@@ -168,6 +176,43 @@ def list_jobs(
         .all()
     )
     return jobs, total
+
+
+# Statuses a batch rollup always reports, so the UI can render a stable set of
+# counters instead of columns appearing and disappearing as a batch progresses.
+BATCH_STATUSES = ("pending", "running", "completed", "failed", "cancelled")
+
+
+def _summarize_statuses(rows) -> dict:
+    """Shape ``[(status, count), …]`` into ``{"total": n, "by_status": {…}}``.
+
+    Every status in :data:`BATCH_STATUSES` is present with an explicit zero — a
+    missing key and a zero mean the same thing to a reader but not to a template,
+    and "0 failed" is the answer an operator most wants to see. A status outside the
+    set is carried through rather than dropped, so an unexpected value shows up in
+    the UI instead of silently vanishing from the total.
+
+    Pure, so the rollup arithmetic is testable without a database.
+    """
+    by_status = {s: 0 for s in BATCH_STATUSES}
+    for status, count in (rows or []):
+        by_status[status or "unknown"] = by_status.get(status or "unknown", 0) + int(count)
+    return {"total": sum(by_status.values()), "by_status": by_status}
+
+
+def batch_summary(db: Session, batch_id: str, created_by: Optional[str] = None) -> dict:
+    """Status rollup for one bulk-run batch: ``{batch_id, total, by_status}``.
+
+    ``created_by`` scopes the counts exactly as :func:`list_jobs` does — the caller
+    passes it for a user who may only see their own jobs, so the rollup can never
+    reveal the existence of jobs that user cannot read."""
+    from sqlalchemy import func
+
+    query = db.query(Job.status, func.count(Job.id)).filter(Job.batch_id == batch_id)
+    if created_by:
+        query = query.filter(Job.created_by == created_by)
+    summary = _summarize_statuses(query.group_by(Job.status).all())
+    return {"batch_id": batch_id, **summary}
 
 
 def has_active_job_for_vm(db: Session, vmx_path: str) -> bool:
