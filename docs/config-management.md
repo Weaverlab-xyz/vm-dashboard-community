@@ -143,6 +143,48 @@ Treat these playbooks accordingly. Starters live in
 
 ---
 
+## Bulk runs from the inventory
+
+The Config Management page runs one asset against one target. To apply a playbook
+across a fleet, use the **Inventory** page (`/inventory`): filter to what you want,
+tick the rows, and a run panel appears. Each selected resource becomes its **own
+job**, all tagged with a shared `batch_id` — so one host failing doesn't roll back
+the others, and each job keeps its own log and output scrubbing.
+
+**One kind per run.** Selecting a VM locks the checkboxes on Kubernetes clusters and
+databases, and vice versa. This isn't a UI convenience — the kinds are not
+interchangeable at any level. A VM run SSHes to a host; k8s and database runs are
+`localhost` plays that reach *out* over a kubeconfig or DB login. Different request
+fields, a different runner, and a playbook written for one is meaningless against
+another. A mixed selection could only ever produce a pile of failed jobs, so it is
+refused rather than attempted.
+
+Rows that can't be a target at all are disabled, with the reason on hover:
+
+| Row | Why it's disabled |
+|---|---|
+| Virtual desktops | No Ansible target exists behind a seat. |
+| Proxmox / Nutanix VMs | Their deploy records a node + VMID, not an address. Target them through their hypervisor **group** on the Config Management page instead. |
+| Databases with an unsupported engine | The runner image ships client libraries for postgres / mysql / sqlserver only. |
+| Clusters or databases in a cloud with no runner | See [Runners](#runners). |
+
+Those reasons come from the server, computed by the same rule the endpoint enforces,
+so the page can never offer a checkbox the API would reject.
+
+Two limits worth knowing. A batch is capped at **50 targets** — each one is a job, so
+a mis-clicked "select all" against a large estate would otherwise fan out unbounded
+work. And while *selection* problems refuse the whole request before any job exists,
+a **per-target** failure at dispatch does not: several checks depend on the target's
+cloud, so a mixed-cloud VM batch can be valid for one host and not another. Those
+targets come back in the response's `failed` list and are named in the toast; the
+rest still run.
+
+The panel covers the common case — asset, SSH user, extra vars. Runs needing a
+managed-account checkout or named secret vars are still one-at-a-time on the Config
+Management page (the `/run-bulk` endpoint accepts those fields for API callers).
+
+---
+
 ## Asset types
 
 | Extension | Type | How the runner handles it |

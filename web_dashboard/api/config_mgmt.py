@@ -16,6 +16,7 @@ Target types:
     Bare IP / hostname     — ad-hoc; cloud field determines SSH key source
 """
 import logging
+import uuid
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
@@ -256,6 +257,10 @@ class RunRequest(BaseModel):
     # passes the backend explicitly because the same asset name may exist on
     # multiple backends.
     asset_backend: str = ""
+    # Groups the jobs of one bulk run (see /run-bulk). A descriptive label only —
+    # nothing authorizes off it — carried on job metadata so the batch can be
+    # identified in the job list.
+    batch_id: str = ""
     # BeyondTrust Password Safe managed-account checkout (LOCAL runner only). The
     # credential is checked out just-in-time at run time — the operator never sees
     # it. managed_account is the connection identity; managed_become is an optional
@@ -948,6 +953,7 @@ async def _run_cloud_localhost(payload: "RunRequest", db, current_user):
             "asset_backend": asset_backend,
             "extra_vars": payload.extra_vars or {},
             "secret_vars": payload.secret_vars or {},
+            **({"batch_id": payload.batch_id} if payload.batch_id else {}),
         },
     )
     if wants_secret:
@@ -1070,12 +1076,15 @@ async def run_playbook(
                         "secret is locked to it."))
     description = f"Ansible ({atype}): {payload.asset} → {payload.target}"
 
+    job_meta = {"description": description}
+    if payload.batch_id:
+        job_meta["batch_id"] = payload.batch_id
     job = job_service.create_job(
         db,
         job_type="ansible_local",
         created_by=current_user.username,
         workgroup="ansible",
-        metadata={"description": description},
+        metadata=job_meta,
     )
     if wants_secret:
         # Audit the use — kinds + var names only, never the source refs or values.
@@ -1111,6 +1120,108 @@ async def run_playbook(
         payload.managed_become.model_dump() if payload.managed_become else None,
     )
     return {"job_id": job.id, "status": "queued"}
+
+
+class BulkRunRequest(BaseModel):
+    """A run against several inventory rows at once. The targets are named by
+    INVENTORY ID (``job:…`` / ``k8s:…`` / ``clouddb:…``), never by address — the
+    server resolves each one from its own records, so a client cannot point a run at
+    a host it doesn't own by supplying an IP."""
+    inventory_ids: list[str] = []
+    asset: str
+    asset_backend: str = ""
+    extra_vars: dict = {}
+    secret_vars: dict = {}
+    # VM-only connection fields; ignored for k8s/database rows (localhost plays).
+    ansible_user: str = ""
+    secret_become_source: str = ""
+    secret_ssh_key_source: str = ""
+    managed_account: ManagedAccountRef | None = None
+    managed_become: ManagedAccountRef | None = None
+
+
+@router.post("/run-bulk")
+async def run_playbook_bulk(
+    payload: BulkRunRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Run one asset against several inventory resources — one job per target.
+
+    Validation happens at two levels, and they fail differently on purpose:
+
+    * SELECTION problems — mixed kinds, a kind with no Config-Management path, a row
+      that isn't individually targetable, an id the caller can't see — are checked
+      before any job exists and refuse the whole request with a 400.
+    * PER-TARGET problems are found only when a target is dispatched, and they do not
+      necessarily apply to the rest of the batch: several checks in ``/run`` turn on
+      the target's cloud (``_effective_runner`` and everything downstream of it), so
+      a mixed-cloud VM selection can be fine for one host and not another. Those
+      targets are reported in ``failed`` and the remaining ones still run, rather
+      than being silently dropped or aborting a batch that is already part-queued.
+
+    Each target is dispatched through the ordinary ``/run`` path, so every permission
+    check, secret-store validation and runner decision behaves exactly as it does for
+    a single run — this endpoint adds selection, not a second code path. Jobs share a
+    ``batch_id`` in their metadata.
+
+    Returns ``{batch_id, kind, count, jobs: [...], failed: [...]}``; 400 if every
+    target failed.
+    """
+    from ..services import inventory_service
+
+    # Resolved from a FRESH collect(), not the page's cache: this enqueues work, so
+    # it must not act on a resource that was destroyed since the page loaded. The
+    # RBAC filter is the inventory page's own — an id outside what this user can see
+    # comes back as "unknown" rather than as a target.
+    accessible = inventory_service.accessible_workgroups(current_user)
+    visible = [i for i in inventory_service.collect(db)
+               if inventory_service.visible_to(i, accessible, current_user.username)]
+    try:
+        plan = inventory_service.plan_bulk_run(visible, payload.inventory_ids)
+    except inventory_service.BulkSelectionError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    batch_id = uuid.uuid4().hex[:12]
+    jobs, failed = [], []
+    for target in plan["targets"]:
+        req = RunRequest(
+            asset=payload.asset,
+            asset_backend=payload.asset_backend,
+            extra_vars=payload.extra_vars,
+            secret_vars=payload.secret_vars,
+            ansible_user=payload.ansible_user,
+            secret_become_source=payload.secret_become_source,
+            secret_ssh_key_source=payload.secret_ssh_key_source,
+            managed_account=payload.managed_account,
+            managed_become=payload.managed_become,
+            batch_id=batch_id,
+            **target["spec"],
+        )
+        try:
+            result = await run_playbook(req, background_tasks, db, current_user)
+        except HTTPException as e:
+            failed.append({"inventory_id": target["id"], "name": target["name"],
+                           "error": str(e.detail)})
+            continue
+        jobs.append({"inventory_id": target["id"], "name": target["name"],
+                     "job_id": result["job_id"]})
+
+    if not jobs:
+        # Nothing queued — surface the first reason rather than a misleading success.
+        detail = failed[0]["error"] if failed else "No targets could be run."
+        raise HTTPException(
+            status_code=400,
+            detail=f"No jobs were queued. First target failed with: {detail}")
+
+    job_service.log_audit(
+        db, current_user.username, "ansible_bulk_run",
+        details={"batch_id": batch_id, "kind": plan["kind"], "asset": payload.asset,
+                 "count": len(jobs), "targets": [j["name"] for j in jobs],
+                 "failed": [f["name"] for f in failed]})
+    return {"batch_id": batch_id, "kind": plan["kind"], "count": len(jobs),
+            "jobs": jobs, "failed": failed}
 
 
 @router.get("/secret-options")

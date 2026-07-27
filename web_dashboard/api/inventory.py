@@ -18,10 +18,9 @@ router = APIRouter(prefix="/api/inventory", tags=["inventory"])
 
 def _accessible_workgroups(user: User) -> Optional[List[str]]:
     """Canonical workgroup names the user can see, or None for admins (mirrors
-    the per-provider list endpoints, e.g. api/aws.py)."""
-    if user.is_effective_admin:
-        return None
-    return [w.lower() for w in user.workgroups_list]
+    the per-provider list endpoints, e.g. api/aws.py). Delegates to the service so
+    this endpoint and the bulk-run endpoint resolve RBAC identically."""
+    return inventory_service.accessible_workgroups(user)
 
 
 @router.get("")
