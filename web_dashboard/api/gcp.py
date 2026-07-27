@@ -19,6 +19,10 @@ from ..config import settings
 from ..database import Job, User, get_db
 from ..models.gcp import (
     GCPCreateImageRequest,
+    GCPBulkDeployItem,
+    GCPBulkDeployJobResult,
+    GCPBulkDeployRequest,
+    GCPBulkDeployResponse,
     GCPDeployRequest,
     GCPDeployResponse,
     GCPImageListResponse,
@@ -512,6 +516,131 @@ async def _fan_out_batch(
         job_ids=[c["job_id"] for c in children],
         names=names,
     )
+
+
+# ── Bulk Deploy (multi-select: one VM per selected image) ─────────────────────
+
+@router.post("/bulk-deploy", response_model=GCPBulkDeployResponse)
+async def bulk_deploy_instances(
+    req: GCPBulkDeployRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("gcp", "write")),
+):
+    """Deploy one GCE instance per selected image, sharing one Jumpoint for the batch.
+
+    The other axis from the deploy form's Count: that launches N copies of one image,
+    this launches one VM per image the operator ticked.
+
+    The runner needs no changes for this — ``gce_bulk_deploy`` already rebuilds a full
+    ``GCPDeployRequest`` per child from ``children[].req``, so a per-child image is
+    simply a different value in a field it already reads.
+    """
+    if not req.items:
+        raise HTTPException(status_code=400, detail="At least one image is required.")
+
+    project_id = _gcp_project()
+    if not project_id:
+        raise HTTPException(status_code=400, detail="GCP project ID not configured — run the setup wizard.")
+
+    zone = _resolve_zone(req.zone)
+    region = _region_from_zone(zone)
+    workgroup = _validate_workgroup(db, current_user, req.workgroup)
+
+    # Names here are typed per row in the bulk modal, so unlike the count path they can
+    # genuinely repeat. Both checks run before anything is created.
+    names = [i.instance_name for i in req.items]
+    for name in names:
+        deploy_batch.validate_name(name, "gcp")
+    deploy_batch.reject_name_collisions(db, "gce_deploy", names)
+
+    # Policy gate every VM before the first create_job — a denial partway through would
+    # strand queued children that nothing can claim or reconcile. Per item because each
+    # carries its own image.
+    await deploy_batch.enforce_admission(
+        "gcp:gce:deploy",
+        requests=[{"region": region, "zone": zone,
+                   "instance_type": req.machine_type, "image": item.image_self_link,
+                   "name": item.instance_name,
+                   "count": len(req.items), "batch": True}
+                  for item in req.items],
+        actor=current_user, db=db,
+    )
+
+    batch_id = uuid.uuid4().hex[:12]
+    children, results = [], []
+    for item in req.items:
+        # Each child carries a complete single-deploy request — its own image, count 1.
+        child_req = GCPDeployRequest(
+            image_self_link=item.image_self_link,
+            image_name=item.image_name,
+            instance_name=item.instance_name,
+            machine_type=req.machine_type,
+            zone=zone,
+            subnetwork=req.subnetwork,
+            create_external_ip=req.create_external_ip,
+            ssh_username=req.ssh_username,
+            disk_size_gb=req.disk_size_gb,
+            network_tags=req.network_tags,
+            workgroup=workgroup,
+            register_in_entitle=req.register_in_entitle,
+            register_in_passwordsafe=req.register_in_passwordsafe,
+            ssh_key_secret_override=req.ssh_key_secret_override,
+            jump_group=req.jump_group,
+            jumpoint_name=req.jumpoint_name,
+            docker_deploy_key_ref=req.docker_deploy_key_ref,
+            count=1,
+        )
+        job = job_service.create_job(
+            db,
+            job_type="gce_deploy",
+            created_by=current_user.username,
+            workgroup=workgroup,
+            # `queued`, not `pending`: the runner claims on status='pending', so a
+            # pending child would be deployed a second time alongside its parent.
+            status="queued",
+            batch_id=batch_id,
+            metadata={
+                "project_id":      project_id,
+                "zone":            zone,
+                "region":          region,
+                "instance_name":   item.instance_name,
+                "machine_type":    req.machine_type,
+                "image_self_link": item.image_self_link,
+                "image_name":      item.image_name,
+                "workgroup":       workgroup,
+                "bulk":            True,
+                "req":             child_req.model_dump(),
+            },
+        )
+        job_service.set_cloud_resource_id(db, job.id, item.instance_name)
+        job_service.log_audit(
+            db, current_user.username, "gce_deploy",
+            details={"instance_name": item.instance_name, "zone": zone,
+                     "machine_type": req.machine_type,
+                     "workgroup": workgroup, "bulk": True},
+        )
+        children.append({"job_id": job.id, "instance_name": item.instance_name,
+                         "req": child_req.model_dump()})
+        results.append(GCPBulkDeployJobResult(
+            image_self_link=item.image_self_link,
+            instance_name=item.instance_name,
+            job_id=job.id, status="queued"))
+
+    job_service.create_job(
+        db,
+        job_type="gce_bulk_deploy",
+        created_by=current_user.username,
+        workgroup=workgroup,
+        batch_id=batch_id,
+        metadata={
+            "project_id": project_id,
+            "zone":       zone,
+            "region":     region,
+            "workgroup":  workgroup,
+            "children":   children,
+        },
+    )
+    return GCPBulkDeployResponse(jobs=results, count=len(results), batch_id=batch_id)
 
 
 @router.post("/deploy", response_model=GCPDeployResponse)

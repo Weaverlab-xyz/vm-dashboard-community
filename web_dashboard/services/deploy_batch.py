@@ -40,6 +40,19 @@ def expand_names(base: str, count: int, provider: str) -> List[str]:
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+def validate_name(name: str, provider: str) -> str:
+    """400 if a hand-typed VM name is illegal for the provider.
+
+    The count path gets this for free — ``expand_names`` validates the base before it
+    numbers it. The multi-select bulk paths take a name per row straight from the
+    operator, so without this a GCE-illegal name (uppercase, leading digit, a space)
+    reaches the cloud SDK and fails mid-batch, after some siblings already exist."""
+    try:
+        return vm_naming.validate_base(name, provider)
+    except vm_naming.VMNameError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 def reject_name_collisions(db, deploy_job_type: str, names: Sequence[str]) -> None:
     """409 if any name is already claimed, or repeated within this request.
 
