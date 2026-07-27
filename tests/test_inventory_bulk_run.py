@@ -227,6 +227,38 @@ def test_selection_order_is_preserved():
     assert [t["name"] for t in plan["targets"]] == ["c", "a", "b"]
 
 
+# ── connection-identity fields vs non-VM targets ──────────────────────────────
+
+def test_connection_fields_are_fine_for_vms():
+    assert inv.reject_connection_fields("vm", {"managed_account": {"account_name": "svc"},
+                                               "secret_ssh_key_source": "bt_safe://k"}) is None
+
+
+def test_managed_account_is_refused_for_clusters():
+    """The run path IGNORES these for a localhost play. One run can absorb that
+    silently; a batch would leave the operator believing 50 clusters got a
+    credential they never got."""
+    msg = inv.reject_connection_fields("k8s", {"managed_account": {"account_name": "svc"}})
+    assert msg and "managed_account" in msg and "no" in msg and "SSH connection" in msg
+
+
+def test_ssh_key_and_become_are_refused_for_databases():
+    msg = inv.reject_connection_fields("database", {
+        "secret_ssh_key_source": "bt_safe://key", "secret_become_source": "bt_safe://sudo"})
+    assert msg and "secret_ssh_key_source" in msg and "secret_become_source" in msg
+
+
+def test_named_secret_vars_stay_allowed_for_non_vm_kinds():
+    """secret_vars is the one secret kind a localhost play does honor, so it must
+    not be swept up by this guard."""
+    assert inv.reject_connection_fields("k8s", {"secret_vars": {"db_pw": "bt_safe://x"}}) is None
+
+
+def test_empty_connection_fields_do_not_trip_the_guard():
+    assert inv.reject_connection_fields("k8s", {"managed_account": None,
+                                                "secret_ssh_key_source": ""}) is None
+
+
 # ── RBAC helper shared with the inventory listing ─────────────────────────────
 
 def test_accessible_workgroups_admin_is_none():

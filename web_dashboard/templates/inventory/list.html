@@ -95,6 +95,14 @@
         <span x-text="running ? 'Queueing…' : 'Run'"></span>
       </button>
     </div>
+
+    <p class="text-xs text-blue-700 mt-3">
+      Need a Secrets-Management secret or a Password Safe managed account?
+      <button @click="handOffToConfigMgmt()" class="font-medium underline hover:no-underline">
+        Continue on the Config Management page →
+      </button>
+      <span class="text-blue-600">It carries this selection over and adds the secret pickers.</span>
+    </p>
   </div>
 
   <!-- Inventory table -->
@@ -259,6 +267,26 @@
       },
 
       clearSelection() { this.selected = []; },
+
+      // Hand the selection to /config-mgmt, which has the secret + managed-account
+      // pickers. sessionStorage rather than a query string (50 ids makes an unusable
+      // URL) and rather than localStorage — a pending fleet run must not survive a
+      // browser restart. The receiving page removes the key as soon as it reads it.
+      handOffToConfigMgmt() {
+        const rows = this.items.filter(i => this.selected.includes(i.id));
+        // A representative host, so the Password Safe account list can be populated
+        // there. Each job still resolves the chosen account name against its own
+        // host — this only supplies the names to choose from.
+        const sample = rows.find(r => r.kind === 'vm' && r.ip) || null;
+        sessionStorage.setItem('cfgmgmt_bulk_selection', JSON.stringify({
+          ids: this.selected,
+          kind: this.selectedKind,
+          names: rows.map(r => r.name),
+          sampleHost: sample ? sample.ip : '',
+          sampleName: sample ? sample.name : '',
+        }));
+        window.location.href = '/config-mgmt';
+      },
 
       async runBulk() {
         let extra = {};

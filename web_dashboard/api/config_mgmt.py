@@ -19,7 +19,7 @@ import logging
 import uuid
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 from sqlalchemy.orm import Session
 
 from ..database import Job, User, get_db
@@ -223,13 +223,34 @@ async def get_localhost_targets(
 # ── Playbook / asset run ───────────────────────────────────────────────────────
 
 class ManagedAccountRef(BaseModel):
-    """A BeyondTrust Password Safe managed account the operator picked from the
-    live list. The ids drive the just-in-time credential checkout; the name is
-    non-secret and becomes ``ansible_user``. Never carries a credential."""
-    system_id: int
-    account_id: int
+    """A BeyondTrust Password Safe managed account. Never carries a credential.
+
+    Two forms, because a single run and a bulk run identify an account differently:
+
+    * PINNED — ``system_id`` + ``account_id``, picked from the live list for one
+      host. Drives the just-in-time checkout directly.
+    * BY NAME — ``account_name`` only, used by a bulk run. Both ids are specific to
+      one managed system, so a pinned ref cannot be reused across a fleet: it would
+      check out one machine's credential and connect to every host with it. A
+      name-only ref is instead resolved against each job's OWN target host at run
+      time (see ``_resolve_managed_ref``).
+
+    ``account_name`` is non-secret and becomes ``ansible_user``.
+    """
+    system_id: int | None = None
+    account_id: int | None = None
     account_name: str = ""
     uses_ssh_key: bool = False   # DSSAutoManagementFlag → checkout as -t dsskey
+
+    @model_validator(mode="after")
+    def _pinned_or_named(self):
+        if self.account_id is not None and self.system_id is not None:
+            return self
+        if (self.account_name or "").strip():
+            return self
+        raise ValueError(
+            "a managed account needs either both system_id and account_id (a pinned "
+            "account for one host) or an account_name (resolved per host at run time)")
 
 
 class RunRequest(BaseModel):
@@ -306,6 +327,52 @@ def _find_cloud_deploy_meta(db, cloud: str, ip: str) -> dict:
         if (meta.get("public_ip") or meta.get("private_ip")) == ip:
             return meta
     return {}
+
+
+async def _resolve_managed_ref(db, ref: dict, target: str, cloud: str) -> dict:
+    """Fill in a name-only managed-account ref against ``target``'s own host.
+
+    A bulk run picks an account by NAME, because ``system_id``/``account_id`` belong
+    to one managed system — reusing one pinned ref across a fleet would check out a
+    single machine's credential and connect everywhere with it. Each job therefore
+    resolves the name against the host it is actually configuring.
+
+    Already-pinned refs (a single run from the picker) pass through untouched, so
+    this costs a Password Safe lookup only on the bulk path.
+
+    Runs the same chain as GET /managed-accounts: a deploy-name hint, then a
+    managed-system lookup by IP or name, then that system's accounts. Raises
+    ``LookupError`` when the host has no such account — the caller fails just this
+    job, leaving the rest of the batch alone.
+    """
+    if not ref or ref.get("account_id") is not None:
+        return ref
+    from ..services import btapi_service, managed_accounts as ma
+
+    wanted = (ref.get("account_name") or "").strip()
+    # Cloud-native onboarding registers the managed system under the deploy name with
+    # a placeholder IP, so an IP-only lookup misses it — same hint the run form passes.
+    meta = _find_cloud_deploy_meta(db, cloud, target)
+    name_hint = meta.get("instance_name") or meta.get("vm_name") or ""
+    ip, sys_name = ma.lookup_args(target, name_hint)
+
+    systems = await btapi_service.list_ps_managed_systems_by_ip_or_name(ip, sys_name)
+    accounts_by_system = {}
+    for s in systems:
+        sid = s.get("ManagedSystemID") or s.get("SystemId") or s.get("SystemID")
+        if sid is None:
+            continue
+        accounts_by_system[int(sid)] = \
+            await btapi_service.list_ps_managed_accounts_with_fallback(int(sid))
+
+    found = ma.find_account_by_name(
+        ma.normalize_managed_systems(systems, accounts_by_system), wanted)
+    if not found:
+        raise LookupError(
+            f"Password Safe has no managed account named {wanted!r} for host "
+            f"{target!r}. Onboard it there, or run this host separately with an "
+            f"account picked from its own list.")
+    return found
 
 
 def _vm_build_key_secret(cloud: str, meta: dict) -> str:
@@ -535,6 +602,18 @@ async def _run_job(
             # Long enough that the request is still open after the run for the
             # rotate-on-check-in + check-in below (best-effort mitigation).
             _req_dur = int(_cfg("ansible_managed_request_duration_min") or 60)
+            # A bulk run supplies the account by NAME; resolve it against THIS job's
+            # host before checking anything out, so every host uses its own
+            # credential. A pinned ref from the single-run picker passes through.
+            try:
+                managed_account = await _resolve_managed_ref(db, managed_account, target, cloud)
+                managed_become = await _resolve_managed_ref(db, managed_become, target, cloud)
+            except LookupError as e:
+                job_service.set_failed(db, job_id, str(e))
+                return
+            except btapi_service.BTAPIError as e:
+                job_service.set_failed(db, job_id, f"Password Safe lookup failed: {e}")
+                return
             try:
                 if managed_account:
                     req_id, cred = await btapi_service.get_ps_credential_with_request(
@@ -1182,6 +1261,18 @@ async def run_playbook_bulk(
         plan = inventory_service.plan_bulk_run(visible, payload.inventory_ids)
     except inventory_service.BulkSelectionError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+    # A k8s/database run is a localhost play with no SSH connection; the run path
+    # silently ignores the connection-identity fields. Across a batch that silence
+    # would be misleading, so refuse instead.
+    wrong_fields = inventory_service.reject_connection_fields(plan["kind"], {
+        "secret_ssh_key_source": payload.secret_ssh_key_source,
+        "secret_become_source": payload.secret_become_source,
+        "managed_account": payload.managed_account,
+        "managed_become": payload.managed_become,
+    })
+    if wrong_fields:
+        raise HTTPException(status_code=400, detail=wrong_fields)
 
     batch_id = uuid.uuid4().hex[:12]
     jobs, failed = [], []

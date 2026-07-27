@@ -97,6 +97,43 @@ def normalize_managed_systems(systems: list, accounts_by_system: dict) -> list:
     return out
 
 
+def find_account_by_name(systems: list, name: str):
+    """Locate a managed account by NAME across the normalized systems for one host.
+
+    This is what makes a managed account usable in a bulk run. A
+    ``ManagedAccountRef`` pins ``system_id`` + ``account_id``, both specific to one
+    managed system, so the same ref cannot be reused across a fleet — it would check
+    out one machine's credential and connect everywhere with it. Instead each job
+    looks up the chosen account name against ITS OWN host and builds the ref from
+    that host's ids.
+
+    Matching accepts the raw account name or its :func:`ssh_login_user` form, so a
+    cloud-plugin registration like ``svc-ansible;local`` (AWS Systems Manager appends
+    a scope suffix) matches a plain ``svc-ansible``. Comparison is case-insensitive:
+    Password Safe account names are not case-sensitive in practice, and a case
+    mismatch here would surface as a confusing per-host "account not found".
+
+    Returns a ``ManagedAccountRef``-shaped dict, or ``None`` when the host has no
+    such account. Pure — the ps-cli calls that produce ``systems`` are the caller's.
+    """
+    wanted = (name or "").strip().lower()
+    if not wanted:
+        return None
+    for system in systems or []:
+        for account in (system.get("accounts") or []):
+            raw = (account.get("name") or "").strip().lower()
+            if wanted in (raw, ssh_login_user(raw)):
+                return {
+                    "system_id":    system["system_id"],
+                    "account_id":   account["account_id"],
+                    # The account's own name, not the operator's spelling — it
+                    # becomes ansible_user, and the suffix form is significant there.
+                    "account_name": account.get("name") or "",
+                    "uses_ssh_key": bool(account.get("uses_ssh_key")),
+                }
+    return None
+
+
 def requires_ephemeral_store(has_managed: bool, eff_runner: str,
                              is_adhoc: bool, is_playbook: bool) -> bool:
     """True when a managed-account run would dispatch to a store-referencing cloud

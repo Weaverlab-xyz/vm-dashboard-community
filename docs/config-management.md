@@ -179,9 +179,35 @@ cloud, so a mixed-cloud VM batch can be valid for one host and not another. Thos
 targets come back in the response's `failed` list and are named in the toast; the
 rest still run.
 
-The panel covers the common case — asset, SSH user, extra vars. Runs needing a
-managed-account checkout or named secret vars are still one-at-a-time on the Config
-Management page (the `/run-bulk` endpoint accepts those fields for API callers).
+### Secrets and managed accounts in a bulk run
+
+The inventory panel covers the common case — asset, SSH user, extra vars. For a run
+that needs a Secrets-Management secret or a Password Safe managed account, use
+**Continue on the Config Management page →**. It carries the selection over and the
+full run form applies to it: named secret vars, become password, SSH key, and the
+managed-account picker.
+
+**A managed account is matched by name on each host.** A `ManagedAccountRef` normally
+pins `system_id` + `account_id`, and both belong to one managed system — reusing one
+across a fleet would check out a *single machine's* credential and connect to every
+host with it. So a bulk run sends the account **name** instead, and each job resolves
+it against the host it is actually configuring, then checks out that host's own
+credential. The account list you pick from is read from one target as a sample; a host
+that doesn't have an account by that name fails **only its own job**, with a message
+naming the host and the account.
+
+This works for domain accounts too — the Password Safe lookup already falls back to
+domain-linked accounts — and it matches the `{user};{suffix}` form that cloud-native
+onboarding registers (the AWS Systems Manager plugin appends a scope suffix), so
+picking `svc-ansible` matches `svc-ansible;local`.
+
+**Connection credentials are refused for Kubernetes and database batches.** Those run
+a `localhost` play that reaches out over a kubeconfig or DB login — there is no SSH
+connection to authenticate, and the run path silently ignores `managed_account`,
+`managed_become`, `secret_ssh_key_source` and `secret_become_source`. A single run can
+absorb that quietly; a batch would leave you believing a credential had been applied
+to fifty clusters, so `/run-bulk` rejects the combination with a 400. Named
+`secret_vars` are honored on those targets and stay available.
 
 ---
 

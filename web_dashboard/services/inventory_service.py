@@ -291,3 +291,26 @@ def plan_bulk_run(items: list, selected_ids: list) -> dict:
             "These selected resources can't be targeted:\n  - " + "\n  - ".join(problems))
 
     return {"kind": kind, "targets": targets}
+
+
+# Run fields that authenticate an SSH CONNECTION. A k8s/database run is a localhost
+# play reaching out over a kubeconfig or DB login — it has no SSH connection, and the
+# run path silently ignores these (see RunRequest.target_kind). Silent is survivable
+# for one run; across a batch it would let an operator believe a credential had been
+# applied to every cluster, so a bulk run rejects them outright.
+_CONNECTION_FIELDS = ("secret_ssh_key_source", "secret_become_source",
+                      "managed_account", "managed_become")
+
+
+def reject_connection_fields(kind: str, present: dict):
+    """Error message when connection-identity fields are set for a non-VM bulk run,
+    else ``None``. ``present`` maps field name → the submitted value (any truthy
+    value counts as set)."""
+    if kind == "vm":
+        return None
+    offenders = [f for f in _CONNECTION_FIELDS if present.get(f)]
+    if not offenders:
+        return None
+    return (f"{', '.join(offenders)} cannot apply to {kind} targets — they run a "
+            f"localhost play that reaches out over a kubeconfig or DB login, with no "
+            f"SSH connection to authenticate. Use named secret vars instead.")
