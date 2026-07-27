@@ -18,7 +18,7 @@ Same shape in both files, divergent only where the package manager / unit names 
 1. **OS-family gate** — abort if run on the wrong family (Debian script refuses RPM systems and vice-versa).
 2. **Resolve the BT target user** — `$BT_TARGET_USER` env override, else autodetect the cloud-default user from a known list (`ubuntu`/`debian`/`admin` on Debian-family, `ec2-user`/`rocky`/`centos`/`almalinux`/`cloud-user` on RPM-family), else fall back to `$SUDO_USER`.
 3. **System updates** — `apt-get dist-upgrade` (Debian) / `dnf --security upgrade` (RPM). Skippable with `BT_SKIP_UPDATES=1`.
-4. **sshd hardening for PRA Shell Jump** — writes `/etc/ssh/sshd_config.d/99-bt-ready.conf` enforcing key-only auth, no root password login, sensible client-alive timers. Validated with `sshd -t` before exit.
+4. **sshd hardening for PRA Shell Jump** — writes `/etc/ssh/sshd_config.d/00-bt-ready.conf` enforcing key-only auth, no root password login, sensible client-alive timers. Validated with `sshd -t` before exit. (`00-`, not `99-`: sshd is first-occurrence-wins, so loading lex-first is what makes these directives beat a later compliance drop-in — see **Precedence** below. On OpenSSH < 8.2, which has no `Include` for `sshd_config.d`, they go into `/etc/ssh/sshd_config` instead.)
 5. **Sudoers** — writes `/etc/sudoers.d/90-bt-ready` granting the resolved user passwordless sudo. Validated with `visudo -c` before keeping.
 6. **Time sync** — `systemd-timesyncd` (Debian) / `chronyd` (RPM). BeyondTrust auth fails on skewed clocks.
 7. **Baseline hygiene** — persistent journald; opt-in unattended security updates via `BT_AUTOPATCH=1`.
@@ -244,7 +244,7 @@ The first end-to-end run. Repeat the equivalent on Azure and GCP afterward — t
    ```sh
    sudo -n true                              # passwordless sudo
    sudo cat /etc/sudoers.d/90-bt-ready       # the NOPASSWD line for ubuntu
-   sudo cat /etc/ssh/sshd_config.d/99-bt-ready.conf
+   sudo cat /etc/ssh/sshd_config.d/00-bt-ready.conf
    systemctl is-active ssh                   # active
    timedatectl                               # System clock synchronized: yes
    sudo journalctl --list-boots | head       # persistent journald
