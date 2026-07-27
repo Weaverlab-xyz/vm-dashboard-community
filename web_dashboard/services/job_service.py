@@ -128,6 +128,41 @@ def set_failed(db: Session, job_id: str, error: str) -> Optional[Job]:
     return job
 
 
+def finish_batch_parent(db: Session, parent_job_id: str, child_job_ids: list) -> Optional[Job]:
+    """Close out a ``*_bulk_deploy`` parent once its children have all been driven.
+
+    A parent exists only to drive its children, so nothing ever gave it a terminal
+    status. The worker sets a job ``running`` when it claims it and only marks it
+    failed if dispatch *raises* — a batch that finishes normally therefore left its
+    parent stuck at ``running`` 0% until ``reconcile_stale_jobs`` eventually failed a
+    batch that had actually succeeded.
+
+    The parent's outcome is the children's: completed unless every child failed, since
+    a parent that ran to the end did its job even when an individual VM did not. The
+    per-child counts land on the parent's metadata so the row is worth reading rather
+    than just being unstuck.
+    """
+    children = db.query(Job).filter(Job.id.in_(child_job_ids)).all() if child_job_ids else []
+    counts = {}
+    for child in children:
+        counts[child.status] = counts.get(child.status, 0) + 1
+    total = len(children)
+    failed = counts.get("failed", 0)
+    summary = {"batch_total": total, "batch_failed": failed,
+               "batch_completed": counts.get("completed", 0)}
+
+    if total and failed == total:
+        job = db.query(Job).filter(Job.id == parent_job_id).first()
+        if job:
+            meta = job.metadata_dict
+            meta.update(summary)
+            job.metadata_dict = meta
+            db.commit()
+        return set_failed(db, parent_job_id,
+                          f"All {total} instance(s) in the batch failed.")
+    return set_completed(db, parent_job_id, summary)
+
+
 def update_metadata(db: Session, job_id: str, data: dict) -> Optional[Job]:
     """Merge `data` into the job's existing metadata without changing status."""
     job = db.query(Job).filter(Job.id == job_id).first()

@@ -34,6 +34,21 @@ def _get_db_session():
     return SessionLocal()
 
 
+def _finish_parent(parent_job_id: str, child_job_ids: list) -> None:
+    """Give the batch parent a terminal status once its children are done.
+
+    Own session: `run()` holds none, and the per-child sessions are opened and closed
+    inside `_run_deploy`. Best-effort — a parent left `running` is cosmetic next to a
+    batch whose VMs all exist."""
+    db = _get_db_session()
+    try:
+        job_service.finish_batch_parent(db, parent_job_id, child_job_ids)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("could not close out batch parent %s: %s", parent_job_id, exc)
+    finally:
+        db.close()
+
+
 def _ssh_key_secret(payload: OCIDeployRequest) -> str:
     """The Vault secret this launch reads its public key from — per-launch override
     first, then the configured default. Shared by the single and batch paths so they
@@ -54,6 +69,9 @@ async def run(job_id: str, job_type: str, meta: dict) -> None:
         # drives them and owns their status. Each child carries its own full request.
         job_items = [(c["job_id"], OCIDeployRequest(**c["req"])) for c in meta["children"]]
         await _run_bulk_deploy(job_items, meta["compartment_ocid"])
+        # The parent has no terminal status of its own — the worker only marks a job
+        # failed when dispatch raises, so without this it stays `running` at 0%.
+        _finish_parent(job_id, [c["job_id"] for c in meta["children"]])
     elif job_type == "oci_destroy":
         await _run_destroy(job_id, meta["instance_ocid"], meta.get("deploy_job_id"))
 

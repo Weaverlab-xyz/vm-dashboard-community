@@ -81,6 +81,9 @@ async def run(job_id: str, job_type: str, meta: dict) -> None:
             meta.get("jumpoint_name") or "",
             meta.get("pra_credential_ref") or "",
         )
+        # The parent has no terminal status of its own — the worker only marks a job
+        # failed when dispatch raises, so without this it stays `running` at 0%.
+        _finish_parent(job_id, [c["job_id"] for c in meta["children"]])
     elif job_type == "ec2_destroy":
         await _run_destroy(job_id, meta.get("deploy_job_id") or "",
                            meta["instance_id"], meta["region"])
@@ -244,6 +247,21 @@ async def _acquire_batch_resources(db, progress_job_id: str, region: str,
 def _get_db_session():
     from ..database import SessionLocal
     return SessionLocal()
+
+
+def _finish_parent(parent_job_id: str, child_job_ids: list) -> None:
+    """Give the batch parent a terminal status once its children are done.
+
+    Own session: `run()` holds none, and the per-child sessions are opened and closed
+    inside `_run_deploy`. Best-effort — a parent left `running` is cosmetic next to a
+    batch whose VMs all exist."""
+    db = _get_db_session()
+    try:
+        job_service.finish_batch_parent(db, parent_job_id, child_job_ids)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("could not close out batch parent %s: %s", parent_job_id, exc)
+    finally:
+        db.close()
 
 
 def _aws_deploy_payload_hash(**fields) -> str:
