@@ -149,20 +149,57 @@ def test_no_handled_type_is_both_claimable_and_dispatched_in_request():
         + "; ".join(violations))
 
 
-def test_bulk_deploy_children_are_created_unclaimable():
-    """The specific instance of the rule above, pinned by name so a later edit to the
-    bulk endpoint can't quietly drop the status and reintroduce the double launch."""
-    src = open(os.path.join(_ROOT, "web_dashboard", "api", "aws.py")).read()
-    tree = ast.parse(src)
-    fn = next(n for n in ast.walk(tree)
-              if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-              and n.name == "bulk_deploy_amis")
-    children = [(t, s) for t, s in _create_job_calls(fn) if t == "ec2_deploy"]
-    assert children, "bulk_deploy_amis no longer creates ec2_deploy children"
-    for job_type, status in children:
-        assert status == "queued", (
-            f"bulk ec2_deploy children are created {status!r} — the runner will claim "
-            "them alongside their ec2_bulk_deploy parent and deploy each instance twice")
+def _parent_child_endpoints():
+    """Endpoints that create a parent job whose metadata carries a `children` list.
+
+    Structural, so it needs no list of known bulk endpoints: naming child job ids in a
+    parent's metadata *is* the declaration that something other than the runner will
+    drive them."""
+    for path in _api_modules():
+        tree = ast.parse(open(path).read(), path)
+        for fn in ast.walk(tree):
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            parents, others = [], []
+            for n in ast.walk(fn):
+                if not (isinstance(n, ast.Call) and getattr(n.func, "attr", "") == "create_job"):
+                    continue
+                md = next((k.value for k in n.keywords if k.arg == "metadata"), None)
+                keys = ({k.value for k in md.keys if isinstance(k, ast.Constant)}
+                        if isinstance(md, ast.Dict) else set())
+                def kw(name, default=None):
+                    for k in n.keywords:
+                        if k.arg == name and isinstance(k.value, ast.Constant):
+                            return k.value.value
+                    return default
+                (parents if "children" in keys else others).append(
+                    (kw("job_type"), kw("status", "pending")))
+            if parents:
+                yield os.path.basename(path), fn.name, parents, others
+
+
+def test_children_of_a_parent_job_are_created_unclaimable():
+    """The rule the in-request check above can't see any more.
+
+    That one keys on `background_tasks.add_task` being present in the endpoint — but
+    once a bulk endpoint is migrated the add_task is gone, so it stops applying exactly
+    when the parent/child split becomes real. A dropped `status="queued"` would then be
+    caught by nothing, and every VM in the batch gets created twice.
+
+    Checked structurally against any endpoint that names child job ids in a parent's
+    metadata, so a future bulk endpoint is covered the day it is written."""
+    found, violations = 0, []
+    for module, fn_name, parents, others in _parent_child_endpoints():
+        found += 1
+        for job_type, status in others:
+            if job_type in _handled_types() and status != "queued":
+                violations.append(
+                    f"{module}:{fn_name} creates {job_type} as {status!r} while also "
+                    "creating a parent that lists it as a child")
+    assert found >= 2, (
+        f"expected the AWS and Azure bulk endpoints to match this shape, found {found} — "
+        "the rule may have stopped matching rather than started passing")
+    assert not violations, "; ".join(violations)
 
 
 def test_queued_is_outside_the_claim_query():
