@@ -4,25 +4,37 @@ Unlike VM/host targets (which SSH/WinRM *to* an IP — handled by ``api.config_m
 ``_run_job``), these run a ``hosts: localhost, connection: local`` play that reaches
 *out* to the cluster API (via a kubeconfig) or the DB endpoint (via login vars).
 
-They ALWAYS execute on a **remote in-cloud transient runner** (ECS / ACI / Cloud
-Run) placed in-subnet with line-of-sight to the private endpoint — never the local
-sibling-Docker path, which can't reach RFC1918 endpoints and whose egress traverses
-the corporate TLS-inspecting proxy. This is the same reasoning that gave
-``k8s_runner_service`` its cloud path.
+The runner is chosen by the target's cloud, and the choice is about **line-of-sight
+to the endpoint**:
+
+* Cloud-hosted resources (aws / azure / gcp) ALWAYS execute on a **remote in-cloud
+  transient runner** (ECS / ACI / Cloud Run) placed in-subnet with reach to the
+  private endpoint — never the local sibling-Docker path, which can't reach those
+  RFC1918 endpoints and whose egress traverses the corporate TLS-inspecting proxy.
+  This is the same reasoning that gave ``k8s_runner_service`` its cloud path.
+* A Kubernetes cluster registered with ``cloud="local"`` (an on-prem cluster — see
+  ``examples/playbooks/k3s/`` for building one) inverts that: it sits on the
+  corporate LAN, where an in-cloud task has no route at all, so it runs in the local
+  sibling container. Same image, same localhost play, same scrubbing.
 
 Dispatched by ``jobs_worker`` (``job_type=ansible_cloud_run``). The connection
 material is resolved server-side at launch from the resource row + the encrypted
 config store, delivered to the runner via an ephemeral env var, and scrubbed from
 the job output. The job metadata carries only refs — never a resolved credential.
 """
+import asyncio
 import base64
 import json
 import logging
+import os
+import subprocess
+import tempfile
 
 from sqlalchemy.orm import Session
 
 from . import (cloud_database_service, config_service, job_service,
                k8s_runner_service, k8s_service, storage_service)
+from .ansible_localhost_cmd import build_local_docker_argv
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +43,17 @@ ANSIBLE_DB_ENGINES = ("postgres", "mysql", "sqlserver")
 
 # The cloud's native transient runner (the default when no per-cloud override).
 _CLOUD_NATIVE_RUNNER = {"aws": "ecs", "azure": "aci", "gcp": "gcp"}
+
+# Which resources may be a Config-Management target, by cloud. Single source of truth
+# for both the picker listing (/managed-targets) and the run gate — they sat as two
+# separate literal tuples and silently disagreeing would half-wire the feature.
+#
+# "local" is a Kubernetes cluster registered from a kubeconfig (an on-prem cluster —
+# examples/playbooks/k3s/ builds one); it runs on the local runner. Databases stay
+# cloud-only: a CloudDatabase is always provisioned into a cloud and never carries
+# cloud="local", so there is nothing for a local runner to reach.
+K8S_TARGET_CLOUDS = ("aws", "azure", "gcp", "local")
+DB_TARGET_CLOUDS = ("aws", "azure", "gcp")
 
 # Distinct ECS task family so these localhost runs don't share task-def revision
 # history with the SSH VM runner (ansible-config-mgmt) or the k8s runner (k8s-runner).
@@ -75,11 +98,23 @@ def _kubeconfig_tokens(kubeconfig: str) -> list:
 
 
 def resolve_runner(cloud: str) -> str:
-    """The transient in-cloud runner backend for a k8s/DB target in ``cloud``:
-    ``ansible_runner_<cloud>`` override, else the cloud-native default. ``local`` is
-    rejected — these resources are private, so the run must execute in-cloud (this
-    also keeps the API/DB traffic clear of the corporate TLS-inspecting proxy)."""
+    """The runner backend for a k8s/DB target in ``cloud``: ``ansible_runner_<cloud>``
+    override, else the cloud-native default.
+
+    Two rules that look contradictory but aren't — they cover opposite topologies:
+
+    * ``cloud="local"`` (an on-prem cluster registered from a kubeconfig) MUST run on
+      the local runner. The cluster is on the corporate LAN, where a transient ECS /
+      ACI / Cloud Run task has no route; the dashboard host is the only thing with
+      line-of-sight.
+    * ``cloud`` in aws/azure/gcp must NOT run on the local runner. Those control
+      planes / DB endpoints are private to their VPC, so the run has to originate
+      in-cloud (which also keeps the traffic clear of a corporate TLS-inspecting
+      proxy). An ``ansible_runner_<cloud>: local`` override stays an error.
+    """
     cloud = (cloud or "").strip().lower()
+    if cloud == "local":
+        return "local"
     default = _CLOUD_NATIVE_RUNNER.get(cloud)
     if not default:
         raise AnsibleCloudRunError(
@@ -92,21 +127,124 @@ def resolve_runner(cloud: str) -> str:
     return runner
 
 
+def _run_local_docker_sync(cmd: list) -> tuple:
+    """Run the local `docker run` and return ``(exit_code, combined_output)``.
+
+    Note the tuple order: it matches the cloud runner task fns, which is the REVERSE
+    of ansible_local_service._run_sync's ``(output, rc)``. Mirroring the cloud shape
+    here keeps _dispatch_cloud_localhost_runner's four branches interchangeable."""
+    try:
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+    except FileNotFoundError:
+        raise AnsibleCloudRunError(
+            "The local Ansible runner needs the `docker` CLI on the dashboard host, "
+            "and it was not found. On-prem Kubernetes targets run in a sibling "
+            "container because only this host has a route to the cluster — a "
+            "dashboard deployed in a cloud (ECS / ACI / Cloud Run) cannot run them.")
+    lines: list = []
+    if proc.stdout:
+        for line in iter(proc.stdout.readline, ""):
+            lines.append(line.rstrip())
+    proc.wait()
+    return proc.returncode or 0, "\n".join(lines)
+
+
+async def _run_local_ansible_localhost(
+    *, image: str, playbook_b64: str, conn_vars_b64: str, kubeconfig_b64: str,
+    ps_env: dict | None = None,
+) -> tuple:
+    """Localhost Ansible play in a sibling container on the dashboard host — the
+    on-prem Kubernetes path (``cloud="local"``).
+
+    Every env value is written to a 0600 ``--env-file`` in a per-run temp directory
+    rather than passed with ``-e``, so the kubeconfig's client key never lands in the
+    host's process list. The directory is removed as soon as the container exits."""
+    env: dict = {"PLAYBOOK_B64": playbook_b64}
+    if conn_vars_b64:
+        env["CONN_VARS_B64"] = conn_vars_b64
+    if kubeconfig_b64:
+        env["KUBECONFIG_B64"] = kubeconfig_b64
+    env.update(ps_env or {})
+
+    with tempfile.TemporaryDirectory(prefix="ansible_cloud_run_") as tmpdir:
+        env_path = os.path.join(tmpdir, "run_env")
+        # Docker env-file lines are literal KEY=VALUE with no shell interpolation,
+        # so base64 blobs and a client secret are carried verbatim.
+        with open(env_path, "w", newline="\n") as f:
+            for k, v in env.items():
+                f.write(f"{k}={v}\n")
+        try:
+            os.chmod(env_path, 0o600)
+        except OSError:
+            pass  # Windows NTFS — the file lives in the per-run tmpdir either way
+
+        cmd = build_local_docker_argv(
+            image=image, env_file_path=env_path,
+            with_conn_vars=bool(conn_vars_b64), with_kubeconfig=bool(kubeconfig_b64))
+        logger.info("ansible-cloud-run local: image=%s kubeconfig=%s conn_vars=%s",
+                    image, bool(kubeconfig_b64), bool(conn_vars_b64))
+        return await asyncio.to_thread(_run_local_docker_sync, cmd)
+
+
+def check_target(kind: str, cloud: str, asset_backend: str, asset: str = "") -> str | None:
+    """Validate a k8s/database Config-Management target against its asset storage.
+
+    Returns the error detail for a 400, or ``None`` when the run may proceed. Lives
+    here rather than inline in the endpoint because the two conditions interact and
+    the interaction is the easy thing to get wrong:
+
+    * which clouds are targetable depends on the target KIND (a database has no
+      on-prem case), and
+    * whether local filesystem assets are readable depends on WHERE THE RUNNER RUNS,
+      which is itself derived from the cloud. The in-cloud runners can't see this
+      host's disk; the local runner is this host, so for an on-prem cluster the
+      storage restriction simply doesn't apply.
+
+    Reads config (via resolve_runner) but changes nothing, so both branches are
+    unit-testable without standing up the app.
+    """
+    cloud = (cloud or "").strip().lower()
+    allowed = K8S_TARGET_CLOUDS if kind == "k8s" else DB_TARGET_CLOUDS
+    if cloud not in allowed:
+        return (f"cloud {cloud!r} has no Ansible runner for {kind} targets "
+                f"(supported: {'/'.join(allowed)}).")
+    if asset_backend == "local":
+        try:
+            runs_here = resolve_runner(cloud) == "local"
+        except AnsibleCloudRunError as e:
+            # A misconfigured ansible_runner_<cloud>. Report it as a validation error
+            # now rather than letting the caller enqueue a job that dies in the worker.
+            return str(e)
+        if not runs_here:
+            return (f"Asset {asset!r} lives on local filesystem storage, which the "
+                    f"in-cloud runner cannot reach. Move it to a cloud backend (S3 / "
+                    f"Azure Blob / GCS) on the Storage page, then re-run.")
+    return None
+
+
 async def _dispatch_cloud_localhost_runner(
     *, runner: str, image: str, job_id: str,
     playbook_b64: str, conn_vars_b64: str, kubeconfig_b64: str,
     ps_env: dict | None = None,
 ) -> tuple:
-    """Route to the configured transient cloud runner, reusing the k8s runner's infra
-    resolution+validation (subnet / role / VPC connector — shared with the VM Ansible
-    runner config) but overriding the image with ``ansible_cloud_image`` and the ECS
-    task family. Returns ``(exit_code, output)``; a ``K8sRunnerError`` from the infra
+    """Route to the configured runner, reusing the k8s runner's infra resolution +
+    validation (subnet / role / VPC connector — shared with the VM Ansible runner
+    config) but overriding the image with ``ansible_cloud_image`` and the ECS task
+    family. Returns ``(exit_code, output)``; a ``K8sRunnerError`` from the infra
     validation (missing subnet/role/…) propagates to the caller's ``set_failed``.
 
     ``ps_env`` (when present) is the auto-injected credential env — PASSWORD_SAFE_*
     and/or PORTAINER_* — for an in-playbook
     beyondtrust.secrets_safe lookup; it rides the runner's connection-material env
     channel (no cloud store)."""
+    if runner == "local":
+        # On-prem cluster: no cloud infra to resolve, so this branch takes none of
+        # the subnet/role config the three below require.
+        return await _run_local_ansible_localhost(
+            image=image, playbook_b64=playbook_b64, conn_vars_b64=conn_vars_b64,
+            kubeconfig_b64=kubeconfig_b64, ps_env=ps_env,
+        )
     if runner == "ecs":
         from . import aws_service
         cfg = k8s_runner_service._resolve_ecs()

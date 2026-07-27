@@ -16,9 +16,10 @@ Target types:
     Bare IP / hostname     — ad-hoc; cloud field determines SSH key source
 """
 import logging
+import uuid
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 from sqlalchemy.orm import Session
 
 from ..database import Job, User, get_db
@@ -195,8 +196,9 @@ async def get_localhost_targets(
     the Config-Management page doesn't need the separate k8s / cloud_database feature
     permissions just to populate its picker.
 
-    Only aws/azure/gcp resources with a supported engine appear — the ones an in-cloud
-    Ansible runner can actually reach + configure.
+    Only resources an Ansible runner can actually reach + configure appear: aws/azure/gcp
+    (in-cloud runner), plus — for Kubernetes only — clusters registered with cloud="local",
+    which run on the dashboard's local runner. Databases stay cloud-only.
 
     Response shape:
         {"k8s": [{id, name, cloud, status}, …],
@@ -207,12 +209,12 @@ async def get_localhost_targets(
 
     clusters = []
     for c in db.query(K8sCluster).order_by(K8sCluster.created_at.desc()).all():
-        if (c.cloud or "").lower() in ("aws", "azure", "gcp"):
+        if (c.cloud or "").lower() in acr.K8S_TARGET_CLOUDS:
             clusters.append({"id": c.id, "name": c.name, "cloud": c.cloud,
                              "status": c.status})
     databases = []
     for d in db.query(CloudDatabase).order_by(CloudDatabase.created_at.desc()).all():
-        if (d.cloud or "").lower() in ("aws", "azure", "gcp") and d.engine in acr.ANSIBLE_DB_ENGINES:
+        if (d.cloud or "").lower() in acr.DB_TARGET_CLOUDS and d.engine in acr.ANSIBLE_DB_ENGINES:
             databases.append({"id": d.id, "engine": d.engine, "cloud": d.cloud,
                               "status": d.status})
     return {"k8s": clusters, "databases": databases}
@@ -221,13 +223,34 @@ async def get_localhost_targets(
 # ── Playbook / asset run ───────────────────────────────────────────────────────
 
 class ManagedAccountRef(BaseModel):
-    """A BeyondTrust Password Safe managed account the operator picked from the
-    live list. The ids drive the just-in-time credential checkout; the name is
-    non-secret and becomes ``ansible_user``. Never carries a credential."""
-    system_id: int
-    account_id: int
+    """A BeyondTrust Password Safe managed account. Never carries a credential.
+
+    Two forms, because a single run and a bulk run identify an account differently:
+
+    * PINNED — ``system_id`` + ``account_id``, picked from the live list for one
+      host. Drives the just-in-time checkout directly.
+    * BY NAME — ``account_name`` only, used by a bulk run. Both ids are specific to
+      one managed system, so a pinned ref cannot be reused across a fleet: it would
+      check out one machine's credential and connect to every host with it. A
+      name-only ref is instead resolved against each job's OWN target host at run
+      time (see ``_resolve_managed_ref``).
+
+    ``account_name`` is non-secret and becomes ``ansible_user``.
+    """
+    system_id: int | None = None
+    account_id: int | None = None
     account_name: str = ""
     uses_ssh_key: bool = False   # DSSAutoManagementFlag → checkout as -t dsskey
+
+    @model_validator(mode="after")
+    def _pinned_or_named(self):
+        if self.account_id is not None and self.system_id is not None:
+            return self
+        if (self.account_name or "").strip():
+            return self
+        raise ValueError(
+            "a managed account needs either both system_id and account_id (a pinned "
+            "account for one host) or an account_name (resolved per host at run time)")
 
 
 class RunRequest(BaseModel):
@@ -255,6 +278,10 @@ class RunRequest(BaseModel):
     # passes the backend explicitly because the same asset name may exist on
     # multiple backends.
     asset_backend: str = ""
+    # Groups the jobs of one bulk run (see /run-bulk). A descriptive label only —
+    # nothing authorizes off it — carried on job metadata so the batch can be
+    # identified in the job list.
+    batch_id: str = ""
     # BeyondTrust Password Safe managed-account checkout (LOCAL runner only). The
     # credential is checked out just-in-time at run time — the operator never sees
     # it. managed_account is the connection identity; managed_become is an optional
@@ -300,6 +327,52 @@ def _find_cloud_deploy_meta(db, cloud: str, ip: str) -> dict:
         if (meta.get("public_ip") or meta.get("private_ip")) == ip:
             return meta
     return {}
+
+
+async def _resolve_managed_ref(db, ref: dict, target: str, cloud: str) -> dict:
+    """Fill in a name-only managed-account ref against ``target``'s own host.
+
+    A bulk run picks an account by NAME, because ``system_id``/``account_id`` belong
+    to one managed system — reusing one pinned ref across a fleet would check out a
+    single machine's credential and connect everywhere with it. Each job therefore
+    resolves the name against the host it is actually configuring.
+
+    Already-pinned refs (a single run from the picker) pass through untouched, so
+    this costs a Password Safe lookup only on the bulk path.
+
+    Runs the same chain as GET /managed-accounts: a deploy-name hint, then a
+    managed-system lookup by IP or name, then that system's accounts. Raises
+    ``LookupError`` when the host has no such account — the caller fails just this
+    job, leaving the rest of the batch alone.
+    """
+    if not ref or ref.get("account_id") is not None:
+        return ref
+    from ..services import btapi_service, managed_accounts as ma
+
+    wanted = (ref.get("account_name") or "").strip()
+    # Cloud-native onboarding registers the managed system under the deploy name with
+    # a placeholder IP, so an IP-only lookup misses it — same hint the run form passes.
+    meta = _find_cloud_deploy_meta(db, cloud, target)
+    name_hint = meta.get("instance_name") or meta.get("vm_name") or ""
+    ip, sys_name = ma.lookup_args(target, name_hint)
+
+    systems = await btapi_service.list_ps_managed_systems_by_ip_or_name(ip, sys_name)
+    accounts_by_system = {}
+    for s in systems:
+        sid = s.get("ManagedSystemID") or s.get("SystemId") or s.get("SystemID")
+        if sid is None:
+            continue
+        accounts_by_system[int(sid)] = \
+            await btapi_service.list_ps_managed_accounts_with_fallback(int(sid))
+
+    found = ma.find_account_by_name(
+        ma.normalize_managed_systems(systems, accounts_by_system), wanted)
+    if not found:
+        raise LookupError(
+            f"Password Safe has no managed account named {wanted!r} for host "
+            f"{target!r}. Onboard it there, or run this host separately with an "
+            f"account picked from its own list.")
+    return found
 
 
 def _vm_build_key_secret(cloud: str, meta: dict) -> str:
@@ -529,6 +602,18 @@ async def _run_job(
             # Long enough that the request is still open after the run for the
             # rotate-on-check-in + check-in below (best-effort mitigation).
             _req_dur = int(_cfg("ansible_managed_request_duration_min") or 60)
+            # A bulk run supplies the account by NAME; resolve it against THIS job's
+            # host before checking anything out, so every host uses its own
+            # credential. A pinned ref from the single-run picker passes through.
+            try:
+                managed_account = await _resolve_managed_ref(db, managed_account, target, cloud)
+                managed_become = await _resolve_managed_ref(db, managed_become, target, cloud)
+            except LookupError as e:
+                job_service.set_failed(db, job_id, str(e))
+                return
+            except btapi_service.BTAPIError as e:
+                job_service.set_failed(db, job_id, f"Password Safe lookup failed: {e}")
+                return
             try:
                 if managed_account:
                     req_id, cred = await btapi_service.get_ps_credential_with_request(
@@ -872,8 +957,10 @@ async def _run_cloud_localhost(payload: "RunRequest", db, current_user):
 
     These are localhost plays that reach out via a kubeconfig / DB login vars, so
     the SSH-oriented request fields are ignored. Connection material is resolved
-    server-side at launch (never here, never stored on the job) and the run always
-    executes on the in-cloud transient runner (jobs_worker → ansible_cloud_run_service).
+    server-side at launch (never here, never stored on the job). The run executes on
+    the in-cloud transient runner, or — for a cloud="local" Kubernetes cluster, which
+    only this host can reach — the local sibling container (jobs_worker →
+    ansible_cloud_run_service.resolve_runner).
     Returns ``{job_id, status: "queued"}``; the client polls /api/jobs/{id}."""
     from ..services import (k8s_service, cloud_database_service,
                             ansible_cloud_run_service as acr)
@@ -914,19 +1001,12 @@ async def _run_cloud_localhost(payload: "RunRequest", db, current_user):
                 detail="database has no endpoint yet — wait for provisioning to finish.")
         target_label = f"{engine}/{payload.target_id[:8]}"
 
-    if cloud not in ("aws", "azure", "gcp"):
-        raise HTTPException(
-            status_code=400,
-            detail=f"cloud {cloud!r} has no in-cloud Ansible runner (supported: aws/azure/gcp).")
-
-    # The cloud runner can't read the dashboard's local filesystem storage.
+    # Targetable cloud + reachable asset storage. Both conditions turn on where the
+    # runner executes, so they're resolved together in the service (unit-tested there).
     asset_backend = payload.asset_backend or storage_service.active_backend()
-    if asset_backend == "local":
-        raise HTTPException(
-            status_code=400,
-            detail=(f"Asset '{payload.asset}' lives on local filesystem storage, which the "
-                    f"in-cloud runner cannot reach. Move it to a cloud backend (S3 / Azure "
-                    f"Blob / GCS) on the Storage page, then re-run."))
+    problem = acr.check_target(kind, cloud, asset_backend, payload.asset)
+    if problem:
+        raise HTTPException(status_code=400, detail=problem)
 
     # Only operator-picked named secret_vars apply to a localhost play (no SSH key /
     # become / managed-account). Using one requires the secrets:use permission.
@@ -952,6 +1032,7 @@ async def _run_cloud_localhost(payload: "RunRequest", db, current_user):
             "asset_backend": asset_backend,
             "extra_vars": payload.extra_vars or {},
             "secret_vars": payload.secret_vars or {},
+            **({"batch_id": payload.batch_id} if payload.batch_id else {}),
         },
     )
     if wants_secret:
@@ -1074,12 +1155,15 @@ async def run_playbook(
                         "secret is locked to it."))
     description = f"Ansible ({atype}): {payload.asset} → {payload.target}"
 
+    job_meta = {"description": description}
+    if payload.batch_id:
+        job_meta["batch_id"] = payload.batch_id
     job = job_service.create_job(
         db,
         job_type="ansible_local",
         created_by=current_user.username,
         workgroup="ansible",
-        metadata={"description": description},
+        metadata=job_meta,
     )
     if wants_secret:
         # Audit the use — kinds + var names only, never the source refs or values.
@@ -1115,6 +1199,120 @@ async def run_playbook(
         payload.managed_become.model_dump() if payload.managed_become else None,
     )
     return {"job_id": job.id, "status": "queued"}
+
+
+class BulkRunRequest(BaseModel):
+    """A run against several inventory rows at once. The targets are named by
+    INVENTORY ID (``job:…`` / ``k8s:…`` / ``clouddb:…``), never by address — the
+    server resolves each one from its own records, so a client cannot point a run at
+    a host it doesn't own by supplying an IP."""
+    inventory_ids: list[str] = []
+    asset: str
+    asset_backend: str = ""
+    extra_vars: dict = {}
+    secret_vars: dict = {}
+    # VM-only connection fields; ignored for k8s/database rows (localhost plays).
+    ansible_user: str = ""
+    secret_become_source: str = ""
+    secret_ssh_key_source: str = ""
+    managed_account: ManagedAccountRef | None = None
+    managed_become: ManagedAccountRef | None = None
+
+
+@router.post("/run-bulk")
+async def run_playbook_bulk(
+    payload: BulkRunRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Run one asset against several inventory resources — one job per target.
+
+    Validation happens at two levels, and they fail differently on purpose:
+
+    * SELECTION problems — mixed kinds, a kind with no Config-Management path, a row
+      that isn't individually targetable, an id the caller can't see — are checked
+      before any job exists and refuse the whole request with a 400.
+    * PER-TARGET problems are found only when a target is dispatched, and they do not
+      necessarily apply to the rest of the batch: several checks in ``/run`` turn on
+      the target's cloud (``_effective_runner`` and everything downstream of it), so
+      a mixed-cloud VM selection can be fine for one host and not another. Those
+      targets are reported in ``failed`` and the remaining ones still run, rather
+      than being silently dropped or aborting a batch that is already part-queued.
+
+    Each target is dispatched through the ordinary ``/run`` path, so every permission
+    check, secret-store validation and runner decision behaves exactly as it does for
+    a single run — this endpoint adds selection, not a second code path. Jobs share a
+    ``batch_id`` in their metadata.
+
+    Returns ``{batch_id, kind, count, jobs: [...], failed: [...]}``; 400 if every
+    target failed.
+    """
+    from ..services import inventory_service
+
+    # Resolved from a FRESH collect(), not the page's cache: this enqueues work, so
+    # it must not act on a resource that was destroyed since the page loaded. The
+    # RBAC filter is the inventory page's own — an id outside what this user can see
+    # comes back as "unknown" rather than as a target.
+    accessible = inventory_service.accessible_workgroups(current_user)
+    visible = [i for i in inventory_service.collect(db)
+               if inventory_service.visible_to(i, accessible, current_user.username)]
+    try:
+        plan = inventory_service.plan_bulk_run(visible, payload.inventory_ids)
+    except inventory_service.BulkSelectionError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # A k8s/database run is a localhost play with no SSH connection; the run path
+    # silently ignores the connection-identity fields. Across a batch that silence
+    # would be misleading, so refuse instead.
+    wrong_fields = inventory_service.reject_connection_fields(plan["kind"], {
+        "secret_ssh_key_source": payload.secret_ssh_key_source,
+        "secret_become_source": payload.secret_become_source,
+        "managed_account": payload.managed_account,
+        "managed_become": payload.managed_become,
+    })
+    if wrong_fields:
+        raise HTTPException(status_code=400, detail=wrong_fields)
+
+    batch_id = uuid.uuid4().hex[:12]
+    jobs, failed = [], []
+    for target in plan["targets"]:
+        req = RunRequest(
+            asset=payload.asset,
+            asset_backend=payload.asset_backend,
+            extra_vars=payload.extra_vars,
+            secret_vars=payload.secret_vars,
+            ansible_user=payload.ansible_user,
+            secret_become_source=payload.secret_become_source,
+            secret_ssh_key_source=payload.secret_ssh_key_source,
+            managed_account=payload.managed_account,
+            managed_become=payload.managed_become,
+            batch_id=batch_id,
+            **target["spec"],
+        )
+        try:
+            result = await run_playbook(req, background_tasks, db, current_user)
+        except HTTPException as e:
+            failed.append({"inventory_id": target["id"], "name": target["name"],
+                           "error": str(e.detail)})
+            continue
+        jobs.append({"inventory_id": target["id"], "name": target["name"],
+                     "job_id": result["job_id"]})
+
+    if not jobs:
+        # Nothing queued — surface the first reason rather than a misleading success.
+        detail = failed[0]["error"] if failed else "No targets could be run."
+        raise HTTPException(
+            status_code=400,
+            detail=f"No jobs were queued. First target failed with: {detail}")
+
+    job_service.log_audit(
+        db, current_user.username, "ansible_bulk_run",
+        details={"batch_id": batch_id, "kind": plan["kind"], "asset": payload.asset,
+                 "count": len(jobs), "targets": [j["name"] for j in jobs],
+                 "failed": [f["name"] for f in failed]})
+    return {"batch_id": batch_id, "kind": plan["kind"], "count": len(jobs),
+            "jobs": jobs, "failed": failed}
 
 
 @router.get("/secret-options")

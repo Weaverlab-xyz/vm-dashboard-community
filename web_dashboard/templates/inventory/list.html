@@ -52,11 +52,70 @@
     </div>
   </div>
 
+  <!-- Bulk Config Management -->
+  <div x-show="selected.length > 0" x-cloak
+       class="bg-blue-50 rounded-xl border border-blue-200 shadow-sm p-4 mb-6">
+    <div class="flex items-start justify-between gap-4 mb-3">
+      <div>
+        <h2 class="text-sm font-semibold text-blue-900">
+          Run a playbook on <span x-text="selected.length"></span>
+          <span x-text="kindLabel(selectedKind) + (selected.length === 1 ? '' : 's')"></span>
+        </h2>
+        <p class="text-xs text-blue-700 mt-0.5">
+          One job per resource. A bulk run targets one kind at a time — other kinds are
+          locked while this selection is active.
+        </p>
+      </div>
+      <button @click="clearSelection()" class="text-xs text-blue-700 hover:underline shrink-0">Clear</button>
+    </div>
+
+    <div class="flex flex-wrap items-end gap-3">
+      <div class="flex-1 min-w-[240px]">
+        <label class="block text-xs font-medium text-gray-600 mb-1">Playbook</label>
+        <select x-model="runAsset"
+                class="w-full text-sm border border-gray-300 rounded-lg px-2 py-1.5 focus:ring-2 focus:ring-blue-500">
+          <option value="">Select a playbook…</option>
+          <template x-for="a in playbookAssets()" :key="a.backend + '|' + a.name">
+            <option :value="a.backend + '|' + a.name" x-text="a.name + ' (' + a.backend + ')'"></option>
+          </template>
+        </select>
+      </div>
+      <div x-show="selectedKind === 'vm'" class="min-w-[150px]">
+        <label class="block text-xs font-medium text-gray-600 mb-1">SSH user</label>
+        <input x-model="runUser" type="text" placeholder="(default)"
+               class="w-full text-sm border border-gray-300 rounded-lg px-2 py-1.5 focus:ring-2 focus:ring-blue-500">
+      </div>
+      <div class="flex-1 min-w-[200px]">
+        <label class="block text-xs font-medium text-gray-600 mb-1">Extra vars (JSON)</label>
+        <input x-model="runExtraVars" type="text" placeholder="{}"
+               class="w-full text-sm border border-gray-300 rounded-lg px-2 py-1.5 font-mono focus:ring-2 focus:ring-blue-500">
+      </div>
+      <button @click="runBulk()" :disabled="!runAsset || running"
+              class="bg-blue-600 hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-medium px-4 py-2 rounded-lg shadow-sm transition">
+        <span x-text="running ? 'Queueing…' : 'Run'"></span>
+      </button>
+    </div>
+
+    <p class="text-xs text-blue-700 mt-3">
+      Need a Secrets-Management secret or a Password Safe managed account?
+      <button @click="handOffToConfigMgmt()" class="font-medium underline hover:no-underline">
+        Continue on the Config Management page →
+      </button>
+      <span class="text-blue-600">It carries this selection over and adds the secret pickers.</span>
+    </p>
+  </div>
+
   <!-- Inventory table -->
   <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
     <table class="w-full text-sm">
       <thead>
         <tr class="bg-gray-50 border-b border-gray-200 text-left">
+          <th class="px-4 py-3 w-10">
+            <input type="checkbox" @change="toggleAll($event.target.checked)"
+                   :checked="allShownSelected()" :disabled="selectableShown().length === 0"
+                   title="Select all runnable resources shown"
+                   class="rounded border-gray-300 text-blue-600 focus:ring-blue-500 disabled:opacity-30">
+          </th>
           <th class="px-4 py-3 font-semibold text-gray-600">Provider</th>
           <th class="px-4 py-3 font-semibold text-gray-600">Kind</th>
           <th class="px-4 py-3 font-semibold text-gray-600">Name</th>
@@ -70,13 +129,18 @@
       </thead>
       <tbody class="divide-y divide-gray-50">
         <tr x-show="loading">
-          <td colspan="9" class="px-4 py-10 text-center text-gray-400">Loading…</td>
+          <td colspan="10" class="px-4 py-10 text-center text-gray-400">Loading…</td>
         </tr>
         <tr x-show="!loading && filtered().length === 0">
-          <td colspan="9" class="px-4 py-10 text-center text-gray-400">No deployed resources found.</td>
+          <td colspan="10" class="px-4 py-10 text-center text-gray-400">No deployed resources found.</td>
         </tr>
         <template x-for="r in filtered()" :key="r.id">
-          <tr class="hover:bg-gray-50 transition">
+          <tr class="hover:bg-gray-50 transition" :class="isSelected(r) ? 'bg-blue-50' : ''">
+            <td class="px-4 py-3">
+              <input type="checkbox" :checked="isSelected(r)" @change="toggle(r)"
+                     :disabled="!selectable(r)" :title="disabledReason(r)"
+                     class="rounded border-gray-300 text-blue-600 focus:ring-blue-500 disabled:opacity-30 disabled:cursor-not-allowed">
+            </td>
             <td class="px-4 py-3 font-medium text-gray-800 uppercase" x-text="r.cloud"></td>
             <td class="px-4 py-3 text-gray-600" x-text="kindLabel(r.kind)"></td>
             <td class="px-4 py-3 text-gray-800 max-w-[220px] truncate" x-text="r.name" :title="r.name"></td>
@@ -111,6 +175,14 @@
       filterKind: '',
       filterRegion: '',
 
+      // Bulk Config-Management run
+      selected: [],          // inventory ids
+      assets: [],
+      runAsset: '',
+      runUser: '',
+      runExtraVars: '',
+      running: false,
+
       async init() {
         requireAuth();
         await this.load();
@@ -121,10 +193,140 @@
         try {
           const resp = await API.get('/api/inventory');
           this.items = (resp && resp.items) || [];
+          // Drop selections for rows that no longer exist, so a refresh can't leave
+          // ids pointing at destroyed resources.
+          const live = new Set(this.items.map(i => i.id));
+          this.selected = this.selected.filter(id => live.has(id));
         } catch (e) {
           toast('Failed to load inventory: ' + e.message, 'error');
         } finally {
           this.loading = false;
+        }
+        if (this.assets.length === 0) {
+          try {
+            this.assets = await API.get('/api/config-mgmt/assets') || [];
+          } catch (e) {
+            this.assets = [];   // bulk run stays unavailable; the table still works
+          }
+        }
+      },
+
+      // ── selection ───────────────────────────────────────────────────────────
+      // `cfg_runnable` / `cfg_reason` come from the server (inventory_service), which
+      // derives them from the same rule the bulk endpoint enforces — so this never
+      // offers a checkbox the server would refuse.
+
+      playbookAssets() {
+        return this.assets.filter(a => /\.ya?ml$/i.test(a.name));
+      },
+
+      get selectedKind() {
+        const first = this.items.find(i => i.id === this.selected[0]);
+        return first ? first.kind : '';
+      },
+
+      selectable(r) {
+        if (!r.cfg_runnable) return false;
+        return !this.selectedKind || r.kind === this.selectedKind;
+      },
+
+      disabledReason(r) {
+        if (!r.cfg_runnable) return r.cfg_reason || 'Not a Config-Management target.';
+        if (this.selectedKind && r.kind !== this.selectedKind) {
+          return `A bulk run targets one kind at a time — ${this.kindLabel(this.selectedKind)}s `
+               + `are selected. Clear the selection to pick ${this.kindLabel(r.kind)}s instead.`;
+        }
+        return '';
+      },
+
+      isSelected(r) { return this.selected.includes(r.id); },
+
+      toggle(r) {
+        if (this.isSelected(r)) this.selected = this.selected.filter(id => id !== r.id);
+        else if (this.selectable(r)) this.selected = [...this.selected, r.id];
+      },
+
+      selectableShown() {
+        return this.filtered().filter(r => this.selectable(r));
+      },
+
+      allShownSelected() {
+        const shown = this.selectableShown();
+        return shown.length > 0 && shown.every(r => this.isSelected(r));
+      },
+
+      toggleAll(checked) {
+        if (!checked) { this.clearSelection(); return; }
+        // With nothing selected yet, "select all" over a mixed table would be
+        // ambiguous — anchor on the first runnable row's kind and take that kind only.
+        const shown = this.filtered().filter(r => r.cfg_runnable);
+        const kind = this.selectedKind || (shown[0] && shown[0].kind);
+        if (!kind) return;
+        const ids = shown.filter(r => r.kind === kind).map(r => r.id);
+        this.selected = [...new Set([...this.selected, ...ids])];
+      },
+
+      clearSelection() { this.selected = []; },
+
+      // Hand the selection to /config-mgmt, which has the secret + managed-account
+      // pickers. sessionStorage rather than a query string (50 ids makes an unusable
+      // URL) and rather than localStorage — a pending fleet run must not survive a
+      // browser restart. The receiving page removes the key as soon as it reads it.
+      handOffToConfigMgmt() {
+        const rows = this.items.filter(i => this.selected.includes(i.id));
+        // A representative host, so the Password Safe account list can be populated
+        // there. Each job still resolves the chosen account name against its own
+        // host — this only supplies the names to choose from.
+        const sample = rows.find(r => r.kind === 'vm' && r.ip) || null;
+        sessionStorage.setItem('cfgmgmt_bulk_selection', JSON.stringify({
+          ids: this.selected,
+          kind: this.selectedKind,
+          names: rows.map(r => r.name),
+          sampleHost: sample ? sample.ip : '',
+          sampleName: sample ? sample.name : '',
+        }));
+        window.location.href = '/config-mgmt';
+      },
+
+      async runBulk() {
+        let extra = {};
+        if (this.runExtraVars.trim()) {
+          try {
+            extra = JSON.parse(this.runExtraVars);
+          } catch (e) {
+            toast('Extra vars must be valid JSON.', 'error');
+            return;
+          }
+        }
+        const [backend, ...rest] = this.runAsset.split('|');
+        const count = this.selected.length;
+        if (!confirm(`Run ${rest.join('|')} on ${count} ${this.kindLabel(this.selectedKind)}`
+                     + `${count === 1 ? '' : 's'}? This queues ${count} job${count === 1 ? '' : 's'}.`)) return;
+        this.running = true;
+        try {
+          const resp = await API.post('/api/config-mgmt/run-bulk', {
+            inventory_ids: this.selected,
+            asset: rest.join('|'),
+            asset_backend: backend,
+            extra_vars: extra,
+            ansible_user: this.runUser,
+          });
+          const failed = resp.failed || [];
+          if (failed.length) {
+            // A target can fail its own validation without the batch being wrong —
+            // several checks depend on the target's cloud. Name them rather than
+            // letting the count quietly disagree with what was selected.
+            toast(`Queued ${resp.count} job(s); ${failed.length} could not run: `
+                  + failed.map(f => `${f.name} (${f.error})`).join('; '), 'error');
+          } else {
+            toast(`Queued ${resp.count} job(s) — batch ${resp.batch_id}`, 'success');
+          }
+          this.clearSelection();
+          this.runExtraVars = '';
+        } catch (e) {
+          toast('Bulk run failed: ' + e.message, 'error');
+        } finally {
+          this.running = false;
         }
       },
 

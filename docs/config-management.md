@@ -143,6 +143,74 @@ Treat these playbooks accordingly. Starters live in
 
 ---
 
+## Bulk runs from the inventory
+
+The Config Management page runs one asset against one target. To apply a playbook
+across a fleet, use the **Inventory** page (`/inventory`): filter to what you want,
+tick the rows, and a run panel appears. Each selected resource becomes its **own
+job**, all tagged with a shared `batch_id` — so one host failing doesn't roll back
+the others, and each job keeps its own log and output scrubbing.
+
+**One kind per run.** Selecting a VM locks the checkboxes on Kubernetes clusters and
+databases, and vice versa. This isn't a UI convenience — the kinds are not
+interchangeable at any level. A VM run SSHes to a host; k8s and database runs are
+`localhost` plays that reach *out* over a kubeconfig or DB login. Different request
+fields, a different runner, and a playbook written for one is meaningless against
+another. A mixed selection could only ever produce a pile of failed jobs, so it is
+refused rather than attempted.
+
+Rows that can't be a target at all are disabled, with the reason on hover:
+
+| Row | Why it's disabled |
+|---|---|
+| Virtual desktops | No Ansible target exists behind a seat. |
+| Proxmox / Nutanix VMs | Their deploy records a node + VMID, not an address. Target them through their hypervisor **group** on the Config Management page instead. |
+| Databases with an unsupported engine | The runner image ships client libraries for postgres / mysql / sqlserver only. |
+| Clusters or databases in a cloud with no runner | See [Runners](#runners). |
+
+Those reasons come from the server, computed by the same rule the endpoint enforces,
+so the page can never offer a checkbox the API would reject.
+
+Two limits worth knowing. A batch is capped at **50 targets** — each one is a job, so
+a mis-clicked "select all" against a large estate would otherwise fan out unbounded
+work. And while *selection* problems refuse the whole request before any job exists,
+a **per-target** failure at dispatch does not: several checks depend on the target's
+cloud, so a mixed-cloud VM batch can be valid for one host and not another. Those
+targets come back in the response's `failed` list and are named in the toast; the
+rest still run.
+
+### Secrets and managed accounts in a bulk run
+
+The inventory panel covers the common case — asset, SSH user, extra vars. For a run
+that needs a Secrets-Management secret or a Password Safe managed account, use
+**Continue on the Config Management page →**. It carries the selection over and the
+full run form applies to it: named secret vars, become password, SSH key, and the
+managed-account picker.
+
+**A managed account is matched by name on each host.** A `ManagedAccountRef` normally
+pins `system_id` + `account_id`, and both belong to one managed system — reusing one
+across a fleet would check out a *single machine's* credential and connect to every
+host with it. So a bulk run sends the account **name** instead, and each job resolves
+it against the host it is actually configuring, then checks out that host's own
+credential. The account list you pick from is read from one target as a sample; a host
+that doesn't have an account by that name fails **only its own job**, with a message
+naming the host and the account.
+
+This works for domain accounts too — the Password Safe lookup already falls back to
+domain-linked accounts — and it matches the `{user};{suffix}` form that cloud-native
+onboarding registers (the AWS Systems Manager plugin appends a scope suffix), so
+picking `svc-ansible` matches `svc-ansible;local`.
+
+**Connection credentials are refused for Kubernetes and database batches.** Those run
+a `localhost` play that reaches out over a kubeconfig or DB login — there is no SSH
+connection to authenticate, and the run path silently ignores `managed_account`,
+`managed_become`, `secret_ssh_key_source` and `secret_become_source`. A single run can
+absorb that quietly; a batch would leave you believing a credential had been applied
+to fifty clusters, so `/run-bulk` rejects the combination with a 400. Named
+`secret_vars` are honored on those targets and stay available.
+
+---
+
 ## Asset types
 
 | Extension | Type | How the runner handles it |

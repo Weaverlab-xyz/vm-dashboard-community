@@ -105,8 +105,30 @@
             </template>
           </div>
 
+          <!-- Bulk selection handed over from /inventory -->
+          <template x-if="bulk">
+            <div class="rounded-lg border border-blue-200 bg-blue-50 p-3">
+              <div class="flex items-start justify-between gap-3">
+                <div>
+                  <p class="text-sm font-semibold text-blue-900">
+                    Bulk run: <span x-text="bulk.ids.length"></span>
+                    <span x-text="kindNoun(bulk.kind) + (bulk.ids.length === 1 ? '' : 's')"></span>
+                    from inventory
+                  </p>
+                  <p class="text-xs text-blue-700 mt-0.5" x-text="bulk.names.join(', ')"></p>
+                </div>
+                <button @click="clearBulk()" class="text-xs text-blue-700 hover:underline shrink-0">Clear</button>
+              </div>
+              <p class="text-[11px] text-blue-700 mt-2">
+                One job per resource. Secrets below apply to every one of them; a managed
+                account is matched <strong>by name on each host</strong>, so each checks out
+                its own credential.
+              </p>
+            </div>
+          </template>
+
           <!-- Target picker — on-prem groups + cloud VMs -->
-          <div>
+          <div x-show="!bulk">
             <label class="block text-sm font-medium text-gray-700 mb-1">Target</label>
             <select x-model="form.target" @change="onTargetChange()"
                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm
@@ -282,11 +304,19 @@
             </p>
 
             <!-- Managed account (BeyondTrust Password Safe) — live list, JIT checkout.
-                 Shown for a specific host (on-prem free-text or a cloud VM IP). -->
-            <div x-show="effectiveHost && (managedEnabled || managedLoading)" x-cloak
+                 Shown for a specific host (on-prem free-text or a cloud VM IP), or in
+                 bulk mode for the sample host. Kind-gated too: a k8s/database run is a
+                 localhost play with no SSH connection to authenticate. -->
+            <div x-show="targetKind === 'vm' && effectiveHost && (managedEnabled || managedLoading)" x-cloak
                  class="border-t border-gray-100 pt-3 space-y-2">
               <p class="text-xs font-medium text-gray-700">Managed account
                 <span class="text-gray-400 font-normal">(Password Safe — checked out just-in-time)</span></p>
+
+              <p x-show="bulk" x-cloak class="text-[11px] text-blue-700">
+                These accounts are read from <strong x-text="bulk ? bulk.sampleName || bulk.sampleHost : ''"></strong>
+                as a sample. The run sends the account <em>name</em>, and each host checks out
+                its own credential — a host without that account fails only its own job.
+              </p>
 
               <p x-show="managedLoading" class="text-[11px] text-gray-400">Looking up managed accounts…</p>
               <p x-show="!managedLoading && managedError" x-text="managedError" class="text-[11px] text-amber-600"></p>
@@ -341,7 +371,7 @@
 
           <!-- Run button -->
           <button @click="runAsset()"
-                  :disabled="running || !form.asset_key || !form.target"
+                  :disabled="running || !form.asset_key || (!bulk && !form.target)"
                   class="w-full flex items-center justify-center gap-2 bg-blue-700 hover:bg-blue-800
                          disabled:opacity-50 text-white text-sm font-medium px-4 py-2.5 rounded-lg transition">
             <svg x-show="running" class="animate-spin h-4 w-4" fill="none" viewBox="0 0 24 24">
@@ -489,6 +519,10 @@ function configMgmt() {
   return {
     loading: true,
     targets: [],
+    // A selection handed over from /inventory: {ids, kind, names, sampleHost,
+    // sampleName}. Non-null puts the page in bulk mode — the target picker is
+    // replaced by the selection and the run posts to /run-bulk.
+    bulk: null,
     assets: [],
     assetsLoading: true,
     cloudTargets: { aws: [], azure: [], gcp: [] },
@@ -556,6 +590,7 @@ function configMgmt() {
     // in-cloud runner) or vm (everything else — SSH/WinRM). Drives which form fields
     // and secret sub-panels are relevant.
     get targetKind() {
+      if (this.bulk) return this.bulk.kind || 'vm';
       const t = this.form.target;
       if (t.startsWith('k8s:')) return 'k8s';
       if (t.startsWith('db:'))  return 'database';
@@ -580,6 +615,9 @@ function configMgmt() {
     // host, or a cloud target's IP. On-prem GROUP keys have no single host, so
     // they yield '' (managed accounts are per-system).
     get effectiveHost() {
+      // Bulk: one representative host, only to populate the account NAME list. Each
+      // job re-resolves the chosen name against its own host at run time.
+      if (this.bulk) return this.bulk.sampleHost || '';
       const t = this.form.target;
       if (t === '__host__') return (this.customHost || '').trim();
       if (t.startsWith('aws:'))   return t.slice(4);
@@ -594,6 +632,7 @@ function configMgmt() {
     // placeholder IP, so an IP-only lookup misses it; the name finds it. '' for
     // on-prem free-text hosts (there the host string is itself the name).
     get effectiveHostName() {
+      if (this.bulk) return this.bulk.sampleName || '';
       const t = this.form.target;
       let list = null, ip = '';
       if (t.startsWith('aws:'))        { list = this.cloudTargets.aws;   ip = t.slice(4); }
@@ -644,6 +683,32 @@ function configMgmt() {
       } finally {
         this.managedLoading = false;
       }
+    },
+
+    // Secret BINDINGS for a run — variable names and source refs, never values.
+    // Shared by the single and bulk paths so the two can't bind differently.
+    buildSecretPayload() {
+      const secret_vars = {};
+      let secret_become_source = '', secret_ssh_key_source = '';
+      if (this.canUseSecrets) {
+        for (const r of this.secretRows) {
+          const v = (r.var || '').trim(), s = (r.source || '').trim();
+          if (v && s) secret_vars[v] = s;
+        }
+        secret_become_source = (this.secretBecomeSource || '').trim();
+        secret_ssh_key_source = (this.secretSshKeySource || '').trim();
+      }
+      return { secret_vars, secret_become_source, secret_ssh_key_source };
+    },
+
+    // A managed account for a BULK run: the name only. The picker's ids came from
+    // the sample host's list, and both are specific to that one managed system —
+    // sending them would make all N jobs check out that machine's credential. The
+    // server resolves the name against each job's own host instead.
+    bulkManagedRef(key) {
+      if (!this.canUseSecrets || !this.managedEnabled) return null;
+      const ref = this.resolveManaged(key);
+      return ref ? { account_name: ref.account_name } : null;
     },
 
     // Resolve a "system_id:account_id" picker value to the run-request shape
@@ -714,6 +779,7 @@ function configMgmt() {
 
     async init() {
       requireAuth();
+      this.readBulkHandOff();
       await Promise.all([
         this.loadInventory(),
         this.loadAssets(),
@@ -723,6 +789,30 @@ function configMgmt() {
         this.loadSecretOptions(),
       ]);
       this.loading = false;
+      // Needs canUseSecrets from loadSecretOptions, and in bulk mode keys on the
+      // handed-over sample host rather than a picked target.
+      if (this.bulk) await this.loadManagedAccounts();
+    },
+
+    // Pick up a selection handed over from /inventory. Removed on read: a refresh
+    // must not silently re-arm a fleet run the operator already submitted or left.
+    readBulkHandOff() {
+      let raw = null;
+      try {
+        raw = sessionStorage.getItem('cfgmgmt_bulk_selection');
+        sessionStorage.removeItem('cfgmgmt_bulk_selection');
+      } catch (e) { return; }          // storage disabled — single-target mode
+      if (!raw) return;
+      try {
+        const sel = JSON.parse(raw);
+        if (sel && Array.isArray(sel.ids) && sel.ids.length) this.bulk = sel;
+      } catch (e) { /* malformed — ignore and stay in single-target mode */ }
+    },
+
+    clearBulk() { this.bulk = null; this.loadManagedAccounts(); },
+
+    kindNoun(k) {
+      return ({ vm: 'VM', database: 'database', k8s: 'Kubernetes cluster' })[k] || k;
     },
 
     async loadLocalhostTargets() {
@@ -822,9 +912,48 @@ function configMgmt() {
       const [assetBackend, ...rest] = this.form.asset_key.split('|');
       const assetName = rest.join('|');
 
+      // Bulk run handed over from /inventory: same secret payload as a single run,
+      // but the targets are inventory ids and the managed account travels by NAME.
+      if (this.bulk) {
+        const s = this.buildSecretPayload();
+        this.running = true;
+        try {
+          const result = await API.post('/api/config-mgmt/run-bulk', {
+            inventory_ids: this.bulk.ids,
+            asset: assetName,
+            asset_backend: assetBackend,
+            ansible_user: (this.form.ansible_user || '').trim(),
+            extra_vars,
+            secret_vars: s.secret_vars,
+            secret_become_source: s.secret_become_source,
+            secret_ssh_key_source: s.secret_ssh_key_source,
+            // Name-only: system_id/account_id belong to the sample host, so sending
+            // them would point every job at that one machine's credential.
+            managed_account: this.bulkManagedRef(this.managedAccountKey),
+            managed_become: this.bulkManagedRef(this.managedBecomeKey),
+          });
+          const failed = result.failed || [];
+          if (failed.length) {
+            toast(`Queued ${result.count} job(s); ${failed.length} could not run: `
+                  + failed.map(f => `${f.name} (${f.error})`).join('; '), 'error');
+          } else {
+            toast(`Queued ${result.count} job(s) — batch ${result.batch_id}`, 'success');
+          }
+          this.bulk = null;
+          await this.loadJobs();
+        } catch (e) {
+          this.runError = e.message || 'Failed to queue bulk run.';
+        } finally {
+          this.running = false;
+        }
+        return;
+      }
+
       // Kubernetes-cluster / cloud-database targets: a localhost play on the in-cloud
-      // runner. Send target_kind + target_id; the SSH-oriented fields don't apply, and
-      // connection material is injected server-side. Named secret_vars still apply.
+      // runner — or, for a cloud="local" cluster (on-prem), the dashboard's local
+      // runner; the server picks. Send target_kind + target_id; the SSH-oriented
+      // fields don't apply, and connection material is injected server-side. Named
+      // secret_vars still apply.
       if (this.targetKind !== 'vm') {
         const kind = this.targetKind;
         const target_id = this.form.target.slice(this.form.target.indexOf(':') + 1);
@@ -863,17 +992,8 @@ function configMgmt() {
       else if (target.startsWith('gcp:'))   { cloud = 'gcp';   target = target.slice(4); }
       if (!target) { this.runError = 'Enter a target host.'; return; }
 
-      // Build secret bindings (never the values) — only if the user may use secrets.
-      const secret_vars = {};
-      let secret_become_source = '', secret_ssh_key_source = '';
-      if (this.canUseSecrets) {
-        for (const r of this.secretRows) {
-          const v = (r.var || '').trim(), s = (r.source || '').trim();
-          if (v && s) secret_vars[v] = s;
-        }
-        secret_become_source = (this.secretBecomeSource || '').trim();
-        secret_ssh_key_source = (this.secretSshKeySource || '').trim();
-      }
+      const s = this.buildSecretPayload();
+      const { secret_vars, secret_become_source, secret_ssh_key_source } = s;
 
       // Managed-account refs (ids + name + ssh-key flag) — never a credential.
       let managed_account = null, managed_become = null;
