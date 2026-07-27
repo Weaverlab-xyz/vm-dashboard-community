@@ -454,7 +454,19 @@ async def _run_bulk_deploy(
                                or _cfg_svc.get("bt_jumpoint_name") or settings.bt_jumpoint_name)
         _bulk_client_secret = (_cfg_svc.resolve_reference(pra_credential_ref.strip())
                                if pra_credential_ref else "")
+    except Exception as e:
+        # Batch SETUP failed, so nothing has been created — failing every child is the
+        # right answer here, and only here. The deploy loop below is deliberately
+        # OUTSIDE this handler: past that point children have completed, and
+        # job_service.set_failed has no status guard, so a stray exception used to mark
+        # a fully successful batch failed and discard its Shell Jump / Entitle /
+        # Password Safe state as far as the UI is concerned.
+        for job_id, _ in job_items:
+            job_service.set_failed(db, job_id, f"Bulk deploy error: {e}")
+        db.close()
+        return
 
+    try:
         # Step 3: Deploy each instance, all sharing the same ECS task ARN
         for job_id, item in job_items:
             # Claim this child only as its turn comes — see the note above.
@@ -585,14 +597,18 @@ async def _run_bulk_deploy(
             except Exception as e:
                 job_service.set_failed(db, job_id, f"Unexpected error: {e}")
 
-        await cache_service.invalidate(cache_service.key_global("aws_instances"))
-        await cache_service.invalidate(cache_service.key_global("cfgmgmt_instances"))
-
-    except Exception as e:
-        for job_id, _ in job_items:
-            job_service.set_failed(db, job_id, f"Bulk deploy error: {e}")
     finally:
         db.close()
+
+    # Deliberately outside the handler above. job_service.set_failed does not check the
+    # current status, so an invalidate failure raised inside that try marked every
+    # already-deployed child of the batch `failed` — throwing away its Shell Jump,
+    # Entitle and Password Safe state as far as the UI is concerned.
+    try:
+        await cache_service.invalidate(cache_service.key_global("aws_instances"))
+        await cache_service.invalidate(cache_service.key_global("cfgmgmt_instances"))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Bulk deploy cache invalidation failed (non-fatal): %s", exc)
 
 
 async def _run_destroy(destroy_job_id: str, deploy_job_id: str, instance_id: str, region: str = ""):

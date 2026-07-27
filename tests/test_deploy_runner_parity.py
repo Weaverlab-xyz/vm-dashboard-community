@@ -70,29 +70,42 @@ def test_every_aws_launch_passes_os_type():
         "installed — Session Manager and the Password Safe SSM plugin both break silently.")
 
 
-def test_a_batch_cannot_fail_children_after_the_loop_finishes():
-    """`job_service.set_failed` does not check the current status, so a `set_failed`
-    reached *after* the per-item loop can overwrite children that already completed —
-    discarding their PRA / Entitle / Password Safe state as far as the UI is concerned.
+def test_a_batch_recovery_handler_cannot_reach_children_it_already_deployed():
+    """`job_service.set_failed` does not check the current status.
 
-    Per-item handlers inside the loop are fine and expected; this only rejects calls
-    past the end of the loop body."""
+    So a handler shaped `except Exception: for job in job_items: set_failed(job)` is
+    only safe while nothing has been created yet. Wrapped around the per-item deploy
+    loop it becomes a footgun: anything raised *after* the loop — `cache_service.invalidate`
+    was the live example — marks every already-completed child failed and discards its
+    PRA / Entitle / Password Safe state as far as the UI is concerned.
+
+    The rule is therefore about nesting, not line order: a fail-them-all handler is
+    rejected when its own `try` body contains a loop, i.e. when it wraps the deploying.
+    The same handler guarding only pre-loop setup is fine and stays allowed. Per-item
+    handlers inside the loop are likewise fine — they fail exactly one child."""
     checked, violations = 0, []
     for module in _LAUNCHERS:
         bulk = _function(_tree(module), "_run_bulk_deploy")
         if bulk is None:
             continue          # not every provider has a batch path
         checked += 1
-        loops = [n for n in ast.walk(bulk) if isinstance(n, (ast.For, ast.AsyncFor))]
-        if not loops:
-            continue
-        loop_end = max(n.end_lineno for n in loops)
-        late = [c.lineno for c in _calls_named(bulk, "set_failed") if c.lineno > loop_end]
-        if late:
-            violations.append(
-                f"{module}:_run_bulk_deploy calls set_failed at line(s) {late}, after the "
-                f"per-item loop ends at line {loop_end} — that can overwrite a child that "
-                "already completed")
+        for node in ast.walk(bulk):
+            if not isinstance(node, ast.Try):
+                continue
+            guards_the_loop = any(
+                isinstance(n, (ast.For, ast.AsyncFor))
+                for stmt in node.body for n in ast.walk(stmt))
+            if not guards_the_loop:
+                continue      # setup-only handler — failing every child is correct there
+            for handler in node.handlers:
+                for n in ast.walk(handler):
+                    if (isinstance(n, (ast.For, ast.AsyncFor))
+                            and _calls_named(n, "set_failed")):
+                        violations.append(
+                            f"{module}:_run_bulk_deploy has a fail-every-child handler at "
+                            f"line {n.lineno} wrapped around the per-item loop — anything "
+                            "raised after the loop overwrites children that already "
+                            "completed")
     assert checked >= 2, (
         f"expected at least two providers with a _run_bulk_deploy, found {checked} — "
         "the walk may have stopped matching rather than started passing")

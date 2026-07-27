@@ -454,7 +454,19 @@ async def _run_bulk_deploy(job_items: list, req: AzureBulkDeployRequest, rg: str
                                or _cfg("azure_jumpoint_name") or _cfg("bt_jumpoint_name"))
         _pra_ref = (getattr(req, "pra_credential_ref", "") or "").strip()
         batch_client_secret = _pra_cfg.resolve_reference(_pra_ref) if _pra_ref else ""
+    except Exception as e:
+        # Batch SETUP failed, so nothing has been created — failing every child is the
+        # right answer here, and only here. The deploy loop below is deliberately
+        # OUTSIDE this handler: past that point children have completed, and
+        # job_service.set_failed has no status guard, so a stray exception used to mark
+        # a fully successful batch failed and discard its Shell Jump / Entitle /
+        # Password Safe state as far as the UI is concerned.
+        for job_id, _ in job_items:
+            job_service.set_failed(db, job_id, f"Bulk deploy error: {e}")
+        db.close()
+        return
 
+    try:
         for job_id, item in job_items:
             # Claim this child only as its turn comes — see the note above.
             job_service.set_running(db, job_id)
@@ -579,13 +591,14 @@ async def _run_bulk_deploy(job_items: list, req: AzureBulkDeployRequest, rg: str
             except Exception as e:
                 job_service.set_failed(db, job_id, f"Unexpected error: {e}")
 
-        await cache_service.invalidate(cache_service.key_global("azure_vms"))
-
-    except Exception as e:
-        for job_id, _ in job_items:
-            job_service.set_failed(db, job_id, f"Bulk deploy error: {e}")
     finally:
         db.close()
+
+    # Deliberately outside the setup handler above — see the note there.
+    try:
+        await cache_service.invalidate(cache_service.key_global("azure_vms"))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Bulk deploy cache invalidation failed (non-fatal): %s", exc)
 async def _run_destroy(destroy_job_id: str, deploy_job_id: str, vm_name: str, rg: str):
     db = _get_db_session()
     try:
