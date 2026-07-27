@@ -139,6 +139,26 @@
   <!-- ── Custom Images ──────────────────────────────────────────────────── -->
   <div x-show="activeTab === 'custom'">
 
+    <!-- Selection toolbar. Mirrors the AWS/Azure image tables: tick images, deploy one
+         VM per image. For N copies of ONE image, use Count on the deploy form. -->
+    <div x-show="!imagesLoading && customImages.length > 0"
+         class="flex items-center justify-between mb-4">
+      <label class="flex items-center gap-2 text-sm text-gray-600 cursor-pointer">
+        <input type="checkbox" @change="toggleSelectAllImages($event)"
+               :checked="selectedImages.length > 0 && selectedImages.length === customImages.length"
+               class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+        Select all
+      </label>
+      <div class="flex items-center gap-2" x-show="selectedImages.length > 0" x-cloak>
+        <button @click="selectedImages = []"
+                class="text-xs text-gray-500 hover:text-gray-700 px-2 py-1.5">Clear</button>
+        <button @click="openBulkDeployModal()"
+                class="text-xs bg-green-600 hover:bg-green-700 text-white px-3 py-1.5 rounded-lg font-medium transition">
+          Bulk Deploy (<span x-text="selectedImages.length"></span>)
+        </button>
+      </div>
+    </div>
+
     <!-- Loading skeleton -->
     <div x-show="imagesLoading" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
       <template x-for="i in 4" :key="i">
@@ -151,8 +171,12 @@
 
     <div x-show="!imagesLoading" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
       <template x-for="img in customImages" :key="img.self_link">
-        <div class="bg-white rounded-xl border border-gray-200 hover:border-blue-300 hover:shadow-sm transition-all p-4 flex flex-col gap-2">
+        <div class="bg-white rounded-xl border hover:shadow-sm transition-all p-4 flex flex-col gap-2"
+             :class="selectedImages.includes(img.self_link) ? 'border-green-400 ring-1 ring-green-200' : 'border-gray-200 hover:border-blue-300'">
           <div class="flex items-start justify-between gap-2">
+            <input type="checkbox" :value="img.self_link" x-model="selectedImages"
+                   @click.stop
+                   class="mt-0.5 rounded border-gray-300 text-green-600 focus:ring-green-500 flex-shrink-0">
             <div class="flex-1 min-w-0">
               <p class="text-sm font-medium text-gray-900 truncate" x-text="img.name"></p>
               <p class="text-xs text-gray-400 mt-0.5" x-text="img.family || 'Custom'"></p>
@@ -561,6 +585,128 @@
     </div>
   </div>
 
+  <!-- ── Bulk Deploy modal (one VM per selected image) ─────────────────────── -->
+  <div x-show="bulkModal.open" x-cloak x-transition
+       class="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-40"
+       @click.self="bulkModal.open = false">
+    <div class="bg-white rounded-xl shadow-2xl w-full max-w-xl mx-4 max-h-screen overflow-y-auto">
+      <div class="px-6 py-4 border-t-4 border-green-600">
+        <h2 class="text-lg font-bold text-gray-900">Bulk Deploy GCE Instances</h2>
+        <p class="text-xs text-gray-500 mt-0.5">
+          <span x-text="bulkModal.items.length"></span> image<span x-show="bulkModal.items.length !== 1">s</span>
+          selected — one VM per image. To deploy several copies of a single image, use
+          the Count field on the normal deploy form.
+        </p>
+      </div>
+
+      <div class="px-6 pb-4 space-y-4">
+        <!-- Per-image names -->
+        <div class="space-y-2">
+          <label class="block text-xs font-semibold text-gray-700 uppercase tracking-wide">Instance Names</label>
+          <template x-for="(img, idx) in bulkModal.items" :key="img.self_link">
+            <div class="flex items-center gap-3">
+              <span class="text-xs text-gray-500 w-40 truncate" x-text="img.name"></span>
+              <input x-model="bulkModal.names[idx]" type="text"
+                     :placeholder="'vm-' + (idx + 1)"
+                     class="flex-1 border border-gray-300 rounded-md px-2 py-1.5 text-sm font-mono">
+            </div>
+          </template>
+          <p class="text-xs text-gray-400">Lowercase letters, numbers and hyphens (RFC1035).</p>
+        </div>
+
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Workgroup <span class="text-gray-400 font-normal">(shared)</span> *</label>
+          <select x-model="bulkModal.workgroup"
+                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500">
+            <option value="">— select a workgroup —</option>
+            <template x-for="wg in availableWorkgroups" :key="wg">
+              <option :value="wg" x-text="wg"></option>
+            </template>
+          </select>
+        </div>
+
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Machine Type <span class="text-gray-400 font-normal">(shared)</span></label>
+            <select x-model="bulkModal.machine_type"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500">
+              <template x-for="m in networkOpts.machine_types || []" :key="m">
+                <option :value="m" x-text="m"></option>
+              </template>
+            </select>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Zone <span class="text-gray-400 font-normal">(shared)</span></label>
+            <select x-model="bulkModal.zone"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500">
+              <option value="">— use default zone —</option>
+              <template x-for="z in networkOpts.zones || []" :key="z">
+                <option :value="z" x-text="z"></option>
+              </template>
+            </select>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Disk Size (GB) <span class="text-gray-400 font-normal">(shared)</span></label>
+            <input type="number" min="10" x-model.number="bulkModal.disk_size_gb"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500">
+          </div>
+          <div class="flex items-end pb-2">
+            <label class="flex items-center gap-2 text-sm text-gray-700">
+              <input type="checkbox" x-model="bulkModal.create_external_ip"
+                     class="rounded border-gray-300 text-green-600 focus:ring-green-500">
+              External IP
+            </label>
+          </div>
+        </div>
+
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Subnetwork <span class="text-gray-400 font-normal">(shared)</span></label>
+          <select x-model="bulkModal.subnetwork"
+                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500">
+            <option value="">— configured default —</option>
+            <template x-for="s in networkOpts.subnetworks || []" :key="s.self_link">
+              <option :value="s.self_link" x-text="s.name"></option>
+            </template>
+          </select>
+        </div>
+
+        {% if entitle_enabled %}
+        <label class="flex items-center gap-2 text-sm text-gray-700">
+          <input type="checkbox" x-model="bulkModal.register_in_entitle"
+                 class="rounded border-gray-300 text-green-600 focus:ring-green-500">
+          Register each VM in Entitle for just-in-time SSH access
+        </label>
+        {% endif %}
+        {% if beyondtrust_enabled %}
+        <label class="flex items-center gap-2 text-sm text-gray-700">
+          <input type="checkbox" x-model="bulkModal.register_in_passwordsafe"
+                 class="rounded border-gray-300 text-green-600 focus:ring-green-500">
+          Onboard each VM into Password Safe (managed system + account)
+        </label>
+        {% endif %}
+
+        <div x-show="bulkModal.error" x-cloak
+             class="bg-red-50 border border-red-200 rounded-lg px-3 py-2 text-sm text-red-700"
+             x-text="bulkModal.error"></div>
+      </div>
+
+      <div class="px-6 py-4 border-t border-gray-100 flex justify-end gap-3">
+        <button @click="bulkModal.open = false" class="px-4 py-2 text-sm text-gray-600 font-medium">Cancel</button>
+        <button @click="submitBulkDeploy()"
+                :disabled="bulkModal.submitting || !bulkModal.workgroup"
+                class="px-5 py-2 bg-green-600 hover:bg-green-700 disabled:opacity-50 text-white text-sm font-medium rounded-lg transition">
+          <span x-show="!bulkModal.submitting">
+            Deploy <span x-text="bulkModal.items.length"></span> Instance<span x-show="bulkModal.items.length !== 1">s</span>
+          </span>
+          <span x-show="bulkModal.submitting" x-cloak>Deploying…</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
   <!-- ── Build Image (Packer) ─────────────────────────────────────────────── -->
   <div x-show="activeTab === 'build'">
     <div class="max-w-2xl">
@@ -781,6 +927,16 @@ function gcpDashboard() {
     // Data
     publicImages:   [],
     customImages:   [],
+    // Multi-select bulk: tick images, deploy one VM per image. The other axis from
+    // deployForm.count, which deploys N copies of ONE image.
+    selectedImages: [],
+    bulkModal: {
+      open: false, items: [], names: [], workgroup: '',
+      machine_type: 'e2-medium', zone: '', subnetwork: '', disk_size_gb: 20,
+      create_external_ip: false,
+      register_in_entitle: false, register_in_passwordsafe: false,
+      submitting: false, error: '',
+    },
     exportingImages: new Set(),
     instances:      [],
     networkOpts:    { zones: [], machine_types: [], subnetworks: [], region: '', ssh_key_configured: false },
@@ -1087,6 +1243,65 @@ function gcpDashboard() {
         this.sshKeyPreview = '';
       } finally {
         this.sshKeyLoading = false;
+      }
+    },
+
+    toggleSelectAllImages(ev) {
+      this.selectedImages = ev.target.checked
+        ? this.customImages.map(i => i.self_link)
+        : [];
+    },
+
+    async openBulkDeployModal() {
+      const items = this.customImages.filter(i => this.selectedImages.includes(i.self_link));
+      this.bulkModal = {
+        open: true,
+        items,
+        // Seed each name from its image, sanitised to RFC1035 so the server's
+        // validate_name doesn't 400 on a default the user never typed.
+        names: items.map(i => (i.name || '')
+          .toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/^[^a-z]+/, '').slice(0, 60)),
+        workgroup: this._defaultWorkgroup(),
+        machine_type: this.networkOpts.machine_types?.includes('e2-medium')
+          ? 'e2-medium' : (this.networkOpts.machine_types?.[0] || 'e2-medium'),
+        zone: '', subnetwork: '', disk_size_gb: 20, create_external_ip: false,
+        register_in_entitle: false, register_in_passwordsafe: false,
+        submitting: false, error: '',
+      };
+      if (!this.networkOpts.zones) await this.loadNetworkOpts();
+    },
+
+    async submitBulkDeploy() {
+      const m = this.bulkModal;
+      if (!m.workgroup) { m.error = 'Select a workgroup.'; return; }
+      if (m.names.some(n => !n || !n.trim())) { m.error = 'Every instance needs a name.'; return; }
+      m.submitting = true;
+      m.error = '';
+      try {
+        const res = await API.post('/api/gcp/bulk-deploy', {
+          items: m.items.map((img, idx) => ({
+            image_self_link: img.self_link,
+            image_name: img.name || '',
+            instance_name: m.names[idx].trim().toLowerCase(),
+          })),
+          machine_type: m.machine_type,
+          zone: m.zone,
+          subnetwork: m.subnetwork,
+          create_external_ip: m.create_external_ip,
+          disk_size_gb: m.disk_size_gb,
+          workgroup: m.workgroup,
+          register_in_entitle: m.register_in_entitle,
+          register_in_passwordsafe: m.register_in_passwordsafe,
+        });
+        m.open = false;
+        this.selectedImages = [];
+        if (window.afterDeploy(res, { label: 'GCE bulk deploy',
+                                      notify: (msg, t) => this.showToast(msg, t) })) return;
+        this.showToast(`${res.count} instance(s) queued`);
+      } catch (e) {
+        m.error = e.message || 'Bulk deploy failed';
+      } finally {
+        m.submitting = false;
       }
     },
 
