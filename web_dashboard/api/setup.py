@@ -91,6 +91,7 @@ class AzureRegionConfig(BaseModel):
     db_subnet_id: str = ""
     db_mysql_subnet_id: str = ""
     db_private_dns_zone_id: str = ""
+    jumpoint_subnet_id: str = ""
     gallery_name: str = ""
     gallery_resource_group: str = ""
     default_vm_size: str = ""

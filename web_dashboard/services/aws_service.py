@@ -1530,6 +1530,7 @@ def _run_ecs_task_sync(
     execution_role_arn: str,
     image: str = "beyondtrust/sra-jumpoint",
     launch_type: str = "EC2",
+    host_instance_id: str = "",
 ) -> str:
     """Ensure the ECS cluster exists, register the task definition if needed,
     then launch one jumpoint task. Returns the task ARN.
@@ -1537,6 +1538,11 @@ def _run_ecs_task_sync(
     launch_type "EC2" (default) places the task on EC2 capacity with host
     networking so it can do protocol tunneling; "FARGATE" is the legacy,
     tunnel-incapable path. EC2 capacity is provisioned by the sandbox script.
+
+    ``host_instance_id`` pins the task to one container instance. With several
+    gateway hosts in the same cluster, ECS's default placement would otherwise be
+    free to stack two tasks on one host and leave another bare — each gateway host
+    needs its own task, so the caller names the host it just launched.
     """
     ec2 = launch_type.upper() == "EC2"
     ecs = _get_ecs(region)
@@ -1571,6 +1577,11 @@ def _run_ecs_task_sync(
         },
         "count": 1,
     }
+    if ec2 and host_instance_id:
+        # Cluster query language; ec2InstanceId is a built-in field.
+        run_kwargs["placementConstraints"] = [
+            {"type": "memberOf", "expression": f"ec2InstanceId == {host_instance_id}"}
+        ]
     if not ec2:
         # awsvpc networking is Fargate-only here; the EC2 task uses host
         # networking (the container instance's ENI/SG), so no networkConfiguration.
@@ -1612,14 +1623,18 @@ async def run_ecs_jumpoint_task(
     execution_role_arn: str = "",
     image: str = "beyondtrust/sra-jumpoint",
     launch_type: str = "EC2",
+    host_instance_id: str = "",
 ) -> str:
-    """Start an ECS task running the BeyondTrust Jumpoint container. Returns the
-    task ARN. launch_type "EC2" (default) is tunnel-capable; "FARGATE" is legacy."""
+    """Start an ECS task running the BeyondTrust Gateway container. Returns the
+    task ARN. launch_type "EC2" (default) is tunnel-capable; "FARGATE" is legacy.
+    ``host_instance_id`` pins the task to one container instance — see
+    :func:`_run_ecs_task_sync`."""
     try:
         return await asyncio.to_thread(
             _run_ecs_task_sync,
             region, cluster, task_family, subnet_id, security_group_ids,
             deploy_key, cpu, memory, execution_role_arn, image, launch_type,
+            host_instance_id,
         )
     except (ClientError, BotoCoreError) as e:
         raise AWSError(f"Failed to start ECS Jumpoint task: {e}") from e
