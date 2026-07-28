@@ -102,10 +102,10 @@ both:
 - A `portainer-ui` **Web Jump** is created, so the UI opens from the PRA
   representative console — brokered and recorded — with no CIDR change for your own
   workstation.
-- A Web Jump connects *through* a **Jumpoint**, so the source hitting the node is that
-  host's egress IP. The dashboard ensures its managed Jumpoint host is up and
+- A Web Jump connects *through* a **Gateway**, so the source hitting the node is that
+  host's egress IP. The dashboard ensures its managed Gateway host is up and
   **auto-allows that IP** as a `/32`. It re-checks on every deploy, because AWS/GCP
-  jumpoint IPs are ephemeral. A *pre-existing* Jumpoint you run yourself can't be
+  gateway IPs are ephemeral. A *pre-existing* Gateway you run yourself can't be
   auto-detected — add its IP to `portainer_allowed_source_cidrs` manually.
 - Pick a **Vault Account Group** and the admin credential is stored as a PRA Vault
   account and **injected at login** — the password is never displayed, and the job
@@ -114,7 +114,7 @@ both:
 
 Provisioning runs after first-run bootstrap (the password has to exist to be vaulted)
 and is **best-effort** — a PRA hiccup logs a warning and leaves the node deployed and
-usable over its public IP. Jump Group, Jumpoint and Vault group default to the
+usable over its public IP. Jump Group, Gateway and Vault group default to the
 `bt_*` settings when not chosen on the form.
 
 Requires PRA to be configured (`bt_api_host`, `bt_client_id`, `bt_jumpoint_name`);
@@ -227,10 +227,10 @@ on the run form is irrelevant — nothing is installed on it.
 | `portainer_ui_web_jump_enabled` | `false` | Broker the UI via a PRA Web Jump (opt-in) |
 | `portainer_ui_verify_certificate` | `false` | Web Jump TLS verification — off for the node's self-signed cert |
 | `portainer_ui_jump_group` | `""` | Jump Group for the Web Jump; blank = `bt_jump_group_name` |
-| `portainer_ui_jumpoint_name` | `""` | Jumpoint for the Web Jump; blank = `bt_jumpoint_name` |
+| `portainer_ui_jumpoint_name` | `""` | Gateway for the Web Jump; blank = `bt_jumpoint_name` |
 | `portainer_ui_vault_account_group_id` | `""` | Vault account group the admin credential is stored in; blank = `bt_vault_account_group_id`, else the password is shown |
-| `portainer_ui_jumpoint_cloud` | `gcp` | Which managed Jumpoint host brokers the UI; its egress IP is auto-allowed |
-| `portainer_ui_jumpoint_egress_ip` | `""` | Captured Jumpoint egress IP (runtime-set; auto-added as a `/32`) |
+| `portainer_ui_jumpoint_cloud` | `gcp` | Which managed Gateway host brokers the UI; its egress IP is auto-allowed |
+| `portainer_ui_jumpoint_egress_ip` | `""` | Captured Gateway egress IP (runtime-set; auto-added as a `/32`) |
 
 ---
 

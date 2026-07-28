@@ -27,7 +27,7 @@ Coverage differs by cloud/engine:
 | **GCP** | postgres / mysql / sqlserver (Cloud SQL, private IP) | ✅ tunnel | ❌ | ✅ postgres / mysql (via forwarder) |
 | **OCI** | **oracle only** (Autonomous DB) | ✅ tunnel¹ | ❌ | ❌ |
 
-¹ OCI has no dashboard-provisioned jumpoint — you supply your own (see the OCI section).
+¹ OCI has no dashboard-provisioned gateway — you supply your own (see the OCI section).
 
 Everything is driven by Terraform from the job worker; deploy state is written to the
 active [storage backend](storage-management.md).
@@ -39,7 +39,7 @@ active [storage backend](storage-management.md).
 The database is **private** (`publicly_accessible = false`, or a public free-tier
 Autonomous DB on OCI). The dashboard's backend has **no direct network path to it** — the
 only way in is a BeyondTrust PRA protocol tunnel brokered through a shared, on-demand
-**jumpoint host** that sits in (or peers into) the database's network.
+**gateway host** that sits in (or peers into) the database's network.
 
 ```
   operator / app                dashboard backend (worker)
@@ -47,19 +47,19 @@ only way in is a BeyondTrust PRA protocol tunnel brokered through a shared, on-d
         │  PRA client                     │  terraform apply (beyondtrust/sra: tunnel + Vault account)
         ▼                                 ▼
   ┌───────────┐   PRA protocol tunnel   ┌────────────────┐   private net   ┌───────────────┐
-  │    PRA    │◄───────────────────────►│  Jumpoint host │◄───────────────►│  managed DB   │
+  │    PRA    │◄───────────────────────►│  Gateway host  │◄───────────────►│  managed DB   │
   │ appliance │      (jump item)        │  (per cloud)   │   :5432/3306/   │  (private)    │
   └───────────┘                         └────────────────┘   1433/1521     └───────────────┘
 ```
 
-The jumpoint host differs per cloud (Fargate/ACI can't do protocol tunneling, so AWS
+The gateway host differs per cloud (Fargate/ACI can't do protocol tunneling, so AWS
 uses EC2 and Azure a VM):
 
-| Cloud | Jumpoint host | Provisioned by the dashboard? |
+| Cloud | Gateway host | Provisioned by the dashboard? |
 |---|---|---|
 | AWS | ECS-on-EC2 container instance (`bt-jumpoint` cluster) | ✅ on demand, ref-counted |
-| Azure | privileged jumpoint container on an Azure VM (`clouddb-jumpoint`) | ✅ on demand, ref-counted |
-| GCP | privileged jumpoint container on a Container-Optimized-OS GCE VM | ✅ on demand, ref-counted |
+| Azure | privileged gateway container on an Azure VM (`clouddb-jumpoint`) | ✅ on demand, ref-counted |
+| GCP | privileged gateway container on a Container-Optimized-OS GCE VM | ✅ on demand, ref-counted |
 | OCI | compute instance in the VCN public subnet | ❌ **operator must pre-create it** (see OCI below) |
 
 Per-engine tunnel resource (`beyondtrust/sra` provider, in
@@ -86,13 +86,13 @@ Before any cloud database will get a working tunnel, configure PRA once under
 
 - **PRA appliance + OAuth API account** → `bt_api_host`, `bt_client_id`,
   `bt_client_secret` (used by the SRA Terraform provider to create the tunnel).
-- A **pre-existing Jump Group** and **Jumpoint** in PRA → `bt_jump_group_name`,
+- A **pre-existing Jump Group** and **Gateway** in PRA → `bt_jump_group_name`,
   `bt_jumpoint_name`. The dashboard does *not* create these.
-- The **Jumpoint Docker deploy key**, pasted in (config key is per cloud — see each
-  section). Without it the shared jumpoint host can't start and the tunnel shows
+- The **Gateway Docker deploy key**, pasted in (config key is per cloud — see each
+  section). Without it the shared gateway host can't start and the tunnel shows
   *Unavailable* in PRA.
 
-Each provision can override the Jump Group / Jumpoint / PRA credential per database
+Each provision can override the Jump Group / Gateway / PRA credential per database
 (the `jump_group`, `jumpoint_name`, `pra_credential_ref` form fields); otherwise the
 `bt_*` defaults apply. (The per-cloud `*_bt_jump_group_name` / `*_jumpoint_name` keys
 are for PRA *Shell Jumps*, not the DB tunnel.)
@@ -111,7 +111,7 @@ Engines: postgres / mysql / sqlserver. Sandbox: [`scripts/sandbox/Linux/setup-aw
 (RDS needs ≥2) → the RDS **DB subnet group** `dashboard-sandbox-db`; a Postgres
 **parameter group** with `rds.force_ssl=0` (`clouddb-nossl-pg16`); a MySQL-8.4
 **parameter group** with `require_secure_transport=0` (`clouddb-nossl-mysql84`); a **DB
-security group** allowing 5432/3306/1433 *from the jumpoint SG only*; the `bt-jumpoint`
+security group** allowing 5432/3306/1433 *from the gateway SG only*; the `bt-jumpoint`
 ECS cluster + `ecsInstanceRole` + `ecsTaskExecutionRole`; and RDS/ECS/PassRole
 permissions on the scoped dashboard IAM user.
 
@@ -120,7 +120,7 @@ rejected by the PRA MySQL tunnel; 8.4 defaults to `caching_sha2_password`). SQL 
 (`sqlserver-ex`) has **no `db_name`** — you connect to `master` and create databases
 afterward — and its instance class is bumped to `db.t3.small` (needs ≥2 GiB).
 
-**Jumpoint host:** an **ECS-on-EC2** container instance the dashboard launches on demand
+**Gateway host:** an **ECS-on-EC2** container instance the dashboard launches on demand
 (kicked early so its ~2-min boot overlaps the RDS apply) and terminates when the last
 DB/VM/cluster is gone.
 
@@ -132,10 +132,10 @@ DB/VM/cluster is gone.
 | `aws_db_parameter_group_name` | — | `rds.force_ssl=0` Postgres group (Settings field) |
 | `aws_db_mysql_parameter_group_name` | — | `require_secure_transport=0` MySQL-8.4 group (import-only) |
 | `aws_db_security_group_id` | — | DB SG allowing tunnel ingress (import-only) |
-| `aws_ecs_docker_deploy_key` | — | Jumpoint Docker deploy key |
-| `bt_ecs_cluster` / `bt_ecs_launch_type` | `bt-jumpoint` / `EC2` | Jumpoint cluster (Fargate can't tunnel) |
-| `bt_ecs_host_instance_type` / `bt_ecs_host_instance_profile` | `t3.small` / `ecsInstanceRole` | Jumpoint EC2 host |
-| `bt_ecs_jumpoint_subnet_id` / `bt_ecs_jumpoint_security_group_id` | — | Jumpoint host placement (import-only) |
+| `aws_ecs_docker_deploy_key` | — | Gateway Docker deploy key |
+| `bt_ecs_cluster` / `bt_ecs_launch_type` | `bt-jumpoint` / `EC2` | Gateway cluster (Fargate can't tunnel) |
+| `bt_ecs_host_instance_type` / `bt_ecs_host_instance_profile` | `t3.small` / `ecsInstanceRole` | Gateway EC2 host |
+| `bt_ecs_jumpoint_subnet_id` / `bt_ecs_jumpoint_security_group_id` | — | Gateway host placement (import-only) |
 
 **Checklist:** run `setup-aws.sh` → import the emitted config at `/setup` → set
 `aws_ecs_docker_deploy_key` + the PRA keys → provision from the Cloud Databases page.
@@ -157,7 +157,7 @@ AWS). Postgres/MySQL Flexible Servers get `require_secure_transport=OFF`. SQL Se
 Azure SQL DB + a Private Endpoint (always TLS — fine, the mssql tunnel does backend TLS);
 any Flexible-Server SKU picked in the form is coerced to a valid SQL-DB SKU.
 
-**Jumpoint host:** a **real Azure VM** (`clouddb-jumpoint`) — ACI is serverless and can't
+**Gateway host:** a **real Azure VM** (`clouddb-jumpoint`) — ACI is serverless and can't
 protocol-tunnel — in `azure_jumpoint_subnet_id` (falls back to `azure_aci_subnet_id`).
 
 **Config keys:**
@@ -168,9 +168,9 @@ protocol-tunnel — in `azure_jumpoint_subnet_id` (falls back to `azure_aci_subn
 | `azure_db_mysql_subnet_id` / `azure_db_mysql_private_dns_zone_id` | — | MySQL delegated subnet + DNS zone (import-only) |
 | `azure_db_sqlserver_subnet_id` / `azure_db_sqlserver_private_dns_zone_id` | — | SQL Server PE subnet + `privatelink…` zone (import-only) |
 | `azure_resource_group` / `azure_location` | `vm-cli-rg` / `centralus` | RG + default region (Settings fields) |
-| `azure_jumpoint_subnet_id` | — | Jumpoint VM subnet; falls back to `azure_aci_subnet_id` |
-| `azure_aci_deploy_key` / `azure_aci_docker_deploy_key` | — | Jumpoint Docker deploy key |
-| `azure_jumpoint_vm_size` | `Standard_B1s` | Jumpoint VM size |
+| `azure_jumpoint_subnet_id` | — | Gateway VM subnet; falls back to `azure_aci_subnet_id` |
+| `azure_aci_deploy_key` / `azure_aci_docker_deploy_key` | — | Gateway Docker deploy key |
+| `azure_jumpoint_vm_size` | `Standard_B1s` | Gateway VM size |
 
 **Checklist:** run `setup-azure.sh` → import the six `azure_db_*` keys + RG/location +
 `azure_jumpoint_subnet_id` → set `azure_aci_docker_deploy_key` + PRA keys → provision.
@@ -191,8 +191,8 @@ instance root password — there's no separate `google_sql_user`); the service f
 `master_username=sqlserver`. Postgres/MySQL use
 `ssl_mode=ALLOW_UNENCRYPTED_AND_ENCRYPTED` for the cleartext tunnel.
 
-**Jumpoint host:** a **privileged jumpoint container on a Container-Optimized-OS GCE VM**
-(`clouddb-shared-jumpoint`), in the jumpoint subnetwork (which has NAT egress).
+**Gateway host:** a **privileged gateway container on a Container-Optimized-OS GCE VM**
+(`clouddb-shared-jumpoint`), in the gateway subnetwork (which has NAT egress).
 
 **Config keys:**
 
@@ -201,9 +201,9 @@ instance root password — there's no separate `google_sql_user`); the service f
 | `gcp_db_network` | — | VPC self-link for Cloud SQL private IP (import-only; falls back to `gcp_network`) |
 | `gcp_project_id` / `gcp_region` / `gcp_zone` | — / `us-central1` / `us-central1-a` | project + default region/zone (Settings) |
 | `gcp_network` / `gcp_subnetwork` | `default` / — | VPC + VM subnet |
-| `gcp_jumpoint_subnetwork` | — | Jumpoint subnet (has NAT; preferred over the VM subnet) |
-| `gcp_jumpoint_name` / `gcp_jumpoint_machine_type` | `clouddb-shared-jumpoint` / `e2-micro` | Jumpoint VM |
-| `gcp_cloud_run_docker_deploy_key` | — | Jumpoint deploy key (→ `gcp_jumpoint_docker_deploy_key` → `gcp_jumpoint_deploy_key`) |
+| `gcp_jumpoint_subnetwork` | — | Gateway subnet (has NAT; preferred over the VM subnet) |
+| `gcp_jumpoint_name` / `gcp_jumpoint_machine_type` | `clouddb-shared-jumpoint` / `e2-micro` | Gateway VM |
+| `gcp_cloud_run_docker_deploy_key` | — | Gateway deploy key (→ `gcp_jumpoint_docker_deploy_key` → `gcp_jumpoint_deploy_key`) |
 
 **Checklist:** run `setup-gcp.sh` → import `gcp_project_id`/`gcp_region`/`gcp_network`/
 `gcp_subnetwork`/`gcp_jumpoint_subnetwork`/`gcp_db_network` → set
@@ -222,9 +222,9 @@ varies); `is_free_tier=true` is the **default**; `is_mtls_connection_required=fa
 the `tcp` tunnel can connect over TLS without a client wallet. It's reached over a generic
 `tcp` PRA tunnel to the ADB TLS listener (1521).
 
-> ⚠️ **OCI caveat 1 — no dashboard-provisioned jumpoint.** `ensure_jumpoint_host` has no
+> ⚠️ **OCI caveat 1 — no dashboard-provisioned gateway.** `ensure_jumpoint_host` has no
 > OCI branch; for `cloud=oci` it falls through to the AWS path and fails (non-fatal). **You
-> must pre-create a BeyondTrust Jumpoint in the OCI public subnet** that can reach the ADB
+> must pre-create a BeyondTrust Gateway in the OCI public subnet** that can reach the ADB
 > TLS endpoint, and point `bt_jumpoint_name` / `bt_jump_group_name` (or the per-DB
 > overrides) at it.
 
@@ -243,7 +243,7 @@ fully managed PaaS — no parameter groups, delegated subnets, or private DNS zo
 OCI has no per-region config sets.
 
 **Checklist:** run `setup-oci.sh` → import the `oci_*` credential + compartment/VCN keys →
-**stand up your own Jumpoint in the OCI public subnet** and point `bt_jumpoint_name` at it
+**stand up your own Gateway in the OCI public subnet** and point `bt_jumpoint_name` at it
 → provision (default = free-tier public ADB).
 
 ---
@@ -278,7 +278,7 @@ config keys to match what you uploaded.
 ### AWS — `dbssm` (AWS Systems Manager)
 
 The dashboard creates the managed user by running the DB client (`psql` / `mysql` /
-`sqlcmd`, as a `docker run`) on the shared **ECS jumpoint host over AWS SSM
+`sqlcmd`, as a `docker run`) on the shared **ECS gateway host over AWS SSM
 `SendCommand`** — the only dashboard component with line-of-sight to the private DB. It
 registers the DB on the **`{engine} SSM Custom Plugin`** platform with DNS name
 `{instanceArn};{region};{dbEndpoint};{dbName};{publicKeyPath};{suffix}`. The **functional
@@ -397,7 +397,7 @@ on-demand **socat forwarder** in the sandbox VPC and points Entitle at it — en
 ## Lifecycle (provisioning & decommission)
 
 - **Provision:** from the Cloud Databases page, pick engine + cloud + region and (when
-  PRA is configured) a Jump Group / Jumpoint. The record + admin credential are created
+  PRA is configured) a Jump Group / Gateway. The record + admin credential are created
   synchronously; the `terraform apply`, tunnel brokering, and any Password Safe onboarding
   run in the **job worker** as a background job.
 - **Decommission:** tears down the PRA tunnel + Vault account, any Layer-2 Password Safe
@@ -413,7 +413,7 @@ on-demand **socat forwarder** in the sandbox VPC and points Entitle at it — en
   must be **8.4** on every cloud (8.0's admin auth plugin is rejected by the PRA tunnel;
   flipping the server parameter doesn't fix the existing admin). The modules default to
   8.4 — don't override to 8.0.
-- **Tunnel shows *Unavailable* in PRA.** Usually the jumpoint host never started: set the
+- **Tunnel shows *Unavailable* in PRA.** Usually the gateway host never started: set the
   cloud's deploy key (`aws_ecs_docker_deploy_key` / `azure_aci_docker_deploy_key` /
   `gcp_cloud_run_docker_deploy_key`). On **OCI** there is no auto-jumpoint — you must
   pre-create one in the public subnet.

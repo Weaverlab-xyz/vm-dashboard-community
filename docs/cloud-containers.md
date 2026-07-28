@@ -61,7 +61,7 @@ entrypoint-based images so ACI matches ECS/GCE).
 ### Target settings
 
 Cluster / subnet / resource-group / zone settings default to the values already configured
-in **Setup** (the same ones the Jumpoint and runners use). The deploy form's **Advanced**
+in **Setup** (the same ones the Gateway and runners use). The deploy form's **Advanced**
 section overrides them per deploy. Optional CPU / memory fields override the per-runtime
 defaults.
 
@@ -79,14 +79,14 @@ The Cloud tab also lists container workloads the dashboard manages — and it's 
 know **most of them are shared infrastructure, not your compose deploys**:
 
 - **ECS Tasks / ACI Containers / GCE Container Instances** — these lists mix your **compose
-  deploys** with the **shared BeyondTrust jumpoint** and the **Ansible / image-promote / k8s
+  deploys** with the **shared BeyondTrust gateway** and the **Ansible / image-promote / k8s
   runner** tasks. On GCE the rows carry a purpose badge: `Compose` (your deploy,
-  `labels.purpose=compose`) vs `Jumpoint` (internal, `labels.purpose=bt-jumpoint`,
+  `labels.purpose=compose`) vs `Gateway` (internal, `labels.purpose=bt-jumpoint`,
   auto-recreated).
 - **GCP Cloud Run Jobs** — a **read-only** view of the 5 most recent dashboard-managed
   *runner* jobs (Ansible / promote / k8s). Cloud Run is **not** a compose deploy target.
 
-So a container appearing here that you didn't deploy is usually the jumpoint or a runner —
+So a container appearing here that you didn't deploy is usually the gateway or a runner —
 leave it alone; the dashboard manages its lifecycle.
 
 ---
@@ -106,5 +106,5 @@ leave it alone; the dashboard manages its lifecycle.
 - **GCE COS** runs containers on the instance's host network, so compose `ports` are
   informational there — reachability is governed by the instance's firewall tags/rules.
 
-For the per-cloud network topology (jumpoint subnets, ECS cluster, ACI/COS placement) see
+For the per-cloud network topology (gateway subnets, ECS cluster, ACI/COS placement) see
 [Cloud Sandbox](CLOUD_SANDBOX.md).

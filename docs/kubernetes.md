@@ -173,7 +173,7 @@ clusters: **PRA tunnels (Layer 1 — reach it)**, the **PRA vault token / ESO (L
 secrets)**, and **Entitle + Entra federation (Layer 3 — time-boxed access)**.
 
 - **PRA k8s tunnel** — `POST /clusters/{id}/tunnel` creates an `sra_protocol_tunnel_jump` with
-  `tunnel_type=k8s` through the shared jumpoint host. Optional `vault_inject` mints a
+  `tunnel_type=k8s` through the shared gateway host. Optional `vault_inject` mints a
   cluster-admin ServiceAccount bearer token in-cluster and stores it as a **PRA Vault token
   account** for injection at session launch (PRA-only access, no Entitle). **Caveat:** this
   proxy **strips `Impersonate-*` headers**, so `kubectl --as` does not work through it — use

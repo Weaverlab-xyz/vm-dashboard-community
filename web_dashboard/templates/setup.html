@@ -153,13 +153,13 @@
             </p>
           </div>
           <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">BeyondTrust Jumpoint Docker Deploy Key (optional)</label>
+            <label class="block text-sm font-medium text-gray-700 mb-1">BeyondTrust Gateway Docker Deploy Key (optional)</label>
             <input type="password" x-model="form.aws.aws_ecs_docker_deploy_key"
               autocomplete="new-password"
               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
               :placeholder="isReconfig ? '••••••••  (leave blank to keep current)' : 'paste deploy key from BeyondTrust'">
             <p class="mt-1 text-xs text-gray-500">
-              Required if you launch BeyondTrust Jumpoint containers in ECS. Stored encrypted in the dashboard DB and resolved through whichever secrets backend you select on the <code class="bg-gray-100 px-1 rounded">/secrets</code> page.
+              Required if you launch BeyondTrust Gateway containers in ECS. Stored encrypted in the dashboard DB and resolved through whichever secrets backend you select on the <code class="bg-gray-100 px-1 rounded">/secrets</code> page.
             </p>
           </div>
         </div>
@@ -305,8 +305,8 @@
           </div>
 
           <div class="border-t border-gray-100 pt-4">
-            <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-3">Container Registry — ACI Ansible / Jumpoint pulls (optional)</p>
-            <p class="text-xs text-gray-400 mb-3">Configure if you mirror the Ansible runner or BeyondTrust Jumpoint images in your own registry (e.g. to bypass Docker Hub rate limits). Credentials are stored encrypted in the dashboard DB and resolved through whichever secrets backend you select on the <code>/secrets</code> page.</p>
+            <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-3">Container Registry — ACI Ansible / Gateway pulls (optional)</p>
+            <p class="text-xs text-gray-400 mb-3">Configure if you mirror the Ansible runner or BeyondTrust Gateway images in your own registry (e.g. to bypass Docker Hub rate limits). Credentials are stored encrypted in the dashboard DB and resolved through whichever secrets backend you select on the <code>/secrets</code> page.</p>
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div class="sm:col-span-2">
                 <label class="block text-sm font-medium text-gray-700 mb-1">Registry Server</label>
@@ -322,7 +322,7 @@
                        placeholder="willhallonline/ansible:latest">
               </div>
               <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">Jumpoint Image</label>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Gateway Image</label>
                 <input type="text" x-model="form.azure.azure_aci_jumpoint_image"
                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
                        placeholder="beyondtrust/sra-jumpoint:latest">
@@ -342,12 +342,12 @@
                        placeholder="leave blank to keep">
               </div>
               <div class="sm:col-span-2">
-                <label class="block text-sm font-medium text-gray-700 mb-1">BeyondTrust Jumpoint Docker Deploy Key (optional)</label>
+                <label class="block text-sm font-medium text-gray-700 mb-1">BeyondTrust Gateway Docker Deploy Key (optional)</label>
                 <input type="password" x-model="form.azure.azure_aci_docker_deploy_key"
                        autocomplete="new-password"
                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
                        :placeholder="isReconfig ? '••••••••  (leave blank to keep current)' : 'paste deploy key from BeyondTrust'">
-                <p class="text-xs text-gray-500 mt-1">Required if you launch BeyondTrust Jumpoint containers in ACI. Stored encrypted in the dashboard DB and resolved through whichever secrets backend you select on the <code>/secrets</code> page.</p>
+                <p class="text-xs text-gray-500 mt-1">Required if you launch BeyondTrust Gateway containers in ACI. Stored encrypted in the dashboard DB and resolved through whichever secrets backend you select on the <code>/secrets</code> page.</p>
               </div>
             </div>
           </div>
@@ -525,22 +525,22 @@ gcloud iam service-accounts keys create sa-key.json \
                 placeholder="projects/…/regions/us-central1/subnetworks/default">
             </div>
             <div>
-              <label class="block text-sm font-medium text-gray-700 mb-1">Jumpoint Subnetwork (optional)</label>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Gateway Subnetwork (optional)</label>
               <input type="text" x-model="form.gcp.gcp_jumpoint_subnetwork"
                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
                 placeholder="projects/…/regions/us-central1/subnetworks/…-jumpoint-subnet">
               <p class="mt-1 text-xs text-gray-500">
-                Cloud-NAT subnet the cloud-database tunnel Jumpoint lands in (it needs egress to reach PRA, unlike the default VM subnet). Emitted by <code class="bg-gray-100 px-1 rounded">setup-gcp.sh</code> as <code class="bg-gray-100 px-1 rounded">gcp_jumpoint_subnetwork</code>; falls back to the default subnetwork if blank.
+                Cloud-NAT subnet the cloud-database tunnel Gateway lands in (it needs egress to reach PRA, unlike the default VM subnet). Emitted by <code class="bg-gray-100 px-1 rounded">setup-gcp.sh</code> as <code class="bg-gray-100 px-1 rounded">gcp_jumpoint_subnetwork</code>; falls back to the default subnetwork if blank.
               </p>
             </div>
             <div class="sm:col-span-2">
-              <label class="block text-sm font-medium text-gray-700 mb-1">BeyondTrust Jumpoint Docker Deploy Key (optional)</label>
+              <label class="block text-sm font-medium text-gray-700 mb-1">BeyondTrust Gateway Docker Deploy Key (optional)</label>
               <input type="password" x-model="form.gcp.gcp_cloud_run_docker_deploy_key"
                 autocomplete="new-password"
                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
                 :placeholder="isReconfig ? '••••••••  (leave blank to keep current)' : 'paste deploy key from BeyondTrust'">
               <p class="mt-1 text-xs text-gray-500">
-                The deploy key the GCE COS Jumpoint container registers with. Stored encrypted in the dashboard DB and resolved through whichever secrets backend you select on the <code class="bg-gray-100 px-1 rounded">/secrets</code> page. Consumed when provisioning the GCP cloud-database tunnel Jumpoint.
+                The deploy key the GCE COS Gateway container registers with. Stored encrypted in the dashboard DB and resolved through whichever secrets backend you select on the <code class="bg-gray-100 px-1 rounded">/secrets</code> page. Consumed when provisioning the GCP cloud-database tunnel Gateway.
               </p>
             </div>
           </div>

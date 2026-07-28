@@ -116,7 +116,7 @@ shell.
 What you get per cloud:
 
 - A dedicated VPC/VNet with two subnets — one for the BeyondTrust SRA
-  Jumpoint container (internet egress so it can phone home to PRA), one
+  Gateway container (internet egress so it can phone home to PRA), one
   for your lab VMs (**no** internet egress).
 - A managed-by-dashboard service principal / IAM role / service account
   with the minimum permissions needed.

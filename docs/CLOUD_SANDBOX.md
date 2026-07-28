@@ -44,15 +44,15 @@ A consistent topology across all three clouds:
 
 | Layer | Purpose | Internet egress |
 |---|---|---|
-| **Jumpoint segment** | Hosts the BeyondTrust SRA Jumpoint container so it can phone home to PRA's relay. | ✅ Yes |
-| **VM segment** | Hosts the lab [VMs you deploy](cloud-vms.md) via the dashboard. | ❌ No — only the Jumpoint can reach them, and they cannot reach the internet directly. |
+| **Gateway segment** | Hosts the BeyondTrust SRA Gateway container so it can phone home to PRA's relay. | ✅ Yes |
+| **VM segment** | Hosts the lab [VMs you deploy](cloud-vms.md) via the dashboard. | ❌ No — only the Gateway can reach them, and they cannot reach the internet directly. |
 | **DB segment** | Dedicated private subnets for [managed cloud databases](cloud-databases.md) (AWS shown; Azure/GCP/OCI have their own DB subnets below). | ❌ No — brokered only through the PRA tunnel. |
 | **[Managed Kubernetes](kubernetes.md)** | Clusters build their **own** network — the dashboard's Terraform creates each cluster's VPC/VNet + subnets + egress (AWS: a small NAT instance) and destroys it on decommission. No sandbox k8s subnet. The AWS EKS build additionally VPC-peers back to the sandbox VPC and opens the DB/VM SGs for direct access. | Cluster-owned (per-cluster NAT). Management-plane access via Entitle/PRA + the AWS peering. |
-| **Desktops segment** (Azure) | Dedicated **non-delegated** subnet (`10.99.6.0/24`) for VDI desktop pools, separate from the VM segment because the RS jump client must register with the appliance at first boot. | ⚠️ **443 only** — the NSG allows outbound HTTPS (jump-client registration + Windows activation/updates) but denies other Internet; RDP brokered in via the Jumpoint. |
+| **Desktops segment** (Azure) | Dedicated **non-delegated** subnet (`10.99.6.0/24`) for VDI desktop pools, separate from the VM segment because the RS jump client must register with the appliance at first boot. | ⚠️ **443 only** — the NSG allows outbound HTTPS (jump-client registration + Windows activation/updates) but denies other Internet; RDP brokered in via the Gateway. |
 
 Per-cloud isolation mechanism:
 
-| Cloud | Jumpoint host | VM isolation |
+| Cloud | Gateway host | VM isolation |
 |---|---|---|
 | **AWS** | ECS Fargate task in a public subnet (IGW-routed) | Private subnet with no IGW route + restrictive security group (egress to VPC only) |
 | **Azure** | ACI container in a delegated subnet | NSG denies `Internet` outbound, allows `VirtualNetwork` |
@@ -64,7 +64,7 @@ Each setup script also creates:
   with the minimum permissions the dashboard needs.
 - An SSH key pair stored as `{public_key, private_key}` JSON in the cloud's
   secret manager (Secrets Manager / Key Vault / Secret Manager).
-- (Azure only) A storage account + file share for the Jumpoint container's
+- (Azure only) A storage account + file share for the Gateway container's
   `/jpt` persistence volume.
 
 Every resource is tagged `managed-by=dashboard-sandbox` and named with a
@@ -160,7 +160,7 @@ re-run after a partial failure or a network blip.
 
 ```
 VPC dashboard-sandbox-vpc (10.99.0.0/16)
-  ├─ public subnet  10.99.1.0/24  → IGW → internet      [ECS Jumpoint task]
+  ├─ public subnet  10.99.1.0/24  → IGW → internet      [ECS Gateway task]
   ├─ private subnet 10.99.2.0/24  → local VPC only      [user EC2 instances]
   ├─ db subnet a    10.99.3.0/24  (AZ a) → local only   [managed databases]
   └─ db subnet b    10.99.4.0/24  (AZ b) → local only   [managed databases]
@@ -173,7 +173,7 @@ RDS:
 Security groups:
   dashboard-sandbox-jumpoint-sg
     egress: 0.0.0.0/0 (so PRA relay is reachable)
-    ingress: none — egress-only; the Jumpoint dials out, nothing connects in
+    ingress: none — egress-only; the Gateway dials out, nothing connects in
   dashboard-sandbox-vm-sg
     egress: 10.99.0.0/16 only — no internet
     ingress: tcp/22 from dashboard-sandbox-jumpoint-sg
@@ -210,7 +210,7 @@ with recovery paths rather than minting a third key.
 Resource group dashboard-sandbox-rg
   └─ VNet dashboard-sandbox-vnet (10.99.0.0/16)
        ├─ aci-subnet 10.99.1.0/24 (delegated to Microsoft.ContainerInstance)
-       │    → internet egress (default)            [ACI Jumpoint]
+       │    → internet egress (default)            [ACI Gateway]
        ├─ vm-subnet  10.99.2.0/24
        │    NSG dashboard-sandbox-vm-nsg:
        │      outbound: allow VirtualNetwork (priority 100)
@@ -221,7 +221,7 @@ Resource group dashboard-sandbox-rg
        ├─ db-subnet  10.99.4.0/24                   [managed databases]
        │    (delegated to Microsoft.DBforPostgreSQL/flexibleServers)
        │    → private VNet-integrated Flexible Server
-       ├─ jumpoint-subnet 10.99.5.0/24              [tunnel-capable VM Jumpoint]
+       ├─ jumpoint-subnet 10.99.5.0/24              [tunnel-capable VM Gateway]
        │    → internet egress (no deny NSG; phones home to PRA)
        └─ desktops-subnet 10.99.6.0/24              [VDI desktop pools]
             NSG dashboard-sandbox-desktops-nsg:
@@ -234,10 +234,10 @@ Resource group dashboard-sandbox-rg
 Private DNS zone dashboard-sandbox.private.postgres.database.azure.com
   linked to the VNet → the Flexible Server's private FQDN resolves inside it.
   (The Azure analog of the AWS private DB subnet group / GCP private-services
-  access. The DB is private-only; only the jumpoint VM reaches it.)
+  access. The DB is private-only; only the gateway VM reaches it.)
 
 Storage account dashboard-sandbox-…  (Standard_LRS, file share `jpt`)
-  for the ACI Jumpoint /jpt persistence volume
+  for the ACI Gateway /jpt persistence volume
 
 Key Vault dashboard-sandbox-kv-…
   Secret azureVM-ssh-keypair    {public_key, private_key} JSON
@@ -251,11 +251,11 @@ Service principal dashboard-sandbox-sp
 Container registry dashboardsandboxacr…  (Basic SKU)
   Mirrors 3 public images so deploy-time pulls come from ACR, not Docker Hub
   (which rate-limits anonymous pulls):
-    beyondtrust/sra-jumpoint:latest          [ACI Shell-Jump Jumpoint]
+    beyondtrust/sra-jumpoint:latest          [ACI Shell-Jump Gateway]
     chrweav/ansible-winrm:latest             [ACI config-mgmt runner]
     chrweav/dashboard-promote-runner:latest  [ACI cross-cloud image promote]
   One registry serves every region (globally pullable); per-region re-runs reuse it.
-  Opt out with SANDBOX_SKIP_ACR=1. The VM-based tunnel Jumpoint still pulls from
+  Opt out with SANDBOX_SKIP_ACR=1. The VM-based tunnel Gateway still pulls from
   Docker Hub — its cloud-init docker-runs without a registry login.
 ```
 
@@ -268,7 +268,7 @@ keep them collision-safe.
 ```
 VPC dashboard-sandbox-vpc (custom mode)
   ├─ dashboard-sandbox-jumpoint-subnet 10.99.1.0/24
-  │    → Cloud NAT → internet                     [Jumpoint COS GCE VM]
+  │    → Cloud NAT → internet                     [Gateway COS GCE VM]
   └─ dashboard-sandbox-vm-subnet       10.99.2.0/24
        (no Cloud NAT mapping)
        → no internet egress                       [user GCE instances]
@@ -276,7 +276,7 @@ VPC dashboard-sandbox-vpc (custom mode)
 Cloud Router dashboard-sandbox-router
 Cloud NAT    dashboard-sandbox-nat
   --nat-custom-subnet-ip-ranges dashboard-sandbox-jumpoint-subnet
-  (only the jumpoint subnet gets NAT — the VM subnet is genuinely cut off)
+  (only the gateway subnet gets NAT — the VM subnet is genuinely cut off)
 
 Firewall rules:
   dashboard-sandbox-allow-internal
@@ -299,7 +299,7 @@ Private Services Access (managed databases):
   servicenetworking peering on the VPC → Cloud SQL private IP path.
   The instance is private-IP-only; its IP lands in the peered range
   (outside 10.99.0.0/16), so deny-vm-egress already blocks user VMs —
-  only the jumpoint reaches it (GCP analog of the AWS private DB subnets).
+  only the gateway reaches it (GCP analog of the AWS private DB subnets).
 
 Service account dashboard-sandbox-sa@<project>.iam.gserviceaccount.com
   Roles: compute.admin, secretmanager.secretAccessor,
@@ -312,7 +312,7 @@ Secret Manager:
 ```
 
 **Auto-tagging**: the dashboard automatically attaches the `bt-jumpoint`
-network tag to its Jumpoint COS VM and the `dashboard-sandbox-vm` tag (read
+network tag to its Gateway COS VM and the `dashboard-sandbox-vm` tag (read
 from the `gcp_default_network_tag` config key the sandbox script provides)
 to every user VM it deploys. The firewall rules' source/target tags match
 those automatically — no manual tagging in the deploy form.
@@ -373,7 +373,7 @@ After a deploy, sanity-check that the VM segment really is cut off from
 the internet. From the dashboard's job log, identify your VM's private
 IP, then:
 
-**AWS / GCP** (via the Jumpoint as a jump host, or the dashboard's Shell
+**AWS / GCP** (via the Gateway as a jump host, or the dashboard's Shell
 Jump if BT is wired):
 
 ```bash
@@ -381,8 +381,8 @@ Jump if BT is wired):
 curl -m 5 https://example.com   # should hang/fail — no internet route
 ip route                         # should show no default route, or only VPC routes
 
-# Confirm the Jumpoint side has internet
-curl -m 5 https://example.com   # should succeed from the Jumpoint container
+# Confirm the Gateway side has internet
+curl -m 5 https://example.com   # should succeed from the Gateway container
 ```
 
 **Azure**:
@@ -405,9 +405,9 @@ three cloud free tiers cover most of this.
 
 Running infrastructure adds the obvious things:
 
-- AWS Fargate Jumpoint task: ~$10/mo (256 CPU / 512 MB).
-- Azure ACI Jumpoint: ~$10/mo (1 vCPU / 2 GB).
-- GCP `e2-micro` Jumpoint: ~$5/mo.
+- AWS Fargate Gateway task: ~$10/mo (256 CPU / 512 MB).
+- Azure ACI Gateway: ~$10/mo (1 vCPU / 2 GB).
+- GCP `e2-micro` Gateway: ~$5/mo.
 - User VMs: standard EC2 / VM / GCE pricing for whatever you deploy.
 
 If GCP idle cost matters, tear down between sessions:
@@ -513,7 +513,7 @@ the prefix/tag if you want multiple isolated sandboxes per cloud account
   via separate `AzurePlatform*` service tags — by design, since Azure VMs
   legitimately need DNS and metadata. Add explicit deny rules for those if
   your threat model excludes them.
-- **AWS public subnet is the Jumpoint's only home.** The dashboard's
+- **AWS public subnet is the Gateway's only home.** The dashboard's
   printed config sets the *private* subnet as the deploy default, but if
   someone overrides the deploy form's subnet to the public one, the
   resulting EC2 instance will get internet access. The sandbox doesn't

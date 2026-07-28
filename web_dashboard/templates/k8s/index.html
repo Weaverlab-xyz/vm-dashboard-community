@@ -344,7 +344,7 @@
                  class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
         </div>
         <div>
-          <label class="block text-xs font-medium text-gray-600 mb-1">Jumpoint <span class="text-gray-400">(name override — the "separate jumpoint")</span></label>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Gateway <span class="text-gray-400">(name override — the "separate gateway")</span></label>
           <input type="text" x-model="brokerForm.jumpoint_name" placeholder="(configured default)"
                  class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
         </div>
@@ -408,7 +408,7 @@
           </select>
         </div>
         <div>
-          <label class="block text-xs font-medium text-gray-600 mb-1">Jumpoint <span class="text-gray-400">(the "separate jumpoint" the tunnel routes through)</span></label>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Gateway <span class="text-gray-400">(the "separate gateway" the tunnel routes through)</span></label>
           <select x-model="tunnelForm.jumpoint_name" class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
             <option value="">(configured default)</option>
             <template x-for="j in tunnelOpts.jumpoints" :key="j.id">
@@ -490,7 +490,7 @@
           </select>
         </div>
         <div>
-          <label class="block text-xs font-medium text-gray-600 mb-1">Jumpoint <span class="text-gray-400">(the jumpoint the tunnel routes through)</span></label>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Gateway <span class="text-gray-400">(the gateway the tunnel routes through)</span></label>
           <select x-model="apiTunnelForm.jumpoint_name" class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
             <option value="">(configured default)</option>
             <template x-for="j in tunnelOpts.jumpoints" :key="j.id">
@@ -750,7 +750,7 @@ function k8sPage() {
     showSecrets: false, secretsBusy: false, secretsTarget: null, secretsKind: 'eso',
     showTunnel: false, tunneling: false, tunnelTarget: null,
     tunnelForm: { jump_group: '', jumpoint_name: '', tunnelCredBackend: '', pra_credential_ref: '', vault_inject: false, vault_account_group_id: null },
-    tunnelOpts: { configured: true, jump_groups: [], jumpoints: [], vault_account_groups: [] },
+    tunnelOpts: { configured: true, jump_groups: [], gateways: [], vault_account_groups: [] },
     showApiTunnel: false, apiTunneling: false, apiTunnelTarget: null,
     apiTunnelForm: { jump_group: '', jumpoint_name: '', apiTunnelCredBackend: '', pra_credential_ref: '' },
     showEntraGroup: false, entraBusy: false, entraTarget: null,
@@ -966,7 +966,7 @@ function k8sPage() {
         const r = await API.post(`/api/k8s/clusters/${this.brokerTarget.id}/access`, body);
         let msg;
         if (r.access === 'pra_tunnel') {
-          msg = `PRA tunnel ready (jump ${r.pra && r.pra.tunnel_jump_id || '—'}, jumpoint ${r.pra && r.pra.jumpoint || '—'}) — connect via the BeyondTrust representative console.`;
+          msg = `PRA tunnel ready (jump ${r.pra && r.pra.tunnel_jump_id || '—'}, gateway ${r.pra && r.pra.jumpoint || '—'}) — connect via the BeyondTrust representative console.`;
         } else if (r.access === 'ingress' && r.url) {
           window.open(r.url, '_blank', 'noopener');
           msg = 'Opened the brokered management ingress.';
@@ -996,7 +996,7 @@ function k8sPage() {
         tunnelCredBackend: '', pra_credential_ref: c.pra_credential_ref || '',
         vault_inject: false, vault_account_group_id: null,
       };
-      this.tunnelOpts = { configured: true, jump_groups: [], jumpoints: [], vault_account_groups: [] };
+      this.tunnelOpts = { configured: true, jump_groups: [], gateways: [], vault_account_groups: [] };
       this.showTunnel = true;
       try {
         this.tunnelOpts = await API.get('/api/k8s/clusters/pra-options');
@@ -1050,7 +1050,7 @@ function k8sPage() {
         jumpoint_name: c.jumpoint_name || '',
         apiTunnelCredBackend: '', pra_credential_ref: c.pra_credential_ref || '',
       };
-      this.tunnelOpts = { configured: true, jump_groups: [], jumpoints: [], vault_account_groups: [] };
+      this.tunnelOpts = { configured: true, jump_groups: [], gateways: [], vault_account_groups: [] };
       this.showApiTunnel = true;
       try {
         this.tunnelOpts = await API.get('/api/k8s/clusters/pra-options');

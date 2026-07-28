@@ -1,7 +1,7 @@
 """
-Shared BeyondTrust Jumpoint host — on-demand EC2 lifecycle.
+Shared BeyondTrust Gateway host — on-demand EC2 lifecycle.
 
-The tunnel-capable Jumpoint runs on an ECS-on-EC2 container instance (Fargate
+The tunnel-capable Gateway runs on an ECS-on-EC2 container instance (Fargate
 can't do protocol tunneling — see aws_service / config bt_ecs_launch_type). To
 avoid a standing ~$15/mo host, the dashboard manages ONE shared host's lifecycle
 by reference count:
@@ -10,7 +10,7 @@ by reference count:
                                             cloud database, or a managed K8s cluster's
                                             PRA tunnel is provisioned. Creates the host
                                             (idempotent, tag find-or-create) and the
-                                            jumpoint task on it.
+                                            gateway task on it.
   * teardown_jumpoint_host_if_idle(db, …) — called on EC2 destroy / DB decommission /
                                             K8s tunnel removal. Terminates the host only
                                             when nothing (no managed EC2 instance, no
@@ -19,7 +19,7 @@ by reference count:
 
 Prereqs (one-time, created by scripts/sandbox/Linux/setup-aws.sh): the
 ``ecsInstanceRole`` + instance profile, the bt-jumpoint cluster, the public
-subnet + jumpoint SG, and the dashboard IAM user's ssm:GetParameter* /
+subnet + gateway SG, and the dashboard IAM user's ssm:GetParameter* /
 iam:PassRole(ecsInstanceRole) / ecs:*ContainerInstances permissions. Everything
 here is best-effort from the caller's perspective; failures log and leave the
 DB/EC2 resource intact (the tunnel/jump is just unavailable until fixed).
@@ -50,12 +50,12 @@ def _cfg(key: str) -> str:
 
 
 def _persist_jumpoint_egress_ip(ip: Optional[str]) -> None:
-    """Record the dashboard-managed Jumpoint host's egress IP so a node firewall can
+    """Record the dashboard-managed Gateway host's egress IP so a node firewall can
     auto-allow it (consumed by ``{rancher,portainer}_node_service._jumpoint_cidr`` when
     that node's Web Jump is enabled). Best-effort; only overwrites when we actually
     learned an IP, so an Azure ensure (no public IP) never clobbers a good GCP/AWS value.
 
-    The Jumpoint host is SHARED per cloud, so the same IP serves every Web Jump — but
+    The Gateway host is SHARED per cloud, so the same IP serves every Web Jump — but
     each feature owns its own key so it reads only what it configured."""
     if not ip:
         return
@@ -65,7 +65,7 @@ def _persist_jumpoint_egress_ip(ip: Optional[str]) -> None:
                            ("portainer_ui_jumpoint_egress_ip", "Portainer")):
             if config_service.get(key) != ip:
                 config_service.set(key, ip)
-                logger.info("jumpoint-host: recorded Web-Jump Jumpoint egress IP %s for the %s firewall",
+                logger.info("jumpoint-host: recorded Web-Jump Gateway egress IP %s for the %s firewall",
                             ip, label)
     except Exception as exc:
         logger.warning("jumpoint-host: persisting egress IP failed (non-fatal): %s", exc)
@@ -80,30 +80,30 @@ def _ui_jumpoint_region(cloud: str) -> str:
 
 
 async def ensure_rancher_ui_jumpoint() -> Optional[str]:
-    """Best-effort: ensure the dashboard-managed Jumpoint host that brokers the
+    """Best-effort: ensure the dashboard-managed Gateway host that brokers the
     Rancher-UI Web Jump is up, capture its egress IP into
     ``rancher_ui_jumpoint_egress_ip``, and return it.
 
     Cloud is picked by ``rancher_ui_jumpoint_cloud`` (default ``gcp`` — same cloud as
     the Rancher node, and its GCE host exposes a clean external IP). The Azure host
     has no public IP, so nothing is captured there and the operator must add the IP
-    to ``rancher_allowed_source_cidrs`` manually. A pre-existing operator Jumpoint
+    to ``rancher_allowed_source_cidrs`` manually. A pre-existing operator Gateway
     (not dashboard-provisioned) likewise can't be auto-detected."""
     from . import config_service
     cloud = (_cfg("rancher_ui_jumpoint_cloud") or "gcp").lower()
     try:
         await ensure_jumpoint_host(cloud, _ui_jumpoint_region(cloud))
     except Exception as exc:
-        logger.warning("rancher-ui jumpoint: ensure failed (non-fatal): %s", exc)
+        logger.warning("rancher-ui gateway: ensure failed (non-fatal): %s", exc)
     return config_service.get("rancher_ui_jumpoint_egress_ip") or None
 
 
 async def ensure_portainer_ui_jumpoint() -> Optional[str]:
-    """Best-effort: ensure the dashboard-managed Jumpoint host that brokers the
+    """Best-effort: ensure the dashboard-managed Gateway host that brokers the
     Portainer-UI Web Jump is up, capture its egress IP into
     ``portainer_ui_jumpoint_egress_ip``, and return it.
 
-    Same shape as :func:`ensure_rancher_ui_jumpoint` — the Jumpoint host itself is
+    Same shape as :func:`ensure_rancher_ui_jumpoint` — the Gateway host itself is
     SHARED, so when both Web Jumps run on the same cloud this is a no-op that just
     re-reads the (possibly refreshed) IP. Cloud is picked by
     ``portainer_ui_jumpoint_cloud`` (default ``gcp`` — same cloud as the node). The
@@ -114,12 +114,12 @@ async def ensure_portainer_ui_jumpoint() -> Optional[str]:
     try:
         await ensure_jumpoint_host(cloud, _ui_jumpoint_region(cloud))
     except Exception as exc:
-        logger.warning("portainer-ui jumpoint: ensure failed (non-fatal): %s", exc)
+        logger.warning("portainer-ui gateway: ensure failed (non-fatal): %s", exc)
     return config_service.get("portainer_ui_jumpoint_egress_ip") or None
 
 
 async def _resolve_deploy_key() -> str:
-    """BeyondTrust Jumpoint Docker deploy key — direct config field first, then
+    """BeyondTrust Gateway Docker deploy key — direct config field first, then
     the legacy Password-Safe title (same resolution as the EC2/RDS paths)."""
     direct = _cfg("aws_ecs_docker_deploy_key")
     if direct:
@@ -422,7 +422,7 @@ def _active_gce_count(db) -> int:
     Deliberately asymmetric with ``_active_ec2_count``, which counts *all* live
     ec2_deploy rows: on AWS every EC2 deploy uses the shared host, so "all" is right
     there. On GCP both shapes coexist — singles follow ``gcp_vm_jumpoint_mode`` (shared
-    by default), batches always share, and a deploy carrying its own Jumpoint deploy key
+    by default), batches always share, and a deploy carrying its own Gateway deploy key
     is always paired — so counting all of them would let one paired VM pin the shared
     host forever and block a cloud-database reclaim.
 
@@ -441,7 +441,7 @@ def _active_azure_vm_count(db) -> int:
 
     Shaped like ``_active_gce_count``, not ``_active_ec2_count``, for the same reason:
     on Azure both shapes coexist — singles follow ``azure_vm_jumpoint_mode`` (shared by
-    default), and a deploy that asked for ACI or carried its own Jumpoint deploy key got
+    default), and a deploy that asked for ACI or carried its own Gateway deploy key got
     its own container group instead — so counting all ``azure_deploy`` rows would let one
     ACI-brokered VM pin the shared VM forever and block a cloud-database reclaim.
 
@@ -456,10 +456,10 @@ def _active_azure_vm_count(db) -> int:
 
 
 def _active_k8s_count(db, cloud: Optional[str] = None) -> int:
-    # A managed cluster needs the shared Jumpoint while it has EITHER a live PRA
+    # A managed cluster needs the shared Gateway while it has EITHER a live PRA
     # k8s tunnel (pra_jump_id set) OR a live API TCP tunnel (config key
     # k8s_api_tunnel_jump_{id} set — no DB column) routing through it, so neither
-    # tunnel's teardown yanks the jumpoint from under the other. (Registered local
+    # tunnel's teardown yanks the gateway from under the other. (Registered local
     # clusters carry cloud='local' and never match a real-cloud filter.)
     from ..database import K8sCluster
     from . import config_service
@@ -471,9 +471,9 @@ def _active_k8s_count(db, cloud: Optional[str] = None) -> int:
 
 
 def _active_vdesktop_count(db, cloud: Optional[str] = None) -> int:
-    # A desktop seat needs the shared Jumpoint only while it has a live PRA Remote
+    # A desktop seat needs the shared Gateway only while it has a live PRA Remote
     # RDP jump routing through it — i.e. pra_jump_id is set. Mirrors
-    # _active_k8s_count so a VDI pool keeps the jumpoint alive, and neither a
+    # _active_k8s_count so a VDI pool keeps the gateway alive, and neither a
     # clouddb/k8s teardown yanks it from under running seats nor a VDI teardown
     # from under a DB/cluster.
     from ..database import VirtualDesktop
@@ -484,7 +484,7 @@ def _active_vdesktop_count(db, cloud: Optional[str] = None) -> int:
 
 
 async def teardown_jumpoint_host_if_idle(db, cloud: str, region: str) -> None:
-    """Terminate the shared Jumpoint host for ``cloud`` iff nothing is left using
+    """Terminate the shared Gateway host for ``cloud`` iff nothing is left using
     it. Dispatches per cloud. Best-effort; logs and returns on error."""
     if cloud == "gcp":
         return await _teardown_jumpoint_host_if_idle_gcp(db, region)
@@ -531,17 +531,17 @@ async def _teardown_jumpoint_host_if_idle_aws(db, region: str) -> None:
         logger.warning("gateway-host: idle teardown failed (non-fatal): %s", exc)
 
 
-# ── GCP: privileged BeyondTrust Jumpoint container on a COS GCE VM ─────────────
+# ── GCP: privileged BeyondTrust Gateway container on a COS GCE VM ─────────────
 # Cloud Run / serverless can't grant NET_ADMIN/NET_RAW/IPC_LOCK + /dev/net/tun,
 # so the tunnel host is a Container-Optimised-OS GCE instance running the
-# jumpoint container PRIVILEGED (gcp_service sets securityContext.privileged).
+# gateway container PRIVILEGED (gcp_service sets securityContext.privileged).
 # One shared, ref-counted instance, mirroring the AWS host lifecycle.
 
 def _gcp_jumpoint_name() -> str:
-    """GCE *instance* name for the shared jumpoint VM — must be a valid GCE
+    """GCE *instance* name for the shared gateway VM — must be a valid GCE
     resource name (RFC1035: lowercase, leading letter, hyphens). This is NOT the
-    PRA Jumpoint the tunnel binds to: that comes from the form's jumpoint picker,
-    and which PRA Jumpoint the container joins is set by its deploy key. So
+    PRA Gateway the tunnel binds to: that comes from the form's gateway picker,
+    and which PRA Gateway the container joins is set by its deploy key. So
     sanitize any configured value — a PRA display name like 'GCP Run' (space +
     uppercase) otherwise 400s the Compute API as an invalid instance name."""
     raw = (_cfg("gcp_jumpoint_name") or "clouddb-shared-jumpoint").strip().lower()
@@ -556,21 +556,21 @@ def _gcp_project() -> str:
 
 
 def _gcp_jumpoint_zone(region: str) -> str:
-    # Explicit jumpoint zone wins; else the generic gcp_zone; else derive a
+    # Explicit gateway zone wins; else the generic gcp_zone; else derive a
     # conventional zone from the region (region-b) as a last resort.
     return _cfg("gcp_jumpoint_zone") or _cfg("gcp_zone") or (f"{region}-b" if region else "")
 
 
 def _gcp_jumpoint_subnetwork(project: str, zone: str) -> str:
-    """Regional self-link for the jumpoint's subnet. Prefer gcp_jumpoint_subnetwork
+    """Regional self-link for the gateway's subnet. Prefer gcp_jumpoint_subnetwork
     (the sandbox's Cloud-NAT subnet) over gcp_subnetwork (the user-VM subnet, which
-    the sandbox leaves without internet egress — a jumpoint there can't reach PRA to
+    the sandbox leaves without internet egress — a gateway there can't reach PRA to
     register). The sandbox emits a bare name, but GCE's networkInterfaces.subnetwork
     needs projects/<p>/regions/<r>/subnetworks/<name>; a value already containing "/"
     is passed through unchanged."""
     from . import region_catalog
     from .region_config import resolve_region
-    # Resolve per the jumpoint's region (derived from its zone). The region-config
+    # Resolve per the gateway's region (derived from its zone). The region-config
     # jumpoint_subnetwork falls back to gcp_subnetwork, then the flat keys.
     region = region_catalog.region_from_zone(zone)
     sub = resolve_region("gcp", region)["jumpoint_subnetwork"]
@@ -580,7 +580,7 @@ def _gcp_jumpoint_subnetwork(project: str, zone: str) -> str:
 
 
 async def _resolve_gcp_deploy_key() -> str:
-    """BeyondTrust Jumpoint deploy key for GCP launches — resolved through whichever
+    """BeyondTrust Gateway deploy key for GCP launches — resolved through whichever
     secrets backend the user picked on /secrets (same keys the GCP deploy flow uses)."""
     from . import config_service
     return (config_service.get("gcp_cloud_run_docker_deploy_key")
@@ -656,19 +656,19 @@ async def _teardown_jumpoint_host_if_idle_gcp(db, region: str) -> None:
         logger.warning("gateway-host(gcp): idle teardown failed (non-fatal): %s", exc)
 
 
-# ── Azure: privileged BeyondTrust Jumpoint on an Azure VM ─────────────────────
+# ── Azure: privileged BeyondTrust Gateway on an Azure VM ─────────────────────
 # ACI (run_aci_jumpoint_task) is serverless and can't grant NET_ADMIN/NET_RAW/
 # IPC_LOCK + /dev/net/tun, so the tunnel host is a real Azure VM running the
-# jumpoint container privileged (azure_service.run_vm_jumpoint). One shared,
+# gateway container privileged (azure_service.run_vm_jumpoint). One shared,
 # ref-counted VM, mirroring the AWS/GCP host lifecycle.
 
 _AZURE_JUMPOINT_VM_NAME = "clouddb-jumpoint"
 
 
 async def _resolve_azure_deploy_key() -> str:
-    """BeyondTrust Jumpoint deploy key for Azure launches — resolved through
+    """BeyondTrust Gateway deploy key for Azure launches — resolved through
     whichever secrets backend the user picked on /secrets (same keys the ACI
-    jumpoint path uses)."""
+    gateway path uses)."""
     from . import config_service
     return (config_service.get("azure_aci_deploy_key")
             or config_service.get("azure_aci_docker_deploy_key")
@@ -677,7 +677,7 @@ async def _resolve_azure_deploy_key() -> str:
 
 def _azure_compliant_password() -> str:
     """A random password meeting Azure's VM complexity rules (3 of 4 categories).
-    The jumpoint VM's NIC carries a Standard, secure-by-default public IP used only
+    The gateway VM's NIC carries a Standard, secure-by-default public IP used only
     for egress — Standard IPs block all inbound unless an NSG allows it, and none is
     attached, so no inbound SSH is possible — this just satisfies the API; it is
     never used to log in."""

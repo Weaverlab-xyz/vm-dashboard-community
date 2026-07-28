@@ -171,7 +171,7 @@ def _build_tf_variables(
                 or resolve_region("aws", region)["db_subnet_group_name"],
             "vpc_security_group_ids": opts.get("vpc_security_group_ids", []),
             # Attach the force_ssl=0 parameter group the sandbox pre-created, so the
-            # PRA protocol tunnel's cleartext jumpoint→RDS connection isn't rejected.
+            # PRA protocol tunnel's cleartext gateway→RDS connection isn't rejected.
             # Empty config → "" → module falls back to the RDS default group.
             "parameter_group_name": _cfg("aws_db_parameter_group_name"),
             "tags": {"managed-by": "vm-dashboard", "clouddb-id": db_id},
@@ -226,7 +226,7 @@ def _build_tf_variables(
         # The private_network the instance gets its private IP on; the sandbox
         # configures private-services-access on it. ssl_mode defaults inside the
         # module to ALLOW_UNENCRYPTED_AND_ENCRYPTED so the PRA tunnel's cleartext
-        # jumpoint→DB connection is accepted (mirrors AWS's force_ssl=0).
+        # gateway→DB connection is accepted (mirrors AWS's force_ssl=0).
         return {
             "project": _cfg("gcp_project") or _cfg("gcp_project_id"),
             "region": region,
@@ -354,7 +354,7 @@ def _build_tf_variables(
 
     if (engine, cloud) == ("oracle", "oci"):
         # OCI Autonomous Database (ATP/ADW). Free-tier (default) is a PUBLIC
-        # endpoint reached over the PRA tcp tunnel from the public-subnet jumpoint
+        # endpoint reached over the PRA tcp tunnel from the public-subnet gateway
         # (Always-Free ADB can't sit in a VCN); a private endpoint needs is_free_tier
         # false + a subnet. The admin login is always ADMIN; only the password is a
         # variable (mapped from the minted master_password). db_name is ADB-shaped
@@ -477,7 +477,7 @@ def _cfg(key: str) -> str:
 
 
 def _pra_configured() -> bool:
-    """True when a PRA/SRA appliance + Jumpoint + Jump Group are configured —
+    """True when a PRA/SRA appliance + Gateway + Jump Group are configured —
     the prerequisites for brokering a tunnel. When false, a DB is still
     provisioned/recorded; it just isn't reachable until PRA is set up."""
     return all(_cfg(k) for k in ("bt_api_host", "bt_jumpoint_name", "bt_jump_group_name"))
@@ -491,7 +491,7 @@ def _pscli_configured() -> bool:
 
 
 async def _resolve_ecs_deploy_key() -> str:
-    """BeyondTrust Jumpoint Docker deploy key — same resolution as the EC2
+    """BeyondTrust Gateway Docker deploy key — same resolution as the EC2
     deploy flow (api/aws.py:_resolve_aws_ecs_deploy_key): direct config field
     first, then the legacy Password-Safe title. Empty when neither is set."""
     direct = _cfg("aws_ecs_docker_deploy_key")
@@ -508,10 +508,10 @@ async def _resolve_ecs_deploy_key() -> str:
 
 
 async def _ensure_jumpoint_node(region: str) -> None:
-    """Make sure the ECS-hosted Jumpoint (the PRA gateway) has at least one
+    """Make sure the ECS-hosted Gateway (the PRA gateway) has at least one
     live node before brokering a tunnel. The tunnel jump item can be created
     with zero nodes online, but it shows 'Unavailable' in PRA until a node
-    registers — so check the Jumpoint cluster for a running task and start one
+    registers — so check the Gateway cluster for a running task and start one
     (the same launch the EC2 deploy flow does) only when there is none.
     Non-fatal throughout, like the EC2 path."""
     from . import aws_service
@@ -520,13 +520,13 @@ async def _ensure_jumpoint_node(region: str) -> None:
     try:
         tasks = await aws_service.list_ecs_tasks(region, cluster)
     except Exception as exc:
-        logger.warning("clouddb: could not list Jumpoint ECS tasks (%s) — skipping node check", exc)
+        logger.warning("clouddb: could not list Gateway ECS tasks (%s) — skipping node check", exc)
         return
     live = [t for t in tasks
             if t.get("lastStatus") in ("PROVISIONING", "PENDING", "RUNNING")
             and f"task-definition/{family}:" in (t.get("taskDefinitionArn") or "")]
     if live:
-        logger.info("clouddb: Jumpoint node already up (%d live task(s) in cluster %s)",
+        logger.info("clouddb: Gateway node already up (%d live task(s) in cluster %s)",
                     len(live), cluster)
         return
 
@@ -543,8 +543,8 @@ async def _ensure_jumpoint_node(region: str) -> None:
         if missing_net:
             need += ", bt_ecs_jumpoint_subnet_id, bt_ecs_jumpoint_security_group_id"
         logger.warning(
-            "clouddb: no live Jumpoint node and cannot auto-start one — set %s. "
-            "The tunnel will show Unavailable in PRA until a Jumpoint node is online.",
+            "clouddb: no live Gateway node and cannot auto-start one — set %s. "
+            "The tunnel will show Unavailable in PRA until a Gateway node is online.",
             need)
         return
     try:
@@ -561,10 +561,10 @@ async def _ensure_jumpoint_node(region: str) -> None:
             image=_cfg("bt_ecs_image"),
             launch_type=launch_type,
         )
-        logger.info("clouddb: started Jumpoint ECS node %s (launch_type=%s) — "
+        logger.info("clouddb: started Gateway ECS node %s (launch_type=%s) — "
                     "registers with PRA in ~1-2 min", arn.split("/")[-1], launch_type)
     except Exception as exc:
-        logger.warning("clouddb: Jumpoint ECS node launch failed (non-fatal): %s", exc)
+        logger.warning("clouddb: Gateway ECS node launch failed (non-fatal): %s", exc)
 
 
 async def _broker_tunnel(db: Session, *, row: CloudDatabase, job_id: str,
@@ -579,7 +579,7 @@ async def _broker_tunnel(db: Session, *, row: CloudDatabase, job_id: str,
     ``(managed_user, managed_password)`` so the injected/vaulted credential is the
     dedicated managed DB user (the rotation target) rather than the master admin."""
     from . import terraform_pra_service as pra
-    # The shared Jumpoint host was ensured at the start of run_provision_apply
+    # The shared Gateway host was ensured at the start of run_provision_apply
     # (so its ~2-min boot overlaps the RDS apply); ensure again here — idempotent
     # and cheap when the host is already up — so the task is running before we
     # broker the tunnel.
@@ -587,7 +587,7 @@ async def _broker_tunnel(db: Session, *, row: CloudDatabase, job_id: str,
     try:
         await jumpoint_host_service.ensure_jumpoint_host(row.cloud, _cfg(row.cloud + "_region") or row.region)
     except Exception as exc:
-        logger.warning("clouddb: ensure jumpoint host (broker) failed (non-fatal): %s", exc)
+        logger.warning("clouddb: ensure gateway host (broker) failed (non-fatal): %s", exc)
     try:
         jump_name = tf_variables.get("identifier") or f"clouddb-{row.id[:8]}"
         job = db.query(Job).filter(Job.id == job_id).first()
@@ -947,7 +947,7 @@ def _managed_user_name(db_id: str) -> str:
 async def _create_db_managed_user(db: Session, *, row: CloudDatabase, job_id: str,
                                   engine: str, tf_variables: dict) -> dict:
     """Create the dedicated managed DB user from the admin credential by running
-    the DB client on the shared Jumpoint host over AWS SSM. Returns the onboarding
+    the DB client on the shared Gateway host over AWS SSM. Returns the onboarding
     context (managed user + password, jump host id, region, db name, admin user,
     client image). Raises on failure so the caller falls back to admin staging."""
     from . import aws_service, jumpoint_host_service
@@ -956,8 +956,8 @@ async def _create_db_managed_user(db: Session, *, row: CloudDatabase, job_id: st
     host_id = await jumpoint_host_service.ensure_jumpoint_host(row.cloud, region)
     if not host_id:
         raise CloudDatabaseError(
-            "no SSM jump host available — the shared Jumpoint host must be up to run "
-            "the DB client (check aws_ecs_docker_deploy_key + jumpoint config)")
+            "no SSM jump host available — the shared Gateway host must be up to run "
+            "the DB client (check aws_ecs_docker_deploy_key + gateway config)")
     admin_username = (tf_variables.get("master_username")
                       or tf_variables.get("administrator_login") or "dbadmin")
     admin_password = (config_service.get(f"clouddb/{row.id}/admin")
@@ -1278,14 +1278,14 @@ async def run_provision_apply(
         tf_variables[_pw_key] = _pw
     job_service.set_running(db, job_id)
     try:
-        # Kick the shared Jumpoint host EARLY (only when PRA is configured) so its
+        # Kick the shared Gateway host EARLY (only when PRA is configured) so its
         # ~2-min boot overlaps the 5-10-min RDS apply instead of stacking after it.
         if _pra_configured():
             try:
                 from . import jumpoint_host_service
                 await jumpoint_host_service.ensure_jumpoint_host(row.cloud, _cfg(row.cloud + "_region") or row.region)
             except Exception as exc:
-                logger.warning("clouddb: ensure jumpoint host (pre-apply) failed (non-fatal): %s", exc)
+                logger.warning("clouddb: ensure gateway host (pre-apply) failed (non-fatal): %s", exc)
 
         # On-demand SSM interface endpoints for the AWS dbssm onboarding path so a
         # private-subnet target reaches the SSM control plane. Ref-counted; torn
@@ -1589,15 +1589,15 @@ async def run_decommission(db: Session, *, db_id: str, job_id: str) -> None:
     # Retire the minted admin credential from the encrypted config store too.
     config_service.delete(f"clouddb/{db_id}/admin")
 
-    # Terminate the shared Jumpoint host if nothing is left using it (best-effort;
+    # Terminate the shared Gateway host if nothing is left using it (best-effort;
     # the row is no longer active, so it's excluded from the count).
-    job_service.update_progress(db, job_id, 90, "Reclaiming idle Jumpoint host…")
+    job_service.update_progress(db, job_id, 90, "Reclaiming idle Gateway host…")
     try:
         from . import jumpoint_host_service
         await jumpoint_host_service.teardown_jumpoint_host_if_idle(db, row.cloud, _cfg(row.cloud + "_region") or row.region)
     except Exception as exc:
-        warnings.append(f"Jumpoint host teardown: {exc}")
-        logger.warning("clouddb: jumpoint host idle-teardown failed (non-fatal): %s", exc)
+        warnings.append(f"Gateway host teardown: {exc}")
+        logger.warning("clouddb: gateway host idle-teardown failed (non-fatal): %s", exc)
 
     # Reclaim the shared SSM interface endpoints if no EC2 instance / AWS cloud DB
     # is left (this row is already inactive, so it's excluded from the count).

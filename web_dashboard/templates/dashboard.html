@@ -673,7 +673,7 @@
       },
 
       async _fetchGceInstances() {
-        // GCE COS instances = jumpoints + compose (mirrors the merged
+        // GCE COS instances = gateways + compose (mirrors the merged
         // "GCE Container Instances" table on the Containers page).
         try {
           const [jp, cp] = await Promise.all([
