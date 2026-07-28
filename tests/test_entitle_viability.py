@@ -10,9 +10,12 @@ Covers:
 - ``_serialize`` surfaces ``entitle_viable`` for the frontend gate;
 - the forward-compat contract: adding a provider to the viable set flips it True.
 
-Imports the real service, so run it where the app deps exist (inside the container):
-    docker compose run --rm worker python tests/test_entitle_viability.py
-Also runs under pytest.
+Imports the real service. It used to need the full app environment, which meant it ran
+only in CI — and a change to ``_serialize`` broke it there after passing everything a
+developer could run locally. ``cloud_database_service`` imports sqlalchemy at module
+scope purely for the ``Session`` type hint, so stubbing that is enough to run here too.
+
+    python tests/test_entitle_viability.py     (or under pytest)
 """
 import asyncio
 import os
@@ -22,6 +25,44 @@ import types
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
+
+if "sqlalchemy" not in sys.modules:
+    _sa = types.ModuleType("sqlalchemy")
+    _orm = types.ModuleType("sqlalchemy.orm")
+    _orm.Session = type("Session", (), {})
+    _sa.orm = _orm
+    sys.modules["sqlalchemy"] = _sa
+    sys.modules["sqlalchemy.orm"] = _orm
+
+try:  # the real app deps exist in CI; stub the module surface elsewhere
+    import pydantic_settings  # noqa: F401
+except ModuleNotFoundError:
+    _conf = types.ModuleType("web_dashboard.config")
+    _conf.settings = type("_Settings", (), {"__getattr__": lambda self, _k: ""})()
+    sys.modules["web_dashboard.config"] = _conf
+
+    # database.py builds real ORM models, which the thin sqlalchemy stub above can't
+    # support. The tests here use SimpleNamespace rows anyway — the service only needs
+    # the names importable. Same approach as tests/test_clouddb_ansible_conn_vars.py.
+    _db = types.ModuleType("web_dashboard.database")
+    _db.CloudDatabase = type("CloudDatabase", (), {"id": None})
+    _db.Job = type("Job", (), {})
+    sys.modules["web_dashboard.database"] = _db
+
+    # config_service pulls in cryptography, whose native extension can't load here.
+    # These four are only needed for the import to succeed — nothing under test calls
+    # them.
+    _cfgsvc = types.ModuleType("web_dashboard.services.config_service")
+    _cfgsvc.get = lambda *_a, **_k: ""
+    _cfgsvc.set = lambda *_a, **_k: None
+    _cfgsvc.get_bool = lambda *_a, **_k: False
+    sys.modules["web_dashboard.services.config_service"] = _cfgsvc
+    _jobsvc = types.ModuleType("web_dashboard.services.job_service")
+    _jobsvc.create_job = lambda *_a, **_k: None
+    sys.modules["web_dashboard.services.job_service"] = _jobsvc
+    for _name in ("terraform", "terraform_provider_env"):
+        sys.modules[f"web_dashboard.services.{_name}"] = types.ModuleType(
+            f"web_dashboard.services.{_name}")
 
 from web_dashboard.services import cloud_database_service as svc  # noqa: E402
 
@@ -34,6 +75,9 @@ def _row(**kw):
         region="us-east1", instance_id="i-1", private_host="h", port=1433,
         status="available", jump_item_id=None, entitle_integration_id=None,
         created_by="tester", created_at=None,
+        # Registered vs dashboard-provisioned. _serialize surfaces it so the page can
+        # pick the right delete verb; these rows are all the provisioned kind.
+        source="provisioned", db_name=None,
     )
     defaults.update(kw)
     return types.SimpleNamespace(**defaults)
