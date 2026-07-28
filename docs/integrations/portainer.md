@@ -81,7 +81,7 @@ The job runs on the durable worker (VM boot plus bootstrap outlasts a web timeou
 | Configuring firewall | Auto-detects the dashboard's public egress IP, merges it with your CIDRs, applies the rule. **Fails fast** if the merged set is empty |
 | Launching COS VM | Creates (or reuses/starts) the VM; relocates it if you picked a different region |
 | Waiting for Portainer | Polls `GET /api/system/status` until it serves |
-| Creating the admin user | `POST /api/users/admin/init` as `admin` |
+| Signing in as the admin user | The VM was launched with `--admin-password`, so the admin already exists |
 | Minting an API token | Logs in and creates a personal access token |
 
 On success the job **writes the connection settings for you** — `portainer_url`,
@@ -91,6 +91,17 @@ so the Containers tab starts working with no Settings round-trip.
 If you left **Admin password** blank the dashboard generates a 24-character one and
 shows it once, on the Containers page (`Log in as admin / …`). Change it in Portainer
 after first login.
+
+The password is settled **before** the VM is created and passed to the container as a
+bcrypt hash (`--admin-password`), so Portainer initializes its admin at startup. That
+is deliberate: Portainer only accepts `POST /api/users/admin/init` for a short window
+after the container starts, and once that window closes it answers *every* request with
+`administrator initialization timeout` — a node with no admin that nobody can log into
+until the container restarts. Initializing at boot means there is no window to lose. A
+node that is already in that state can't be repaired by redeploying (the launcher reuses
+a running VM, and the container declaration is only read at boot) — **delete the node
+and deploy again**; the job now says so instead of reporting a misleading
+"already had an admin user".
 
 ### PRA Web Jump (optional)
 
@@ -103,10 +114,15 @@ both:
   representative console — brokered and recorded — with no CIDR change for your own
   workstation.
 - A Web Jump connects *through* a **Gateway**, so the source hitting the node is that
-  host's egress IP. The dashboard ensures its managed Gateway host is up and
-  **auto-allows that IP** as a `/32`. It re-checks on every deploy, because AWS/GCP
-  gateway IPs are ephemeral. A *pre-existing* Gateway you run yourself can't be
-  auto-detected — add its IP to `portainer_allowed_source_cidrs` manually.
+  host's egress IP. The dashboard **auto-allows a `/32` for every gateway it deployed**
+  in that cloud — the managed one *and* any you added on **Containers → Gateways** —
+  because they all join the same PRA Gateway cluster and PRA may broker the session
+  through any node in it. The set is re-applied on every node deploy and on every
+  gateway deploy/teardown, since AWS/GCP gateway IPs are ephemeral. A *pre-existing*
+  Gateway you run yourself can't be auto-detected — add its IP to
+  `portainer_allowed_source_cidrs` manually.
+- A provisioned Web Jump also **holds a reference on the shared gateway**, so the idle
+  teardown won't reclaim the host that brokers it.
 - Pick a **Vault Account Group** and the admin credential is stored as a PRA Vault
   account and **injected at login** — the password is never displayed, and the job
   result says so instead of echoing it. Leave it blank for a plain (non-injected) Web
@@ -230,7 +246,7 @@ on the run form is irrelevant — nothing is installed on it.
 | `portainer_ui_jumpoint_name` | `""` | Gateway for the Web Jump; blank = `bt_jumpoint_name` |
 | `portainer_ui_vault_account_group_id` | `""` | Vault account group the admin credential is stored in; blank = `bt_vault_account_group_id`, else the password is shown |
 | `portainer_ui_jumpoint_cloud` | `gcp` | Which managed Gateway host brokers the UI; its egress IP is auto-allowed |
-| `portainer_ui_jumpoint_egress_ip` | `""` | Captured Gateway egress IP (runtime-set; auto-added as a `/32`) |
+| `portainer_ui_jumpoint_egress_ip` | `""` | Captured egress IP of the SHARED Gateway (runtime-set; auto-added as a `/32`). Gateways you deploy yourself are read from the gateway registry instead, so every cluster node is allowed |
 
 ---
 
@@ -242,6 +258,19 @@ Integrations → Portainer CE**. The flag applies immediately; no restart needed
 **"Portainer is not configured" card on the Containers page** — the URL or API token
 is missing. Deploy a managed server, or fill both in under **Settings → Integrations
 → Portainer CE**.
+
+**Portainer shows "Your Portainer instance timed out for security purposes"** — the
+node's admin-initialization window closed before an admin was created, so the whole API
+is fenced off. A redeploy can't fix it (the running VM is reused, and the
+`--admin-password` declaration is only read at boot): **delete the node on the
+Containers page and deploy again**. Nodes deployed by this version initialize their
+admin at startup and can't reach this state.
+
+**A Web Jump through a gateway you deployed can't reach the node** — the node firewall
+allows a `/32` per gateway, refreshed on every gateway deploy/teardown. Check
+**Settings → Containers → Effective firewall sources**: the gateway should be listed
+under *Web-Jump Gateways*. If it isn't, its egress IP was never recorded — redeploy the
+gateway, or add the IP to `portainer_allowed_source_cidrs`.
 
 **Deploy fails with "the Portainer node's firewall is closed"** — no allowed source
 CIDRs, and the dashboard couldn't auto-detect its own egress IP. Set

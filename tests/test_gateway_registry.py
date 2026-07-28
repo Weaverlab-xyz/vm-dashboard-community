@@ -202,6 +202,99 @@ def test_the_gateway_table_records_which_kind_it_is():
     assert "index=True" in block
 
 
+def test_the_gateway_table_records_the_egress_ip():
+    """The column existed but nothing ever wrote it, so the node firewalls had no way
+    to learn about a gateway they had to admit."""
+    src = _read("web_dashboard", "database.py")
+    block = src[src.index("class Gateway(Base)"):src.index("# ========== DATABASE UTILITIES")]
+    assert "egress_ip = Column(" in block
+    svc = _read("web_dashboard", "services", "gateway_service.py")
+    assert "def record_egress_ip(" in svc, "nothing records a gateway's egress IP"
+    jhs = _read("web_dashboard", "services", "jumpoint_host_service.py")
+    assert "record_egress_ip" in jhs, (
+        "the ensure path never writes the egress IP it just learned")
+
+
+# ── the firewall consequences of a gateway existing ───────────────────────────
+
+def test_a_gateway_deploy_reapplies_the_node_firewalls():
+    """The bug this whole area turns on. A gateway is a new SOURCE address in front of
+    every source-restricted node, so a deploy that doesn't re-apply the rules produces a
+    gateway that cannot reach the node it was deployed to serve."""
+    src = _read("web_dashboard", "services", "gateway_service.py")
+    deploy = src[src.index("async def _run_deploy"):src.index("async def refresh_node_firewalls")]
+    assert "refresh_node_firewalls" in deploy, (
+        "gateway deploy never refreshes the node firewalls — the new gateway's /32 is "
+        "missing from the allow list")
+    teardown = src[src.index("async def _run_teardown"):]
+    assert "refresh_node_firewalls" in teardown, (
+        "gateway teardown leaves the departed gateway's /32 in the allow list")
+    refresh = src[src.index("async def refresh_node_firewalls"):
+                  src.index("async def _run_teardown")]
+    for node in ("rancher", "portainer"):
+        assert node in refresh, f"the {node} node firewall is not refreshed"
+
+
+def test_every_live_gateway_is_allowed_not_just_the_shared_one():
+    """Gateway hosts in a cloud join ONE PRA Gateway cluster and PRA distributes
+    sessions across its nodes, so the broker may be any of them. Allowing a single
+    remembered /32 is a coin flip."""
+    for module in ("portainer_node_service", "rancher_node_service"):
+        src = _read("web_dashboard", "services", f"{module}.py")
+        assert "def _jumpoint_cidrs(" in src, f"{module} still allows one gateway /32"
+        block = src[src.index("def _jumpoint_cidrs("):]
+        block = block[:block.index("\ndef ")]
+        assert "live_egress_ips" in block, (
+            f"{module} does not read the gateway registry, so a user-deployed gateway "
+            f"is never admitted")
+
+
+def test_a_torn_down_gateway_stops_being_allowed():
+    """A remembered IP that outlives its host keeps a dead VM in the rule while the
+    gateway that replaced it goes unallowed."""
+    src = _read("web_dashboard", "services", "jumpoint_host_service.py")
+    assert "def _clear_managed_egress_ip(" in src
+    for cloud in ("aws", "gcp", "azure"):
+        assert f'_clear_managed_egress_ip("{cloud}"' in src, (
+            f"the {cloud} idle teardown leaves the deleted gateway's IP in the firewall")
+    svc = _read("web_dashboard", "services", "gateway_service.py")
+    live = svc[svc.index("def live_egress_ips("):svc.index("def record_egress_ip(")]
+    assert 'status != "deleted"' in live, (
+        "live_egress_ips counts deleted gateways, so their /32s never leave the rule")
+
+
+def test_a_web_jump_keeps_the_shared_gateway_alive():
+    """What actually broke: the idle teardown reaped the gateway while a provisioned
+    Web Jump was brokering through it, because nothing counted Web Jumps."""
+    src = _read("web_dashboard", "services", "jumpoint_host_service.py")
+    assert "def _active_web_jump_count(" in src, "Web Jumps hold no reference on the gateway"
+    for fn in ("_teardown_jumpoint_host_if_idle_aws",
+               "_teardown_jumpoint_host_if_idle_gcp",
+               "_teardown_jumpoint_host_if_idle_azure"):
+        block = src[src.index(f"async def {fn}("):]
+        nxt = block.index("\nasync def ", 10) if "\nasync def " in block[10:] else len(block)
+        block = block[:nxt]
+        assert "_active_web_jump_count" in block, (
+            f"{fn} can delete a gateway a Web Jump is using")
+    count = src[src.index("def _active_web_jump_count("):
+                src.index("async def teardown_jumpoint_host_if_idle")]
+    assert "web_jump_id" in count, (
+        "the count keys on the enabled flag alone, so an enabled-but-unprovisioned Web "
+        "Jump would pin the gateway forever")
+
+
+def test_the_gateway_launcher_falls_back_to_a_sibling_zone():
+    """One capacity-exhausted zone left the deployment with NO gateway: the ensure path
+    is best-effort, so the 503 was only logged."""
+    src = _read("web_dashboard", "services", "gcp_service.py")
+    block = src[src.index("def _run_gce_jumpoint_sync("):src.index("async def run_gce_jumpoint(")]
+    assert "_is_zone_capacity_error" in block, (
+        "the gateway launcher has no zone fallback, unlike the Portainer/Rancher ones")
+    assert "_find_instance_zone_in_region" in block, (
+        "with zone fallback, a zone-scoped reuse check would create a duplicate gateway "
+        "in a sibling zone")
+
+
 def test_no_cap_is_imposed_on_gateway_count():
     """The stated requirement: three in us-central1, two in us-east-2, operator's
     discretion. A cap would have to come from somewhere, so assert nothing invented

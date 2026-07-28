@@ -91,6 +91,22 @@ know **most of them are shared infrastructure, not your compose deploys**:
 So a container appearing here that you didn't deploy is usually the gateway or a runner —
 leave it alone; the dashboard manages its lifecycle.
 
+### Gateways and the node firewalls
+
+The **Gateways** tab lists both kinds of BeyondTrust Gateway host: the **managed** one the
+dashboard auto-ensures and reference-counts, and the ones an operator **deploys** to carry
+session load. Two lifecycle rules follow from that, and both are enforced for you:
+
+- Every gateway host in a cloud uses that cloud's deploy key, so they all join the **same
+  PRA Gateway cluster** as additional nodes — and PRA may broker a session through any one
+  of them. So the source-restricted Rancher and Portainer nodes allow a `/32` for **every**
+  live gateway, re-applied on each gateway deploy and teardown. A gateway that isn't in the
+  allow list can reach nothing, which looks exactly like a broken Web Jump.
+- A provisioned Rancher/Portainer **Web Jump holds a reference** on the shared gateway, so
+  the idle teardown can't reclaim the host that brokers it. Without that, the last cloud
+  DB or cluster going away took the management UIs offline with it.
+
+
 ### Reaping stranded runner jobs
 
 A Cloud Run runner deletes its own job when the execution ends, but that delete is

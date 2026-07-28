@@ -49,15 +49,38 @@ def _cfg(key: str) -> str:
     return getattr(settings, key, "") or ""
 
 
-def _persist_jumpoint_egress_ip(ip: Optional[str]) -> None:
-    """Record the dashboard-managed Gateway host's egress IP so a node firewall can
-    auto-allow it (consumed by ``{rancher,portainer}_node_service._jumpoint_cidr`` when
-    that node's Web Jump is enabled). Best-effort; only overwrites when we actually
-    learned an IP, so an Azure ensure (no public IP) never clobbers a good GCP/AWS value.
+def _persist_jumpoint_egress_ip(ip: Optional[str], cloud: str = "", name: str = "",
+                                managed: bool = True) -> None:
+    """Record a Gateway host's egress IP so a node firewall can auto-allow it.
 
-    The Gateway host is SHARED per cloud, so the same IP serves every Web Jump — but
-    each feature owns its own key so it reads only what it configured."""
+    Two sinks, deliberately:
+
+    * the gateway's own registry row (``Gateway.egress_ip``), which is what
+      ``{rancher,portainer}_node_service._jumpoint_cidrs`` reads — EVERY live gateway
+      in the cloud, because they all join one PRA Gateway cluster and any of them may
+      broker a given session;
+    * the ``*_ui_jumpoint_egress_ip`` config keys, the single-slot "last known shared
+      gateway" the firewalls have always folded in. Only the MANAGED gateway writes
+      these: a user-deployed gateway overwriting them made the two features disagree
+      about which host they were configured for.
+
+    Best-effort; only overwrites when we actually learned an IP, so an Azure ensure
+    (no public IP) never clobbers a good GCP/AWS value."""
     if not ip:
+        return
+    if cloud and name:
+        try:
+            from ..database import SessionLocal
+            from . import gateway_service
+            db = SessionLocal()
+            try:
+                gateway_service.record_egress_ip(db, cloud, name, ip)
+            finally:
+                db.close()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("jumpoint-host: recording the gateway's egress IP failed "
+                           "(non-fatal): %s", exc)
+    if not managed:
         return
     try:
         from . import config_service
@@ -69,6 +92,41 @@ def _persist_jumpoint_egress_ip(ip: Optional[str]) -> None:
                             ip, label)
     except Exception as exc:
         logger.warning("jumpoint-host: persisting egress IP failed (non-fatal): %s", exc)
+
+
+def _record_placement(placement: Optional[dict], zone: str, ip: Optional[str]) -> None:
+    """Fill a caller's ``placement`` out-dict with where the host landed. Only sets
+    what we learned, so a cloud with no zone (AWS) or no public IP (Azure) leaves the
+    caller's existing value alone."""
+    if placement is None:
+        return
+    if zone:
+        placement["zone"] = zone
+    if ip:
+        placement["egress_ip"] = ip
+
+
+def _clear_managed_egress_ip(cloud: str, name: str) -> None:
+    """Forget a torn-down managed gateway: mark its registry row deleted and drop the
+    remembered shared /32.
+
+    Load-bearing for the firewalls, not tidiness. The remembered IP outlived the host
+    it described, so every subsequent refresh kept re-applying a rule that admitted a
+    VM that no longer existed — while the gateway that replaced it went unallowed."""
+    try:
+        from ..database import SessionLocal
+        from . import config_service, gateway_service
+        db = SessionLocal()
+        try:
+            gateway_service.mark_deleted(db, cloud, name)
+        finally:
+            db.close()
+        for key in ("rancher_ui_jumpoint_egress_ip", "portainer_ui_jumpoint_egress_ip"):
+            if config_service.get(key):
+                config_service.set(key, "")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("jumpoint-host: clearing the torn-down gateway's egress IP failed "
+                       "(non-fatal): %s", exc)
 
 
 def _ui_jumpoint_region(cloud: str) -> str:
@@ -207,7 +265,8 @@ def managed_host_name(cloud: str) -> str:
     return _cfg("bt_ecs_host_name") or "dashboard-sandbox-jumpoint-host"
 
 
-async def ensure_jumpoint_host(cloud: str, region: str, name: str = "") -> Optional[str]:
+async def ensure_jumpoint_host(cloud: str, region: str, name: str = "",
+                               placement: Optional[dict] = None) -> Optional[str]:
     """Ensure a tunnel-capable Gateway host is up for ``cloud``; return its
     instance/host id (or None). Dispatches per cloud — AWS uses ECS-on-EC2, GCP uses
     a privileged container on a COS GCE VM. Best-effort for callers.
@@ -219,20 +278,29 @@ async def ensure_jumpoint_host(cloud: str, region: str, name: str = "") -> Optio
     Whether a name was given also decides ownership, and so who records it: no name
     means the managed gateway, which is adopted into the registry here because
     nothing else knows it happened. A named gateway was requested through a job that
-    already owns its row."""
+    already owns its row.
+
+    ``placement``, when given, is filled in with ``{zone, egress_ip}`` — where the host
+    actually landed, which the caller can't infer: a blank zone is resolved here and a
+    capacity-exhausted zone falls through to a sibling."""
     requested = bool(name)
+    # Always collect the placement, even when the caller doesn't want it: the adoption
+    # below needs the egress IP, and the managed row is CREATED there — so on a first
+    # ensure there is no row for the ensure path's own write to land on.
+    placement = {} if placement is None else placement
     if cloud == "gcp":
-        host_id = await _ensure_jumpoint_host_gcp(region, name)
+        host_id = await _ensure_jumpoint_host_gcp(region, name, placement=placement)
     elif cloud == "azure":
-        host_id = await _ensure_jumpoint_host_azure(region, name)
+        host_id = await _ensure_jumpoint_host_azure(region, name, placement=placement)
     else:
-        host_id = await _ensure_jumpoint_host_aws(region, name)
+        host_id = await _ensure_jumpoint_host_aws(region, name, placement=placement)
     if host_id and not requested:
-        _adopt_managed_row(cloud, region, host_id)
+        _adopt_managed_row(cloud, region, host_id,
+                           egress_ip=placement.get("egress_ip", ""))
     return host_id
 
 
-def _adopt_managed_row(cloud: str, region: str, host_id: str) -> None:
+def _adopt_managed_row(cloud: str, region: str, host_id: str, egress_ip: str = "") -> None:
     """Record the auto-ensured gateway in the registry, so the Gateways page shows it
     beside the requested ones. Owns its own session — callers of ensure_jumpoint_host
     are mid-deploy and hold sessions of their own. Best-effort by contract: an
@@ -243,7 +311,7 @@ def _adopt_managed_row(cloud: str, region: str, host_id: str) -> None:
         db = SessionLocal()
         try:
             gateway_service.adopt_managed(db, cloud, region, managed_host_name(cloud),
-                                          host_id=host_id)
+                                          host_id=host_id, egress_ip=egress_ip)
         finally:
             db.close()
     except Exception as exc:  # noqa: BLE001
@@ -288,7 +356,8 @@ async def _await_ecs_registration(region: str, host_id: str) -> None:
                    "task anyway", host_id, _REGISTER_TIMEOUT_S)
 
 
-async def _ensure_jumpoint_host_aws(region: str, name: str = "") -> Optional[str]:
+async def _ensure_jumpoint_host_aws(region: str, name: str = "",
+                                    placement: Optional[dict] = None) -> Optional[str]:
     """Ensure an AWS Gateway host (and its task) is up; return its instance id (or
     None on the FARGATE escape hatch / when nothing was created). Raises AWSError on
     failure — callers treat this as best-effort."""
@@ -305,12 +374,15 @@ async def _ensure_jumpoint_host_aws(region: str, name: str = "") -> Optional[str
         await _ensure_task(region, deploy_key)
         return None
 
+    requested = bool(name)
     name = name or managed_host_name("aws")
     existing = await aws_service.find_instances_by_tag(
         region, name_tag=name, states=["pending", "running"])
     if existing:
         logger.info("gateway-host: reusing host %s (%s)", existing[0]["instance_id"], name)
-        _persist_jumpoint_egress_ip(existing[0].get("public_ip"))
+        _record_placement(placement, "", existing[0].get("public_ip"))
+        _persist_jumpoint_egress_ip(existing[0].get("public_ip"), "aws", name,
+                                    managed=not requested)
         # The tag match includes `pending`, and a running host may still be mid-ECS
         # registration — wait, or RunTask 400s with "No Container Instances".
         await _await_ecs_registration(region, existing[0]["instance_id"])
@@ -329,7 +401,9 @@ async def _ensure_jumpoint_host_aws(region: str, name: str = "") -> Optional[str
     if recheck:
         logger.info("gateway-host: host appeared concurrently (%s) — reusing",
                     recheck[0]["instance_id"])
-        _persist_jumpoint_egress_ip(recheck[0].get("public_ip"))
+        _record_placement(placement, "", recheck[0].get("public_ip"))
+        _persist_jumpoint_egress_ip(recheck[0].get("public_ip"), "aws", name,
+                                    managed=not requested)
         # Losing the race means the winner may still be booting — same wait as above.
         await _await_ecs_registration(region, recheck[0]["instance_id"])
         await _ensure_task(region, deploy_key, recheck[0]["instance_id"])
@@ -355,7 +429,9 @@ async def _ensure_jumpoint_host_aws(region: str, name: str = "") -> Optional[str
     try:
         fresh = await aws_service.find_instances_by_tag(region, name_tag=name, states=["pending", "running"])
         if fresh:
-            _persist_jumpoint_egress_ip(fresh[0].get("public_ip"))
+            _record_placement(placement, "", fresh[0].get("public_ip"))
+            _persist_jumpoint_egress_ip(fresh[0].get("public_ip"), "aws", name,
+                                        managed=not requested)
     except Exception as exc:
         logger.warning("gateway-host: capturing host public IP failed (non-fatal): %s", exc)
     await _ensure_task(region, deploy_key, host_id)
@@ -483,6 +559,31 @@ def _active_vdesktop_count(db, cloud: Optional[str] = None) -> int:
     return q.count()
 
 
+def _active_web_jump_count(cloud: str) -> int:
+    """Web Jumps brokered by ``cloud``'s shared gateway — the Rancher/Portainer
+    management UIs.
+
+    Load-bearing, like ``_active_gce_count``: a provisioned Web Jump reaches its node
+    THROUGH this gateway, so reaping it takes the UI offline and takes the jumpoint /32
+    out of the node's firewall with it. Both features already store the ids this counts,
+    so an enabled-but-never-provisioned Web Jump correctly holds no reference."""
+    from . import config_service
+    total = 0
+    for enabled, jump_id, cloud_key in (
+            ("rancher_ui_web_jump_enabled", "rancher_ui_web_jump_id",
+             "rancher_ui_jumpoint_cloud"),
+            ("portainer_ui_web_jump_enabled", "portainer_ui_web_jump_id",
+             "portainer_ui_jumpoint_cloud")):
+        if not config_service.get_bool(enabled, False):
+            continue
+        if not (config_service.get(jump_id) or "").strip():
+            continue
+        # Same default as ensure_{rancher,portainer}_ui_jumpoint: gcp.
+        if ((config_service.get(cloud_key) or "gcp").strip().lower()) == cloud:
+            total += 1
+    return total
+
+
 async def teardown_jumpoint_host_if_idle(db, cloud: str, region: str) -> None:
     """Terminate the shared Gateway host for ``cloud`` iff nothing is left using
     it. Dispatches per cloud. Best-effort; logs and returns on error."""
@@ -506,7 +607,8 @@ async def _teardown_jumpoint_host_if_idle_aws(db, region: str) -> None:
     from . import aws_service
     try:
         active = (_active_db_count(db, "aws") + _active_ec2_count(db)
-                  + _active_k8s_count(db, "aws") + _active_vdesktop_count(db, "aws"))
+                  + _active_k8s_count(db, "aws") + _active_vdesktop_count(db, "aws")
+                  + _active_web_jump_count("aws"))
         if active > 0:
             logger.info("gateway-host: keeping host (%d active resource(s))", active)
             return
@@ -527,6 +629,7 @@ async def _teardown_jumpoint_host_if_idle_aws(db, region: str) -> None:
                 logger.warning("gateway-host: stopping gateway task(s) failed (non-fatal): %s", exc)
             await aws_service.terminate_instance(region, h["instance_id"])
             logger.info("gateway-host: terminated idle host %s", h["instance_id"])
+        _clear_managed_egress_ip("aws", name)
     except Exception as exc:
         logger.warning("gateway-host: idle teardown failed (non-fatal): %s", exc)
 
@@ -605,11 +708,11 @@ async def _resolve_gcp_deploy_key() -> str:
             or "")
 
 
-async def _ensure_jumpoint_host_gcp(region: str, name: str = "",
-                                    zone: str = "") -> Optional[str]:
+async def _ensure_jumpoint_host_gcp(region: str, name: str = "", zone: str = "",
+                                    placement: Optional[dict] = None) -> Optional[str]:
     """Ensure a COS GCE Gateway VM is up (idempotent on name); return its name.
     Best-effort — logs and returns None when prerequisites are missing."""
-    from . import gcp_service
+    from . import gcp_service, region_catalog
     from .region_config import resolve_region
     project = _gcp_project()
     if not project:
@@ -620,8 +723,12 @@ async def _ensure_jumpoint_host_gcp(region: str, name: str = "",
         logger.warning("gateway-host(gcp): gateway deploy key not set "
                        "(gcp_cloud_run_docker_deploy_key) — tunnels unavailable until configured.")
         return None
+    requested = bool(name)
     name = name or _gcp_jumpoint_name()
     zone = zone or _gcp_jumpoint_zone(region)
+    # The launcher's zone fallback is region-scoped, so a blank region (single-region
+    # installs pass one through, but a zone-only caller may not) is derived from the zone.
+    region = region or region_catalog.region_from_zone(zone)
     try:
         meta = await gcp_service.run_gce_jumpoint(
             project_id=project,
@@ -634,10 +741,17 @@ async def _ensure_jumpoint_host_gcp(region: str, name: str = "",
             subnetwork=_gcp_jumpoint_subnetwork(project, zone),
             machine_type=_cfg("gcp_jumpoint_machine_type") or "e2-micro",
             create_external_ip=True,
+            # Lets the launcher try the region's other zones when this one is out of
+            # capacity, instead of leaving the deployment with no gateway at all.
+            region=region,
         )
+        landed_zone = meta.get("zone") or zone
         logger.info("gateway-host(gcp): gateway %s %s in %s",
-                    name, "reused" if meta.get("reused") else "started", zone)
-        _persist_jumpoint_egress_ip(meta.get("external_ip"))
+                    name, "reused" if meta.get("reused") else "started", landed_zone)
+        if placement is not None:
+            placement.update({"zone": landed_zone, "egress_ip": meta.get("external_ip") or ""})
+        _persist_jumpoint_egress_ip(meta.get("external_ip"), "gcp", name,
+                                    managed=not requested)
         return name
     except Exception as exc:
         logger.warning("gateway-host(gcp): ensure failed (non-fatal): %s", exc)
@@ -658,7 +772,8 @@ async def _teardown_jumpoint_host_if_idle_gcp(db, region: str) -> None:
         # borrowed it. The AWS counterpart has always included its _active_ec2_count
         # term for exactly this reason.
         active = (_active_db_count(db, "gcp") + _active_k8s_count(db, "gcp")
-                  + _active_vdesktop_count(db, "gcp") + _active_gce_count(db))
+                  + _active_vdesktop_count(db, "gcp") + _active_gce_count(db)
+                  + _active_web_jump_count("gcp"))
         if active > 0:
             logger.info("gateway-host(gcp): keeping gateway (%d active resource(s))", active)
             return
@@ -668,6 +783,7 @@ async def _teardown_jumpoint_host_if_idle_gcp(db, region: str) -> None:
         name = managed_host_name("gcp")
         await gcp_service.stop_gce_jumpoint(project, _gcp_jumpoint_zone(region), name)
         logger.info("gateway-host(gcp): deleted idle gateway %s", name)
+        _clear_managed_egress_ip("gcp", name)
     except Exception as exc:
         logger.warning("gateway-host(gcp): idle teardown failed (non-fatal): %s", exc)
 
@@ -721,7 +837,8 @@ def _azure_gateway_location(region: str) -> str:
     return region_catalog.normalize("azure", region) or _cfg("azure_location")
 
 
-async def _ensure_jumpoint_host_azure(region: str, name: str = "") -> Optional[str]:
+async def _ensure_jumpoint_host_azure(region: str, name: str = "",
+                                      placement: Optional[dict] = None) -> Optional[str]:
     """Ensure an Azure VM Gateway is up (idempotent on name); return its name.
     Best-effort — logs and returns None when prerequisites are missing."""
     from . import azure_service
@@ -730,6 +847,7 @@ async def _ensure_jumpoint_host_azure(region: str, name: str = "") -> Optional[s
     rc = resolve_region("azure", location)
     rg = rc["resource_group"]
     subnet = rc["jumpoint_subnet_id"] or _cfg("azure_aci_subnet_id")
+    requested = bool(name)
     name = name or managed_host_name("azure")
     if not (rg and location and subnet):
         logger.warning("gateway-host(azure): azure_resource_group / azure_location / "
@@ -759,7 +877,9 @@ async def _ensure_jumpoint_host_azure(region: str, name: str = "") -> Optional[s
         )
         logger.info("gateway-host(azure): gateway VM %s %s in %s",
                     name, "reused" if meta.get("reused") else "started", location)
-        _persist_jumpoint_egress_ip(meta.get("public_ip"))
+        _record_placement(placement, location, meta.get("public_ip"))
+        _persist_jumpoint_egress_ip(meta.get("public_ip"), "azure", name,
+                                    managed=not requested)
         return name
     except Exception as exc:
         logger.warning("gateway-host(azure): ensure failed (non-fatal): %s", exc)
@@ -780,7 +900,8 @@ async def _teardown_jumpoint_host_if_idle_azure(db, region: str) -> None:
         # that borrowed it. The AWS and GCP counterparts carry their _active_ec2_count /
         # _active_gce_count terms for exactly this reason.
         active = (_active_db_count(db, "azure") + _active_k8s_count(db, "azure")
-                  + _active_vdesktop_count(db, "azure") + _active_azure_vm_count(db))
+                  + _active_vdesktop_count(db, "azure") + _active_azure_vm_count(db)
+                  + _active_web_jump_count("azure"))
         if active > 0:
             logger.info("gateway-host(azure): keeping gateway (%d active resource(s))", active)
             return
@@ -790,5 +911,6 @@ async def _teardown_jumpoint_host_if_idle_azure(db, region: str) -> None:
         name = managed_host_name("azure")
         await azure_service.stop_vm_jumpoint(rg, name)
         logger.info("gateway-host(azure): deleted idle gateway %s", name)
+        _clear_managed_egress_ip("azure", name)
     except Exception as exc:
         logger.warning("gateway-host(azure): idle teardown failed (non-fatal): %s", exc)

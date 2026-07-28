@@ -79,10 +79,11 @@ class FakeAws:
         return f"arn:aws:ecs:::task/{CLUSTER}/new"
 
 
-def _load(fake, active=0):
+def _load(fake, active=0, web_jumps=0):
     """Import the service with a fake aws_service and stubbed config reads.
 
-    ``active`` is the reference count the teardown sees. The real counters query the
+    ``active`` is the reference count the teardown sees, ``web_jumps`` the number of
+    Web Jumps brokering through this cloud's gateway. The real counters query the
     ORM, and their import failure is swallowed by the teardown's best-effort
     try/except — which would make every teardown assertion below pass without the
     teardown ever running. Stubbing them is what keeps these tests honest."""
@@ -108,6 +109,12 @@ def _load(fake, active=0):
     m._active_ec2_count = lambda db: 0
     m._active_k8s_count = lambda db, cloud=None: 0
     m._active_vdesktop_count = lambda db, cloud=None: 0
+    # Reads config rather than the ORM, but for the same reason as the counters above:
+    # unstubbed it raises into the teardown's best-effort try/except and every teardown
+    # assertion below would pass without the teardown having run.
+    m._active_web_jump_count = lambda cloud="": web_jumps
+    # The teardown forgets the host it just deleted; that write needs a session.
+    m._clear_managed_egress_ip = lambda cloud, name: None
     return m
 
 
@@ -161,6 +168,17 @@ def test_teardown_keeps_everything_when_a_resource_is_still_active():
     asyncio.run(m._teardown_jumpoint_host_if_idle_aws(_DB, REGION))
     assert not fake.stopped and not fake.terminated, (
         "teardown ran while a resource was still using the gateway")
+
+
+def test_a_web_jump_alone_keeps_the_gateway():
+    """What actually happened in the field: nothing else was using the gateway, so it
+    was reaped — and took the Portainer Web Jump's only broker with it, leaving a Web
+    Jump pointed at a PRA Gateway with no live node."""
+    fake = FakeAws()
+    m = _load(fake, web_jumps=1)
+    asyncio.run(m._teardown_jumpoint_host_if_idle_aws(_DB, REGION))
+    assert not fake.terminated, (
+        "the gateway was terminated while a Web Jump was brokering through it")
 
 
 # ── a second gateway gets its own task, pinned to its own host ────────────────

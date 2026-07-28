@@ -44,6 +44,13 @@ _IP_ECHO_URLS = (
 # The admin Portainer's first-run init creates.
 _ADMIN_USERNAME = "admin"
 
+# Told to the operator when a node has locked itself out. A REDEPLOY alone won't fix it:
+# the launcher reuses a RUNNING VM as-is, and konlet only reads the container
+# declaration (with --admin-password) at boot — so the VM has to go.
+_LOCKED_NODE_REMEDY = ("Delete the node on the Containers page and deploy again: the "
+                       "replacement VM initializes its admin at boot, so it can't hit "
+                       "this window.")
+
 
 def _firewall_name(node_name: str) -> str:
     return f"{node_name}-allow-mgmt"
@@ -151,17 +158,47 @@ def _allowed_cidrs() -> list[str]:
     return cidrs
 
 
-def _jumpoint_cidr() -> list[str]:
-    """/32 for the dashboard-managed Web-Jump Jumpoint host, when known + enabled.
+def _jumpoint_cidrs(db=None) -> list[str]:
+    """/32s for the Gateway hosts that can broker this node's Web Jump.
 
-    A PRA Web Jump reaches the node THROUGH a Jumpoint, so the source IP hitting the
-    firewall is the Jumpoint host's egress IP (never the PRA appliance's). Only known
-    when the dashboard provisioned that host (see jumpoint_host_service); empty for a
-    pre-existing operator Jumpoint (add its IP to the CSV manually)."""
+    A PRA Web Jump reaches the node THROUGH a Gateway, so the source IP hitting the
+    firewall is that host's egress IP (never the PRA appliance's).
+
+    EVERY live gateway in the Web Jump's cloud counts, not just the shared one: they
+    all join the same PRA Gateway cluster and PRA distributes sessions across its
+    nodes, so the broker for a given session may be any of them. Allowing only the
+    remembered shared /32 left a user-deployed gateway locked out of the node it was
+    deployed to carry.
+
+    Sources: the gateway registry (``Gateway.egress_ip``, authoritative and
+    per-gateway) plus the legacy ``portainer_ui_jumpoint_egress_ip`` key, which still
+    covers a shared host recorded before this table existed. Empty for a pre-existing
+    operator Gateway the dashboard didn't provision — add its IP to the CSV manually."""
     if not config_service.get_bool("portainer_ui_web_jump_enabled", False):
         return []
+    ips = set()
     ip = (config_service.get("portainer_ui_jumpoint_egress_ip") or "").strip()
-    return [f"{ip}/32"] if ip else []
+    if ip:
+        ips.add(ip)
+    cloud = (config_service.get("portainer_ui_jumpoint_cloud") or "gcp").strip().lower()
+    try:
+        from . import gateway_service
+        if db is not None:
+            ips.update(gateway_service.live_egress_ips(db, cloud))
+        else:
+            # Callers on the read-only path (firewall_status via the API) have a session;
+            # the refresh path may not, so open a short-lived one rather than skip the
+            # registry and quietly narrow the rule.
+            from ..database import SessionLocal
+            _db = SessionLocal()
+            try:
+                ips.update(gateway_service.live_egress_ips(_db, cloud))
+            finally:
+                _db.close()
+    except Exception as exc:  # noqa: BLE001 — never let an inventory read close the rule
+        logger.warning("Portainer firewall: reading gateway egress IPs failed "
+                       "(continuing with %d known): %s", len(ips), exc)
+    return sorted(f"{i}/32" for i in ips)
 
 
 def _dashboard_cidr() -> list[str]:
@@ -243,18 +280,18 @@ async def refresh_portainer_firewall(db=None) -> dict:
     """Recompute the node's firewall source set and re-apply it idempotently.
 
     The merged set is the manual CSV (``_allowed_cidrs``) plus the dashboard's own
-    egress /32 plus the Web-Jump Jumpoint's /32. Fail-closed and idempotent behavior
-    is inherited from ``gcp_service.ensure_portainer_firewall`` (empty set → rule
-    deleted; ``0.0.0.0/0`` from allow_open dedupes harmlessly). No-op safe: returns
-    early when no GCP project is configured, so callers can fire it best-effort even
-    when no node is deployed.
+    egress /32 plus a /32 for every Gateway that can broker the Web Jump. Fail-closed
+    and idempotent behavior is inherited from ``gcp_service.ensure_portainer_firewall``
+    (empty set → rule deleted; ``0.0.0.0/0`` from allow_open dedupes harmlessly). No-op
+    safe: returns early when no GCP project is configured, so callers can fire it
+    best-effort even when no node is deployed.
 
-    ``db`` is accepted (and unused) to match ``refresh_rancher_firewall``'s signature —
-    Portainer has no per-cluster egress IPs to fold in."""
+    ``db`` is optional so best-effort callers can fire it without a session; it is used
+    to read the gateway registry."""
     p = _node_params()
     if not p["project_id"]:
         return {"skipped": "no gcp project configured"}
-    merged = sorted(set(_allowed_cidrs()) | set(_dashboard_cidr()) | set(_jumpoint_cidr()))
+    merged = sorted(set(_allowed_cidrs()) | set(_dashboard_cidr()) | set(_jumpoint_cidrs(db)))
     if not merged:
         logger.warning("Portainer node has NO allowed source CIDRs — firewall stays closed "
                        "(node unreachable). Set portainer_allowed_source_cidrs in Settings.")
@@ -270,13 +307,15 @@ def firewall_status(db=None) -> dict:
     :func:`refresh_portainer_firewall` would apply, so the operator can see exactly
     which sources are allowed and why."""
     dash = _dashboard_cidr()
-    jump = _jumpoint_cidr()
+    jump = _jumpoint_cidrs(db)
     merged = sorted(set(_allowed_cidrs()) | set(dash) | set(jump))
     csv = config_service.get("portainer_allowed_source_cidrs") or ""
     return {
         "manual_cidrs": [c.strip() for c in csv.split(",") if c.strip()],
         "dashboard_egress_ip": dash[0] if dash else "",
+        # Kept singular for the existing Settings panel; gateway_cidrs is the full set.
         "jumpoint_egress_ip": jump[0] if jump else "",
+        "gateway_cidrs": jump,
         "merged": merged,
         "allow_open": config_service.get_bool("gcp_portainer_allow_open", False),
         "opened": bool(merged),
@@ -375,34 +414,58 @@ async def remove_portainer_ui_web_jump() -> None:
     config_service.set("portainer_ui_vault_account_id", "")
 
 
-async def _bootstrap(db, job_id: str, url: str) -> tuple[str, str]:
-    """First-run the node: create the admin, then mint an API token.
+def _admin_password_hash(password: str) -> str:
+    """bcrypt hash of ``password`` for Portainer's ``--admin-password``.
+
+    Round-tripped before it is handed out: a hash Portainer can't verify would produce
+    a node that boots fine and rejects the only password we know, which is worse than
+    failing here. Returns ``""`` when bcrypt is unavailable, so the caller falls back
+    to the first-run init endpoint."""
+    try:
+        import bcrypt
+    except ImportError:
+        logger.warning("bcrypt is not installed — the Portainer node will fall back to "
+                       "first-run API initialization, which races Portainer's init window.")
+        return ""
+    raw = password.encode()
+    hashed = bcrypt.hashpw(raw, bcrypt.gensalt()).decode()
+    if not bcrypt.checkpw(raw, hashed.encode()):
+        raise RuntimeError("bcrypt produced a hash it cannot verify — refusing to launch a "
+                           "Portainer node nobody could log into")
+    return hashed
+
+
+async def _bootstrap(db, job_id: str, url: str, password: str) -> tuple[str, str]:
+    """Sign in as the admin and mint an API token; initialize the admin if needed.
 
     Returns ``(pat, note)``. ``note`` is a human-readable caveat for the job result
-    (empty on the clean path). A node whose init window has closed yields
-    ``("", note)`` rather than raising — the VM is up and usable, the operator just
-    has to supply a PAT by hand."""
-    password = config_service.get("portainer_admin_password")
-    generated = False
-    if not password:
-        password = _generate_admin_password()
-        generated = True
+    (empty on the clean path).
 
-    job_service.update_progress(db, job_id, 75, "Creating the admin user")
+    Login comes FIRST because a node launched by this dashboard initializes its admin
+    at container start (``--admin-password``) — there is nothing left to init. The
+    first-run endpoint stays as the fallback for a node created before that, or one
+    launched without a usable bcrypt hash.
+
+    Propagates :class:`PortainerInitWindowClosed`: that node has no admin at all, so a
+    hand-supplied PAT can't rescue it and reporting a note would hide a dead node."""
+    job_service.update_progress(db, job_id, 75, "Signing in as the admin user")
     try:
-        await portainer_service.init_admin(url, _ADMIN_USERNAME, password)
-    except portainer_service.PortainerAlreadyInitialized as exc:
-        logger.warning("Portainer first-run init unavailable: %s", exc)
-        return "", ("The node already had an admin user, so no API token could be minted "
-                    "automatically. Add a Portainer API token in Settings → Containers.")
-
-    # Only persist the password once init actually succeeded, so a failed deploy
-    # doesn't leave a credential that doesn't open anything.
-    config_service.set("portainer_admin_password", password)
-    config_service.set("portainer_admin_password_generated", "1" if generated else "0")
+        jwt = await portainer_service.login(url, _ADMIN_USERNAME, password)
+    except portainer_service.PortainerInitWindowClosed:
+        raise
+    except portainer_service.PortainerError as exc:
+        logger.info("Portainer admin login failed (%s) — trying first-run initialization", exc)
+        job_service.update_progress(db, job_id, 78, "Creating the admin user")
+        try:
+            await portainer_service.init_admin(url, _ADMIN_USERNAME, password)
+        except portainer_service.PortainerAlreadyInitialized as already:
+            logger.warning("Portainer first-run init unavailable: %s", already)
+            return "", ("The node already had an admin user with a different password, so no "
+                        "API token could be minted automatically. Add a Portainer API token "
+                        "in Settings → Containers.")
+        jwt = await portainer_service.login(url, _ADMIN_USERNAME, password)
 
     job_service.update_progress(db, job_id, 85, "Minting an API token")
-    jwt = await portainer_service.login(url, _ADMIN_USERNAME, password)
     pat = await portainer_service.create_access_token(url, jwt, password)
     return pat, ""
 
@@ -420,7 +483,7 @@ async def run_deploy(db, *, job_id: str, meta: dict) -> None:
             return
 
         # Persist the deploy-form PRA choices to config FIRST, so the firewall merge
-        # (_jumpoint_cidr gates on portainer_ui_web_jump_enabled) and the later
+        # (_jumpoint_cidrs gates on portainer_ui_web_jump_enabled) and the later
         # Web-Jump provisioning all honor this deploy's picks. Only keys the operator
         # actually sent are written, so a bare redeploy keeps the existing Settings.
         if "web_jump_enabled" in meta:
@@ -476,12 +539,26 @@ async def run_deploy(db, *, job_id: str, meta: dict) -> None:
                 except Exception as exc:
                     logger.warning("Failed to delete old-region Portainer node (continuing): %s", exc)
 
+        # Settle the admin credential BEFORE the VM exists. Portainer only accepts its
+        # first-run init endpoint for a short window after the container starts and then
+        # fences off the entire API ("administrator initialization timeout") — a race the
+        # deploy loses whenever the image pull or readiness poll runs long, leaving a node
+        # NOBODY can log into. Passing the hash at launch makes the node come up already
+        # initialized, so there is no window to lose.
+        password = config_service.get("portainer_admin_password") or ""
+        generated = False
+        if not password:
+            password = _generate_admin_password()
+            generated = True
+        pw_hash = _admin_password_hash(password)
+
         job_service.update_progress(db, job_id, 30, "Launching COS VM")
         res = await gcp_service.run_gce_portainer(
             p["project_id"], p["zone"], p["name"], p["image"],
             network=p["network"], subnetwork=p["subnetwork"],
             machine_type=p["machine_type"], boot_disk_gb=p["boot_disk_gb"],
-            network_tag=p["network_tag"], create_external_ip=True, region=p["region"])
+            network_tag=p["network_tag"], create_external_ip=True, region=p["region"],
+            admin_password_hash=pw_hash)
         external_ip = res.get("external_ip") or ""
         url = res.get("url") or ""
         if not external_ip:
@@ -499,8 +576,19 @@ async def run_deploy(db, *, job_id: str, meta: dict) -> None:
         config_service.set("portainer_url", url)
         config_service.set("portainer_verify_ssl", "0")
 
+        # A fresh VM was created WITH this password baked in, so persist it now — the
+        # credential is real from the moment the container starts, and losing it would
+        # leave a node we can't log into even though its admin exists.
+        if pw_hash and not res.get("reused"):
+            config_service.set("portainer_admin_password", password)
+            config_service.set("portainer_admin_password_generated", "1" if generated else "0")
+
         job_service.update_progress(db, job_id, 55, "Waiting for Portainer to start")
-        ready = await portainer_service.wait_ready(url, _ready_timeout_s())
+        try:
+            ready = await portainer_service.wait_ready(url, _ready_timeout_s())
+        except portainer_service.PortainerInitWindowClosed as exc:
+            job_service.set_failed(db, job_id, f"{exc} {_LOCKED_NODE_REMEDY}")
+            return
         if not ready:
             job_service.set_failed(
                 db, job_id,
@@ -516,7 +604,11 @@ async def run_deploy(db, *, job_id: str, meta: dict) -> None:
             job_service.update_progress(db, job_id, 85, "Reusing the existing API token")
             pat = existing_pat
         else:
-            pat, note = await _bootstrap(db, job_id, url)
+            try:
+                pat, note = await _bootstrap(db, job_id, url, password)
+            except portainer_service.PortainerInitWindowClosed as exc:
+                job_service.set_failed(db, job_id, f"{exc} {_LOCKED_NODE_REMEDY}")
+                return
 
         if pat:
             config_service.set("portainer_pat", pat)

@@ -1203,9 +1203,11 @@
                       <span class="text-gray-500">Dashboard egress:</span>
                       <code class="bg-white px-1 rounded" x-text="portainerFirewall.dashboard_egress_ip || '(not detected)'"></code>
                     </p>
-                    <p x-show="portainerFirewall.jumpoint_egress_ip">
-                      <span class="text-gray-500">Web-Jump Gateway:</span>
-                      <code class="bg-white px-1 rounded" x-text="portainerFirewall.jumpoint_egress_ip"></code>
+                    <p x-show="(portainerFirewall.gateway_cidrs || []).length">
+                      <span class="text-gray-500">Web-Jump Gateways:</span>
+                      <template x-for="c in portainerFirewall.gateway_cidrs || []" :key="c">
+                        <code class="bg-white px-1 rounded mr-1" x-text="c"></code>
+                      </template>
                     </p>
                     <p>
                       <span class="text-gray-500">Merged allow-list:</span>
@@ -2494,9 +2496,9 @@
                   <span class="text-gray-500">Dashboard egress:</span>
                   <span class="ml-1 font-mono text-gray-700" x-text="rancherFirewall.dashboard_egress_ip"></span>
                 </div>
-                <div class="mb-1" x-show="rancherFirewall.jumpoint_egress_ip">
-                  <span class="text-gray-500">Web-Jump Gateway:</span>
-                  <span class="ml-1 font-mono text-gray-700" x-text="rancherFirewall.jumpoint_egress_ip"></span>
+                <div class="mb-1" x-show="rancherFirewall.gateway_cidrs && rancherFirewall.gateway_cidrs.length">
+                  <span class="text-gray-500">Web-Jump Gateways:</span>
+                  <span class="ml-1 font-mono text-gray-700" x-text="(rancherFirewall.gateway_cidrs || []).join(', ')"></span>
                 </div>
                 <div class="mb-1" x-show="rancherFirewall.runner_source_cidr">
                   <span class="text-gray-500">API runner (VPC connector):</span>
@@ -2506,7 +2508,7 @@
                   <span class="text-gray-500">Manual:</span>
                   <span class="ml-1 font-mono text-gray-700" x-text="rancherFirewall.manual_cidrs.join(', ')"></span>
                 </div>
-                <p class="text-gray-400 mt-1" x-show="!(rancherFirewall.cluster_egress_ips && rancherFirewall.cluster_egress_ips.length) && !rancherFirewall.dashboard_egress_ip && !rancherFirewall.jumpoint_egress_ip && !(rancherFirewall.manual_cidrs && rancherFirewall.manual_cidrs.length)">
+                <p class="text-gray-400 mt-1" x-show="!(rancherFirewall.cluster_egress_ips && rancherFirewall.cluster_egress_ips.length) && !rancherFirewall.dashboard_egress_ip && !(rancherFirewall.gateway_cidrs && rancherFirewall.gateway_cidrs.length) && !(rancherFirewall.manual_cidrs && rancherFirewall.manual_cidrs.length)">
                   No sources yet — provision a cluster, enable the Web Jump, or add a CIDR above.
                 </p>
               </div>
