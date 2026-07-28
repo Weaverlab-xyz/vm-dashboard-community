@@ -134,53 +134,103 @@ async def _resolve_deploy_key() -> str:
     return ""
 
 
-async def _ensure_task(region: str, deploy_key: str) -> None:
-    """Run the jumpoint task on the cluster if none is live (host must already
-    have capacity). Mirrors the old cloud_database_service._ensure_jumpoint_node
-    task half."""
+def _aws_region_cfg(region: str) -> dict:
+    """Per-region gateway settings (cluster, subnet, security group).
+
+    A gateway in us-east-2 needs that region's cluster and subnet, not the flat
+    default — ``region_config`` already models this and falls back to the flat
+    ``bt_ecs_*`` keys when no per-region config exists, so single-region setups are
+    unaffected."""
+    from .region_config import resolve_region
+    return resolve_region("aws", region)
+
+
+async def _live_gateway_tasks(region: str, cluster: str, family: str,
+                              host_instance_id: str = "") -> list[dict]:
+    """Live gateway tasks in ``cluster``, optionally only those running on one
+    container instance.
+
+    Scoping by host is what makes several gateways able to share a cluster: without
+    it, "is a task already live?" is answered by *any* host's task, and "stop the
+    tasks" stops everybody's.
+    """
     from . import aws_service
-    cluster = _cfg("bt_ecs_cluster")
-    family = _cfg("bt_ecs_task_family")
-    launch_type = (_cfg("bt_ecs_launch_type") or "EC2").upper()
     tasks = await aws_service.list_ecs_tasks(region, cluster)
     live = [t for t in tasks
             if t.get("lastStatus") in ("PROVISIONING", "PENDING", "RUNNING")
             and f"task-definition/{family}:" in (t.get("taskDefinitionArn") or "")]
+    if not host_instance_id:
+        return live
+    instances = await aws_service.list_container_instances(region, cluster)
+    arns = {c["arn"] for c in instances if c.get("ec2_instance_id") == host_instance_id}
+    return [t for t in live if t.get("containerInstanceArn") in arns]
+
+
+async def _ensure_task(region: str, deploy_key: str, host_instance_id: str = "") -> None:
+    """Run the gateway task on ``host_instance_id`` if none is live there (the host
+    must already have capacity). With no host given, falls back to the historical
+    cluster-wide check — the FARGATE path, which has no container instance."""
+    from . import aws_service
+    rc = _aws_region_cfg(region)
+    cluster = rc["ecs_cluster"]
+    family = _cfg("bt_ecs_task_family")
+    launch_type = (_cfg("bt_ecs_launch_type") or "EC2").upper()
+    live = await _live_gateway_tasks(region, cluster, family, host_instance_id)
     if live:
-        logger.info("jumpoint-host: task already live (%d) in cluster %s", len(live), cluster)
+        logger.info("gateway-host: task already live (%d) in cluster %s%s",
+                    len(live), cluster,
+                    f" on {host_instance_id}" if host_instance_id else "")
         return
     arn = await aws_service.run_ecs_jumpoint_task(
         region=region, cluster=cluster, task_family=family,
-        subnet_id=_cfg("bt_ecs_jumpoint_subnet_id"),
-        security_group_ids=[s.strip() for s in _cfg("bt_ecs_jumpoint_security_group_id").split(",") if s.strip()],
+        subnet_id=rc["jumpoint_subnet_id"],
+        security_group_ids=[s.strip() for s in (rc["jumpoint_security_group_id"] or "").split(",") if s.strip()],
         deploy_key=deploy_key, cpu=_cfg("bt_ecs_cpu"), memory=_cfg("bt_ecs_memory"),
         execution_role_arn=_cfg("bt_ecs_execution_role_arn"), image=_cfg("bt_ecs_image"),
         launch_type=launch_type,
+        host_instance_id=host_instance_id,
     )
-    logger.info("jumpoint-host: started jumpoint task %s — registers with PRA in ~1-2 min",
+    logger.info("gateway-host: started gateway task %s — registers with PRA in ~1-2 min",
                 arn.split("/")[-1])
 
 
-async def ensure_jumpoint_host(cloud: str, region: str) -> Optional[str]:
-    """Ensure the shared tunnel-capable Jumpoint host is up for ``cloud``; return
-    its instance/host id (or None). Dispatches per cloud — AWS uses ECS-on-EC2,
-    GCP uses a privileged container on a COS GCE VM. Best-effort for callers."""
+def managed_host_name(cloud: str) -> str:
+    """The name of the *auto-ensured* shared gateway for ``cloud``.
+
+    Split out because it is now a boundary, not just a config read: a user-deployed
+    gateway must never be given this name, and the idle teardown must never act on a
+    host that does not carry it."""
     if cloud == "gcp":
-        return await _ensure_jumpoint_host_gcp(region)
+        return _gcp_jumpoint_name()
     if cloud == "azure":
-        return await _ensure_jumpoint_host_azure(region)
-    return await _ensure_jumpoint_host_aws(region)
+        return _AZURE_JUMPOINT_VM_NAME
+    return _cfg("bt_ecs_host_name") or "dashboard-sandbox-jumpoint-host"
 
 
-async def _ensure_jumpoint_host_aws(region: str) -> Optional[str]:
-    """Ensure the shared AWS Jumpoint host (and its task) is up; return its
-    instance id (or None on the FARGATE escape hatch / when nothing was created).
-    Raises AWSError on failure — callers treat this as best-effort."""
+async def ensure_jumpoint_host(cloud: str, region: str, name: str = "") -> Optional[str]:
+    """Ensure a tunnel-capable Gateway host is up for ``cloud``; return its
+    instance/host id (or None). Dispatches per cloud — AWS uses ECS-on-EC2, GCP uses
+    a privileged container on a COS GCE VM. Best-effort for callers.
+
+    ``name`` defaults to the shared auto-ensured gateway, which is what every
+    existing caller gets. A caller passing a name is asking for *that* gateway host,
+    which is how user-deployed gateways get more than one per cloud."""
+    if cloud == "gcp":
+        return await _ensure_jumpoint_host_gcp(region, name)
+    if cloud == "azure":
+        return await _ensure_jumpoint_host_azure(region, name)
+    return await _ensure_jumpoint_host_aws(region, name)
+
+
+async def _ensure_jumpoint_host_aws(region: str, name: str = "") -> Optional[str]:
+    """Ensure an AWS Gateway host (and its task) is up; return its instance id (or
+    None on the FARGATE escape hatch / when nothing was created). Raises AWSError on
+    failure — callers treat this as best-effort."""
     from . import aws_service
     deploy_key = await _resolve_deploy_key()
     if not deploy_key:
-        logger.warning("jumpoint-host: aws_ecs_docker_deploy_key not set — cannot start a "
-                       "jumpoint; tunnels/jumps will be unavailable until configured.")
+        logger.warning("gateway-host: aws_ecs_docker_deploy_key not set — cannot start a "
+                       "gateway; tunnels/jumps will be unavailable until configured.")
         return None
 
     launch_type = (_cfg("bt_ecs_launch_type") or "EC2").upper()
@@ -189,53 +239,57 @@ async def _ensure_jumpoint_host_aws(region: str) -> Optional[str]:
         await _ensure_task(region, deploy_key)
         return None
 
-    name = _cfg("bt_ecs_host_name") or "dashboard-sandbox-jumpoint-host"
+    name = name or managed_host_name("aws")
     existing = await aws_service.find_instances_by_tag(
         region, name_tag=name, states=["pending", "running"])
     if existing:
-        logger.info("jumpoint-host: reusing host %s", existing[0]["instance_id"])
+        logger.info("gateway-host: reusing host %s (%s)", existing[0]["instance_id"], name)
         _persist_jumpoint_egress_ip(existing[0].get("public_ip"))
-        await _ensure_task(region, deploy_key)
+        await _ensure_task(region, deploy_key, existing[0]["instance_id"])
         return existing[0]["instance_id"]
 
     # Create the host. Re-check the tag right before launch to shrink the
     # find-or-create race (acceptable residual window for a single-operator lab).
+    rc = _aws_region_cfg(region)
+    cluster = rc["ecs_cluster"]
     ami_id = await aws_service.get_ssm_parameter(region, _ECS_AMI_SSM)
     user_data = (f"#!/bin/bash\n"
-                 f"echo \"ECS_CLUSTER={_cfg('bt_ecs_cluster')}\" >> /etc/ecs/ecs.config\n"
+                 f"echo \"ECS_CLUSTER={cluster}\" >> /etc/ecs/ecs.config\n"
                  f"modprobe tun || true\n")
     recheck = await aws_service.find_instances_by_tag(region, name_tag=name, states=["pending", "running"])
     if recheck:
-        logger.info("jumpoint-host: host appeared concurrently (%s) — reusing",
+        logger.info("gateway-host: host appeared concurrently (%s) — reusing",
                     recheck[0]["instance_id"])
         _persist_jumpoint_egress_ip(recheck[0].get("public_ip"))
-        await _ensure_task(region, deploy_key)
+        await _ensure_task(region, deploy_key, recheck[0]["instance_id"])
         return recheck[0]["instance_id"]
 
     inst = await aws_service.run_container_instance(
         region,
         ami_id=ami_id,
         instance_type=_cfg("bt_ecs_host_instance_type") or "t3.small",
-        subnet_id=_cfg("bt_ecs_jumpoint_subnet_id"),
-        security_group_ids=[s.strip() for s in _cfg("bt_ecs_jumpoint_security_group_id").split(",") if s.strip()],
+        subnet_id=rc["jumpoint_subnet_id"],
+        security_group_ids=[s.strip() for s in (rc["jumpoint_security_group_id"] or "").split(",") if s.strip()],
         instance_profile=_cfg("bt_ecs_host_instance_profile") or "ecsInstanceRole",
         user_data=user_data,
         name_tag=name,
     )
     host_id = inst["instance_id"]
-    logger.info("jumpoint-host: launched host %s (%s) — awaiting ECS registration",
+    logger.info("gateway-host: launched host %s (%s) — awaiting ECS registration",
                 host_id, _cfg("bt_ecs_host_instance_type") or "t3.small")
 
-    # Wait for the instance to register with the cluster before running the task.
-    cluster = _cfg("bt_ecs_cluster")
+    # Wait for THIS host to register with the cluster before running its task. A
+    # cluster-wide "any ACTIVE instance" check would pass immediately on the second
+    # gateway, and the task would then be placed before its host was ready.
     deadline = time.monotonic() + _REGISTER_TIMEOUT_S
     while time.monotonic() < deadline:
         ci = await aws_service.list_container_instances(region, cluster)
-        if any(c.get("status") == "ACTIVE" for c in ci):
+        if any(c.get("status") == "ACTIVE" and c.get("ec2_instance_id") == host_id
+               for c in ci):
             break
         await asyncio.sleep(_REGISTER_POLL_S)
     else:
-        logger.warning("jumpoint-host: host %s did not register within %ds — attempting the "
+        logger.warning("gateway-host: host %s did not register within %ds — attempting the "
                        "task anyway", host_id, _REGISTER_TIMEOUT_S)
     # Capture the freshly-launched host's (ephemeral) public IP for the Rancher
     # firewall — run_container_instance returns only the id, so look it up by tag.
@@ -244,8 +298,8 @@ async def _ensure_jumpoint_host_aws(region: str) -> Optional[str]:
         if fresh:
             _persist_jumpoint_egress_ip(fresh[0].get("public_ip"))
     except Exception as exc:
-        logger.warning("jumpoint-host: capturing host public IP failed (non-fatal): %s", exc)
-    await _ensure_task(region, deploy_key)
+        logger.warning("gateway-host: capturing host public IP failed (non-fatal): %s", exc)
+    await _ensure_task(region, deploy_key, host_id)
     return host_id
 
 
@@ -305,34 +359,41 @@ async def teardown_jumpoint_host_if_idle(db, cloud: str, region: str) -> None:
 
 
 async def _teardown_jumpoint_host_if_idle_aws(db, region: str) -> None:
-    """Terminate the shared AWS host iff nothing is left using it (no managed EC2
-    instance, no active AWS cloud database). Best-effort; logs and returns on error."""
+    """Terminate the *managed* AWS host iff nothing is left using it (no managed EC2
+    instance, no active AWS cloud database). Best-effort; logs and returns on error.
+
+    Scoped to the managed gateway throughout. The host lookup is already narrow — it
+    matches only the managed Name tag — but the task stop was not: it stopped every
+    running task in the cluster, which was harmless while one gateway existed and
+    would silently kill a user-deployed gateway's task once they share a cluster.
+    Both halves now key off the managed host's own instance id.
+    """
     from . import aws_service
     try:
         active = (_active_db_count(db, "aws") + _active_ec2_count(db)
                   + _active_k8s_count(db, "aws") + _active_vdesktop_count(db, "aws"))
         if active > 0:
-            logger.info("jumpoint-host: keeping host (%d active resource(s))", active)
+            logger.info("gateway-host: keeping host (%d active resource(s))", active)
             return
-        name = _cfg("bt_ecs_host_name") or "dashboard-sandbox-jumpoint-host"
+        name = managed_host_name("aws")
         hosts = await aws_service.find_instances_by_tag(
             region, name_tag=name, states=["pending", "running", "stopping", "stopped"])
         if not hosts:
             return
-        # Stop the jumpoint task(s) first (graceful PRA deregistration), then
-        # terminate the host.
-        cluster = _cfg("bt_ecs_cluster")
-        try:
-            for t in await aws_service.list_ecs_tasks(region, cluster):
-                if t.get("lastStatus") in ("RUNNING", "PENDING", "PROVISIONING"):
-                    await aws_service.stop_ecs_jumpoint_task(region, cluster, t["taskArn"])
-        except Exception as exc:
-            logger.warning("jumpoint-host: stopping jumpoint task(s) failed (non-fatal): %s", exc)
+        # Stop this host's gateway task(s) first (graceful PRA deregistration), then
+        # terminate the host. Never touches a task on any other container instance.
+        cluster = _aws_region_cfg(region)["ecs_cluster"]
+        family = _cfg("bt_ecs_task_family")
         for h in hosts:
+            try:
+                for t in await _live_gateway_tasks(region, cluster, family, h["instance_id"]):
+                    await aws_service.stop_ecs_jumpoint_task(region, cluster, t["taskArn"])
+            except Exception as exc:
+                logger.warning("gateway-host: stopping gateway task(s) failed (non-fatal): %s", exc)
             await aws_service.terminate_instance(region, h["instance_id"])
-            logger.info("jumpoint-host: terminated idle host %s", h["instance_id"])
+            logger.info("gateway-host: terminated idle host %s", h["instance_id"])
     except Exception as exc:
-        logger.warning("jumpoint-host: idle teardown failed (non-fatal): %s", exc)
+        logger.warning("gateway-host: idle teardown failed (non-fatal): %s", exc)
 
 
 # ── GCP: privileged BeyondTrust Jumpoint container on a COS GCE VM ─────────────
@@ -393,22 +454,23 @@ async def _resolve_gcp_deploy_key() -> str:
             or "")
 
 
-async def _ensure_jumpoint_host_gcp(region: str) -> Optional[str]:
-    """Ensure the shared COS GCE Jumpoint VM is up (idempotent on name); return its
-    name. Best-effort — logs and returns None when prerequisites are missing."""
+async def _ensure_jumpoint_host_gcp(region: str, name: str = "",
+                                    zone: str = "") -> Optional[str]:
+    """Ensure a COS GCE Gateway VM is up (idempotent on name); return its name.
+    Best-effort — logs and returns None when prerequisites are missing."""
     from . import gcp_service
     from .region_config import resolve_region
     project = _gcp_project()
     if not project:
-        logger.warning("jumpoint-host(gcp): gcp_project not set — cannot start a jumpoint.")
+        logger.warning("gateway-host(gcp): gcp_project not set — cannot start a gateway.")
         return None
     deploy_key = await _resolve_gcp_deploy_key()
     if not deploy_key:
-        logger.warning("jumpoint-host(gcp): jumpoint deploy key not set "
+        logger.warning("gateway-host(gcp): gateway deploy key not set "
                        "(gcp_cloud_run_docker_deploy_key) — tunnels unavailable until configured.")
         return None
-    name = _gcp_jumpoint_name()
-    zone = _gcp_jumpoint_zone(region)
+    name = name or _gcp_jumpoint_name()
+    zone = zone or _gcp_jumpoint_zone(region)
     try:
         meta = await gcp_service.run_gce_jumpoint(
             project_id=project,
@@ -422,32 +484,36 @@ async def _ensure_jumpoint_host_gcp(region: str) -> Optional[str]:
             machine_type=_cfg("gcp_jumpoint_machine_type") or "e2-micro",
             create_external_ip=True,
         )
-        logger.info("jumpoint-host(gcp): jumpoint %s %s in %s",
+        logger.info("gateway-host(gcp): gateway %s %s in %s",
                     name, "reused" if meta.get("reused") else "started", zone)
         _persist_jumpoint_egress_ip(meta.get("external_ip"))
         return name
     except Exception as exc:
-        logger.warning("jumpoint-host(gcp): ensure failed (non-fatal): %s", exc)
+        logger.warning("gateway-host(gcp): ensure failed (non-fatal): %s", exc)
         return None
 
 
 async def _teardown_jumpoint_host_if_idle_gcp(db, region: str) -> None:
-    """Delete the shared GCE Jumpoint VM iff no active GCP cloud database is left
-    using it. Best-effort; logs and returns on error."""
+    """Delete the *managed* GCE Gateway VM iff no active GCP cloud database is left
+    using it. Best-effort; logs and returns on error.
+
+    Safe against user-deployed gateways by construction: it deletes one VM by the
+    managed name, which no user gateway is allowed to take."""
     from . import gcp_service
     try:
         active = (_active_db_count(db, "gcp") + _active_k8s_count(db, "gcp")
                   + _active_vdesktop_count(db, "gcp"))
         if active > 0:
-            logger.info("jumpoint-host(gcp): keeping jumpoint (%d active resource(s))", active)
+            logger.info("gateway-host(gcp): keeping gateway (%d active resource(s))", active)
             return
         project = _gcp_project()
         if not project:
             return
-        await gcp_service.stop_gce_jumpoint(project, _gcp_jumpoint_zone(region), _gcp_jumpoint_name())
-        logger.info("jumpoint-host(gcp): deleted idle jumpoint %s", _gcp_jumpoint_name())
+        name = managed_host_name("gcp")
+        await gcp_service.stop_gce_jumpoint(project, _gcp_jumpoint_zone(region), name)
+        logger.info("gateway-host(gcp): deleted idle gateway %s", name)
     except Exception as exc:
-        logger.warning("jumpoint-host(gcp): idle teardown failed (non-fatal): %s", exc)
+        logger.warning("gateway-host(gcp): idle teardown failed (non-fatal): %s", exc)
 
 
 # ── Azure: privileged BeyondTrust Jumpoint on an Azure VM ─────────────────────
@@ -486,20 +552,23 @@ def _azure_compliant_password() -> str:
             return pw
 
 
-async def _ensure_jumpoint_host_azure(region: str) -> Optional[str]:
-    """Ensure the shared Azure VM Jumpoint is up (idempotent on name); return its
-    name. Best-effort — logs and returns None when prerequisites are missing."""
+async def _ensure_jumpoint_host_azure(region: str, name: str = "") -> Optional[str]:
+    """Ensure an Azure VM Gateway is up (idempotent on name); return its name.
+    Best-effort — logs and returns None when prerequisites are missing."""
     from . import azure_service
-    rg = _cfg("azure_resource_group")
+    from .region_config import resolve_region
     location = _cfg("azure_location") or region
-    subnet = _cfg("azure_jumpoint_subnet_id") or _cfg("azure_aci_subnet_id")
+    rc = resolve_region("azure", location)
+    rg = rc["resource_group"]
+    subnet = rc["jumpoint_subnet_id"] or _cfg("azure_aci_subnet_id")
+    name = name or managed_host_name("azure")
     if not (rg and location and subnet):
-        logger.warning("jumpoint-host(azure): azure_resource_group / azure_location / "
-                       "azure_jumpoint_subnet_id not set — cannot start a jumpoint.")
+        logger.warning("gateway-host(azure): azure_resource_group / azure_location / "
+                       "azure_jumpoint_subnet_id not set — cannot start a gateway.")
         return None
     deploy_key = await _resolve_azure_deploy_key()
     if not deploy_key:
-        logger.warning("jumpoint-host(azure): jumpoint deploy key not set "
+        logger.warning("gateway-host(azure): gateway deploy key not set "
                        "(azure_aci_deploy_key) — tunnels unavailable until configured.")
         return None
     # Bake the native DB clients into the VM when Password Safe cloud-DB onboarding
@@ -512,36 +581,40 @@ async def _ensure_jumpoint_host_azure(region: str) -> Optional[str]:
         and (_cfg("passwordsafe_azure_db_registration_method") or "runcommand").lower() != "off")
     try:
         meta = await azure_service.run_vm_jumpoint(
-            rg=rg, location=location, subnet_id=subnet, name=_AZURE_JUMPOINT_VM_NAME,
+            rg=rg, location=location, subnet_id=subnet, name=name,
             container_image=_cfg("azure_aci_jumpoint_image") or "beyondtrust/sra-jumpoint:latest",
             deploy_key=deploy_key,
             vm_size=_cfg("azure_jumpoint_vm_size") or "Standard_B1s",
             admin_password=_azure_compliant_password(),
             install_db_clients=install_db_clients,
         )
-        logger.info("jumpoint-host(azure): jumpoint VM %s %s in %s",
-                    _AZURE_JUMPOINT_VM_NAME, "reused" if meta.get("reused") else "started", location)
+        logger.info("gateway-host(azure): gateway VM %s %s in %s",
+                    name, "reused" if meta.get("reused") else "started", location)
         _persist_jumpoint_egress_ip(meta.get("public_ip"))
-        return _AZURE_JUMPOINT_VM_NAME
+        return name
     except Exception as exc:
-        logger.warning("jumpoint-host(azure): ensure failed (non-fatal): %s", exc)
+        logger.warning("gateway-host(azure): ensure failed (non-fatal): %s", exc)
         return None
 
 
 async def _teardown_jumpoint_host_if_idle_azure(db, region: str) -> None:
-    """Delete the shared Azure Jumpoint VM iff no active Azure cloud database is
-    left using it. Best-effort; logs and returns on error."""
+    """Delete the *managed* Azure Gateway VM iff no active Azure cloud database is
+    left using it. Best-effort; logs and returns on error.
+
+    Safe against user-deployed gateways by construction: it deletes one VM by the
+    managed name, which no user gateway is allowed to take."""
     from . import azure_service
     try:
         active = (_active_db_count(db, "azure") + _active_k8s_count(db, "azure")
                   + _active_vdesktop_count(db, "azure"))
         if active > 0:
-            logger.info("jumpoint-host(azure): keeping jumpoint (%d active resource(s))", active)
+            logger.info("gateway-host(azure): keeping gateway (%d active resource(s))", active)
             return
         rg = _cfg("azure_resource_group")
         if not rg:
             return
-        await azure_service.stop_vm_jumpoint(rg, _AZURE_JUMPOINT_VM_NAME)
-        logger.info("jumpoint-host(azure): deleted idle jumpoint %s", _AZURE_JUMPOINT_VM_NAME)
+        name = managed_host_name("azure")
+        await azure_service.stop_vm_jumpoint(rg, name)
+        logger.info("gateway-host(azure): deleted idle gateway %s", name)
     except Exception as exc:
-        logger.warning("jumpoint-host(azure): idle teardown failed (non-fatal): %s", exc)
+        logger.warning("gateway-host(azure): idle teardown failed (non-fatal): %s", exc)

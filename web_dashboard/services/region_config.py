@@ -68,6 +68,9 @@ _SPECS: dict[str, _Spec] = {
             "db_subnet_id":           "azure_db_subnet_id",
             "db_mysql_subnet_id":     "azure_db_mysql_subnet_id",
             "db_private_dns_zone_id": "azure_db_private_dns_zone_id",
+            # Gateway hosts are per-region like every other subnet here; AWS and GCP
+            # already carried this field and Azure was the only cloud without it.
+            "jumpoint_subnet_id":     "azure_jumpoint_subnet_id",
             "gallery_name":           "azure_shared_image_gallery",
             "gallery_resource_group": "azure_gallery_resource_group",
             "default_vm_size":        "azure_desktops_vm_size",
