@@ -3,12 +3,14 @@ const T = require('path').join(__dirname, '..', 'web_dashboard', 'templates') + 
 
 // Pull a helper's source straight out of the template so we exercise the real
 // code. Anchor on the definition (line-leading `name(...) {`), not markup refs.
+// An `async` prefix is part of the definition and is kept — a body with `await` in
+// it is a syntax error without it.
 function extract(file, name) {
   const src = fs.readFileSync(T + file, 'utf8');
-  const re = new RegExp(String.raw`\n[ \t]*` + name + String.raw`\s*\([^)]*\)\s*\{`);
+  const re = new RegExp(String.raw`\n[ \t]*(?:async[ \t]+)?` + name + String.raw`\s*\([^)]*\)\s*\{`);
   const m = re.exec(src);
   if (!m) throw new Error(file + ': definition of ' + name + ' not found');
-  const start = m.index + m[0].indexOf(name);
+  const start = m.index + m[0].search(/\S/);
   let depth = 0, end = -1;
   for (let j = src.indexOf('{', start); j < src.length; j++) {
     if (src[j] === '{') depth++;
@@ -159,5 +161,35 @@ ok('namePreview flags a truncated base',
    N.namePreview('verylongbasename', 2, 15).truncated === true);
 ok('namePreview does not flag a base that fits',
    N.namePreview('web', 2, 15).truncated === false);
+
+// ── Azure: a Location change must clear the region-scoped pickers ─────────────
+// The bug these pin: the Location <select> reloaded the subnet/NSG options for the
+// new region but left the PREVIOUS region's selection in place. An Azure subnet id
+// embeds the VNet's resource group, not its region, and the sandbox names its
+// VNet/subnet identically in every region, so the stale pick reads as correct — and
+// on the bulk route it fails every VM in the batch, after all N child job rows exist.
+// The deploy routes reject the mismatch too (api/azure.py::_reject_cross_region_
+// network, pinned in tests/test_azure_region.py); this is the half that keeps the
+// form from offering it.
+const AZ = 'azure/index.html';
+for (const [fn, form] of [['onDeployLocationChange', 'deployModal'],
+                          ['onBulkLocationChange', 'bulkModal']]) {
+  const loaded = [];
+  const o = build(AZ, fn, {
+    [form]: {
+      location: 'westeurope',                       // just changed to
+      subnetId: '/subscriptions/s/resourceGroups/rg/providers/Microsoft.Network'
+                + '/virtualNetworks/sandbox-vnet/subnets/vm-subnet',   // centralus
+      nsgIds: ['/subscriptions/s/resourceGroups/rg/providers/Microsoft.Network'
+               + '/networkSecurityGroups/sandbox-vm-nsg'],
+    },
+    loadNetworkOpts: (bust, loc) => { loaded.push([bust, loc]); },
+  });
+  o[fn]();   // async, but everything asserted below happens before its first await
+  ok(AZ + ' ' + fn + '() clears the stale subnet', o[form].subnetId === '');
+  ok(AZ + ' ' + fn + '() clears the stale NSGs', o[form].nsgIds.length === 0);
+  ok(AZ + ' ' + fn + '() reloads the options for the new location',
+     eq(loaded, [[true, 'westeurope']]));
+}
 
 process.exit(fail ? 1 : 0);

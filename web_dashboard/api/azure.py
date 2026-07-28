@@ -106,6 +106,40 @@ def _resolve_location(location: Optional[str]) -> str:
 
 
 
+async def _reject_cross_region_network(subnet_id: str, nsg_ids, location: str) -> None:
+    """400 when a picked subnet/NSG lives in a region other than ``location``.
+
+    Azure catches this itself — ``azure_service._validate_deploy_consistency`` raises
+    before any resource is created — but that runs in the RUNNER, per VM: on a bulk
+    deploy it fires once the N child job rows already exist and fails every one of
+    them. Rejecting the request instead keeps the mismatch in front of the operator,
+    where it is fixable, and creates no jobs.
+
+    The mismatch is easy to submit because a subnet's ARM id embeds the VNet's
+    resource group, not its region, so a stale picker selection reads as plausible:
+    the sandbox names its VNet/subnet identically in every region it is run in.
+
+    Ids whose region can't be resolved are left alone (see ``resource_locations``) —
+    the runner-side check is still behind this.
+    """
+    ids = [i for i in [subnet_id, *(nsg_ids or [])] if i and str(i).strip()]
+    if not ids:
+        return
+    want = region_catalog.normalize("azure", location)
+    found = await azure_service.resource_locations(ids)
+    for rid in ids:
+        actual = found.get(rid) or ""
+        if not actual or region_catalog.normalize("azure", actual) == want:
+            continue
+        kind = "subnet" if "/subnets/" in rid else "NSG"
+        raise HTTPException(
+            status_code=400,
+            detail=(f"The selected {kind} '{rid.rsplit('/', 1)[-1]}' is in {actual}, but "
+                    f"the deploy location is {location}. Azure VNets and NSGs are "
+                    f"regional — pick a {kind} in {location}, or deploy into {actual}."),
+        )
+
+
 async def _validate_ssh_key_override(override) -> None:
     """When the operator overrides the SSH key secret at launch, require it to be a
     Key Vault keypair JSON with a ``public_key`` (resolve_azure_ssh_public_key raises
@@ -692,6 +726,7 @@ async def deploy_vm(
     # deploy in a non-default region lands in that region's RG; falls back to the
     # flat azure_resource_group for single-region setups.
     rg = req.resource_group or _rg_for(loc)
+    await _reject_cross_region_network(req.subnet_id, req.nsg_ids, loc)
     workgroup = _validate_workgroup(db, current_user, req.workgroup)
     req.workgroup = workgroup
     await _validate_ssh_key_override(req.ssh_key_secret_override)
@@ -773,6 +808,7 @@ async def bulk_deploy_vms(
     req.location = loc            # normalise so the runner uses the resolved location
     # Region-aware RG resolution (PR3) — see deploy_vm above.
     rg = req.resource_group or _rg_for(loc)
+    await _reject_cross_region_network(req.subnet_id, req.nsg_ids, loc)
     workgroup = _validate_workgroup(db, current_user, req.workgroup)
     req.workgroup = workgroup
     await _validate_ssh_key_override(req.ssh_key_secret_override)

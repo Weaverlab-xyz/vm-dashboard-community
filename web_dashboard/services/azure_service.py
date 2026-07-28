@@ -799,6 +799,43 @@ def _resource_region_from_id(network, resource_id: str, kind: str):
     return None
 
 
+def _resource_locations_sync(cred, sub_id: str, resource_ids: list) -> dict:
+    network = _get_network(cred, sub_id)
+    out: dict[str, str] = {}
+    for rid in resource_ids:
+        kind = ("subnet" if "/subnets/" in rid
+                else "nsg" if "/networkSecurityGroups/" in rid else "")
+        out[rid] = (_resource_region_from_id(network, rid, kind) or "") if kind else ""
+    return out
+
+
+async def resource_locations(resource_ids) -> dict:
+    """Map each subnet / NSG ARM id to the region it lives in, "" when undeterminable.
+
+    An ARM id carries the VNet's *resource group* but not its region, so this is a
+    lookup (the VNet's / NSG's own ``location``) rather than a parse — unlike GCP,
+    where the region is a segment of the subnetwork self-link. An id that can't be
+    resolved (no creds, no Reader on that resource group, a malformed id) maps to ""
+    so callers fail open, exactly as ``_validate_deploy_consistency`` does below.
+
+    Exists so the deploy routes can reject a cross-region pick at REQUEST time. The
+    same check already runs in ``_validate_deploy_consistency``, but that is per VM
+    inside the runner: on a bulk deploy it fires once all N child job rows exist and
+    fails the whole batch.
+    """
+    ids = [str(r) for r in (resource_ids or []) if r and str(r).strip()]
+    if not ids:
+        return {}
+    try:
+        cred, sub_id = await _ensure_creds()
+        return await asyncio.to_thread(_resource_locations_sync, cred, sub_id, ids)
+    except Exception as e:
+        # Fail open: a lookup we couldn't perform must not block an otherwise valid
+        # deploy. The runner-side check still stands behind this.
+        logger.warning("region lookup for %d resource(s) failed: %s", len(ids), e)
+        return {}
+
+
 def _sku_trusted_launch_capable(compute, location: str, vm_size: str):
     """True/False when we can determine whether vm_size supports Trusted Launch in
     location (Gen2 + vTPM/Secure Boot, TL not disabled); None when unknown (e.g. the
