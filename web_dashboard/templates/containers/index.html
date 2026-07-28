@@ -1632,7 +1632,11 @@ function containersDashboard() {
       // 'onprem' is this tab's former id — kept as an alias so older links and
       // bookmarks still land on the Portainer tab.
       const tab = hash === 'onprem' ? 'portainer' : hash;
-      if (['portainer', 'cloud', 'rancher'].includes(tab)) {
+      // 'gateways' is Jinja-gated below, panel and all — unlike #portainer, whose panel
+      // renders either way — so honouring it with the feature off would show a blank
+      // page. The dashboard's Gateways tile links here.
+      const tabs = ['portainer', 'cloud', 'rancher'{% if beyondtrust_enabled %}, 'gateways'{% endif %}];
+      if (tabs.includes(tab)) {
         this.activeTab = tab;
       }
       const tasks = [
@@ -1648,6 +1652,11 @@ function containersDashboard() {
       {% endif %}
       {% if k8s_management_enabled %}
       tasks.push(this.loadRancher());
+      {% endif %}
+      {% if beyondtrust_enabled %}
+      // Stays lazy — the tab button loads on click. Landing here from the dashboard
+      // tile skips that click, so fetch it now or the table renders empty.
+      if (this.activeTab === 'gateways') tasks.push(this.loadGateways());
       {% endif %}
       await Promise.all(tasks);
     },
