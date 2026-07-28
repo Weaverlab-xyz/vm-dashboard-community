@@ -93,8 +93,18 @@ static IP**. Two connectivity modes (the service picks based on config):
 - **Peering** — the cluster gets its own VPC peered both ways (+ `…-allow-ssh-from-k8s`);
   reaches VMs only (GCP peering is **non-transitive**, so Cloud SQL stays on the PRA tunnel).
 
-Config (import-only): `gcp_gke_k8s_version`, `gcp_gke_machine_type`, `gcp_gke_authorized_cidrs`;
-connectivity from the region config's `network` / `k8s_subnetwork` + secondary-range names.
+The **private control plane** gets a per-cluster `/28`, allocated as the lowest free slot in
+`gcp_gke_master_cidr_base` (`172.16.0.0/16`) — GCP materializes it as a
+`gke-…-pe-subnet` subnetwork and rejects overlaps VPC-wide (**other regions included**), so a
+shared base with one fixed `/28` only ever fits one cluster. Slots in use are read from each
+cluster's provisioning job plus a live scan of every cluster's `masterIpv4CidrBlock`, so
+orphans and hand-made clusters are skipped too — note the `pe-subnet` itself does **not** show
+up in `gcloud compute networks subnets list`, so the cluster scan is the only way to see a
+range that a failed/`ERROR` cluster still holds.
+
+Config (import-only): `gcp_gke_k8s_version`, `gcp_gke_machine_type`, `gcp_gke_authorized_cidrs`,
+`gcp_gke_master_cidr_base`; connectivity from the region config's `network` / `k8s_subnetwork` +
+secondary-range names.
 
 ### Sandbox prerequisites
 
@@ -240,6 +250,11 @@ dashboard.
   hop-limit 2 and grants the node role `AmazonEBSCSIDriverPolicy` when `enable_ebs_csi` is on.
 - **Cluster CIDR clash.** The EKS VPC CIDR (`aws_eks_vpc_cidr`) must not overlap the sandbox
   `10.99.0.0/16` or another concurrent cluster.
+- **GKE apply fails "Conflicting IP cidr range … conflicts with existing subnetwork
+  `gke-…-pe-subnet`".** Two clusters want the same control-plane `/28`. Ranges are allocated
+  per cluster now; if it recurs, the live scan couldn't run (check the provision log for
+  "live range scan failed" — the SA needs `compute.subnetworks.list` +
+  `container.clusters.list`) or `gcp_gke_master_cidr_base` is exhausted/overlapping.
 - **`kubectl --as` fails through the PRA k8s tunnel.** Expected — that proxy strips
   impersonation headers; use the **API (TCP) tunnel** for impersonation/Entitle grants.
 - **kubectl to the API server fails behind a TLS-inspecting proxy.** Trust the corp CA or use

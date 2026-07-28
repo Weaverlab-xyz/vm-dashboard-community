@@ -265,6 +265,12 @@ class Settings(BaseSettings):
     gcp_gke_k8s_version: str = ""
     gcp_gke_machine_type: str = ""
     gcp_gke_authorized_cidrs: str = ""
+    # Pool the per-cluster GKE private control-plane /28 is carved from. GCP treats
+    # that range as a subnetwork of the cluster's VPC and rejects any overlap
+    # VPC-wide (other regions included), so every cluster needs its own slot —
+    # k8s_service._gke_master_cidr picks the lowest free one. Must not overlap the
+    # sandbox subnets (10.x) or any peered network; a /16 gives 4096 clusters.
+    gcp_gke_master_cidr_base: str = "172.16.0.0/16"
     # Managed-Kubernetes (OKE) provisioning. Self-contained VCN (own CIDR, distinct
     # from the sandbox 10.98/16); BASIC cluster = free control plane; the node pool
     # defaults to a single Always-Free A1.Flex node (2 OCPU / 12 GB). Empty version /

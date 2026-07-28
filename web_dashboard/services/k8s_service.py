@@ -259,7 +259,7 @@ def create_cluster(db: Session, *, cloud: str, name: str, region: str,
     # that gap and dispatch with no tf_variables → KeyError('tf_variables'). k8s
     # tf_variables carry no secrets, so embedding them at create time is safe.
     tf_variables = _build_cluster_tf_variables(
-        cloud=cloud, cluster_id=cluster_id, name=name, region=region, opts=opts)
+        cloud=cloud, cluster_id=cluster_id, name=name, region=region, opts=opts, db=db)
 
     from . import job_service
     job = job_service.create_job(
@@ -325,8 +325,100 @@ def _with_configured_first(values: list, configured: str) -> list:
     return out
 
 
+# ── GKE private control-plane (master) CIDR allocation ───────────────────────
+# A private GKE cluster reserves a /28 for its control plane, and GCP enforces
+# that range as unique across the whole VPC the cluster touches: it materializes
+# as a system-managed `gke-<cluster>-<hash>-pe-subnet` subnetwork, and subnet
+# ranges may not overlap ANYWHERE in the network, other regions included. One
+# hard-coded module default therefore only ever works for the first cluster —
+# co-located clusters all sit in the shared sandbox VPC, and self-contained ones
+# export their subnet routes into it over the peering — so the second cluster
+# dies ~40s into the apply with
+#   Conflicting IP cidr range: Invalid IPCidrRange: 172.16.8.0/28 conflicts with
+#   existing subnetwork 'gke-<other>-pe-subnet' in region '<other-region>'
+# Hence a distinct /28 per cluster, carved from a base block the sandbox never
+# uses (its subnets live in 10.x — see scripts/sandbox/*/setup-gcp*).
+# NB the pe-subnet GCP blames is invisible to `subnetworks.list`, so a range in
+# use is discoverable only from the owning cluster's masterIpv4CidrBlock — and a
+# cluster left in ERROR by a failed apply still holds its range.
+_GKE_MASTER_CIDR_BASE = "172.16.0.0/16"
+_GKE_MASTER_PREFIX = 28
+# What the module defaulted to before per-cluster allocation: a cluster the
+# dashboard provisioned back then holds this range with nothing recorded.
+_GKE_LEGACY_MASTER_CIDR = "172.16.8.0/28"
+
+
+def _gke_recorded_master_cidrs(db: Optional[Session]) -> set:
+    """The control-plane /28 held by every GKE cluster this dashboard still owns,
+    read back from each cluster's provisioning Job (``tf_variables.master_cidr``).
+    A cluster provisioned before per-cluster allocation recorded nothing but still
+    holds the module's old default, so count that. Registered (not provisioned)
+    clusters contribute nothing — their range is unknown here, and the live scan
+    in :func:`gcp_service.reserved_cidrs` covers them. Empty when ``db`` is None."""
+    out: set = set()
+    if db is None:
+        return out
+    try:
+        rows = db.query(K8sCluster).filter(K8sCluster.cloud == "gcp").all()
+        metas: dict = {}
+        job_ids = [r.deploy_job_id for r in rows if r.deploy_job_id]
+        if job_ids:
+            for job in db.query(Job).filter(Job.id.in_(job_ids)).all():
+                metas[job.id] = (job.metadata_dict or {}).get("tf_variables") or {}
+        for row in rows:
+            recorded = str(metas.get(row.deploy_job_id or "", {}).get("master_cidr") or "").strip()
+            if recorded:
+                out.add(recorded)
+            elif row.source == "provisioned":
+                out.add(_GKE_LEGACY_MASTER_CIDR)
+    except Exception as exc:
+        logger.warning("GKE master-CIDR: could not read the recorded ranges (%s)", exc)
+    return out
+
+
+def _gke_master_cidr(db: Optional[Session], *, project: str) -> str:
+    """Allocate a free /28 for a new GKE cluster's private control plane — the
+    lowest slot in ``gcp_gke_master_cidr_base`` that overlaps neither a range this
+    dashboard already handed out nor anything live in the project."""
+    import ipaddress
+    configured = _cfg("gcp_gke_master_cidr_base", _GKE_MASTER_CIDR_BASE)
+    try:
+        base = ipaddress.ip_network(configured, strict=False)
+        if base.prefixlen > _GKE_MASTER_PREFIX:
+            raise ValueError(f"must be /{_GKE_MASTER_PREFIX} or wider")
+    except ValueError as exc:
+        logger.warning("gcp_gke_master_cidr_base %r is unusable (%s) — using %s",
+                       configured, exc, _GKE_MASTER_CIDR_BASE)
+        base = ipaddress.ip_network(_GKE_MASTER_CIDR_BASE)
+
+    taken = _gke_recorded_master_cidrs(db)
+    if project:
+        try:
+            from . import gcp_service
+            taken |= gcp_service.reserved_cidrs(project)
+        except Exception as exc:
+            # Non-fatal: the recorded ranges alone still separate our own clusters.
+            logger.warning("GKE master-CIDR: live range scan failed (%s)", exc)
+    taken_nets = []
+    for cidr in taken:
+        try:
+            taken_nets.append(ipaddress.ip_network(cidr, strict=False))
+        except ValueError:
+            continue
+
+    for candidate in base.subnets(new_prefix=_GKE_MASTER_PREFIX):
+        if not any(candidate.overlaps(net) for net in taken_nets):
+            logger.info("GKE master-CIDR: allocated %s from %s (%d range(s) in use)",
+                        candidate, base, len(taken_nets))
+            return str(candidate)
+    raise K8sError(
+        f"no free /{_GKE_MASTER_PREFIX} left in {base} for the GKE control plane — "
+        f"widen gcp_gke_master_cidr_base or decommission an unused cluster")
+
+
 def _build_cluster_tf_variables(*, cloud: str, cluster_id: str, name: str,
-                                region: str, opts: dict) -> dict:
+                                region: str, opts: dict,
+                                db: Optional[Session] = None) -> dict:
     """The Terraform ``-var`` set for the cluster module (aws EKS / azure AKS /
     gcp GKE).
 
@@ -336,7 +428,11 @@ def _build_cluster_tf_variables(*, cloud: str, cluster_id: str, name: str,
     the DB/VM SGs for direct management-plane access. k8s version + node size
     fall back to config then the module defaults; ``node_instance_type`` maps to
     the per-cloud node-size var (EKS instance type / AKS vm_size / GKE machine
-    type)."""
+    type).
+
+    ``db`` is only needed by the GKE control-plane CIDR allocator (which reads the
+    ranges already handed out); without it that allocation starts from an empty
+    ledger, so pass it on any path that provisions."""
     _tags = {"managed-by": "vm-dashboard", "k8s-cluster-id": cluster_id}
     if cloud == "aws":
         tf = {
@@ -476,6 +572,10 @@ def _build_cluster_tf_variables(*, cloud: str, cluster_id: str, name: str,
         cidrs = opts.get("authorized_cidrs") or _cfg_list("gcp_gke_authorized_cidrs")
         if cidrs:
             tf["authorized_cidrs"] = cidrs
+        # A distinct /28 for the private control plane — the module default only
+        # fits one cluster per VPC (see _gke_master_cidr). The destroy path passes
+        # the recorded value through opts so its -var set matches the apply's.
+        tf["master_cidr"] = opts.get("master_cidr") or _gke_master_cidr(db, project=project)
         # Reach the private lab resources from an in-cluster agent. Two modes,
         # region-resolved (per-region entry → flat gcp_* fallback) so they also flow
         # through the destroy path (opts={}):
@@ -921,10 +1021,16 @@ async def run_decommission(db: Session, *, cluster_id: str, job_id: str) -> None
             # terraform destroy evaluates the module config, so it needs the same
             # -var set apply used (else "No value for required variable"). The values
             # don't change what's destroyed (resources come from state), but the
-            # provider's region must be correct — reconstruct from the row.
+            # provider's region must be correct — reconstruct from the row. Carry the
+            # GKE control-plane /28 over from the provisioning job rather than letting
+            # the allocator hand out a fresh one (inert here, but a destroy shouldn't
+            # burn a slot or hit the live range scan).
+            prov_job = db.query(Job).filter(Job.id == row.deploy_job_id).first()
+            prov_vars = ((prov_job.metadata_dict or {}).get("tf_variables") or {}) if prov_job else {}
             destroy_vars = _build_cluster_tf_variables(
                 cloud=row.cloud, cluster_id=row.id, name=row.name,
-                region=row.region or "", opts={})
+                region=row.region or "", db=db,
+                opts={"master_cidr": prov_vars.get("master_cidr") or _GKE_LEGACY_MASTER_CIDR})
             await terraform.destroy(
                 _deploy_dir(row.deploy_job_id),
                 env=terraform_provider_env.provider_env(row.cloud),
