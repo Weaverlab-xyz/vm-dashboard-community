@@ -252,15 +252,65 @@ def test_registration_wait_is_not_satisfied_by_a_different_host():
     m = _load(fake)
     m._REGISTER_TIMEOUT_S = 0.05
     m._REGISTER_POLL_S = 0.01
-    asyncio.run(m._await_ecs_registration(REGION, MANAGED_HOST))
-    assert fake.polls > 1, (
-        f"returned after {fake.polls} poll(s) — a different host being ACTIVE satisfied "
-        "the wait, so RunTask would fire before this host had registered")
+    try:
+        asyncio.run(m._await_ecs_registration(REGION, MANAGED_HOST))
+        raise AssertionError("a different host being ACTIVE satisfied the wait, so "
+                             "RunTask would fire before this host had registered")
+    except m.GatewayHostError:
+        pass
+    assert fake.polls > 1, f"gave up after {fake.polls} poll(s)"
 
 
-def test_registration_wait_gives_up_rather_than_raising():
-    """Best-effort, like every other call in this module: a listing failure must not
-    take down the deploy that asked for a gateway."""
+def test_registration_wait_raises_rather_than_attempting_a_doomed_runtask():
+    """The bug this file's wait was added for, one layer on: waiting and then calling
+    RunTask anyway turns "the host never joined the cluster" into
+    `InvalidParameterException: No Container Instances were found in your cluster`,
+    which names neither the host nor the cause. The real cause is almost always the
+    instance profile missing ecs:RegisterContainerInstance — the agent treats that
+    denial as terminal and exits — so the message has to say so."""
+    class NeverRegisters(FakeAws):
+        async def list_container_instances(self, region, cluster):
+            return []
+
+    m = _load(NeverRegisters())
+    m._REGISTER_TIMEOUT_S = 0.05
+    m._REGISTER_POLL_S = 0.01
+    try:
+        asyncio.run(m._await_ecs_registration(REGION, MANAGED_HOST))
+        raise AssertionError("timed out and fired RunTask anyway")
+    except m.GatewayHostError as exc:
+        msg = str(exc)
+    assert MANAGED_HOST in msg, "the failure does not name the host"
+    assert "ecs:RegisterContainerInstance" in msg, (
+        "the failure does not name the permission that is almost always missing")
+
+
+def test_registration_wait_survives_a_transient_listing_failure():
+    """Returning on the first listing error sent the deploy straight to the RunTask the
+    wait exists to prevent — one throttled call was enough."""
+    class FlakyThenReady(FakeAws):
+        def __init__(self):
+            super().__init__()
+            self.polls = 0
+
+        async def list_container_instances(self, region, cluster):
+            self.polls += 1
+            if self.polls == 1:
+                raise RuntimeError("Throttling: Rate exceeded")
+            return await FakeAws.list_container_instances(self, region, cluster)
+
+    fake = FlakyThenReady()
+    m = _load(fake)
+    m._REGISTER_TIMEOUT_S = 1
+    m._REGISTER_POLL_S = 0.01
+    asyncio.run(m._await_ecs_registration(REGION, MANAGED_HOST))  # must not raise
+    assert fake.polls > 1, "gave up on the first listing error instead of polling again"
+
+
+def test_registration_wait_gives_up_rather_than_raising_when_it_never_read_the_cluster():
+    """A listing that never succeeds is the one case that still falls through to the
+    attempt: not knowing whether the host registered is different from knowing it did
+    not, and RunTask may well work. Best-effort, like every other call in this module."""
     class Broken(FakeAws):
         async def list_container_instances(self, region, cluster):
             raise RuntimeError("ECS unavailable")
@@ -270,6 +320,55 @@ def test_registration_wait_gives_up_rather_than_raising():
     m._REGISTER_TIMEOUT_S = 1
     m._REGISTER_POLL_S = 0.01
     asyncio.run(m._await_ecs_registration(REGION, MANAGED_HOST))  # must not raise
+
+
+# ── recovering a host a failed deploy already built ───────────────────────────
+
+def test_host_lookup_finds_an_aws_host_by_its_gateway_name():
+    """On AWS the host id is an instance id the launch assigned, so a deploy that
+    raised after run_instances never learned it. Without this lookup the registry row
+    keeps host_id empty and the running host is invisible on the Gateways page."""
+    fake = FakeAws()
+    m = _load(fake)
+    got = asyncio.run(m.find_gateway_host_id("aws", REGION, "managed-gateway"))
+    assert got == MANAGED_HOST, f"expected {MANAGED_HOST}, got {got!r}"
+
+
+def test_host_lookup_returns_blank_when_nothing_was_built():
+    """It must not invent a host: a row pointed at something that does not exist is a
+    Remove button that silently does nothing."""
+    fake = FakeAws()
+    m = _load(fake)
+    assert asyncio.run(m.find_gateway_host_id("aws", REGION, "never-created")) == ""
+
+
+def test_host_lookup_swallows_failures():
+    """Runs while a job is already failing — it must not replace the real error."""
+    class Broken(FakeAws):
+        async def find_instances_by_tag(self, region, name_tag, states):
+            raise RuntimeError("EC2 unavailable")
+
+    m = _load(Broken())
+    assert asyncio.run(m.find_gateway_host_id("aws", REGION, "managed-gateway")) == ""
+
+
+# ── the IAM grant the host cannot register without ────────────────────────────
+# A shell-script assertion in a service test file, because this is the same failure as
+# the registration wait above seen one layer down: without this policy the agent's
+# RegisterContainerInstance is denied, it exits, and no gateway in the account can ever
+# run a task. It is worth a test because the breakage is invisible — the script prints
+# "Reusing IAM role ecsInstanceRole" and exits 0.
+
+def test_setup_aws_attaches_the_ecs_policy_outside_the_create_branch():
+    src = open(os.path.join(_ROOT, "scripts", "sandbox", "Linux", "setup-aws.sh")).read()
+    start = src.index('ECS_INSTANCE_ROLE="ecsInstanceRole"')
+    block = src[start:src.index("get-instance-profile", start)]
+    assert "AmazonEC2ContainerServiceforEC2Role" in block, (
+        "setup-aws.sh no longer attaches the ECS policy to the Jumpoint host role")
+    assert block.index("AmazonEC2ContainerServiceforEC2Role") > block.index("\nfi\n"), (
+        "the ECS policy is attached inside the role-CREATE branch, so a pre-existing "
+        "ecsInstanceRole (AWS's own default name — a console wizard or an older run of "
+        "this script makes one) is reused without ecs:RegisterContainerInstance forever")
 
 
 # ── region resolution ─────────────────────────────────────────────────────────

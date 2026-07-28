@@ -430,10 +430,22 @@ else
       "Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]
     }' \
     --tags "Key=$SANDBOX_TAG_KEY,Value=$SANDBOX_TAG_VALUE" >/dev/null
-  retry 8 5 aws iam attach-role-policy --role-name "$ECS_INSTANCE_ROLE" \
-    --policy-arn arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
   ok "Created IAM role $ECS_INSTANCE_ROLE"
 fi
+# Attach OUTSIDE the create branch. Attaching only on create left a PRE-EXISTING
+# ecsInstanceRole without the ECS grants forever — and that role is easy to already
+# have, since `ecsInstanceRole` is AWS's own default name (an ECS console wizard, an
+# older run of this script, or a run whose attach failed all produce one). The agent
+# on every Jumpoint host then fails RegisterContainerInstance with AccessDenied and
+# *exits* — it treats the denial as terminal — so the cluster sits at zero container
+# instances and every gateway RunTask fails with "No Container Instances were found in
+# your cluster". That is silent: only gateway_deploy treats a missing Gateway as fatal,
+# so ordinary EC2/database/K8s deploys just record ecs_error and report success with no
+# tunnel. Attaching a managed policy is idempotent, so re-running costs nothing; the
+# retry absorbs IAM propagation right after create-role. Not `|| warn` like the SSM
+# attach below: without this grant no Gateway can ever come up.
+retry 8 5 aws iam attach-role-policy --role-name "$ECS_INSTANCE_ROLE" \
+  --policy-arn arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
 # The Jumpoint host doubles as the SSM Run Command target for the optional
 # cloud-DB Password Safe onboarding (the dashboard runs the DB client on it via
 # SSM to create the managed DB user). Attach the SSM managed-instance core policy
