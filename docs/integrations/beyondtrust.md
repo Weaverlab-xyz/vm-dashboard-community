@@ -17,7 +17,9 @@ discoverable from one place.
   RDP** and **Protocol Tunnel** jump items, plus PRA Vault accounts, so operators reach
   VMs, container UIs, databases and Kubernetes API servers through PRA rather than
   direct network exposure. Driven by the `sra` Terraform provider plus a small REST
-  client for the few calls the provider can't make.
+  client for the few calls the provider can't make. It also runs the **Gateway hosts**
+  those jumps are brokered through — one auto-managed per cloud, plus any you deploy to
+  carry session load. See [Gateway hosts](gateways.md).
 - **Endpoint Privilege Management for Linux (EPM-L)** — agent package builds, sync to
   asset storage, and installation tokens. Gated by the **same** `beyondtrust_enabled`
   flag as the two above. See [EPM-L](epml.md).
@@ -147,6 +149,7 @@ fill in the fields.
 | **Managed-account checkout for playbook runs** | A Config-Management run can use a Password Safe managed account as its login identity — the operator picks an account from a live list and the credential is checked out **just-in-time** at run time, never shown and scrubbed from job output. See [below](#managed-account-checkout-for-config-management-runs) |
 | **Resource onboarding** | VMs and cloud databases the dashboard builds are registered as Password Safe managed systems + accounts, and removed again on destroy |
 | **PRA jump items** | Shell Jump (VMs), Web Jump (Portainer / Rancher UIs), Remote RDP (virtual desktops) and Protocol Tunnel (databases, Kubernetes API) — created and torn down with the resource |
+| **Gateway hosts** | The hosts those jumps broker *through*. One per cloud is auto-ensured and reference-counted; **Containers → Gateways** inventories them and deploys more to carry session load. See [Gateway hosts](gateways.md) |
 | **PRA Vault accounts** | Tunnel credentials are minted as PRA Vault accounts, which can themselves be onboarded into Password Safe for rotation |
 | **EPM-L agent lifecycle** | Package builds, sync to asset storage, and installation tokens — same feature flag ([EPM-L](epml.md)) |
 | **Secret audit log** | Every checkout creates an immutable record in Password Safe |
@@ -431,6 +434,13 @@ as an ECS task or EC2 instance (`bt_ecs_launch_type`, `bt_ecs_cluster`,
 `bt_ecs_jumpoint_subnet_id`, `bt_ecs_image`, and the CPU/memory/role keys). Configure it
 in the same Settings panel; it exists so a cloud VPC can have a Gateway with
 line-of-sight to private instances without one being run by hand.
+
+Those keys describe the **auto-managed** AWS host — the one the dashboard ensures on
+demand and reclaims when idle. It is not the only one you can have: **Containers →
+Gateways** lists every gateway host in every cloud and deploys additional ones, which
+join the same PRA Gateway as extra cluster nodes (so `bt_jumpoint_name` never changes).
+Full detail — the managed-vs-requested lifecycle, placement, naming, and the node-firewall
+consequences — is in **[Gateway hosts](gateways.md)**.
 
 ---
 
