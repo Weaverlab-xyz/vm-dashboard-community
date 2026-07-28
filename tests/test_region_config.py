@@ -19,12 +19,14 @@ config_service / config are stubbed so no DB is needed.
 
 Run: python tests/test_region_config.py   (or under pytest)
 """
+import ast
 import json
 import os
 import sys
 import types
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _ROOT)
 
 # Stub config_service (a mutable dict) + settings before importing region_config.
 _CONF: dict = {}
@@ -178,6 +180,33 @@ def test_region_fields_and_unknown_cloud():
 
 
 # ── setup.py drift guard + import-key namespace (skips without fastapi) ────────
+
+def test_setup_models_match_region_fields_without_importing_fastapi():
+    """The same drift assertion as below, read from the AST so it runs everywhere.
+
+    The guard below imports ``api.setup``, which needs fastapi — absent from most
+    local environments, where it prints SKIP and passes. Adding a field to a
+    ``_SPECS`` entry without adding it to the matching model therefore looks green
+    locally and only fails in CI, which is exactly how it happened. This version has
+    no imports to miss, so the drift shows up where the edit is made.
+
+    Field *order* matters: the guard compares tuples, because the model's declaration
+    order is what the /regions/{cloud} editor renders."""
+    src = open(os.path.join(_ROOT, "web_dashboard", "api", "setup.py"),
+               encoding="utf-8").read()
+    models = {
+        n.name: tuple(s.target.id for s in n.body if isinstance(s, ast.AnnAssign))
+        for n in ast.walk(ast.parse(src))
+        if isinstance(n, ast.ClassDef) and n.name.endswith("RegionConfig")
+    }
+    expected = {"azure": "AzureRegionConfig", "aws": "AwsRegionConfig",
+                "gcp": "GcpRegionConfig"}
+    for cloud, cls in expected.items():
+        assert cls in models, f"{cls} not found in api/setup.py"
+        assert models[cls] == rc.region_fields(cloud), (
+            f"{cloud} setup model fields drifted from region_fields({cloud}):\n"
+            f"  model: {models[cls]}\n  spec : {rc.region_fields(cloud)}")
+
 
 def test_setup_models_match_region_fields_and_key_namespace():
     try:
