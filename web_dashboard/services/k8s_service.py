@@ -848,13 +848,73 @@ def _tf_milestone(line: str, cur_pct: int, cur_msg: str) -> tuple:
     return cur_pct, cur_msg
 
 
+async def _rollback_failed_provision(*, cluster_id: str, job_id: str, cloud: str,
+                                     tf_variables: dict) -> str:
+    """Best-effort ``terraform destroy`` of a provision that died part-way through.
+    Returns a note to append to the job's error message (never raises).
+
+    A failed apply is **not** a no-op in the cloud — Terraform keeps whatever it
+    managed to create, and the deploy dir's state still references it. Observed on
+    GKE: the initial node pool hit GCE_STOCKOUT, so the apply failed, but the
+    cluster object survived in ERROR state with 0 nodes *and* went on holding its
+    private control-plane /28. That subnetwork doesn't show up in ``gcloud compute
+    networks subnets list``, so the orphan is invisible until the NEXT provision
+    dies with "Conflicting IP cidr range … conflicts with existing subnetwork".
+    Tearing the partial deployment down here keeps a failed provision cheap and
+    keeps the next one unblocked.
+
+    Deliberately non-fatal: the apply error is the thing the operator needs to see,
+    so a rollback that itself fails must not replace it. The caller appends the
+    returned note instead — and the ``failed`` row stays put, so Delete (which runs
+    :func:`run_decommission`) can retry the teardown.
+    """
+    from . import terraform, terraform_provider_env
+    from ..api.websocket import broadcast_progress
+    logger.warning("k8s provision: apply failed for %s — rolling back the partial "
+                   "deployment (terraform destroy)", cluster_id)
+
+    # NB: no job_service.cancel_check in this stream, unlike the apply's on_line.
+    # Cancelling the job is one of the ways we get here, and re-checking would
+    # abort the rollback on its first line — leaving behind exactly the orphan
+    # this function exists to clean up. The per-line broadcast still heartbeats
+    # the job row, which the startup reconcile needs to see during a long destroy.
+    async def on_line(line: str) -> None:
+        await broadcast_progress(job_id, 90, "Rolling back the failed provision…",
+                                 log_line=line)
+
+    try:
+        await broadcast_progress(job_id, 90, "Provision failed — rolling back…")
+        await terraform.destroy(
+            _deploy_dir(job_id),
+            env=terraform_provider_env.provider_env(cloud),
+            template_dir=_cluster_template_dir(cloud),
+            variables=tf_variables,   # destroy evaluates the config; same -var set as apply
+            on_line=on_line,
+        )
+    except Exception as exc:
+        logger.error("k8s provision rollback FAILED cluster_id=%s: %s", cluster_id, exc)
+        return ("\n\n[rollback] terraform destroy also failed — MANUAL CLEANUP REQUIRED. "
+                "Whatever the apply created is still live in the cloud (on GKE the "
+                "cluster keeps holding its control-plane CIDR and will block the next "
+                f"provision). Delete the cluster to retry the teardown. Cause: {exc}")
+    logger.info("k8s provision rollback complete cluster_id=%s — partial deployment destroyed",
+                cluster_id)
+    return ("\n\n[rollback] The partial deployment was destroyed — no cloud resources "
+            "should remain from this attempt.")
+
+
 async def run_provision_apply(db: Session, *, cluster_id: str, job_id: str,
                               cloud: str, tf_variables: dict) -> None:
     """**§1.1a** background task: ``terraform apply`` the cluster module, assemble a
     kubeconfig from its outputs, store it as a secrets-backend reference (the same
     path :func:`register_cluster` uses), and flip the row to ``registered`` — after
-    which the Phase 2-4 flows treat it like any registered cluster. Marks the row +
-    job failed on apply error. Mirrors ``cloud_database_service.run_provision_apply``."""
+    which the Phase 2-4 flows treat it like any registered cluster.
+
+    On failure: roll the partial deployment back (see
+    :func:`_rollback_failed_provision`), then mark the row + job failed. The row is
+    left at ``failed`` either way — it's the operator's record that the attempt
+    happened, and if the rollback didn't fully succeed, Delete re-runs the destroy.
+    Mirrors ``cloud_database_service.run_provision_apply``."""
     from . import config_service, job_service, terraform, terraform_provider_env
     from ..api.websocket import broadcast_progress
     row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
@@ -869,6 +929,7 @@ async def run_provision_apply(db: Session, *, cluster_id: str, job_id: str,
         _p["pct"], _p["msg"] = _tf_milestone(line, _p["pct"], _p["msg"])
         await broadcast_progress(job_id, _p["pct"], _p["msg"], log_line=line)
 
+    registered = False   # flipped once the row is committed as "registered"
     try:
         outputs = await terraform.apply(
             _deploy_dir(job_id), tf_variables,
@@ -908,6 +969,7 @@ async def run_provision_apply(db: Session, *, cluster_id: str, job_id: str,
         row.api_server = endpoint
         row.status = "registered"
         db.commit()
+        registered = True    # past this point the cluster is live — never roll back
         job_service.set_completed(db, job_id)
         logger.info("k8s provision complete cluster_id=%s cluster=%s endpoint=%s egress_ip=%s",
                     cluster_id, cluster_out_name, endpoint, egress_ip or "-")
@@ -920,9 +982,14 @@ async def run_provision_apply(db: Session, *, cluster_id: str, job_id: str,
         except Exception as exc:
             logger.warning("k8s provision: rancher firewall refresh failed (non-fatal): %s", exc)
     except Exception as exc:
+        # Tear down whatever the apply managed to create BEFORE the row goes failed,
+        # so a failed provision doesn't leave a half-built cluster billing (and, on
+        # GKE, squatting on a control-plane CIDR the next provision needs).
+        note = "" if registered else await _rollback_failed_provision(
+            cluster_id=cluster_id, job_id=job_id, cloud=cloud, tf_variables=tf_variables)
         row.status = "failed"
         db.commit()
-        job_service.set_failed(db, job_id, str(exc))
+        job_service.set_failed(db, job_id, f"{exc}{note}")
         logger.exception("k8s provision failed cluster_id=%s: %s", cluster_id, exc)
 
 
