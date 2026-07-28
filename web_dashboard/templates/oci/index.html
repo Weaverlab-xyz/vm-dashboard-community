@@ -82,12 +82,35 @@
       </template>
     </div>
 
+    <!-- Selection toolbar. Mirrors the other clouds: tick images, launch one instance
+         per image. For N copies of ONE image, use Count on the deploy form. -->
+    <div x-show="!imagesLoading && filteredImages().length > 0"
+         class="flex items-center justify-between mb-4">
+      <label class="flex items-center gap-2 text-sm text-gray-600 cursor-pointer">
+        <input type="checkbox" @change="toggleSelectAllImages($event)"
+               :checked="selectedImages.length > 0 && selectedImages.length === filteredImages().length"
+               class="rounded border-gray-300 text-red-600 focus:ring-red-500">
+        Select all
+      </label>
+      <div class="flex items-center gap-2" x-show="selectedImages.length > 0" x-cloak>
+        <button @click="selectedImages = []"
+                class="text-xs text-gray-500 hover:text-gray-700 px-2 py-1.5">Clear</button>
+        <button @click="openBulkDeployModal()"
+                class="text-xs bg-red-700 hover:bg-red-800 text-white px-3 py-1.5 rounded-lg font-medium transition">
+          Bulk Deploy (<span x-text="selectedImages.length"></span>)
+        </button>
+      </div>
+    </div>
+
     <div x-show="imagesLoading" class="text-sm text-gray-400">Loading images…</div>
 
     <div x-show="!imagesLoading" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
       <template x-for="img in filteredImages()" :key="img.ocid">
-        <div class="bg-white rounded-xl border border-gray-200 hover:border-red-300 hover:shadow-sm transition-all p-4 flex flex-col gap-2">
+        <div class="bg-white rounded-xl border hover:shadow-sm transition-all p-4 flex flex-col gap-2"
+             :class="selectedImages.includes(img.ocid) ? 'border-red-400 ring-1 ring-red-200' : 'border-gray-200 hover:border-red-300'">
           <div class="flex items-start justify-between gap-2">
+            <input type="checkbox" :value="img.ocid" x-model="selectedImages" @click.stop
+                   class="mt-0.5 rounded border-gray-300 text-red-600 focus:ring-red-500 flex-shrink-0">
             <div class="flex-1 min-w-0">
               <p class="text-sm font-medium text-gray-900 truncate" x-text="img.display_name"></p>
               <p class="text-xs text-gray-400 mt-0.5" x-text="(img.operating_system + ' ' + img.operating_system_version).trim() || 'Image'"></p>
@@ -153,9 +176,24 @@
 
       <div class="space-y-4">
         <div>
-          <label class="block text-xs font-medium text-gray-600 mb-1">Instance name</label>
-          <input type="text" x-model="deployForm.instance_name"
-                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+          <div class="grid grid-cols-3 gap-3">
+            <div class="col-span-2">
+              <label class="block text-xs font-medium text-gray-600 mb-1">Instance name</label>
+              <input type="text" x-model="deployForm.instance_name"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-gray-600 mb-1">Count</label>
+              <!-- Clearing the acknowledgment on change is deliberate: a free-tier
+                   warning accepted at count 1 must not carry silently into count 10. -->
+              <input type="number" min="1" :max="countMax" step="1"
+                     x-model.number="deployForm.count"
+                     @change="deployForm.acknowledge_charges = false"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            </div>
+          </div>
+          <p x-show="(deployForm.count || 1) > 1" x-cloak
+             class="text-xs font-mono text-gray-500 mt-1" x-text="namePreviewFor().text"></p>
         </div>
 
         <div>
@@ -306,11 +344,125 @@
       </div>
     </div>
   </div>
+
+  <!-- ── Bulk Deploy modal (one instance per selected image) ────────────────── -->
+  <div x-show="bulkModal.open" x-cloak x-transition
+       class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+       @click.self="bulkModal.open = false">
+    <div class="bg-white rounded-xl shadow-2xl w-full max-w-xl p-6 max-h-screen overflow-y-auto">
+      <h2 class="text-lg font-bold text-gray-900">Bulk Deploy OCI Instances</h2>
+      <p class="text-xs text-gray-500 mb-4">
+        <span x-text="bulkModal.items.length"></span> image<span x-show="bulkModal.items.length !== 1">s</span>
+        selected — one instance per image. To launch several copies of a single image,
+        use the Count field on the normal deploy form.
+      </p>
+
+      <div class="space-y-4">
+        <div class="space-y-2">
+          <label class="block text-xs font-semibold text-gray-700 uppercase tracking-wide">Instance Names</label>
+          <template x-for="(img, idx) in bulkModal.items" :key="img.ocid">
+            <div class="flex items-center gap-3">
+              <span class="text-xs text-gray-500 w-40 truncate" x-text="img.display_name"></span>
+              <input x-model="bulkModal.names[idx]" type="text"
+                     :placeholder="'instance-' + (idx + 1)"
+                     class="flex-1 border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
+            </div>
+          </template>
+        </div>
+
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Workgroup (shared)</label>
+          <select x-model="bulkModal.workgroup"
+                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            <option value="">— select a workgroup —</option>
+            <template x-for="wg in availableWorkgroups" :key="wg">
+              <option :value="wg" x-text="wg"></option>
+            </template>
+          </select>
+        </div>
+
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Shape (shared)</label>
+          <select x-model="bulkModal.shape" @change="onBulkShapeChange()"
+                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            <template x-for="s in networkOpts.shapes" :key="s.shape">
+              <option :value="s.shape" x-text="s.shape"></option>
+            </template>
+          </select>
+        </div>
+
+        <div class="grid grid-cols-3 gap-3" x-show="bulkIsFlexShape()" x-cloak>
+          <div>
+            <label class="block text-xs font-medium text-gray-600 mb-1">OCPUs</label>
+            <input type="number" min="1" x-model.number="bulkModal.ocpus"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-gray-600 mb-1">Memory (GB)</label>
+            <input type="number" min="1" x-model.number="bulkModal.memory_gb"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-gray-600 mb-1">Boot (GB)</label>
+            <input type="number" min="50" x-model.number="bulkModal.boot_volume_gb"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+          </div>
+        </div>
+
+        <label class="flex items-center gap-2 text-sm text-gray-700">
+          <input type="checkbox" x-model="bulkModal.assign_public_ip"
+                 class="rounded border-gray-300 text-red-600 focus:ring-red-500">
+          Assign public IP
+        </label>
+
+        <!-- Free-tier gate, evaluated over the WHOLE selection: N images means N
+             instances of the shared shape, which is what trips the 2-instance cap. -->
+        <div x-show="bulkFreeTierWarnings().length || bulkModal.serverGateTripped" x-cloak
+             class="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2.5 text-xs text-amber-800">
+          <p class="font-semibold mb-1">This selection may exceed the Always-Free tier:</p>
+          <ul class="list-disc list-inside space-y-0.5">
+            <template x-for="w in bulkFreeTierWarnings()" :key="w"><li x-text="w"></li></template>
+            <li x-show="bulkModal.serverGateTripped && !bulkFreeTierWarnings().length"
+                x-text="bulkModal.serverGateMessage"></li>
+          </ul>
+          <label class="flex items-center gap-2 mt-2 font-medium text-amber-900">
+            <input type="checkbox" x-model="bulkModal.acknowledge_charges">
+            I understand this may incur charges
+          </label>
+        </div>
+
+        <p x-show="bulkModal.error" x-cloak class="text-xs text-red-600" x-text="bulkModal.error"></p>
+      </div>
+
+      <div class="flex justify-end gap-2 mt-6">
+        <button @click="bulkModal.open = false"
+                class="px-4 py-2 text-sm text-gray-600 hover:text-gray-900 font-medium">Cancel</button>
+        <button @click="submitBulkDeploy()" :disabled="bulkModal.submitting || !bulkDeployReady()"
+                class="px-4 py-2 text-sm bg-red-700 hover:bg-red-800 disabled:opacity-40 text-white rounded-lg font-medium transition">
+          <span x-show="!bulkModal.submitting">
+            Deploy <span x-text="bulkModal.items.length"></span>
+          </span>
+          <span x-show="bulkModal.submitting" x-cloak>Deploying…</span>
+        </button>
+      </div>
+    </div>
+  </div>
 </div>
 
 <script>
 function ociDashboard() {
   return {
+    ...deployNameState(),
+    // Multi-select bulk: tick images, launch one instance per image. The other axis
+    // from deployForm.count, which launches N copies of ONE image.
+    selectedImages: [],
+    bulkModal: {
+      open: false, items: [], names: [], workgroup: '',
+      shape: 'VM.Standard.E2.1.Micro', ocpus: null, memory_gb: null,
+      boot_volume_gb: 50, assign_public_ip: false, acknowledge_charges: false,
+      submitting: false, error: '',
+      serverGateTripped: false, serverGateMessage: '',
+    },
     activeTab: 'images',
     region: '',
     imagesLoading: false,
@@ -338,7 +490,7 @@ function ociDashboard() {
     // Initialised inline (a method-call initializer can't use `this` in an
     // object literal); openDeployModal() resets it via blankForm().
     deployForm: {
-      instance_name: '', shape: 'VM.Standard.E2.1.Micro',
+      instance_name: '', count: 1, shape: 'VM.Standard.E2.1.Micro',
       ocpus: null, memory_gb: null, availability_domain: '',
       subnet_ocid: '', assign_public_ip: false, ssh_username: 'opc',
       boot_volume_gb: 50, workgroup: '', acknowledge_charges: false,
@@ -349,7 +501,7 @@ function ociDashboard() {
 
     blankForm() {
       return {
-        instance_name: '', shape: 'VM.Standard.E2.1.Micro',
+        instance_name: '', count: 1, shape: 'VM.Standard.E2.1.Micro',
         ocpus: null, memory_gb: null, availability_domain: '',
         subnet_ocid: '', assign_public_ip: false, ssh_username: 'opc',
         boot_volume_gb: 50, workgroup: '', acknowledge_charges: false,
@@ -438,27 +590,153 @@ function ociDashboard() {
     },
 
     // Client-side advisory mirror of services/oci_freetier.py (backend enforces).
-    freeTierWarnings() {
+    // Client mirror of services/oci_freetier.evaluate, so the acknowledgment checkbox
+    // appears before submit rather than after a 400. Count-aware: a selection that is
+    // free once is not free N times, and the AMD instance cap is the rule a count
+    // trips first — it was missing here entirely.
+    // One implementation for both entry points. The single form multiplies by its
+    // Count, the bulk modal by the number of selected images — same arithmetic, and
+    // keeping it in one place is the whole reason the two can't drift apart.
+    _freeTierWarnings(sel, n) {
       const ft = this.networkOpts.free_tier || {};
-      const f = this.deployForm;
       const out = [];
-      const isAmd = f.shape === ft.amd_shape;
-      const isA1 = f.shape === ft.a1_shape;
+      const isAmd = sel.shape === ft.amd_shape;
+      const isA1 = sel.shape === ft.a1_shape;
       if (ft.amd_shape && !isAmd && !isA1) {
-        out.push('Shape ' + f.shape + ' is not an Always-Free shape.');
+        out.push('Shape ' + sel.shape + ' is not an Always-Free shape.');
+      }
+      if (isAmd && n > (ft.amd_max_instances || 2)) {
+        out.push('Launching ' + n + ' × ' + ft.amd_shape + ' exceeds the free tier’s '
+                 + (ft.amd_max_instances || 2) + ' instances.');
       }
       if (isA1) {
-        if ((f.ocpus || 0) > (ft.a1_max_ocpus || 0)) out.push('Ampere A1 OCPUs exceed the free budget (~' + ft.a1_max_ocpus + ').');
-        if ((f.memory_gb || 0) > (ft.a1_max_memory_gb || 0)) out.push('Ampere A1 memory exceeds the free budget (~' + ft.a1_max_memory_gb + ' GB).');
+        if ((sel.ocpus || 0) * n > (ft.a1_max_ocpus || 0)) out.push('Ampere A1 OCPUs (' + ((sel.ocpus || 0) * n) + ') exceed the free budget (~' + ft.a1_max_ocpus + ').');
+        if ((sel.memory_gb || 0) * n > (ft.a1_max_memory_gb || 0)) out.push('Ampere A1 memory (' + ((sel.memory_gb || 0) * n) + ' GB) exceeds the free budget (~' + ft.a1_max_memory_gb + ' GB).');
       }
-      if ((f.boot_volume_gb || 0) > (ft.boot_volume_gb || 50)) {
+      const bv = sel.boot_volume_gb || 0;
+      if (bv * n > (ft.block_storage_gb || 200)) {
+        out.push('Boot storage (' + bv + ' GB × ' + n + ') exceeds the '
+                 + (ft.block_storage_gb || 200) + ' GB free block-storage allotment.');
+      } else if (bv > (ft.boot_volume_gb || 50)) {
         out.push('Boot volume above the ' + (ft.boot_volume_gb || 50) + ' GB free default draws down the shared free pool.');
       }
       return out;
     },
 
+    freeTierWarnings() {
+      return this._freeTierWarnings(this.deployForm,
+                                    Math.max(1, this.deployForm.count || 1));
+    },
+
+    bulkFreeTierWarnings() {
+      // N selected images = N instances of the shared shape.
+      return this._freeTierWarnings(this.bulkModal,
+                                    Math.max(1, this.bulkModal.items.length));
+    },
+
+    bulkIsFlexShape() {
+      const ft = this.networkOpts.free_tier || {};
+      return this.bulkModal.shape === ft.a1_shape
+             || (this.bulkModal.shape || '').includes('Flex');
+    },
+
+    onBulkShapeChange() {
+      const ft = this.networkOpts.free_tier || {};
+      if (this.bulkIsFlexShape()) {
+        this.bulkModal.ocpus = this.bulkModal.ocpus || ft.a1_max_ocpus || 1;
+        this.bulkModal.memory_gb = this.bulkModal.memory_gb || ft.a1_max_memory_gb || 6;
+      } else {
+        this.bulkModal.ocpus = null;
+        this.bulkModal.memory_gb = null;
+      }
+      // A changed shape changes the envelope, so a prior acknowledgment no longer
+      // applies — same reasoning as the Count field clearing it on the single form.
+      this.bulkModal.acknowledge_charges = false;
+    },
+
+    toggleSelectAllImages(ev) {
+      this.selectedImages = ev.target.checked
+        ? this.filteredImages().map(i => i.ocid)
+        : [];
+    },
+
+    openBulkDeployModal() {
+      const items = this.filteredImages().filter(i => this.selectedImages.includes(i.ocid));
+      this.bulkModal = {
+        open: true,
+        items,
+        names: items.map(i => (i.display_name || '')
+          .replace(/[^A-Za-z0-9-]/g, '-').slice(0, 60)),
+        // Blank, like blankForm() — this page has always made the operator choose,
+        // and the submit button stays disabled until they do.
+        workgroup: '',
+        shape: 'VM.Standard.E2.1.Micro',
+        ocpus: null, memory_gb: null, boot_volume_gb: 50,
+        assign_public_ip: false, acknowledge_charges: false,
+        submitting: false, error: '',
+        serverGateTripped: false, serverGateMessage: '',
+      };
+    },
+
+    bulkDeployReady() {
+      const m = this.bulkModal;
+      if (!m.workgroup || !m.items.length) return false;
+      if (m.names.some(n => !n || !n.trim())) return false;
+      if ((this.bulkFreeTierWarnings().length || m.serverGateTripped)
+          && !m.acknowledge_charges) return false;
+      return true;
+    },
+
+    async submitBulkDeploy() {
+      const m = this.bulkModal;
+      m.submitting = true;
+      m.error = '';
+      try {
+        const r = await API.post('/api/oci/bulk-deploy', {
+          items: m.items.map((img, idx) => ({
+            image_ocid: img.ocid,
+            image_name: img.display_name || '',
+            instance_name: m.names[idx].trim(),
+          })),
+          shape: m.shape,
+          ocpus: m.ocpus,
+          memory_gb: m.memory_gb,
+          boot_volume_gb: m.boot_volume_gb,
+          assign_public_ip: m.assign_public_ip,
+          workgroup: m.workgroup,
+          acknowledge_charges: m.acknowledge_charges,
+        });
+        m.open = false;
+        this.selectedImages = [];
+        if (window.afterDeploy(r, { label: 'OCI bulk deploy',
+                                    notify: (msg, t) => this.notify(msg, t) })) return;
+        this.notify(`${r.count} instance(s) queued`);
+        this.activeTab = 'instances';
+        setTimeout(() => this.loadInstances(true), 1500);
+      } catch (e) {
+        // Same server free-tier gate as the single form — reveal the acknowledgment.
+        if (e && e.code === 'free_tier_exceeded') {
+          m.serverGateTripped = true;
+          m.serverGateMessage = e.message || 'Selection exceeds the Always-Free tier.';
+          m.error = 'Selection exceeds the Always-Free tier — tick the acknowledgment to proceed.';
+        } else {
+          m.error = (e && e.message) ? e.message : 'Bulk deploy failed.';
+        }
+      } finally {
+        m.submitting = false;
+      }
+    },
+
+    // Preview of the names a count > 1 deploy will create.
+    namePreviewFor() {
+      return this.namePreview(this.deployForm.instance_name, this.deployForm.count,
+                              window.NAME_LIMITS.oci);
+    },
+
     deployReady() {
       if (!this.deployForm.instance_name || !this.deployForm.workgroup) return false;
+      const n = this.deployForm.count || 1;
+      if (!(n >= 1 && n <= this.countMax)) return false;
       if ((this.freeTierWarnings().length || this.serverGateTripped) && !this.deployForm.acknowledge_charges) return false;
       return true;
     },
@@ -491,6 +769,9 @@ function ociDashboard() {
       try {
         const r = await API.post('/api/oci/deploy', body);
         this.deployModal = false;
+        // A batch lands on the /jobs rollup; a single deploy keeps its own path.
+        if (window.afterDeploy(r, { label: 'OCI deploy',
+                                    notify: (m, t) => this.notify(m, t) })) return;
         this.notify('Deploy started (job ' + r.job_id + ').');
         this.activeTab = 'instances';
         setTimeout(() => this.loadInstances(true), 1500);

@@ -202,6 +202,58 @@ def test_a_busy_neighbour_does_not_satisfy_a_bare_host():
         "a task running on another host suppressed this host's gateway task")
 
 
+# ── the ECS registration wait ─────────────────────────────────────────────────
+# This helper is where two changes met: the wait itself was added so a REUSED host
+# that is still mid-registration doesn't get a RunTask that 400s with "No Container
+# Instances", and it then had to become host-scoped so several gateways can share a
+# cluster. Merging those wrong is silent — the wait would still "work", just on the
+# wrong host's readiness — so both halves are pinned here.
+
+def test_registration_wait_returns_once_the_named_host_is_active():
+    fake = FakeAws()
+    m = _load(fake)
+    m._REGISTER_TIMEOUT_S = 2
+    m._REGISTER_POLL_S = 0.01
+    asyncio.run(m._await_ecs_registration(REGION, MANAGED_HOST))  # must not hang
+
+
+def test_registration_wait_is_not_satisfied_by_a_different_host():
+    """A neighbour being ready says nothing about this host, and the task is
+    placement-constrained to this host anyway — so accepting any ACTIVE instance
+    would just move the RunTask failure later."""
+    class OnlyOtherHostActive(FakeAws):
+        def __init__(self):
+            super().__init__()
+            self.polls = 0
+
+        async def list_container_instances(self, region, cluster):
+            self.polls += 1
+            return [{"arn": "ci/user", "status": "ACTIVE", "ec2_instance_id": USER_HOST}]
+
+    fake = OnlyOtherHostActive()
+    m = _load(fake)
+    m._REGISTER_TIMEOUT_S = 0.05
+    m._REGISTER_POLL_S = 0.01
+    asyncio.run(m._await_ecs_registration(REGION, MANAGED_HOST))
+    assert fake.polls > 1, (
+        f"returned after {fake.polls} poll(s) — a different host being ACTIVE satisfied "
+        "the wait, so RunTask would fire before this host had registered")
+
+
+def test_registration_wait_gives_up_rather_than_raising():
+    """Best-effort, like every other call in this module: a listing failure must not
+    take down the deploy that asked for a gateway."""
+    class Broken(FakeAws):
+        async def list_container_instances(self, region, cluster):
+            raise RuntimeError("ECS unavailable")
+
+    fake = Broken()
+    m = _load(fake)
+    m._REGISTER_TIMEOUT_S = 1
+    m._REGISTER_POLL_S = 0.01
+    asyncio.run(m._await_ecs_registration(REGION, MANAGED_HOST))  # must not raise
+
+
 # ── region resolution ─────────────────────────────────────────────────────────
 
 def test_aws_gateway_settings_come_from_region_config():

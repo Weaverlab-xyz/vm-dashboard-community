@@ -23,6 +23,17 @@ def _install_stubs():
         setattr(db, name, type(name, (), {}))
     sys.modules["web_dashboard.database"] = db
 
+    # sqlalchemy is only needed for the `Session` type hint and the query builder in
+    # collect() / live_or_pending_vm_names, neither of which the pure mappers touch.
+    # Stubbing it (as tests/test_job_batches.py does) means this file actually runs
+    # on a checkout without the app requirements instead of skipping itself.
+    sa = types.ModuleType("sqlalchemy")
+    sa_orm = types.ModuleType("sqlalchemy.orm")
+    sa_orm.Session = type("Session", (), {})
+    sa.orm = sa_orm
+    sys.modules.setdefault("sqlalchemy", sa)
+    sys.modules.setdefault("sqlalchemy.orm", sa_orm)
+
 
 _install_stubs()
 try:
@@ -125,6 +136,48 @@ def test_visible_nonworkgroup_is_owner_only():
     item = {"workgroup": None, "deployed_by": "alice"}
     assert svc.visible_to(item, ["hydra"], "alice") is True
     assert svc.visible_to(item, ["hydra"], "bob") is False
+
+
+# ── name claims (the pre-flight behind count-based deploys) ──────────────────
+#
+# live_or_pending_vm_names needs a Session, so what's tested here is the predicate it
+# is built on. That predicate decides whether a deploy can reuse a name — and because
+# Azure/GCP/OCI destroy resolve their deploy job by FIRST MATCH on name, getting it
+# wrong means a destroy can target the wrong VM.
+
+def test_name_claim_uses_the_same_key_order_as_the_inventory_mapper():
+    assert svc._name_claimed_by(_job(metadata_dict={"instance_name": "web-01"})) == "web-01"
+    assert svc._name_claimed_by(_job(metadata_dict={"vm_name": "vm-01"})) == "vm-01"
+    assert svc._name_claimed_by(_job(metadata_dict={"name": "n-01"})) == "n-01"
+
+
+def test_name_claim_falls_back_to_cloud_resource_id():
+    """Azure/GCP/OCI set cloud_resource_id to the VM name at enqueue, so an in-flight
+    row is still findable before its metadata is fully written."""
+    assert svc._name_claimed_by(_job(metadata_dict={}, cloud_resource_id="i-123")) == "i-123"
+
+
+def test_a_destroyed_vm_releases_its_name():
+    job = _job(metadata_dict={"instance_name": "web-01", "destroyed": True})
+    assert svc._name_claimed_by(job) is None
+
+
+def test_a_nameless_job_claims_nothing():
+    """Must be None, not '(unnamed)' — the mapper's placeholder would otherwise
+    become a name that every nameless job collides with."""
+    assert svc._name_claimed_by(_job(metadata_dict={}, cloud_resource_id=None)) is None
+    assert svc._name_claimed_by(_job(metadata_dict={"instance_name": "   "},
+                                     cloud_resource_id="")) is None
+
+
+def test_in_flight_statuses_hold_a_name():
+    """A batch submitted while another is still running has to see those names, or
+    both batches pick the same ones and collide at launch."""
+    for status in ("pending", "queued", "running"):
+        assert status in svc._NAME_HOLDING_STATUSES
+    assert "completed" in svc._NAME_HOLDING_STATUSES
+    assert "failed" not in svc._NAME_HOLDING_STATUSES
+    assert "cancelled" not in svc._NAME_HOLDING_STATUSES
 
 
 if __name__ == "__main__":

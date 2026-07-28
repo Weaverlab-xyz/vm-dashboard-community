@@ -37,11 +37,27 @@ Terraform. (Terraform VM modules exist under `terraform/ec2_instance`, `terrafor
 `terraform/gce_instance` for a separate CLI-oriented path, but `/api/*/deploy` does **not**
 use them.)
 
+There is exactly **one** `_run_deploy` per cloud, and it is the only place that cloud's
+SDK is asked to create a VM. A batch does not repeat it: `_run_bulk_deploy` acquires
+whatever is genuinely shared for the run — the jumpoint, and on AWS the NAT instance,
+SSM endpoints and SSH key; on Azure the quota check, ACI container and Key Vault key —
+then loops calling `_run_deploy` with those injected. Each instance still owns its own
+job row, so one failure fails that row and the batch carries on.
+
+That shape is load-bearing rather than tidy. When the batch path was a second copy of
+the deploy body it drifted, and every divergence was invisible because a batch still
+reported success: AWS batches stopped passing `os_type` and booted Linux VMs with no SSM
+agent, and Azure batches ignored the per-deploy Jumpoint key. `tests/test_deploy_runner_parity.py`
+asserts no `_run_bulk_deploy` calls its cloud's launch function directly.
+
 Ordered steps (each Layer-1/2/3 step is **non-fatal** — a failure logs a warning and the
 deploy still succeeds):
 
-1. **Ensure the jumpoint host** (only when `beyondtrust_enabled`) — AWS/Azure/GCP each
-   bring up their shared/ paired jumpoint; **OCI does nothing here** (bring your own).
+1. **Ensure the jumpoint host** (only when `beyondtrust_enabled`) — AWS uses a shared
+   ref-counted ECS host, Azure the shared `clouddb-jumpoint` VM (see
+   `azure_vm_jumpoint_mode`), GCP the shared COS host (see `gcp_vm_jumpoint_mode`);
+   **OCI does nothing here** (bring your own). In a batch this happens once for the
+   whole run.
 2. **AWS only** — ensure the shared on-demand **NAT instance** (`aws_nat_instance_enabled`)
    and **SSM interface endpoints** (`aws_ssm_endpoints_enabled`).
 3. **Fetch the SSH public key** from the cloud's secret store and inject it (Linux via
@@ -63,6 +79,55 @@ and `/vms` (unified cross-cloud inventory).
 Each cloud reads its credentials + a default subnet + an SSH-keypair secret from config
 (emitted by the sandbox setup script). The **admin/SSH keypair** is stored in the cloud's
 own secret store and retrievable per instance from the UI.
+
+### Deploying more than one VM
+
+Every deploy form has a **Count** (1–20). Leave it at 1 and nothing changes. Set it higher
+and the base name is expanded into a numbered series — `web` × 3 becomes `web-01`,
+`web-02`, `web-03` — with the form previewing the exact names before you submit.
+
+A count above 1 creates one `*_bulk_deploy` **parent** job plus one `queued` child per VM,
+all sharing a `batch_id`; the browser lands on `/jobs?batch_id=…`, which rolls the batch up
+into total / running / failed. The children deploy **sequentially** inside a single worker
+slot, so a batch of N takes roughly N × the single-deploy time and occupies one of the
+`WORKER_REPLICAS` slots for the duration — that, plus default cloud vCPU quotas, is why the
+ceiling is 20 (`MAX_DEPLOY_COUNT` in [`services/vm_naming.py`](../web_dashboard/services/vm_naming.py)).
+
+Names are expanded by truncating the *base*, never the numeric suffix, so a series stays
+unique at any provider's length limit. Two limits are worth knowing:
+
+* **Azure batches are budgeted to 15 characters**, not the 64-char ARM limit, because the
+  in-guest hostname is derived as `vm_name[:15]`. A longer base would give every VM in the
+  batch the same hostname, which breaks Entitle and Password Safe onboarding — both key off
+  hostname. Single deploys are unaffected.
+* **GCP names must be RFC1035** (lowercase, leading letter, hyphens); a base that isn't is
+  rejected with a 400 rather than silently rewritten.
+
+Names are checked against VMs the dashboard has already deployed *or is deploying*, and a
+clash returns **409** rather than creating anything. That matters because Azure, GCP and OCI
+resolve a destroy by first match on name, so duplicates would make a later teardown
+ambiguous.
+
+### The two ways to deploy several VMs
+
+All four clouds offer both, and they are different operations:
+
+| | **Count** (on the deploy form) | **Bulk Deploy** (on the image list) |
+|---|---|---|
+| What it makes | N copies of **one** image | one VM **per selected image** |
+| Names | auto-numbered from a base | typed per VM |
+| Where | the deploy modal | tick images, then the *Bulk Deploy (n)* button |
+
+Both produce the same job shape — one `*_bulk_deploy` parent plus one `queued` child per
+VM, sharing a `batch_id` — so both land on the `/jobs?batch_id=` rollup and both share a
+single Jumpoint for the run.
+
+Use Count for "five identical lab boxes"; use Bulk Deploy for "one each of these three
+images". GCP and OCI gained Bulk Deploy after AWS and Azure, so older screenshots may show
+their image lists without checkboxes.
+
+Policy guardrails ([Policy Guardrails](policy-guardrails.md)) are enforced **per VM** on every
+path — count batches and multi-select bulk included — before any job row is created.
 
 ### AWS (EC2)
 
@@ -101,6 +166,34 @@ and a service principal with **Contributor** on the RG.
 | `azure_key_vault_url` / `azure_ssh_keypair_secret_name` | — / `azureVM-ssh-keypair` | SSH keypair secret |
 | `azure_ssh_username` | `azureuser` | default Linux login |
 | `azure_aci_subnet_id` / `azure_aci_docker_deploy_key` | — | ACI jumpoint (Layer 1) |
+| `azure_jumpoint_subnet_id` | — | subnet for the shared VM jumpoint (falls back to `azure_aci_subnet_id`) |
+| `azure_vm_jumpoint_mode` | `shared` | `shared` (the ref-counted `clouddb-jumpoint` VM) or `aci` (a container group per VM) |
+
+Azure single deploys borrow the **shared, ref-counted jumpoint VM** that cloud databases,
+k8s tunnels and VDI seats already use, following `azure_vm_jumpoint_mode` (editable under
+**Settings → BeyondTrust → Azure overrides**, so the choice is reversible without a
+redeploy). Batches still share one ACI container group. Two things override the mode: a
+deploy supplying its own **Jumpoint deploy key** always gets ACI (the shared host resolves
+its key from config, so there is nowhere to honour a per-deploy override), and `aci` mode
+restores the pre-2026-07 per-deploy container.
+
+`shared` is the default because ACI has two limits a real VM does not:
+
+* **No protocol tunneling.** ACI is serverless and cannot grant `NET_ADMIN` / `NET_RAW` /
+  `IPC_LOCK` or `/dev/net/tun`, so an ACI-brokered VM gets a Shell Jump but never a
+  Protocol Tunnel. The shared VM runs the container privileged (`azure_service.run_vm_jumpoint`).
+* **One shared identity store.** Every ACI group gets a random name
+  (`bt-jumpoint-azure-<uuid8>`) but they all mount the same `/jpt` Azure File share, which
+  is where the Jumpoint persists its identity. Successive groups contend over that one
+  install, and once the `.installed-<key-hash>` marker disagrees with what is on disk the
+  container **crash-loops** (`ExitCode 1`, no log output) and never registers with PRA. The
+  Containers page still shows it *Running*, because that is the ACI **group** state — check
+  `containers[0].instanceView.currentState` for `CrashLoopBackOff`. Recovery: empty the
+  `jpt` share so the next container reinstalls clean.
+
+Which shape a VM used is recorded as `jumpoint_mode` on its deploy job; destroy releases a
+shared reference and lets `jumpoint_host_service` decide, or stops the ACI group when no
+sibling VM still references it.
 
 Windows is supported: the dashboard generates + vaults a local-admin password, retrievable
 via `GET /api/azure/vms/{name}/admin-password`. Windows VMs use an **RDP jump**, not the
@@ -120,9 +213,27 @@ SSH keypair, and a service account. The dashboard **auto-attaches** `gcp_default
 | `gcp_network` / `gcp_subnetwork` | `default` / — | VPC + VM subnet |
 | `gcp_ssh_key_secret_name` | — | Secret Manager keypair secret |
 | `gcp_ssh_username` | `gcp-user` | default Linux login |
-| `gcp_jumpoint_subnetwork` / `gcp_cloud_run_docker_deploy_key` | — | per-VM COS jumpoint (Layer 1) |
+| `gcp_jumpoint_subnetwork` / `gcp_cloud_run_docker_deploy_key` | — | COS jumpoint subnet + deploy key (Layer 1) |
+| `gcp_vm_jumpoint_mode` | `shared` | `shared` (one ref-counted host) or `paired` (an `e2-micro` per VM) |
 
-Each GCP deploy spins up a **per-VM paired COS jumpoint** `bt-jumpoint-<vmname>`.
+GCP deploys borrow the **shared, ref-counted jumpoint host** that cloud databases, k8s
+tunnels and VDI seats already use — one host, rather than an `e2-micro` per VM. Batches
+always share. Single deploys follow `gcp_vm_jumpoint_mode` (`shared` by default,
+`paired` for the pre-2026-07 behaviour of a dedicated `bt-jumpoint-<vmname>`), editable
+under **Settings → BeyondTrust → GCP overrides** so the choice is reversible without a
+redeploy.
+
+Two things override the mode. A deploy that supplies its own **Jumpoint deploy key** is
+always paired — the shared host resolves its key from config, so there is nowhere to
+honour a per-deploy override on it. And the shared host lands on the
+`jumpoint_subnetwork` (the only sandbox subnet with Cloud NAT) rather than the VM
+subnet; reachability is unaffected either way, because the sandbox SSH rule is
+tag-based (`--source-tags bt-jumpoint`) and so applies VPC-wide.
+
+Which shape a VM used is recorded as `jumpoint_mode` on its deploy job, and destroy
+handles both: a paired jumpoint is deleted once no sibling VM references it, a shared
+one only has its reference released. Rows predating the field are inferred as paired,
+so no migration is needed.
 
 ### OCI (Compute) — read the caveats
 
@@ -144,7 +255,10 @@ user + API keypair, and (best-effort) a KMS vault SSH-keypair secret.
 > `oci_bt_jump_group_name` / `oci_jumpoint_name` (or `bt_*`) at it. (2) **Region is fixed to
 > `oci_region`.** (3) **Free-tier gate** — the form defaults to Always-Free
 > (`VM.Standard.E2.1.Micro` / `A1.Flex`); a larger shape is rejected (HTTP 400) unless the
-> request sets `acknowledge_charges=true`. (4) **SDK-only** (no Terraform VM module),
+> request sets `acknowledge_charges=true`. The gate is evaluated over the whole request,
+> so a **Count** that would exceed the envelope trips it even when each VM is individually
+> free — three free micros is one more than the tier allows. Changing the count clears any
+> acknowledgment you had already ticked. (4) **SDK-only** (no Terraform VM module),
 > Linux-only, no per-region config sets.
 
 ---
@@ -228,7 +342,15 @@ in [image-management.md](image-management.md).
 - **Can't SSH the VM** — the VM SG/NSG only allows SSH from the jumpoint; reach it through the
   PRA Shell Jump, not directly.
 - **OCI deploy rejected (HTTP 400)** — a non-free-tier shape without `acknowledge_charges`;
-  tick the acknowledge box or pick a free-tier shape.
+  tick the acknowledge box or pick a free-tier shape. With a **Count**, the whole batch is
+  measured against the envelope, so this can fire on a shape that is free on its own.
+- **Deploy rejected (HTTP 409, `vm_name_collision`)** — the names this deploy would create
+  are already taken by VMs the dashboard deployed or is deploying. Pick a different base
+  name, or destroy the existing VMs first. The check is deliberately strict: Azure, GCP and
+  OCI resolve a destroy by first match on name, so duplicates make teardown ambiguous.
+- **A batch child is stuck `queued`** — children are created unclaimable on purpose and are
+  driven by their `*_bulk_deploy` parent. Check the parent (same `batch_id`): if it failed
+  or was reconciled away, its children have nothing to drive them.
 
 For the sandbox network topology see [Cloud Sandbox](CLOUD_SANDBOX.md); for day-2 Ansible
 against deployed VMs see [Config Management](config-management.md).

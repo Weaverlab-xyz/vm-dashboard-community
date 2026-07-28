@@ -222,6 +222,43 @@ async def ensure_jumpoint_host(cloud: str, region: str, name: str = "") -> Optio
     return await _ensure_jumpoint_host_aws(region, name)
 
 
+async def _await_ecs_registration(region: str, host_id: str) -> None:
+    """Block until ``host_id`` is an ACTIVE container instance, or the timeout.
+
+    Both the create and the REUSE path need this. A tag lookup matches instances in
+    `pending` as well as `running`, and an EC2 host that is merely running has not
+    necessarily had its ECS agent join the cluster yet — so "found a host" is not the
+    same as "the cluster can place a task". Calling RunTask in that window fails with
+    `InvalidParameterException: No Container Instances were found in your cluster`,
+    which the caller records as `ecs_error` and the deploy then proceeds without a
+    Gateway. Reuse skipped this wait and was the common way to hit it: any deploy
+    landing while another had just launched the host got no Gateway at all.
+
+    Scoped to the named host rather than "any ACTIVE instance in the cluster": with
+    several gateways sharing a cluster, a neighbour being ready says nothing about
+    this host, and the task is placement-constrained to this host anyway — so waiting
+    on someone else's readiness would just move the RunTask failure later.
+
+    Costs nothing on the healthy path — an already-registered host returns ACTIVE on
+    the first poll.
+    """
+    from . import aws_service
+    cluster = _aws_region_cfg(region)["ecs_cluster"]
+    deadline = time.monotonic() + _REGISTER_TIMEOUT_S
+    while time.monotonic() < deadline:
+        try:
+            ci = await aws_service.list_container_instances(region, cluster)
+        except Exception as exc:  # noqa: BLE001 — best-effort, same as the caller
+            logger.warning("gateway-host: listing container instances failed: %s", exc)
+            return
+        if any(c.get("status") == "ACTIVE" and c.get("ec2_instance_id") == host_id
+               for c in ci):
+            return
+        await asyncio.sleep(_REGISTER_POLL_S)
+    logger.warning("gateway-host: host %s did not register within %ds — attempting the "
+                   "task anyway", host_id, _REGISTER_TIMEOUT_S)
+
+
 async def _ensure_jumpoint_host_aws(region: str, name: str = "") -> Optional[str]:
     """Ensure an AWS Gateway host (and its task) is up; return its instance id (or
     None on the FARGATE escape hatch / when nothing was created). Raises AWSError on
@@ -245,6 +282,9 @@ async def _ensure_jumpoint_host_aws(region: str, name: str = "") -> Optional[str
     if existing:
         logger.info("gateway-host: reusing host %s (%s)", existing[0]["instance_id"], name)
         _persist_jumpoint_egress_ip(existing[0].get("public_ip"))
+        # The tag match includes `pending`, and a running host may still be mid-ECS
+        # registration — wait, or RunTask 400s with "No Container Instances".
+        await _await_ecs_registration(region, existing[0]["instance_id"])
         await _ensure_task(region, deploy_key, existing[0]["instance_id"])
         return existing[0]["instance_id"]
 
@@ -261,6 +301,8 @@ async def _ensure_jumpoint_host_aws(region: str, name: str = "") -> Optional[str
         logger.info("gateway-host: host appeared concurrently (%s) — reusing",
                     recheck[0]["instance_id"])
         _persist_jumpoint_egress_ip(recheck[0].get("public_ip"))
+        # Losing the race means the winner may still be booting — same wait as above.
+        await _await_ecs_registration(region, recheck[0]["instance_id"])
         await _ensure_task(region, deploy_key, recheck[0]["instance_id"])
         return recheck[0]["instance_id"]
 
@@ -278,19 +320,7 @@ async def _ensure_jumpoint_host_aws(region: str, name: str = "") -> Optional[str
     logger.info("gateway-host: launched host %s (%s) — awaiting ECS registration",
                 host_id, _cfg("bt_ecs_host_instance_type") or "t3.small")
 
-    # Wait for THIS host to register with the cluster before running its task. A
-    # cluster-wide "any ACTIVE instance" check would pass immediately on the second
-    # gateway, and the task would then be placed before its host was ready.
-    deadline = time.monotonic() + _REGISTER_TIMEOUT_S
-    while time.monotonic() < deadline:
-        ci = await aws_service.list_container_instances(region, cluster)
-        if any(c.get("status") == "ACTIVE" and c.get("ec2_instance_id") == host_id
-               for c in ci):
-            break
-        await asyncio.sleep(_REGISTER_POLL_S)
-    else:
-        logger.warning("gateway-host: host %s did not register within %ds — attempting the "
-                       "task anyway", host_id, _REGISTER_TIMEOUT_S)
+    await _await_ecs_registration(region, host_id)
     # Capture the freshly-launched host's (ephemeral) public IP for the Rancher
     # firewall — run_container_instance returns only the id, so look it up by tag.
     try:
@@ -318,6 +348,45 @@ def _active_ec2_count(db) -> int:
     from ..database import Job
     jobs = db.query(Job).filter(Job.job_type == "ec2_deploy", Job.status == "completed").all()
     return sum(1 for j in jobs if not (j.metadata_dict or {}).get("destroyed"))
+
+
+def _active_gce_count(db) -> int:
+    """Live GCE VMs that borrowed the SHARED host.
+
+    Deliberately asymmetric with ``_active_ec2_count``, which counts *all* live
+    ec2_deploy rows: on AWS every EC2 deploy uses the shared host, so "all" is right
+    there. On GCP both shapes coexist — singles follow ``gcp_vm_jumpoint_mode`` (shared
+    by default), batches always share, and a deploy carrying its own Jumpoint deploy key
+    is always paired — so counting all of them would let one paired VM pin the shared
+    host forever and block a cloud-database reclaim.
+
+    Keys on ``jumpoint_host_id`` (what the deploy actually used) rather than
+    ``jumpoint_mode`` (what it intended), so a row whose ensure failed and never
+    touched the host doesn't hold a phantom reference."""
+    from ..database import Job
+    jobs = db.query(Job).filter(Job.job_type == "gce_deploy", Job.status == "completed").all()
+    return sum(1 for j in jobs
+               if not (j.metadata_dict or {}).get("destroyed")
+               and (j.metadata_dict or {}).get("jumpoint_host_id"))
+
+
+def _active_azure_vm_count(db) -> int:
+    """Live Azure VMs that borrowed the SHARED host.
+
+    Shaped like ``_active_gce_count``, not ``_active_ec2_count``, for the same reason:
+    on Azure both shapes coexist — singles follow ``azure_vm_jumpoint_mode`` (shared by
+    default), and a deploy that asked for ACI or carried its own Jumpoint deploy key got
+    its own container group instead — so counting all ``azure_deploy`` rows would let one
+    ACI-brokered VM pin the shared VM forever and block a cloud-database reclaim.
+
+    Keys on ``jumpoint_host_id`` (what the deploy actually used) rather than
+    ``jumpoint_mode`` (what it intended), so a row whose ensure failed and never touched
+    the host doesn't hold a phantom reference."""
+    from ..database import Job
+    jobs = db.query(Job).filter(Job.job_type == "azure_deploy", Job.status == "completed").all()
+    return sum(1 for j in jobs
+               if not (j.metadata_dict or {}).get("destroyed")
+               and (j.metadata_dict or {}).get("jumpoint_host_id"))
 
 
 def _active_k8s_count(db, cloud: Optional[str] = None) -> int:
@@ -494,15 +563,20 @@ async def _ensure_jumpoint_host_gcp(region: str, name: str = "",
 
 
 async def _teardown_jumpoint_host_if_idle_gcp(db, region: str) -> None:
-    """Delete the *managed* GCE Gateway VM iff no active GCP cloud database is left
-    using it. Best-effort; logs and returns on error.
+    """Delete the *managed* GCE Gateway VM iff nothing is left using it — no active
+    GCP cloud database, k8s tunnel, VDI seat, or batch-deployed GCE VM. Best-effort;
+    logs and returns on error.
 
     Safe against user-deployed gateways by construction: it deletes one VM by the
     managed name, which no user gateway is allowed to take."""
     from . import gcp_service
     try:
+        # _active_gce_count is load-bearing, not tidiness: without it a cloud-database
+        # decommission would delete the host out from under every running GCE VM that
+        # borrowed it. The AWS counterpart has always included its _active_ec2_count
+        # term for exactly this reason.
         active = (_active_db_count(db, "gcp") + _active_k8s_count(db, "gcp")
-                  + _active_vdesktop_count(db, "gcp"))
+                  + _active_vdesktop_count(db, "gcp") + _active_gce_count(db))
         if active > 0:
             logger.info("gateway-host(gcp): keeping gateway (%d active resource(s))", active)
             return
@@ -598,15 +672,20 @@ async def _ensure_jumpoint_host_azure(region: str, name: str = "") -> Optional[s
 
 
 async def _teardown_jumpoint_host_if_idle_azure(db, region: str) -> None:
-    """Delete the *managed* Azure Gateway VM iff no active Azure cloud database is
-    left using it. Best-effort; logs and returns on error.
+    """Delete the *managed* Azure Gateway VM iff nothing is left using it — no active
+    Azure cloud database, k8s tunnel, VDI seat, or Azure VM that borrowed it.
+    Best-effort; logs and returns on error.
 
     Safe against user-deployed gateways by construction: it deletes one VM by the
     managed name, which no user gateway is allowed to take."""
     from . import azure_service
     try:
+        # _active_azure_vm_count is load-bearing, not tidiness: without it a
+        # cloud-database decommission would delete the host out from under every Azure VM
+        # that borrowed it. The AWS and GCP counterparts carry their _active_ec2_count /
+        # _active_gce_count terms for exactly this reason.
         active = (_active_db_count(db, "azure") + _active_k8s_count(db, "azure")
-                  + _active_vdesktop_count(db, "azure"))
+                  + _active_vdesktop_count(db, "azure") + _active_azure_vm_count(db))
         if active > 0:
             logger.info("gateway-host(azure): keeping gateway (%d active resource(s))", active)
             return

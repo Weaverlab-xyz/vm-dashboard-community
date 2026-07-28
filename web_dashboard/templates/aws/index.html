@@ -720,13 +720,30 @@
             </p>
           </div>
 
-          <!-- Instance Name -->
+          <!-- Instance Name + Count -->
           <div class="mb-4">
-            <label class="block text-sm font-medium text-gray-700 mb-1">Instance Name *</label>
-            <input type="text" x-model="deployForm.instance_name" required
-                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm
-                          focus:outline-none focus:ring-2 focus:ring-blue-500"
-                   placeholder="e.g. my-vm-deployment">
+            <div class="grid grid-cols-3 gap-3">
+              <div class="col-span-2">
+                <label class="block text-sm font-medium text-gray-700 mb-1">Instance Name *</label>
+                <input type="text" x-model="deployForm.instance_name" required
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm
+                              focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="e.g. web">
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Count *</label>
+                <input type="number" min="1" :max="countMax" step="1" required
+                       x-model.number="deployForm.count"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm
+                              focus:outline-none focus:ring-2 focus:ring-blue-500">
+              </div>
+            </div>
+            <p class="text-xs text-gray-400 mt-1">
+              More than one launches copies of the same AMI, numbered automatically.
+            </p>
+            <p x-show="(deployForm.count || 1) > 1" x-cloak class="text-xs font-mono mt-1"
+               :class="namePreviewFor().truncated ? 'text-amber-600' : 'text-gray-500'"
+               x-text="namePreviewFor().text"></p>
           </div>
 
           <!-- Region — changing it refetches subnets/SGs, which are region-scoped -->
@@ -943,9 +960,11 @@
                   class="flex-1 py-2 border border-gray-300 rounded-lg text-sm font-medium hover:bg-gray-50 transition">
             Close
           </button>
-          <a href="/jobs"
+          <!-- Filtered to this batch when we have an id: /jobs?batch_id= renders a
+               live rollup (total / running / failed) instead of the whole queue. -->
+          <a :href="bulkBatchId ? '/jobs?batch_id=' + encodeURIComponent(bulkBatchId) : '/jobs'"
              class="flex-1 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg transition text-center">
-            View All Jobs
+            <span x-text="bulkBatchId ? 'View This Batch' : 'View All Jobs'"></span>
           </a>
         </div>
       </div>
@@ -980,6 +999,20 @@
                 </div>
               </template>
             </div>
+          </div>
+
+          <!-- Shared: Workgroup — required by the API, and it decides who can see
+               every VM in this batch, so it needs a control and not just a default -->
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Workgroup <span class="text-gray-400 font-normal">(shared)</span> *</label>
+            <select x-model="deployForm.workgroup" required
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm
+                           focus:outline-none focus:ring-2 focus:ring-green-500">
+              <option value="">— select a workgroup —</option>
+              <template x-for="wg in availableWorkgroups" :key="wg">
+                <option :value="wg" x-text="wg"></option>
+              </template>
+            </select>
           </div>
 
           <!-- Shared: Region — every instance in the batch lands here -->
@@ -1053,6 +1086,56 @@
                class="text-xs text-red-500 mt-1">Select at least one security group.</p>
           </div>
 
+          <!-- Shared: SSH key override. The value was already being sent; without a
+               control it silently inherited whatever the single modal last set. -->
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">SSH key secret <span class="text-gray-400 font-normal">(shared, optional)</span></label>
+            <select x-model="deployForm.ssh_key_secret_override"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm
+                           focus:outline-none focus:ring-2 focus:ring-green-500">
+              <option value="">Use configured default</option>
+              <template x-for="s in deployForm.sshKeySecrets" :key="s">
+                <option :value="s" x-text="s"></option>
+              </template>
+            </select>
+            <p class="mt-1 text-xs text-gray-400">Any Secrets Manager secret. Must be JSON with a <code>public_key</code> — validated on launch.</p>
+          </div>
+
+          <!-- Shared: BeyondTrust PRA options. The single modal has always had these;
+               the batch path dropped them entirely, so every VM in a batch registered
+               against the configured jump group whatever the operator picked. -->
+          <div class="space-y-3 p-3 bg-gray-50 rounded-lg border border-gray-200">
+            <p class="text-xs font-semibold text-gray-600">BeyondTrust PRA options
+              <span class="font-normal text-gray-400">— shared; fall back to the configured defaults.</span>
+            </p>
+            <div class="grid grid-cols-2 gap-3">
+              <div>
+                <label class="block text-xs font-medium text-gray-600 mb-1">Jump group</label>
+                <select x-model="deployForm.jump_group" :disabled="!praPickers.jump_groups.length"
+                        class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
+                  <option value="">(configured default)</option>
+                  <template x-for="g in praPickers.jump_groups || []" :key="g.id">
+                    <option :value="g.name" x-text="g.name"></option>
+                  </template>
+                </select>
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-gray-600 mb-1">Jumpoint</label>
+                <select x-model="deployForm.jumpoint_name" :disabled="!praPickers.jumpoints.length"
+                        class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
+                  <option value="">(configured default)</option>
+                  <template x-for="j in praPickers.jumpoints || []" :key="j.id">
+                    <option :value="j.name" x-text="j.name"></option>
+                  </template>
+                </select>
+              </div>
+            </div>
+            <p x-show="praPickers.loaded && !praPickers.jump_groups.length && !praPickers.jumpoints.length" x-cloak
+               class="text-xs text-gray-400">No PRA jump groups/jumpoints returned — the shell jump falls back to the configured defaults.</p>
+            {{ secret_picker("deployForm", "praCredBackend", "pra_credential_ref",
+                             "PRA credential", "Overrides bt_client_secret for this batch's shell jumps.") }}
+          </div>
+
           {% if entitle_enabled %}
           <!-- Entitle registration opt-in (applies to every instance in the batch) -->
           <div class="mb-1">
@@ -1091,7 +1174,7 @@
               Cancel
             </button>
             <button @click="submitBulkDeploy()"
-                    :disabled="bulkDeploying || deployForm.security_group_ids.length === 0 || !deployForm.subnet_id"
+                    :disabled="bulkDeploying || deployForm.security_group_ids.length === 0 || !deployForm.subnet_id || !deployForm.workgroup"
                     class="flex-1 py-2 bg-green-600 hover:bg-green-700 disabled:opacity-50
                            text-white text-sm font-medium rounded-lg transition">
               <span x-show="!bulkDeploying">
@@ -1289,6 +1372,7 @@
   function awsDashboard() {
     return {
       ...secretPickerState(),
+      ...deployNameState(),
       region: 'us-east-2',
       activeTab: 'community',
 
@@ -1348,6 +1432,7 @@
       praPickers: { configured: false, jump_groups: [], jumpoints: [], loaded: false },
       deployForm: {
         instance_name: '',
+        count: 1,
         instance_type: 't3.medium',
         region: '',
         sshKeyName: '',
@@ -1374,6 +1459,7 @@
       bulkDeploying: false,
       bulkDeployError: '',
       bulkDeployResults: [],
+      bulkBatchId: '',
 
       // ENA enablement
       enablingEna: new Set(),
@@ -1665,6 +1751,7 @@
         this.deployForm = {
           ami_id: ami ? ami.ami_id : '',
           instance_name: defaultName,
+          count: 1,
           instance_type: 't3.medium',
           region: this.region,
           sshKeyName: '',
@@ -1675,6 +1762,9 @@
           workgroup: this.availableWorkgroups.includes('default') ? 'default' :
                      (this.availableWorkgroups[0] || ''),
           jump_group: '', jumpoint_name: '',
+          // The secret_picker macro binds to both of these; without them here the
+          // wholesale reset drops the keys and the picker starts on undefined.
+          praCredBackend: '', pra_credential_ref: '',
           register_in_entitle: false,
           register_in_passwordsafe: false,
           ssh_key_secret_override: '',
@@ -1749,6 +1839,12 @@
         }
       },
 
+      // Preview of the names a count > 1 launch will create.
+      namePreviewFor() {
+        return this.namePreview(this.deployForm.instance_name, this.deployForm.count,
+                                window.NAME_LIMITS.aws);
+      },
+
       async submitDeploy() {
         const amiId = (this.deployForm.ami_id || '').trim();
         if (!amiId || !amiId.startsWith('ami-')) {
@@ -1760,6 +1856,11 @@
           this.deployError = 'Please fill in all required fields.';
           return;
         }
+        const count = this.deployForm.count || 1;
+        if (!(count >= 1 && count <= this.countMax)) {
+          this.deployError = `Count must be between 1 and ${this.countMax}.`;
+          return;
+        }
 
         this.deploying = true;
         this.deployError = '';
@@ -1768,6 +1869,7 @@
           const body = {
             ami_id: amiId,
             instance_name: this.deployForm.instance_name,
+            count: count,
             region: this.deployForm.region,
             instance_type: this.deployForm.instance_type,
             subnet_id: this.deployForm.subnet_id,
@@ -1783,6 +1885,8 @@
 
           const resp = await API.post('/api/aws/deploy', body);
           this.showDeployModal = false;
+          // A batch lands on the /jobs rollup; a single deploy keeps its own path.
+          if (window.afterDeploy(resp, { label: 'EC2 deploy' })) return;
           toast('EC2 deployment started!', 'success');
           setTimeout(() => window.location.href = '/jobs/' + resp.job_id, 400);
         } catch (e) {
@@ -1839,12 +1943,27 @@
         });
         this.bulkDeployError = '';
         this.bulkDeployResults = [];
+        this.bulkBatchId = '';
         this.deployForm.instance_name = '';
         this.deployForm.sshKeyPreviewLoading = true;
         // Bulk shares deployForm with the single-deploy modal, which may never
         // have been opened — seed the region from the configured default.
         this.deployForm.region = this.deployForm.region || this.region;
+        // ...and the workgroup, which submitBulkDeploy sends and the API requires.
+        // Unseeded it posts '', which is a valid str to pydantic, so the user got a
+        // confusing "Unknown workgroup ''" 400 rather than a validation error.
+        this.deployForm.workgroup = this.deployForm.workgroup ||
+          (this.availableWorkgroups.includes('default') ? 'default'
+                                                        : (this.availableWorkgroups[0] || ''));
+        // deployForm is shared with the single modal, so anything it left behind would
+        // leak into this batch. Reset the fields this modal now exposes.
+        this.deployForm.jump_group = '';
+        this.deployForm.jumpoint_name = '';
+        this.deployForm.praCredBackend = '';
+        this.deployForm.pra_credential_ref = '';
+        this.deployForm.ssh_key_secret_override = '';
         this.showBulkDeployModal = true;
+        this.loadPraPickers();
 
         const fetches = [this.loadNetworkOptsFor(this.deployForm.region)];
         // Fetch configured key preview if not already loaded from a prior modal open
@@ -1858,6 +1977,13 @@
             })
           );
         }
+        // The override list is only fetched by openDeployModal, so without this the
+        // new dropdown below renders empty.
+        fetches.push(
+          API.get('/api/aws/secrets/ssh-keys').then(r => {
+            this.deployForm.sshKeySecrets = r?.secrets || [];
+          }).catch(() => { this.deployForm.sshKeySecrets = []; })
+        );
         try {
           await Promise.all(fetches);
         } catch (e) {
@@ -1877,6 +2003,10 @@
           this.bulkDeployError = 'All instances must have a name.';
           return;
         }
+        if (!this.deployForm.workgroup) {
+          this.bulkDeployError = 'Select a workgroup.';
+          return;
+        }
 
         this.bulkDeploying = true;
         this.bulkDeployError = '';
@@ -1892,11 +2022,15 @@
             subnet_id: this.deployForm.subnet_id,
             security_group_ids: this.deployForm.security_group_ids,
             workgroup: this.deployForm.workgroup,
+            jump_group: this.deployForm.jump_group || null,
+            jumpoint_name: this.deployForm.jumpoint_name || null,
+            pra_credential_ref: this.deployForm.pra_credential_ref || null,
             register_in_entitle: this.deployForm.register_in_entitle,
             register_in_passwordsafe: this.deployForm.register_in_passwordsafe,
             ssh_key_secret_override: this.deployForm.ssh_key_secret_override || null,
           });
           this.bulkDeployResults = resp.jobs || [];
+          this.bulkBatchId = resp.batch_id || '';
           toast(`${resp.count} deployment${resp.count !== 1 ? 's' : ''} queued!`, 'success');
         } catch (e) {
           this.bulkDeployError = e.message;

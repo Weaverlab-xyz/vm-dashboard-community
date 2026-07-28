@@ -862,7 +862,7 @@ def _run_gce_jumpoint_sync(
     RUNNING in the zone, returns its info without re-creating."""
     _require_compute()
     from google.cloud import compute_v1
-    from google.api_core.exceptions import NotFound
+    from google.api_core.exceptions import Conflict, NotFound
 
     creds = _gcp_creds()
     client = compute_v1.InstancesClient(credentials=creds)
@@ -888,6 +888,9 @@ def _run_gce_jumpoint_sync(
         return {
             "name": name, "zone": zone, "self_link": existing.self_link,
             "status": status, "reused": True,
+            # Surface the ephemeral egress IP even on reuse: the Web-Jump firewall
+            # (_jumpoint_cidr) needs it, and a reclaimed VM's IP may have changed.
+            "external_ip": _external_ip_of(existing),
         }
     except NotFound:
         pass
@@ -936,13 +939,30 @@ def _run_gce_jumpoint_sync(
         "Starting GCE COS Jumpoint '%s' in %s (image=%s, machine=%s, deploy_key_len=%d)",
         name, zone, container_image, machine_type, len(deploy_key or ""),
     )
-    op = client.insert(project=project_id, zone=zone, instance_resource=instance)
-    op.result(timeout=300)
+    try:
+        op = client.insert(project=project_id, zone=zone, instance_resource=instance)
+        op.result(timeout=300)
+        reused = False
+    except Conflict:
+        # Lost a find-or-create race: another worker replica created this instance
+        # between our get() above and this insert. GCE instance names are unique per
+        # zone, so a 409 means the thing we wanted now exists — which is success, not
+        # failure. Returning it (rather than raising into the caller's blanket except,
+        # which would yield None) matters because the shared host is ref-counted on
+        # jumpoint_host_id: a caller that got None would record no reference and let
+        # the host be reclaimed while it still needed it.
+        logger.info("GCE Jumpoint '%s' was created concurrently — reusing it", name)
+        reused = True
 
+    # Re-fetched after the insert (or after losing the race), so both the status and
+    # the egress IP describe whichever instance actually exists now.
     info = client.get(project=project_id, zone=zone, instance=name)
     return {
         "name": name, "zone": zone, "self_link": info.self_link,
-        "status": info.status, "reused": False,
+        "status": info.status, "reused": reused,
+        # The Web-Jump firewall (_jumpoint_cidr) whitelists this /32 so the Jumpoint
+        # host can reach a source-restricted Rancher/Portainer node.
+        "external_ip": _external_ip_of(info),
     }
 
 

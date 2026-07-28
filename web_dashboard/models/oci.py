@@ -1,6 +1,8 @@
 """Pydantic models for OCI (Oracle Cloud Infrastructure) API endpoints."""
 from typing import List, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+from ..services.vm_naming import MAX_DEPLOY_COUNT
 
 
 class OCIImageInfo(BaseModel):
@@ -79,14 +81,71 @@ class OCIDeployRequest(BaseModel):
     # PRA per-launch overrides (fall back to oci_bt_* / bt_* config).
     jump_group: Optional[str] = None
     jumpoint_name: Optional[str] = None
+    count: int = Field(
+        default=1, ge=1, le=MAX_DEPLOY_COUNT,
+        description="Number of identical instances to launch. 1 is a plain single "
+                    "deploy; >1 fans out into a batch and auto-numbers the names. The "
+                    "free-tier gate is evaluated against the whole batch, so a count "
+                    "that would exceed the Always-Free envelope needs acknowledge_charges.")
 
 
 class OCIDeployResponse(BaseModel):
-    job_id: str
+    job_id: str          # for a batch (count > 1) this is the PARENT job
     status: str
     message: str
     # Populated (with status="warning") when the selection exceeds the free tier
     # and acknowledge_charges was not set — the form surfaces these + the checkbox.
+    free_tier_warnings: List[str] = []
+    # Batch fields, defaulted so a count-1 response is unchanged for existing callers.
+    count: int = 1
+    batch_id: Optional[str] = None
+    job_ids: List[str] = []   # child job ids, in name order
+    names: List[str] = []     # the expanded names actually used, post-truncation
+
+
+class OCIBulkDeployItem(BaseModel):
+    """One instance in a multi-select bulk request: its own image, its own name.
+
+    The other axis from ``OCIDeployRequest.count`` — count launches N copies of ONE
+    image, bulk launches one instance per SELECTED image. Shape/OCPUs/memory stay
+    request-level, so the free-tier gate can still reason about the whole selection."""
+    image_ocid: str
+    image_name: str = ""              # display/tracking only
+    instance_name: str
+
+
+class OCIBulkDeployRequest(BaseModel):
+    items: List[OCIBulkDeployItem]
+    shape: str = "VM.Standard.E2.1.Micro"
+    ocpus: Optional[float] = None
+    memory_gb: Optional[float] = None
+    availability_domain: str = ""
+    subnet_ocid: str = ""
+    assign_public_ip: bool = False
+    ssh_username: str = "opc"
+    boot_volume_gb: int = 50
+    workgroup: str
+    # Free-tier warn-and-confirm gate, evaluated over the WHOLE selection: N free
+    # micros is still N instances against a 2-instance envelope.
+    acknowledge_charges: bool = False
+    register_in_entitle: bool = False
+    register_in_passwordsafe: bool = False
+    ssh_key_secret_override: Optional[str] = None
+    jump_group: Optional[str] = None
+    jumpoint_name: Optional[str] = None
+
+
+class OCIBulkDeployJobResult(BaseModel):
+    image_ocid: str
+    instance_name: str
+    job_id: str
+    status: str
+
+
+class OCIBulkDeployResponse(BaseModel):
+    jobs: List[OCIBulkDeployJobResult]
+    count: int
+    batch_id: Optional[str] = None
     free_tier_warnings: List[str] = []
 
 

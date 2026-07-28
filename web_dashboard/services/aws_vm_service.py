@@ -12,6 +12,7 @@ on the image-build side).
 """
 import asyncio
 import logging
+from typing import Optional
 
 from ..config import settings
 from ..database import Job
@@ -29,6 +30,17 @@ def _aws_cfg(key: str, fallback: str = "") -> str:
     module exists to remove. ``packer_build_service`` carries its ``_cfg`` the same way."""
     from ..services import config_service
     return config_service.get(key) or getattr(settings, key, None) or fallback
+
+
+def _aws_region() -> str:
+    """The configured default region, for the paths that don't carry one on the job.
+
+    Own copy for the same reason as ``_aws_cfg`` above — and it has to exist here at
+    all because ``_run_create_image`` and ``_run_ami_copy`` call it. ``_run_deploy``
+    and ``_run_bulk_deploy`` instead bind a *local* ``_aws_region`` string from the
+    job's persisted region, which is why they were unaffected while these two were
+    raising NameError."""
+    return _aws_cfg("aws_region") or "us-east-2"
 
 
 # ── Job-runner entry point ────────────────────────────────────────────────────
@@ -62,7 +74,16 @@ async def run(job_id: str, job_type: str, meta: dict) -> None:
             meta.get("security_group_ids") or [],
             meta["workgroup"],
             meta["region"],
+            # `.get`, not `[...]`: parent rows created before these were threaded
+            # through carry none of them and must stay runnable. Same deliberate
+            # optionality tests/test_cloud_deploy_meta documents for the single path.
+            meta.get("jump_group") or "",
+            meta.get("jumpoint_name") or "",
+            meta.get("pra_credential_ref") or "",
         )
+        # The parent has no terminal status of its own — the worker only marks a job
+        # failed when dispatch raises, so without this it stays `running` at 0%.
+        _finish_parent(job_id, [c["job_id"] for c in meta["children"]])
     elif job_type == "ec2_destroy":
         await _run_destroy(job_id, meta.get("deploy_job_id") or "",
                            meta["instance_id"], meta["region"])
@@ -87,9 +108,160 @@ class _BulkItem:
         self.instance_name = instance_name
 
 
+class _BatchResources:
+    """The regional resources an EC2 deploy needs, acquired once and reusable.
+
+    A value object rather than six keyword-only parameters, for the reason ``_BulkItem``
+    gives above and ``gcp_vm_service._JumpointRef`` gives again: ``record()`` then writes
+    the same result keys whether these were acquired for a single instance or hoisted
+    for a whole batch, so the two paths cannot drift in what they report.
+
+    Unlike GCP there is no paired/shared discriminator, because
+    ``jumpoint_host_service._active_ec2_count`` counts every live ``ec2_deploy`` row and
+    ignores ``jumpoint_host_id`` — nothing can reclaim the AWS host early, so the id
+    recorded here is informational.
+
+    ``ssh_public_key`` is ``None`` until fetched, which is not the same as ``""``: a
+    batch hoists the fetch, while a single deploy defers it until the AMI turns out to
+    be Linux, so a Windows deploy never fails on a key it will not use.
+    """
+    __slots__ = ("jumpoint_host_id", "ecs_error", "nat_instance_id", "nat_error",
+                 "ssm_endpoint_ids", "ssm_endpoint_error",
+                 "ssh_secret_name", "ssh_public_key", "ssh_key_error")
+
+    def __init__(self, ssh_secret_name: str = ""):
+        self.jumpoint_host_id = None
+        self.ecs_error = ""
+        self.nat_instance_id = None
+        self.nat_error = ""
+        self.ssm_endpoint_ids = None
+        self.ssm_endpoint_error = ""
+        self.ssh_secret_name = ssh_secret_name
+        self.ssh_public_key = None
+        self.ssh_key_error = ""
+
+    def record(self, result: dict) -> None:
+        """Write what was acquired (or what failed) onto a deploy's result metadata."""
+        if self.jumpoint_host_id:
+            result["jumpoint_host_id"] = self.jumpoint_host_id
+        elif self.ecs_error:
+            result["ecs_error"] = self.ecs_error
+        if self.nat_instance_id:
+            result["nat_instance_id"] = self.nat_instance_id
+        elif self.nat_error:
+            result["nat_error"] = self.nat_error
+        if self.ssm_endpoint_ids:
+            result["ssm_endpoint_ids"] = self.ssm_endpoint_ids
+        elif self.ssm_endpoint_error:
+            result["ssm_endpoint_error"] = self.ssm_endpoint_error
+
+    def summary(self) -> str:
+        """One line for a batch child, standing in for the per-step progress messages
+        it did not perform because the batch had already done the work."""
+        parts = []
+        parts.append(f"Jumpoint host {self.jumpoint_host_id}" if self.jumpoint_host_id
+                     else (f"Jumpoint unavailable ({self.ecs_error})" if self.ecs_error
+                           else "no Jumpoint host"))
+        if self.nat_instance_id:
+            parts.append(f"NAT {self.nat_instance_id}")
+        elif self.nat_error:
+            parts.append(f"NAT failed ({self.nat_error})")
+        if self.ssm_endpoint_ids:
+            parts.append("SSM endpoints ready")
+        elif self.ssm_endpoint_error:
+            parts.append(f"SSM endpoints failed ({self.ssm_endpoint_error})")
+        return "Using the batch's shared resources — " + ", ".join(parts) + "…"
+
+
+async def _acquire_batch_resources(db, progress_job_id: str, region: str,
+                                   ssh_secret_name: str, *, count: int = 1,
+                                   fetch_ssh_key: bool = False) -> _BatchResources:
+    """Ensure the regional resources a deploy (or a whole batch) needs.
+
+    Every step is best-effort and records its own error rather than raising: none of
+    them should abort a launch, and in a batch a raise here would take every child down
+    with it. ``fetch_ssh_key`` is set by the batch path only — one Secrets Manager round
+    trip for the run instead of one per instance.
+    """
+    from ..services import config_service as _cfg_svc
+    res = _BatchResources(ssh_secret_name)
+    scope = f" for {count}-instance batch" if count > 1 else ""
+
+    if _cfg_svc.get_bool("beyondtrust_enabled"):
+        job_service.update_progress(
+            db, progress_job_id, 15,
+            f"Ensuring the shared BeyondTrust Jumpoint host{scope}…")
+        try:
+            from ..services import jumpoint_host_service
+            res.jumpoint_host_id = await jumpoint_host_service.ensure_jumpoint_host("aws", region)
+            job_service.update_progress(db, progress_job_id, 35,
+                                        "Jumpoint host ready, launching EC2 instance…")
+        except Exception as e:
+            res.ecs_error = str(e)
+            job_service.update_progress(
+                db, progress_job_id, 35,
+                f"Jumpoint host ensure failed (non-fatal): {e} — continuing with EC2 launch…")
+    else:
+        job_service.update_progress(db, progress_job_id, 35, "Preparing EC2 launch…")
+
+    # Shared on-demand NAT instance (independent of BeyondTrust) so the VM's private
+    # subnet gets outbound internet.
+    if _cfg_svc.get_bool("aws_nat_instance_enabled"):
+        try:
+            from ..services import nat_instance_service
+            res.nat_instance_id = await nat_instance_service.ensure_nat_instance(region)
+            if res.nat_instance_id:
+                job_service.update_progress(db, progress_job_id, 36,
+                                            "NAT instance ready (VM egress enabled)…")
+        except Exception as e:
+            res.nat_error = str(e)
+            job_service.update_progress(
+                db, progress_job_id, 36,
+                f"NAT ensure failed (non-fatal): {e} — VM may lack outbound internet…")
+
+    # Shared on-demand SSM interface endpoints so a private-subnet VM can reach the SSM
+    # control plane (Password Safe SSM onboarding).
+    if _cfg_svc.get_bool("aws_ssm_endpoints_enabled"):
+        try:
+            from ..services import ssm_endpoint_service
+            res.ssm_endpoint_ids = await ssm_endpoint_service.ensure_ssm_endpoints(region)
+            if res.ssm_endpoint_ids:
+                job_service.update_progress(db, progress_job_id, 37,
+                                            "SSM interface endpoints ready…")
+        except Exception as e:
+            res.ssm_endpoint_error = str(e)
+
+    if fetch_ssh_key:
+        job_service.update_progress(db, progress_job_id, 38,
+                                    "Fetching SSH public key from Secrets Manager…")
+        try:
+            key_detail = await aws_service.get_ssh_public_key_from_secret(region, ssh_secret_name)
+            res.ssh_public_key = key_detail["public_key"]
+        except Exception as e:
+            # Recorded, not raised: an all-Windows batch does not need a key, and a
+            # Linux child fails on its own below rather than taking the batch with it.
+            res.ssh_key_error = str(e)
+    return res
+
+
 def _get_db_session():
     from ..database import SessionLocal
     return SessionLocal()
+
+
+def _finish_parent(parent_job_id: str, child_job_ids: list) -> None:
+    """Give the batch parent a terminal status once its children are done.
+
+    Own session: `run()` holds none, and the per-child sessions are opened and closed
+    inside `_run_deploy`. Best-effort — a parent left `running` is cosmetic next to a
+    batch whose VMs all exist."""
+    db = _get_db_session()
+    try:
+        job_service.finish_batch_parent(db, parent_job_id, child_job_ids)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("could not close out batch parent %s: %s", parent_job_id, exc)
+    finally:
+        db.close()
 
 
 def _aws_deploy_payload_hash(**fields) -> str:
@@ -152,69 +324,47 @@ async def _run_deploy(
     jumpoint_name: str = None,
     pra_credential_ref: str = None,
     region: str = "",
+    *,
+    resources: Optional[_BatchResources] = None,
 ):
+    """Deploy one EC2 instance.
+
+    ``resources`` is injected by ``_run_bulk_deploy`` so a batch ensures the Jumpoint
+    host, NAT instance, SSM endpoints and SSH key once instead of once per instance.
+    Left None — the single-deploy path — this acquires its own. Keyword-only, so the
+    existing positional call in ``run()`` is untouched.
+
+    This is the only place an EC2 instance is launched. The batch path used to be a
+    second copy of this body, which is how it came to drop ``os_type`` and boot every
+    Linux VM without an SSM agent."""
     db = _get_db_session()
     result = {}
     try:
         job_service.set_running(db, job_id)
 
-        # ── Step 1: Start ECS Jumpoint container first (BeyondTrust only) ─────
         from ..services import config_service as _cfg_svc
         from ..services.region_config import resolve_region
         # Per-deploy region (falls back to the configured default for older callers).
+        # NB: a LOCAL shadowing the module-level _aws_region() on purpose — losing this
+        # binding would silently swap the job's region for the configured default.
         _aws_region = region or _aws_cfg("aws_region") or "us-east-2"
         # Per-region SSH key secret + SSM instance profile (blank fields / the default
         # region fall back to the flat ec2_* config keys).
         _rc = resolve_region("aws", _aws_region)
         _meta = (db.query(Job).filter(Job.id == job_id).first().metadata_dict or {})
         ssh_secret_name = _meta.get("ssh_key_secret_override") or _rc["ssh_key_secret"]
-        if _cfg_svc.get_bool("beyondtrust_enabled"):
-            job_service.update_progress(db, job_id, 15, "Ensuring the shared BeyondTrust Jumpoint host…")
-            try:
-                from ..services import jumpoint_host_service
-                host_id = await jumpoint_host_service.ensure_jumpoint_host("aws", _aws_region)
-                if host_id:
-                    result["jumpoint_host_id"] = host_id
-                job_service.update_progress(db, job_id, 35, "Jumpoint host ready, launching EC2 instance…")
-            except Exception as e:
-                result["ecs_error"] = str(e)
-                job_service.update_progress(
-                    db, job_id, 35,
-                    f"Jumpoint host ensure failed (non-fatal): {e} — continuing with EC2 launch…"
-                )
+
+        # ── Step 1: regional resources (Jumpoint host, NAT, SSM endpoints) ────
+        if resources is None:
+            resources = await _acquire_batch_resources(
+                db, job_id, _aws_region, ssh_secret_name)
         else:
-            job_service.update_progress(db, job_id, 35, "Preparing EC2 launch…")
+            # The batch already did this work; say so rather than leaving the child
+            # to jump straight from queued to "launching".
+            job_service.update_progress(db, job_id, 38, resources.summary())
+        resources.record(result)
 
-        # ── Step 1b: Ensure the shared on-demand NAT instance (independent of
-        # BeyondTrust) so the VM's private subnet gets outbound internet. ────────
-        if _cfg_svc.get_bool("aws_nat_instance_enabled"):
-            try:
-                from ..services import nat_instance_service
-                nat_id = await nat_instance_service.ensure_nat_instance(_aws_region)
-                if nat_id:
-                    result["nat_instance_id"] = nat_id
-                    job_service.update_progress(db, job_id, 36, "NAT instance ready (VM egress enabled)…")
-            except Exception as e:
-                result["nat_error"] = str(e)
-                job_service.update_progress(
-                    db, job_id, 36,
-                    f"NAT ensure failed (non-fatal): {e} — VM may lack outbound internet…")
-
-        # ── Step 1c: Ensure the shared on-demand SSM interface endpoints so a
-        # private-subnet VM can reach the SSM control plane (Password Safe SSM
-        # onboarding). Best-effort — a failure never blocks the deploy. ─────────
-        if _cfg_svc.get_bool("aws_ssm_endpoints_enabled"):
-            try:
-                from ..services import ssm_endpoint_service
-                ssm_eps = await ssm_endpoint_service.ensure_ssm_endpoints(_aws_region)
-                if ssm_eps:
-                    result["ssm_endpoint_ids"] = ssm_eps
-                    job_service.update_progress(db, job_id, 37, "SSM interface endpoints ready…")
-            except Exception as e:
-                result["ssm_endpoint_error"] = str(e)
-
-        # ── Step 2: Fetch SSH public key from Secrets Manager ──────────────────
-        job_service.update_progress(db, job_id, 38, "Fetching SSH public key from Secrets Manager…")
+        # ── Step 2: identify the AMI, and fetch a key if it needs one ─────────
         ami_info = await aws_service.describe_ami(_aws_region, ami_id)
         is_windows = "windows" in (ami_info.get("platform", "") or "").lower()
         if is_windows:
@@ -223,8 +373,17 @@ async def _run_deploy(
         else:
             from ..services.os_detection import detect_os_type
             os_type, ssh_user = detect_os_type(ami_info.get("name", ""))
-            key_detail = await aws_service.get_ssh_public_key_from_secret(_aws_region, ssh_secret_name)
-            public_key = key_detail["public_key"]
+            if resources.ssh_key_error:
+                raise AWSError(f"SSH public key unavailable: {resources.ssh_key_error}")
+            if resources.ssh_public_key is None:
+                # Single deploy: fetch only now that the AMI is known to be Linux, so a
+                # Windows launch never fails on a key it will not use.
+                job_service.update_progress(
+                    db, job_id, 38, "Fetching SSH public key from Secrets Manager…")
+                key_detail = await aws_service.get_ssh_public_key_from_secret(
+                    _aws_region, ssh_secret_name)
+                resources.ssh_public_key = key_detail["public_key"]
+            public_key = resources.ssh_public_key
             result["ssh_secret_name"] = ssh_secret_name
             result["ssh_user"] = ssh_user   # image's cloud-default login user → Entitle sudo_user
 
@@ -347,200 +506,71 @@ async def _run_bulk_deploy(
     security_group_ids: list,
     workgroup: str = "",
     region: str = "",
+    jump_group: str = "",
+    jumpoint_name: str = "",
+    pra_credential_ref: str = "",
 ):
-    """
-    Background task for bulk EC2 deployment.
-    Ensures the shared Jumpoint host is up once for the whole batch, then deploys
-    each instance sequentially. The host is ref-counted across all EC2 instances
-    and databases and reclaimed when the last one is removed.
-    """
+    """Deploy a batch of EC2 instances behind one set of shared regional resources.
+
+    Ensures the Jumpoint host, NAT instance, SSM endpoints and SSH key ONCE for the
+    whole run, then hands them to ``_run_deploy`` per instance. The Jumpoint host is
+    ref-counted across all EC2 instances and databases and reclaimed when the last one
+    goes.
+
+    Thin on purpose. This was a 230-line near-copy of ``_run_deploy``, and the copy had
+    already drifted: it dropped ``os_type`` (so every Linux VM in a batch booted with no
+    SSM agent), resolved the PRA jump group from config only, and wrapped the whole run
+    in a handler that could mark completed instances failed. ``_run_deploy`` now owns
+    set_running / set_completed / set_failed and cache invalidation per instance, so one
+    failure fails that row alone and the batch carries on."""
+    # job_items[0] below is otherwise an IndexError on an empty batch, which the setup
+    # handler would then swallow into a loop over nothing — leaving the parent job
+    # running with no explanation. Matches oci_vm_service._run_bulk_deploy.
+    if not job_items:
+        return
+
+    from ..services.region_config import resolve_region
+    # Shared per-batch region (falls back to the configured default). Local, shadowing
+    # the module-level _aws_region() — see the note in _run_deploy.
+    _aws_region = region or _aws_cfg("aws_region") or "us-east-2"
+
     db = _get_db_session()
     try:
-        # Mark all jobs running
-        for job_id, _ in job_items:
-            job_service.set_running(db, job_id)
-
-        # Step 1: Start ONE ECS Jumpoint container for the whole batch (BT only)
-        from ..services import config_service as _cfg_svc
-        from ..services.region_config import resolve_region
-        # Shared per-batch region (falls back to the configured default).
-        _aws_region = region or _aws_cfg("aws_region") or "us-east-2"
-        # Per-region SSH key secret + SSM instance profile (flat fallback for the
-        # default region / blank fields).
-        _rc = resolve_region("aws", _aws_region)
         first_job_id = job_items[0][0]
+        _rc = resolve_region("aws", _aws_region)
+        # Every child is written the same override by both endpoints, so reading the
+        # first one's is equivalent and saves N metadata loads.
         _bmeta = (db.query(Job).filter(Job.id == first_job_id).first().metadata_dict or {})
         ssh_secret_name = _bmeta.get("ssh_key_secret_override") or _rc["ssh_key_secret"]
-        ecs_error = None
-        jumpoint_host_id = None
-        if _cfg_svc.get_bool("beyondtrust_enabled"):
-            job_service.update_progress(
-                db, first_job_id, 10,
-                f"Ensuring the shared BeyondTrust Jumpoint host for {len(job_items)}-instance batch…"
-            )
-            try:
-                from ..services import jumpoint_host_service
-                jumpoint_host_id = await jumpoint_host_service.ensure_jumpoint_host("aws", _aws_region)
-            except Exception as e:
-                ecs_error = str(e)
-        else:
-            job_service.update_progress(
-                db, first_job_id, 10,
-                f"Preparing {len(job_items)}-instance batch…"
-            )
-
-        # Step 1b: Ensure ONE shared NAT instance for the whole batch (independent
-        # of BeyondTrust) so the VMs' private subnet gets outbound internet.
-        nat_instance_id = None
-        nat_error = None
-        if _cfg_svc.get_bool("aws_nat_instance_enabled"):
-            try:
-                from ..services import nat_instance_service
-                nat_instance_id = await nat_instance_service.ensure_nat_instance(_aws_region)
-            except Exception as e:
-                nat_error = str(e)
-
-        # Step 1c: Ensure ONE shared set of SSM interface endpoints for the batch
-        # (private-subnet SSM reach). Best-effort — never blocks the deploy.
-        ssm_endpoint_ids = None
-        ssm_endpoint_error = None
-        if _cfg_svc.get_bool("aws_ssm_endpoints_enabled"):
-            try:
-                from ..services import ssm_endpoint_service
-                ssm_endpoint_ids = await ssm_endpoint_service.ensure_ssm_endpoints(_aws_region)
-            except Exception as e:
-                ssm_endpoint_error = str(e)
-
-        # Step 2: Fetch SSH public key once for the whole batch
-        job_service.update_progress(db, first_job_id, 18, "Fetching SSH public key from Secrets Manager…")
-        key_detail = await aws_service.get_ssh_public_key_from_secret(_aws_region, ssh_secret_name)
-        shared_public_key = key_detail["public_key"]
-
-        # Step 3: Deploy each instance, all sharing the same ECS task ARN
-        for job_id, item in job_items:
-            result: dict = {"ssh_secret_name": ssh_secret_name}
-            if jumpoint_host_id:
-                result["jumpoint_host_id"] = jumpoint_host_id
-            elif ecs_error:
-                result["ecs_error"] = ecs_error
-            if nat_instance_id:
-                result["nat_instance_id"] = nat_instance_id
-            elif nat_error:
-                result["nat_error"] = nat_error
-            if ssm_endpoint_ids:
-                result["ssm_endpoint_ids"] = ssm_endpoint_ids
-            elif ssm_endpoint_error:
-                result["ssm_endpoint_error"] = ssm_endpoint_error
-
-            try:
-                job_service.update_progress(
-                    db, job_id, 40, f"Launching EC2 instance {item.instance_name}…"
-                )
-                ami_info = await aws_service.describe_ami(_aws_region, item.ami_id)
-                is_windows = "windows" in (ami_info.get("platform", "") or "").lower()
-                if not is_windows:
-                    from ..services.os_detection import detect_os_type
-                    _, result["ssh_user"] = detect_os_type(ami_info.get("name", ""))
-                # Cloud-identity JIT Phase 2: per-instance elevation in
-                # the bulk batch. One Entitle activation per EC2 launch
-                # so a denial of one row doesn't poison the others.
-                from ..services.cloud_identity_service import elevate, CloudIdentityError
-                _bulk_job = job_service.get_job(db, job_id)
-                _bulk_payload = _aws_deploy_payload_hash(
-                    region=_aws_region, ami_id=item.ami_id,
-                    instance_type=instance_type, subnet_id=subnet_id,
-                    security_group_ids=security_group_ids, workgroup=workgroup,
-                    instance_name=item.instance_name,
-                )
-                async with elevate(
-                    "aws", "aws:ec2:deploy",
-                    duration_minutes=15,
-                    payload_hash=_bulk_payload,
-                    requester_user_id=_bulk_job.created_by if _bulk_job else None,
-                    workgroup=workgroup or None,
-                ) as _bulk_elev:
-                    instance_result = await aws_service.launch_instance(
-                        region=_aws_region,
-                        ami_id=item.ami_id,
-                        instance_name=item.instance_name,
-                        instance_type=instance_type,
-                        public_key="" if is_windows else shared_public_key,
-                        subnet_id=subnet_id,
-                        security_group_ids=security_group_ids,
-                        iam_instance_profile=_rc["ssm_instance_profile"],
-                        workgroup=workgroup,
-                        correlation_tag=_bulk_elev.correlation_tag,
-                    )
-                result.update(instance_result)
-                if instance_result.get("instance_id"):
-                    job_service.set_cloud_resource_id(db, job_id, instance_result["instance_id"])
-
-                instance_id = result["instance_id"]
-                hostname = result.get("private_ip") or result.get("public_ip") or instance_id
-                job_service.update_progress(
-                    db, job_id, 70,
-                    f"Instance {instance_id} launched ({hostname}), provisioning Shell Jump…"
-                )
-
-                # Step 3: BeyondTrust PRA — Shell Jump per instance (optional)
-                if _cfg_svc.get_bool("beyondtrust_enabled"):
-                    from ..services import terraform_pra_service
-                    try:
-                        bt_result = await terraform_pra_service.provision_jump(
-                            vm_name=item.instance_name,
-                            hostname=hostname,
-                            jump_group_name=_cfg_svc.get("bt_jump_group_name") or settings.bt_jump_group_name,
-                            jumpoint_name=_cfg_svc.get("bt_jumpoint_name") or settings.bt_jumpoint_name,
-                            tag="AWS",
-                        )
-                        result["bt_shell_jump_id"] = bt_result.get("shell_jump_id")
-                        result["bt_jump_group_name"] = bt_result.get("jump_group_name")
-                        result["bt_tf_state"] = bt_result.get("tf_state_json")
-                        job_service.update_progress(
-                            db, job_id, 90,
-                            f"Shell Jump created (ID: {bt_result.get('shell_jump_id')}, "
-                            f"group: {bt_result.get('jump_group_name')})"
-                        )
-                    except Exception as e:
-                        result["bt_error"] = str(e)
-                        job_service.update_progress(
-                            db, job_id, 90,
-                            f"Instance deployed but Shell Jump provisioning failed: {e}"
-                        )
-                else:
-                    job_service.update_progress(db, job_id, 90, "Instance deployed.")
-
-                # Step 4: Entitle — register as SSH integration (per-build opt-in)
-                from ..services import entitle_vm_hook
-                _bjob = db.query(Job).filter(Job.id == job_id).first()
-                _breg = bool((_bjob.metadata_dict or {}).get("register_in_entitle")) if _bjob else False
-                if _breg and not is_windows and entitle_vm_hook.registration_enabled():
-                    await _register_vm_in_entitle(db, job_id, item.instance_name, hostname,
-                                                  result, private=not bool(result.get("public_ip")))
-
-                # Step 5: Password Safe — onboard as a managed system + account (per-build opt-in)
-                from ..services import ps_vm_hook
-                _bpsreg = bool((_bjob.metadata_dict or {}).get("register_in_passwordsafe")) if _bjob else False
-                if _bpsreg and not is_windows and ps_vm_hook.registration_enabled():
-                    await _register_vm_in_passwordsafe(db, job_id, item.instance_name, hostname, result,
-                                                       instance_id=instance_id, region=_aws_region)
-
-                job_service.set_completed(db, job_id, result)
-
-            except AWSError as e:
-                # EC2 launch failed — mark this job failed but continue the batch
-                job_service.set_failed(db, job_id, str(e))
-            except Exception as e:
-                job_service.set_failed(db, job_id, f"Unexpected error: {e}")
-
-        await cache_service.invalidate(cache_service.key_global("aws_instances"))
-        await cache_service.invalidate(cache_service.key_global("cfgmgmt_instances"))
-
+        resources = await _acquire_batch_resources(
+            db, first_job_id, _aws_region, ssh_secret_name,
+            count=len(job_items), fetch_ssh_key=True)
     except Exception as e:
+        # Batch SETUP failed, so nothing has been created — failing every child is the
+        # right answer here, and only here. Past this point children have completed,
+        # and job_service.set_failed has no status guard.
         for job_id, _ in job_items:
             job_service.set_failed(db, job_id, f"Bulk deploy error: {e}")
+        return
     finally:
         db.close()
+
+    for job_id, item in job_items:
+        await _run_deploy(
+            job_id,
+            item.ami_id,
+            item.instance_name,
+            instance_type,
+            subnet_id,
+            security_group_ids,
+            workgroup,
+            jump_group,
+            jumpoint_name,
+            pra_credential_ref,
+            _aws_region,
+            resources=resources,
+        )
+
 
 
 async def _run_destroy(destroy_job_id: str, deploy_job_id: str, instance_id: str, region: str = ""):

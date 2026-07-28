@@ -557,6 +557,11 @@ class Settings(BaseSettings):
     azure_image_storage_account: str = ""         # Storage account for temp VHD upload during OVA→Azure image import
     azure_aci_file_share: str = "jpt"             # Azure File Share name for /jpt mount
     azure_jumpoint_name: str = ""                 # name of the pre-existing Jumpoint for Azure Shell Jumps
+    # How a SINGLE Azure VM deploy reaches its Jumpoint. "shared" (default) borrows the
+    # ref-counted clouddb-jumpoint VM — tunnel-capable, and no shared /jpt identity store
+    # to corrupt. "aci" starts a dedicated ACI container group per deploy (Shell Jump
+    # only; ACI cannot protocol-tunnel). Batches always share one ACI group.
+    azure_vm_jumpoint_mode: str = "shared"        # "shared" | "aci"
     # ACR credentials (leave empty to pull from Docker Hub without auth).
     # Direct fields are preferred; values are stored encrypted in the DB and
     # transparently resolved through the chosen secrets backend (PS / AWS SM /
@@ -861,6 +866,12 @@ class Settings(BaseSettings):
     gcp_jumpoint_image: str = "beyondtrust/sra-jumpoint:latest"
     gcp_jumpoint_machine_type: str = "e2-micro"
     gcp_jumpoint_zone: str = ""          # blank → use the deploy zone
+    # Which Jumpoint a SINGLE GCP VM deploy gets. "shared" (default) borrows the
+    # ref-counted host that cloud databases, k8s tunnels and VDI seats already use;
+    # "paired" gives every VM its own bt-jumpoint-<vm> e2-micro, the pre-2026-07
+    # behaviour. Batches always share. A deploy carrying its own docker_deploy_key_ref
+    # is forced to "paired" regardless, since the shared host resolves its key globally.
+    gcp_vm_jumpoint_mode: str = "shared"  # "shared" | "paired"
     # Network tag(s) automatically attached to every dashboard-deployed user
     # VM. Comma-separated. Used to scope sandbox firewall rules (e.g. the
     # egress-deny rule on the sandbox VM subnet keys off this tag). Set to

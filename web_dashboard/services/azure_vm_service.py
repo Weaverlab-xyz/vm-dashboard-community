@@ -11,6 +11,7 @@ into the API package is backwards (see services/aws_vm_service for the AWS count
 """
 import asyncio
 import logging
+from typing import Optional
 
 from ..config import settings
 from ..database import Job
@@ -51,12 +52,14 @@ async def run(job_id: str, job_type: str, meta: dict) -> None:
         await _run_deploy(job_id, req, meta["resource_group"], meta["location"])
     elif job_type == "azure_bulk_deploy":
         # Children were created ``queued`` so the runner cannot claim them alongside
-        # this parent; _run_bulk_deploy drives them and owns their status. It unpacks
-        # each entry as a plain (job_id, vm_name) pair — unlike the AWS runner, which
-        # takes an object per item.
+        # this parent; _run_bulk_deploy drives them and owns their status.
         req = AzureBulkDeployRequest(**meta["req"])
-        job_items = [(c["job_id"], c["vm_name"]) for c in meta["children"]]
+        job_items = [(c["job_id"], _AzureBulkItem.from_child(c, req))
+                     for c in meta["children"]]
         await _run_bulk_deploy(job_items, req, meta["resource_group"], meta["location"])
+        # The parent has no terminal status of its own — the worker only marks a job
+        # failed when dispatch raises, so without this it stays `running` at 0%.
+        _finish_parent(job_id, [c["job_id"] for c in meta["children"]])
     elif job_type == "azure_destroy":
         await _run_destroy(job_id, meta.get("deploy_job_id") or "",
                            meta["vm_name"], meta["resource_group"])
@@ -68,6 +71,251 @@ async def run(job_id: str, job_type: str, meta: dict) -> None:
                                     name=meta["image_name"],
                                     description=meta.get("description") or "",
                                     generalize=meta.get("generalize", False)))
+
+
+class _AciRef:
+    """How a deploy reached its BeyondTrust Jumpoint.
+
+    ``mode`` is the part that matters, and there are three shapes:
+
+      * ``owned``  — this deploy created its own ACI container group and must stop it
+        if the VM create fails.
+      * ``shared`` — a batch owns the ACI group, and one VM failing must leave it
+        running for its siblings.
+      * ``host``   — this deploy BORROWED the ref-counted ``clouddb-jumpoint`` VM that
+        ``jumpoint_host_service`` owns on behalf of cloud databases, k8s tunnels and
+        VDI seats. It must only release a reference; the teardown decision belongs to
+        that service.
+
+    Mirrors ``gcp_vm_service._JumpointRef``, where the same paired-vs-shared
+    distinction is what stops a VM destroy deleting the ref-counted host.
+
+    ``deploy_key_note`` is carried rather than dropped: the batch path used to assign it
+    and never read it, so an ACI built without a deploy key left no trace anywhere an
+    operator would look.
+    """
+    __slots__ = ("mode", "group_name", "error", "deploy_key_note", "host_id", "region")
+
+    def __init__(self, mode: str, group_name: str = "", error: str = "",
+                 deploy_key_note: str = "", host_id: str = "", region: str = ""):
+        self.mode, self.group_name = mode, group_name
+        self.error, self.deploy_key_note = error, deploy_key_note
+        self.host_id, self.region = host_id, region
+
+    @property
+    def owned(self) -> bool:
+        """True when tearing this group down on failure is this deploy's business."""
+        return self.mode == "owned" and bool(self.group_name)
+
+    def record(self, result: dict) -> None:
+        """Write this reference onto the deploy job's result metadata.
+
+        A borrowed host is NEVER recorded under ``aci_group_name``. That key is what
+        drives the ACI teardown in ``_run_destroy`` — and, worse, an absent
+        ``aci_group_name`` there triggers a sweep that stops *every* dashboard ACI
+        group. Recording the shared host under its own key keeps both paths honest.
+        """
+        if self.mode == "host":
+            result["jumpoint_mode"] = "host"
+            if self.host_id:
+                result["jumpoint_host_id"] = self.host_id
+                result["jumpoint_region"] = self.region
+            elif self.error:
+                result["jumpoint_error"] = self.error
+            return
+        if self.group_name:
+            result["aci_group_name"] = self.group_name
+        elif self.error:
+            result["aci_error"] = self.error
+
+    def note(self) -> str:
+        """The progress line describing the outcome, in any mode."""
+        if self.mode == "host":
+            if self.host_id:
+                return (f"Using the shared BeyondTrust Jumpoint host ({self.host_id}), "
+                        "deploying VM…")
+            return (f"Shared Jumpoint host unavailable (non-fatal): {self.error}"
+                    " — continuing with VM deploy…")
+        if self.group_name:
+            verb = "started" if self.mode == "owned" else "shared by this batch"
+            return f"ACI Jumpoint {verb} ({self.group_name}){self.deploy_key_note}, deploying VM…"
+        if self.error:
+            return (f"ACI Jumpoint failed (non-fatal): {self.error}{self.deploy_key_note}"
+                    " — continuing with VM deploy…")
+        return "Preparing Azure VM deploy…"
+
+
+async def _acquire_aci(db, progress_job_id: str, req, loc: str, *,
+                       count: int = 1, mode: str = "owned") -> _AciRef:
+    """Start one ACI Jumpoint container group, for a single deploy or a whole batch.
+
+    ``mode`` says who is responsible for stopping it: ``owned`` for a single deploy,
+    ``shared`` for a batch, where one VM's failure must leave the group running for its
+    siblings.
+
+    Best-effort: a failure is recorded and the VM deploy continues, because the operator
+    may already have a Jumpoint reaching that VNet."""
+    scope = f" for {count}-VM batch" if count > 1 else " container"
+    job_service.update_progress(
+        db, progress_job_id, 10, f"Starting BeyondTrust ACI Jumpoint{scope}…")
+    deploy_key_note = ""
+    try:
+        try:
+            # Per-request override wins, as on every other cloud. The batch path used to
+            # skip this and quietly build its ACI with the configured default key.
+            if getattr(req, "docker_deploy_key_ref", None):
+                from ..services import config_service as _cs
+                deploy_key = _cs.resolve_reference(req.docker_deploy_key_ref.strip())
+            else:
+                deploy_key = await _resolve_azure_aci_deploy_key()
+        except Exception as key_err:
+            logger.warning("ACI deploy key fetch failed (%s) — creating ACI without deploy key", key_err)
+            deploy_key = ""
+            deploy_key_note = f" [deploy key fetch failed: {key_err}]"
+        # Fetch ACR credentials if configured (backend-neutral resolution).
+        acr_server, acr_username, acr_password = await _resolve_acr_credentials()
+        group = await azure_service.run_aci_jumpoint_task(
+            rg=_aci_rg(),
+            location=loc,
+            # ACI jumpoint params come from config_service (the wizard / sandbox write
+            # them to the DB) — NOT the Pydantic settings object, whose env-var defaults
+            # are empty here. An empty subnet_id creates the jumpoint OUTSIDE the VNet,
+            # so it has no route to the VM's private IP and the SSH Shell Jump times out
+            # (credential rotation still works — that's the control plane).
+            subnet_id=_cfg("azure_aci_subnet_id") or settings.azure_aci_subnet_id,
+            image=_cfg("azure_aci_jumpoint_image"),
+            cpu=float(_cfg("azure_aci_cpu") or settings.azure_aci_cpu),
+            memory=float(_cfg("azure_aci_memory") or settings.azure_aci_memory),
+            deploy_key=deploy_key,
+            acr_server=acr_server,
+            acr_username=acr_username,
+            acr_password=acr_password,
+            storage_account=_cfg("azure_aci_storage_account") or settings.azure_aci_storage_account,
+            storage_account_rg=_cfg("azure_aci_storage_account_rg") or settings.azure_aci_storage_account_rg,
+            file_share=_cfg("azure_aci_file_share") or settings.azure_aci_file_share,
+        )
+        ref = _AciRef(mode, group_name=group, deploy_key_note=deploy_key_note)
+    except Exception as e:
+        ref = _AciRef(mode, error=str(e), deploy_key_note=deploy_key_note)
+    job_service.update_progress(db, progress_job_id, 15, ref.note())
+    return ref
+
+
+def _aci_requested(req) -> bool:
+    """Whether this single deploy should start its own ACI Jumpoint container group.
+
+    Default is False — singles borrow the shared ``clouddb-jumpoint`` VM instead, which
+    mirrors ``gcp_vm_service._paired_requested`` and fixes two things ACI can't:
+
+      * ACI is serverless and cannot do protocol tunneling (no NET_ADMIN / NET_RAW /
+        IPC_LOCK, no ``/dev/net/tun``), so an ACI-brokered VM gets a Shell Jump but
+        never a Protocol Tunnel. The shared VM host runs the container privileged.
+      * Every ACI group gets a random name but they all mount ONE ``/jpt`` Azure File
+        share, which is the Jumpoint's persistent identity store. Successive groups
+        fought over that one install; once the ``.installed-<key-hash>`` marker and the
+        install on disk disagreed, the container crash-looped (ExitCode 1, no output)
+        and never registered with PRA at all.
+
+    A request carrying its own Jumpoint deploy key still gets an ACI group: the shared
+    host serves many resources and resolves its key from config, so there is nowhere to
+    honour a per-deploy override on it. Silently ignoring the form field would be the
+    "succeeds with a side effect missing" failure this codebase keeps writing tests
+    against, so the override wins and that VM gets its own container."""
+    if getattr(req, "docker_deploy_key_ref", None):
+        logger.info("Azure deploy carries a docker_deploy_key_ref — using a dedicated ACI "
+                    "Jumpoint so the per-deploy key is honoured")
+        return True
+    return (_cfg("azure_vm_jumpoint_mode") or "shared").strip().lower() == "aci"
+
+
+async def _acquire_shared_host(db, progress_job_id: str, loc: str) -> _AciRef:
+    """Borrow the ref-counted Azure VM Jumpoint that cloud databases, k8s tunnels and
+    VDI seats already share — one host for every VM instead of one container per deploy.
+
+    Best-effort like the ACI path: the VM still launches when the jumpoint is
+    unavailable, it just has no Shell Jump until one exists."""
+    from ..services import jumpoint_host_service
+    job_service.update_progress(
+        db, progress_job_id, 10, "Ensuring the shared BeyondTrust Jumpoint host…")
+    try:
+        host = await jumpoint_host_service.ensure_jumpoint_host("azure", loc)
+    except Exception as e:
+        logger.warning("Shared Azure Jumpoint host unavailable (non-fatal): %s", e)
+        ref = _AciRef("host", region=loc, error=str(e))
+    else:
+        ref = _AciRef("host", host_id=host or "", region=loc,
+                      error="" if host else
+                            "shared Jumpoint host unavailable — check azure_resource_group, "
+                            "azure_jumpoint_subnet_id and the ACI deploy key in the wizard")
+    job_service.update_progress(db, progress_job_id, 15, ref.note())
+    return ref
+
+
+def _child_request(item: "_AzureBulkItem", req: AzureBulkDeployRequest) -> AzureDeployRequest:
+    """Project one bulk item onto the single-deploy model.
+
+    Everything the two models share is copied straight over; the per-item image fields
+    and the VM name override it. That keeps ``_run_deploy`` taking exactly one request
+    type, so there is only ever one body deploying an Azure VM.
+
+    The item's values have already been resolved against the batch request by
+    ``_AzureBulkItem.from_child``, which is the back-compat hinge for count fan-out
+    children — those carry only ``vm_name`` and inherit the rest."""
+    shared = {k: v for k, v in req.model_dump().items()
+              if k in AzureDeployRequest.model_fields and k != "vm_name"}
+    shared.update(
+        vm_name=item.vm_name,
+        image_id=item.image_id,
+        image_publisher=item.image_publisher,
+        image_offer=item.image_offer,
+        image_sku=item.image_sku,
+        image_version=item.image_version,
+        os_type=item.os_type,
+        trusted_launch=item.trusted_launch,
+        count=1,
+    )
+    return AzureDeployRequest(**shared)
+
+
+class _AzureBulkItem:
+    """The per-VM fields ``_run_bulk_deploy`` reads off each child.
+
+    Mirrors ``aws_vm_service._BulkItem``. An object rather than a widened tuple
+    because ``(job_id, vm_name)`` was unpacked in four places, and because bulk now
+    genuinely means one VM *per selected image* — the image is per item, not per batch.
+    """
+    __slots__ = ("vm_name", "image_id", "image_publisher", "image_offer",
+                 "image_sku", "image_version", "os_type", "trusted_launch")
+
+    def __init__(self, vm_name: str, image_id: str = "", image_publisher=None,
+                 image_offer=None, image_sku=None, image_version=None,
+                 os_type: str = "Linux", trusted_launch: bool = False):
+        self.vm_name, self.image_id = vm_name, image_id
+        self.image_publisher, self.image_offer = image_publisher, image_offer
+        self.image_sku, self.image_version = image_sku, image_version
+        self.os_type, self.trusted_launch = os_type, trusted_launch
+
+    @classmethod
+    def from_child(cls, child: dict, req) -> "_AzureBulkItem":
+        """Build from a child metadata entry, falling back to the batch-level request.
+
+        The fallbacks are the back-compat hinge: an ``azure_bulk_deploy`` parent
+        created before per-item images existed carries children with only ``vm_name``,
+        and those still resolve every field off ``req`` and run to completion."""
+        def pick(key, default=None):
+            value = child.get(key)
+            return getattr(req, key, default) if value is None else value
+
+        return cls(
+            vm_name=child["vm_name"],
+            image_id=pick("image_id", "") or "",
+            image_publisher=pick("image_publisher"),
+            image_offer=pick("image_offer"),
+            image_sku=pick("image_sku"),
+            image_version=pick("image_version"),
+            os_type=pick("os_type", "Linux") or "Linux",
+            trusted_launch=bool(pick("trusted_launch", False)),
+        )
 
 
 async def _resolve_azure_aci_deploy_key() -> str:
@@ -138,18 +386,69 @@ async def _effective_ssh_public_key(req) -> str:
 def _get_db_session():
     from ..database import SessionLocal
     return SessionLocal()
-async def _run_deploy(job_id: str, req: AzureDeployRequest, rg: str, loc: str):
+
+
+def _finish_parent(parent_job_id: str, child_job_ids: list) -> None:
+    """Give the batch parent a terminal status once its children are done.
+
+    Own session: `run()` holds none, and the per-child sessions are opened and closed
+    inside `_run_deploy`. Best-effort — a parent left `running` is cosmetic next to a
+    batch whose VMs all exist."""
+    db = _get_db_session()
+    try:
+        job_service.finish_batch_parent(db, parent_job_id, child_job_ids)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("could not close out batch parent %s: %s", parent_job_id, exc)
+    finally:
+        db.close()
+
+
+async def _run_deploy(job_id: str, req: AzureDeployRequest, rg: str, loc: str, *,
+                      aci: Optional[_AciRef] = None,
+                      ssh_public_key: Optional[str] = None,
+                      quota_checked: bool = False):
+    """Deploy one Azure VM.
+
+    The keyword-only arguments are injected by ``_run_bulk_deploy`` so a batch does the
+    quota check, the ACI Jumpoint and the Key Vault read once instead of once per VM.
+    Left at their defaults — the single-deploy path — this does all three itself.
+
+    This is the only place an Azure VM is created. The batch path used to be a second
+    copy of this body, and drifted: it ignored ``docker_deploy_key_ref``, dropped the
+    ACI outcome message, and never surfaced a failed deploy-key fetch."""
     db = _get_db_session()
     result = {}
     is_windows = req.os_type.lower() == "windows"
     try:
         job_service.set_running(db, job_id)
 
-        # Windows: generate + vault the admin password before any cloud
-        # resources exist — a VM whose password can't be retrieved is useless.
+        # Step 0: Quota check — fail fast before anything is created, including the
+        # Windows password below. (The single path used to vault a password first and
+        # orphan it when the quota check then failed.)
+        if not quota_checked:
+            job_service.update_progress(db, job_id, 5, f"Checking Azure quota in {loc}…")
+            await azure_service.check_vm_quota(loc, req.vm_size)
+
+        # Step 1: BeyondTrust Jumpoint — the shared ref-counted VM host by default, or a
+        # dedicated ACI container group when the operator asked for one (or supplied a
+        # per-deploy key). See _aci_requested for why shared is the default.
+        if settings.beyondtrust_enabled:
+            if aci is None:
+                aci = (await _acquire_aci(db, job_id, req, loc) if _aci_requested(req)
+                       else await _acquire_shared_host(db, job_id, loc))
+            else:
+                # The batch started one group for the whole run.
+                job_service.update_progress(db, job_id, 15, aci.note())
+            aci.record(result)
+        else:
+            aci = _AciRef("none")
+            job_service.update_progress(db, job_id, 15, "Preparing Azure VM deploy…")
+
+        # Step 2: Windows gets a generated admin password, vaulted before the VM is
+        # created — a VM whose password can't be retrieved is useless.
         admin_password = ""
         if is_windows:
-            job_service.update_progress(db, job_id, 5, "Generating Windows admin password…")
+            job_service.update_progress(db, job_id, 30, "Generating Windows admin password…")
             admin_password = azure_service.generate_windows_admin_password()
             backend, ref = await asyncio.to_thread(
                 azure_service.store_windows_admin_password, req.vm_name, job_id[:8], admin_password,
@@ -159,66 +458,10 @@ async def _run_deploy(job_id: str, req: AzureDeployRequest, rg: str, loc: str):
             result["admin_password_backend"] = backend
             result["admin_password_ref"] = ref
 
-        # Step 0: Quota check — fail fast before any resources are created
-        job_service.update_progress(db, job_id, 10, f"Checking Azure quota in {loc}…")
-        await azure_service.check_vm_quota(loc, req.vm_size)
-
-        # Step 1: Start ACI Jumpoint container (BeyondTrust only)
-        deploy_key_note = ""
-        if settings.beyondtrust_enabled:
-            from ..services import btapi_service
-            job_service.update_progress(db, job_id, 15, "Starting BeyondTrust ACI Jumpoint container…")
-            try:
-                try:
-                    if getattr(req, "docker_deploy_key_ref", None):
-                        from ..services import config_service as _cs
-                        deploy_key = _cs.resolve_reference(req.docker_deploy_key_ref.strip())
-                    else:
-                        deploy_key = await _resolve_azure_aci_deploy_key()
-                except Exception as key_err:
-                    logger.warning("ACI deploy key fetch failed (%s) — creating ACI without deploy key", key_err)
-                    deploy_key = ""
-                    deploy_key_note = f" [deploy key fetch failed: {key_err}]"
-                # Fetch ACR credentials if configured (backend-neutral resolution).
-                acr_server, acr_username, acr_password = await _resolve_acr_credentials()
-                aci_group_name = await azure_service.run_aci_jumpoint_task(
-                    rg=_aci_rg(),
-                    location=loc,
-                    # ACI jumpoint params come from config_service (the wizard /
-                    # sandbox write them to the DB) — NOT the Pydantic settings
-                    # object, whose env-var defaults are empty here. An empty
-                    # subnet_id creates the jumpoint OUTSIDE the VNet, so it has no
-                    # route to the VM's private IP and the SSH Shell Jump times out
-                    # (credential rotation still works — that's the control plane).
-                    # Same fix class as the jump-group/jumpoint-name resolution below.
-                    subnet_id=_cfg("azure_aci_subnet_id") or settings.azure_aci_subnet_id,
-                    image=_cfg("azure_aci_jumpoint_image"),
-                    cpu=float(_cfg("azure_aci_cpu") or settings.azure_aci_cpu),
-                    memory=float(_cfg("azure_aci_memory") or settings.azure_aci_memory),
-                    deploy_key=deploy_key,
-                    acr_server=acr_server,
-                    acr_username=acr_username,
-                    acr_password=acr_password,
-                    storage_account=_cfg("azure_aci_storage_account") or settings.azure_aci_storage_account,
-                    storage_account_rg=_cfg("azure_aci_storage_account_rg") or settings.azure_aci_storage_account_rg,
-                    file_share=_cfg("azure_aci_file_share") or settings.azure_aci_file_share,
-                )
-                result["aci_group_name"] = aci_group_name
-                job_service.update_progress(
-                    db, job_id, 30,
-                    f"ACI Jumpoint started ({aci_group_name}){deploy_key_note}, deploying VM…"
-                )
-            except Exception as e:
-                result["aci_error"] = str(e)
-                job_service.update_progress(
-                    db, job_id, 30,
-                    f"ACI Jumpoint failed (non-fatal): {e}{deploy_key_note} — continuing with VM deploy…"
-                )
-        else:
-            job_service.update_progress(db, job_id, 30, "Preparing Azure VM deploy…")
-
-        # Step 2: Deploy Azure VM (3-step: PIP → NIC → VM)
+        # Step 3: Deploy Azure VM (3-step: PIP → NIC → VM)
         job_service.update_progress(db, job_id, 35, f"Creating Azure VM '{req.vm_name}'…")
+        if ssh_public_key is None:
+            ssh_public_key = await _effective_ssh_public_key(req)
         try:
             vm_result = await azure_service.deploy_vm(
                 rg=rg,
@@ -230,7 +473,7 @@ async def _run_deploy(job_id: str, req: AzureDeployRequest, rg: str, loc: str):
                 nsg_ids=req.nsg_ids,
                 create_public_ip=req.create_public_ip,
                 ssh_username=req.ssh_username,
-                ssh_public_key=await _effective_ssh_public_key(req),
+                ssh_public_key=ssh_public_key,
                 image_publisher=req.image_publisher,
                 image_offer=req.image_offer,
                 image_sku=req.image_sku,
@@ -242,9 +485,11 @@ async def _run_deploy(job_id: str, req: AzureDeployRequest, rg: str, loc: str):
             )
             result.update(vm_result)
         except AzureError as e:
-            if result.get("aci_group_name"):
+            # Only tear the group down if this deploy created it. In a batch it is
+            # shared, and stopping it here would strand every sibling still to come.
+            if aci.owned:
                 try:
-                    await azure_service.stop_aci_jumpoint_task(_aci_rg(), result["aci_group_name"])
+                    await azure_service.stop_aci_jumpoint_task(_aci_rg(), aci.group_name)
                 except Exception:
                     pass
             raise
@@ -272,9 +517,16 @@ async def _run_deploy(job_id: str, req: AzureDeployRequest, rg: str, loc: str):
             jumpoint_name = (getattr(req, "jumpoint_name", None) or "").strip() or _cfg("azure_jumpoint_name") or _cfg("bt_jumpoint_name")
             _cred = getattr(req, "pra_credential_ref", None)
             _client_secret = _cs.resolve_reference(_cred.strip()) if _cred else ""
-            aci_note = f" (ACI: {result['aci_group_name']})" if result.get("aci_group_name") else (
-                f" (ACI failed: {result['aci_error']})" if result.get("aci_error") else " (no ACI)"
-            )
+            if result.get("jumpoint_host_id"):
+                aci_note = f" (shared Jumpoint host: {result['jumpoint_host_id']})"
+            elif result.get("jumpoint_error"):
+                aci_note = f" (shared Jumpoint host failed: {result['jumpoint_error']})"
+            elif result.get("aci_group_name"):
+                aci_note = f" (ACI: {result['aci_group_name']})"
+            elif result.get("aci_error"):
+                aci_note = f" (ACI failed: {result['aci_error']})"
+            else:
+                aci_note = " (no Jumpoint)"
             try:
                 bt_result = await terraform_pra_service.provision_jump(
                     vm_name=req.vm_name,
@@ -333,191 +585,62 @@ async def _run_deploy(job_id: str, req: AzureDeployRequest, rg: str, loc: str):
         job_service.set_failed(db, job_id, f"Unexpected error: {e}")
     finally:
         db.close()
-async def _run_bulk_deploy(job_items: list, req: AzureBulkDeployRequest, rg: str, loc: str):
-    """Start ONE ACI Jumpoint for the batch, then deploy each VM sequentially."""
-    db = _get_db_session()
-    aci_group_name = None
-    is_windows = req.os_type.lower() == "windows"
-    try:
-        for job_id, _ in job_items:
-            job_service.set_running(db, job_id)
 
+
+async def _run_bulk_deploy(job_items: list, req: AzureBulkDeployRequest, rg: str, loc: str):
+    """Deploy a batch of Azure VMs behind one ACI Jumpoint.
+
+    Checks the quota, starts the container group and reads the Key Vault key ONCE for
+    the whole run, then hands all three to ``_run_deploy`` per VM.
+
+    Thin on purpose. This was a 210-line near-copy of ``_run_deploy`` and had drifted:
+    it ignored ``docker_deploy_key_ref``, assigned a ``deploy_key_note`` it never read,
+    emitted no ACI outcome at all, and wrapped the run in a handler that could mark
+    completed VMs failed. ``_run_deploy`` owns set_running / set_completed / set_failed
+    and cache invalidation per VM, so one failure fails that row alone."""
+    # job_items[0] below is otherwise an IndexError on an empty batch, which the setup
+    # handler would then swallow into a loop over nothing — leaving the parent job
+    # running with no explanation. Matches oci_vm_service._run_bulk_deploy.
+    if not job_items:
+        return
+
+    db = _get_db_session()
+    try:
         first_job_id = job_items[0][0]
 
-        # Step 0: Quota check — fail fast before any resources are created
+        # Quota is a batch-level question: vm_size is shared, so one check covers the
+        # run and fails it before anything is created.
         job_service.update_progress(db, first_job_id, 5, f"Checking Azure quota in {loc}…")
         await azure_service.check_vm_quota(loc, req.vm_size)
 
-        aci_error = None
-        deploy_key_note = ""
-        if settings.beyondtrust_enabled:
-            from ..services import btapi_service
-            job_service.update_progress(
-                db, first_job_id, 10,
-                f"Starting ACI Jumpoint for {len(job_items)}-VM batch…"
-            )
-            try:
-                try:
-                    deploy_key = await _resolve_azure_aci_deploy_key()
-                except Exception as key_err:
-                    logger.warning("ACI deploy key fetch failed (%s) — creating ACI without deploy key", key_err)
-                    deploy_key = ""
-                    deploy_key_note = f" [deploy key fetch failed: {key_err}]"
-                # Fetch ACR credentials if configured (backend-neutral resolution).
-                acr_server, acr_username, acr_password = await _resolve_acr_credentials()
-                aci_group_name = await azure_service.run_aci_jumpoint_task(
-                    rg=_aci_rg(),
-                    location=loc,
-                    # ACI jumpoint params come from config_service (the wizard /
-                    # sandbox write them to the DB) — NOT the Pydantic settings
-                    # object, whose env-var defaults are empty here. An empty
-                    # subnet_id creates the jumpoint OUTSIDE the VNet, so it has no
-                    # route to the VM's private IP and the SSH Shell Jump times out
-                    # (credential rotation still works — that's the control plane).
-                    # Same fix class as the jump-group/jumpoint-name resolution below.
-                    subnet_id=_cfg("azure_aci_subnet_id") or settings.azure_aci_subnet_id,
-                    image=_cfg("azure_aci_jumpoint_image"),
-                    cpu=float(_cfg("azure_aci_cpu") or settings.azure_aci_cpu),
-                    memory=float(_cfg("azure_aci_memory") or settings.azure_aci_memory),
-                    deploy_key=deploy_key,
-                    acr_server=acr_server,
-                    acr_username=acr_username,
-                    acr_password=acr_password,
-                    storage_account=_cfg("azure_aci_storage_account") or settings.azure_aci_storage_account,
-                    storage_account_rg=_cfg("azure_aci_storage_account_rg") or settings.azure_aci_storage_account_rg,
-                    file_share=_cfg("azure_aci_file_share") or settings.azure_aci_file_share,
-                )
-            except Exception as e:
-                aci_error = str(e)
-                aci_group_name = None
-        else:
-            job_service.update_progress(
-                db, first_job_id, 10,
-                f"Preparing {len(job_items)}-VM batch…"
-            )
+        # mode="shared": one VM failing must not stop the container the rest still need.
+        aci = (await _acquire_aci(db, first_job_id, req, loc,
+                                  count=len(job_items), mode="shared")
+               if settings.beyondtrust_enabled else _AciRef("none"))
 
-        for job_id, vm_name in job_items:
-            result: dict = {}
-            if aci_group_name:
-                result["aci_group_name"] = aci_group_name
-            elif aci_error:
-                result["aci_error"] = aci_error
-
-            try:
-                # Windows: per-VM password, vaulted before that VM is created.
-                admin_password = ""
-                if is_windows:
-                    job_service.update_progress(db, job_id, 30, "Generating Windows admin password…")
-                    admin_password = azure_service.generate_windows_admin_password()
-                    backend, ref = await asyncio.to_thread(
-                        azure_service.store_windows_admin_password, vm_name, job_id[:8], admin_password,
-                    )
-                    result["admin_username"] = req.ssh_username
-                    result["admin_password_backend"] = backend
-                    result["admin_password_ref"] = ref
-
-                job_service.update_progress(db, job_id, 35, f"Creating Azure VM '{vm_name}'…")
-                vm_result = await azure_service.deploy_vm(
-                    rg=rg,
-                    location=loc,
-                    vm_name=vm_name,
-                    vm_size=req.vm_size,
-                    image_id=req.image_id,
-                    subnet_id=req.subnet_id,
-                    nsg_ids=req.nsg_ids,
-                    create_public_ip=req.create_public_ip,
-                    ssh_username=req.ssh_username,
-                    ssh_public_key=await _effective_ssh_public_key(req),
-                    image_publisher=req.image_publisher,
-                    image_offer=req.image_offer,
-                    image_sku=req.image_sku,
-                    image_version=req.image_version,
-                    workgroup=getattr(req, "workgroup", "") or "",
-                    os_type=req.os_type,
-                    admin_password=admin_password,
-                    trusted_launch=getattr(req, "trusted_launch", False),
-                )
-                result.update(vm_result)
-
-                hostname = result.get("private_ip") or result.get("public_ip") or vm_name
-                job_service.update_progress(
-                    db, job_id, 70,
-                    f"VM '{vm_name}' created ({hostname})"
-                    + ("…" if is_windows else ", provisioning Shell Jump…")
-                )
-
-                if settings.beyondtrust_enabled and is_windows:
-                    job_service.update_progress(
-                        db, job_id, 90,
-                        "Windows VM deployed — Shell Jump (SSH) skipped; broker access with an "
-                        "RDP jump item on the Jumpoint. Password: Azure → VMs → Password."
-                    )
-                elif settings.beyondtrust_enabled:
-                    from ..services import terraform_pra_service
-                    jump_group = _cfg("azure_bt_jump_group_name") or _cfg("bt_jump_group_name")
-                    jumpoint_name = _cfg("azure_jumpoint_name") or _cfg("bt_jumpoint_name")
-                    aci_note = f" (ACI: {result['aci_group_name']})" if result.get("aci_group_name") else (
-                        f" (ACI failed: {result['aci_error']})" if result.get("aci_error") else " (no ACI)"
-                    )
-                    try:
-                        bt_result = await terraform_pra_service.provision_jump(
-                            vm_name=vm_name,
-                            hostname=hostname,
-                            jump_group_name=jump_group,
-                            jumpoint_name=jumpoint_name,
-                            tag="Azure",
-                        )
-                        result["bt_shell_jump_id"] = bt_result.get("shell_jump_id")
-                        result["bt_jump_group_name"] = bt_result.get("jump_group_name")
-                        result["bt_tf_state"] = bt_result.get("tf_state_json")
-                        job_service.update_progress(
-                            db, job_id, 90,
-                            f"Shell Jump created (ID: {bt_result.get('shell_jump_id')}, "
-                            f"group: {jump_group}){aci_note}"
-                        )
-                    except Exception as e:
-                        result["bt_error"] = str(e)
-                        job_service.update_progress(
-                            db, job_id, 90, f"VM deployed but Shell Jump failed: {e}{aci_note}"
-                        )
-                else:
-                    job_service.update_progress(db, job_id, 90, "VM deployed.")
-
-                # Step 4: Entitle — register as SSH integration (Linux only; opt-in).
-                from ..services import entitle_vm_hook, config_service
-                if (getattr(req, "register_in_entitle", False) and not is_windows
-                        and entitle_vm_hook.registration_enabled()):
-                    # Resolved login user (config override → request field → cloud
-                    # default); config_service.get is store-only (see the GCP fix).
-                    await entitle_vm_hook.register(db, job_id, vm_name, hostname,
-                                                   private=not req.create_public_ip,
-                                                   result=result, tag="Azure",
-                                                   sudo_user=config_service.get("azure_ssh_username") or req.ssh_username or "azureuser",
-                                                   ssh_key_secret=req.ssh_key_secret_override or "")
-
-                # Step 5: Password Safe — onboard as a managed system + account.
-                from ..services import ps_vm_hook
-                if (getattr(req, "register_in_passwordsafe", False) and not is_windows
-                        and ps_vm_hook.registration_enabled()):
-                    await ps_vm_hook.register(db, job_id, vm_name, hostname,
-                                              result=result, tag="Azure",
-                                              ssh_key_secret=req.ssh_key_secret_override or "",
-                                              resource_group=rg)
-
-                job_service.set_completed(db, job_id, result)
-
-            except AzureError as e:
-                job_service.set_failed(db, job_id, str(e))
-            except Exception as e:
-                job_service.set_failed(db, job_id, f"Unexpected error: {e}")
-
-        await cache_service.invalidate(cache_service.key_global("azure_vms"))
-
+        # One Key Vault round trip for the batch, not one per VM.
+        batch_ssh_public_key = await _effective_ssh_public_key(req)
     except Exception as e:
+        # Batch SETUP failed, so nothing has been created — failing every child is the
+        # right answer here, and only here. Past this point children have completed,
+        # and job_service.set_failed has no status guard.
         for job_id, _ in job_items:
             job_service.set_failed(db, job_id, f"Bulk deploy error: {e}")
+        return
     finally:
         db.close()
+
+    for job_id, item in job_items:
+        await _run_deploy(
+            job_id,
+            _child_request(item, req),
+            rg,
+            loc,
+            aci=aci,
+            ssh_public_key=batch_ssh_public_key,
+            quota_checked=True,
+        )
+
 async def _run_destroy(destroy_job_id: str, deploy_job_id: str, vm_name: str, rg: str):
     db = _get_db_session()
     try:
@@ -531,7 +654,9 @@ async def _run_destroy(destroy_job_id: str, deploy_job_id: str, vm_name: str, rg
         if deploy_job:
             meta = deploy_job.metadata_dict
 
-            # Stop ACI Jumpoint — only if no other active VMs share this container group
+            # Stop ACI Jumpoint — only if no other active VMs share this container group.
+            # A shared-host deploy carries no aci_group_name (see _AciRef.record), so it
+            # falls straight through to the release below.
             aci_group_name = meta.get("aci_group_name")
             active_sibling_jobs = [
                 j for j in db.query(Job)
@@ -562,7 +687,10 @@ async def _run_destroy(destroy_job_id: str, deploy_job_id: str, vm_name: str, rg
                     result["aci_group_shared"] = aci_group_name
 
             # Fallback: if no metadata-tracked ACI and no other active VMs remain,
-            # enumerate and stop all dashboard ACI jumpoints (covers untracked containers)
+            # enumerate and stop all dashboard ACI jumpoints (covers untracked
+            # containers). Only ever stops ACI groups — the shared clouddb-jumpoint VM
+            # is not an ACI group and list_aci_tasks cannot see it, so a shared-host
+            # deploy landing here sweeps orphans without touching its own Jumpoint.
             if not aci_group_name and not active_sibling_jobs:
                 job_service.update_progress(
                     db, destroy_job_id, 50, "No active VMs remain — checking for orphaned ACI Jumpoints…"
@@ -626,6 +754,33 @@ async def _run_destroy(destroy_job_id: str, deploy_job_id: str, vm_name: str, rg
             meta["destroyed"] = True
             job_service.set_completed(db, deploy_job_id, meta)
 
+            # Release the borrowed shared Jumpoint host, if that is how this deploy
+            # reached PRA. Deliberately AFTER the `destroyed` flag above:
+            # teardown_jumpoint_host_if_idle counts live rows and takes no "exclude me"
+            # argument, so releasing first would let the row being destroyed count
+            # itself and the host would never be reclaimed. gcp_vm_service and
+            # aws_vm_service order it the same way for the same reason.
+            #
+            # Rows written before jumpoint_mode existed can only be ACI: nothing ever
+            # wrote jumpoint_host_id on an azure_deploy, and the only writer of
+            # aci_group_name was the ACI path. The inference is total, so this needs no
+            # backfill and existing VMs tear down exactly as they do today.
+            if meta.get("jumpoint_mode") == "host":
+                # Drop this VM's reference and let jumpoint_host_service decide. It
+                # counts Azure VMs, cloud databases, k8s tunnels and VDI seats, so the
+                # host survives as long as anything still needs it.
+                region = meta.get("jumpoint_region") or _cfg("azure_location")
+                job_service.update_progress(
+                    db, destroy_job_id, 95,
+                    "Releasing the shared BeyondTrust Jumpoint host…")
+                try:
+                    from ..services import jumpoint_host_service
+                    await jumpoint_host_service.teardown_jumpoint_host_if_idle(
+                        db, "azure", region)
+                except Exception as e:
+                    logger.warning("Shared Jumpoint host release failed (non-fatal): %s", e)
+                    result["jumpoint_host_teardown_error"] = str(e)
+
         job_service.set_completed(db, destroy_job_id, result)
         await cache_service.invalidate(cache_service.key_global("azure_vms"))
 
@@ -635,6 +790,8 @@ async def _run_destroy(destroy_job_id: str, deploy_job_id: str, vm_name: str, rg
         job_service.set_failed(db, destroy_job_id, f"Unexpected error: {e}")
     finally:
         db.close()
+
+
 async def _run_create_image(
     job_id: str, vm_name: str, rg: str, req: AzureCreateImageRequest
 ):

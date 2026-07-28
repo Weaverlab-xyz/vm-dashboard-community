@@ -67,6 +67,15 @@ async def run(job_id: str, job_type: str, meta: dict) -> None:
     if job_type == "gce_deploy":
         req = GCPDeployRequest(**meta["req"])
         await _run_deploy(job_id, req, meta["project_id"], meta["zone"])
+    elif job_type == "gce_bulk_deploy":
+        # The children were created `queued` so the runner's claim query (which filters
+        # status='pending') cannot pick them up alongside this parent; _run_bulk_deploy
+        # drives them and owns their status. Each child carries its own full request.
+        job_items = [(c["job_id"], GCPDeployRequest(**c["req"])) for c in meta["children"]]
+        await _run_bulk_deploy(job_items, meta["project_id"], meta["zone"])
+        # The parent has no terminal status of its own — the worker only marks a job
+        # failed when dispatch raises, so without this it stays `running` at 0%.
+        _finish_parent(job_id, [c["job_id"] for c in meta["children"]])
     elif job_type == "gce_capture_image":
         await _run_capture(job_id, meta["project_id"], meta["zone"],
                            meta["instance_name"], meta["image_name"],
@@ -94,7 +103,162 @@ async def _resolve_gcp_jumpoint_deploy_key() -> str:
 def _get_db_session():
     from ..database import SessionLocal
     return SessionLocal()
-async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, zone: str) -> None:
+
+
+def _finish_parent(parent_job_id: str, child_job_ids: list) -> None:
+    """Give the batch parent a terminal status once its children are done.
+
+    Own session: `run()` holds none, and the per-child sessions are opened and closed
+    inside `_run_deploy`. Best-effort — a parent left `running` is cosmetic next to a
+    batch whose VMs all exist."""
+    db = _get_db_session()
+    try:
+        job_service.finish_batch_parent(db, parent_job_id, child_job_ids)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("could not close out batch parent %s: %s", parent_job_id, exc)
+    finally:
+        db.close()
+
+
+class _JumpointRef:
+    """How one GCE deploy reached its BeyondTrust Jumpoint.
+
+    ``mode`` is the discriminator persisted on the deploy job and read back by
+    ``_run_destroy``. A ``paired`` ref OWNS a dedicated ``bt-jumpoint-<vm>`` VM and has
+    to delete it once no sibling deploy references it. A ``shared`` ref BORROWS the
+    ref-counted host that ``jumpoint_host_service`` owns on behalf of cloud databases,
+    k8s tunnels and VDI seats, and must only release a reference — the teardown
+    decision is that service's to make, not this one's.
+
+    A value object rather than a widened tuple for the same reason as
+    ``aws_vm_service._BulkItem``: the shape is read back in three places and a bare
+    tuple makes the shared/paired distinction invisible at the call site.
+    """
+    __slots__ = ("mode", "name", "zone", "region", "error", "reused")
+
+    def __init__(self, mode: str, name: str = "", zone: str = "",
+                 region: str = "", error: str = "", reused: bool = False):
+        self.mode, self.name, self.zone = mode, name, zone
+        self.region, self.error, self.reused = region, error, reused
+
+    def record(self, meta: dict) -> None:
+        """Write this reference onto the deploy job's result metadata.
+
+        A shared host is NEVER recorded under ``jumpoint_name``. That key is what
+        triggers the paired teardown in ``_run_destroy``, whose sibling count looks at
+        ``gce_deploy`` rows only — so recording a shared host there would delete it
+        when the last GCE VM went, taking every cloud-database, k8s and VDI tunnel
+        routed through the same host down with it.
+        """
+        if self.error:
+            meta["jumpoint_error"] = self.error
+        if not self.name:
+            return
+        meta["jumpoint_mode"] = self.mode
+        if self.mode == "paired":
+            meta["jumpoint_name"] = self.name
+            meta["jumpoint_zone"] = self.zone
+        else:
+            meta["jumpoint_host_id"] = self.name
+            meta["jumpoint_region"] = self.region
+
+
+async def _acquire_paired_jumpoint(db, job_id: str, payload: GCPDeployRequest,
+                                   project_id: str, zone: str, subnet: str) -> _JumpointRef:
+    """Start (or reuse) the dedicated ``bt-jumpoint-<vm>`` VM for a single deploy.
+
+    Best-effort, unchanged from before this was extracted: a failure is recorded on the
+    job and the VM launch continues, because the operator may already have a Jumpoint
+    reaching that subnet by other means."""
+    from ..services import config_service as _cfg_svc
+    name = _jumpoint_name(payload.instance_name)
+    image = _cfg_svc.get("gcp_jumpoint_image") or "beyondtrust/sra-jumpoint:latest"
+    machine = _cfg_svc.get("gcp_jumpoint_machine_type") or "e2-micro"
+    jp_zone = _cfg_svc.get("gcp_jumpoint_zone") or zone
+    job_service.update_progress(db, job_id, 5, f"Starting BeyondTrust Jumpoint {name}…")
+    try:
+        if getattr(payload, "docker_deploy_key_ref", None):
+            deploy_key = _cfg_svc.resolve_reference(payload.docker_deploy_key_ref.strip())
+        else:
+            deploy_key = await _resolve_gcp_jumpoint_deploy_key()
+        if not deploy_key:
+            raise RuntimeError(
+                "Jumpoint deploy key not configured "
+                "(gcp_cloud_run_docker_deploy_key) — set it in the wizard."
+            )
+        meta = await gcp_service.run_gce_jumpoint(
+            project_id=project_id,
+            zone=jp_zone,
+            name=name,
+            container_image=image,
+            deploy_key=deploy_key,
+            subnetwork=subnet or "",
+            machine_type=machine,
+            create_external_ip=True,
+        )
+        ref = _JumpointRef("paired", name=meta.get("name", ""),
+                           zone=meta.get("zone", jp_zone),
+                           reused=bool(meta.get("reused")))
+        job_service.update_progress(
+            db, job_id, 15,
+            f"Jumpoint {name} {'reused' if ref.reused else 'started'}, launching VM…"
+        )
+        return ref
+    except Exception as e:
+        # Non-fatal — continue to VM launch; user may already have a Jumpoint elsewhere.
+        logger.warning("GCP Jumpoint provisioning failed (non-fatal): %s", e)
+        job_service.update_progress(
+            db, job_id, 15,
+            f"Jumpoint provisioning failed (non-fatal): {e} — continuing with VM launch…"
+        )
+        return _JumpointRef("paired", error=str(e))
+
+
+def _paired_requested(payload: GCPDeployRequest) -> bool:
+    """Whether this single deploy should start its own ``bt-jumpoint-<vm>`` VM.
+
+    True when the operator asked for paired mode, and — regardless of mode — when the
+    request carries its own Jumpoint deploy key. The shared host is one VM serving many
+    resources and resolves its key from config, so there is nowhere to honour a
+    per-deploy override on it. Silently ignoring the form field would be the
+    "succeeds with a side effect missing" failure this codebase keeps writing tests
+    against, so the override wins and that VM gets its own jumpoint."""
+    if getattr(payload, "docker_deploy_key_ref", None):
+        logger.info("GCP deploy carries a docker_deploy_key_ref — using a paired "
+                    "Jumpoint so the per-deploy key is honoured")
+        return True
+    return (_gcp_cfg("gcp_vm_jumpoint_mode", "shared") or "shared").strip().lower() == "paired"
+
+
+async def _acquire_shared_jumpoint(region: str) -> _JumpointRef:
+    """Borrow the ref-counted COS Jumpoint host that cloud databases, k8s tunnels and
+    VDI seats already share — one for a whole batch instead of one per VM.
+
+    Best-effort like the paired path: a batch still launches its VMs when the jumpoint
+    is unavailable, it just has no Shell Jump."""
+    from ..services import jumpoint_host_service
+    try:
+        host = await jumpoint_host_service.ensure_jumpoint_host("gcp", region)
+    except Exception as e:
+        logger.warning("Shared GCP Jumpoint host unavailable (non-fatal): %s", e)
+        return _JumpointRef("shared", region=region, error=str(e))
+    if not host:
+        return _JumpointRef(
+            "shared", region=region,
+            error="shared Jumpoint host unavailable — check the GCP project and the "
+                  "jumpoint deploy key in the wizard")
+    return _JumpointRef("shared", name=host, region=region)
+
+
+async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, zone: str,
+                      *, jumpoint: Optional[_JumpointRef] = None) -> None:
+    """Deploy one GCE instance.
+
+    ``jumpoint`` is injected by ``_run_bulk_deploy`` so a batch acquires ONE shared
+    host rather than N paired VMs. Left at None — the single-deploy path — this
+    behaves exactly as it did before batches existed, starting its own paired
+    ``bt-jumpoint-<vm>``. Keyword-only so the existing ``gce_deploy`` call in ``run()``
+    is untouched."""
     from ..services import config_service as _cfg_svc
     from ..services.region_config import resolve_region
     db = _get_db_session()
@@ -107,50 +271,35 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
     # (the "Failed to fetch resources / SSH timeout" trap). Explicit form value wins.
     subnet = payload.subnetwork or _rc["subnetwork"]
     bt_enabled = _cfg_svc.get_bool("beyondtrust_enabled")
-    jumpoint_name = ""
-    jumpoint_zone = zone
-    jumpoint_meta: dict = {}
+    jp: Optional[_JumpointRef] = None
     try:
         job_service.set_running(db, job_id)
 
         # ── Step 1: Start BT Jumpoint on COS-on-GCE first (BeyondTrust only) ──
         if bt_enabled:
-            jumpoint_name = _jumpoint_name(payload.instance_name)
-            jumpoint_image = _cfg_svc.get("gcp_jumpoint_image") or "beyondtrust/sra-jumpoint:latest"
-            jumpoint_machine = _cfg_svc.get("gcp_jumpoint_machine_type") or "e2-micro"
-            jumpoint_zone = _cfg_svc.get("gcp_jumpoint_zone") or zone
-            job_service.update_progress(db, job_id, 5, f"Starting BeyondTrust Jumpoint {jumpoint_name}…")
-            try:
-                if getattr(payload, "docker_deploy_key_ref", None):
-                    deploy_key = _cfg_svc.resolve_reference(payload.docker_deploy_key_ref.strip())
-                else:
-                    deploy_key = await _resolve_gcp_jumpoint_deploy_key()
-                if not deploy_key:
-                    raise RuntimeError(
-                        "Jumpoint deploy key not configured "
-                        "(gcp_cloud_run_docker_deploy_key) — set it in the wizard."
-                    )
-                jumpoint_meta = await gcp_service.run_gce_jumpoint(
-                    project_id=project_id,
-                    zone=jumpoint_zone,
-                    name=jumpoint_name,
-                    container_image=jumpoint_image,
-                    deploy_key=deploy_key,
-                    subnetwork=subnet or "",
-                    machine_type=jumpoint_machine,
-                    create_external_ip=True,
-                )
+            if jumpoint is not None:
+                # Injected by _run_bulk_deploy — one shared host for the whole batch.
+                jp = jumpoint
                 job_service.update_progress(
                     db, job_id, 15,
-                    f"Jumpoint {jumpoint_name} {'reused' if jumpoint_meta.get('reused') else 'started'}, launching VM…"
+                    f"Using the shared BeyondTrust Jumpoint {jp.name}, launching VM…"
+                    if jp.name else
+                    f"Shared Jumpoint unavailable ({jp.error}) — continuing with VM launch…"
                 )
-            except Exception as e:
-                # Non-fatal — continue to VM launch; user may already have a Jumpoint elsewhere.
-                jumpoint_meta = {"error": str(e)}
-                logger.warning("GCP Jumpoint provisioning failed (non-fatal): %s", e)
+            elif _paired_requested(payload):
+                jp = await _acquire_paired_jumpoint(
+                    db, job_id, payload, project_id, zone, subnet)
+            else:
+                # Default: borrow the same ref-counted host cloud databases, k8s
+                # tunnels and VDI seats use, instead of a per-VM e2-micro.
+                job_service.update_progress(
+                    db, job_id, 5, "Ensuring the shared BeyondTrust Jumpoint host…")
+                jp = await _acquire_shared_jumpoint(_region_from_zone(zone))
                 job_service.update_progress(
                     db, job_id, 15,
-                    f"Jumpoint provisioning failed (non-fatal): {e} — continuing with VM launch…"
+                    f"Using the shared BeyondTrust Jumpoint {jp.name}, launching VM…"
+                    if jp.name else
+                    f"Shared Jumpoint unavailable ({jp.error}) — continuing with VM launch…"
                 )
 
         # Retrieve SSH public key (per-launch override wins over the region default)
@@ -203,27 +352,26 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
             "image_self_link": payload.image_self_link,
             "image_name":    payload.image_name,
         }
-        if bt_enabled:
-            if jumpoint_meta.get("error"):
-                final_meta["jumpoint_error"] = jumpoint_meta["error"]
-            elif jumpoint_meta.get("name"):
-                final_meta["jumpoint_name"] = jumpoint_meta["name"]
-                final_meta["jumpoint_zone"] = jumpoint_meta.get("zone", jumpoint_zone)
+        if jp:
+            jp.record(final_meta)
 
         # ── BeyondTrust PRA — Shell Jump (optional) ───────────────────────────
         if _cfg_svc.get_bool("beyondtrust_enabled"):
             from ..services import terraform_pra_service
             jump_group = ((payload.jump_group or "").strip() or _cfg_svc.get("gcp_bt_jump_group_name")
                           or _cfg_svc.get("bt_jump_group_name") or settings.bt_jump_group_name)
-            jumpoint_name = ((payload.jumpoint_name or "").strip() or _cfg_svc.get("gcp_jumpoint_name")
-                             or _cfg_svc.get("bt_jumpoint_name") or settings.bt_jumpoint_name)
+            # NB: the PRA *display* name, not the GCE instance name that _JumpointRef
+            # carries. These were one variable until the jumpoint block moved out, and
+            # it only worked because the metadata write above had already happened.
+            pra_jumpoint_name = ((payload.jumpoint_name or "").strip() or _cfg_svc.get("gcp_jumpoint_name")
+                                 or _cfg_svc.get("bt_jumpoint_name") or settings.bt_jumpoint_name)
             job_service.update_progress(db, job_id, 90, f"Instance launched ({hostname}), provisioning Shell Jump…")
             try:
                 bt_result = await terraform_pra_service.provision_jump(
                     vm_name=payload.instance_name,
                     hostname=hostname,
                     jump_group_name=jump_group,
-                    jumpoint_name=jumpoint_name,
+                    jumpoint_name=pra_jumpoint_name,
                     tag="GCP",
                 )
                 final_meta["bt_shell_jump_id"] = bt_result.get("shell_jump_id")
@@ -262,7 +410,12 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
         if getattr(payload, "register_in_passwordsafe", False) and ps_vm_hook.registration_enabled():
             await ps_vm_hook.register(db, job_id, payload.instance_name, hostname,
                                       result=final_meta, tag="GCP", ssh_key_secret=secret_name,
-                                      project=_gcp_project(), zone=result["zone"])
+                                      # The job's project, not _gcp_project() — see this
+                                      # module's run() docstring. The managed-system
+                                      # address is projectId/zone/instanceName, so
+                                      # reading the CURRENT default would onboard the VM
+                                      # under an address that resolves to nothing.
+                                      project=project_id, zone=result["zone"])
 
         job_service.set_completed(db, job_id, final_meta)
         await cache_service.invalidate(cache_service.key_global("gcp_instances"))
@@ -272,6 +425,30 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
         job_service.set_failed(db, job_id, str(exc))
     finally:
         db.close()
+
+
+async def _run_bulk_deploy(job_items: list, project_id: str, zone: str) -> None:
+    """Deploy a batch of GCE instances behind ONE shared Jumpoint.
+
+    ``job_items`` is ``[(job_id, GCPDeployRequest)]`` — each child carries its own
+    expanded instance name, everything else is shared.
+
+    Thin on purpose. The AWS and Azure bulk runners are 200-line near-copies of their
+    single-deploy counterparts, and that duplication is exactly why the AWS batch path
+    quietly lost its PRA overrides. Injecting the jumpoint instead means every feature
+    on the single path — PRA Shell Jump, Entitle, Password Safe — is in the batch path
+    for free, and stays there.
+
+    ``_run_deploy`` owns set_running/set_completed/set_failed per child, so one VM's
+    failure fails that row alone and the batch carries on."""
+    from ..services import config_service as _cfg_svc
+    jumpoint = None
+    if _cfg_svc.get_bool("beyondtrust_enabled"):
+        jumpoint = await _acquire_shared_jumpoint(_region_from_zone(zone))
+    for job_id, payload in job_items:
+        await _run_deploy(job_id, payload, project_id, zone, jumpoint=jumpoint)
+
+
 async def _run_capture(
     job_id: str,
     project_id: str,
@@ -295,6 +472,8 @@ async def _run_capture(
         job_service.set_failed(db, job_id, str(exc))
     finally:
         db.close()
+
+
 async def _run_destroy(
     job_id: str, project_id: str, zone: str, instance_name: str,
     deploy_job_id: Optional[str] = None,
@@ -354,43 +533,86 @@ async def _run_destroy(
         job_service.update_progress(db, job_id, 50, f"Deleting instance {instance_name}…")
         await gcp_service.terminate_instance(project_id=project_id, zone=zone, instance_name=instance_name)
 
-        # Clean up paired Jumpoint VM, but only if no other live deploy still references it
-        # (multiple VMs may share the same Jumpoint via deploy_key — sibling-aware cleanup).
-        jumpoint_name = deploy_meta.get("jumpoint_name") if deploy_job_id else None
-        if jumpoint_name:
-            sibling_count = sum(
-                1 for j in db.query(Job).filter(
-                    Job.job_type == "gce_deploy", Job.status == "completed"
-                ).all()
-                if j.id != deploy_job_id
-                and not j.metadata_dict.get("destroyed")
-                and j.metadata_dict.get("jumpoint_name") == jumpoint_name
-            )
-            if sibling_count == 0:
-                jumpoint_zone = deploy_meta.get("jumpoint_zone", zone)
-                job_service.update_progress(
-                    db, job_id, 75, f"Stopping paired Jumpoint {jumpoint_name}…"
-                )
-                try:
-                    await gcp_service.stop_gce_jumpoint(
-                        project_id=project_id, zone=jumpoint_zone, name=jumpoint_name
-                    )
-                    result["jumpoint_stopped"] = jumpoint_name
-                except Exception as e:
-                    logger.warning("Jumpoint cleanup failed for %s: %s", jumpoint_name, e)
-                    result["jumpoint_error"] = f"cleanup failed: {e}"
-            else:
-                result["jumpoint_shared"] = jumpoint_name
-                logger.info(
-                    "Leaving Jumpoint %s running — %d other active deploy(s) reference it",
-                    jumpoint_name, sibling_count,
-                )
-
+        # Mark the deploy row destroyed BEFORE releasing the Jumpoint.
+        #
+        # The paired branch below excludes this job explicitly, so ordering never
+        # mattered for it. The shared branch calls teardown_jumpoint_host_if_idle,
+        # which counts live rows and takes no "exclude me" argument — leave this until
+        # afterwards and the row being destroyed counts itself, so the host is never
+        # reclaimed. aws_vm_service._run_destroy orders it the same way for the same
+        # reason.
         if deploy_job_id:
             deploy_meta["destroyed"] = True
             deploy_job = job_service.get_job(db, deploy_job_id)
             if deploy_job:
                 job_service.set_completed(db, deploy_job_id, deploy_meta)
+
+        # Release the Jumpoint. Two shapes coexist: a PAIRED bt-jumpoint-<vm> VM this
+        # deploy owns outright, or a borrowed reference to the SHARED ref-counted host.
+        #
+        # A row written before jumpoint_mode existed can only be paired: nothing ever
+        # wrote jumpoint_host_id on a gce_deploy, and the only writer of jumpoint_name
+        # was the paired block. The inference is therefore total, which is why this
+        # needs no backfill and old VMs keep tearing down exactly as they do today.
+        mode = deploy_meta.get("jumpoint_mode") if deploy_job_id else None
+        if not mode and deploy_job_id and deploy_meta.get("jumpoint_name"):
+            mode = "paired"
+
+        if mode == "paired":
+            jumpoint_name = deploy_meta.get("jumpoint_name") or ""
+            from ..services import jumpoint_host_service as _jhs
+            if jumpoint_name and jumpoint_name == _jhs._gcp_jumpoint_name():
+                # Belt and braces. A VM destroy must never delete the shared host — it
+                # also serves cloud databases, k8s tunnels and VDI seats, none of which
+                # the gce_deploy-scoped sibling count below can see.
+                logger.warning(
+                    "Refusing to delete %s from a VM destroy — that is the shared "
+                    "ref-counted Jumpoint host, not a paired one", jumpoint_name)
+                result["jumpoint_shared"] = jumpoint_name
+            elif jumpoint_name:
+                # Sibling-aware cleanup: several VMs may share one paired Jumpoint.
+                # Shared-mode rows carry no jumpoint_name, so they can never match here.
+                sibling_count = sum(
+                    1 for j in db.query(Job).filter(
+                        Job.job_type == "gce_deploy", Job.status == "completed"
+                    ).all()
+                    if j.id != deploy_job_id
+                    and not j.metadata_dict.get("destroyed")
+                    and j.metadata_dict.get("jumpoint_name") == jumpoint_name
+                )
+                if sibling_count == 0:
+                    jumpoint_zone = deploy_meta.get("jumpoint_zone", zone)
+                    job_service.update_progress(
+                        db, job_id, 75, f"Stopping paired Jumpoint {jumpoint_name}…"
+                    )
+                    try:
+                        await gcp_service.stop_gce_jumpoint(
+                            project_id=project_id, zone=jumpoint_zone, name=jumpoint_name
+                        )
+                        result["jumpoint_stopped"] = jumpoint_name
+                    except Exception as e:
+                        logger.warning("Jumpoint cleanup failed for %s: %s", jumpoint_name, e)
+                        result["jumpoint_error"] = f"cleanup failed: {e}"
+                else:
+                    result["jumpoint_shared"] = jumpoint_name
+                    logger.info(
+                        "Leaving Jumpoint %s running — %d other active deploy(s) reference it",
+                        jumpoint_name, sibling_count,
+                    )
+
+        elif mode == "shared":
+            # Drop this VM's reference and let jumpoint_host_service decide. It counts
+            # GCE VMs, cloud databases, k8s tunnels and VDI seats, so the host survives
+            # as long as anything still needs it.
+            region = deploy_meta.get("jumpoint_region") or _region_from_zone(zone)
+            job_service.update_progress(
+                db, job_id, 75, "Releasing the shared BeyondTrust Jumpoint host…")
+            try:
+                from ..services import jumpoint_host_service
+                await jumpoint_host_service.teardown_jumpoint_host_if_idle(db, "gcp", region)
+            except Exception as e:
+                logger.warning("Shared Jumpoint host release failed (non-fatal): %s", e)
+                result["jumpoint_host_teardown_error"] = str(e)
 
         job_service.set_completed(db, job_id, result)
         await cache_service.invalidate(cache_service.key_global("gcp_instances"))

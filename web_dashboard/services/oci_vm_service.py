@@ -34,31 +34,71 @@ def _get_db_session():
     return SessionLocal()
 
 
+def _finish_parent(parent_job_id: str, child_job_ids: list) -> None:
+    """Give the batch parent a terminal status once its children are done.
+
+    Own session: `run()` holds none, and the per-child sessions are opened and closed
+    inside `_run_deploy`. Best-effort — a parent left `running` is cosmetic next to a
+    batch whose VMs all exist."""
+    db = _get_db_session()
+    try:
+        job_service.finish_batch_parent(db, parent_job_id, child_job_ids)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("could not close out batch parent %s: %s", parent_job_id, exc)
+    finally:
+        db.close()
+
+
+def _ssh_key_secret(payload: OCIDeployRequest) -> str:
+    """The Vault secret this launch reads its public key from — per-launch override
+    first, then the configured default. Shared by the single and batch paths so they
+    can't resolve to different secrets."""
+    from ..services import config_service
+    return payload.ssh_key_secret_override or config_service.get("oci_ssh_key_secret") or ""
+
+
 # ── Job-runner entry point ────────────────────────────────────────────────────
 
 async def run(job_id: str, job_type: str, meta: dict) -> None:
     """Run one OCI job. Every argument comes from the metadata the endpoint persisted."""
     if job_type == "oci_deploy":
         await _run_deploy(job_id, OCIDeployRequest(**meta["req"]), meta["compartment_ocid"])
+    elif job_type == "oci_bulk_deploy":
+        # The children were created `queued` so the runner's claim query (which filters
+        # status='pending') cannot pick them up alongside this parent; _run_bulk_deploy
+        # drives them and owns their status. Each child carries its own full request.
+        job_items = [(c["job_id"], OCIDeployRequest(**c["req"])) for c in meta["children"]]
+        await _run_bulk_deploy(job_items, meta["compartment_ocid"])
+        # The parent has no terminal status of its own — the worker only marks a job
+        # failed when dispatch raises, so without this it stays `running` at 0%.
+        _finish_parent(job_id, [c["job_id"] for c in meta["children"]])
     elif job_type == "oci_destroy":
         await _run_destroy(job_id, meta["instance_ocid"], meta.get("deploy_job_id"))
 
 
-async def _run_deploy(job_id: str, payload: OCIDeployRequest, compartment: str) -> None:
+async def _run_deploy(job_id: str, payload: OCIDeployRequest, compartment: str,
+                      *, ssh_public_key: Optional[str] = None) -> None:
+    """Deploy one OCI compute instance.
+
+    ``ssh_public_key`` is injected by ``_run_bulk_deploy`` so a batch resolves the Vault
+    secret once instead of once per VM. Left at None — the single-deploy path — this
+    fetches it itself, exactly as before batches existed. Keyword-only so the existing
+    ``oci_deploy`` call in ``run()`` is untouched."""
     from ..services import config_service as _cfg_svc
     db = _get_db_session()
     try:
         job_service.set_running(db, job_id)
 
         # Resolve the SSH public key (per-launch override wins over the default).
-        secret = (payload.ssh_key_secret_override or _cfg_svc.get("oci_ssh_key_secret") or "")
-        ssh_public_key = ""
-        if secret:
-            job_service.update_progress(db, job_id, 15, "Retrieving SSH public key from OCI Vault…")
-            try:
-                ssh_public_key = await oci_service.get_ssh_public_key(secret)
-            except Exception as exc:
-                logger.warning("Could not fetch OCI SSH key: %s", exc)
+        secret = _ssh_key_secret(payload)
+        if ssh_public_key is None:
+            ssh_public_key = ""
+            if secret:
+                job_service.update_progress(db, job_id, 15, "Retrieving SSH public key from OCI Vault…")
+                try:
+                    ssh_public_key = await oci_service.get_ssh_public_key(secret)
+                except Exception as exc:
+                    logger.warning("Could not fetch OCI SSH key: %s", exc)
 
         job_service.update_progress(db, job_id, 25, "Launching compute instance…")
         result = await oci_service.launch_instance(
@@ -143,6 +183,34 @@ async def _run_deploy(job_id: str, payload: OCIDeployRequest, compartment: str) 
         job_service.set_failed(db, job_id, str(exc))
     finally:
         db.close()
+
+
+async def _run_bulk_deploy(job_items: list, compartment: str) -> None:
+    """Deploy a batch of OCI instances, resolving the Vault key once for the whole run.
+
+    ``job_items`` is ``[(job_id, OCIDeployRequest)]`` — each child carries its own
+    expanded instance name, everything else is shared.
+
+    The simplest of the four batch runners: OCI provisions no Jumpoint of its own (it
+    binds to an existing one named in config), no NAT instance and no quota precheck,
+    so the only thing worth hoisting is the key fetch. ``_run_deploy`` owns
+    set_running/set_completed/set_failed per child, so one instance failing fails that
+    row alone and the batch carries on."""
+    if not job_items:
+        return
+    # Every child shares the payload bar its name, so they resolve to one secret.
+    shared_key: Optional[str] = None
+    secret = _ssh_key_secret(job_items[0][1])
+    if secret:
+        try:
+            shared_key = await oci_service.get_ssh_public_key(secret)
+        except Exception as exc:
+            logger.warning("Could not fetch OCI SSH key for the batch: %s", exc)
+            shared_key = ""
+    else:
+        shared_key = ""
+    for job_id, payload in job_items:
+        await _run_deploy(job_id, payload, compartment, ssh_public_key=shared_key)
 
 async def _run_destroy(job_id: str, instance_ocid: str, deploy_job_id: Optional[str] = None) -> None:
     db = _get_db_session()

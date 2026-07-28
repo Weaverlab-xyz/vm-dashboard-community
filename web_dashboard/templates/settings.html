@@ -716,6 +716,24 @@
                        placeholder="ACI">
               </div>
             </div>
+            <div class="mb-3">
+              <label class="block text-sm font-medium text-gray-700 mb-1">VM Jumpoint mode <span class="text-gray-400 font-normal">(Azure)</span></label>
+              <!-- x-init default is load-bearing: an unset string config key reads back
+                   as "" from /api/setup/feature, not as the model default. -->
+              <select x-model="panelCfg.azure_vm_jumpoint_mode"
+                      x-init="panelCfg.azure_vm_jumpoint_mode = panelCfg.azure_vm_jumpoint_mode || 'shared'"
+                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                <option value="shared">Shared host (default) — one Jumpoint VM for all VMs, databases and clusters</option>
+                <option value="aci">ACI — a dedicated container group per VM</option>
+              </select>
+              <p class="text-xs text-gray-400 mt-1">
+                Applies to single deploys; a batch always shares one ACI group. ACI is
+                Shell-Jump only — it cannot do protocol tunnels — and every group mounts
+                the same <span class="font-mono">/jpt</span> share, so they contend over one
+                Jumpoint identity. A deploy that supplies its own Jumpoint deploy key always
+                gets ACI, since the shared host uses the configured key.
+              </p>
+            </div>
             <p class="text-xs text-gray-400 mb-2">GCP overrides — leave blank to reuse the AWS values above.</p>
             <div class="grid grid-cols-2 gap-3">
               <div>
@@ -730,6 +748,22 @@
                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
                        placeholder="same as AWS">
               </div>
+            </div>
+            <div class="mt-3">
+              <label class="block text-sm font-medium text-gray-700 mb-1">VM Jumpoint mode <span class="text-gray-400 font-normal">(GCP)</span></label>
+              <!-- x-init default is load-bearing: an unset string config key reads back
+                   as "" from /api/setup/feature, not as the model default. -->
+              <select x-model="panelCfg.gcp_vm_jumpoint_mode"
+                      x-init="panelCfg.gcp_vm_jumpoint_mode = panelCfg.gcp_vm_jumpoint_mode || 'shared'"
+                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                <option value="shared">Shared host (default) — one Jumpoint for all VMs, databases and clusters</option>
+                <option value="paired">Paired — a dedicated bt-jumpoint-&lt;vm&gt; per VM</option>
+              </select>
+              <p class="text-xs text-gray-400 mt-1">
+                Applies to single deploys; a batch always shares one Jumpoint. Paired
+                costs an extra e2-micro per VM. A deploy that supplies its own Jumpoint
+                deploy key is always paired, since the shared host uses the configured key.
+              </p>
             </div>
           </div>
 

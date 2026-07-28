@@ -40,7 +40,7 @@ from ..models.aws import (
     NetworkOptions,
     SSHKeySecretDetail,
 )
-from ..services import aws_service, job_service, cache_service, cloud_stats, region_catalog, workgroup_service
+from ..services import aws_service, deploy_batch, job_service, cache_service, cloud_stats, region_catalog, workgroup_service
 from ..services.aws_service import AWSError
 from .auth import require_admin, require_permission
 
@@ -404,6 +404,97 @@ async def list_ssh_key_secret_names(
 
 # ── Deploy ────────────────────────────────────────────────────────────────────
 
+async def _fan_out_batch(
+    req: DeployRequest, db: Session, current_user: User,
+    *, region: str, workgroup: str,
+) -> DeployResponse:
+    """Fan a ``count > 1`` deploy out into one ``ec2_bulk_deploy`` parent plus N
+    ``queued`` ``ec2_deploy`` children — the same parent type the multi-select bulk
+    route already uses, with every child sharing the one AMI.
+
+    Repeating the same ``ami_id`` across the children is the correct degenerate case
+    for ``_BulkItem``: only ``instance_name`` varies, so the runner's existing
+    reconstruction needs no change at all.
+
+    A separate module-level function, NOT an ``if`` inside ``deploy_ami``:
+    ``test_worker_dispatch``'s children-are-unclaimable rule walks the AST per
+    function, so a ``children``-carrying create_job in the same function as the single
+    deploy's ``pending`` one reads as a violation whatever the runtime branch does.
+    """
+    names = deploy_batch.expand_names(req.instance_name, req.count, "aws")
+    deploy_batch.reject_name_collisions(db, "ec2_deploy", names)
+    await deploy_batch.enforce_admission(
+        "aws:ec2:deploy",
+        requests=deploy_batch.batch_request_docs(
+            {"region": region, "instance_type": req.instance_type, "image": req.ami_id},
+            names),
+        actor=current_user, db=db,
+    )
+
+    batch_id = uuid.uuid4().hex[:12]
+    children = []
+    for name in names:
+        job = job_service.create_job(
+            db,
+            job_type="ec2_deploy",
+            created_by=current_user.username,
+            workgroup=workgroup,
+            # `queued`, not `pending`: the runner claims on status='pending', so a
+            # pending child would be launched a second time alongside its parent.
+            status="queued",
+            batch_id=batch_id,
+            metadata={
+                "ami_id": req.ami_id,
+                "instance_name": name,
+                "instance_type": req.instance_type,
+                "region": region,
+                "subnet_id": req.subnet_id,
+                "security_group_ids": req.security_group_ids,
+                "workgroup": workgroup,
+                "bulk": True,
+                "register_in_entitle": req.register_in_entitle,
+                "register_in_passwordsafe": req.register_in_passwordsafe,
+                "ssh_key_secret_override": req.ssh_key_secret_override,
+            },
+        )
+        job_service.log_audit(
+            db, current_user.username, "ec2_deploy",
+            details={"ami_id": req.ami_id, "instance_name": name,
+                     "workgroup": workgroup, "bulk": True},
+        )
+        children.append({"job_id": job.id, "ami_id": req.ami_id, "instance_name": name})
+
+    parent = job_service.create_job(
+        db,
+        job_type="ec2_bulk_deploy",
+        created_by=current_user.username,
+        workgroup=workgroup,
+        batch_id=batch_id,
+        metadata={
+            "instance_type": req.instance_type,
+            "region": region,
+            "subnet_id": req.subnet_id,
+            "security_group_ids": req.security_group_ids,
+            "workgroup": workgroup,
+            # The runner rebuilds the whole PRA call from the parent, so anything
+            # omitted here is silently skipped rather than failing loudly.
+            "jump_group": req.jump_group,
+            "jumpoint_name": req.jumpoint_name,
+            "pra_credential_ref": req.pra_credential_ref,
+            "children": children,
+        },
+    )
+    return DeployResponse(
+        job_id=parent.id,
+        status="pending",
+        message=f"EC2 deployment queued for {len(names)} instances ({names[0]} … {names[-1]})",
+        count=len(names),
+        batch_id=batch_id,
+        job_ids=[c["job_id"] for c in children],
+        names=names,
+    )
+
+
 @router.post("/deploy", response_model=DeployResponse)
 async def deploy_ami(
     req: DeployRequest,
@@ -411,19 +502,25 @@ async def deploy_ami(
     current_user: User = Depends(require_permission("aws", "write")),
 ):
     """
-    Launch an EC2 instance from an AMI using the AWS API.
+    Launch one or more EC2 instances from an AMI using the AWS API.
     Returns a job_id trackable at /api/jobs/{job_id} or /api/ws/jobs/{job_id}.
+    ``count > 1`` fans out into a batch (see ``_fan_out_batch``).
     """
     workgroup = _validate_workgroup(db, current_user, req.workgroup)
     region = _resolve_region(req.region)
     await _validate_ssh_key_override(req.ssh_key_secret_override)
+
+    if req.count > 1:
+        return await _fan_out_batch(req, db, current_user,
+                                    region=region, workgroup=workgroup)
 
     # Pre-action policy gate (inert unless enabled + this action is gated).
     from ..services import admission_service
     admission_service.enforce(
         "aws:ec2:deploy",
         request={"region": region, "instance_type": req.instance_type,
-                 "image": req.ami_id, "name": req.instance_name},
+                 "image": req.ami_id, "name": req.instance_name,
+                 "count": 1, "batch": False},
         actor=current_user, db=db,
     )
 
@@ -485,6 +582,23 @@ async def bulk_deploy_amis(
     region = _resolve_region(req.region)
     await _validate_ssh_key_override(req.ssh_key_secret_override)
 
+    # Names here are hand-typed per row in the bulk modal, so unlike the count path
+    # they can genuinely repeat. Checked before anything is created.
+    deploy_batch.reject_name_collisions(
+        db, "ec2_deploy", [i.instance_name for i in req.items])
+
+    # Policy gate every item BEFORE the first create_job. This route had no gate at
+    # all, so allowed_regions / instance_size_caps / prod_window silently did not
+    # apply to batches. Per item because each carries its own AMI.
+    await deploy_batch.enforce_admission(
+        "aws:ec2:deploy",
+        requests=[{"region": region, "instance_type": req.instance_type,
+                   "image": item.ami_id, "name": item.instance_name,
+                   "count": len(req.items), "batch": True}
+                  for item in req.items],
+        actor=current_user, db=db,
+    )
+
     # Create one job per instance up front so callers get all job IDs immediately.
     #
     # These are created ``queued``, not ``pending``: the parent ec2_bulk_deploy job
@@ -535,6 +649,12 @@ async def bulk_deploy_amis(
             "subnet_id": req.subnet_id,
             "security_group_ids": req.security_group_ids,
             "workgroup": workgroup,
+            # The runner rebuilds the whole PRA call from the parent, so anything
+            # omitted here is silently skipped rather than failing loudly — which is
+            # exactly what used to happen to these three.
+            "jump_group": req.jump_group,
+            "jumpoint_name": req.jumpoint_name,
+            "pra_credential_ref": req.pra_credential_ref,
             "children": [
                 {"job_id": job_id, "ami_id": item.ami_id,
                  "instance_name": item.instance_name}
@@ -552,7 +672,7 @@ async def bulk_deploy_amis(
         )
         for job_id, item in job_items
     ]
-    return BulkDeployResponse(jobs=results, count=len(results))
+    return BulkDeployResponse(jobs=results, count=len(results), batch_id=batch_id)
 
 
 # ── Deregister AMI ────────────────────────────────────────────────────────────

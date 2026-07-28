@@ -42,7 +42,9 @@ def _install_stubs():
     sys.modules.setdefault("sqlalchemy.orm", sa_orm)
 
     db = types.ModuleType("web_dashboard.database")
-    db.Job = type("Job", (), {})
+    # `id` needs an `in_` for finish_batch_parent's filter expression to evaluate; the
+    # fake query below ignores the result.
+    db.Job = type("Job", (), {"id": types.SimpleNamespace(in_=lambda *a, **k: None)})
     db.AuditLog = type("AuditLog", (), {})
     sys.modules.setdefault("web_dashboard.database", db)
 
@@ -121,6 +123,95 @@ def test_counts_are_coerced_to_int():
     out = js._summarize_statuses([("completed", "4")])
     assert out["by_status"]["completed"] == 4
     assert out["total"] == 4
+
+
+# ── finish_batch_parent ──────────────────────────────────────────────────────
+#
+# A *_bulk_deploy parent exists only to drive its children, so nothing ever gave it a
+# terminal status: the worker sets a job `running` when it claims it and only marks it
+# failed if dispatch RAISES. A batch that finished normally left its parent stuck at
+# `running` 0% until reconcile_stale_jobs eventually failed a batch that had succeeded.
+
+
+class _FakeJob:
+    def __init__(self, job_id, status="completed"):
+        self.id, self.status = job_id, status
+        self.progress_pct = 0
+        self.completed_at = self.updated_at = None
+        self.error_message = None
+        self.metadata_dict = {}
+
+
+class _FakeQuery:
+    def __init__(self, rows, want_one=None):
+        self._rows, self._want_one = rows, want_one
+
+    def filter(self, *a, **k):
+        return self
+
+    def all(self):
+        return self._rows
+
+    def first(self):
+        return self._want_one
+
+
+class _FakeDB:
+    """Returns the child rows for the `.all()` lookup and the parent for `.first()`."""
+    def __init__(self, children, parent):
+        self._children, self._parent = children, parent
+        self.commits = 0
+
+    def query(self, *a, **k):
+        return _FakeQuery(self._children, self._parent)
+
+    def commit(self):
+        self.commits += 1
+
+    def refresh(self, _obj):
+        pass
+
+
+def _run(children_statuses, child_ids=None):
+    children = [_FakeJob(f"c{i}", s) for i, s in enumerate(children_statuses)]
+    parent = _FakeJob("parent", "running")
+    db = _FakeDB(children, parent)
+    ids = child_ids if child_ids is not None else [c.id for c in children]
+    js.finish_batch_parent(db, "parent", ids)
+    return parent
+
+
+def test_a_fully_successful_batch_completes_its_parent():
+    parent = _run(["completed", "completed", "completed"])
+    assert parent.status == "completed"
+    assert parent.progress_pct == 100
+    assert parent.metadata_dict["batch_total"] == 3
+    assert parent.metadata_dict["batch_completed"] == 3
+    assert parent.metadata_dict["batch_failed"] == 0
+
+
+def test_a_partly_failed_batch_still_completes_its_parent():
+    """The parent ran to the end; one VM failing is the child's status to carry, not
+    the parent's. Marking the parent failed would imply the batch never ran."""
+    parent = _run(["completed", "failed", "completed"])
+    assert parent.status == "completed"
+    assert parent.metadata_dict["batch_failed"] == 1
+    assert parent.metadata_dict["batch_completed"] == 2
+
+
+def test_a_wholly_failed_batch_fails_its_parent():
+    parent = _run(["failed", "failed"])
+    assert parent.status == "failed"
+    assert "2 instance(s)" in (parent.error_message or "")
+    assert parent.metadata_dict["batch_failed"] == 2
+
+
+def test_an_empty_child_list_still_closes_the_parent():
+    """The whole point is that the parent never stays `running`. An empty or
+    unresolvable child list must not leave it stuck."""
+    parent = _run([], child_ids=[])
+    assert parent.status == "completed"
+    assert parent.metadata_dict["batch_total"] == 0
 
 
 if __name__ == "__main__":

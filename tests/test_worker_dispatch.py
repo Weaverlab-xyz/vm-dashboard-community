@@ -33,7 +33,7 @@ _WORKER = os.path.join(_ROOT, "web_dashboard", "jobs_worker.py")
 
 
 def _src():
-    return open(_WORKER).read()
+    return open(_WORKER, encoding="utf-8").read()
 
 
 def _handled_types():
@@ -131,7 +131,7 @@ def test_no_handled_type_is_both_claimable_and_dispatched_in_request():
     handled = _handled_types()
     violations = []
     for path in _api_modules():
-        tree = ast.parse(open(path).read(), path)
+        tree = ast.parse(open(path, encoding="utf-8").read(), path)
         for fn in ast.walk(tree):
             if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
@@ -156,7 +156,7 @@ def _parent_child_endpoints():
     parent's metadata *is* the declaration that something other than the runner will
     drive them."""
     for path in _api_modules():
-        tree = ast.parse(open(path).read(), path)
+        tree = ast.parse(open(path, encoding="utf-8").read(), path)
         for fn in ast.walk(tree):
             if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
@@ -187,7 +187,13 @@ def test_children_of_a_parent_job_are_created_unclaimable():
     caught by nothing, and every VM in the batch gets created twice.
 
     Checked structurally against any endpoint that names child job ids in a parent's
-    metadata, so a future bulk endpoint is covered the day it is written."""
+    metadata, so a future bulk endpoint is covered the day it is written.
+
+    Because the walk is per FUNCTION, the count>1 fan-out has to live in its own
+    module-level `_fan_out_batch` rather than as an `if` inside the deploy route: a
+    runtime branch is invisible here, so the single deploy's `pending` create_job in
+    the same function would read as a violation. Nesting the helper doesn't help
+    either — ast.walk descends into nested defs and re-attributes them to the parent."""
     found, violations = 0, []
     for module, fn_name, parents, others in _parent_child_endpoints():
         found += 1
@@ -196,9 +202,10 @@ def test_children_of_a_parent_job_are_created_unclaimable():
                 violations.append(
                     f"{module}:{fn_name} creates {job_type} as {status!r} while also "
                     "creating a parent that lists it as a child")
-    assert found >= 2, (
-        f"expected the AWS and Azure bulk endpoints to match this shape, found {found} — "
-        "the rule may have stopped matching rather than started passing")
+    assert found >= 8, (
+        f"expected all eight batch paths to match this shape — a count fan-out and a "
+        f"multi-select bulk route for each of the four clouds — found {found}; the rule "
+        "may have stopped matching rather than started passing")
     assert not violations, "; ".join(violations)
 
 
