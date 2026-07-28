@@ -83,13 +83,38 @@ know **most of them are shared infrastructure, not your compose deploys**:
   runner** tasks. On GCE the rows carry a purpose badge: `Compose` (your deploy,
   `labels.purpose=compose`) vs `Gateway` (internal, `labels.purpose=bt-jumpoint`,
   auto-recreated).
-- **GCP Cloud Run Jobs** — a **read-only** view of the dashboard-managed *runner* jobs
+- **GCP Cloud Run Jobs** — a view of the dashboard-managed *runner* jobs
   (Ansible / promote / k8s) that are **currently in flight**; runners that have finished are
   filtered out, so an empty list means nothing is running. Cloud Run is **not** a compose
   deploy target.
 
 So a container appearing here that you didn't deploy is usually the gateway or a runner —
 leave it alone; the dashboard manages its lifecycle.
+
+### Reaping stranded runner jobs
+
+A Cloud Run runner deletes its own job when the execution ends, but that delete is
+best-effort — it sits in a `finally`, so restarting or redeploying the worker between the
+execution finishing and the delete landing strands the job. Filtering those out of the list
+above hides them; it doesn't reclaim them, and they accumulate in the project.
+
+So the listing also **reaps** as it goes: it already walks every runner region and reads
+every job's state, and it deletes the finished dashboard-managed jobs it finds. Three guards
+bound what it can touch — the job must be labelled `managed-by=vm-dashboard`, its execution
+must have **finished** (a pending or running runner is never touched, and a job whose state
+can't be read counts as running), and it must have been finished for at least
+`gcp_cloud_run_job_reap_age_minutes` (default 60, floored at 30). That age guard keeps the
+sweep clear of a live runner's own cleanup, which fetches logs before deleting. Failures are
+logged and never surfaced — a delete that 403s must not blank the panel.
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `gcp_cloud_run_job_reap_enabled` | `true` | Automatic sweep during the listing. Turning it off does **not** disable the manual action below. |
+| `gcp_cloud_run_job_reap_age_minutes` | `60` | How long a finished job must sit before it may be reaped. Values below 30 are raised to 30. |
+
+To clear a backlog on demand — after a redeploy, or when the automatic sweep is off —
+`POST /api/containers/gce-cloud-run-jobs/reap` (needs `containers:delete`) runs the same
+sweep explicitly and reports what it deleted.
 
 ---
 

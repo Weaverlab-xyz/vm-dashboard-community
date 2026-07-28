@@ -794,6 +794,12 @@ class Settings(BaseSettings):
     # gcp_ansible_vpc_connector when set. Egress stays private-ranges-only.
     gcp_run_network: str = ""                # VPC name, e.g. "dashboard-sandbox-vpc"
     gcp_run_subnetwork: str = ""             # subnet in the runner's region, e.g. "dashboard-sandbox-jumpoint-subnet"
+    # Stranded-runner reaper. Each runner deletes its own Cloud Run Job in a `finally`;
+    # a worker restart between the execution ending and that delete landing strands the
+    # job in the project. The reaper is the safety net (see gcp_service). Disabling it
+    # only stops the automatic sweep — the Containers reap action still works.
+    gcp_cloud_run_job_reap_enabled: bool = True
+    gcp_cloud_run_job_reap_age_minutes: int = 60   # must exceed a runner's whole lifetime
 
     # Ephemeral cloud secrets for managed-account checkout on the ECS / Cloud Run
     # runners. OFF by default: a checked-out Password Safe credential is written to

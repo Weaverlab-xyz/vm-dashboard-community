@@ -766,7 +766,8 @@ async def stop_gce_compose_endpoint(
 # ── GCP Cloud Run runner jobs (Ansible / promote / k8s) ──────────────────────
 # An IN-FLIGHT view — the GCP analogue of the ECS-tasks / ACI panels. Runners whose
 # execution has finished are filtered out in the service (their self-delete is
-# best-effort, so finished jobs linger in the project). Read-only.
+# best-effort, so finished jobs linger in the project). Hiding them is not reclaiming
+# them, so the reap action below deletes the strays the listing hides.
 
 @router.get("/gce-cloud-run-jobs", response_model=CloudRunJobListResponse)
 async def list_gce_cloud_run_jobs_endpoint(
@@ -797,6 +798,40 @@ async def list_gce_cloud_run_jobs_endpoint(
         return CloudRunJobListResponse(jobs=jobs, project_id=project_id, count=len(jobs))
     except GCPError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
+
+
+@router.post("/gce-cloud-run-jobs/reap", response_model=ContainerActionResponse)
+async def reap_gce_cloud_run_jobs_endpoint(
+    current_user: User = Depends(require_permission("containers", "delete")),
+):
+    """Delete runner jobs stranded in the project by a self-delete that never landed.
+
+    Maintenance action. The listing above already reaps opportunistically; this is
+    the explicit form, for clearing a backlog on demand (and the only form when
+    `gcp_cloud_run_job_reap_enabled` is off). Only finished, dashboard-managed jobs
+    past the age guard are touched — a pending or running runner is never reaped."""
+    from ..services import gcp_service
+    from ..services.gcp_service import GCPError
+
+    project_id = _gcp_project_id()
+    if not project_id:
+        raise HTTPException(status_code=503, detail="GCP project not configured.")
+    try:
+        outcome = await gcp_service.reap_stranded_cloud_run_jobs(project_id)
+    except GCPError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
+    reaped = outcome.get("reaped") or []
+    failed = outcome.get("failed") or 0
+    if not reaped and not failed:
+        return ContainerActionResponse(ok=True, message="No stranded runner jobs to reap")
+    detail = ", ".join(f"{j['name']} ({j['region']})" for j in reaped)
+    message = f"Reaped {len(reaped)} stranded runner job(s)"
+    if detail:
+        message += f": {detail}"
+    if failed:
+        message += f" — {failed} could not be deleted (see logs)"
+    return ContainerActionResponse(ok=True, message=message)
 
 
 # ── Rancher management node (privileged container on GCE COS) ────────────────
