@@ -410,8 +410,11 @@
           <select x-model="deployForm.subnetwork"
                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
             <option value="">— default network —</option>
+            <!-- Region in the label: the sandbox uses ONE subnet name in every region,
+                 so without it two different subnets read identically. -->
             <template x-for="sn in networkOpts.subnetworks" :key="sn.self_link">
-              <option :value="sn.self_link" x-text="sn.name + ' (' + sn.ip_cidr_range + ')'"></option>
+              <option :value="sn.self_link"
+                      x-text="sn.name + ' (' + [sn.ip_cidr_range, networkOpts.region].filter(Boolean).join(', ') + ')'"></option>
             </template>
           </select>
         </div>
@@ -637,7 +640,7 @@
           </div>
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">Zone <span class="text-gray-400 font-normal">(shared)</span></label>
-            <select x-model="bulkModal.zone"
+            <select x-model="bulkModal.zone" @change="onBulkZoneChange()"
                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500">
               <option value="">— use default zone —</option>
               <template x-for="z in networkOpts.zones || []" :key="z">
@@ -668,7 +671,8 @@
                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500">
             <option value="">— configured default —</option>
             <template x-for="s in networkOpts.subnetworks || []" :key="s.self_link">
-              <option :value="s.self_link" x-text="s.name"></option>
+              <option :value="s.self_link"
+                      x-text="s.name + (networkOpts.region ? ' (' + networkOpts.region + ')' : '')"></option>
             </template>
           </select>
         </div>
@@ -1178,8 +1182,16 @@ function gcpDashboard() {
         const q = zone ? '?zone=' + encodeURIComponent(zone) : '';
         const res = await API.get('/api/gcp/network-options' + q);
         this.networkOpts = res;
-        if (res.machine_types?.length && !this.deployForm.machine_type) {
-          this.deployForm.machine_type = res.machine_types.includes('e2-medium') ? 'e2-medium' : res.machine_types[0];
+        // Machine types are zone-scoped like subnets are region-scoped, so a selection
+        // the new zone doesn't offer goes back to the default here — otherwise the form
+        // shows an empty picker and submits a type GCE 400s on. Also seeds the initial
+        // blank, which is all this used to do.
+        const types = res.machine_types || [];
+        if (types.length) {
+          const fallback = types.includes('e2-medium') ? 'e2-medium' : types[0];
+          for (const form of [this.deployForm, this.bulkModal]) {
+            if (form && !types.includes(form.machine_type)) form.machine_type = fallback;
+          }
         }
       } catch (_) {}
     },
@@ -1188,6 +1200,16 @@ function gcpDashboard() {
     async onZoneChange() {
       this.deployForm.subnetwork = '';
       await this.loadNetworkOpts(this.deployForm.zone);
+    },
+
+    // Same for the bulk modal's shared Zone. Without this the Subnetwork picker keeps
+    // listing the previous region's subnets — and because the sandbox names its subnet
+    // identically in every region, an operator switching to us-east1-b would send a
+    // us-central1 subnet that looks right and fails every VM in the batch with GCE's
+    // "Scope of the specified subnetwork doesn't match the scope of the instance".
+    async onBulkZoneChange() {
+      this.bulkModal.subnetwork = '';
+      await this.loadNetworkOpts(this.bulkModal.zone);
     },
 
     async loadPraPickers() {
@@ -1229,6 +1251,12 @@ function gcpDashboard() {
       this.sshKeyLoading = true;
       this.deployModal   = true;
       this.loadPraPickers();
+      // The form above reset zone to the configured default, so re-scope the pickers to
+      // its region too — otherwise a previous deploy in another zone leaves the
+      // Subnetwork list pointing at that region and the pair mismatches (the mirror of
+      // the bulk-modal case in onBulkZoneChange). Not awaited: the dropdowns are
+      // reactive and the selection is already blank, so nothing stale can be submitted.
+      this.loadNetworkOpts(this.deployForm.zone);
 
       // Load the SSH-key-secret override candidate list (best-effort)
       API.get('/api/gcp/secrets/ssh-keys')
@@ -1268,7 +1296,11 @@ function gcpDashboard() {
         register_in_entitle: false, register_in_passwordsafe: false,
         submitting: false, error: '',
       };
-      if (!this.networkOpts.zones) await this.loadNetworkOpts();
+      // The modal opens on the configured default zone, so the pickers have to be
+      // scoped back to ITS region — a previous deploy may have left networkOpts on
+      // another one. (Unconditional: `zones` is initialised to [], so the old
+      // load-once guard never fired anyway.)
+      await this.loadNetworkOpts(this.bulkModal.zone);
     },
 
     async submitBulkDeploy() {

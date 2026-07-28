@@ -10,6 +10,13 @@ bare name is rejected at insert time with:
 ``_qualify_subnetwork`` / ``_qualify_network`` normalize these to region/global
 partial self-links (region derived from the instance zone) before the insert.
 
+The second failure mode here is the opposite one: a subnetwork that IS a self-link but
+for the WRONG region. The picker offers whichever region was last loaded, and the
+sandbox names its subnet identically in every region, so a bulk deploy into us-east1-b
+could ship a us-central1 self-link — GCE then rejects every VM in the batch with
+"Scope of the specified subnetwork doesn't match the scope of the instance".
+``subnetwork_region`` is what lets the API reject that at request time instead.
+
 Run: python tests/test_gcp_subnetwork_qualify.py   (or under pytest)
 """
 import os
@@ -21,6 +28,7 @@ try:
     from web_dashboard.services.gcp_service import (
         _qualify_subnetwork,
         _qualify_network,
+        subnetwork_region,
     )
 except Exception as exc:  # pragma: no cover — deps absent outside CI
     try:
@@ -56,6 +64,26 @@ def test_already_qualified_subnet_passthrough():
 
 def test_empty_subnet_passthrough():
     assert _qualify_subnetwork("", PROJECT, "us-east1-b") == ""
+
+
+def test_subnetwork_region_reads_the_region_out_of_a_self_link():
+    # The exact value the failed bulk deploy sent, against zone us-east1-b.
+    full = (f"https://www.googleapis.com/compute/v1/projects/{PROJECT}"
+            f"/regions/us-central1/subnetworks/dashboard-sandbox-vm-subnet")
+    assert subnetwork_region(full) == "us-central1"
+    assert subnetwork_region(
+        f"projects/{PROJECT}/regions/us-east1/subnetworks/vm-subnet") == "us-east1"
+    assert subnetwork_region("regions/europe-west4/subnetworks/vm-subnet") == "europe-west4"
+
+
+def test_subnetwork_region_is_blank_when_there_is_none():
+    # A bare name and a blank value are region-qualified from the instance zone
+    # downstream, so they must report "" — no region, therefore no conflict.
+    assert subnetwork_region("dashboard-sandbox-vm-subnet") == ""
+    assert subnetwork_region("") == ""
+    assert subnetwork_region(None) == ""
+    # Malformed refs must not raise — a trailing "regions" with nothing after it.
+    assert subnetwork_region(f"projects/{PROJECT}/regions") == ""
 
 
 def test_bare_network_is_global_qualified():
