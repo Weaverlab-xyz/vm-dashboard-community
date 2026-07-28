@@ -372,7 +372,7 @@
           </div>
           <div>
             <label class="block text-xs font-medium text-gray-700 mb-1">Location</label>
-            <select x-model="deployModal.location" @change="loadNetworkOpts(true, deployModal.location)" class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm">
+            <select x-model="deployModal.location" @change="onDeployLocationChange()" class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm">
               <template x-for="loc in networkOpts.locations" :key="loc">
                 <option :value="loc" x-text="loc"></option>
               </template>
@@ -395,8 +395,11 @@
           <label class="block text-xs font-medium text-gray-700 mb-1">Subnet <span class="text-red-500">*</span></label>
           <select x-model="deployModal.subnetId" class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm">
             <option value="">Select a subnet…</option>
+            <!-- Region in the label: the sandbox names its VNet/subnet identically in
+                 every region it is run in, so without it two different subnets read
+                 the same. -->
             <template x-for="s in networkOpts.subnets" :key="s.id">
-              <option :value="s.id" x-text="s.vnet_name + ' / ' + s.name + (s.address_prefix ? ' (' + s.address_prefix + ')' : '')"></option>
+              <option :value="s.id" x-text="s.vnet_name + ' / ' + s.name + ' (' + [s.address_prefix, networkOpts.location].filter(Boolean).join(', ') + ')'"></option>
             </template>
           </select>
         </div>
@@ -583,7 +586,7 @@
           </div>
           <div>
             <label class="block text-xs font-medium text-gray-700 mb-1">Location</label>
-            <select x-model="bulkModal.location" @change="loadNetworkOpts(true, bulkModal.location)" class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm">
+            <select x-model="bulkModal.location" @change="onBulkLocationChange()" class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm">
               <template x-for="loc in networkOpts.locations" :key="loc">
                 <option :value="loc" x-text="loc"></option>
               </template>
@@ -606,8 +609,9 @@
           <label class="block text-xs font-medium text-gray-700 mb-1">Subnet</label>
           <select x-model="bulkModal.subnetId" class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm">
             <option value="">Select a subnet…</option>
+            <!-- Region in the label — see the single-deploy picker above. -->
             <template x-for="s in networkOpts.subnets" :key="s.id">
-              <option :value="s.id" x-text="s.vnet_name + ' / ' + s.name"></option>
+              <option :value="s.id" x-text="s.vnet_name + ' / ' + s.name + (networkOpts.location ? ' (' + networkOpts.location + ')' : '')"></option>
             </template>
           </select>
         </div>
@@ -1257,6 +1261,28 @@ function azureDashboard() {
       await this.loadNetworkOpts(true);
     },
 
+    // Subnets and NSGs are regional: the ones listed for the previous location do not
+    // exist in the new one, so reloading the options is not enough — the *selection*
+    // has to go too. An Azure subnet id embeds the VNet's resource group rather than
+    // its region, and the sandbox names its VNet/subnet identically in every region,
+    // so a carried-over pick looks right and is rejected only once the NIC is created:
+    // "InvalidResourceReference". The deploy routes now reject it up front too
+    // (_reject_cross_region_network in api/azure.py) — this keeps the form from
+    // offering the mismatch in the first place.
+    async onDeployLocationChange() {
+      this.deployModal.subnetId = '';
+      this.deployModal.nsgIds = [];
+      await this.loadNetworkOpts(true, this.deployModal.location);
+    },
+
+    // Same for the bulk modal's shared Location, where the cost is higher: a stale
+    // subnet there fails every VM in the batch, after all N child job rows exist.
+    async onBulkLocationChange() {
+      this.bulkModal.subnetId = '';
+      this.bulkModal.nsgIds = [];
+      await this.loadNetworkOpts(true, this.bulkModal.location);
+    },
+
     async loadMarketplace() {
       this.marketplaceLoading = true;
       try {
@@ -1475,7 +1501,7 @@ function azureDashboard() {
       }
     },
 
-    openBulkDeployModal() {
+    async openBulkDeployModal() {
       const selected = this.privateImages.filter(i => this.selectedImages.includes(i.resource_id));
       this.bulkModal = {
         open: true,
@@ -1509,6 +1535,19 @@ function azureDashboard() {
         .then(r => { this.bulkModal.sshKeySecrets = r?.secrets || []; })
         .catch(() => { this.bulkModal.sshKeySecrets = []; });
       if (this.bulkHasLinux()) this.fetchBulkKeyvaultKey();
+      // The modal opens on the header region, so the pickers have to be re-scoped to
+      // ITS subnets/NSGs — networkOpts is shared with the single-deploy modal, and a
+      // Location change there earlier in the session leaves it on another region (the
+      // mirror of onBulkLocationChange). Safe to run after the modal is shown: both
+      // selections start blank, so nothing stale can be submitted while it is in
+      // flight, and the dropdowns fill in reactively.
+      await this.loadNetworkOpts(false, this.bulkModal.location);
+      // vmSize was seeded from the pre-reload list; VM sizes are location-scoped too,
+      // so a size the new region doesn't offer would submit blank.
+      const sizes = this.networkOpts.vm_sizes || [];
+      if (sizes.length && !sizes.includes(this.bulkModal.vmSize)) {
+        this.bulkModal.vmSize = sizes[0];
+      }
     },
 
     async fetchBulkKeyvaultKey() {
