@@ -285,13 +285,60 @@ async def connection(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+class RegisterDatabaseRequest(BaseModel):
+    """A database that already exists. No Terraform inputs — the dashboard is recording
+    it, not building it."""
+    engine: str
+    cloud: str                       # aws | azure | gcp | oci | local ('local' = on-prem)
+    host: str
+    port: Optional[int] = None
+    db_name: str = ""
+    region: str = ""
+    instance_id: str = ""
+    # Password Safe system + account. The credential itself is checked out at run time
+    # and never stored, so only ids and a name travel.
+    managed_account: dict
+
+
+@router.post("/register", status_code=201)
+async def register_database(
+    req: RegisterDatabaseRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("cloud_database", "write")),
+):
+    """Record an existing database so it can be a Config Management target — the
+    database counterpart of registering a Kubernetes cluster from a kubeconfig."""
+    _require_enabled()
+    try:
+        return cloud_database_service.register_database(
+            db, engine=req.engine, cloud=req.cloud, host=req.host, port=req.port,
+            db_name=req.db_name, managed_account=req.managed_account or {},
+            created_by=current_user.username, region=req.region,
+            instance_id=req.instance_id,
+        )
+    except cloud_database_service.CloudDatabaseError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.delete("/{db_id}")
 async def decommission_database(
     db_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("cloud_database", "delete")),
 ):
+    """Destroy a provisioned database, or deregister a registered one.
+
+    The verb follows ``source``, as it does for Kubernetes clusters: the dashboard holds
+    Terraform state for what it provisioned and nothing at all for what it was merely
+    told about, so deleting someone else's database is never the right action here."""
     _require_enabled()
+    row = cloud_database_service.get_database(db, db_id)
+    if row is not None and row.get("source") == "registered":
+        try:
+            cloud_database_service.deregister_database(db, db_id)
+            return {"id": db_id, "status": "deregistered"}
+        except cloud_database_service.CloudDatabaseError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     try:
         # start_decommission creates the pending clouddb_decommission job; the job
         # runner claims it and drives the teardown (no payload needed — the run fn
