@@ -478,6 +478,66 @@ async def get_network_options(project_id: str, region: str, zone: str,
     return await asyncio.to_thread(_get_network_options_sync, project_id, region, zone, zone_regions)
 
 
+def reserved_cidrs(project_id: str = "") -> set:
+    """Every IP range already claimed in the project — subnetworks (all regions,
+    primary + secondary) plus the private control-plane block of every GKE cluster.
+
+    Feeds the GKE master-CIDR allocator (``k8s_service._gke_master_cidr``): GCP
+    rejects a control-plane range that overlaps anything in the VPC the cluster
+    touches, and the check is VPC-wide, so a range in use by a cluster in ANOTHER
+    region still conflicts.
+
+    The **cluster scan is the load-bearing leg**. GCP blames the conflict on the
+    system-managed ``gke-<cluster>-<hash>-pe-subnet`` that backs a private control
+    plane, but that subnet is NOT returned by ``subnetworks.list`` (verified
+    against a live conflict) — only ``privateClusterConfig.masterIpv4CidrBlock``
+    exposes the range, including for clusters this dashboard never provisioned or
+    orphaned from a failed apply. The subnetwork scan is defense in depth: it
+    keeps the allocator off real subnets if the base block is ever pointed at
+    space the sandbox uses.
+
+    Best-effort and project-wide (over-reserving only shifts the allocator to a
+    later slot): each leg is independent and a failure is logged, not raised —
+    the caller still gets whatever the other leg found. Synchronous; the caller
+    is the sync provision path."""
+    project_id = project_id or _gcp_project()
+    out: set = set()
+    if not project_id:
+        return out
+
+    try:
+        _require_compute()
+        from google.cloud import compute_v1
+        client = compute_v1.SubnetworksClient(credentials=_gcp_creds())
+        # aggregated_list yields (scope, SubnetworksScopedList) for every region in
+        # one call — a per-region list would miss the cross-region conflicts.
+        for _scope, scoped in client.aggregated_list(project=project_id, timeout=30):
+            for sn in (scoped.subnetworks or []):
+                if sn.ip_cidr_range:
+                    out.add(sn.ip_cidr_range)
+                for sr in (sn.secondary_ip_ranges or []):
+                    if sr.ip_cidr_range:
+                        out.add(sr.ip_cidr_range)
+    except Exception as exc:
+        logger.warning("GCP reserved_cidrs: subnetwork scan failed (%s)", exc)
+
+    try:
+        session = _authed_session()
+        # locations/- = every zonal and regional cluster in the project.
+        r = session.get(
+            f"https://container.googleapis.com/v1/projects/{project_id}/locations/-/clusters",
+            timeout=30)
+        r.raise_for_status()
+        for cluster in (r.json().get("clusters") or []):
+            block = (cluster.get("privateClusterConfig") or {}).get("masterIpv4CidrBlock")
+            if block:
+                out.add(block)
+    except Exception as exc:
+        logger.warning("GCP reserved_cidrs: GKE cluster scan failed (%s)", exc)
+
+    return out
+
+
 # ── Secret Manager ────────────────────────────────────────────────────────────
 
 def _get_secret_sync(project_id: str, secret_name: str) -> str:

@@ -88,10 +88,17 @@ variable "services_cidr" {
   description = "Secondary range for services (VPC-native)"
 }
 
+# GKE turns this into a system-managed 'gke-<cluster>-<hash>-pe-subnet' subnetwork
+# in the cluster's VPC, and subnet ranges must not overlap ANYWHERE in that VPC —
+# other regions included. Every cluster sharing a VPC (co-located, or peered into
+# the sandbox) therefore needs a DISTINCT /28, else the apply fails ~40s in with
+# "Conflicting IP cidr range … conflicts with existing subnetwork". The dashboard
+# allocates one per cluster (k8s_service._gke_master_cidr, from
+# gcp_gke_master_cidr_base); the default below only suits a single-cluster VPC.
 variable "master_cidr" {
   type        = string
   default     = "172.16.8.0/28"
-  description = "RFC-1918 /28 for the private control-plane endpoint"
+  description = "RFC-1918 /28 for the private control-plane endpoint — unique per cluster within the VPC"
 }
 
 # Public API endpoint restricted to these CIDRs. Empty = open to all.
