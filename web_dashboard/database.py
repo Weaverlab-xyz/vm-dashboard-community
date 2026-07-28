@@ -699,6 +699,48 @@ class K8sCluster(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
+class Gateway(Base):
+    """Inventory of dashboard-deployed BeyondTrust Gateway hosts.
+
+    Until now a gateway was found, not tracked: the dashboard auto-ensured exactly
+    one per cloud by a fixed name tag and reference-counted it against the resources
+    using it. That answers "is there a gateway?" but not "what gateways do we have",
+    which is the question an operator running several for session load actually has.
+
+    Two kinds of row, distinguished by ``managed``:
+
+      * ``managed=True`` — the auto-ensured shared gateway. Still reference-counted
+        and still torn down when idle; the row is a record of it, not the control.
+        Adopted on first ensure, so a gateway that already exists gets registered
+        rather than duplicated.
+      * ``managed=False`` — deployed on request from the Gateways tab. Never
+        reference-counted, never auto-torn-down, no cap: three in us-central1 and
+        two in us-east-2 is a normal configuration. Removed only when asked.
+
+    ``name`` is the cloud resource name (EC2 ``Name`` tag / GCE instance / Azure VM)
+    and is what keeps the two kinds apart in the cloud itself — the managed teardown
+    acts on the managed name alone, so it can never reach a user-deployed host.
+    """
+    __tablename__ = "gateways"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    cloud = Column(String(20), nullable=False, index=True)   # aws | azure | gcp
+    region = Column(String(40), nullable=True, index=True)
+    zone = Column(String(40), nullable=True)                 # GCP/Azure placement
+    name = Column(String(200), nullable=False, index=True)   # cloud resource name
+    status = Column(String(32), nullable=False, default="provisioning", index=True)
+    # provisioning | running | error | deleting | deleted
+    managed = Column(Boolean, nullable=False, default=False, index=True)
+
+    host_id = Column(String(128), nullable=True)             # EC2 instance id / VM name
+    egress_ip = Column(String(45), nullable=True)            # what a node firewall allows
+    deploy_job_id = Column(String(36), nullable=True)
+    error = Column(Text, nullable=True)
+
+    created_by = Column(String(100), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 # ========== DATABASE UTILITIES ==========
 
 def get_db() -> Session:

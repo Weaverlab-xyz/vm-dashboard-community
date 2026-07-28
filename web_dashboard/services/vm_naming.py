@@ -77,6 +77,18 @@ def suffix_width(count: int, start: int = 1) -> int:
     return max(2, len(str(start + max(int(count), 1) - 1)))
 
 
+def name_limit(provider: str) -> int:
+    """The length an expanded name must fit in for ``provider``.
+
+    Public because callers that name a *single* resource still need the limit:
+    ``validate_base`` deliberately doesn't apply it (a base is allowed to be long
+    enough that only the expansion trims it), and ``expand`` bakes it into a suffix
+    budget. A caller naming one thing has neither."""
+    if provider not in _LIMITS:
+        raise VMNameError(f"Unknown provider {provider!r}.")
+    return _LIMITS[provider]
+
+
 def validate_base(base: str, provider: str) -> str:
     """Return the stripped base, or raise VMNameError if it can never expand legally.
 
