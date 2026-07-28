@@ -890,14 +890,8 @@ def _rancher_deploy_regions() -> list[str]:
     """Regions the Rancher node can be deployed into: the configured default region
     plus every region that has a per-region config set (`gcp_region_configs`), default
     first. Restricting to configured regions keeps the operator from picking a region
-    with no subnet (the node's subnet is regional). Mirrors how api/gcp.py assembles
-    its zone-region set from `load_region_configs`."""
-    default = region_catalog.normalize("gcp", region_catalog.default_region("gcp"))
-    out = [default]
-    for r in sorted(region_config.load_region_configs("gcp").keys()):
-        if r and r not in out:
-            out.append(r)
-    return out
+    with no subnet (the node's subnet is regional)."""
+    return region_config.deployable_regions("gcp")
 
 
 @router.post("/rancher/deploy", response_model=DeployContainerResponse)
@@ -930,7 +924,7 @@ async def deploy_rancher_node(
             raise HTTPException(status_code=400, detail=f"Invalid GCP zone: {req.zone!r}")
         zone = region_catalog.normalize("gcp", req.zone)
         # A zone must sit inside the chosen region (when a region was also given).
-        if meta.get("region") and region_catalog.region_from_zone(zone) != meta["region"]:
+        if meta.get("region") and not region_config.zone_in_region(zone, meta["region"]):
             raise HTTPException(
                 status_code=400,
                 detail=f"Zone {zone!r} is not in region {meta['region']!r}.")
@@ -1077,16 +1071,9 @@ async def get_portainer_node_deploy_options(
 
 
 def _portainer_deploy_regions() -> list[str]:
-    """Regions the Portainer node can be deployed into: the configured default region
-    plus every region that has a per-region config set (`gcp_region_configs`), default
-    first. Restricting to configured regions keeps the operator from picking a region
-    with no subnet. Mirrors :func:`_rancher_deploy_regions`."""
-    default = region_catalog.normalize("gcp", region_catalog.default_region("gcp"))
-    out = [default]
-    for r in sorted(region_config.load_region_configs("gcp").keys()):
-        if r and r not in out:
-            out.append(r)
-    return out
+    """Regions the Portainer node can be deployed into — same rule as
+    :func:`_rancher_deploy_regions` (the node's subnet is regional)."""
+    return region_config.deployable_regions("gcp")
 
 
 @router.post("/portainer/node/deploy", response_model=DeployContainerResponse)
@@ -1112,7 +1099,7 @@ async def deploy_portainer_node(
             raise HTTPException(status_code=400, detail=f"Invalid GCP zone: {req.zone!r}")
         zone = region_catalog.normalize("gcp", req.zone)
         # A zone must sit inside the chosen region (when a region was also given).
-        if meta.get("region") and region_catalog.region_from_zone(zone) != meta["region"]:
+        if meta.get("region") and not region_config.zone_in_region(zone, meta["region"]):
             raise HTTPException(
                 status_code=400,
                 detail=f"Zone {zone!r} is not in region {meta['region']!r}.")

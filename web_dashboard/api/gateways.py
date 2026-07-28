@@ -20,7 +20,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ..database import User, get_db
-from ..services import gateway_service, job_service
+from ..services import gateway_service, job_service, region_catalog, region_config
 from ..services.gateway_service import GatewayError
 from .auth import get_current_user, require_permission
 
@@ -33,6 +33,39 @@ class DeployGatewayRequest(BaseModel):
     region: str = ""
     zone: str = ""
     name: str = ""
+
+
+def _placement(req: "DeployGatewayRequest") -> tuple[str, str]:
+    """Validate and normalise the requested (region, zone) for ``req.cloud``.
+
+    The region only reaches the cloud SDKs by way of the per-region config lookup, so
+    a malformed one used to surface as a confusing resource error much later. The
+    zone/region cross-check matters more than it looks: the GCP gateway's subnet is
+    derived from its *zone*, so a zone in another region would quietly relocate the
+    host and ignore the chosen region.
+
+    Blank stays blank — that means "the configured default", resolved at deploy time.
+    """
+    region = ""
+    if req.region.strip():
+        if not region_catalog.validate(req.cloud, req.region):
+            raise HTTPException(status_code=400,
+                                detail=f"Invalid {req.cloud} region '{req.region}'.")
+        region = region_catalog.normalize(req.cloud, req.region)
+
+    # Only GCP places the host in a zone; the other clouds have no use for one.
+    if req.cloud != "gcp" or not req.zone.strip():
+        return region, ""
+    if not region_catalog.validate_zone(req.zone):
+        raise HTTPException(status_code=400, detail=f"Invalid GCP zone '{req.zone}'.")
+    zone = region_catalog.normalize("gcp", req.zone)
+    if region and not region_config.zone_in_region(zone, region):
+        raise HTTPException(
+            status_code=400,
+            detail=(f"Zone '{zone}' is not in region '{region}'. The gateway's subnet "
+                    f"follows its zone, so it would come up outside '{region}'."),
+        )
+    return region, zone
 
 
 @router.get("")
@@ -71,6 +104,7 @@ async def deploy_gateway(
     function of session load, which the dashboard can't see."""
     if req.cloud not in gateway_service.CLOUDS:
         raise HTTPException(status_code=400, detail=f"Unknown cloud '{req.cloud}'.")
+    region, zone = _placement(req)
     try:
         name = gateway_service.validate_name(db, req.cloud, req.name)
     except GatewayError as e:
@@ -79,8 +113,8 @@ async def deploy_gateway(
     from ..database import Gateway
     import uuid as _uuid
     row = Gateway(
-        id=str(_uuid.uuid4()), cloud=req.cloud, region=req.region or None,
-        zone=req.zone or None, name=name, status="provisioning", managed=False,
+        id=str(_uuid.uuid4()), cloud=req.cloud, region=region or None,
+        zone=zone or None, name=name, status="provisioning", managed=False,
         created_by=current_user.username,
     )
     db.add(row)
@@ -94,8 +128,8 @@ async def deploy_gateway(
             "job_type": "gateway_deploy",
             "gateway_id": row.id,
             "cloud": req.cloud,
-            "region": req.region,
-            "zone": req.zone,
+            "region": region,
+            "zone": zone,
             "name": name,
         },
     )
@@ -104,7 +138,7 @@ async def deploy_gateway(
 
     job_service.log_audit(
         db, current_user.username, "gateway_deploy",
-        details={"cloud": req.cloud, "region": req.region, "name": name},
+        details={"cloud": req.cloud, "region": region, "name": name},
     )
     return {"job_id": job.id, "gateway_id": row.id, "name": name, "status": "pending"}
 
