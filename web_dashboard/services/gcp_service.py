@@ -588,6 +588,27 @@ def _qualify_subnetwork(subnetwork: str, project_id: str, zone: str) -> str:
     return f"projects/{project_id}/regions/{region}/subnetworks/{subnetwork}"
 
 
+def subnetwork_region(subnetwork: str) -> str:
+    """The region baked into a subnetwork ref, or "" when it carries none.
+
+    Reads the ``regions/<region>/subnetworks/<name>`` segment of a full or partial
+    self-link. A bare name has no region (``_qualify_subnetwork`` derives one from the
+    instance zone), so it returns "" — callers must treat that as "no conflict", not
+    as a mismatch.
+
+    Exists so a deploy can be rejected at request time when the picked subnet lives in
+    a different region than the target zone: GCE only reports that as an opaque
+    "Scope of the specified subnetwork doesn't match the scope of the instance" 400
+    once the job is already running, and the sandbox names its subnet identically in
+    every region, so the two are indistinguishable in a picker.
+    """
+    parts = [p for p in (subnetwork or "").split("/") if p]
+    try:
+        return parts[parts.index("regions") + 1]
+    except (ValueError, IndexError):
+        return ""
+
+
 def _qualify_network(network: str) -> str:
     """Normalize a VPC network ref for GCE's ``networkInterfaces[].network``.
     A bare name (``dashboard-sandbox-vpc``) is likewise rejected as a malformed

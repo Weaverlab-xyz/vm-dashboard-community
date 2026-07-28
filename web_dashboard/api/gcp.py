@@ -86,6 +86,32 @@ def _region_from_zone(zone: str) -> str:
     return _gcp_region()
 
 
+def _reject_cross_region_subnetwork(subnetwork: str, zone: str, region: str) -> None:
+    """400 when an explicitly-picked subnetwork lives in another region than ``zone``.
+
+    GCE catches this itself, but only at insert time and only as::
+
+        Invalid value for field 'resource.networkInterfaces[0].subnetwork': …
+        Scope of the specified subnetwork doesn't match the scope of the instance
+
+    — which names neither region, and arrives after the job rows exist (a bulk deploy
+    creates N children and fails all of them). Rejecting the request instead keeps the
+    mismatch in front of the operator, where it is fixable.
+
+    Blank subnets and bare names are left alone: those are region-qualified from the
+    instance zone downstream (``gcp_service._qualify_subnetwork``) and cannot conflict.
+    """
+    sn_region = gcp_service.subnetwork_region(subnetwork)
+    if not sn_region or sn_region == region:
+        return
+    raise HTTPException(
+        status_code=400,
+        detail=(f"Subnetwork is in {sn_region} but zone {zone} is in {region}. "
+                f"GCP subnetworks are regional — pick a {region} subnetwork, or a zone "
+                f"in {sn_region}."),
+    )
+
+
 
 
 
@@ -544,6 +570,7 @@ async def bulk_deploy_instances(
 
     zone = _resolve_zone(req.zone)
     region = _region_from_zone(zone)
+    _reject_cross_region_subnetwork(req.subnetwork, zone, region)
     workgroup = _validate_workgroup(db, current_user, req.workgroup)
 
     # Names here are typed per row in the bulk modal, so unlike the count path they can
@@ -658,6 +685,7 @@ async def deploy_instance(
     zone = _resolve_zone(payload.zone)
     payload.zone = zone            # normalise so the runner uses the resolved zone
     region = _region_from_zone(zone)
+    _reject_cross_region_subnetwork(payload.subnetwork, zone, region)
     workgroup = _validate_workgroup(db, current_user, payload.workgroup)
     payload.workgroup = workgroup
 
