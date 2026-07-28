@@ -764,16 +764,17 @@ async def stop_gce_compose_endpoint(
 
 
 # ── GCP Cloud Run runner jobs (Ansible / promote / k8s) ──────────────────────
-# The runner jobs self-delete on completion, so this is effectively an in-flight
-# view — the GCP analogue of the ECS-tasks / ACI panels. Read-only, 5 most recent.
+# An IN-FLIGHT view — the GCP analogue of the ECS-tasks / ACI panels. Runners whose
+# execution has finished are filtered out in the service (their self-delete is
+# best-effort, so finished jobs linger in the project). Read-only.
 
 @router.get("/gce-cloud-run-jobs", response_model=CloudRunJobListResponse)
 async def list_gce_cloud_run_jobs_endpoint(
     current_user: User = Depends(require_permission("containers", "read")),
 ):
-    """List dashboard-managed Cloud Run runner jobs (Ansible / promote / k8s),
-    newest first and capped at 5. These jobs self-delete when they finish, so the
-    list is effectively the ones currently in flight."""
+    """List the dashboard-managed Cloud Run runner jobs (Ansible / promote / k8s)
+    currently in flight, newest first. Finished runners are excluded, so this is
+    also what the dashboard's Cloud Run Jobs tile counts."""
     from ..services import gcp_service
     from ..services.gcp_service import GCPError
 
@@ -781,7 +782,7 @@ async def list_gce_cloud_run_jobs_endpoint(
     if not project_id:
         raise HTTPException(status_code=503, detail="GCP project not configured.")
     try:
-        raw = await gcp_service.list_cloud_run_jobs(project_id, limit=5)
+        raw = await gcp_service.list_cloud_run_jobs(project_id, limit=20)
         jobs = [
             CloudRunJobInfo(
                 name=j.get("name", ""),

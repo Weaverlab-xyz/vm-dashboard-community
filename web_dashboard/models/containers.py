@@ -167,7 +167,7 @@ class CloudRunJobInfo(BaseModel):
     region: str
     purpose: str = ""       # ansible-runner | promote-runner | k8s-runner
     image: str = ""
-    status: str = ""        # RUNNING | PENDING | COMPLETED
+    status: str = ""        # RUNNING | PENDING (finished jobs are not listed)
     created_at: Optional[str] = None
 
 
