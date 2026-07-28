@@ -1543,10 +1543,153 @@ def _cloud_run_job_row(job, region: str) -> Optional[dict]:
     }
 
 
+# ── Stranded-runner reaper ────────────────────────────────────────────────────
+# `_cloud_run_job_row` HIDES a finished runner; this reaps it. Each runner deletes
+# its own job in a `finally`, but that delete is best-effort — a worker restart (or
+# a delete that itself fails) between the execution ending and the delete landing
+# leaves a COMPLETED job sitting in the project forever. The live project was
+# holding k8s-runner jobs from four separate days that way.
+#
+# Same safety-net shape as ephemeral_gc.sweep() and the Cloud SQL orphan sweep: it
+# only ever touches a resource it can positively identify as ours and finished, it
+# runs opportunistically off a path that is already walking the regions, and every
+# failure is logged rather than raised.
+
+_CLOUD_RUN_REAP_AGE_MIN_DEFAULT = 60
+
+# A runner's own lifetime bounds how recent a job the reaper may touch: the
+# execution times out at 1200s and the poll loop waits up to 120 x 10s on top, then
+# logs are fetched, and only then does the `finally` delete run. Reaping inside that
+# window would pull the job out from under a live runner — its next get_execution
+# would 404 and fail a run whose work had actually succeeded. 30 min is the floor
+# regardless of what the config says.
+_CLOUD_RUN_REAP_AGE_MIN_FLOOR = 30
+
+
+def _cloud_run_reap_enabled() -> bool:
+    """Whether the OPPORTUNISTIC sweep runs. The explicit reap action ignores this."""
+    from . import config_service
+    return config_service.get_bool("gcp_cloud_run_job_reap_enabled", True)
+
+
+def _cloud_run_reap_min_age_s() -> int:
+    """How long a finished runner job must have sat before the reaper may delete it."""
+    raw = _cfg("gcp_cloud_run_job_reap_age_minutes")
+    if not raw:
+        from ..config import settings
+        raw = getattr(settings, "gcp_cloud_run_job_reap_age_minutes",
+                      _CLOUD_RUN_REAP_AGE_MIN_DEFAULT)
+    try:
+        minutes = int(raw)
+    except (TypeError, ValueError):
+        minutes = _CLOUD_RUN_REAP_AGE_MIN_DEFAULT
+    return max(_CLOUD_RUN_REAP_AGE_MIN_FLOOR, minutes) * 60
+
+
+def _cloud_run_job_finished_age_s(job, *, now: Optional[datetime] = None) -> Optional[float]:
+    """Seconds since this job's execution finished, or None when that can't be read.
+
+    Prefers the execution's `completion_time`. Falls back to the job's `create_time`,
+    which OVERSTATES the age by however long the run took — bounded, since the runners
+    cap an execution at 1200s, and harmless against an age guard floored well above a
+    runner's whole lifetime. The fallback matters: it keeps the reaper working across
+    the google-cloud-run field-shape drift that `_cloud_run_job_status` already guards
+    for, instead of silently leaking again.
+
+    None means "don't reap" — the reaper only ever deletes a job it can date.
+    """
+    now = now or datetime.now(timezone.utc)
+
+    def _age(ts) -> Optional[float]:
+        try:
+            if hasattr(ts, "ToDatetime"):  # protobuf Timestamp
+                ts = ts.ToDatetime()       # naive UTC on older protobuf; tz-aware on newer
+            if not isinstance(ts, datetime):
+                return None
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            return (now - ts).total_seconds()
+        except Exception:
+            return None
+
+    try:
+        # HasField first: an UNSET protobuf Timestamp reads back as epoch 0, which
+        # would date every job to 1970 and make the age guard meaningless.
+        ref = job._pb.latest_created_execution
+        completion = ref.completion_time if ref.HasField("completion_time") else None
+    except Exception:
+        completion = None
+    if completion is not None:
+        age = _age(completion)
+        if age is not None:
+            return age
+    return _age(getattr(job, "create_time", None))
+
+
+def _cloud_run_reap_target(job, region: str, *, min_age_s: float) -> Optional[dict]:
+    """Describe a job that is safe to reap, or None to leave it alone.
+
+    Three guards, all of which must hold:
+
+      * ``labels.managed-by == vm-dashboard`` — the project holds Cloud Run Jobs we
+        did not create, and the reaper must never delete one of them;
+      * the execution has FINISHED. A PENDING or RUNNING job is live work. Note this
+        guard fails safe by construction: `_cloud_run_job_status` falls back to
+        "RUNNING" when it can't read the fields, so field-shape drift can only ever
+        make the reaper do nothing — never make it delete a running job;
+      * it finished at least ``min_age_s`` ago, so the reaper cannot race the
+        runner's own cleanup (see `_CLOUD_RUN_REAP_AGE_MIN_FLOOR`).
+    """
+    labels = dict(job.labels) if job.labels else {}
+    if labels.get("managed-by") != "vm-dashboard":
+        return None
+    if _cloud_run_job_status(job) != "COMPLETED":
+        return None
+    age = _cloud_run_job_finished_age_s(job)
+    if age is None or age < min_age_s:
+        return None
+    return {
+        "name":      job.name.split("/")[-1],
+        "full_name": job.name,
+        "region":    region,
+        "purpose":   labels.get("purpose", ""),
+        "age_s":     int(age),
+    }
+
+
+def _reap_cloud_run_jobs(jobs_client, targets: list[dict]) -> dict:
+    """Delete each target, best-effort. Returns ``{"reaped": [...], "failed": n}``.
+
+    Deletes are submitted but not waited on. The job is already finished — the LRO is
+    only tidying up — and blocking a containers-page render on N sequential waits is
+    the worse trade. A delete that never lands is simply retried by the next sweep;
+    reaping is idempotent, since a job that did go away is just NotFound next time.
+    """
+    reaped: list[dict] = []
+    failed = 0
+    for t in targets:
+        try:
+            jobs_client.delete_job(name=t["full_name"])
+        except Exception as exc:  # noqa: BLE001 — a 403/404 here must stay non-fatal
+            failed += 1
+            logger.warning("Cloud Run reaper: could not delete %s in %s: %s",
+                           t["name"], t["region"], exc)
+            continue
+        reaped.append(t)
+        logger.info("Cloud Run reaper: deleted stranded %s job %s in %s (finished %s ago)",
+                    t["purpose"] or "runner", t["name"], t["region"],
+                    timedelta(seconds=t["age_s"]))
+    return {"reaped": reaped, "failed": failed}
+
+
 def _list_cloud_run_jobs_sync(project_id: str, limit: int = 20) -> list[dict]:
     """List in-flight dashboard-managed Cloud Run Jobs (newest first, capped at
     `limit`). Finished jobs are dropped before the cap, so a backlog of stranded
-    COMPLETED runners can never crowd out a job that is actually running."""
+    COMPLETED runners can never crowd out a job that is actually running.
+
+    Doubles as the opportunistic reaper: this walk already visits every runner region
+    and already reads each job's state, so reaping what it hides costs no extra list
+    calls. Entirely best-effort — the cleanup can never fail the listing."""
     _require_run()
     from google.cloud import run_v2
 
@@ -1555,6 +1698,8 @@ def _list_cloud_run_jobs_sync(project_id: str, limit: int = 20) -> list[dict]:
 
     results: list[dict] = []
     errors: list[str] = []
+    reap_targets: list[dict] = []
+    reap_age_s = _cloud_run_reap_min_age_s() if _cloud_run_reap_enabled() else None
     regions = _cloud_run_runner_regions()
     for region in regions:
         parent = f"projects/{project_id}/locations/{region}"
@@ -1563,6 +1708,13 @@ def _list_cloud_run_jobs_sync(project_id: str, limit: int = 20) -> list[dict]:
                 row = _cloud_run_job_row(job, region)
                 if row is not None:
                     results.append(row)
+                elif reap_age_s is not None:
+                    # Only a HIDDEN job can be debris — anything shown is in flight.
+                    # The reap guards re-check ownership, so a foreign job hidden by
+                    # the row filter is still never a candidate here.
+                    target = _cloud_run_reap_target(job, region, min_age_s=reap_age_s)
+                    if target is not None:
+                        reap_targets.append(target)
         except Exception as e:  # one region being unavailable shouldn't blank the panel
             errors.append(f"{region}: {e}")
             logger.warning("Cloud Run list_jobs failed in %s: %s", region, e)
@@ -1570,6 +1722,14 @@ def _list_cloud_run_jobs_sync(project_id: str, limit: int = 20) -> list[dict]:
     # Every region errored (Cloud Run API off / no permission) → surface it.
     if not results and errors and len(errors) == len(regions):
         raise GCPError("; ".join(errors))
+
+    # Reap AFTER the walk — never delete while paging a list — and behind its own
+    # guard, so a delete that 403s can't blank the panel we are about to return.
+    if reap_targets:
+        try:
+            _reap_cloud_run_jobs(jobs_client, reap_targets)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Cloud Run reaper: opportunistic sweep failed (non-fatal): %s", exc)
 
     results.sort(key=lambda j: j["created_at"] or "", reverse=True)
     return results[:limit]
@@ -1583,6 +1743,68 @@ async def list_cloud_run_jobs(project_id: str, limit: int = 20) -> list[dict]:
         raise
     except Exception as e:
         raise GCPError(f"Failed to list Cloud Run jobs: {e}") from e
+
+
+def _reap_stranded_cloud_run_jobs_sync(
+    project_id: str, *, min_age_s: Optional[float] = None,
+) -> dict:
+    """Sweep every runner region and delete stranded FINISHED runner jobs.
+
+    The explicit form of the opportunistic sweep in `_list_cloud_run_jobs_sync` —
+    identical guards, identical deletes — for an operator who wants the debris gone
+    now rather than on the next containers-page load, and the way to clear a backlog
+    that accrued while the automatic sweep was disabled. Returns what it reaped.
+
+    ``min_age_s`` overrides the configured guard (tests only; the endpoint does not
+    expose it). Raises :class:`GCPError` only when EVERY region failed to list —
+    unlike the listing path, an operator asking for a reap should hear that it could
+    not run at all. Individual delete failures are counted, not raised."""
+    _require_run()
+    from google.cloud import run_v2
+
+    if min_age_s is None:
+        min_age_s = _cloud_run_reap_min_age_s()
+    creds = _gcp_creds()
+    jobs_client = run_v2.JobsClient(credentials=creds)
+
+    targets: list[dict] = []
+    errors: list[str] = []
+    regions = _cloud_run_runner_regions()
+    for region in regions:
+        parent = f"projects/{project_id}/locations/{region}"
+        try:
+            for job in jobs_client.list_jobs(parent=parent):
+                target = _cloud_run_reap_target(job, region, min_age_s=min_age_s)
+                if target is not None:
+                    targets.append(target)
+        except Exception as e:  # noqa: BLE001 — one bad region shouldn't stop the rest
+            errors.append(f"{region}: {e}")
+            logger.warning("Cloud Run reaper: list_jobs failed in %s: %s", region, e)
+
+    if errors and len(errors) == len(regions):
+        raise GCPError("; ".join(errors))
+
+    outcome = _reap_cloud_run_jobs(jobs_client, targets)
+    logger.info("Cloud Run reaper: swept %s — reaped %d, failed %d",
+                ", ".join(regions) or "no regions",
+                len(outcome["reaped"]), outcome["failed"])
+    return {
+        "reaped":  outcome["reaped"],
+        "failed":  outcome["failed"],
+        "regions": regions,
+        "errors":  errors,
+    }
+
+
+async def reap_stranded_cloud_run_jobs(project_id: str) -> dict:
+    """Delete dashboard-managed Cloud Run runner jobs left behind by a run whose
+    self-delete never landed. Never touches a job that is pending or running."""
+    try:
+        return await asyncio.to_thread(_reap_stranded_cloud_run_jobs_sync, project_id)
+    except GCPError:
+        raise
+    except Exception as e:
+        raise GCPError(f"Failed to reap stranded Cloud Run jobs: {e}") from e
 
 
 # ── Rancher management node on COS-on-GCE ─────────────────────────────────────
