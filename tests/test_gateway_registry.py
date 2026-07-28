@@ -172,6 +172,25 @@ def test_deploy_is_queued_not_run_in_request():
         assert f'"{t}"' in worker, f"{t} is not wired into the runner"
 
 
+def test_a_failed_deploy_records_the_host_it_already_built():
+    """The AWS ensure launches the EC2 host and only then waits for its ECS agent, so a
+    failure after that point leaves a host running. Recording host_id only on success
+    meant the row showed an errored gateway with nothing to remove, and the running
+    t3.small was findable only by the Name-tag lookup inside teardown_gateway."""
+    src = _read("web_dashboard", "services", "gateway_service.py")
+    body = src[src.index("async def _run_deploy"):src.index("async def _run_teardown")]
+    assert "_record_partial_host" in body, (
+        "a failed gateway deploy does not record the host it already created")
+    # Anchor on the awaited call, not the name — it is also mentioned in the comment
+    # above the guard, which would make this pass with no guard at all.
+    ensure = body.index("await jumpoint_host_service")
+    assert "try:" in body[:ensure], "the ensure call is not guarded"
+    recorder = src[src.index("async def _record_partial_host"):src.index("async def _run_deploy")]
+    assert "find_gateway_host_id" in recorder, "the recorder does not look the host up"
+    assert "not row.host_id" in recorder, (
+        "the recorder overwrites a host_id the row already had")
+
+
 def test_the_service_exposes_the_runner_entry_point():
     src = _read("web_dashboard", "services", "gateway_service.py")
     import re

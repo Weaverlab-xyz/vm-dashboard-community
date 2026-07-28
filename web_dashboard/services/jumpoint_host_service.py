@@ -18,9 +18,10 @@ by reference count:
                                             using it.
 
 Prereqs (one-time, created by scripts/sandbox/Linux/setup-aws.sh): the
-``ecsInstanceRole`` + instance profile, the bt-jumpoint cluster, the public
-subnet + gateway SG, and the dashboard IAM user's ssm:GetParameter* /
-iam:PassRole(ecsInstanceRole) / ecs:*ContainerInstances permissions. Everything
+``ecsInstanceRole`` + instance profile — carrying AmazonEC2ContainerServiceforEC2Role,
+without which the host's agent cannot join the cluster and no task can ever be placed
+— the bt-jumpoint cluster, the public subnet + gateway SG, and the dashboard IAM user's
+ssm:GetParameter* / iam:PassRole(ecsInstanceRole) / ecs:*ContainerInstances. Everything
 here is best-effort from the caller's perspective; failures log and leave the
 DB/EC2 resource intact (the tunnel/jump is just unavailable until fixed).
 """
@@ -38,6 +39,16 @@ _ECS_AMI_SSM = "/aws/service/ecs/optimized-ami/amazon-linux-2023/recommended/ima
 
 _REGISTER_TIMEOUT_S = 180   # wait for the EC2 host to register as an ECS container instance
 _REGISTER_POLL_S = 10
+
+
+class GatewayHostError(Exception):
+    """A gateway host could not be made ready to run the Gateway task.
+
+    Local rather than ``aws_service.AWSError`` so this module keeps its property of
+    having no import-time cloud dependencies (every cloud import here is
+    function-local). Callers catch broadly, so the type costs them nothing — what they
+    want from it is the message.
+    """
 
 
 def _cfg(key: str) -> str:
@@ -326,10 +337,9 @@ async def _await_ecs_registration(region: str, host_id: str) -> None:
     `pending` as well as `running`, and an EC2 host that is merely running has not
     necessarily had its ECS agent join the cluster yet — so "found a host" is not the
     same as "the cluster can place a task". Calling RunTask in that window fails with
-    `InvalidParameterException: No Container Instances were found in your cluster`,
-    which the caller records as `ecs_error` and the deploy then proceeds without a
-    Gateway. Reuse skipped this wait and was the common way to hit it: any deploy
-    landing while another had just launched the host got no Gateway at all.
+    `InvalidParameterException: No Container Instances were found in your cluster`.
+    Reuse skipped this wait and was the common way to hit it: any deploy landing while
+    another had just launched the host got no Gateway at all.
 
     Scoped to the named host rather than "any ACTIVE instance in the cluster": with
     several gateways sharing a cluster, a neighbour being ready says nothing about
@@ -338,22 +348,55 @@ async def _await_ecs_registration(region: str, host_id: str) -> None:
 
     Costs nothing on the healthy path — an already-registered host returns ACTIVE on
     the first poll.
+
+    Raises :class:`GatewayHostError` on timeout instead of letting the caller fire a
+    RunTask that cannot succeed. Timing out here is not a race that one more attempt
+    might win: the host is up, the cluster is readable, and the host still is not in
+    it — overwhelmingly because the agent's `RegisterContainerInstance` was denied,
+    which the agent treats as terminal and exits on. Trying anyway just swapped a
+    diagnosable condition for `InvalidParameterException: No Container Instances`,
+    which names neither the host nor the permission.
+
+    A *listing* that never succeeds is the one case that still falls through to the
+    attempt: not knowing whether the host registered is different from knowing it did
+    not, and RunTask may well work. Transient listing failures no longer end the wait
+    at all — returning on the first one meant one throttled call sent the deploy
+    straight to the doomed RunTask it was supposed to prevent.
     """
     from . import aws_service
     cluster = _aws_region_cfg(region)["ecs_cluster"]
     deadline = time.monotonic() + _REGISTER_TIMEOUT_S
-    while time.monotonic() < deadline:
+    listed = False        # did any poll actually read the cluster?
+    last_exc = None
+    while True:
         try:
             ci = await aws_service.list_container_instances(region, cluster)
-        except Exception as exc:  # noqa: BLE001 — best-effort, same as the caller
-            logger.warning("gateway-host: listing container instances failed: %s", exc)
-            return
-        if any(c.get("status") == "ACTIVE" and c.get("ec2_instance_id") == host_id
-               for c in ci):
-            return
+            listed, last_exc = True, None
+            if any(c.get("status") == "ACTIVE" and c.get("ec2_instance_id") == host_id
+                   for c in ci):
+                return
+        except Exception as exc:  # noqa: BLE001 — keep polling; the deadline is the bound
+            last_exc = exc
+            logger.warning("gateway-host: listing container instances failed "
+                           "(still waiting on %s): %s", host_id, exc)
+        if time.monotonic() >= deadline:
+            break
         await asyncio.sleep(_REGISTER_POLL_S)
-    logger.warning("gateway-host: host %s did not register within %ds — attempting the "
-                   "task anyway", host_id, _REGISTER_TIMEOUT_S)
+
+    if not listed:
+        logger.warning("gateway-host: could not read cluster %s to confirm %s registered "
+                       "(last error: %s) — attempting the task anyway",
+                       cluster, host_id, last_exc)
+        return
+    raise GatewayHostError(
+        f"Gateway host {host_id} did not register with the ECS cluster {cluster!r} "
+        f"within {_REGISTER_TIMEOUT_S}s, so no Gateway task can be placed on it. The "
+        f"usual cause is the host's instance profile "
+        f"({_cfg('bt_ecs_host_instance_profile') or 'ecsInstanceRole'}) missing "
+        f"ecs:RegisterContainerInstance — attach the AWS-managed "
+        f"AmazonEC2ContainerServiceforEC2Role policy to that role. The ECS agent treats "
+        f"the denial as terminal and exits, so the host stays out of the cluster "
+        f"permanently; /var/log/ecs/ecs-agent.log on the host confirms it.")
 
 
 async def _ensure_jumpoint_host_aws(region: str, name: str = "",
@@ -436,6 +479,40 @@ async def _ensure_jumpoint_host_aws(region: str, name: str = "",
         logger.warning("gateway-host: capturing host public IP failed (non-fatal): %s", exc)
     await _ensure_task(region, deploy_key, host_id)
     return host_id
+
+
+async def find_gateway_host_id(cloud: str, region: str, name: str) -> str:
+    """The cloud id of the gateway host named ``name``, or ``""`` when none exists.
+
+    For recovering what a FAILED deploy already built. On AWS the host id is an EC2
+    instance id the launch assigns, so a deploy that raised after ``run_instances`` —
+    the ECS-registration wait being the usual place — left a running host whose id the
+    caller never learned. GCP and Azure name their hosts, so there the lookup exists
+    only to confirm the VM is really there rather than hand back a pointer to something
+    that was never created.
+
+    Best-effort by contract: returns ``""`` on any lookup failure, because this runs
+    while a job is already failing and must not replace that failure with its own.
+    """
+    try:
+        if cloud == "gcp":
+            from . import gcp_service
+            found = await gcp_service.describe_instances(
+                _gcp_project(), _gcp_jumpoint_zone(region), [name])
+            return name if found else ""
+        if cloud == "azure":
+            from . import azure_service
+            from .region_config import resolve_region
+            rg = resolve_region("azure", _azure_gateway_location(region))["resource_group"]
+            return name if await azure_service.get_vm(rg, name) else ""
+        from . import aws_service
+        hosts = await aws_service.find_instances_by_tag(
+            region, name_tag=name, states=["pending", "running", "stopping", "stopped"])
+        return hosts[0]["instance_id"] if hosts else ""
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("gateway-host(%s): looking up the host for %s failed: %s",
+                       cloud, name, exc)
+        return ""
 
 
 async def teardown_gateway(cloud: str, region: str, name: str, zone: str = "") -> None:

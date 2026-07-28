@@ -259,6 +259,33 @@ def _mark_error(db, gateway_id: Optional[str], message: str) -> None:
         db.commit()
 
 
+async def _record_partial_host(db, gateway_id: Optional[str], cloud: str, region: str,
+                               name: str) -> None:
+    """Point the registry row at a host a failed deploy already created, so the operator
+    can remove it from the Gateways page instead of it becoming a cost nobody can see.
+
+    Only fills a blank ``host_id`` — a row that already names its host knows better than
+    a lookup by name does. Best-effort throughout: an inventory write must never be what
+    replaces the real failure, so this swallows everything and lets the caller re-raise
+    the original exception."""
+    if not gateway_id:
+        return
+    try:
+        from . import jumpoint_host_service
+        host_id = await jumpoint_host_service.find_gateway_host_id(cloud, region, name)
+        if not host_id:
+            return
+        row = get_gateway(db, gateway_id)
+        if row is not None and not row.host_id:
+            row.host_id = host_id
+            db.commit()
+            logger.warning("gateway %s failed but left host %s behind — recorded it on the "
+                           "registry row so it can be removed", name, host_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("gateway: recording the partial host for %s failed "
+                       "(non-fatal): %s", name, exc)
+
+
 async def _run_deploy(db, job_id: str, meta: dict) -> None:
     from . import job_service, jumpoint_host_service
     cloud, region = meta["cloud"], meta["region"]
@@ -272,20 +299,30 @@ async def _run_deploy(db, job_id: str, meta: dict) -> None:
     # then skips the managed-adoption write, because the row below is already ours.
     # ``placement`` comes back filled with where the host actually landed.
     placement: dict = {}
-    if cloud == "gcp" and zone:
-        host_id = await jumpoint_host_service._ensure_jumpoint_host_gcp(
-            region, name, zone, placement=placement)
-    else:
-        host_id = await jumpoint_host_service.ensure_jumpoint_host(
-            cloud, region, name, placement=placement)
+    try:
+        if cloud == "gcp" and zone:
+            host_id = await jumpoint_host_service._ensure_jumpoint_host_gcp(
+                region, name, zone, placement=placement)
+        else:
+            host_id = await jumpoint_host_service.ensure_jumpoint_host(
+                cloud, region, name, placement=placement)
 
-    if not host_id:
-        # The ensure paths are best-effort and return None when a prerequisite (deploy
-        # key, project, subnet) is missing — they log the specific one.
-        raise GatewayError(
-            f"The {cloud} gateway could not be started. Check that the {cloud} deploy "
-            "key and gateway subnet are configured in Settings → BeyondTrust; the job "
-            "log names the missing value.")
+        if not host_id:
+            # The ensure paths are best-effort and return None when a prerequisite (deploy
+            # key, project, subnet) is missing — they log the specific one.
+            raise GatewayError(
+                f"The {cloud} gateway could not be started. Check that the {cloud} deploy "
+                "key and gateway subnet are configured in Settings → BeyondTrust; the job "
+                "log names the missing value.")
+    except Exception:
+        # A failed ensure can still have built the host: the AWS path launches the EC2
+        # instance and only then waits for its ECS agent to register, so anything raised
+        # from there on leaves a host running. Record it before the job fails — otherwise
+        # the row keeps host_id empty, the Gateways page shows an errored gateway with
+        # nothing to remove, and the only thing that can still find the host is the
+        # Name-tag lookup inside teardown_gateway.
+        await _record_partial_host(db, gateway_id, cloud, region, name)
+        raise
 
     row = get_gateway(db, gateway_id) if gateway_id else None
     if row is not None:
