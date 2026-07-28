@@ -95,14 +95,16 @@ def test_resolve_runner_local_ignores_a_per_cloud_override():
     assert acr.resolve_runner("local") == "local"
 
 
-def test_target_clouds_k8s_allows_local_databases_do_not():
-    """Single source of truth shared with the /managed-targets picker and the run
-    gate. A CloudDatabase is always provisioned into a cloud, so there is no local
-    endpoint for a local runner to reach."""
-    assert "local" in acr.K8S_TARGET_CLOUDS
-    assert "local" not in acr.DB_TARGET_CLOUDS
-    for c in ("aws", "azure", "gcp"):
-        assert c in acr.K8S_TARGET_CLOUDS and c in acr.DB_TARGET_CLOUDS
+def test_target_clouds_allow_local_for_both_kinds():
+    """Single source of truth shared with the /managed-targets picker and the run gate.
+
+    Databases were cloud-only while every CloudDatabase row was something the dashboard
+    provisioned. Registration changed that: a registered row can be on-prem
+    (cloud='local') and is reached by the local runner, exactly as a kubeconfig-
+    registered cluster is."""
+    for c in ("aws", "azure", "gcp", "local"):
+        assert c in acr.K8S_TARGET_CLOUDS, f"k8s target cloud {c} missing"
+        assert c in acr.DB_TARGET_CLOUDS, f"database target cloud {c} missing"
 
 
 def test_resolve_runner_rejects_unsupported_cloud():
@@ -136,12 +138,12 @@ def test_check_target_accepts_a_cloud_cluster_with_a_cloud_asset():
     assert acr.check_target("k8s", "gcp", "s3", "play.yml") is None
 
 
-def test_check_target_refuses_a_local_database():
-    """A CloudDatabase is always provisioned into a cloud; cloud='local' is not a
-    thing for it, and the local runner has no endpoint to reach."""
+def test_check_target_allows_a_local_database():
+    """A registered on-prem database is a legitimate target — the local runner reaches
+    it directly. This asserted the opposite while every database row was dashboard-
+    provisioned."""
     CONF.clear()
-    msg = acr.check_target("database", "local", "s3", "play.yml")
-    assert msg and "no Ansible runner for database targets" in msg
+    assert acr.check_target("database", "local", "s3", "play.yml") is None
 
 
 def test_check_target_refuses_an_unsupported_cloud():

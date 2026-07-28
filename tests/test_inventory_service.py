@@ -93,9 +93,12 @@ def test_vm_item_name_fallback_to_resource_id_then_placeholder():
 def test_db_item_shape():
     row = types.SimpleNamespace(id="d1234567", cloud="azure", engine="postgres",
                                 instance_id="clouddb-ab", region="eastus",
-                                status="available", created_by="bob", created_at=_TS)
+                                status="available", created_by="bob", created_at=_TS,
+                                source="provisioned", private_host=None)
     it = svc._db_item(row)
     assert it["cloud"] == "azure" and it["kind"] == "database"
+    # Drives the delete verb on /databases and the badge on /inventory.
+    assert it["source"] == "provisioned"
     assert it["name"] == "postgres clouddb-ab" and it["state"] == "available"
     assert it["workgroup"] is None and it["detail_href"] == "/databases"
     assert it["id"] == "clouddb:d1234567"

@@ -117,7 +117,10 @@ def _db_item(row) -> dict:
         # Separate from `name` so a bulk-run selection can check it against the
         # engines the ansible-cloud image actually ships client libraries for.
         "engine": row.engine,
-        "name": f"{row.engine} {row.instance_id or row.id[:8]}".strip(),
+        # registered = the dashboard didn't provision it; delete deregisters rather
+        # than destroys, and its credential is a Password Safe managed account.
+        "source": row.source or "provisioned",
+        "name": f"{row.engine} {row.instance_id or row.private_host or row.id[:8]}".strip(),
         "region": row.region or "",
         "state": row.status,
         "workgroup": None,
@@ -269,7 +272,7 @@ def _target_spec(item: dict):
 
     if kind == "database":
         if cloud not in acr.DB_TARGET_CLOUDS:
-            return (f"cloud {cloud!r} has no in-cloud Ansible runner "
+            return (f"cloud {cloud!r} has no Ansible runner for database targets "
                     f"(supported: {'/'.join(acr.DB_TARGET_CLOUDS)}).")
         engine = item.get("engine")
         if engine not in acr.ANSIBLE_DB_ENGINES:

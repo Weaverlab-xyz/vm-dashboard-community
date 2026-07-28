@@ -15,10 +15,18 @@
 
   <div class="flex items-center justify-between mb-1">
     <h1 class="text-2xl font-bold text-gray-800">Cloud Databases</h1>
-    <button @click="openProvision()"
-            class="bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-3 py-1.5 rounded-lg">
-      Provision database
-    </button>
+    <div class="flex items-center gap-2">
+      {% if beyondtrust_enabled %}
+      <button @click="openRegister()"
+              class="bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 text-sm font-medium px-3 py-1.5 rounded-lg">
+        Register existing
+      </button>
+      {% endif %}
+      <button @click="openProvision()"
+              class="bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-3 py-1.5 rounded-lg">
+        Provision database
+      </button>
+    </div>
   </div>
   <p class="text-sm text-gray-500 mb-6">
     Managed databases are provisioned <strong>private</strong> (no public endpoint) and
@@ -106,6 +114,123 @@
       </table>
     </div>
   </div>
+
+  {% if beyondtrust_enabled %}
+  <!-- Register-existing modal — records a database the dashboard did not create -->
+  <div x-show="showRegister" x-cloak
+       class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+       @click.self="showRegister = false">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
+      <div class="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+        <h3 class="text-lg font-semibold">Register an existing database</h3>
+        <button @click="showRegister = false" class="text-gray-400 hover:text-gray-600 text-xl">&times;</button>
+      </div>
+
+      <div class="px-6 py-5 space-y-4">
+        <p class="text-sm text-gray-500">
+          Record a database the dashboard didn't provision — on-premises or in a cloud — so it
+          can be a Configuration Management target. Nothing is created or changed; removing it
+          later deregisters it and leaves the database alone.
+        </p>
+
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-xs font-medium text-gray-600 mb-1">Engine</label>
+            <select x-model="reg.engine" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              <option value="postgres">PostgreSQL</option>
+              <option value="mysql">MySQL</option>
+              <option value="sqlserver">SQL Server</option>
+              <option value="oracle">Oracle</option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-gray-600 mb-1">Location</label>
+            <select x-model="reg.cloud" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              <option value="local">On-premises</option>
+              <option value="azure">Azure</option>
+              <option value="aws">AWS</option>
+              <option value="gcp">GCP</option>
+              <option value="oci">OCI</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- The run gate rejects a managed-account run on the ECS / Cloud Run runners,
+             so say it here rather than letting it surface when a run is attempted. -->
+        <p x-show="reg.cloud === 'aws' || reg.cloud === 'gcp'" x-cloak
+           class="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+          Registering works, but a Configuration Management run against an AWS or GCP database
+          is refused today: those run on ECS / Cloud Run, which reference a stored secret and
+          can't take a just-in-time checkout. On-premises and Azure run fine.
+        </p>
+
+        <div class="grid grid-cols-3 gap-3">
+          <div class="col-span-2">
+            <label class="block text-xs font-medium text-gray-600 mb-1">Host</label>
+            <input type="text" x-model="reg.host" @change="loadRegAccounts()"
+                   placeholder="db.corp.internal"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-gray-600 mb-1">Port</label>
+            <input type="number" x-model.number="reg.port" placeholder="5432"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+          </div>
+        </div>
+
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">
+            Database name <span class="text-gray-400 font-normal">(optional — SQL Server uses master)</span>
+          </label>
+          <input type="text" x-model="reg.db_name" placeholder="appdb"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+        </div>
+
+        <div class="pt-2 border-t border-gray-100">
+          <p class="text-sm font-medium text-gray-700 mb-1">
+            Admin account
+            <span class="text-gray-400 font-normal">(Password Safe — checked out just-in-time)</span>
+          </p>
+          <p x-show="regAccountsLoading" class="text-[11px] text-gray-400">Looking up managed accounts…</p>
+          <p x-show="!regAccountsLoading && regAccountsError" x-text="regAccountsError"
+             class="text-[11px] text-amber-600"></p>
+          <p x-show="!regAccountsLoading && !regAccountsError && regSystems.length === 0"
+             class="text-[11px] text-gray-400">
+            No Password Safe managed accounts found for this host. Enter the host above, then
+            onboard it in Password Safe — the dashboard never stores a database credential.
+          </p>
+          <template x-if="regSystems.length > 0">
+            <select x-model="reg.accountKey"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              <option value="">— select an account —</option>
+              <template x-for="s in regSystems" :key="s.system_id">
+                <optgroup :label="`${s.name} (${s.ip})`">
+                  <template x-for="a in s.accounts" :key="a.account_id">
+                    <option :value="`${s.system_id}:${a.account_id}:${a.name}`" x-text="a.name"></option>
+                  </template>
+                </optgroup>
+              </template>
+            </select>
+          </template>
+        </div>
+
+        <div x-show="regError" x-cloak
+             class="text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2"
+             x-text="regError"></div>
+      </div>
+
+      <div class="px-6 py-4 border-t border-gray-100 flex justify-end gap-2">
+        <button @click="showRegister = false"
+                class="px-4 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50">Cancel</button>
+        <button @click="submitRegister()" :disabled="!reg.host || !reg.accountKey || regSaving"
+                class="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium disabled:opacity-50">
+          <span x-show="!regSaving">Register</span>
+          <span x-show="regSaving" x-cloak>Registering…</span>
+        </button>
+      </div>
+    </div>
+  </div>
+  {% endif %}
 
   <!-- Provision modal -->
   <div x-show="showForm" x-cloak
@@ -405,6 +530,13 @@ function databasesPage() {
     entitleRegEnabled: {{ entitle_registration_enabled | default(false) | tojson }},
     toast: '', toastType: 'success',
     showForm: false, saving: false, conn: null,
+
+    // Register-existing: a database the dashboard didn't provision. The credential is
+    // a Password Safe managed account, so only its ids travel — never a password.
+    showRegister: false, regSaving: false, regError: '',
+    regSystems: [], regAccountsLoading: false, regAccountsError: '',
+    reg: { engine: 'postgres', cloud: 'local', host: '', port: null, db_name: '', accountKey: '' },
+
     options: { cloud: '', region: '', regions: [], instance_classes: [], db_subnet_groups: [], security_groups: [], vault_account_groups: [], jump_groups: [], gateways: [] },
     loadingOptions: false, optionsError: '',
     form: { engine: 'postgres', cloud: 'aws', region: '', name: '', master_username: 'dbadmin',
@@ -452,6 +584,61 @@ function databasesPage() {
       } else if (!transitional && this._pollTimer) {
         clearInterval(this._pollTimer);
         this._pollTimer = null;
+      }
+    },
+
+    openRegister() {
+      this.reg = { engine: 'postgres', cloud: 'local', host: '', port: null, db_name: '', accountKey: '' };
+      this.regSystems = [];
+      this.regError = '';
+      this.regAccountsError = '';
+      this.showRegister = true;
+    },
+
+    async loadRegAccounts() {
+      // Same lookup the Config Management run form uses — managed systems and their
+      // accounts for this host, ids and names only.
+      const host = (this.reg.host || '').trim();
+      this.regSystems = [];
+      this.regAccountsError = '';
+      if (!host) return;
+      this.regAccountsLoading = true;
+      try {
+        const data = await API.get('/api/config-mgmt/managed-accounts?host=' + encodeURIComponent(host));
+        this.regSystems = data.systems || [];
+      } catch (e) {
+        this.regAccountsError = e.message;
+      } finally {
+        this.regAccountsLoading = false;
+      }
+    },
+
+    async submitRegister() {
+      this.regSaving = true;
+      this.regError = '';
+      try {
+        const [systemId, accountId, ...nameParts] = (this.reg.accountKey || '').split(':');
+        await API.post('/api/databases/register', {
+          engine: this.reg.engine,
+          cloud: this.reg.cloud,
+          host: (this.reg.host || '').trim(),
+          port: this.reg.port || null,
+          db_name: (this.reg.db_name || '').trim(),
+          managed_account: {
+            system_id: Number(systemId),
+            account_id: Number(accountId),
+            // Rejoin: an account name may itself contain a colon (the cloud-plugin
+            // scope suffix uses ';', but don't assume the separator is unique).
+            account_name: nameParts.join(':'),
+          },
+        });
+        this.showRegister = false;
+        await this.refresh();
+        this.flash('Database registered — it can now be selected in Configuration Management.');
+      } catch (e) {
+        this.regError = e.message || 'Registration failed.';
+      } finally {
+        this.regSaving = false;
       }
     },
 
@@ -589,13 +776,21 @@ function databasesPage() {
     },
 
     async decommission(d) {
-      if (!confirm(`Decommission "${d.engine}" database in ${d.region}?\n\nThis removes the PRA tunnel and destroys the instance.`)) return;
+      // A registered database is someone else's: the dashboard has no Terraform state
+      // for it and deleting the row must not promise destruction.
+      const registered = d.source === 'registered';
+      const prompt = registered
+        ? `Deregister "${d.engine}" at ${d.private_host || d.id}?\n\nThis removes it from the dashboard only — the database itself is left running.`
+        : `Decommission "${d.engine}" database in ${d.region}?\n\nThis removes the PRA tunnel and destroys the instance.`;
+      if (!confirm(prompt)) return;
       try {
         await API.del(`/api/databases/${d.id}`);
-        this.flash('Decommission started — watch the row status (tracked in Jobs).');
+        this.flash(registered
+          ? 'Deregistered — the database itself was not touched.'
+          : 'Decommission started — watch the row status (tracked in Jobs).');
         await this.refresh();
       } catch (e) {
-        this.flash(e.message || 'Decommission failed.', 'error');
+        this.flash(e.message || (registered ? 'Deregister failed.' : 'Decommission failed.'), 'error');
       }
     },
 

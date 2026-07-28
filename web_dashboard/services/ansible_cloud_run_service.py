@@ -48,12 +48,12 @@ _CLOUD_NATIVE_RUNNER = {"aws": "ecs", "azure": "aci", "gcp": "gcp"}
 # for both the picker listing (/managed-targets) and the run gate — they sat as two
 # separate literal tuples and silently disagreeing would half-wire the feature.
 #
-# "local" is a Kubernetes cluster registered from a kubeconfig (an on-prem cluster —
-# examples/playbooks/k3s/ builds one); it runs on the local runner. Databases stay
-# cloud-only: a CloudDatabase is always provisioned into a cloud and never carries
-# cloud="local", so there is nothing for a local runner to reach.
+# "local" is an on-prem resource the dashboard did not provision but has a reference to:
+# a Kubernetes cluster registered from a kubeconfig (examples/playbooks/k3s/ builds one),
+# or a database registered with a Password Safe managed account. Both run on the local
+# runner, which reaches them directly rather than through a cloud-native runner.
 K8S_TARGET_CLOUDS = ("aws", "azure", "gcp", "local")
-DB_TARGET_CLOUDS = ("aws", "azure", "gcp")
+DB_TARGET_CLOUDS = ("aws", "azure", "gcp", "local")
 
 # Distinct ECS task family so these localhost runs don't share task-def revision
 # history with the SSH VM runner (ansible-config-mgmt) or the k8s runner (k8s-runner).
@@ -323,7 +323,7 @@ async def run(db: Session, *, job_id: str, meta: dict) -> None:
         vars_file.update(resolved_secret_vars)
 
         if target_kind == "database":
-            conn = cloud_database_service.ansible_connection_vars(db, target_id)
+            conn = await cloud_database_service.ansible_connection_vars(db, target_id)
             engine = conn.get("db_engine")
             if engine not in ANSIBLE_DB_ENGINES:
                 job_service.set_failed(

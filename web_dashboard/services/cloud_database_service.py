@@ -44,6 +44,11 @@ logger = logging.getLogger(__name__)
 # (no MongoDB resource yet). All engine × cloud combos are wired — see _IMPLEMENTED.
 VALID_ENGINES = {"postgres", "mysql", "sqlserver", "oracle"}
 VALID_CLOUDS = {"aws", "azure", "gcp", "oci"}
+# Clouds a database may be REGISTERED from. Wider than VALID_CLOUDS because
+# provisioning needs a Terraform module and registering needs only somewhere to reach:
+# 'local' is an on-prem database, run against by the local runner (the same shape a
+# kubeconfig-registered k8s cluster already has).
+VALID_REGISTER_CLOUDS = VALID_CLOUDS | {"local"}
 _IMPLEMENTED = {
     ("postgres", "aws"), ("postgres", "gcp"), ("postgres", "azure"),
     ("mysql", "aws"), ("mysql", "azure"), ("mysql", "gcp"),
@@ -1637,7 +1642,138 @@ def connection_info(db: Session, db_id: str) -> dict:
     }
 
 
-def ansible_connection_vars(db: Session, db_id: str) -> dict:
+_MANAGED_REF_PREFIX = "psmanaged:"
+
+
+def register_database(db: Session, *, engine: str, cloud: str, host: str,
+                      port: int | None, db_name: str, managed_account: dict,
+                      created_by: str, region: str = "", instance_id: str = "") -> dict:
+    """Record a database that already exists, so it can be a Config Management target.
+
+    The sibling of :func:`k8s_service.register_cluster`: no Terraform, no provisioning
+    job, just an inventory row plus the reference needed to reach it. ``cloud='local'``
+    is an on-prem database — the local runner reaches it directly, the same shape a
+    kubeconfig-registered cluster already has.
+
+    ``managed_account`` is a Password Safe system/account pair. The credential itself is
+    never stored: it is checked out at run time by
+    :func:`_registered_connection_vars`, so this row holds only ids and a name."""
+    engine = (engine or "").strip().lower()
+    cloud = (cloud or "").strip().lower()
+    host = (host or "").strip()
+    if engine not in VALID_ENGINES:
+        raise CloudDatabaseError(
+            f"unknown engine {engine!r} (expected one of {sorted(VALID_ENGINES)})")
+    if cloud not in VALID_REGISTER_CLOUDS:
+        raise CloudDatabaseError(
+            f"unknown cloud {cloud!r} (expected one of {sorted(VALID_REGISTER_CLOUDS)})")
+    if not host:
+        raise CloudDatabaseError("a host is required — it is how the runner reaches the database")
+    for key in ("system_id", "account_id"):
+        if not (managed_account or {}).get(key):
+            raise CloudDatabaseError(
+                "a Password Safe managed account is required: the dashboard checks the "
+                "credential out at run time rather than storing one")
+    if db.query(CloudDatabase).filter(CloudDatabase.private_host == host,
+                                      CloudDatabase.engine == engine).first():
+        raise CloudDatabaseError(
+            f"a {engine} database at {host!r} is already registered")
+
+    row = CloudDatabase(
+        engine=engine, cloud=cloud, source="registered",
+        provider="registered", region=region or None, instance_id=instance_id or None,
+        private_host=host, port=port or _DEFAULT_PORTS.get(engine),
+        db_name=(db_name or "").strip() or None,
+        status="available",
+        created_at=datetime.utcnow(),
+        credentials_ref=_MANAGED_REF_PREFIX + json.dumps({
+            "system_id": managed_account["system_id"],
+            "account_id": managed_account["account_id"],
+            "account_name": managed_account.get("account_name") or "",
+            "uses_ssh_key": bool(managed_account.get("uses_ssh_key")),
+        }, sort_keys=True),
+        created_by=created_by,
+    )
+    db.add(row)
+    db.commit()
+    logger.info("Registered %s database %s (%s) at %s", engine, row.id, cloud, host)
+    return _serialize(row)
+
+
+def get_database(db: Session, db_id: str) -> Optional[dict]:
+    """One serialized row, or None. Lets a caller branch on ``source`` without reaching
+    for the ORM itself."""
+    row = db.query(CloudDatabase).filter(CloudDatabase.id == db_id).first()
+    return _serialize(row) if row else None
+
+
+def deregister_database(db: Session, db_id: str) -> None:
+    """Drop a registered database from the inventory.
+
+    Deliberately not a decommission: the dashboard did not create this database and has
+    no Terraform state for it, so there is nothing to destroy and destroying would be
+    the wrong verb for someone else's data. :func:`run_decommission` stays the path for
+    provisioned rows."""
+    row = db.query(CloudDatabase).filter(CloudDatabase.id == db_id).first()
+    if not row:
+        raise CloudDatabaseError(f"cloud database {db_id} not found")
+    if row.source != "registered":
+        raise CloudDatabaseError(
+            f"database {db_id} was provisioned by the dashboard — it is decommissioned "
+            "(Terraform destroy), not deregistered")
+    db.delete(row)
+    db.commit()
+    logger.info("Deregistered database %s (%s)", db_id, row.private_host)
+
+
+def managed_account_ref(row) -> dict:
+    """The Password Safe system/account this registered row was registered with."""
+    raw = (row.credentials_ref or "")
+    if not raw.startswith(_MANAGED_REF_PREFIX):
+        raise CloudDatabaseError(
+            f"database {row.id} has no Password Safe managed account recorded — "
+            "re-register it with an account so the credential can be checked out")
+    return json.loads(raw[len(_MANAGED_REF_PREFIX):])
+
+
+async def _registered_connection_vars(row) -> dict:
+    """Connection vars for a registered database, credential checked out just-in-time.
+
+    Mirrors the VM path in ``ansible_local_run_service``: check out against the pinned
+    system/account, use the value inline, and let the request expire on its duration.
+    That path only checks a request back in when it made an ephemeral store copy — the
+    inline runners (local, ACI) leave expiry to Password Safe, and this is one of those.
+    """
+    from . import btapi_service
+    ref = managed_account_ref(row)
+    duration = int(_cfg("ansible_managed_request_duration_min") or 60)
+    try:
+        _req_id, credential = await btapi_service.get_ps_credential_with_request(
+            ref["system_id"], ref["account_id"], duration_min=duration,
+            uses_ssh_key=ref.get("uses_ssh_key", False))
+    except btapi_service.BTAPIError as exc:
+        raise CloudDatabaseError(
+            f"Password Safe checkout failed for database {row.id}: {exc}") from exc
+    if not credential:
+        raise CloudDatabaseError(
+            f"Password Safe returned an empty credential for database {row.id}")
+
+    engine = row.engine
+    db_name = row.db_name or ("master" if engine == "sqlserver" else "")
+    from . import managed_accounts as ma
+    return {
+        "db_engine": engine,
+        "db_login_host": row.private_host or "",
+        "db_login_port": row.port or _DEFAULT_PORTS.get(engine),
+        # The account name is the login identity, minus any cloud-plugin scope suffix —
+        # the same normalization the SSH path applies before using it as ansible_user.
+        "db_login_user": ma.ssh_login_user(ref.get("account_name") or ""),
+        "db_login_password": credential,
+        "db_name": db_name,
+    }
+
+
+async def ansible_connection_vars(db: Session, db_id: str) -> dict:
     """Connection variables an Ansible ``localhost`` play uses to reach this managed
     DB over the network. Resolved server-side and injected as **scrubbed secret
     extra-vars** — the operator never sees them.
@@ -1658,6 +1794,12 @@ def ansible_connection_vars(db: Session, db_id: str) -> dict:
     row = db.query(CloudDatabase).filter(CloudDatabase.id == db_id).first()
     if not row:
         raise CloudDatabaseError(f"cloud database {db_id} not found")
+    # A registered database has no Terraform state and no provisioning job, so there is
+    # no tf_variables to read a credential out of. It carries a Password Safe managed
+    # account instead, checked out at run time. Everything below this line is the
+    # provisioned path, unchanged.
+    if row.source == "registered":
+        return await _registered_connection_vars(row)
     engine = row.engine
     prov_job = _provision_job_for(db, db_id)
     tfv = ((prov_job.metadata_dict or {}).get("tf_variables") if prov_job else None) or {}
@@ -1698,6 +1840,8 @@ def _serialize(r: CloudDatabase) -> dict:
         "id": r.id, "engine": r.engine, "provider": r.provider, "cloud": r.cloud,
         "region": r.region, "instance_id": r.instance_id, "private_host": r.private_host,
         "port": r.port, "status": r.status, "jump_item_id": r.jump_item_id,
+        # Drives the delete verb (deregister vs decommission) and the UI badge.
+        "source": r.source or "provisioned", "db_name": r.db_name,
         "entitle_integration_id": r.entitle_integration_id,
         "entitle_viable": _entitle_viable(r.engine, r.provider),
         "created_by": r.created_by,

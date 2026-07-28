@@ -179,11 +179,14 @@ def test_database_with_an_unsupported_engine_is_refused():
     _expect_error(items, ["clouddb:d1"], "not supported for Ansible runs")
 
 
-def test_local_database_is_refused():
-    """A CloudDatabase is always provisioned into a cloud; there's no local runner
-    path for one, unlike a Kubernetes cluster."""
+def test_local_database_is_selectable():
+    """A registered on-prem database runs on the local runner, like a kubeconfig-
+    registered cluster. This asserted a refusal while every database row was something
+    the dashboard had provisioned into a cloud."""
     items = [_db("clouddb:d1", "pg d1", cloud="local")]
-    _expect_error(items, ["clouddb:d1"], "no in-cloud Ansible runner")
+    plan = inv.plan_bulk_run(items, ["clouddb:d1"])
+    assert plan["kind"] == "database"
+    assert [t["spec"]["target_id"] for t in plan["targets"]] == ["d1"]
 
 
 def test_cluster_in_an_unsupported_cloud_is_refused():

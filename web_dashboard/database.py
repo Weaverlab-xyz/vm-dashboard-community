@@ -631,12 +631,21 @@ class CloudDatabase(Base):
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     engine = Column(String(20), nullable=False)            # postgres | mysql | sqlserver
     provider = Column(String(40), nullable=True)           # e.g. rds | azure_flexible | cloud_sql
-    cloud = Column(String(20), nullable=False)             # aws | azure | gcp
+    cloud = Column(String(20), nullable=False)             # aws | azure | gcp | local
     region = Column(String(64), nullable=True)
+    # Mirrors K8sCluster.source. A `registered` row is a database that already existed —
+    # on-prem (cloud='local') or one the dashboard didn't provision — recorded so it can
+    # be a Config Management target. It has no Terraform state and no provisioning job,
+    # so delete deregisters it rather than destroying it, and its admin credential comes
+    # from a Password Safe managed account instead of the job's tf_variables.
+    source = Column(String(16), nullable=False, default="provisioned")  # provisioned | registered
 
     instance_id = Column(String(255), nullable=True)       # cloud resource id (filled on apply)
     private_host = Column(String(255), nullable=True)      # private endpoint host (no public endpoint)
     port = Column(Integer, nullable=True)
+    # Only a registered row needs this: a provisioned one reads its database name from
+    # the provisioning job's tf_variables, which a registered row does not have.
+    db_name = Column(String(128), nullable=True)
     status = Column(String(32), nullable=False, default="provisioning", index=True)
 
     credentials_ref = Column(Text, nullable=True)          # backend-agnostic ref (resolved via config_service)
@@ -822,6 +831,12 @@ def init_db():
             "ALTER TABLE k8s_clusters ADD COLUMN egress_ip VARCHAR(45)",
             # Job heartbeat — drives the startup reconcile of restart-orphaned jobs.
             "ALTER TABLE jobs ADD COLUMN updated_at TIMESTAMP",
+            # Registered vs dashboard-provisioned databases. Every pre-existing row was
+            # provisioned by Terraform, so that is the backfill value — the opposite of
+            # k8s_clusters, whose rows all predate provisioning and default to
+            # 'registered'.
+            "ALTER TABLE cloud_databases ADD COLUMN source VARCHAR(16) DEFAULT 'provisioned'",
+            "ALTER TABLE cloud_databases ADD COLUMN db_name VARCHAR(128)",
             # Cloud-db per-DB PRA broker overrides (config defaults as fallback).
             "ALTER TABLE cloud_databases ADD COLUMN jump_group VARCHAR(128)",
             "ALTER TABLE cloud_databases ADD COLUMN jumpoint_name VARCHAR(128)",

@@ -14,6 +14,7 @@ Heavy deps are stubbed in sys.modules (mirrors test_clouddb_provision_job_meta.p
 no real DB or cloud account is needed. Runs under pytest, or standalone:
     python tests/test_clouddb_ansible_conn_vars.py
 """
+import asyncio
 import os
 import sys
 import types
@@ -34,12 +35,28 @@ class _CloudDatabase:
     # Class-level attrs so `CloudDatabase.id == x` in the filter() expression is a
     # plain comparison (the fake query ignores the predicate anyway).
     id = None
+    # Every row here is the provisioned path — the registered one reads its credential
+    # from Password Safe instead and is covered by tests/test_database_registration.py.
+    source = "provisioned"
+    db_name = None
 
     def __init__(self, **kw):
         self.__dict__.update(kw)
 
 
 def _install_stubs():
+    # sqlalchemy is imported at module scope by cloud_database_service purely for the
+    # `Session` type hint. Stubbing it is what lets this file run outside CI — without
+    # it the whole module skips, and a change that breaks these assertions looks green
+    # locally and only fails after a push.
+    if "sqlalchemy" not in sys.modules:
+        sa = types.ModuleType("sqlalchemy")
+        orm = types.ModuleType("sqlalchemy.orm")
+        orm.Session = type("Session", (), {})
+        sa.orm = orm
+        sys.modules["sqlalchemy"] = sa
+        sys.modules["sqlalchemy.orm"] = orm
+
     confmod = types.ModuleType("web_dashboard.config")
     confmod.settings = _Settings()
     sys.modules["web_dashboard.config"] = confmod
@@ -100,9 +117,13 @@ class _FakeDB:
 
 
 def _run(db, db_id, tf_variables):
+    """ansible_connection_vars became async when registered databases landed: their
+    credential is checked out from Password Safe at run time rather than read from the
+    provisioning job. The provisioned path below is otherwise unchanged, which is what
+    these assertions pin."""
     svc._provision_job_for = lambda _db, _id: types.SimpleNamespace(
         metadata_dict={"tf_variables": tf_variables})
-    return svc.ansible_connection_vars(db, db_id)
+    return asyncio.run(svc.ansible_connection_vars(db, db_id))
 
 
 def test_postgres_aws_uses_store_password_and_provisioned_db_name():
