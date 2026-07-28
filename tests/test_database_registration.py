@@ -100,7 +100,11 @@ class _FakeDB:
 
 
 def _install_stubs():
-    if "sqlalchemy" not in sys.modules:
+    try:
+        # Availability, NOT `in sys.modules` — in CI the real library is installed but
+        # not yet imported here, and a stub would shadow it.
+        from sqlalchemy.orm import Session as _RealSession  # noqa: F401
+    except Exception:
         sa = types.ModuleType("sqlalchemy")
         orm = types.ModuleType("sqlalchemy.orm")
         orm.Session = type("Session", (), {})

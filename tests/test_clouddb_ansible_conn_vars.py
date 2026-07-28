@@ -49,7 +49,11 @@ def _install_stubs():
     # `Session` type hint. Stubbing it is what lets this file run outside CI — without
     # it the whole module skips, and a change that breaks these assertions looks green
     # locally and only fails after a push.
-    if "sqlalchemy" not in sys.modules:
+    try:
+        # Availability, NOT `in sys.modules` — in CI the real library is installed but
+        # not yet imported here, and a stub would shadow it.
+        from sqlalchemy.orm import Session as _RealSession  # noqa: F401
+    except Exception:
         sa = types.ModuleType("sqlalchemy")
         orm = types.ModuleType("sqlalchemy.orm")
         orm.Session = type("Session", (), {})

@@ -26,7 +26,13 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-if "sqlalchemy" not in sys.modules:
+try:
+    # Availability, NOT `"sqlalchemy" in sys.modules`: in CI the real library is
+    # installed but not yet imported when this module runs, so the sys.modules check
+    # is False and the thin stub below would shadow it — which is exactly how this
+    # file broke CI once already ("cannot import name 'create_engine'").
+    from sqlalchemy.orm import Session as _RealSession  # noqa: F401
+except Exception:
     _sa = types.ModuleType("sqlalchemy")
     _orm = types.ModuleType("sqlalchemy.orm")
     _orm.Session = type("Session", (), {})
