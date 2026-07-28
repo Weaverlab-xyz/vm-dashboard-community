@@ -887,7 +887,7 @@
         <h2 class="text-lg font-semibold text-gray-800">
           GCP Cloud Run Jobs
           <span class="ml-2 text-sm font-normal text-gray-400"
-                x-text="cloudRunJobs.length ? cloudRunJobs.length + ' jobs' : ''"></span>
+                x-text="cloudRunJobs.length ? cloudRunJobs.length + ' in flight' : ''"></span>
         </h2>
         <button @click="loadCloudRunJobs()" :disabled="cloudRunLoading"
                 class="px-2.5 py-1 text-xs font-medium text-gray-600 border border-gray-300 hover:bg-gray-50 rounded-lg transition">
@@ -935,7 +935,7 @@
 
       <p class="mt-2 text-xs text-gray-400">
         Ansible, image-promote, and Kubernetes runners execute as ephemeral Cloud Run Jobs and are
-        removed when they finish — this shows the 5 most recent (typically the ones in flight).
+        removed when they finish — only the ones still in flight are listed here.
       </p>
     </div>
 
@@ -2209,9 +2209,9 @@ function containersDashboard() {
       return 'bg-blue-100 text-blue-600';
     },
 
+    // Only in-flight jobs reach this table — the API filters COMPLETED out.
     cloudRunStatusBadge(status) {
       if (status === 'RUNNING')   return 'bg-green-100 text-green-700';
-      if (status === 'COMPLETED') return 'bg-gray-100 text-gray-500';
       if (status === 'PENDING')   return 'bg-yellow-100 text-yellow-700';
       return 'bg-blue-100 text-blue-600';
     },

@@ -83,8 +83,10 @@ know **most of them are shared infrastructure, not your compose deploys**:
   runner** tasks. On GCE the rows carry a purpose badge: `Compose` (your deploy,
   `labels.purpose=compose`) vs `Gateway` (internal, `labels.purpose=bt-jumpoint`,
   auto-recreated).
-- **GCP Cloud Run Jobs** — a **read-only** view of the 5 most recent dashboard-managed
-  *runner* jobs (Ansible / promote / k8s). Cloud Run is **not** a compose deploy target.
+- **GCP Cloud Run Jobs** — a **read-only** view of the dashboard-managed *runner* jobs
+  (Ansible / promote / k8s) that are **currently in flight**; runners that have finished are
+  filtered out, so an empty list means nothing is running. Cloud Run is **not** a compose
+  deploy target.
 
 So a container appearing here that you didn't deploy is usually the gateway or a runner —
 leave it alone; the dashboard manages its lifecycle.

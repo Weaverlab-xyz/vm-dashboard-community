@@ -1448,10 +1448,15 @@ async def list_gce_compose(project_id: str) -> list[dict]:
 
 
 # ── Cloud Run Jobs listing (Ansible / promote / k8s runners) ─────────────────
-# The runner jobs (labels.managed-by=vm-dashboard) self-delete when their
-# execution finishes, so a live listing is effectively "in-flight jobs" — the
-# GCP analogue of the ECS-tasks / ACI-container-groups panels. Runner jobs are
-# regional, so we sweep every region a runner can target and cap the result.
+# The runner jobs (labels.managed-by=vm-dashboard) delete themselves when their
+# execution finishes, so this panel is meant to be an "in-flight jobs" view — the
+# GCP analogue of the ECS-tasks / ACI-container-groups panels. That self-delete is
+# best-effort though (see the `finally` blocks in the runners below: a worker
+# restart between the execution ending and the delete landing strands the job), so
+# finished runners DO accumulate in the project. They are filtered out here rather
+# than in the UI, so the containers panel and the dashboard tile — which just
+# counts what this returns — agree. Runner jobs are regional, so we sweep every
+# region a runner can target and cap the result.
 
 def _cloud_run_runner_regions() -> list[str]:
     """Distinct regions any Cloud Run runner can target (ansible/promote/k8s)."""
@@ -1479,8 +1484,48 @@ def _cloud_run_job_status(job) -> str:
         return "RUNNING"
 
 
-def _list_cloud_run_jobs_sync(project_id: str, limit: int = 5) -> list[dict]:
-    """List dashboard-managed Cloud Run Jobs (newest first, capped at `limit`)."""
+def _cloud_run_job_row(job, region: str) -> Optional[dict]:
+    """Shape a listed Cloud Run Job into a panel row, or None to hide it.
+
+    Hidden are foreign jobs (not ours to report) and runners whose execution has
+    already finished — this is an in-flight view, and a stranded COMPLETED job is
+    cleanup debris, not work in progress. A job whose state can't be read is KEPT:
+    the fallback in `_cloud_run_job_status` is "RUNNING", and hiding a live runner
+    is the worse error of the two.
+    """
+    labels = dict(job.labels) if job.labels else {}
+    if labels.get("managed-by") != "vm-dashboard":
+        return None
+    status = _cloud_run_job_status(job)
+    if status == "COMPLETED":
+        return None
+    image = ""
+    try:
+        conts = job.template.template.containers
+        if conts:
+            image = conts[0].image
+    except Exception:
+        pass
+    created_at = ""
+    try:
+        if job.create_time:
+            created_at = job.create_time.isoformat()
+    except Exception:
+        pass
+    return {
+        "name":       job.name.split("/")[-1],
+        "region":     region,
+        "purpose":    labels.get("purpose", ""),
+        "image":      image,
+        "status":     status,
+        "created_at": created_at,
+    }
+
+
+def _list_cloud_run_jobs_sync(project_id: str, limit: int = 20) -> list[dict]:
+    """List in-flight dashboard-managed Cloud Run Jobs (newest first, capped at
+    `limit`). Finished jobs are dropped before the cap, so a backlog of stranded
+    COMPLETED runners can never crowd out a job that is actually running."""
     _require_run()
     from google.cloud import run_v2
 
@@ -1494,30 +1539,9 @@ def _list_cloud_run_jobs_sync(project_id: str, limit: int = 5) -> list[dict]:
         parent = f"projects/{project_id}/locations/{region}"
         try:
             for job in jobs_client.list_jobs(parent=parent):
-                labels = dict(job.labels) if job.labels else {}
-                if labels.get("managed-by") != "vm-dashboard":
-                    continue
-                image = ""
-                try:
-                    conts = job.template.template.containers
-                    if conts:
-                        image = conts[0].image
-                except Exception:
-                    pass
-                created_at = ""
-                try:
-                    if job.create_time:
-                        created_at = job.create_time.isoformat()
-                except Exception:
-                    pass
-                results.append({
-                    "name":       job.name.split("/")[-1],
-                    "region":     region,
-                    "purpose":    labels.get("purpose", ""),
-                    "image":      image,
-                    "status":     _cloud_run_job_status(job),
-                    "created_at": created_at,
-                })
+                row = _cloud_run_job_row(job, region)
+                if row is not None:
+                    results.append(row)
         except Exception as e:  # one region being unavailable shouldn't blank the panel
             errors.append(f"{region}: {e}")
             logger.warning("Cloud Run list_jobs failed in %s: %s", region, e)
@@ -1530,8 +1554,8 @@ def _list_cloud_run_jobs_sync(project_id: str, limit: int = 5) -> list[dict]:
     return results[:limit]
 
 
-async def list_cloud_run_jobs(project_id: str, limit: int = 5) -> list[dict]:
-    """List dashboard-managed Cloud Run runner jobs (in-flight / most recent)."""
+async def list_cloud_run_jobs(project_id: str, limit: int = 20) -> list[dict]:
+    """List the dashboard-managed Cloud Run runner jobs currently in flight."""
     try:
         return await asyncio.to_thread(_list_cloud_run_jobs_sync, project_id, limit)
     except GCPError:
