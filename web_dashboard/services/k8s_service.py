@@ -903,6 +903,31 @@ async def _rollback_failed_provision(*, cluster_id: str, job_id: str, cloud: str
             "should remain from this attempt.")
 
 
+def _explain_apply_failure(cloud: str, tf_variables: dict, text: str) -> str:
+    """Prefix a *zonal capacity* apply failure with what the operator has to do.
+
+    A GKE cluster is created with a one-node default pool in a SINGLE zone (the
+    module's ``zone`` — Settings → Multi-region, else the region's first UP zone),
+    so a zone with no room for that machine type fails the create ~35 min in, once
+    the node pool's instance group gives up:
+      Not all instances running in IGM … [GCE_STOCKOUT]: … does not have enough
+      resources available to fulfill the request.
+    Retrying the same zone just repeats it, so name the zone + the way out instead
+    of leaving that buried under a wall of instance-group text. The half-created
+    cluster is already gone by the time this is read — :func:`_rollback_failed_provision`
+    runs first and appends its own ``[rollback]`` note after this message.
+    """
+    low = text.lower()
+    if cloud != "gcp" or not ("stockout" in low or "does not have enough resources" in low):
+        return text
+    zone = str(tf_variables.get("zone") or "").strip() or "the region's first available zone"
+    machine = str(tf_variables.get("machine_type") or "").strip() or "the node machine type"
+    return (f"{zone} has no capacity for {machine} (GCE_STOCKOUT) — GKE could not create "
+            f"the cluster's first node. Retry in another zone (Settings → Multi-region → "
+            f"the region's zone; blank picks the region's first available zone) or with a "
+            f"different machine type.\n\n{text}")
+
+
 async def run_provision_apply(db: Session, *, cluster_id: str, job_id: str,
                               cloud: str, tf_variables: dict) -> None:
     """**§1.1a** background task: ``terraform apply`` the cluster module, assemble a
@@ -989,7 +1014,9 @@ async def run_provision_apply(db: Session, *, cluster_id: str, job_id: str,
             cluster_id=cluster_id, job_id=job_id, cloud=cloud, tf_variables=tf_variables)
         row.status = "failed"
         db.commit()
-        job_service.set_failed(db, job_id, f"{exc}{note}")
+        # …explained first (a zonal stockout's actionable line), then the rollback note.
+        job_service.set_failed(
+            db, job_id, f"{_explain_apply_failure(cloud, tf_variables, str(exc))}{note}")
         logger.exception("k8s provision failed cluster_id=%s: %s", cluster_id, exc)
 
 
