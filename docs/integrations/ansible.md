@@ -145,7 +145,7 @@ the image-promote runner (see [Shared cloud infrastructure](#shared-cloud-infras
 
 | Panel label | Config key | Env var | Default | Meaning |
 |---|---|---|---|---|
-| ECS cluster | `ansible_ecs_cluster` | `ANSIBLE_ECS_CLUSTER` | `bt-jumpoint` | ECS cluster the Fargate task lands in. Shares the cluster with the BT Jumpoint by default. |
+| ECS cluster | `ansible_ecs_cluster` | `ANSIBLE_ECS_CLUSTER` | `bt-jumpoint` | ECS cluster the Fargate task lands in. Shares the cluster with the BT Gateway by default. |
 | ECS task family | `ansible_ecs_task_family` | `ANSIBLE_ECS_TASK_FAMILY` | `ansible-config-mgmt` | Task-definition family for the **Ansible** task (the k8s task uses its own `k8s-runner` family). Auto-registered on first run. |
 | ECS subnet ID | `ansible_ecs_subnet_id` | `ANSIBLE_ECS_SUBNET_ID` | _(empty)_ | Fargate task subnet. A VPC private subnet is recommended; it must have egress to the target. |
 | ECS security group IDs | `ansible_ecs_security_group_ids` | `ANSIBLE_ECS_SECURITY_GROUP_IDS` | _(empty)_ | Comma-separated security-group IDs (optional). |
@@ -160,7 +160,7 @@ the image-promote runner (see [Shared cloud infrastructure](#shared-cloud-infras
 
 | Panel label | Config key | Env var | Default | Meaning |
 |---|---|---|---|---|
-| ACI subnet ID | `ansible_aci_subnet_id` | `ANSIBLE_ACI_SUBNET_ID` | _(empty)_ | Subnet ARM ID for ACI VNet injection (so the container group can reach private targets). When unset, falls back to the jumpoint's subnet (`azure_aci_subnet_id`). **If neither is set the container group is public and cannot reach private VM/cluster IPs.** Must be delegated to `Microsoft.ContainerInstance/containerGroups` and have routing + NSG to the target subnet on the required port; reusing the jumpoint's subnet is the simplest proven choice. |
+| ACI subnet ID | `ansible_aci_subnet_id` | `ANSIBLE_ACI_SUBNET_ID` | _(empty)_ | Subnet ARM ID for ACI VNet injection (so the container group can reach private targets). When unset, falls back to the gateway's subnet (`azure_aci_subnet_id`). **If neither is set the container group is public and cannot reach private VM/cluster IPs.** Must be delegated to `Microsoft.ContainerInstance/containerGroups` and have routing + NSG to the target subnet on the required port; reusing the gateway's subnet is the simplest proven choice. |
 | ACR server | `ansible_aci_acr_server` | `ANSIBLE_ACI_ACR_SERVER` | _(empty)_ | Private ACR login server (e.g. `myregistry.azurecr.io`). Only needed when the runner image is hosted in a private ACR. |
 | ACR username | `ansible_aci_acr_username` | `ANSIBLE_ACI_ACR_USERNAME` | _(empty)_ | ACR username / service-principal appId for the image pull. |
 | ACR password | `ansible_aci_acr_password` | `ANSIBLE_ACI_ACR_PASSWORD` | _(empty)_ | ACR password / SP secret (encrypted at rest). |
@@ -315,7 +315,7 @@ backends need nothing beyond the Docker socket (Ansible) or in-container
 ### AWS (ECS Fargate)
 
 - **ECS Fargate cluster** the dashboard can `run-task` against
-  (`ansible_ecs_cluster`; reuses the BT Jumpoint cluster by default).
+  (`ansible_ecs_cluster`; reuses the BT Gateway cluster by default).
 - **Task execution role** (`ansible_ecs_execution_role_arn`) with
   `service-role/AmazonECSTaskExecutionRolePolicy` — this is what ECS uses to
   **pull the image** (from a private ECR) and **write CloudWatch logs**. It
@@ -1074,9 +1074,9 @@ range to the VM.
 **Azure: ACI runner UNREACHABLE / `ssh: connect to host <ip> port 22: Operation
 timed out`** — the ACI container has no route to the target VM's private IP. Set
 `ansible_aci_subnet_id` to a VNet-delegated subnet with line-of-sight to the target
-subnet; when unset it now falls back to the jumpoint's `azure_aci_subnet_id`. With no
+subnet; when unset it now falls back to the gateway's `azure_aci_subnet_id`. With no
 subnet the container group is public and cannot reach private targets. (A working PRA
-Shell Jump to the same VM confirms the jumpoint's subnet reaches it — reuse that subnet.)
+Shell Jump to the same VM confirms the gateway's subnet reaches it — reuse that subnet.)
 
 ### Kubernetes runner
 

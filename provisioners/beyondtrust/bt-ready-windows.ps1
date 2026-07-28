@@ -9,7 +9,7 @@
   WinRM (marketplace base images have no SSH at first boot); this script bakes
   OpenSSH + RDP into the OUTPUT image so VMs deployed from it are reachable the
   same way Linux cloud VMs are — SSH — plus agentless RDP through the PRA
-  Jumpoint.
+  Gateway.
 
   WHY THE KEY IS BAKED HERE: Azure cannot inject SSH public keys into Windows
   VMs at deploy time (that is Linux-only — WindowsConfiguration has no SSH
@@ -124,7 +124,7 @@ if ($DisablePasswordAuth) {
 }
 Restart-Service sshd
 
-# -- 7. RDP + NLA (PRA agentless RDP via the Jumpoint) ------------------------
+# -- 7. RDP + NLA (PRA agentless RDP via the Gateway) ------------------------
 if ($EnableRdp) {
     Log 'enabling RDP + NLA + firewall group'
     Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `

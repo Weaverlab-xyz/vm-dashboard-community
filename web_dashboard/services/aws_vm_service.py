@@ -159,9 +159,9 @@ class _BatchResources:
         """One line for a batch child, standing in for the per-step progress messages
         it did not perform because the batch had already done the work."""
         parts = []
-        parts.append(f"Jumpoint host {self.jumpoint_host_id}" if self.jumpoint_host_id
-                     else (f"Jumpoint unavailable ({self.ecs_error})" if self.ecs_error
-                           else "no Jumpoint host"))
+        parts.append(f"Gateway host {self.jumpoint_host_id}" if self.jumpoint_host_id
+                     else (f"Gateway unavailable ({self.ecs_error})" if self.ecs_error
+                           else "no Gateway host"))
         if self.nat_instance_id:
             parts.append(f"NAT {self.nat_instance_id}")
         elif self.nat_error:
@@ -190,17 +190,17 @@ async def _acquire_batch_resources(db, progress_job_id: str, region: str,
     if _cfg_svc.get_bool("beyondtrust_enabled"):
         job_service.update_progress(
             db, progress_job_id, 15,
-            f"Ensuring the shared BeyondTrust Jumpoint host{scope}…")
+            f"Ensuring the shared BeyondTrust Gateway host{scope}…")
         try:
             from ..services import jumpoint_host_service
             res.jumpoint_host_id = await jumpoint_host_service.ensure_jumpoint_host("aws", region)
             job_service.update_progress(db, progress_job_id, 35,
-                                        "Jumpoint host ready, launching EC2 instance…")
+                                        "Gateway host ready, launching EC2 instance…")
         except Exception as e:
             res.ecs_error = str(e)
             job_service.update_progress(
                 db, progress_job_id, 35,
-                f"Jumpoint host ensure failed (non-fatal): {e} — continuing with EC2 launch…")
+                f"Gateway host ensure failed (non-fatal): {e} — continuing with EC2 launch…")
     else:
         job_service.update_progress(db, progress_job_id, 35, "Preparing EC2 launch…")
 
@@ -329,7 +329,7 @@ async def _run_deploy(
 ):
     """Deploy one EC2 instance.
 
-    ``resources`` is injected by ``_run_bulk_deploy`` so a batch ensures the Jumpoint
+    ``resources`` is injected by ``_run_bulk_deploy`` so a batch ensures the Gateway
     host, NAT instance, SSM endpoints and SSH key once instead of once per instance.
     Left None — the single-deploy path — this acquires its own. Keyword-only, so the
     existing positional call in ``run()`` is untouched.
@@ -354,7 +354,7 @@ async def _run_deploy(
         _meta = (db.query(Job).filter(Job.id == job_id).first().metadata_dict or {})
         ssh_secret_name = _meta.get("ssh_key_secret_override") or _rc["ssh_key_secret"]
 
-        # ── Step 1: regional resources (Jumpoint host, NAT, SSM endpoints) ────
+        # ── Step 1: regional resources (Gateway host, NAT, SSM endpoints) ────
         if resources is None:
             resources = await _acquire_batch_resources(
                 db, job_id, _aws_region, ssh_secret_name)
@@ -429,7 +429,7 @@ async def _run_deploy(
             job_service.set_failed(db, job_id, f"Cloud-identity elevation refused EC2 deploy: {e}")
             return
         except AWSError as e:
-            # EC2 failed. The shared Jumpoint host is ref-counted and may serve
+            # EC2 failed. The shared Gateway host is ref-counted and may serve
             # other resources, so we don't tear it down here — an idle host is
             # reclaimed on the next destroy/decommission.
             raise
@@ -512,8 +512,8 @@ async def _run_bulk_deploy(
 ):
     """Deploy a batch of EC2 instances behind one set of shared regional resources.
 
-    Ensures the Jumpoint host, NAT instance, SSM endpoints and SSH key ONCE for the
-    whole run, then hands them to ``_run_deploy`` per instance. The Jumpoint host is
+    Ensures the Gateway host, NAT instance, SSM endpoints and SSH key ONCE for the
+    whole run, then hands them to ``_run_deploy`` per instance. The Gateway host is
     ref-counted across all EC2 instances and databases and reclaimed when the last one
     goes.
 
@@ -656,7 +656,7 @@ async def _run_destroy(destroy_job_id: str, deploy_job_id: str, instance_id: str
             meta["destroyed"] = True
             job_service.set_completed(db, deploy_job_id, meta)
 
-        # Terminate the shared Jumpoint host if nothing is left using it (this
+        # Terminate the shared Gateway host if nothing is left using it (this
         # deploy job is now marked destroyed, so it's excluded from the count).
         try:
             from ..services import jumpoint_host_service

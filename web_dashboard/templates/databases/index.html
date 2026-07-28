@@ -329,7 +329,7 @@
               </select>
             </div>
             <div>
-              <label class="block text-xs font-medium text-gray-600 mb-1">Jumpoint</label>
+              <label class="block text-xs font-medium text-gray-600 mb-1">Gateway</label>
               <select x-model="form.jumpoint_name" :disabled="loadingOptions"
                       class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
                 <option value="">(configured default)</option>
@@ -405,7 +405,7 @@ function databasesPage() {
     entitleRegEnabled: {{ entitle_registration_enabled | default(false) | tojson }},
     toast: '', toastType: 'success',
     showForm: false, saving: false, conn: null,
-    options: { cloud: '', region: '', regions: [], instance_classes: [], db_subnet_groups: [], security_groups: [], vault_account_groups: [], jump_groups: [], jumpoints: [] },
+    options: { cloud: '', region: '', regions: [], instance_classes: [], db_subnet_groups: [], security_groups: [], vault_account_groups: [], jump_groups: [], gateways: [] },
     loadingOptions: false, optionsError: '',
     form: { engine: 'postgres', cloud: 'aws', region: '', name: '', master_username: 'dbadmin',
             instance_class: 'db.t3.micro', allocated_storage: null, db_subnet_group_name: '', vpc_security_group_ids: [], vault_account_group_id: null,
@@ -462,7 +462,7 @@ function databasesPage() {
                     tier: 'db-f1-micro', disk_size: null, private_network: '',
                     sku_name: 'B_Standard_B1ms', storage_gb: 32,
                     jump_group: '', jumpoint_name: '', praCredBackend: '', pra_credential_ref: '' };
-      this.options = { cloud: '', region: '', regions: [], instance_classes: [], db_subnet_groups: [], security_groups: [], vault_account_groups: [], jump_groups: [], jumpoints: [] };
+      this.options = { cloud: '', region: '', regions: [], instance_classes: [], db_subnet_groups: [], security_groups: [], vault_account_groups: [], jump_groups: [], gateways: [] };
       this.optionsError = '';
       this.showForm = true;
       this.loadOptions();   // fire-and-forget — the modal opens immediately, EC2-style
@@ -524,7 +524,7 @@ function databasesPage() {
       this.form.region = '';
       this.form.db_subnet_group_name = '';
       this.form.vpc_security_group_ids = [];
-      this.options = { cloud: '', region: '', regions: [], instance_classes: [], db_subnet_groups: [], security_groups: [], vault_account_groups: [], jump_groups: [], jumpoints: [] };
+      this.options = { cloud: '', region: '', regions: [], instance_classes: [], db_subnet_groups: [], security_groups: [], vault_account_groups: [], jump_groups: [], gateways: [] };
       this.optionsError = '';
       this.loadOptions();
     },

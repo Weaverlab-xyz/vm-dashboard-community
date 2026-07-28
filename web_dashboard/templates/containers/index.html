@@ -279,7 +279,7 @@
           </label>
           <p class="text-[11px] text-gray-400 mt-1 ml-6">
             Creates a <code>portainer-ui</code> Web Jump and stores the generated admin credential in the chosen
-            PRA Vault account group for injected login — the password never appears here. The Jumpoint's egress IP
+            PRA Vault account group for injected login — the password never appears here. The Gateway's egress IP
             is auto-added to the node firewall. Applied on Deploy/Redeploy.
           </p>
           <div x-show="portainerDeployForm.web_jump_enabled" x-cloak class="grid grid-cols-3 gap-3 mt-3 ml-6">
@@ -294,7 +294,7 @@
               </select>
             </div>
             <div>
-              <label class="block text-xs font-medium text-gray-600 mb-1">Jumpoint</label>
+              <label class="block text-xs font-medium text-gray-600 mb-1">Gateway</label>
               <select x-model="portainerDeployForm.jumpoint_name"
                       class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
                 <option value="">(configured default)</option>
@@ -797,7 +797,7 @@
       </div>
     </div>
 
-    <!-- ── GCE Container Instances (COS on GCE — Jumpoints + Compose) ─────── -->
+    <!-- ── GCE Container Instances (COS on GCE — Gateways + Compose) ─────── -->
     <div class="mb-8">
       <div class="flex items-center justify-between mb-3">
         <h2 class="text-lg font-semibold text-gray-800">
@@ -844,7 +844,7 @@
               <tr class="hover:bg-gray-50">
                 <td class="px-4 py-3 text-sm font-medium text-gray-900 font-mono" x-text="i.name"></td>
                 <td class="px-4 py-3 text-sm">
-                  <span :class="i.purpose === 'Jumpoint'
+                  <span :class="i.purpose === 'Gateway'
                     ? 'bg-indigo-100 text-indigo-700'
                     : 'bg-teal-100 text-teal-700'"
                         class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium"
@@ -875,7 +875,7 @@
 
       <p class="mt-2 text-xs text-gray-400">
         Both run as containers on Container-Optimised OS GCE instances.
-        <span class="font-medium">Jumpoints</span> are recreated automatically on the next VM deploy;
+        <span class="font-medium">Gateways</span> are recreated automatically on the next VM deploy;
         <span class="font-medium">Compose</span> instances are deployed via <em>+ Deploy Compose</em>.
         Stop / Delete removes the COS instance.
       </p>
@@ -1041,7 +1041,7 @@
               </select>
             </div>
             <div>
-              <label class="block text-xs font-medium text-gray-600 mb-1">Jumpoint</label>
+              <label class="block text-xs font-medium text-gray-600 mb-1">Gateway</label>
               <select x-model="deployForm.jumpoint_name"
                       class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
                 <option value="">(configured default)</option>
@@ -1541,7 +1541,7 @@ function containersDashboard() {
     aciLoading: false,
     aciError: null,
 
-    // GCP Jumpoint container instances (COS on GCE)
+    // GCP Gateway container instances (COS on GCE)
     gceJumpoints: [],
     gceProject: '',
     gceLoading: false,
@@ -1563,7 +1563,7 @@ function containersDashboard() {
     // Merged view of the two COS instance kinds, tagged by purpose.
     get gceInstances() {
       return [
-        ...this.gceJumpoints.map(i => ({ ...i, purpose: 'Jumpoint' })),
+        ...this.gceJumpoints.map(i => ({ ...i, purpose: 'Gateway' })),
         ...this.gceCompose.map(i => ({ ...i, purpose: 'Compose' })),
       ];
     },
@@ -1577,7 +1577,7 @@ function containersDashboard() {
     rancherError: null,
     rancherDeploying: false,
     // Deploy-time region + PRA picks (parity with DB/VM deploys)
-    praOpts: { configured: false, regions: [], jump_groups: [], jumpoints: [], vault_account_groups: [] },
+    praOpts: { configured: false, regions: [], jump_groups: [], gateways: [], vault_account_groups: [] },
     deployForm: { region: '', zone: '', web_jump_enabled: false, jump_group: '', jumpoint_name: '', vault_account_group_id: null },
     rancherActionPending: null,
     rancherImportName: '',
@@ -1596,7 +1596,7 @@ function containersDashboard() {
     portainerNodeActionPending: null,
     portainerRegions: [],
     // Deploy-form options: regions + the PRA pickers (same shape as praOpts).
-    portainerDeployOpts: { configured: false, regions: [], jump_groups: [], jumpoints: [], vault_account_groups: [] },
+    portainerDeployOpts: { configured: false, regions: [], jump_groups: [], gateways: [], vault_account_groups: [] },
     portainerDeployForm: { region: '', zone: '', web_jump_enabled: false, jump_group: '', jumpoint_name: '', vault_account_group_id: null },
 
     // ── Lifecycle ──────────────────────────────────────────────────────────
@@ -1931,7 +1931,7 @@ function containersDashboard() {
       }
     },
 
-    // ── GCP Jumpoint container instances (COS on GCE) ──────────────────────
+    // ── GCP Gateway container instances (COS on GCE) ──────────────────────
     async loadGceJumpoints() {
       this.gceLoading = true;
       this.gceError = null;
@@ -1948,7 +1948,7 @@ function containersDashboard() {
     },
 
     async stopGceJumpoint(i) {
-      if (!confirm(`Stop Jumpoint instance "${i.name}"? The instance is deleted and recreated on the next VM deploy.`)) return;
+      if (!confirm(`Stop Gateway instance "${i.name}"? The instance is deleted and recreated on the next VM deploy.`)) return;
       this.gceActionPending = i.name;
       try {
         await API.post(`/api/containers/gce-jumpoints/${encodeURIComponent(i.name)}/stop?zone=${encodeURIComponent(i.zone)}`);

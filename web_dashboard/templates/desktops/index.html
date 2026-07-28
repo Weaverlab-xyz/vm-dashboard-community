@@ -19,7 +19,7 @@
   <p class="text-sm text-gray-500 mb-6">
     A desktop pool is <em>N</em> private VMs from a desktop image. <strong>Azure</strong>
     provisions them now; AWS/GCP create records only (coming next). Brokered
-    "Open session" through the BeyondTrust PRA Jumpoint lands in Phase 2.
+    "Open session" through the BeyondTrust PRA Gateway lands in Phase 2.
   </p>
 
   <!-- Toast -->
@@ -260,7 +260,7 @@
           <div class="space-y-3">
             <div class="grid grid-cols-2 gap-3">
               <div><div class="text-xs text-gray-400 uppercase">Jump Group</div><div x-text="session?.pra?.jump_group || '—'"></div></div>
-              <div><div class="text-xs text-gray-400 uppercase">Jumpoint</div><div x-text="session?.pra?.jumpoint || '—'"></div></div>
+              <div><div class="text-xs text-gray-400 uppercase">Gateway</div><div x-text="session?.pra?.jumpoint || '—'"></div></div>
             </div>
             <p class="text-xs text-gray-500" x-text="session?.note"></p>
             <a :href="session?.console_url" target="_blank" x-show="session?.console_url"

@@ -42,7 +42,7 @@ deployment.
   You know who (the dashboard service account) requested what credential and
   when.
 - **SSH key checkout for cloud VMs** — the Ansible config-management runner and
-  BeyondTrust Jumpoint container retrieve SSH keys from Password Safe managed
+  BeyondTrust Gateway container retrieve SSH keys from Password Safe managed
   accounts, so the private key never touches the host filesystem.
 - **In-playbook secret lookup (Ansible)** — a config-management playbook can fetch
   its own secrets/managed-account passwords from Password Safe at runtime via the
@@ -143,7 +143,7 @@ fill in the fields.
 | Feature | Description |
 |---|---|
 | **Vault-backed cloud credentials** | AWS, Azure, and SSH credentials resolved from Password Safe at runtime rather than stored in the application database |
-| **SSH key checkout** | Ansible and BT Jumpoint tasks retrieve SSH private keys from Managed Accounts on demand |
+| **SSH key checkout** | Ansible and BT Gateway tasks retrieve SSH private keys from Managed Accounts on demand |
 | **Managed-account checkout for playbook runs** | A Config-Management run can use a Password Safe managed account as its login identity — the operator picks an account from a live list and the credential is checked out **just-in-time** at run time, never shown and scrubbed from job output. See [below](#managed-account-checkout-for-config-management-runs) |
 | **Resource onboarding** | VMs and cloud databases the dashboard builds are registered as Password Safe managed systems + accounts, and removed again on destroy |
 | **PRA jump items** | Shell Jump (VMs), Web Jump (Portainer / Rancher UIs), Remote RDP (virtual desktops) and Protocol Tunnel (databases, Kubernetes API) — created and torn down with the resource |
@@ -290,7 +290,7 @@ is immediately usable.
 
 A managed system keyed by hostname/IP on an SSH platform; the dashboard pushes the VM's own
 SSH private key into the managed account and `passwordsafe_ssh_key_enforcement_mode` enforces
-key-only auth. This requires SSH line-of-sight from a Resource Broker / Jumpoint. Select it per
+key-only auth. This requires SSH line-of-sight from a Resource Broker / Gateway. Select it per
 cloud via the `*_registration_method` key (set to `ssh`).
 
 ### Configuration keys
@@ -400,7 +400,7 @@ Set these as Packer build env on the build page. Full detail and a smoke-test re
 
 **Linux** — upload the script to your active storage backend via `/storage`, then on the AWS / Azure / GCP build page pick it from the **Load from storage** dropdown above the Provisioner Script textarea.
 
-**Windows** — `bt-ready-windows.ps1` runs on the Azure Windows build (`os_type=Windows`) before the template's windows-restart + Sysprep finisher. It bakes OpenSSH + RDP into the *output* image so VMs deployed from it are reachable by SSH like Linux ones, plus agentless RDP through the Jumpoint.
+**Windows** — `bt-ready-windows.ps1` runs on the Azure Windows build (`os_type=Windows`) before the template's windows-restart + Sysprep finisher. It bakes OpenSSH + RDP into the *output* image so VMs deployed from it are reachable by SSH like Linux ones, plus agentless RDP through the Gateway.
 
 > **Azure cannot inject SSH public keys into Windows VMs** — that is a Linux-only deploy feature. So the key is authorized *in the image*. Use the public half of the keypair the dashboard holds in Key Vault (`azure_ssh_keypair_secret_name`) so the private half stays retrievable from the VMs tab exactly as it is for Linux. With no key set, password SSH still works using the admin password the deploy generates and vaults.
 
@@ -420,16 +420,16 @@ only; exporting an equivalently-named env var has no effect.
 | `bt_client_id` / `bt_client_secret` | PRA Config API OAuth client-credentials pair |
 | `pra_config_api_client_id` / `pra_config_api_client_secret` | Optional narrower client used only for the PRA Vault functional account; falls back to `bt_client_id` / `bt_client_secret` |
 | `bt_jump_group_name` | Jump group new jump items land in |
-| `bt_jumpoint_name` | The Jumpoint to route through, **by name** — the pickers in Settings enumerate both from the PRA Config API |
+| `bt_jumpoint_name` | The Gateway to route through, **by name** — the pickers in Settings enumerate both from the PRA Config API |
 | `azure_bt_jump_group_name` | Azure-specific jump-group override; blank falls back to `bt_jump_group_name` |
 | `bt_vault_account_group_id` | Vault account group new tunnel credentials are created in |
 | `bt_ps_deploy_key_title` | Title of the Password Safe secret holding the Docker deploy key — the dashboard looks secrets up by title |
 | `bt_shell_jump_id` | Recorded per-VM so the jump item can be torn down with the VM; not operator-set |
 
-**Self-hosted Jumpoint (AWS).** A separate `bt_ecs_*` block provisions a Jumpoint host
+**Self-hosted Gateway (AWS).** A separate `bt_ecs_*` block provisions a Gateway host
 as an ECS task or EC2 instance (`bt_ecs_launch_type`, `bt_ecs_cluster`,
 `bt_ecs_jumpoint_subnet_id`, `bt_ecs_image`, and the CPU/memory/role keys). Configure it
-in the same Settings panel; it exists so a cloud VPC can have a Jumpoint with
+in the same Settings panel; it exists so a cloud VPC can have a Gateway with
 line-of-sight to private instances without one being run by hand.
 
 ---

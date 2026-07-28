@@ -86,12 +86,12 @@ async def run(job_id: str, job_type: str, meta: dict) -> None:
 
 
 def _jumpoint_name(vm_name: str) -> str:
-    """Deterministic Jumpoint VM name. Each user VM gets its own paired
-    Jumpoint, mirroring the AWS ECS pattern. GCE names cap at 63 chars."""
+    """Deterministic Gateway VM name. Each user VM gets its own paired
+    Gateway, mirroring the AWS ECS pattern. GCE names cap at 63 chars."""
     base = f"bt-jumpoint-{vm_name}".lower()
     return base[:63]
 async def _resolve_gcp_jumpoint_deploy_key() -> str:
-    """Return the BeyondTrust SRA Jumpoint deploy key for GCP launches.
+    """Return the BeyondTrust SRA Gateway deploy key for GCP launches.
     Resolves through whichever secrets backend the user picked on /secrets;
     `gcp_cloud_run_docker_deploy_key` is the historical key name."""
     from ..services import config_service
@@ -121,7 +121,7 @@ def _finish_parent(parent_job_id: str, child_job_ids: list) -> None:
 
 
 class _JumpointRef:
-    """How one GCE deploy reached its BeyondTrust Jumpoint.
+    """How one GCE deploy reached its BeyondTrust Gateway.
 
     ``mode`` is the discriminator persisted on the deploy job and read back by
     ``_run_destroy``. A ``paired`` ref OWNS a dedicated ``bt-jumpoint-<vm>`` VM and has
@@ -168,14 +168,14 @@ async def _acquire_paired_jumpoint(db, job_id: str, payload: GCPDeployRequest,
     """Start (or reuse) the dedicated ``bt-jumpoint-<vm>`` VM for a single deploy.
 
     Best-effort, unchanged from before this was extracted: a failure is recorded on the
-    job and the VM launch continues, because the operator may already have a Jumpoint
+    job and the VM launch continues, because the operator may already have a Gateway
     reaching that subnet by other means."""
     from ..services import config_service as _cfg_svc
     name = _jumpoint_name(payload.instance_name)
     image = _cfg_svc.get("gcp_jumpoint_image") or "beyondtrust/sra-jumpoint:latest"
     machine = _cfg_svc.get("gcp_jumpoint_machine_type") or "e2-micro"
     jp_zone = _cfg_svc.get("gcp_jumpoint_zone") or zone
-    job_service.update_progress(db, job_id, 5, f"Starting BeyondTrust Jumpoint {name}…")
+    job_service.update_progress(db, job_id, 5, f"Starting BeyondTrust Gateway {name}…")
     try:
         if getattr(payload, "docker_deploy_key_ref", None):
             deploy_key = _cfg_svc.resolve_reference(payload.docker_deploy_key_ref.strip())
@@ -183,7 +183,7 @@ async def _acquire_paired_jumpoint(db, job_id: str, payload: GCPDeployRequest,
             deploy_key = await _resolve_gcp_jumpoint_deploy_key()
         if not deploy_key:
             raise RuntimeError(
-                "Jumpoint deploy key not configured "
+                "Gateway deploy key not configured "
                 "(gcp_cloud_run_docker_deploy_key) — set it in the wizard."
             )
         meta = await gcp_service.run_gce_jumpoint(
@@ -201,15 +201,15 @@ async def _acquire_paired_jumpoint(db, job_id: str, payload: GCPDeployRequest,
                            reused=bool(meta.get("reused")))
         job_service.update_progress(
             db, job_id, 15,
-            f"Jumpoint {name} {'reused' if ref.reused else 'started'}, launching VM…"
+            f"Gateway {name} {'reused' if ref.reused else 'started'}, launching VM…"
         )
         return ref
     except Exception as e:
-        # Non-fatal — continue to VM launch; user may already have a Jumpoint elsewhere.
-        logger.warning("GCP Jumpoint provisioning failed (non-fatal): %s", e)
+        # Non-fatal — continue to VM launch; user may already have a Gateway elsewhere.
+        logger.warning("GCP Gateway provisioning failed (non-fatal): %s", e)
         job_service.update_progress(
             db, job_id, 15,
-            f"Jumpoint provisioning failed (non-fatal): {e} — continuing with VM launch…"
+            f"Gateway provisioning failed (non-fatal): {e} — continuing with VM launch…"
         )
         return _JumpointRef("paired", error=str(e))
 
@@ -218,35 +218,35 @@ def _paired_requested(payload: GCPDeployRequest) -> bool:
     """Whether this single deploy should start its own ``bt-jumpoint-<vm>`` VM.
 
     True when the operator asked for paired mode, and — regardless of mode — when the
-    request carries its own Jumpoint deploy key. The shared host is one VM serving many
+    request carries its own Gateway deploy key. The shared host is one VM serving many
     resources and resolves its key from config, so there is nowhere to honour a
     per-deploy override on it. Silently ignoring the form field would be the
     "succeeds with a side effect missing" failure this codebase keeps writing tests
-    against, so the override wins and that VM gets its own jumpoint."""
+    against, so the override wins and that VM gets its own gateway."""
     if getattr(payload, "docker_deploy_key_ref", None):
         logger.info("GCP deploy carries a docker_deploy_key_ref — using a paired "
-                    "Jumpoint so the per-deploy key is honoured")
+                    "Gateway so the per-deploy key is honoured")
         return True
     return (_gcp_cfg("gcp_vm_jumpoint_mode", "shared") or "shared").strip().lower() == "paired"
 
 
 async def _acquire_shared_jumpoint(region: str) -> _JumpointRef:
-    """Borrow the ref-counted COS Jumpoint host that cloud databases, k8s tunnels and
+    """Borrow the ref-counted COS Gateway host that cloud databases, k8s tunnels and
     VDI seats already share — one for a whole batch instead of one per VM.
 
-    Best-effort like the paired path: a batch still launches its VMs when the jumpoint
+    Best-effort like the paired path: a batch still launches its VMs when the gateway
     is unavailable, it just has no Shell Jump."""
     from ..services import jumpoint_host_service
     try:
         host = await jumpoint_host_service.ensure_jumpoint_host("gcp", region)
     except Exception as e:
-        logger.warning("Shared GCP Jumpoint host unavailable (non-fatal): %s", e)
+        logger.warning("Shared GCP Gateway host unavailable (non-fatal): %s", e)
         return _JumpointRef("shared", region=region, error=str(e))
     if not host:
         return _JumpointRef(
             "shared", region=region,
-            error="shared Jumpoint host unavailable — check the GCP project and the "
-                  "jumpoint deploy key in the wizard")
+            error="shared Gateway host unavailable — check the GCP project and the "
+                  "gateway deploy key in the wizard")
     return _JumpointRef("shared", name=host, region=region)
 
 
@@ -254,7 +254,7 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
                       *, jumpoint: Optional[_JumpointRef] = None) -> None:
     """Deploy one GCE instance.
 
-    ``jumpoint`` is injected by ``_run_bulk_deploy`` so a batch acquires ONE shared
+    ``gateway`` is injected by ``_run_bulk_deploy`` so a batch acquires ONE shared
     host rather than N paired VMs. Left at None — the single-deploy path — this
     behaves exactly as it did before batches existed, starting its own paired
     ``bt-jumpoint-<vm>``. Keyword-only so the existing ``gce_deploy`` call in ``run()``
@@ -275,16 +275,16 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
     try:
         job_service.set_running(db, job_id)
 
-        # ── Step 1: Start BT Jumpoint on COS-on-GCE first (BeyondTrust only) ──
+        # ── Step 1: Start BT Gateway on COS-on-GCE first (BeyondTrust only) ──
         if bt_enabled:
             if jumpoint is not None:
                 # Injected by _run_bulk_deploy — one shared host for the whole batch.
                 jp = jumpoint
                 job_service.update_progress(
                     db, job_id, 15,
-                    f"Using the shared BeyondTrust Jumpoint {jp.name}, launching VM…"
+                    f"Using the shared BeyondTrust Gateway {jp.name}, launching VM…"
                     if jp.name else
-                    f"Shared Jumpoint unavailable ({jp.error}) — continuing with VM launch…"
+                    f"Shared Gateway unavailable ({jp.error}) — continuing with VM launch…"
                 )
             elif _paired_requested(payload):
                 jp = await _acquire_paired_jumpoint(
@@ -293,13 +293,13 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
                 # Default: borrow the same ref-counted host cloud databases, k8s
                 # tunnels and VDI seats use, instead of a per-VM e2-micro.
                 job_service.update_progress(
-                    db, job_id, 5, "Ensuring the shared BeyondTrust Jumpoint host…")
+                    db, job_id, 5, "Ensuring the shared BeyondTrust Gateway host…")
                 jp = await _acquire_shared_jumpoint(_region_from_zone(zone))
                 job_service.update_progress(
                     db, job_id, 15,
-                    f"Using the shared BeyondTrust Jumpoint {jp.name}, launching VM…"
+                    f"Using the shared BeyondTrust Gateway {jp.name}, launching VM…"
                     if jp.name else
-                    f"Shared Jumpoint unavailable ({jp.error}) — continuing with VM launch…"
+                    f"Shared Gateway unavailable ({jp.error}) — continuing with VM launch…"
                 )
 
         # Retrieve SSH public key (per-launch override wins over the region default)
@@ -361,7 +361,7 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
             jump_group = ((payload.jump_group or "").strip() or _cfg_svc.get("gcp_bt_jump_group_name")
                           or _cfg_svc.get("bt_jump_group_name") or settings.bt_jump_group_name)
             # NB: the PRA *display* name, not the GCE instance name that _JumpointRef
-            # carries. These were one variable until the jumpoint block moved out, and
+            # carries. These were one variable until the gateway block moved out, and
             # it only worked because the metadata write above had already happened.
             pra_jumpoint_name = ((payload.jumpoint_name or "").strip() or _cfg_svc.get("gcp_jumpoint_name")
                                  or _cfg_svc.get("bt_jumpoint_name") or settings.bt_jumpoint_name)
@@ -428,14 +428,14 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
 
 
 async def _run_bulk_deploy(job_items: list, project_id: str, zone: str) -> None:
-    """Deploy a batch of GCE instances behind ONE shared Jumpoint.
+    """Deploy a batch of GCE instances behind ONE shared Gateway.
 
     ``job_items`` is ``[(job_id, GCPDeployRequest)]`` — each child carries its own
     expanded instance name, everything else is shared.
 
     Thin on purpose. The AWS and Azure bulk runners are 200-line near-copies of their
     single-deploy counterparts, and that duplication is exactly why the AWS batch path
-    quietly lost its PRA overrides. Injecting the jumpoint instead means every feature
+    quietly lost its PRA overrides. Injecting the gateway instead means every feature
     on the single path — PRA Shell Jump, Entitle, Password Safe — is in the batch path
     for free, and stays there.
 
@@ -533,7 +533,7 @@ async def _run_destroy(
         job_service.update_progress(db, job_id, 50, f"Deleting instance {instance_name}…")
         await gcp_service.terminate_instance(project_id=project_id, zone=zone, instance_name=instance_name)
 
-        # Mark the deploy row destroyed BEFORE releasing the Jumpoint.
+        # Mark the deploy row destroyed BEFORE releasing the Gateway.
         #
         # The paired branch below excludes this job explicitly, so ordering never
         # mattered for it. The shared branch calls teardown_jumpoint_host_if_idle,
@@ -547,7 +547,7 @@ async def _run_destroy(
             if deploy_job:
                 job_service.set_completed(db, deploy_job_id, deploy_meta)
 
-        # Release the Jumpoint. Two shapes coexist: a PAIRED bt-jumpoint-<vm> VM this
+        # Release the Gateway. Two shapes coexist: a PAIRED bt-jumpoint-<vm> VM this
         # deploy owns outright, or a borrowed reference to the SHARED ref-counted host.
         #
         # A row written before jumpoint_mode existed can only be paired: nothing ever
@@ -567,10 +567,10 @@ async def _run_destroy(
                 # the gce_deploy-scoped sibling count below can see.
                 logger.warning(
                     "Refusing to delete %s from a VM destroy — that is the shared "
-                    "ref-counted Jumpoint host, not a paired one", jumpoint_name)
+                    "ref-counted Gateway host, not a paired one", jumpoint_name)
                 result["jumpoint_shared"] = jumpoint_name
             elif jumpoint_name:
-                # Sibling-aware cleanup: several VMs may share one paired Jumpoint.
+                # Sibling-aware cleanup: several VMs may share one paired Gateway.
                 # Shared-mode rows carry no jumpoint_name, so they can never match here.
                 sibling_count = sum(
                     1 for j in db.query(Job).filter(
@@ -583,7 +583,7 @@ async def _run_destroy(
                 if sibling_count == 0:
                     jumpoint_zone = deploy_meta.get("jumpoint_zone", zone)
                     job_service.update_progress(
-                        db, job_id, 75, f"Stopping paired Jumpoint {jumpoint_name}…"
+                        db, job_id, 75, f"Stopping paired Gateway {jumpoint_name}…"
                     )
                     try:
                         await gcp_service.stop_gce_jumpoint(
@@ -591,12 +591,12 @@ async def _run_destroy(
                         )
                         result["jumpoint_stopped"] = jumpoint_name
                     except Exception as e:
-                        logger.warning("Jumpoint cleanup failed for %s: %s", jumpoint_name, e)
+                        logger.warning("Gateway cleanup failed for %s: %s", jumpoint_name, e)
                         result["jumpoint_error"] = f"cleanup failed: {e}"
                 else:
                     result["jumpoint_shared"] = jumpoint_name
                     logger.info(
-                        "Leaving Jumpoint %s running — %d other active deploy(s) reference it",
+                        "Leaving Gateway %s running — %d other active deploy(s) reference it",
                         jumpoint_name, sibling_count,
                     )
 
@@ -606,12 +606,12 @@ async def _run_destroy(
             # as long as anything still needs it.
             region = deploy_meta.get("jumpoint_region") or _region_from_zone(zone)
             job_service.update_progress(
-                db, job_id, 75, "Releasing the shared BeyondTrust Jumpoint host…")
+                db, job_id, 75, "Releasing the shared BeyondTrust Gateway host…")
             try:
                 from ..services import jumpoint_host_service
                 await jumpoint_host_service.teardown_jumpoint_host_if_idle(db, "gcp", region)
             except Exception as e:
-                logger.warning("Shared Jumpoint host release failed (non-fatal): %s", e)
+                logger.warning("Shared Gateway host release failed (non-fatal): %s", e)
                 result["jumpoint_host_teardown_error"] = str(e)
 
         job_service.set_completed(db, job_id, result)

@@ -206,9 +206,9 @@ A typical deploy:
    the per-cloud page (`/aws`, `/azure`, `/gcp`).
 2. **Job created** — the dashboard creates a `Job` row in the DB,
    queues a background task, returns the job ID immediately.
-3. **Provision Jumpoint** (if BeyondTrust enabled) — the cloud's
-   ephemeral Jumpoint container is spawned first so PRA can register
-   it before the user VM comes up. State for the Jumpoint deployment
+3. **Provision Gateway** (if BeyondTrust enabled) — the cloud's
+   ephemeral Gateway container is spawned first so PRA can register
+   it before the user VM comes up. State for the Gateway deployment
    is recorded under the same job's extra_data.
 4. **Terraform apply** — the per-cloud module is copied into a fresh
    `terraform/deployments/{job_id}/` working dir; `init` configures the
@@ -231,8 +231,8 @@ A typical destroy:
 3. **Instance destroy** — `terraform destroy -auto-approve` against
    the per-job state (in the storage backend; the working dir is
    re-materialised from the module template if the container lost it).
-4. **Sibling-aware Jumpoint cleanup** — if no other active deploys
-   reference the same Jumpoint, the cloud Jumpoint container is
+4. **Sibling-aware Gateway cleanup** — if no other active deploys
+   reference the same Gateway, the cloud Gateway container is
    stopped too; otherwise it stays running for the others.
 5. **Mark deploy job as destroyed** — `Job.extra_data["destroyed"] =
    true` so it's filtered out of "active" lists.
@@ -245,7 +245,7 @@ A typical destroy:
 the cloud console, the dashboard's state directory is now lying — it
 still believes the resource exists. The next destroy will fail with a
 "resource not found" error, the directory has to be hand-cleaned, and
-any sibling-aware logic (Jumpoint cleanup) gets confused. The path is
+any sibling-aware logic (Gateway cleanup) gets confused. The path is
 designed to be closed.
 
 **Tag everything you create.** The dashboard tags every resource with

@@ -189,7 +189,7 @@ A ready-made starter provisioner ships at
 it installs **OpenSSH Server**, enables **RDP + NLA**, sets the SSH
 default shell to PowerShell, and (optionally) authorizes an SSH public
 key — turning a Windows Server Core image into one you can reach by
-`ssh` like a Linux VM, plus agentless RDP through the Jumpoint. Upload
+`ssh` like a Linux VM, plus agentless RDP through the Gateway. Upload
 it to `/storage` (the layer tags `.ps1` as `powershell`) and Load it,
 or paste it in. See
 [provisioners/beyondtrust/README.md](../provisioners/beyondtrust/README.md#windows-bt-ready-windowsps1).
