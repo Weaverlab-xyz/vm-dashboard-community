@@ -90,7 +90,7 @@
         <div class="flex flex-wrap items-end gap-3">
           <div>
             <label class="block text-xs font-medium text-gray-600 mb-1">Cloud</label>
-            <select x-model="gwForm.cloud" @change="gwSuggestName()"
+            <select x-model="gwForm.cloud" @change="gwCloudChanged()"
                     class="text-sm border border-gray-300 rounded-lg px-2 py-1.5 focus:ring-2 focus:ring-blue-500">
               <option value="aws">AWS</option>
               <option value="azure">Azure</option>
@@ -99,13 +99,25 @@
           </div>
           <div>
             <label class="block text-xs font-medium text-gray-600 mb-1">Region</label>
-            <input type="text" x-model="gwForm.region" @change="gwSuggestName()"
-                   placeholder="us-east-2"
-                   class="text-sm border border-gray-300 rounded-lg px-2 py-1.5 w-40 focus:ring-2 focus:ring-blue-500">
+            <!-- Configured regions only (Settings → Multi-region), not the whole
+                 catalog: a gateway needs that region's own subnet. -->
+            <select x-model="gwForm.region" @change="gwRegionChanged()"
+                    :disabled="gwRegionsLoading"
+                    class="text-sm font-mono border border-gray-300 rounded-lg px-2 py-1.5 w-44 focus:ring-2 focus:ring-blue-500 disabled:opacity-50">
+              <!-- The default region is preselected; blank stays available so the
+                   form still works if the region list can't be fetched. -->
+              <option value="">(configured default)</option>
+              <template x-for="r in gwRegions" :key="r">
+                <option :value="r" x-text="r"></option>
+              </template>
+            </select>
           </div>
           <div x-show="gwForm.cloud === 'gcp'">
-            <label class="block text-xs font-medium text-gray-600 mb-1">Zone</label>
-            <input type="text" x-model="gwForm.zone" placeholder="us-central1-b"
+            <label class="block text-xs font-medium text-gray-600 mb-1">
+              Zone <span class="text-gray-400">(optional)</span>
+            </label>
+            <input type="text" x-model="gwForm.zone"
+                   :placeholder="gwZoneHints[gwForm.region] || 'us-central1-b'"
                    class="text-sm border border-gray-300 rounded-lg px-2 py-1.5 w-40 focus:ring-2 focus:ring-blue-500">
           </div>
           <div>
@@ -119,6 +131,15 @@
             <span x-show="gwDeploying" x-cloak>Queueing…</span>
           </button>
         </div>
+        <p class="mt-2 text-[11px] text-gray-400">
+          Only regions with a per-region config set are listed — add one under
+          <a href="/settings" class="underline">Settings → Multi-region</a>
+          to deploy elsewhere. A region without its own subnet would put the gateway on the
+          default region's network.
+          <span x-show="gwForm.cloud === 'gcp'" x-cloak>
+            Blank zone uses <span class="font-mono" x-text="gwZoneHints[gwForm.region] || '(the region default)'"></span>.
+          </span>
+        </p>
         <div x-show="gwError" x-cloak
              class="mt-3 text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2"
              x-text="gwError"></div>
@@ -1475,6 +1496,11 @@ function containersDashboard() {
     gwDeploying: false,
     gwError: null,
     gwForm: { cloud: 'aws', region: '', zone: '', name: '' },
+    // Region picker for the selected cloud: the regions that carry a per-region
+    // config set (default first), plus the zone each one places a GCP host in.
+    gwRegions: [],
+    gwZoneHints: {},
+    gwRegionsLoading: false,
 
     // Portainer state
     endpoints: [],
@@ -2094,7 +2120,42 @@ function containersDashboard() {
       } finally {
         this.gatewaysLoading = false;
       }
+      // Regions first, so the suggested name carries the region it will deploy to.
+      if (!this.gwRegions.length) await this.gwLoadRegions();
       if (!this.gwForm.name) this.gwSuggestName();
+    },
+
+    async gwLoadRegions() {
+      // The picker offers what the dashboard can actually place a gateway in: the
+      // configured default region plus every region with a config set of its own.
+      this.gwRegionsLoading = true;
+      try {
+        const data = await API.get('/api/regions?cloud=' + encodeURIComponent(this.gwForm.cloud));
+        this.gwRegions = data.configured || [];
+        this.gwZoneHints = data.zones || {};
+      } catch (e) {
+        // Leave the picker empty — its "(configured default)" option still deploys.
+        this.gwRegions = []; this.gwZoneHints = {};
+      } finally {
+        this.gwRegionsLoading = false;
+      }
+      if (!this.gwRegions.includes(this.gwForm.region)) {
+        this.gwForm.region = this.gwRegions[0] || '';
+      }
+      this.gwForm.zone = '';
+    },
+
+    async gwCloudChanged() {
+      // Regions are per-cloud, so the list and the chosen region both have to move.
+      await this.gwLoadRegions();
+      this.gwSuggestName();
+    },
+
+    gwRegionChanged() {
+      // The zone hint follows the region; a zone left over from the previous one
+      // would place the host outside the region that was just picked.
+      this.gwForm.zone = '';
+      this.gwSuggestName();
     },
 
     async gwSuggestName() {

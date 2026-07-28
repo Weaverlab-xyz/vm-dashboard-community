@@ -382,7 +382,7 @@ async def teardown_gateway(cloud: str, region: str, name: str, zone: str = "") -
     elif cloud == "azure":
         from . import azure_service
         from .region_config import resolve_region
-        location = _cfg("azure_location") or region
+        location = _azure_gateway_location(region)
         await azure_service.stop_vm_jumpoint(resolve_region("azure", location)["resource_group"], name)
     else:
         from . import aws_service
@@ -556,9 +556,25 @@ def _gcp_project() -> str:
 
 
 def _gcp_jumpoint_zone(region: str) -> str:
-    # Explicit gateway zone wins; else the generic gcp_zone; else derive a
-    # conventional zone from the region (region-b) as a last resort.
-    return _cfg("gcp_jumpoint_zone") or _cfg("gcp_zone") or (f"{region}-b" if region else "")
+    """The zone a GCP gateway host runs in for ``region``.
+
+    ``gcp_jumpoint_zone`` is the gateway's zone override, but it only applies where
+    it belongs: a zone from another region would place the host — and the subnet
+    ``_gcp_jumpoint_subnetwork`` derives from that zone — outside the region the
+    operator asked for, silently ignoring their choice. Everything else is
+    ``region_config``'s zone resolution (the region's own ``zone``, then the flat
+    ``gcp_zone`` when it is in-region, then ``<region>-b``).
+
+    A blank region keeps the historical chain exactly, so single-region installs are
+    unaffected.
+    """
+    from .region_config import resolve_zone_for_region, zone_in_region
+    override = _cfg("gcp_jumpoint_zone")
+    if not region:
+        return override or _cfg("gcp_zone") or ""
+    if override and zone_in_region(override, region):
+        return override
+    return resolve_zone_for_region(region)
 
 
 def _gcp_jumpoint_subnetwork(project: str, zone: str) -> str:
@@ -692,12 +708,25 @@ def _azure_compliant_password() -> str:
             return pw
 
 
+def _azure_gateway_location(region: str) -> str:
+    """The Azure region a gateway VM is created in — and torn down from.
+
+    A requested region wins; ``azure_location`` is the fallback for the *managed*
+    host, which is ensured without one. Reading the flat key first (as this used to)
+    made a region choice a no-op: the VM came up in the default region while the row,
+    the job and the operator all said otherwise, and the teardown then looked for it
+    in the wrong resource group.
+    """
+    from . import region_catalog
+    return region_catalog.normalize("azure", region) or _cfg("azure_location")
+
+
 async def _ensure_jumpoint_host_azure(region: str, name: str = "") -> Optional[str]:
     """Ensure an Azure VM Gateway is up (idempotent on name); return its name.
     Best-effort — logs and returns None when prerequisites are missing."""
     from . import azure_service
     from .region_config import resolve_region
-    location = _cfg("azure_location") or region
+    location = _azure_gateway_location(region)
     rc = resolve_region("azure", location)
     rg = rc["resource_group"]
     subnet = rc["jumpoint_subnet_id"] or _cfg("azure_aci_subnet_id")
