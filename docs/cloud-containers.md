@@ -18,7 +18,8 @@ dashboard runs across AWS, Azure, and GCP.
 
 Related surfaces on the same page live in their own docs: the **Portainer** tab
 → [Portainer integration](integrations/portainer.md); the **Kubernetes
-(Rancher)** tab → [Kubernetes](kubernetes.md) and [Rancher integration](integrations/rancher.md).
+(Rancher)** tab → [Kubernetes](kubernetes.md) and [Rancher integration](integrations/rancher.md);
+the **Gateways** tab → [Gateway hosts](integrations/gateways.md).
 Note the **"Containers" nav link is gated on `portainer_enabled`** (default on) even though
 the Cloud tab works regardless — a cloud-only operator who disables Portainer reaches it via
 the direct `/containers` URL.
@@ -105,6 +106,12 @@ session load. Two lifecycle rules follow from that, and both are enforced for yo
 - A provisioned Rancher/Portainer **Web Jump holds a reference** on the shared gateway, so
   the idle teardown can't reclaim the host that brokers it. Without that, the last cloud
   DB or cluster going away took the management UIs offline with it.
+
+The tab is gated on `beyondtrust_enabled`, and the **Gateways** tile in the dashboard's
+Containers section deep-links straight to it (`/containers#gateways`). For the full story —
+why the managed gateway can't be deleted, why the region picker offers only configured
+regions, and the naming rules that keep the two kinds of host apart in the cloud — see
+**[Gateway hosts](integrations/gateways.md)**.
 
 
 ### Reaping stranded runner jobs
