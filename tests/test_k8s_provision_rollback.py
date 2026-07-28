@@ -240,7 +240,12 @@ def test_apply_failure_destroys_the_partial_deployment():
 
 def test_rollback_success_is_reported_but_keeps_the_apply_error_primary():
     row, error = _run(apply_exc=_TerraformError("GCE_STOCKOUT"))
-    assert error.startswith("GCE_STOCKOUT"), "the apply error must lead the message"
+    # The apply error stays primary: it comes before the rollback note, which is only
+    # ever appended. (A GCP stockout additionally gets the one-line "which zone, and
+    # what to do" lead that _explain_apply_failure adds — see
+    # test_k8s_capacity_message.py — so the assertion is on ORDER, not on offset 0.)
+    assert "GCE_STOCKOUT" in error
+    assert error.index("GCE_STOCKOUT") < error.lower().index("[rollback]")
     assert "rollback" in error.lower()
     assert "destroyed" in error.lower()
     assert row.status == "failed"
@@ -251,10 +256,30 @@ def test_rollback_failure_is_non_fatal_and_flags_manual_cleanup():
     # escape run_provision_apply (the job would otherwise never be marked failed).
     row, error = _run(apply_exc=_TerraformError("GCE_STOCKOUT"),
                       destroy_exc=_TerraformError("quota exceeded on delete"))
-    assert error.startswith("GCE_STOCKOUT"), "the apply error must stay primary"
+    assert "GCE_STOCKOUT" in error, "the apply error must stay in the message"
+    assert error.index("GCE_STOCKOUT") < error.lower().index("[rollback]"), \
+        "the apply error must stay primary — the rollback note is appended after it"
     assert "quota exceeded on delete" in error, "the rollback failure must be surfaced"
     assert "MANUAL CLEANUP REQUIRED" in error
     assert row.status == "failed"
+
+
+def test_a_stockout_reads_explanation_then_apply_error_then_rollback_note():
+    """The three pieces compose in the order an operator needs them.
+
+    The dashboard's activity feed shows the head of ``error_message``, and a real
+    apply error is the whole terraform stream — so the actionable line has to lead,
+    the raw output has to survive, and the rollback note goes last.
+    """
+    raw = ("terraform apply failed:\nError: Error waiting for creating GKE cluster: "
+           "Not all instances running in IGM … [GCE_STOCKOUT]: … The zone "
+           "'…/zones/us-central1-c' does not have enough resources available.")
+    _row, error = _run(apply_exc=_TerraformError(raw))
+    head = error.split("\n", 1)[0]
+    assert "no capacity" in head and "GCE_STOCKOUT" in head, \
+        f"the failure must lead with the capacity explanation, got: {head!r}"
+    assert raw in error, "the raw terraform output must survive intact"
+    assert error.index("no capacity") < error.index(raw) < error.lower().index("[rollback]")
 
 
 def test_rollback_runs_when_the_operator_cancels_the_apply():

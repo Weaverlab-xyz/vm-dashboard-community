@@ -5,6 +5,7 @@ Uses asyncio.to_thread() so long-running applies don't block the event loop.
 """
 import asyncio
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -16,6 +17,8 @@ except ImportError:  # pragma: no cover
 from typing import Awaitable, Callable, Optional
 
 from ..config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class TerraformError(Exception):
@@ -237,12 +240,53 @@ def _apply_sync(deploy_dir: str, var_args: list, env: Optional[dict] = None) -> 
     return {k: v["value"] for k, v in raw.items()}
 
 
+def _destroy_args(var_args: Optional[list] = None, refresh: bool = True) -> list:
+    """`terraform destroy` args; ``refresh=False`` skips the pre-destroy refresh
+    (see :data:`_REFRESH_WEDGE_MARKERS`)."""
+    cmd = ["destroy", "-auto-approve", "-no-color", "-input=false"]
+    if not refresh:
+        cmd.append("-refresh=false")
+    return cmd + (var_args or [])
+
+
 def _destroy_sync(deploy_dir: str, env: Optional[dict] = None,
-                  var_args: Optional[list] = None) -> None:
-    cmd = ["destroy", "-auto-approve", "-no-color", "-input=false"] + (var_args or [])
-    r = _run(cmd, deploy_dir, timeout=600, env=env)
+                  var_args: Optional[list] = None, refresh: bool = True) -> None:
+    r = _run(_destroy_args(var_args, refresh), deploy_dir, timeout=600, env=env)
     if r.returncode != 0:
         raise TerraformError(f"terraform destroy failed:\n{r.stderr}\n{r.stdout}")
+
+
+# ── Destroy-time refresh wedges ───────────────────────────────────────────────
+# `terraform destroy` REFRESHES before it plans, so a provider read that can never
+# succeed aborts the whole run before anything is deleted — and every retry burns
+# the same failure, so the resources stay orphaned forever.
+#
+# The one hit in the wild is the google provider's GKE resume-on-read: it stores
+# the in-flight cluster operation in state and every later READ resumes waiting on
+# it (resource_container_cluster.go → ContainerOperationWait "resuming GKE
+# cluster", read timeout 90m). A cluster whose CREATE died — e.g. the pinned zone
+# ran out of capacity for the default pool's first node, so the create operation
+# ended in GCE_STOCKOUT ~35 min in — then fails EVERY teardown with
+#   Error waiting for resuming GKE cluster: … [GCE_STOCKOUT] … Expected 1, running 0
+# leaving the cluster plus its VPC/router/NAT/address behind.
+#
+# STATE (not the refresh) decides what gets destroyed, so retrying once with
+# -refresh=false is both safe and sufficient: the provider skips the read and goes
+# straight to Delete, whose own wait treats ERROR/DEGRADED as a resting state and
+# tolerates a 404 for anything already gone out-of-band. terraform_pra_service /
+# ps_resource_service already destroy with -refresh=false unconditionally for the
+# same "the provider errors on refresh" reason; here it stays a fallback so a
+# normal destroy keeps the drift detection a refresh gives us.
+_REFRESH_WEDGE_MARKERS = (
+    "error waiting for resuming gke cluster",
+)
+
+
+def _is_refresh_wedge(output: str) -> bool:
+    """True when a failed destroy looks like a doomed *refresh* rather than a real
+    delete failure — worth exactly one retry with ``-refresh=false``."""
+    low = (output or "").lower()
+    return any(m in low for m in _REFRESH_WEDGE_MARKERS)
 
 
 def _import_sync(deploy_dir: str, address: str, resource_id: str,
@@ -380,6 +424,10 @@ async def destroy(deploy_dir: str, env: Optional[dict] = None,
     destroyed (resources come from state), but provider-config vars (e.g. the
     google provider's project/region) must be correct, so callers reconstruct
     the full set rather than passing placeholders.
+
+    A destroy that fails on a refresh which can never succeed (see
+    :data:`_REFRESH_WEDGE_MARKERS`) is retried once with ``-refresh=false`` —
+    otherwise the teardown is wedged permanently and the resources are orphaned.
     """
     backend_type, backend_config, backend_env = _backend_settings(deploy_dir)
     merged_env = {**backend_env, **(env or {})}
@@ -410,14 +458,33 @@ async def destroy(deploy_dir: str, env: Optional[dict] = None,
 
     if on_line is None:
         await asyncio.to_thread(_init_sync, deploy_dir, merged_env, backend_type, backend_config)
-        await asyncio.to_thread(_destroy_sync, deploy_dir, merged_env, var_args)
+        try:
+            await asyncio.to_thread(_destroy_sync, deploy_dir, merged_env, var_args)
+        except TerraformError as exc:
+            if not _is_refresh_wedge(str(exc)):
+                raise
+            logger.warning("terraform destroy in %s failed on an unrecoverable refresh "
+                           "— retrying with -refresh=false: %s", deploy_dir, exc)
+            await asyncio.to_thread(_destroy_sync, deploy_dir, merged_env, var_args,
+                                    refresh=False)
         return
 
     # Streaming path (mirrors apply): serialized non-streamed init, then stream destroy.
     await asyncio.to_thread(_init_sync, deploy_dir, merged_env, backend_type, backend_config)
-    rc, out = await _stream(
-        ["destroy", "-auto-approve", "-no-color", "-input=false"] + var_args,
-        deploy_dir, merged_env, on_line)
+    rc, out = await _stream(_destroy_args(var_args), deploy_dir, merged_env, on_line)
+    if rc != 0 and _is_refresh_wedge(out):
+        note = ("destroy failed on a refresh that can never succeed (a stale in-flight "
+                "cloud operation in state) — retrying with -refresh=false")
+        logger.warning("terraform destroy in %s: %s", deploy_dir, note)
+        try:
+            await on_line(f"[dashboard] {note}")
+        except JobCancelled:
+            raise  # the operator cancelled: don't start a second destroy
+        except Exception:
+            pass   # a UI-broadcast hiccup must not block the retry
+        rc, retry_out = await _stream(
+            _destroy_args(var_args, refresh=False), deploy_dir, merged_env, on_line)
+        out = f"{out}\n{retry_out}"
     if rc != 0:
         raise TerraformError(f"terraform destroy failed:\n{out}")
 
