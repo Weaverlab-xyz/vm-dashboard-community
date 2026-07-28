@@ -214,12 +214,41 @@ async def ensure_jumpoint_host(cloud: str, region: str, name: str = "") -> Optio
 
     ``name`` defaults to the shared auto-ensured gateway, which is what every
     existing caller gets. A caller passing a name is asking for *that* gateway host,
-    which is how user-deployed gateways get more than one per cloud."""
+    which is how user-deployed gateways get more than one per cloud.
+
+    Whether a name was given also decides ownership, and so who records it: no name
+    means the managed gateway, which is adopted into the registry here because
+    nothing else knows it happened. A named gateway was requested through a job that
+    already owns its row."""
+    requested = bool(name)
     if cloud == "gcp":
-        return await _ensure_jumpoint_host_gcp(region, name)
-    if cloud == "azure":
-        return await _ensure_jumpoint_host_azure(region, name)
-    return await _ensure_jumpoint_host_aws(region, name)
+        host_id = await _ensure_jumpoint_host_gcp(region, name)
+    elif cloud == "azure":
+        host_id = await _ensure_jumpoint_host_azure(region, name)
+    else:
+        host_id = await _ensure_jumpoint_host_aws(region, name)
+    if host_id and not requested:
+        _adopt_managed_row(cloud, region, host_id)
+    return host_id
+
+
+def _adopt_managed_row(cloud: str, region: str, host_id: str) -> None:
+    """Record the auto-ensured gateway in the registry, so the Gateways page shows it
+    beside the requested ones. Owns its own session — callers of ensure_jumpoint_host
+    are mid-deploy and hold sessions of their own. Best-effort by contract: an
+    inventory write must never be what fails a deploy."""
+    try:
+        from ..database import SessionLocal
+        from . import gateway_service
+        db = SessionLocal()
+        try:
+            gateway_service.adopt_managed(db, cloud, region, managed_host_name(cloud),
+                                          host_id=host_id)
+        finally:
+            db.close()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("gateway-host: registering the managed gateway failed "
+                       "(non-fatal): %s", exc)
 
 
 async def _await_ecs_registration(region: str, host_id: str) -> None:
@@ -331,6 +360,43 @@ async def _ensure_jumpoint_host_aws(region: str, name: str = "") -> Optional[str
         logger.warning("gateway-host: capturing host public IP failed (non-fatal): %s", exc)
     await _ensure_task(region, deploy_key, host_id)
     return host_id
+
+
+async def teardown_gateway(cloud: str, region: str, name: str, zone: str = "") -> None:
+    """Delete one named Gateway host unconditionally.
+
+    The counterpart to ``teardown_jumpoint_host_if_idle``, for a gateway an operator
+    deployed on purpose: no reference counting, because nothing implicitly depends on
+    it — it exists because someone asked for it and goes away when someone asks.
+
+    Refuses the managed gateway. That one's lifecycle belongs to the ensure/idle pair,
+    and deleting it here would leave the auto-ensure to silently recreate it while the
+    registry row said it was gone."""
+    if name == managed_host_name(cloud):
+        raise ValueError(
+            f"{name!r} is the auto-managed gateway for {cloud}; it is created and "
+            "removed by the reference-counted lifecycle, not by request")
+    if cloud == "gcp":
+        from . import gcp_service
+        await gcp_service.stop_gce_jumpoint(_gcp_project(), zone or _gcp_jumpoint_zone(region), name)
+    elif cloud == "azure":
+        from . import azure_service
+        from .region_config import resolve_region
+        location = _cfg("azure_location") or region
+        await azure_service.stop_vm_jumpoint(resolve_region("azure", location)["resource_group"], name)
+    else:
+        from . import aws_service
+        cluster = _aws_region_cfg(region)["ecs_cluster"]
+        family = _cfg("bt_ecs_task_family")
+        hosts = await aws_service.find_instances_by_tag(
+            region, name_tag=name, states=["pending", "running", "stopping", "stopped"])
+        for h in hosts:
+            # Stop this host's tasks first so PRA deregisters gracefully, and only
+            # this host's — the same scoping the idle teardown uses.
+            for t in await _live_gateway_tasks(region, cluster, family, h["instance_id"]):
+                await aws_service.stop_ecs_jumpoint_task(region, cluster, t["taskArn"])
+            await aws_service.terminate_instance(region, h["instance_id"])
+    logger.info("gateway-host(%s): deleted gateway %s", cloud, name)
 
 
 def _active_db_count(db, cloud: Optional[str] = None) -> int:

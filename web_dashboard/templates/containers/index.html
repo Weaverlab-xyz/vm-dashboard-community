@@ -53,8 +53,136 @@
         Kubernetes (Rancher)
       </button>
       {% endif %}
+      {% if beyondtrust_enabled %}
+      <button @click="activeTab = 'gateways'; loadGateways()"
+              :class="activeTab === 'gateways'
+                ? 'border-b-2 border-blue-600 text-blue-600 font-semibold'
+                : 'border-b-2 border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'"
+              class="px-4 py-2 text-sm transition whitespace-nowrap">
+        Gateways
+      </button>
+      {% endif %}
     </nav>
   </div>
+
+  {% if beyondtrust_enabled %}
+  <!-- ── BeyondTrust Gateways ────────────────────────────────────────────── -->
+  <div x-show="activeTab === 'gateways'" x-cloak>
+    <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6 mb-6">
+      <div class="flex items-start justify-between gap-4">
+        <div>
+          <h2 class="text-lg font-semibold text-gray-800">BeyondTrust Gateways</h2>
+          <p class="text-sm text-gray-500 mt-1 max-w-3xl">
+            The dashboard always keeps one gateway per cloud for its own tunnels and jumps,
+            and removes it once nothing is using it. Add your own to carry session traffic —
+            as many as you want, in whatever regions you want. They join the same PRA Gateway
+            as additional cluster nodes, so nothing needs repointing.
+          </p>
+        </div>
+        <button @click="loadGateways()" :disabled="gatewaysLoading"
+                class="shrink-0 text-sm bg-white border border-gray-300 hover:bg-gray-50 px-3 py-2 rounded-lg shadow-sm font-medium transition disabled:opacity-50">
+          Refresh
+        </button>
+      </div>
+
+      <!-- Deploy form -->
+      <div class="mt-5 pt-5 border-t border-gray-100">
+        <div class="flex flex-wrap items-end gap-3">
+          <div>
+            <label class="block text-xs font-medium text-gray-600 mb-1">Cloud</label>
+            <select x-model="gwForm.cloud" @change="gwSuggestName()"
+                    class="text-sm border border-gray-300 rounded-lg px-2 py-1.5 focus:ring-2 focus:ring-blue-500">
+              <option value="aws">AWS</option>
+              <option value="azure">Azure</option>
+              <option value="gcp">GCP</option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-gray-600 mb-1">Region</label>
+            <input type="text" x-model="gwForm.region" @change="gwSuggestName()"
+                   placeholder="us-east-2"
+                   class="text-sm border border-gray-300 rounded-lg px-2 py-1.5 w-40 focus:ring-2 focus:ring-blue-500">
+          </div>
+          <div x-show="gwForm.cloud === 'gcp'">
+            <label class="block text-xs font-medium text-gray-600 mb-1">Zone</label>
+            <input type="text" x-model="gwForm.zone" placeholder="us-central1-b"
+                   class="text-sm border border-gray-300 rounded-lg px-2 py-1.5 w-40 focus:ring-2 focus:ring-blue-500">
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-gray-600 mb-1">Name</label>
+            <input type="text" x-model="gwForm.name" placeholder="gw-us-east-2-01"
+                   class="text-sm border border-gray-300 rounded-lg px-2 py-1.5 w-56 focus:ring-2 focus:ring-blue-500">
+          </div>
+          <button @click="deployGateway()" :disabled="gwDeploying || !gwForm.cloud"
+                  class="text-sm bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-medium transition disabled:opacity-50">
+            <span x-show="!gwDeploying">Deploy gateway</span>
+            <span x-show="gwDeploying" x-cloak>Queueing…</span>
+          </button>
+        </div>
+        <div x-show="gwError" x-cloak
+             class="mt-3 text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2"
+             x-text="gwError"></div>
+      </div>
+    </div>
+
+    <!-- Gateway list -->
+    <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+      <table class="w-full text-sm">
+        <thead>
+          <tr class="bg-gray-50 border-b border-gray-200 text-left">
+            <th class="px-4 py-3 font-semibold text-gray-600">Status</th>
+            <th class="px-4 py-3 font-semibold text-gray-600">Name</th>
+            <th class="px-4 py-3 font-semibold text-gray-600">Cloud</th>
+            <th class="px-4 py-3 font-semibold text-gray-600">Region</th>
+            <th class="px-4 py-3 font-semibold text-gray-600">Host</th>
+            <th class="px-4 py-3 font-semibold text-gray-600">Created by</th>
+            <th class="px-4 py-3 font-semibold text-gray-600 text-right">Actions</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-50">
+          <tr x-show="gatewaysLoading">
+            <td colspan="7" class="px-4 py-10 text-center text-gray-400">Loading…</td>
+          </tr>
+          <tr x-show="!gatewaysLoading && gateways.length === 0">
+            <td colspan="7" class="px-4 py-10 text-center text-gray-400">
+              No gateways yet. The managed one appears here the first time the dashboard needs it.
+            </td>
+          </tr>
+          <template x-for="g in gateways" :key="g.id">
+            <tr class="hover:bg-gray-50 transition">
+              <td class="px-4 py-3">
+                <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium"
+                      :class="statusBadge(g.status)" x-text="g.status"></span>
+              </td>
+              <td class="px-4 py-3 font-medium text-gray-800">
+                <span x-text="g.name"></span>
+                <!-- The managed gateway is reference-counted; it isn't the operator's to remove. -->
+                <span x-show="g.managed" x-cloak
+                      class="ml-2 align-middle inline-flex items-center px-1.5 py-0.5 rounded
+                             bg-gray-100 text-gray-600 text-[10px] font-medium"
+                      title="Created and removed automatically as resources need it">managed</span>
+              </td>
+              <td class="px-4 py-3 text-gray-500" x-text="g.cloud"></td>
+              <td class="px-4 py-3 text-gray-500" x-text="g.region || '–'"></td>
+              <td class="px-4 py-3 text-gray-500 text-xs font-mono" x-text="g.host_id || '–'"></td>
+              <td class="px-4 py-3 text-gray-500 text-xs" x-text="g.created_by || '–'"></td>
+              <td class="px-4 py-3 text-right">
+                <a x-show="g.deploy_job_id" :href="'/jobs/' + g.deploy_job_id" x-cloak
+                   class="text-blue-500 hover:underline text-xs font-medium mr-2">Job</a>
+                <button x-show="!g.managed" @click="destroyGateway(g)"
+                        class="text-red-500 hover:text-red-700 text-xs font-medium">Remove</button>
+              </td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </div>
+    <p x-show="gateways.some(g => g.error)" x-cloak class="mt-3 text-xs text-gray-500">
+      A gateway in <span class="font-medium">error</span> kept its row so the reason stays
+      visible — open its job for the detail.
+    </p>
+  </div>
+  {% endif %}
 
 
   <!-- ── Indeterminate progress bar (any Portainer loading) ─────────────── -->
@@ -1339,7 +1467,14 @@
 function containersDashboard() {
   return {
     // Top-level tab — Cloud is the primary view; the Portainer tab needs Portainer
-    activeTab: 'cloud',  // 'cloud' | 'portainer' | 'rancher'
+    activeTab: 'cloud',  // 'cloud' | 'portainer' | 'rancher' | 'gateways'
+
+    // BeyondTrust Gateways
+    gateways: [],
+    gatewaysLoading: false,
+    gwDeploying: false,
+    gwError: null,
+    gwForm: { cloud: 'aws', region: '', zone: '', name: '' },
 
     // Portainer state
     endpoints: [],
@@ -1946,6 +2081,63 @@ function containersDashboard() {
     },
 
     // ── Managed Portainer server ─────────────────────────────────────────────
+    // ── BeyondTrust Gateways ───────────────────────────────────────────────
+    async loadGateways() {
+      this.gatewaysLoading = true;
+      this.gwError = null;
+      try {
+        const data = await API.get('/api/gateways');
+        this.gateways = data.gateways || [];
+      } catch (e) {
+        this.gwError = e.message;
+        this.gateways = [];
+      } finally {
+        this.gatewaysLoading = false;
+      }
+      if (!this.gwForm.name) this.gwSuggestName();
+    },
+
+    async gwSuggestName() {
+      // Best-effort convenience: a blank name is a validation error server-side, so
+      // prefill a free one. A failure here just leaves the field for the operator.
+      try {
+        const q = new URLSearchParams({ cloud: this.gwForm.cloud, region: this.gwForm.region || '' });
+        const data = await API.get('/api/gateways/suggest-name?' + q.toString());
+        this.gwForm.name = data.name || '';
+      } catch (e) { /* leave the field as the operator left it */ }
+    },
+
+    async deployGateway() {
+      this.gwDeploying = true;
+      this.gwError = null;
+      try {
+        const body = {
+          cloud: this.gwForm.cloud,
+          region: this.gwForm.region || '',
+          zone: this.gwForm.cloud === 'gcp' ? (this.gwForm.zone || '') : '',
+          name: this.gwForm.name || '',
+        };
+        await API.post('/api/gateways/deploy', body);
+        this.gwForm.name = '';
+        await this.loadGateways();
+      } catch (e) {
+        this.gwError = e.message;
+      } finally {
+        this.gwDeploying = false;
+      }
+    },
+
+    async destroyGateway(g) {
+      if (!confirm(`Remove gateway "${g.name}"? Sessions routed through it will drop.`)) return;
+      this.gwError = null;
+      try {
+        await API.del('/api/gateways/' + g.id);
+        await this.loadGateways();
+      } catch (e) {
+        this.gwError = e.message;
+      }
+    },
+
     async loadPortainerNode() {
       this.portainerNodeLoading = true;
       this.portainerNodeError = null;

@@ -482,6 +482,7 @@ from .api import docs_pages  # noqa: E402
 from .api import workgroups as workgroups_api  # noqa: E402
 from .api import workgroup_overrides as workgroup_overrides_api  # noqa: E402
 from .api import cloud_identity as cloud_identity_api  # noqa: E402
+from .api import gateways as gateways_api  # noqa: E402
 from .api.mcp_server import get_mcp_asgi_app  # noqa: E402
 
 
@@ -641,6 +642,12 @@ try:
     app.include_router(epml.router, dependencies=[_feature_gate("beyondtrust_enabled")])
 except ImportError as exc:
     logger.warning("API router 'epml' not loaded: %s", exc)
+
+# Gateway hosts are a BeyondTrust PRA concept, so the routes follow the same flag as
+# the rest of the integration — with it off there is nothing for a gateway to register
+# with and the Gateways tab stays hidden.
+app.include_router(gateways_api.router,
+                   dependencies=[_feature_gate("beyondtrust_enabled")])
 
 try:
     # Virtual desktop management (Azure pools + PRA brokering). Gated on vdesktops_enabled.

@@ -51,6 +51,7 @@ HANDLED_TYPES = (
     "oci_deploy", "oci_bulk_deploy", "oci_destroy",
     "azure_deploy", "azure_bulk_deploy", "azure_destroy", "azure_create_image",
     "gce_deploy", "gce_bulk_deploy", "gce_capture_image", "gce_destroy",
+    "gateway_deploy", "gateway_teardown",
 )
 
 POLL_INTERVAL = 2.0  # seconds between queue polls when idle
@@ -249,6 +250,11 @@ async def _dispatch(job_id: str, job_type: str, meta: dict) -> None:
             # instead of a paired bt-jumpoint-<vm> per instance.
             from .services import gcp_vm_service
             await gcp_vm_service.run(job_id, job_type, meta)
+        elif job_type in ("gateway_deploy", "gateway_teardown"):
+            # An operator-requested BeyondTrust Gateway host. Unlike the auto-ensured
+            # one, nothing reference-counts it — it lives until someone removes it.
+            from .services import gateway_service
+            await gateway_service.run(db, job_id=job_id, meta=meta)
         else:  # pragma: no cover — HANDLED_TYPES guards the claim
             logger.warning("job runner: unhandled job_type %s (job %s)", job_type, job_id)
     finally:
