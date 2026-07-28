@@ -937,48 +937,76 @@ def _run_gce_jumpoint_sync(
     machine_type: str = "e2-micro",
     cos_image_family: str = "cos-stable",
     create_external_ip: bool = True,
+    region: str = "",
 ) -> dict:
     """Launch a small COS GCE instance running the BT Jumpoint container.
     Idempotent on existence: if an instance with the same name is already
-    RUNNING in the zone, returns its info without re-creating."""
+    RUNNING in the region, returns its info without re-creating.
+
+    On a fresh launch, sibling zones in the same region are tried on
+    ``ZONE_RESOURCE_POOL_EXHAUSTED`` — same as the Portainer/Rancher node launchers.
+    Without it a single capacity-exhausted zone silently leaves the deployment with
+    NO gateway (the ensure path is best-effort for its callers, so the error is only
+    logged), and every Web Jump and tunnel that needs a broker fails."""
     _require_compute()
     from google.cloud import compute_v1
     from google.api_core.exceptions import Conflict, NotFound
 
     creds = _gcp_creds()
     client = compute_v1.InstancesClient(credentials=creds)
+    region = (region or (zone.rsplit("-", 1)[0] if zone else "")).strip()
 
     # Reuse if already present — but "reused" must mean a LIVE gateway. A name match
     # alone isn't enough: a STOPPED/TERMINATED VM was previously reported reused with a
     # dead jumpoint (no gateway for the tunnel). If it isn't RUNNING, start it — COS
     # re-runs the jumpoint container on boot — and wait for RUNNING before returning.
+    #
+    # Looked up REGION-wide, not in `zone` alone: with the sibling-zone fallback below
+    # an earlier launch may have landed in another zone of the region, and a
+    # zone-scoped get would 404 there and insert a DUPLICATE gateway (GCE names are
+    # unique per zone, not per region).
+    found_zone = _find_instance_zone_in_region(client, project_id, name, region) or zone
     try:
-        existing = client.get(project=project_id, zone=zone, instance=name)
+        if not found_zone:
+            # Nothing to reuse and nowhere to look: a blank zone with no regional match
+            # means this is a first launch. (A get with an empty zone is a 400, not the
+            # NotFound this block is written to absorb.)
+            raise NotFound("no zone to check for an existing gateway")
+        existing = client.get(project=project_id, zone=found_zone, instance=name)
         status = existing.status
         if status != "RUNNING":
             logger.info("GCE Jumpoint '%s' exists but status=%s — starting it for a live gateway",
                         name, status)
             try:
-                start_op = client.start(project=project_id, zone=zone, instance=name)
+                start_op = client.start(project=project_id, zone=found_zone, instance=name)
                 start_op.result(timeout=180)
-                existing = client.get(project=project_id, zone=zone, instance=name)
+                existing = client.get(project=project_id, zone=found_zone, instance=name)
                 status = existing.status
             except Exception as start_err:
                 logger.warning("GCE Jumpoint '%s' start failed (status=%s): %s",
                                name, status, start_err)
         return {
-            "name": name, "zone": zone, "self_link": existing.self_link,
+            "name": name, "zone": found_zone, "self_link": existing.self_link,
             "status": status, "reused": True,
             # Surface the ephemeral egress IP even on reuse: the Web-Jump firewall
-            # (_jumpoint_cidr) needs it, and a reclaimed VM's IP may have changed.
+            # (_jumpoint_cidrs) needs it, and a reclaimed VM's IP may have changed.
             "external_ip": _external_ip_of(existing),
         }
     except NotFound:
         pass
 
+    # Zones to try, resolved BEFORE the instance is built: the subnet self-link is
+    # region-scoped, so it is qualified once against the region every candidate shares
+    # (and picking a real zone here also handles a blank ``zone``).
+    candidate_zones = [z for z in (_rancher_candidate_zones(project_id, region, zone, creds,
+                                                            log_label="gateway")
+                                   or [zone]) if z]
+    if not candidate_zones:
+        raise GCPError(f"No GCE zone to launch gateway '{name}' in "
+                       f"(region={region!r}, zone={zone!r})")
+
     instance = compute_v1.Instance()
     instance.name = name
-    instance.machine_type = f"zones/{zone}/machineTypes/{machine_type}"
 
     # Boot disk from Container-Optimised OS
     disk = compute_v1.AttachedDisk()
@@ -994,7 +1022,7 @@ def _run_gce_jumpoint_sync(
     # Network
     nic = compute_v1.NetworkInterface()
     if subnetwork:
-        nic.subnetwork = _qualify_subnetwork(subnetwork, project_id, zone)
+        nic.subnetwork = _qualify_subnetwork(subnetwork, project_id, candidate_zones[0])
     elif network:
         nic.network = _qualify_network(network)
     if create_external_ip:
@@ -1016,32 +1044,48 @@ def _run_gce_jumpoint_sync(
     # Jumpoint can SSH into VMs in the user-VM subnet.
     instance.tags = compute_v1.Tags(items=[_JUMPOINT_LABEL])
 
-    logger.info(
-        "Starting GCE COS Jumpoint '%s' in %s (image=%s, machine=%s, deploy_key_len=%d)",
-        name, zone, container_image, machine_type, len(deploy_key or ""),
-    )
-    try:
-        op = client.insert(project=project_id, zone=zone, instance_resource=instance)
-        op.result(timeout=300)
-        reused = False
-    except Conflict:
-        # Lost a find-or-create race: another worker replica created this instance
-        # between our get() above and this insert. GCE instance names are unique per
-        # zone, so a 409 means the thing we wanted now exists — which is success, not
-        # failure. Returning it (rather than raising into the caller's blanket except,
-        # which would yield None) matters because the shared host is ref-counted on
-        # jumpoint_host_id: a caller that got None would record no reference and let
-        # the host be reclaimed while it still needed it.
-        logger.info("GCE Jumpoint '%s' was created concurrently — reusing it", name)
-        reused = True
+    # Insert into the first candidate zone with capacity; on
+    # ZONE_RESOURCE_POOL_EXHAUSTED fall through to the region's sibling zones.
+    launch_zone, reused, last_err = "", False, None
+    for cand in candidate_zones:
+        instance.machine_type = f"zones/{cand}/machineTypes/{machine_type}"
+        logger.info(
+            "Starting GCE COS Jumpoint '%s' in %s (image=%s, machine=%s, deploy_key_len=%d)",
+            name, cand, container_image, machine_type, len(deploy_key or ""),
+        )
+        try:
+            op = client.insert(project=project_id, zone=cand, instance_resource=instance)
+            op.result(timeout=300)
+            launch_zone = cand
+            break
+        except Conflict:
+            # Lost a find-or-create race: another worker replica created this instance
+            # between our get() above and this insert. GCE instance names are unique per
+            # zone, so a 409 means the thing we wanted now exists — which is success, not
+            # failure. Returning it (rather than raising into the caller's blanket except,
+            # which would yield None) matters because the shared host is ref-counted on
+            # jumpoint_host_id: a caller that got None would record no reference and let
+            # the host be reclaimed while it still needed it.
+            logger.info("GCE Jumpoint '%s' was created concurrently — reusing it", name)
+            launch_zone, reused = cand, True
+            break
+        except Exception as e:
+            if _is_zone_capacity_error(e) and cand != candidate_zones[-1]:
+                logger.warning("Gateway zone %s is out of capacity (%s) — trying the next "
+                               "zone in %s", cand, e, region)
+                last_err = e
+                continue
+            raise
+    if not launch_zone:
+        raise GCPError(f"Failed to launch gateway '{name}' in region '{region}': {last_err}")
 
     # Re-fetched after the insert (or after losing the race), so both the status and
     # the egress IP describe whichever instance actually exists now.
-    info = client.get(project=project_id, zone=zone, instance=name)
+    info = client.get(project=project_id, zone=launch_zone, instance=name)
     return {
-        "name": name, "zone": zone, "self_link": info.self_link,
+        "name": name, "zone": launch_zone, "self_link": info.self_link,
         "status": info.status, "reused": reused,
-        # The Web-Jump firewall (_jumpoint_cidr) whitelists this /32 so the Jumpoint
+        # The Web-Jump firewall (_jumpoint_cidrs) whitelists this /32 so the Jumpoint
         # host can reach a source-restricted Rancher/Portainer node.
         "external_ip": _external_ip_of(info),
     }
@@ -1057,6 +1101,7 @@ async def run_gce_jumpoint(
     subnetwork: str = "",
     machine_type: str = "e2-micro",
     create_external_ip: bool = True,
+    region: str = "",
 ) -> dict:
     """Async wrapper for _run_gce_jumpoint_sync."""
     try:
@@ -1064,6 +1109,7 @@ async def run_gce_jumpoint(
             _run_gce_jumpoint_sync,
             project_id, zone, name, container_image, deploy_key,
             network, subnetwork, machine_type, "cos-stable", create_external_ip,
+            region,
         )
     except GCPError:
         raise
@@ -1987,6 +2033,29 @@ def _external_ip_of(info) -> str:
     return ""
 
 
+def _find_instance_zone_in_region(client, project_id: str, name: str, region: str) -> str:
+    """The zone in ``region`` where instance ``name`` lives, or ``""``.
+
+    Needed wherever a launcher has zone fallback: the VM may sit in a sibling zone of
+    the one we'd pick today, and a zone-scoped ``get`` would 404 and create a second
+    copy under the same name (GCE names are unique per zone, not per region).
+    Best-effort — a lookup failure returns ``""``, which just means "insert"."""
+    if not region:
+        return ""
+    try:
+        from google.cloud import compute_v1
+        request = compute_v1.AggregatedListInstancesRequest(
+            project=project_id, filter=f'name = "{name}"')
+        for zone_path, scoped in client.aggregated_list(request=request):
+            for inst in (scoped.instances or []):
+                zone_name = zone_path.split("/")[-1]
+                if inst.name == name and zone_name.rsplit("-", 1)[0] == region:
+                    return zone_name
+    except Exception as e:  # noqa: BLE001 — inventory read; the caller can still insert
+        logger.warning("could not search region %s for instance '%s' (%s)", region, name, e)
+    return ""
+
+
 def _internal_ip_of(info) -> str:
     """Best-effort: pull the primary internal (VPC) IP off a compute instance —
     the address in-cloud runners reach it at (VPC-connector egress is
@@ -2313,7 +2382,8 @@ _PORTAINER_LABEL = "portainer"
 _PORTAINER_DATA_HOSTPATH = "/var/lib/portainer"
 
 
-def _portainer_container_spec_yaml(container_image: str) -> str:
+def _portainer_container_spec_yaml(container_image: str,
+                                   admin_password_hash: str = "") -> str:
     """Generate the gce-container-declaration konlet YAML for the Portainer server.
 
     No ``privileged`` and no Docker-socket mount — the managed server administers
@@ -2321,7 +2391,16 @@ def _portainer_container_spec_yaml(container_image: str) -> str:
     bind-mounted to a host path on the boot disk so a container restart (COS re-runs
     it on every boot) keeps state; a VM delete still discards it. No port block is
     needed: COS runs the container on the host network, so Portainer binds host
-    9443/8000 directly (firewall-governed)."""
+    9443/8000 directly (firewall-governed).
+
+    ``admin_password_hash`` (bcrypt) is passed as ``--admin-password`` so Portainer
+    creates the admin user AT STARTUP. That is what makes the deploy deterministic:
+    Portainer only accepts ``POST /api/users/admin/init`` for a short window after the
+    container starts and then fences off its whole API with "Administrator
+    initialization timeout" — a window the dashboard was racing (and losing) while it
+    waited for the node to serve, leaving a node nobody could ever log into. Passing
+    the hash up front means there is no window to lose. konlet hands ``args`` straight
+    to the entrypoint (no shell), so the ``$`` in a bcrypt hash needs no escaping."""
     import yaml
     spec = {
         "spec": {
@@ -2343,6 +2422,8 @@ def _portainer_container_spec_yaml(container_image: str) -> str:
             "restartPolicy": "Always",
         }
     }
+    if admin_password_hash:
+        spec["spec"]["containers"][0]["args"] = ["--admin-password", admin_password_hash]
     return yaml.safe_dump(spec, default_flow_style=False)
 
 
@@ -2436,11 +2517,17 @@ def _run_gce_portainer_sync(
     cos_image_family: str = "cos-stable",
     create_external_ip: bool = True,
     region: str = "",
+    admin_password_hash: str = "",
 ) -> dict:
     """Launch (or reuse) a COS GCE instance running the Portainer CE server.
     Idempotent on existence: a RUNNING same-named VM is returned as-is; a stopped
     one is started (COS re-runs the container on boot). Returns the public IP +
     derived https URL so the caller can pin portainer_url and bootstrap.
+
+    ``admin_password_hash`` (bcrypt) initializes the admin user at container start —
+    see :func:`_portainer_container_spec_yaml`. It only applies to a FRESH launch:
+    konlet reads the declaration from instance metadata at boot, so a reused VM keeps
+    whatever it was created with.
 
     ``zone`` may be blank — the launcher then auto-picks a valid zone in ``region``
     (falling back to ``region_of(zone)`` when only a zone is given). On a fresh
@@ -2520,7 +2607,7 @@ def _run_gce_portainer_sync(
         )]
     instance.network_interfaces = [nic]
 
-    container_yaml = _portainer_container_spec_yaml(container_image)
+    container_yaml = _portainer_container_spec_yaml(container_image, admin_password_hash)
     instance.metadata = compute_v1.Metadata(items=[
         compute_v1.Items(key="gce-container-declaration", value=container_yaml),
         compute_v1.Items(key="google-logging-enabled", value="true"),
@@ -2573,6 +2660,7 @@ async def run_gce_portainer(
     network_tag: str = "portainer",
     create_external_ip: bool = True,
     region: str = "",
+    admin_password_hash: str = "",
 ) -> dict:
     """Async wrapper for _run_gce_portainer_sync."""
     try:
@@ -2580,7 +2668,7 @@ async def run_gce_portainer(
             _run_gce_portainer_sync,
             project_id, zone, name, container_image,
             network, subnetwork, machine_type, boot_disk_gb, network_tag,
-            "cos-stable", create_external_ip, region,
+            "cos-stable", create_external_ip, region, admin_password_hash,
         )
     except GCPError:
         raise

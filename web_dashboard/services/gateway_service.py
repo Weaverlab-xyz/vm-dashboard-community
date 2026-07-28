@@ -69,6 +69,65 @@ def _to_dict(g) -> dict:
     }
 
 
+def live_egress_ips(db, cloud: str) -> list[str]:
+    """Egress IPs of every live gateway in ``cloud`` — the sources a node firewall must
+    admit for a Web Jump to reach a source-restricted node.
+
+    Every gateway host in a cloud joins the same PRA Gateway *cluster*, and PRA
+    distributes sessions across its nodes: the broker for any given session may be ANY
+    of them, so allowing one remembered IP is a coin flip. Deleted rows are excluded so
+    a torn-down gateway's /32 leaves the rule."""
+    from ..database import Gateway
+    rows = (db.query(Gateway)
+              .filter(Gateway.cloud == cloud, Gateway.status != "deleted",
+                      Gateway.egress_ip.isnot(None)).all())
+    return sorted({(r.egress_ip or "").strip() for r in rows if (r.egress_ip or "").strip()})
+
+
+def record_egress_ip(db, cloud: str, name: str, egress_ip: str) -> None:
+    """Store a gateway's egress IP on its registry row (best-effort).
+
+    Called from the ensure paths for both kinds of gateway, because the IP is
+    ephemeral: a reclaim/recreate changes it, and the firewall reads these rows."""
+    from ..database import Gateway
+    if not egress_ip:
+        return
+    try:
+        row = (db.query(Gateway)
+                 .filter(Gateway.cloud == cloud, Gateway.name == name,
+                         Gateway.status != "deleted").first())
+        if row is None or (row.egress_ip or "") == egress_ip:
+            return
+        row.egress_ip = egress_ip
+        db.commit()
+        logger.info("gateway registry: %s gateway %s egress IP = %s", cloud, name, egress_ip)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("gateway registry: recording egress IP for %s failed (non-fatal): %s",
+                       name, exc)
+        db.rollback()
+
+
+def mark_deleted(db, cloud: str, name: str) -> None:
+    """Mark a gateway row deleted after its host is gone (best-effort).
+
+    The idle teardown deletes the managed host directly, so without this the Gateways
+    page keeps showing a gateway that no longer exists — and its stale /32 stays in
+    every node firewall."""
+    from ..database import Gateway
+    try:
+        row = (db.query(Gateway)
+                 .filter(Gateway.cloud == cloud, Gateway.name == name,
+                         Gateway.status != "deleted").first())
+        if row is None:
+            return
+        row.status = "deleted"
+        row.egress_ip = None
+        db.commit()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("gateway registry: marking %s deleted failed (non-fatal): %s", name, exc)
+        db.rollback()
+
+
 def existing_names(db, cloud: str) -> list[str]:
     """Names already taken in ``cloud`` — registry rows plus the managed name, which
     may have no row yet if the auto-ensure has never run."""
@@ -211,10 +270,14 @@ async def _run_deploy(db, job_id: str, meta: dict) -> None:
 
     # Passing a name is what marks this as a requested gateway: ensure_jumpoint_host
     # then skips the managed-adoption write, because the row below is already ours.
+    # ``placement`` comes back filled with where the host actually landed.
+    placement: dict = {}
     if cloud == "gcp" and zone:
-        host_id = await jumpoint_host_service._ensure_jumpoint_host_gcp(region, name, zone)
+        host_id = await jumpoint_host_service._ensure_jumpoint_host_gcp(
+            region, name, zone, placement=placement)
     else:
-        host_id = await jumpoint_host_service.ensure_jumpoint_host(cloud, region, name)
+        host_id = await jumpoint_host_service.ensure_jumpoint_host(
+            cloud, region, name, placement=placement)
 
     if not host_id:
         # The ensure paths are best-effort and return None when a prerequisite (deploy
@@ -229,10 +292,39 @@ async def _run_deploy(db, job_id: str, meta: dict) -> None:
         row.status = "running"
         row.host_id = host_id
         row.error = None
+        # Record where it ACTUALLY landed: the launcher resolves a blank zone, and may
+        # fall through to a sibling zone on a capacity error, so the requested zone is
+        # not necessarily the real one — and teardown deletes by (zone, name).
+        row.zone = placement.get("zone") or row.zone
+        row.egress_ip = placement.get("egress_ip") or row.egress_ip
         db.commit()
+
+    # A new gateway is a new source address in front of every source-restricted node.
+    # Re-applying here is what closes the gap: the ensure path records the IP, but
+    # nothing was re-applying the rules, so a Web Jump brokered by this gateway hit a
+    # firewall that had never heard of it.
+    job_service.update_progress(db, job_id, 90, "Updating node firewalls")
+    await refresh_node_firewalls(db, f"gateway {name} deploy")
 
     job_service.update_progress(db, job_id, 100, f"Gateway {name} is up ({host_id}).")
     job_service.set_completed(db, job_id, {"host_id": host_id, "name": name})
+
+
+async def refresh_node_firewalls(db, why: str) -> None:
+    """Re-apply the Rancher + Portainer node firewalls after the gateway set changes.
+
+    Both nodes are source-restricted and brokered through a gateway, so their allow
+    lists are a function of which gateways exist. Best-effort and no-op safe (each
+    refresh returns early when its node/cloud isn't configured) — a firewall refresh
+    must never be what fails a gateway job."""
+    from . import portainer_node_service, rancher_node_service
+    for label, refresh in (("rancher", rancher_node_service.refresh_rancher_firewall),
+                           ("portainer", portainer_node_service.refresh_portainer_firewall)):
+        try:
+            await refresh(db)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("gateway: %s firewall refresh after %s failed (non-fatal): %s",
+                           label, why, exc)
 
 
 async def _run_teardown(db, job_id: str, meta: dict) -> None:
@@ -249,7 +341,13 @@ async def _run_teardown(db, job_id: str, meta: dict) -> None:
     row = get_gateway(db, gateway_id) if gateway_id else None
     if row is not None:
         row.status = "deleted"
+        row.egress_ip = None
         db.commit()
+
+    # Drop the departed gateway's /32 from the node firewalls — the row is deleted
+    # above, so the recomputed set no longer contains it.
+    job_service.update_progress(db, job_id, 90, "Updating node firewalls")
+    await refresh_node_firewalls(db, f"gateway {name} teardown")
 
     job_service.update_progress(db, job_id, 100, f"Gateway {name} removed.")
     job_service.set_completed(db, job_id, {"name": name})

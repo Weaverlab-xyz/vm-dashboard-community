@@ -231,20 +231,24 @@ and-egg problem. The dashboard now manages the allow-list for you:
   NAT IP on GCP, a static NAT-gateway IP on Azure). The provision job captures it
   (module output `nat_public_ip` → `k8s_clusters.egress_ip`) and adds it to the
   node firewall as a `/32`. Decommissioning the cluster removes it again.
-- **Web-Jump Gateway** — when the [PRA Web Jump](#pra-web-jump-optional) is
-  enabled, the dashboard-managed Gateway host's egress IP is captured and added
-  as a `/32`. A Web Jump reaches the node **through a Gateway**, so this — not the
-  PRA appliance IP — is the source the firewall must allow. `rancher_ui_jumpoint_cloud`
-  (default `gcp`, same cloud as the node) picks which dashboard-managed Gateway
-  brokers the UI.
+- **Web-Jump Gateways** — when the [PRA Web Jump](#pra-web-jump-optional) is
+  enabled, a `/32` is added for **every gateway the dashboard deployed** in that cloud:
+  the shared managed host *and* any you added on **Containers → Gateways**. A Web Jump
+  reaches the node **through a Gateway**, so this — not the PRA appliance IP — is the
+  source the firewall must allow, and since all of a cloud's gateway hosts join one PRA
+  Gateway *cluster*, PRA may broker a given session through any node in it: allowing
+  only the shared host's IP left a session brokered by another node blocked.
+  `rancher_ui_jumpoint_cloud` (default `gcp`, same cloud as the node) picks which
+  cloud's gateways broker the UI. A provisioned Web Jump also holds a reference on the
+  shared gateway, so the idle teardown can't reclaim its broker.
 - **Manual CIDRs** — `rancher_allowed_source_cidrs` is still honoured and **added
   on top**, for extra operator/human IPs and for **pre-existing operator Gateways**
   (a Gateway the dashboard didn't provision has an egress IP the dashboard can't
   learn — add it here).
 
 The effective set is recomputed and re-applied idempotently on every relevant
-event: node deploy, cluster provision, cluster import, cluster decommission, and
-Web Jump enable. It stays **fail-closed** — if there are no manual CIDRs, no
+event: node deploy, cluster provision, cluster import, cluster decommission, Web Jump
+enable, and every **gateway deploy or teardown**. It stays **fail-closed** — if there are no manual CIDRs, no
 provisioned clusters, and no captured Gateway IP, the firewall is not opened
 (unless *Allow open* is ticked). The **Settings → Kubernetes** panel shows the
 computed allow-list read-only.
@@ -253,7 +257,8 @@ All three dashboard-managed gateway hosts expose a knowable egress IP: GCP and A
 via the host's public IP, and Azure via a **Standard, secure-by-default public IP**
 on the gateway VM's NIC (Standard IPs block all inbound unless an NSG allows it, so
 this is egress-only — no ingress path). The AWS/GCP gateway IPs are ephemeral and
-re-captured on each ensure; the Azure one is static.
+re-captured on each ensure and recorded per-gateway (`gateways.egress_ip`); the Azure
+one is static. A gateway that is torn down has its `/32` dropped from the rule.
 
 **Limitations.** A **pre-existing operator Gateway** (one the dashboard didn't
 provision) has an egress IP the dashboard can't learn — add it to
@@ -415,7 +420,7 @@ apply immediately.
 | `rancher_ui_web_jump_enabled` | `false` | Opt-in PRA Web Jump broker for the UI |
 | `rancher_ui_verify_certificate` | `false` | Web Jump cert verification |
 | `rancher_ui_jumpoint_cloud` | `gcp` | Which dashboard-managed Gateway host brokers the UI (`gcp`\|`aws`\|`azure`); its egress IP is auto-whitelisted |
-| `rancher_ui_jumpoint_egress_ip` | (runtime) | Captured egress IP of the dashboard-managed Web-Jump Gateway (auto-added to the firewall) |
+| `rancher_ui_jumpoint_egress_ip` | (runtime) | Captured egress IP of the SHARED Web-Jump Gateway (auto-added to the firewall). Gateways you deploy yourself come from the gateway registry, so every cluster node is allowed |
 | `rancher_ui_vault_account_group_id` | `""` | PRA Vault account group (numeric id) the admin credential is vaulted into for Web-Jump injection; usually chosen per-deploy |
 | `rancher_ui_vault_account_id` | (runtime) | PRA Vault account id created for the admin credential; cleared on teardown |
 | `entitle_rancher_private` | `false` | Attach the Entitle agent token (node not reachable from Entitle's cloud) |

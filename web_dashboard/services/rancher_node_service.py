@@ -168,18 +168,41 @@ def _auto_cluster_cidrs(db) -> list[str]:
     return [f"{r.egress_ip.strip()}/32" for r in rows if (r.egress_ip or "").strip()]
 
 
-def _jumpoint_cidr() -> list[str]:
-    """/32 for the dashboard-managed Web-Jump Jumpoint host, when known + enabled.
+def _jumpoint_cidrs(db=None) -> list[str]:
+    """/32s for the Gateway hosts that can broker this node's Web Jump.
 
-    A PRA Web Jump reaches the node THROUGH a Jumpoint, so the source IP hitting
-    the firewall is the Jumpoint host's egress IP (never the PRA appliance's).
-    Only known when the dashboard provisioned that host (see jumpoint_host_service);
-    empty for a pre-existing operator Jumpoint (add its IP to the CSV manually).
+    A PRA Web Jump reaches the node THROUGH a Gateway, so the source IP hitting
+    the firewall is that host's egress IP (never the PRA appliance's).
+
+    EVERY live gateway in the Web Jump's cloud counts, not just the shared one: they
+    all join the same PRA Gateway cluster and PRA distributes sessions across its
+    nodes, so the broker for a given session may be any of them. Sources are the
+    gateway registry (``Gateway.egress_ip``) plus the legacy
+    ``rancher_ui_jumpoint_egress_ip`` key. Empty for a pre-existing operator Gateway
+    the dashboard didn't provision (add its IP to the CSV manually).
     """
     if not config_service.get_bool("rancher_ui_web_jump_enabled", False):
         return []
+    ips = set()
     ip = (config_service.get("rancher_ui_jumpoint_egress_ip") or "").strip()
-    return [f"{ip}/32"] if ip else []
+    if ip:
+        ips.add(ip)
+    cloud = (config_service.get("rancher_ui_jumpoint_cloud") or "gcp").strip().lower()
+    try:
+        from . import gateway_service
+        if db is not None:
+            ips.update(gateway_service.live_egress_ips(db, cloud))
+        else:
+            from ..database import SessionLocal
+            _db = SessionLocal()
+            try:
+                ips.update(gateway_service.live_egress_ips(_db, cloud))
+            finally:
+                _db.close()
+    except Exception as exc:  # noqa: BLE001 — never let an inventory read close the rule
+        logger.warning("Rancher firewall: reading gateway egress IPs failed "
+                       "(continuing with %d known): %s", len(ips), exc)
+    return sorted(f"{i}/32" for i in ips)
 
 
 def _dashboard_cidr() -> list[str]:
@@ -284,8 +307,8 @@ async def refresh_rancher_firewall(db) -> dict:
     """Recompute the node's firewall source set and re-apply it idempotently.
 
     The merged set is the manual CSV (``_allowed_cidrs``) plus the auto-discovered
-    dashboard-provisioned cluster egress /32s plus the dashboard-managed Web-Jump
-    Jumpoint /32. Called from every lifecycle event that changes the set (node
+    dashboard-provisioned cluster egress /32s plus a /32 for every Gateway that can
+    broker the Web Jump. Called from every lifecycle event that changes the set (node
     deploy, cluster provision/import/decommission, Web Jump enable). Fail-closed
     and idempotent behavior is inherited from ``gcp_service.ensure_rancher_firewall``
     (empty set → rule deleted; ``0.0.0.0/0`` from allow_open dedupes harmlessly).
@@ -296,7 +319,7 @@ async def refresh_rancher_firewall(db) -> dict:
     if not p["project_id"]:
         return {"skipped": "no gcp project configured"}
     merged = sorted(set(_allowed_cidrs()) | set(_auto_cluster_cidrs(db))
-                    | set(_jumpoint_cidr()) | set(_dashboard_cidr()) | set(_runner_cidr()))
+                    | set(_jumpoint_cidrs(db)) | set(_dashboard_cidr()) | set(_runner_cidr()))
     # Warn on the FINAL merged set only — an empty manual CSV alone is normal
     # (auto-discovered sources usually populate the set on their own).
     if not merged:
@@ -317,7 +340,7 @@ def firewall_status(db) -> dict:
     rows = db.query(K8sCluster).filter(K8sCluster.egress_ip.isnot(None)).all()
     clusters = [{"name": r.name, "cloud": r.cloud, "ip": (r.egress_ip or "").strip()}
                 for r in rows if (r.egress_ip or "").strip()]
-    jump = _jumpoint_cidr()
+    jump = _jumpoint_cidrs(db)
     dash = _dashboard_cidr()
     runner = _runner_cidr()
     merged = sorted(set(_allowed_cidrs()) | set(_auto_cluster_cidrs(db))
@@ -326,7 +349,9 @@ def firewall_status(db) -> dict:
     return {
         "manual_cidrs": [c.strip() for c in csv.split(",") if c.strip()],
         "cluster_egress_ips": clusters,
+        # Kept singular for the existing Settings panel; gateway_cidrs is the full set.
         "jumpoint_egress_ip": jump[0] if jump else "",
+        "gateway_cidrs": jump,
         "dashboard_egress_ip": dash[0] if dash else "",
         "runner_source_cidr": runner[0] if runner else "",
         "merged": merged,
@@ -386,7 +411,7 @@ async def run_deploy(db, *, job_id: str, meta: dict) -> None:
             return
 
         # Persist the deploy-form PRA choices to config FIRST, so the firewall
-        # merge (_jumpoint_cidr gates on rancher_ui_web_jump_enabled) and the later
+        # merge (_jumpoint_cidrs gates on rancher_ui_web_jump_enabled) and the later
         # Web-Jump provisioning (register_rancher_ui_web_jump reads _cfg) all honor
         # this deploy's picks. Only keys the operator actually sent are written, so a
         # bare redeploy keeps the existing Settings.
