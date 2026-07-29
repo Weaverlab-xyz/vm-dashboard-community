@@ -219,8 +219,9 @@
           reference, and registers it — then launch a plane / broker access / install secrets as usual.
           <strong>EKS</strong>, <strong>AKS</strong>, and <strong>GKE</strong> are supported;
           <strong>OKE</strong> is experimental (no Entra federation, in-process kubectl, not yet
-          live-validated). AKS/GKE/OKE create their own network with internet egress; EKS uses the
-          sandbox's private k8s subnets.
+          live-validated). Every cluster builds its own network with internet egress — no shared
+          sandbox subnets; EKS additionally peers its VPC back to the sandbox so in-cluster agents
+          can reach the private VMs/DBs directly.
         </p>
         <div class="grid grid-cols-2 gap-3">
           <div>
