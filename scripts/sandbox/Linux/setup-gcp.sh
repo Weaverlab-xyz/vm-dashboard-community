@@ -151,8 +151,13 @@ fi
 
 section "GCP sandbox in project $PROJECT_ID, region $REGION ($ZONE)"
 
-# Apply the sandbox label everywhere we can (GCP uses labels, not tags).
-LABELS="${SANDBOX_TAG_KEY//-/_}=${SANDBOX_TAG_VALUE//-/_}"
+# Apply the sandbox label everywhere we can (GCP uses labels, not tags). Hyphens are
+# legal in both GCP label keys and values ([a-z]([-_a-z0-9]*)), so keep the tag verbatim
+# — this used to normalize hyphens to underscores, which bought nothing and desynced the
+# sandbox from the dashboard's own hyphenated labels (gcp_service.py). cost_service still
+# accepts the underscored forms: billing-export rows are immutable, so historical
+# managed_by=dashboard_sandbox rows keep showing up forever.
+LABELS="${SANDBOX_TAG_KEY}=${SANDBOX_TAG_VALUE}"
 
 VPC="${NAME}-vpc"
 JP_SUBNET="${NAME}-jumpoint-subnet"

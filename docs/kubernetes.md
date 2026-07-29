@@ -85,8 +85,11 @@ Config: `aws_vpc_id` (sandbox VPC to peer back to, import-only), `aws_eks_vpc_ci
 
 ### Azure AKS
 
-Builds its **own VNet** (default `10.96.0.0/16`) with Azure CNI, egress via a **user-assigned
-NAT gateway + static IP** (stable, whitelistable). Uses the **existing resource group**
+Builds its **own VNet** (default `10.96.0.0/16`) with Azure CNI, egress via the **AKS-managed
+outbound load balancer pinned to our own static IP** (stable, whitelistable). Supplying the IP
+replaces AKS's managed outbound IP, which would otherwise live in the opaque `MC_` node RG and
+could rotate. This replaced a per-cluster user-assigned NAT gateway: same `/32` contract, ~40%
+less per cluster-hour and ~9× less per GB. Uses the **existing resource group**
 (`azure_resource_group`, default `vm-cli-rg`) because the dashboard SP is RG-scoped. AAD-
 integrated with Azure RBAC (`oidc_issuer_enabled` + `workload_identity_enabled`); creates a
 **per-cluster Key Vault** + user-assigned managed identity + federated credential — the
@@ -94,6 +97,14 @@ Entitle agent's `azure_secret_manager` backend (the in-cluster Secrets path 401s
 
 Config (import-only): `azure_aks_k8s_version`, `azure_aks_node_vm_size`,
 `azure_aks_authorized_cidrs`.
+
+Clusters provisioned **before** the load-balancer switch still hold a NAT gateway in their
+Terraform state, and `terraform destroy` removes it from state even though the module no longer
+declares it. After decommissioning one of those, confirm nothing was left billing:
+
+```bash
+az network nat-gateway list -g <rg> --query "[?tags.\"managed-by\"=='vm-dashboard'].{name:name,rg:resourceGroup}" -o table
+```
 
 ### GCP GKE
 

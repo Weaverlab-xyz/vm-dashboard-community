@@ -971,6 +971,13 @@ def _ensure_ssm_vpce_security_group_sync(region: str, vpc_id: str, vpc_cidr: str
         VpcId=vpc_id,
         TagSpecifications=[{
             "ResourceType": "security-group",
+            # dashboard-sandbox DELIBERATELY, unlike the endpoint itself (which is
+            # vm-dashboard so its ~$7/mo lands in the dashboard scope on /costs).
+            # rollback.sh:48 builds Name=tag:managed-by,Values=dashboard-sandbox and
+            # step 2b deletes security groups with exactly that filter; AWS refuses
+            # DeleteVpc while any non-default SG remains, so retagging this would leave
+            # the SG behind and wedge the whole sandbox teardown. Security groups are
+            # free and never appear in Cost Explorer, so this costs no attribution.
             "Tags": [{"Key": "Name", "Value": name},
                      {"Key": "managed-by", "Value": "dashboard-sandbox"}],
         }],
@@ -1049,8 +1056,12 @@ def _create_ssm_endpoint_sync(region: str, vpc_id: str, service_name: str, subne
         PrivateDnsEnabled=True,
         TagSpecifications=[{
             "ResourceType": "vpc-endpoint",
+            # vm-dashboard, not dashboard-sandbox: the DASHBOARD creates and deletes
+            # these, and each bills ~$7/mo while it exists, so they belong in the
+            # dashboard scope on /costs (cost_service.get_aws_managed_breakdown).
+            # Safe for teardown — rollback.sh sweeps endpoints by vpc-id, not by tag.
             "Tags": [{"Key": "Name", "Value": name_tag},
-                     {"Key": "managed-by", "Value": "dashboard-sandbox"}],
+                     {"Key": "managed-by", "Value": "vm-dashboard"}],
         }],
     )
     return resp["VpcEndpoint"]["VpcEndpointId"]

@@ -54,17 +54,21 @@ async def cost_breakdown(
     refresh: bool = Query(False, description="Bust the cache and re-query the clouds"),
     current_user: User = Depends(require_admin),
 ) -> dict:
-    """Per-cloud, per-service MTD spend for dashboard-managed resources
-    (``managed-by=vm-dashboard``), cached. Same resilience contract as
-    /summary — clouds without the tag/creds/permission report "unavailable"
-    (with a hint) rather than failing the request. ``refresh=true`` invalidates
-    the cache first so the next fetch is fresh."""
-    key = cache_service.key_global("cost_breakdown")
+    """Per-cloud, per-service MTD spend split into **dashboard**
+    (``managed-by=vm-dashboard``) and **sandbox** (``managed-by=dashboard-sandbox``)
+    scope, cached. Same resilience contract as /summary — clouds without the
+    tag/creds/permission report "unavailable" (with a hint) rather than failing the
+    request. ``refresh=true`` invalidates the cache first so the next fetch is fresh.
+
+    The cache key is versioned in ``cost_service`` so a payload-shape change can't be
+    served stale to a template expecting the new shape; main.py's warmer reads the same
+    constant so the two can't drift onto different keys."""
+    key = cache_service.key_global(cost_service.CACHE_KEY_BREAKDOWN)
     if refresh:
         await cache_service.invalidate(key)
     data, cached_at = await cache_service.get_or_refresh(
         key,
-        cache_service.TTL["cost_breakdown"],
+        cache_service.TTL[cost_service.CACHE_KEY_BREAKDOWN],
         cost_service.get_cost_breakdown,
     )
     return {**data, "cached_at": cached_at}
