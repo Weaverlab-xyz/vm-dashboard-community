@@ -398,6 +398,58 @@ def destroy_job_type(deploy_job_type: str) -> Optional[str]:
     return _DESTROY_FOR.get(deploy_job_type)
 
 
+# The metadata each cloud's DELETE endpoint puts on its destroy job, as
+# (target_key_in_deploy_metadata, extra_required_keys). The reaper rebuilds exactly this
+# shape so the job it enqueues is indistinguishable from one the Destroy button created —
+# see build_destroy_metadata.
+_DESTROY_META = {
+    "ec2_deploy":   ("instance_id",   ("region",)),
+    "azure_deploy": ("vm_name",       ("resource_group",)),
+    "gce_deploy":   ("instance_name", ("zone", "project_id")),
+    "oci_deploy":   ("instance_ocid", ()),
+}
+
+
+def build_destroy_metadata(deploy_job_type: str, deploy_meta: dict, deploy_job_id: str):
+    """``(destroy_job_type, metadata)`` for reaping a VM, or ``(None, reason)``.
+
+    Every value is read from the deploy job's own metadata and **never re-derived from
+    current config**. That is the whole point: each DELETE endpoint already resolves and
+    persists these at deploy time precisely so the runner doesn't re-resolve them later.
+    ``api/azure.py`` spells out why — re-deriving would read whatever
+    ``azure_resource_group`` is configured *now* rather than the group the VM actually
+    went into — and ``api/gcp.py`` is blunter still: "a destroy aimed at the wrong project
+    is the worst version of this bug."
+
+    So a deploy job missing a key its destroy needs is REFUSED, with a reason the operator
+    sees in the sweep report, rather than reaped against a guessed default. That case is
+    real: a VM deployed before multi-region support recorded no ``region``. Refusing means
+    it shows up as needing a manual delete — which is right, because the alternative is a
+    destroy pointed somewhere nobody chose.
+    """
+    spec = _DESTROY_META.get(deploy_job_type)
+    destroy_type = _DESTROY_FOR.get(deploy_job_type)
+    if not spec or not destroy_type:
+        return None, (f"{deploy_job_type} has no queued teardown, so it cannot be "
+                      f"auto-deleted")
+    target_key, extra = spec
+    meta = deploy_meta or {}
+
+    target = meta.get(target_key)
+    if not target:
+        return None, (f"its deploy job recorded no {target_key} — the cloud resource "
+                      f"cannot be identified, so delete it manually")
+    out = {target_key: target, "deploy_job_id": deploy_job_id}
+    for key in extra:
+        value = meta.get(key)
+        if not value:
+            return None, (f"its deploy job recorded no {key}, and re-deriving one from "
+                          f"current config could aim the destroy at the wrong "
+                          f"{key.replace('_', ' ')} — delete it manually")
+        out[key] = value
+    return destroy_type, out
+
+
 # ── Eligibility, as the UI and the server both see it ────────────────────────
 
 def ttl_capable(item: dict) -> tuple:
@@ -456,6 +508,33 @@ def armed(armed_at_ts: Optional[float], now_ts: float) -> bool:
     if not armed_at_ts:
         return False
     return (now_ts - armed_at_ts) >= ARM_DELAY_MINUTES * 60
+
+
+def deletion_active(enforce_since_ts: Optional[float], now_ts: float) -> bool:
+    """Whether DELETION may happen at all, independent of any single resource.
+
+    Turning off report-only mode is the moment this feature becomes destructive, and the
+    dangerous case is specific: an operator watches in report-only for a week, 40
+    resources quietly pass their expiry, and unchecking one box makes all 40 eligible at
+    once. So enforcement gets its own arming delay, on the same clock as the feature's —
+    a guaranteed hour, with the full backlog listed on /inventory and in the sweep report,
+    to extend or pin anything still needed.
+
+    A delay rather than a permanent carve-out for the backlog: refusing forever to reap
+    anything that expired before enforcement was enabled would leave a set of resources
+    the feature can see, reports every pass, and can never act on. That is a worse
+    failure — a growing pile of overdue resources nobody deletes — than making the
+    operator wait an hour.
+
+    Requires both ``enforce`` and ``not dry_run``; ``enforce_since_ts`` is None until a
+    pass has observed both, so the clock starts from an actual observation rather than
+    from whenever the setting was written.
+    """
+    if not enforce() or dry_run():
+        return False
+    if not enforce_since_ts:
+        return False
+    return (now_ts - enforce_since_ts) >= ARM_DELAY_MINUTES * 60
 
 
 def expired(items: list, now_ts: float, *, grace_min: int) -> list:

@@ -3,11 +3,28 @@
 Answers the *when* and *what happened*; ``services/expiry_policy.py`` owns the *may I*.
 The split mirrors ``ephemeral_gc`` (sweep) over ``ephemeral_secrets`` (pure predicate).
 
-**This module contains no deletion code.** A sweep enumerates, applies
-``expiry_policy.reap_target``, and *reports* — deliberately, so the observe-only release
-cannot destroy anything by configuration accident. Enqueueing the destroy jobs is a
-separate, small change whose whole review surface is "does it destroy exactly the right
-thing, at most once."
+A sweep enumerates the inventory, applies ``expiry_policy.reap_target``, reports, and —
+when every gate is open — destroys. It never implements teardown itself: for a VM it
+enqueues the identical job row the cloud's own DELETE endpoint creates, and for a database
+or cluster it calls the same ``start_decommission``. That is what keeps this small, and it
+means the PRA tunnel, vault and Password Safe cleanup all happen exactly as they do when a
+human presses Destroy.
+
+**Four gates stand between overdue and destroyed**, and the pass reports its full target
+list whichever of them is shut, so an operator always sees what *would* happen:
+
+  1. ``resource_expiry_enabled``;
+  2. a stamped ``expires_at`` — NULL means never, which is why enabling the feature on an
+     existing fleet acts on nothing;
+  3. the feature armed for ``ARM_DELAY_MINUTES``;
+  4. ``enforce`` on, ``dry_run`` off, and *enforcement* armed for its own
+     ``ARM_DELAY_MINUTES`` — so turning report-only off cannot act on a backlog that
+     accumulated while it was on.
+
+At-most-once is structural: enqueueing a destroy clears the resource's ``expires_at`` in
+the same commit, which removes it from ``expired()``'s view entirely. No new column, no
+filtering on ``extra_data``, and for databases and clusters it is doubled by
+``start_decommission``'s own in-flight check.
 
 How a pass reaches the worker, and why:
 
@@ -38,6 +55,10 @@ SWEEP_JOB_TYPE = "expiry_sweep"
 
 _LAST_SWEEP_KEY = "resource_expiry_last_sweep"
 _ARMED_AT_KEY = "resource_expiry_armed_at"
+# When a pass first observed enforcement live (enforce on AND dry-run off). Deletion waits
+# ARM_DELAY_MINUTES past this, so unchecking report-only can't act on a backlog the
+# operator hasn't had a chance to review. See expiry_policy.deletion_active.
+_ENFORCE_SINCE_KEY = "resource_expiry_enforce_since"
 
 # Transaction-advisory-lock id serializing the ENQUEUE side across processes. Distinct
 # from init_db's 20260101 and the audit chain's 20260102 — sharing either would wedge
@@ -102,6 +123,54 @@ def _armed_at() -> Optional[datetime]:
     if ts is None:
         return None
     return datetime.utcfromtimestamp(ts)
+
+
+def _enforce_since() -> Optional[datetime]:
+    raw = ""
+    try:
+        raw = _cs().get(_ENFORCE_SINCE_KEY, "") or ""
+    except Exception:                                  # pragma: no cover - defensive
+        pass
+    ts = expiry_policy.parse_ts(raw) if raw else None
+    return datetime.utcfromtimestamp(ts) if ts else None
+
+
+def _note_enforcement(db: Session, now: datetime) -> Optional[datetime]:
+    """Keep ``resource_expiry_enforce_since`` in step with the enforcement flags.
+
+    Set on the first pass that observes enforcement live; CLEARED the moment it isn't.
+    Clearing matters: an operator who turns report-only back on has withdrawn consent to
+    delete, so turning it off again must restart the full arming delay rather than
+    resuming a clock that kept running while the feature was inert.
+    """
+    live = expiry_policy.enforce() and not expiry_policy.dry_run()
+    existing = _enforce_since()
+    if live and existing is None:
+        try:
+            _cs().set(_ENFORCE_SINCE_KEY, now.isoformat())
+        except Exception:
+            logger.exception("failed to persist %s", _ENFORCE_SINCE_KEY)
+            return None
+        try:
+            job_service.log_audit(
+                db, REAPER_ACTOR, "resource_expiry_enforce_armed",
+                details={"enforce_since": now.isoformat(),
+                         "arm_delay_minutes": expiry_policy.ARM_DELAY_MINUTES},
+            )
+        except Exception:
+            logger.warning("could not audit resource_expiry_enforce_armed", exc_info=True)
+        logger.warning("auto-delete ENFORCEMENT armed at %s; resources past their expiry "
+                       "will be destroyed from %d minutes hence",
+                       now.isoformat(), expiry_policy.ARM_DELAY_MINUTES)
+        return now
+    if not live and existing is not None:
+        try:
+            _cs().set(_ENFORCE_SINCE_KEY, "")
+        except Exception:
+            logger.exception("failed to clear %s", _ENFORCE_SINCE_KEY)
+        logger.info("auto-delete enforcement withdrawn; the arming delay will restart")
+        return None
+    return existing
 
 
 def _arm(db: Session, now: datetime) -> datetime:
@@ -183,25 +252,154 @@ async def run(db: Session, *, job_id: str, meta: dict) -> None:
     else:
         summary = (f"Scanned {result.get('scanned', 0)}, "
                    f"past expiry {result.get('due', 0)}, "
-                   f"deleted {result.get('reaped', 0)}"
-                   + (" (report only)" if result.get("dry_run") else ""))
+                   f"destroyed {result.get('reaped', 0)}")
+        if result.get("failed"):
+            summary += f", {result['failed']} failed"
+        if not result.get("deleting"):
+            summary += " (report only — nothing deleted)"
     job_service.update_progress(db, job_id, 100, summary)
     job_service.set_completed(db, job_id, {"sweep": result})
+
+
+# ── Deletion ──────────────────────────────────────────────────────────────────
+
+class ReapRefused(Exception):
+    """This resource must not be reaped, with an operator-facing reason. Distinct from an
+    unexpected error: a refusal is a decision the report should explain, not a fault."""
+
+
+def _reap_vm(db: Session, target: dict) -> str:
+    """Enqueue the destroy job for one expired VM and return its id.
+
+    Rebuilds the *same* job row the cloud's own DELETE endpoint creates — same job_type,
+    same metadata keys, from the deploy job's own recorded values. Deliberately not a
+    reimplementation of teardown: the whole reason the reaper is small is that every
+    teardown path, with its PRA tunnel and vault and Password Safe cleanup, already exists
+    behind these job types.
+    """
+    deploy_job_id = target.get("job_id")
+    if not deploy_job_id:
+        raise ReapRefused("no deploy job recorded, so its teardown cannot be located")
+    deploy_job = db.query(Job).filter(Job.id == deploy_job_id).first()
+    if deploy_job is None:
+        raise ReapRefused("its deploy job no longer exists")
+
+    meta = deploy_job.metadata_dict or {}
+    if meta.get("destroyed"):
+        raise ReapRefused("already destroyed")
+
+    destroy_type, payload = expiry_policy.build_destroy_metadata(
+        deploy_job.job_type, meta, deploy_job_id)
+    if destroy_type is None:
+        raise ReapRefused(payload)                     # payload is the reason string
+
+    destroy_job = job_service.create_job(
+        db, job_type=destroy_type, created_by=REAPER_ACTOR,
+        workgroup=deploy_job.workgroup, metadata=payload)
+
+    # At-most-once, committed with the enqueue. Clearing expires_at removes the resource
+    # from expired()'s view entirely, so the next pass cannot enqueue a second destroy —
+    # the same trick as the existing `destroyed` marker, and portable (no new column, and
+    # no filtering on extra_data). The breadcrumbs are read-only for one known row.
+    fresh = db.query(Job).filter(Job.id == deploy_job_id).first()
+    fresh.expires_at = None
+    bc = fresh.metadata_dict or {}
+    bc["expiry_reaped_at"] = _utcnow().isoformat()
+    bc["expiry_reap_job_id"] = destroy_job.id
+    fresh.metadata_dict = bc
+    db.commit()
+    return destroy_job.id
+
+
+def _reap_row(db: Session, target: dict) -> str:
+    """Start the teardown for one expired database or cluster, returning the job id.
+
+    Goes through the same ``start_decommission`` the DELETE endpoints call, which already
+    refuses to start a second teardown while one is in flight and flips the row's status
+    out of the reapable set — so idempotency here is doubled rather than assumed.
+    """
+    kind = target["kind"]
+    rid = (target["id"].split(":", 1) + [""])[1]
+    if not rid:
+        raise ReapRefused("unrecognised inventory id")
+
+    if kind == "database":
+        from . import cloud_database_service
+        out = cloud_database_service.start_decommission(db, rid, created_by=REAPER_ACTOR)
+        model, jid = CloudDatabase, out.get("job_id")
+    elif kind == "k8s":
+        from . import k8s_service
+        out = k8s_service.start_decommission(db, rid, created_by=REAPER_ACTOR)
+        model, jid = K8sCluster, out.get("job_id")
+    else:                                              # pragma: no cover - guarded upstream
+        raise ReapRefused(f"{kind} has no queued teardown")
+
+    row = db.query(model).filter(model.id == rid).first()
+    if row is not None:
+        row.expires_at = None
+        db.commit()
+    return jid or ""
+
+
+def _reap_one(db: Session, target: dict) -> dict:
+    """Reap one target. Returns the target annotated with ``destroy_job_id`` or ``error``.
+
+    Never raises. One resource that refuses or errors — a 403, a deploy job missing its
+    region, a teardown already running — must not abandon the rest of the pass, the same
+    way ``_reap_cloud_run_jobs`` counts a failed delete and moves on. A resource left
+    un-reaped simply reappears next pass, or stays visible as overdue on /inventory with
+    the reason on the report.
+    """
+    out = dict(target)
+    try:
+        if target["kind"] == "vm":
+            out["destroy_job_id"] = _reap_vm(db, target)
+        else:
+            out["destroy_job_id"] = _reap_row(db, target)
+    except ReapRefused as exc:
+        db.rollback()
+        out["error"] = str(exc)
+        logger.info("auto-delete skipped %s (%s): %s", target["id"], target["name"], exc)
+        return out
+    except Exception as exc:                           # noqa: BLE001
+        db.rollback()
+        out["error"] = str(exc)[:200]
+        logger.warning("auto-delete failed for %s (%s)", target["id"], target["name"],
+                       exc_info=True)
+        return out
+
+    logger.warning("auto-delete DESTROYED %s %s/%s %r (expired %dm ago) via job %s",
+                   target["kind"], target["cloud"], target["region"], target["name"],
+                   target["overdue_s"] // 60, out["destroy_job_id"])
+    try:
+        job_service.log_audit(
+            db, REAPER_ACTOR, "resource_expiry_reaped", target_vm=target["name"],
+            details={"inventory_id": target["id"], "kind": target["kind"],
+                     "cloud": target["cloud"], "region": target["region"],
+                     "expires_at": target["expires_at"],
+                     "overdue_seconds": target["overdue_s"],
+                     "destroy_job_id": out["destroy_job_id"]},
+        )
+    except Exception:
+        logger.warning("could not audit resource_expiry_reaped for %s", target["id"],
+                       exc_info=True)
+    return out
 
 
 # ── The sweep ─────────────────────────────────────────────────────────────────
 
 def sweep_once(db: Session, *, job_id: Optional[str] = None) -> dict:
-    """One pass: enumerate the inventory, find what is past its expiry, report it.
+    """One pass: find what is past its expiry, and destroy it when policy allows.
 
     Enumeration is ``inventory_service.collect(db)`` — no new query code. That function
     already normalizes every kind to one row shape, already owns the ``job:`` /
     ``clouddb:`` / ``k8s:`` id scheme, and already excludes destroyed and deleted rows.
     Once every 30 minutes it costs nothing the /inventory page doesn't already pay.
 
-    Reporting only, by construction: this module has no enqueue path. ``reaped`` is
-    therefore always 0 here, and is kept in the summary so the shape doesn't change when
-    deletion lands.
+    Four independent gates stand between a resource being overdue and being destroyed —
+    the feature enabled, a stamped expiry (NULL means never), the feature armed, and
+    enforcement armed with report-only off. When any of them is shut the pass still
+    reports the full target list, so an operator always sees what *would* happen.
     """
     from . import inventory_service
 
@@ -220,6 +418,13 @@ def sweep_once(db: Session, *, job_id: Optional[str] = None) -> dict:
     now_ts = started.timestamp()
     is_armed = expiry_policy.armed(armed_ts, now_ts)
 
+    # Enforcement carries its own arming delay, so unchecking report-only cannot act on a
+    # backlog nobody has reviewed. Tracked here rather than read from the flags alone so
+    # the clock starts from an observed pass.
+    enforce_since = _note_enforcement(db, started)
+    may_delete = is_armed and expiry_policy.deletion_active(
+        enforce_since.timestamp() if enforce_since else None, now_ts)
+
     grace = expiry_policy.grace_minutes()
     items = inventory_service.collect(db)
 
@@ -236,13 +441,58 @@ def sweep_once(db: Session, *, job_id: Optional[str] = None) -> dict:
             continue
         targets.append(target)
 
-    # Oldest-overdue first, so a capped pass acts on the longest-expired resources and
-    # the report reads in the order an operator would triage.
+    # Oldest-overdue first, so a capped pass acts on the longest-expired resources and the
+    # report reads in the order an operator would triage.
     targets.sort(key=lambda t: t["overdue_s"], reverse=True)
     cap = expiry_policy.max_per_pass()
-    capped = len(targets) > cap
-    if capped:
-        targets = targets[:cap]
+    due_total = len(targets)
+
+    if job_id and targets:
+        verb = "destroying" if may_delete else "past their auto-delete expiry"
+        job_service.append_job_log(db, job_id, f"{due_total} resource(s) {verb}:")
+
+    # Act. Each target is independent — see _reap_one, which never raises.
+    #
+    # The cap counts DELETIONS, not attempts. A resource that refuses — a deploy job with
+    # no recorded region, say — destroys nothing, so charging it a slot would let one
+    # permanently un-reapable resource starve the whole feature: it sorts oldest-first
+    # forever, so with a small cap it would take the same slot on every pass and nothing
+    # else would ever be reaped. Refusals are cheap (a metadata read, no cloud call), so
+    # attempting them all costs nothing and keeps them visible in the report.
+    reaped = failed = 0
+    deferred = 0
+    for t in targets:
+        if not may_delete:
+            t["would_delete"] = True
+            if job_id:
+                job_service.append_job_log(
+                    db, job_id,
+                    f"  {t['kind']}/{t['cloud']} {t['name']} — expired "
+                    f"{t['overdue_s'] // 60}m ago; NOT deleted "
+                    f"({_why_not_deleting(is_armed, enforce_since, now_ts)})")
+            continue
+        if reaped >= cap:
+            t["deferred"] = True
+            deferred += 1
+            continue
+        outcome = _reap_one(db, t)
+        t.update(outcome)
+        if t.get("error"):
+            failed += 1
+        else:
+            reaped += 1
+        if job_id:
+            tail = (f"FAILED: {t['error']}" if t.get("error")
+                    else f"destroy job {t['destroy_job_id']}")
+            job_service.append_job_log(
+                db, job_id,
+                f"  {t['kind']}/{t['cloud']} {t['name']} — expired "
+                f"{t['overdue_s'] // 60}m ago → {tail}")
+    if deferred and job_id:
+        job_service.append_job_log(
+            db, job_id, f"  …and {deferred} more, deferred to the next sweep "
+                        f"(max {cap} deletions per pass)")
+    capped = deferred > 0
 
     ended = _utcnow()
     result = {
@@ -253,34 +503,29 @@ def sweep_once(db: Session, *, job_id: Optional[str] = None) -> dict:
         "enforce": expiry_policy.enforce(),
         "armed": is_armed,
         "armed_at": armed_at.isoformat(),
+        "enforce_since": enforce_since.isoformat() if enforce_since else None,
+        # The one field that answers "did this pass have teeth" without the reader having
+        # to combine four flags themselves.
+        "deleting": may_delete,
         "scanned": len(items),
-        "due": len(targets),
-        # Always 0 in this release: nothing in this module deletes.
-        "reaped": 0,
-        "skipped": 0,
-        "failed": 0,
+        # Everything past its expiry, not just what this pass acted on — an operator
+        # reading "due 3" while 40 are overdue would draw exactly the wrong conclusion.
+        "due": due_total,
+        "reaped": reaped,
+        "failed": failed,
+        "deferred": deferred,
         "capped": capped,
         "targets": targets,
         "skipped_reasons": skipped_reasons,
     }
     _persist_result(result)
 
-    if job_id and targets:
-        job_service.append_job_log(
-            db, job_id, f"{len(targets)} resource(s) past their auto-delete expiry:")
-        for t in targets:
-            job_service.append_job_log(
-                db, job_id,
-                f"  {t['kind']}/{t['cloud']} {t['name']} — expired "
-                f"{t['overdue_s'] // 60}m ago (report only; deletion is not enabled "
-                f"in this build)")
-
     if targets:
         # Audited only when there is something to say. A hash-chain entry every 30
         # minutes forever would bury the entries that matter.
         details = {k: result[k] for k in
                    ("scanned", "due", "reaped", "failed", "capped",
-                    "dry_run", "enforce", "armed")}
+                    "dry_run", "enforce", "armed", "deleting")}
         details["job_id"] = job_id
         try:
             job_service.log_audit(
@@ -288,10 +533,33 @@ def sweep_once(db: Session, *, job_id: Optional[str] = None) -> dict:
             )
         except Exception:
             logger.warning("could not audit resource_expiry_sweep", exc_info=True)
-        logger.info("auto-delete sweep: %d of %d resource(s) past expiry (report only)",
-                    len(targets), len(items))
+        # warning, not info, on a pass that actually destroyed something: this is the one
+        # log line that says infrastructure went away without a human asking.
+        (logger.warning if reaped else logger.info)(
+            "auto-delete sweep: %d of %d resource(s) past expiry, %d destroyed, %d failed"
+            "%s", len(targets), len(items), reaped, failed,
+            "" if may_delete else " (report only — nothing was deleted)")
 
     return result
+
+
+def _why_not_deleting(is_armed: bool, enforce_since, now_ts: float) -> str:
+    """The single reason this pass isn't destroying, for the Live Output line.
+
+    Ordered from most-deliberate to most-transient so the operator reads the thing they'd
+    actually have to change first.
+    """
+    if not expiry_policy.enforce():
+        return "deletion is not enabled"
+    if expiry_policy.dry_run():
+        return "report-only mode"
+    if not is_armed:
+        return "the feature is still arming"
+    if not enforce_since:
+        return "enforcement was just enabled"
+    mins = int((expiry_policy.ARM_DELAY_MINUTES * 60 - (now_ts - enforce_since.timestamp()))
+               // 60)
+    return f"enforcement arms in {max(1, mins)}m"
 
 
 def _skip_reason(item: dict, *, now_ts: float, grace: int, is_armed: bool) -> Optional[str]:
@@ -416,6 +684,8 @@ def status() -> dict:
     """Feature state for the clients — thresholds, arming, and the floors, so the UI
     can explain a clamp instead of just showing one."""
     armed_at = _armed_at()
+    enforce_since = _enforce_since()
+    now = _utcnow().timestamp()
     return {
         "enabled": expiry_policy.enabled(),
         "enforce": expiry_policy.enforce(),
@@ -425,18 +695,27 @@ def status() -> dict:
         "max_total_hours": expiry_policy.max_total_hours(),
         "warn_hours": expiry_policy.warn_hours(),
         "allow_never": expiry_policy.allow_never(),
-        "armed": expiry_policy.armed(armed_at.timestamp() if armed_at else None,
-                                     _utcnow().timestamp()),
+        "armed": expiry_policy.armed(armed_at.timestamp() if armed_at else None, now),
         "armed_at": armed_at.isoformat() if armed_at else None,
         "arms_at": ((armed_at + timedelta(minutes=expiry_policy.ARM_DELAY_MINUTES))
                     .isoformat() if armed_at else None),
+        # Enforcement's own arming clock — what the UI needs to say "nothing will be
+        # deleted before HH:MM" after an operator turns report-only off.
+        "enforce_since": enforce_since.isoformat() if enforce_since else None,
+        "enforce_arms_at": ((enforce_since
+                             + timedelta(minutes=expiry_policy.ARM_DELAY_MINUTES))
+                            .isoformat() if enforce_since else None),
         "floors": {
             "min_ttl_minutes": expiry_policy.MIN_TTL_MINUTES_FLOOR,
             "grace_minutes": expiry_policy.REAP_GRACE_MIN_FLOOR,
             "arm_delay_minutes": expiry_policy.ARM_DELAY_MINUTES,
             "max_per_pass_ceiling": expiry_policy.MAX_PER_PASS_CEILING,
         },
-        # Always false in this release — nothing here deletes. Surfaced so the UI can
-        # say "report only" honestly rather than inferring it from the flags.
-        "deletion_available": False,
+        # Whether this build can delete at all (it can), kept distinct from whether it
+        # WILL right now — that's `deleting`, which folds in both arming clocks and the
+        # two flags so the UI never has to combine them itself and get it wrong.
+        "deletion_available": True,
+        "deleting": expiry_policy.armed(armed_at.timestamp() if armed_at else None, now)
+        and expiry_policy.deletion_active(
+            enforce_since.timestamp() if enforce_since else None, now),
     }

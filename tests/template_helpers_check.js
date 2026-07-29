@@ -280,13 +280,30 @@ ok('expiryBadge honours a server warn_hours of 1',
 ok('expiryBadge honours a server warn_hours of 240',
    badge({ expires_at: inFuture(5 * DAY) }, { warn_hours: 240 }).includes('bg-yellow-100'));
 
-// Report-only vs armed: the operator must not read "deleting…" when nothing deletes.
+// Report-only vs live: the operator must not read "deleting…" when nothing deletes, nor
+// a mild "overdue" when a destroy really is queued. The label keys off the server's single
+// folded `deleting` flag — which already accounts for BOTH arming clocks as well as the two
+// flags — so the page can't reach a different conclusion than the sweeper did.
 const past = new Date(Date.now() - 2 * HR).toISOString();
-ok('an overdue row reads "overdue" in report-only mode',
-   label({ expires_at: past }, { dry_run: true, deletion_available: false }) === 'overdue');
-ok('an overdue row reads "deleting…" only when deletion is really on',
-   label({ expires_at: past }, { dry_run: false, deletion_available: true }) === 'deleting…');
-ok('an overdue row does not claim to be deleting while dry-run is on',
-   label({ expires_at: past }, { dry_run: true, deletion_available: true }) === 'overdue');
+ok('an overdue row reads "overdue" when nothing is being deleted',
+   label({ expires_at: past }, { deleting: false }) === 'overdue');
+ok('an overdue row reads "deleting…" when deletion is live',
+   label({ expires_at: past }, { deleting: true }) === 'deleting…');
+ok('an overdue row defaults to "overdue" when the flag is absent',
+   label({ expires_at: past }, {}) === 'overdue');
+
+// ttlWhyNot: the reason shown when nothing is being destroyed, in the order an operator
+// would act on it — the setting they'd change first, then the clock they'd wait out.
+const why = (ttl) => build('inventory/list.html', 'ttlWhyNot', { ttl, utcStamp: U.utcStamp }).ttlWhyNot();
+global.utcStamp = U.utcStamp;
+ok('ttlWhyNot names the disabled setting first',
+   /not enabled/i.test(why({ enforce: false, dry_run: true })));
+ok('ttlWhyNot names report-only when enforcement is on',
+   /report-only/i.test(why({ enforce: true, dry_run: true })));
+ok('ttlWhyNot names the feature arming delay',
+   /still arming/i.test(why({ enforce: true, dry_run: false, armed: false })));
+ok('ttlWhyNot names the deletion arming deadline',
+   /arms at/i.test(why({ enforce: true, dry_run: false, armed: true,
+                         enforce_arms_at: '2026-07-29T14:00:00' })));
 
 process.exit(fail ? 1 : 0);

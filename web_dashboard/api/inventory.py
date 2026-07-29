@@ -58,12 +58,16 @@ async def list_inventory(
     # dashboard's "expiring soon" warning read ONE threshold instead of hardcoding two
     # that could drift. Read per request, not from the cached items, because it is
     # config-derived and the item cache is 60s stale by design.
-    from ..services import expiry_policy
+    from ..services import expiry_policy, expiry_reaper
     expiry = {
         "enabled": expiry_policy.enabled(),
         "enforce": expiry_policy.enforce(),
         "dry_run": expiry_policy.dry_run(),
         "warn_hours": expiry_policy.warn_hours(),
+        # The folded "is anything actually being destroyed" answer, so the dashboard's
+        # warning wording and /inventory's badge can't disagree about it. Computed
+        # server-side because it depends on two arming clocks, not just the flags.
+        "deleting": expiry_reaper.status()["deleting"],
     }
     return {"items": items, "count": len(items), "cached_at": cached_at,
             "expiry": expiry}

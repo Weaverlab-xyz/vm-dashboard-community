@@ -325,6 +325,73 @@ def test_a_stamped_default_is_clamped_to_the_floor():
 
 # ── destroy-type mapping ─────────────────────────────────────────────────────
 
+def test_build_destroy_metadata_matches_each_endpoint():
+    """The exact keys each DELETE endpoint puts on its destroy job. A reap that builds a
+    different shape produces a job the runner mis-reads — or worse, one it reads as
+    pointing somewhere else."""
+    cases = {
+        "ec2_deploy": ({"instance_id": "i-1", "region": "us-east-2"},
+                       "ec2_destroy",
+                       {"instance_id": "i-1", "region": "us-east-2", "deploy_job_id": "d"}),
+        "azure_deploy": ({"vm_name": "az", "resource_group": "rg"},
+                         "azure_destroy",
+                         {"vm_name": "az", "resource_group": "rg", "deploy_job_id": "d"}),
+        "gce_deploy": ({"instance_name": "g", "zone": "z", "project_id": "p"},
+                       "gce_destroy",
+                       {"instance_name": "g", "zone": "z", "project_id": "p",
+                        "deploy_job_id": "d"}),
+        "oci_deploy": ({"instance_ocid": "ocid1.x"},
+                       "oci_destroy",
+                       {"instance_ocid": "ocid1.x", "deploy_job_id": "d"}),
+    }
+    for deploy_type, (meta, want_type, want_meta) in cases.items():
+        got_type, got_meta = pol.build_destroy_metadata(deploy_type, meta, "d")
+        assert got_type == want_type, deploy_type
+        assert got_meta == want_meta, (deploy_type, got_meta)
+
+
+def test_build_destroy_metadata_refuses_rather_than_guessing():
+    """A key the deploy never recorded must not be substituted from current config. This
+    is the case api/gcp.py calls "the worst version of this bug" — a destroy aimed at the
+    wrong project."""
+    refusals = [
+        ("ec2_deploy",   {"instance_id": "i-1"},                      "region"),
+        ("ec2_deploy",   {"region": "us-east-1"},                     "instance_id"),
+        ("azure_deploy", {"vm_name": "az"},                           "resource_group"),
+        ("gce_deploy",   {"instance_name": "g", "zone": "z"},         "project_id"),
+        ("gce_deploy",   {"instance_name": "g", "project_id": "p"},   "zone"),
+        ("oci_deploy",   {},                                          "instance_ocid"),
+    ]
+    for deploy_type, meta, missing in refusals:
+        got_type, reason = pol.build_destroy_metadata(deploy_type, meta, "d")
+        assert got_type is None, f"{deploy_type} missing {missing} was not refused"
+        assert missing in reason, (deploy_type, reason)
+        assert "manually" in reason, "the refusal should tell the operator what to do"
+    # A blank string is as absent as a missing key.
+    assert pol.build_destroy_metadata("ec2_deploy",
+                                      {"instance_id": "", "region": "us-east-1"}, "d")[0] is None
+
+
+def test_build_destroy_metadata_refuses_unreapable_deploy_types():
+    for jt in ("proxmox_deploy", "nutanix_deploy", "ec2_bulk_deploy", "k8s_provision", ""):
+        got_type, reason = pol.build_destroy_metadata(jt, {"instance_id": "i"}, "d")
+        assert got_type is None and reason, jt
+
+
+def test_deletion_active_needs_both_flags_and_its_own_delay():
+    """Deletion's arming clock is what stops unchecking report-only from acting on a
+    backlog nobody has reviewed."""
+    _on(resource_expiry_enforce=1, resource_expiry_dry_run=0)
+    now = NOW_TS
+    assert pol.deletion_active(now - pol.ARM_DELAY_MINUTES * 60, now) is True
+    assert pol.deletion_active(now - 60, now) is False            # just enabled
+    assert pol.deletion_active(None, now) is False                # never observed
+    _on(resource_expiry_enforce=1, resource_expiry_dry_run=1)
+    assert pol.deletion_active(now - 10 * 3600, now) is False     # report-only wins
+    _on(resource_expiry_enforce=0, resource_expiry_dry_run=0)
+    assert pol.deletion_active(now - 10 * 3600, now) is False     # enforce off wins
+
+
 def test_destroy_job_type_matches_what_each_endpoint_creates():
     """These four strings must equal the job_type the DELETE endpoints enqueue, or the
     reaper would create rows nothing claims."""
