@@ -228,7 +228,14 @@ const U = {
 ok('timeAgo cannot express a future time (why timeUntil exists)',
    U.timeAgo(new Date(Date.now() + 6 * 3600000).toISOString()) === 'just now');
 
-const inFuture = ms => new Date(Date.now() + ms).toISOString();
+// Stamps land `slack` past the boundary asked for, and that padding is load-bearing: the
+// Date.now() here and the one inside timeUntil are two separate clock reads, so every
+// millisecond that elapses between them shaves the delta. An exact 12-day stamp floors to
+// 11d the instant the process is one tick slower — the assertion would only hold when both
+// reads land in the same millisecond, a coin flip weighted by machine speed. 30s is orders
+// of magnitude below every unit the helper prints, so the expected label is unchanged; it
+// just can't be lost to scheduling. Pass slack: 0 for a case deliberately mid-unit.
+const inFuture = (ms, slack = 30000) => new Date(Date.now() + ms + slack).toISOString();
 const MIN = 60000, HR = 3600000, DAY = 86400000;
 
 ok('timeUntil says never for no expiry', U.timeUntil(null) === 'never'
@@ -236,14 +243,20 @@ ok('timeUntil says never for no expiry', U.timeUntil(null) === 'never'
 ok('timeUntil is overdue for a past time, never "just now"',
    U.timeUntil(new Date(Date.now() - 2 * HR).toISOString()) === 'overdue');
 ok('timeUntil counts minutes under an hour', U.timeUntil(inFuture(45 * MIN)) === 'in 45m');
-ok('timeUntil never shows 0m for a live timer', U.timeUntil(inFuture(20000)) === 'in 1m');
+// Deliberately mid-unit — 20s must floor to 0m and be clamped up — so it takes no slack:
+// anywhere in (0s, 60s) clamps to 1m, and padding would only walk it toward the minute
+// boundary this is asserting below.
+ok('timeUntil never shows 0m for a live timer', U.timeUntil(inFuture(20000, 0)) === 'in 1m');
 ok('timeUntil counts hours under 48h', U.timeUntil(inFuture(6 * HR)) === 'in 6h');
 ok('timeUntil counts days past 48h', U.timeUntil(inFuture(12 * DAY)) === 'in 12d');
 ok('timeUntil is – for an unreadable stamp', U.timeUntil('tomorrow') === '–');
 
 // The server stores naive datetime.utcnow(). Read as LOCAL time, every expiry would be
 // wrong by the host's UTC offset — invisible in UTC-based CI, wrong on a laptop.
-const naive = new Date(Date.now() + 6 * HR).toISOString().replace('Z', '');
+// Through inFuture for its slack: this compares two timeUntil calls, so an unpadded 6h
+// stamp can be read as 'in 6h' by the first and 'in 5h' by the second and fail on the
+// clock rather than on the timezone rule it means to pin.
+const naive = inFuture(6 * HR).replace('Z', '');
 ok('timeUntil reads a naive stamp as UTC, not local',
    U.timeUntil(naive) === U.timeUntil(naive + 'Z'));
 ok('utcStamp renders an absolute UTC deadline',
