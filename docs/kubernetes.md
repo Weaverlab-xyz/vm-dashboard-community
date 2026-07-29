@@ -132,7 +132,7 @@ Config (import-only): `gcp_gke_k8s_version`, `gcp_gke_machine_type`, `gcp_gke_au
 `gcp_gke_master_cidr_base`; connectivity from the region config's `network` / `k8s_subnetwork` +
 secondary-range names.
 
-### OCI OKE ⚠️ experimental
+### OCI OKE — experimental
 
 Builds a **self-contained VCN** (default `10.96.0.0/16` — must **not** overlap the sandbox VCN
 `10.98.0.0/16`; give each concurrent cluster a distinct block) with api / nodes / lb subnets, an
