@@ -65,7 +65,7 @@ Pass a comma-separated list (and `wantlist=True`) to fetch several at once.
 | `lookup-managed-account.yml` | localhost | either | Fetch a rotated managed-account password (`MANAGED_ACCOUNT`) |
 | `lookup-secret.yml` | localhost | either | Fetch a stored secret (`SECRET`) and write it to a `0600` file |
 | `vm-secret-to-host.yml` | Linux VM (SSH) | `ansible-winrm` | Fetch a secret on the runner, deliver it to the target host |
-| `db-credential-from-ps.yml` | Cloud database | `ansible-cloud` | Fetch a DB role password from PS, create the Postgres role |
+| `db-credential-from-ps.yml` | Database | `ansible-cloud` | Fetch a DB role password from PS, create the Postgres role |
 | `onboard-safe-and-account.yml` | localhost | either | **Management** — create a safe/folder/secret via `beyondtrust.password_safe` modules |
 
 > `onboard-safe-and-account.yml` uses the write/management modules, whose argument names vary

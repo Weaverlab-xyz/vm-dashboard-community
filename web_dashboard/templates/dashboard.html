@@ -297,7 +297,7 @@
           gridClass: 'grid grid-cols-1 sm:grid-cols-2 gap-4',
           refreshable: true,
           tiles: [
-            { key: 'cloud_databases', title: 'Cloud Databases',     href: '/databases', flag: 'cloud_database',  description: 'managed DB instances' },
+            { key: 'cloud_databases', title: 'Databases',           href: '/databases', flag: 'cloud_database',  description: 'provisioned + registered' },
             { key: 'k8s_clusters',    title: 'Kubernetes Clusters', href: '/k8s',       flag: 'k8s_management',  description: 'managed clusters' },
           ],
         },
@@ -414,7 +414,7 @@
         if (f.oci)     t.push({ label: 'OCI instance', href: '/oci' });
         if (f.proxmox) t.push({ label: 'Proxmox VM',   href: '/proxmox' });
         if (f.nutanix) t.push({ label: 'Nutanix VM',   href: '/nutanix' });
-        if (f.cloud_database) t.push({ label: 'Cloud database',     href: '/databases' });
+        if (f.cloud_database) t.push({ label: 'Database',           href: '/databases' });
         if (f.k8s_management) t.push({ label: 'Kubernetes cluster', href: '/k8s' });
         return t;
       },

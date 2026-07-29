@@ -147,7 +147,7 @@ fill in the fields.
 | **Vault-backed cloud credentials** | AWS, Azure, and SSH credentials resolved from Password Safe at runtime rather than stored in the application database |
 | **SSH key checkout** | Ansible and BT Gateway tasks retrieve SSH private keys from Managed Accounts on demand |
 | **Managed-account checkout for playbook runs** | A Config-Management run can use a Password Safe managed account as its login identity — the operator picks an account from a live list and the credential is checked out **just-in-time** at run time, never shown and scrubbed from job output. See [below](#managed-account-checkout-for-config-management-runs) |
-| **Resource onboarding** | VMs and cloud databases the dashboard builds are registered as Password Safe managed systems + accounts, and removed again on destroy |
+| **Resource onboarding** | VMs and cloud databases the dashboard builds are onboarded as Password Safe managed systems + accounts, and removed again on destroy |
 | **PRA jump items** | Shell Jump (VMs), Web Jump (Portainer / Rancher UIs), Remote RDP (virtual desktops) and Protocol Tunnel (databases, Kubernetes API) — created and torn down with the resource |
 | **Gateway hosts** | The hosts those jumps broker *through*. One per cloud is auto-ensured and reference-counted; **Containers → Gateways** inventories them and deploys more to carry session load. See [Gateway hosts](gateways.md) |
 | **PRA Vault accounts** | Tunnel credentials are minted as PRA Vault accounts, which can themselves be onboarded into Password Safe for rotation |
@@ -320,14 +320,19 @@ recorded on the job (`ps_error`) but never fail the deploy.
 
 ---
 
-## Cloud databases
+## Databases
 
 The dashboard also provisions **managed cloud databases** (AWS / Azure / GCP / OCI), reaches
 them through a PRA protocol tunnel, and can optionally **onboard AWS and Azure databases into
 Password Safe** for credential rotation (via the `{engine} SSM Custom Plugin` /
 `{engine} Azure Run Command Plugin` and the shared `PRA Vault Username Password` plugin). That
 whole feature — base provisioning, per-cloud prerequisites, and the Password Safe onboarding —
-is documented separately in **[Cloud Databases](../cloud-databases.md)**.
+is documented separately in **[Databases](../databases.md)**.
+
+The dashboard can also **register** a database it did not create — on-premises or in a cloud —
+so it can be a Configuration Management target. That path has no tunnel and no onboarding: its
+admin login is a Password Safe **managed account**, checked out just-in-time per run and never
+stored, so the database has to be onboarded in Password Safe *before* it can be registered.
 
 ---
 

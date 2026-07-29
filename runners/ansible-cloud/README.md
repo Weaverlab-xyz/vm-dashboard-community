@@ -1,6 +1,6 @@
 # `ansible-cloud` runner image
 
-The Ansible runner image for **Kubernetes-cluster** and **cloud-database**
+The Ansible runner image for **Kubernetes-cluster** and **database**
 Configuration-Management targets. Unlike the VM runner
 ([`runners/ansible-winrm/`](../ansible-winrm/), which SSHes/WinRMs *to* a host),
 these targets run a **`hosts: localhost` play** that reaches *out* to the cluster

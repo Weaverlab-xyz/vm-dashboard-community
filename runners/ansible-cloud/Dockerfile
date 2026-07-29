@@ -1,4 +1,4 @@
-# The dashboard's Ansible runner image for KUBERNETES-CLUSTER and CLOUD-DATABASE
+# The dashboard's Ansible runner image for KUBERNETES-CLUSTER and DATABASE
 # config-management targets. Those run `hosts: localhost` plays that reach out to
 # the cluster API (kubeconfig) or the DB endpoint (login vars) over the network —
 # the opposite of the SSH/WinRM VM runner (`chrweav/ansible-winrm`), which this

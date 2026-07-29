@@ -194,8 +194,9 @@ def check_target(kind: str, cloud: str, asset_backend: str, asset: str = "") -> 
     here rather than inline in the endpoint because the two conditions interact and
     the interaction is the easy thing to get wrong:
 
-    * which clouds are targetable depends on the target KIND (a database has no
-      on-prem case), and
+    * which clouds are targetable depends on the target KIND — see K8S_TARGET_CLOUDS
+      vs DB_TARGET_CLOUDS; both now include ``local``, since a database can be
+      registered on-prem just as a cluster can — and
     * whether local filesystem assets are readable depends on WHERE THE RUNNER RUNS,
       which is itself derived from the cloud. The in-cloud runners can't see this
       host's disk; the local runner is this host, so for an on-prem cluster the

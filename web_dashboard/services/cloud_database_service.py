@@ -1,10 +1,15 @@
 """
-Cloud database infrastructure — the engine/cloud-agnostic service seam (community).
+Database infrastructure — the engine/cloud-agnostic service seam (community).
 
 Provisions **private** managed databases (Postgres / MySQL / SQL Server) reached
 only through a BeyondTrust PRA tunnel, and records each in the ``cloud_databases``
 inventory table. Shaped like the other cloud services; drives Terraform via a
 per-job deploy dir (``terraform/deployments/{job_id}``).
+
+Also **registers** databases it did not provision (``source='registered'``) — on-premises
+(``cloud='local'``) or in a cloud — so they can be Config Management targets. Provisioning
+needs a Terraform module and is therefore cloud-only; registering needs only somewhere to
+reach, which is why ``VALID_REGISTER_CLOUDS`` is wider than ``VALID_CLOUDS``.
 
 Implements **postgres / mysql / sqlserver across aws / azure / gcp**
 end-to-end on the dashboard side (record + Terraform variables + apply/destroy
@@ -857,7 +862,7 @@ async def run_entitle_register(db: Session, *, db_id: str, job_id: str,
     provision path's non-fatal wrapper, a post-hoc request should surface failures)."""
     row = db.query(CloudDatabase).filter(CloudDatabase.id == db_id).first()
     if not row:
-        job_service.set_failed(db, job_id, f"cloud database {db_id} not found")
+        job_service.set_failed(db, job_id, f"database {db_id} not found")
         return
     job_service.set_running(db, job_id)
     try:
@@ -1428,7 +1433,7 @@ def start_decommission(db: Session, db_id: str, created_by: str = "") -> dict:
     ``{ok, db_id, job_id}``; mirrors :func:`provision`."""
     row = db.query(CloudDatabase).filter(CloudDatabase.id == db_id).first()
     if not row:
-        raise CloudDatabaseError(f"cloud database {db_id} not found")
+        raise CloudDatabaseError(f"database {db_id} not found")
 
     # Already in flight — return the existing job rather than starting a second.
     # Only short-circuit on an ACTIVE (pending/running) job; a cancelled/failed
@@ -1462,7 +1467,7 @@ async def run_decommission(db: Session, *, db_id: str, job_id: str) -> None:
     never configured) are skips, not failures."""
     row = db.query(CloudDatabase).filter(CloudDatabase.id == db_id).first()
     if not row:
-        job_service.set_failed(db, job_id, f"cloud database {db_id} not found")
+        job_service.set_failed(db, job_id, f"database {db_id} not found")
         return
     job_service.set_running(db, job_id)
     errors: list[str] = []
@@ -1668,7 +1673,7 @@ def list_databases(db: Session) -> list[dict]:
 def connection_info(db: Session, db_id: str) -> dict:
     row = db.query(CloudDatabase).filter(CloudDatabase.id == db_id).first()
     if not row:
-        raise CloudDatabaseError(f"cloud database {db_id} not found")
+        raise CloudDatabaseError(f"database {db_id} not found")
     # jump_item_id is the PRA protocol-tunnel jump a user opens to reach the
     # private DB (populated once the tunnel is brokered; null if PRA is unset).
     return {
@@ -1756,7 +1761,7 @@ def deregister_database(db: Session, db_id: str) -> None:
     provisioned rows."""
     row = db.query(CloudDatabase).filter(CloudDatabase.id == db_id).first()
     if not row:
-        raise CloudDatabaseError(f"cloud database {db_id} not found")
+        raise CloudDatabaseError(f"database {db_id} not found")
     if row.source != "registered":
         raise CloudDatabaseError(
             f"database {db_id} was provisioned by the dashboard — it is decommissioned "
@@ -1833,7 +1838,7 @@ async def ansible_connection_vars(db: Session, db_id: str) -> dict:
     :class:`CloudDatabaseError` when the row or its admin credential can't be resolved."""
     row = db.query(CloudDatabase).filter(CloudDatabase.id == db_id).first()
     if not row:
-        raise CloudDatabaseError(f"cloud database {db_id} not found")
+        raise CloudDatabaseError(f"database {db_id} not found")
     # A registered database has no Terraform state and no provisioning job, so there is
     # no tf_variables to read a credential out of. It carries a Password Safe managed
     # account instead, checked out at run time. Everything below this line is the

@@ -2,7 +2,7 @@
 
 The dashboard provisions (or imports) managed Kubernetes clusters and layers management +
 privileged access on top — the same **provisioning + stacked layers** model as
-[Cloud Databases](cloud-databases.md) and [Cloud VMs](cloud-vms.md), adapted to Kubernetes:
+[Databases](databases.md) and [Cloud VMs](cloud-vms.md), adapted to Kubernetes:
 
 - **Provision / register** *(stand it up)* — Terraform-build a new cluster, or register an
   existing/local one from a kubeconfig.
@@ -49,7 +49,7 @@ standing cluster-admin for every run made against it.
 >   recently, so *no* published image could run it: `apply` failed in `_materialize` with
 >   "Terraform module template not found". It needs a **rebuilt image** plus a first live
 >   tenancy run. The same omission applied to the OCI *database* module — see
->   [Cloud Databases → OCI](cloud-databases.md#oci-autonomous-database--read-the-caveats).
+>   [Databases → OCI](databases.md#oci-autonomous-database--read-the-caveats).
 >
 > Router/model docstrings that say "aws/azure/gcp only / 501" predate OKE.
 

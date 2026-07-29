@@ -54,7 +54,8 @@ the last thing using it goes away without a teardown yanking it out from under s
 else. These hold a reference on it — while any of them is live, the idle teardown leaves
 the host alone:
 
-- **Cloud databases** in `available` or `provisioning` state.
+- **Provisioned cloud databases** in `available` or `provisioning` state. A *registered*
+  database holds nothing — it has no tunnel, so it was never using the host.
 - **VMs that borrowed the shared host** — every live EC2 deploy; and for GCE / Azure, the
   deploys that actually recorded a `jumpoint_host_id` (a VM given its own paired gateway
   container isn't using the shared one, and shouldn't pin it).

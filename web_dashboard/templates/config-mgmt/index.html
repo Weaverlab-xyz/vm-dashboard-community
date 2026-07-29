@@ -180,9 +180,9 @@
                 </optgroup>
               </template>
 
-              <!-- Cloud databases (localhost play via DB login vars) -->
+              <!-- Databases, provisioned or registered (localhost play via DB login vars) -->
               <template x-if="cloudDatabases.length > 0">
-                <optgroup label="Cloud Databases">
+                <optgroup label="Databases">
                   <template x-for="d in cloudDatabases" :key="`db:${d.id}`">
                     <option :value="`db:${d.id}`" x-text="`${d.engine} · ${d.cloud} (${d.id.slice(0,8)}${d.status ? ' · '+d.status : ''})`"></option>
                   </template>
@@ -543,7 +543,7 @@ function configMgmt() {
     assets: [],
     assetsLoading: true,
     cloudTargets: { aws: [], azure: [], gcp: [] },
-    // Managed-service localhost targets (Kubernetes clusters + cloud databases).
+    // Managed-service localhost targets (Kubernetes clusters + databases).
     k8sClusters: [],
     cloudDatabases: [],
     jobsLoading: true,
