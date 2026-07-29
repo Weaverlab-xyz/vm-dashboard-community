@@ -73,6 +73,15 @@ jobs:
             type=raw,value=latest,enable=${{ github.ref_type == 'tag' && !contains(github.ref_name, '-') }}
             type=sha,enable=${{ github.event_name == 'workflow_dispatch' }}
 
+      # secrets.github_token: consumed by the main Dockerfile's Packer step as
+      # PACKER_GITHUB_API_TOKEN. `packer plugins install` resolves plugins via
+      # the GitHub API, whose anonymous quota is 60 req/hour per *source IP* —
+      # shared NAT on a hosted runner, so it is regularly exhausted by unrelated
+      # tenants (this failed release v26.7.3 with a 403). Authenticating raises
+      # it to 1000 req/hour/repo. Passed as a build secret, not a --build-arg,
+      # so it never lands in the published image history; the other three images
+      # don't mount it and are unaffected. contents:read above is all it needs
+      # (it only reads public hashicorp/packer-plugin-* release tags).
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
@@ -82,5 +91,7 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          secrets: |
+            github_token=${{ secrets.GITHUB_TOKEN }}
           cache-from: type=gha,scope=${{ matrix.image }}
           cache-to: type=gha,mode=max,scope=${{ matrix.image }}
