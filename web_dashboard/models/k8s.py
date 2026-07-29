@@ -37,7 +37,7 @@ class ClusterProvisionRequest(BaseModel):
     k8s_version: Optional[str] = None         # control-plane version (else config / module default)
     node_instance_type: Optional[str] = None  # node size: EC2 type / AKS vm_size / GKE machine type
     node_count: Optional[int] = None          # desired node count (else module default)
-    vpc_cidr: Optional[str] = None            # AWS only — the EKS module's own VPC CIDR (default 10.97.0.0/16; distinct per concurrent cluster)
+    vpc_cidr: Optional[str] = None            # AWS + OCI — the module's own network CIDR: EKS VPC (default 10.97.0.0/16) / OKE VCN (default 10.96.0.0/16). One shared field, no separate vcn_cidr; distinct per concurrent cluster
     authorized_cidrs: Optional[list[str]] = None  # restrict the public API endpoint (empty = open)
     zone: Optional[str] = None                # GCP only — zonal cluster zone (else <region>-a)
     enable_ebs_csi: Optional[bool] = None     # AWS only — install the EBS CSI driver addon (dynamic PVCs); off by default, opt in for stateful workloads (e.g. Rancher)

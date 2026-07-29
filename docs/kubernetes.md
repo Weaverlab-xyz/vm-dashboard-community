@@ -80,8 +80,10 @@ the stable egress IP). Notable specifics:
   sandbox rollback** — rollback refuses while an active peering exists.
 
 Config: `aws_vpc_id` (sandbox VPC to peer back to, import-only), `aws_eks_vpc_cidr`
-(`10.97.0.0/16`), `aws_eks_k8s_version`, `aws_eks_node_instance_type`. `aws_k8s_subnet_a_id` /
-`aws_k8s_subnet_b_id` are **vestigial** (still shown in Settings, ignored by the module).
+(`10.97.0.0/16`), `aws_eks_k8s_version`, `aws_eks_node_instance_type` — all editable in
+**Settings → Kubernetes Management**; the Provision modal's **Cluster VPC CIDR** field overrides
+`aws_eks_vpc_cidr` per-cluster. `aws_k8s_subnet_a_id` / `aws_k8s_subnet_b_id` are **vestigial**
+(still shown in Settings, ignored by the module).
 
 ### Azure AKS
 
@@ -147,9 +149,12 @@ provider-native env vars — the module declares `tenancy_ocid` / `user_ocid` / 
 `settings.oci_region` falls back to `us-ashburn-1`, so it is always populated — and, as with OCI
 databases, the cluster **always lands in `oci_region`** regardless of the region picked in the form.
 
-Config (import-only): `oci_oke_k8s_version`, `oci_oke_node_shape`, `oci_oke_vcn_cidr`; compartment
-from `oci_compartment_ocid` (falling back to `oci_tenancy_ocid`). Versions use OKE's `v`-prefixed
-format (`v1.31.1`) — confirm what the region offers with `oci ce cluster-options get`.
+Config: `oci_oke_vcn_cidr` (`10.96.0.0/16`) is editable in **Settings → Kubernetes Management**,
+and the Provision modal's **Cluster VCN CIDR** field overrides it per-cluster — it travels on the
+same `vpc_cidr` request field AWS uses (there is no separate `vcn_cidr` field). `oci_oke_k8s_version`
+/ `oci_oke_node_shape` stay import-only (they seed the form's version / node-size pickers).
+Compartment from `oci_compartment_ocid` (falling back to `oci_tenancy_ocid`). Versions use OKE's
+`v`-prefixed format (`v1.31.1`) — confirm what the region offers with `oci ce cluster-options get`.
 
 ### Sandbox prerequisites
 
@@ -294,7 +299,8 @@ dashboard.
 - **EKS EBS CSI addon never goes ACTIVE.** IMDS hop limit or the CSI addon — the module sets
   hop-limit 2 and grants the node role `AmazonEBSCSIDriverPolicy` when `enable_ebs_csi` is on.
 - **Cluster CIDR clash.** The EKS VPC CIDR (`aws_eks_vpc_cidr`) must not overlap the sandbox
-  `10.99.0.0/16` or another concurrent cluster.
+  `10.99.0.0/16` or another concurrent cluster; same for the OKE VCN CIDR (`oci_oke_vcn_cidr`)
+  against the sandbox VCN `10.98.0.0/16`. Both are overridable per-cluster in the Provision modal.
 - **GKE apply fails "Conflicting IP cidr range … conflicts with existing subnetwork
   `gke-…-pe-subnet`".** Two clusters want the same control-plane `/28`. Ranges are allocated
   per cluster now; if it recurs, the live scan couldn't run (check the provision log for

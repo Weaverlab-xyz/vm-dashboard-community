@@ -855,8 +855,13 @@ class K8sManagementFeatureConfig(BaseModel):
     aws_k8s_subnet_a_id: str = ""
     aws_k8s_subnet_b_id: str = ""
     # Optional defaults (blank → the terraform/k8s_cluster/aws_eks module defaults).
+    aws_eks_vpc_cidr: str = ""            # the EKS build's OWN VPC (blank → 10.97.0.0/16); must not overlap the sandbox VPC 10.99.0.0/16
     aws_eks_k8s_version: str = ""
     aws_eks_node_instance_type: str = ""
+    # OCI OKE provisioning defaults (blank → the terraform/k8s_cluster/oci_oke
+    # module defaults). The provision form overrides the CIDR per-cluster via the
+    # shared vpc_cidr request field.
+    oci_oke_vcn_cidr: str = ""            # the OKE build's OWN VCN (blank → 10.96.0.0/16); must not overlap the sandbox VCN 10.98.0.0/16
     # Rancher management plane (import model). The central Rancher server runs as
     # a single privileged container on a PUBLIC GCE COS VM (gcp_rancher_* below);
     # runtime ids (rancher_server_url / rancher_api_token) are set by the deploy
