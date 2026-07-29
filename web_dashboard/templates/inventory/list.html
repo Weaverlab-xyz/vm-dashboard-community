@@ -16,18 +16,19 @@
   </div>
 
   {% if resource_expiry_enabled %}
-  <!-- Auto-delete state. Two distinct "nothing will be destroyed" reasons, kept apart
-       because they resolve differently: report-only is a setting an admin turns off, the
-       arming delay just elapses. -->
-  <div x-show="ttl.dry_run || !ttl.deletion_available" x-cloak
+  <!-- Auto-delete state. One banner, driven by the server's folded `deleting` flag rather
+       than by recombining four flags here — the page and the sweeper must never disagree
+       about whether anything is actually being destroyed. -->
+  <div x-show="!ttl.deleting" x-cloak
        class="mb-4 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-800">
-    <span class="font-semibold">Auto-delete is in report-only mode.</span>
-    Expiry timers are tracked and shown here, but nothing is deleted.
+    <span class="font-semibold">Nothing is being auto-deleted.</span>
+    <span x-text="ttlWhyNot()"></span>
   </div>
-  <div x-show="ttl.deletion_available && !ttl.dry_run && !ttl.armed" x-cloak
-       class="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
-    <span class="font-semibold">Auto-delete is arming.</span>
-    Nothing will be deleted before <span x-text="utcStamp(ttl.arms_at)"></span>.
+  <div x-show="ttl.deleting" x-cloak
+       class="mb-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
+    <span class="font-semibold">Auto-delete is live.</span>
+    Resources past their expiry are permanently destroyed on the next sweep. Extend
+    anything you still need.
   </div>
   {% endif %}
 
@@ -477,7 +478,21 @@
         const _tick = this.now;
         const label = timeUntil(r.expires_at);
         if (label !== 'overdue') return label;
-        return this.ttl.deletion_available && !this.ttl.dry_run ? 'deleting…' : 'overdue';
+        // `deleting` is the server's own folded answer (both arming clocks + both flags).
+        // Recombining those here is how the page ends up promising a deletion that isn't
+        // happening, or staying quiet about one that is.
+        return this.ttl.deleting ? 'deleting…' : 'overdue';
+      },
+
+      // Why nothing is being destroyed, in the operator's order of "what would I change".
+      ttlWhyNot() {
+        if (!this.ttl.enforce) return 'Deletion is not enabled in Settings.';
+        if (this.ttl.dry_run) return 'Report-only mode is on — timers are tracked but not acted on.';
+        if (!this.ttl.armed) return 'The feature is still arming' +
+          (this.ttl.arms_at ? ' until ' + utcStamp(this.ttl.arms_at) + '.' : '.');
+        if (this.ttl.enforce_arms_at) return 'Deletion was just enabled and arms at '
+          + utcStamp(this.ttl.enforce_arms_at) + '. Extend anything you need before then.';
+        return 'Deletion is arming.';
       },
 
       expiryBadge(r) {

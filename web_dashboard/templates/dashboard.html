@@ -467,11 +467,13 @@
             const t = new Date(i.expires_at + (/Z$/.test(i.expires_at) ? '' : 'Z')).getTime();
             return !isNaN(t) && (t - Date.now()) < warnMs;
           }).sort((a, b) => new Date(a.expires_at) - new Date(b.expires_at));
-          const verb = ttl.dry_run || !ttl.deletion_available
-            ? 'would auto-delete' : 'auto-deletes';
-          const fix = ttl.dry_run || !ttl.deletion_available
-            ? 'report-only mode — nothing will be deleted'
-            : 'extend it on the Inventory page to keep it';
+          // One server-computed flag, not a recombination of the four settings: a warning
+          // that says "will be deleted" when nothing is, or stays mild when deletion is
+          // live, is worse than no warning.
+          const verb = ttl.deleting ? 'auto-deletes' : 'would auto-delete';
+          const fix = ttl.deleting
+            ? 'extend it on the Inventory page to keep it'
+            : 'nothing is being deleted yet — see Inventory';
           // Roll up past three: the list is capped at 8 items, and a big expiring batch
           // would otherwise bury the failed jobs.
           if (soon.length > 3) {

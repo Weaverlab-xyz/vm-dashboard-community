@@ -589,8 +589,12 @@
 
           <p class="text-[11px] text-amber-600">
             Deletion runs on a schedule, not instantly, so a resource may sit briefly past
-            its expiry. The first sweep after you enable this only starts a one-hour arming
-            delay — nothing can be deleted until that elapses, and it isn't configurable.
+            its expiry. Two one-hour arming delays stand in the way and neither is
+            configurable: the first sweep after you enable the feature only starts the
+            clock, and turning <strong>Observe only</strong> off starts a second one — so
+            there is always an hour, with the full list visible on
+            <a href="/inventory" class="underline">Inventory</a>, before anything is
+            destroyed. Turning Observe only back on resets that second clock.
           </p>
         </div>
       </template>
@@ -3362,10 +3366,14 @@ function settingsPage() {
       if (s.corrupted) return 'The stored report could not be read.';
       if (s.skipped) return 'Last pass skipped: ' + s.skipped;
       const lines = [
-        `${s.started_at} · scanned ${s.scanned}, past expiry ${s.due}, deleted ${s.reaped}`
-        + (s.dry_run ? ' (report only)' : '') + (s.capped ? ' · CAPPED' : ''),
+        `${s.started_at} · scanned ${s.scanned}, past expiry ${s.due}, destroyed ${s.reaped}`
+        + (s.failed ? `, ${s.failed} failed` : '')
+        + (s.deleting ? '' : ' (report only — nothing deleted)')
+        + (s.capped ? ' · CAPPED' : ''),
       ];
-      if (!s.armed) lines.push('Arming — nothing can be deleted yet.');
+      if (!s.armed) lines.push('The feature is still arming — nothing can be deleted yet.');
+      else if (!s.deleting && s.enforce_since) lines.push(
+        'Deletion was enabled at ' + s.enforce_since + ' and is still arming.');
       for (const t of (s.targets || []).slice(0, 5)) {
         lines.push(`  ${t.kind}/${t.cloud} ${t.name} — ${Math.floor(t.overdue_s / 60)}m overdue`);
       }

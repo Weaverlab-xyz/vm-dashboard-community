@@ -155,35 +155,131 @@ def test_the_policy_module_stays_pure():
                     f"expiry_policy imports {alias.name}; keep it stdlib-only")
 
 
-# ── observe-only by construction, not by configuration ────────────────────────
+# ── deletion reuses the endpoints' own job types ──────────────────────────────
+#
+# PR 1's test_this_release_cannot_enqueue_a_deletion lived here and asserted the ABSENCE
+# of every destroy path. Deletion has now landed deliberately, so that test is gone and
+# these took its place: the point is no longer "can't delete" but "deletes only through
+# the paths a human's Destroy button already uses".
 
-DESTROY_TYPES = ("ec2_destroy", "azure_destroy", "gce_destroy", "oci_destroy",
-                 "clouddb_decommission", "k8s_decommission")
-
-
-def test_this_release_cannot_enqueue_a_deletion():
-    """The reaper reports and nothing more. Deletion is a separate change, so the
-    guarantee is the ABSENCE of the code path rather than a flag someone could flip —
-    which is a stronger property than any amount of dry-run defaulting.
-
-    When deletion does land, this test should be deleted in the same commit, deliberately.
-    """
+def test_the_reaper_does_not_reimplement_teardown():
+    """The reaper must enqueue jobs and call start_decommission — never drive Terraform,
+    a cloud SDK, or a PRA/vault cleanup itself. A second teardown implementation would
+    drift from the endpoint's and leak exactly the resources this feature exists to stop
+    leaking."""
     src = _src(_REAPER)
-    for jt in DESTROY_TYPES:
-        assert jt not in src, (
-            f"expiry_reaper references {jt} — this release is meant to be observe-only "
-            "by construction. If deletion is intentional, remove this test in the same "
-            "commit so the change is explicit.")
-    assert "start_decommission" not in src, (
-        "expiry_reaper calls start_decommission — see above")
+    for forbidden in ("terraform", "boto3", "ec2_client", "compute_v1",
+                      "run_destroy", "run_decommission", "delete_instance"):
+        assert forbidden not in src, (
+            f"expiry_reaper references {forbidden} — teardown belongs to the service the "
+            "destroy job dispatches to, not to the reaper")
 
 
-def test_the_sweep_reports_zero_reaped():
-    """The summary shape must already carry `reaped` so adding deletion doesn't change
-    the report's schema — and in this release it is hardcoded 0."""
+def test_the_reaper_derives_destroy_metadata_from_the_deploy_job():
+    """Never from current config. Each DELETE endpoint resolves and PERSISTS region /
+    resource_group / project_id at deploy time precisely so the runner doesn't re-resolve
+    them later — api/gcp.py calls a destroy aimed at the wrong project "the worst version
+    of this bug"."""
+    src = ast.unparse(_fn(_POLICY, "build_destroy_metadata"))
+    assert "deploy_meta" in src
+    for reresolved in ("config_service", "settings", "_aws_region", "_rg", "_gcp_project"):
+        assert reresolved not in src, (
+            f"build_destroy_metadata reads {reresolved} — it must use only what the "
+            "deploy job recorded, and refuse when a key is missing")
+
+
+def test_every_reapable_kind_has_a_reap_path():
+    """A kind that reap_target can return but _reap_one can't act on would be reported as
+    due every pass and never resolved."""
+    reap = ast.unparse(_fn(_REAPER, "_reap_one"))
+    assert '"vm"' in reap or "'vm'" in reap
+    row = ast.unparse(_fn(_REAPER, "_reap_row"))
+    for kind in ("database", "k8s"):
+        assert f'"{kind}"' in row or f"'{kind}'" in row, f"_reap_row ignores {kind}"
+
+
+def test_at_most_once_is_a_write_not_a_hope():
+    """Enqueueing a destroy must clear expires_at in the same commit. Without that the
+    next pass sees the same overdue resource and enqueues a second destroy — the failure
+    mode that turns one expiry into N teardowns of the same thing."""
+    for fn_name in ("_reap_vm", "_reap_row"):
+        src = ast.unparse(_fn(_REAPER, fn_name))
+        assert "expires_at = None" in src, (
+            f"{fn_name} does not clear expires_at — a second sweep would re-enqueue")
+        assert "commit" in src, f"{fn_name} does not commit its at-most-once write"
+
+
+def test_reap_one_never_raises():
+    """One bad resource — a 403, a missing region, a teardown already running — must not
+    abandon the rest of the pass. Mirrors _reap_cloud_run_jobs, which counts a failed
+    delete and moves on."""
+    fn = _fn(_REAPER, "_reap_one")
+    handlers = [n for n in ast.walk(fn) if isinstance(n, ast.ExceptHandler)]
+    assert handlers, "_reap_one has no exception handling"
+    caught = {ast.unparse(h.type) for h in handlers if h.type is not None}
+    assert any("Exception" in c for c in caught), (
+        "_reap_one does not catch bare Exception — an unexpected error would kill the pass")
+    assert not any(isinstance(n, ast.Raise) and n.exc is not None
+                   for n in ast.walk(fn)), "_reap_one raises; it must report instead"
+
+
+def test_the_per_pass_cap_counts_deletions_not_attempts():
+    """A resource that always refuses must not starve the cap.
+
+    Found in an end-to-end run: a VM whose deploy job recorded no region refuses on every
+    pass, and it sorts oldest-first forever, so charging a refusal against the cap let ONE
+    un-reapable resource consume a deletion slot indefinitely. With cap=1 nothing else
+    would ever be reaped — the feature would silently stop working, and the report would
+    look busy while doing nothing.
+
+    The fix is that the budget is spent on successful reaps only; refusals are attempted
+    (they're a metadata read, no cloud call) and reported. Asserted structurally because
+    the bug is in the loop's control flow, which no return value exposes.
+    """
     src = ast.unparse(_fn(_REAPER, "sweep_once"))
-    assert "'reaped': 0" in src or '"reaped": 0' in src, (
-        "sweep_once should report reaped=0 explicitly while deletion is absent")
+    assert "reaped >= cap" in src, (
+        "the cap is not checked against the successful-reap count — a refusal that "
+        "consumes a slot lets one bad resource starve every pass")
+    # And the pre-loop truncation that used to do this must be gone, or the loop check is
+    # dead code and the starvation is back.
+    assert "targets[:cap]" not in src, (
+        "targets are still truncated before the loop; refusals inside the truncated "
+        "window would consume deletion budget again")
+
+
+def test_the_report_counts_everything_overdue_not_just_this_pass():
+    """"due 2" while 40 resources are overdue would tell an operator the opposite of the
+    truth."""
+    src = ast.unparse(_fn(_REAPER, "sweep_once"))
+    assert "due_total" in src, (
+        "sweep_once reports len(targets) after capping rather than the true overdue count")
+
+
+def test_deletion_is_gated_on_both_arming_clocks():
+    """Turning report-only off must not act on a backlog accumulated while it was on."""
+    src = ast.unparse(_fn(_REAPER, "sweep_once"))
+    assert "deletion_active" in src, "sweep_once does not consult deletion_active"
+    assert "may_delete" in src
+    pol = ast.unparse(_fn(_POLICY, "deletion_active"))
+    assert "ARM_DELAY_MINUTES" in pol, "deletion_active has no arming delay"
+    assert "dry_run" in pol and "enforce" in pol, (
+        "deletion_active must require both flags, not just one")
+
+
+def test_the_reaper_actor_is_not_a_login_name():
+    """created_by on a destroy job and username in the audit log both have to read
+    unambiguously as machine action, and stay separable in an audit query."""
+    assert "-" in reaper_actor() or reaper_actor().islower()
+    assert reaper_actor() not in ("system", "admin", ""), (
+        "the reaper's actor should be distinguishable from the generic system actor")
+
+
+def reaper_actor() -> str:
+    for node in ast.walk(ast.parse(_src(_REAPER))):
+        if isinstance(node, ast.Assign) and any(
+                getattr(t, "id", None) == "REAPER_ACTOR" for t in node.targets):
+            return node.value.value
+    raise AssertionError("REAPER_ACTOR not found")
 
 
 # ── the stamp seam ────────────────────────────────────────────────────────────
