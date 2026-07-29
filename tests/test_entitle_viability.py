@@ -5,9 +5,14 @@ Covers:
 - ``_entitle_viable`` truth table: every engine except SQL Server is viable, and
   SQL Server is viable only when its ``provider`` is in the viable-providers set
   (empty today → all three managed flavors are blocked);
+- a **registered** row is never viable, whatever its engine: it has no provisioning
+  credential to register with, so the button must be hidden and the API must refuse;
+- each blocker gets its own message — the registered one names the missing
+  provisioning credential rather than reusing the SQL Server connector wording;
 - ``_entitle_register_core`` refuses a non-viable row up front with
   ``CloudDatabaseError`` (before any DB access);
-- ``_serialize`` surfaces ``entitle_viable`` for the frontend gate;
+- ``_serialize`` surfaces ``entitle_viable`` for the frontend gate, and
+  ``connection_info`` surfaces ``source`` for the API's pre-flight;
 - the forward-compat contract: adding a provider to the viable set flips it True.
 
 Imports the real service. It used to need the full app environment, which meant it ran
@@ -89,10 +94,81 @@ def _row(**kw):
     return types.SimpleNamespace(**defaults)
 
 
+class _FakeQuery:
+    """Enough of a Query for connection_info: filter() ignores its criterion (a real
+    BinaryExpression in CI, a plain bool against the stub class elsewhere)."""
+    def __init__(self, row):
+        self._row = row
+
+    def filter(self, *_a, **_k):
+        return self
+
+    def first(self):
+        return self._row
+
+
+class _FakeSession:
+    def __init__(self, row):
+        self._row = row
+
+    def query(self, *_a, **_k):
+        return _FakeQuery(self._row)
+
+
 def test_non_sqlserver_engines_always_viable():
     for engine in ("postgres", "mysql", "oracle"):
         for provider in ("rds", "cloudsql", "flexibleserver", "autonomous", None):
             assert svc._entitle_viable(engine, provider) is True
+
+
+def test_provisioned_source_is_the_default_reading():
+    # An older row can carry source=None; it is a provisioned row, not a registered one.
+    for source in (None, "", "provisioned"):
+        assert svc._entitle_viable("postgres", "rds", source) is True
+
+
+def test_registered_rows_are_never_viable():
+    # register_database stamps provider="registered" + source="registered"; every engine
+    # is blocked, including the ones the connector itself supports fine.
+    for engine in ("postgres", "mysql", "oracle", "sqlserver"):
+        assert svc._entitle_viable(engine, "registered", "registered") is False
+    # Also blocked when the row happens to carry a real provider (a registered row
+    # pointed at an RDS endpoint, say) — source alone decides.
+    assert svc._entitle_viable("postgres", "rds", "registered") is False
+
+
+def test_registered_reason_names_the_missing_credential():
+    reason = svc._entitle_ineligible_reason(
+        "postgres", "registered", source="registered", cloud="aws")
+    assert reason and "provisioned" in reason and "credential" in reason
+    # The whole point of the separate message: it must NOT reuse the SQL Server
+    # connector wording, which says nothing about why a registered row can't register.
+    assert "sysadmin" not in reason and "CONTROL SERVER" not in reason
+
+
+def test_registered_beats_sqlserver_in_the_reason():
+    # A registered SQL Server row hits the more fundamental blocker: even an
+    # Entitle-compatible flavor would have no credential to register with.
+    reason = svc._entitle_ineligible_reason(
+        "sqlserver", "registered", source="registered", cloud="aws")
+    assert reason and "sysadmin" not in reason
+
+
+def test_provisioned_sqlserver_reason_still_names_the_connector():
+    # Source-awareness must not blunt the existing message for provisioned rows.
+    reason = svc._entitle_ineligible_reason(
+        "sqlserver", "cloudsql", source="provisioned", cloud="gcp")
+    assert reason and "sysadmin" in reason and "CONTROL SERVER" in reason
+    assert "cloudsql" in reason           # provider named
+    assert "registered" not in reason
+    # provider unset → the cloud names the flavor instead of a bare blank.
+    assert "gcp" in svc._entitle_ineligible_reason(
+        "sqlserver", None, source="provisioned", cloud="gcp")
+
+
+def test_viable_rows_have_no_reason():
+    assert svc._entitle_ineligible_reason("postgres", "rds", source="provisioned") is None
+    assert svc._entitle_ineligible_reason("mysql", "cloudsql") is None
 
 
 def test_managed_sqlserver_flavors_are_blocked_today():
@@ -132,9 +208,38 @@ def test_register_core_refuses_non_viable_before_db_access():
         assert "sysadmin" in str(exc) and "CONTROL SERVER" in str(exc)
 
 
+def test_register_core_refuses_a_registered_row_before_db_access():
+    # The failure this guard replaces: a registered postgres row passed the old
+    # engine-only check, queued a job, and died deep in _entitle_register_core on
+    # "no admin credential available". db=None proves it never gets that far now.
+    row = _row(engine="postgres", provider="registered", cloud="aws",
+               source="registered", port=5432)
+    try:
+        asyncio.run(svc._entitle_register_core(None, row=row, engine="postgres"))
+        raise AssertionError("expected CloudDatabaseError for a registered row")
+    except svc.CloudDatabaseError as exc:
+        assert "provisioned" in str(exc)
+        assert "no admin credential" not in str(exc)   # not the deep-in-the-job failure
+
+
 def test_serialize_exposes_entitle_viable():
     assert svc._serialize(_row(engine="sqlserver", provider="cloudsql"))["entitle_viable"] is False
     assert svc._serialize(_row(engine="postgres", provider="cloudsql"))["entitle_viable"] is True
+    # A registered row: viable engine, but the button must still be hidden.
+    assert svc._serialize(_row(engine="postgres", provider="registered",
+                               source="registered"))["entitle_viable"] is False
+
+
+def test_connection_info_exposes_source_for_the_api_preflight():
+    # The API's entitle-register gate reads `source` off connection_info; without it the
+    # pre-flight silently treats every row as provisioned.
+    row = _row(engine="postgres", provider="registered", source="registered")
+    assert svc.connection_info(_FakeSession(row), row.id)["source"] == "registered"
+    prov = _row(engine="postgres", provider="rds", source="provisioned")
+    assert svc.connection_info(_FakeSession(prov), prov.id)["source"] == "provisioned"
+    # An older row with a NULL source reads as provisioned, not as a missing key.
+    old = _row(engine="postgres", provider="rds", source=None)
+    assert svc.connection_info(_FakeSession(old), old.id)["source"] == "provisioned"
 
 
 if __name__ == "__main__":
