@@ -343,6 +343,72 @@ def test_local_databases_are_a_valid_config_management_target():
         "rejected by the run gate before the runner is ever chosen")
 
 
+# ── the ref-count: a registered row must not pin the shared Gateway ───────────
+
+class _Col:
+    """Enough of a SQLAlchemy column for _active_db_count to BUILD its predicates.
+
+    The fake session discards them, so these tests assert the Python-side ``source``
+    filter specifically — not the status/cloud scoping, which stays plain SQL."""
+
+    def in_(self, _values):
+        return self
+
+    def __eq__(self, _other):
+        return self
+
+    __hash__ = object.__hash__
+
+
+class _Cols:
+    """Stands in for the CloudDatabase *class* while the counter builds predicates.
+    Kept off _CloudDatabase so no other test sees a column where it expects None."""
+    status = _Col()
+    cloud = _Col()
+    source = _Col()
+
+
+def _gateway_ref_count(rows, cloud="aws"):
+    import web_dashboard.database as dbmod
+    from web_dashboard.services import jumpoint_host_service as jhs
+    prev = dbmod.CloudDatabase
+    dbmod.CloudDatabase = _Cols          # the counter imports it per-call
+    try:
+        return jhs._active_db_count(_FakeDB(rows), cloud)
+    finally:
+        dbmod.CloudDatabase = prev
+
+
+def test_a_registered_database_does_not_pin_the_shared_gateway():
+    """The leak. A registered row is born status='available' with no Terraform state, no
+    PRA tunnel and no jump item — it never brokers through the shared Gateway host. The
+    ref-count keyed on status alone, so registering one AWS database kept that host up
+    forever, and with it the three SSM interface endpoints (the ~$10/mo PR #402 fixed)."""
+    rows = [_CloudDatabase(id="db-reg", cloud="aws", status="available",
+                           source="registered")]
+    assert _gateway_ref_count(rows) == 0, (
+        "a registered database still holds a Gateway reference: the idle teardown and "
+        "the SSM endpoint reclaim can never fire")
+
+
+def test_a_provisioned_database_still_pins_the_shared_gateway():
+    """The other direction: the fix must not turn the reference off wholesale. A
+    provisioned database really does broker its tunnel through the host."""
+    rows = [_CloudDatabase(id="db-reg", cloud="aws", status="available",
+                           source="registered"),
+            _CloudDatabase(id="db-prov", cloud="aws", status="available",
+                           source="provisioned")]
+    assert _gateway_ref_count(rows) == 1
+
+
+def test_a_null_source_counts_as_provisioned():
+    """Rows predating registration migrate with DEFAULT 'provisioned', but the read stays
+    NULL-tolerant because under-counting is the dangerous direction: it would reap the
+    gateway from under a live database's tunnel."""
+    rows = [_CloudDatabase(id="db-old", cloud="aws", status="available", source=None)]
+    assert _gateway_ref_count(rows) == 1
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0
