@@ -394,14 +394,33 @@ itself, `curl https://example.com` should fail at TCP, not at TLS.
 
 ## Cost
 
-Estimates if you leave the sandbox sitting idle (no VMs deployed). All
-three cloud free tiers cover most of this.
+Estimates if you leave the sandbox sitting idle (no VMs deployed). The
+cloud free tiers cover most of this. For the full audit behind these figures —
+including per-cluster costs and which standing resources can and can't move into
+per-resource Terraform — see
+[sandbox-provisioning-cost-audit](notes/sandbox-provisioning-cost-audit.md).
 
 | Cloud | Idle / month | Why |
 |---|--:|---|
-| AWS   | ~$0     | VPC, subnets, IGW, SGs, IAM are free; ECS cluster has no charge until a task runs. Secrets Manager: ~$0.40. SSM interface VPC endpoints are created on-demand per running EC2/DB (~$7/mo each, ~$22/mo for all three) and removed automatically when the last one is decommissioned — nothing while idle. |
-| Azure | ~$5     | RG, VNet, NSGs, Key Vault, SP free. Storage account file share: ~$0.05. Container registry (Basic): ~$5/mo — opt out with `SANDBOX_SKIP_ACR=1`. |
-| GCP   | ~$1.50  | Cloud NAT bills hourly even when idle. VPC, subnets, firewall rules, Secret Manager are free. |
+| AWS   | ~$0.40  | VPC, subnets, IGW, SGs, IAM are free; ECS cluster has no charge until a task runs. Secrets Manager: ~$0.40. No NAT gateway or Elastic IP is created. SSM interface VPC endpoints are created on-demand per running EC2/DB (~$7/mo each, ~$22/mo for all three) and removed automatically when the last one is decommissioned — nothing while idle. |
+| Azure | ~$6.60  | RG, VNet, NSGs, Key Vault, SP free. Container registry (Basic): ~$5/mo — opt out with `SANDBOX_SKIP_ACR=1`. **Three private DNS zones (Postgres, MySQL, SQL Server): ~$0.50/mo each.** Those are what make VNet-integrated managed databases resolvable; they're created unconditionally, with no opt-out, and `rollback.sh --cloud azure` removes them with the resource group. Storage account file share: ~$0.05. |
+| GCP   | ~$1.56  | Cloud NAT bills hourly even when idle. Secret Manager: ~$0.06 per active version. VPC, subnets, Cloud Router, firewall rules and the PSA reserved range are free. |
+| OCI   | ~$0.10  | KMS vault (the shared `DEFAULT` type, not the ~$1/hr `VIRTUAL_PRIVATE`) plus one key version and one secret; skip with `OCI_SKIP_VAULT=1`. VCN, subnets, gateways, security lists and IAM are free — and unlike AWS, an OCI NAT gateway carries no hourly charge. |
+
+Once `cost_explorer_enabled` is on, **`/costs` reports this baseline as its own
+"sandbox" scope**, separate from resources the dashboard provisioned — the two are
+distinguished by the `managed-by` tag value (`dashboard-sandbox` vs `vm-dashboard`).
+Two caveats worth knowing, both surfaced as notes on the page itself:
+
+- **Azure** tags don't inherit from a resource group to its children, so untagged
+  children (disks, NICs, ACI) land in "unattributed". Enabling *Cost Management →
+  Manage tag inheritance* at subscription scope fixes it with no config change here.
+- **GCP** Cloud Router and Cloud NAT — i.e. the entire GCP idle cost — accept no
+  labels at all. To attribute them, label the project itself (forward-only; past
+  billing-export rows are immutable):
+  ```bash
+  gcloud projects update "$PROJECT_ID" --update-labels managed-by=dashboard-sandbox
+  ```
 
 Running infrastructure adds the obvious things:
 
