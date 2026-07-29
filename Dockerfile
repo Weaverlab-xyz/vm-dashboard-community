@@ -158,15 +158,57 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # so packer init does not require internet access at build time.
 # 1.10+ required for S3-native state locking (use_lockfile) — no DynamoDB needed.
 # See services/terraform.py + docs/terraform-state-backend-plan.md.
+#
+# `packer plugins install` resolves each plugin through the GitHub *API*
+# (GET /repos/hashicorp/packer-plugin-<name>/git/matching-refs/tags), which is
+# rate limited to 60 requests/hour per source IP when unauthenticated. On a
+# GitHub-hosted runner that IP is shared NAT, so the hour's budget is often
+# already spent by unrelated tenants before this step runs — release v26.7.3
+# died here with "403 API rate limit exceeded for 20.29.188.144 [rate reset in
+# 8m05s]": amazon installed, then azure was refused. Nothing in the build had
+# changed; v26.7.2 built the identical layer 2.5h earlier.
+#
+# Two defences, in the order they apply:
+#   1. PACKER_GITHUB_API_TOKEN from a build *secret* — never a --build-arg,
+#      which would leave the token in the image history. CI passes the
+#      workflow's GITHUB_TOKEN (see .github/workflows/publish-images.yml),
+#      lifting the ceiling to 1000 req/hour/repo so a shared IP stops
+#      mattering. required=false keeps tokenless local builds
+#      (`docker compose build`, scripts/onboard.sh) working unchanged.
+#   2. A retry loop for tokenless builds. A rate-limit reset is minutes away,
+#      not seconds, so the backoff escalates (60/120/180/240s, ~10min total)
+#      instead of burning its attempts inside a window that is still closed.
+#      That covers a reset like the one above but cannot outlast a full hourly
+#      window — hence the token is the real fix, this is the safety net. It
+#      hard-fails rather than ship an image whose plugins aren't cached.
+# The packer.zip curl also picks up the --retry flags the other release-artifact
+# fetches in this file already carry (see the helm-install curl below).
 ARG TERRAFORM_VERSION=1.10.5
-RUN ARCH=$(dpkg --print-architecture) \
-    && curl -fsSL "https://releases.hashicorp.com/packer/${PACKER_VERSION}/packer_${PACKER_VERSION}_linux_${ARCH}.zip" \
+RUN --mount=type=secret,id=github_token,required=false \
+    ARCH=$(dpkg --print-architecture) \
+    && curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors \
+        "https://releases.hashicorp.com/packer/${PACKER_VERSION}/packer_${PACKER_VERSION}_linux_${ARCH}.zip" \
         -o /tmp/packer.zip \
     && unzip -q /tmp/packer.zip -d /usr/local/bin/ \
     && rm /tmp/packer.zip \
-    && packer plugins install github.com/hashicorp/amazon \
-    && packer plugins install github.com/hashicorp/azure \
-    && packer plugins install github.com/hashicorp/googlecompute
+    && if [ -s /run/secrets/github_token ]; then \
+           PACKER_GITHUB_API_TOKEN="$(cat /run/secrets/github_token)"; \
+           export PACKER_GITHUB_API_TOKEN; \
+           echo "packer plugin getter: authenticating to the GitHub API"; \
+       else \
+           echo "packer plugin getter: no GITHUB token, using the 60/hour anonymous quota"; \
+       fi \
+    && for plugin in amazon azure googlecompute; do \
+           for attempt in 1 2 3 4 5; do \
+               packer plugins install "github.com/hashicorp/${plugin}" && break; \
+               if [ "$attempt" = 5 ]; then \
+                   echo "packer plugins install ${plugin} failed after 5 attempts; if this is a 403 rate limit, pass a GitHub token as the github_token build secret" >&2; \
+                   exit 1; \
+               fi; \
+               echo "packer plugins install ${plugin} attempt $attempt failed (GitHub API rate limit?); retrying in $((attempt * 60))s..." >&2; \
+               sleep $((attempt * 60)); \
+           done; \
+       done
 
 # Install OPA (Open Policy Agent) — the bundled binary admission_service shells
 # for pre-action policy guardrails (services/_opa.py). Static build, arch-aware
