@@ -71,6 +71,23 @@ variable "node_count" {
   description = "Node count for the default node pool"
 }
 
+# AKS's own default is 128 GiB, and because Standard_B2s is premium-capable that
+# lands on Premium_LRS — a P10 per node. Measured, not assumed: every AKS node
+# resource group in this subscription billed the "P10 LRS Disk" meter and nothing
+# else. 32 GiB is the smallest disk that clears the AKS 30 GiB floor and still
+# fits the P4 tier, roughly a third the price per node, and leaves ~15 GiB of
+# containerd image cache after the node image — ample for demo clusters.
+# os_disk_type is deliberately left unset (Managed): Ephemeral needs the VM's
+# cache disk >= os_disk_size_gb and B2s only has ~8 GiB, so it can't be used
+# without moving to a larger vm_size that costs more in compute than the disk
+# saves. Sizing default_node_pool is ForceNew, which is safe only because
+# provisions are apply-once (k8s_service applies once per cluster, then destroys).
+variable "os_disk_size_gb" {
+  type        = number
+  default     = 32
+  description = "Node OS disk size (GiB). AKS minimum is 30; 32 keeps it in the P4 tier."
+}
+
 variable "vnet_cidr" {
   type        = string
   default     = "10.96.0.0/16"
@@ -259,10 +276,11 @@ resource "azurerm_kubernetes_cluster" "this" {
   workload_identity_enabled = true
 
   default_node_pool {
-    name           = "default"
-    node_count     = var.node_count
-    vm_size        = var.vm_size
-    vnet_subnet_id = azurerm_subnet.nodes.id
+    name            = "default"
+    node_count      = var.node_count
+    vm_size         = var.vm_size
+    vnet_subnet_id  = azurerm_subnet.nodes.id
+    os_disk_size_gb = var.os_disk_size_gb # see the variable — AKS's 128 GiB default is a P10 per node
   }
 
   identity {
