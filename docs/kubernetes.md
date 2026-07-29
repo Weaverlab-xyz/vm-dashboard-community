@@ -21,7 +21,7 @@ page + `/api/k8s`; permission scope `k8s`).
 | **AWS EKS** | ✅ Terraform (self-contained VPC) | shared Entra app as the cluster's **OIDC IdP** | API TCP tunnel + `kubectl oidc-login` |
 | **Azure AKS** | ✅ Terraform (self-contained VNet) | **native managed-AAD** (federation is a no-op) | API TCP tunnel + `kubelogin` |
 | **GCP GKE** | ✅ Terraform (self-contained VPC) | **Workforce Identity Federation + Connect Gateway** | Connect Gateway |
-| **OCI OKE** | ⚠️ **experimental** — implemented in the service, **not surfaced** in the UI/Settings | — | — |
+| **OCI OKE** | ⚠️ **experimental** — Terraform (self-contained VCN) | ❌ none | API TCP tunnel (in-process `kubectl`) |
 
 You can also **register/import** an existing or local cluster (`cloud = aws|azure|gcp|local`,
 e.g. kind/k3s) from a full kubeconfig — no provisioning required. To *build* that on-prem
@@ -34,11 +34,24 @@ API endpoint is reachable from your LAN, not from an ECS task. That host therefo
 registered kubeconfig is stored and used verbatim — no token is minted for it — so it is
 standing cluster-admin for every run made against it.
 
-> **OCI OKE status.** The service layer implements OKE provisioning
-> (`terraform/k8s_cluster/oci_oke`, `_PROVISION_IMPLEMENTED` includes `oci`), but it is not
-> exposed in the provision pickers/Settings and has no cloud runner (in-process kubectl
-> only). Treat it as experimental; the router/model docstrings that say "aws/azure/gcp only /
-> 501" predate it.
+> **OCI OKE status.** Provisioning is wired end to end — the module
+> (`terraform/k8s_cluster/oci_oke`), `_PROVISION_IMPLEMENTED`, the `provision_options` pickers,
+> and the **`oci (OKE)`** entry in the Provision modal. Three gaps keep it **experimental**:
+>
+> - **No Entra → RBAC federation.** `enable_entra_federation` has `aws`/`azure`/`gcp` branches
+>   only, so there is no "authenticate as yourself" path — access is the assembled exec
+>   kubeconfig (`oci ce cluster generate-token`, token-minted server-side).
+> - **No OCI-native runner.** `k8s_runner_service.mode()` resolves only
+>   `local | ecs | aci | gcp`, so management-plane `kubectl`/`helm` against an OKE cluster runs
+>   **in-process** in the dashboard container — which must therefore reach the cluster's public
+>   API endpoint — unless you point `k8s_runner_oci` at another cloud's runner.
+> - **Never live-validated.** The module was absent from the Dockerfile `COPY` set until
+>   recently, so *no* published image could run it: `apply` failed in `_materialize` with
+>   "Terraform module template not found". It needs a **rebuilt image** plus a first live
+>   tenancy run. The same omission applied to the OCI *database* module — see
+>   [Cloud Databases → OCI](cloud-databases.md#oci-autonomous-database--read-the-caveats).
+>
+> Router/model docstrings that say "aws/azure/gcp only / 501" predate OKE.
 
 ---
 
@@ -105,6 +118,27 @@ range that a failed/`ERROR` cluster still holds.
 Config (import-only): `gcp_gke_k8s_version`, `gcp_gke_machine_type`, `gcp_gke_authorized_cidrs`,
 `gcp_gke_master_cidr_base`; connectivity from the region config's `network` / `k8s_subnetwork` +
 secondary-range names.
+
+### OCI OKE ⚠️ experimental
+
+Builds a **self-contained VCN** (default `10.96.0.0/16` — must **not** overlap the sandbox VCN
+`10.98.0.0/16`; give each concurrent cluster a distinct block) with api / nodes / lb subnets, an
+IGW, a **NAT gateway** (its `nat_ip` is the stable egress IP), and a **service gateway** so nodes
+reach the OKE control plane and OCIR without traversing the internet. The cluster is a
+**`BASIC_CLUSTER`** (free control plane) with a FLANNEL overlay and a **public** API endpoint; the
+node pool defaults to a single Always-Free **Ampere `VM.Standard.A1.Flex`** node at 2 OCPU / 12 GB
+— the whole free Ampere allocation. Leave `node_image_id` blank and the module auto-picks an
+Oracle-Linux image matching the k8s version and the shape's architecture (`aarch64` for A1).
+
+Credentials reach Terraform as **`TF_VAR_*`** (`terraform_provider_env.oci_env()`) rather than
+provider-native env vars — the module declares `tenancy_ocid` / `user_ocid` / `fingerprint` /
+`private_key` / `private_key_passphrase` / `region` as variables. `region` has **no default**, but
+`settings.oci_region` falls back to `us-ashburn-1`, so it is always populated — and, as with OCI
+databases, the cluster **always lands in `oci_region`** regardless of the region picked in the form.
+
+Config (import-only): `oci_oke_k8s_version`, `oci_oke_node_shape`, `oci_oke_vcn_cidr`; compartment
+from `oci_compartment_ocid` (falling back to `oci_tenancy_ocid`). Versions use OKE's `v`-prefixed
+format (`v1.31.1`) — confirm what the region offers with `oci ce cluster-options get`.
 
 ### Sandbox prerequisites
 

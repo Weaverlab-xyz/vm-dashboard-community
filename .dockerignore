@@ -29,6 +29,7 @@ terraform/*
 !terraform/db_sqlserver
 !terraform/db_gcp_sqlserver
 !terraform/db_azure_sqlserver
+!terraform/db_oci_autonomous
 !terraform/k8s_cluster
 # Admission-control Rego policies — read at runtime by admission_service (the
 # pre-action guardrails). COPYed by the Dockerfile, so must be in the context.

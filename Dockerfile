@@ -110,14 +110,16 @@ COPY terraform/db_gcp_mysql/ ./terraform/db_gcp_mysql/
 COPY terraform/db_sqlserver/ ./terraform/db_sqlserver/
 COPY terraform/db_gcp_sqlserver/ ./terraform/db_gcp_sqlserver/
 COPY terraform/db_azure_sqlserver/ ./terraform/db_azure_sqlserver/
+COPY terraform/db_oci_autonomous/ ./terraform/db_oci_autonomous/
 # Managed-Kubernetes provisioning modules (driven by k8s_service, §1.1a): EKS
-# (hashicorp/aws), AKS (hashicorp/azurerm ~> 3.0), GKE (hashicorp/google ~> 5.0) —
-# all three providers are already in the pre-cache init below. Without the AKS/GKE
-# COPYs an azure/gcp provision fails at _materialize: "No such file or directory:
-# /app/terraform/k8s_cluster/azure_aks".
+# (hashicorp/aws), AKS (hashicorp/azurerm ~> 3.0), GKE (hashicorp/google ~> 5.0),
+# OKE (oracle/oci ~> 5.0) — all four providers are already in the pre-cache init
+# below. Without the AKS/GKE/OKE COPYs an azure/gcp/oci provision fails at
+# _materialize: "No such file or directory: /app/terraform/k8s_cluster/azure_aks".
 COPY terraform/k8s_cluster/aws_eks/ ./terraform/k8s_cluster/aws_eks/
 COPY terraform/k8s_cluster/azure_aks/ ./terraform/k8s_cluster/azure_aks/
 COPY terraform/k8s_cluster/gcp_gke/ ./terraform/k8s_cluster/gcp_gke/
+COPY terraform/k8s_cluster/oci_oke/ ./terraform/k8s_cluster/oci_oke/
 # Action-level admission-control policies (Rego), evaluated by admission_service
 # via the bundled OPA binary (installed below). Ship the tree so operators can
 # add/edit rules; admission_service reads terraform/policy/admission/ pre-action.
@@ -183,7 +185,8 @@ RUN ARCH=$(dpkg --print-architecture) \
 
 # Install Terraform (architecture-aware) and pre-cache every provider the
 # dashboard uses at run time — the BeyondTrust SRA provider (PRA tunnels/shell
-# jumps) AND the cloud-database providers (aws/azurerm/google). Baking them in
+# jumps) AND the cloud-database / k8s-cluster providers (aws/azurerm/google/oci —
+# oracle/oci covers both db_oci_autonomous and k8s_cluster/oci_oke). Baking them in
 # at build (on CI's clean network) means a pulled image has NO outbound provider
 # download at run time — so cloud-DB provisioning works behind a TLS-inspecting
 # proxy without the corp-CA dance, and isn't subject to flaky registry pulls.
@@ -195,8 +198,9 @@ RUN ARCH=$(dpkg --print-architecture) \
 # slow — observed on BOTH the native amd64 leg and the emulated (QEMU) arm64 leg
 # of the multi-arch build — that 10s is exceeded ("request canceled
 # (Client.Timeout exceeded while awaiting headers)") and init fails even though
-# the provider exists. Resolving four providers (sra/aws/azurerm/google) in one
-# init multiplies the registry round-trips, so a single slow response is enough.
+# the provider exists. Resolving seven providers (sra/passwordsafe/entitle/aws/
+# azurerm/google/oci) in one init multiplies the registry round-trips, so a single
+# slow response is enough.
 # The registry also proxies provider signatures/checksums from github.com, so a
 # GitHub blip surfaces here as "504 Gateway Timeout returned from github.com"
 # (this failed release v26.6.5). Such blips can outlast a short retry window, so
