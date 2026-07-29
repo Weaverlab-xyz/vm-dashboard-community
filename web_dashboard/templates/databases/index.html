@@ -170,15 +170,6 @@
           </div>
         </div>
 
-        <!-- The run gate rejects a managed-account run on the ECS / Cloud Run runners,
-             so say it here rather than letting it surface when a run is attempted. -->
-        <p x-show="reg.cloud === 'aws' || reg.cloud === 'gcp'" x-cloak
-           class="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
-          Registering works, but a Configuration Management run against an AWS or GCP database
-          is refused today: those run on ECS / Cloud Run, which reference a stored secret and
-          can't take a just-in-time checkout. On-premises and Azure run fine.
-        </p>
-
         <div class="grid grid-cols-3 gap-3">
           <div class="col-span-2">
             <label class="block text-xs font-medium text-gray-600 mb-1">Host</label>
