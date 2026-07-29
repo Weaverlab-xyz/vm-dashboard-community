@@ -14,8 +14,8 @@ by reference count:
   * teardown_jumpoint_host_if_idle(db, …) — called on EC2 destroy / DB decommission /
                                             K8s tunnel removal. Terminates the host only
                                             when nothing (no managed EC2 instance, no
-                                            active DB, no tunneled K8s cluster) is left
-                                            using it.
+                                            active provisioned DB, no tunneled K8s
+                                            cluster) is left using it.
 
 Prereqs (one-time, created by scripts/sandbox/Linux/setup-aws.sh): the
 ``ecsInstanceRole`` + instance profile — carrying AmazonEC2ContainerServiceforEC2Role,
@@ -553,12 +553,20 @@ async def teardown_gateway(cloud: str, region: str, name: str, zone: str = "") -
 
 
 def _active_db_count(db, cloud: Optional[str] = None) -> int:
+    # Only dashboard-PROVISIONED databases hold a reference to the shared Gateway. A
+    # registered row is someone else's database — no Terraform state, no PRA tunnel, no
+    # jump item — so it never brokers through the host, and counting it pinned the
+    # gateway (and, on AWS, the three SSM endpoints) forever. Registered rows are born
+    # status='available', so the status gate alone never caught them. NULL means
+    # provisioned: the migration in database.py backfills that literal, and reading it
+    # NULL-tolerantly is the safe direction — under-counting would reap the gateway from
+    # under a live DB.
     from ..database import CloudDatabase
     q = (db.query(CloudDatabase)
            .filter(CloudDatabase.status.in_(["available", "provisioning"])))
     if cloud:
         q = q.filter(CloudDatabase.cloud == cloud)
-    return q.count()
+    return sum(1 for r in q.all() if (r.source or "provisioned") != "registered")
 
 
 def _active_ec2_count(db) -> int:
