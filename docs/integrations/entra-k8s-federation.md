@@ -19,7 +19,7 @@ Object ID wrapped in a workforce `principalSet` URI.
 | **GKE** | **Entra federation** action → Workforce Identity Federation | `gcloud auth login` | Connect Gateway |
 
 > **EKS and GKE need *different* Entra app registrations** — you cannot reuse one for
-> both (see [One-time setup §1](#1-entra-app-registrations-one-per-cloud)). The Entra
+> both (see [One-time setup §1](#1-entra-app-registrations--one-per-cloud)). The Entra
 > *group* is the same everywhere; only the app registration differs.
 
 ---
@@ -82,7 +82,7 @@ A **second, distinct** registration for Workforce Identity Federation:
 - **Token configuration → Add groups claim → Security groups**, on the **ID token**.
 
 Its client ID + secret feed the `gcloud iam workforce-pools providers create-oidc`
-command in the [GKE section](#gke-workforce-identity-federation-connect-gateway) — they
+command in the [GKE section](#gke--workforce-identity-federation--connect-gateway) — they
 are **not** entered into the dashboard.
 
 ### 2. Dashboard settings (Settings → Kubernetes)

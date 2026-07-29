@@ -30,7 +30,7 @@ docker compose exec db psql -U dashboardadmin -d vmclidashboard -c "\d entitle_a
 
 **Expected:** the table prints with columns including `id`, `cloud`,
 `operation`, `status`, `payload_hash`, `requested_at`, `entitle_request_id`,
-and the rest of the row shape from the [design Appendix](../design/cloud-identity-jit.md#7-audit-trail).
+and the rest of the row shape from the [design §6.7](../design/cloud-identity-jit.md#67-audit-trail--agent-revoke-sweeper).
 
 ```powershell
 docker compose exec db psql -U dashboardadmin -d vmclidashboard -c "\d approvals" | Select-String "principal_kind"
