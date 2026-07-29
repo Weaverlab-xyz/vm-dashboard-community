@@ -807,6 +807,35 @@ class Settings(BaseSettings):
     gcp_cloud_run_job_reap_enabled: bool = True
     gcp_cloud_run_job_reap_age_minutes: int = 60   # must exceed a runner's whole lifetime
 
+    # ── Auto-delete timer (resource expiry) ──────────────────────────────────
+    # Gives dashboard-provisioned cloud VMs, databases and k8s clusters an expiry,
+    # then destroys them when it passes — the same teardown the Destroy button runs.
+    # See services/expiry_policy.py for the guards and services/expiry_reaper.py for
+    # the sweep.
+    #
+    # OFF is not the only brake, because this feature deletes infrastructure:
+    #   * a resource with expires_at NULL is never touched, and every resource that
+    #     predates the feature is NULL — so enabling it acts on nothing;
+    #   * resource_expiry_default_hours=0 means new deploys aren't stamped either, so
+    #     flipping only the master switch still changes nothing;
+    #   * resource_expiry_dry_run=True means even a stamped, overdue fleet is only
+    #     REPORTED;
+    #   * resource_expiry_enforce=False is a second, separate gate on deletion.
+    # Floors an operator cannot lower (minimum lifetime, reap grace, arming delay,
+    # per-pass cap) are module constants in expiry_policy, not keys here.
+    resource_expiry_enabled: bool = False
+    resource_expiry_enforce: bool = False          # deletion gate; on-but-inert until set
+    resource_expiry_dry_run: bool = True           # report only, enqueue nothing
+    resource_expiry_default_hours: int = 0         # 0 = don't stamp new deployments
+    resource_expiry_extend_hours: int = 24         # what one Extend click adds
+    resource_expiry_max_total_hours: int = 720     # 30d ceiling, counted from created_at
+    resource_expiry_warn_hours: int = 24           # "expiring soon" window
+    resource_expiry_grace_minutes: int = 30        # floored at REAP_GRACE_MIN_FLOOR
+    resource_expiry_sweep_interval_minutes: int = 30
+    resource_expiry_max_per_pass: int = 10         # capped at MAX_PER_PASS_CEILING
+    resource_expiry_allow_never: bool = False      # may an admin clear a timer outright
+    resource_expiry_exempt_workgroups: str = ""    # CSV; mirrors the admission_* lists
+
     # Ephemeral cloud secrets for managed-account checkout on the ECS / Cloud Run
     # runners. OFF by default: a checked-out Password Safe credential is written to
     # the cloud secret store as a short-lived, RBAC-locked secret, injected via the

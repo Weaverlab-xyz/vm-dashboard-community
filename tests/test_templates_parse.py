@@ -93,6 +93,38 @@ def test_region_filter_pages_define_their_helpers():
     assert not failures, "Missing region-filter helpers:\n  " + "\n  ".join(failures)
 
 
+def test_inventory_column_count_matches_both_colspans():
+    """The Expires column is Jinja-gated, and the loading + empty rows each carry their
+    own colspan. A new <th> without updating BOTH leaves those two rows misaligned — the
+    single most likely mistake when adding a column here, and nothing else catches it.
+
+    Rendered twice, with the flag on and off, because the whole point of the conditional
+    is that both states have to be right.
+    """
+    from jinja2 import Environment
+    full = os.path.join(_TEMPLATES, "inventory", "list.html")
+    with open(full, encoding="utf-8") as fh:
+        src = fh.read()
+    thead = re.search(r"<thead>.*?</thead>", src, re.S)
+    assert thead, "inventory/list.html has no <thead>"
+
+    env = Environment()
+    for flag in (True, False):
+        # Render only the fragments that carry the count, so this needs no base template
+        # or Alpine runtime.
+        n_th = len(re.findall(
+            r"<th\b",
+            env.from_string(thead.group(0)).render(resource_expiry_enabled=flag)))
+        colspans = {
+            int(env.from_string("{{ " + expr + " }}").render(resource_expiry_enabled=flag))
+            for expr in re.findall(r'colspan="\{\{([^}]+)\}\}"', src)
+        }
+        # Any literal colspans in the table must match too.
+        colspans |= {int(v) for v in re.findall(r'colspan="(\d+)"', src)}
+        assert colspans == {n_th}, (
+            f"resource_expiry_enabled={flag}: {n_th} <th> but colspan(s) {sorted(colspans)}")
+
+
 def test_alpine_region_helpers_behave():
     """Run the node harness, which extracts each region helper from its template
     and exercises it. Skips when node isn't installed."""

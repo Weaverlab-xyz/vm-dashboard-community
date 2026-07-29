@@ -22,6 +22,24 @@ function extract(file, name) {
 const build = (file, name, state) =>
   Object.assign(eval('({' + extract(file, name) + '})'), state);
 
+// Sibling of extract() for a TOP-LEVEL `function name(...) {}` declaration. The globals
+// in static/js/app.js (timeAgo, timeUntil, utcStamp) are written that way, so the
+// method-shaped anchor above can't see them — and a function declaration can't be
+// wrapped in an object literal the way build() does either. Returns the callable.
+function extractFn(file, name) {
+  const src = fs.readFileSync(T + file, 'utf8');
+  const re = new RegExp(String.raw`\nfunction[ \t]+` + name + String.raw`\s*\([^)]*\)\s*\{`);
+  const m = re.exec(src);
+  if (!m) throw new Error(file + ': function ' + name + ' not found');
+  const start = m.index + 1;
+  let depth = 0, end = -1;
+  for (let j = src.indexOf('{', start); j < src.length; j++) {
+    if (src[j] === '{') depth++;
+    else if (src[j] === '}') { depth--; if (depth === 0) { end = j; break; } }
+  }
+  return eval('(' + src.slice(start, end + 1) + ')');
+}
+
 let fail = 0;
 const ok = (n, c) => { console.log((c ? 'ok   ' : 'FAIL ') + n); if (!c) fail++; };
 
@@ -191,5 +209,84 @@ for (const [fn, form] of [['onDeployLocationChange', 'deployModal'],
   ok(AZ + ' ' + fn + '() reloads the options for the new location',
      eq(loaded, [[true, 'westeurope']]));
 }
+
+// ── auto-delete timer: the expiry label + badge ───────────────────────────────
+// timeUntil exists because timeAgo CANNOT be reused: timeAgo computes (now - t) and
+// collapses every negative result to 'just now', so an expiry — always a future
+// timestamp — would render "just now" on every unexpired resource. These pin that,
+// the naive-string-is-UTC rule the server's datetime.utcnow() depends on, and that the
+// warn colour is driven by the SERVER's warn_hours rather than a hardcoded 24.
+const U = {
+  timeUntil: extractFn('../static/js/app.js', 'timeUntil'),
+  utcStamp: extractFn('../static/js/app.js', 'utcStamp'),
+  timeAgo: extractFn('../static/js/app.js', 'timeAgo'),
+};
+
+// The reason timeUntil has to exist at all. If this ever stops holding, someone has
+// "simplified" the expiry column by reusing timeAgo and every unexpired resource now
+// reads "just now".
+ok('timeAgo cannot express a future time (why timeUntil exists)',
+   U.timeAgo(new Date(Date.now() + 6 * 3600000).toISOString()) === 'just now');
+
+const inFuture = ms => new Date(Date.now() + ms).toISOString();
+const MIN = 60000, HR = 3600000, DAY = 86400000;
+
+ok('timeUntil says never for no expiry', U.timeUntil(null) === 'never'
+   && U.timeUntil('') === 'never' && U.timeUntil(undefined) === 'never');
+ok('timeUntil is overdue for a past time, never "just now"',
+   U.timeUntil(new Date(Date.now() - 2 * HR).toISOString()) === 'overdue');
+ok('timeUntil counts minutes under an hour', U.timeUntil(inFuture(45 * MIN)) === 'in 45m');
+ok('timeUntil never shows 0m for a live timer', U.timeUntil(inFuture(20000)) === 'in 1m');
+ok('timeUntil counts hours under 48h', U.timeUntil(inFuture(6 * HR)) === 'in 6h');
+ok('timeUntil counts days past 48h', U.timeUntil(inFuture(12 * DAY)) === 'in 12d');
+ok('timeUntil is – for an unreadable stamp', U.timeUntil('tomorrow') === '–');
+
+// The server stores naive datetime.utcnow(). Read as LOCAL time, every expiry would be
+// wrong by the host's UTC offset — invisible in UTC-based CI, wrong on a laptop.
+const naive = new Date(Date.now() + 6 * HR).toISOString().replace('Z', '');
+ok('timeUntil reads a naive stamp as UTC, not local',
+   U.timeUntil(naive) === U.timeUntil(naive + 'Z'));
+ok('utcStamp renders an absolute UTC deadline',
+   /^\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC$/.test(U.utcStamp('2026-07-28T14:03:00')));
+ok('utcStamp is blank for no expiry', U.utcStamp(null) === '' && U.utcStamp('x') === '');
+
+// expiryLabel calls the bare global timeUntil, exactly as it does in the page (app.js
+// defines it at top level and the template re-exports it into the Alpine component).
+global.timeUntil = U.timeUntil;
+
+const badge = (row, ttl) =>
+  build('inventory/list.html', 'expiryBadge',
+        { now: Date.now(), ttl: ttl || {} }).expiryBadge(row);
+const label = (row, ttl) =>
+  build('inventory/list.html', 'expiryLabel',
+        { now: Date.now(), ttl: ttl || {} }).expiryLabel(row);
+
+ok('expiryLabel says never with no timer', label({ expires_at: null }) === 'never');
+ok('expiryLabel says exempt for an exempt row',
+   label({ expires_at: null, expiry_exempt: true }) === 'exempt');
+ok('expiryBadge is unstyled with no timer',
+   badge({ expires_at: null }).includes('bg-transparent'));
+ok('expiryBadge is red inside the last hour',
+   badge({ expires_at: inFuture(30 * MIN) }, { warn_hours: 24 }).includes('bg-red-100'));
+ok('expiryBadge is yellow inside the warn window',
+   badge({ expires_at: inFuture(6 * HR) }, { warn_hours: 24 }).includes('bg-yellow-100'));
+ok('expiryBadge is plain outside the warn window',
+   badge({ expires_at: inFuture(10 * DAY) }, { warn_hours: 24 }).includes('bg-transparent'));
+
+// The threshold is the SERVER's. Hardcoding 24 here would let /inventory highlight a row
+// the dashboard's warning ignores (and vice versa) with nothing to catch the drift.
+ok('expiryBadge honours a server warn_hours of 1',
+   badge({ expires_at: inFuture(6 * HR) }, { warn_hours: 1 }).includes('bg-transparent'));
+ok('expiryBadge honours a server warn_hours of 240',
+   badge({ expires_at: inFuture(5 * DAY) }, { warn_hours: 240 }).includes('bg-yellow-100'));
+
+// Report-only vs armed: the operator must not read "deleting…" when nothing deletes.
+const past = new Date(Date.now() - 2 * HR).toISOString();
+ok('an overdue row reads "overdue" in report-only mode',
+   label({ expires_at: past }, { dry_run: true, deletion_available: false }) === 'overdue');
+ok('an overdue row reads "deleting…" only when deletion is really on',
+   label({ expires_at: past }, { dry_run: false, deletion_available: true }) === 'deleting…');
+ok('an overdue row does not claim to be deleting while dry-run is on',
+   label({ expires_at: past }, { dry_run: true, deletion_available: true }) === 'overdue');
 
 process.exit(fail ? 1 : 0);

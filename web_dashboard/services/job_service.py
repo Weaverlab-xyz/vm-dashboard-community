@@ -33,6 +33,7 @@ def create_job(
     metadata: Optional[dict] = None,
     batch_id: Optional[str] = None,
     status: str = "pending",
+    expires_at: Optional[datetime] = None,
 ) -> Job:
     """Create a new job record, ``pending`` by default.
 
@@ -44,7 +45,14 @@ def create_job(
     HANDLED_TYPES`` (jobs_worker._claim_one), so a child created ``pending`` under a
     handled type would be claimed and run a second time, concurrently with its
     parent. Creating such children ``queued`` keeps them out of the claim query while
-    still showing on /jobs. Only pass it when something else owns the execution."""
+    still showing on /jobs. Only pass it when something else owns the execution.
+
+    ``expires_at`` is the auto-delete timer. Pass it to override; leave it None and a
+    cloud VM deploy is stamped from the global default. This is the ONE funnel every
+    VM deploy row passes through — single deploys, count fan-outs and bulk children
+    alike — so stamping here means no provider can be forgotten and a fifth cloud is
+    covered the day it's added. See expiry_policy.default_expiry_for, which returns
+    None on a set-membership test for every job type that isn't a VM deploy."""
     job = Job(
         id=str(uuid.uuid4()),
         job_type=job_type,
@@ -58,6 +66,16 @@ def create_job(
     )
     if metadata:
         job.metadata_dict = metadata
+    if expires_at is not None:
+        job.expires_at = expires_at
+    else:
+        # Imported here, not at module top: expiry_policy reads config_service, and a
+        # top-level import would make job_service depend on it at import time.
+        from . import expiry_policy
+        try:
+            job.expires_at = expiry_policy.default_expiry_for(job_type, workgroup=workgroup)
+        except Exception:  # noqa: BLE001 — a timer must never block a deploy
+            job.expires_at = None
     db.add(job)
     db.commit()
     db.refresh(job)

@@ -962,6 +962,38 @@ class AdmissionControlFeatureConfig(BaseModel):
     admission_prod_window: str = ""
 
 
+class ResourceExpiryFeatureConfig(BaseModel):
+    """Auto-delete timer. The toggle owns `resource_expiry_enabled` (feature name → key
+    via _feature_to_cfg_key) and turns on stamping, display and warning ONLY — deletion
+    additionally requires `resource_expiry_enforce`, default off, so enabling the feature
+    is observe-only until an operator opts in. `resource_expiry_default_hours` = 0 means
+    new deploys aren't stamped either, so an install that enables this without choosing a
+    default is inert twice over.
+
+    Every numeric field is annotated plain `int`, never Optional[int]: _read_feature keys
+    off `info.annotation is int`, so an Optional would read back as "" for an unset key
+    and 422 the whole panel on save — the exact regression
+    tests/test_setup_feature_roundtrip.py exists to pin.
+
+    Hard floors (minimum lifetime, reap grace, arming delay, per-pass cap) are module
+    constants in services/expiry_policy.py, NOT keys here, so no configuration can reach
+    past them. `resource_expiry_armed_at` / `_last_sweep` are runtime state the reaper
+    writes and are deliberately absent for the same reason.
+    """
+    enabled: bool = False
+    resource_expiry_enforce: bool = False
+    resource_expiry_dry_run: bool = True
+    resource_expiry_default_hours: int = 0
+    resource_expiry_extend_hours: int = 24
+    resource_expiry_max_total_hours: int = 720
+    resource_expiry_warn_hours: int = 24
+    resource_expiry_grace_minutes: int = 30
+    resource_expiry_sweep_interval_minutes: int = 30
+    resource_expiry_max_per_pass: int = 10
+    resource_expiry_allow_never: bool = False
+    resource_expiry_exempt_workgroups: str = ""
+
+
 class MultiRegionFeatureConfig(BaseModel):
     """Config-only panel that hosts the per-region config-set editors for AWS, GCP
     and Azure. The region maps themselves live under ``<cloud>_region_configs`` and
@@ -1000,6 +1032,7 @@ _FEATURE_MODELS = {
     "vdesktops":      VirtualDesktopsFeatureConfig,
     "cost_explorer":  CostExplorerFeatureConfig,
     "admission_control": AdmissionControlFeatureConfig,
+    "resource_expiry":   ResourceExpiryFeatureConfig,
     "multi_region":   MultiRegionFeatureConfig,
     "oidc":           OidcFeatureConfig,
 }

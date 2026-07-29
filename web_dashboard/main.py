@@ -99,6 +99,12 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(_ci_sweeper_loop(), name="ci_sweeper_loop")
     )
 
+    # Auto-delete timer sweeper. Loop always launched; it no-ops while the feature is
+    # off, so flipping it on in Settings activates the next pass without an app restart.
+    warmers.append(
+        asyncio.create_task(_expiry_sweeper_loop(), name="expiry_sweeper_loop")
+    )
+
     # Cost-summary warmer — always launched; no-ops (no billable calls) while the
     # cost feature is off, so flipping the flag in Settings warms the next pass.
     warmers.append(
@@ -193,6 +199,43 @@ async def _ci_sweeper_loop() -> None:
             interval = ci_sweeper.sweep_interval_seconds()
         except Exception:
             interval = 60 * 60
+        await asyncio.sleep(interval)
+
+
+# ── Auto-delete timer sweeper loop ───────────────────────────────────────────
+
+async def _expiry_sweeper_loop() -> None:
+    """Enqueue one auto-delete (resource expiry) sweep per interval.
+
+    This loop ONLY enqueues — it must never call ``sweep_once`` itself. The app runs
+    under ``gunicorn -w 2``, so every task started here runs twice; letting
+    ``jobs_worker._claim_one``'s ``UPDATE ... WHERE status='pending'`` rowcount decide the
+    winner is what makes a pass single-flight across both app workers AND the three
+    worker replicas, on SQLite as well as PostgreSQL. It also puts the destructive half of
+    the feature in the worker process, where every other long/destructive operation runs,
+    and gives each pass a job row on /jobs with Live Output and cancel.
+
+    Cadence is read live each iteration so a Settings change takes effect on the next
+    pass without an app restart (same contract as _ci_sweeper_loop).
+    """
+    from .database import SessionLocal
+    from .services import expiry_policy, expiry_reaper
+
+    while True:
+        try:
+            db = SessionLocal()
+            try:
+                await asyncio.to_thread(expiry_reaper.enqueue_sweep_if_due, db)
+            finally:
+                db.close()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("auto-delete sweep enqueue failed: %s", exc)
+        try:
+            interval = expiry_policy.sweep_interval_seconds()
+        except Exception:
+            interval = 30 * 60
         await asyncio.sleep(interval)
 
 
@@ -457,6 +500,10 @@ def _feature_flags() -> dict:
         "k8s_management_enabled": config_service.get_bool("k8s_management_enabled", settings.k8s_management_enabled),
         "cost_explorer_enabled": config_service.get_bool("cost_explorer_enabled", settings.cost_explorer_enabled),
         "admission_control_enabled": config_service.get_bool("admission_control_enabled", settings.admission_control_enabled),
+        # Auto-delete timer — gates the Expires column on /inventory and the dashboard's
+        # "expiring soon" warning. Deletion has its own second gate
+        # (resource_expiry_enforce), read server-side only.
+        "resource_expiry_enabled": config_service.get_bool("resource_expiry_enabled", settings.resource_expiry_enabled),
         # Entitle user-JIT Phase 4 UI affordances — surfaces the
         # "Request access" nav link + portal URL when both are configured.
         "entitle_user_jit_enabled":   config_service.get_bool("entitle_user_jit_enabled", settings.entitle_user_jit_enabled),
@@ -483,6 +530,7 @@ from .api import workgroups as workgroups_api  # noqa: E402
 from .api import workgroup_overrides as workgroup_overrides_api  # noqa: E402
 from .api import cloud_identity as cloud_identity_api  # noqa: E402
 from .api import gateways as gateways_api  # noqa: E402
+from .api import expiry as expiry_api  # noqa: E402
 from .api.mcp_server import get_mcp_asgi_app  # noqa: E402
 
 
@@ -676,6 +724,11 @@ try:
     app.include_router(inventory.router)
 except ImportError as exc:
     logger.warning("API router 'inventory' not loaded: %s", exc)
+
+# Auto-delete timer (extend/pin + sweeper surface). Not feature-gated at the router:
+# GET /status has to answer "disabled" so the pages can hide the column, and the
+# mutations refuse on their own when the feature is off.
+app.include_router(expiry_api.router)
 
 
 # ── HTML pages ────────────────────────────────────────────────────────────────
@@ -960,6 +1013,7 @@ async def features():
         "admission":    flags["admission_control_enabled"],
         "cloud_database": flags["cloud_database_enabled"],
         "k8s_management": flags["k8s_management_enabled"],
+        "resource_expiry": flags["resource_expiry_enabled"],
     }
 
 

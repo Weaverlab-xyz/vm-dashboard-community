@@ -245,9 +245,15 @@ def create_cluster(db: Session, *, cloud: str, name: str, region: str,
         raise K8sError(f"a cluster named {name!r} is already registered")
 
     cluster_id = str(uuid.uuid4())
+    from . import expiry_policy
     row = K8sCluster(
         id=cluster_id, cloud=cloud, name=name, status="provisioning",
         source="provisioned", region=region, created_by=created_by,
+        # Auto-delete timer from the global default; None (no timer) unless the feature
+        # is on AND a default is configured. Only this PROVISION path stamps one —
+        # register_cluster deliberately does not, since deleting a registered cluster
+        # only drops the dashboard's record. See expiry_policy.default_expiry_for_kind.
+        expires_at=expiry_policy.default_expiry_for_kind("k8s", source="provisioned"),
     )
     db.add(row)
     db.commit()

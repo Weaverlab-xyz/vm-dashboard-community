@@ -51,6 +51,12 @@ def _vm_item(job) -> dict:
         "workgroup": (job.workgroup or None),
         "deployed_by": job.created_by,
         "created_at": _iso(job.created_at),
+        # Auto-delete timer; None = never. A VM has no inventory table, so its expiry
+        # lives on this deploy Job — which is already what `job:<id>` identifies.
+        # `source` is "provisioned" by construction: collect() only reaches here for a
+        # deploy the dashboard itself ran.
+        "expires_at": _iso(job.expires_at),
+        "source": "provisioned",
         "job_id": job.id,
         # Ansible's connection address, same resolution as the Config-Management
         # target picker (api/config_mgmt.get_cloud_targets). Empty for providers whose
@@ -126,6 +132,7 @@ def _db_item(row) -> dict:
         "workgroup": None,
         "deployed_by": row.created_by,
         "created_at": _iso(row.created_at),
+        "expires_at": _iso(row.expires_at),
         "job_id": None,
         "detail_href": "/databases",
     }
@@ -136,12 +143,16 @@ def _k8s_item(row) -> dict:
         "id": f"k8s:{row.id}",
         "cloud": row.cloud,
         "kind": "k8s",
+        # Same meaning as _db_item's: a `registered` cluster is one the dashboard was
+        # told about rather than provisioned, so it is never auto-deleted.
+        "source": row.source or "registered",
         "name": row.name,
         "region": row.region or "",
         "state": row.status,
         "workgroup": None,
         "deployed_by": row.created_by,
         "created_at": _iso(row.created_at),
+        "expires_at": _iso(row.expires_at),
         "job_id": row.deploy_job_id,
         "detail_href": "/k8s",
     }
@@ -159,6 +170,12 @@ def _desktop_item(row) -> dict:
         "workgroup": None,
         "deployed_by": row.created_by,
         "created_at": _iso(row.created_at),
+        # A seat never carries an auto-delete timer: its teardown is
+        # vdesktop_pool_teardown(seat_ids), so expiring one seat would silently shrink a
+        # live pool. There is deliberately no expires_at column on virtual_desktops, so
+        # nothing can be stamped here that the sweeper wouldn't honour.
+        "expires_at": None,
+        "source": "provisioned",
         "job_id": None,
         "detail_href": "/desktops",
     }
@@ -196,11 +213,29 @@ def collect(db: Session) -> list:
     # not when it can't. Derived from the same _target_spec the bulk-run endpoint
     # validates with, so the page's checkboxes and the server's guard can never
     # disagree — and the operator sees the reason on hover instead of after a 400.
+    # Annotate each row with whether it can carry an auto-delete timer, and why not when
+    # it can't — the same contract as cfg_runnable/cfg_reason above, for the same reason:
+    # the Expires column renders the control only when eligible and shows this reason on
+    # hover, so the page and the sweeper's own guard can never disagree.
+    #
+    # Note what is deliberately NOT computed here: an "expiring soon" boolean. collect()
+    # is cached for 60s, so a time-derived flag would go stale inside the cache (the
+    # discipline cost_service.apply_budget_alerts documents). Clients get the raw
+    # expires_at plus the warn threshold and derive it live.
+    from . import expiry_policy
     for item in items:
         spec = _target_spec(item)
         unrunnable = isinstance(spec, str)
         item["cfg_runnable"] = not unrunnable
         item["cfg_reason"] = spec if unrunnable else ""
+
+        capable, why = expiry_policy.ttl_capable(item)
+        exempt = capable and expiry_policy.is_exempt(item)
+        item["ttl_capable"] = capable and not exempt
+        item["expiry_exempt"] = exempt
+        item["ttl_reason"] = (
+            "its workgroup is exempt from auto-delete" if exempt else why
+        )
 
     return items
 

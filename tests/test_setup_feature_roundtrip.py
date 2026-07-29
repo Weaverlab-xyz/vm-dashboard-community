@@ -44,8 +44,10 @@ def _install_config_stub():
 
 _install_config_stub()
 try:
-    from web_dashboard.api.setup import (_read_feature, AnsibleFeatureConfig,
-                                         PortainerFeatureConfig)
+    from web_dashboard.api.setup import (_read_feature, _CONFIG_ONLY_FEATURES,
+                                         _FEATURE_MODELS, AnsibleFeatureConfig,
+                                         PortainerFeatureConfig,
+                                         ResourceExpiryFeatureConfig)
 except Exception as exc:  # pragma: no cover — skip if fastapi/pydantic/app deps missing
     try:
         import pytest
@@ -130,10 +132,84 @@ def test_portainer_set_int_is_preserved():
         CONF.clear()
 
 
+def test_resource_expiry_ints_round_trip():
+    """The auto-delete panel has SEVEN int fields — the most exposed to the ""-doesn't-
+    validate bug this file exists for. An unset read must return real ints and
+    re-validate, or the whole panel 422s on save and the operator can't configure the
+    feature at all."""
+    CONF.clear()
+    data = _read_feature("resource_expiry", ResourceExpiryFeatureConfig)
+    expected = {
+        "resource_expiry_default_hours": 0,
+        "resource_expiry_extend_hours": 24,
+        "resource_expiry_max_total_hours": 720,
+        "resource_expiry_warn_hours": 24,
+        "resource_expiry_grace_minutes": 30,
+        "resource_expiry_sweep_interval_minutes": 30,
+        "resource_expiry_max_per_pass": 10,
+    }
+    for key, want in expected.items():
+        assert data[key] == want, f"{key}: {data[key]!r} != {want}"
+        assert isinstance(data[key], int), f"{key} read back as {type(data[key])}"
+    # patch_feature_config does exactly this on save — it must not raise.
+    ResourceExpiryFeatureConfig(**data)
+
+
+def test_resource_expiry_is_safe_by_default():
+    """Two independent brakes, pinned so neither can be flipped by an innocent-looking
+    default change: report-only is ON, and the default lifetime is 0 (= stamp nothing).
+    Together they mean enabling the feature deletes nothing until an operator makes two
+    more deliberate choices."""
+    CONF.clear()
+    data = _read_feature("resource_expiry", ResourceExpiryFeatureConfig)
+    assert data["resource_expiry_dry_run"] is True
+    assert data["resource_expiry_enforce"] is False
+    assert data["resource_expiry_default_hours"] == 0
+    assert data["resource_expiry_allow_never"] is False
+    assert data["enabled"] is False
+    # And the same defaults on the model itself, which is what a PATCH validates against.
+    m = ResourceExpiryFeatureConfig()
+    assert m.resource_expiry_dry_run is True and m.resource_expiry_enforce is False
+    assert m.resource_expiry_default_hours == 0
+
+
+def test_resource_expiry_runtime_state_is_not_editable():
+    """armed_at and last_sweep are written by the reaper. If they were panel fields, an
+    operator could reset the arming clock — the one delay that guarantees a review window
+    between enabling the feature and destroying something — from the Settings page."""
+    fields = set(ResourceExpiryFeatureConfig.model_fields)
+    for runtime_key in ("resource_expiry_armed_at", "resource_expiry_last_sweep"):
+        assert runtime_key not in fields, f"{runtime_key} must not be a panel field"
+
+
+def test_resource_expiry_is_registered_with_a_real_toggle():
+    """Registration is duplicated between _FEATURE_MODELS and settings.html and is easy
+    to half-do. It must NOT be config-only: the feature needs its own on/off."""
+    assert _FEATURE_MODELS.get("resource_expiry") is ResourceExpiryFeatureConfig
+    assert "resource_expiry" not in _CONFIG_ONLY_FEATURES
+    assert "enabled" in ResourceExpiryFeatureConfig.model_fields
+
+
+def test_resource_expiry_set_int_is_preserved():
+    CONF.clear()
+    CONF["resource_expiry_default_hours"] = "72"
+    try:
+        data = _read_feature("resource_expiry", ResourceExpiryFeatureConfig)
+        assert data["resource_expiry_default_hours"] == 72
+        ResourceExpiryFeatureConfig(**data)
+    finally:
+        CONF.clear()
+
+
 if __name__ == "__main__":
-    test_unset_int_fields_round_trip()
-    test_set_int_field_is_preserved()
-    test_per_cloud_runner_image_keys_round_trip()
-    test_portainer_managed_node_fields_round_trip()
-    test_portainer_set_int_is_preserved()
-    print("ok")
+    fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
+    failures = 0
+    for fn in fns:
+        try:
+            fn()
+            print(f"ok   {fn.__name__}")
+        except Exception as e:  # noqa: BLE001
+            failures += 1
+            print(f"FAIL {fn.__name__}: {e}")
+    print(f"\n{len(fns) - failures}/{len(fns)} passed")
+    sys.exit(1 if failures else 0)

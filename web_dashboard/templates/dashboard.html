@@ -452,6 +452,48 @@
                      detail: (i.cloud || '') + (i.region ? ' · ' + i.region : ''),
                      time: i.created_at, href: i.detail_href || '/inventory' });
         }
+        // Resources whose auto-delete timer is inside the warning window. This is the
+        // ONLY warning the feature has — there is no email or chat notification anywhere
+        // in this app — so it has to be legible: an operator who never opens the
+        // dashboard gets no notice at all before a resource is deleted.
+        //
+        // Note the 'expiry:' id prefix. The failed-state item above uses a bare i.id, so
+        // without it dismissing one would silently hide the other for the same resource.
+        const ttl = inv?.expiry;
+        if (ttl?.enabled) {
+          const warnMs = (ttl.warn_hours || 24) * 3600 * 1000;
+          const soon = (inv?.items || []).filter(i => {
+            if (!i.expires_at || i.expiry_exempt) return false;
+            const t = new Date(i.expires_at + (/Z$/.test(i.expires_at) ? '' : 'Z')).getTime();
+            return !isNaN(t) && (t - Date.now()) < warnMs;
+          }).sort((a, b) => new Date(a.expires_at) - new Date(b.expires_at));
+          const verb = ttl.dry_run || !ttl.deletion_available
+            ? 'would auto-delete' : 'auto-deletes';
+          const fix = ttl.dry_run || !ttl.deletion_available
+            ? 'report-only mode — nothing will be deleted'
+            : 'extend it on the Inventory page to keep it';
+          // Roll up past three: the list is capped at 8 items, and a big expiring batch
+          // would otherwise bury the failed jobs.
+          if (soon.length > 3) {
+            out.push({
+              id: 'expiry:rollup', severity: 'warn',
+              title: soon.length + ' resources ' + verb + ' within ' + (ttl.warn_hours || 24) + 'h',
+              detail: 'soonest: ' + soon[0].name + ' ' + timeUntil(soon[0].expires_at)
+                      + ' — ' + fix,
+              time: null, href: '/inventory',
+            });
+          } else {
+            for (const i of soon) {
+              const hot = (new Date(i.expires_at + (/Z$/.test(i.expires_at) ? '' : 'Z')).getTime()
+                           - Date.now()) < 3600 * 1000;
+              out.push({
+                id: 'expiry:' + i.id, severity: hot ? 'error' : 'warn',
+                title: i.name + ' (' + i.kind + ') ' + verb + ' ' + timeUntil(i.expires_at),
+                detail: fix, time: null, href: '/inventory',
+              });
+            }
+          }
+        }
         // Budget alerts — overall + per-cloud (cost is null for non-admins).
         const budgetItem = (bdg, label, idSuffix) => {
           if (!bdg || (bdg.status !== 'over' && bdg.status !== 'approaching')) return;
