@@ -409,6 +409,78 @@ def test_a_null_source_counts_as_provisioned():
     assert _gateway_ref_count(rows) == 1
 
 
+# ── the ephemeral-store gate does not apply to a database target ──────────────
+# A registered AWS database + a Password Safe managed account was believed to be
+# unrunnable: the theory was that `requires_ephemeral_store` refuses a managed-account
+# run on the ECS / Cloud Run runners, so AWS and GCP databases could be registered but
+# not run against. It was never true. The gate lives in the SSH/ad-hoc branch of /run,
+# and a database target returns to _run_cloud_localhost dozens of lines earlier, so the
+# gate is not merely passed — it is unreachable. A live run settled it: an AWS
+# registered database resolved its credential from Password Safe just-in-time and the
+# play completed on the ECS runner (rc=0).
+#
+# The mechanism is the difference between two transport channels, and that is what
+# these tests pin. A database run's connection vars ride the runner's INLINE env
+# (`CONN_VARS_B64` — an ECS override-env `value`, ACI `secure_value`, a Cloud Run env
+# var), so nothing needs to pre-exist in a cloud secret store. The SSH path's
+# named/become secrets ride the provider's secret-REFERENCE channel (`valueFrom`) on
+# ECS and Cloud Run, which is the only reason that opt-in exists.
+
+def _config_mgmt_src():
+    return open(os.path.join(_ROOT, "web_dashboard", "api", "config_mgmt.py"),
+                encoding="utf-8").read()
+
+
+def test_database_target_returns_before_the_ephemeral_store_gate():
+    """The early return must stay ahead of the gate. If someone moves the gate above
+    it — or moves the dispatch below it — every AWS/GCP database run starts 400ing
+    unless an unrelated cloud-secrets opt-in is enabled."""
+    src = _config_mgmt_src()
+    dispatch = src.find('target_kind in ("k8s", "database")')
+    gate = src.find("requires_ephemeral_store(")
+    assert dispatch != -1, "the k8s/database early return is gone from /run"
+    assert gate != -1, "requires_ephemeral_store call is gone — did the gate move?"
+    assert dispatch < gate, (
+        "the ephemeral-store gate now precedes the k8s/database dispatch, so a database "
+        "target is subject to a rule written for the VM SSH path")
+
+
+def test_run_cloud_localhost_never_consults_the_ephemeral_store_gate():
+    """The path a database target actually takes must not grow the gate either."""
+    src = _config_mgmt_src()
+    start = src.find("async def _run_cloud_localhost(")
+    assert start != -1, "_run_cloud_localhost is gone"
+    end = src.find("\n@router.post(\"/run\")", start)
+    body = src[start:end if end != -1 else len(src)]
+    assert "requires_ephemeral_store" not in body, (
+        "_run_cloud_localhost consults the ephemeral-store gate; a database run's "
+        "credential is delivered inline, so there is no store-residency requirement")
+
+
+def test_database_conn_vars_ride_the_inline_env_on_every_runner():
+    """CONN_VARS_B64 must be an inline value on ECS, not a store reference. `valueFrom`
+    here would be the thing that actually made the old claim true."""
+    src = open(os.path.join(_ROOT, "web_dashboard", "services", "aws_service.py"),
+               encoding="utf-8").read()
+    idx = src.find('"name": "CONN_VARS_B64"')
+    assert idx != -1, "CONN_VARS_B64 is no longer put on the ECS task override env"
+    entry = src[idx:idx + 200]
+    assert '"value": conn_vars_b64' in entry, (
+        "CONN_VARS_B64 is no longer passed by inline value — if it became a "
+        "`valueFrom` store reference, a just-in-time credential really would need an "
+        "ephemeral store copy and the database run path would need a gate")
+
+
+def test_register_form_does_not_claim_aws_gcp_runs_are_refused():
+    """The register form carried an amber warning saying a Config Management run against
+    an AWS or GCP database 'is refused today'. The live run disproved it; keep it gone."""
+    tpl = open(os.path.join(_ROOT, "web_dashboard", "templates", "databases", "index.html"),
+               encoding="utf-8").read()
+    assert "is refused today" not in tpl, (
+        "the register form again claims AWS/GCP database runs are refused — they are "
+        "not; both run on their in-cloud runner with an inline credential")
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0

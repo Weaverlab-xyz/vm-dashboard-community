@@ -133,11 +133,34 @@ the request **expire** on its duration rather than checking it back in, matching
 inline runners already do for VMs. Contrast the provisioned path, which reads its admin
 credential from the provisioning job's Terraform variables and the encrypted config store.
 
+> **The account must be *requestable* by the dashboard's Password Safe API identity** —
+> onboarding it is necessary but not sufficient. The checkout goes through a Password Safe
+> *request*, so that identity's group needs the **Requestor** role, with an access policy
+> granting **View** (API-only is fine), on a Smart Rule containing the account. Without it
+> the row registers and lists happily and the run fails in the worker with `Password Safe
+> checkout failed for database …: 4031, statuscode: 403`. Two things make this easy to
+> misdiagnose: a *database* Smart Rule needs its own grant — the ones covering
+> Linux/SSM/Waagent accounts do not extend to it, so the VM path working tells you nothing
+> — and Smart Rule membership is recomputed on a schedule, so a freshly created account is
+> not requestable the instant it exists. Check with
+> `ps-cli access-policies test -s-id <system> -a-id <account>`; an empty list means no
+> policy applies yet.
+
 **Where the run executes** follows the database's location, exactly as it does for
 clusters — an on-premises database runs in a sibling container on the dashboard host,
 because nothing in a cloud has a route to your LAN; a cloud-hosted one runs on that
 cloud's transient in-subnet runner. See
 [Ansible → Kubernetes-cluster and database targets](integrations/ansible.md#kubernetes-cluster-and-database-targets-localhost-runs).
+
+**Every runner takes the just-in-time credential, AWS and GCP included.** A database run is
+a localhost play, and its connection variables ride the runner's *inline* environment
+channel as `CONN_VARS_B64` — the ECS task override env, ACI `secure_value`, the Cloud Run
+env, or a `0600 --env-file` locally — decoded to a `0600` file and passed as `-e @…`.
+Nothing needs to pre-exist in a cloud secret store, so the ephemeral-store opt-in that
+governs a **VM SSH** managed-account run (`ansible_cloud_ephemeral_secrets_enabled`, see
+[Secrets Management](secrets-management.md#ephemeral-cloud-secrets)) does **not** apply
+here. That opt-in exists only because the SSH path injects named/become secrets by
+*reference* (`valueFrom`) on ECS and Cloud Run; the database path never does.
 
 **What registration does not give you.** A registered row has no Terraform state and no
 provisioning job, so none of the three layers apply: no PRA protocol tunnel, no Layer-2
