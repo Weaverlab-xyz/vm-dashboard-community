@@ -6,9 +6,11 @@
    and Oracle Autonomous DB on OCI are all wired (provision → private managed DB →
    BeyondTrust PRA tunnel → decommission). Backed by /api/databases (gated by
    cloud_database_enabled). The "Register in Entitle" button is additionally gated
-   on d.entitle_viable — managed SQL Server (Cloud SQL / RDS-standard / Azure SQL
-   Database) can't satisfy Entitle's MSSQL connector (needs sysadmin/CONTROL SERVER),
-   so it's hidden there; see _entitle_viable in cloud_database_service.py. #}
+   on d.entitle_viable, which is false for two kinds of row: a REGISTERED database
+   (no provisioning credential to hand the connector) and managed SQL Server (Cloud
+   SQL / RDS-standard / Azure SQL Database can't grant the sysadmin/CONTROL SERVER
+   its connector needs). See _entitle_viable in cloud_database_service.py — the API
+   rejects the same rows with a 400, so hiding the button is belt-and-braces. #}
 
 {% block content %}
 <div class="max-w-6xl mx-auto py-8 px-4" x-data="databasesPage()" x-init="init()">

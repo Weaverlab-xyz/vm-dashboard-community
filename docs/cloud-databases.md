@@ -378,7 +378,9 @@ AWS keys above):
 request **just-in-time** access to it instead of holding a standing credential. Gated by
 `entitle_registration_enabled` plus a per-provision **"Register in Entitle"** toggle, and
 there is a post-provision **Register** button (job `clouddb_entitle_register`) to onboard
-an existing DB. Teardown deregisters on decommission. Full Entitle setup (owner, workflow,
+a DB the dashboard already provisioned — a *registered* database is not offerable (no
+provisioning credential to register with; the API refuses it with a 400). Teardown
+deregisters on decommission. Full Entitle setup (owner, workflow,
 durations, the agent) lives in the [Entitle integration](integrations/entitle.md) doc.
 
 The account model is **per engine**:

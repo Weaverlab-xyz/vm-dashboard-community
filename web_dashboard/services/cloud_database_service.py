@@ -82,14 +82,47 @@ _PROVIDER = {
 _ENTITLE_VIABLE_SQLSERVER_PROVIDERS: frozenset = frozenset()
 
 
-def _entitle_viable(engine: str, provider: Optional[str]) -> bool:
-    """Whether a cloud DB's (engine, provider) can be managed by its Entitle DB
-    connector. Only SQL Server is constrained: its connector needs sysadmin/CONTROL
-    SERVER, which managed Cloud SQL / RDS-standard / Azure SQL Database can't grant
-    (see ``_ENTITLE_VIABLE_SQLSERVER_PROVIDERS``). Every other engine is viable."""
-    if engine != "sqlserver":
-        return True
-    return (provider or "") in _ENTITLE_VIABLE_SQLSERVER_PROVIDERS
+def _entitle_ineligible_reason(engine: str, provider: Optional[str], *,
+                               source: Optional[str] = None,
+                               cloud: Optional[str] = None) -> Optional[str]:
+    """``None`` if this cloud DB can be onboarded to Entitle, else the reason it can't,
+    worded for the user. Single source of truth for all three gates — the button (via
+    :func:`_serialize`'s ``entitle_viable``), the API pre-flight, and
+    :func:`_entitle_register_core` — so they can't disagree about what is offerable.
+
+    Two independent blockers, each with its own message:
+
+    * a **registered** database (``source="registered"``) was never provisioned here, so
+      there is no provisioning job, no ``tf_variables`` and no ``config://clouddb/<id>/
+      admin`` entry for :func:`_entitle_register_core` to build the connector's admin
+      credential from. Its Password Safe managed account is checked out at run time and
+      never stored on the row, so registration can only ever fail. Checked first: it
+      holds for every engine, and it is the more fundamental of the two.
+    * **SQL Server**'s connector needs sysadmin/CONTROL SERVER, which the managed
+      flavors this dashboard provisions can't grant (see
+      ``_ENTITLE_VIABLE_SQLSERVER_PROVIDERS``).
+
+    ``cloud`` only sharpens the SQL Server message for a row whose ``provider`` is unset;
+    omitting it is safe.
+    """
+    if (source or "provisioned") == "registered":
+        return ("Register in Entitle is only supported on dashboard-provisioned "
+                "databases. This database was registered, so there is no provisioning "
+                "credential to give the Entitle connector — its Password Safe managed "
+                "account is checked out at run time and never stored.")
+    if engine == "sqlserver" and (provider or "") not in _ENTITLE_VIABLE_SQLSERVER_PROVIDERS:
+        return (f"Entitle's Microsoft SQL Server connector requires sysadmin/CONTROL "
+                f"SERVER, which managed {provider or cloud or 'cloud'} SQL Server does "
+                f"not grant. Register is only supported on Entitle-compatible SQL Server "
+                f"(Azure SQL Managed Instance / AWS RDS Custom).")
+    return None
+
+
+def _entitle_viable(engine: str, provider: Optional[str],
+                    source: Optional[str] = None) -> bool:
+    """Whether this cloud DB can be managed by its Entitle DB connector — the boolean
+    face of :func:`_entitle_ineligible_reason` (see there for the blockers)."""
+    return _entitle_ineligible_reason(engine, provider, source=source) is None
 
 
 # terraform/<dir> module per (engine, cloud) — relative to repo root (parents[2]).
@@ -689,19 +722,17 @@ async def _entitle_register_core(db: Session, *, row: CloudDatabase, engine: str
     ``tf_variables`` is supplied on the provision path (password already re-injected);
     the post-hoc path passes ``None`` and we reconstruct the admin credential from
     the provisioning job metadata + the encrypted config store."""
-    # Entitle's Microsoft SQL Server connector needs sysadmin/CONTROL SERVER, which
-    # managed Cloud SQL / RDS-standard / Azure SQL Database can't grant — registering
-    # would create an integration that then fails Entitle's resource sync ("missing
-    # required server permissions"). Refuse up front with a clear error. On the
-    # provision path _register_entitle swallows this, so non-viable engines simply
-    # never auto-register; on the user-initiated path run_entitle_register surfaces it
-    # as a failed job.
-    if not _entitle_viable(engine, row.provider):
-        raise CloudDatabaseError(
-            f"Entitle's Microsoft SQL Server connector requires sysadmin/CONTROL SERVER, "
-            f"which managed {row.provider or row.cloud} SQL Server does not grant. Register "
-            f"is only supported on Entitle-compatible SQL Server "
-            f"(Azure SQL Managed Instance / AWS RDS Custom).")
+    # Refuse an un-onboardable row up front, before any Entitle or Terraform work:
+    # a registered DB has no provisioning credential to register with, and managed SQL
+    # Server would yield an integration that then fails Entitle's resource sync
+    # ("missing required server permissions"). See _entitle_ineligible_reason. On the
+    # provision path _register_entitle swallows this, so non-viable rows simply never
+    # auto-register; on the user-initiated path run_entitle_register surfaces it as a
+    # failed job — and the API rejects it with a 400 before the job is even queued.
+    reason = _entitle_ineligible_reason(engine, row.provider, source=row.source,
+                                        cloud=row.cloud)
+    if reason:
+        raise CloudDatabaseError(reason)
     from . import entitle_registration_service as ent
     prov_job = _provision_job_for(db, row.id)
     tfv = tf_variables if tf_variables is not None else \
@@ -1643,6 +1674,9 @@ def connection_info(db: Session, db_id: str) -> dict:
     return {
         "db_id": row.id, "engine": row.engine, "cloud": row.cloud,
         "provider": row.provider,
+        # source lets a caller tell a provisioned row from a registered one without
+        # reaching for the ORM — the Entitle pre-flight in the API needs it.
+        "source": row.source or "provisioned",
         "status": row.status, "private_host": row.private_host, "port": row.port,
         "jump_item_id": row.jump_item_id,
     }
@@ -1849,7 +1883,7 @@ def _serialize(r: CloudDatabase) -> dict:
         # Drives the delete verb (deregister vs decommission) and the UI badge.
         "source": r.source or "provisioned", "db_name": r.db_name,
         "entitle_integration_id": r.entitle_integration_id,
-        "entitle_viable": _entitle_viable(r.engine, r.provider),
+        "entitle_viable": _entitle_viable(r.engine, r.provider, r.source),
         "created_by": r.created_by,
         "created_at": r.created_at.isoformat() if r.created_at else None,
     }

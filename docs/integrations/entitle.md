@@ -37,6 +37,13 @@ Terraform provider:
 > checkbox via the row's `entitle_viable` flag. Adding a provider to that set flips it
 > back on; the truth table is pinned by `tests/test_entitle_viability.py`.
 
+> **Registered databases can't be onboarded either.** A database added with *Register
+> existing* (`source="registered"`) has no provisioning job and no Terraform state, so
+> there is no admin credential to give the connector — its Password Safe managed account
+> is checked out at run time and never stored. `_entitle_ineligible_reason` refuses those
+> rows first, whatever the engine, with a message naming the missing credential rather
+> than the SQL Server one above.
+
 Registration is done by [`entitle_registration_service.py`](../../web_dashboard/services/entitle_registration_service.py),
 mirroring `terraform_pra_service`: it generates HCL, runs `terraform apply`, records
 the new integration id, and stashes the Terraform state on the provisioning job so
