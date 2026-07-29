@@ -202,10 +202,10 @@ and broken Gateway deploys**:
 |---|---|
 | `clouddb-nossl-pg16` / `clouddb-nossl-mysql84` parameter groups | RDS forces SSL; the PRA protocol tunnel has no backend-TLS option, so cloud-DB sessions fail |
 | `AWSServiceRoleForRDS` | First RDS create in a virgin account can fail |
-| `dashboard-sandbox-db-sg` | Config fell back to the VM SG — no Jumpoint-scoped ingress |
+| `dashboard-sandbox-db-sg` | Config fell back to the VM SG — no Gateway-scoped ingress |
 | `ecsInstanceRole` + instance profile + 2 policy attachments | Gateway host's ECS agent can't register. The policy already granted `PassRole` on `role/ecsInstanceRole` — a role the script never created |
-| `bt_ecs_launch_type=EC2` | **Worst of the set.** Absent, the Jumpoint defaults to Fargate, which cannot protocol-tunnel at all |
-| `bt_ecs_host_instance_profile` | Dashboard has no profile to attach to the on-demand Jumpoint host |
+| `bt_ecs_launch_type=EC2` | **Worst of the set.** Absent, the Gateway defaults to Fargate, which cannot protocol-tunnel at all |
+| `bt_ecs_host_instance_profile` | Dashboard has no profile to attach to the on-demand Gateway host |
 
 Now at parity: both scripts issue an identical set of AWS CLI operations and emit an
 identical set of 37 config keys. The `AmazonEC2ContainerServiceforEC2Role` attach is
