@@ -217,8 +217,10 @@
         <p class="text-xs text-gray-500">
           Stands up a managed cluster with Terraform, stores its kubeconfig as a secrets-backend
           reference, and registers it — then launch a plane / broker access / install secrets as usual.
-          <strong>EKS</strong>, <strong>AKS</strong>, and <strong>GKE</strong> are supported. AKS/GKE
-          create their own network with internet egress; EKS uses the sandbox's private k8s subnets.
+          <strong>EKS</strong>, <strong>AKS</strong>, and <strong>GKE</strong> are supported;
+          <strong>OKE</strong> is experimental (no Entra federation, in-process kubectl, not yet
+          live-validated). AKS/GKE/OKE create their own network with internet egress; EKS uses the
+          sandbox's private k8s subnets.
         </p>
         <div class="grid grid-cols-2 gap-3">
           <div>

@@ -25,9 +25,11 @@ Coverage differs by cloud/engine:
 | **AWS** | postgres / mysql / sqlserver (RDS) | ✅ tunnel | ✅ `dbssm` | ✅ register + JIT |
 | **Azure** | postgres / mysql (Flexible Server) + sqlserver (SQL DB + Private Endpoint) | ✅ tunnel | ✅ `dbazure` | ✅ register + JIT |
 | **GCP** | postgres / mysql / sqlserver (Cloud SQL, private IP) | ✅ tunnel | ❌ | ✅ postgres / mysql (via forwarder) |
-| **OCI** | **oracle only** (Autonomous DB) | ✅ tunnel¹ | ❌ | ❌ |
+| **OCI** | ⚠️ **oracle only** (Autonomous DB) — read the caveats² | ✅ tunnel¹ | ❌ | ❌ |
 
 ¹ OCI has no dashboard-provisioned gateway — you supply your own (see the OCI section).
+² The OCI module only started shipping in the image recently and has **never completed a live
+run**; it also always provisions into `oci_region`. See [OCI](#oci-autonomous-database--read-the-caveats).
 
 Everything is driven by Terraform from the job worker; deploy state is written to the
 active [storage backend](storage-management.md).
@@ -234,6 +236,15 @@ the `tcp` tunnel can connect over TLS without a client wallet. It's reached over
 > **paid/private** ADB must be given a subnet via the `oci_subnet_ocid` provision option —
 > do not rely on `oci_default_subnet_ocid`, which points at the VM subnet; the sandbox's
 > private db-subnet OCID is not emitted to any config key.
+
+> ⚠️ **OCI caveat 3 — never live-validated; needs a rebuilt image.** `terraform/db_oci_autonomous`
+> was absent from the Dockerfile `COPY` set (and excluded from the build context by
+> `.dockerignore`) until recently, so **no published image could provision an OCI database** —
+> `apply` failed in `terraform._materialize` with "Terraform module template not found", even
+> though `("oracle", "oci")` is listed in `_IMPLEMENTED`. The module now ships, but that means
+> this path has **never completed a live run**: treat the first provision as a bring-up, and make
+> sure you are on an image built after the fix. The OCI **OKE** module was missing the same way —
+> see [Kubernetes → OCI OKE](kubernetes.md#oci-oke--experimental).
 
 **Config keys** (all Settings fields): `oci_tenancy_ocid`, `oci_user_ocid`,
 `oci_fingerprint`, `oci_private_key` (+ `oci_private_key_passphrase`), `oci_region`
