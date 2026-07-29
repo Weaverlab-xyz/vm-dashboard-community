@@ -650,10 +650,10 @@ def _build_cluster_tf_variables(*, cloud: str, cluster_id: str, name: str,
 async def provision_options(cloud: str, region: str = "") -> dict:
     """Assemble the provision-form pickers for one cloud (region-scoped). Curated
     static lists for regions / node sizes / k8s versions (the configured value is
-    merged in + first); AWS additionally serves live VPC subnets for the EKS subnet
-    override + the two configured sandbox subnet ids to pre-select. AKS/GKE create
-    their own network → subnets / configured_subnet_ids empty. Raises K8sError on an
-    unknown cloud; AWS subnet discovery errors propagate as aws_service.AWSError."""
+    merged in + first). Every cloud's module builds its own network, so there is no
+    subnet override on any cloud — ``subnets`` / ``configured_subnet_ids`` are always
+    empty (kept for response-shape compatibility). Raises K8sError on an unknown
+    cloud."""
     cloud = (cloud or "aws").strip().lower()
     if cloud not in _PROVISION_IMPLEMENTED:
         raise K8sError(f"unknown cloud {cloud!r} (expected one of {', '.join(_PROVISION_IMPLEMENTED)})")
@@ -679,8 +679,8 @@ async def provision_options(cloud: str, region: str = "") -> dict:
         "subnets": [],
         "configured_subnet_ids": [],
     }
-    # All three cloud modules build their own network now (EKS self-contained +
-    # peered), so no per-cloud subnet options are served.
+    # Every cloud module builds its own network now (EKS self-contained + peered),
+    # so no per-cloud subnet options are served.
     return out
 
 
