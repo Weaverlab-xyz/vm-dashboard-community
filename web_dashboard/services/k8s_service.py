@@ -624,8 +624,10 @@ def _build_cluster_tf_variables(*, cloud: str, cluster_id: str, name: str,
             "cluster_name": _gke_name(f"k8s-{name}"),   # OKE names: <=63, DNS-ish; reuse the GKE sanitizer
             "tags": _tags,
         }
-        # The provision form reuses the shared `vpc_cidr` field for the VCN CIDR.
-        vcn_cidr = opts.get("vpc_cidr") or opts.get("vcn_cidr") or _cfg("oci_oke_vcn_cidr")
+        # The provision form reuses the shared `vpc_cidr` request field for the VCN
+        # CIDR (it shows as "Cluster VCN CIDR" for oci) — there is no separate
+        # `vcn_cidr` request field.
+        vcn_cidr = opts.get("vpc_cidr") or _cfg("oci_oke_vcn_cidr")
         if vcn_cidr:
             tf["vcn_cidr"] = vcn_cidr
         version = opts.get("k8s_version") or _cfg("oci_oke_k8s_version")

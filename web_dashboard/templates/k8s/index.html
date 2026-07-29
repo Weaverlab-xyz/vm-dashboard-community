@@ -296,12 +296,19 @@
                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="(blank = open to all)">
           <p class="text-[11px] text-gray-400 mt-1">Restricts the <strong>public</strong> API endpoint. Blank = open (0.0.0.0/0). The dashboard runner must be able to reach it.</p>
         </div>
-        <!-- AWS only — the EKS build creates + peers its OWN VPC; optional CIDR override -->
-        <div x-show="provForm.cloud === 'aws'" x-cloak>
-          <label class="block text-sm font-medium text-gray-700 mb-1">Cluster VPC CIDR <span class="text-gray-400">(the EKS build creates + peers its own VPC)</span></label>
+        <!-- AWS / OCI — the build creates its OWN cluster network; optional CIDR override.
+             Both clouds send the same `vpc_cidr` request field (OKE maps it to vcn_cidr). -->
+        <div x-show="provForm.cloud === 'aws' || provForm.cloud === 'oci'" x-cloak>
+          <label class="block text-sm font-medium text-gray-700 mb-1">
+            <span x-text="provForm.cloud === 'oci' ? 'Cluster VCN CIDR' : 'Cluster VPC CIDR'"></span>
+            <span class="text-gray-400"
+                  x-text="provForm.cloud === 'oci' ? '(the OKE build creates its own VCN)' : '(the EKS build creates + peers its own VPC)'"></span>
+          </label>
           <input type="text" x-model="provForm.vpc_cidr"
-                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="10.97.0.0/16">
-          <p class="text-[11px] text-gray-400 mt-1">Blank = default <code>10.97.0.0/16</code>. Must not overlap the sandbox VPC (<code>10.99.0.0/16</code>); give each concurrent cluster a distinct block.</p>
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                 :placeholder="provForm.cloud === 'oci' ? '10.96.0.0/16' : '10.97.0.0/16'">
+          <p x-show="provForm.cloud === 'aws'" class="text-[11px] text-gray-400 mt-1">Blank = default <code>10.97.0.0/16</code>. Must not overlap the sandbox VPC (<code>10.99.0.0/16</code>); give each concurrent cluster a distinct block.</p>
+          <p x-show="provForm.cloud === 'oci'" class="text-[11px] text-gray-400 mt-1">Blank = default <code>10.96.0.0/16</code>. Must not overlap the sandbox VCN (<code>10.98.0.0/16</code>); give each concurrent cluster a distinct block.</p>
         </div>
         <!-- AWS only — EBS CSI driver (dynamic PVCs); off by default, opt in for stateful workloads -->
         <div x-show="provForm.cloud === 'aws'" x-cloak class="flex items-start gap-2">
@@ -858,7 +865,8 @@ function k8sPage() {
         if (f.k8s_version) body.k8s_version = f.k8s_version;
         if (f.node_instance_type) body.node_instance_type = f.node_instance_type;
         if (f.node_count) body.node_count = Number(f.node_count);
-        if (f.cloud === 'aws' && f.vpc_cidr && f.vpc_cidr.trim()) {
+        // Shared field: the EKS VPC CIDR for aws, the OKE VCN CIDR for oci.
+        if ((f.cloud === 'aws' || f.cloud === 'oci') && f.vpc_cidr && f.vpc_cidr.trim()) {
           body.vpc_cidr = f.vpc_cidr.trim();
         }
         if (f.authorized_cidrs && f.authorized_cidrs.trim()) {

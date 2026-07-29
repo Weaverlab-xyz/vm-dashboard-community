@@ -177,6 +177,43 @@ def test_gcp_without_project_raises():
     raise AssertionError("expected K8sError when gcp_project is unconfigured")
 
 
+# ── OCI / OKE ────────────────────────────────────────────────────────────────
+
+def test_oci_maps_the_shared_vpc_cidr_field_to_vcn_cidr():
+    # There is no separate `vcn_cidr` request field: the provision form's shared
+    # `vpc_cidr` field (labelled "Cluster VCN CIDR" for oci) drives the OKE VCN.
+    CONF.clear()
+    CONF["oci_compartment_ocid"] = "ocid1.compartment.oc1..aaa"
+    try:
+        tf = _build("oci", name="Demo", opts={
+            "vpc_cidr": "10.80.0.0/16", "node_instance_type": "VM.Standard.A1.Flex",
+            "k8s_version": "v1.31.1", "node_ocpus": 2, "node_memory_gbs": 12, "node_count": 1,
+        })
+        assert tf["compartment_ocid"] == "ocid1.compartment.oc1..aaa"
+        assert tf["cluster_name"] == "k8s-demo"           # _gke_name lowercases
+        assert tf["vcn_cidr"] == "10.80.0.0/16"           # the shared field lands on vcn_cidr
+        assert "vpc_cidr" not in tf                       # the OKE module has no vpc_cidr var
+        assert tf["node_shape"] == "VM.Standard.A1.Flex"  # OKE node-size var
+        assert tf["k8s_version"] == "v1.31.1"
+        assert tf["node_ocpus"] == 2 and tf["node_memory_gbs"] == 12
+        assert tf["node_count"] == 1
+        assert "node_desired" not in tf and "machine_type" not in tf
+    finally:
+        CONF.clear()
+
+
+def test_oci_vcn_cidr_falls_back_to_config():
+    CONF.clear()
+    CONF.update({"oci_tenancy_ocid": "ocid1.tenancy.oc1..bbb",
+                 "oci_oke_vcn_cidr": "10.96.0.0/16"})
+    try:
+        tf = _build("oci")
+        assert tf["compartment_ocid"] == "ocid1.tenancy.oc1..bbb"  # no compartment → tenancy root
+        assert tf["vcn_cidr"] == "10.96.0.0/16"                    # config default flows through
+    finally:
+        CONF.clear()
+
+
 # ── cross-cloud node-size var mapping (the regression this file guards) ───────
 
 def test_node_instance_type_maps_to_the_right_per_cloud_var():
@@ -187,6 +224,7 @@ def test_node_instance_type_maps_to_the_right_per_cloud_var():
         assert _build("aws", opts=opts)["node_instance_type"] == "SIZE"
         assert _build("azure", opts=opts)["vm_size"] == "SIZE"
         assert _build("gcp", opts=opts)["machine_type"] == "SIZE"
+        assert _build("oci", opts=opts)["node_shape"] == "SIZE"
     finally:
         CONF.clear()
 
