@@ -44,8 +44,12 @@ def _install_stubs():
     sys.modules.setdefault("sqlalchemy.exc", sa_exc)
 
     db = types.ModuleType("web_dashboard.database")
+    # NotificationDelivery/Endpoint are here because the reaper reaches
+    # notification_service to queue its expiring/reaped messages. Without them that
+    # import raises, the emit is swallowed by _notify's guard, and the notification
+    # path in these tests silently does nothing.
     for name in ("CloudDatabase", "Job", "K8sCluster", "VirtualDesktop", "User",
-                 "AuditLog", "JobLog"):
+                 "AuditLog", "JobLog", "NotificationDelivery", "NotificationEndpoint"):
         setattr(db, name, type(name, (), {"id": None}))
     db.get_db = lambda: None
     db._is_sqlite = True
@@ -467,6 +471,111 @@ def test_max_per_pass_bounds_the_damage_rate():
     assert pol.max_per_pass() == 3
     _armed(resource_expiry_max_per_pass=10**6)
     assert pol.max_per_pass() == pol.MAX_PER_PASS_CEILING
+
+
+# ── the auto-delete warning (resource.expiring) ──────────────────────────────
+#
+# _notify is stubbed here: it only builds an event and hands it to the outbox, and the
+# outbox has its own tests. What matters in the reaper is the LATCH — warn once, and
+# only burn the latch if something was actually queued.
+
+class _WarnRow:
+    """A row carrying both halves of the timer: the deadline and the warned-once latch."""
+    def __init__(self, rid, expires_at, warned_at=None):
+        self.id = rid
+        self.expires_at = expires_at
+        self.expiry_warned_at = warned_at
+        self.created_at = None
+
+
+def _warn_setup(queued=1, *, warned_at=None, hours_left=6):
+    """One warnable VM, `hours_left` from its expiry, with _notify recording calls."""
+    expires = NOW + timedelta(hours=hours_left)
+    row = _WarnRow("abc", expires, warned_at)
+    db = _FakeDB()
+    _patch(db, {"job:abc": row})
+    sent = []
+
+    def _fake_notify(_db, event_type, *, title, body, target, url="", fields=None,
+                     dedupe_bucket=""):
+        sent.append((event_type, target["id"]))
+        return queued
+
+    reaper._notify = _fake_notify
+    item = {"id": "job:abc", "kind": "vm", "cloud": "aws", "name": "vm-1",
+            "source": "provisioned", "state": "active", "workgroup": "sandbox",
+            "region": "us-east-1", "job_id": "abc",
+            "expires_at": expires.isoformat()}
+    return db, row, item, sent
+
+
+def test_a_resource_entering_the_window_is_warned_once():
+    CONF.clear()
+    CONF["resource_expiry_enabled"] = "1"
+    db, row, item, sent = _warn_setup()
+
+    assert reaper._warn_expiring(db, [item], now_ts=NOW.timestamp()) == 1
+    assert sent == [("resource.expiring", "job:abc")]
+    assert row.expiry_warned_at is not None, "the latch was not stamped"
+
+
+def test_a_second_sweep_does_not_warn_again():
+    """THE property. The sweep runs every 30 minutes; without the latch an operator
+    would get the same warning 48 times before the resource was destroyed."""
+    CONF.clear()
+    CONF["resource_expiry_enabled"] = "1"
+    db, row, item, sent = _warn_setup(warned_at=NOW)
+
+    assert reaper._warn_expiring(db, [item], now_ts=NOW.timestamp()) == 0
+    assert sent == [], "a resource with expiry_warned_at set was warned again"
+
+
+def test_the_latch_is_not_burned_when_nothing_was_queued():
+    """Notifications off, no endpoint configured, or storm-suppressed. The resource must
+    stay eligible to warn later rather than being silently marked as told."""
+    CONF.clear()
+    CONF["resource_expiry_enabled"] = "1"
+    db, row, item, sent = _warn_setup(queued=0)
+
+    assert reaper._warn_expiring(db, [item], now_ts=NOW.timestamp()) == 0
+    assert sent, "_notify should still have been offered the event"
+    assert row.expiry_warned_at is None, (
+        "the latch was burned even though nothing was queued — this resource would "
+        "never be warned about again")
+
+
+def test_a_resource_outside_the_window_is_not_warned():
+    CONF.clear()
+    CONF["resource_expiry_enabled"] = "1"
+    # Default warn window is 24h; this one has 100h left.
+    db, row, item, sent = _warn_setup(hours_left=100)
+
+    assert reaper._warn_expiring(db, [item], now_ts=NOW.timestamp()) == 0
+    assert sent == []
+    assert row.expiry_warned_at is None
+
+
+def test_something_already_past_expiry_is_the_reapers_business_not_the_warners():
+    """"Expires soon" about a resource being destroyed right now is noise, and would
+    also burn the latch on the way past."""
+    CONF.clear()
+    CONF["resource_expiry_enabled"] = "1"
+    db, row, item, sent = _warn_setup(hours_left=-2)
+
+    assert reaper._warn_expiring(db, [item], now_ts=NOW.timestamp()) == 0
+    assert sent == []
+
+
+def test_a_resource_with_no_timer_is_never_warned():
+    """Same retroactivity guarantee the reaper has: every row predating the feature
+    backfilled to NULL, so enabling notifications must not warn about all of them."""
+    CONF.clear()
+    CONF["resource_expiry_enabled"] = "1"
+    db, row, item, sent = _warn_setup()
+    item["expires_at"] = None
+
+    assert reaper._warn_expiring(db, [item], now_ts=NOW.timestamp()) == 0
+    assert sent == []
 
 
 if __name__ == "__main__":

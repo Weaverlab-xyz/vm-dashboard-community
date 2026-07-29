@@ -791,31 +791,6 @@ async def config_drift_report(
     (last apply older than ``config_drift_stale_days``) and **changed** (the
     stored playbook's current content differs from what was applied). Read-only —
     computed from the ``config_apply_state`` rows recorded on each successful run."""
-    import base64
-    from ..services import config_drift, config_service as cs
-    from ..config import settings
-    from ..database import ConfigApplyState
+    from ..services import config_drift
 
-    try:
-        stale_days = int(cs.get("config_drift_stale_days")
-                         or getattr(settings, "config_drift_stale_days", 14) or 14)
-    except (TypeError, ValueError):
-        stale_days = 14
-
-    rows = db.query(ConfigApplyState).all()
-    row_dicts = [{
-        "target": r.target, "playbook_ref": r.playbook_ref,
-        "content_hash": r.content_hash, "applied_at": r.applied_at, "job_id": r.job_id,
-    } for r in rows]
-
-    # Current content hash per distinct playbook (for change detection). Best-effort
-    # — an asset that's since been deleted/unreadable just yields no change signal.
-    current: dict = {}
-    for ref in {r.playbook_ref for r in rows}:
-        try:
-            b64 = await storage_service.fetch_asset_b64(ref)
-            current[ref] = config_drift.content_hash(base64.b64decode(b64))
-        except Exception:
-            pass
-
-    return config_drift.evaluate(row_dicts, current, stale_days)
+    return await config_drift.collect(db)

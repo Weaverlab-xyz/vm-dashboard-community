@@ -534,6 +534,7 @@ from .api import workgroup_overrides as workgroup_overrides_api  # noqa: E402
 from .api import cloud_identity as cloud_identity_api  # noqa: E402
 from .api import gateways as gateways_api  # noqa: E402
 from .api import expiry as expiry_api  # noqa: E402
+from .api import notifications as notifications_api  # noqa: E402
 from .api.mcp_server import get_mcp_asgi_app  # noqa: E402
 
 
@@ -732,6 +733,11 @@ except ImportError as exc:
 # GET /status has to answer "disabled" so the pages can hide the column, and the
 # mutations refuse on their own when the feature is off.
 app.include_router(expiry_api.router)
+
+# Outbound notifications. Not feature-gated at the router either: an admin has to be
+# able to add and test an endpoint *before* switching the feature on, and every route
+# here is admin-only and harmless while it is off.
+app.include_router(notifications_api.router)
 
 
 # ── HTML pages ────────────────────────────────────────────────────────────────

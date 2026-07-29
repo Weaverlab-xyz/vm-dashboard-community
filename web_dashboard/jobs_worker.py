@@ -348,6 +348,25 @@ async def _run_loop(poll_interval: float = POLL_INTERVAL) -> None:
                     await hb
 
 
+async def _main() -> None:
+    """Run the job runner and the notification drain concurrently.
+
+    The drain is a *peer* of the job runner, not a job type and not a step inside
+    ``_run_loop``. Each worker runs one job at a time (docker-compose sets the replica
+    count for exactly that reason), so putting delivery in the queue would park an
+    alert behind a 30-minute terraform apply — and park the apply behind a stalled
+    webhook POST.
+
+    ``drain_loop`` is started unconditionally and no-ops while notifications are off,
+    so flipping the Settings toggle needs no restart. Its failures are its own: it owns
+    a try/except per pass and can never take the job runner down with it.
+    """
+    from .services import notification_service
+
+    await asyncio.gather(_run_loop(),
+                         notification_service.drain_loop())
+
+
 def main() -> None:
     install_log_correlation()
     logging.basicConfig(
@@ -359,7 +378,7 @@ def main() -> None:
     # init_db is advisory-locked (Postgres) + idempotent, so racing the app is safe.
     init_db()
     logger.info("job runner: database ready")
-    asyncio.run(_run_loop())
+    asyncio.run(_main())
 
 
 if __name__ == "__main__":

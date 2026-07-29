@@ -836,6 +836,32 @@ class Settings(BaseSettings):
     resource_expiry_allow_never: bool = False      # may an admin clear a timer outright
     resource_expiry_exempt_workgroups: str = ""    # CSV; mirrors the admission_* lists
 
+    # ── Outbound notifications ───────────────────────────────────────────────
+    # Sends dashboard events to webhook endpoints (Slack, Microsoft Teams via a Power
+    # Automate Workflows URL, or a signed generic envelope you point at whatever you
+    # like — that last one is how email is delivered; there is no SMTP client here).
+    # Endpoints themselves are rows in `notification_endpoints`, not keys, because
+    # their URLs are credentials and there can be several. See docs/notifications.md.
+    #
+    # Two brakes, because this sends messages to people:
+    #   * notifications_enabled off means nothing is emitted, drained or scanned;
+    #   * notify_dry_run=True — still the default once ON — records what WOULD be sent
+    #     and sends nothing, so the first pass against a live estate fills a log rather
+    #     than a channel.
+    notifications_enabled: bool = False
+    notify_dry_run: bool = True
+    notify_event_types: str = ("resource.expiring,resource.reaped,job.failed,"
+                               "cost.budget_exceeded,secret.stale,config.drift")
+    notify_min_severity: str = "warning"           # info | warning | critical
+    notify_base_url: str = ""                      # absolute origin for deep links
+    notify_http_timeout_s: int = 10
+    notify_flush_interval_s: int = 30              # drain cadence, re-read every pass
+    notify_scan_interval_s: int = 3600             # cost / secret / drift condition scan
+    notify_max_attempts: int = 4                   # then the delivery is terminal-failed
+    notify_max_per_flush: int = 50
+    notify_max_queue: int = 500                    # above this, emit() suppresses
+    notify_retention_days: int = 30                # 0 = keep delivery rows forever
+
     # Ephemeral cloud secrets for managed-account checkout on the ECS / Cloud Run
     # runners. OFF by default: a checked-out Password Safe credential is written to
     # the cloud secret store as a short-lived, RBAC-locked secret, injected via the
