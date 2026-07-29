@@ -274,6 +274,29 @@ unretried `ecsTaskExecutionRole` attach now uses it too.
 6. **Dead config keys** `aws_k8s_subnet_a_id` / `aws_k8s_subnet_b_id`
    (`config.py:253-254`, already annotated "no longer consumed").
 
+## What this audit didn't check
+
+Worth naming, because a gap in the method is more useful to the next person than the
+findings are. This audit traced, for each Terraform module, **what it creates** and **what
+it takes as input** — but never **whether those inputs are reachable**. A module variable
+can be perfectly declared, correctly read by `_build_cluster_tf_variables`, and still be
+dead if no form field or Settings key can populate it.
+
+**#464 found exactly that, twice.** `_build_cluster_tf_variables`'s `oci` branch read the
+OKE VCN CIDR from the provision request, but the form's CIDR input was gated
+`x-show="provForm.cloud === 'aws'"` and `submitProvision()` forwarded it for AWS only — so
+`opts.get("vcn_cidr")` was unreachable and **every OKE cluster silently took the
+`10.96.0.0/16` default**, which is the precise collision `oci_oke` warns about (it carves
+api/nodes/lb subnets from that block, so concurrent clusters need distinct blocks). The same
+PR found `aws_eks_vpc_cidr` absent from the Settings panel and the config model too. Two
+instances in one sitting makes it a pattern, not an oversight.
+
+That class of bug is invisible to the kind of inventory this audit did, and invisible to
+`terraform validate`, because nothing is malformed — the value simply never arrives. Anyone
+extending this audit should walk the *other* direction: from each module's `variable` blocks
+outward to a form field or Settings key, and flag any that dead-ends. `tests/test_k8s_tf_vars.py`
+is where that belongs; #464 notes it had **no `oci` coverage at all** beforehand.
+
 ## Test-suite note
 
 `tests/test_cost_service.py` stubs cloud SDKs in `sys.modules`, and four of its tests
