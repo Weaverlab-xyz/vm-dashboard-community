@@ -268,9 +268,12 @@ async def _warm_cost_summary() -> None:
                 summary = await cost_service.get_cost_summary()
                 await cache_service.set(cache_service.key_global("cost_summary"), summary, ttl)
                 breakdown = await cost_service.get_cost_breakdown()
+                # Key comes from cost_service so the warmer and /api/costs/breakdown
+                # can't drift onto different keys — if they did, the warmer would fill a
+                # key nobody reads and every page load would pay a live 4-cloud fetch.
                 await cache_service.set(
-                    cache_service.key_global("cost_breakdown"), breakdown,
-                    cache_service.TTL["cost_breakdown"])
+                    cache_service.key_global(cost_service.CACHE_KEY_BREAKDOWN), breakdown,
+                    cache_service.TTL[cost_service.CACHE_KEY_BREAKDOWN])
         except asyncio.CancelledError:
             raise
         except Exception as exc:

@@ -115,8 +115,12 @@ if (-not $Zone) {
 
 Write-Section "GCP sandbox in project $ProjectId, region $Region ($Zone)"
 
-# GCP labels can't contain hyphens-as-keys — substitute underscore.
-$Labels = "$($Script:SandboxTagKey -replace '-','_')=$($Script:SandboxTagValue -replace '-','_')"
+# Hyphens are legal in both GCP label keys and values ([a-z]([-_a-z0-9]*)), so keep the
+# tag verbatim — this used to normalize hyphens to underscores, which bought nothing and
+# desynced the sandbox from the dashboard's own hyphenated labels (gcp_service.py).
+# cost_service still accepts the underscored forms: billing-export rows are immutable, so
+# historical managed_by=dashboard_sandbox rows keep showing up forever.
+$Labels = "$($Script:SandboxTagKey)=$($Script:SandboxTagValue)"
 
 $Vpc       = "$Name-vpc"
 $JpSubnet  = "$Name-jumpoint-subnet"

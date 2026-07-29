@@ -7,7 +7,9 @@
   <div class="flex items-center justify-between mb-6">
     <div>
       <h1 class="text-2xl font-bold text-gray-900">Cloud Costs</h1>
-      <p class="text-sm text-gray-500 mt-1">Month-to-date spend. AWS Cost Explorer + Azure Cost Management.</p>
+      <p class="text-sm text-gray-500 mt-1">Month-to-date spend, split into dashboard-provisioned
+        resources and sandbox baseline. AWS Cost Explorer · Azure Cost Management · GCP BigQuery
+        export · OCI Usage API.</p>
     </div>
     <button @click="load(true)" :disabled="loading"
             class="text-sm bg-white border border-gray-300 hover:bg-gray-50 px-3 py-2 rounded-lg shadow-sm font-medium transition">
@@ -59,13 +61,20 @@
     </div>
   </div>
 
-  <!-- ── Dashboard-managed breakdown ───────────────────────────────────────── -->
+  <!-- ── Attributed breakdown (dashboard vs sandbox) ────────────────────────── -->
   <div class="flex items-baseline justify-between mb-3">
-    <h2 class="font-semibold text-gray-800">Dashboard-managed spend (MTD)</h2>
+    <h2 class="font-semibold text-gray-800">Attributed spend (MTD)</h2>
     <span class="text-sm text-gray-500">
-      tagged <code class="text-xs bg-gray-100 px-1 py-0.5 rounded">managed-by=vm-dashboard</code> ·
-      <span class="font-semibold text-gray-700"
-            x-text="breakdown.grand_total == null ? '–' : money(breakdown.grand_total, breakdown.currency)"></span>
+      <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-medium bg-indigo-100 text-indigo-700">
+        dashboard
+        <span class="ml-1 font-semibold" x-text="money(breakdown.dashboard_total, breakdown.currency)"></span>
+      </span>
+      <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-medium bg-amber-100 text-amber-700 ml-1">
+        sandbox
+        <span class="ml-1 font-semibold" x-text="money(breakdown.sandbox_total, breakdown.currency)"></span>
+      </span>
+      · <span class="font-semibold text-gray-700"
+              x-text="breakdown.grand_total == null ? '–' : money(breakdown.grand_total, breakdown.currency)"></span>
     </span>
   </div>
 
@@ -82,29 +91,60 @@
           <p class="text-sm text-gray-400">unavailable</p>
           <p class="text-xs text-gray-400 mt-1" x-text="c.detail"></p>
         </div>
-        <!-- service rows -->
-        <table x-show="c.status === 'ok'" class="w-full text-sm">
-          <tbody class="divide-y divide-gray-50">
-            <tr x-show="c.services.length === 0">
-              <td class="px-4 py-4 text-center text-gray-400 text-xs">No managed spend this month.</td>
-            </tr>
-            <template x-for="s in c.services" :key="s.service">
-              <tr class="hover:bg-gray-50">
-                <td class="px-4 py-2 text-gray-700 truncate max-w-[180px]" x-text="s.service" :title="s.service"></td>
-                <td class="px-4 py-2 text-right text-gray-900 font-medium whitespace-nowrap"
-                    x-text="money(s.amount, c.currency)"></td>
-              </tr>
+        <!-- per-scope service rows -->
+        <div x-show="c.status === 'ok'">
+          <template x-for="sc in ['dashboard', 'sandbox']" :key="sc">
+            <div x-show="scopeRows(c, sc).length || scopeTotal(c, sc) != null">
+              <div class="flex items-baseline justify-between px-4 py-1.5 bg-gray-50/60 border-b border-gray-100">
+                <span class="text-[11px] font-semibold uppercase tracking-wide"
+                      :class="sc === 'sandbox' ? 'text-amber-700' : 'text-indigo-700'"
+                      x-text="sc" :title="c.scope_basis?.[sc] || ''"></span>
+                <span class="text-xs font-semibold text-gray-700"
+                      x-text="scopeTotal(c, sc) == null ? 'not measurable' : money(scopeTotal(c, sc), c.currency)"></span>
+              </div>
+              <table class="w-full text-sm">
+                <tbody class="divide-y divide-gray-50">
+                  <tr x-show="scopeRows(c, sc).length === 0">
+                    <td class="px-4 py-2 text-center text-gray-400 text-xs"
+                        x-text="scopeTotal(c, sc) == null ? 'this cloud cannot attribute it — see note' : 'no ' + sc + ' spend this month'"></td>
+                  </tr>
+                  <template x-for="s in scopeRows(c, sc)" :key="sc + '/' + s.service">
+                    <tr class="hover:bg-gray-50">
+                      <td class="px-4 py-2 text-gray-700 truncate max-w-[180px]" x-text="s.service" :title="s.service"></td>
+                      <td class="px-4 py-2 text-right text-gray-900 font-medium whitespace-nowrap"
+                          x-text="money(s.amount, c.currency)"></td>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+            </div>
+          </template>
+          <!-- spend no tag can reach (untagged children, unlabellable services) -->
+          <div class="flex items-baseline justify-between px-4 py-2 border-t border-gray-200 bg-gray-50/40"
+               x-show="unattributed(c) != null">
+            <span class="text-[11px] font-semibold uppercase tracking-wide text-gray-500">unattributed</span>
+            <span class="text-xs font-medium text-gray-600" x-text="money(unattributed(c), c.currency)"></span>
+          </div>
+          <ul class="px-4 py-2 space-y-1" x-show="(c.notes || []).length">
+            <template x-for="n in (c.notes || [])" :key="n">
+              <li class="text-[11px] text-gray-400 leading-snug" x-text="n"></li>
             </template>
-          </tbody>
-        </table>
+          </ul>
+        </div>
       </div>
     </template>
   </div>
 
   <p class="text-xs text-gray-400 mt-6">
-    AWS breakdown requires the <code class="bg-gray-100 px-1 rounded">managed-by</code> cost-allocation tag
-    to be activated in the Billing console (forward-only; ~24h to populate). Only resources tagged after the
-    tag normalization carry <code class="bg-gray-100 px-1 rounded">managed-by=vm-dashboard</code>.
+    Both scopes share the <code class="bg-gray-100 px-1 rounded">managed-by</code> tag key
+    (<code class="bg-gray-100 px-1 rounded">vm-dashboard</code> for resources the dashboard provisioned,
+    <code class="bg-gray-100 px-1 rounded">dashboard-sandbox</code> for the sandbox baseline). AWS requires
+    that key activated as a cost-allocation tag in the Billing console (forward-only; ~24h to populate) —
+    activation is per key, so one activation covers both scopes.
+    <strong>Unattributed</strong> is spend no tag can reach: GCP Cloud Router/NAT accept no labels, Azure
+    tags don't inherit to disks/NICs/ACI (enable Cost Management tag inheritance to fix), and the OCI Usage
+    API ignores freeform tags — OCI is scoped by compartment instead, so its sandbox figure includes
+    dashboard-provisioned resources in the same compartment.
   </p>
 
 </div>
@@ -150,6 +190,22 @@
 
       budgetBar(s) {
         return ({ over: 'bg-red-500', approaching: 'bg-yellow-400', ok: 'bg-green-500' })[s] || 'bg-gray-400';
+      },
+
+      scopeRows(c, sc) { return (c.scopes && c.scopes[sc] && c.scopes[sc].services) || []; },
+
+      // null means "this cloud can't measure this scope" (rendered as "not
+      // measurable"); 0 means "measured, and it's zero". Don't collapse the two.
+      scopeTotal(c, sc) { return (c.scopes && c.scopes[sc]) ? c.scopes[sc].total : null; },
+
+      // Prefer the cloud's own measured remainder. Otherwise derive it from that same
+      // cloud's account total — same currency by construction. Tag-filtered clouds
+      // (AWS/Azure) can't measure it, so this is where their untagged spend surfaces.
+      unattributed(c) {
+        if (c.unattributed_total != null) return c.unattributed_total;
+        const acct = (this.summary.clouds || []).find(s => s.cloud === c.cloud);
+        if (!acct || acct.status !== 'ok' || acct.amount == null || c.total == null) return null;
+        return Math.round((acct.amount - c.total) * 100) / 100;
       },
 
       money(amount, currency) {
