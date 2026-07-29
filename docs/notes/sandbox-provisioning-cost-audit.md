@@ -78,12 +78,17 @@ in the per-cluster Terraform that already exists.
 East US, USD, 730 h/mo, from the Azure Retail Prices API and public AWS/GCP rates. Fixed
 cost only, excluding data processing.
 
-| AKS, per cluster-month | Before | After |
+| AKS, per cluster-month | Before | After (#459 + #460) |
 |---|--:|--:|
 | Network (NAT gateway → LB outbound rule, + Standard public IP) | $36.50 | **$21.90** |
 | 2 × `Standard_B2s` | $60.74 | $60.74 |
-| 2 × OS disk (128 GiB Premium default) | $39.42 | $39.42 |
-| **Total** | **$136.66** | **$122.06** |
+| 2 × OS disk (128 GiB → 32 GiB, P10 → P4) | $39.42 | **$12.28** |
+| **Total** | **$136.66** | **$94.92** |
+
+At the effective rate this subscription actually pays for managed disks (~79% of list, see
+[the node OS disk](#the-node-os-disk--done-separately)) the disk row is $31.08 → $9.78, so
+the real total is nearer $126 → $92. The list-price figures are kept above so the table
+stays on one consistent basis.
 
 `azure_aks` was the only one of the three k8s modules that specified **neither** a NAT
 alternative nor node disk sizing:
@@ -122,19 +127,31 @@ nodes reach even the public API server through that VM, so losing the race fails
 registration 20–40 min in and triggers `_rollback_failed_provision`
 (`k8s_service.py:885-903`). Bad trade for demo clusters.
 
-### Still on the table: the node OS disk
+### The node OS disk — done separately
 
-`os_disk_size_gb = 32` on `default_node_pool` would save a further ~$27/cluster-month
-(P10 $19.71 → P4 $6.14 per node). Not applied — it was outside the agreed scope of this
-pass. Two things to know if it's picked up:
+Landed in **#460** as `os_disk_size_gb = 32` (a variable, matching how the module already
+exposes `vm_size`/`node_count`), taken after this audit and outside its original scope.
 
-- `os_disk_type = "Ephemeral"` is **not** available on `Standard_B2s`: Ephemeral needs the
-  VM cache disk ≥ `os_disk_size_gb`, and B2s has ~8 GiB against an AKS floor of 30.
-- Measure rather than trusting the documented default, which has moved between AKS
-  versions:
-  ```bash
-  az aks show -g <rg> -n <cluster> --query "agentPoolProfiles[0].{sizeGb:osDiskSizeGb,type:osDiskType,vm:vmSize}" -o table
-  ```
+That PR **measured** what this audit had estimated from list prices, and the estimate was
+high. A Cost Management query grouped by resource group × meter showed every
+`mc_dashboard-sandbox-rg_*` node resource group billing the "P10 LRS Disk" meter and
+nothing else, across 13 clusters in two regions — which also rules out Ephemeral, since
+that wouldn't bill as a managed disk at all. Dividing Cost by UsageQuantity on the same
+query gives the effective rate on **this** subscription: P10 $15.54, P4 $4.89, i.e. ~79% of
+list. So the real saving is **~$21.30/cluster-month**, not the ~$27 the list-price table
+above implies.
+
+Worth keeping in proportion: those are *rates*. These clusters are short-lived, and actual
+OS-disk spend across all 13 was **$0.55 over three months**. The change costs nothing
+either way, but it isn't recovering real money at current usage.
+
+`os_disk_type` stays unset (Managed): Ephemeral needs the VM cache disk ≥
+`os_disk_size_gb`, and `Standard_B2s` has ~8 GiB against an AKS floor of 30, so it would
+force a larger `vm_size` costing more in compute than the disk saves.
+
+Two techniques worth reusing from that pass: you can price an Azure meter from billing data
+with no live resource to inspect, and dividing Cost by UsageQuantity gives your *negotiated*
+rate rather than the retail one — which is what the Retail Prices API would have told you.
 
 ### Backward compatibility
 
@@ -217,37 +234,44 @@ never receive the grant.
 needed to absorb IAM eventual consistency after `create-role`. The pre-existing
 unretried `ecsTaskExecutionRole` attach now uses it too.
 
+### Resolved after this audit
+
+- **OCI Terraform modules weren't in the shipped image** — fixed in **#461**.
+  `cloud_database_service.py` marked `("oracle","oci")` implemented and `k8s_service.py`
+  marked `"oci"` provisionable, but the Dockerfile never COPYed `terraform/db_oci_autonomous`
+  or `terraform/k8s_cluster/oci_oke`, and `.dockerignore` excluded the DB one from the build
+  context entirely. Both failed at `terraform._materialize` with "module template not found".
+  The trap worth remembering: the Dockerfile *did* pre-cache the `oracle/oci` provider, which
+  makes the packaging look complete on a grep — **provider pre-cache is not module COPY**, and
+  adding a cloud/engine needs three edits (Dockerfile COPY, `.dockerignore` re-include, and
+  the provider pre-cache stanza).
+- **The AKS node OS disk** — fixed in **#460**; see
+  [the node OS disk](#the-node-os-disk--done-separately) above.
+
 ### Open — not addressed here
 
-1. **OCI Terraform modules aren't in the shipped image.** `cloud_database_service.py:59`
-   marks `("oracle","oci")` implemented and `k8s_service.py:203` marks `"oci"`
-   provisionable, but `Dockerfile:104-124` never COPYs `terraform/db_oci_autonomous` or
-   `terraform/k8s_cluster/oci_oke`, and `.dockerignore:24-40` excludes the DB one from the
-   build context entirely. Both fail at `terraform._materialize` with "module template not
-   found" (`terraform.py:129-135`). `docs/kubernetes.md:24` flags OKE experimental; the OCI
-   *database* path carries no caveat at all. **This is the highest-value remaining gap.**
-2. **Dead VM modules.** `terraform/ec2_instance`, `terraform/azure_vm`,
+1. **Dead VM modules.** `terraform/ec2_instance`, `terraform/azure_vm`,
    `terraform/gce_instance` are referenced by nothing, shipped in nothing, and untouched
    since their initial commits. `terraform.py:35-37`'s vestigial `_TEMPLATE_DIR` default
    still points at `ec2_instance`. (`docs/infrastructure-as-code.md` claimed VM deploys ran
    Terraform — corrected in this pass.)
-3. **`rollback.sh` leaves GCP privilege behind.** `:531-533` revokes 6 of the 16 project
+2. **`rollback.sh` leaves GCP privilege behind.** `:531-533` revokes 6 of the 16 project
    role bindings granted at `setup-gcp.sh:460-470`, and the **10 grants on Cloud Build's
    default service accounts** (`:532-542`, including project-wide `storage.admin` and
    `compute.admin`) are never revoked. Those SAs are project-owned and survive teardown —
    residual privilege, not just policy bloat.
-4. **`terraform/deployments/<job_id>/` is never cleaned** after a successful destroy.
+3. **`terraform/deployments/<job_id>/` is never cleaned** after a successful destroy.
    `_DEPLOYMENTS_DIR` (`k8s_service.py:202`) is only ever created; every `shutil.rmtree`
    in that file targets a runner `tmpdir` instead. `storage_service.py:639` scans that
    same root for local-backend state.
-5. **Azure multi-region DB hole.** The MySQL DNS zone and the SQL Server PE subnet + zone
+4. **Azure multi-region DB hole.** The MySQL DNS zone and the SQL Server PE subnet + zone
    are read from flat config (`cloud_database_service.py:328`, `:355-356`) while
    `region_config.py:64-75` only carries fields for `db_subnet_id`, `db_mysql_subnet_id`
    and `db_private_dns_zone_id`. A non-default-region MySQL or SQL Server DB gets the
    **default region's** zone/subnet.
-6. **`Setup-AzureSandbox.ps1`** omits the optional external image-gallery block
+5. **`Setup-AzureSandbox.ps1`** omits the optional external image-gallery block
    (`setup-azure.sh:406-479`). Low priority — it's gated behind `AZURE_IMAGE_GALLERY_RG`.
-7. **Dead config keys** `aws_k8s_subnet_a_id` / `aws_k8s_subnet_b_id`
+6. **Dead config keys** `aws_k8s_subnet_a_id` / `aws_k8s_subnet_b_id`
    (`config.py:253-254`, already annotated "no longer consumed").
 
 ## Test-suite note
