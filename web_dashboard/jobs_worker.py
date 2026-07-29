@@ -52,6 +52,11 @@ HANDLED_TYPES = (
     "azure_deploy", "azure_bulk_deploy", "azure_destroy", "azure_create_image",
     "gce_deploy", "gce_bulk_deploy", "gce_capture_image", "gce_destroy",
     "gateway_deploy", "gateway_teardown",
+    # Auto-delete timer sweep. The app's loop only ENQUEUES one of these; _claim_one's
+    # rowcount lock below is what makes a pass single-flight across two gunicorn workers
+    # and three worker replicas. Running it here also gives each pass a job row, Live
+    # Output and cancel — see services/expiry_reaper.
+    "expiry_sweep",
 )
 
 POLL_INTERVAL = 2.0  # seconds between queue polls when idle
@@ -255,6 +260,12 @@ async def _dispatch(job_id: str, job_type: str, meta: dict) -> None:
             # one, nothing reference-counts it — it lives until someone removes it.
             from .services import gateway_service
             await gateway_service.run(db, job_id=job_id, meta=meta)
+        elif job_type == "expiry_sweep":
+            # One auto-delete pass. The app enqueues these on a timer; winning the claim
+            # above is what guarantees exactly one runs, however many app workers or
+            # worker replicas are up.
+            from .services import expiry_reaper
+            await expiry_reaper.run(db, job_id=job_id, meta=meta)
         else:  # pragma: no cover — HANDLED_TYPES guards the claim
             logger.warning("job runner: unhandled job_type %s (job %s)", job_type, job_id)
     finally:

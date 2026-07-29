@@ -53,4 +53,17 @@ async def list_inventory(
         items = [i for i in items if i["cloud"] == provider.lower()]
     if kind:
         items = [i for i in items if i["kind"] == kind.lower()]
-    return {"items": items, "count": len(items), "cached_at": cached_at}
+
+    # Auto-delete state travels with the listing so /inventory's Expires badge and the
+    # dashboard's "expiring soon" warning read ONE threshold instead of hardcoding two
+    # that could drift. Read per request, not from the cached items, because it is
+    # config-derived and the item cache is 60s stale by design.
+    from ..services import expiry_policy
+    expiry = {
+        "enabled": expiry_policy.enabled(),
+        "enforce": expiry_policy.enforce(),
+        "dry_run": expiry_policy.dry_run(),
+        "warn_hours": expiry_policy.warn_hours(),
+    }
+    return {"items": items, "count": len(items), "cached_at": cached_at,
+            "expiry": expiry}

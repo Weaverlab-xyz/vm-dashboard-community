@@ -296,6 +296,37 @@ function timeAgo(isoStr) {
     return new Date(utcStr).toLocaleDateString();
 }
 
+// Forward-looking sibling of timeAgo, for the auto-delete timer. timeAgo cannot be
+// reused: it computes (now - t) and collapses every negative result to 'just now', so a
+// future timestamp — which is what an expiry always is — would render "just now" on every
+// unexpired resource.
+//
+// Returns 'overdue' once the moment has passed, so the caller doesn't have to
+// distinguish "expiring" from "expired" by re-parsing the date. Granularity stops at
+// minutes: seconds churn on every tick and read as false precision on a multi-day timer.
+function timeUntil(isoStr) {
+    if (!isoStr) return 'never';
+    // Server stores datetime.utcnow() without timezone info — treat as UTC
+    const utcStr = /Z$|[+-]\d{2}:\d{2}$/.test(isoStr) ? isoStr : isoStr + 'Z';
+    const t = new Date(utcStr).getTime();
+    if (isNaN(t)) return '–';
+    const s = Math.floor((t - Date.now()) / 1000);
+    if (s <= 0) return 'overdue';
+    if (s < 3600) return `in ${Math.max(1, Math.floor(s / 60))}m`;
+    if (s < 172800) return `in ${Math.floor(s / 3600)}h`;   // < 48h → hours
+    return `in ${Math.floor(s / 86400)}d`;
+}
+
+// Absolute UTC form of a timestamp, for the tooltip behind a relative label. An operator
+// about to extend or delete something needs the actual deadline, not "in 6h".
+function utcStamp(isoStr) {
+    if (!isoStr) return '';
+    const utcStr = /Z$|[+-]\d{2}:\d{2}$/.test(isoStr) ? isoStr : isoStr + 'Z';
+    const d = new Date(utcStr);
+    if (isNaN(d.getTime())) return '';
+    return d.toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
+}
+
 function requireAuth() {
     if (!Alpine.store('auth').isLoggedIn) {
         window.location.href = '/login';

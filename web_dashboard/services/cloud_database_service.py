@@ -407,6 +407,7 @@ def provision(
             f"{engine} on {cloud} is not available yet"
         )
 
+    from . import expiry_policy
     row = CloudDatabase(
         engine=engine,
         provider=_PROVIDER.get((engine, cloud)),
@@ -419,6 +420,11 @@ def provision(
         jump_group=(jump_group or "").strip() or None,
         jumpoint_name=(jumpoint_name or "").strip() or None,
         pra_credential_ref=(pra_credential_ref or "").strip() or None,
+        # Auto-delete timer from the global default; None (no timer) unless the feature
+        # is on AND a default is configured. Only this PROVISION path stamps one —
+        # register_database deliberately does not, since deleting a registered row only
+        # deregisters it. See expiry_policy.default_expiry_for_kind.
+        expires_at=expiry_policy.default_expiry_for_kind("database", source="provisioned"),
     )
     db.add(row)
     db.commit()

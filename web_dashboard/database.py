@@ -212,6 +212,22 @@ class Job(Base):
     # column holding a JSON string, so there is no operator that filters it portably
     # across SQLite and PostgreSQL — only a LIKE scan.
     batch_id = Column(String(32), index=True, nullable=True)
+    # Auto-delete timer. Meaningful ONLY on the cloud VM deploy types
+    # (expiry_policy.REAPABLE_VM_JOB_TYPES) — a VM has no inventory table of its own,
+    # so its deploy Job row IS its record of existence, which is why `job:<id>` is
+    # already its inventory id. NULL and ignored on every other job row.
+    #
+    # NULL means "no expiry, never auto-deleted" — NOT "inherit the global default".
+    # Same meaning PersonalAccessToken.expires_at already carries. That is the
+    # load-bearing safety property of the whole feature: every row that predates the
+    # column is NULL, so enabling auto-delete on an existing fleet selects nothing,
+    # by construction rather than by a guard.
+    expires_at = Column(DateTime, nullable=True, index=True)
+    # Set by the sweeper before it records an impending-deletion warning, so a warning
+    # fires once. Read only by the server-side warning channels — deliberately NOT by
+    # the dashboard's "Needs attention" item, which is derived client-side on every
+    # poll and has its own per-browser dismissal.
+    expiry_warned_at = Column(DateTime, nullable=True)
     status = Column(String(20), nullable=False, default="pending", index=True)  # pending, running, completed, failed, cancelled
     progress_pct = Column(Integer, default=0)
     progress_message = Column(Text)
@@ -658,6 +674,12 @@ class CloudDatabase(Base):
 
     created_by = Column(String(100), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    # Auto-delete timer — NULL = never (see Job.expires_at). Only ever stamped on a
+    # `provisioned` row: "deleting" a registered database merely deregisters it, and a
+    # timer that silently forgets somebody's registered production database is worse
+    # than no timer at all.
+    expires_at = Column(DateTime, nullable=True, index=True)
+    expiry_warned_at = Column(DateTime, nullable=True)
 
 
 class K8sCluster(Base):
@@ -706,6 +728,11 @@ class K8sCluster(Base):
 
     created_by = Column(String(100), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    # Auto-delete timer — NULL = never (see Job.expires_at). Only ever stamped on a
+    # `provisioned` row, for the same reason as CloudDatabase.expires_at: deleting a
+    # registered cluster only drops the dashboard's record of it.
+    expires_at = Column(DateTime, nullable=True, index=True)
+    expiry_warned_at = Column(DateTime, nullable=True)
 
 
 class Gateway(Base):
@@ -852,6 +879,24 @@ def init_db():
             # page can filter to a batch and roll up its status.
             "ALTER TABLE jobs ADD COLUMN batch_id VARCHAR(32)",
             "CREATE INDEX ix_jobs_batch_id ON jobs(batch_id)",
+            # Auto-delete timer (resource expiry). Real indexed columns rather than
+            # keys in extra_data, for exactly the reason given on batch_id above:
+            # extra_data is a Text column holding a JSON string, so no operator
+            # filters it portably across SQLite and PostgreSQL — and the sweeper's
+            # whole job is `WHERE expires_at <= :cutoff`.
+            #
+            # Every pre-existing row backfills to NULL, which means "never expires".
+            # That is deliberate and load-bearing: turning the feature on cannot
+            # select a single resource that already existed.
+            "ALTER TABLE jobs ADD COLUMN expires_at TIMESTAMP",
+            "ALTER TABLE jobs ADD COLUMN expiry_warned_at TIMESTAMP",
+            "CREATE INDEX ix_jobs_expires_at ON jobs(expires_at)",
+            "ALTER TABLE cloud_databases ADD COLUMN expires_at TIMESTAMP",
+            "ALTER TABLE cloud_databases ADD COLUMN expiry_warned_at TIMESTAMP",
+            "CREATE INDEX ix_cloud_databases_expires_at ON cloud_databases(expires_at)",
+            "ALTER TABLE k8s_clusters ADD COLUMN expires_at TIMESTAMP",
+            "ALTER TABLE k8s_clusters ADD COLUMN expiry_warned_at TIMESTAMP",
+            "CREATE INDEX ix_k8s_clusters_expires_at ON k8s_clusters(expires_at)",
         ]
         for stmt in _migrations:
             if _is_sqlite:
