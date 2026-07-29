@@ -37,6 +37,7 @@ works:
 | [Cloud Containers](docs/cloud-containers.md) | Deploy a stored Docker Compose file to ECS / ACI / GCE-COS; the supported subset; app starters in [`examples/compose/`](examples/compose/); monitoring the container fleet. | You want to run a containerized app (Guacamole, Trivy, OPA, …) on a cloud runtime without Portainer. |
 | [Kubernetes](docs/kubernetes.md) | Provision/import EKS / AKS / GKE; Rancher / Portainer / ESO management plane; PRA tunnels, Entra→RBAC federation, Entitle JIT. | You're managing Kubernetes clusters and their privileged access. |
 | [Generic OIDC (SSO)](docs/integrations/oidc.md) | Discovery-driven OpenID Connect login for any IdP (Okta, Entra, Keycloak, Google, …); PKCE, group→workgroup mapping, admin Settings panel. | You want single sign-on for the dashboard instead of local passwords. |
+| [Notifications](docs/notifications.md) | Outbound webhooks — Slack, Microsoft Teams (Power Automate Workflows), or a signed JSON envelope you point at anything. Auto-delete warnings, job failures, budget/secret/drift alerts. | You've turned on the auto-delete timer and want to hear about it without opening the dashboard. |
 
 Together they're the philosophy of the tool: **declarative,
 version-controlled, idempotent, ephemeral where it should be and

@@ -524,8 +524,11 @@
               <input type="number" min="1" x-model.number="panelCfg.resource_expiry_warn_hours"
                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
               <p class="text-[11px] text-gray-400 mt-1">
-                Hours. <strong>There is no email or chat notification</strong> — an operator
-                has to open the dashboard.
+                Hours. A resource entering this window shows a warning on the dashboard,
+                and — if <button type="button" @click="openPanelByKey('notifications')"
+                class="underline text-blue-600">Notifications</button> is on — fires one
+                <span class="font-mono">resource.expiring</span> message per endpoint,
+                once each. Otherwise an operator has to open the dashboard to see it.
               </p>
             </div>
           </div>
@@ -595,6 +598,301 @@
             there is always an hour, with the full list visible on
             <a href="/inventory" class="underline">Inventory</a>, before anything is
             destroyed. Turning Observe only back on resets that second clock.
+          </p>
+        </div>
+      </template>
+
+      <template x-if="panel?.key === 'notifications' && !panelLoading">
+        <div class="space-y-4">
+          <p class="text-sm text-gray-500">
+            Push dashboard events to Slack, Microsoft Teams, or any HTTP endpoint. Delivery
+            is <strong>outbound only</strong> — nothing here opens an inbound webhook.
+            See <a href="/docs/notifications" class="text-blue-600 underline">the notifications doc</a>.
+          </p>
+
+          <div class="rounded-lg border border-amber-200 bg-amber-50 p-3 text-[11px] text-amber-800">
+            There is no built-in email sender. To send mail, add a <span class="font-mono">custom</span>
+            endpoint pointed at a Power Automate Flow (or similar) and let that send the message —
+            the same endpoint can fan out to a mailbox, a channel and a ticket queue.
+          </div>
+
+          <label class="flex items-start gap-2">
+            <input type="checkbox" x-model="panelCfg.notify_dry_run"
+                   class="mt-0.5 rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+            <span class="text-sm text-gray-700">
+              <span class="font-medium">Dry run — record, don't send</span>
+              <span class="block text-[11px] text-gray-400 mt-0.5">
+                On by default. Every message is written to the delivery log below with status
+                <span class="font-mono">dry-run</span> and nothing leaves the dashboard. Watch a
+                full day, then turn this off. The per-endpoint <strong>Test</strong> button
+                ignores this and always sends.
+              </span>
+            </span>
+          </label>
+
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Dashboard URL</label>
+            <input type="text" x-model="panelCfg.notify_base_url"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                   placeholder="https://dashboard.example.com">
+            <p class="text-[11px] mt-1"
+               :class="panelCfg.notify_base_url ? 'text-gray-400' : 'text-amber-600'">
+              The worker has no idea what address you reach the dashboard on. Leave this blank
+              and every message ships with <strong>no link</strong> — which looks like a bug but
+              is this setting. No trailing path.
+            </p>
+          </div>
+
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Events to send</label>
+            <input type="text" x-model="panelCfg.notify_event_types"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono">
+            <p class="text-[11px] text-gray-400 mt-1">
+              Comma-separated. Known:
+              <span class="font-mono" x-text="notif.knownEvents.join(', ')"></span>.
+              An individual endpoint can narrow this further, but not widen it.
+            </p>
+          </div>
+
+          <div class="grid grid-cols-3 gap-3">
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Minimum severity</label>
+              <select x-model="panelCfg.notify_min_severity"
+                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                <option value="info">info</option>
+                <option value="warning">warning</option>
+                <option value="critical">critical</option>
+              </select>
+              <p class="text-[11px] text-gray-400 mt-1">Below this, nothing is queued.</p>
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Send every</label>
+              <input type="number" min="5" x-model.number="panelCfg.notify_flush_interval_s"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              <p class="text-[11px] text-gray-400 mt-1">Seconds (floor 5).</p>
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Condition scan every</label>
+              <input type="number" min="300" x-model.number="panelCfg.notify_scan_interval_s"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              <p class="text-[11px] text-gray-400 mt-1">
+                Seconds (floor 300). Budget, stale-secret and drift checks.
+              </p>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-4 gap-3">
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Attempts</label>
+              <input type="number" min="1" max="5" x-model.number="panelCfg.notify_max_attempts"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Timeout</label>
+              <input type="number" min="1" x-model.number="panelCfg.notify_http_timeout_s"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Max per pass</label>
+              <input type="number" min="1" x-model.number="panelCfg.notify_max_per_flush"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Queue ceiling</label>
+              <input type="number" min="1" x-model.number="panelCfg.notify_max_queue"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            </div>
+          </div>
+          <p class="text-[11px] text-gray-400 -mt-2">
+            Retries back off 30s → 2m → 10m → 30m and survive a worker restart. Past the queue
+            ceiling, new messages are recorded as <span class="font-mono">suppressed</span>
+            rather than queued — the brake that keeps a first enable against a large estate from
+            becoming an incident.
+          </p>
+
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Keep delivery history</label>
+            <input type="number" min="0" x-model.number="panelCfg.notify_retention_days"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            <p class="text-[11px] text-gray-400 mt-1">
+              Days. 0 = keep forever. Failed deliveries are never pruned — they're the evidence.
+            </p>
+          </div>
+
+          <!-- ── Endpoints ─────────────────────────────────────────────── -->
+          <div class="rounded-lg border border-gray-200 bg-gray-50 p-3">
+            <div class="flex items-center justify-between mb-2">
+              <span class="text-sm font-medium text-gray-700">Endpoints</span>
+              <button type="button" @click="newEndpoint()"
+                      class="text-xs px-2 py-1 rounded border border-gray-300 bg-white hover:bg-gray-50 font-medium">
+                Add endpoint
+              </button>
+            </div>
+
+            <p x-show="notif.error" x-cloak class="text-[11px] text-red-600 mb-2"
+               x-text="notif.error"></p>
+            <p x-show="!notif.loading && !notif.endpoints.length && !notif.draft" x-cloak
+               class="text-[11px] text-gray-500">
+              No endpoints yet. Nothing will be sent until you add one.
+            </p>
+
+            <div class="space-y-2">
+              <template x-for="ep in notif.endpoints" :key="ep.id">
+                <div class="rounded border border-gray-200 bg-white p-2">
+                  <div class="flex items-center justify-between gap-2">
+                    <div class="min-w-0">
+                      <span class="text-sm font-medium text-gray-800" x-text="ep.name"></span>
+                      <span class="ml-2 text-[10px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-600 font-mono"
+                            x-text="ep.fmt"></span>
+                      <span x-show="!ep.enabled" x-cloak
+                            class="ml-1 text-[10px] px-1.5 py-0.5 rounded bg-gray-200 text-gray-600">off</span>
+                      <span class="block text-[11px] text-gray-400 font-mono truncate"
+                            x-text="ep.url_hint"></span>
+                    </div>
+                    <div class="flex items-center gap-1 shrink-0">
+                      <button type="button" @click="testEndpoint(ep)"
+                              :disabled="notif.testingId === ep.id"
+                              class="text-xs px-2 py-1 rounded border border-gray-300 bg-white hover:bg-gray-50 disabled:opacity-50">
+                        <span x-text="notif.testingId === ep.id ? 'Sending…' : 'Test'"></span>
+                      </button>
+                      <button type="button" @click="editEndpoint(ep)"
+                              class="text-xs px-2 py-1 rounded border border-gray-300 bg-white hover:bg-gray-50">Edit</button>
+                      <button type="button" @click="deleteEndpoint(ep)"
+                              class="text-xs px-2 py-1 rounded border border-red-200 text-red-600 bg-white hover:bg-red-50">Delete</button>
+                    </div>
+                  </div>
+                  <p x-show="ep.event_types" x-cloak class="text-[11px] text-gray-400 mt-1">
+                    Only: <span class="font-mono" x-text="ep.event_types"></span>
+                  </p>
+                  <p x-show="ep.last_error" x-cloak
+                     class="text-[11px] text-red-600 mt-1 font-mono break-all"
+                     x-text="'Last error: ' + ep.last_error"></p>
+                  <div x-show="notif.testResult && notif.testResult.id === ep.id" x-cloak
+                       class="mt-1 text-[11px] font-mono break-all"
+                       :class="notif.testResult?.ok ? 'text-green-700' : 'text-red-600'"
+                       x-text="notif.testResult?.ok
+                                 ? ('delivered (HTTP ' + notif.testResult.status_code + ')')
+                                 : notif.testResult?.error"></div>
+                </div>
+              </template>
+            </div>
+
+            <!-- add / edit form -->
+            <div x-show="notif.draft" x-cloak class="mt-3 rounded border border-blue-200 bg-white p-3 space-y-2">
+              <div class="grid grid-cols-3 gap-2">
+                <div class="col-span-2">
+                  <label class="block text-[11px] font-medium text-gray-600 mb-1">Name</label>
+                  <input type="text" x-model="notif.draft.name"
+                         class="w-full border border-gray-300 rounded px-2 py-1 text-sm"
+                         placeholder="platform-alerts">
+                </div>
+                <div>
+                  <label class="block text-[11px] font-medium text-gray-600 mb-1">Format</label>
+                  <select x-model="notif.draft.fmt"
+                          class="w-full border border-gray-300 rounded px-2 py-1 text-sm">
+                    <template x-for="f in notif.formats" :key="f">
+                      <option :value="f" x-text="f"></option>
+                    </template>
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label class="block text-[11px] font-medium text-gray-600 mb-1">Webhook URL</label>
+                <input type="text" x-model="notif.draft.url"
+                       class="w-full border border-gray-300 rounded px-2 py-1 text-sm font-mono"
+                       :placeholder="notif.draft.id ? (notif.draft.url_hint + '  (leave blank to keep)') : 'https://…'">
+                <p class="text-[11px] text-gray-400 mt-1"
+                   x-show="notif.draft.fmt === 'teams'" x-cloak>
+                  Teams: create a <strong>Power Automate Workflow</strong> from the "Post to a channel
+                  when a webhook request is received" template and paste its URL. The old
+                  <span class="font-mono">outlook.office.com</span> connector webhooks were
+                  permanently switched off in May 2026 and will not work. Messages post as the
+                  Flow bot; the name and icon can't be changed.
+                </p>
+                <p class="text-[11px] text-gray-400 mt-1"
+                   x-show="notif.draft.fmt === 'slack'" x-cloak>
+                  Slack: an Incoming Webhook URL from the Slack app that owns the channel.
+                </p>
+                <p class="text-[11px] text-gray-400 mt-1"
+                   x-show="notif.draft.fmt === 'custom'" x-cloak>
+                  Any endpoint that accepts JSON. The body is a stable, versioned envelope; set a
+                  secret below to have it signed with HMAC-SHA256.
+                </p>
+              </div>
+
+              <div x-show="notif.draft.fmt === 'custom'" x-cloak>
+                <label class="block text-[11px] font-medium text-gray-600 mb-1">Signing secret</label>
+                <input type="password" x-model="notif.draft.secret" autocomplete="new-password"
+                       class="w-full border border-gray-300 rounded px-2 py-1 text-sm font-mono"
+                       :placeholder="notif.draft.has_secret ? '•••••••• (leave blank to keep)' : 'optional'">
+                <p class="text-[11px] text-gray-400 mt-1">
+                  Sent as <span class="font-mono">X-Dashboard-Signature</span>. An
+                  <span class="font-mono">aws_sm://</span> / <span class="font-mono">azure_kv://</span> /
+                  <span class="font-mono">gcp_sm://</span> / <span class="font-mono">bt_safe://</span>
+                  reference is resolved at send time.
+                </p>
+              </div>
+
+              <div>
+                <label class="block text-[11px] font-medium text-gray-600 mb-1">Only these events</label>
+                <input type="text" x-model="notif.draft.event_types"
+                       class="w-full border border-gray-300 rounded px-2 py-1 text-sm font-mono"
+                       placeholder="blank = everything enabled above">
+              </div>
+
+              <label class="flex items-center gap-2">
+                <input type="checkbox" x-model="notif.draft.enabled"
+                       class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+                <span class="text-sm text-gray-700">Enabled</span>
+              </label>
+
+              <div class="flex justify-end gap-2 pt-1">
+                <button type="button" @click="notif.draft = null"
+                        class="text-xs px-2 py-1 rounded border border-gray-300 bg-white hover:bg-gray-50">Cancel</button>
+                <button type="button" @click="saveEndpoint()" :disabled="notif.saving"
+                        class="text-xs px-3 py-1 rounded bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50">
+                  <span x-text="notif.saving ? 'Saving…' : 'Save endpoint'"></span>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- ── Delivery log ──────────────────────────────────────────── -->
+          <div class="rounded-lg border border-gray-200 bg-gray-50 p-3">
+            <div class="flex items-center justify-between mb-2">
+              <span class="text-sm font-medium text-gray-700">Recent deliveries</span>
+              <button type="button" @click="loadNotifications()"
+                      class="text-xs px-2 py-1 rounded border border-gray-300 bg-white hover:bg-gray-50 font-medium">
+                Refresh
+              </button>
+            </div>
+            <p class="text-[11px] text-gray-500 mb-2" x-text="notifSummaryLine()"></p>
+            <p x-show="!notif.deliveries.length" x-cloak class="text-[11px] text-gray-500">
+              Nothing recorded yet.
+            </p>
+            <div class="space-y-1 max-h-64 overflow-y-auto">
+              <template x-for="d in notif.deliveries" :key="d.id">
+                <div class="text-[11px] font-mono flex gap-2">
+                  <span class="shrink-0 w-14"
+                        :class="{'text-green-700': d.status === 'sent',
+                                 'text-red-600': d.status === 'failed',
+                                 'text-gray-400': d.status === 'dry_run' || d.status === 'suppressed',
+                                 'text-amber-600': d.status === 'pending' || d.status === 'sending'}"
+                        x-text="d.status"></span>
+                  <span class="shrink-0 text-gray-400" x-text="d.channel"></span>
+                  <span class="truncate text-gray-700"
+                        x-text="d.subject + (d.error ? ' — ' + d.error : '')"></span>
+                </div>
+              </template>
+            </div>
+          </div>
+
+          <p class="text-[11px] text-amber-600">
+            Delivery is at-least-once: a worker killed mid-send retries when the row is
+            reclaimed, so a duplicate message is possible. A failing endpoint can never
+            slow down or fail the job it is reporting on — sending happens in a separate
+            process, after the fact.
           </p>
         </div>
       </template>
@@ -3040,6 +3338,8 @@ function settingsPage() {
         desc: 'Pre-action policy gate (OPA): allowed regions, blocked sizes, change-freeze.' },
       { key: 'resource_expiry', label: 'Auto-delete Timer',     hasConfig: true,  enabled: false,
         desc: 'Give new cloud VMs, databases and clusters an expiry, then destroy them when it passes. Starts in report-only mode.' },
+      { key: 'notifications', label: 'Notifications',           hasConfig: true,  enabled: false,
+        desc: 'Send auto-delete warnings, job failures and budget/secret/drift alerts to Slack, Microsoft Teams, or a signed webhook. Starts in dry-run mode.' },
       { key: 'cloud_database', label: 'Databases',              hasConfig: true,  enabled: false,
         desc: 'Provision private managed databases (PostgreSQL, MySQL, SQL Server) on AWS, Azure and GCP, or register ones you already run — on-premises or in a cloud. PRA tunnel for the private ones.' },
       { key: 'k8s_management', label: 'Kubernetes',             hasConfig: true,  enabled: false,
@@ -3064,6 +3364,17 @@ function settingsPage() {
     portainerFirewall: null, // same for the managed Portainer node (Containers panel)
     expirySweep: null,       // last auto-delete sweep summary (Auto-delete Timer panel)
     expirySweeping: false,
+
+    // ── Notifications panel ──────────────────────────────────────────────
+    // Endpoints are rows in their own table, not panel config keys, so they load and
+    // save through /api/notifications rather than the generic feature-panel plumbing.
+    notif: {
+      endpoints: [], formats: [], knownEvents: [], summary: null,
+      deliveries: [], loading: false, error: '',
+      draft: null,           // the endpoint being added/edited, or null
+      saving: false, testingId: '',
+      testResult: null,      // { id, ok, error, status_code }
+    },
 
     // Cross-cloud per-region config sets — the Multi-region panel. One state block
     // per cloud, each loaded from / saved to /api/setup/regions/{cloud}. The generic
@@ -3371,6 +3682,11 @@ function settingsPage() {
             this.expirySweep = await API.get('/api/expiry/last-sweep');
           } catch (e) { /* never run yet — the summary line says so */ }
         }
+        // Notifications: endpoints and the delivery log live outside the feature-panel
+        // config, so they load alongside it.
+        if (intg.key === 'notifications') {
+          await this.loadNotifications();
+        }
       } catch (e) {
         this.panelError = 'Failed to load configuration: ' + e.message;
       } finally {
@@ -3418,6 +3734,116 @@ function settingsPage() {
       } finally {
         this.expirySweeping = false;
       }
+    },
+
+    // ── Notifications ────────────────────────────────────────────────────
+    // Endpoints and deliveries are their own resources, so none of this goes through
+    // the generic feature-panel save. The API never returns a URL or a secret — only
+    // a scheme+host hint and a has_secret flag.
+
+    openPanelByKey(key) {
+      const intg = this.integrations.find(i => i.key === key);
+      if (intg) this.openPanel(intg);
+    },
+
+    async loadNotifications() {
+      this.notif.loading = true;
+      this.notif.error = '';
+      this.notif.draft = null;
+      this.notif.testResult = null;
+      try {
+        const [eps, sum, del] = await Promise.all([
+          API.get('/api/notifications/endpoints'),
+          API.get('/api/notifications/summary').catch(() => null),
+          API.get('/api/notifications/deliveries?page_size=20').catch(() => null),
+        ]);
+        this.notif.endpoints = eps.endpoints || [];
+        this.notif.formats = eps.formats || [];
+        this.notif.knownEvents = eps.known_events || [];
+        this.notif.summary = sum;
+        this.notif.deliveries = (del && del.deliveries) || [];
+      } catch (e) {
+        this.notif.error = 'Could not load notification endpoints: ' + e.message;
+      } finally {
+        this.notif.loading = false;
+      }
+    },
+
+    newEndpoint() {
+      this.notif.draft = { id: '', name: '', url: '', fmt: 'custom', secret: '',
+                           event_types: '', enabled: true };
+    },
+
+    editEndpoint(ep) {
+      // url and secret start blank on an edit: the server never sends them back, and a
+      // blank means "leave it alone" on save. Typing in either field replaces it.
+      this.notif.draft = { id: ep.id, name: ep.name, url: '', fmt: ep.fmt, secret: '',
+                           event_types: ep.event_types || '', enabled: ep.enabled,
+                           url_hint: ep.url_hint, has_secret: ep.has_secret };
+    },
+
+    async saveEndpoint() {
+      const d = this.notif.draft;
+      if (!d) return;
+      this.notif.saving = true;
+      try {
+        if (d.id) {
+          const body = { name: d.name, fmt: d.fmt, event_types: d.event_types,
+                         enabled: d.enabled };
+          if (d.url) body.url = d.url;         // omitted = keep the stored URL
+          if (d.secret) body.secret = d.secret;
+          await API.patch(`/api/notifications/endpoints/${d.id}`, body);
+        } else {
+          await API.post('/api/notifications/endpoints', {
+            name: d.name, url: d.url, fmt: d.fmt, secret: d.secret,
+            event_types: d.event_types, enabled: d.enabled });
+        }
+        this.notif.draft = null;
+        await this.loadNotifications();
+        toast('Endpoint saved.', 'success');
+      } catch (e) {
+        toast('Could not save the endpoint: ' + e.message, 'error');
+      } finally {
+        this.notif.saving = false;
+      }
+    },
+
+    async deleteEndpoint(ep) {
+      if (!confirm(`Delete the notification endpoint "${ep.name}"? Queued deliveries to it will fail.`)) return;
+      try {
+        await API.delete(`/api/notifications/endpoints/${ep.id}`);
+        await this.loadNotifications();
+        toast('Endpoint deleted.', 'success');
+      } catch (e) {
+        toast('Could not delete the endpoint: ' + e.message, 'error');
+      }
+    },
+
+    async testEndpoint(ep) {
+      this.notif.testingId = ep.id;
+      this.notif.testResult = null;
+      try {
+        const r = await API.post(`/api/notifications/endpoints/${ep.id}/test`, {});
+        this.notif.testResult = { id: ep.id, ...r };
+        // Reload so last_success_at / last_error reflect the attempt.
+        const eps = await API.get('/api/notifications/endpoints');
+        this.notif.endpoints = eps.endpoints || [];
+      } catch (e) {
+        this.notif.testResult = { id: ep.id, ok: false, error: e.message };
+      } finally {
+        this.notif.testingId = '';
+      }
+    },
+
+    notifSummaryLine() {
+      const s = this.notif.summary;
+      if (!s) return 'No delivery activity recorded yet.';
+      const parts = [];
+      for (const k of ['sent', 'pending', 'failed', 'dry_run', 'suppressed']) {
+        if (s[k]) parts.push(`${s[k]} ${k.replace('_', '-')}`);
+      }
+      const head = parts.length ? parts.join(', ') : 'nothing sent';
+      return `Last ${s.window_hours}h: ${head}.`;
     },
 
     // Per-cloud runner backends fall back to the legacy global ansible_runner /

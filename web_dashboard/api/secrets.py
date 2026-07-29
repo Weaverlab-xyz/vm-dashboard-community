@@ -14,6 +14,8 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
+from ..services import secret_hygiene
+
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/secrets", tags=["secrets"])
 
@@ -52,33 +54,12 @@ def _require_admin_dep(request: Request) -> None:
 # ── Secret registry ───────────────────────────────────────────────────────────
 # All secrets the dashboard manages, regardless of which feature they belong to.
 
-_SECRET_REGISTRY: list[tuple[str, str]] = [
-    # (config_service key, human-readable description)
-    ("aws_secret_access_key",     "AWS Secret Access Key"),
-    ("azure_client_secret",       "Azure Service Principal Client Secret"),
-    ("azure_oauth_client_secret", "Azure OAuth App Client Secret"),
-    ("gcp_service_account_json",  "GCP Service Account JSON Key"),
-    ("pscli_client_secret",       "BeyondTrust ps-cli Client Secret"),
-    ("bt_client_secret",          "BeyondTrust Privileged Remote Access Client Secret"),
-    ("epml_pat",                  "BeyondTrust EPM-L Personal Access Token"),
-    ("entitle_api_token",         "Entitle API Token"),
-    ("entitle_api_key",           "Entitle Terraform Provider API Key"),
-    ("proxmox_token_secret",      "Proxmox API Token Secret"),
-    ("proxmox_password",          "Proxmox Password"),
-    ("vsphere_password",          "vSphere Password"),
-    ("hyperv_password",           "Hyper-V Password"),
-    ("nutanix_password",          "Nutanix Password"),
-    ("xcpng_password",            "XCP-ng Password"),
-]
-
-# Prefix → backend id — must match secrets_backend_service._EXT_PREFIXES keys
-_BACKEND_PREFIXES: dict[str, str] = {
-    "database":        "",
-    "aws_sm":          "aws_sm://",
-    "azure_kv":        "azure_kv://",
-    "gcp_sm":          "gcp_sm://",
-    "bt_secrets_safe": "bt_safe://",
-}
+# The lists themselves live in services/secret_hygiene.py so the worker-side
+# notification scanner can read them without importing a router (a service importing
+# from ..api is the dependency direction the wiring tests forbid). Aliased here under
+# their original names because this module and api/config_mgmt.py already use them.
+_SECRET_REGISTRY = secret_hygiene.SECRET_REGISTRY
+_BACKEND_PREFIXES = secret_hygiene.BACKEND_PREFIXES
 
 _VALID_BACKENDS = frozenset(_BACKEND_PREFIXES)
 _EXTERNAL_BACKENDS = _VALID_BACKENDS - {"database"}
@@ -249,45 +230,13 @@ async def secret_staleness(request: Request):
     ``secret_max_age_days`` (0 = disabled). Admin-only, read-only.
     """
     _require_admin(request)
-    from ..services import config_service as cs, secret_hygiene
-    from ..config import settings
-    from ..database import SessionLocal, AppConfig
+    from ..database import SessionLocal
 
-    try:
-        max_age = int(cs.get("secret_max_age_days")
-                      or getattr(settings, "secret_max_age_days", 0) or 0)
-    except (TypeError, ValueError):
-        max_age = 0
-
-    cs._ensure_loaded()
-    keys = [k for k, _ in _SECRET_REGISTRY]
     db = SessionLocal()
     try:
-        updated = {
-            r.key: r.updated_at
-            for r in db.query(AppConfig).filter(
-                AppConfig.key.in_(keys), AppConfig.workgroup.is_(None)).all()
-        }
+        return secret_hygiene.collect(db)
     finally:
         db.close()
-
-    items = []
-    for key in keys:
-        raw = cs.get_raw(key)
-        if not raw:
-            continue  # unset → nothing to age
-        source = "database"
-        changed_at = updated.get(key)
-        for b_id, prefix in _BACKEND_PREFIXES.items():
-            if prefix and raw.startswith(prefix):
-                source = b_id
-                # Prefer the vault's real last-changed date; fall back to when the
-                # reference was configured in the dashboard.
-                changed_at = cs.describe_reference(raw) or updated.get(key)
-                break
-        items.append({"key": key, "source": source, "changed_at": changed_at})
-
-    return secret_hygiene.summarize(items, max_age)
 
 
 @router.post("/migrate")

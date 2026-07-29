@@ -255,10 +255,112 @@ async def run(db: Session, *, job_id: str, meta: dict) -> None:
                    f"destroyed {result.get('reaped', 0)}")
         if result.get("failed"):
             summary += f", {result['failed']} failed"
+        if result.get("warned"):
+            summary += f", {result['warned']} warned"
         if not result.get("deleting"):
             summary += " (report only — nothing deleted)"
     job_service.update_progress(db, job_id, 100, summary)
     job_service.set_completed(db, job_id, {"sweep": result})
+
+
+# ── Outbound notification ─────────────────────────────────────────────────────
+
+def _notify(db: Session, event_type: str, *, title: str, body: str, target: dict,
+            url: str = "", fields: Optional[dict] = None,
+            dedupe_bucket: str = "") -> int:
+    """Queue one notification about a resource. Returns rows queued (0 when off).
+
+    Deliberately thin: it only builds the event and hands it to the outbox, which
+    INSERTs and returns. No HTTP happens anywhere on this path — the worker's drain
+    loop does the sending, so a dead webhook can never slow down or fail a sweep.
+
+    Guarded even though ``emit_safe`` is itself guarded: building the event reads a
+    target dict assembled elsewhere, and a resource is already destroyed by the time
+    the reaped notification is built. Failing to announce it must not turn a completed
+    reap into an error.
+    """
+    try:
+        from . import notification_service, notify_policy
+        event = notify_policy.NotificationEvent(
+            event_type=event_type, title=title, body=body,
+            resource_id=target.get("id") or "",
+            resource_kind=target.get("kind") or "",
+            resource_name=target.get("name") or "",
+            cloud=target.get("cloud") or "",
+            region=target.get("region") or "",
+            workgroup=target.get("workgroup") or "",
+            url=url, dedupe_bucket=dedupe_bucket,
+            fields={k: v for k, v in (fields or {}).items() if v not in (None, "")},
+        )
+        return notification_service.emit_safe(db, event)
+    except Exception:                                  # noqa: BLE001
+        logger.warning("could not queue a %s notification for %s", event_type,
+                       target.get("id"), exc_info=True)
+        return 0
+
+
+def _warn_expiring(db: Session, items: list, *, now_ts: float) -> int:
+    """Warn once about each resource heading into its auto-delete window.
+
+    This is what the ``expiry_warned_at`` column was added for — its own docstring in
+    database.py reserves it for "the server-side warning channels" — and until now
+    nothing wrote it. The dashboard's client-side banner is unaffected: it is derived
+    fresh on every poll and has its own per-browser dismissal.
+
+    Fire-once is a write, not a hope: the stamp is committed here, so a second sweep
+    (or a second worker) finds the latch set. It is stamped only *after* the outbox
+    accepted the rows, so a pass that queued nothing — notifications off, no endpoints
+    configured, storm-suppressed — leaves the resource still eligible to warn later.
+    ``set_expiry`` clears the latch on an extend, which correctly re-warns against the
+    new deadline.
+    """
+    warn_seconds = expiry_policy.warn_hours() * 3600
+    warned = 0
+    for item in items:
+        if not item.get("expires_at"):
+            continue
+        expires_ts = expiry_policy.parse_ts(item.get("expires_at"))
+        if not expires_ts:
+            continue
+        remaining = expires_ts - now_ts
+        # Already past expiry is the reaper's business, not the warner's — a "expires
+        # soon" message about something being destroyed right now is just noise.
+        if remaining <= 0 or remaining > warn_seconds:
+            continue
+        capable, _ = expiry_policy.ttl_capable(item)
+        if not capable:
+            continue                                   # nothing will auto-delete it anyway
+
+        resolved = _resolve_row(db, item["id"])
+        if resolved is None:
+            continue
+        row = resolved[0]
+        if getattr(row, "expiry_warned_at", None) is not None:
+            continue
+
+        hours = max(1, int(remaining // 3600))
+        queued = _notify(
+            db, "resource.expiring",
+            title=f"{item['name']} auto-deletes in about {hours}h",
+            body=("Its auto-delete timer expires soon. Extend it from the dashboard if "
+                  "you still need it — otherwise it will be destroyed automatically."),
+            target=item,
+            url="/inventory",
+            fields={"Expires": item.get("expires_at"), "State": item.get("state")})
+        if not queued:
+            continue
+
+        try:
+            fresh = _resolve_row(db, item["id"])
+            if fresh is not None:
+                fresh[0].expiry_warned_at = _utcnow()
+                db.commit()
+                warned += 1
+        except Exception:
+            logger.warning("could not stamp expiry_warned_at for %s", item["id"],
+                           exc_info=True)
+            db.rollback()
+    return warned
 
 
 # ── Deletion ──────────────────────────────────────────────────────────────────
@@ -383,6 +485,20 @@ def _reap_one(db: Session, target: dict) -> dict:
     except Exception:
         logger.warning("could not audit resource_expiry_reaped for %s", target["id"],
                        exc_info=True)
+
+    # Queue the "we destroyed this" notification. INSERT-only and non-raising, like the
+    # audit append above — the resource is already gone, so failing to announce it must
+    # not turn a completed reap into an error. Note this fires on ENQUEUE of the
+    # teardown, not its completion; the destroy job carries the rest of the story.
+    _notify(db, "resource.reaped",
+            title=f"Auto-deleted {target['name']} ({target['cloud']})",
+            body=("Its auto-delete timer expired and the dashboard started its teardown. "
+                  "This was not requested by a person."),
+            target=target,
+            url=f"/jobs/{out['destroy_job_id']}",
+            fields={"Expired": target.get("expires_at"),
+                    "Overdue": f"{target['overdue_s'] // 60}m",
+                    "Destroy job": out["destroy_job_id"]})
     return out
 
 
@@ -440,6 +556,17 @@ def sweep_once(db: Session, *, job_id: Optional[str] = None) -> dict:
                 skipped_reasons[reason] = skipped_reasons.get(reason, 0) + 1
             continue
         targets.append(target)
+
+    # Warn about what is heading INTO the window, before acting on what is already past
+    # it. Independent of the arming and enforcement gates on purpose: an operator who has
+    # not yet armed deletion still wants to know a timer is running down, and warning is
+    # not destructive. Never raises.
+    try:
+        warned = _warn_expiring(db, items, now_ts=now_ts)
+    except Exception:
+        logger.warning("auto-delete expiry warnings failed", exc_info=True)
+        db.rollback()
+        warned = 0
 
     # Oldest-overdue first, so a capped pass acts on the longest-expired resources and the
     # report reads in the order an operator would triage.
@@ -515,6 +642,9 @@ def sweep_once(db: Session, *, job_id: Optional[str] = None) -> dict:
         "failed": failed,
         "deferred": deferred,
         "capped": capped,
+        # Resources warned for the first time this pass. Zero on a steady-state estate —
+        # each resource is warned once — so a non-zero value means new timers landed.
+        "warned": warned,
         "targets": targets,
         "skipped_reasons": skipped_reasons,
     }
@@ -525,7 +655,7 @@ def sweep_once(db: Session, *, job_id: Optional[str] = None) -> dict:
         # minutes forever would bury the entries that matter.
         details = {k: result[k] for k in
                    ("scanned", "due", "reaped", "failed", "capped",
-                    "dry_run", "enforce", "armed", "deleting")}
+                    "warned", "dry_run", "enforce", "armed", "deleting")}
         details["job_id"] = job_id
         try:
             job_service.log_audit(

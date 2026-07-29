@@ -3,6 +3,7 @@ Job management service.
 Creates, updates, and queries background job records.
 """
 import json
+import logging
 import uuid
 from datetime import datetime, timedelta
 from typing import Optional, List
@@ -12,6 +13,8 @@ from sqlalchemy.orm import Session
 
 from ..database import Job, AuditLog
 from . import audit_chain
+
+logger = logging.getLogger(__name__)
 
 # Postgres transaction-advisory-lock id that serializes audit-chain appends +
 # backfill across Gunicorn/jobs-worker processes (distinct from init_db's
@@ -143,7 +146,45 @@ def set_failed(db: Session, job_id: str, error: str) -> Optional[Job]:
         job.error_message = error
         db.commit()
         db.refresh(job)
+        # After the commit, always: the notification is a report on a transition that
+        # has already happened, so nothing it does can undo one. Hooked here rather than
+        # at the ~221 call sites that reach this function.
+        notify_job_failed(db, job)
     return job
+
+
+def notify_job_failed(db: Session, job) -> None:
+    """Queue a ``job.failed`` notification. INSERT-only, and cannot raise.
+
+    Deliberately does no network I/O — it writes an outbox row and returns, and the
+    worker's drain loop does the sending. That is the strongest available form of
+    "a notification can never fail a job", and ``tests/test_notify_wiring.py`` asserts
+    it statically rather than trusting the convention to hold.
+    """
+    try:
+        if job is None:
+            return
+        from . import notification_service, notify_policy
+        label = job.vm_path or job.cloud_resource_id or job.job_type
+        event = notify_policy.NotificationEvent(
+            event_type="job.failed",
+            title=f"{job.job_type} failed — {label}",
+            body=(job.error_message or "No error message was recorded.")[:1000],
+            resource_id=f"job:{job.id}",
+            resource_kind="job",
+            resource_name=label or job.job_type,
+            workgroup=job.workgroup or "",
+            url=f"/jobs/{job.id}",
+            fields={"Job type": job.job_type, "Started by": job.created_by},
+        )
+        notification_service.emit_safe(db, event)
+    except Exception:                                  # noqa: BLE001
+        logger.warning("could not queue a job.failed notification for %s",
+                       getattr(job, "id", "?"), exc_info=True)
+        try:
+            db.rollback()
+        except Exception:                              # pragma: no cover - defensive
+            pass
 
 
 def finish_batch_parent(db: Session, parent_job_id: str, child_job_ids: list) -> Optional[Job]:
@@ -500,6 +541,7 @@ def reconcile_stale_jobs(db: Session, stale_after_minutes: int = 10) -> int:
     the count."""
     cutoff = datetime.utcnow() - timedelta(minutes=stale_after_minutes)
     n = 0
+    reconciled = []
     for job in db.query(Job).filter(Job.status == "running").all():
         last = job.updated_at or job.started_at or job.created_at
         if last and last > cutoff:
@@ -509,7 +551,15 @@ def reconcile_stale_jobs(db: Session, stale_after_minutes: int = 10) -> int:
         job.updated_at = datetime.utcnow()
         job.error_message = "Interrupted by an app restart (no heartbeat) — re-run if needed."
         _flip_resource_row(db, job)
+        reconciled.append(job)
         n += 1
     if n:
         db.commit()
+        # This path writes `failed` inline rather than going through set_failed, so it
+        # would otherwise be the one job failure nobody hears about — and "the worker
+        # died mid-provision" is exactly what an operator most needs told. Emitted after
+        # the commit, or the outbox insert would flush a half-built reconcile. Up to five
+        # processes run this at startup; the unique dedupe key absorbs the race.
+        for job in reconciled:
+            notify_job_failed(db, job)
     return n

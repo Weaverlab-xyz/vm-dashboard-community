@@ -453,9 +453,12 @@
                      time: i.created_at, href: i.detail_href || '/inventory' });
         }
         // Resources whose auto-delete timer is inside the warning window. This is the
-        // ONLY warning the feature has — there is no email or chat notification anywhere
-        // in this app — so it has to be legible: an operator who never opens the
-        // dashboard gets no notice at all before a resource is deleted.
+        // only warning an operator who never configures anything gets, so it has to be
+        // legible. Outbound notifications (services/notify_policy.py) can also fire a
+        // `resource.expiring` message per endpoint — but that is off by default, and it
+        // is deliberately independent of this item: the server-side warning fires once
+        // and is latched on `expiry_warned_at`, while this one is derived fresh on every
+        // poll and has its own per-browser dismissal.
         //
         // Note the 'expiry:' id prefix. The failed-state item above uses a bare i.id, so
         // without it dismissing one would silently hide the other for the same resource.

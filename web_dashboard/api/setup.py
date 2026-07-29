@@ -1021,6 +1021,47 @@ class OidcFeatureConfig(BaseModel):
     oidc_groups_claim: str = ""
 
 
+class NotificationsFeatureConfig(BaseModel):
+    """Outbound notifications. Two brakes, both deliberate.
+
+    The toggle owns `notifications_enabled`; `notify_dry_run` then defaults ON, so
+    turning the feature on records what *would* be sent and sends nothing. Enabling
+    this against a live estate can produce hundreds of messages in the first pass, so
+    the first thing an operator gets is a delivery log to read rather than an inbox to
+    apologise for — the same observe-first rollout `resource_expiry_dry_run` gives the
+    reaper.
+
+    The endpoints themselves are NOT here: they are rows in `notification_endpoints`,
+    managed through /api/notifications/endpoints, because their URLs and HMAC secrets
+    are credentials and there can be several of them. This panel carries only the
+    global knobs.
+
+    Every numeric field is annotated plain `int`, never Optional[int]: _read_feature
+    keys off `info.annotation is int`, so an Optional would read back as "" for an
+    unset key and 422 the whole panel on save — the exact regression
+    tests/test_setup_feature_roundtrip.py exists to pin.
+
+    `notify_last_scan_at` is runtime state the scanner writes and is deliberately
+    absent, for the same reason `resource_expiry_last_sweep` is.
+    """
+    enabled: bool = False
+    notify_dry_run: bool = True
+    notify_event_types: str = (
+        "resource.expiring,resource.reaped,job.failed,"
+        "cost.budget_exceeded,secret.stale,config.drift")
+    notify_min_severity: str = "warning"
+    # Absolute origin (e.g. https://dash.corp.example). The worker has no request
+    # context, so without this every message ships with no link at all.
+    notify_base_url: str = ""
+    notify_http_timeout_s: int = 10
+    notify_flush_interval_s: int = 30
+    notify_scan_interval_s: int = 3600
+    notify_max_attempts: int = 4
+    notify_max_per_flush: int = 50
+    notify_max_queue: int = 500
+    notify_retention_days: int = 30
+
+
 _FEATURE_MODELS = {
     "vmware":       VMwareFeatureConfig,
     "beyondtrust":  BeyondTrustFeatureConfig,
@@ -1038,6 +1079,7 @@ _FEATURE_MODELS = {
     "cost_explorer":  CostExplorerFeatureConfig,
     "admission_control": AdmissionControlFeatureConfig,
     "resource_expiry":   ResourceExpiryFeatureConfig,
+    "notifications":  NotificationsFeatureConfig,
     "multi_region":   MultiRegionFeatureConfig,
     "oidc":           OidcFeatureConfig,
 }
