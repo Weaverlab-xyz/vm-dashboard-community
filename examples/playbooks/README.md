@@ -1,7 +1,7 @@
 # Sample Ansible playbooks (managed-service starters)
 
 Ready-to-adapt playbooks for configuring **Linux** and **Windows** cloud VMs, plus
-**Kubernetes clusters** and **cloud databases**, via the dashboard's **Config
+**Kubernetes clusters** and **databases**, via the dashboard's **Config
 Management** feature
 (see [docs/integrations/ansible.md](../../docs/integrations/ansible.md)). They are
 the Ansible counterpart to [`examples/compose/`](../compose/) — upload one, edit
@@ -264,15 +264,18 @@ reach a private API server and bypass the corporate TLS-inspecting proxy; they u
 | `deployment-apply.yml` | Apply a sample nginx Deployment + Service |
 | `helm-install.yml` | `helm upgrade --install` a chart (`helm_release`/`helm_chart`/…) |
 
-## Cloud databases (`database/`)
+## Databases (`database/`)
 
 Localhost plays using `community.postgresql` / `community.mysql` / `community.general`
-(mssql). Pick a provisioned database as the target (Config Management → target kind
-**Cloud database**). The dashboard resolves the admin credential server-side and injects
+(mssql). Pick a provisioned **or registered** database as the target (Config Management →
+target kind **Databases**). The dashboard resolves the admin credential server-side — from
+the provisioning job for a database it built, or a just-in-time Password Safe
+managed-account checkout for a registered one — and injects
 it as **scrubbed** extra-vars — `db_login_host`, `db_login_port`, `db_login_user`,
 `db_login_password` (and `db_name`) — so you never see or type it. Like the k8s plays,
-these run on the in-cloud runner (in-subnet with line-of-sight to the private endpoint)
-using the `ansible-cloud` image. For a new **role/user** password, bind a
+these use the `ansible-cloud` image: on the in-cloud runner for a cloud-hosted database
+(in-subnet with line-of-sight to the private endpoint), or a sibling container on the
+dashboard host for an on-premises one. For a new **role/user** password, bind a
 Secrets-Management secret via **Use a secret** (mapped to `target_role_password` /
 `target_user_password`) rather than a plaintext extra var.
 

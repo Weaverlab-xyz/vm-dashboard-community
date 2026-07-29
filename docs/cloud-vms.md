@@ -2,7 +2,7 @@
 
 The dashboard deploys **cloud virtual machines** across AWS, Azure, GCP, and OCI, then
 layers the BeyondTrust PAM stack on top — the same **provisioning + three layers** model
-as [Cloud Databases](cloud-databases.md) and [Kubernetes](kubernetes.md):
+as [Databases](databases.md) and [Kubernetes](kubernetes.md):
 
 - **Provisioning** *(stand it up)* — launch an instance into a **private** subnet and inject
   an SSH key. Done directly through each cloud's **SDK** (not Terraform — see Architecture).

@@ -1,5 +1,5 @@
 # Create a PostgreSQL login role.
-# Target: a managed PostgreSQL cloud database. Admin connection vars (db_login_*) are
+# Target: a PostgreSQL database (provisioned or registered). Admin connection vars (db_login_*) are
 # auto-injected. Supply the new role's own password via a Secrets-Management secret
 # (run form → "Use a secret", mapped to target_role_password) so it's never in plaintext.
 #

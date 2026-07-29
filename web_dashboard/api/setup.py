@@ -816,7 +816,7 @@ class XcpNgFeatureConfig(BaseModel):
 
 
 class CloudDatabaseFeatureConfig(BaseModel):
-    """Config panel for the Cloud Databases feature. Graduated from preview to GA
+    """Config panel for the Databases feature. Graduated from preview to GA
     once every engine (PostgreSQL / MySQL / SQL Server) was validated end-to-end on
     all three clouds. The toggle owns `cloud_database_enabled` via its own `enabled`
     field (feature name → key through _feature_to_cfg_key, like cost_explorer /

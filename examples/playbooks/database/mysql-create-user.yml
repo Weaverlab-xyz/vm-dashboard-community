@@ -1,5 +1,5 @@
 # Create a MySQL user with minimal privileges.
-# Target: a managed MySQL cloud database. Admin connection vars (db_login_*) are
+# Target: a MySQL database (provisioned or registered). Admin connection vars (db_login_*) are
 # auto-injected. Supply the new user's password via a Secrets-Management secret
 # (run form → "Use a secret", mapped to target_user_password).
 #

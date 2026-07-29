@@ -275,6 +275,25 @@ function statusBadge(status) {
     return map[status] || 'bg-gray-100 text-gray-600';
 }
 
+// Display name for a PERMISSION_SCOPES key. The keys are persisted in user/group
+// permission JSON (and bootstrap_entitle_groups.py turns them into Entitle group names),
+// so a scope whose display name has drifted from its key gets an entry here rather than
+// a rename. Anything unmapped falls back to the old behaviour: underscores to spaces,
+// capitalized by CSS.
+function permissionScopeLabel(scope) {
+    const map = {
+        cloud_database: 'Databases',
+        config_mgmt:    'Configuration',
+        k8s:            'Kubernetes',
+        vms:            'VMs',
+        aws:            'AWS',
+        azure:          'Azure',
+        gcp:            'GCP',
+        oci:            'OCI',
+    };
+    return map[scope] || String(scope || '').replace(/_/g, ' ');
+}
+
 function formatDuration(seconds) {
     if (seconds == null) return '–';
     if (seconds < 60) return `${seconds}s`;

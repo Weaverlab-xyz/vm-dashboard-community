@@ -11,7 +11,7 @@ dashboard runs across AWS, Azure, and GCP.
 | **GCP GCE** | a **Container-Optimized OS** VM running all services as a multi-container [konlet](https://cloud.google.com/container-optimized-os/docs) spec (Cloud Run Jobs are single-container, so a COS instance is used instead) | ✅ |
 
 > **The PAM layer stack does not apply here.** Unlike [Cloud VMs](cloud-vms.md),
-> [Cloud Databases](cloud-databases.md), and [Kubernetes](kubernetes.md), a compose
+> [Databases](databases.md), and [Kubernetes](kubernetes.md), a compose
 > deployment is an **ephemeral workload**, not a persistent access target — there is no PRA
 > tunnel, Password Safe onboarding, or Entitle registration for it. This doc is about
 > *provisioning* container workloads and *monitoring* the dashboard's container fleet.

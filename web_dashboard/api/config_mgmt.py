@@ -188,22 +188,23 @@ async def get_cloud_targets(
     }
 
 
-# ── Localhost targets (Kubernetes clusters + cloud databases) ───────────────────
+# ── Localhost targets (Kubernetes clusters + databases) ─────────────────────────
 
 @router.get("/localhost-targets")
 async def get_localhost_targets(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Kubernetes clusters + cloud databases selectable as **localhost** Ansible
+    """Kubernetes clusters + databases selectable as **localhost** Ansible
     targets (the run reaches out via kubeconfig / DB login vars). Ids + display fields
     only — never a secret. Parallels ``/cloud-targets`` for VMs, and is served here so
     the Config-Management page doesn't need the separate k8s / cloud_database feature
     permissions just to populate its picker.
 
     Only resources an Ansible runner can actually reach + configure appear: aws/azure/gcp
-    (in-cloud runner), plus — for Kubernetes only — clusters registered with cloud="local",
-    which run on the dashboard's local runner. Databases stay cloud-only.
+    (in-cloud runner), plus — for both clusters and databases — those registered with
+    cloud="local", which run on the dashboard's local runner. See ``K8S_TARGET_CLOUDS``
+    and ``DB_TARGET_CLOUDS`` for the two lists.
 
     Response shape:
         {"k8s": [{id, name, cloud, status}, …],

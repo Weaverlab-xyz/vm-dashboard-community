@@ -136,7 +136,7 @@ selector writes a per-cloud key; the global keys remain as a fallback (see
 > Kubernetes cluster (`cloud = local`) always uses the local runner — it is the only
 > backend with a route to your LAN — so there is no key to set, and a stray one is
 > ignored rather than honored. See
-> [Kubernetes-cluster & cloud-database targets](#kubernetes-cluster--cloud-database-targets-localhost-runs).
+> [Kubernetes-cluster and database targets](#kubernetes-cluster-and-database-targets-localhost-runs).
 
 ### Shared cloud infrastructure — AWS / ECS
 
@@ -590,7 +590,7 @@ does for a single run. Queueing lands you on `/jobs?batch_id=…` — the batch 
 out of the job list, with a status rollup across all of it.
 
 Every run is claimed from the `jobs` table by the **job runner** (the `worker` service
-in the compose files), the same way Kubernetes and cloud-database runs are. A batch
+in the compose files), the same way Kubernetes and database runs are. A batch
 therefore survives a dashboard restart, and its jobs execute concurrently across
 `WORKER_REPLICAS` (default 3) rather than one at a time — that number is the ceiling
 on how many hosts a batch touches simultaneously.
@@ -921,9 +921,9 @@ extra vars).
 
 ---
 
-## Kubernetes-cluster & cloud-database targets (localhost runs)
+## Kubernetes-cluster and database targets (localhost runs)
 
-Registered Kubernetes clusters and provisioned cloud databases are selectable
+Registered or provisioned Kubernetes clusters and databases are selectable
 Config-Management targets too, but they don't SSH anywhere — Ansible's
 `kubernetes.core` and `community.postgresql`/`mysql`/`general` modules run a
 `hosts: localhost, connection: local` play and connect *out* to the API server
@@ -945,23 +945,30 @@ Config-Management targets too, but they don't SSH anywhere — Ansible's
     runner can't reach those RFC1918 endpoints and its egress hits the corporate TLS
     proxy, so an `ansible_runner_<cloud>: local` override is **rejected**. The
     backend is `ansible_runner_<cloud>`, defaulting to that cloud's native runner.
-  - **On-prem (`cloud = local`).** A Kubernetes cluster registered from a kubeconfig
-    — see [`examples/playbooks/k3s/`](../../examples/playbooks/k3s/) for building one
-    — sits on your LAN, where an in-cloud task has **no route at all**. Those runs
-    execute in a sibling container **on the dashboard host**, which is the only thing
-    that can reach the cluster: same `ansible_cloud_image`, same localhost play, same
+  - **On-prem (`cloud = local`).** A **registered** resource on your LAN, where an
+    in-cloud task has **no route at all**: a Kubernetes cluster registered from a
+    kubeconfig — see [`examples/playbooks/k3s/`](../../examples/playbooks/k3s/) for
+    building one — or a database registered against a Password Safe managed account, see
+    [Databases → Registering an existing database](../databases.md#registering-an-existing-database).
+    Those runs execute in a sibling container **on the dashboard host**, which is the only
+    thing that can reach them: same `ansible_cloud_image`, same localhost play, same
     scrubbing. Two consequences — the dashboard host needs a working `docker` CLI and
-    network reach to the cluster's API address (a dashboard deployed *in* a cloud has
+    network reach to the endpoint (a dashboard deployed *in* a cloud has
     neither, and the run is refused with a message saying so), and local filesystem
     assets work fine, because the "move it to S3 first" rule exists only for the
     in-cloud runners that can't read this host's disk.
 
-  Cloud databases are always cloud-hosted — a `CloudDatabase` is provisioned into a
-  cloud and never carries `cloud = local`, so the on-prem case is Kubernetes-only.
+  Databases follow the same split. A **provisioned** database is always cloud-hosted; a
+  **registered** one may be either — `cloud = local` for an on-premises database, or the
+  cloud it already lives in. Registered **OCI** is the one gap: it can be registered, but
+  no runner resolves for `oci`, so it is refused as a target.
 - **Auto-injected, scrubbed connection material.** The kubeconfig is token-prepped
   server-side (a short-lived bearer token replaces the cloud exec-auth block) and
-  delivered via `K8S_AUTH_KUBECONFIG`/`KUBECONFIG`; the DB admin credential is
-  resolved from the encrypted config store and delivered as `db_login_*` extra-vars.
+  delivered via `K8S_AUTH_KUBECONFIG`/`KUBECONFIG`. The DB admin credential comes from one
+  of two places, following the row's source: a **provisioned** database's is read from its
+  provisioning job plus the encrypted config store, while a **registered** one has no
+  provisioning job — its Password Safe **managed account** is checked out just-in-time at
+  launch and never persisted. Either way it arrives as `db_login_*` extra-vars.
   Both ride the runner task's ephemeral env and are redacted from job output. An
   operator can still bind extra Secrets-Management **named vars** (e.g. a new role's
   password) via **Use a secret**; SSH-only options (become password, SSH key,

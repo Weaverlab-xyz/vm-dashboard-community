@@ -1,9 +1,13 @@
-# Cloud Databases
+# Databases
 
-The dashboard provisions **managed cloud databases** and layers the BeyondTrust PAM
-stack on top of them. The feature is **provisioning + three stacked layers**, each
-solving a different privileged-access problem (this is the same model used across the
-[Cloud VMs](cloud-vms.md) and [Kubernetes](kubernetes.md) docs):
+The dashboard manages databases two ways — **provision** a new managed database in a
+cloud, or **register** one that already exists, on-premises included — and layers the
+BeyondTrust PAM stack on top of what it provisions. Provisioning needs a Terraform
+module, so it is cloud-only; registering needs only somewhere to reach.
+
+The provisioned path is **provisioning + three stacked layers**, each solving a different
+privileged-access problem (the same model used across the [Cloud VMs](cloud-vms.md) and
+[Kubernetes](kubernetes.md) docs):
 
 - **Provisioning** — stand up a **private** database (AWS RDS / Azure Flexible Server +
   SQL DB / GCP Cloud SQL / OCI Autonomous DB). The dashboard mints the admin credential
@@ -13,12 +17,21 @@ solving a different privileged-access problem (this is the same model used acros
   injection. This is what makes the private database usable.
 - **Layer 2 — Password Safe** *(manage its secrets)* — *optional.* Password Safe owns
   rotation of a dedicated managed DB user and keeps the PRA-vaulted credential in sync.
-- **Layer 3 — Entitle** *(grant time-boxed access)* — *optional.* Register the DB as an
+- **Layer 3 — Entitle** *(grant time-boxed access)* — *optional.* Onboard the DB as an
   Entitle integration so users request just-in-time access; Entitle mints **ephemeral
   accounts** (or assigns persistent roles) per engine.
 
+The other path is [registration](#registering-an-existing-database): record a database
+the dashboard did **not** create — on-premises (`cloud = local`) or in a cloud — so it
+can be a [Configuration Management](config-management.md) target. Nothing is built and no
+credential is stored; the admin login is a Password Safe **managed account** checked out
+at run time.
+
 The layers stack — stop after Provisioning + PRA, or add Password Safe and/or Entitle.
-Coverage differs by cloud/engine:
+**They apply to what the dashboard provisions**: a registered database gets none of them,
+because there is no Terraform state to tear down and no credential to vault. That is the
+trade for being able to point at a database you already run. Provisioning coverage
+differs by cloud/engine:
 
 | Cloud | Provisioning | L1 PRA | L2 Password Safe | L3 Entitle |
 |---|---|---|---|---|
@@ -37,6 +50,9 @@ active [storage backend](storage-management.md).
 ---
 
 ## Architecture
+
+*This section describes a **provisioned** database. A registered one is reached however
+you already reach it — see [Registering an existing database](#registering-an-existing-database).*
 
 The database is **private** (`publicly_accessible = false`, or a public free-tier
 Autonomous DB on OCI). The dashboard's backend has **no direct network path to it** — the
@@ -81,9 +97,65 @@ because their tunnels terminate/forward TLS themselves.
 
 ---
 
+## Registering an existing database
+
+Registration records a database the dashboard **didn't create**, so it can be a
+[Configuration Management](config-management.md) target. It is the database sibling of
+registering a Kubernetes cluster from a kubeconfig ([Kubernetes](kubernetes.md)): the
+dashboard builds nothing, changes nothing, and stores no credential. `cloud = local` is
+the on-premises case.
+
+The registerable set is deliberately wider than the provisionable one — **provisioning
+needs a Terraform module, registering needs only somewhere to reach.** Any of `local`,
+`aws`, `azure`, `gcp` or `oci` may be registered, and engines are **postgres / mysql /
+sqlserver / oracle**. Configuration Management runs cover postgres / mysql / sqlserver;
+the `ansible-cloud` runner image ships no Oracle client, and no Ansible runner resolves
+for `oci` at all, so an OCI row registers and lists but can't be a run target.
+
+**How to register.** **Databases** page → **Register existing**, or
+`POST /api/databases/register` (permission `cloud_database:write`). The button only
+renders when the BeyondTrust integration is on (`beyondtrust_enabled`), because the admin
+login *has* to be a Password Safe managed account. The `cloud_database_enabled` feature
+toggle gates registration and provisioning alike.
+
+| Field | Notes |
+|---|---|
+| **Engine** | postgres / mysql / sqlserver / oracle |
+| **Location** | `local` (on-premises) / aws / azure / gcp / oci |
+| **Host** | Required — it is how the runner reaches the database. One row per engine + host; a duplicate is refused. |
+| **Port** | Optional; defaults per engine (5432 / 3306 / 1433 / 1521). |
+| **Database name** | Optional. SQL Server falls back to `master`. |
+| **Admin account** | A Password Safe **managed system + account**, looked up live by host — the same lookup the Configuration Management run form uses. Onboard the database in Password Safe *first*; the list is empty until you do. |
+
+**The credential is never stored.** The row keeps the managed system id, account id and
+account name — nothing else. At run time the dashboard checks the credential out and lets
+the request **expire** on its duration rather than checking it back in, matching what the
+inline runners already do for VMs. Contrast the provisioned path, which reads its admin
+credential from the provisioning job's Terraform variables and the encrypted config store.
+
+**Where the run executes** follows the database's location, exactly as it does for
+clusters — an on-premises database runs in a sibling container on the dashboard host,
+because nothing in a cloud has a route to your LAN; a cloud-hosted one runs on that
+cloud's transient in-subnet runner. See
+[Ansible → Kubernetes-cluster and database targets](integrations/ansible.md#kubernetes-cluster-and-database-targets-localhost-runs).
+
+**What registration does not give you.** A registered row has no Terraform state and no
+provisioning job, so none of the three layers apply: no PRA protocol tunnel, no Layer-2
+Password Safe onboarding of a rotated DB user, and no Layer-3 Entitle integration (Entitle
+onboarding reads the provisioning job's admin credential, which such a row doesn't have).
+Nothing is created in the cloud, and no gateway host is brokered on its behalf.
+
+**Delete deregisters.** Removing a registered row drops it from the inventory and leaves
+the database running — the dashboard holds no Terraform state for someone else's database,
+and destroying it would be the wrong verb. The row's action button says **Deregister**
+rather than Decommission, and the confirm dialog says the database itself is untouched.
+The reverse is refused too: a provisioned database is decommissioned, never deregistered.
+
+---
+
 ## Layer 1 — PRA access (shared prerequisites, all clouds)
 
-Before any cloud database will get a working tunnel, configure PRA once under
+Before any **provisioned** database will get a working tunnel, configure PRA once under
 **Settings → Integrations → BeyondTrust**:
 
 - **PRA appliance + OAuth API account** → `bt_api_host`, `bt_client_id`,
@@ -99,7 +171,8 @@ Each provision can override the Jump Group / Gateway / PRA credential per databa
 `bt_*` defaults apply. (The per-cloud `*_bt_jump_group_name` / `*_jumpoint_name` keys
 are for PRA *Shell Jumps*, not the DB tunnel.)
 
-Also enable the **Cloud Databases** feature toggle (`cloud_database_enabled`).
+Also enable the **Databases** feature toggle (`cloud_database_enabled`) — it gates
+registration as well as provisioning.
 
 ---
 
@@ -140,7 +213,7 @@ DB/VM/cluster is gone.
 | `bt_ecs_jumpoint_subnet_id` / `bt_ecs_jumpoint_security_group_id` | — | Gateway host placement (import-only) |
 
 **Checklist:** run `setup-aws.sh` → import the emitted config at `/setup` → set
-`aws_ecs_docker_deploy_key` + the PRA keys → provision from the Cloud Databases page.
+`aws_ecs_docker_deploy_key` + the PRA keys → provision from the Databases page.
 
 ### Azure (Flexible Server / SQL Database)
 
@@ -267,7 +340,7 @@ and keeps the PRA-vaulted credential in sync. **GCP and OCI are not supported** 
 databases provision and get a tunnel, but no Password Safe onboarding.
 
 Both paths create a **dedicated managed DB user** as the rotation target (not the master
-admin), point the PRA tunnel's injected credential at it, register the DB as a Password
+admin), point the PRA tunnel's injected credential at it, onboard the DB as a Password
 Safe **managed system + managed account**, and onboard the PRA Vault account on the
 **`PRA Vault Username Password`** plugin so rotations propagate into the tunnel credential.
 Every step is **non-fatal**: any failure logs a warning and falls back to the legacy
@@ -374,12 +447,14 @@ AWS keys above):
 
 ## Layer 3 — Entitle (just-in-time access)
 
-*Optional.* Register a managed database as a BeyondTrust **Entitle** integration so users
-request **just-in-time** access to it instead of holding a standing credential. Gated by
-`entitle_registration_enabled` plus a per-provision **"Register in Entitle"** toggle, and
-there is a post-provision **Register** button (job `clouddb_entitle_register`) to onboard
-a DB the dashboard already provisioned — a *registered* database is not offerable (no
-provisioning credential to register with; the API refuses it with a 400). Teardown
+*Optional.* Onboard a **provisioned** database into BeyondTrust **Entitle** as its own
+integration, so users request **just-in-time** access to it instead of holding a standing
+credential. Gated by `entitle_registration_enabled` plus a per-provision
+**"Register in Entitle"** toggle, and there is a post-provision **Register in Entitle**
+button (job `clouddb_entitle_register`) for a database provisioned earlier. This layer
+needs the provisioning job's admin credential, so a
+[registered](#registering-an-existing-database) database is not offerable — the button is
+hidden and the API refuses it with a 400. Teardown
 deregisters on decommission. Full Entitle setup (owner, workflow,
 durations, the agent) lives in the [Entitle integration](integrations/entitle.md) doc.
 
@@ -407,12 +482,17 @@ on-demand **socat forwarder** in the sandbox VPC and points Entitle at it — en
 
 ---
 
-## Lifecycle (provisioning & decommission)
+## Lifecycle (provision, register, decommission)
 
-- **Provision:** from the Cloud Databases page, pick engine + cloud + region and (when
+- **Provision:** from the Databases page, pick engine + cloud + region and (when
   PRA is configured) a Jump Group / Gateway. The record + admin credential are created
   synchronously; the `terraform apply`, tunnel brokering, and any Password Safe onboarding
   run in the **job worker** as a background job.
+- **Register:** from the Databases page, **Register existing** → engine, location, host and
+  a Password Safe managed account. The row is created synchronously with status
+  `available`; there is no job, because there is nothing to build.
+- **Deregister:** removing a registered row deletes the row only — no Terraform, no PRA or
+  Password Safe teardown, because there was never anything to tear down.
 - **Decommission:** tears down the PRA tunnel + Vault account, any Layer-2 Password Safe
   managed systems + functional accounts, any Layer-3 Entitle integration (+ the GCP
   forwarder), and finally the database instance — accumulating (not swallowing) errors so
@@ -442,6 +522,16 @@ on-demand **socat forwarder** in the sandbox VPC and points Entitle at it — en
   `clouddb_ps_onboarding_enabled` **and** `pscli_*` being configured (and, for Azure,
   `passwordsafe_azure_db_registration_method != off`). Failures are non-fatal and fall back
   to the legacy admin-credential staging — check the job log for the warning.
+- **Registering: "no Password Safe managed accounts found for this host."** The lookup is by
+  the host string you typed and needs an already-onboarded managed system in Password Safe.
+  Onboard the database there first, and check `beyondtrust_enabled` plus the `pscli_*` OAuth
+  client — the dashboard deliberately has no "type a database password" path.
+- **A registered on-prem database run fails with `docker: command not found`.** A
+  `cloud = local` database runs in a sibling container on the dashboard host, because
+  nothing in a cloud has a route to your LAN. That host needs the Docker socket mounted and
+  network reach to the database.
+- **A registered OCI database can't be selected in Configuration Management.** Expected —
+  no Ansible runner resolves for `oci`. Registration still gives you the inventory row.
 
 For the base BeyondTrust/PRA setup (OAuth accounts, Jump Group/Jumpoint, deploy keys), see
 the [BeyondTrust integration](integrations/beyondtrust.md) doc. For the sandbox network

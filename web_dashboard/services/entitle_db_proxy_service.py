@@ -77,7 +77,7 @@ async def ensure_db_forwarder(db, row) -> Optional[tuple]:
     if not enabled() or row.cloud != "gcp":
         return None
     if not row.private_host:
-        raise ValueError("cloud database has no private host yet — cannot build a forwarder")
+        raise ValueError("database has no private host yet — cannot build a forwarder")
 
     project, zone, network, subnetwork = _resolve_placement(row)
     if not project:

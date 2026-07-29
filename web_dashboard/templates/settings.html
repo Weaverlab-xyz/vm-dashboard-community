@@ -271,7 +271,7 @@
             <p class="text-xs text-gray-500 leading-snug" x-text="f.desc"></p>
           </div>
 
-          <!-- Configure: only preview flags that also carry config (e.g. Cloud Databases) -->
+          <!-- Configure: only preview flags that also carry config (e.g. Databases) -->
           <button x-show="f.configFeature" @click="openPanel({ key: f.configFeature, label: f.label })"
                   class="text-xs text-blue-600 hover:text-blue-700 font-medium flex-shrink-0">Configure →</button>
         </div>
@@ -915,9 +915,9 @@
             </div>
           </div>
 
-          <!-- Cloud Database Password Safe onboarding (AWS-only) -->
+          <!-- Database Password Safe onboarding (provisioned cloud DBs only) -->
           <div class="border-t border-gray-100 pt-4">
-            <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Cloud Database Onboarding <span class="text-gray-400 font-normal normal-case">(AWS only)</span></p>
+            <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Database Onboarding <span class="text-gray-400 font-normal normal-case">(AWS only)</span></p>
             <p class="text-xs text-gray-400 mb-3">
               When on, provisioning an AWS database creates a dedicated managed DB user, onboards the DB as a
               Password Safe managed system + managed account (via the <code class="bg-gray-100 px-1 rounded">{engine} SSM Custom Plugin</code>),
@@ -928,7 +928,7 @@
             <label class="flex items-center gap-2 mb-3 text-sm text-gray-700">
               <input type="checkbox" x-model="panelCfg.clouddb_ps_onboarding_enabled"
                      class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
-              Enable Password Safe onboarding for AWS &amp; Azure cloud databases
+              Enable Password Safe onboarding for provisioned AWS &amp; Azure databases
             </label>
             <div x-show="panelCfg.clouddb_ps_onboarding_enabled" class="space-y-3">
               <div class="grid grid-cols-3 gap-3">
@@ -1799,7 +1799,7 @@
       <template x-if="panel?.key === 'entitle' && !panelLoading">
         <div class="space-y-4">
           <p class="text-sm text-gray-500">
-            Entitle integration. As the dashboard builds Linux VMs and cloud databases it
+            Entitle integration. As the dashboard builds Linux VMs and databases it
             registers each as an Entitle integration (SSH ephemeral accounts / PostgreSQL /
             MySQL / SQL Server) so users can request just-in-time access in Entitle. Requires
             an Entitle tenant.
@@ -2330,7 +2330,7 @@
         </div>
       </template>
 
-      <!-- ── Cloud Databases (config panel; enable/disable via the feature toggle) ── -->
+      <!-- ── Databases (config panel; enable/disable via the feature toggle) ── -->
       <template x-if="panel?.key === 'cloud_database' && !panelLoading">
         <div class="space-y-4">
           <p class="text-sm text-gray-500">
@@ -3040,8 +3040,8 @@ function settingsPage() {
         desc: 'Pre-action policy gate (OPA): allowed regions, blocked sizes, change-freeze.' },
       { key: 'resource_expiry', label: 'Auto-delete Timer',     hasConfig: true,  enabled: false,
         desc: 'Give new cloud VMs, databases and clusters an expiry, then destroy them when it passes. Starts in report-only mode.' },
-      { key: 'cloud_database', label: 'Cloud Databases',        hasConfig: true,  enabled: false,
-        desc: 'Private managed databases (PostgreSQL, MySQL, SQL Server) on AWS, Azure and GCP, reached through a PRA tunnel.' },
+      { key: 'cloud_database', label: 'Databases',              hasConfig: true,  enabled: false,
+        desc: 'Provision private managed databases (PostgreSQL, MySQL, SQL Server) on AWS, Azure and GCP, or register ones you already run — on-premises or in a cloud. PRA tunnel for the private ones.' },
       { key: 'k8s_management', label: 'Kubernetes',             hasConfig: true,  enabled: false,
         desc: 'Provision (EKS/AKS/GKE), register, and broker Kubernetes clusters — PRA tunnels + Entitle real-identity JIT.' },
       { key: 'multi_region', label: 'Multi-region',            hasConfig: true,  enabled: true, configOnly: true,

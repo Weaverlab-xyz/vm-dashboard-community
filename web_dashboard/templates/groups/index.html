@@ -64,7 +64,7 @@
                 <span x-show="m.default_permissions">
                   <template x-for="[scope, levels] in Object.entries(m.default_permissions || {})" :key="scope">
                     <span x-show="levels.length > 0" class="inline-block mr-1">
-                      <span class="font-medium capitalize" x-text="scope.replace('_',' ')"></span>:
+                      <span class="font-medium capitalize" x-text="permissionScopeLabel(scope)"></span>:
                       <span x-text="levels.join('/')"></span>
                     </span>
                   </template>
@@ -142,7 +142,7 @@
             <tbody class="divide-y divide-gray-100">
               <template x-for="scope in permissionScopes" :key="scope">
                 <tr class="hover:bg-gray-50">
-                  <td class="px-3 py-2 font-medium text-gray-700 capitalize" x-text="scope.replace('_', ' ')"></td>
+                  <td class="px-3 py-2 font-medium text-gray-700 capitalize" x-text="permissionScopeLabel(scope)"></td>
                   <template x-for="level in permissionLevels" :key="level">
                     <td class="px-3 py-2 text-center">
                       <input type="checkbox"

@@ -2,10 +2,15 @@
 {% from "partials/secret_picker.html" import secret_picker %}
 {% block title %}Databases – Infrastructure Management{% endblock %}
 
-{# Cloud database infrastructure page. Postgres/MySQL/SQL Server on AWS/Azure/GCP
-   and Oracle Autonomous DB on OCI are all wired (provision → private managed DB →
-   BeyondTrust PRA tunnel → decommission). Backed by /api/databases (gated by
-   cloud_database_enabled). The "Register in Entitle" button is additionally gated
+{# Database infrastructure page. Two ways a row gets here: provisioned — Postgres/
+   MySQL/SQL Server on AWS/Azure/GCP and Oracle Autonomous DB on OCI, wired end to end
+   (provision → private managed DB → BeyondTrust PRA tunnel → decommission) — or
+   registered, a database that already existed, on-premises (cloud='local') or in a
+   cloud, recorded so it can be a Configuration Management target. Provisioning needs a
+   Terraform module, so it's cloud-only; registering needs only somewhere to reach.
+   Backed by /api/databases (gated by cloud_database_enabled), and the delete verb
+   follows source — a registered row is deregistered, not destroyed.
+   The "Register in Entitle" button is additionally gated
    on d.entitle_viable, which is false for two kinds of row: a REGISTERED database
    (no provisioning credential to hand the connector) and managed SQL Server (Cloud
    SQL / RDS-standard / Azure SQL Database can't grant the sysadmin/CONTROL SERVER
@@ -16,7 +21,7 @@
 <div class="max-w-6xl mx-auto py-8 px-4" x-data="databasesPage()" x-init="init()">
 
   <div class="flex items-center justify-between mb-1">
-    <h1 class="text-2xl font-bold text-gray-800">Cloud Databases</h1>
+    <h1 class="text-2xl font-bold text-gray-800">Databases</h1>
     <div class="flex items-center gap-2">
       {% if beyondtrust_enabled %}
       <button @click="openRegister()"
@@ -31,9 +36,12 @@
     </div>
   </div>
   <p class="text-sm text-gray-500 mb-6">
-    Managed databases are provisioned <strong>private</strong> (no public endpoint) and
-    reached only through a BeyondTrust PRA protocol-tunnel jump. <strong>PostgreSQL, MySQL,
-    and SQL Server</strong> across <strong>AWS, Azure, and GCP</strong> are all supported.
+    <strong>Register</strong> a database that already exists — on-premises or in any cloud —
+    so it can be a Configuration Management target. Or <strong>provision</strong> a new one:
+    managed databases are built <strong>private</strong> (no public endpoint) and reached only
+    through a BeyondTrust PRA protocol-tunnel jump. <strong>PostgreSQL, MySQL, and SQL
+    Server</strong> across <strong>AWS, Azure, and GCP</strong> are supported, plus Oracle on
+    OCI. Provisioning needs a Terraform module, so it's cloud-only; registering isn't.
   </p>
 
   <!-- Toast -->
@@ -41,7 +49,7 @@
        :class="toastType === 'error' ? 'bg-red-50 border-red-200 text-red-700' : 'bg-green-50 border-green-200 text-green-700'"
        class="mb-6 border rounded-lg px-4 py-3 text-sm" x-text="toast"></div>
 
-  <!-- All cloud databases (unified list) -->
+  <!-- All databases, provisioned and registered (unified list) -->
   <div>
     <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
       <div x-show="!loading && regions().length > 1" x-cloak
@@ -61,13 +69,15 @@
       </div>
       <div x-show="loading" x-cloak class="p-6 text-center text-sm text-gray-400">Loading…</div>
       <div x-show="!loading && databases.length === 0" x-cloak class="p-10 text-center text-sm text-gray-400">
-        No databases yet. Click <strong>Provision database</strong> to create a private managed instance.
+        No databases yet. Click <strong>Provision database</strong> to create a private managed
+        instance{% if beyondtrust_enabled %}, or <strong>Register existing</strong> to record one you
+        already run — on-premises or in a cloud{% endif %}.
       </div>
       <table x-show="!loading && databases.length > 0" x-cloak class="min-w-full text-sm">
         <thead>
           <tr class="text-left text-xs uppercase text-gray-500 bg-gray-50 border-b border-gray-200">
             <th class="px-4 py-3">Engine</th>
-            <th class="px-4 py-3">Cloud</th>
+            <th class="px-4 py-3">Location</th>
             <th class="px-4 py-3">Region</th>
             <th class="px-4 py-3">Status</th>
             <th class="px-4 py-3">Endpoint (private)</th>
@@ -83,7 +93,7 @@
                 <div class="text-xs text-gray-400" x-text="d.provider"></div>
               </td>
               <td class="px-4 py-3">
-                <span class="text-[10px] uppercase font-semibold px-1.5 py-0.5 rounded bg-slate-100 text-slate-600" x-text="d.cloud"></span>
+                <span class="text-[10px] uppercase font-semibold px-1.5 py-0.5 rounded bg-slate-100 text-slate-600" x-text="locationLabel(d.cloud)"></span>
               </td>
               <td class="px-4 py-3 text-gray-500" x-text="d.region"></td>
               <td class="px-4 py-3">
@@ -107,8 +117,11 @@
                         x-show="entitleRegEnabled && d.entitle_integration_id"
                         title="Remove this database's Entitle integration"
                         class="text-xs px-2 py-1 text-fuchsia-700 hover:underline ml-1">Deregister</button>
+                <!-- Verb follows source, the same branch decommission() takes: a registered
+                     row is deregistered, not destroyed. -->
                 <button @click="decommission(d)" x-show="d.status !== 'decommissioned' && d.status !== 'decommissioning'"
-                        class="text-xs px-2 py-1 text-red-600 hover:underline ml-1">Decommission</button>
+                        class="text-xs px-2 py-1 text-red-600 hover:underline ml-1"
+                        x-text="d.source === 'registered' ? 'Deregister' : 'Decommission'"></button>
               </td>
             </tr>
           </template>
@@ -827,6 +840,13 @@ function databasesPage() {
         decommissioned:   'bg-gray-100 text-gray-500',
       })[s] || 'bg-gray-100 text-gray-600';
     },
+
+    // 'local' is the on-prem case and is the one value that isn't a cloud, so the raw
+    // column would read LOCAL. Say what the register form says.
+    locationLabel(c) {
+      return c === 'local' ? 'On-premises' : (c || '');
+    },
+
     flash(m, t) { this.toast = m; this.toastType = t || 'success'; setTimeout(() => { this.toast = ''; }, 4500); },
   };
 }

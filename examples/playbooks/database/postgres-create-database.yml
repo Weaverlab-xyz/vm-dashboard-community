@@ -1,9 +1,10 @@
 # Create a PostgreSQL database.
-# Target: a managed PostgreSQL cloud database (Config Management → target kind
-# "Cloud database"). The dashboard injects the admin connection as extra-vars —
+# Target: a PostgreSQL database, provisioned or registered (Config Management → target
+# kind "Databases"). The dashboard injects the admin connection as extra-vars —
 # db_login_host / db_login_port / db_login_user / db_login_password — so you never
 # type or see the credential. This is a localhost play: Ansible connects OUT to the
-# private DB endpoint from the in-cloud runner.
+# DB endpoint — from the in-cloud runner for a cloud-hosted database, or from a sibling
+# container on the dashboard host for an on-premises one.
 #
 # extra_vars:
 #   target_db_name: appdb    # the database to create (required)

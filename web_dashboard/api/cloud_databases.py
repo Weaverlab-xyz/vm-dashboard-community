@@ -1,11 +1,15 @@
 """
-Cloud database infrastructure API — Phase 1 (gated by ``cloud_database_enabled``).
+Database infrastructure API — Phase 1 (gated by ``cloud_database_enabled``).
 
   POST   /api/databases                 — provision a managed DB (record + schedule apply)
-  GET    /api/databases                 — list dashboard-provisioned databases
+  POST   /api/databases/register        — record a database that already exists
+  GET    /api/databases                 — list databases, provisioned and registered
   GET    /api/databases/options         — pickers for the provision form (region-scoped)
   GET    /api/databases/{id}/connection — connection info (the PRA jump is Phase 2)
-  DELETE /api/databases/{id}            — decommission
+  DELETE /api/databases/{id}            — decommission, or deregister if registered
+
+Provisioning is cloud-only because it needs a Terraform module; registering needs
+only somewhere to reach, so it also covers on-premises (``cloud='local'``).
 
 Permission-gated via the ``cloud_database`` scope (read/write/delete), mirroring
 the AWS/Azure/GCP pages; list results are scoped to the caller's own rows for
@@ -27,12 +31,12 @@ from ..services.aws_service import AWSError
 from .auth import require_permission
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/api/databases", tags=["cloud-databases"])
+router = APIRouter(prefix="/api/databases", tags=["databases"])
 
 
 def _require_enabled() -> None:
     if not config_service.get_bool("cloud_database_enabled", settings.cloud_database_enabled):
-        raise HTTPException(status_code=403, detail="cloud database infrastructure is disabled")
+        raise HTTPException(status_code=403, detail="database infrastructure is disabled")
 
 
 class ProvisionRequest(BaseModel):
