@@ -211,7 +211,7 @@ def test_portainer_set_int_is_preserved():
 
 
 def test_resource_expiry_ints_round_trip():
-    """The auto-delete panel has SEVEN int fields — the most exposed to the ""-doesn't-
+    """The auto-delete panel has EIGHT int fields — the most exposed to the ""-doesn't-
     validate bug this file exists for. An unset read must return real ints and
     re-validate, or the whole panel 422s on save and the operator can't configure the
     feature at all."""
@@ -224,6 +224,7 @@ def test_resource_expiry_ints_round_trip():
         "resource_expiry_warn_hours": 24,
         "resource_expiry_grace_minutes": 30,
         "resource_expiry_sweep_interval_minutes": 30,
+        "resource_expiry_sweep_retention_days": 7,
         "resource_expiry_max_per_pass": 10,
     }
     for key, want in expected.items():

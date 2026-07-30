@@ -103,6 +103,7 @@ _DEFAULT_MAX_PER_PASS = 10
 _DEFAULT_MAX_TOTAL_HOURS = 720
 _DEFAULT_EXTEND_HOURS = 24
 _DEFAULT_WARN_HOURS = 24
+_DEFAULT_SWEEP_RETENTION_DAYS = 7
 
 
 # ── Config access ────────────────────────────────────────────────────────────
@@ -193,6 +194,33 @@ def sweep_interval_seconds() -> int:
     """Loop cadence for the background sweeper (see main._expiry_sweeper_loop)."""
     minutes = max(5, _int("resource_expiry_sweep_interval_minutes", _DEFAULT_SWEEP_INTERVAL_MIN))
     return minutes * 60
+
+
+def sweep_min_gap_seconds() -> int:
+    """Shortest gap allowed between two sweep *rows* — the dedupe window
+    ``expiry_reaper.enqueue_sweep_if_due`` enforces on top of its active-pass check.
+
+    Half the interval, which is the only value that satisfies both constraints at once:
+    long enough that the two ``gunicorn -w 2`` loops ticking within a second of each other
+    collapse to one row, and short enough that it can never suppress the *next* scheduled
+    tick, whatever the operator sets the interval to.
+
+    Derived rather than configurable on purpose. It is a property of the deployment
+    topology (two app workers on one timer), not a preference, so there is nothing here for
+    an operator to get right or wrong.
+    """
+    return max(1, sweep_interval_seconds() // 2)
+
+
+def sweep_retention_days() -> int:
+    """How long a *completed* sweep row is kept on /jobs. 0 = keep forever.
+
+    Needed because the sweep is the only job type that writes a row on a timer whether or
+    not it had anything to do: at the 30-minute default that is 48 rows a day, and nothing
+    else prunes the ``jobs`` table. Mirrors ``notify_policy.retention_days`` — including
+    its rule that only successful rows expire, since a failed pass is evidence.
+    """
+    return max(0, _int("resource_expiry_sweep_retention_days", _DEFAULT_SWEEP_RETENTION_DAYS))
 
 
 def max_per_pass() -> int:

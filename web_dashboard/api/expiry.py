@@ -148,6 +148,11 @@ async def force_sweep(
     ``force`` bypasses ONLY the "a pass is already queued or running" check. It does not
     bypass report-only mode, the arming delay, or the per-pass cap; those are what make
     the feature safe and no request may waive them.
+
+    ``min_gap_seconds=0`` opts out of the enqueue's recency window. That window exists to
+    collapse the two app workers' simultaneous *timer* ticks into one row; applying it here
+    would refuse an operator's button for up to half an interval and report it as "already
+    queued or running", which would be a plain lie. A human pressing Run Sweep means now.
     """
     from ..services import expiry_policy
     if not expiry_policy.enabled():
@@ -155,7 +160,7 @@ async def force_sweep(
             status_code=400,
             detail="The auto-delete timer is disabled. Enable it in Settings first.")
 
-    job_id = expiry_reaper.enqueue_sweep_if_due(db)
+    job_id = expiry_reaper.enqueue_sweep_if_due(db, min_gap_seconds=0)
     if job_id is None and force:
         from ..services import job_service
         job_id = job_service.create_job(

@@ -107,6 +107,97 @@ def test_the_enqueue_guard_checks_for_an_active_pass():
     assert "SWEEP_JOB_TYPE" in src or "expiry_sweep" in src
 
 
+def test_the_enqueue_guard_also_checks_recency():
+    """The active-pass check is NOT sufficient on its own, and this is the property that
+    says so in the source rather than in a comment.
+
+    ``ACTIVE_STATUSES`` is a liveness test. A sweep with nothing to reap completes in well
+    under a second, and with three worker replicas polling every 2s the first row is
+    frequently already ``completed`` by the time the second gunicorn worker looks — so the
+    liveness check passes and a duplicate is created. Measured on the live install before
+    the recency term existed: 5 of 55 rows were pairs 0.13–0.4s apart. Harmless while a
+    pass only reports; under enforce it is two destroy enqueues for one resource.
+
+    **A liveness-based dedupe cannot hold when the work is instantaneous.** Worth reading
+    before writing the next "is one already running?" check anywhere in this codebase.
+    """
+    fn = _fn(_REAPER, "enqueue_sweep_if_due")
+    src = ast.unparse(fn)
+    assert "min_gap_seconds" in src, (
+        "enqueue_sweep_if_due has no recency window — two app workers on one timer will "
+        "produce two sweep rows per tick whenever a pass finishes inside the tick")
+    assert "created_at" in src, (
+        "the recency window does not look at Job.created_at, so it cannot be measuring "
+        "how long ago the last pass was enqueued")
+
+
+# ── sweep-history retention: what a prune may and may not delete ──────────────
+
+def test_the_prune_is_scoped_to_the_sweep_job_type():
+    """THE safety property of prune_sweep_history, and why it is not a general
+    "prune old jobs" helper.
+
+    A cloud VM has no inventory table: its deploy Job row IS its record of existence,
+    which is why `job:<id>` is already its inventory id and why `expires_at` rides on that
+    row. Deleting job rows by age alone would therefore delete VMs from the inventory while
+    leaving them running and billing — the exact orphan this whole feature exists to
+    prevent. A sweep row is the one job type referencing no resource at all.
+    """
+    fn = _fn(_REAPER, "prune_sweep_history")
+    src = ast.unparse(fn)
+    assert "SWEEP_JOB_TYPE" in src, (
+        "prune_sweep_history is not scoped to expiry_sweep rows — it can delete the deploy "
+        "job rows that ARE the VM inventory")
+    assert "'completed'" in src or '"completed"' in src, (
+        "prune_sweep_history is not restricted to completed rows — a failed pass is "
+        "evidence and must not be swept away before an operator has seen it")
+    assert "JobLog" in src, (
+        "prune_sweep_history deletes jobs but not their job_logs; JobLog has no foreign "
+        "key to jobs, so nothing cascades and the log rows become unreachable orphans")
+
+
+def test_only_the_prune_deletes_rows():
+    """Nothing else in the reaper may issue a delete. Its whole design is that teardown is
+    handed to the queue and the only mutation it makes itself is to `expires_at` — a
+    `.delete()` anywhere else would be a resource *record* being removed instead of a
+    resource being destroyed, which is how an orphan is born."""
+    offenders = set()
+    for node in ast.walk(ast.parse(_src(_REAPER))):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if node.name == "prune_sweep_history":
+            continue
+        for inner in ast.walk(node):
+            if isinstance(inner, ast.Call) and isinstance(inner.func, ast.Attribute) \
+                    and inner.func.attr == "delete":
+                offenders.add(node.name)
+    assert not offenders, (
+        f"expiry_reaper deletes rows outside prune_sweep_history: {sorted(offenders)}")
+
+
+def test_the_sweep_prunes_its_own_history():
+    """No second timer: the pass that writes the rows prunes them, the same shape as
+    notification_service's drain loop. A prune nobody calls is retention that silently
+    isn't happening."""
+    refs = _names(_fn(_REAPER, "run"))
+    assert "prune_sweep_history" in refs, (
+        "run() never prunes — the jobs table grows at 48 sweep rows/day forever")
+
+
+def test_the_hidden_set_and_the_pruned_set_cannot_diverge():
+    """/jobs hides completed routine rows; the reaper deletes completed sweep rows. If the
+    two ever disagreed a row would be either permanently invisible yet kept forever, or
+    visible right up to the moment it silently vanished."""
+    jobsvc = _src(_JOBSVC)
+    m = re.search(r"ROUTINE_JOB_TYPES\s*=\s*\(([^)]*)\)", jobsvc)
+    assert m, "job_service.ROUTINE_JOB_TYPES is gone — /jobs has no way to hide the sweep"
+    assert "expiry_sweep" in m.group(1), (
+        "expiry_sweep is not in ROUTINE_JOB_TYPES, so 48 rows/day are hidden from nobody")
+    assert '"completed"' in jobsvc, (
+        "the routine filter does not restrict itself to completed rows — a FAILED sweep "
+        "would be hidden from the dashboard's failed-jobs panel")
+
+
 # ── advisory-lock id collision ────────────────────────────────────────────────
 
 def _lock_ids(path):

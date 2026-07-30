@@ -32,6 +32,9 @@ def _install_stubs():
     sa = types.ModuleType("sqlalchemy")
     sa.text = lambda s: s
     sa.func = types.SimpleNamespace(count=lambda *a, **k: None)
+    # list_jobs builds `~and_(...)` for its routine-job filter. The expression only has to
+    # survive being constructed and inverted — the fake query never interprets it.
+    sa.and_ = lambda *a, **k: type("_Expr", (), {"__invert__": lambda s: s})()
     sa_exc = types.ModuleType("sqlalchemy.exc")
     sa_exc.IntegrityError = type("IntegrityError", (Exception,), {})
     sa_orm = types.ModuleType("sqlalchemy.orm")

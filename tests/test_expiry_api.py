@@ -39,6 +39,8 @@ def _install_stubs():
     sa = types.ModuleType("sqlalchemy")
     sa.__path__ = []
     sa.text = lambda s: s
+    # job_service.list_jobs builds `~and_(...)`; only construction + inversion matter here.
+    sa.and_ = lambda *a, **k: type("_Expr", (), {"__invert__": lambda s: s})()
     sa_orm = types.ModuleType("sqlalchemy.orm")
     sa_orm.Session = type("Session", (), {})
     sa.orm = sa_orm
@@ -337,6 +339,21 @@ def test_the_force_sweep_does_not_bypass_the_safety_gates():
     for waived in ("dry_run", "armed", "max_per_pass", "ARM_DELAY"):
         assert waived not in body, (
             f"force_sweep touches {waived} — force must only bypass the active-pass check")
+
+
+def test_the_force_sweep_opts_out_of_the_recency_window():
+    """The enqueue's recency window exists to collapse the two app workers' simultaneous
+    TIMER ticks into one row. Applied to this endpoint it would refuse an operator's button
+    for up to half a sweep interval and report it as "already queued or running" — a plain
+    lie about why nothing happened. Only the timer path ever fires twice."""
+    src = _api_src()
+    fn = next(n for n in ast.walk(ast.parse(src))
+              if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+              and n.name == "force_sweep")
+    body = ast.unparse(_strip_docstring(fn))
+    assert "min_gap_seconds=0" in body, (
+        "force_sweep must pass min_gap_seconds=0 — otherwise Run Sweep silently no-ops "
+        "for half an interval after every scheduled pass")
 
 
 if __name__ == "__main__":

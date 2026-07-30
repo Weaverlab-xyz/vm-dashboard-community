@@ -42,12 +42,22 @@ async def list_jobs(
     status: Optional[str] = Query(None),
     workgroup: Optional[str] = Query(None),
     batch_id: Optional[str] = Query(None, description="Only jobs from one bulk run"),
+    include_routine: bool = Query(
+        False, description="Include completed timer-driven maintenance passes "
+                           "(job_service.ROUTINE_JOB_TYPES). Excluded by default."),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """
     List jobs with optional filters.
     Non-admin users only see their own jobs.
+
+    Completed rows of ``job_service.ROUTINE_JOB_TYPES`` are hidden unless
+    ``include_routine`` is set. The default is what makes both this page and the
+    dashboard's recent-activity widget readable: the auto-delete sweep writes 48 rows a
+    day whether or not it found anything, so a real deploy drops off the first page within
+    hours. A *failed* routine pass is never hidden, so the dashboard's failed-jobs panel
+    keeps working — see the constant for why that split matters.
     """
     owner_filter = None if can_audit_jobs(current_user) else current_user.username
     jobs, total = job_service.list_jobs(
@@ -58,6 +68,7 @@ async def list_jobs(
         created_by=owner_filter,
         workgroup=workgroup,
         batch_id=batch_id,
+        include_routine=include_routine,
     )
     return JobListResponse(
         jobs=[_job_to_response(j) for j in jobs],

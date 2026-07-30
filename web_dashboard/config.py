@@ -871,6 +871,10 @@ class Settings(BaseSettings):
     resource_expiry_warn_hours: int = 24           # "expiring soon" window
     resource_expiry_grace_minutes: int = 30        # floored at REAP_GRACE_MIN_FLOOR
     resource_expiry_sweep_interval_minutes: int = 30
+    # How long a COMPLETED sweep row survives on /jobs. 0 = keep forever. The sweep is the
+    # only job type written on a timer whether or not it had work — 48 rows/day at the
+    # default interval — and nothing else prunes `jobs`. Failed passes never expire.
+    resource_expiry_sweep_retention_days: int = 7
     resource_expiry_max_per_pass: int = 10         # capped at MAX_PER_PASS_CEILING
     resource_expiry_allow_never: bool = False      # may an admin clear a timer outright
     resource_expiry_exempt_workgroups: str = ""    # CSV; mirrors the admission_* lists

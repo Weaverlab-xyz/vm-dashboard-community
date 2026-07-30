@@ -49,6 +49,44 @@ both read unambiguously as machine action.
 
 ---
 
+## One row per tick
+
+Both `gunicorn -w 2` workers run the timer, so both reach the same tick within about a
+second of each other. Three checks collapse that into a single sweep, and the third is not
+redundant:
+
+1. a Postgres advisory lock serializes the two callers;
+2. the **active-pass** check refuses while a sweep is queued, pending or running;
+3. the **recency** check refuses while a sweep merely *finished* moments ago.
+
+The third exists because the second provably does not hold on its own. `ACTIVE_STATUSES` is
+a liveness test, and a sweep with nothing to reap finishes in well under a second — so with
+three worker replicas polling every two seconds, the first row is often already `completed`
+by the time the second app worker looks. Before the recency check was added, 5 of 55 rows on
+a live install were duplicate pairs 0.13–0.4 s apart. **A liveness-based dedupe cannot hold
+when the work is instantaneous.**
+
+The window is half the sweep interval: wide enough to swallow a duplicate tick, never wide
+enough to suppress the next scheduled one. **Run sweep now** opts out of it, because a human
+pressing the button means now.
+
+### Why `/jobs` looks quiet
+
+A sweep records a job whether or not it found anything — 48 rows a day at the default
+interval, against a `jobs` table nothing else prunes. Two things keep that from burying real
+work:
+
+- **Job History hides completed sweeps.** Tick **Show routine sweeps** to see them.
+- **Completed sweeps are deleted past *Keep sweep history*** (7 days by default).
+
+Both rules stop at `completed`. A **failed or cancelled** sweep is always listed, always
+kept, and still appears in the dashboard's failed-jobs panel — a pass that broke is the one
+you need to see. Retention only ever touches `expiry_sweep` rows: a VM's deploy job row *is*
+its inventory record, so pruning `jobs` by age alone would delete VMs from the inventory
+while leaving them running in the cloud.
+
+---
+
 ## What can carry a timer
 
 | Kind | Reapable | Teardown |
@@ -142,7 +180,8 @@ Panel labels, with the underlying key, since the keys are what the API and envir
 | Extend button adds | `resource_expiry_extend_hours` | `24` | Hours per click. |
 | Warn this long before | `resource_expiry_warn_hours` | `24` | Entering this window shows a dashboard warning and fires `resource.expiring`. |
 | Grace | `resource_expiry_grace_minutes` | `30` | Minutes past expiry before acting. Absorbs clock skew between app and worker. |
-| Sweep every | `resource_expiry_sweep_interval_minutes` | `30` | Read live, so a change lands on the next pass without a restart. |
+| Sweep every | `resource_expiry_sweep_interval_minutes` | `30` | Read live, so a change lands on the next pass without a restart. Also sets the cadence of everything below — at `30` the sweep records **48 job rows a day**. |
+| Keep sweep history | `resource_expiry_sweep_retention_days` | `7` | Days a *completed* sweep row survives on `/jobs`. `0` = keep forever. A failed pass never expires. |
 | Max per sweep | `resource_expiry_max_per_pass` | `10` | Bounds the damage rate. Targets go oldest-overdue-first, and the cap counts **deletions, not attempts** — otherwise a few unreapable rows at the front would starve everything behind them forever. |
 | Allow admins to remove a timer | `resource_expiry_allow_never` | off | Off means the most anyone can do is extend. |
 | Exempt workgroups | `resource_expiry_exempt_workgroups` | *blank* | CSV. **Only VMs carry a workgroup** — databases, clusters and desktop seats don't, so pin those individually instead. |
@@ -248,6 +287,15 @@ to deliver has still burned it.
 **A timer I extended came back shorter than I asked for.** The maximum total lifetime,
 counted from when the resource was created rather than from now.
 
+**No sweeps in Job History.** Successful ones are hidden — tick **Show routine sweeps**. If
+they are missing with the box ticked, either the feature is off, or they aged past *Keep
+sweep history*. The Settings panel's last-sweep summary is read from config, not from `/jobs`,
+so it survives retention and is the better place to confirm the sweep is running at all.
+
+**Two sweeps at the same timestamp.** Fixed — see *One row per tick*. Pairs seconds apart in
+history that predate the fix are harmless: while **Observe only** is on, a duplicate pass just
+reported the same thing twice.
+
 ---
 
 ## Where things live
@@ -255,10 +303,11 @@ counted from when the resource was created rather than from now.
 | | |
 |---|---|
 | `services/expiry_policy.py` | Pure: what timer a new resource gets, whether one may be reaped, what an extend resolves to. The floors live here as constants. Stdlib + `config_service` only. |
-| `services/expiry_reaper.py` | The sweep, the two arming clocks, and the write behind Extend. |
+| `services/expiry_reaper.py` | The sweep, the two arming clocks, the write behind Extend, and `prune_sweep_history` — which may only ever delete `expiry_sweep` rows. |
 | `api/expiry.py` | Set / status / run-a-sweep endpoints. |
 | `main.py` | `_expiry_sweeper_loop` — enqueues, never sweeps. |
 | `jobs_worker.py` | Claims `expiry_sweep` and runs the pass. |
+| `services/job_service.py` | `ROUTINE_JOB_TYPES` + the `include_routine` filter that hides completed sweeps on `/jobs`. |
 | `templates/inventory/list.html` | The Expires column and the Extend modal. |
 | `templates/settings.html` | The panel. |
 | `jobs`, `cloud_databases`, `k8s_clusters` | Each carries `expires_at` + `expiry_warned_at`. |

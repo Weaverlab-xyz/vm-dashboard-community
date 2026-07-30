@@ -29,10 +29,43 @@ if _ROOT not in sys.path:
 CONF = {}
 
 
+class _Col:
+    """One column of a stub model, inside a filter expression.
+
+    Every operator returns a plain True: the fake sessions below never interpret a filter
+    — each test scripts the query's *result* instead — so a column only has to survive
+    being compared. Assertions are about the reaper's decisions, not about SQLAlchemy.
+    """
+    def __eq__(self, other): return True
+    def __ne__(self, other): return True
+    def __lt__(self, other): return True
+    def __le__(self, other): return True
+    def __gt__(self, other): return True
+    def __ge__(self, other): return True
+    def __hash__(self): return id(self)
+    def in_(self, *a, **k): return True
+    def notin_(self, *a, **k): return True
+
+
+class _Model(type):
+    """Metaclass making *any* attribute of a stub model a column.
+
+    Deliberately open rather than a fixed list of columns. expiry_reaper builds its filters
+    inside functions that catch broad exceptions on purpose (a sweep must never take the app
+    down), so a column this stub had not been told about would raise AttributeError *inside*
+    that handler — where it reads as a clean "nothing to enqueue" and the test passes for
+    exactly the wrong reason. Being open means a new filter can never fail that way.
+    """
+    def __getattr__(cls, name):
+        return _Col()
+
+
 def _install_stubs():
     sa = types.ModuleType("sqlalchemy")
     sa.__path__ = []
     sa.text = lambda s: s
+    # job_service.list_jobs builds `~and_(...)`; only construction + inversion matter here.
+    sa.and_ = lambda *a, **k: type("_Expr", (), {"__invert__": lambda s: s})()
     sa_orm = types.ModuleType("sqlalchemy.orm")
     sa_orm.Session = type("Session", (), {})
     sa.orm = sa_orm
@@ -50,7 +83,7 @@ def _install_stubs():
     # path in these tests silently does nothing.
     for name in ("CloudDatabase", "Job", "K8sCluster", "VirtualDesktop", "User",
                  "AuditLog", "JobLog", "NotificationDelivery", "NotificationEndpoint"):
-        setattr(db, name, type(name, (), {"id": None}))
+        setattr(db, name, _Model(name, (), {}))
     db.get_db = lambda: None
     db._is_sqlite = True
     sys.modules.setdefault("web_dashboard.database", db)
@@ -576,6 +609,200 @@ def test_a_resource_with_no_timer_is_never_warned():
 
     assert reaper._warn_expiring(db, [item], now_ts=NOW.timestamp()) == 0
     assert sent == []
+
+
+# ── the enqueue guard: exactly one row per tick ───────────────────────────────
+#
+# The regression these cover was found on the live install, not here: 5 of 55 sweep rows
+# were duplicate pairs 0.13–0.4s apart. Both `gunicorn -w 2` loops tick together, and the
+# active-pass check is a LIVENESS test — with an empty pass completing in ~0s and three
+# worker replicas polling every 2s, the first row is often already `completed` before the
+# second app worker looks. No unit test could have caught it, because each check is
+# individually correct; only the pair is wrong.
+
+class _EnqueueDB(_FakeDB):
+    """Scripts the enqueue's lookups in order: active-pass check, then recency check.
+
+    Consuming one scripted answer per ``.first()`` makes the NUMBER of lookups observable
+    too, which is the only honest way to assert the force-sweep opt-out: skipping the
+    recency check must mean "it never looked", not "it looked and found nothing".
+    """
+    def __init__(self, firsts=()):
+        super().__init__()
+        self._firsts = list(firsts)
+        self.lookups = 0
+
+    def query(self, *a, **k):
+        return self
+
+    def filter(self, *a, **k):
+        return self
+
+    def first(self):
+        self.lookups += 1
+        return self._firsts.pop(0) if self._firsts else None
+
+
+def _enqueue_patch(db):
+    """Record enqueued sweeps on the fake. Lighter than _patch, which also replaces
+    db.query — here the session itself is the thing under test."""
+    from web_dashboard.services import job_service
+
+    def _create_job(_db, job_type=None, created_by=None, **kw):
+        db.created.append((job_type, created_by))
+        return types.SimpleNamespace(id=f"sweep-{len(db.created)}")
+
+    job_service.create_job = _create_job
+
+
+def test_an_idle_tick_enqueues_exactly_one_sweep():
+    CONF.clear()
+    CONF["resource_expiry_enabled"] = "1"
+    db = _EnqueueDB()
+    _enqueue_patch(db)
+
+    job_id = reaper.enqueue_sweep_if_due(db)
+    assert job_id == "sweep-1"
+    assert db.created == [("expiry_sweep", "system")]
+    assert db.lookups == 2, "both the active-pass and recency checks must run"
+
+
+def test_a_pass_still_in_flight_blocks_a_second():
+    """The original guard, unchanged: a queued/pending/running sweep is enough."""
+    CONF.clear()
+    CONF["resource_expiry_enabled"] = "1"
+    db = _EnqueueDB(firsts=(("sweep-0",),))
+    _enqueue_patch(db)
+
+    assert reaper.enqueue_sweep_if_due(db) is None
+    assert db.created == []
+    assert db.lookups == 1, "an active pass should short-circuit before the recency check"
+
+
+def test_a_pass_that_just_completed_blocks_the_duplicate_tick():
+    """THE regression test. Nothing is active — the first row already finished — and the
+    old guard therefore said "go", producing the second row seen live 0.4s after the
+    first. The recency check is what refuses it."""
+    CONF.clear()
+    CONF["resource_expiry_enabled"] = "1"
+    db = _EnqueueDB(firsts=(None, ("sweep-0",)))     # not active, but very recent
+    _enqueue_patch(db)
+
+    assert reaper.enqueue_sweep_if_due(db) is None
+    assert db.created == [], "a duplicate sweep was enqueued for the same tick"
+    assert db.lookups == 2
+
+
+def test_the_operator_force_path_skips_the_recency_check():
+    """api/expiry.py passes min_gap_seconds=0. A human who just pressed Run Sweep means
+    now, and the window would otherwise refuse them for up to half an interval while
+    reporting "already queued or running" — which would be false."""
+    CONF.clear()
+    CONF["resource_expiry_enabled"] = "1"
+    db = _EnqueueDB(firsts=(None, ("sweep-0",)))     # a recent row it must ignore
+    _enqueue_patch(db)
+
+    assert reaper.enqueue_sweep_if_due(db, min_gap_seconds=0) == "sweep-1"
+    assert db.lookups == 1, "the recency row must not even be consulted"
+
+
+def test_the_force_path_still_respects_an_active_pass():
+    """min_gap_seconds=0 waives the recency window and nothing else — two concurrent
+    passes remain two destroy enqueues for the same resource."""
+    CONF.clear()
+    CONF["resource_expiry_enabled"] = "1"
+    db = _EnqueueDB(firsts=(("sweep-0",),))
+    _enqueue_patch(db)
+
+    assert reaper.enqueue_sweep_if_due(db, min_gap_seconds=0) is None
+    assert db.created == []
+
+
+# ── sweep-history retention ───────────────────────────────────────────────────
+
+class _PruneDB(_FakeDB):
+    """Records the delete()s a prune issued, keyed by the model it was querying."""
+    def __init__(self, ids=()):
+        super().__init__()
+        self._rows = [(i,) for i in ids]
+        self.model = None
+        self.deleted = {}
+        self.limited = None
+        self.fail_on_delete = False
+
+    def query(self, model, *a, **k):
+        self.model = getattr(model, "__name__", None)
+        return self
+
+    def filter(self, *a, **k):
+        return self
+
+    def limit(self, n):
+        self.limited = n
+        return self
+
+    def all(self):
+        return list(self._rows)
+
+    def delete(self, *a, **k):
+        if self.fail_on_delete:
+            raise RuntimeError("db exploded mid-prune")
+        self.deleted[self.model] = len(self._rows)
+        return len(self._rows)
+
+
+def test_a_prune_drops_the_rows_and_their_live_output():
+    """job_logs carries no foreign key to jobs, so nothing cascades — a prune that
+    forgot it would leave unreachable log rows keyed to a job id that no longer exists."""
+    CONF.clear()
+    CONF["resource_expiry_sweep_retention_days"] = "7"
+    db = _PruneDB(ids=("old-1", "old-2"))
+
+    assert reaper.prune_sweep_history(db) == 2
+    assert db.deleted.get("JobLog") == 2, "Live Output was orphaned, not deleted"
+    assert db.deleted.get("Job") == 2
+    assert db.commits == 1
+
+
+def test_a_prune_is_bounded_per_pass():
+    """The first prune on a long-lived install could face thousands of rows; an unbounded
+    delete would put that on the sweep's critical path."""
+    CONF.clear()
+    CONF["resource_expiry_sweep_retention_days"] = "7"
+    db = _PruneDB(ids=("old-1",))
+    reaper.prune_sweep_history(db)
+    assert db.limited == reaper._PRUNE_BATCH
+
+
+def test_retention_off_prunes_nothing_at_all():
+    """0 = keep forever, and it must not even issue the SELECT."""
+    CONF.clear()
+    CONF["resource_expiry_sweep_retention_days"] = "0"
+    db = _PruneDB(ids=("old-1",))
+
+    assert reaper.prune_sweep_history(db) == 0
+    assert db.model is None and db.deleted == {}
+
+
+def test_nothing_past_the_window_is_a_clean_no_op():
+    CONF.clear()
+    CONF["resource_expiry_sweep_retention_days"] = "7"
+    db = _PruneDB(ids=())
+
+    assert reaper.prune_sweep_history(db) == 0
+    assert db.deleted == {} and db.commits == 0
+
+
+def test_a_failed_prune_rolls_back_and_does_not_raise():
+    """A sweep that did its work must not be reported as failed because housekeeping
+    afterwards hit the database wrong."""
+    CONF.clear()
+    CONF["resource_expiry_sweep_retention_days"] = "7"
+    db = _PruneDB(ids=("old-1",))
+    db.fail_on_delete = True
+
+    assert reaper.prune_sweep_history(db) == 0
+    assert db.rollbacks == 1 and db.commits == 0
 
 
 if __name__ == "__main__":
