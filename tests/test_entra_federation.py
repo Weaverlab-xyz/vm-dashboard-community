@@ -5,7 +5,9 @@ Entra token authenticates and its group Object IDs match the RBAC `Group` bindin
 (bind_entra_group) — the real-identity JIT story extended from AKS to EKS. These lock
 in the pure pieces: the shared-app settings resolver (_entra_oidc_settings), and the
 token-free `kubectl oidc-login` kubeconfig transform (_entra_oidc_login_kubeconfig /
-build_entra_oidc_kubeconfig).
+build_entra_oidc_kubeconfig), plus the AKS leg of the same download
+(_entra_aks_user_login_kubeconfig), which flips Azure kubelogin out of the stored
+service-principal mode into an interactive device-code sign-in as the user.
 
 Stubs the DB / sqlalchemy imports so k8s_service loads without an app/DB (same as
 test_entra_group / test_pra_api_tunnel). Runs under pytest or standalone.
@@ -31,6 +33,13 @@ _db = types.ModuleType("web_dashboard.database")
 _db.Job = type("Job", (), {})
 _db.K8sCluster = type("K8sCluster", (), {"id": None})
 sys.modules.setdefault("web_dashboard.database", _db)
+
+# azure_service is lazily imported by the AKS transform, only for its two well-known
+# AAD app ids — stub it (real values) so no azure SDK is needed.
+_az = types.ModuleType("web_dashboard.services.azure_service")
+_az.AKS_AAD_SERVER_APP_ID = "6dae42f8-4368-4678-94ff-3960e28e3630"
+_az.AKS_AAD_CLIENT_APP_ID = "80faf920-1908-4b52-b5ef-a8e7bedfc67a"
+sys.modules.setdefault("web_dashboard.services.azure_service", _az)
 
 from web_dashboard.services import k8s_service as k  # noqa: E402
 
@@ -61,6 +70,31 @@ users:
 
 _OIDC = {"issuer": "https://login.microsoftonline.com/TENANT/v2.0",
          "client_id": "CLIENT-GUID", "username_claim": "oid", "groups_claim": "groups"}
+
+# A repointed AKS kubeconfig as _assemble_aks_kubeconfig writes it: `kubelogin` in
+# service-principal mode, which reads AAD_SERVICE_PRINCIPAL_CLIENT_ID/_SECRET from the
+# environment — the dashboard's identity, not the downloading user's.
+_AKS_REPOINTED_SPN = """
+apiVersion: v1
+kind: Config
+current-context: k8s-aks
+clusters:
+- name: k8s-aks
+  cluster:
+    server: https://127.0.0.1:6443
+    tls-server-name: k8s-aks-abc.hcp.eastus.azmk8s.io
+    certificate-authority-data: TEST_CA_B64
+contexts:
+- name: k8s-aks
+  context: {cluster: k8s-aks, user: k8s-aks}
+users:
+- name: k8s-aks
+  user:
+    exec:
+      apiVersion: client.authentication.k8s.io/v1beta1
+      command: kubelogin
+      args: [get-token, --server-id, 6dae42f8-4368-4678-94ff-3960e28e3630, --login, spn]
+"""
 
 
 def _with_cfg(mapping):
@@ -201,6 +235,90 @@ def test_connect_gateway_kubeconfig_is_token_free():
     assert exec_blk.get("provideClusterInfo") is True
     assert "token" not in cfg["users"][0]["user"]   # picks up the active workforce identity
     assert "k8s-aws-v1." not in out and "client-key-data" not in out
+
+
+# ── AKS (native managed-AAD, but the stored exec is service-principal mode) ───────
+
+def test_aks_download_is_user_login_not_spn():
+    restore = _with_cfg({"azure_tenant_id": "T-123"})
+    try:
+        out = k._entra_aks_user_login_kubeconfig(_AKS_REPOINTED_SPN)
+    finally:
+        restore()
+    cfg = yaml.safe_load(out)
+    exec_blk = cfg["users"][0]["user"]["exec"]
+    args = exec_blk["args"]
+    assert exec_blk["command"] == "kubelogin"          # Azure kubelogin, not int128's
+    # No longer the dashboard's service principal: `--login spn` reads
+    # AAD_SERVICE_PRINCIPAL_CLIENT_ID/_SECRET from the operator's environment.
+    assert "spn" not in args
+    assert args[args.index("--login") + 1] == "devicecode"
+    # Interactive as the *user*: well-known AKS AAD client app + the lab tenant, with
+    # the server-id (the token audience) preserved from the stored kubeconfig.
+    assert args[args.index("--client-id") + 1] == "80faf920-1908-4b52-b5ef-a8e7bedfc67a"
+    assert args[args.index("--tenant-id") + 1] == "T-123"
+    assert args[args.index("--server-id") + 1] == "6dae42f8-4368-4678-94ff-3960e28e3630"
+    # Token-free: no injected credential of any kind.
+    assert "token" not in cfg["users"][0]["user"]
+    assert "auth-provider" not in cfg["users"][0]["user"]
+    assert "client-key-data" not in out and "client-secret" not in out
+    assert "AAD_SERVICE_PRINCIPAL" not in out
+    # The cluster block (repoint + CA) is untouched.
+    cl = cfg["clusters"][0]["cluster"]
+    assert cl["server"] == "https://127.0.0.1:6443"
+    assert cl["certificate-authority-data"] == "TEST_CA_B64"
+    assert cl["tls-server-name"] == "k8s-aks-abc.hcp.eastus.azmk8s.io"
+
+
+def test_aks_registered_user_mode_exec_is_left_alone():
+    # A user-uploaded kubeconfig that already signs in as a person (azurecli here;
+    # equally devicecode/interactive) must not be rewritten.
+    src = _AKS_REPOINTED_SPN.replace("--login, spn", "--login, azurecli")
+    restore = _with_cfg({"azure_tenant_id": "T-123"})
+    try:
+        args = yaml.safe_load(k._entra_aks_user_login_kubeconfig(src))["users"][0]["user"]["exec"]["args"]
+    finally:
+        restore()
+    assert args[args.index("--login") + 1] == "azurecli"
+    assert "--client-id" not in args   # nothing injected
+
+
+def test_aks_legacy_azure_authprovider_is_left_alone():
+    src = """
+apiVersion: v1
+kind: Config
+current-context: k8s-aks
+clusters:
+- name: k8s-aks
+  cluster: {server: 'https://127.0.0.1:6443', certificate-authority-data: TEST_CA_B64}
+contexts:
+- name: k8s-aks
+  context: {cluster: k8s-aks, user: k8s-aks}
+users:
+- name: k8s-aks
+  user:
+    auth-provider:
+      name: azure
+      config: {apiserver-id: SRV, client-id: CLI, tenant-id: T, environment: AzurePublicCloud}
+"""
+    restore = _with_cfg({"azure_tenant_id": "T-123"})
+    try:
+        user = yaml.safe_load(k._entra_aks_user_login_kubeconfig(src))["users"][0]["user"]
+    finally:
+        restore()
+    assert user["auth-provider"]["name"] == "azure" and "exec" not in user
+
+
+def test_aks_download_raises_without_tenant():
+    restore = _with_cfg({})   # no azure_tenant_id — kubelogin can't do a device code
+    try:
+        try:
+            k._entra_aks_user_login_kubeconfig(_AKS_REPOINTED_SPN)
+            raise AssertionError("expected K8sError when azure_tenant_id unset")
+        except k.K8sError:
+            pass
+    finally:
+        restore()
 
 
 if __name__ == "__main__":

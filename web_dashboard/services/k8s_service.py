@@ -3125,6 +3125,66 @@ def _entra_oidc_login_kubeconfig(kubeconfig: str, oidc: dict) -> str:
     return yaml.safe_dump(cfg, default_flow_style=False, sort_keys=False)
 
 
+# kubelogin login modes that authenticate as a *machine* identity rather than the
+# person holding the file. `spn` is what _assemble_aks_kubeconfig writes for the
+# runner (it reads AAD_SERVICE_PRINCIPAL_CLIENT_ID/_SECRET from the environment —
+# the dashboard's SP); msi/workloadidentity are the same problem from a registered
+# kubeconfig. Everything else (devicecode / interactive / azurecli / ropc) is
+# already the user, and is left alone.
+_KUBELOGIN_MACHINE_LOGINS = ("spn", "msi", "workloadidentity")
+
+
+def _entra_aks_user_login_kubeconfig(kubeconfig: str) -> str:
+    """Pure transform: rewrite an AKS ``kubelogin`` exec from service-principal mode
+    to interactive **device-code** as the end user, preserving ``--server-id`` and
+    adding the well-known AKS AAD client app id + the tenant. Token-free — no static
+    credential is written, and the cluster block (CA / repointed server) is untouched.
+
+    Without this the download carries ``--login spn``, which authenticates as whatever
+    ``AAD_SERVICE_PRINCIPAL_CLIENT_ID``/``_SECRET`` are in the operator's environment:
+    either nothing (the file just fails) or the *dashboard's* service principal, which
+    defeats the real-identity/JIT story the download exists for.
+
+    Device-code for the same reason as EKS (see ``_entra_oidc_login_kubeconfig``): the
+    browser authcode flow SSOs the operator into the *machine's own* tenant, the wrong
+    one for a lab/demo tenant. A registered (user-uploaded) kubeconfig that already
+    authenticates as a person — a user-mode exec, or the legacy ``azure``
+    auth-provider — is left exactly as it is."""
+    from . import azure_service
+    cfg = yaml.safe_load(kubeconfig) or {}
+    tenant = ""
+    for u in (cfg.get("users") or []):
+        user = u.get("user") or {}
+        if (user.get("auth-provider") or {}).get("name") == "azure":
+            continue    # legacy authprovider — already an interactive user login
+        exec_blk = user.get("exec") or {}
+        if (exec_blk.get("command") or "") not in ("kubelogin", "kubelogin.exe"):
+            continue
+        args = list(exec_blk.get("args") or [])
+        login = args[args.index("--login") + 1] if (
+            "--login" in args and args.index("--login") + 1 < len(args)) else ""
+        if login not in _KUBELOGIN_MACHINE_LOGINS:
+            continue    # devicecode / azurecli / interactive (or kubelogin's default) — the user's own
+        if not tenant:
+            tenant = _cfg("azure_tenant_id")
+            if not tenant:
+                raise K8sError("no Entra tenant — set azure_tenant_id on Settings (Azure "
+                               "panel) so the AKS kubeconfig can sign the user in "
+                               "interactively instead of as the dashboard's service principal")
+        server_id = args[args.index("--server-id") + 1] if (
+            "--server-id" in args and args.index("--server-id") + 1 < len(args)) \
+            else azure_service.AKS_AAD_SERVER_APP_ID
+        exec_blk["args"] = [
+            "get-token",
+            "--server-id", server_id,
+            "--client-id", azure_service.AKS_AAD_CLIENT_APP_ID,
+            "--tenant-id", tenant,
+            "--login", "devicecode",
+        ]
+        exec_blk.setdefault("interactiveMode", "IfAvailable")
+    return yaml.safe_dump(cfg, default_flow_style=False, sort_keys=False)
+
+
 def _connect_gateway_kubeconfig(context_name: str, server: str) -> str:
     """A token-free Connect Gateway kubeconfig for GKE: server = the public gateway
     URL, auth = ``gke-gcloud-auth-plugin`` (picks up the active gcloud/workforce
@@ -3152,10 +3212,11 @@ def build_entra_oidc_kubeconfig(db: Session, cluster_id: str) -> str:
     """Return a token-free kubeconfig for real-identity access, authenticating as the
     USER's own Entra identity (not the dashboard's). EKS: the stored kubeconfig
     repointed at the API tunnel with the exec block replaced by ``kubectl oidc-login``
-    (int128 kubelogin) against the shared Entra app. AKS: the existing kubelogin
-    (Azure) kubeconfig repointed at the tunnel — already Entra. GKE: a **Connect
-    Gateway** kubeconfig (NOT the tunnel) — the user's workforce identity reaches the
-    private cluster through the gateway."""
+    (int128 kubelogin) against the shared Entra app. AKS: the Azure kubelogin
+    kubeconfig repointed at the tunnel, with its exec flipped out of service-principal
+    mode into an interactive device-code sign-in. GKE: a **Connect Gateway** kubeconfig
+    (NOT the tunnel) — the user's workforce identity reaches the private cluster
+    through the gateway."""
     row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
     if row is None:
         raise K8sError(f"cluster {cluster_id} not found")
@@ -3172,7 +3233,7 @@ def build_entra_oidc_kubeconfig(db: Session, cluster_id: str) -> str:
     local_port = int(_cfg("k8s_api_tunnel_local_port", "6443"))
     kubeconfig = _repoint_kubeconfig_to_tunnel(resolve_kubeconfig(db, cluster_id), local_port)
     if row.cloud == "azure":
-        return kubeconfig  # AKS kubelogin exec is already the user's Entra identity
+        return _entra_aks_user_login_kubeconfig(kubeconfig)
     return _entra_oidc_login_kubeconfig(kubeconfig, _entra_oidc_settings())
 
 

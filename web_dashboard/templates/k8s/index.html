@@ -1265,7 +1265,13 @@ function k8sPage() {
         const resp = await fetch(`/api/k8s/clusters/${c.id}/entra-kubeconfig`, {
           headers: { ...(token ? { 'Authorization': `Bearer ${token}` } : {}) },
         });
-        if (!resp.ok) { this.flash(`kubeconfig download failed (HTTP ${resp.status}).`, 'error'); return; }
+        if (!resp.ok) {
+          // Surface the server's reason (e.g. azure_tenant_id unset) — a bare HTTP code
+          // is unactionable for a config gap.
+          const detail = await resp.json().then(j => j && j.detail).catch(() => '');
+          this.flash(detail || `kubeconfig download failed (HTTP ${resp.status}).`, 'error');
+          return;
+        }
         const text = await resp.text();
         const url = URL.createObjectURL(new Blob([text], { type: 'application/yaml' }));
         const a = document.createElement('a');
@@ -1275,7 +1281,8 @@ function k8sPage() {
         URL.revokeObjectURL(url);
         this.flash(c.cloud === 'gcp'
           ? 'Connect Gateway kubeconfig downloaded — run "gcloud auth login --login-config" first, then point KUBECONFIG at it.'
-          : 'Entra kubeconfig downloaded — connect the API tunnel, then point KUBECONFIG at it (EKS uses device-code sign-in).');
+          : 'Entra kubeconfig downloaded — connect the API tunnel, then point KUBECONFIG at it. '
+            + 'The first kubectl prints a device code to sign in as yourself.');
       } catch (e) {
         this.flash(e.message || 'kubeconfig download failed.', 'error');
       }

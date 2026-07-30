@@ -149,6 +149,11 @@ def invalidate_credentials() -> None:
 # the kubeconfig's exec block doesn't carry an explicit --server-id.
 AKS_AAD_SERVER_APP_ID = "6dae42f8-4368-4678-94ff-3960e28e3630"
 
+# The well-known AAD *client* application kubelogin uses for interactive (device-code
+# / browser) AKS sign-in as a real person. First-party and present in every tenant —
+# `az aks get-credentials` writes this same id into the exec block.
+AKS_AAD_CLIENT_APP_ID = "80faf920-1908-4b52-b5ef-a8e7bedfc67a"
+
 
 def aks_get_token(server_id: str = AKS_AAD_SERVER_APP_ID) -> str:
     """Mint a short-lived AAD bearer token for an AKS cluster — the server-side
