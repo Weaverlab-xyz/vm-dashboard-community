@@ -6,6 +6,7 @@ the FastAPI event loop free (same pattern as services/powershell.py).
 import asyncio
 import base64
 import json
+import logging
 from typing import Optional
 from datetime import datetime, timezone
 
@@ -15,6 +16,8 @@ try:
     _boto3_available = True
 except ImportError:
     _boto3_available = False
+
+logger = logging.getLogger(__name__)
 
 
 class AWSError(Exception):
