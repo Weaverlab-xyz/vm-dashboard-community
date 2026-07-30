@@ -59,14 +59,14 @@ def _resolve_aws_runner_config() -> dict:
 
     missing = []
     if not subnet_id:
-        missing.append("promote_runner_ecs_subnet_id (or ansible_ecs_subnet_id)")
+        missing.append("promote_runner_ecs_subnet_id (or ansible_ecs_subnet_id — Settings → Remote Worker)")
     if not execution_role_arn:
-        missing.append("promote_runner_ecs_execution_role_arn (or ansible_ecs_execution_role_arn)")
+        missing.append("promote_runner_ecs_execution_role_arn (or ansible_ecs_execution_role_arn — Settings → Remote Worker)")
     if not task_role_arn:
-        missing.append("promote_runner_ecs_task_role_arn (S3 write to the staging bucket)")
+        missing.append("promote_runner_ecs_task_role_arn (S3 write to the staging bucket; no form field — PATCH /api/storage/config)")
     if missing:
         raise PromoteRunnerError(
-            "Promote runner is not configured. Set on /storage: " + ", ".join(missing) + "."
+            "AWS promote runner is not configured. Missing: " + ", ".join(missing) + "."
         )
 
     return {
@@ -202,12 +202,12 @@ def _resolve_azure_runner_config() -> dict:
 
     missing = []
     if not rg:
-        missing.append("promote_runner_azure_resource_group (or azure_resource_group)")
+        missing.append("promote_runner_azure_resource_group (or azure_resource_group — /setup wizard)")
     if not staging_account:
-        missing.append("promote_runner_azure_staging_account (or storage_azure_account)")
+        missing.append("promote_runner_azure_staging_account (or storage_azure_account — /storage)")
     if missing:
         raise PromoteRunnerError(
-            "Azure promote runner is not configured. Set on /storage: "
+            "Azure promote runner is not configured. Missing: "
             + ", ".join(missing) + "."
         )
 
@@ -342,10 +342,12 @@ def _resolve_oci_runner_config() -> dict:
     if not subnet_ocid:
         missing.append("promote_runner_oci_subnet_ocid (or oci_default_subnet_ocid — the runner VNIC)")
     if not staging_bucket:
-        missing.append("promote_runner_oci_staging_bucket (Object Storage bucket for the QCOW2)")
+        missing.append("promote_runner_oci_staging_bucket (Object Storage bucket for the QCOW2 — must already exist)")
     if missing:
         raise PromoteRunnerError(
-            "OCI promote runner is not configured. Set on /storage: " + ", ".join(missing) + "."
+            "OCI promote runner is not configured. Set in Settings → Remote Worker → "
+            "Image-promote runner (OCI — Container Instances). Missing: "
+            + ", ".join(missing) + "."
         )
 
     return {
@@ -474,14 +476,14 @@ def _resolve_gcp_runner_config() -> dict:
 
     missing = []
     if not project_id:
-        missing.append("gcp_project_id")
+        missing.append("gcp_project_id (/setup wizard)")
     if not region:
-        missing.append("promote_runner_gcp_region (or gcp_region)")
+        missing.append("promote_runner_gcp_region (or gcp_region — /setup wizard)")
     if not staging_bucket:
-        missing.append("promote_runner_gcp_staging_bucket (or storage_gcs_bucket)")
+        missing.append("promote_runner_gcp_staging_bucket (or storage_gcs_bucket — /storage)")
     if missing:
         raise PromoteRunnerError(
-            "GCP promote runner is not configured. Set on /storage: "
+            "GCP promote runner is not configured. Missing: "
             + ", ".join(missing) + "."
         )
 

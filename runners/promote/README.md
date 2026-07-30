@@ -167,8 +167,14 @@ better fit, but the IAM/role shapes below are the same either way.
 ## Configuration
 
 Every key below lives in the same `config_service` store as the rest of
-the dashboard's settings. Set them on `/storage` (the page hosts a
-generic `PATCH /api/storage/config` form) or via env var override.
+the dashboard's settings. `promote_runner_image` and the OCI-target keys
+have form fields in **Settings → Remote Worker → Image-promote runner**;
+the rest have no form field anywhere — set those with
+`PATCH /api/storage/config` or via env var override. (The `/storage` page
+round-trips every `promote_runner_*` key on save but renders no inputs
+for them, so it is not where you set them.) Where a key has a fallback,
+the fallback is whatever you already configured in the `/setup` wizard or
+on `/storage`.
 
 | Key | Default | Purpose |
 |---|---|---|
