@@ -541,7 +541,8 @@ async def entra_kubeconfig(
     """Download a token-free kubeconfig for real-identity access over the API tunnel,
     authenticating as the USER's own Entra identity. EKS uses ``kubectl oidc-login``
     (int128 kubelogin) against the shared Entra app; AKS uses the native Azure
-    kubelogin. Connect the API tunnel first, then point ``KUBECONFIG`` at this file."""
+    kubelogin in interactive device-code mode. Both sign in with a device code.
+    Connect the API tunnel first, then point ``KUBECONFIG`` at this file."""
     try:
         content = k8s_service.build_entra_oidc_kubeconfig(db, cluster_id)
         info = k8s_service.get_cluster(db, cluster_id)

@@ -14,7 +14,7 @@ Object ID wrapped in a workforce `principalSet` URI.
 
 | Cloud | Trust mechanism | End-user auth | Reached via |
 |---|---|---|---|
-| **AKS** | native managed-AAD (no action needed) | Azure `kubelogin` | API tunnel |
+| **AKS** | native managed-AAD (no action needed) | Azure `kubelogin` (device code) | API tunnel |
 | **EKS** | **Entra federation** action → OIDC identity provider | `kubectl oidc-login` (int128) | API tunnel |
 | **GKE** | **Entra federation** action → Workforce Identity Federation | `gcloud auth login` | Connect Gateway |
 
@@ -126,6 +126,29 @@ This is **int128's** `kubelogin` (`kubectl oidc-login`), **not** Azure's `kubelo
 install oidc-login`, or download the release binary onto `PATH`). For headless
 machines add `--grant-type=device-code` to the exec args; the default browser flow
 listens on `http://localhost:8000`.
+
+---
+
+## Connect to an AKS cluster
+
+AKS's managed-AAD integration *is* the trust, so there is nothing to federate — only
+the group bind and the tunnel:
+
+1. **Entra group → Bind group.**
+2. **API tunnel → Create tunnel**, then connect it in the rep console.
+3. **Entra federation → Download Entra kubeconfig.**
+4. On the user's machine (needs `kubectl` + Azure `kubelogin` on `PATH`):
+   ```
+   set KUBECONFIG=<downloaded>-entra.kubeconfig
+   kubectl get ns          # prints a device code to complete in any browser
+   ```
+
+The download rewrites the stored `kubelogin` exec into an interactive **device-code**
+sign-in (well-known AKS AAD client app + your tenant, `--server-id` preserved), so it
+authenticates as the *user*, not as the dashboard's service principal — no
+`kubelogin convert-kubeconfig` step. A **registered** kubeconfig that already signs in
+as a person (`--login azurecli`/`devicecode`/`interactive`, or the legacy `azure`
+auth-provider) is passed through untouched.
 
 ---
 
