@@ -141,19 +141,30 @@ def test_ruff_f821_is_clean():
     Stricter than the AST check above because it models real scoping. Skipped rather
     than required, since ruff is not in requirements.txt and there is no lint step in
     CI — the check above is the one that always runs.
+
+    The availability check is ``find_spec``, not a ``FileNotFoundError`` around the
+    subprocess, and that distinction is the whole reason this comment exists: with ruff
+    absent, ``python -m ruff`` does not fail to launch. Python launches fine, prints
+    "No module named ruff" to *stderr*, and exits **1** — indistinguishable by exit code
+    from "ruff ran and found something". The first version of this test asserted on an
+    empty findings list in CI because of exactly that.
     """
+    import importlib.util
+    if importlib.util.find_spec("ruff") is None:
+        print("     (skipped: ruff is not installed)")
+        return
     try:
         proc = subprocess.run(
             [sys.executable, "-m", "ruff", "check", "web_dashboard",
              "--select", "F821", "--output-format", "concise"],
             cwd=_ROOT, capture_output=True, text=True, timeout=120)
-    except (FileNotFoundError, subprocess.TimeoutExpired):  # pragma: no cover
-        print("     (skipped: ruff unavailable)")
+    except subprocess.TimeoutExpired:                        # pragma: no cover
+        print("     (skipped: ruff timed out)")
         return
     if proc.returncode not in (0, 1):                        # pragma: no cover
-        print(f"     (skipped: ruff exited {proc.returncode})")
+        print(f"     (skipped: ruff exited {proc.returncode}: {proc.stderr[:200]})")
         return
-    assert proc.returncode == 0, f"ruff F821 findings:\n{proc.stdout}"
+    assert proc.returncode == 0, f"ruff F821 findings:\n{proc.stdout or proc.stderr}"
 
 
 def test_the_guard_would_catch_the_bugs_it_was_written_for():
