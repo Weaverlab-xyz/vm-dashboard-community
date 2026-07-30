@@ -421,7 +421,7 @@
           <label class="block text-xs font-medium text-gray-600 mb-1">Gateway <span class="text-gray-400">(the "separate gateway" the tunnel routes through)</span></label>
           <select x-model="tunnelForm.jumpoint_name" class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
             <option value="">(configured default)</option>
-            <template x-for="j in tunnelOpts.jumpoints" :key="j.id">
+            <template x-for="j in tunnelOpts.gateways" :key="j.id">
               <option :value="j.name" x-text="j.name"></option>
             </template>
           </select>
@@ -503,7 +503,7 @@
           <label class="block text-xs font-medium text-gray-600 mb-1">Gateway <span class="text-gray-400">(the gateway the tunnel routes through)</span></label>
           <select x-model="apiTunnelForm.jumpoint_name" class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
             <option value="">(configured default)</option>
-            <template x-for="j in tunnelOpts.jumpoints" :key="j.id">
+            <template x-for="j in tunnelOpts.gateways" :key="j.id">
               <option :value="j.name" x-text="j.name"></option>
             </template>
           </select>
@@ -1010,7 +1010,16 @@ function k8sPage() {
       this.tunnelOpts = { configured: true, jump_groups: [], gateways: [], vault_account_groups: [] };
       this.showTunnel = true;
       try {
-        this.tunnelOpts = await API.get('/api/k8s/clusters/pra-options');
+        // The endpoint answers with `r.jumpoints` (the vendor's field name); fold that
+        // into `gateways` rather than assigning the payload wholesale, so every key the
+        // markup reads exists in both shapes this object takes.
+        const r = await API.get('/api/k8s/clusters/pra-options');
+        this.tunnelOpts = {
+          configured: !!r.configured,
+          jump_groups: r.jump_groups || [],
+          gateways: r.jumpoints || [],
+          vault_account_groups: r.vault_account_groups || [],
+        };
       } catch (e) {
         this.flash(e.message || 'Could not load PRA options.', 'error');
       }
@@ -1064,7 +1073,16 @@ function k8sPage() {
       this.tunnelOpts = { configured: true, jump_groups: [], gateways: [], vault_account_groups: [] };
       this.showApiTunnel = true;
       try {
-        this.tunnelOpts = await API.get('/api/k8s/clusters/pra-options');
+        // The endpoint answers with `r.jumpoints` (the vendor's field name); fold that
+        // into `gateways` rather than assigning the payload wholesale, so every key the
+        // markup reads exists in both shapes this object takes.
+        const r = await API.get('/api/k8s/clusters/pra-options');
+        this.tunnelOpts = {
+          configured: !!r.configured,
+          jump_groups: r.jump_groups || [],
+          gateways: r.jumpoints || [],
+          vault_account_groups: r.vault_account_groups || [],
+        };
       } catch (e) {
         this.flash(e.message || 'Could not load PRA options.', 'error');
       }
