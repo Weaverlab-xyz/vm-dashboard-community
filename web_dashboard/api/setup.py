@@ -757,8 +757,8 @@ class AnsibleFeatureConfig(BaseModel):
     promote_runner_azure_target_storage_account_id: str = ""
     # GCP target (Cloud Run job).
     promote_runner_gcp_region: str = ""
-    promote_runner_gcp_cpu: str = "2000m"
-    promote_runner_gcp_memory: str = "4Gi"
+    promote_runner_gcp_cpu: str = "4"
+    promote_runner_gcp_memory: str = "16Gi"
     promote_runner_gcp_vpc_connector: str = ""
     promote_runner_gcp_service_account: str = ""
     promote_runner_gcp_staging_bucket: str = ""
