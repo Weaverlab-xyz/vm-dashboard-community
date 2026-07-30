@@ -119,7 +119,7 @@ def _provisioner_env_block(env: dict, sensitive_var_names: dict = None, indent: 
     return indent + "environment_vars = [" + ", ".join(items) + "]\n"
 
 
-def _secret_var_decls(sensitive_var_names: dict = None) -> str:
+def _sensitive_var_decls(sensitive_var_names: dict = None) -> str:
     """HCL ``variable`` declarations (marked ``sensitive``) for each secret env
     var, or "" when there are none.
 
@@ -155,7 +155,7 @@ def generate_aws_template(
 ) -> str:
     safe = _safe_ami_name(image_name)
     envb = _provisioner_env_block(provisioner_env, provisioner_secret_vars)
-    decls = _secret_var_decls(provisioner_secret_vars)
+    decls = _sensitive_var_decls(provisioner_secret_vars)
     prov = ('\n  provisioner "shell" {\n    script = "provision.sh"\n' + envb + '  }\n') if has_provisioner else ""
     return (
         'packer {\n'
@@ -222,7 +222,7 @@ def generate_azure_template(
 ) -> str:
     safe = _safe_azure_name(image_name)
     envb = _provisioner_env_block(provisioner_env, provisioner_secret_vars)
-    decls = _secret_var_decls(provisioner_secret_vars)
+    decls = _sensitive_var_decls(provisioner_secret_vars)
     # Azure requires waagent deprovision to generalize the image
     prov = (
         '\n  provisioner "shell" {\n'
@@ -295,7 +295,7 @@ def generate_azure_linux_gallery_template(
     PKR_VAR_gallery_* vars. Mirrors generate_azure_template otherwise (same shell
     provisioner + waagent generalize)."""
     envb = _provisioner_env_block(provisioner_env, provisioner_secret_vars)
-    decls = _secret_var_decls(provisioner_secret_vars)
+    decls = _sensitive_var_decls(provisioner_secret_vars)
     prov = (
         '\n  provisioner "shell" {\n'
         '    execute_command = "chmod +x {{ .Path }}; {{ .Vars }} sudo -E sh \'{{ .Path }}\'"\n'
@@ -539,7 +539,7 @@ def generate_gcp_template(
 ) -> str:
     safe = _safe_gcp_name(image_name)
     envb = _provisioner_env_block(provisioner_env, provisioner_secret_vars)
-    decls = _secret_var_decls(provisioner_secret_vars)
+    decls = _sensitive_var_decls(provisioner_secret_vars)
     prov = ('\n  provisioner "shell" {\n    script = "provision.sh"\n' + envb + '  }\n') if has_provisioner else ""
     # Boot disk. The googlecompute builder defaults to pd-standard (a spinning
     # HDD): low IOPS, which drags out unpacking hundreds of RPMs/debs during a
@@ -645,7 +645,7 @@ def generate_oci_template(
     has_provisioner: bool,
     provisioner_env: dict = None,
     # Env-var name → Packer variable NAME. Never a secret value: those reach the
-    # build only as PKR_VAR_* on the subprocess env. See _secret_var_decls.
+    # build only as PKR_VAR_* on the subprocess env. See _sensitive_var_decls.
     provisioner_sensitive_var_names: dict = None,
     ocpus: Optional[float] = None,
     memory_gb: Optional[float] = None,
@@ -653,7 +653,7 @@ def generate_oci_template(
 ) -> str:
     safe = _safe_oci_name(image_name)
     envb = _provisioner_env_block(provisioner_env, provisioner_sensitive_var_names)
-    decls = _secret_var_decls(provisioner_sensitive_var_names)
+    decls = _sensitive_var_decls(provisioner_sensitive_var_names)
     prov = ('\n  provisioner "shell" {\n    script = "provision.sh"\n' + envb + '  }\n') if has_provisioner else ""
 
     # Flex shapes (A1.Flex, E4.Flex …) carry no built-in size and the builder
