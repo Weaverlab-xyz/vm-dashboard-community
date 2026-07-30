@@ -47,7 +47,8 @@ reads like credential spraying in a customer's SIEM.
 | Variable | Default | Notes |
 |---|---|---|
 | `DASHBOARD_URL` | — | Required. Must be `https://` unless `AGENT_INSECURE_TLS=1`. |
-| `AGENT_ENROLLMENT_CODE` | — | Required on first start only; the identity persists. |
+| `AGENT_ENROLLMENT_CODE` | — | Required on first start only; the identity persists. Stays readable via `docker inspect` for the container's life — prefer the file below. |
+| `AGENT_ENROLLMENT_CODE_FILE` | — | Path to a mounted file holding the code. Wins over the variable above. Must be readable by uid 10001. |
 | `AGENT_STATE_DIR` | `/var/lib/dashboard-agent` | Holds the 0600 private key. Mount a volume. |
 | `AGENT_POLICY_FILE` | `/etc/dashboard-agent/policy.yaml` | Mount read-only. |
 | `AGENT_MODE` | `normal` | `audit` logs what it would do and executes nothing. |
@@ -58,6 +59,17 @@ reads like credential spraying in a customer's SIEM.
 
 `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` are honoured. Set `NO_PROXY` for your private
 ranges, or probes get routed to the corporate proxy and fail confusingly.
+
+## Back-pressure
+
+The dashboard throttles each agent (see `services/agent_guard.py`) and answers **429**
+with `Retry-After` when one is over its cap. The agent honours that interval instead of
+its own doubling, with jitter so a fleet throttled together does not return in lockstep.
+
+A **401 is not a 429**: 401 means the signature was refused — revoked, re-enrolled
+elsewhere, or the audience changed — and the process exits rather than hammering. Only a
+429 means "come back later". Anything that conflates the two turns a busy minute into a
+fleet that never reconnects.
 
 ## Build
 

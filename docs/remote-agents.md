@@ -45,6 +45,78 @@ the clear on every poll.
 | Nothing reusable on the wire | `X-Agent-Signature` over method + path + sha256(body) + audience + timestamp + nonce |
 | Least privilege | Agents never touch `require_permission` — its "empty permissions means unrestricted" rule is right for a pre-OIDC human, dangerous for a machine principal |
 | Auditable | Every lease and completion is a hash-chained `audit_log` entry with actor `agent:{name}` |
+| Bounded, even when authenticated | `services/agent_guard.py` caps signed requests per *agent* and failed enrolments per address — the only throttle in the app, on the only surface that faces a hostile network |
+| Only a trusted caller pins the audience | `_resolve_audience(persist=…)`: an admin minting a code, or a valid enrolment. An unauthenticated poll cannot freeze a value of its choosing into the config |
+
+## The agent's private key
+
+The agent generates an Ed25519 keypair on first start and keeps the private half. Only
+the public half is ever sent, so **a dump of the dashboard's database cannot impersonate
+an agent** — there is nothing in it to replay.
+
+Where it lives, exactly: `$AGENT_STATE_DIR/identity.json`, created mode 0600 inside a
+0700 directory owned by uid 10001, written to a temporary file and renamed so it never
+exists world-readable even for an instant. It is **not** encrypted at rest: no passphrase,
+no TPM, no keyring. That is a deliberate limit rather than an oversight — a passphrase an
+unattended container must read at boot has to be stored next to the key it protects.
+
+Who can read it:
+
+| Who | Can read the key |
+|---|---|
+| `root` on the agent host | **Yes.** `docker cp`, `docker exec`, the volume on disk, `/proc/<pid>/mem`. File modes do not constrain root. |
+| Anyone in the `docker` group | **Yes** — socket access is root-equivalent, with or without this agent. |
+| Another container on the host | No, unless it mounts the state volume or the Docker socket. |
+| Anyone on the network, including a TLS-inspecting proxy | No. The key never crosses it, and a signature is good for one method, one path, one body, sixty seconds. |
+| The dashboard, or whoever compromises it | No. It only ever received the public half. |
+
+**What a stolen key actually grants**, which is the part worth being precise about: it
+authenticates five `POST /api/agent/*` routes and nothing else. The holder can lease jobs
+an operator already queued *for that agent*, heartbeat them, push log lines, and complete
+them. They cannot create a job (that needs an admin session), learn anything about what
+else the dashboard manages, reach any user-facing route, or touch another agent's jobs —
+`owned_job` filters on `agent_id` and answers "not found" identically for "not yours", so
+the API is not even an oracle for their existence. In this phase the agent holds no target
+credentials, so there is nothing on the LAN to inherit either.
+
+That leaves two real consequences: denial of service against that one agent's queue, and
+the ability to **report false findings**. Findings are data a human reads and acts on, so
+treat them as untrusted input — which is the other reason nothing is auto-registered.
+
+Revocation does not depend on reaching the container. **Revoke** clears the stored public
+key, so the next poll fails verification whatever that container is still doing, and any
+job it held is failed immediately rather than at the next reconcile.
+
+### Running under Podman
+
+Rootless Podman is a real improvement here and worth preferring — as long as it is
+recommended for the right reason. It changes *who* can steal the key. It does not change
+whether host root can.
+
+What it actually buys:
+
+- **No daemon socket**, so the `docker` group row above disappears entirely. In most
+  shops that group is the larger of the two exposures.
+- The state volume lives under `~/.local/share/containers/storage/volumes/…`, owned by one
+  unprivileged user rather than by root, with uid 10001 mapped through that user's subuid
+  range.
+- Every hardening flag in the emitted command works unchanged — `--read-only`,
+  `--cap-drop ALL`, `--security-opt no-new-privileges`, `--user`, `--tmpfs`. Substitute
+  `podman run` for `docker run` and paste it as-is.
+
+Two things to know before you do:
+
+- **On SELinux hosts the read-only mounts need a label suffix** — `:ro,z` — or the
+  container cannot read `policy.yaml`. That fails closed (`Cannot read the policy file`,
+  exit 2), so it is a confusing five minutes rather than a hole.
+- `--restart unless-stopped` does not survive a reboot on its own; rootless Podman needs
+  `systemctl --user enable podman-restart` (and `loginctl enable-linger`) because there is
+  no daemon to do it for you.
+
+What neither runtime fixes is host root. If that is the threat you are defending against,
+the answer is not a different container runtime — it is a credential that cannot be
+copied, sealed to hardware, which is a future feature rather than a configuration. Until
+then the honest position is the blast-radius table above plus fast revocation.
 
 ## Architecture
 
@@ -130,6 +202,14 @@ both matter here:
   `http://…` into the config permanently, making every agent signature fail to verify
   with a 401 that looks exactly like a revoked agent.
 
+  Only two callers are allowed to pin that value: an admin minting an enrolment code, and
+  a successful enrolment. An unauthenticated poll — including one arriving at the
+  plain-HTTP 8001 with a forged `Host` — resolves an audience but never writes it down, so
+  a stranger cannot pin one of their choosing and 401 your whole fleet. Set
+  `PUBLIC_BASE_URL` regardless: it is what makes the pinned value *correct* rather than
+  merely trusted, and it is the only way the value is right when the operator's browser
+  and the agents reach the dashboard on different names.
+
 ### 2. Write the policy
 
 Copy [`examples/remote-agent/policy.example.yaml`](../examples/remote-agent/policy.example.yaml)
@@ -159,6 +239,19 @@ writes its identity to the state volume. The code is never needed again.
 
 The private key never leaves the agent host. The dashboard only ever stores the public
 half, so a dashboard database dump does not let anyone impersonate an agent.
+
+The default command passes the code as `-e AGENT_ENROLLMENT_CODE`, which is convenient and
+has one drawback worth knowing: an environment variable is baked into the container's
+config, so `docker inspect` still shows the code long after it has been spent. The modal
+offers a second form that mounts it as a file and sets `AGENT_ENROLLMENT_CODE_FILE`
+instead, leaving nothing durable in Docker's metadata; delete the file once the agent shows
+Online. To keep the code out of your shell history as well, write that file with an editor
+rather than pasting the `printf` line.
+
+Because the container runs as uid 10001, that file has to be readable by it — a mode 0600
+file owned by your host user is *not*, and the agent says so and exits rather than failing
+mysteriously. A single-use secret with a fifteen-minute lifetime in a directory you chose
+is an acceptable trade for that; a long-lived one would not be.
 
 ### 4. Discover
 
@@ -201,11 +294,47 @@ the inventory of everything else the dashboard manages.
 - **Ship the agent's stdout to your SIEM.** The dashboard is not the authoritative
   audit record for an agent — if it were, a compromised dashboard could delete the
   evidence of its own compromise. The container log is the copy it cannot reach.
+- **Prefer rootless Podman** on hosts where more than one person is in the `docker`
+  group — see [Running under Podman](#running-under-podman) for what it does and does not
+  buy you.
 - **Name ports in the policy**, not just networks.
 - **One agent per site**, named for the site.
 - **Watch the policy hash** on the Agents page. It only changes when the file does.
 - **Re-enrol rather than reuse.** Issuing a new code clears the stored public key, so
   the container being replaced stops being able to lease work immediately.
+
+## Rate limits
+
+The agent vhost is the only surface this dashboard deliberately publishes to a network it
+does not own, so it is the only one with a throttle of its own
+(`services/agent_guard.py`). Nothing else in the app is rate limited — the SlowAPI limiter
+in `main.py` is inert on purpose, because a blanket per-address cap would break a UI that
+fires many calls per page load.
+
+Three caps, keyed differently because only one of these routes has a principal to key on:
+
+| What | Key | Default | Config key |
+|---|---|---|---|
+| Signed requests | the **agent id**, proven by its signature | 240 / minute | `agent_max_requests_per_minute` |
+| Failed enrolments | client address | 10 / 15 min | `agent_enroll_max_per_ip` |
+| Failed enrolments, all sources | — | 200 / 15 min | `agent_enroll_max_global` |
+
+Set `agent_throttle_enabled` false to disable, or any cap to `0`. The per-agent cap keys on
+the agent id rather than the address for the same reason the login throttle keys on the
+username: an address is only as trustworthy as `TRUSTED_PROXY_HOSTS`, while an agent id is
+proven by a signature the caller cannot forge.
+
+240/minute is about three times what a *busy* agent does. While a scan runs it reports
+every two seconds — roughly 60 requests a minute — and idle polling at the default
+interval is 12. If you lower this, lower it toward 60, not toward the poll interval.
+
+Over a cap the answer is **429 with `Retry-After`**, never 401, and the agent waits the
+interval it was given with jitter so a fleet throttled together does not come back in
+lockstep. Only *failed* enrolments count, so enrolling a fleet back to back trips nothing.
+
+Neither cap is brute-force protection — an enrolment code is 256 bits and every other
+route needs a valid signature. They bound denial of service and table growth, which is
+what an unauthenticated internet-facing endpoint actually needs.
 
 ## Behind a TLS-inspecting proxy
 
@@ -230,6 +359,9 @@ an objection into a demonstration.
 | `the dashboard rejected this agent's signature` | Revoked, re-enrolled elsewhere, or the dashboard URL changed (the audience is pinned). Issue a fresh code. |
 | Enrolment returns 400 | The code is single-use and expires in 15 minutes. Issue another. |
 | Enrolment returns 404 | `remote_agents_enabled` is off. |
+| Enrolment returns 429, and the container exits 2 | Too many *failed* enrolments recently from this address. Nothing is wrong with this agent; the restart policy retries after `Retry-After`. |
+| `the dashboard asked us to slow down` | Over the per-agent cap. Expected during a burst, and it recovers on its own. If an ordinary scan trips it, raise `agent_max_requests_per_minute` — see [Rate limits](#rate-limits). |
+| `AGENT_ENROLLMENT_CODE_FILE … cannot be read` | The container runs as uid 10001; a mode 0600 file owned by your host user is unreadable inside it. Make it world-readable or use the environment variable. |
 | Agent polls, gets 503 | Dashboard setup is not complete. The agent backs off; it is deliberately not redirected to the HTML wizard. |
 | `Policy refused N of M host:port combinations` | Working as intended — the request was wider than the policy. The counts tell you which to widen. |
 | Stuck `queued`, agent online | The job type is not in the agent's `job_types`. Check the policy. |

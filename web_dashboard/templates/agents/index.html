@@ -151,6 +151,27 @@
           Copy command
         </button>
       </div>
+
+      <!-- The env-var form above puts the code in the container's config, where
+           `docker inspect` keeps it long after the code has been spent. Offered as an
+           alternative rather than the default because it costs an extra file and a
+           cleanup step, and the code is single-use with a 15-minute TTL. -->
+      <details class="mt-4" x-show="enrol.docker_run_code_file">
+        <summary class="text-xs font-medium text-gray-600 cursor-pointer hover:text-gray-800">
+          Alternative: keep the code out of <code class="font-mono">docker inspect</code>
+        </summary>
+        <p class="text-xs text-gray-500 mt-2">
+          Mounts the code as a file instead of an environment variable, so nothing durable in
+          Docker's metadata holds it. To keep it out of your shell history too, write
+          <code class="font-mono">agent-enroll-code</code> with an editor and skip the first line.
+        </p>
+        <pre class="bg-gray-900 text-gray-100 rounded-lg p-3 text-xs overflow-x-auto whitespace-pre mt-2"
+             x-text="enrol.docker_run_code_file"></pre>
+        <button @click="copy(enrol.docker_run_code_file)"
+                class="mt-2 text-xs px-3 py-1.5 rounded-lg border border-gray-300 hover:bg-gray-50 transition">
+          Copy command
+        </button>
+      </details>
       <p class="text-xs text-gray-500 mt-4">
         The agent needs a <code class="font-mono">policy.yaml</code> naming the networks it may
         scan — it refuses all work without one. See
@@ -285,8 +306,10 @@ function agentsPage() {
     },
 
     showEnrol(r) {
+      const install = r.install || {};
       this.enrol = {name: r.name, code: r.enrollment_code,
-                    docker_run: (r.install || {}).docker_run || ''};
+                    docker_run: install.docker_run || '',
+                    docker_run_code_file: install.docker_run_code_file || ''};
       this.enrolOpen = true;
     },
 

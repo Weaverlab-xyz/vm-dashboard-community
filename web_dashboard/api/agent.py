@@ -38,8 +38,9 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ..database import Job, RemoteAgent, User, get_db
-from ..services import (agent_job_meta, agent_service, agent_signing, config_service,
-                        job_service, public_url)
+from ..services import (agent_guard, agent_job_meta, agent_service, agent_signing,
+                        config_service, job_service, public_url)
+from ..services.agent_guard import AgentThrottled
 from ..services.agent_service import AgentError
 from .auth import require_admin
 
@@ -51,7 +52,7 @@ _AUDIENCE_CONFIG = "agent_base_url"
 
 # ── Audience ──────────────────────────────────────────────────────────────────
 
-def _resolve_audience(request: Request) -> str:
+def _resolve_audience(request: Request, *, persist: bool = False) -> str:
     """The URL an agent signs against, pinned on first use.
 
     The audience binds a signature to *this* dashboard: a request captured by a rogue
@@ -67,11 +68,27 @@ def _resolve_audience(request: Request) -> str:
     ``https`` because ProxyHeadersMiddleware rewrote the scheme, so pinning from a
     request that arrived through an untrusted proxy would freeze an ``http://``
     audience into the config and make every agent signature fail to verify.
+
+    **``persist`` is why this has a flag.** Pinning writes a value that every future
+    signature is checked against, permanently, so *which request* is allowed to do the
+    pinning matters. Only two callers may: the operator minting an enrolment code
+    (authenticated admin) and a successful enrolment (a valid single-use code). The
+    unauthenticated signature path must not, or the first stranger to reach
+    ``/api/agent/lease`` with a forged ``Host`` — trivial against the plain-HTTP 8001 the
+    base stack still publishes — pins the audience to a value of their choosing and 401s
+    every real agent until an operator clears the config key by hand. Worse, an audience
+    pinned to a host the attacker controls is the one thing that would let a signature
+    captured there be replayed here, which is precisely what the audience exists to stop.
+
+    When nothing is pinned yet, this still *returns* a derived value so verification has
+    something to compare against; it simply does not write it down.
     """
     pinned = config_service.get(_AUDIENCE_CONFIG)
     if pinned:
         return pinned.rstrip("/")
     resolved = public_url.resolve(request)
+    if not persist:
+        return resolved
     config_service.set(_AUDIENCE_CONFIG, resolved)
     logger.info("agent: pinned the signing audience to %s", resolved)
     return resolved
@@ -79,6 +96,21 @@ def _resolve_audience(request: Request) -> str:
 
 def _client_ip(request: Request) -> str:
     return request.client.host if request.client else ""
+
+
+def _throttled(exc: AgentThrottled) -> HTTPException:
+    """A 429 carrying ``Retry-After``.
+
+    The header is the whole point — without it a backing-off agent has to guess, and a
+    fleet that all guessed the same interval would come back in lockstep and trip the cap
+    again. ``scope`` stays in the log and out of the response: telling a caller whether
+    it hit a per-agent or a global cap tells them about traffic that is not theirs.
+    """
+    return HTTPException(
+        status_code=429,
+        detail=f"Too many requests. Retry in {exc.retry_after}s.",
+        headers={"Retry-After": str(exc.retry_after)},
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -105,6 +137,8 @@ async def enroll_agent(body: EnrollRequest, request: Request,
             db, code=body.enrollment_code, public_key=body.public_key,
             agent_version=body.agent_version, policy_hash=body.policy_hash,
             ip=_client_ip(request))
+    except AgentThrottled as exc:
+        raise _throttled(exc)
     except AgentError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -115,7 +149,9 @@ async def enroll_agent(body: EnrollRequest, request: Request,
         "agent_id": agent.id,
         "name": agent.name,
         "site": agent.site or "",
-        "audience": _resolve_audience(request),
+        # One of only two callers allowed to pin — see _resolve_audience. A valid
+        # single-use code is what makes this request trustworthy enough to do it.
+        "audience": _resolve_audience(request, persist=True),
         # Pinned by the agent and used to verify every job envelope from here on.
         "dashboard_public_key": agent_service.envelope_public_key(),
         "poll_interval_s": agent_service.DEFAULT_POLL_INTERVAL_S,
@@ -149,6 +185,11 @@ async def signed_agent(request: Request, db: Session = Depends(get_db)) -> Remot
             signature=signature, audience=_resolve_audience(request),
             method=request.method, path=request.url.path,
             body=await request.body(), ip=_client_ip(request))
+    except AgentThrottled as exc:
+        # 429, never 401: the agent reads a 401 as "I was revoked" and stops for good
+        # (see `lease` in runners/agent/agent.py), where a 429 makes it back off and
+        # come back. Getting this wrong would turn a load spike into a dead fleet.
+        raise _throttled(exc)
     except AgentError as exc:
         # One status and one shape for every failure. Distinguishing "unknown agent"
         # from "bad signature" from "replay" would tell a prober which part they got
@@ -336,21 +377,56 @@ def _agent_row(agent: RemoteAgent, running: int = 0) -> dict:
     }
 
 
+# The hardening flags and mounts both install forms share. `$PWD` rather than `./`
+# because `docker run -v` requires an absolute source path — a relative one is rejected
+# outright, so the command as previously emitted could not run at all. Quoted so a
+# directory with a space in it survives.
+_RUN_FLAGS = (
+    "docker run -d --name dashboard-agent --restart unless-stopped \\\n"
+    "  --read-only --cap-drop ALL --security-opt no-new-privileges:true \\\n"
+    "  --user 10001:10001 --tmpfs /tmp \\\n"
+    "  -v dashboard_agent_state:/var/lib/dashboard-agent \\\n"
+    '  -v "$PWD/policy.yaml:/etc/dashboard-agent/policy.yaml:ro" \\\n'
+)
+
+
 def _install_hint(request: Request, code: str) -> dict:
-    """A copy-paste install command built from this dashboard's own URL, so the
-    operator never has to type it and cannot typo the one value that must match the
-    signing audience."""
-    base = _resolve_audience(request)
+    """Copy-paste install commands built from this dashboard's own URL, so the operator
+    never has to type it and cannot typo the one value that must match the signing
+    audience.
+
+    Two forms, because where the enrolment code goes is a real trade-off:
+
+    ``docker_run`` passes it as an environment variable. Convenient, and the code is
+    single-use with a 15-minute TTL — but an env var is baked into the container's
+    config, so it stays readable via ``docker inspect`` for the life of the container,
+    long after it is worthless.
+
+    ``docker_run_code_file`` mounts it as a file instead, so nothing durable in Docker's
+    metadata holds the value. The file itself is world-readable on purpose: the container
+    runs as uid 10001 and a bind-mounted 0600 file owned by the host user would simply be
+    unreadable inside it. That is an acceptable trade for a single-use 15-minute secret in
+    a directory the operator chose, and the trailing ``rm`` closes it. An operator who
+    wants the code in neither shell history nor Docker metadata can write that file with
+    an editor and skip the first line entirely.
+    """
+    base = _resolve_audience(request, persist=True)
     return {
         "docker_run": (
-            "docker run -d --name dashboard-agent --restart unless-stopped \\\n"
-            "  --read-only --cap-drop ALL --security-opt no-new-privileges:true \\\n"
-            "  --user 10001:10001 --tmpfs /tmp \\\n"
-            "  -v dashboard_agent_state:/var/lib/dashboard-agent \\\n"
-            "  -v ./policy.yaml:/etc/dashboard-agent/policy.yaml:ro \\\n"
-            f"  -e DASHBOARD_URL={base} \\\n"
-            f"  -e AGENT_ENROLLMENT_CODE={code} \\\n"
-            "  chrweav/dashboard-agent:latest"
+            _RUN_FLAGS
+            + f"  -e DASHBOARD_URL={base} \\\n"
+            + f"  -e AGENT_ENROLLMENT_CODE={code} \\\n"
+            + "  chrweav/dashboard-agent:latest"
+        ),
+        "docker_run_code_file": (
+            f"umask 022 && printf '%s' '{code}' > ./agent-enroll-code\n\n"
+            + _RUN_FLAGS
+            + '  -v "$PWD/agent-enroll-code:/etc/dashboard-agent/enroll-code:ro" \\\n'
+            + f"  -e DASHBOARD_URL={base} \\\n"
+            + "  -e AGENT_ENROLLMENT_CODE_FILE=/etc/dashboard-agent/enroll-code \\\n"
+            + "  chrweav/dashboard-agent:latest\n\n"
+            + "# Once the Agents page shows this agent Online, the code is spent:\n"
+            + "rm ./agent-enroll-code"
         ),
         "dashboard_url": base,
     }
