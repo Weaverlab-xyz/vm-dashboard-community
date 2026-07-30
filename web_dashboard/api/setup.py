@@ -715,20 +715,59 @@ class AnsibleFeatureConfig(BaseModel):
     # Used for ALL cloud runners on k8s/DB targets — never the winrm image.
     ansible_cloud_image: str = "chrweav/ansible-cloud:latest"
     # Image-promote runner — always runs as a one-shot task in the target cloud
-    # (ECS / ACI / Cloud Run); no per-cloud selector. Blank → the public Docker
-    # Hub image; set a full registry path to use a private mirror (e.g. an ACR
-    # copy that dodges Docker Hub pull limits). Read by promote_runner_service.
+    # (ECS / ACI / Cloud Run / Container Instances); no per-cloud selector.
+    # Blank → the public Docker Hub image; set a full registry path to use a
+    # private mirror (e.g. an ACR copy that dodges Docker Hub pull limits).
+    # Read by promote_runner_service.
     promote_runner_image: str = ""
-    # OCI-target promote runner (Container Instances). OCI's only remote-worker
-    # task is the image-promote runner (no Ansible/K8s OCI runner), so — unlike
-    # AWS/Azure/GCP, which inherit the ansible_*/storage_* keys above — its
-    # per-target config has no other home and lives here. staging_bucket is
-    # required (no fallback); compartment/subnet fall back to the primary oci_*
-    # config. Mirrors promote_runner_oci_* in config.py + StorageConfigPatch.
-    # ocpus/memory_gbs are str (config.py has them as float) to survive the
-    # _read_feature round-trip — it only coerces bool/int, so a float field
-    # would fail validation on an unset "" PATCH. Same trick StorageConfigPatch
-    # uses. Read by promote_runner_service._resolve_oci_runner_config.
+    # Per-target-cloud promote-runner config. Most keys fall back to the
+    # ansible_*/storage_*/<cloud>_* keys already on this model (single-account
+    # installs need set almost nothing) — the fallbacks live in
+    # promote_runner_service._resolve_*_runner_config, and the panel's hint text
+    # names them. Mirrors promote_runner_* in config.py + StorageConfigPatch;
+    # both surfaces write the same config_service keys.
+    #
+    # Numeric knobs are declared str here even where config.py types them as
+    # float, to survive the _read_feature round-trip — it only coerces bool/int,
+    # so a float field would fail validation on an unset "" PATCH. Same trick
+    # StorageConfigPatch uses.
+    #
+    # AWS target (ECS Fargate). task_role_arn has no fallback: the task needs
+    # s3:PutObject on the staging bucket, which the Ansible runner's role lacks.
+    promote_runner_ecs_cluster: str = ""
+    promote_runner_ecs_task_family: str = "promote-runner"
+    promote_runner_ecs_subnet_id: str = ""
+    promote_runner_ecs_security_group_ids: str = ""
+    promote_runner_ecs_execution_role_arn: str = ""
+    promote_runner_ecs_task_role_arn: str = ""
+    promote_runner_ecs_cpu: str = "1024"
+    promote_runner_ecs_memory: str = "4096"
+    promote_runner_aws_staging_bucket: str = ""
+    promote_runner_aws_staging_prefix: str = "promote-staging"
+    # Azure target (ACI container group).
+    promote_runner_azure_resource_group: str = ""
+    promote_runner_azure_location: str = ""
+    promote_runner_azure_subnet_id: str = ""
+    promote_runner_azure_cpu: str = "2"
+    promote_runner_azure_memory_gb: str = "4"
+    promote_runner_azure_staging_account: str = ""
+    promote_runner_azure_staging_container: str = ""
+    promote_runner_azure_staging_prefix: str = "promote-staging"
+    promote_runner_azure_target_resource_group: str = ""
+    promote_runner_azure_target_storage_account_id: str = ""
+    # GCP target (Cloud Run job).
+    promote_runner_gcp_region: str = ""
+    promote_runner_gcp_cpu: str = "2000m"
+    promote_runner_gcp_memory: str = "4Gi"
+    promote_runner_gcp_vpc_connector: str = ""
+    promote_runner_gcp_service_account: str = ""
+    promote_runner_gcp_staging_bucket: str = ""
+    promote_runner_gcp_staging_prefix: str = "promote-staging"
+    promote_runner_gcp_image_family: str = ""
+    # OCI target (Container Instances). OCI's only remote-worker task is the
+    # image-promote runner (no Ansible/K8s OCI runner), so its staging_bucket is
+    # required with no fallback; compartment/subnet fall back to the primary
+    # oci_* config. Read by promote_runner_service._resolve_oci_runner_config.
     promote_runner_oci_staging_bucket: str = ""
     promote_runner_oci_staging_prefix: str = "promote-staging"
     promote_runner_oci_compartment: str = ""

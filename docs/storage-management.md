@@ -244,12 +244,13 @@ runner writes into (`promote_runner_aws_staging_bucket`,
 `promote_runner_gcp_staging_bucket`) so the cloud's import API reads
 from local storage. The hub stays the read-only source-of-truth.
 
-**Promote-runner config.** The `/storage` page also hosts the
-`promote_runner_*` config keys (image override, ECS/ACI/Cloud Run
-plumbing, target-side staging, IAM role ARNs). The
-[runner README](../runners/promote/README.md) has the full table —
-the `/storage` form is just the surface that round-trips them through
-`PATCH /api/storage/config`.
+**Promote-runner config.** The `promote_runner_*` keys (image override,
+ECS/ACI/Cloud Run/Container Instances plumbing, target-side staging, IAM
+role ARNs) are edited in **Settings → Remote Worker → Image-promote
+runner**, one sub-card per target cloud. `PATCH /api/storage/config`
+also accepts them — the promote runner shares the hub backend's
+lifecycle, so the storage API round-trips them for scripted setups. The
+[runner README](../runners/promote/README.md) has the full table.
 
 ---
 

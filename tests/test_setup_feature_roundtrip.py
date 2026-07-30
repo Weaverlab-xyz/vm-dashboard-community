@@ -14,13 +14,18 @@ Pure-Python: ``config_service`` is stubbed (no DB). Skips if fastapi/pydantic (t
 app deps ``api.setup`` needs) aren't installed. Runs under pytest, or standalone:
     python tests/test_setup_feature_roundtrip.py
 """
+import ast
 import os
+import re
 import sys
 import types
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
+
+_SETTINGS_HTML = os.path.join(_ROOT, "web_dashboard", "templates", "settings.html")
+_STORAGE_API = os.path.join(_ROOT, "web_dashboard", "api", "storage.py")
 
 # Simulated config store. Unset keys resolve to "" — exactly what the real
 # config_service.get(key) returns for a key that was never written.
@@ -97,6 +102,79 @@ def test_per_cloud_runner_image_keys_round_trip():
         AnsibleFeatureConfig(**data)
     finally:
         CONF.clear()
+
+
+def _annotated_fields(path, class_name):
+    """Field name -> annotation source for a pydantic model, read via ast so the
+    module doesn't have to be importable (api.storage pulls in the cloud SDKs)."""
+    tree = ast.parse(open(path, encoding="utf-8").read())
+    cls = next(n for n in ast.walk(tree)
+               if isinstance(n, ast.ClassDef) and n.name == class_name)
+    return {s.target.id: ast.unparse(s.annotation) for s in cls.body
+            if isinstance(s, ast.AnnAssign) and isinstance(s.target, ast.Name)}
+
+
+def test_promote_runner_fields_round_trip():
+    """The promote runner's per-target-cloud config lives on this panel. Its numeric
+    knobs (ECS cpu/memory, ACI cpu/memory_gb, OCI ocpus/memory_gbs) are typed ``float``
+    or int-ish in config.py but MUST be ``str`` on the model: _read_feature only coerces
+    bool/int, so a float field would read back as "" and 422 the whole panel on save —
+    the same failure mode the int fields at the top of this file pin."""
+    CONF.clear()
+    data = _read_feature("ansible", AnsibleFeatureConfig)
+    numeric = ("promote_runner_ecs_cpu", "promote_runner_ecs_memory",
+               "promote_runner_azure_cpu", "promote_runner_azure_memory_gb",
+               "promote_runner_oci_ocpus", "promote_runner_oci_memory_gbs")
+    for key in numeric:
+        assert AnsibleFeatureConfig.model_fields[key].annotation is str, \
+            f"{key} must be str on the model (float/int breaks the unset round-trip)"
+        assert data[key] == "", f"{key} read back as {data[key]!r}, not the unset \"\""
+    # The one with no fallback anywhere: without a form field an AWS promote can't be
+    # configured from the UI at all (the ECS task can't write the S3 staging object).
+    assert "promote_runner_ecs_task_role_arn" in data
+    AnsibleFeatureConfig(**data)
+
+    CONF["promote_runner_ecs_task_role_arn"] = "arn:aws:iam::123456789012:role/promote"
+    CONF["promote_runner_oci_ocpus"] = "4"
+    try:
+        data = _read_feature("ansible", AnsibleFeatureConfig)
+        assert data["promote_runner_ecs_task_role_arn"].endswith("role/promote")
+        assert data["promote_runner_oci_ocpus"] == "4"
+        AnsibleFeatureConfig(**data)
+    finally:
+        CONF.clear()
+
+
+def test_every_promote_runner_key_has_a_form_field():
+    """A promote_runner_* key the API accepts but no form binds is dead config — the
+    operator has to PATCH JSON to configure a promote. Pin that every key on the model
+    is bound in the Remote Worker panel."""
+    html = open(_SETTINGS_HTML, encoding="utf-8").read()
+    bound = set(re.findall(r"panelCfg\.(promote_runner_[a-z_0-9]+)", html))
+    model_keys = {k for k in AnsibleFeatureConfig.model_fields if k.startswith("promote_runner_")}
+    assert model_keys, "the panel model lost its promote_runner_* fields"
+    assert not (model_keys - bound), \
+        f"no form field for: {sorted(model_keys - bound)}"
+    assert not (bound - model_keys), \
+        f"bound in settings.html but not on AnsibleFeatureConfig: {sorted(bound - model_keys)}"
+
+
+def test_promote_runner_keys_match_the_storage_api():
+    """Both surfaces write the same config_service keys — the panel (this model) and
+    PATCH /api/storage/config (StorageConfigPatch), which scripted setups use. If they
+    drift, a key is settable on one and invisible on the other."""
+    patch_keys = {k for k in _annotated_fields(_STORAGE_API, "StorageConfigPatch")
+                  if k.startswith("promote_runner_")}
+    model_keys = {k for k in AnsibleFeatureConfig.model_fields if k.startswith("promote_runner_")}
+    assert model_keys == patch_keys, (
+        f"only on the panel: {sorted(model_keys - patch_keys)}; "
+        f"only on /api/storage/config: {sorted(patch_keys - model_keys)}")
+    # GET /api/storage/config lists its keys literally; an omission there means the
+    # PATCH-able key never reaches the client that's about to PATCH the object back.
+    storage_src = open(_STORAGE_API, encoding="utf-8").read()
+    get_listed = set(re.findall(r'"(promote_runner_[a-z_0-9]+)"', storage_src))
+    assert not (patch_keys - get_listed), \
+        f"missing from GET /api/storage/config: {sorted(patch_keys - get_listed)}"
 
 
 def test_portainer_managed_node_fields_round_trip():
