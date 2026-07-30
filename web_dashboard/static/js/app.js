@@ -84,6 +84,14 @@ window.API = {
                 if (detail.missing_scope)      e.missingScope     = detail.missing_scope;
                 if (detail.missing_level)      e.missingLevel     = detail.missing_level;
             }
+            // Hand the Error to toast() out of band, because no call site does: all
+            // ~142 of them pass a STRING built from it (`toast(e.message, 'error')`,
+            // `toast('Deploy failed: ' + e.message, 'error')`), which drops
+            // requestAccessUrl one hop before the renderer. base.html's toast()
+            // re-attaches the link from here — see the adoption rules there. Nulled
+            // on a failure without a link so the stash always reflects the most
+            // recent one. Pinned end to end in tests/toast_request_access_check.js.
+            window.__lastApiError = e.requestAccessUrl ? { error: e, at: Date.now() } : null;
             throw e;
         }
 

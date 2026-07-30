@@ -125,20 +125,32 @@ def test_inventory_column_count_matches_both_colspans():
             f"resource_expiry_enabled={flag}: {n_th} <th> but colspan(s) {sorted(colspans)}")
 
 
-def test_alpine_region_helpers_behave():
-    """Run the node harness, which extracts each region helper from its template
-    and exercises it. Skips when node isn't installed."""
+def _run_node(script, label):
+    """Run a tests/*.js harness in its own node process. Skips when node isn't
+    installed (it is on the CI runner)."""
     import shutil
     import subprocess
 
     if not shutil.which("node"):
         print("   (skipped: node not installed)")
         return
-    script = os.path.join(_ROOT, "tests", "template_helpers_check.js")
-    proc = subprocess.run([shutil.which("node"), script],
+    proc = subprocess.run([shutil.which("node"), os.path.join(_ROOT, "tests", script)],
                           capture_output=True, text=True)
     assert proc.returncode == 0, (
-        "template helper checks failed:\n" + proc.stdout + proc.stderr)
+        label + " failed:\n" + proc.stdout + proc.stderr)
+
+
+def test_alpine_region_helpers_behave():
+    """Run the node harness, which extracts each region helper from its template
+    and exercises it."""
+    _run_node("template_helpers_check.js", "template helper checks")
+
+
+def test_toast_carries_the_request_access_link():
+    """Entitle user-JIT Phase 4: the request-access deep link has to survive from the
+    403 body all the way to the toast object the renderer reads. Its own harness
+    because it stubs fetch/Alpine, which the helper checks must not inherit."""
+    _run_node("toast_request_access_check.js", "toast deep-link checks")
 
 
 if __name__ == "__main__":

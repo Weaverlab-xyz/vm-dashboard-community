@@ -366,6 +366,41 @@ Exit criteria:
 2. 403 page deep-links land on the right Entitle resource.
 3. JWT TTL is documented as a tuning knob.
 
+**As built — how the 403 deep link reaches the screen.** Four hops, and
+it was broken at two of them for a long time without any symptom, so
+read this before touching any of them:
+
+1. `api/auth.py::require_permission` → on a denial, asks
+   `_build_request_access_link` for a URL and, if it gets one, returns a
+   **dict** detail (`message`, `missing_scope`, `missing_level`,
+   `request_access_url`) instead of the usual plain string. Both shapes
+   are live — an operator without user-JIT configured still gets the
+   string, and the frontend handles both.
+2. `static/js/app.js::API.request` → lifts those fields off the body onto
+   the thrown `Error` as `requestAccessUrl` etc.
+3. `templates/base.html::toast()` → re-attaches `requestAccessUrl` to the
+   toast. It cannot simply read the Error: every one of the ~142 `toast()`
+   call sites passes a *string* built from it (`toast(e.message, 'error')`,
+   `toast('Deploy failed: ' + e.message, 'error')`), so the Error is gone
+   by then. `API.request` therefore stashes the Error on
+   `window.__lastApiError` and `toast()` adopts the link when the string it
+   was handed contains that error's message, consuming the stash and
+   ignoring one older than 5s so a later unrelated toast can't inherit it.
+   Rewriting the 142 call sites to pass the Error would remove the need
+   for this — it is the deliberate trade for not doing that.
+4. The `x-for` in base.html renders the `<a>` when `t.requestAccessUrl` is
+   set.
+
+The two failures worth knowing about, because neither produced an error
+anywhere: `_build_request_access_link` referenced `config_service` with no
+import in scope, so it raised `NameError` on every call and the caller's
+`except Exception` read that as "no link"; and hop 3 discarded the URL as
+described above. Hops 2 and 4 were correct the whole time, which is why the
+feature looked finished. Pinned now in
+`tests/test_entitle_request_access_link.py` (hop 1 — the payload shape) and
+`tests/toast_request_access_check.js` (hops 2–4 — 403 body through to the
+rendered toast object).
+
 **Runbook stub:** `entitle-user-jit-phase-4-ui.md`.
 
 **Test environments:** community + dev + QA + prod.
