@@ -65,6 +65,11 @@ log = logging.getLogger("agent")
 
 DASHBOARD_URL = (os.environ.get("DASHBOARD_URL") or "").rstrip("/")
 ENROLLMENT_CODE = os.environ.get("AGENT_ENROLLMENT_CODE", "").strip()
+# Preferred over the variable above. An env var is baked into the container's config and
+# stays readable via `docker inspect` for the container's whole life, long after the code
+# has been spent; a mounted file leaves nothing durable in Docker's metadata and can be
+# deleted the moment enrolment succeeds.
+ENROLLMENT_CODE_FILE = os.environ.get("AGENT_ENROLLMENT_CODE_FILE", "").strip()
 STATE_DIR = os.environ.get("AGENT_STATE_DIR", "/var/lib/dashboard-agent")
 POLICY_FILE = os.environ.get("AGENT_POLICY_FILE", "/etc/dashboard-agent/policy.yaml")
 CA_BUNDLE = os.environ.get("AGENT_CA_BUNDLE", "").strip()
@@ -89,6 +94,54 @@ class AgentFatal(Exception):
 class PolicyRefusal(Exception):
     """The agent declined the work. Reported back as a job failure, and logged
     locally in full — the local log is the audit record the dashboard cannot edit."""
+
+
+class Throttled(Exception):
+    """The dashboard answered 429 and said when to come back.
+
+    Distinct from ``requests.RequestException`` so the retry uses the interval the server
+    asked for rather than this process's own doubling — and distinct from ``AgentFatal``
+    because being asked to slow down is not a reason to exit.
+    """
+
+    def __init__(self, retry_after: float):
+        self.retry_after = max(1.0, float(retry_after))
+        super().__init__(f"throttled for {self.retry_after:.0f}s")
+
+
+def enrollment_code() -> str:
+    """The one-time enrolment code, from a mounted file when one is configured.
+
+    The file wins when both are set: an operator who went to the trouble of mounting one
+    meant it, and silently preferring the environment variable would quietly undo the
+    reason they did. Only read when there is no stored identity, so deleting the file
+    after a successful enrolment — which is the point of using one — does not stop the
+    agent from restarting.
+    """
+    if ENROLLMENT_CODE_FILE:
+        try:
+            with open(ENROLLMENT_CODE_FILE) as fh:
+                return fh.read().strip()
+        except OSError as exc:
+            raise AgentFatal(
+                f"AGENT_ENROLLMENT_CODE_FILE is set to {ENROLLMENT_CODE_FILE} but it "
+                f"cannot be read ({exc}). The container runs as uid 10001, so a file "
+                f"mode 0600 owned by another user is unreadable inside it — mount it "
+                f"world-readable, or pass AGENT_ENROLLMENT_CODE instead.")
+    return ENROLLMENT_CODE
+
+
+def _retry_after_seconds(resp, default: float) -> float:
+    """The server's ``Retry-After`` in seconds, or ``default``.
+
+    Only the delta-seconds form is handled, because that is the only form this dashboard
+    sends. An HTTP-date would fall through to the default rather than being parsed
+    wrongly, which is the safe direction to be wrong in.
+    """
+    try:
+        return max(1.0, float(int((resp.headers.get("Retry-After") or "").strip())))
+    except (TypeError, ValueError):
+        return default
 
 
 # ── Canonical signing (mirrors web_dashboard/services/agent_signing.py) ───────
@@ -354,6 +407,12 @@ class Dashboard:
             "agent_version": AGENT_VERSION,
             "policy_hash": POLICY.digest,
         }, signed=False)
+        if resp.status_code == 429:
+            wait = _retry_after_seconds(resp, 30)
+            raise AgentFatal(
+                f"the dashboard is throttling enrolment and asked for a retry in "
+                f"{wait:.0f}s. Nothing is wrong with this agent — exiting so the "
+                f"container's restart policy retries.")
         if resp.status_code != 200:
             raise AgentFatal(f"enrolment refused ({resp.status_code}): {resp.text[:300]}")
         data = resp.json()
@@ -369,6 +428,11 @@ class Dashboard:
             raise AgentFatal(
                 "the dashboard rejected this agent's signature — it was probably "
                 "revoked. Re-enrol with a fresh code.")
+        if resp.status_code == 429:
+            # Never conflated with the 401 above: one means stop for good, the other
+            # means come back later, and treating a load spike as a revocation would
+            # take a whole fleet down permanently.
+            raise Throttled(_retry_after_seconds(resp, 30))
         if resp.status_code == 503:
             log.info("dashboard is not ready yet; backing off")
             return None
@@ -883,12 +947,14 @@ def main() -> int:
     dashboard = Dashboard(DASHBOARD_URL)
     dashboard.identity = Identity.load()
     if dashboard.identity is None:
-        if not ENROLLMENT_CODE:
-            log.error("No stored identity and AGENT_ENROLLMENT_CODE is not set. "
-                      "Create an agent in the dashboard and pass its code.")
-            return 2
         try:
-            dashboard.identity = dashboard.enroll(ENROLLMENT_CODE)
+            code = enrollment_code()
+            if not code:
+                raise AgentFatal(
+                    "No stored identity, and neither AGENT_ENROLLMENT_CODE nor "
+                    "AGENT_ENROLLMENT_CODE_FILE is set. Register an agent in the "
+                    "dashboard and pass the code it gives you.")
+            dashboard.identity = dashboard.enroll(code)
         except AgentFatal as exc:
             log.error("%s", exc)
             return 2
@@ -910,6 +976,13 @@ def main() -> int:
             # end. Back off hard rather than hammering, and keep saying so.
             log.error("REFUSED a job envelope: %s", exc)
             backoff = min(backoff * 2, 300)
+        except Throttled as exc:
+            # Honour the server's interval instead of this process's own doubling. Never
+            # shorter than the poll interval, and the jitter below is what keeps a fleet
+            # that was throttled together from returning in lockstep and doing it again.
+            log.warning("the dashboard asked us to slow down; waiting %.0fs",
+                        exc.retry_after)
+            backoff = max(exc.retry_after, poll)
         except requests.RequestException as exc:
             log.warning("dashboard unreachable (%s); retrying in %.0fs", exc, backoff)
             backoff = min(backoff * 2, 300)

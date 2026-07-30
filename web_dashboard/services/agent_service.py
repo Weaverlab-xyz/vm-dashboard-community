@@ -41,7 +41,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..database import AgentNonce, Job, RemoteAgent
-from . import agent_signing, config_service, job_service
+from . import agent_guard, agent_signing, config_service, job_service
 
 logger = logging.getLogger(__name__)
 
@@ -205,7 +205,30 @@ def status_of(agent: RemoteAgent, *, now: Optional[datetime] = None) -> str:
 
 def enroll(db: Session, *, code: str, public_key: str, agent_version: str = "",
            policy_hash: str = "", ip: str = "") -> RemoteAgent:
-    """Redeem a one-time enrolment code, binding the agent's public key to the row.
+    """Redeem a one-time enrolment code, throttled on the way in.
+
+    This is the only unauthenticated route in the agent API, and on the agent overlay it
+    is the only unauthenticated route reachable from a hostile network at all, so the
+    guard wraps it here rather than at the endpoint — every caller gets it, including a
+    future one that forgets.
+
+    Only failures are recorded, so enrolling a fleet back to back never trips the cap.
+    """
+    agent_guard.check_enroll(db, ip=ip)
+    try:
+        return _redeem(db, code=code, public_key=public_key,
+                       agent_version=agent_version, policy_hash=policy_hash, ip=ip)
+    except AgentError:
+        # Recorded for every refusal, whether the code was unknown, expired, revoked or
+        # malformed. Distinguishing them here would leak which part the caller got right,
+        # exactly as the endpoint's single 401 shape avoids doing.
+        agent_guard.record_enroll_failure(db, ip=ip)
+        raise
+
+
+def _redeem(db: Session, *, code: str, public_key: str, agent_version: str = "",
+            policy_hash: str = "", ip: str = "") -> RemoteAgent:
+    """Bind the agent's public key to the row named by a valid enrolment code.
 
     Looked up by hash, then confirmed with a constant-time compare. The lookup is
     already an indexed equality on a hash so it leaks nothing by itself; the compare is
@@ -267,6 +290,14 @@ def authenticate(db: Session, *, agent_id: str, timestamp: str, nonce: str,
         signature=signature, audience=audience, method=method, path=path, body=body,
     ):
         raise AgentError("Signature verification failed.")
+
+    # Between the signature and the nonce, deliberately. After the signature so an
+    # unauthenticated caller who guesses an agent id cannot spend that agent's budget —
+    # the same argument the nonce ordering above makes. Before the nonce insert so a
+    # throttled flood stops growing `agent_nonces` at the cap instead of past it.
+    # Raises AgentThrottled, which is NOT an AgentError: it must reach the client as 429,
+    # not as the 401 that tells an agent it was revoked.
+    agent_guard.check_request(db, agent_id)
 
     if not _consume_nonce(db, agent_id, nonce):
         raise AgentError("Replayed request.")

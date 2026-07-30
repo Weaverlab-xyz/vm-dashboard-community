@@ -303,6 +303,30 @@ class AgentNonce(Base):
     __table_args__ = (UniqueConstraint("agent_id", "nonce", name="uq_agent_nonce"),)
 
 
+class AgentEnrollAttempt(Base):
+    """One FAILED agent enrolment attempt, for the throttle in ``agent_guard``.
+
+    ``POST /api/agent/enroll`` is the only unauthenticated route on the only vhost this
+    dashboard deliberately exposes to a hostile network, and it does a database lookup
+    per call. Guessing a code is infeasible (256 bits), so this table is not really
+    brute-force protection — it is what stops an unauthenticated flood from writing rows
+    and burning query budget indefinitely.
+
+    Successes are not recorded, so the table only ever holds evidence of failure, and it
+    is empty in normal operation. Same storage reasoning as ``LoginAttempt``: in the
+    database because gunicorn runs two workers, and an in-process counter would give an
+    attacker double the allowance and reset it on redeploy.
+    """
+    __tablename__ = "agent_enroll_attempts"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    # Empty string when the peer is unknown, exactly like LoginAttempt.ip — a missing
+    # address must still be recorded, or it would be the one free lane.
+    ip = Column(String(45), nullable=False, default="", index=True)
+    # Indexed because every query is a range scan on it, in both the check and the sweep.
+    attempted_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+
 class Job(Base):
     """Job model for tracking long-running operations"""
     __tablename__ = "jobs"
