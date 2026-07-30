@@ -194,6 +194,29 @@ class PersonalAccessToken(Base):
     user = relationship("User", back_populates="personal_access_tokens")
 
 
+class LoginAttempt(Base):
+    """One FAILED password login. Successes are not recorded here — a successful login
+    deletes the username's rows, so the table only ever holds the evidence of failure.
+
+    In the database rather than in a process, because gunicorn runs two workers: an
+    in-memory counter would give an attacker double the allowance and reset it on every
+    redeploy. Same reasoning as the job claim and the notification outbox.
+
+    Doubles as the only record that a brute-force attempt happened at all — before this
+    existed, a failed login left no trace anywhere in the system.
+    """
+    __tablename__ = "login_attempts"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    # Case-folded by login_guard.normalize_username, so `Admin` and `admin` cannot each
+    # get their own budget. Recorded whether or not the account exists — a throttle that
+    # engaged only for real users would answer "does this user exist?".
+    username = Column(String(150), nullable=False, index=True)
+    ip = Column(String(45), nullable=False, default="", index=True)
+    # Indexed because every query is a range scan on it, in both the check and the sweep.
+    attempted_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+
 class RemoteAgent(Base):
     """A containerised agent running inside a private network that polls this
     dashboard for work — the inverse of every other execution path, which dials out

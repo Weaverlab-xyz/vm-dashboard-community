@@ -401,7 +401,18 @@ async def _warm_portainer_containers() -> None:
 
 
 # ── Rate limiter ──────────────────────────────────────────────────────────────
-
+#
+# READ THIS BEFORE ASSUMING ANYTHING IS RATE LIMITED. `default_limits` only takes
+# effect through `SlowAPIMiddleware`, which is deliberately NOT added: a blanket
+# 60/minute per address would break the UI, which fires many API calls per page load.
+# There are also no `@limiter.limit` decorators. So this limiter is currently inert and
+# `settings.rate_limit_per_minute` does nothing — the object exists for the exception
+# handler wiring below and for endpoints that opt in later.
+#
+# Brute-force protection on the one endpoint that actually needs it lives in
+# `services/login_guard.py` instead, keyed on the USERNAME rather than the address —
+# `get_remote_address` reads a value derived from X-Forwarded-For, which the default
+# `trusted_proxy_hosts="*"` lets any client spoof and rotate per request.
 limiter = Limiter(key_func=get_remote_address, default_limits=[f"{settings.rate_limit_per_minute}/minute"])
 
 
