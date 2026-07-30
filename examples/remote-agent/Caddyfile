@@ -1,0 +1,50 @@
+# Caddy config for the remote-agent vhost. Used by docker-compose.agent.yml.
+#
+# Automatic HTTPS: Caddy obtains and renews a Let's Encrypt certificate for
+# {$AGENT_HOSTNAME} on its own. There is no renewal cron to forget.
+
+{
+	email {$ACME_EMAIL}
+	# Caddy's own admin API is not needed here and binding it inside a
+	# container that terminates public traffic is free attack surface.
+	admin off
+}
+
+{$AGENT_HOSTNAME} {
+	encode gzip
+
+	# The ONLY thing this vhost serves. Everything else — the UI, /api/auth,
+	# /setup, /swagger, the OAuth callbacks — stays on the internal address and is
+	# never reachable from wherever the agents live.
+	handle /api/agent* {
+		reverse_proxy app:8000 {
+			# The agent holds a lease poll open for up to ~50s.
+			transport http {
+				read_timeout 120s
+			}
+		}
+	}
+
+	# One response for every other path, so this host is not an oracle for which
+	# dashboard routes exist.
+	handle {
+		respond "Not found" 404
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		# No HTML is served here, so nothing needs a referrer or a frame.
+		Referrer-Policy "no-referrer"
+		X-Frame-Options "DENY"
+		-Server
+	}
+
+	log {
+		output stdout
+		format json
+		# Agent credentials are Ed25519 signatures valid for one request and 60
+		# seconds, so there is nothing replayable in these headers to redact —
+		# which is precisely why the design does not use a bearer token.
+	}
+}

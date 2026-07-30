@@ -425,7 +425,14 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # Trust X-Forwarded-Proto/X-Forwarded-For from the Container Apps / reverse proxy.
 # This makes request.url.scheme reflect "https" when accessed through the proxy.
-app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
+#
+# `trusted_proxy_hosts` defaults to "*" because the community compose publishes
+# gunicorn directly with nothing in front, so there is no proxy address to name and
+# no header to spoof from outside the host. The moment you DO put a proxy in front —
+# in particular the remote-agent vhost in docker-compose.agent.yml — pin this to that
+# proxy, because `get_remote_address` keys the rate limiter off X-Forwarded-For and a
+# wildcard lets any direct client spoof its way past a per-IP limit.
+app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=settings.trusted_proxy_hosts)
 
 
 # ── Setup guard middleware ────────────────────────────────────────────────────
@@ -436,12 +443,23 @@ from starlette.responses import RedirectResponse as _Redirect  # noqa: E402
 
 _SETUP_BYPASS_PREFIXES = ("/setup", "/api/setup", "/static", "/api/health", "/api/features", "/api/secrets", "/api/storage")
 
+# Machine callers that must never be handed a 302 to an HTML wizard. A remote agent
+# polls this API in a loop with follow_redirects off; a redirect would arrive as an
+# opaque non-JSON response it can only treat as a hard error. 503 + Retry-After says
+# "not yet, come back" in the one vocabulary an HTTP client already understands.
+_SETUP_503_PREFIXES = ("/api/agent",)
+
 @app.middleware("http")
 async def setup_guard(request: Request, call_next):
     path = request.url.path
     if any(path.startswith(p) for p in _SETUP_BYPASS_PREFIXES):
         return await call_next(request)
     if not config_service.is_setup_complete():
+        if any(path.startswith(p) for p in _SETUP_503_PREFIXES):
+            return JSONResponse(
+                {"detail": "Dashboard setup is not complete."},
+                status_code=503, headers={"Retry-After": "60"},
+            )
         return _Redirect("/setup", status_code=302)
     return await call_next(request)
 
@@ -502,6 +520,7 @@ def _feature_flags() -> dict:
         "entitle_registration_enabled": config_service.get_bool("entitle_registration_enabled", settings.entitle_registration_enabled),
         "k8s_management_enabled": config_service.get_bool("k8s_management_enabled", settings.k8s_management_enabled),
         "cost_explorer_enabled": config_service.get_bool("cost_explorer_enabled", settings.cost_explorer_enabled),
+        "remote_agents_enabled": config_service.get_bool("remote_agents_enabled", settings.remote_agents_enabled),
         "admission_control_enabled": config_service.get_bool("admission_control_enabled", settings.admission_control_enabled),
         # Auto-delete timer — gates the Expires column on /inventory and the dashboard's
         # "expiring soon" warning. Deletion has its own second gate
@@ -535,6 +554,7 @@ from .api import cloud_identity as cloud_identity_api  # noqa: E402
 from .api import gateways as gateways_api  # noqa: E402
 from .api import expiry as expiry_api  # noqa: E402
 from .api import notifications as notifications_api  # noqa: E402
+from .api import agent as agent_api  # noqa: E402
 from .api.mcp_server import get_mcp_asgi_app  # noqa: E402
 
 
@@ -567,6 +587,10 @@ app.include_router(workgroup_overrides_api.router)
 app.include_router(jobs.router)
 app.include_router(audit_api.router)
 app.include_router(docs_pages.router)
+# Remote on-prem agents. Gated: this is the only router that accepts requests from
+# outside the dashboard's own trust domain, so it must be off unless asked for.
+app.include_router(agent_api.router,
+                   dependencies=[_feature_gate("remote_agents_enabled")])
 
 # ── API explorer (/swagger) + authenticated schema ────────────────────────────
 # FastAPI's built-ins are disabled above. The schema is the sensitive part — it
@@ -926,6 +950,13 @@ async def k8s_page(request: Request):
     """Kubernetes management page — Phase 3a. Nav-gated on k8s_management_enabled;
     the /api/k8s router is feature-gated."""
     return templates.TemplateResponse("k8s/index.html", {"request": request, **_feature_flags()})
+
+
+@app.get("/agents", response_class=HTMLResponse, include_in_schema=False)
+async def agents_page(request: Request):
+    """Remote on-prem agents. Nav-gated on remote_agents_enabled (+ admin); the
+    /api/agent router is feature-gated and its operator half is admin-only."""
+    return templates.TemplateResponse("agents/index.html", {"request": request, **_feature_flags()})
 
 
 @app.get("/users", response_class=HTMLResponse, include_in_schema=False)

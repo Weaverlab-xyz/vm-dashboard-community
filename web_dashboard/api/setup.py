@@ -213,6 +213,7 @@ class FeaturesSetup(BaseModel):
     admission_control_enabled: bool = False
     cloud_database_enabled: bool = False
     k8s_management_enabled: bool = False
+    remote_agents_enabled: bool = False
 
 
 class SetupPayload(BaseModel):
@@ -337,6 +338,7 @@ def _apply_config(payload: SetupPayload) -> None:
         "admission_control_enabled": "1" if payload.features.admission_control_enabled else "0",
         "cloud_database_enabled":   "1" if payload.features.cloud_database_enabled else "0",
         "k8s_management_enabled":   "1" if payload.features.k8s_management_enabled else "0",
+        "remote_agents_enabled":    "1" if payload.features.remote_agents_enabled else "0",
     })
 
     config_service.set_many(pairs)

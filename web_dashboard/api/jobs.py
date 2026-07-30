@@ -141,13 +141,15 @@ async def cancel_job(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Cancel a pending or running job."""
+    """Cancel a queued, pending or running job."""
     job = job_service.get_job(db, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     if job.created_by != current_user.username and not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Access denied")
-    if job.status not in ("pending", "running"):
+    # `queued` included: a job assigned to a remote agent that never came back would
+    # otherwise be uncancellable, and it is the one an operator most wants to clear.
+    if job.status not in ("queued", "pending", "running"):
         raise HTTPException(status_code=409, detail=f"Cannot cancel a job with status '{job.status}'")
 
     updated = job_service.set_cancelled(db, job_id)

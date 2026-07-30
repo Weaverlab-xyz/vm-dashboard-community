@@ -1,0 +1,354 @@
+{% extends "base.html" %}
+
+{% block title %}Remote Agents – Infrastructure Management{% endblock %}
+
+{% block content %}
+<div class="max-w-6xl mx-auto py-8 px-4" x-data="agentsPage()" x-init="init()">
+
+  <h1 class="text-2xl font-bold text-gray-800 mb-1">Remote Agents</h1>
+  <p class="text-sm text-gray-500 mb-8">
+    Containerised agents that run inside a private network and poll <em>out</em> to this
+    dashboard for work — so on-premises Kubernetes clusters and databases can be discovered
+    without opening a single inbound firewall rule. Each agent authenticates with an Ed25519
+    key it generates itself; no reusable credential ever crosses the wire.
+  </p>
+
+  <!-- Toast -->
+  <div x-show="toast" x-cloak x-transition
+       :class="toastType === 'error' ? 'bg-red-50 border-red-200 text-red-700' : 'bg-green-50 border-green-200 text-green-700'"
+       class="mb-6 border rounded-lg px-4 py-3 text-sm" x-text="toast"></div>
+
+  <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+    <div class="flex items-center justify-between mb-4">
+      <h2 class="text-base font-semibold text-gray-700">Enrolled Agents</h2>
+      <button @click="openCreate()"
+              class="flex items-center gap-1.5 text-sm bg-blue-700 hover:bg-blue-800
+                     text-white px-3 py-1.5 rounded-lg font-medium transition">
+        <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/>
+        </svg>
+        Register Agent
+      </button>
+    </div>
+
+    <div x-show="loading" class="py-6 text-center text-gray-400 text-sm">Loading…</div>
+
+    <div x-show="!loading && agents.length === 0" class="py-8 text-center text-gray-400 text-sm">
+      No agents yet. Click "Register Agent" to get an enrolment code and a run command.
+    </div>
+
+    <div x-show="!loading && agents.length > 0" class="overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead>
+          <tr class="text-left text-xs text-gray-500 uppercase tracking-wide border-b border-gray-100">
+            <th class="pb-2 pr-4">Name</th>
+            <th class="pb-2 pr-4">Site</th>
+            <th class="pb-2 pr-4">Status</th>
+            <th class="pb-2 pr-4">Version</th>
+            <th class="pb-2 pr-4">Last seen</th>
+            <th class="pb-2 pr-4">Running</th>
+            <th class="pb-2"></th>
+          </tr>
+        </thead>
+        <tbody>
+          <template x-for="a in agents" :key="a.id">
+            <tr class="border-b border-gray-50 hover:bg-gray-50">
+              <td class="py-2.5 pr-4 font-medium text-gray-800">
+                <span x-text="a.name"></span>
+                <div class="text-xs text-gray-400" x-text="a.description || ''"></div>
+              </td>
+              <td class="py-2.5 pr-4 font-mono text-xs text-gray-500" x-text="a.site || '—'"></td>
+              <td class="py-2.5 pr-4">
+                <span :class="statusClass(a.status)"
+                      class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium"
+                      x-text="a.status"></span>
+              </td>
+              <td class="py-2.5 pr-4 font-mono text-xs text-gray-500" x-text="a.agent_version || '—'"></td>
+              <td class="py-2.5 pr-4 text-xs text-gray-500" x-text="a.last_seen_at ? fmt(a.last_seen_at) : 'never'"></td>
+              <td class="py-2.5 pr-4 text-xs text-gray-700" x-text="a.running_jobs"></td>
+              <td class="py-2.5 text-right whitespace-nowrap">
+                <button @click="openDiscover(a)"
+                        :disabled="a.status !== 'online'"
+                        :class="a.status === 'online' ? 'text-blue-600 hover:text-blue-800' : 'text-gray-300 cursor-not-allowed'"
+                        class="text-xs font-medium transition mr-2">
+                  Discover
+                </button>
+                <button @click="reissue(a)"
+                        :disabled="a.status === 'revoked'"
+                        :class="a.status === 'revoked' ? 'text-gray-300 cursor-not-allowed' : 'text-gray-600 hover:text-gray-800'"
+                        class="text-xs font-medium transition mr-2">
+                  Re-enrol
+                </button>
+                <button @click="revoke(a)"
+                        :disabled="a.status === 'revoked'"
+                        :class="a.status === 'revoked' ? 'text-gray-300 cursor-not-allowed' : 'text-red-500 hover:text-red-700'"
+                        class="text-xs font-medium transition">
+                  Revoke
+                </button>
+              </td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Register modal -->
+  <div x-show="createOpen" x-cloak
+       class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
+    <div class="bg-white rounded-xl shadow-xl w-full max-w-lg p-6">
+      <h3 class="text-lg font-semibold text-gray-800 mb-4">Register Agent</h3>
+      <div class="space-y-4">
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Name</label>
+          <input type="text" x-model="form.name" placeholder="lab-dc1"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-200"/>
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Site <span class="text-gray-400">(optional)</span></label>
+          <input type="text" x-model="form.site" placeholder="dc1"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-200"/>
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Description <span class="text-gray-400">(optional)</span></label>
+          <input type="text" x-model="form.description" placeholder="Primary lab network"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-200"/>
+        </div>
+      </div>
+      <div class="flex justify-end gap-2 mt-6">
+        <button @click="createOpen = false"
+                class="text-sm px-3 py-1.5 rounded-lg text-gray-600 hover:bg-gray-100 transition">Cancel</button>
+        <button @click="create()"
+                class="text-sm bg-blue-700 hover:bg-blue-800 text-white px-3 py-1.5 rounded-lg font-medium transition">
+          Register
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Enrolment code modal — shown ONCE -->
+  <div x-show="enrolOpen" x-cloak
+       class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
+    <div class="bg-white rounded-xl shadow-xl w-full max-w-2xl p-6">
+      <h3 class="text-lg font-semibold text-gray-800 mb-1">Enrolment code for <span x-text="enrol.name"></span></h3>
+      <p class="text-sm text-red-600 mb-4">
+        Shown once. It expires in 15 minutes and can only be redeemed a single time.
+      </p>
+      <div class="mb-4">
+        <label class="block text-xs font-medium text-gray-600 mb-1">Code</label>
+        <div class="flex gap-2">
+          <input type="text" readonly :value="enrol.code"
+                 class="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono bg-gray-50"/>
+          <button @click="copy(enrol.code)"
+                  class="text-sm px-3 py-1.5 rounded-lg border border-gray-300 hover:bg-gray-50 transition">Copy</button>
+        </div>
+      </div>
+      <div>
+        <label class="block text-xs font-medium text-gray-600 mb-1">Run this inside the private network</label>
+        <pre class="bg-gray-900 text-gray-100 rounded-lg p-3 text-xs overflow-x-auto whitespace-pre" x-text="enrol.docker_run"></pre>
+        <button @click="copy(enrol.docker_run)"
+                class="mt-2 text-xs px-3 py-1.5 rounded-lg border border-gray-300 hover:bg-gray-50 transition">
+          Copy command
+        </button>
+      </div>
+      <p class="text-xs text-gray-500 mt-4">
+        The agent needs a <code class="font-mono">policy.yaml</code> naming the networks it may
+        scan — it refuses all work without one. See
+        <a href="/docs/remote-agents.md" class="text-blue-600 hover:underline">the remote agent docs</a>
+        for a starting file.
+      </p>
+      <div class="flex justify-end mt-6">
+        <button @click="enrolOpen = false"
+                class="text-sm bg-blue-700 hover:bg-blue-800 text-white px-3 py-1.5 rounded-lg font-medium transition">
+          Done
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Discover modal -->
+  <div x-show="discoverOpen" x-cloak
+       class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
+    <div class="bg-white rounded-xl shadow-xl w-full max-w-lg p-6">
+      <h3 class="text-lg font-semibold text-gray-800 mb-1">Discover via <span x-text="discover.agentName"></span></h3>
+      <p class="text-sm text-gray-500 mb-4">
+        Unauthenticated probes only — a TCP connect and a protocol banner. Nothing ever
+        attempts a login. The agent will refuse any target outside its own policy file.
+      </p>
+      <div class="space-y-4">
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">Look for</label>
+          <select x-model="discover.scan_kind"
+                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            <option value="both">Kubernetes clusters and databases</option>
+            <option value="k8s">Kubernetes clusters only</option>
+            <option value="database">Databases only</option>
+          </select>
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">
+            Networks <span class="text-gray-400">(comma-separated CIDRs; blank = the agent's own subnet)</span>
+          </label>
+          <input type="text" x-model="discover.cidrs" placeholder="10.20.0.0/24, 10.20.1.0/24"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-200"/>
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-gray-600 mb-1">
+            Hosts <span class="text-gray-400">(optional, comma-separated)</span>
+          </label>
+          <input type="text" x-model="discover.hostnames" placeholder="pg01.lab.local"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-200"/>
+        </div>
+        <label class="flex items-center gap-2 text-sm text-gray-700">
+          <input type="checkbox" x-model="discover.use_local_kubeconfig" class="rounded border-gray-300"/>
+          Also read a kubeconfig mounted into the agent
+        </label>
+      </div>
+      <div class="flex justify-end gap-2 mt-6">
+        <button @click="discoverOpen = false"
+                class="text-sm px-3 py-1.5 rounded-lg text-gray-600 hover:bg-gray-100 transition">Cancel</button>
+        <button @click="runDiscover()"
+                class="text-sm bg-blue-700 hover:bg-blue-800 text-white px-3 py-1.5 rounded-lg font-medium transition">
+          Start scan
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+function agentsPage() {
+  return {
+    agents: [],
+    loading: true,
+    toast: '',
+    toastType: 'success',
+    createOpen: false,
+    enrolOpen: false,
+    discoverOpen: false,
+    form: {name: '', site: '', description: ''},
+    enrol: {name: '', code: '', docker_run: ''},
+    discover: {agentId: '', agentName: '', scan_kind: 'both', cidrs: '', hostnames: '',
+               use_local_kubeconfig: true},
+    _timer: null,
+
+    async init() {
+      requireAuth();
+      await this.load();
+      // Status is derived from last_seen_at, so it only changes as the agent polls.
+      this._timer = setInterval(() => this.load(true), 15000);
+    },
+
+    async load(quiet) {
+      if (!quiet) this.loading = true;
+      try {
+        const r = await API.get('/api/agent');
+        this.agents = r.agents || [];
+      } catch (e) {
+        if (!quiet) this.flash('Failed to load agents: ' + (e.message || e), 'error');
+      } finally {
+        this.loading = false;
+      }
+    },
+
+    statusClass(s) {
+      return {
+        online:    'bg-green-100 text-green-800',
+        offline:   'bg-gray-100 text-gray-600',
+        enrolling: 'bg-yellow-100 text-yellow-800',
+        revoked:   'bg-red-100 text-red-700',
+      }[s] || 'bg-gray-100 text-gray-600';
+    },
+
+    fmt(ts) {
+      try { return new Date(ts + 'Z').toLocaleString(); } catch (e) { return ts; }
+    },
+
+    openCreate() {
+      this.form = {name: '', site: '', description: ''};
+      this.createOpen = true;
+    },
+
+    async create() {
+      try {
+        const r = await API.post('/api/agent', {
+          name: this.form.name.trim(),
+          site: this.form.site.trim(),
+          description: this.form.description.trim(),
+        });
+        this.createOpen = false;
+        this.showEnrol(r);
+        await this.load();
+      } catch (e) {
+        this.flash('Register failed: ' + (e.message || e), 'error');
+      }
+    },
+
+    showEnrol(r) {
+      this.enrol = {name: r.name, code: r.enrollment_code,
+                    docker_run: (r.install || {}).docker_run || ''};
+      this.enrolOpen = true;
+    },
+
+    async reissue(a) {
+      if (!confirm(`Issue a new enrolment code for '${a.name}'?\n\nThe currently running container will stop being able to claim work immediately.`)) return;
+      try {
+        this.showEnrol(await API.post(`/api/agent/${encodeURIComponent(a.id)}/enrollment-code`, {}));
+        await this.load();
+      } catch (e) {
+        this.flash('Could not re-issue: ' + (e.message || e), 'error');
+      }
+    },
+
+    async revoke(a) {
+      if (!confirm(`Revoke agent '${a.name}'?\n\nAny job it is running will be marked failed.`)) return;
+      try {
+        const r = await API.delete('/api/agent/' + encodeURIComponent(a.id));
+        this.flash(r.detail || 'Agent revoked.', 'success');
+        await this.load();
+      } catch (e) {
+        this.flash('Revoke failed: ' + (e.message || e), 'error');
+      }
+    },
+
+    openDiscover(a) {
+      this.discover = {agentId: a.id, agentName: a.name, scan_kind: 'both',
+                       cidrs: '', hostnames: '', use_local_kubeconfig: true};
+      this.discoverOpen = true;
+    },
+
+    _list(s) {
+      return (s || '').split(',').map(v => v.trim()).filter(Boolean);
+    },
+
+    async runDiscover() {
+      try {
+        const r = await API.post(`/api/agent/${encodeURIComponent(this.discover.agentId)}/discover`, {
+          scan_kind: this.discover.scan_kind,
+          cidrs: this._list(this.discover.cidrs),
+          hostnames: this._list(this.discover.hostnames),
+          use_local_kubeconfig: this.discover.use_local_kubeconfig,
+        });
+        this.discoverOpen = false;
+        // The job page streams the agent's output through the existing Live Output pane.
+        window.location.href = '/jobs/' + r.job_id;
+      } catch (e) {
+        this.flash('Could not start the scan: ' + (e.message || e), 'error');
+      }
+    },
+
+    copy(text) {
+      navigator.clipboard.writeText(text)
+        .then(() => this.flash('Copied.', 'success'))
+        .catch(() => this.flash('Copy failed — select and copy manually.', 'error'));
+    },
+
+    flash(msg, type) {
+      this.toast = msg;
+      this.toastType = type;
+      setTimeout(() => { this.toast = ''; }, 4000);
+    },
+  };
+}
+</script>
+{% endblock %}

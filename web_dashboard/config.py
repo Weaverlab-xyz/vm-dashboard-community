@@ -33,6 +33,11 @@ class Settings(BaseSettings):
     vdesktops_enabled: bool = False     # Virtual desktops router + /desktops page (Azure pools + PRA brokering)
     cloud_database_enabled: bool = False  # /api/databases router — private managed DBs brokered via a PRA tunnel
     k8s_management_enabled: bool = False  # /api/k8s router — provision/register/manage Kubernetes clusters
+    # /api/agent router + /agents page — containerised agents inside private networks
+    # that poll OUT to this dashboard for work. Off by default and deliberately so:
+    # it is the only router that serves callers outside the dashboard's trust domain,
+    # and enabling it means publishing an endpoint those agents can reach.
+    remote_agents_enabled: bool = False
     cost_explorer_enabled: bool = False   # /api/costs router + dashboard spend tile (AWS Cost Explorer + Azure Cost Mgmt)
     cost_monthly_budget: float = 0.0      # overall monthly cloud-spend budget for alerts (account currency); 0 = disabled
     cost_budget_aws: float = 0.0          # optional per-cloud monthly budgets; 0 = disabled
@@ -209,6 +214,13 @@ class Settings(BaseSettings):
 
     # CORS
     cors_origins: List[str] = ["http://localhost:8001", "http://localhost:3000"]
+
+    # Which peers may set X-Forwarded-For / X-Forwarded-Proto. "*" matches today's
+    # behaviour and is right while compose publishes gunicorn with nothing in front.
+    # Pin it to the proxy once one exists (docker-compose.agent.yml): the rate limiter
+    # keys off get_remote_address, so a wildcard means any direct client can spoof its
+    # source IP and walk past a per-IP limit.
+    trusted_proxy_hosts: str = "*"
 
     # PowerShell
     vm_cli_wrapper_path: str = r"C:\Scripts\VM_CLI\VM_DEMO_CLI\vm_cli_api_wrapper.ps1"

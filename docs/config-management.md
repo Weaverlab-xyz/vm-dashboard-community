@@ -336,6 +336,32 @@ the codebase for "give me a long-lived worker for performance reasons."
 You pay a one-second startup penalty per run; you never have to defend
 a fleet of long-lived runners to a security review.
 
+#### The one long-lived process, and why it doesn't contradict this
+
+[Remote agents](remote-agents.md) run a persistent container inside a customer's
+private network. That looks like the exact thing this section argues against, so it is
+worth being precise about why it isn't.
+
+Read the sentence above again: no escape hatch for a long-lived worker *for performance
+reasons*. An agent is not asking for persistence to save a second of startup. It asks
+for it for **reachability** — you cannot launch a one-shot container inside a network
+you cannot reach, so something has to already be there. That is a different
+justification, and the four invariants this section actually names all survive it:
+
+| Invariant above | How the agent holds it |
+|---|---|
+| Secrets fetched just-in-time | The agent holds no target credentials at all today — discovery never authenticates |
+| No process or filesystem outlives the run | Nothing is written per job; the only persistent state is the agent's own signing key |
+| No shared user namespace between runs | Agent-executed Ansible spawns a **one-shot sibling container** per job; the supervisor never runs a playbook itself |
+| Dashboard never holds the secret long | Strengthened, in fact: refs are resolved on demand and the agent fetches them for the life of one child container |
+
+So the runner is still one-shot. What moved is the thing that launches it — from the
+dashboard's Docker socket to one inside the network the target actually lives on. The
+supervisor that does the launching is small, holds no credentials, and executes nothing
+the dashboard sends it: the job payload is a closed allowlist of scalars and network
+addresses, and its handler table is a closed dict rather than a dispatch on a string
+from the wire.
+
 ---
 
 ## Secret scanning (advisory)

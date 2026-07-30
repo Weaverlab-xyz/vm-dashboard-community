@@ -87,6 +87,11 @@
    {% if request.url.path.startswith('/jobs') %}{{ nav_active }}{% endif %}">Jobs</a>
 
 {# ── Admin ────────────────────────────────────────────────────────── #}
+{% if remote_agents_enabled %}
+<a x-show="$store.auth.isAdmin" href="/agents"
+   class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
+   {% if request.url.path.startswith('/agents') %}{{ nav_active }}{% endif %}">Agents</a>
+{% endif %}
 <a x-show="$store.auth.isAdmin" href="/secrets"
    class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
    {% if request.url.path.startswith('/secrets') %}{{ nav_active }}{% endif %}">Secrets</a>

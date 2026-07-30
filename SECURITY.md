@@ -76,7 +76,8 @@ vulnerability.
 **Out of scope** — generally not vulnerabilities:
 
 - Issues that require an already-compromised host, root/admin on the server, or
-  a malicious administrator account.
+  a malicious administrator account — **except across the remote-agent boundary,
+  see below**.
 - Misconfiguration of *your* deployment — e.g. exposing the dashboard to the
   internet without a reverse proxy/TLS, weak credentials you set, or over-broad
   cloud IAM you grant.
@@ -85,6 +86,37 @@ vulnerability.
   localhost-only flows.
 - Findings in third-party dependencies without demonstrated impact here — please
   report those upstream, though we still want to hear about them.
+
+### The remote-agent trust boundary
+
+Everything above assumes one trust domain: you run the dashboard, it holds your
+credentials, and an administrator abusing it is abusing resources they already own.
+
+[Remote agents](docs/remote-agents.md) break that assumption, so they get their own
+rule. An agent is a container running inside a private network — possibly one whose
+owner is not the dashboard's operator — and it is, structurally, a
+dashboard-controlled execution endpoint on that network. **Across this boundary the
+dashboard is untrusted.** Compromise of the dashboard, or of its database, must not
+be sufficient to execute anything on the far side.
+
+**In scope** for the agent, in addition to everything above:
+
+- Any way to make an agent act on a job envelope that the dashboard's signing key did
+  not sign — including forging, replaying, or substituting one.
+- Any way to get an agent to reach a host or port outside its `policy.yaml`, including
+  via DNS rebinding, redirect following, or a path that skips the resolved-IP check.
+- Any protocol field that can carry executable content — a command, a script, a
+  fetchable URL, a filename — into an agent.
+- Any way for one enrolled agent to lease, read, log to, or complete another agent's
+  job.
+- Any way for an agent credential to be replayable: a captured request that succeeds
+  twice, outside its timestamp window, or against a different method, path, body or
+  audience than it was signed for.
+- Any way a dashboard-side API can modify, disable, or misreport an agent's local
+  policy file.
+
+Reports in these categories are wanted **even though they require a compromised or
+malicious dashboard**, which is exactly the exemption that does not apply here.
 
 For background on how the dashboard handles credentials and secrets, see
 [docs/secrets-management.md](docs/secrets-management.md).

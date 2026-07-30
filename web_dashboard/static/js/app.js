@@ -234,7 +234,15 @@ class JobTracker {
 
     connect() {
         const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-        this.ws = new WebSocket(`${protocol}//${location.host}/api/ws/jobs/${this.jobId}`);
+        // The browser WebSocket API cannot set an Authorization header, and a token in
+        // the query string would be logged by every proxy on the path. The subprotocol
+        // list is the one client-settable header that is neither, so the token rides
+        // there and the server echoes `vmdash.bearer` back on accept.
+        const token = localStorage.getItem('vm_cli_token');
+        const url = `${protocol}//${location.host}/api/ws/jobs/${this.jobId}`;
+        this.ws = token
+            ? new WebSocket(url, ['vmdash.bearer', token])
+            : new WebSocket(url);
 
         this.ws.onmessage = (event) => {
             const data = JSON.parse(event.data);

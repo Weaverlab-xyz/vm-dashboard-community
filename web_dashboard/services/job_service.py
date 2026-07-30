@@ -37,6 +37,7 @@ def create_job(
     batch_id: Optional[str] = None,
     status: str = "pending",
     expires_at: Optional[datetime] = None,
+    agent_id: Optional[str] = None,
 ) -> Job:
     """Create a new job record, ``pending`` by default.
 
@@ -50,12 +51,22 @@ def create_job(
     parent. Creating such children ``queued`` keeps them out of the claim query while
     still showing on /jobs. Only pass it when something else owns the execution.
 
+    ``agent_id`` assigns the row to an enrolled remote agent and **forces**
+    ``status='queued'`` — it is not a request, and a caller cannot opt out. A remote
+    agent leases on ``status='queued' AND agent_id=:id``; if such a row were left
+    ``pending`` under a type the local runner also handles, both would claim it and it
+    would execute twice, once in a network the other cannot even reach. Forcing it in
+    this one funnel — the single function every job row passes through — is what makes
+    that unforgettable, rather than a rule each new call site has to remember.
+
     ``expires_at`` is the auto-delete timer. Pass it to override; leave it None and a
     cloud VM deploy is stamped from the global default. This is the ONE funnel every
     VM deploy row passes through — single deploys, count fan-outs and bulk children
     alike — so stamping here means no provider can be forgotten and a fifth cloud is
     covered the day it's added. See expiry_policy.default_expiry_for, which returns
     None on a set-membership test for every job type that isn't a VM deploy."""
+    if agent_id:
+        status = "queued"
     job = Job(
         id=str(uuid.uuid4()),
         job_type=job_type,
@@ -66,6 +77,7 @@ def create_job(
         created_at=datetime.utcnow(),
         created_by=created_by,
         batch_id=batch_id or None,
+        agent_id=agent_id or None,
     )
     if metadata:
         job.metadata_dict = metadata
@@ -235,9 +247,15 @@ def update_metadata(db: Session, job_id: str, data: dict) -> Optional[Job]:
 
 
 def set_cancelled(db: Session, job_id: str) -> Optional[Job]:
-    """Mark a job as cancelled."""
+    """Mark a job as cancelled.
+
+    ``queued`` is cancellable for the same reason ``pending`` is: the work has not
+    started. It was omitted while the only queued rows were bulk children nobody
+    cancels individually, but a job waiting on a remote agent that is offline is
+    exactly the row an operator reaches for the Cancel button on.
+    """
     job = db.query(Job).filter(Job.id == job_id).first()
-    if job and job.status in ("pending", "running"):
+    if job and job.status in ("queued", "pending", "running"):
         job.status = "cancelled"
         job.completed_at = datetime.utcnow()
         db.commit()

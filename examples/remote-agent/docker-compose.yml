@@ -1,0 +1,59 @@
+# Remote on-prem agent — run this INSIDE the private network you want discovered.
+#
+#   1. Register the agent on the dashboard's Agents page and copy the enrolment code.
+#   2. Copy policy.example.yaml to policy.yaml and edit the target ranges.
+#   3. AGENT_ENROLLMENT_CODE=agte_... docker compose up -d
+#
+# The code is single-use and expires in 15 minutes. On first start the agent generates
+# an Ed25519 keypair, redeems the code, and stores its identity in the named volume —
+# so the code is only needed once and can be dropped from the environment afterwards.
+#
+# Note what is absent: no `ports:`, no `/var/run/docker.sock`, no privileged flag, no
+# host networking. The agent never listens on anything and never launches anything.
+
+services:
+  agent:
+    image: chrweav/dashboard-agent:latest
+    container_name: dashboard-agent
+    restart: unless-stopped
+
+    # ── Hardening. None of this is optional. ──────────────────────────────────
+    user: "10001:10001"
+    read_only: true                    # the state volume below is the only writable path
+    cap_drop: [ALL]                    # a TCP connect needs no capability
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 200
+    tmpfs:
+      - /tmp:noexec,nosuid,nodev,size=16m
+
+    environment:
+      # Must be https. The agent refuses to send signed requests over plaintext unless
+      # AGENT_INSECURE_TLS=1, which is for a throwaway lab and warns on every poll.
+      DASHBOARD_URL: ${DASHBOARD_URL:?set DASHBOARD_URL, e.g. https://agents.example.com}
+      # Only needed on first start; the identity in the volume is used from then on.
+      AGENT_ENROLLMENT_CODE: ${AGENT_ENROLLMENT_CODE:-}
+      AGENT_POLL_INTERVAL: "5"
+      # Set to "audit" to log every job it WOULD run and execute nothing. Worth two
+      # weeks before you let it act — it is usually what gets the agent approved.
+      AGENT_MODE: ${AGENT_MODE:-normal}
+      # Behind a TLS-inspecting corporate proxy, point this at the inspection CA and
+      # mount it below. HTTP_PROXY / HTTPS_PROXY / NO_PROXY are honoured automatically;
+      # remember NO_PROXY for the private ranges, or probes get sent to the proxy.
+      # AGENT_CA_BUNDLE: /etc/dashboard-agent/corp-ca.crt
+
+    volumes:
+      # Holds the Ed25519 private key. Losing it just means re-enrolling.
+      - agent_state:/var/lib/dashboard-agent
+      - ./policy.yaml:/etc/dashboard-agent/policy.yaml:ro
+      # Optional: a kubeconfig for clusters you already have credentials for. Only the
+      # API server URL and version are ever reported — the credentials stay in the file.
+      # - ./kubeconfig:/etc/dashboard-agent/kubeconfig:ro
+      # - /usr/local/share/ca-certificates/corp.crt:/etc/dashboard-agent/corp-ca.crt:ro
+
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+volumes:
+  agent_state:
