@@ -199,6 +199,42 @@ def test_kubernetes_probe_sends_only_an_unauthenticated_get():
     assert "Authorization" not in code, "the k8s probe must not send a credential"
 
 
+def test_kubernetes_probe_refuses_deprecated_tls_versions():
+    """The probe turns verification off — it is identifying an unknown host whose CA it
+    has never seen — and that also relaxes the context's security level enough to
+    negotiate TLS 1.0/1.1.
+
+    Asserted against the live context rather than the source, because the default
+    minimum depends on the OpenSSL the image was built against: it happens to be
+    TLS 1.2 on some builds and is not guaranteed to be on others. Kubernetes has
+    required TLS 1.2 for years, so pinning the floor costs no discovery reach.
+    """
+    import ssl as _ssl
+    created = []
+    original = _ssl.create_default_context
+
+    def _capture(*a, **kw):
+        ctx = original(*a, **kw)
+        created.append(ctx)
+        return ctx
+
+    _ssl.create_default_context = _capture
+    try:
+        # No listener on this port, so the probe builds its context and then returns
+        # None at the connect — which is all we need to inspect it.
+        agent.probe_kubernetes("127.0.0.1", 1, 0.05)
+    finally:
+        _ssl.create_default_context = original
+
+    assert created, "probe_kubernetes did not build an SSL context"
+    ctx = created[0]
+    assert ctx.minimum_version >= _ssl.TLSVersion.TLSv1_2, (
+        f"the probe would negotiate {ctx.minimum_version!r}; pin TLSv1_2 or higher")
+    # And the verification posture is still deliberately off — if this ever flips, the
+    # probe stops working against every self-signed cluster CA out there.
+    assert ctx.verify_mode == _ssl.CERT_NONE and ctx.check_hostname is False
+
+
 # ── Version / distro parsing ──────────────────────────────────────────────────
 
 def test_distro_is_derived_from_the_version_string():

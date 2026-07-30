@@ -547,6 +547,12 @@ def probe_kubernetes(ip: str, port: int, timeout: float) -> Optional[dict]:
     # certificate is read as EVIDENCE, not trusted for anything.
     context.check_hostname = False
     context.verify_mode = ssl.CERT_NONE
+    # Dropping verification also relaxes the context's security level, which lets it
+    # negotiate TLS 1.0/1.1. Pin the floor back: Kubernetes has required TLS 1.2 since
+    # 1.x (`--tls-min-version` defaults to VersionTLS12), so nothing we want to find is
+    # excluded, and a probe should not be the one thing in the estate still willing to
+    # speak a deprecated protocol.
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
 
     sock = _connect(ip, port, timeout)
     if sock is None:
