@@ -748,8 +748,8 @@ class Settings(BaseSettings):
     # documented in runners/promote/README.md). Falls back to existing
     # gcp_* / storage_gcs_* keys for single-tenant installs.
     promote_runner_gcp_region: str = ""                  # fallback: gcp_region
-    promote_runner_gcp_cpu: str = "2000m"                # qemu-img headroom
-    promote_runner_gcp_memory: str = "4Gi"               # ~4 GiB for multi-GB VHDs + tar wrap
+    promote_runner_gcp_cpu: str = "4"                    # Cloud Run requires >=4 vCPU above 8Gi
+    promote_runner_gcp_memory: str = "16Gi"              # memory-backed /tmp: VHD + raw disk + tar.gz
     promote_runner_gcp_vpc_connector: str = ""           # optional, for private-network egress
     promote_runner_gcp_service_account: str = ""         # optional: workload-identity SA email for the runner
     promote_runner_gcp_staging_bucket: str = ""          # fallback: storage_gcs_bucket

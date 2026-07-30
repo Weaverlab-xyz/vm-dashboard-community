@@ -222,13 +222,17 @@ needs the staging bucket and — on AWS — the task role.
 | Key | Fallback | Purpose |
 |---|---|---|
 | `promote_runner_gcp_region` | `gcp_region` | Region the Cloud Run Job runs in. |
-| `promote_runner_gcp_cpu` | `2000m` | Cloud Run container CPU. |
-| `promote_runner_gcp_memory` | `4Gi` | Cloud Run container memory. |
+| `promote_runner_gcp_cpu` | `4` | Cloud Run container CPU. Jobs take integer vCPU only (`1`, `2`, `4`, `6`, `8`) — not millicpu. |
+| `promote_runner_gcp_memory` | `16Gi` | Cloud Run container memory. `/tmp` is memory-backed and holds the VHD + the raw disk + the tar.gz, so multi-GB images OOM at 4Gi. |
 | `promote_runner_gcp_vpc_connector` | _(optional)_ | Serverless VPC Access connector for private egress. |
 | `promote_runner_gcp_service_account` | _(optional)_ | Workload-identity SA email for the runner. |
 | `promote_runner_gcp_staging_bucket` | `storage_gcs_bucket` | GCS bucket for the staged tar.gz. |
 | `promote_runner_gcp_staging_prefix` | `promote-staging` | Object prefix. |
 | `promote_runner_gcp_image_family` | _(optional)_ | Family label on the resulting custom image. |
+
+CPU and memory are paired — Cloud Run rejects a job whose memory exceeds what
+its vCPU count allows, so raise both together: 2 vCPU tops out at 8Gi, 4 vCPU at
+16Gi, 6 vCPU at 24Gi, 8 vCPU at 32Gi (the ceiling).
 
 ### OCI-target
 
