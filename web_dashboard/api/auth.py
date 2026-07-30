@@ -37,7 +37,7 @@ from ..services.fido2_service import (
     b64url_encode,
     b64url_decode,
 )
-from ..services import login_guard
+from ..services import login_guard, public_url
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 logger = logging.getLogger(__name__)
@@ -623,13 +623,19 @@ def _oauth_cfg() -> tuple:
 
 def _build_redirect_uri(request: Request) -> str:
     """
-    Derive the OAuth callback URI from the incoming request so that the flow
-    works regardless of whether the user accessed via localhost, an IP, or a
-    hostname.  Falls back to the configured static value if unavailable.
+    The Entra OAuth callback URI.
+
+    Prefers the configured ``public_base_url``, falling back to deriving it from the
+    incoming request so the flow still works via localhost, an IP or a hostname without
+    reconfiguration. The preference order matters behind a reverse proxy: a derived URI
+    is only ``https`` because ProxyHeadersMiddleware rewrote the scheme from
+    ``X-Forwarded-Proto``, so a proxy missing from ``trusted_proxy_hosts`` would produce
+    an ``http://`` callback that Entra rejects as a redirect-URI mismatch. Stating the
+    origin once removes that dependency entirely.
     """
     try:
-        base = f"{request.url.scheme}://{request.url.netloc}"
-        return f"{base}/api/auth/oauth/azure/callback"
+        return (public_url.join("/api/auth/oauth/azure/callback", request)
+                or settings.azure_oauth_redirect_uri)
     except Exception:
         return settings.azure_oauth_redirect_uri
 
@@ -738,9 +744,10 @@ async def oauth_azure_callback(
 # Google Workspace, JumpCloud, Ping, GitLab. See services/oidc_service.py.
 
 def _oidc_redirect_uri(request: Request) -> str:
-    """Derive the callback from the incoming request, matching the Entra path, so
-    the flow works via localhost, an IP, or a hostname without reconfiguration."""
-    return f"{request.url.scheme}://{request.url.netloc}/api/auth/oauth/oidc/callback"
+    """The OIDC callback, resolved exactly like the Entra one above — configured
+    ``public_base_url`` first, request-derived as the fallback."""
+    return (public_url.join("/api/auth/oauth/oidc/callback", request)
+            or f"{request.url.scheme}://{request.url.netloc}/api/auth/oauth/oidc/callback")
 
 
 @router.get("/oauth/oidc/login")

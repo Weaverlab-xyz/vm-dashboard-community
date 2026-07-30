@@ -25,6 +25,7 @@ from .logging_context import (
 from .database import SessionLocal, User, create_admin_user, init_db
 from .services import cache_service
 from .services import config_service
+from .services import public_url
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
@@ -434,16 +435,39 @@ app = FastAPI(
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-# Trust X-Forwarded-Proto/X-Forwarded-For from the Container Apps / reverse proxy.
-# This makes request.url.scheme reflect "https" when accessed through the proxy.
+# Trust X-Forwarded-Proto/X-Forwarded-For from a reverse proxy, so request.url.scheme
+# reflects "https" when the dashboard is reached through one.
 #
-# `trusted_proxy_hosts` defaults to "*" because the community compose publishes
-# gunicorn directly with nothing in front, so there is no proxy address to name and
-# no header to spoof from outside the host. The moment you DO put a proxy in front —
-# in particular the remote-agent vhost in docker-compose.agent.yml — pin this to that
-# proxy, because `get_remote_address` keys the rate limiter off X-Forwarded-For and a
-# wildcard lets any direct client spoof its way past a per-IP limit.
+# Pinned to loopback by default rather than "*". A wildcard lets any client that can
+# reach the socket declare its own source address, and get_remote_address believes it —
+# which is exactly the value the login throttle's per-address cap keys off. Set
+# TRUSTED_PROXY_HOSTS to the proxy's literal IP when you put one in front; it must be a
+# literal, because uvicorn 0.27 compares strings and understands neither hostnames nor
+# CIDR.
 app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=settings.trusted_proxy_hosts)
+
+_forwarded_auditor = public_url.ForwardedHeaderAuditor(settings.trusted_proxy_hosts)
+
+
+@app.middleware("http")
+async def warn_untrusted_forwarded_headers(request: Request, call_next):
+    """Say something when a proxy header arrives from a peer we do not trust.
+
+    The decision lives in ``public_url.ForwardedHeaderAuditor`` so it is testable
+    without importing this module; all that happens here is plumbing.
+
+    Runs OUTSIDE ProxyHeadersMiddleware. Starlette builds the stack so the
+    most-recently-added middleware is outermost, and ProxyHeaders was added above, so
+    ``request.client`` here is still the real transport peer rather than a rewritten
+    one — which is the whole point, since the peer is what the operator has to name.
+    """
+    warning = _forwarded_auditor.check(
+        request.client.host if request.client else "",
+        "x-forwarded-proto" in request.headers or "x-forwarded-for" in request.headers,
+    )
+    if warning:
+        logger.warning("%s", warning)
+    return await call_next(request)
 
 
 # ── Setup guard middleware ────────────────────────────────────────────────────

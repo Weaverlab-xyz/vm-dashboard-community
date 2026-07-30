@@ -38,7 +38,8 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ..database import Job, RemoteAgent, User, get_db
-from ..services import agent_job_meta, agent_service, agent_signing, config_service, job_service
+from ..services import (agent_job_meta, agent_service, agent_signing, config_service,
+                        job_service, public_url)
 from ..services.agent_service import AgentError
 from .auth import require_admin
 
@@ -57,18 +58,23 @@ def _resolve_audience(request: Request) -> str:
     host an agent was misconfigured to trust cannot be replayed here, because the
     signature covers that host's URL and not ours.
 
-    Derived from the first request that needs it and then persisted, rather than read
-    from the live request every time. Deriving per-request would trust the ``Host``
-    header, and an attacker who can set that could make the audience match whatever
-    they captured — which is the one way to unpick this check.
+    Resolved once and then persisted, rather than read from the live request every
+    time. Deriving per-request would trust the ``Host`` header, and an attacker who can
+    set that could make the audience match whatever they captured — which is the one
+    way to unpick this check.
+
+    ``public_base_url`` wins when set. Behind a reverse proxy the derived value is only
+    ``https`` because ProxyHeadersMiddleware rewrote the scheme, so pinning from a
+    request that arrived through an untrusted proxy would freeze an ``http://``
+    audience into the config and make every agent signature fail to verify.
     """
     pinned = config_service.get(_AUDIENCE_CONFIG)
     if pinned:
         return pinned.rstrip("/")
-    derived = f"{request.url.scheme}://{request.url.netloc}".rstrip("/")
-    config_service.set(_AUDIENCE_CONFIG, derived)
-    logger.info("agent: pinned the signing audience to %s", derived)
-    return derived
+    resolved = public_url.resolve(request)
+    config_service.set(_AUDIENCE_CONFIG, resolved)
+    logger.info("agent: pinned the signing audience to %s", resolved)
+    return resolved
 
 
 def _client_ip(request: Request) -> str:

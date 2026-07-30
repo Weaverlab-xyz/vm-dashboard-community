@@ -93,13 +93,13 @@ vulnerability.
 `POST /api/auth/login` is throttled by `web_dashboard/services/login_guard.py`. Worth
 knowing how it is keyed, because the obvious assumption is wrong:
 
-- **The primary key is the username**, not the source address. `get_remote_address`
-  reads a value derived from `X-Forwarded-For`, and the shipped
-  `TRUSTED_PROXY_HOSTS` default is `*` — so a per-address cap alone is defeated by
-  rotating one header per request. A username cannot be rotated; it is the thing being
-  attacked.
-- A **per-address cap** rides along to catch spraying across many accounts. Its
-  strength depends on pinning `TRUSTED_PROXY_HOSTS` to your proxy.
+- **The primary key is the username**, not the source address. A username cannot be
+  rotated; it is the thing being attacked. The address is a secondary key, because an
+  address is only as trustworthy as the proxy configuration behind it.
+- A **per-address cap** rides along to catch spraying across many accounts. It is
+  meaningful only because `TRUSTED_PROXY_HOSTS` now defaults to loopback rather than
+  `*` — see below. If you set it back to `*`, this half becomes decorative: a client
+  can then declare its own address and rotate it per request.
 - Counters live in the database, so they hold across both gunicorn workers and survive
   a restart. An in-process counter would give an attacker double the allowance.
 - It is a **sliding window, not a lockout** — deliberately. A lockout would hand
@@ -122,7 +122,38 @@ Tunable through the config store (`app_config`), all optional:
 
 Note that **no other endpoint is rate limited.** The SlowAPI limiter in `main.py` is
 constructed but inert — `SlowAPIMiddleware` is not added, because a blanket per-address
-cap would break the UI. Missing rate limits elsewhere remain out of scope above.
+cap would break the UI, which fires many API calls per page load. Missing rate limits
+elsewhere remain out of scope above.
+
+### Reverse proxies, forwarded headers, and the public URL
+
+`TRUSTED_PROXY_HOSTS` decides which peers may set `X-Forwarded-For` and
+`X-Forwarded-Proto`. It **defaults to `127.0.0.1`**, matching uvicorn's own default. A
+wildcard would let any client that can reach the socket declare its own source address,
+and the per-address half of the login throttle keys off exactly that value.
+
+**Behind a reverse proxy, set it to the proxy's literal IP.** It must be a literal:
+uvicorn 0.27 compares strings and understands neither hostnames nor CIDR (CIDR arrived
+in 0.31), so a service name or a subnet silently never matches. `docker-compose.agent.yml`
+shows the pattern — a fixed subnet and a static address on the proxy container.
+
+Getting it wrong is **not silent**. When a forwarded header arrives from an untrusted
+peer the dashboard logs, once per peer:
+
+> Ignoring X-Forwarded-* from 172.29.7.2: it is not in trusted_proxy_hosts (127.0.0.1).
+> If 172.29.7.2 is your reverse proxy, set TRUSTED_PROXY_HOSTS=172.29.7.2 …
+
+**Set `PUBLIC_BASE_URL` too** (e.g. `https://dash.example.com`). The OAuth callback URIs
+and the remote-agent signing audience used to be derived from `request.url.scheme`,
+which is only `https` because the proxy headers were trusted — so proxy trust and OAuth
+correctness were the same failure. Stating the origin once decouples them: the callback
+is right whether or not the proxy is listed, which matters because a redirect-URI
+mismatch is rejected by the identity provider with no useful diagnostic.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `TRUSTED_PROXY_HOSTS` | `127.0.0.1` | Literal peer IPs allowed to set `X-Forwarded-*`, comma-separated |
+| `PUBLIC_BASE_URL` | *(derived)* | The absolute origin this dashboard is reached at |
 
 ### The remote-agent trust boundary
 

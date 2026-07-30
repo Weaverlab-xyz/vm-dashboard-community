@@ -215,12 +215,31 @@ class Settings(BaseSettings):
     # CORS
     cors_origins: List[str] = ["http://localhost:8001", "http://localhost:3000"]
 
-    # Which peers may set X-Forwarded-For / X-Forwarded-Proto. "*" matches today's
-    # behaviour and is right while compose publishes gunicorn with nothing in front.
-    # Pin it to the proxy once one exists (docker-compose.agent.yml): the rate limiter
-    # keys off get_remote_address, so a wildcard means any direct client can spoof its
-    # source IP and walk past a per-IP limit.
-    trusted_proxy_hosts: str = "*"
+    # The absolute origin this dashboard is reached at, e.g. https://dash.example.com.
+    # Blank = derive it from each request, which is right for a laptop install reached
+    # over localhost, an IP and a hostname on different days.
+    #
+    # Set it whenever a reverse proxy is involved. It is what decouples the OAuth
+    # callback URIs from proxy-header trust: derived URIs are only https because
+    # ProxyHeadersMiddleware rewrote the scheme from X-Forwarded-Proto, so a proxy
+    # that isn't in trusted_proxy_hosts below would silently produce http:// callbacks
+    # that the identity provider rejects. See services/public_url.py.
+    public_base_url: str = ""
+
+    # Which peers may set X-Forwarded-For / X-Forwarded-Proto.
+    #
+    # Defaults to loopback (uvicorn's own default), NOT "*". A wildcard means any
+    # client that can reach the socket may declare its own source address, and
+    # get_remote_address — which the login throttle's per-address cap and any future
+    # rate limiting key off — believes it. Rotating one header per request then walks
+    # straight past the cap.
+    #
+    # Behind a proxy, set this to the proxy's literal IP (comma-separated for several).
+    # It must be a literal: uvicorn 0.27's ProxyHeadersMiddleware does plain string
+    # comparison against the peer address and understands neither hostnames nor CIDR
+    # (CIDR arrived in uvicorn 0.31). Getting it wrong is not silent — the app logs a
+    # warning naming the peer that sent the untrusted header. See main.py.
+    trusted_proxy_hosts: str = "127.0.0.1"
 
     # PowerShell
     vm_cli_wrapper_path: str = r"C:\Scripts\VM_CLI\VM_DEMO_CLI\vm_cli_api_wrapper.ps1"

@@ -55,9 +55,8 @@ services:
 
   app:
     environment:
-      # Pin which peer may set X-Forwarded-For / X-Forwarded-Proto. The wildcard
-      # default lets any direct client spoof its source address, and the rate limiter
-      # keys off exactly that.
+      # Which peer may set X-Forwarded-For / X-Forwarded-Proto. The app defaults to
+      # loopback, which is not this gateway, so it has to be named explicitly.
       #
       # It has to be a literal IP. uvicorn 0.27's ProxyHeadersMiddleware does a plain
       # string comparison against the peer address — it does not resolve service names
@@ -66,6 +65,11 @@ services:
       # would silently never match, leaving X-Forwarded-For untrusted and every client
       # appearing to come from the gateway.
       - TRUSTED_PROXY_HOSTS=172.29.7.2
+      # The origin the world reaches this dashboard at. Belt and braces alongside the
+      # line above: it makes the OAuth callback URIs and the remote-agent signing
+      # audience correct even if the proxy address changes and the line above goes
+      # stale, because they stop being derived from the request scheme at all.
+      - PUBLIC_BASE_URL=https://${AGENT_HOSTNAME}
 
 networks:
   default:

@@ -116,6 +116,20 @@ internet-facing surface becomes one machine-only, HTML-free, session-free prefix
 The base stack still publishes 8001; bind it to loopback or firewall it, or the
 plain-HTTP dashboard sits beside the TLS vhost and the split buys you nothing.
 
+The overlay also sets two things you would otherwise have to reason about yourself, and
+both matter here:
+
+- **`TRUSTED_PROXY_HOSTS`** — the literal IP of the Caddy container, which is why the
+  overlay pins a subnet and gives the gateway a static address. Without it the app
+  ignores the proxy's headers and every agent appears to come from the gateway, which
+  also flattens the login throttle's per-address cap. It must be a literal: uvicorn 0.27
+  understands neither hostnames nor CIDR. Get it wrong and the app logs a warning naming
+  the peer to add.
+- **`PUBLIC_BASE_URL`** — the origin agents reach you on. The signing audience is
+  derived from it, and an audience derived instead from an untrusted request would pin
+  `http://…` into the config permanently, making every agent signature fail to verify
+  with a 401 that looks exactly like a revoked agent.
+
 ### 2. Write the policy
 
 Copy [`examples/remote-agent/policy.example.yaml`](../examples/remote-agent/policy.example.yaml)
@@ -221,6 +235,7 @@ an objection into a demonstration.
 | Stuck `queued`, agent online | The job type is not in the agent's `job_types`. Check the policy. |
 | Nothing found on a subnet you expect | Confirm the ports are in `targets`, and remember `already_registered` findings still appear. |
 | Clock skew errors | Signatures are valid ±60s. Run NTP on the agent host. |
+| Every agent 401s right after adding a proxy, and the dashboard logs `Ignoring X-Forwarded-*` | The proxy is not in `TRUSTED_PROXY_HOSTS`, so the audience was pinned as `http://…`. Set the variable **and** `PUBLIC_BASE_URL`, then clear the stale `agent_base_url` config key and re-enrol. |
 
 ## Where this is heading
 
