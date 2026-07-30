@@ -273,16 +273,6 @@ def write_aws_sm_ephemeral(name: str, value: str, exec_role_arn: str = "",
     return arn
 
 
-def delete_aws_sm(name_or_arn: str) -> None:
-    """Force-delete an AWS SM secret (no recovery window — so the name frees
-    immediately and billing stops). Used to clean up an ephemeral after the run."""
-    region, _ = _aws_cfg()
-    import boto3
-    client = boto3.client("secretsmanager", region_name=region)
-    client.delete_secret(SecretId=name_or_arn, ForceDeleteWithoutRecovery=True)
-    logger.info("AWS SM: force-deleted %s", name_or_arn)
-
-
 def list_aws_sm_ephemeral() -> list:
     """List ephemeral secrets (by tag) as ``[{"id": arn, "created_ts": epoch}]``
     for the GC sweeper."""
@@ -466,15 +456,6 @@ def write_gcp_sm_ephemeral(name: str, value: str, runner_sa: str) -> str:
         client.set_iam_policy(request={"resource": resource, "policy": policy})
     logger.info("GCP SM: wrote ephemeral secret %s (rbac→%s)", name, runner_sa or "none")
     return name
-
-
-def delete_gcp_sm(ref: str) -> None:
-    """Delete an ephemeral GCP SM secret by its (non-secret) resource id. Used for
-    post-run cleanup."""
-    project, _, _ = _gcp_cfg()
-    client = _gcp_client()
-    client.delete_secret(request={"name": f"projects/{project}/secrets/{ref}"})
-    logger.info("GCP SM: deleted %s", ref)
 
 
 def list_gcp_sm_ephemeral() -> list:
@@ -835,6 +816,14 @@ def list_aws_sm() -> list[dict]:
 
 
 def delete_aws_sm(ref: str) -> None:
+    """Force-delete an AWS SM secret: no recovery window, so the name frees
+    immediately and billing stops.
+
+    The one deleter for both callers — the Secrets page "Delete" button and
+    ephemeral cleanup (post-run in `ansible_local_run_service`, plus the
+    `ephemeral_gc` sweeper). Keep it that way: a second definition of this name
+    later in the module would silently win over this one.
+    """
     region, _ = _aws_cfg()
     import boto3
     client = boto3.client("secretsmanager", region_name=region)
@@ -894,6 +883,12 @@ def list_gcp_sm() -> list[dict]:
 
 
 def delete_gcp_sm(ref: str) -> None:
+    """Delete a GCP SM secret by its (non-secret) resource id.
+
+    The one deleter for both callers — the Secrets page "Delete" button and
+    ephemeral cleanup (post-run in `ansible_local_run_service`, plus the
+    `ephemeral_gc` sweeper).
+    """
     project, _, _ = _gcp_cfg()
     client = _gcp_client()
     name = f"projects/{project}/secrets/{ref}"
