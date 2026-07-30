@@ -188,7 +188,7 @@ e.g. require human approval even for `*-read`.
 
 ## 6. Multi-tenancy variation (prod)
 
-Per the [multi-tenancy execution plan](../../docs/multi-tenancy-execution-plan.md),
+Per the [multi-tenancy plan](../saas-roadmap.md#multi-tenancy--audit-cross-cutting),
 prod runs N tenants. The Entitle integration needs per-tenant
 groups + per-tenant virtual applications:
 

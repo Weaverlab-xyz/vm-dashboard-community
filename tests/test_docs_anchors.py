@@ -1,5 +1,6 @@
-"""Every ``#fragment`` link inside ``docs/`` must land on a real heading — in the
-dashboard's own docs viewer, not just on GitHub.
+"""Every intra-repo link inside ``docs/`` must point at something that exists, and
+every ``#fragment`` must land on a real heading — in the dashboard's own docs viewer,
+not just on GitHub.
 
 The two renderers used to disagree. Docs are authored and reviewed on GitHub, so
 anchors get written GitHub's way; ``/docs/<page>`` renders them with
@@ -19,6 +20,13 @@ lasted as long as it did and why it needs a test rather than a fix alone.
 *production* renderer to keep it closed. Because that slugifier is a faithful port
 of ``github-slugger``, a fragment that resolves here resolves on GitHub too, so
 this doubles as a dead-link check for the repo as rendered on GitHub.
+
+The existence half of this file covers links *without* a fragment too, which were
+unchecked for a long time and are exactly as dead when wrong. ``notifications.md``
+pointed the words "auto-delete timer" at ``../README.md`` — a file that exists, so
+nothing was broken in the filesystem sense, but which documents no such thing. A
+target-exists check can't catch that one; what it does catch is the far more common
+version, a link to a doc that was renamed or never written at all.
 
 Only inline ``[text](target)`` links exist in ``docs/`` today — no reference-style
 definitions, no raw ``<a href>``. If either ever appears, widen ``_LINK``.
@@ -64,15 +72,23 @@ def _ids_by_doc():
             for rel, p in _docs()}
 
 
-def _fragment_links():
-    """(source, href, target_relpath, fragment) for every intra-repo anchor link."""
+def _links():
+    """(source, href, target_relpath, fragment) for every intra-repo link.
+
+    ``fragment`` is ``""`` for a plain file link, and ``target`` is the source doc
+    itself for a same-page ``#anchor`` — so the anchor check below reads naturally and
+    the existence check below can't trip over one.
+
+    A leading ``/`` is skipped along with the URL schemes: those are *app routes*
+    (``/docs/integrations/entitle``), which the docs viewer serves and which are not
+    filesystem paths. Resolving them against the repo root would fail a link that works
+    in the product.
+    """
     for rel, p in _docs():
         for href in _LINK.findall(open(p, encoding="utf-8").read()):
-            if href.startswith(("http://", "https://", "mailto:")):
+            if href.startswith(("http://", "https://", "mailto:", "/")):
                 continue
             path, _, frag = href.partition("#")
-            if not frag:
-                continue
             target = rel if not path else os.path.normpath(
                 os.path.join(os.path.dirname(rel), path)).replace("\\", "/")
             yield rel, href, target, frag
@@ -80,24 +96,30 @@ def _fragment_links():
 
 def test_every_docs_anchor_link_resolves_in_the_dashboard_renderer():
     ids = _ids_by_doc()
-    broken = [f"{src} -> {href}" for src, href, target, frag in _fragment_links()
-              if target in ids and frag not in ids[target]]
+    broken = [f"{src} -> {href}" for src, href, target, frag in _links()
+              if frag and target in ids and frag not in ids[target]]
     assert not broken, (
         f"{len(broken)} anchor link(s) don't resolve in /docs — the reader lands at "
         "the top of the page instead of the section:\n  " + "\n  ".join(broken))
 
 
-def test_anchor_links_point_at_files_that_exist():
-    """A fragment link to a missing file is dead in both renderers, and the check
-    above can't see it — that one only validates targets it was able to render.
+def test_docs_links_point_at_files_that_exist():
+    """A link to a missing file is dead in both renderers, and the check above can't
+    see it — that one only validates targets it was able to render.
+
+    Fragment or not: a bare ``[text](renamed-doc.md)`` is just as broken, and skipping
+    those is how ``docs/multi-tenancy-execution-plan.md`` stayed linked from
+    ``design/entitle-user-jit.md`` while never having existed in the repo at all.
 
     A handful of links reach outside ``docs/`` (``../CONTRIBUTING.md#…``, a
-    ``#L15`` line anchor into a template). Those resolve on GitHub and are dead in
-    the in-app viewer either way, since ``/docs`` only serves ``docs/*.md`` — so
-    check the file is there and leave the fragment alone."""
-    missing = [f"{src} -> {href}" for src, href, target, _ in _fragment_links()
-               if not os.path.exists(os.path.join(_ROOT, target))]
-    assert not missing, "anchor link(s) to a file that isn't there:\n  " + "\n  ".join(missing)
+    ``#L15`` line anchor into a template) and some point at directories
+    (``integrations/``, ``../scripts/sandbox/Linux``). Those resolve on GitHub, and a
+    fragment among them is dead in the in-app viewer either way since ``/docs`` only
+    serves ``docs/*.md`` — so check the path is there and leave the fragment alone."""
+    missing = sorted({f"{src} -> {href}" for src, href, target, _ in _links()
+                      if not os.path.exists(os.path.join(_ROOT, target))})
+    assert not missing, (
+        f"{len(missing)} link(s) to a file that isn't there:\n  " + "\n  ".join(missing))
 
 
 # ── the slugifier itself ──────────────────────────────────────────────────────
