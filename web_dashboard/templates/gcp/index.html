@@ -968,7 +968,7 @@ function gcpDashboard() {
     // BeyondTrust PRA Jump Group / Gateway pickers for the deploy-form dropdowns
     // (shared /api/pra/pickers, fetched once). Empty when PRA isn't configured →
     // dropdowns show only "(configured default)" and the backend falls back.
-    praPickers: { configured: false, jump_groups: [], gateways: [], loaded: false },
+    praPickers: { configured: false, jump_groups: [], jumpoints: [], loaded: false },
     deployForm: {
       instance_name:     '',
       count:              1,
@@ -1219,7 +1219,7 @@ function gcpDashboard() {
       if (this.praPickers.loaded) return;
       try {
         const r = await API.get('/api/pra/pickers');
-        if (r) this.praPickers = { configured: !!r.configured, jump_groups: r.jump_groups || [], gateways: r.jumpoints || [], loaded: true };
+        if (r) this.praPickers = { configured: !!r.configured, jump_groups: r.jump_groups || [], jumpoints: r.jumpoints || [], loaded: true };
       } catch (e) { /* non-fatal */ }
     },
 
