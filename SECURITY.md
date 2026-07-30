@@ -83,9 +83,46 @@ vulnerability.
   cloud IAM you grant.
 - Secrets you commit to your own fork or `.env`.
 - Denial of service from unrealistic request volumes, or missing rate limits on
-  localhost-only flows.
+  localhost-only flows. (Password login is throttled — see below. A bypass of
+  *that* is in scope.)
 - Findings in third-party dependencies without demonstrated impact here — please
   report those upstream, though we still want to hear about them.
+
+### Login throttling
+
+`POST /api/auth/login` is throttled by `web_dashboard/services/login_guard.py`. Worth
+knowing how it is keyed, because the obvious assumption is wrong:
+
+- **The primary key is the username**, not the source address. `get_remote_address`
+  reads a value derived from `X-Forwarded-For`, and the shipped
+  `TRUSTED_PROXY_HOSTS` default is `*` — so a per-address cap alone is defeated by
+  rotating one header per request. A username cannot be rotated; it is the thing being
+  attacked.
+- A **per-address cap** rides along to catch spraying across many accounts. Its
+  strength depends on pinning `TRUSTED_PROXY_HOSTS` to your proxy.
+- Counters live in the database, so they hold across both gunicorn workers and survive
+  a restart. An in-process counter would give an attacker double the allowance.
+- It is a **sliding window, not a lockout** — deliberately. A lockout would hand
+  anyone who knows a username a denial-of-service against that account. The block
+  lifts on its own and `Retry-After` says exactly when.
+- The 429 is identical whether the account exists, does not exist, or is real and being
+  guessed at, so the throttle is not a user-enumeration oracle.
+- The same budget covers the FIDO2 second factor and `webauthn/login/begin`, so a
+  stolen password does not buy unlimited attempts at the second factor.
+
+Tunable through the config store (`app_config`), all optional:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `login_throttle_enabled` | `true` | Master switch; fails *closed* if unreadable |
+| `login_max_attempts` | `10` | Failures per username per window; `0` disables |
+| `login_max_attempts_per_ip` | `50` | Failures per address per window; `0` disables |
+| `login_window_minutes` | `15` | The sliding window |
+| `login_retention_minutes` | `60` | How long failure rows are kept for forensics |
+
+Note that **no other endpoint is rate limited.** The SlowAPI limiter in `main.py` is
+constructed but inert — `SlowAPIMiddleware` is not added, because a blanket per-address
+cap would break the UI. Missing rate limits elsewhere remain out of scope above.
 
 ### The remote-agent trust boundary
 

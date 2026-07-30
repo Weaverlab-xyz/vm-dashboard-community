@@ -37,6 +37,7 @@ from ..services.fido2_service import (
     b64url_encode,
     b64url_decode,
 )
+from ..services import login_guard
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 logger = logging.getLogger(__name__)
@@ -247,8 +248,35 @@ def require_workgroup_access(workgroup: str):
 
 # ── Login (step 1: password) ──────────────────────────────────────────────────
 
+def _client_ip(request: Optional[Request]) -> str:
+    return request.client.host if (request and request.client) else ""
+
+
+def _enforce_login_throttle(db: Session, username: str, ip: str) -> None:
+    """Refuse early if this username or address is over its failure budget.
+
+    Runs before the password is checked, so a throttled request never reaches bcrypt —
+    which stops the throttle from doubling as a CPU amplifier.
+
+    The 429 says nothing about *why*: the same response has to come back whether the
+    username exists, does not exist, or is real and simply being guessed at, or the
+    throttle becomes the enumeration oracle it is meant to slow down.
+    """
+    try:
+        login_guard.check(db, username=username, ip=ip)
+    except login_guard.LoginThrottled as exc:
+        logger.warning("login throttled (%s) for %r from %s",
+                       exc.scope, login_guard.normalize_username(username), ip or "?")
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many failed sign-in attempts. Try again shortly.",
+            headers={"Retry-After": str(exc.retry_after)},
+        )
+
+
 @router.post("/login")
 async def login(
+    request: Request,
     form_data: OAuth2PasswordRequestForm = Depends(),
     db: Session = Depends(get_db),
 ):
@@ -259,11 +287,17 @@ async def login(
     - If the user has FIDO2 keys registered: returns a pre_auth_token (HTTP 202)
       and the client must complete the FIDO2 step at POST /api/auth/login/mfa.
     - OAuth-only users (auth_provider != 'local') cannot use this endpoint.
+
+    Throttled per username and per source address — see services/login_guard.
     """
+    ip = _client_ip(request)
+    _enforce_login_throttle(db, form_data.username, ip)
+
     user = db.query(User).filter(User.username == form_data.username).first()
 
     # Block OAuth-only users from password login
     if user and user.auth_provider != "local":
+        login_guard.record_failure(db, username=form_data.username, ip=ip)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="This account uses Microsoft login. Use 'Sign in with Microsoft' instead.",
@@ -271,15 +305,22 @@ async def login(
         )
 
     if not user or not verify_password(form_data.password, user.hashed_password):
+        login_guard.record_failure(db, username=form_data.username, ip=ip)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
     if not user.is_active:
+        # Counted like any other non-token outcome. The password may well have been
+        # right, but a disabled account is not a way to keep probing for free.
+        login_guard.record_failure(db, username=form_data.username, ip=ip)
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account disabled")
 
-    # If MFA is enforced → return pre-auth token and signal the FIDO2 step
+    # If MFA is enforced → return pre-auth token and signal the FIDO2 step.
+    # Failures are NOT cleared yet: the password was right, but this login is only half
+    # done, and clearing here would let a stolen password reset the budget indefinitely
+    # while the second factor is attacked.
     if user.mfa_required:
         pre_auth = _create_pre_auth_token(user.id)
         return Response(
@@ -288,6 +329,7 @@ async def login(
             media_type="application/json",
         )
 
+    login_guard.clear(db, username=user.username)
     token = create_access_token({"sub": user.username})
     return TokenResponse(
         access_token=token,
@@ -300,17 +342,24 @@ async def login(
 
 @router.post("/login/mfa", response_model=TokenResponse)
 async def login_mfa(
+    request: Request,
     body: MfaLoginRequest,
     db: Session = Depends(get_db),
 ):
     """
     Complete login by verifying a FIDO2 assertion.
     Requires the pre_auth_token issued in step 1.
+
+    Shares the username's failure budget with step 1, so an attacker holding a stolen
+    password cannot get an unlimited number of attempts at the second factor.
     """
     user_id = _decode_pre_auth_token(body.pre_auth_token)
     user = db.query(User).filter(User.id == user_id, User.is_active == True).first()
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+
+    ip = _client_ip(request)
+    _enforce_login_throttle(db, user.username, ip)
 
     # Fetch the challenge stored during webauthn/login/begin
     challenge_token = body.assertion_response.get("challenge_token")
@@ -347,6 +396,7 @@ async def login_mfa(
             response=authentication,
         )
     except Exception as exc:
+        login_guard.record_failure(db, username=user.username, ip=ip)
         raise HTTPException(status_code=400, detail=f"FIDO2 authentication failed: {exc}")
 
     # Update sign_count (anti-cloning measure) and last_used_at
@@ -358,6 +408,8 @@ async def login_mfa(
             db.commit()
             break
 
+    # Both factors are now satisfied — this is the point the budget resets.
+    login_guard.clear(db, username=user.username)
     token = create_access_token({"sub": user.username})
     return TokenResponse(
         access_token=token,
@@ -370,13 +422,20 @@ async def login_mfa(
 
 @router.get("/webauthn/login/begin", response_model=Fido2AuthBeginResponse)
 async def webauthn_login_begin(
+    request: Request,
     username: str,
     db: Session = Depends(get_db),
 ):
     """
     Generate a WebAuthn authentication challenge for the given username.
     Called by the frontend before invoking navigator.credentials.get().
+
+    Unauthenticated, and it answers 404 for an unknown user — so it is a username
+    oracle. It shares the throttle counters rather than having its own: once a username
+    is over budget, every pre-auth surface for it is closed, and the oracle can only be
+    read at the throttled rate.
     """
+    _enforce_login_throttle(db, username, _client_ip(request))
     user = db.query(User).filter(User.username == username, User.is_active == True).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
