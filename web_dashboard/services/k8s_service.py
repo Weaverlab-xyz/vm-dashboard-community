@@ -301,8 +301,11 @@ K8S_VERSIONS = {
     "aws":   ["1.36", "1.35", "1.34", "1.33"],
     "azure": ["1.36", "1.35", "1.34", "1.33"],
     "gcp":   ["1.36", "1.35", "1.34", "1.33"],
-    # OKE uses the v-prefixed patch format; confirm live with `oci ce cluster-options get`.
-    "oci":   ["v1.31.1", "v1.30.1", "v1.29.10"],
+    # OKE uses the v-prefixed patch format, and it *does* have a live version API —
+    # provision_options() reads it (oci_service.oke_cluster_versions) and only falls
+    # back to this list when OCI is unconfigured/unreachable. OKE rejects retired
+    # versions outright, so keep this in step with `oci ce cluster-options get`.
+    "oci":   ["v1.36.1", "v1.35.2", "v1.34.2", "v1.33.1"],
 }
 K8S_NODE_TYPES = {
     "aws":   ["t3.small", "t3.medium", "t3.large", "t3.xlarge",
@@ -672,12 +675,28 @@ async def provision_options(cloud: str, region: str = "") -> dict:
     regions = _with_configured_first(
         _with_configured_first(region_catalog.region_ids(cloud), region), configured_region)
 
+    versions = K8S_VERSIONS[cloud]
+    if cloud == "oci":
+        # OKE is the one cloud here with a live version-discovery API, and the one
+        # that hard-rejects a retired version (400 InvalidParameter part-way through
+        # the apply). Read the live set; fall back to the curated list when OCI is
+        # unconfigured or unreachable so the modal still opens. No region argument:
+        # every OKE cluster lands in the configured oci_region regardless of the
+        # region picked here, so the SDK's own config region is the right one.
+        try:
+            from . import oci_service
+            live = await oci_service.oke_cluster_versions()
+            if live:
+                versions = live
+        except Exception as exc:  # noqa: BLE001 — never block the form on OCI
+            logger.warning("OKE version discovery failed; using the curated list: %s", exc)
+
     out = {
         "cloud": cloud,
         "region": region,
         "regions": regions,
         "node_instance_types": _with_configured_first(K8S_NODE_TYPES[cloud], _cfg(cfg_node)),
-        "k8s_versions": _with_configured_first(K8S_VERSIONS[cloud], _cfg(cfg_ver)),
+        "k8s_versions": _with_configured_first(versions, _cfg(cfg_ver)),
         "subnets": [],
         "configured_subnet_ids": [],
     }
