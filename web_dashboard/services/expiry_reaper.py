@@ -46,7 +46,7 @@ from typing import Optional
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from ..database import CloudDatabase, Job, K8sCluster
+from ..database import CloudDatabase, Job, JobLog, K8sCluster
 from . import expiry_policy, job_service
 
 logger = logging.getLogger(__name__)
@@ -201,19 +201,46 @@ def _arm(db: Session, now: datetime) -> datetime:
 
 # ── Enqueue side (runs in the app) ────────────────────────────────────────────
 
-def enqueue_sweep_if_due(db: Session) -> Optional[str]:
-    """Create one ``expiry_sweep`` job unless a pass is already queued or running.
+def enqueue_sweep_if_due(db: Session, *, min_gap_seconds: Optional[int] = None) -> Optional[str]:
+    """Create one ``expiry_sweep`` job unless a pass is already active or just ran.
 
     Returns the new job id, or None when nothing was enqueued. Called on a timer by
     ``main._expiry_sweeper_loop`` and on demand by ``POST /api/expiry/sweep``.
 
-    Two layers keep this to one pass at a time: the advisory lock serializes concurrent
-    callers on PostgreSQL (both gunicorn workers hitting the same tick), and the
-    active-job check is what actually decides. On SQLite the check stands alone, which is
-    fine — a duplicate would claim, find the same work, and report it twice.
+    THREE layers keep this to one pass per tick, and the third is not redundant:
+
+      * the advisory lock serializes concurrent callers on PostgreSQL — both gunicorn
+        workers reaching the same tick;
+      * the **active-job** check refuses while a pass is queued, pending or running;
+      * the **recency** check refuses while a pass merely *finished* moments ago.
+
+    The recency check exists because the active-job check alone provably does not hold.
+    ``ACTIVE_STATUSES`` is a liveness test, and a sweep with nothing to reap completes in
+    well under a second: with ``jobs_worker.POLL_INTERVAL`` at 2s across three replicas the
+    mean claim latency is ~0.7s, so whenever a replica polls inside the ~0.4s that separates
+    the two app workers' ticks, the first row is already ``completed`` before the second
+    worker looks — and a duplicate is created. Measured on the live install before this
+    guard existed: 5 of 55 rows were pairs 0.13–0.4s apart. **A liveness-based dedupe cannot
+    hold when the work is instantaneous; it needs a recency term.** Worth remembering before
+    writing the next "is one already running?" check in this codebase.
+
+    Harmless while a pass only reports. Under ``enforce`` two concurrent passes are two
+    destroy enqueues aimed at the same resource, which is why this is fixed here rather
+    than left to the queue.
+
+    ``min_gap_seconds`` defaults to :func:`expiry_policy.sweep_min_gap_seconds` (half the
+    interval). Pass 0 to skip the recency check — the operator-facing force-sweep endpoint
+    does, because a human who just pressed the button means now, and only the timer path
+    ever fires twice. Defaulting to the guard rather than to 0 keeps a future caller from
+    reintroducing the duplicate by forgetting a kwarg.
     """
     if not expiry_policy.enabled():
         return None
+    if min_gap_seconds is None:
+        try:
+            min_gap_seconds = expiry_policy.sweep_min_gap_seconds()
+        except Exception:                              # pragma: no cover - defensive
+            min_gap_seconds = 60
     try:
         from ..database import _is_sqlite
         if not _is_sqlite:
@@ -226,6 +253,19 @@ def enqueue_sweep_if_due(db: Session) -> Optional[str]:
         )
         if existing:
             return None
+        if min_gap_seconds > 0:
+            # Any status: a pass that already ran this tick covered this moment's work
+            # whether it completed, failed or was cancelled. Naive UTC, because
+            # `Job.created_at` is `datetime.utcnow()` and mixing an aware value into the
+            # comparison would let the session TimeZone decide the cutoff.
+            floor = _utcnow() - timedelta(seconds=min_gap_seconds)
+            recent = (
+                db.query(Job.id)
+                .filter(Job.job_type == SWEEP_JOB_TYPE, Job.created_at >= floor)
+                .first()
+            )
+            if recent:
+                return None
         # create_job commits, which ends the transaction and releases the lock.
         job = job_service.create_job(db, job_type=SWEEP_JOB_TYPE, created_by="system")
         return job.id
@@ -233,6 +273,65 @@ def enqueue_sweep_if_due(db: Session) -> Optional[str]:
         logger.warning("could not enqueue an auto-delete sweep", exc_info=True)
         db.rollback()
         return None
+
+
+# ── Housekeeping ──────────────────────────────────────────────────────────────
+
+# Rows deleted per prune call. The first pass after retention is configured on a
+# long-lived install could face thousands; a bounded batch keeps that off the sweep's
+# critical path, and at 48 rows/day against a prune every interval any backlog drains
+# within a few passes anyway.
+_PRUNE_BATCH = 500
+
+
+def prune_sweep_history(db: Session) -> int:
+    """Drop *completed* sweep rows past the retention window, and their Live Output.
+
+    Returns rows deleted. Never raises — losing a prune must not fail the pass that
+    called it.
+
+    **``Job.job_type == SWEEP_JOB_TYPE`` is the load-bearing filter in this function, and
+    the reason this is not a general "prune old jobs" helper.** A cloud VM has no inventory
+    table: its deploy Job row IS its record of existence, which is why ``job:<id>`` is
+    already its inventory id and why ``expires_at`` rides on that row. Deleting job rows by
+    age would therefore delete *VMs from the inventory* while leaving them running and
+    billing in the cloud — the exact orphan this whole feature exists to prevent. A sweep
+    row is the one job type that references no resource at all, so it is the one that can
+    be thrown away.
+
+    Only ``completed`` rows expire. A failed or cancelled pass is evidence and stays until
+    an operator has seen it, matching ``notification_service.prune``; the /jobs filter
+    hides exactly the same set, so a failure stays visible in both places.
+
+    ``job_logs`` is deleted first and explicitly: it carries no foreign key to ``jobs``
+    (see ``database.JobLog``), so nothing cascades and the rows would otherwise be
+    unreachable orphans keyed to a job id that no longer exists.
+    """
+    days = expiry_policy.sweep_retention_days()
+    if not days:
+        return 0
+    cutoff = _utcnow() - timedelta(days=days)
+    try:
+        ids = [r[0] for r in (
+            db.query(Job.id)
+            .filter(Job.job_type == SWEEP_JOB_TYPE,
+                    Job.status == "completed",
+                    Job.created_at < cutoff)
+            .limit(_PRUNE_BATCH)
+            .all()
+        )]
+        if not ids:
+            return 0
+        db.query(JobLog).filter(JobLog.job_id.in_(ids)).delete(synchronize_session=False)
+        n = db.query(Job).filter(Job.id.in_(ids)).delete(synchronize_session=False)
+        db.commit()
+        logger.info("pruned %d completed %s row(s) older than %d day(s)",
+                    n, SWEEP_JOB_TYPE, days)
+        return int(n or 0)
+    except Exception:                                  # noqa: BLE001
+        logger.warning("could not prune %s history", SWEEP_JOB_TYPE, exc_info=True)
+        db.rollback()
+        return 0
 
 
 # ── Worker entry point ────────────────────────────────────────────────────────
@@ -261,6 +360,12 @@ async def run(db: Session, *, job_id: str, meta: dict) -> None:
             summary += " (report only — nothing deleted)"
     job_service.update_progress(db, job_id, 100, summary)
     job_service.set_completed(db, job_id, {"sweep": result})
+
+    # The pass that writes the rows is the pass that prunes them — the same shape as
+    # notification_service's drain loop, and it needs no second timer. Ordered after
+    # set_completed so a prune failure cannot leave the job looking unfinished, and
+    # harmless to this row: it was created seconds ago, far inside the retention window.
+    prune_sweep_history(db)
 
 
 # ── Outbound notification ─────────────────────────────────────────────────────

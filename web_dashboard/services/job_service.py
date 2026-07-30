@@ -7,7 +7,7 @@ import logging
 import uuid
 from datetime import datetime, timedelta
 from typing import Optional, List
-from sqlalchemy import text
+from sqlalchemy import and_, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -25,6 +25,21 @@ _AUDIT_LOCK_ID = 20260102
 # a parent job will drive (see create_job); ``pending`` is waiting for the runner to
 # claim it. Neither has started, but neither is finished either.
 ACTIVE_STATUSES = ("queued", "pending", "running")
+
+# Recurring internal maintenance passes. What sets these apart from every other job type
+# is that they are driven by a timer rather than by a person, they reference no resource,
+# and they write a row whether or not there was anything to do — the auto-delete sweep
+# alone is 48 rows/day at its 30-minute default, which is enough to push a real deploy off
+# the first page of /jobs within hours.
+#
+# :func:`list_jobs` hides these by default, and ONLY where ``status == "completed"``: a
+# failed or cancelled pass is the case an operator needs to see, and it stays visible in
+# the dashboard's failed-jobs panel and here alike. ``expiry_reaper.prune_sweep_history``
+# deletes exactly the set that is hidden, so "hidden" and "eventually discarded" never
+# disagree.
+#
+# Display and retention only — nothing authorizes off this tuple.
+ROUTINE_JOB_TYPES = ("expiry_sweep",)
 
 
 def create_job(
@@ -276,12 +291,22 @@ def list_jobs(
     created_by: Optional[str] = None,
     workgroup: Optional[str] = None,
     batch_id: Optional[str] = None,
+    include_routine: bool = True,
 ) -> tuple[List[Job], int]:
     """
     List jobs with optional filters.
     Returns (jobs, total_count).
+
+    ``include_routine=False`` drops the completed rows of :data:`ROUTINE_JOB_TYPES` — the
+    timer-driven maintenance passes that would otherwise bury every operator-initiated job.
+    It excludes only ``completed`` ones, so a failed sweep still surfaces. Defaults to True
+    so this stays a display choice made by the caller that renders a list, not a filter
+    silently applied to every count in the app.
     """
     query = db.query(Job)
+    if not include_routine:
+        query = query.filter(~and_(Job.job_type.in_(ROUTINE_JOB_TYPES),
+                                   Job.status == "completed"))
     if status:
         # Accept a comma-separated list (e.g. "pending,running") so a single
         # count call can span multiple statuses; a single value still works.

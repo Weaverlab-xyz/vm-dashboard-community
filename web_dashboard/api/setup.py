@@ -1035,6 +1035,7 @@ class ResourceExpiryFeatureConfig(BaseModel):
     resource_expiry_warn_hours: int = 24
     resource_expiry_grace_minutes: int = 30
     resource_expiry_sweep_interval_minutes: int = 30
+    resource_expiry_sweep_retention_days: int = 7
     resource_expiry_max_per_pass: int = 10
     resource_expiry_allow_never: bool = False
     resource_expiry_exempt_workgroups: str = ""

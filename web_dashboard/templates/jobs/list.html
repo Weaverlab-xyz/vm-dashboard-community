@@ -31,6 +31,16 @@
           <option>cancelled</option>
         </select>
       </div>
+
+      <!-- Routine passes are hidden by default: the auto-delete sweep alone writes 48
+           rows/day whether or not it found anything. Only *completed* ones are hidden, so
+           a failed pass shows up here without the box being ticked. -->
+      <label class="flex items-center gap-2 text-sm text-gray-600 cursor-pointer"
+             title="Timer-driven maintenance passes, e.g. the auto-delete sweep. Failed ones are always shown.">
+        <input type="checkbox" x-model="includeRoutine" @change="page=1; loadJobs()"
+               class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+        Show routine sweeps
+      </label>
     </div>
 
     <!-- Batch rollup — shown when filtered to one bulk run -->
@@ -146,6 +156,10 @@
       pageSize: 20,
       loading: true,
       filterStatus: '',
+      // Completed timer-driven maintenance passes (job_service.ROUTINE_JOB_TYPES). Off by
+      // default, matching the API default — `total` then counts real jobs, which is the
+      // number the header is claiming to show.
+      includeRoutine: false,
       // One bulk Config-Management run. Seeded from ?batch_id= so a run can link
       // straight here, and so the URL stays shareable/bookmarkable.
       filterBatch: '',
@@ -165,6 +179,7 @@
           let url = `/api/jobs?page=${this.page}&page_size=${this.pageSize}`;
           if (this.filterStatus) url += `&status=${this.filterStatus}`;
           if (this.filterBatch) url += `&batch_id=${encodeURIComponent(this.filterBatch)}`;
+          if (this.includeRoutine) url += '&include_routine=true';
           const resp = await API.get(url);
           if (!resp) return;
           this.jobs = resp.jobs || [];
@@ -237,6 +252,7 @@
           vm_start: 'Start VM', vm_stop: 'Stop VM',
           bulk_start: 'Bulk Start', bulk_stop: 'Bulk Stop',
           windows_update_run: 'Windows Update',
+          expiry_sweep: 'Auto-delete Sweep',
         };
         return labels[job.job_type] || job.job_type;
       },

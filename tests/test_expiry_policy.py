@@ -236,6 +236,50 @@ def test_sweep_interval_and_grace_have_floors():
     assert pol.grace_minutes() >= pol.REAP_GRACE_MIN_FLOOR
 
 
+# ── enqueue dedupe window ────────────────────────────────────────────────────
+
+def test_the_dedupe_window_never_swallows_the_next_scheduled_tick():
+    """THE property of sweep_min_gap_seconds, at every interval an operator can set.
+
+    The window suppresses a second sweep row. If it ever reached a full interval it would
+    suppress the *next legitimate* tick too and the feature would silently halve — or stop.
+    Strictly less than the interval is what makes it a duplicate filter rather than a rate
+    limit, and it has to hold at the floor as well as at absurd values.
+    """
+    for minutes in (0, 1, 5, 7, 30, 90, 1440):
+        _on(resource_expiry_sweep_interval_minutes=minutes)
+        interval = pol.sweep_interval_seconds()
+        gap = pol.sweep_min_gap_seconds()
+        assert 0 < gap < interval, f"{minutes}m: gap {gap} vs interval {interval}"
+
+
+def test_the_dedupe_window_is_wide_enough_for_two_app_workers():
+    """The race it exists to close is sub-second — two gunicorn workers ~0.4s apart, with
+    the first row already `completed` because an empty pass takes ~0s. Any window in
+    minutes closes it; this pins that the window is not accidentally in that same
+    sub-second range where it would do nothing at all."""
+    _on(resource_expiry_sweep_interval_minutes=5)          # the tightest allowed cadence
+    assert pol.sweep_min_gap_seconds() >= 60
+
+
+# ── sweep-history retention ──────────────────────────────────────────────────
+
+def test_sweep_retention_defaults_to_a_bounded_window():
+    """Unset must not mean "keep forever": the sweep writes 48 rows/day at the default
+    interval and nothing else prunes `jobs`."""
+    _on()
+    assert 0 < pol.sweep_retention_days() <= 30
+
+
+def test_sweep_retention_zero_means_keep_forever():
+    """An explicit 0 is a real choice — an operator who wants the full history — and must
+    survive the read rather than being clamped up to the default."""
+    _on(resource_expiry_sweep_retention_days=0)
+    assert pol.sweep_retention_days() == 0
+    _on(resource_expiry_sweep_retention_days=-5)           # nonsense floors to 0, not 7
+    assert pol.sweep_retention_days() == 0
+
+
 def test_clamp_hours_clamps_both_directions():
     _on(resource_expiry_max_total_hours=720)
     floor_h = pol.MIN_TTL_MINUTES_FLOOR / 60.0

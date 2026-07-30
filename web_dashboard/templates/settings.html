@@ -555,6 +555,25 @@
             </div>
           </div>
 
+          <div class="grid grid-cols-3 gap-3">
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Keep sweep history</label>
+              <input type="number" min="0" x-model.number="panelCfg.resource_expiry_sweep_retention_days"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              <p class="text-[11px] text-gray-400 mt-1">Days, 0 = forever.</p>
+            </div>
+            <div class="col-span-2 flex items-end">
+              <p class="text-[11px] text-gray-400 mb-1">
+                A sweep records a job every interval whether or not it found anything —
+                48 a day at the default. Completed ones are dropped past this age and are
+                hidden on
+                <a href="/jobs" class="underline text-blue-600">Job History</a> unless you
+                tick "Show routine sweeps"; a <em>failed</em> pass is always kept and always
+                shown.
+              </p>
+            </div>
+          </div>
+
           <label class="flex items-start gap-2">
             <input type="checkbox" x-model="panelCfg.resource_expiry_allow_never"
                    class="mt-0.5 rounded border-gray-300 text-blue-600 focus:ring-blue-500">
