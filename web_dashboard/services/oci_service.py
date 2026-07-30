@@ -494,6 +494,47 @@ async def oke_cluster_versions(region: str = "") -> list[str]:
         raise OCIError(f"OKE cluster-options lookup failed: {exc}") from exc
 
 
+def _shape_sort_key(shape: str) -> tuple:
+    """Ordering for the worker-shape picker: free-tier first, then flexible VM
+    shapes, then fixed VM shapes, then bare metal — alphabetical within each band.
+    Free-tier-first matches ``_list_shapes_sync``; bare metal sorts last on
+    purpose, since ``BM.Standard.E5.192`` is a 192-OCPU machine billed whole and
+    must never head a list operators pick lab clusters from."""
+    name = (shape or "").strip()
+    return (not oci_freetier.is_free_shape(name), name.startswith("BM."),
+            "Flex" not in name, name)
+
+
+def _oke_node_pool_shapes_sync(region: str) -> list[str]:
+    import oci
+    cfg = _oci_config()
+    if region:
+        cfg = {**cfg, "region": region}
+    client = oci.container_engine.ContainerEngineClient(cfg)
+    opts = client.get_node_pool_options("all", compartment_id=_compartment()).data
+    shapes = [str(s) for s in (getattr(opts, "shapes", None) or []) if s]
+    return sorted(dict.fromkeys(shapes), key=_shape_sort_key)
+
+
+async def oke_node_pool_shapes(region: str = "") -> list[str]:
+    """Worker shapes OKE currently offers, best default first — the API behind
+    ``oci ce node-pool-options get``. OKE takes only a *subset* of OCI's compute
+    shapes, and that subset varies by region and tenancy, so the provision form
+    reads it live: a shape Compute lists but OKE won't take fails node-pool
+    creation ~10 minutes into a provision, after the VCN and cluster are already
+    built. Blank ``region`` → the configured ``oci_region``, which is where every
+    OKE cluster lands regardless of the region picked in the form.
+
+    This is discovery for the picker, not a gate — nothing validates a submitted
+    shape against it (see ``k8s_service.provision_options``)."""
+    try:
+        return await asyncio.to_thread(_oke_node_pool_shapes_sync, region)
+    except OCIError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise OCIError(f"OKE node-pool-options lookup failed: {exc}") from exc
+
+
 # ── OKE cluster token (kubeconfig exec auth) ──────────────────────────────────
 
 def oke_get_token(cluster_id: str, region: str = "") -> str:
