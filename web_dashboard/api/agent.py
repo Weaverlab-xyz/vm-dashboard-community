@@ -261,9 +261,10 @@ async def complete(job_id: str, body: CompleteRequest, request: Request,
     return {"job_id": job.id, "status": applied}
 
 
-def _owned(db: Session, agent: RemoteAgent, job_id: str) -> Job:
+def _owned(db: Session, agent: RemoteAgent, job_id: str, *,
+           statuses: tuple = agent_service.WINDING_DOWN) -> Job:
     try:
-        return agent_service.owned_job(db, agent, job_id)
+        return agent_service.owned_job(db, agent, job_id, statuses=statuses)
     except AgentError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
 

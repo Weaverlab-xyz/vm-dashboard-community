@@ -225,8 +225,12 @@ def enroll(db: Session, *, code: str, public_key: str, agent_version: str = "",
         raise AgentError("Enrolment code has expired. Issue a new one from the Agents page.")
 
     # Reject a malformed key here rather than storing it and failing every later poll
-    # with an unexplained 401.
-    agent_signing.load_public_key(public_key)
+    # with an unexplained 401. Translated to AgentError so the endpoint answers 400
+    # like every other bad-input case, instead of leaking a 500.
+    try:
+        agent_signing.load_public_key(public_key)
+    except agent_signing.SignatureError as exc:
+        raise AgentError(f"Invalid public key: {exc}")
 
     agent.public_key = public_key
     agent.policy_hash = (policy_hash or "")[:64]
@@ -361,8 +365,15 @@ def allowed_job_types(agent: RemoteAgent) -> tuple:
     return tuple(t for t in AGENT_JOB_TYPES if t in per_agent)
 
 
+# A cancelled job is still the agent's until it winds down. Cooperative cancel works
+# by the agent LEARNING about the cancel on its next heartbeat, so refusing these
+# endpoints the moment the status flips would make cancel unreachable: the agent would
+# keep working, never be told, and only discover it when its completion was rejected.
+WINDING_DOWN = ("running", "cancelled")
+
+
 def owned_job(db: Session, agent: RemoteAgent, job_id: str,
-              *, require_running: bool = True) -> Job:
+              *, statuses: tuple = WINDING_DOWN) -> Job:
     """Fetch a job this agent currently holds, or refuse.
 
     Every per-job endpoint goes through here. The ``agent_id`` equality is what stops
@@ -375,7 +386,7 @@ def owned_job(db: Session, agent: RemoteAgent, job_id: str,
         # Deliberately identical to the not-found case: an agent must not be able to
         # probe for the existence of jobs belonging to another agent.
         raise AgentError("Job not found for this agent.")
-    if require_running and job.status != "running":
+    if job.status not in statuses:
         raise AgentError(f"Job is not leased by this agent (status '{job.status}').")
     return job
 
@@ -422,7 +433,15 @@ def _sanitize_line(line) -> str:
 
 def complete_job(db: Session, agent: RemoteAgent, job: Job, *, status: str,
                  result: Optional[dict] = None, error: str = "") -> str:
-    """Finish a leased job. Returns the terminal status actually applied."""
+    """Finish a leased job. Returns the terminal status actually applied.
+
+    A job the operator already cancelled stays cancelled. The agent is expected to
+    report `failed` when it winds down after seeing the cancel flag, and rewriting the
+    row would replace the operator's deliberate action with a failure they did not
+    cause — the /jobs page would show a red error for something that worked as asked.
+    """
+    if job.status == "cancelled":
+        return "cancelled"
     if status == "completed":
         payload = result or {}
         encoded = json.dumps(payload)
