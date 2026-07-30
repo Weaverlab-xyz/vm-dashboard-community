@@ -453,6 +453,47 @@ async def terminate_instance(instance_id: str, preserve_boot_volume: bool = Fals
         raise OCIError(f"terminate_instance failed: {exc}") from exc
 
 
+# ── OKE cluster options ───────────────────────────────────────────────────────
+
+def _version_sort_key(version: str) -> tuple:
+    """Numeric sort key for an OKE version string (``v1.33.10`` → ``(1, 33, 10)``).
+    Sorting the strings directly ranks v1.33.9 above v1.33.10; non-numeric
+    components sort last-resort low."""
+    parts = (version or "").lstrip("vV").split(".")
+    key = []
+    for part in parts:
+        try:
+            key.append(int(part))
+        except ValueError:
+            key.append(-1)
+    return tuple(key)
+
+
+def _oke_cluster_versions_sync(region: str) -> list[str]:
+    import oci
+    cfg = _oci_config()
+    if region:
+        cfg = {**cfg, "region": region}
+    client = oci.container_engine.ContainerEngineClient(cfg)
+    opts = client.get_cluster_options("all", compartment_id=_compartment()).data
+    versions = [str(v) for v in (getattr(opts, "kubernetes_versions", None) or []) if v]
+    return sorted(versions, key=_version_sort_key, reverse=True)
+
+
+async def oke_cluster_versions(region: str = "") -> list[str]:
+    """Kubernetes versions OKE currently offers, newest first — the API behind
+    ``oci ce cluster-options get``. OKE retires versions every few months, so the
+    provision form reads them live rather than trusting a curated list that rots
+    into a 400 "Invalid kubernetesVersion" mid-apply. Blank ``region`` → the
+    configured ``oci_region`` (where every OKE cluster lands)."""
+    try:
+        return await asyncio.to_thread(_oke_cluster_versions_sync, region)
+    except OCIError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise OCIError(f"OKE cluster-options lookup failed: {exc}") from exc
+
+
 # ── OKE cluster token (kubeconfig exec auth) ──────────────────────────────────
 
 def oke_get_token(cluster_id: str, region: str = "") -> str:

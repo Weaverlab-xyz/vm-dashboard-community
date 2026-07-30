@@ -140,8 +140,11 @@ IGW, a **NAT gateway** (its `nat_ip` is the stable egress IP), and a **service g
 reach the OKE control plane and OCIR without traversing the internet. The cluster is a
 **`BASIC_CLUSTER`** (free control plane) with a FLANNEL overlay and a **public** API endpoint; the
 node pool defaults to a single Always-Free **Ampere `VM.Standard.A1.Flex`** node at 2 OCPU / 12 GB
-— the whole free Ampere allocation. Leave `node_image_id` blank and the module auto-picks an
-Oracle-Linux image matching the k8s version and the shape's architecture (`aarch64` for A1).
+— the whole free Ampere allocation. Leave `node_image_id` blank and the module auto-picks the newest
+Oracle-Linux image whose `OKE-<version>` suffix matches the cluster's **exact** patch version and
+whose flavour matches the shape. Note OKE tags only its **ARM** images (`…-aarch64-…`) — the x86
+images carry no arch token at all, so the match is by exclusion (no `aarch64` ⇒ x86, no `Gen2-GPU`
+⇒ non-GPU); an `x86_64` name match finds nothing and leaves the node pool with an empty image.
 
 Credentials reach Terraform as **`TF_VAR_*`** (`terraform_provider_env.oci_env()`) rather than
 provider-native env vars — the module declares `tenancy_ocid` / `user_ocid` / `fingerprint` /
@@ -153,8 +156,16 @@ Config: `oci_oke_vcn_cidr` (`10.96.0.0/16`) is editable in **Settings → Kubern
 and the Provision modal's **Cluster VCN CIDR** field overrides it per-cluster — it travels on the
 same `vpc_cidr` request field AWS uses (there is no separate `vcn_cidr` field). `oci_oke_k8s_version`
 / `oci_oke_node_shape` stay import-only (they seed the form's version / node-size pickers).
-Compartment from `oci_compartment_ocid` (falling back to `oci_tenancy_ocid`). Versions use OKE's
-`v`-prefixed format (`v1.31.1`) — confirm what the region offers with `oci ce cluster-options get`.
+Compartment from `oci_compartment_ocid` (falling back to `oci_tenancy_ocid`).
+
+**Versions are resolved live, not pinned.** OKE retires Kubernetes versions every few months and
+then hard-rejects them (`400 InvalidParameter, Invalid kubernetesVersion`), so nothing in this path
+carries a hard-coded default: the module reads `oci_containerengine_cluster_option` and, when
+`k8s_version` is blank, picks the newest version the region offers (echoed back as the `k8s_version`
+output); the form's picker reads the same list through `oci_service.oke_cluster_versions()`, falling
+back to `K8S_VERSIONS["oci"]` only when OCI is unconfigured. Versions use OKE's `v`-prefixed patch
+format (`v1.36.1`); a version you pin explicitly is validated against the live list at **plan** time,
+so a stale pin fails before the VCN is built rather than half-way through the apply.
 
 ### Sandbox prerequisites
 

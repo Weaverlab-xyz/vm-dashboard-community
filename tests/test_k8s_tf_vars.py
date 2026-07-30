@@ -187,14 +187,14 @@ def test_oci_maps_the_shared_vpc_cidr_field_to_vcn_cidr():
     try:
         tf = _build("oci", name="Demo", opts={
             "vpc_cidr": "10.80.0.0/16", "node_instance_type": "VM.Standard.A1.Flex",
-            "k8s_version": "v1.31.1", "node_ocpus": 2, "node_memory_gbs": 12, "node_count": 1,
+            "k8s_version": "v1.36.1", "node_ocpus": 2, "node_memory_gbs": 12, "node_count": 1,
         })
         assert tf["compartment_ocid"] == "ocid1.compartment.oc1..aaa"
         assert tf["cluster_name"] == "k8s-demo"           # _gke_name lowercases
         assert tf["vcn_cidr"] == "10.80.0.0/16"           # the shared field lands on vcn_cidr
         assert "vpc_cidr" not in tf                       # the OKE module has no vpc_cidr var
         assert tf["node_shape"] == "VM.Standard.A1.Flex"  # OKE node-size var
-        assert tf["k8s_version"] == "v1.31.1"
+        assert tf["k8s_version"] == "v1.36.1"
         assert tf["node_ocpus"] == 2 and tf["node_memory_gbs"] == 12
         assert tf["node_count"] == 1
         assert "node_desired" not in tf and "machine_type" not in tf

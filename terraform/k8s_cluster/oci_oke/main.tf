@@ -58,8 +58,8 @@ variable "cluster_name" {
 
 variable "k8s_version" {
   type        = string
-  default     = "v1.31.1"
-  description = "OKE Kubernetes version (OKE format, e.g. v1.31.1). Must be a version OKE offers in the region — confirm with `oci ce cluster-options get`."
+  default     = ""
+  description = "OKE Kubernetes version (OKE format, e.g. v1.36.1). Blank → the newest version the region currently offers, read live from the cluster-options API. Pin one only to hold a cluster back; OKE retires versions every few months, so a pinned value eventually 400s."
 }
 
 # Self-contained network (like the EKS/AKS/GKE modules): the module builds its
@@ -127,6 +127,15 @@ data "oci_identity_availability_domains" "ads" {
   compartment_id = var.tenancy_ocid
 }
 
+# Kubernetes versions OKE currently offers in this region. OKE retires versions
+# every few months, so a hard-coded default rots into a 400 "Invalid
+# kubernetesVersion" the first provision after a retirement — read the live set
+# instead (the API behind `oci ce cluster-options get`).
+data "oci_containerengine_cluster_option" "opt" {
+  cluster_option_id = "all"
+  compartment_id    = var.compartment_ocid
+}
+
 # Available OKE node images per version/shape. Used to auto-pick a node image
 # when node_image_id is blank: prefer an Oracle-Linux image whose name matches
 # the node shape's architecture (aarch64 for A1, x86_64 otherwise).
@@ -136,18 +145,53 @@ data "oci_containerengine_node_pool_option" "np" {
 }
 
 locals {
-  is_arm    = can(regex("A1", var.node_shape))
-  arch_hint = local.is_arm ? "aarch64" : "x86_64"
-  # Best-effort: newest Oracle-Linux source matching the arch + k8s minor.
-  ver_minor = join(".", slice(split(".", replace(var.k8s_version, "v", "")), 0, 2))
-  candidate_images = [
-    for s in data.oci_containerengine_node_pool_option.np.sources :
-    s.image_id
-    if can(regex("Oracle-Linux", s.source_name))
-    && can(regex(local.arch_hint, s.source_name))
-    && can(regex(local.ver_minor, s.source_name))
+  # OCI's ARM shapes are the Ampere A-series (VM.Standard.A1.Flex,
+  # VM.Standard.A2.Flex, BM.Standard.A1.160); everything else offered is x86.
+  # Anchored on "Standard.A" so the x86 GPU shapes (BM.GPU.A10.4) don't read as ARM.
+  is_arm = can(regex("Standard\\.A[0-9]", var.node_shape))
+  is_gpu = can(regex("GPU", var.node_shape))
+
+  # Blank k8s_version → the newest version the region still offers. Zero-pad each
+  # component so a lexicographic sort orders numerically: a plain sort() ranks
+  # v1.33.9 above v1.33.10.
+  supported_versions = [
+    for v in data.oci_containerengine_cluster_option.opt.kubernetes_versions :
+    v if can(regex("^v[0-9]+\\.[0-9]+\\.[0-9]+$", v))
   ]
-  node_image = var.node_image_id != "" ? var.node_image_id : try(local.candidate_images[0], "")
+  version_by_sort_key = {
+    for v in local.supported_versions :
+    join(".", [for p in split(".", trimprefix(v, "v")) : format("%03d", tonumber(p))]) => v
+  }
+  sort_keys_desc = reverse(sort(keys(local.version_by_sort_key)))
+  newest_version = try(local.version_by_sort_key[local.sort_keys_desc[0]], "")
+  k8s_version    = var.k8s_version != "" ? var.k8s_version : local.newest_version
+
+  # Anchor the worker image on "OKE-<exact patch>-" so its Kubernetes version
+  # matches the pool's (OKE pairs them) and 1.36.1 can't match a 1.36.10 image.
+  ver_exact    = trimprefix(local.k8s_version, "v")
+  image_ver_re = "OKE-${replace(local.ver_exact, ".", "\\.")}-"
+  # OKE tags only its ARM images (`…-aarch64-…`); the x86 images carry no arch
+  # token at all, so matching on "x86_64" finds nothing and every non-Ampere
+  # shape lands on an empty image_id. Select by exclusion instead, and keep the
+  # Gen2-GPU variants out of a non-GPU pool.
+  matching_sources = local.k8s_version == "" ? [] : [
+    for s in data.oci_containerengine_node_pool_option.np.sources : s
+    if can(regex("Oracle-Linux", s.source_name))
+    && can(regex(local.image_ver_re, s.source_name))
+    && local.is_arm == can(regex("aarch64", s.source_name))
+    && local.is_gpu == can(regex("GPU", s.source_name))
+  ]
+  # Newest first: the trailing build number (`…-OKE-1.36.1-1578`) rises
+  # monotonically, and the name breaks ties toward the newer Oracle-Linux major
+  # (9 > 8). The API returns these in neither order.
+  image_by_sort_key = {
+    for s in local.matching_sources :
+    format("%09d|%s", try(tonumber(regex("-([0-9]+)$", s.source_name)[0]), 0),
+    s.source_name) => s.image_id
+  }
+  image_keys_desc = reverse(sort(keys(local.image_by_sort_key)))
+  auto_image      = try(local.image_by_sort_key[local.image_keys_desc[0]], "")
+  node_image      = var.node_image_id != "" ? var.node_image_id : local.auto_image
 }
 
 # ── Network ──────────────────────────────────────────────────────────────────
@@ -289,8 +333,22 @@ resource "oci_containerengine_cluster" "this" {
   compartment_id     = var.compartment_ocid
   name               = var.cluster_name
   vcn_id             = oci_core_vcn.this.id
-  kubernetes_version = var.k8s_version
+  kubernetes_version = local.k8s_version
   type               = "BASIC_CLUSTER"
+
+  # Both checks resolve at plan time (the versions come from a data source), so a
+  # bad version fails before the VCN is built instead of after — OKE's own 400
+  # arrives half-way through the apply and leaves the network to roll back.
+  lifecycle {
+    precondition {
+      condition     = local.k8s_version != ""
+      error_message = "No OKE Kubernetes version resolved: cluster-options returned no v-prefixed versions. Set k8s_version explicitly."
+    }
+    precondition {
+      condition     = contains(local.supported_versions, local.k8s_version)
+      error_message = "k8s_version ${local.k8s_version} is not offered here. OKE currently offers: ${join(", ", local.supported_versions)}."
+    }
+  }
 
   cluster_pod_network_options {
     cni_type = "FLANNEL_OVERLAY"
@@ -320,7 +378,7 @@ resource "oci_containerengine_node_pool" "this" {
   cluster_id         = oci_containerengine_cluster.this.id
   compartment_id     = var.compartment_ocid
   name               = "${var.cluster_name}-np"
-  kubernetes_version = var.k8s_version
+  kubernetes_version = local.k8s_version
   node_shape         = var.node_shape
 
   node_shape_config {
@@ -348,6 +406,15 @@ resource "oci_containerengine_node_pool" "this" {
   ssh_public_key = var.ssh_public_key != "" ? var.ssh_public_key : null
 
   freeform_tags = var.tags
+
+  # An empty image_id reaches the API as a bare "missing parameter" — say which
+  # version/arch found nothing instead.
+  lifecycle {
+    precondition {
+      condition     = local.node_image != ""
+      error_message = "No OKE worker image matched Oracle-Linux + OKE-${local.ver_exact} for shape ${var.node_shape} (arm=${local.is_arm}, gpu=${local.is_gpu}). Set node_image_id explicitly."
+    }
+  }
 }
 
 # ── Outputs (match the cluster-module contract used by k8s_service) ───────────
@@ -373,6 +440,11 @@ output "cluster_name" {
 output "cluster_ocid" {
   value       = oci_containerengine_cluster.this.id
   description = "OKE cluster OCID (used by `oci ce cluster generate-token`)"
+}
+
+output "k8s_version" {
+  value       = local.k8s_version
+  description = "Kubernetes version actually used (the resolved newest when k8s_version was blank)"
 }
 
 output "endpoint" {
