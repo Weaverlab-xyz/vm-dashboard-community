@@ -96,15 +96,15 @@ def _hcl_escape(value: str) -> str:
     )
 
 
-def _provisioner_env_block(env: dict, secret_vars: dict = None, indent: str = "    ") -> str:
+def _provisioner_env_block(env: dict, sensitive_var_names: dict = None, indent: str = "    ") -> str:
     """An ``environment_vars = [...]`` line for a shell provisioner, or "" when
     there's nothing to set.
 
     ``env`` holds literal values, each inlined as a "KEY=VALUE" array element
-    (empty/None dropped, HCL-escaped). ``secret_vars`` maps an env-var name to a
-    Packer *sensitive* variable name; each becomes "KEY=${var.<name>}" so the
-    actual secret value — supplied at runtime via PKR_VAR_<name> — never appears
-    in the template or the archived copy."""
+    (empty/None dropped, HCL-escaped). ``sensitive_var_names`` maps an env-var
+    name to a Packer *sensitive* variable NAME — never a value; each becomes
+    "KEY=${var.<name>}" so the actual secret, supplied at runtime via
+    PKR_VAR_<name>, never appears in the template or the archived copy."""
     items = [
         '"%s=%s"' % (k, _hcl_escape(str(v)))
         for k, v in (env or {}).items()
@@ -112,22 +112,28 @@ def _provisioner_env_block(env: dict, secret_vars: dict = None, indent: str = " 
     ]
     items += [
         '"%s=${var.%s}"' % (name, var)
-        for name, var in (secret_vars or {}).items()
+        for name, var in (sensitive_var_names or {}).items()
     ]
     if not items:
         return ""
     return indent + "environment_vars = [" + ", ".join(items) + "]\n"
 
 
-def _secret_var_decls(secret_vars: dict = None) -> str:
+def _secret_var_decls(sensitive_var_names: dict = None) -> str:
     """HCL ``variable`` declarations (marked ``sensitive``) for each secret env
-    var, or "" when there are none. Values are supplied at build time via
-    PKR_VAR_<name> in the subprocess env, so only the declarations — never the
-    secret values — are written to the template."""
-    if not secret_vars:
+    var, or "" when there are none.
+
+    ``sensitive_var_names`` maps an env-var name to a Packer variable NAME (e.g.
+    ``{"TOKEN": "penv_0"}``) — it never carries a value. The values are supplied
+    at build time via PKR_VAR_<name> in the subprocess env, so only the
+    declarations, never the secrets, are written to the template. The parameter
+    is named for what it holds: a dict called ``secret_vars`` reads as though the
+    secrets themselves flow into the generated file, which is the opposite of the
+    design (and is what static analysis concluded when it was called that)."""
+    if not sensitive_var_names:
         return ""
     out = ""
-    for var in secret_vars.values():
+    for var in sensitive_var_names.values():
         out += (
             'variable "%s" {\n'
             '  type      = string\n'
@@ -638,14 +644,16 @@ def generate_oci_template(
     image_name: str,
     has_provisioner: bool,
     provisioner_env: dict = None,
-    provisioner_secret_vars: dict = None,
+    # Env-var name → Packer variable NAME. Never a secret value: those reach the
+    # build only as PKR_VAR_* on the subprocess env. See _secret_var_decls.
+    provisioner_sensitive_var_names: dict = None,
     ocpus: Optional[float] = None,
     memory_gb: Optional[float] = None,
     boot_volume_gb: Optional[int] = None,
 ) -> str:
     safe = _safe_oci_name(image_name)
-    envb = _provisioner_env_block(provisioner_env, provisioner_secret_vars)
-    decls = _secret_var_decls(provisioner_secret_vars)
+    envb = _provisioner_env_block(provisioner_env, provisioner_sensitive_var_names)
+    decls = _secret_var_decls(provisioner_sensitive_var_names)
     prov = ('\n  provisioner "shell" {\n    script = "provision.sh"\n' + envb + '  }\n') if has_provisioner else ""
 
     # Flex shapes (A1.Flex, E4.Flex …) carry no built-in size and the builder

@@ -82,6 +82,22 @@ def test_the_key_variable_is_typed_string():
     assert "type      = string" in decl, "oci_key must be explicitly typed string"
 
 
+def test_provisioner_secrets_are_variable_references_not_values():
+    """The sensitive-var path carries env-var name → Packer variable NAME; the
+    resolved secret reaches the build only as PKR_VAR_* on the subprocess env.
+    Asserted explicitly because a reader (and CodeQL's name heuristic) can
+    reasonably suspect the opposite from the dict flowing into the template."""
+    t = _tpl(has_provisioner=True,
+             provisioner_env={"BT_ADMIN_USER": "adminuser"},
+             provisioner_sensitive_var_names={"TOKEN": "penv_0"})
+    assert 'variable "penv_0"' in t and "sensitive = true" in t
+    assert '"TOKEN=${var.penv_0}"' in t, "the secret must be a variable reference"
+    assert "hunter2" not in t  # nothing resembling a value is ever passed in
+    # The plain literal IS inlined — that is the documented difference between
+    # the two paths, and the reason the secret-ref toggle exists.
+    assert '"BT_ADMIN_USER=adminuser"' in t
+
+
 def test_the_runner_passes_the_key_only_through_the_env():
     src = _read("web_dashboard", "services", "packer_build_service.py")
     body = re.search(r"async def _run_oci_build\(.*?\n(.*?)\n# ── Shared helpers", src, re.S).group(1)

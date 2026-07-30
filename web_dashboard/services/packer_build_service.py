@@ -596,10 +596,13 @@ async def _run_oci_build(job_id: str, req: OCIPackerBuildRequest, created_by: st
         env["PKR_VAR_region"] = region
 
         job_service.update_progress(db, job_id, 5, "Generating Packer template…")
+        # sensitive_var_names holds env-var name → Packer variable NAME, not the
+        # secrets themselves; the resolved values live only in pkr_env, which goes
+        # onto the subprocess environment and never into the template.
         if req.provisioner_script.strip():
-            plain_env, secret_vars, pkr_env = await _provisioner_env(req)
+            plain_env, sensitive_var_names, pkr_env = await _provisioner_env(req)
         else:
-            plain_env, secret_vars, pkr_env = {}, {}, {}
+            plain_env, sensitive_var_names, pkr_env = {}, {}, {}
         env.update(pkr_env)
         template = packer_service.generate_oci_template(
             base_image_ocid=req.base_image_ocid,
@@ -611,7 +614,7 @@ async def _run_oci_build(job_id: str, req: OCIPackerBuildRequest, created_by: st
             image_name=req.image_name,
             has_provisioner=bool(req.provisioner_script.strip()),
             provisioner_env=plain_env,
-            provisioner_secret_vars=secret_vars,
+            provisioner_sensitive_var_names=sensitive_var_names,
             ocpus=req.ocpus,
             memory_gb=req.memory_gb,
             boot_volume_gb=req.boot_volume_gb,
