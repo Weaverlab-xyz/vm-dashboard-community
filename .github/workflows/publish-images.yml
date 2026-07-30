@@ -14,6 +14,7 @@ name: Publish images
 #   chrweav/dashboard-promote-runner   (context: runners/promote)
 #   chrweav/ansible-winrm              (context: runners/ansible-winrm)
 #   chrweav/ansible-cloud              (context: runners/ansible-cloud)
+#   chrweav/dashboard-agent            (context: runners/agent)
 
 on:
   push:
@@ -46,6 +47,13 @@ jobs:
           - image: chrweav/ansible-cloud
             context: runners/ansible-cloud
             dockerfile: runners/ansible-cloud/Dockerfile
+          # The remote on-prem agent. Unlike the runners above, this one is pulled by
+          # an operator inside a private network rather than launched by the dashboard,
+          # so the published tag IS the distribution channel — the install command the
+          # Agents page hands out references it by name.
+          - image: chrweav/dashboard-agent
+            context: runners/agent
+            dockerfile: runners/agent/Dockerfile
     steps:
       - name: Checkout
         uses: actions/checkout@v4
