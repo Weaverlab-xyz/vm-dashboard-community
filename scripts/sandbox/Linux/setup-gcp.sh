@@ -458,6 +458,12 @@ fi
 # at Enable-federation time otherwise); gkehub.admin lets it register the cluster to the
 # fleet; resourcemanager.projectIamAdmin lets it grant the workforce principalSet the
 # gkehub.gateway* roles (a project-level setIamPolicy).
+# iam.roleAdmin is the fine-grained Entitle JIT tier: GKE gates the `impersonate` verb
+# in Cloud IAM as well as RBAC, so "Impersonation access" creates/reuses a project CUSTOM
+# role holding only container.clusters.impersonate and binds the group's principalSet to
+# it (roles/container.admin would carry it too, but hands the group standing cluster
+# admin and defeats the point). Without this role the action fails with a 403 on
+# projects.roles.create — see gcp_service.ensure_impersonate_role.
 # bigquery.jobUser + bigquery.dataViewer power the Cloud Costs page: the dashboard
 # runs a query job (jobUser) against the Cloud Billing export table and reads its
 # rows (dataViewer). Both are granted at project scope — if your billing export
@@ -467,13 +473,13 @@ for role in roles/compute.admin roles/secretmanager.secretAccessor \
              roles/run.invoker roles/cloudsql.admin roles/servicenetworking.networksAdmin \
              roles/cloudbuild.builds.editor roles/container.admin roles/logging.viewer \
              roles/serviceusage.serviceUsageAdmin roles/gkehub.admin \
-             roles/resourcemanager.projectIamAdmin \
+             roles/resourcemanager.projectIamAdmin roles/iam.roleAdmin \
              roles/bigquery.jobUser roles/bigquery.dataViewer; do
   retry 8 5 gcloud projects add-iam-policy-binding "$PROJECT_ID" \
     --member "serviceAccount:$SA_EMAIL" --role "$role" \
     --condition=None --quiet >/dev/null
 done
-ok "Granted compute.admin, secretmanager.secretAccessor, iam.serviceAccountUser, run.{admin,developer,invoker}, cloudsql.admin, servicenetworking.networksAdmin, cloudbuild.builds.editor, container.admin, logging.viewer, serviceusage.serviceUsageAdmin, gkehub.admin, resourcemanager.projectIamAdmin, bigquery.jobUser, bigquery.dataViewer"
+ok "Granted compute.admin, secretmanager.secretAccessor, iam.serviceAccountUser, run.{admin,developer,invoker}, cloudsql.admin, servicenetworking.networksAdmin, cloudbuild.builds.editor, container.admin, logging.viewer, serviceusage.serviceUsageAdmin, gkehub.admin, resourcemanager.projectIamAdmin, iam.roleAdmin, bigquery.jobUser, bigquery.dataViewer"
 
 SA_KEY_PATH="$(state_dir gcp)/sa-key.json"
 if [[ ! -s "$SA_KEY_PATH" ]]; then

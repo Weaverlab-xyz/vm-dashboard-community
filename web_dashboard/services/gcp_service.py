@@ -240,6 +240,103 @@ def _modify_project_iam(member: str, project: str, roles: tuple, *, add: bool) -
         s.post(f"{base}:setIamPolicy", json={"policy": policy}).raise_for_status()
 
 
+# ── GKE impersonation gate (Cloud IAM half of the Entitle fine-grained tier) ──
+#
+# GKE authorizes the `impersonate` verb through Cloud IAM *as well as* Kubernetes
+# RBAC, so k8s_service's `entitle-impersonator` ClusterRole is only half the grant:
+# without `container.clusters.impersonate` the API server refuses with
+#   cannot impersonate resource "users" … requires one of
+#   ["container.clusters.impersonate"] permission(s) in Cloud IAM or a Kubernetes
+#   RBAC role with verb "impersonate" for resource "users"
+# even though the RBAC half matches (confirmed live 2026-07-30 — the same group
+# principalSet grants `view` on the same cluster). No predefined role carries that
+# permission without also carrying broad cluster admin (roles/container.admin), which
+# would hand the group standing admin and defeat the fine-grained JIT story, so we
+# create/reuse a project CUSTOM role holding exactly that one permission.
+#
+# The role is project-scoped and shared by every cluster (GKE clusters have no IAM
+# policy of their own), which is why k8s_service ref-counts the binding on removal.
+#
+# CAVEAT (verified by hand 2026-07-30): the permission IS allowed in a custom role, but
+# Google marks it **TESTING** stage — `gcloud iam roles create` warns "not mature and
+# they can go away in the future … do not use them in production systems". So this whole
+# tier can break on a Google-side change with no action from us. If create/bind starts
+# failing on a permission-not-recognised error, that is the first thing to check.
+
+_IMPERSONATE_PERMISSION = "container.clusters.impersonate"
+_IMPERSONATE_ROLE_ID = "dashboardGkeImpersonator"
+
+
+def impersonate_role_name(project: str = "") -> str:
+    """Full resource name of the custom impersonation role (no API call)."""
+    return f"projects/{project or _gcp_project()}/roles/{_IMPERSONATE_ROLE_ID}"
+
+
+def ensure_impersonate_role(project: str = "") -> str:
+    """Create-or-reuse the project custom role carrying ONLY
+    ``container.clusters.impersonate``; returns its full role name. Idempotent.
+
+    Handles the soft-delete window: GCP keeps a deleted custom role for ~7 days and
+    `create` on it fails ALREADY_EXISTS, so a role marked ``deleted`` is undeleted
+    instead. An existing role missing the permission (hand-edited) is patched.
+    Requires ``roles/iam.roleAdmin`` (or equivalent) on the dashboard SA."""
+    project = project or _gcp_project()
+    s = _authed_session()
+    base = f"https://iam.googleapis.com/v1/projects/{project}/roles"
+    name = impersonate_role_name(project)
+    body = {"title": "Dashboard GKE Impersonator",
+            "description": ("Cloud IAM half of the Entitle fine-grained k8s JIT tier: "
+                            "lets a federated principal use kubectl --as on GKE. "
+                            "Managed by the dashboard."),
+            "includedPermissions": [_IMPERSONATE_PERMISSION],
+            "stage": "GA"}
+    r = s.get(f"https://iam.googleapis.com/v1/{name}")
+    if r.status_code == 200:
+        cur = r.json()
+        if cur.get("deleted"):
+            s.post(f"https://iam.googleapis.com/v1/{name}:undelete", json={}).raise_for_status()
+            cur = {}
+        if _IMPERSONATE_PERMISSION not in (cur.get("includedPermissions") or []):
+            s.patch(f"https://iam.googleapis.com/v1/{name}", json=body).raise_for_status()
+        return name
+    if r.status_code != 404:
+        raise GCPError(f"could not read the GKE impersonation role: {r.status_code} {r.text}")
+    c = s.post(f"{base}?roleId={_IMPERSONATE_ROLE_ID}", json={"role": body})
+    if c.status_code == 403:
+        raise GCPError(
+            "denied creating the GKE impersonation custom role — the dashboard service "
+            "account needs roles/iam.roleAdmin (re-run scripts/sandbox/*/setup-gcp) or "
+            f"an operator can pre-create {name} with the single permission "
+            f"{_IMPERSONATE_PERMISSION}: {c.text}")
+    if c.status_code >= 400:
+        # Surface Google's own message rather than a bare HTTPError — the interesting
+        # case is a 400 saying the permission is not supported in custom roles, whose
+        # only workaround is a predefined role that carries it (roles/container.admin,
+        # which also grants standing cluster admin — an operator decision, not ours).
+        raise GCPError(
+            f"could not create the GKE impersonation custom role {name} "
+            f"({c.status_code}): {c.text}")
+    logger.info("Created the GKE impersonation custom role %s", name)
+    return name
+
+
+def grant_impersonate_iam(principal_set: str, project: str = "") -> None:
+    """Let ``principal_set`` use ``kubectl --as`` on this project's GKE clusters:
+    ensure the custom role exists, then bind it (idempotent). Cloud IAM changes take
+    ~1-2 min to propagate, so the first `--as` right after this may still 403."""
+    project = project or _gcp_project()
+    role = ensure_impersonate_role(project)
+    _modify_project_iam(principal_set, project, (role,), add=True)
+
+
+def revoke_impersonate_iam(principal_set: str, project: str = "") -> None:
+    """Remove ``principal_set``'s impersonation binding (idempotent). The custom role
+    itself is left in place — it is project-wide and other clusters may still bind
+    it (and re-creating it costs an extra permission)."""
+    project = project or _gcp_project()
+    _modify_project_iam(principal_set, project, (impersonate_role_name(project),), add=False)
+
+
 def connect_gateway_server_url(membership_id: str, project: str = "", location: str = "global") -> str:
     """The Connect Gateway kube-apiserver URL for a fleet membership (uses the project
     NUMBER, per the gateway URL scheme)."""

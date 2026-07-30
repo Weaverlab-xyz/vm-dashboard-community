@@ -2889,7 +2889,16 @@ async def apply_impersonator_binding(db: Session, cluster_id: str, *,
     """Grant the Entra group cluster-wide ``impersonate`` on ``users``. Reuses the
     federation group id (config ``entra_rbac_group_id``, per-call overridable) and
     the cloud-aware subject. Idempotent (fixed names, ``kubectl apply``). Tracked in
-    config ``k8s_impersonator_{cluster_id}``."""
+    config ``k8s_impersonator_{cluster_id}``.
+
+    On **GKE** the ClusterRole is only HALF the grant: GKE authorizes ``impersonate``
+    through Cloud IAM as well as RBAC, so the group's principalSet also needs
+    ``container.clusters.impersonate`` (gcp_service.grant_impersonate_iam). Skipping it
+    was the bug that made this whole tier fail live on 2026-07-30 with a Forbidden that
+    *looks* like an RBAC problem. EKS and AKS need no cloud-side counterpart: EKS
+    authorizes impersonation purely in Kubernetes RBAC, and AKS ORs the Azure RBAC
+    webhook with Kubernetes RBAC so the RBAC half stands on its own (reasoned, not
+    live-tested — the AKS leg of this tier has never been exercised end to end)."""
     row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
     if row is None:
         raise K8sError(f"cluster {cluster_id} not found")
@@ -2901,15 +2910,26 @@ async def apply_impersonator_binding(db: Session, cluster_id: str, *,
     kubeconfig = resolve_kubeconfig(db, cluster_id)
     await _apply_manifest_via_runner(
         kubeconfig, _entitle_impersonator_manifest(subject), target_cloud=row.cloud)
+    # Cloud IAM half (GKE only). Deliberately fatal: a half-applied grant is exactly
+    # the silent-partial-success that produced the original bug, and both halves are
+    # idempotent so a retry is safe.
+    if row.cloud == "gcp":
+        from . import gcp_service
+        project = _cfg("gcp_project_id")
+        if not project:
+            raise K8sError("gcp_project_id is not configured — GKE impersonation needs "
+                           "the project to grant container.clusters.impersonate")
+        await asyncio.to_thread(gcp_service.grant_impersonate_iam, subject, project)
     from . import config_service
     config_service.set(f"k8s_impersonator_{cluster_id}", gid)
     logger.info("Applied Entitle impersonator binding (group %s) on cluster %s", gid, row.name)
-    return {"group_id": gid}
+    return {"group_id": gid, "cloud_iam_granted": row.cloud == "gcp"}
 
 
 async def remove_impersonator_binding(db: Session, cluster_id: str) -> dict:
     """Delete the impersonator ClusterRole + ClusterRoleBinding + clear its config
-    key (best-effort, idempotent)."""
+    key (best-effort, idempotent). On GKE also drops the Cloud IAM half — but only
+    when no OTHER cluster still has the same group bound (see below)."""
     row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
     from . import config_service
     gid = config_service.get(f"k8s_impersonator_{cluster_id}")
@@ -2923,8 +2943,27 @@ async def remove_impersonator_binding(db: Session, cluster_id: str) -> dict:
             _entitle_impersonator_manifest(gid), target_cloud=row.cloud)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Entitle impersonator unbind for %s failed (non-fatal): %s", cluster_id, exc)
+    # Cloud IAM half (GKE): the custom-role binding is PROJECT-level, so it is shared by
+    # every GKE cluster using this group — ref-count before revoking or removing
+    # impersonation from one cluster silently breaks `--as` on all the others.
+    iam_revoked = False
+    if row.cloud == "gcp":
+        shared = [c.id for c in db.query(K8sCluster).filter(K8sCluster.cloud == "gcp").all()
+                  if c.id != cluster_id and config_service.get(f"k8s_impersonator_{c.id}") == gid]
+        if shared:
+            logger.info("Keeping the GKE impersonate IAM binding for group %s — still used by %s",
+                        gid, ", ".join(shared))
+        else:
+            try:
+                from . import gcp_service
+                await asyncio.to_thread(gcp_service.revoke_impersonate_iam,
+                                        _workforce_principalset(gid), _cfg("gcp_project_id"))
+                iam_revoked = True
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("GKE impersonate IAM revoke for %s failed (non-fatal): %s",
+                               cluster_id, exc)
     config_service.set(f"k8s_impersonator_{cluster_id}", "")
-    return {"ok": True, "removed": True}
+    return {"ok": True, "removed": True, "cloud_iam_revoked": iam_revoked}
 
 
 async def run_impersonator_binding(db: Session, *, cluster_id: str, job_id: str,
@@ -2940,7 +2979,14 @@ async def run_impersonator_binding(db: Session, *, cluster_id: str, job_id: str,
             await remove_impersonator_binding(db, cluster_id)
         else:
             await broadcast_progress(job_id, 20, "Granting the Entra group impersonation access…")
-            await apply_impersonator_binding(db, cluster_id, group_id=group_id)
+            res = await apply_impersonator_binding(db, cluster_id, group_id=group_id)
+            if res.get("cloud_iam_granted"):
+                # Not a wait — just say so, because the first `kubectl --as` inside the
+                # propagation window still 403s and reads exactly like a missing grant.
+                await broadcast_progress(
+                    job_id, 100,
+                    "Granted (RBAC + Cloud IAM). Cloud IAM takes ~1-2 min to propagate — "
+                    "a `kubectl --as` before then can still be Forbidden.")
     except Exception as exc:
         job_service.set_failed(db, job_id, str(exc))
         logger.exception("k8s impersonator job failed cluster=%s action=%s", cluster_id, action)
