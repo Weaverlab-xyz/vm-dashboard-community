@@ -511,7 +511,7 @@
           </div>
         </div>
         <p x-show="praPickers.loaded && !praPickers.jump_groups.length && !praPickers.gateways.length" x-cloak
-           class="text-xs text-gray-400">No PRA jump groups/jumpoints returned — the shell jump falls back to the configured defaults.</p>
+           class="text-xs text-gray-400">No PRA jump groups/Gateways returned — the shell jump falls back to the configured defaults.</p>
         {{ secret_picker("deployModal", "praCredBackend", "pra_credential_ref",
                          "PRA credential", "Overrides bt_client_secret for this deploy's shell jump.") }}
         {{ secret_picker("deployModal", "dockerKeyBackend", "docker_deploy_key_ref",
