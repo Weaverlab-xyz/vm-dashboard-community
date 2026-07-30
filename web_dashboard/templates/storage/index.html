@@ -44,7 +44,7 @@
                  cfg.storage_active_backend === b.id ? 'border-blue-500 bg-blue-50' : 'border-gray-200',
                  b.selectable ? 'cursor-pointer hover:border-gray-300' : 'opacity-60 cursor-not-allowed',
                ]"
-               :title="!b.selectable ? 'This backend only works with ansible_runner=local. Switch runner in Settings → Ansible.' : ''">
+               :title="b.hub_only ? b.hub_only_reason : (!b.selectable ? 'This backend only works with ansible_runner=local. Switch runner in Settings → Ansible.' : '')">
           <input type="radio" :value="b.id" x-model="cfg.storage_active_backend"
                  :disabled="!b.selectable"
                  class="mt-0.5 accent-blue-600">
@@ -54,8 +54,12 @@
               <span x-show="b.configured" class="text-[10px] uppercase font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded">configured</span>
               <span x-show="b.active"     class="text-[10px] uppercase font-semibold text-blue-700  bg-blue-50  border border-blue-200  px-1.5 py-0.5 rounded">active</span>
               <span x-show="b.runner_locked" x-cloak class="text-[10px] uppercase font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded">local runner only</span>
+              <span x-show="b.hub_only" x-cloak class="text-[10px] uppercase font-semibold text-indigo-700 bg-indigo-50 border border-indigo-200 px-1.5 py-0.5 rounded">image hub only</span>
             </div>
-            <p x-show="!b.selectable" x-cloak class="text-xs text-amber-700 mt-1">
+            <!-- Two distinct reasons a backend can't be activated: the runner has
+                 no path to it (UNC), or it can't hold Terraform state (OCI). -->
+            <p x-show="b.hub_only" x-cloak class="text-xs text-indigo-700 mt-1" x-text="b.hub_only_reason"></p>
+            <p x-show="!b.selectable && !b.hub_only" x-cloak class="text-xs text-amber-700 mt-1">
               Requires <code class="bg-amber-50 px-1 rounded">ansible_runner=local</code> (current: <span class="font-mono" x-text="ansibleRunner"></span>). Switch in Settings → Ansible to enable.
             </p>
           </div>
@@ -143,6 +147,45 @@
                 class="text-xs px-3 py-1.5 border border-gray-300 rounded-lg hover:bg-white disabled:opacity-50">
           <span x-show="!testing.gcs">Test connection</span>
           <span x-show="testing.gcs" x-cloak>Testing…</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- ── OCI Object Storage fields ─────────────────────────────────────── -->
+    <div class="grid grid-cols-2 gap-4 mb-5 p-4 bg-gray-50 rounded-lg border border-gray-200">
+      <div class="col-span-2 flex items-center gap-2">
+        <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide">OCI Object Storage</p>
+        <span class="text-[11px] px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-700 border border-indigo-200">image hub only</span>
+      </div>
+      <p class="col-span-2 text-xs text-gray-500 -mt-2">
+        Credentials come from the OCI setup wizard — only the bucket is set here.
+        Can host the image-registry hub, but cannot be the <em>active</em> backend:
+        the active backend also decides where Terraform state lives, and Terraform
+        has no OCI state backend.
+      </p>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Bucket</label>
+        <input type="text" x-model="cfg.storage_oci_bucket"
+               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+               placeholder="dashboard-sandbox-storage">
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Object Prefix</label>
+        <input type="text" x-model="cfg.storage_oci_prefix"
+               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+               placeholder="config-mgmt">
+      </div>
+      <div class="col-span-2">
+        <label class="block text-sm font-medium text-gray-700 mb-1">Namespace <span class="text-gray-400 font-normal">(optional)</span></label>
+        <input type="text" x-model="cfg.storage_oci_namespace"
+               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+               placeholder="looked up from the tenancy when blank">
+      </div>
+      <div class="col-span-2">
+        <button @click="testBackend('oci_object_storage')" :disabled="!cfg.storage_oci_bucket || testing.oci_object_storage"
+                class="text-xs px-3 py-1.5 border border-gray-300 rounded-lg hover:bg-white disabled:opacity-50">
+          <span x-show="!testing.oci_object_storage">Test connection</span>
+          <span x-show="testing.oci_object_storage" x-cloak>Testing…</span>
         </button>
       </div>
     </div>
@@ -239,6 +282,7 @@
         <option value="s3">AWS S3</option>
         <option value="azure_blob">Azure Blob Storage</option>
         <option value="gcs">Google Cloud Storage</option>
+        <option value="oci_object_storage">OCI Object Storage</option>
       </select>
     </div>
 
@@ -555,6 +599,7 @@ function storagePage() {
       storage_s3_bucket: '', storage_s3_region: '', storage_s3_prefix: '',
       storage_azure_account: '', storage_azure_container: '', storage_azure_prefix: '',
       storage_gcs_bucket: '', storage_gcs_prefix: '',
+      storage_oci_bucket: '', storage_oci_namespace: '', storage_oci_prefix: '',
       storage_local_path: '', storage_local_username: '',
       storage_local_password: '', storage_local_domain: '',
     },
@@ -562,7 +607,7 @@ function storagePage() {
     assets: [],
     loadingAssets: false,
     saving: false,
-    testing: { s3: false, azure_blob: false, gcs: false, local: false },
+    testing: { s3: false, azure_blob: false, gcs: false, oci_object_storage: false, local: false },
     migrate: { source: '', target: '', overwrite: false },
     migrating: false,
     migrationResult: null,
@@ -644,6 +689,7 @@ function storagePage() {
         s3:         'AWS S3',
         azure_blob: 'Azure Blob Storage',
         gcs:        'Google Cloud Storage',
+        oci_object_storage: 'OCI Object Storage',
         local:      'Local Filesystem / UNC',
       })[id] || id;
     },

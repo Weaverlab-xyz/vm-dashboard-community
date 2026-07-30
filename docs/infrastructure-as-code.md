@@ -116,8 +116,8 @@ applied to a different cloud-of-clouds (BeyondTrust's PRA platform).
 
 For the "build me a custom image" path, the dashboard wraps Packer:
 [`services/packer_service.py`](../web_dashboard/services/packer_service.py).
-Three builders are supported (`amazon-ebs`, `azure-arm`,
-`googlecompute`); per-build templates are generated in-process from
+Four builders are supported (`amazon-ebs`, `azure-arm`,
+`googlecompute`, `oracle-oci`); per-build templates are generated in-process from
 form input rather than pre-staged in repo, because image-build inputs
 (source AMI, instance type, provisioning script) are too varied to
 template statically.

@@ -451,7 +451,8 @@ def record_promotion(
 def _parse_hub_url(artefact_url: str) -> tuple[str, str]:
     """Return (backend, key) for an artefact_url written by Phase 3 export.
     `s3://bucket/key` -> ("s3", "key"), Azure https URL -> ("azure_blob",
-    "<key-inside-container>"), gs://... -> ("gcs", "key"). Raises
+    "<key-inside-container>"), gs://... -> ("gcs", "key"),
+    oci://namespace/bucket/key -> ("oci_object_storage", "key"). Raises
     ImageRegistryError if the URL shape doesn't match a hub backend — the
     operator probably hand-rolled it and the automated promote can't drive
     it without parsing help."""
@@ -464,6 +465,14 @@ def _parse_hub_url(artefact_url: str) -> tuple[str, str]:
         rest = url[len("gs://"):]
         _, _, key = rest.partition("/")
         return ("gcs", key)
+    if url.startswith("oci://"):
+        # oci://<namespace>/<bucket>/<key> — two segments to strip, not one, since
+        # an OCI object is addressed by (namespace, bucket, name). Both are read
+        # back from config by the backend, so only the key is returned.
+        rest = url[len("oci://"):]
+        _, _, after_ns = rest.partition("/")
+        _, _, key = after_ns.partition("/")
+        return ("oci_object_storage", key)
     parsed = urlparse(url)
     if parsed.scheme == "https" and (parsed.hostname or "").endswith(".blob.core.windows.net"):
         # https://<account>.blob.core.windows.net/<container>/<key>
@@ -472,10 +481,17 @@ def _parse_hub_url(artefact_url: str) -> tuple[str, str]:
         # discarded — the key is everything past the container segment.
         _, _, key = parsed.path.lstrip("/").partition("/")
         return ("azure_blob", key)
+    if parsed.scheme == "https" and (parsed.hostname or "").endswith(".oraclecloud.com"):
+        # https://objectstorage.<region>.oraclecloud.com/n/<ns>/b/<bucket>/o/<key>
+        # Same hostname-suffix discipline as the Azure branch above — never a
+        # substring test, so evil.com/.oraclecloud.com/ can't slip through.
+        _, _, after_o = parsed.path.partition("/o/")
+        if after_o:
+            return ("oci_object_storage", after_o)
     raise ImageRegistryError(
-        f"artefact_url '{url}' isn't on a recognised hub backend (s3/azure_blob/gcs). "
-        "Re-run the build with Phase 3 export to populate the hub URL, or use the "
-        "manual-steps fallback."
+        f"artefact_url '{url}' isn't on a recognised hub backend "
+        "(s3/azure_blob/gcs/oci_object_storage). Re-run the build with Phase 3 export "
+        "to populate the hub URL, or use the manual-steps fallback."
     )
 
 

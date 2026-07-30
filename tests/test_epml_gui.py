@@ -133,16 +133,16 @@ def test_epml_error_is_imported_where_it_is_raised():
 
 # ── the UI sends what the API reads ───────────────────────────────────────────
 
-def test_all_three_build_pages_send_the_package_source():
-    for cloud in ("aws", "azure", "gcp"):
+def test_all_four_build_pages_send_the_package_source():
+    for cloud in ("aws", "azure", "gcp", "oci"):
         page = _read("web_dashboard", "templates", cloud, "index.html")
         assert "bt_epml_source" in page, f"{cloud} build page has no package-source field"
 
 
 def test_the_build_request_models_accept_the_package_source():
     src = _read("web_dashboard", "models", "packer.py")
-    assert src.count("bt_epml_source") == 3, (
-        "bt_epml_source must be on all three build request models")
+    assert src.count("bt_epml_source") == 4, (
+        "bt_epml_source must be on all four build request models")
 
 
 def test_the_run_form_sends_the_token_variable_name():

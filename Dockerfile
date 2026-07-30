@@ -154,8 +154,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get update && apt-get install -y --no-install-recommends docker-ce-cli \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Packer (architecture-aware) and pre-cache all three cloud plugins
-# so packer init does not require internet access at build time.
+# Install Packer (architecture-aware) and pre-cache all four cloud plugins
+# (amazon/azure/googlecompute/oracle) so packer init does not require internet
+# access at build time.
 # 1.10+ required for S3-native state locking (use_lockfile) — no DynamoDB needed.
 # See services/terraform.py + docs/terraform-state-backend-plan.md.
 #
@@ -198,7 +199,7 @@ RUN --mount=type=secret,id=github_token,required=false \
        else \
            echo "packer plugin getter: no GITHUB token, using the 60/hour anonymous quota"; \
        fi \
-    && for plugin in amazon azure googlecompute; do \
+    && for plugin in amazon azure googlecompute oracle; do \
            for attempt in 1 2 3 4 5; do \
                packer plugins install "github.com/hashicorp/${plugin}" && break; \
                if [ "$attempt" = 5 ]; then \

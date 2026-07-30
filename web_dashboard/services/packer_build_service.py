@@ -17,6 +17,7 @@ from ..models.packer import (
     AWSPackerBuildRequest,
     AzurePackerBuildRequest,
     GCPPackerBuildRequest,
+    OCIPackerBuildRequest,
 )
 from . import (
     aws_service,
@@ -41,6 +42,7 @@ _BUILD_REQUEST = {
     "packer_aws_build":   AWSPackerBuildRequest,
     "packer_azure_build": AzurePackerBuildRequest,
     "packer_gcp_build":   GCPPackerBuildRequest,
+    "packer_oci_build":   OCIPackerBuildRequest,
 }
 
 
@@ -52,7 +54,8 @@ async def run_build(job_id: str, job_type: str, meta: dict) -> None:
     created_by = meta.get("created_by", "system")
     fn = {"packer_aws_build": _run_aws_build,
           "packer_azure_build": _run_azure_build,
-          "packer_gcp_build": _run_gcp_build}[job_type]
+          "packer_gcp_build": _run_gcp_build,
+          "packer_oci_build": _run_oci_build}[job_type]
     await fn(job_id, req, created_by)
 
 
@@ -60,7 +63,8 @@ async def run_export(job_id: str, job_type: str, meta: dict) -> None:
     """Run one image export (AMI/disk → the hub bucket)."""
     fn = {"aws_export_image": run_export_aws,
           "gcp_export_image": run_export_gcp,
-          "azure_export_image": run_export_azure}[job_type]
+          "azure_export_image": run_export_azure,
+          "oci_export_image": run_export_oci}[job_type]
     await fn(job_id, meta)
 
 
@@ -550,6 +554,117 @@ async def _run_gcp_build(job_id: str, req: GCPPackerBuildRequest, created_by: st
         db.close()
 
 
+async def _run_oci_build(job_id: str, req: OCIPackerBuildRequest, created_by: str = "system") -> None:
+    db = _get_db_session()
+    build_dir = packer_service.BUILDS_DIR / job_id
+    try:
+        job_service.set_running(db, job_id)
+        build_dir.mkdir(parents=True, exist_ok=True)
+
+        tenancy = _cfg("oci_tenancy_ocid")
+        user = _cfg("oci_user_ocid")
+        fingerprint = _cfg("oci_fingerprint")
+        private_key = _cfg("oci_private_key")
+        passphrase = _cfg("oci_private_key_passphrase")
+        region = _cfg("oci_region") or "us-ashburn-1"
+        compartment = _cfg("oci_compartment_ocid") or tenancy
+        subnet = req.subnet_ocid or _cfg("oci_default_subnet_ocid")
+
+        # Fail loudly and by name. The oracle-oci plugin reads no OCI_* env vars, so
+        # an unconfigured credential surfaces as an opaque config-provider error from
+        # deep inside the plugin — worth pre-empting the way the Azure runner does.
+        missing = [n for n, v in (
+            ("oci_tenancy_ocid", tenancy), ("oci_user_ocid", user),
+            ("oci_fingerprint", fingerprint), ("oci_private_key", private_key),
+        ) if not v]
+        if missing:
+            raise PackerError(
+                "OCI is not configured — missing " + ", ".join(missing)
+                + ". Go to Setup → OCI.")
+        if not subnet:
+            raise PackerError(
+                "No subnet for the build instance. Pick one on the build form, or set "
+                "oci_default_subnet_ocid in Setup → OCI. It must be a public subnet that "
+                "allows inbound TCP 22 from the dashboard — Packer connects over the internet.")
+
+        env = _base_env()
+        env["PKR_VAR_tenancy_ocid"] = tenancy
+        env["PKR_VAR_user_ocid"] = user
+        env["PKR_VAR_fingerprint"] = fingerprint
+        env["PKR_VAR_oci_key"] = private_key
+        env["PKR_VAR_oci_pass"] = passphrase or ""
+        env["PKR_VAR_region"] = region
+
+        job_service.update_progress(db, job_id, 5, "Generating Packer template…")
+        # sensitive_var_names holds env-var name → Packer variable NAME, not the
+        # secrets themselves; the resolved values live only in pkr_env, which goes
+        # onto the subprocess environment and never into the template.
+        if req.provisioner_script.strip():
+            plain_env, sensitive_var_names, pkr_env = await _provisioner_env(req)
+        else:
+            plain_env, sensitive_var_names, pkr_env = {}, {}, {}
+        env.update(pkr_env)
+        template = packer_service.generate_oci_template(
+            base_image_ocid=req.base_image_ocid,
+            shape=req.shape,
+            availability_domain=req.availability_domain,
+            compartment_ocid=compartment,
+            subnet_ocid=subnet,
+            ssh_username=req.ssh_username,
+            image_name=req.image_name,
+            has_provisioner=bool(req.provisioner_script.strip()),
+            provisioner_env=plain_env,
+            provisioner_sensitive_var_names=sensitive_var_names,
+            ocpus=req.ocpus,
+            memory_gb=req.memory_gb,
+            boot_volume_gb=req.boot_volume_gb,
+        )
+        (build_dir / "build.pkr.hcl").write_text(template)
+        _write_provisioner(build_dir, req.provisioner_script)
+
+        def on_progress(pct, msg):
+            job_service.update_progress(db, job_id, pct, msg)
+
+        def on_log(line):
+            job_service.append_job_log(db, job_id, line)
+
+        result = await packer_service.run_build(
+            "oci", build_dir, env, on_progress,
+            is_cancelled=_cancel_checker(job_id), on_log=on_log)
+
+        # Archive template
+        if req.archive_template:
+            bucket = _cfg("packer_oci_bucket") or _cfg("storage_oci_bucket")
+            if bucket:
+                try:
+                    uri = await packer_service.archive_to_oci(
+                        build_dir / "build.pkr.hcl", job_id, req.image_name, bucket)
+                    result["template_archive"] = uri
+                    job_service.update_progress(db, job_id, 98, f"Template archived: {uri}")
+                except Exception as e:
+                    result["archive_error"] = str(e)
+
+        # Export to portable VHD + auto-register
+        export_result = await export_and_register_oci(
+            db, job_id, req.image_name, result.get("artifact_id") or "", created_by,
+        )
+        result.update(export_result)
+
+        job_service.set_completed(db, job_id, result)
+
+    except PackerError as e:
+        job_service.set_failed(db, job_id, str(e))
+    except PackerCancelled:
+        # Operator cancelled: packer was signalled and ran its own cleanup, so the
+        # temp build instance is torn down. The job is already 'cancelled' (that
+        # flip is what the watcher polled for) — leave it, don't mark it failed.
+        logger.info("packer build %s cancelled; build instance cleaned up", job_id)
+    except Exception as e:
+        job_service.set_failed(db, job_id, f"Unexpected error: {e}")
+    finally:
+        db.close()
+
+
 # ── Shared helpers ────────────────────────────────────────────────────────────
 
 def _base_env() -> dict:
@@ -709,6 +824,98 @@ async def run_export_azure(job_id: str, meta: dict) -> None:
         job_service.set_failed(d, job_id, f"Export failed: {e}")
     finally:
         d.close()
+
+
+async def run_export_oci(job_id: str, meta: dict) -> None:
+    d = _get_db_session()
+    try:
+        result = await export_and_register_oci(
+            d, job_id, meta["registry_name"], meta["image_ocid"],
+            meta.get("created_by", "system"),
+        )
+        if result.get("export_error") or result.get("export_skipped"):
+            job_service.set_failed(d, job_id, result.get("export_error") or result["export_skipped"])
+        else:
+            job_service.set_completed(d, job_id, result)
+    except Exception as e:
+        job_service.set_failed(d, job_id, f"Export failed: {e}")
+    finally:
+        d.close()
+
+
+async def export_and_register_oci(
+    db, job_id: str, image_name: str, artefact_id: str, created_by: str,
+) -> dict:
+    """Export an OCI custom image to VHD on the hub and register.
+
+    `artefact_id` is the source image OCID. `image_name` is the registry name.
+
+    VHD rather than OCI's default QCOW2 on purpose: it is the hub's canonical
+    format, so the result needs no qemu-img conversion and is promotable to every
+    other cloud (Azure's import accepts vhd only)."""
+    from . import oci_service
+
+    result: dict = {}
+    if not artefact_id:
+        result["export_skipped"] = "no image OCID provided"
+        return result
+
+    bucket = _cfg("storage_oci_bucket")
+    if not bucket:
+        msg = (
+            "Export skipped: no OCI Object Storage bucket configured (set storage_oci_bucket "
+            "on /storage). OCI native export only writes to Object Storage — required even "
+            "when the hub is on another cloud."
+        )
+        job_service.update_progress(db, job_id, 99, msg)
+        result["export_skipped"] = msg
+        return result
+
+    object_path = _versioned_blob_name(image_name)
+
+    def _on_progress(line: str) -> None:
+        job_service.update_progress(db, job_id, 96, line[:200])
+
+    try:
+        job_service.update_progress(
+            db, job_id, 96, f"Exporting {artefact_id} to oci://{bucket}/{object_path}")
+        export = await oci_service.export_image_to_object_storage(
+            image_ocid=artefact_id,
+            bucket=bucket,
+            object_name=object_path,
+            export_format="VHD",
+            progress_cb=_on_progress,
+        )
+        result["export"] = export
+
+        final_backend, final_key = await _land_on_hub(
+            db, job_id,
+            build_backend="oci_object_storage", build_key=object_path,
+            image_name=image_name, image_ext="vhd",
+        )
+        artefact_url = storage_service.image_url(final_backend, final_key)
+
+        registered = image_registry_service.register_image(
+            db,
+            name=image_name,
+            version=object_path.split("/")[-1].rsplit(".", 1)[0],
+            source_cloud="oci",
+            created_by=created_by,
+            description=f"Registered by job {job_id}",
+            source_image_id=artefact_id,
+            source_region=_cfg("oci_region") or "",
+            artefact_url=artefact_url,
+            artefact_format="vhd",
+        )
+        result["registered_image_id"] = registered["id"]
+        result["artefact_backend"] = final_backend
+        job_service.update_progress(db, job_id, 99, f"Image registered: {registered['id']}")
+    except Exception as e:
+        msg = f"Export/register failed: {e}"
+        logger.exception("OCI export/register failed for job %s", job_id)
+        job_service.update_progress(db, job_id, 99, msg)
+        result["export_error"] = str(e)
+    return result
 
 
 async def export_and_register_aws(

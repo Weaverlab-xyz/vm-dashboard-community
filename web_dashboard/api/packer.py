@@ -4,6 +4,7 @@ Packer image-builder API endpoints.
 POST /api/packer/aws/build    — build an AMI from a source AMI
 POST /api/packer/azure/build  — build an Azure Managed Image
 POST /api/packer/gcp/build    — build a GCP Custom Image
+POST /api/packer/oci/build    — build an OCI Custom Image
 
 Each route validates, persists the request on a job and returns; the build itself
 belongs to the job runner (``services.packer_build_service``), so it survives a
@@ -19,9 +20,10 @@ from ..models.packer import (
     AWSPackerBuildRequest,
     AzurePackerBuildRequest,
     GCPPackerBuildRequest,
+    OCIPackerBuildRequest,
     PackerBuildResponse,
 )
-from ..services import job_service
+from ..services import job_service, oci_freetier
 from .auth import require_permission
 
 logger = logging.getLogger(__name__)
@@ -141,4 +143,69 @@ async def build_gcp_image(
         job_id=job.id,
         status="pending",
         message=f"Packer GCP build queued: {req.image_name} from {req.source_image}",
+    )
+
+
+# ── OCI build ─────────────────────────────────────────────────────────────────
+
+def _oci_cfg(key: str, fallback: str = "") -> str:
+    from ..services import config_service
+    from ..config import settings
+    return config_service.get(key) or getattr(settings, key, None) or fallback
+
+
+@router.post("/oci/build", response_model=PackerBuildResponse)
+async def build_oci_image(
+    req: OCIPackerBuildRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("oci", "write")),
+):
+    """Build an OCI Custom Image using Packer (oracle-oci builder)."""
+    if not req.base_image_ocid:
+        raise HTTPException(status_code=400, detail="base_image_ocid is required.")
+    if not req.image_name:
+        raise HTTPException(status_code=400, detail="image_name is required.")
+    if not req.availability_domain:
+        raise HTTPException(status_code=400, detail="availability_domain is required.")
+
+    # ── Free-tier guardrail (warn + confirm) ──────────────────────────────────
+    # Same gate as the deploy form, with one difference: a build instance is
+    # transient (minutes), so the request is evaluated on its own rather than
+    # folded in with the VMs this dashboard already has running. instance_count is
+    # 1 — a build launches exactly one temporary instance.
+    if _oci_cfg("oci_freetier_enforce", "1") not in ("0", "false", "False", ""):
+        within, warnings = oci_freetier.evaluate(
+            shape=req.shape, ocpus=req.ocpus, memory_gb=req.memory_gb,
+            boot_volume_gb=req.boot_volume_gb, instance_count=1,
+        )
+        if not within and not req.acknowledge_charges:
+            # `code` is preserved onto the Error by the frontend API helper
+            # (app.js); the build form keys off it to reveal the acknowledgment.
+            raise HTTPException(status_code=400, detail={
+                "code": "free_tier_exceeded",
+                "message": "This build instance is outside the OCI Always-Free tier and may incur charges: "
+                           + " ".join(warnings),
+                "warnings": warnings,
+            })
+
+    job = job_service.create_job(
+        db,
+        job_type="packer_oci_build",
+        created_by=current_user.username,
+        metadata={
+            "image_name": req.image_name,
+            "base_image_ocid": req.base_image_ocid,
+            "shape": req.shape,
+            "req": req.model_dump(),
+            "created_by": current_user.username,
+        },
+    )
+    job_service.log_audit(
+        db, current_user.username, "packer_oci_build",
+        details={"image_name": req.image_name, "base_image_ocid": req.base_image_ocid},
+    )
+    return PackerBuildResponse(
+        job_id=job.id,
+        status="pending",
+        message=f"Packer OCI build queued: {req.image_name} from {req.base_image_ocid}",
     )

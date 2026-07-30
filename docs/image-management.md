@@ -3,7 +3,7 @@
 This document explains how the dashboard treats VM images — the
 philosophy that drives the design, the lifecycle the codebase encodes,
 and how a single source image becomes an AMI, an Azure Managed Image,
-and a GCP Custom Image.
+a GCP Custom Image, and an OCI Custom Image.
 
 The companion docs:
 
@@ -27,15 +27,15 @@ deploy is a small adventure. The dashboard tries to make the good path
 the easy path.
 
 **1. Build once, deploy many.** The same image artefact ships to AWS,
-Azure, and GCP. Re-running Packer per cloud doesn't give you "the same
-image" — it gives you three independent images that drift the moment
+Azure, GCP, and OCI. Re-running Packer per cloud doesn't give you "the
+same image" — it gives you four independent images that drift the moment
 provisioning steps depend on package mirrors, mirror timing, or
 upstream release timing. Build the artefact once; promote that exact
 artefact everywhere.
 
 **2. Storage-backed portability.** The image artefact lives in your
 [storage backend](storage-management.md) of record (S3 / Azure Blob /
-GCS / Local-or-UNC). It's a versioned, named, source-controlled
+GCS / OCI Object Storage / Local-or-UNC). It's a versioned, named, source-controlled
 binary blob. The cloud-specific images (AMI / Managed Image / Custom
 Image) are *consumers* of that artefact, not the source of truth. If
 the AMI is accidentally deleted, the artefact in storage lets you
@@ -43,9 +43,10 @@ re-promote without rebuilding.
 
 **3. Same source, multiple targets.** Promotion to a target cloud is a
 distinct, idempotent step that pulls the artefact from storage and
-calls the cloud's native VM-import API. Adding a fourth target
-(Oracle Cloud, on-prem KVM) in the future is a fourth promoter, not a
-fourth Packer template.
+calls the cloud's native VM-import API. A new target (on-prem KVM,
+say) is a new promoter, not a new Packer template — a cloud only needs
+its own builder when you want to *bake* images there, which is why
+Oracle Cloud has both.
 
 **4. Lifecycle hygiene by default.** Every image has a name, a
 version, a build manifest (Packer template + provisioner output), and
@@ -59,9 +60,9 @@ artefact gone everywhere.
 
 | Principle | Where it shows up |
 |---|---|
-| Build once, deploy many | The Packer integration ([`services/packer_service.py`](../web_dashboard/services/packer_service.py)) supports three builders today. The roadmap is to standardise on one source builder + post-build conversion to the other clouds' formats, so a single Packer run produces three deploys. |
-| Storage-backed portability | `archive_to_s3()`, `archive_to_azure_blob()`, `archive_to_gcs()` already export build outputs to the active storage backend. The artefact lands at `images/<name>-<version>/` keyed by the build job ID. |
-| Same source, multiple targets | Each cloud's API (`api/aws.py`, `api/azure.py`, `api/gcp.py`) has create-image-from-source endpoints that accept a storage URL. The promote flow calls them in turn. |
+| Build once, deploy many | The Packer integration ([`services/packer_service.py`](../web_dashboard/services/packer_service.py)) supports four builders today. The roadmap is to standardise on one source builder + post-build conversion to the other clouds' formats, so a single Packer run produces four deploys. |
+| Storage-backed portability | `archive_to_s3()`, `archive_to_azure_blob()`, `archive_to_gcs()`, `archive_to_oci()` already export build outputs to the active storage backend. The artefact lands at `images/<name>-<version>/` keyed by the build job ID. |
+| Same source, multiple targets | Each cloud's API (`api/aws.py`, `api/azure.py`, `api/gcp.py`, `api/oci.py`) has create-image-from-source endpoints that accept a storage URL. The promote flow calls them in turn. |
 | Lifecycle hygiene | Build jobs land in the standard job tracker (`/jobs`) with the Packer template, provisioner stdout/stderr, and resulting image IDs in `extra_data`. Deleting a build job deletes the artefact from storage and (with confirmation) the derived images. |
 
 ---
@@ -73,7 +74,7 @@ in concept but each has its own lifecycle.
 
 ### Packer-driven build
 
-The "I want a custom image baked from scratch" path. Three builders
+The "I want a custom image baked from scratch" path. Four builders
 ship today, picked by the cloud the build runs in:
 
 | Builder | Cloud | Output |
@@ -81,6 +82,7 @@ ship today, picked by the cloud the build runs in:
 | `amazon-ebs` | AWS | EBS-backed AMI |
 | `azure-arm` | Azure | Managed Image in your subscription |
 | `googlecompute` | GCP | Custom Image in your project |
+| `oracle-oci` | OCI | Custom Image in your compartment |
 
 The Packer template is generated in-process from the deploy form
 (source AMI / image, instance type, provisioner script, output
@@ -89,13 +91,39 @@ are too varied to template statically. The build job streams Packer
 stdout/stderr to the live job log so you can watch the provision
 steps.
 
+#### OCI build prerequisites
+
+The OCI builder has two requirements the other three don't, because
+Packer runs inside the dashboard's worker container — outside your
+tenancy's VCN — and reaches the throwaway build instance over the
+public internet:
+
+* **A public subnet.** The build form only offers subnets whose
+  `prohibit_public_ip` is false, and the generated template sets
+  `assign_public_ip = true`. The default `oci_default_subnet_ocid`
+  points at the *private* VM subnet, which cannot work here.
+* **Inbound TCP 22 from the dashboard's egress address.** The sandbox
+  script adds this rule scoped to a single `/32` (§6c of
+  `scripts/sandbox/Linux/setup-oci.sh`; override with
+  `OCI_BUILD_SSH_CIDR`, or `skip` to opt out). Without it the build
+  hangs at *Waiting for SSH* until it times out.
+
+A third, softer one: the base image's architecture must match the
+shape. Oracle encodes `aarch64` in platform image display names, so
+the form warns when an Arm image is paired with an x86 shape or vice
+versa — advisory, because a custom image may be named anything.
+
+Set `storage_oci_bucket` on the Storage page to have builds export to
+VHD and register in the image hub; without it the build still produces
+the custom image and reports `export_skipped`.
+
 After the build succeeds, the resulting image's ID is captured in
 `Job.extra_data` and the artefact (when exported) is uploaded to your
 storage backend.
 
 #### Loading the provisioner script from storage
 
-Every Packer form (AWS / Azure / GCP) has a **Load from storage**
+Every Packer form (AWS / Azure / GCP / OCI) has a **Load from storage**
 dropdown next to the Provisioner Script field. It lists every
 `.sh` / `.bash` asset across every configured storage backend
 (local, S3, Azure Blob, GCS) tagged with the backend it lives on —
@@ -119,7 +147,7 @@ a cloud backend and load it for all three builds.
 #### Passing environment variables to the provisioner
 
 Once a provisioner script is loaded, every Packer form (AWS / Azure /
-GCP) shows an **Environment variables** panel — a repeatable
+GCP / OCI) shows an **Environment variables** panel — a repeatable
 name/value table whose entries are handed to the shell provisioner as
 `environment_vars`. Use it to parameterise a reused script (package
 versions, feature flags, registration endpoints) instead of forking
@@ -287,7 +315,7 @@ The end-to-end flow:
 
 ```mermaid
 flowchart LR
-    build["Packer build<br/>AWS / Azure / GCP"] --> export["Native export to<br/>same-cloud storage"]
+    build["Packer build<br/>AWS / Azure / GCP / OCI"] --> export["Native export to<br/>same-cloud storage"]
     export -- "same-backend as hub<br/>(no copy)" --> hub[("Hub backend<br/>S3 / Blob / GCS")]
     export -- "different cloud<br/>(cross-backend copy)" --> hub
     hub -- "presigned URL" --> runner["Target-cloud runner<br/>ECS / ACI / Cloud Run"]

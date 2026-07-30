@@ -697,3 +697,81 @@ async def create_image_from_object_storage(
         raise
     except Exception as exc:  # noqa: BLE001
         raise OCIError(f"create_image_from_object_storage failed: {exc}") from exc
+
+
+# Poll knobs for the export wait below. A multi-GB image export routinely runs
+# 15-40 minutes, so the ceiling is generous and the interval is coarse.
+_EXPORT_POLL_INTERVAL_S = 20
+_EXPORT_MAX_WAIT_S = 5400
+
+
+def _export_image_sync(
+    *, image_ocid: str, namespace: str, bucket: str, object_name: str,
+    export_format: str, progress_cb=None,
+) -> dict:
+    import time
+    import oci
+    compute = oci.core.ComputeClient(_oci_config())
+    objs = oci.object_storage.ObjectStorageClient(_oci_config())
+
+    details = oci.core.models.ExportImageViaObjectStorageTupleDetails(
+        destination_type="objectStorageTuple",
+        namespace_name=namespace, bucket_name=bucket, object_name=object_name,
+        export_format=export_format,   # "QCOW2" | "VMDK" | "OCI" | "VHD" | "VDI"
+    )
+    compute.export_image(image_ocid, details)
+
+    # Wait on the DESTINATION OBJECT, not the image's lifecycle_state. export_image
+    # is asynchronous server-side: the image flips AVAILABLE → EXPORTING → AVAILABLE,
+    # but it is *already* AVAILABLE when the call returns, so a naive
+    # wait_until(lifecycle_state == "AVAILABLE") satisfies itself instantly and hands
+    # back an object that hasn't been written yet. head_object is the honest signal.
+    deadline = time.monotonic() + _EXPORT_MAX_WAIT_S
+    while True:
+        try:
+            head = objs.head_object(namespace, bucket, object_name)
+            size = int(getattr(head.headers, "get", lambda *_: 0)("content-length") or 0)
+            # The object appears at its final size only once the export completes;
+            # belt and braces, also require the image to be out of EXPORTING.
+            state = getattr(compute.get_image(image_ocid).data, "lifecycle_state", "")
+            if state != "EXPORTING":
+                return {"namespace": namespace, "bucket": bucket,
+                        "object_name": object_name, "export_format": export_format,
+                        "size_bytes": size}
+        except Exception as exc:  # noqa: BLE001 — 404 until the object lands
+            if "NotAuthorizedOrNotFound" not in str(exc) and "404" not in str(exc):
+                logger.debug("OCI export poll for %s: %s", object_name, exc)
+        if time.monotonic() > deadline:
+            raise OCIError(
+                f"image export to oci://{namespace}/{bucket}/{object_name} did not "
+                f"complete within {_EXPORT_MAX_WAIT_S}s")
+        if progress_cb:
+            try:
+                progress_cb(f"Exporting image to oci://{namespace}/{bucket}/{object_name}…")
+            except Exception:  # noqa: BLE001 — progress must never break the wait
+                pass
+        time.sleep(_EXPORT_POLL_INTERVAL_S)
+
+
+async def export_image_to_object_storage(
+    *, image_ocid: str, namespace: str = "", bucket: str, object_name: str,
+    export_format: str = "VHD", progress_cb=None,
+) -> dict:
+    """Export a custom compute image to an Object Storage object and wait for it.
+
+    Defaults to VHD because that is the image hub's canonical artefact format —
+    exporting straight to it means an OCI-built image is promotable to AWS/Azure/GCP
+    with no qemu-img conversion (Azure's import accepts vhd only). Returns
+    {namespace, bucket, object_name, export_format, size_bytes}."""
+    ns = namespace or await object_storage_namespace()
+    try:
+        return await asyncio.to_thread(
+            _export_image_sync,
+            image_ocid=image_ocid, namespace=ns, bucket=bucket,
+            object_name=object_name, export_format=export_format,
+            progress_cb=progress_cb,
+        )
+    except OCIError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise OCIError(f"export_image_to_object_storage failed: {exc}") from exc

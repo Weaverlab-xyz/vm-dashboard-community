@@ -430,6 +430,110 @@ try {
         Write-Warn 'OCI_SKIP_VAULT=1 — no Vault/secret created. Deployed VMs will be keyless unless you set oci_ssh_key_secret.'
     }
 
+    # ── 6b. Object Storage bucket (image hub + Packer image export) ─────────────
+    # Mirrors setup-oci.sh §6b (and setup-aws.sh §7b). Two consumers: the Packer
+    # OCI builder's export leg, which writes the built image out as a VHD before
+    # it is copied to the image-registry hub (OCI can only export to its own
+    # Object Storage, so this is required even when the hub lives on another
+    # cloud), and the image hub itself if you point storage_hub_backend at OCI.
+    # The §1b compartment policy is `manage all-resources`, so no extra IAM.
+    Write-Section 'Object Storage bucket'
+    $Namespace = Get-OciId @('os','ns','get','--query','data','--raw-output')
+    $StorageBucket = "$Name-storage"
+    if (-not $Namespace) {
+        Write-Warn 'Could not read the Object Storage namespace — skipping bucket creation (set storage_oci_bucket manually).'
+        $StorageBucket = ''
+    } else {
+        $exists = $false
+        try {
+            & oci @Oci @('os','bucket','get','--bucket-name',$StorageBucket,'--namespace',$Namespace) *>$null
+            $exists = ($LASTEXITCODE -eq 0)
+        } catch {}
+        if ($exists) {
+            Write-Ok "Reusing bucket $StorageBucket (namespace $Namespace)"
+        } else {
+            try {
+                # Private by default — this holds VM images, not public artefacts.
+                & oci @Oci @('os','bucket','create','--compartment-id',$Compartment,'--name',$StorageBucket,
+                    '--namespace',$Namespace,'--public-access-type','NoPublicAccess',
+                    '--freeform-tags',(New-OciJsonArg $Freeform)) *>$null
+                if ($LASTEXITCODE -eq 0) { Write-Ok "Created bucket $StorageBucket (namespace $Namespace)" }
+                else { throw 'create failed' }
+            } catch {
+                Write-Warn 'Bucket creation failed — set storage_oci_bucket manually if you want OCI image export.'
+                $StorageBucket = ''
+            }
+        }
+    }
+    if ($StorageBucket) { Set-StateValue oci storage_bucket $StorageBucket }
+
+    # ── 6c. SSH ingress for Packer builds ───────────────────────────────────────
+    # The Packer OCI builder launches a throwaway instance in the PUBLIC subnet
+    # and connects to it over the internet — the dashboard runs outside this VCN,
+    # so the §4 security list (22 only from 10.98.1.0/24) would leave every build
+    # hanging at "Waiting for SSH".
+    #
+    # Deliberately NOT 0.0.0.0/0: scoped to a single address, this machine's
+    # detected public IP by default. Override with OCI_BUILD_SSH_CIDR when the
+    # dashboard egresses from elsewhere, or set it to 'skip' to opt out.
+    Write-Section 'Packer build SSH ingress'
+    $BuildSshCidr = $env:OCI_BUILD_SSH_CIDR
+    if ($BuildSshCidr -eq 'skip') {
+        Write-Warn "OCI_BUILD_SSH_CIDR=skip — Packer image builds will hang at 'Waiting for SSH' until you add a rule."
+    } else {
+        if (-not $BuildSshCidr) {
+            try {
+                $myip = (Invoke-RestMethod -Uri 'https://checkip.amazonaws.com' -TimeoutSec 10).Trim()
+                if ($myip) { $BuildSshCidr = "$myip/32" }
+            } catch {}
+        }
+        if (-not $BuildSshCidr) {
+            Write-Warn 'Could not detect this machine public IP — set OCI_BUILD_SSH_CIDR=<ip>/32 and re-run to enable Packer builds.'
+        } else {
+            $existingJson = ''
+            try {
+                $existingJson = (& oci @Oci @('network','security-list','get','--security-list-id',$Sl,
+                    '--query','data."ingress-security-rules"') 2>$null | Out-String)
+            } catch {}
+            $rules = @()
+            if ($existingJson.Trim()) { try { $rules = @($existingJson | ConvertFrom-Json) } catch { $rules = @() } }
+            $already = $rules | Where-Object {
+                $_.source -eq $BuildSshCidr -and $_.'tcp-options'.'destination-port-range'.min -eq 22
+            }
+            if ($already) {
+                Write-Ok "Reusing SSH ingress from $BuildSshCidr"
+            } else {
+                # Read-modify-write: the CLI replaces the whole rule list, so merge
+                # rather than overwrite the intra-VCN rules created in §4.
+                $merged = @()
+                foreach ($r in $rules) {
+                    $entry = [ordered]@{ source = $r.source; protocol = $r.protocol; isStateless = [bool]$r.'is-stateless' }
+                    if ($r.'tcp-options'.'destination-port-range') {
+                        $entry.tcpOptions = @{ destinationPortRange = @{
+                            min = $r.'tcp-options'.'destination-port-range'.min
+                            max = $r.'tcp-options'.'destination-port-range'.max } }
+                    }
+                    $merged += $entry
+                }
+                $merged += [ordered]@{
+                    source = $BuildSshCidr; protocol = '6'; isStateless = $false
+                    tcpOptions = @{ destinationPortRange = @{ min = 22; max = 22 } }
+                }
+                $mergedJson = ConvertTo-Json -InputObject @($merged) -Depth 10 -Compress
+                try {
+                    & oci @Oci @('network','security-list','update','--security-list-id',$Sl,
+                        '--ingress-security-rules',(New-OciJsonArg $mergedJson),'--force') *>$null
+                    if ($LASTEXITCODE -eq 0) {
+                        Write-Ok "Allowed SSH from $BuildSshCidr (Packer builds)"
+                        Set-StateValue oci build_ssh_cidr $BuildSshCidr
+                    } else { throw 'update failed' }
+                } catch {
+                    Write-Warn "Could not add the SSH ingress rule — add 22/tcp from $BuildSshCidr to $SlName manually."
+                }
+            }
+        }
+    }
+
     # ── 7. Print config + write config.json twin ────────────────────────────────
     # By default the dashboard uses the dedicated IAM user minted above; with
     # OCI_SKIP_DASHBOARD_USER=1 it falls back to the operator's own API key.
@@ -456,6 +560,9 @@ try {
         "oci_default_subnet_ocid=$VmSubnet                       # User VMs land here (NAT egress, no public IP)",
         "oci_private_key=…                                         # PEM injected into config.json below"
     )
+    if ($StorageBucket) {
+        $cfg += "storage_oci_bucket=$StorageBucket                 # Image export target; hub-capable (not selectable as active backend)"
+    }
     if ($CfgPassphrase) { $cfg += "oci_private_key_passphrase=$CfgPassphrase" }
     if ($SshSecret) {
         $cfg += "oci_ssh_key_secret=$SshSecret                # Vault secret: JSON {public_key, private_key}"

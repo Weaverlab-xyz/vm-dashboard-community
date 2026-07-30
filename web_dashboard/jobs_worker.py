@@ -44,8 +44,8 @@ HANDLED_TYPES = (
     "clouddb_provision", "clouddb_decommission", "clouddb_entitle_register",
     "ansible_cloud_run", "ansible_local", "epml_sync",
     "vdesktop_pool_provision", "vdesktop_pool_teardown",
-    "packer_aws_build", "packer_azure_build", "packer_gcp_build",
-    "aws_export_image", "gcp_export_image", "azure_export_image",
+    "packer_aws_build", "packer_azure_build", "packer_gcp_build", "packer_oci_build",
+    "aws_export_image", "gcp_export_image", "azure_export_image", "oci_export_image",
     "image_promote_aws", "image_promote_azure", "image_promote_gcp", "image_promote_oci",
     "ec2_deploy", "ec2_bulk_deploy", "ec2_destroy", "ec2_create_image", "ami_copy",
     "oci_deploy", "oci_bulk_deploy", "oci_destroy",
@@ -217,13 +217,15 @@ async def _dispatch(job_id: str, job_type: str, meta: dict) -> None:
         elif job_type == "vdesktop_pool_teardown":
             from .services import vdesktop_service
             await vdesktop_service.teardown_seats(meta["seat_ids"], job_id=job_id)
-        elif job_type in ("packer_aws_build", "packer_azure_build", "packer_gcp_build"):
+        elif job_type in ("packer_aws_build", "packer_azure_build", "packer_gcp_build",
+                          "packer_oci_build"):
             # Packer image build (+ the nested auto-export). The service rebuilds the
             # request from the metadata the endpoint stored — secret refs only,
             # resolved at build launch.
             from .services import packer_build_service
             await packer_build_service.run_build(job_id, job_type, meta)
-        elif job_type in ("aws_export_image", "gcp_export_image", "azure_export_image"):
+        elif job_type in ("aws_export_image", "gcp_export_image", "azure_export_image",
+                          "oci_export_image"):
             from .services import packer_build_service
             await packer_build_service.run_export(job_id, job_type, meta)
         elif job_type in ("image_promote_aws", "image_promote_azure",

@@ -660,16 +660,18 @@ class Settings(BaseSettings):
 
     # Cloud object storage. Originally introduced for Ansible playbooks; now
     # exposed as its own /storage page so future features can reuse the same
-    # backend abstraction. Three backends supported — S3, Azure Blob, GCS —
-    # configured independently. The active backend is the one selected via
-    # storage_active_backend; others can be configured-but-idle for migration.
-    storage_active_backend: str = ""           # "s3" | "azure_blob" | "gcs"
+    # backend abstraction. Four cloud backends supported — S3, Azure Blob, GCS,
+    # OCI Object Storage — configured independently. The active backend is the one
+    # selected via storage_active_backend; others can be configured-but-idle for
+    # migration. OCI is hub-only (see storage_hub_backend): the active backend also
+    # decides where Terraform state lives and Terraform has no OCI state backend.
+    storage_active_backend: str = ""           # "s3" | "azure_blob" | "gcs" | "local"
     # Image-registry hub backend — the single backend that holds the canonical
     # VHD/raw artefact for every registered image regardless of build cloud.
     # When unset, falls back to storage_active_backend so single-backend installs
     # Just Work. Used by the Packer export+register flow and the (upcoming)
     # per-target-cloud promote runners.
-    storage_hub_backend: str = ""              # "" | "s3" | "azure_blob" | "gcs"
+    storage_hub_backend: str = ""              # "" | "s3" | "azure_blob" | "gcs" | "oci_object_storage"
     storage_s3_bucket: str = ""                # e.g. "infra-asset-store"
     storage_s3_region: str = ""                # defaults to aws_region if blank
     storage_s3_prefix: str = "config-mgmt"
@@ -678,6 +680,12 @@ class Settings(BaseSettings):
     storage_azure_prefix: str = "config-mgmt"
     storage_gcs_bucket: str = ""
     storage_gcs_prefix: str = "config-mgmt"
+    # OCI Object Storage. Credentials come from the oci_* API-key block below —
+    # only the bucket is storage-specific. The namespace is per-tenancy and
+    # auto-detected via the Object Storage API when left blank.
+    storage_oci_bucket: str = ""
+    storage_oci_namespace: str = ""            # blank → looked up from the tenancy
+    storage_oci_prefix: str = "config-mgmt"
     # Local filesystem / SMB UNC backend. Path can be either a normal
     # filesystem path inside the container (e.g. a bind-mounted host dir)
     # or a UNC \\server\share[\subpath]. UNC paths are read via the
