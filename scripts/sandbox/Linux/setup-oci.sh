@@ -447,6 +447,81 @@ else
   warn "OCI_SKIP_VAULT=1 — no Vault/secret created. Deployed VMs will be keyless unless you set oci_ssh_key_secret."
 fi
 
+# ── 6b. Object Storage bucket (image hub + Packer template archive) ───────────
+# Mirrors setup-aws.sh §7b and its GCP twin. Two consumers:
+#   • the Packer OCI builder's export leg, which writes the built image out as a
+#     VHD before it is copied to the image-registry hub (OCI can only export to
+#     its own Object Storage, so this is required even when the hub lives on
+#     another cloud);
+#   • the image hub itself, if you point storage_hub_backend at OCI.
+# The compartment policy minted in §1b is `manage all-resources`, which already
+# covers object read/write — no extra IAM statement needed.
+section "Object Storage bucket"
+NAMESPACE="$("${OCI[@]}" os ns get --query 'data' --raw-output 2>/dev/null || echo "")"
+STORAGE_BUCKET="${NAME}-storage"
+if [[ -z "$NAMESPACE" ]]; then
+  warn "Could not read the Object Storage namespace — skipping bucket creation (set storage_oci_bucket manually)."
+  STORAGE_BUCKET=""
+elif "${OCI[@]}" os bucket get --bucket-name "$STORAGE_BUCKET" --namespace "$NAMESPACE" >/dev/null 2>&1; then
+  ok "Reusing bucket $STORAGE_BUCKET (namespace $NAMESPACE)"
+else
+  # Private visibility by default — this holds VM images, not public artefacts.
+  if "${OCI[@]}" os bucket create --compartment-id "$COMPARTMENT" --name "$STORAGE_BUCKET" \
+       --namespace "$NAMESPACE" --public-access-type NoPublicAccess \
+       --freeform-tags "$FREEFORM" >/dev/null 2>&1; then
+    ok "Created bucket $STORAGE_BUCKET (namespace $NAMESPACE)"
+  else
+    warn "Bucket creation failed — set storage_oci_bucket manually if you want OCI image export."
+    STORAGE_BUCKET=""
+  fi
+fi
+[[ -n "$STORAGE_BUCKET" ]] && state_write oci storage_bucket "$STORAGE_BUCKET"
+
+# ── 6c. SSH ingress for Packer builds ────────────────────────────────────────
+# The Packer OCI builder launches a throwaway instance in the PUBLIC subnet and
+# connects to it over the internet — the dashboard runs outside this VCN, so the
+# §4 security list (which only admits 22 from 10.98.1.0/24) would leave every
+# build hanging at "Waiting for SSH".
+#
+# Deliberately NOT 0.0.0.0/0: the rule is scoped to a single address. By default
+# that is this machine's detected public IP; override with OCI_BUILD_SSH_CIDR
+# when the dashboard egresses from somewhere else (a server, a NAT gateway).
+# Set OCI_BUILD_SSH_CIDR=skip to opt out entirely.
+section "Packer build SSH ingress"
+BUILD_SSH_CIDR="${OCI_BUILD_SSH_CIDR:-}"
+if [[ "$BUILD_SSH_CIDR" == "skip" ]]; then
+  warn "OCI_BUILD_SSH_CIDR=skip — Packer image builds will hang at 'Waiting for SSH' until you add a rule."
+else
+  if [[ -z "$BUILD_SSH_CIDR" ]]; then
+    _myip="$(curl -fsS --max-time 10 https://checkip.amazonaws.com 2>/dev/null | tr -d '[:space:]' || echo "")"
+    [[ -n "$_myip" ]] && BUILD_SSH_CIDR="${_myip}/32"
+  fi
+  if [[ -z "$BUILD_SSH_CIDR" ]]; then
+    warn "Could not detect this machine's public IP — set OCI_BUILD_SSH_CIDR=<ip>/32 and re-run to enable Packer builds."
+  elif "${OCI[@]}" network security-list get --security-list-id "$SL" \
+         --query "data.\"ingress-security-rules\"[?source=='$BUILD_SSH_CIDR']" 2>/dev/null | grep -q 22; then
+    ok "Reusing SSH ingress from $BUILD_SSH_CIDR"
+  else
+    # Read-modify-write: the OCI CLI replaces the whole rule list, so merge
+    # rather than overwrite the intra-VCN rules created in §4.
+    _existing="$("${OCI[@]}" network security-list get --security-list-id "$SL" \
+                   --query 'data."ingress-security-rules"' 2>/dev/null || echo '[]')"
+    _newrule="{\"source\":\"$BUILD_SSH_CIDR\",\"protocol\":\"6\",\"isStateless\":false,\"tcpOptions\":{\"destinationPortRange\":{\"min\":22,\"max\":22}}}"
+    if command -v jq >/dev/null 2>&1; then
+      _merged="$(printf '%s' "$_existing" | jq -c ". + [$_newrule]")"
+      if "${OCI[@]}" network security-list update --security-list-id "$SL" \
+           --ingress-security-rules "$_merged" --force >/dev/null 2>&1; then
+        ok "Allowed SSH from $BUILD_SSH_CIDR (Packer builds)"
+        state_write oci build_ssh_cidr "$BUILD_SSH_CIDR"
+      else
+        warn "Could not add the SSH ingress rule — add 22/tcp from $BUILD_SSH_CIDR to $SL_NAME manually."
+      fi
+    else
+      warn "jq not found — add 22/tcp from $BUILD_SSH_CIDR to security list $SL_NAME manually to enable Packer builds."
+    fi
+  fi
+fi
+
 # ── 7. Print config to paste into /setup + write config.json twin ─────────────
 # By default the dashboard uses the dedicated IAM user minted above; with
 # OCI_SKIP_DASHBOARD_USER=1 it falls back to the operator's own API key.
@@ -473,6 +548,9 @@ _cfg=(
   "oci_default_subnet_ocid=$VM_SUBNET                       # User VMs land here (NAT egress, no public IP)"
   "oci_private_key=…                                         # PEM injected into config.json below"
 )
+if [[ -n "$STORAGE_BUCKET" ]]; then
+  _cfg+=("storage_oci_bucket=$STORAGE_BUCKET                 # Image export target; hub-capable (not selectable as active backend)")
+fi
 [[ -n "$CFG_PASSPHRASE" ]] && _cfg+=("oci_private_key_passphrase=$CFG_PASSPHRASE")
 if [[ -n "$SSH_SECRET_OCID" ]]; then
   _cfg+=("oci_ssh_key_secret=$SSH_SECRET_OCID                # Vault secret: JSON {public_key, private_key}")

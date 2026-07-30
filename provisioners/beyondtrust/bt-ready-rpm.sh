@@ -12,10 +12,10 @@
 # short-lived installation token from the dashboard's EPM-L integration — not
 # baked into the image. No host firewall. See provisioners/beyondtrust/README.md.
 #
-# Targets: RHEL, Rocky, CentOS Stream, AlmaLinux, Amazon Linux 2 / 2023.
+# Targets: RHEL, Rocky, CentOS Stream, AlmaLinux, Oracle Linux, Amazon Linux 2 / 2023.
 #
 # Operator-overridable via Packer build env:
-#   BT_TARGET_USER     force sudoers-target user (default: autodetect ec2-user/rocky/centos/almalinux/cloud-user)
+#   BT_TARGET_USER     force sudoers-target user (default: autodetect ec2-user/rocky/centos/almalinux/opc/cloud-user)
 #   BT_ADMIN_USER      Password-Safe-managed bootstrap account name (default: adminuser)
 #   BT_SEED_ADMIN_KEY=1 seed adminuser's authorized_keys with a throwaway key so the
 #                      AWS Systems Manager Custom Plugin has one to rotate (private half discarded)
@@ -85,7 +85,11 @@ resolve_user() {
     fi
     die "BT_TARGET_USER='$BT_TARGET_USER' does not exist on this image"
   fi
-  for candidate in ec2-user rocky centos almalinux cloud-user; do
+  # `opc` is Oracle Linux's default cloud user on OCI. Without it here an OL
+  # image falls through to the SUDO_USER guess below, which only holds while the
+  # caller happens to have self-elevated — the Packer shell provisioner does, a
+  # direct root run does not.
+  for candidate in ec2-user rocky centos almalinux opc cloud-user; do
     if id -u "$candidate" >/dev/null 2>&1; then
       echo "$candidate"; return 0
     fi

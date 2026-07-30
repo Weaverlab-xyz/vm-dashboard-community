@@ -68,6 +68,11 @@
         <span x-show="instances.length" class="ml-1.5 bg-gray-100 text-gray-600 text-xs px-1.5 py-0.5 rounded-full"
               x-text="instances.length"></span>
       </button>
+      <button @click="activeTab = 'build'"
+              :class="activeTab === 'build' ? 'border-red-600 text-red-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'"
+              class="py-3 border-b-2 text-sm font-medium transition-colors">
+        Build Image
+      </button>
     </nav>
   </div>
 
@@ -159,6 +164,247 @@
       </template>
       <div x-show="!instancesLoading && instances.length === 0 && !credError"
            class="text-center text-sm text-gray-400 py-10">No dashboard-deployed instances.</div>
+    </div>
+  </div>
+
+  <!-- ── Build Image ────────────────────────────────────────────────────── -->
+  <div x-show="activeTab === 'build'" x-cloak>
+    <div class="max-w-2xl">
+      <div class="mb-4">
+        <h2 class="text-lg font-semibold text-gray-800">Build OCI Image with Packer</h2>
+        <p class="text-xs text-gray-400 mt-0.5">Provision a platform image with a shell script and capture the result as a custom image in your compartment. Runs as a tracked background job (typically 5–15 min).</p>
+      </div>
+
+      <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 space-y-5">
+
+        <!-- Image Name -->
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Image Name <span class="text-red-500">*</span></label>
+          <input type="text" x-model="ociPackerForm.image_name"
+                 placeholder="my-hardened-oracle-linux"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-red-500 focus:border-red-500">
+          <p class="text-xs text-gray-400 mt-1">Letters, digits, dots, underscores and hyphens. A timestamp is appended automatically.</p>
+        </div>
+
+        <!-- Base Image -->
+        <div>
+          <div class="flex items-center justify-between mb-1">
+            <label class="block text-sm font-medium text-gray-700">Base Image <span class="text-red-500">*</span></label>
+            <label class="flex items-center gap-1.5 text-xs text-gray-500 cursor-pointer">
+              <input type="checkbox" x-model="packerIncludeCustomBases" class="h-3.5 w-3.5 rounded border-gray-300 text-red-600">
+              include custom images
+            </label>
+          </div>
+          <select x-model="ociPackerForm.base_image_ocid" @change="onPackerBaseImageChange()"
+                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-red-500 focus:border-red-500">
+            <option value="">— pick a base image —</option>
+            <template x-for="img in packerBaseImages()" :key="img.ocid">
+              <option :value="img.ocid" x-text="img.display_name"></option>
+            </template>
+          </select>
+          <p class="text-xs text-gray-400 mt-1">Oracle-provided platform images by default. The SSH username is set from the image's OS — a wrong one fails at &ldquo;Waiting for SSH&rdquo; minutes into the build.</p>
+        </div>
+
+        <!-- Shape + SSH Username -->
+        <div class="grid grid-cols-2 gap-4">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Build Shape</label>
+            <select x-model="ociPackerForm.shape" @change="onPackerShapeChange()"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-red-500 focus:border-red-500">
+              <template x-for="s in (networkOpts.shapes || [])" :key="s.shape">
+                <option :value="s.shape" x-text="s.shape + (s.free_tier ? '  (always-free)' : '')"></option>
+              </template>
+            </select>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">SSH Username</label>
+            <input type="text" x-model="ociPackerForm.ssh_username"
+                   placeholder="opc"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:ring-red-500 focus:border-red-500">
+            <p class="text-xs text-gray-400 mt-1"><span class="font-mono">opc</span> on Oracle Linux, <span class="font-mono">ubuntu</span> on Ubuntu.</p>
+          </div>
+        </div>
+
+        <!-- Flex shape sizing -->
+        <div class="grid grid-cols-2 gap-4" x-show="packerShapeIsFlex()" x-cloak>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">OCPUs</label>
+            <input type="number" x-model.number="ociPackerForm.ocpus" min="1" max="128" step="1"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-red-500 focus:border-red-500">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Memory (GB)</label>
+            <input type="number" x-model.number="ociPackerForm.memory_gb" min="1" max="1024" step="1"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-red-500 focus:border-red-500">
+            <p class="text-xs text-gray-400 mt-1">Flexible shapes need explicit sizing; fixed shapes ignore it.</p>
+          </div>
+        </div>
+
+        <!-- Placement -->
+        <div class="grid grid-cols-2 gap-4">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Availability Domain <span class="text-red-500">*</span></label>
+            <select x-model="ociPackerForm.availability_domain"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-red-500 focus:border-red-500">
+              <option value="">— pick an availability domain —</option>
+              <template x-for="ad in (networkOpts.availability_domains || [])" :key="ad">
+                <option :value="ad" x-text="ad"></option>
+              </template>
+            </select>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Subnet</label>
+            <select x-model="ociPackerForm.subnet_ocid"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-red-500 focus:border-red-500">
+              <option value="">(configured default)</option>
+              <template x-for="sn in packerBuildSubnets()" :key="sn.ocid">
+                <option :value="sn.ocid" x-text="sn.display_name + ' — ' + sn.cidr_block"></option>
+              </template>
+            </select>
+            <p class="text-xs text-gray-400 mt-1">Public subnets only — Packer connects from this dashboard, not from inside the VCN.</p>
+          </div>
+        </div>
+
+        <!-- Boot volume -->
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Boot Volume (GB)</label>
+          <input type="number" x-model.number="ociPackerForm.boot_volume_gb" min="50" max="32768"
+                 placeholder="base image default"
+                 class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-red-500 focus:border-red-500">
+          <p class="text-xs text-gray-400 mt-1">Leave blank to use the base image's default. OCI's minimum is 50 GB, which is also the free-tier allowance.</p>
+        </div>
+
+        <!-- Provisioner Script -->
+        <div>
+          <div class="flex items-center justify-between mb-1">
+            <label class="block text-sm font-medium text-gray-700">Provisioner Script</label>
+            <div class="flex items-center gap-2" x-show="storedScripts.length > 0">
+              <label class="text-xs text-gray-500">Load from storage:</label>
+              <select @change="loadProvisionerScript($event.target.value); $event.target.value = ''"
+                      :disabled="loadingScript"
+                      class="text-xs border border-gray-300 rounded px-2 py-1 focus:ring-red-500 focus:border-red-500 disabled:opacity-50">
+                <option value="">— pick a .sh script —</option>
+                <template x-for="s in storedScripts" :key="s.backend + '|' + s.name">
+                  <option :value="s.backend + '|' + s.name"
+                          x-text="s.name + ' (' + backendLabelShort(s.backend) + ')'"></option>
+                </template>
+              </select>
+            </div>
+          </div>
+          <textarea x-model="ociPackerForm.provisioner_script" rows="8"
+                    placeholder="#!/bin/sh&#10;# Install and configure your software here&#10;dnf -y update&#10;dnf -y install nginx"
+                    class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:ring-red-500 focus:border-red-500 resize-y"></textarea>
+          <p class="text-xs text-gray-400 mt-1">
+            Shell script run on the build instance. Leave empty to build a base image with no provisioning.
+            <span x-show="ociPackerForm.loaded_from" x-cloak class="text-red-600">
+              Loaded from <code x-text="ociPackerForm.loaded_from.replace('|', ' — ')"></code>.
+            </span>
+          </p>
+        </div>
+
+        <!-- BeyondTrust provisioner options -->
+        <div x-show="ociPackerForm.provisioner_script.trim()" x-cloak
+             class="space-y-3 p-3 bg-gray-50 rounded-lg border border-gray-200">
+          <p class="text-xs font-semibold text-gray-600">BeyondTrust provisioner options
+            <span class="font-normal text-gray-400">— used by the bt-ready scripts; ignored by other provisioners.</span>
+          </p>
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="block text-xs font-medium text-gray-600 mb-1">Admin user (Password Safe / Entitle)</label>
+              <input type="text" x-model="ociPackerForm.bt_admin_user" placeholder="adminuser"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm font-mono">
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-gray-600 mb-1">Install EPM-L</label>
+              <select x-model="ociPackerForm.bt_epml" class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
+                <option value="">Off</option>
+                <option value="deb">Debian (.deb)</option>
+                <option value="rpm">RPM (.rpm)</option>
+              </select>
+            </div>
+            <div x-show="ociPackerForm.bt_epml" x-cloak>
+              <label class="block text-xs font-medium text-gray-600 mb-1">EPM-L package from</label>
+              <select x-model="ociPackerForm.bt_epml_source" class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
+                <option value="beyondtrust">BeyondTrust (always current)</option>
+                <option value="storage">Asset storage (the synced copy)</option>
+              </select>
+              <p class="text-[11px] text-gray-400 mt-1">
+                Storage pins the version you synced and doesn't need BeyondTrust reachable
+                from the build — sync it first on the Storage page. Not available on
+                local-filesystem storage.
+              </p>
+            </div>
+          </div>
+          <div>
+            <p class="text-[11px] text-gray-400">EPM-L is installed at build; activation runs post-deploy via the EPM-L integration.</p>
+          </div>
+        </div>
+
+        <!-- Provisioner environment variables -->
+        <div x-show="ociPackerForm.provisioner_script.trim()" x-cloak
+             class="space-y-2 p-3 bg-gray-50 rounded-lg border border-gray-200">
+          <div class="flex items-center justify-between">
+            <p class="text-xs font-semibold text-gray-600">Environment variables
+              <span class="font-normal text-gray-400">— passed to the provisioner script.</span>
+            </p>
+            <button type="button" @click="ociPackerForm.provisioner_env_vars.push({name:'',value:'',is_secret_ref:false})"
+                    class="text-xs px-2 py-1 bg-red-700 hover:bg-red-800 text-white rounded">+ Add</button>
+          </div>
+          <template x-for="(ev, i) in ociPackerForm.provisioner_env_vars" :key="i">
+            <div class="flex items-center gap-2">
+              <input type="text" x-model="ev.name" placeholder="NAME"
+                     class="w-1/3 border border-gray-300 rounded-lg px-2 py-1.5 text-sm font-mono">
+              <input type="text" x-model="ev.value" :placeholder="ev.is_secret_ref ? 'bt_safe://account' : 'value'"
+                     class="flex-1 border border-gray-300 rounded-lg px-2 py-1.5 text-sm font-mono">
+              <label class="flex items-center gap-1 text-xs text-gray-600 whitespace-nowrap"
+                     title="Resolve from your configured secret manager (aws_sm://, azure_kv://, gcp_sm://, bt_safe://)">
+                <input type="checkbox" x-model="ev.is_secret_ref" class="h-3.5 w-3.5">secret ref
+              </label>
+              <button type="button" @click="ociPackerForm.provisioner_env_vars.splice(i,1)"
+                      class="text-gray-400 hover:text-red-600 text-lg leading-none px-1">&times;</button>
+            </div>
+          </template>
+          <p class="text-[11px] text-gray-400" x-show="ociPackerForm.provisioner_env_vars.some(e=>e.is_secret_ref)" x-cloak>
+            Secret refs are resolved at build start and passed via Packer sensitive variables — never written to the generated or archived template.
+          </p>
+        </div>
+
+        <!-- Reachability + architecture advisories (non-blocking) -->
+        <div x-show="packerSubnetWarning()" x-cloak
+             class="p-3 bg-amber-50 border border-amber-200 rounded-lg text-sm text-amber-800"
+             x-text="packerSubnetWarning()"></div>
+        <div x-show="packerArchWarning()" x-cloak
+             class="p-3 bg-amber-50 border border-amber-200 rounded-lg text-sm text-amber-800"
+             x-text="packerArchWarning()"></div>
+
+        <!-- Free-tier acknowledgment -->
+        <div x-show="packerFreeTierWarnings().length" x-cloak
+             class="p-3 bg-amber-50 border border-amber-200 rounded-lg space-y-2">
+          <p class="text-sm text-amber-800">This build instance is outside the OCI Always-Free tier and may incur charges:</p>
+          <ul class="list-disc list-inside text-xs text-amber-700 space-y-0.5">
+            <template x-for="w in packerFreeTierWarnings()" :key="w">
+              <li x-text="w"></li>
+            </template>
+          </ul>
+          <label class="flex items-center gap-2 text-sm text-amber-900 cursor-pointer">
+            <input type="checkbox" x-model="ociPackerForm.acknowledge_charges"
+                   class="h-4 w-4 rounded border-amber-300 text-red-600">
+            I understand this may incur charges
+          </label>
+          <p class="text-[11px] text-amber-700">The build instance is transient — Packer terminates it when the build finishes or fails.</p>
+        </div>
+
+        <!-- Error -->
+        <div x-show="ociPackerError" x-cloak class="p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700" x-text="ociPackerError"></div>
+
+        <!-- Submit -->
+        <button @click="submitOciPackerBuild()"
+                :disabled="ociPackerBuilding || !ociPackerForm.image_name || !ociPackerForm.base_image_ocid || !ociPackerForm.availability_domain"
+                class="w-full py-2.5 bg-red-700 hover:bg-red-800 disabled:opacity-50 text-white text-sm font-semibold rounded-lg transition">
+          <span x-show="!ociPackerBuilding">Start Packer Build</span>
+          <span x-show="ociPackerBuilding" x-cloak>Queuing build…</span>
+        </button>
+      </div>
     </div>
   </div>
 
@@ -511,12 +757,40 @@ function ociDashboard() {
       };
     },
 
+    // ── Packer image builder ────────────────────────────────────────────────
+    ociPackerForm: {
+      image_name: '', base_image_ocid: '',
+      shape: 'VM.Standard.E2.1.Micro', ocpus: null, memory_gb: null,
+      availability_domain: '', subnet_ocid: '', ssh_username: 'opc',
+      boot_volume_gb: null, acknowledge_charges: false,
+      provisioner_script: '', archive_template: false, loaded_from: '',
+      provisioner_env_vars: [],
+      bt_admin_user: '', bt_epml: '', bt_epml_source: 'beyondtrust',
+    },
+    ociPackerBuilding: false,
+    ociPackerError: '',
+    packerIncludeCustomBases: false,
+    storedScripts: [],
+    loadingScript: false,
+
     async init() {
       if (typeof requireAuth === 'function') requireAuth();
       API.get('/api/groups/workgroups')
         .then(r => { this.availableWorkgroups = r || []; })
         .catch(() => { this.availableWorkgroups = []; });
+      // Build-tab scripts are optional garnish — don't make the page wait on them.
+      this.loadStoredScripts();
       await Promise.all([this.loadImages(), this.loadNetworkOpts()]);
+      // Default the build subnet to the first public one, so the common case needs
+      // no picking and the "no public subnet" warning fires when there isn't one.
+      const pub = this.packerBuildSubnets();
+      if (pub.length && !this.ociPackerForm.subnet_ocid) {
+        this.ociPackerForm.subnet_ocid = pub[0].ocid;
+      }
+      if ((this.networkOpts.availability_domains || []).length === 1) {
+        this.ociPackerForm.availability_domain = this.networkOpts.availability_domains[0];
+      }
+      if (window.location.hash === '#build') this.activeTab = 'build';
     },
 
     notify(msg, type = 'success') {
@@ -567,6 +841,172 @@ function ociDashboard() {
     filteredImages() {
       if (this.imageFilter === 'all') return this.images;
       return this.images.filter(i => i.source === this.imageFilter);
+    },
+
+    // ── Packer build tab ────────────────────────────────────────────────────
+    packerBaseImages() {
+      return (this.images || []).filter(
+        i => this.packerIncludeCustomBases || i.source === 'platform');
+    },
+
+    packerSelectedBaseImage() {
+      return (this.images || []).find(i => i.ocid === this.ociPackerForm.base_image_ocid) || null;
+    },
+
+    // Packer runs in the dashboard's container, not inside the VCN, so it SSHes to
+    // the build instance's PUBLIC address. A subnet that prohibits public IPs can
+    // never work here, so it isn't offered.
+    packerBuildSubnets() {
+      return (this.networkOpts.subnets || []).filter(s => !s.prohibit_public_ip);
+    },
+
+    packerShapeIsFlex() {
+      const m = (this.networkOpts.shapes || [])
+        .find(s => s.shape === this.ociPackerForm.shape);
+      return m ? !!m.is_flexible : (this.ociPackerForm.shape || '').includes('Flex');
+    },
+
+    onPackerShapeChange() {
+      const ft = this.networkOpts.free_tier || {};
+      if (this.packerShapeIsFlex()) {
+        this.ociPackerForm.ocpus = this.ociPackerForm.ocpus || ft.a1_max_ocpus || 1;
+        this.ociPackerForm.memory_gb = this.ociPackerForm.memory_gb
+          || ft.a1_max_memory_gb || (this.ociPackerForm.ocpus * 8);
+      } else {
+        this.ociPackerForm.ocpus = null;
+        this.ociPackerForm.memory_gb = null;
+      }
+    },
+
+    // The base image's OS decides the login user; a wrong one fails at "Waiting
+    // for SSH" several minutes in, with nothing useful in the log.
+    onPackerBaseImageChange() {
+      const img = this.packerSelectedBaseImage();
+      const os = ((img && img.operating_system) || '').toLowerCase();
+      this.ociPackerForm.ssh_username =
+        os.includes('ubuntu') ? 'ubuntu' :
+        os.includes('debian') ? 'debian' : 'opc';
+    },
+
+    // Launching an aarch64 image on an x86 shape (or the reverse) fails inside OCI
+    // with an opaque error. The image list carries no architecture field — Oracle
+    // encodes it in the display name — so this is a heuristic, hence advisory.
+    packerArchWarning() {
+      const img = this.packerSelectedBaseImage();
+      if (!img) return '';
+      const armImage = /aarch64|arm64/i.test(img.display_name || '');
+      const armShape = /\.A\d+\./i.test(this.ociPackerForm.shape || '');
+      if (armImage && !armShape)
+        return `"${img.display_name}" looks like an aarch64 image — pick an Ampere (A1/A2) shape or the instance will not launch.`;
+      if (!armImage && armShape)
+        return `${this.ociPackerForm.shape} is an Ampere (Arm) shape but "${img.display_name}" looks like an x86_64 image.`;
+      return '';
+    },
+
+    packerSubnetWarning() {
+      if (!this.packerBuildSubnets().length)
+        return 'No public subnet is available in this compartment. Packer reaches the build instance over the internet, so it needs a subnet that permits public IPs and allows inbound TCP 22 from this dashboard.';
+      const sn = (this.networkOpts.subnets || [])
+        .find(s => s.ocid === this.ociPackerForm.subnet_ocid);
+      if (!sn) return '';
+      return `Packer connects from this dashboard, not from inside the VCN — "${sn.display_name}" needs an Internet Gateway route and a security list or NSG allowing inbound TCP 22 from this dashboard's egress address.`;
+    },
+
+    // Mirrors services/oci_freetier.evaluate() so the acknowledgment appears before
+    // the request rather than only on the API's 400. The server re-evaluates and is
+    // the authority; this is the same warn-and-confirm gate the deploy form uses.
+    packerFreeTierWarnings() {
+      const ft = this.networkOpts.free_tier || {};
+      if (!ft.free_shapes) return [];
+      const f = this.ociPackerForm;
+      const out = [];
+      if (!(ft.free_shapes || []).includes(f.shape))
+        out.push(`Shape ${f.shape} is not an Always-Free shape.`);
+      if (f.shape === ft.a1_shape) {
+        if (f.ocpus > ft.a1_max_ocpus)
+          out.push(`${f.ocpus} OCPUs exceeds the free Ampere budget (~${ft.a1_max_ocpus}).`);
+        if (f.memory_gb > ft.a1_max_memory_gb)
+          out.push(`${f.memory_gb} GB exceeds the free Ampere memory budget (~${ft.a1_max_memory_gb} GB).`);
+      }
+      if (f.boot_volume_gb && f.boot_volume_gb > ft.boot_volume_gb)
+        out.push(`Boot volume ${f.boot_volume_gb} GB is above the ${ft.boot_volume_gb} GB free default.`);
+      return out;
+    },
+
+    async loadStoredScripts() {
+      try {
+        const data = await API.get('/api/storage/list-all');
+        this.storedScripts = (data.items || []).filter(a =>
+          a.type === 'script' || a.name.endsWith('.sh') || a.name.endsWith('.bash')
+        );
+      } catch (e) {
+        this.storedScripts = [];
+      }
+    },
+
+    async loadProvisionerScript(key) {
+      if (!key) return;
+      const [backend, ...rest] = key.split('|');
+      const name = rest.join('|');
+      this.loadingScript = true;
+      try {
+        const r = await API.get(`/api/storage/fetch/${encodeURIComponent(backend)}/${encodeURIComponent(name)}`);
+        const bin = atob(r.content_b64 || '');
+        let text;
+        try {
+          const bytes = new Uint8Array(bin.length);
+          for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+          text = new TextDecoder('utf-8').decode(bytes);
+        } catch (_) {
+          text = bin;
+        }
+        this.ociPackerForm.provisioner_script = text;
+        this.ociPackerForm.loaded_from = key;
+        this.notify(`Loaded ${name} from ${backend}`);
+      } catch (e) {
+        this.notify(e.message || 'Failed to load script', 'error');
+      } finally {
+        this.loadingScript = false;
+      }
+    },
+
+    backendLabelShort(id) {
+      return ({ s3: 'S3', azure_blob: 'Azure', gcs: 'GCS',
+                oci_object_storage: 'OCI', local: 'Local' })[id] || id;
+    },
+
+    async submitOciPackerBuild() {
+      this.ociPackerError = '';
+      if (!this.ociPackerForm.image_name)      { this.ociPackerError = 'Image name is required.'; return; }
+      if (!this.ociPackerForm.base_image_ocid) { this.ociPackerError = 'A base image is required.'; return; }
+      if (!this.ociPackerForm.availability_domain) { this.ociPackerError = 'An availability domain is required.'; return; }
+      this.ociPackerBuilding = true;
+      try {
+        // OCI rejects a shape_config on a fixed shape and requires one on a Flex
+        // shape; the request model enforces the same pairing server-side. A blank
+        // number input arrives as '' — coerce so it doesn't fail validation.
+        const flex = this.packerShapeIsFlex();
+        const payload = {
+          ...this.ociPackerForm,
+          ocpus:          flex ? (Number(this.ociPackerForm.ocpus) || 1) : null,
+          memory_gb:      flex ? (Number(this.ociPackerForm.memory_gb) || 8) : null,
+          boot_volume_gb: Number(this.ociPackerForm.boot_volume_gb) || null,
+        };
+        delete payload.loaded_from;
+        const r = await API.post('/api/packer/oci/build', payload);
+        this.notify('Packer OCI build queued (job ' + r.job_id + ').');
+        setTimeout(() => { window.location.href = '/jobs/' + r.job_id; }, 400);
+      } catch (e) {
+        // The backend free-tier gate returns code=free_tier_exceeded; surface the
+        // acknowledgment for cases the client-side mirror can't see.
+        if (e && e.code === 'free_tier_exceeded') {
+          this.serverGateTripped = true;
+          this.serverGateMessage = e.message || '';
+        }
+        this.ociPackerError = (e && e.message) ? e.message : 'Build failed to queue.';
+      } finally {
+        this.ociPackerBuilding = false;
+      }
     },
 
     selectedShapeMeta() {
