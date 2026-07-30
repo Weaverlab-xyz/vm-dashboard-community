@@ -453,7 +453,11 @@ async def apply_impersonator(
     impersonate as until Entitle's **Kubernetes** integration JIT-binds
     ``<prefix>:<email>`` → a role on THIS cluster; they then run
     ``kubectl --as=<prefix>:<email>``. ``group_id`` falls back to entra_rbac_group_id.
-    Open the returned job for status."""
+
+    On **GKE** this grants BOTH halves — GKE gates ``impersonate`` in Cloud IAM as well
+    as RBAC, so the group's principalSet is also bound to a project custom role holding
+    only ``container.clusters.impersonate`` (needs ``roles/iam.roleAdmin`` on the
+    dashboard SA; ~1-2 min to propagate). Open the returned job for status."""
     try:
         k8s_service.get_cluster(db, cluster_id)   # 404 if unknown
     except K8sError as e:
@@ -474,7 +478,10 @@ async def remove_impersonator(
     current_user: User = Depends(require_permission("k8s", "delete")),
 ):
     """Remove the cluster's impersonator ClusterRole + ClusterRoleBinding — enqueues a
-    ``k8s_impersonator_binding`` (action=remove) job. Open the returned job for status."""
+    ``k8s_impersonator_binding`` (action=remove) job. On GKE this also revokes the
+    project-level ``container.clusters.impersonate`` binding, but only when no other GKE
+    cluster still has the same group bound (the grant is project-wide, so an unconditional
+    revoke would break ``--as`` on those). Open the returned job for status."""
     try:
         k8s_service.get_cluster(db, cluster_id)   # 404 if unknown
     except K8sError as e:

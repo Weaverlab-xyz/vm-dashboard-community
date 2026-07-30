@@ -284,10 +284,103 @@ secrets)**, and **Entitle + Entra federation (Layer 3 — time-boxed access)**.
 - **Entitle k8s JIT** — `POST /clusters/{id}/entitle-register` registers the cluster as an
   Entitle **Kubernetes** integration; the fine-grained tier is the **impersonator model**
   (`POST /clusters/{id}/impersonator` grants the Entra group cluster-wide `impersonate` on
-  `users`; Entitle JIT-binds `<prefix>:<email>` → a role, and the user runs
-  `kubectl --as=<prefix>:<email>` over the API tunnel). Config: `entitle_k8s_user_prefix`
+  `users`; Entitle JIT-binds `<prefix>:<sanitized-email>` → a role, and the user runs
+  `kubectl --as=<prefix>:<sanitized-email>`). Config: `entitle_k8s_user_prefix`
   (`entitle`). Agent bootstrap via `POST /clusters/{id}/entitle-agent`. See the
   [Entitle integration](integrations/entitle.md) + [design/entitle-resource-registration.md](design/entitle-resource-registration.md).
+  - **GKE needs BOTH halves — CONFIRMED LIVE 2026-07-30** with a real Entra-federated
+    workforce identity on `gcp-east`. GKE does **not** honor the Kubernetes `impersonate`
+    verb: with the `entitle-impersonator` ClusterRole/Binding correctly in place and *no*
+    Cloud IAM impersonate permission, `--as` fails with
+    `users "entitle:…" is forbidden: User "principal://…/subject/…" cannot impersonate
+    resource "users" … requires one of ["container.clusters.impersonate"] permission(s)
+    in Cloud IAM or a Kubernetes RBAC role with verb "impersonate"`. Binding the group's
+    `principalSet` to a role carrying `container.clusters.impersonate` makes `--as`
+    succeed. Kubernetes RBAC *is* live for these identities — the same group's
+    `entra-group-binding` → `view` was proven to be the sole source of read access once the
+    masking Cloud IAM binding was removed — so this is impersonation-specific, not a
+    general RBAC gap.
+    - **⚠️ Prerequisite that invalidated hours of testing: the Entra group must be
+      ASSIGNED TO THE WIF ENTERPRISE APP** or it never appears in the token's `groups`
+      claim, and *every* binding on it (RBAC and Cloud IAM) silently matches nothing. Read
+      the ⚠️ in
+      [the federation guide §1b](integrations/entra-k8s-federation.md#1b-gke-app-registration-eg-gke-entra-wif)
+      before debugging anything else. Until the group was assigned, three escalating IAM
+      grants (custom role, custom role + `container.clusters.get`, then
+      `roles/container.admin`) all appeared to do nothing, which looked like a GKE
+      authorizer limitation and was not.
+    - **Verify a claim is landing before trusting any result.** Access can be served by a
+      *different* group's Cloud IAM binding — here a basic `roles/viewer` on the sign-in
+      group — which makes `kubectl get ns` succeed whether or not the group you care about
+      is present. The clean probe is to remove the masking binding and see what survives.
+      The same confound makes the 2026-07-16 "GKE group binding validated" result
+      unreliable; the binding is now properly validated as of this entry.
+    - **A standing `roles/viewer` on any Entra group also masks JIT revocation** — access
+      survives grant expiry, so a demo shows the opposite of what it claims. Leave it off.
+    - **Entitle's two grants are separate.** Requesting the *Kubernetes* resource creates
+      the `entk8s-*` binding but grants no Entra group membership (that is an
+      Entra-ID-integration bundle). Both must be live at once, and both were short-TTL
+      here, so re-check each right before testing.
+    - Unexplained leftover: `kubectl auth can-i` → `Forbidden: unknown (post
+      selfsubjectaccessreviews.authorization.k8s.io)` even un-impersonated, though
+      `system:basic-user` grants that to `system:authenticated` everywhere. Suggests the
+      gateway-injected identity may not carry `system:authenticated`. Harmless, but it is
+      why the `kubectl auth` probes are useless here.
+
+    None of the Enable-federation roles
+    (`roles/gkehub.gatewayEditor`, `roles/gkehub.viewer`) carry the permission, so
+    `apply_impersonator_binding`'s GCP path also calls
+    `gcp_service.grant_impersonate_iam`: create-or-reuse the project custom role
+    `dashboardGkeImpersonator` holding **only** `container.clusters.impersonate`, then
+    bind the group's `principalSet` to it. Notes:
+    - **One permission is enough — verified live 2026-07-30.** `container.clusters.get` was
+      added to the role as a hypothesis and then removed; `--as` kept working with
+      `container.clusters.impersonate` alone, so that is all the role should carry.
+    - **`roles/iam.roleAdmin`** on the dashboard SA is required to create that role
+      (added to both sandbox setup scripts — **re-run** yours, or pre-create the role by
+      hand); without it the action fails with a 403 naming the missing role.
+    - Not `roles/container.admin`, which carries the permission but also hands the group
+      standing cluster admin and defeats the fine-grained story.
+    - **Cloud IAM propagation is ~1–2 min** — a `--as` inside that window still 403s and
+      looks identical to a missing grant. The job's final progress line says so.
+    - The binding is **project-level** (GKE clusters have no IAM policy of their own), so
+      removal **ref-counts**: it is revoked only when no other GKE cluster still has the
+      same group bound. The custom role itself is left in place.
+    - Unlike group claims, Cloud IAM is evaluated per request — **no `gcloud auth login`
+      re-run needed** after the grant.
+    - **`container.clusters.impersonate` is in Google's `TESTING` stage.** Confirmed by
+      hand 2026-07-30: it *is* allowed in a custom role, but `gcloud iam roles create`
+      warns it is "not mature and they can go away in the future … do not use them in
+      production systems". The custom role is GA; the permission in it is not. Treat this
+      tier as lab-grade on GKE, and suspect a Google-side change first if the grant
+      starts failing with a permission-not-recognised error.
+    - If you already created a role by hand to unblock a demo (e.g. `gkeImpersonator`),
+      the action will create its own `dashboardGkeImpersonator` alongside it rather than
+      adopt it — the distinct name keeps the dashboard from patching an operator-owned
+      role. Both grant the same thing; delete the manual role and its binding once the
+      automated path is verified.
+  - **The subject is not the raw email.** Entitle sanitizes it when it builds the
+    binding — `karen.walker@weaverlab.xyz` became `entitle:karen.walker-weaverlab.xyz`
+    (the `@` → `-`), while the credential Entitle shows the user still reads
+    `karen.walker@weaverlab.xyz`. Nothing in this repo does that rewrite, so don't assume
+    the rule — read the binding:
+    `kubectl get clusterrolebinding -o custom-columns=NAME:.metadata.name,ROLE:.roleRef.name,SUBJECT:.subjects[*].name`
+    (Entitle's are named `entk8s-<hash>`).
+  - **The `kubectl auth` self-review probes are useless on GKE via Connect Gateway.**
+    A workforce identity there is denied both self-review APIs *regardless of `--as`* —
+    `auth whoami` → `the selfsubjectreviews API is not enabled in the cluster or you do
+    not have permission to call it` (which reads like a cluster feature gap), and
+    `auth can-i` → `Forbidden: unknown (post selfsubjectaccessreviews.authorization.k8s.io)`
+    — even while ordinary reads (`get ns`, `get clusterrolebinding`) succeed. Normally
+    `system:basic-user` grants these to `system:authenticated`, so the gateway-injected
+    identity appears not to carry that group. Probe with a real verb
+    (`kubectl --as=… get ns`) instead, and never read a self-review failure as evidence
+    about impersonation.
+  - **Transport:** the API (TCP) tunnel on EKS/AKS. On **GKE with a workforce identity**
+    it's **Connect Gateway** — the API tunnel is not an option there at all, since the
+    GKE API server can't validate a workforce token. Connect Gateway *does* forward
+    `Impersonate-User` (confirmed live 2026-07-30: the denial above is a GKE authorizer
+    decision about the impersonation attempt, so the header reached the API server).
 
 Config: `entra_rbac_group_id` / `_name` / `_role` (`cluster-admin`), `pra_k8s_namespace`
 (`pra-access`), `pra_k8s_sa_name` (`pra-access`), `k8s_api_tunnel_local_port` (`6443`),

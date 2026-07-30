@@ -118,7 +118,7 @@
                       class="text-xs px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded font-medium"
                       x-text="c.entra_group_bound ? 'Entra group ✓' : 'Entra group'"></button>
               <button x-show="c.status === 'registered' || c.status === 'managed'" @click="openImpersonator(c)"
-                      title="Grant the Entra group cluster-wide impersonate on users (fine-grained JIT): the group authenticates + can impersonate, but has nothing to impersonate until Entitle's Kubernetes integration JIT-binds entitle:<email> → a role on THIS cluster; the user then runs kubectl --as=<prefix>:<email>"
+                      title="Grant the Entra group cluster-wide impersonate on users (fine-grained JIT): the group authenticates + can impersonate, but has nothing to impersonate until Entitle's Kubernetes integration JIT-binds entitle:<email> → a role on THIS cluster; the user then runs kubectl --as=<prefix>:<email> — with the email as ENTITLE sanitized it (@ becomes -), so read the entk8s-* clusterrolebinding for the exact subject"
                       class="text-xs px-2 py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded font-medium"
                       x-text="c.impersonator_bound ? 'Impersonation ✓' : 'Impersonation access'"></button>
               <button x-show="c.status === 'registered' || c.status === 'managed'" @click="openEntraFed(c)"
@@ -593,9 +593,25 @@
           <code>system:masters</code> stays blocked). This is the fine-grained tier: a group member authenticates as
           themselves <em>and</em> can impersonate, but has <strong>nothing to impersonate as</strong> until Entitle's
           <strong>Kubernetes</strong> integration JIT-binds <code>&lt;prefix&gt;:&lt;email&gt;</code> → a role on
-          <strong>this</strong> cluster. They then run <code>kubectl --as=&lt;prefix&gt;:&lt;email&gt;</code> (over the
-          <strong>API tunnel</strong> on GKE — the k8s tunnel strips impersonation headers). Reuses the Entra group
+          <strong>this</strong> cluster. They then run <code>kubectl --as=&lt;prefix&gt;:&lt;email&gt;</code> over the
+          <strong>API tunnel</strong> (never the k8s tunnel — that proxy strips impersonation headers; on GKE with a
+          workforce identity it's <strong>Connect Gateway</strong>, which does forward them). Reuses the Entra group
           configured on Settings → Kubernetes; leave blank for that default.
+        </p>
+        <p class="text-xs text-gray-500">
+          <strong>On GKE this also grants Cloud IAM</strong> — GKE gates <code>impersonate</code> in Cloud IAM as well as
+          RBAC, so the group's <code>principalSet</code> is bound to a project custom role holding only
+          <code>container.clusters.impersonate</code> (needs <code>roles/iam.roleAdmin</code> on the dashboard SA).
+          Allow <strong>1–2 min for IAM to propagate</strong> — a <code>--as</code> before then is still
+          <code>Forbidden</code> and looks exactly like a missing grant. The binding is project-wide, so removing it here
+          is ref-counted against other GKE clusters using the same group.
+        </p>
+        <p class="text-xs text-gray-500">
+          <strong>The subject is not the raw email</strong> — Entitle sanitizes it when it creates the binding
+          (<code>a.b@corp.com</code> → <code>&lt;prefix&gt;:a.b-corp.com</code>) even though the credential it shows the
+          user keeps the <code>@</code>. Impersonating the raw email hits an identity with no bindings. Read the exact
+          subject off the cluster: <code>kubectl get clusterrolebinding -o custom-columns=NAME:.metadata.name,ROLE:.roleRef.name,SUBJECT:.subjects[*].name</code>
+          (Entitle's are <code>entk8s-*</code>).
         </p>
         <div>
           <label class="block text-xs font-medium text-gray-600 mb-1">Entra group Object ID <span class="text-gray-400">(blank = Settings default)</span></label>
@@ -1206,7 +1222,7 @@ function k8sPage() {
     },
 
     async removeImpersonator() {
-      if (!confirm(`Remove impersonation access from "${this.imperTarget.name}"? This deletes the impersonator ClusterRole + binding.`)) return;
+      if (!confirm(`Remove impersonation access from "${this.imperTarget.name}"? This deletes the impersonator ClusterRole + binding, and on GKE also revokes the project-level container.clusters.impersonate IAM binding unless another GKE cluster still uses the same group.`)) return;
       this.imperBusy = true;
       try {
         const r = await API.del(`/api/k8s/clusters/${this.imperTarget.id}/impersonator`);
