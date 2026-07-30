@@ -295,16 +295,16 @@
             </div>
             <div>
               <label class="block text-xs font-medium text-gray-600 mb-1">Gateway</label>
-              <select x-model="deployForm.jumpoint_name" :disabled="!praPickers.jumpoints.length"
+              <select x-model="deployForm.jumpoint_name" :disabled="!praPickers.gateways.length"
                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
                 <option value="">(configured default)</option>
-                <template x-for="j in praPickers.jumpoints || []" :key="j.id">
+                <template x-for="j in praPickers.gateways || []" :key="j.id">
                   <option :value="j.name" x-text="j.name"></option>
                 </template>
               </select>
             </div>
           </div>
-          <p x-show="praPickers.loaded && !praPickers.jump_groups.length && !praPickers.jumpoints.length" x-cloak
+          <p x-show="praPickers.loaded && !praPickers.jump_groups.length && !praPickers.gateways.length" x-cloak
              class="text-xs text-gray-400">No PRA jump groups/jumpoints returned — the shell jump falls back to the configured defaults.</p>
         </div>
 
