@@ -315,7 +315,14 @@ K8S_NODE_TYPES = {
     "gcp":   ["e2-small", "e2-medium", "e2-standard-2", "e2-standard-4",
               "n2-standard-2", "n2-standard-4"],
     # A1.Flex (Always-Free Ampere) first; the flex shapes take an OCPU/memory config.
-    "oci":   ["VM.Standard.A1.Flex", "VM.Standard.E4.Flex", "VM.Standard.E5.Flex"],
+    # As with the versions above, OKE has a live shape API — provision_options()
+    # reads it (oci_service.oke_node_pool_shapes) and only falls back to this list
+    # when OCI is unconfigured/unreachable. OKE accepts only a SUBSET of OCI's
+    # compute shapes and the subset differs by region and tenancy, so keep every
+    # entry here one OKE actually offers (`oci ce node-pool-options get`):
+    # E4.Flex sat in this list unsupported and killed provisions ~10 minutes in, at
+    # node-pool creation, with the VCN and cluster already built.
+    "oci":   ["VM.Standard.A1.Flex", "VM.Standard.A2.Flex", "VM.Standard.E5.Flex"],
 }
 # Region lists come from the shared services/region_catalog (region_ids per cloud);
 # the K8s-specific version + node-size catalogs stay here.
@@ -676,26 +683,40 @@ async def provision_options(cloud: str, region: str = "") -> dict:
         _with_configured_first(region_catalog.region_ids(cloud), region), configured_region)
 
     versions = K8S_VERSIONS[cloud]
+    node_types = K8S_NODE_TYPES[cloud]
     if cloud == "oci":
-        # OKE is the one cloud here with a live version-discovery API, and the one
-        # that hard-rejects a retired version (400 InvalidParameter part-way through
-        # the apply). Read the live set; fall back to the curated list when OCI is
-        # unconfigured or unreachable so the modal still opens. No region argument:
-        # every OKE cluster lands in the configured oci_region regardless of the
-        # region picked here, so the SDK's own config region is the right one.
+        # OKE is the one cloud here with live version- AND shape-discovery APIs, and
+        # the one that hard-rejects both: a retired version 400s at CreateCluster,
+        # and a shape outside OKE's subset of OCI's compute shapes fails at
+        # node-pool creation — ~10 minutes into the apply, with the VCN and cluster
+        # already built. Both lists also rot on their own schedule (OKE retires
+        # versions; the shape subset differs by region and tenancy), so read them
+        # live and fall back to the curated lists when OCI is unconfigured or
+        # unreachable so the modal still opens. No region argument on either: every
+        # OKE cluster lands in the configured oci_region regardless of the region
+        # picked here, so the SDK's own config region is the right one.
+        from . import oci_service
         try:
-            from . import oci_service
             live = await oci_service.oke_cluster_versions()
             if live:
                 versions = live
         except Exception as exc:  # noqa: BLE001 — never block the form on OCI
             logger.warning("OKE version discovery failed; using the curated list: %s", exc)
+        try:
+            live_shapes = await oci_service.oke_node_pool_shapes()
+            if live_shapes:
+                node_types = live_shapes
+        except Exception as exc:  # noqa: BLE001 — never block the form on OCI
+            logger.warning("OKE shape discovery failed; using the curated list: %s", exc)
 
     out = {
         "cloud": cloud,
         "region": region,
         "regions": regions,
-        "node_instance_types": _with_configured_first(K8S_NODE_TYPES[cloud], _cfg(cfg_node)),
+        # Discovery for the pickers only. Nothing validates a submitted shape or
+        # version against these, deliberately: they are scoped to one region and
+        # tenancy, and a hard gate would reject a value valid in another region.
+        "node_instance_types": _with_configured_first(node_types, _cfg(cfg_node)),
         "k8s_versions": _with_configured_first(versions, _cfg(cfg_ver)),
         "subnets": [],
         "configured_subnet_ids": [],

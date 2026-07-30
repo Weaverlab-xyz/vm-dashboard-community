@@ -167,6 +167,19 @@ back to `K8S_VERSIONS["oci"]` only when OCI is unconfigured. Versions use OKE's 
 format (`v1.36.1`); a version you pin explicitly is validated against the live list at **plan** time,
 so a stale pin fails before the VCN is built rather than half-way through the apply.
 
+**Node shapes are read live too.** OKE accepts only a **subset** of the compute shapes OCI offers,
+and the subset varies by region and tenancy — `VM.Standard.E4.Flex` is a normal Compute shape that
+OKE does not take in `us-chicago-1`, while the newer Ampere `VM.Standard.A2.Flex` is one it does.
+A shape outside the subset is not rejected at submit: it fails at **node-pool creation**, ~10 minutes
+into the apply, with the VCN and cluster already built. So the Node size picker reads
+`oci_service.oke_node_pool_shapes()` (the API behind `oci ce node-pool-options get`), falling back to
+`K8S_NODE_TYPES["oci"]` only when OCI is unconfigured. Unlike the version pin there is **no plan-time
+gate**: the live list is scoped to one region and tenancy, so it seeds the picker but never rejects a
+submission, and `oci_oke_node_shape` is always merged in first — a shape valid in another region
+stays reachable through config. Shapes are ordered free-tier first, bare metal last
+(`BM.Standard.E5.192` is a 192-OCPU machine billed whole, and the picker is where a lab cluster
+gets sized).
+
 ### Sandbox prerequisites
 
 The sandbox scripts no longer create k8s subnets — clusters own their networks. The scripts

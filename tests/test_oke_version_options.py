@@ -79,6 +79,10 @@ def _raises(exc):
 
 
 def _options(cloud, **patches):
+    # provision_options reads the live *shape* list for oci as well (see
+    # test_oke_shape_options.py); stub it so these version tests stay hermetic
+    # instead of reaching for OCI on the way past.
+    patches.setdefault("oke_node_pool_shapes", _returns(["VM.Standard.A1.Flex"]))
     with _patched(svc, _cfg=patches.pop("_cfg", _no_config)), \
          _patched(oci_service, **patches):
         return asyncio.run(svc.provision_options(cloud))
