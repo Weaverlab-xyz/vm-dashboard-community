@@ -18,7 +18,6 @@ agent's own dependencies). Runs under pytest, or standalone:
     python tests/test_agent_probes.py
 """
 import importlib.util
-import io
 import os
 import re
 import struct

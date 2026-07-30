@@ -47,7 +47,7 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import Iterable, Optional
+from typing import Optional
 from urllib.parse import urlparse
 
 import requests

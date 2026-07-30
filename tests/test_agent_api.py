@@ -36,8 +36,7 @@ os.environ.setdefault("JWT_SECRET_KEY", "test-secret-for-agent-api-tests")
 try:
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
-    from web_dashboard.database import (Base, Job, RemoteAgent, SessionLocal, engine,
-                                        get_db)
+    from web_dashboard.database import Base, Job, SessionLocal, engine, get_db
     from web_dashboard.api import agent as agent_api
     from web_dashboard.services import agent_service, agent_signing, job_service
 except Exception as exc:  # pragma: no cover — app deps missing
