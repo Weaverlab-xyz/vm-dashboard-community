@@ -6,7 +6,7 @@ is reserved for the hosted edition — see [saas-roadmap.md](saas-roadmap.md) �
 different feature entirely.)
 
 The problem it solves: everything the dashboard knows is on a page you have to open.
-That was tolerable until the [auto-delete timer](../README.md) started **destroying
+That was tolerable until the [auto-delete timer](auto-delete-timer.md) started **destroying
 resources on a schedule**, whose only warning was a banner in a browser nobody had open.
 Three more signals had the same shape — a cloud budget, a stale secret, a drifted host —
 each with an evaluator and no way to tell anybody.
