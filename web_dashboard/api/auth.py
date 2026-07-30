@@ -193,6 +193,14 @@ def require_permission(scope: str, level: str):
             try:
                 deep_link = _build_request_access_link(scope, level)
             except Exception:
+                # Deliberately broad: a malformed deep-link config (bad JSON,
+                # an unreachable secrets backend) must never turn a clean 403
+                # into a 500 on the permission check itself. But log it —
+                # this branch silently hid a NameError in the builder for the
+                # entire life of the feature, so failures have to be visible.
+                logger.warning(
+                    "request-access deep link unavailable for %s:%s", scope, level, exc_info=True
+                )
                 deep_link = None
             if deep_link:
                 detail = {
@@ -214,6 +222,9 @@ def _build_request_access_link(scope: str, level: str):
 
     See docs/design/entitle-user-jit.md §Phase 4 for resolution shape.
     """
+    # Imported locally, matching _oauth_cfg below and the sibling api/ modules.
+    from ..services import config_service
+
     if not config_service.get_bool("entitle_user_jit_enabled", default=False):
         return None
     portal = (config_service.get("entitle_request_portal_url", "") or "").rstrip("/")
