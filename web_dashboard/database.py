@@ -194,6 +194,92 @@ class PersonalAccessToken(Base):
     user = relationship("User", back_populates="personal_access_tokens")
 
 
+class RemoteAgent(Base):
+    """A containerised agent running inside a private network that polls this
+    dashboard for work — the inverse of every other execution path, which dials out
+    from the dashboard and therefore cannot reach a network the dashboard is not on.
+
+    Deliberately NOT a ``PersonalAccessToken`` and deliberately not tied to a ``User``.
+    A PAT resolves to its owner and carries that owner's full authority with no scope
+    (see ``api/auth.py:_get_user_from_pat``), which is a defensible default for a human
+    and a dangerous one for a machine principal sitting on someone else's network. An
+    agent is its own principal, authorized by a closed allow-list in ``agent_service``,
+    and never passes through ``require_permission`` — whose "empty permissions means
+    unrestricted" backward-compat rule would silently grant it everything.
+
+    Identity is an **Ed25519 public key**, not a shared secret. The agent generates the
+    keypair at enrolment and the private half never leaves its host, so no replayable
+    credential ever crosses the wire — which is what makes this safe to run through a
+    corporate TLS-inspecting proxy, where an ``Authorization`` header would land in the
+    proxy's log in the clear.
+    """
+    __tablename__ = "remote_agents"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    # 64 not 100: job rows record the actor as `agent:{name}` in Job.created_by,
+    # which is String(100).
+    name = Column(String(64), nullable=False, unique=True, index=True)
+    site = Column(String(64), index=True)          # routing label, e.g. "dc1"
+    description = Column(Text)
+
+    # Enrolment: a single-use short-lived code, sha256 at rest exactly like a PAT.
+    # NULLed the moment it is redeemed, which is what makes it single-use.
+    enroll_code_hash = Column(String(64), unique=True, index=True, nullable=True)
+    enroll_expires_at = Column(DateTime, nullable=True)
+
+    # Base64 raw Ed25519 public key (32 bytes -> 44 chars). NULL until enrolled.
+    public_key = Column(String(64), nullable=True)
+    # sha256 of the agent's local policy.yaml, self-reported on every poll. The
+    # dashboard cannot change the policy — it can only show the operator that the hash
+    # moved, which is the point: the file is the customer's, not ours.
+    policy_hash = Column(String(64), nullable=True)
+
+    allowed_job_types = Column(Text)               # JSON list; empty/NULL = the default set
+    agent_version = Column(String(32))
+    enrolled_at = Column(DateTime, nullable=True)
+    last_seen_at = Column(DateTime, nullable=True, index=True)
+    last_seen_ip = Column(String(45))              # 45 = max INET6_ADDRSTRLEN
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_by = Column(String(100))
+
+    # No `status` column on purpose. Status is derived from is_active / public_key /
+    # last_seen_at freshness, because a stored status is how you end up with a row
+    # that still reads "online" three weeks after the container died.
+
+    @property
+    def allowed_job_types_list(self) -> list:
+        if not self.allowed_job_types:
+            return []
+        try:
+            value = json.loads(self.allowed_job_types)
+            return value if isinstance(value, list) else []
+        except Exception:  # noqa: BLE001 — a corrupt list must not break the listing
+            return []
+
+
+class AgentNonce(Base):
+    """Replay guard for signed agent requests.
+
+    A timestamp window alone only narrows the replay opportunity to the width of the
+    window; remembering the nonce is what closes it. There is no Redis in this
+    deployment and a swept table is entirely adequate at this request rate — the row
+    count is bounded by (agents x requests per window), not by uptime.
+    """
+    __tablename__ = "agent_nonces"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    agent_id = Column(String(36), nullable=False, index=True)
+    nonce = Column(String(64), nullable=False)
+    # Indexed because the sweeper's only query is a range delete on this column.
+    seen_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+    # The uniqueness IS the guard: the second insert of a nonce raises IntegrityError,
+    # and that is what rejects the replay. Scoped per agent so two agents cannot
+    # collide with each other's random values.
+    __table_args__ = (UniqueConstraint("agent_id", "nonce", name="uq_agent_nonce"),)
+
+
 class Job(Base):
     """Job model for tracking long-running operations"""
     __tablename__ = "jobs"
@@ -212,6 +298,15 @@ class Job(Base):
     # column holding a JSON string, so there is no operator that filters it portably
     # across SQLite and PostgreSQL — only a LIKE scan.
     batch_id = Column(String(32), index=True, nullable=True)
+    # The enrolled remote agent that owns this row's execution, or NULL for the local
+    # job runner. A real indexed column for the same reason as batch_id above: the
+    # lease query is `WHERE status='queued' AND agent_id=:id` on every poll, and
+    # extra_data cannot be filtered portably.
+    #
+    # Setting this forces status='queued' in job_service.create_job, which is what
+    # keeps jobs_worker._claim_one (status='pending') from racing the agent for the row.
+    agent_id = Column(String(36), ForeignKey("remote_agents.id", ondelete="SET NULL"),
+                      index=True, nullable=True)
     # Auto-delete timer. Meaningful ONLY on the cloud VM deploy types
     # (expiry_policy.REAPABLE_VM_JOB_TYPES) — a VM has no inventory table of its own,
     # so its deploy Job row IS its record of existence, which is why `job:<id>` is
@@ -1010,6 +1105,15 @@ def init_db():
             "ALTER TABLE k8s_clusters ADD COLUMN expires_at TIMESTAMP",
             "ALTER TABLE k8s_clusters ADD COLUMN expiry_warned_at TIMESTAMP",
             "CREATE INDEX ix_k8s_clusters_expires_at ON k8s_clusters(expires_at)",
+            # Remote on-prem agent: which enrolled agent owns this job's execution.
+            # The `remote_agents` and `agent_nonces` tables need no entry here —
+            # create_all makes new tables; only new columns on existing tables do.
+            #
+            # No FK in the raw DDL, matching every entry above: SQLite cannot add a
+            # constraint to an existing table, and nothing reads jobs through one. The
+            # relationship is declared on the model for the ORM's benefit only.
+            "ALTER TABLE jobs ADD COLUMN agent_id VARCHAR(36)",
+            "CREATE INDEX ix_jobs_agent_id ON jobs(agent_id)",
         ]
         for stmt in _migrations:
             if _is_sqlite:

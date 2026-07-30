@@ -1,0 +1,175 @@
+"""Invariants for remote-agent job metadata — what keeps code out of the customer LAN.
+
+``ansible_run_meta`` guards a boundary into the *database*, so its rule is "refs, never
+values". This module guards a boundary into a *network the dashboard does not own*, so
+its rule is stricter: no field may carry anything the agent could execute. A discovery
+payload is scalars, enums and network addresses — no command, no script, no URL, no
+filename. That is what makes a compromised dashboard unable to do more than ask an
+agent to scan a range it was already allowed to scan.
+
+The assertions pin the three things that would break it:
+
+  * the closed allowlist, so a field added later trips this test instead of quietly
+    becoming an execution channel;
+  * the round-trip, so a payload written by the endpoint is read back under the same
+    name (a dropped `max_hosts` would silently restore the default and widen a sweep);
+  * the clamps, because they are the only thing standing between an operator typo — or
+    a hostile dashboard — and a /8 sweep of someone's production network.
+
+Pure module, stdlib only. Runs under pytest, or standalone:
+    python tests/test_agent_job_meta.py
+"""
+import importlib.util
+import os
+import re
+import sys
+import types
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_PATH = os.path.join(_ROOT, "web_dashboard", "services", "agent_job_meta.py")
+_spec = importlib.util.spec_from_file_location("agent_job_meta", _PATH)
+ajm = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(ajm)
+
+
+def _payload(**over):
+    """A request-shaped object. discover_meta reads with getattr, so a namespace
+    behaves exactly like the pydantic model."""
+    base = dict(scan_kind="both", cidrs=["10.20.0.0/24"], hostnames=["pg01.lab.local"],
+                ports={"k8s": [6443], "database": [5432]}, use_local_kubeconfig=True,
+                timeout_s=3, max_hosts=256, concurrency=16)
+    base.update(over)
+    return types.SimpleNamespace(**base)
+
+
+# ── the allowlist ─────────────────────────────────────────────────────────────
+
+def test_metadata_keys_are_a_closed_set():
+    """A new field must fail here and be considered, not ride along silently."""
+    meta = ajm.discover_meta(_payload(), description="d")
+    assert set(meta) == set(ajm.DISCOVER_META_KEYS) | {"description"}
+
+
+def test_no_field_can_carry_executable_content():
+    """The property this module exists for. A discovery payload names *where* to look,
+    never *what to run*, so any key shaped like a command, a script, a fetchable URL or
+    a path is banned outright — there is no reference-suffix exemption here, unlike
+    ansible_run_meta, because there is no legitimate use for one."""
+    banned = re.compile(
+        r"(command|cmd|script|shell|exec|playbook|manifest|url|uri|path|file|"
+        r"image|entrypoint|args|env)", re.I)
+    offenders = [k for k in ajm.DISCOVER_META_KEYS if banned.search(k)]
+    assert not offenders, f"execution-shaped key in the discovery allowlist: {offenders}"
+
+
+def test_no_credential_shaped_key_is_persisted():
+    """Discovery never authenticates, so it never needs a credential — and the job row
+    is written to the database, where one must never land."""
+    banned = re.compile(r"(password|passwd|token|secret|credential|private_key)", re.I)
+    offenders = [k for k in ajm.DISCOVER_META_KEYS if banned.search(k)]
+    assert not offenders, f"credential-shaped key in the discovery allowlist: {offenders}"
+
+
+def test_the_execution_guard_actually_rejects_things():
+    """Guard the guard: a regex that matches nothing would make the test above pass
+    forever."""
+    banned = re.compile(
+        r"(command|cmd|script|shell|exec|playbook|manifest|url|uri|path|file|"
+        r"image|entrypoint|args|env)", re.I)
+    for bad in ("command", "playbook_b64", "download_url", "script_path",
+                "manifest", "container_image", "extra_args"):
+        assert banned.search(bad), f"{bad!r} should be rejected by the execution guard"
+    for ok in ("scan_kind", "cidrs", "hostnames", "ports", "timeout_s", "max_hosts"):
+        assert not banned.search(ok), f"{ok!r} is a legitimate discovery field"
+
+
+# ── the round-trip ────────────────────────────────────────────────────────────
+
+def test_round_trip_preserves_every_field():
+    p = _payload()
+    kwargs = ajm.discover_kwargs(ajm.discover_meta(p, description="d"))
+    for key in ajm.DISCOVER_META_KEYS:
+        assert kwargs[key] == getattr(p, key), f"{key} did not survive the round-trip"
+
+
+def test_missing_keys_fall_back_to_defaults():
+    """A job queued by an older build predates some fields; resuming it the way that
+    build would have is better than refusing to run it."""
+    kwargs = ajm.discover_kwargs({"scan_kind": "k8s"})
+    assert kwargs["scan_kind"] == "k8s"
+    assert kwargs["max_hosts"] == ajm._DEFAULTS["max_hosts"]
+    assert kwargs["ports"] == ajm._DEFAULTS["ports"]
+
+
+def test_defaults_are_never_handed_out_by_reference():
+    """A caller that mutated a returned default would poison every later
+    reconstruction in the same process."""
+    first = ajm.discover_kwargs({})
+    first["cidrs"].append("10.0.0.0/8")
+    first["ports"]["k8s"].append(9999)
+    second = ajm.discover_kwargs({})
+    assert second["cidrs"] == []
+    assert 9999 not in second["ports"]["k8s"]
+
+
+# ── the clamps ────────────────────────────────────────────────────────────────
+
+def test_host_and_concurrency_caps_are_enforced():
+    meta = ajm.normalize({"max_hosts": 10 ** 6, "concurrency": 10 ** 4, "timeout_s": 9999})
+    assert meta["max_hosts"] == ajm.MAX_HOSTS_CEILING
+    assert meta["concurrency"] == ajm.MAX_CONCURRENCY
+    assert meta["timeout_s"] == ajm.MAX_TIMEOUT_S
+
+
+def test_lower_bounds_are_enforced():
+    """Zero or negative would mean "no limit" to a naive range()/semaphore."""
+    meta = ajm.normalize({"max_hosts": 0, "concurrency": -5, "timeout_s": 0})
+    assert meta["max_hosts"] >= 1
+    assert meta["concurrency"] >= 1
+    assert meta["timeout_s"] >= 1
+
+
+def test_garbage_falls_back_instead_of_raising():
+    """Normalize runs on a payload that already reached the database; raising here
+    would strand the job rather than run a safe subset of it."""
+    meta = ajm.normalize({"max_hosts": "lots", "concurrency": None,
+                          "timeout_s": [], "scan_kind": "everything",
+                          "cidrs": "10.0.0.0/8", "ports": "all"})
+    assert meta["max_hosts"] == ajm._DEFAULTS["max_hosts"]
+    assert meta["concurrency"] == ajm._DEFAULTS["concurrency"]
+    assert meta["scan_kind"] == "both"
+    assert meta["cidrs"] == []          # a bare string is not a list of CIDRs
+    assert meta["ports"] == ajm._DEFAULTS["ports"]
+
+
+def test_invalid_ports_are_dropped_and_empty_falls_back():
+    meta = ajm.normalize({"ports": {"k8s": [6443, 70000, "x", -1], "database": []}})
+    assert meta["ports"]["k8s"] == [6443]
+    assert meta["ports"]["database"] == ajm._DEFAULTS["ports"]["database"]
+
+
+def test_scan_kind_is_an_enum():
+    for kind in ajm.VALID_SCAN_KINDS:
+        assert ajm.normalize({"scan_kind": kind})["scan_kind"] == kind
+    assert ajm.normalize({"scan_kind": "  K8S  "})["scan_kind"] == "k8s"
+
+
+def test_normalize_is_applied_at_enqueue():
+    """The stored row must already be valid — the agent normalizes again on arrival,
+    but a row that reached the database unclamped is a row someone can read and
+    believe."""
+    meta = ajm.discover_meta(_payload(max_hosts=10 ** 6), description="d")
+    assert meta["max_hosts"] == ajm.MAX_HOSTS_CEILING
+
+
+if __name__ == "__main__":
+    fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
+    failures = 0
+    for fn in fns:
+        try:
+            fn()
+            print(f"ok   {fn.__name__}")
+        except Exception as e:  # noqa: BLE001
+            failures += 1
+            print(f"FAIL {fn.__name__}: {e}")
+    sys.exit(1 if failures else 0)

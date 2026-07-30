@@ -930,6 +930,12 @@ function wizard() {
         desc:  'Provision (EKS/AKS/GKE), register, and broker Kubernetes clusters — PRA tunnels + Entitle real-identity JIT.',
         note:  '',
       },
+      {
+        key:   'remote_agents_enabled',
+        label: 'Remote Agents',
+        desc:  'Containerised agents inside private networks that poll out to this dashboard to discover on-premises Kubernetes clusters and databases. No inbound firewall rules.',
+        note:  'Publishes /api/agent for agents to reach. Terminate TLS in front of the dashboard before enabling this.',
+      },
     ],
 
     async init() {
