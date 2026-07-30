@@ -1,10 +1,9 @@
 """The deploy forms' PRA pickers, and the one way they come apart silently.
 
 All four VM deploy forms (AWS/Azure/GCP/OCI) fill their Jump group and Gateway
-dropdowns from one endpoint, ``/api/pra/pickers``. Unlike the cloud-DB and k8s
-modals — which assign the response wholesale (``this.options = await API.get(...)``,
-so the payload's own keys land in state — these four **map** it field by field,
-because the state also carries a ``loaded`` flag the fetch owns:
+dropdowns from one endpoint, ``/api/pra/pickers``, and **map** it field by field
+rather than assigning the response wholesale, because the state also carries a
+``loaded`` flag the fetch owns:
 
     praPickers: { configured: false, jump_groups: [], gateways: [], loaded: false }
     this.praPickers = { ..., gateways: r.jumpoints || [], loaded: true }
@@ -39,6 +38,10 @@ Three things are pinned:
     be renamed, and pra_api_service is checked so the two cannot drift,
   * the select still posts ``jumpoint_name``, the field the Pydantic deploy models
     accept.
+
+The cloud-DB, k8s and container modals keep their pickers in a state object named
+for the modal rather than in ``praPickers``, so the last section pins the same pair
+for them.
 
 Templates are read as text; no DB, no cloud SDK, no browser.
 
@@ -163,6 +166,83 @@ def test_the_select_still_posts_jumpoint_name():
         assert "jumpoint_name" in _read(model), (
             f"models/{cloud}.py no longer accepts jumpoint_name, but the form posts it")
         assert ">Gateway</label>" in src, f"{path}: the dropdown's label stopped saying Gateway"
+
+
+# ── the same pair, on the modals that don't use `praPickers` ──────────────────
+
+# These four state objects hold the same pickers under a name of their own. They
+# used to assign the response wholesale, which is why the prose rename left them
+# working: the payload's own `jumpoints` key landed in state and the markup read
+# it. What the rename did break was quieter — it rewrote the `jumpoints: []` in
+# every initializer to `gateways: []`, a key nothing filled and nothing read,
+# sitting in the shape that documents what the dropdowns render. Two of the k8s
+# readers had no `|| []` either, so the picker threw on first paint. They now map
+# the payload the way the four VM forms do, which buys the same guards.
+_MODALS = (
+    ("web_dashboard/templates/k8s/index.html", "tunnelOpts"),
+    ("web_dashboard/templates/databases/index.html", "options"),
+    ("web_dashboard/templates/containers/index.html", "praOpts"),
+    ("web_dashboard/templates/containers/index.html", "portainerDeployOpts"),
+)
+
+
+def _state_literals(src, var):
+    """Every literal the state takes: the initial declaration plus each
+    ``this.<var> = {...}`` reset or fetch. The markup reads one key, so every shape
+    has to carry it — a reset that omits it blanks the dropdown mid-modal."""
+    init = re.compile(r"(?<![\w.])%s\s*:\s*\{([^}]*)\}" % var)
+    assign = re.compile(r"this\.%s\s*=\s*\{([^}]*)\}" % var)
+    return init.findall(src) + assign.findall(src)
+
+
+def test_every_modal_state_shape_declares_the_gateways_key():
+    for path, var in _MODALS:
+        src = _read(os.path.join(_ROOT, path))
+        literals = _state_literals(src, var)
+        assert literals, f"{path}: no `{var}` state object any more"
+        for body in literals:
+            assert re.search(r"(?<![\w.])gateways\s*:", body), (
+                f"{path}: a `{var}` literal declares no `gateways` — the Gateway "
+                f"dropdown reads it, so this shape renders empty: {body.strip()[:70]}")
+
+
+def test_every_modal_gateway_dropdown_reads_the_mapped_key():
+    """The reader half. `<var>.jumpoints` is the spelling the prose rename protected
+    and the initializers dropped; reading it again is the empty dropdown returning."""
+    for path, var in _MODALS:
+        src = _read(os.path.join(_ROOT, path))
+        assert not re.search(r"%s\.jumpoints" % var, src), (
+            f"{path}: markup reads `{var}.jumpoints`, which no state shape declares "
+            "— the Gateway dropdown renders empty")
+        blocks = [b for b in _GATEWAY_SELECT.findall(src) if var + "." in b]
+        assert blocks, f"{path}: no Gateway <select> renders a `{var}` list"
+        for block in blocks:
+            keys = set(re.findall(r"%s\.(\w+)" % var, block))
+            assert keys == {"gateways"}, (
+                f"{path}: the Gateway select reads {sorted(keys)} off `{var}`, "
+                "not gateways")
+
+
+def test_every_modal_fetch_folds_the_apis_jumpoints_key():
+    """The writer half, and the one place the payload's own key still belongs.
+    Renaming it to match the state key reads a field no endpoint sends."""
+    for path, var in _MODALS:
+        src = _read(os.path.join(_ROOT, path))
+        assign = re.compile(r"this\.%s\s*=\s*\{([^}]*)\}" % var)
+        assert any(re.search(r"gateways\s*:\s*\w+\.jumpoints", b)
+                   for b in assign.findall(src)), (
+            f"{path}: nothing folds the payload's `jumpoints` into `{var}.gateways` "
+            "— the dropdown is filled from a key the endpoint doesn't send")
+
+
+def test_the_modal_endpoints_still_source_pickers_from_list_pickers():
+    """So the fold above stays tied to the one function that names the key, which
+    test_the_pickers_endpoint_still_returns_jumpoints pins."""
+    for module in ("k8s.py", "cloud_databases.py", "containers.py"):
+        src = _read(os.path.join(_ROOT, "web_dashboard", "api", module))
+        assert "list_pickers()" in src, (
+            f"api/{module} stopped filling its picker dropdowns from "
+            "pra_api_service.list_pickers()")
 
 
 if __name__ == "__main__":

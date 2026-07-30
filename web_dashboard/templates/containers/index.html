@@ -319,7 +319,7 @@
               <select x-model="portainerDeployForm.jumpoint_name"
                       class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
                 <option value="">(configured default)</option>
-                <template x-for="j in portainerDeployOpts.jumpoints || []" :key="j.id">
+                <template x-for="j in portainerDeployOpts.gateways || []" :key="j.id">
                   <option :value="j.name" x-text="j.name"></option>
                 </template>
               </select>
@@ -1066,7 +1066,7 @@
               <select x-model="deployForm.jumpoint_name"
                       class="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
                 <option value="">(configured default)</option>
-                <template x-for="j in praOpts.jumpoints || []" :key="j.id">
+                <template x-for="j in praOpts.gateways || []" :key="j.id">
                   <option :value="j.name" x-text="j.name"></option>
                 </template>
               </select>
@@ -2058,7 +2058,11 @@ function containersDashboard() {
       }
       // PRA pickers for the deploy form (best-effort; empty when PRA unconfigured).
       try {
-        this.praOpts = await API.get('/api/containers/rancher/pra-options');
+        // The endpoint answers with `o.jumpoints` (the vendor's field name); fold that
+        // into `gateways` rather than assigning the payload wholesale, so every key the
+        // markup reads exists in both shapes this object takes.
+        const o = await API.get('/api/containers/rancher/pra-options');
+        this.praOpts = { ...o, gateways: o.jumpoints || [] };
       } catch (e) { /* leave defaults — the fieldset just stays hidden */ }
     },
 
@@ -2228,7 +2232,10 @@ function containersDashboard() {
       // defaults and keeps the PRA fieldset hidden).
       try {
         const opts = await API.get('/api/containers/portainer/node/deploy-options');
-        this.portainerDeployOpts = opts;
+        // The endpoint answers with `opts.jumpoints` (the vendor's field name); fold that
+        // into `gateways` rather than assigning the payload wholesale, so every key the
+        // markup reads exists in both shapes this object takes.
+        this.portainerDeployOpts = { ...opts, gateways: opts.jumpoints || [] };
         this.portainerRegions = opts.regions || [];
       } catch (e) { /* leave defaults — the select still offers "(current / default)" */ }
     },
