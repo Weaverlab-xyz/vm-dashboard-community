@@ -211,10 +211,16 @@
             <label class="block text-sm font-medium text-gray-700 mb-1">Build Shape</label>
             <select x-model="ociPackerForm.shape" @change="onPackerShapeChange()"
                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-red-500 focus:border-red-500">
+              <option value="">— pick a shape —</option>
               <template x-for="s in (networkOpts.shapes || [])" :key="s.shape">
                 <option :value="s.shape" x-text="s.shape + (s.free_tier ? '  (always-free)' : '')"></option>
               </template>
             </select>
+            <p class="text-xs text-gray-400 mt-1" x-show="packerFreeMicroMissing()" x-cloak>
+              This region offers no <span class="font-mono">VM.Standard.E2.1.Micro</span> — the
+              Always-Free AMD micro only exists in the older regions. The free alternative,
+              <span class="font-mono">VM.Standard.A1.Flex</span>, is Arm and needs an aarch64 base image.
+            </p>
           </div>
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">SSH Username</label>
@@ -790,6 +796,17 @@ function ociDashboard() {
       if ((this.networkOpts.availability_domains || []).length === 1) {
         this.ociPackerForm.availability_domain = this.networkOpts.availability_domains[0];
       }
+      // The default shape is a guess, and a wrong one used to submit silently: the
+      // select has no <option> for a shape this region doesn't offer, so Alpine
+      // rendered an empty box while the model kept 'VM.Standard.E2.1.Micro' and
+      // POSTed it. LaunchInstance answers a shape that isn't there with a 404
+      // NotAuthorizedOrNotFound naming no field, one second into the build. Drop a
+      // default the region can't launch and make the operator pick.
+      const offered = (this.networkOpts.shapes || []).map(s => s.shape);
+      if (offered.length && !offered.includes(this.ociPackerForm.shape)) {
+        this.ociPackerForm.shape = '';
+        this.onPackerShapeChange();
+      }
       if (window.location.hash === '#build') this.activeTab = 'build';
     },
 
@@ -858,6 +875,17 @@ function ociDashboard() {
     // never work here, so it isn't offered.
     packerBuildSubnets() {
       return (this.networkOpts.subnets || []).filter(s => !s.prohibit_public_ip);
+    },
+
+    // The Always-Free AMD micro is region-dependent: it exists in the older OCI
+    // regions and not in the newer ones (us-chicago-1 offers no E2 shape at all).
+    // Blank until the live shape list has loaded, so the hint can't flash on a
+    // page that simply hasn't fetched yet.
+    packerFreeMicroMissing() {
+      const shapes = this.networkOpts.shapes || [];
+      if (!shapes.length) return false;
+      const micro = (this.networkOpts.free_tier || {}).amd_shape || 'VM.Standard.E2.1.Micro';
+      return !shapes.some(s => s.shape === micro);
     },
 
     packerShapeIsFlex() {
@@ -980,6 +1008,7 @@ function ociDashboard() {
       if (!this.ociPackerForm.image_name)      { this.ociPackerError = 'Image name is required.'; return; }
       if (!this.ociPackerForm.base_image_ocid) { this.ociPackerError = 'A base image is required.'; return; }
       if (!this.ociPackerForm.availability_domain) { this.ociPackerError = 'An availability domain is required.'; return; }
+      if (!this.ociPackerForm.shape)            { this.ociPackerError = 'A build shape is required.'; return; }
       this.ociPackerBuilding = true;
       try {
         // OCI rejects a shape_config on a fixed shape and requires one on a Flex

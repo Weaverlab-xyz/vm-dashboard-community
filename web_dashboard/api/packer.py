@@ -23,7 +23,8 @@ from ..models.packer import (
     OCIPackerBuildRequest,
     PackerBuildResponse,
 )
-from ..services import job_service, oci_freetier
+from ..services import job_service, oci_freetier, oci_service
+from ..services.oci_service import OCIError
 from .auth import require_permission
 
 logger = logging.getLogger(__name__)
@@ -167,6 +168,25 @@ async def build_oci_image(
         raise HTTPException(status_code=400, detail="image_name is required.")
     if not req.availability_domain:
         raise HTTPException(status_code=400, detail="availability_domain is required.")
+
+    # ── Placement precheck (hard gate) ────────────────────────────────────────
+    # Runs before the free-tier prompt on purpose: a shape that cannot launch at
+    # all must not be waved through an "acknowledge charges" dialog first. This
+    # catches the shape/region and shape/image mismatches that LaunchInstance
+    # reports only as an unattributed 404 NotAuthorizedOrNotFound — notably the
+    # Always-Free VM.Standard.E2.1.Micro default, which no newer OCI region
+    # offers. Advisory-by-design: it fails open if OCI can't be reached.
+    try:
+        await oci_service.check_launch_placement(
+            availability_domain=req.availability_domain,
+            image_ocid=req.base_image_ocid,
+            shape=req.shape,
+        )
+    except OCIError as exc:
+        raise HTTPException(status_code=400, detail={
+            "code": "shape_not_launchable",
+            "message": str(exc),
+        }) from exc
 
     # ── Free-tier guardrail (warn + confirm) ──────────────────────────────────
     # Same gate as the deploy form, with one difference: a build instance is

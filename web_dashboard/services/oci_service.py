@@ -154,6 +154,88 @@ def _list_shapes_sync(compartment_id: str, availability_domain: str = "") -> lis
     return sorted(seen.values(), key=lambda x: (not x["free_tier"], x["shape"]))
 
 
+def _launchable_shapes_sync(
+    compartment_id: str, availability_domain: str, image_ocid: str,
+) -> list[str]:
+    """Shapes that can actually launch ``image_ocid`` in ``availability_domain``.
+
+    Two independent constraints, and a shape has to clear both:
+
+      • ``list_shapes`` — what this AD offers at all. Shape *families* are not
+        deployed to every region: the Always-Free AMD micro
+        ``VM.Standard.E2.1.Micro`` exists in the older regions and is absent from
+        newer ones (us-chicago-1 offers no E2 shape whatsoever).
+      • ``list_image_shape_compatibility_entries`` — what the image supports.
+        Chiefly an architecture gate: the Ampere ``A1.Flex`` free shape is
+        aarch64, so it never pairs with an x86 platform image, and a current
+        Oracle Linux build drops the oldest x86 generations.
+
+    Neither list alone is enough, and the intersection is frequently much smaller
+    than either — an x86 Oracle Linux 10 image in us-chicago-1 has four usable
+    shapes out of 89 compatible ones, none of them free-tier.
+    """
+    import oci
+    compute = oci.core.ComputeClient(_oci_config())
+    offered = {s.shape for s in oci.pagination.list_call_get_all_results(
+        compute.list_shapes, compartment_id=compartment_id,
+        availability_domain=availability_domain).data}
+    compatible = {e.shape for e in oci.pagination.list_call_get_all_results(
+        compute.list_image_shape_compatibility_entries, image_id=image_ocid).data}
+    return sorted(offered & compatible, key=_shape_sort_key)
+
+
+def _check_launch_placement_sync(
+    *, availability_domain: str, image_ocid: str, shape: str,
+    compartment_id: str = "", region: str = "",
+) -> None:
+    """Raise ``OCIError`` if ``shape`` cannot launch ``image_ocid`` in this AD.
+
+    LaunchInstance answers an absent shape, an incompatible image and a genuine
+    policy denial with the *same* opaque ``404 NotAuthorizedOrNotFound`` — no
+    field named, nothing to act on (see the troubleshooting note in
+    docs/image-management.md). Checking the placement first is what turns that
+    into a sentence naming the shape.
+
+    Fails **open** when the lookup itself errors: a listing call that can't
+    reach OCI is not evidence the placement is wrong, and this must never be the
+    reason a build refuses to start.
+    """
+    try:
+        usable = _launchable_shapes_sync(
+            compartment_id or _compartment(), availability_domain, image_ocid)
+    except Exception as exc:  # noqa: BLE001 — advisory check, never a blocker
+        logger.warning("OCI launch-placement precheck skipped: %s", exc)
+        return
+    if not usable or shape in usable:
+        # An empty intersection means the lookup told us nothing useful (an image
+        # with no compatibility entries, say) — don't reject on that either.
+        return
+
+    where = f"{region or _cfg('oci_region') or 'this region'} ({availability_domain})"
+    hint = ", ".join(usable[:8]) + ("…" if len(usable) > 8 else "")
+    free = [s for s in usable if oci_freetier.is_free_shape(s)]
+    raise OCIError(
+        f"Shape {shape} cannot launch this image in {where} — either the shape "
+        f"isn't offered there or the image doesn't support it. OCI reports both "
+        f"as a bare 404 NotAuthorizedOrNotFound. Usable shapes for this image "
+        f"here: {hint}."
+        + ("" if free else
+           " None of them are Always-Free — in regions with no E2 shape the only"
+           " free compute is Ampere VM.Standard.A1.Flex, which needs an aarch64"
+           " image.")
+    )
+
+
+async def check_launch_placement(
+    *, availability_domain: str, image_ocid: str, shape: str,
+    compartment_id: str = "", region: str = "",
+) -> None:
+    await asyncio.to_thread(
+        lambda: _check_launch_placement_sync(
+            availability_domain=availability_domain, image_ocid=image_ocid,
+            shape=shape, compartment_id=compartment_id, region=region))
+
+
 def _list_subnets_sync(compartment_id: str, vcn_id: str = "") -> list[dict]:
     import oci
     vnet = oci.core.VirtualNetworkClient(_oci_config())
