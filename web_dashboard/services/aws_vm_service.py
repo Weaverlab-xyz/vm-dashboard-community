@@ -489,7 +489,6 @@ async def _run_deploy(
 
         job_service.set_completed(db, job_id, result)
         await cache_service.invalidate(cache_service.key_global("aws_instances"))
-        await cache_service.invalidate(cache_service.key_global("cfgmgmt_instances"))
 
     except AWSError as e:
         job_service.set_failed(db, job_id, str(e))
@@ -682,7 +681,6 @@ async def _run_destroy(destroy_job_id: str, deploy_job_id: str, instance_id: str
 
         job_service.set_completed(db, destroy_job_id, result)
         await cache_service.invalidate(cache_service.key_global("aws_instances"))
-        await cache_service.invalidate(cache_service.key_global("cfgmgmt_instances"))
 
     except AWSError as e:
         job_service.set_failed(db, destroy_job_id, str(e))

@@ -242,6 +242,16 @@ async def _expiry_sweeper_loop() -> None:
 
 # ── Background cache warmers ──────────────────────────────────────────────────
 
+# Every warmer below sources its fetcher AND its cache key from the api module that
+# serves the same key. That is deliberate and load-bearing: a warmer holding its own
+# copy of either one drifts silently. Both failure modes have happened here —
+# a second copy of the AWS instance fetch dropped `region`/`workgroup`/`key_name`
+# and blanked the list for every non-admin on each pass, and the network-options
+# warmers wrote key_global() keys the key_param() readers never look at. Warm what
+# the reader reads, by calling the reader's own code.
+#
+# tests/test_cache_warmer_parity.py pins warmer↔reader agreement.
+
 async def _warm_loop(name: str, fetcher, key_fn, ttl: int) -> None:
     """Fetch → cache → sleep(ttl * 0.8) → repeat forever."""
     interval = int(ttl * 0.8)
@@ -250,6 +260,29 @@ async def _warm_loop(name: str, fetcher, key_fn, ttl: int) -> None:
             data = await fetcher()
             await cache_service.set(key_fn(), data, ttl)
             logger.debug("cache warmed key=%s", key_fn())
+        except Exception as exc:
+            logger.warning("cache warmer %s failed: %s", name, exc)
+        await asyncio.sleep(interval)
+
+
+async def _warm_scoped_loop(name: str, scope_fn, fetcher, key_fn, ttl: int) -> None:
+    """Like _warm_loop, for caches keyed per region/location.
+
+    Resolves the scope ONCE per pass and hands the same value to both the fetcher
+    and the key builder, so the key can never describe a different region than the
+    data stored under it. Re-resolving each pass is the point: the scope comes from
+    config_service, so a Setup-wizard region change is picked up without a restart.
+    """
+    interval = int(ttl * 0.8)
+    while True:
+        try:
+            scope = scope_fn()
+            data = await fetcher(scope)
+            key = key_fn(scope)
+            await cache_service.set(key, data, ttl)
+            logger.debug("cache warmed key=%s", key)
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
             logger.warning("cache warmer %s failed: %s", name, exc)
         await asyncio.sleep(interval)
@@ -283,99 +316,64 @@ async def _warm_cost_summary() -> None:
 
 
 async def _warm_aws_amis() -> None:
-    from .services import aws_service
+    from .api import aws as aws_api
     await _warm_loop(
         "aws_amis",
-        fetcher=lambda: aws_service.list_amis(settings.aws_region),
-        key_fn=lambda: cache_service.key_global("aws_amis"),
-        ttl=cache_service.TTL["aws_amis"],
+        fetcher=aws_api._fetch_amis,
+        key_fn=aws_api.amis_cache_key,
+        ttl=cache_service.TTL[aws_api.CACHE_KEY_AMIS],
     )
 
 
 async def _warm_aws_network_opts() -> None:
+    from .api import aws as aws_api
     from .services import aws_service
-    await _warm_loop(
+    await _warm_scoped_loop(
         "aws_network_opts",
-        fetcher=lambda: aws_service.get_network_options(settings.aws_region),
-        key_fn=lambda: cache_service.key_global("aws_network_opts"),
-        ttl=cache_service.TTL["aws_network_opts"],
+        scope_fn=aws_api._aws_region,
+        fetcher=aws_service.get_network_options,
+        key_fn=aws_api.network_opts_cache_key,
+        ttl=cache_service.TTL[aws_api.CACHE_KEY_NETWORK_OPTS],
     )
 
 
 async def _warm_aws_instances() -> None:
-    from .database import SessionLocal, Job
-    from .services import aws_service
+    from .api import aws as aws_api
+    from .database import SessionLocal
 
     async def _fetch():
         db = SessionLocal()
         try:
-            deploy_jobs = (
-                db.query(Job)
-                .filter(Job.job_type == "ec2_deploy", Job.status == "completed")
-                .all()
-            )
-            instance_ids = [
-                job.metadata_dict.get("instance_id")
-                for job in deploy_jobs
-                if not job.metadata_dict.get("destroyed")
-                and job.metadata_dict.get("instance_id")
-            ]
-            if not instance_ids:
-                return []
-            live = await aws_service.describe_instances(settings.aws_region, instance_ids)
-            job_by_instance = {
-                job.metadata_dict.get("instance_id"): job
-                for job in deploy_jobs
-                if job.metadata_dict.get("instance_id")
-            }
-            result = []
-            for inst in live:
-                iid = inst.get("instance_id")
-                j = job_by_instance.get(iid)
-                result.append({**inst, "job_id": j.id if j else None, "deployed_by": j.created_by if j else None})
-            return result
+            return await aws_api._fetch_instances(db)
         finally:
             db.close()
 
     await _warm_loop(
         "aws_instances",
         fetcher=_fetch,
-        key_fn=lambda: cache_service.key_global("aws_instances"),
-        ttl=cache_service.TTL["aws_instances"],
+        key_fn=aws_api.instances_cache_key,
+        ttl=cache_service.TTL[aws_api.CACHE_KEY_INSTANCES],
     )
 
 
-def _live_cfg(key: str) -> str:
-    """Return the live config_service value, falling back to startup settings."""
-    from .services import config_service
-    return config_service.get(key) or getattr(settings, key, "")
-
-
 async def _warm_azure_images() -> None:
-    from .services import azure_service
+    from .api import azure as azure_api
     await _warm_loop(
         "azure_images",
-        fetcher=lambda: azure_service.list_private_images(
-            _live_cfg("azure_shared_image_gallery"),
-            _live_cfg("azure_gallery_resource_group"),
-            _live_cfg("azure_resource_group"),
-        ),
-        key_fn=lambda: cache_service.key_global("azure_images"),
-        ttl=cache_service.TTL["azure_images"],
+        fetcher=azure_api._fetch_private_images,
+        key_fn=azure_api.images_cache_key,
+        ttl=cache_service.TTL[azure_api.CACHE_KEY_IMAGES],
     )
 
 
 async def _warm_azure_network_opts() -> None:
-    from .services import azure_service
-    await _warm_loop(
+    from .api import azure as azure_api
+    await _warm_scoped_loop(
         "azure_network_opts",
-        fetcher=lambda: azure_service.get_network_options(
-            _live_cfg("azure_location"),
-            _live_cfg("azure_vnet_resource_group"),
-            _live_cfg("azure_resource_group"),
-        ),
-        key_fn=lambda: cache_service.key_global("azure_network_opts"),
-        ttl=cache_service.TTL["azure_network_opts"],
+        scope_fn=azure_api._loc,
+        fetcher=azure_api._fetch_network_options,
+        key_fn=azure_api.network_opts_cache_key,
+        ttl=cache_service.TTL[azure_api.CACHE_KEY_NETWORK_OPTS],
     )
 
 

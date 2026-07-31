@@ -29,17 +29,12 @@ TTL = {
     "aws_network_opts":    600,   # 10 min
     "aws_instances":        60,   # 1 min
     "aws_community":       900,   # 15 min
-    "aws_ssh_key_secrets": 300,   # 5 min
     "aws_db_options":      600,   # 10 min — RDS subnet groups + SGs for the DB provision form
     "k8s_provision_opts":  600,   # 10 min — VPC subnets for the k8s provision form (AWS only)
-    # Config management
-    "cfgmgmt_instances":    60,   # 1 min
-    "cfgmgmt_s3status":    120,   # 2 min
     # Azure / azure-sdk-backed
     "azure_images":        300,   # 5 min
     "azure_network_opts":  600,   # 10 min
     "azure_vms":            60,   # 1 min
-    "azure_marketplace":   900,   # 15 min
     # Portainer (proxied via Hybrid Worker in cloud mode)
     "portainer_endpoints": 300,   # 5 min
     "portainer_containers": 60,   # 1 min
