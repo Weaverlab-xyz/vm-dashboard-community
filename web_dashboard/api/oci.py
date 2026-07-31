@@ -63,6 +63,23 @@ def _configured() -> bool:
                 and _oci_cfg("oci_private_key"))
 
 
+def _cache_key(name: str, compartment: str = "") -> str:
+    """Cache key scoped to the region + compartment the SDK call actually used.
+
+    Every OCID these endpoints hand back — image, subnet, instance — is local to
+    one region and compartment. Under the previous ``key_global`` key the payload
+    survived a Setup → OCI region or compartment change for the whole TTL, so the
+    deploy form kept offering the *previous* region's OCIDs; LaunchInstance then
+    rejects them as an opaque ``404 NotAuthorizedOrNotFound`` that names neither
+    region. Keying on both dimensions makes the change self-healing: new region,
+    new key, guaranteed miss. Matches the per-region keying the other clouds
+    already use (``aws_network_opts``, ``azure_network_opts``, ``gcp_network_opts``).
+
+    Blank ``compartment`` → the configured one; callers that already resolved it
+    pass it in so the key always describes the data actually stored.
+    """
+    return cache_service.key_param(name, region=_region(),
+                                   compartment=compartment or _compartment())
 
 
 def _validate_workgroup(db: Session, user: User, workgroup: str) -> str:
@@ -118,16 +135,19 @@ def _existing_freetier_usage(db: Session, exclude_job_id: str = "") -> dict:
 
 @router.get("/images", response_model=OCIImageListResponse)
 async def list_images(
+    bust: bool = Query(False),
     current_user: User = Depends(require_permission("oci", "read")),
 ):
-    """List platform (Oracle-provided) + custom images in the configured compartment."""
+    """List platform (Oracle-provided) + custom images in the configured compartment.
+    Cached 5 min per region+compartment; ``?bust=true`` forces a re-read."""
     if not _configured():
         raise HTTPException(status_code=400, detail="OCI not configured — run the setup wizard.")
     compartment = _compartment()
-    cache_key = cache_service.key_global("oci_images")
-    cached = await cache_service.get(cache_key)
-    if cached:
-        return cached["data"]
+    cache_key = _cache_key("oci_images", compartment)
+    if not bust:
+        cached = await cache_service.get(cache_key)
+        if cached:
+            return cached["data"]
     try:
         images = await oci_service.list_images(compartment)
     except oci_service.OCIError as exc:
@@ -146,7 +166,7 @@ async def network_options(
     catalog for the configured compartment/VCN."""
     if not _configured():
         raise HTTPException(status_code=400, detail="OCI not configured — run the setup wizard.")
-    cache_key = cache_service.key_global("oci_network_opts")
+    cache_key = _cache_key("oci_network_opts")
     if not bust:
         cached = await cache_service.get(cache_key)
         if cached:
@@ -190,7 +210,7 @@ async def _build_oci_instances(db, compartment: str) -> list:
         inst["deployed_by"] = meta.get("deployed_by")
         inst["workgroup"] = meta.get("workgroup") or inst.get("workgroup")
     full = OCIInstanceListResponse(instances=instances, compartment_ocid=compartment, region=_region())
-    await cache_service.set(cache_service.key_global("oci_instances"), full.model_dump(), ttl=60)
+    await cache_service.set(_cache_key("oci_instances", compartment), full.model_dump(), ttl=60)
     return instances
 
 
@@ -209,7 +229,7 @@ async def list_instances(
     if workgroup is not None and accessible is not None and workgroup.lower() not in accessible:
         raise HTTPException(status_code=403, detail=f"No access to workgroup '{workgroup.lower()}'")
 
-    cache_key = cache_service.key_global("oci_instances")
+    cache_key = _cache_key("oci_instances")
     if not bust:
         cached = await cache_service.get(cache_key)
         if cached:
@@ -256,7 +276,7 @@ async def oci_dashboard_stats(
     except oci_service.OCIError:
         pass
     try:
-        cached = await cache_service.get(cache_service.key_global("oci_images"))
+        cached = await cache_service.get(_cache_key("oci_images"))
         imgs = (cached.get("data") or {}).get("images") if cached else await oci_service.list_images(_compartment())
         custom = [i for i in (imgs or []) if i.get("source") == "custom"]
         out["images"] = {"total": len(custom)}

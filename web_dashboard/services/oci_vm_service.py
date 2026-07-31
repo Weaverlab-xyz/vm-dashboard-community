@@ -177,7 +177,11 @@ async def _run_deploy(job_id: str, payload: OCIDeployRequest, compartment: str,
                                       result=final_meta, tag="OCI", ssh_key_secret=secret)
 
         job_service.set_completed(db, job_id, final_meta)
-        await cache_service.invalidate(cache_service.key_global("oci_instances"))
+        # Prefix, not an exact key: the instance list is cached per region+compartment
+        # (api/oci._cache_key), and this runner has no request context to rebuild the
+        # one key with. Dropping every region's entry is also the correct blast radius
+        # — a deploy/terminate changes the inventory whichever region it landed in.
+        await cache_service.invalidate_prefix("oci_instances")
     except Exception as exc:
         logger.error("OCI deploy failed for job %s: %s", job_id, exc)
         job_service.set_failed(db, job_id, str(exc))
@@ -252,7 +256,11 @@ async def _run_destroy(job_id: str, instance_ocid: str, deploy_job_id: Optional[
                 job_service.set_completed(db, deploy_job_id, deploy_meta)
 
         job_service.set_completed(db, job_id, result)
-        await cache_service.invalidate(cache_service.key_global("oci_instances"))
+        # Prefix, not an exact key: the instance list is cached per region+compartment
+        # (api/oci._cache_key), and this runner has no request context to rebuild the
+        # one key with. Dropping every region's entry is also the correct blast radius
+        # — a deploy/terminate changes the inventory whichever region it landed in.
+        await cache_service.invalidate_prefix("oci_instances")
     except Exception as exc:
         logger.error("OCI destroy failed for job %s: %s", job_id, exc)
         job_service.set_failed(db, job_id, str(exc))
