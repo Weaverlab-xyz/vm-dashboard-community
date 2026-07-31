@@ -236,6 +236,40 @@ async def check_launch_placement(
             shape=shape, compartment_id=compartment_id, region=region))
 
 
+def _launchable_shape_rows_sync(compartment_id: str, availability_domain: str = "",
+                                image_ocid: str = "") -> list[dict]:
+    """``_list_shapes_sync`` rows, narrowed to what ``image_ocid`` can boot here.
+
+    The picker's counterpart to ``_check_launch_placement_sync``: that one gates a
+    submitted shape, this one keeps the unusable shapes out of the dropdown to
+    begin with. Both narrow through ``_launchable_shapes_sync``, deliberately —
+    a form that filters on a different rule than the gate enforces ends up either
+    hiding a shape the API would accept or offering one it rejects.
+
+    Returns rows (name + ocpus/memory/is_flexible/free_tier) rather than
+    ``_launchable_shapes_sync``'s bare names, because the form renders the
+    free-tier flag and switches its OCPU/memory inputs on ``is_flexible``.
+
+    Fails **open** on the same two conditions the gate does — a lookup error, and
+    an empty intersection (an image declaring no compatibility entries is
+    indistinguishable from one matching nothing) — so the picker never offers less
+    than the gate would accept, and an unreadable compatibility list degrades to
+    the plain AD list instead of an empty dropdown.
+    """
+    shapes = _list_shapes_sync(compartment_id, availability_domain)
+    if not shapes or not image_ocid or not availability_domain:
+        return shapes
+    try:
+        usable = set(_launchable_shapes_sync(compartment_id, availability_domain, image_ocid))
+    except Exception as exc:  # noqa: BLE001 — advisory narrowing, never a blocker
+        logger.warning("OCI image/shape compatibility lookup failed for %s; offering "
+                       "the unnarrowed AD list: %s", image_ocid, exc)
+        return shapes
+    if not usable:
+        return shapes
+    return [s for s in shapes if s["shape"] in usable]
+
+
 def _list_subnets_sync(compartment_id: str, vcn_id: str = "") -> list[dict]:
     import oci
     vnet = oci.core.VirtualNetworkClient(_oci_config())
@@ -257,15 +291,23 @@ def _list_subnets_sync(compartment_id: str, vcn_id: str = "") -> list[dict]:
     return subnets
 
 
-def _get_network_options_sync(compartment_id: str, vcn_id: str) -> dict:
+def _get_network_options_sync(compartment_id: str, vcn_id: str,
+                              availability_domain: str = "",
+                              image_ocid: str = "") -> dict:
     ads: list[str] = []
     try:
         ads = _list_availability_domains_sync(compartment_id)
     except Exception as exc:
         logger.warning("OCI list_availability_domains failed: %s", exc)
 
+    # A shape list is only meaningful for ONE availability domain, so it has to
+    # follow the AD the caller is actually deploying into — pinning it to ads[0]
+    # while the form lets the operator pick AD-2 offers shapes that may not exist
+    # there. Blank falls back to the first AD, which is also what a blank
+    # availability_domain resolves to at launch time, so the two agree.
+    scope_ad = availability_domain or (ads[0] if ads else "")
     try:
-        shapes = _list_shapes_sync(compartment_id, ads[0] if ads else "")
+        shapes = _launchable_shape_rows_sync(compartment_id, scope_ad, image_ocid)
     except Exception as exc:
         logger.warning("OCI list_shapes failed: %s", exc)
         shapes = []
@@ -284,12 +326,19 @@ def _get_network_options_sync(compartment_id: str, vcn_id: str) -> dict:
         "compartment_ocid": compartment_id,
         "ssh_key_configured": bool(_cfg("oci_ssh_key_secret")),
         "free_tier":      oci_freetier.free_tier_catalog(),
+        # Echo the scope the shape list was resolved for. A caller that sent a
+        # blank AD can only tell which one it actually got by being told.
+        "availability_domain": scope_ad,
+        "image_ocid":     image_ocid,
     }
 
 
-async def get_network_options(compartment_id: str = "", vcn_id: str = "") -> dict:
+async def get_network_options(compartment_id: str = "", vcn_id: str = "",
+                              availability_domain: str = "",
+                              image_ocid: str = "") -> dict:
     return await asyncio.to_thread(
-        _get_network_options_sync, compartment_id or _compartment(), vcn_id or _cfg("oci_vcn_ocid"))
+        _get_network_options_sync, compartment_id or _compartment(), vcn_id or _cfg("oci_vcn_ocid"),
+        availability_domain, image_ocid)
 
 
 async def list_availability_domains(compartment_id: str = "") -> list[str]:

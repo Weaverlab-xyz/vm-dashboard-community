@@ -63,7 +63,7 @@ def _configured() -> bool:
                 and _oci_cfg("oci_private_key"))
 
 
-def _cache_key(name: str, compartment: str = "") -> str:
+def _cache_key(name: str, compartment: str = "", **extra) -> str:
     """Cache key scoped to the region + compartment the SDK call actually used.
 
     Every OCID these endpoints hand back — image, subnet, instance — is local to
@@ -77,9 +77,15 @@ def _cache_key(name: str, compartment: str = "") -> str:
 
     Blank ``compartment`` → the configured one; callers that already resolved it
     pass it in so the key always describes the data actually stored.
+
+    ``**extra`` adds further scope dimensions for endpoints whose payload varies
+    within one region+compartment — /network-options is per availability domain and
+    per image, since OCI offers different shapes in different ADs and an image boots
+    only on the shapes it supports. Region and compartment are always in the key, so
+    an extra dimension narrows it and can never replace them.
     """
     return cache_service.key_param(name, region=_region(),
-                                   compartment=compartment or _compartment())
+                                   compartment=compartment or _compartment(), **extra)
 
 
 def _validate_workgroup(db: Session, user: User, workgroup: str) -> str:
@@ -159,20 +165,34 @@ async def list_images(
 
 @router.get("/network-options", response_model=OCINetworkOptions)
 async def network_options(
+    availability_domain: str = Query(
+        "", description="Scope the shape list to this AD (blank → the first AD, which "
+                        "is also what a blank AD resolves to at launch time). OCI does "
+                        "not offer every shape in every AD of a region."),
+    image_ocid: str = Query(
+        "", description="Narrow the shape list to the shapes this image can boot on "
+                        "(an Ampere shape can be offered in the AD yet refuse an "
+                        "x86_64 image). Ignored when compatibility can't be read."),
     bust: bool = Query(False),
     current_user: User = Depends(require_permission("oci", "read")),
 ):
     """Availability domains, shapes (free-tier flagged), subnets, and the free-tier
-    catalog for the configured compartment/VCN."""
+    catalog for the configured compartment/VCN.
+
+    `shapes` is scoped to `availability_domain` and `image_ocid`; the cache key is
+    scoped the same way, so switching AD on the form can't be served a list built
+    for a different one."""
     if not _configured():
         raise HTTPException(status_code=400, detail="OCI not configured — run the setup wizard.")
-    cache_key = _cache_key("oci_network_opts")
+    cache_key = _cache_key("oci_network_opts",
+                           ad=availability_domain, image=image_ocid)
     if not bust:
         cached = await cache_service.get(cache_key)
         if cached:
             return cached["data"]
     try:
-        opts = await oci_service.get_network_options(_compartment(), _oci_cfg("oci_vcn_ocid"))
+        opts = await oci_service.get_network_options(
+            _compartment(), _oci_cfg("oci_vcn_ocid"), availability_domain, image_ocid)
     except oci_service.OCIError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     from datetime import datetime, timezone

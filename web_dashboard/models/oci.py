@@ -50,6 +50,9 @@ class OCISubnetInfo(BaseModel):
 
 class OCINetworkOptions(BaseModel):
     availability_domains: List[str] = []
+    # AD-scoped, and image-scoped when image_ocid was supplied — see
+    # oci_service._launchable_shapes_sync. Read it together with the two echo
+    # fields below; the same compartment yields different lists per scope.
     shapes: List[OCIShapeInfo] = []
     subnets: List[OCISubnetInfo] = []
     region: str = ""
@@ -57,6 +60,10 @@ class OCINetworkOptions(BaseModel):
     ssh_key_configured: bool = False
     free_tier: dict = {}          # services.oci_freetier.free_tier_catalog()
     cached_at: Optional[str] = None
+    # The scope `shapes` was resolved for. A request with a blank availability
+    # domain gets the first one, and has no other way to learn which that was.
+    availability_domain: str = ""
+    image_ocid: str = ""
 
 
 class OCIDeployRequest(BaseModel):
