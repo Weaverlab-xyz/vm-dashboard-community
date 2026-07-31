@@ -187,6 +187,29 @@ def revoke_agent(db: Session, agent: RemoteAgent) -> int:
     return len(held)
 
 
+def delete_agent(db: Session, agent: RemoteAgent) -> int:
+    """Permanently remove a revoked agent's row. Returns how many jobs were orphaned.
+
+    Callers must have revoked it first — the API enforces that, not this function, so a
+    test can still exercise the deletion path directly.
+
+    The `Job.agent_id` foreign key is ``ondelete="SET NULL"``, but SQLite does not
+    enforce foreign keys unless `PRAGMA foreign_keys=ON` is set per connection, and
+    nothing here sets it. So the null-out is done explicitly rather than relied upon:
+    otherwise the jobs would keep pointing at an id that no longer exists, and the next
+    lease query joining on it would quietly return nothing on SQLite while working on
+    PostgreSQL — the worst kind of difference between dev and prod.
+    """
+    orphaned = (
+        db.query(Job)
+        .filter(Job.agent_id == agent.id)
+        .update({Job.agent_id: None}, synchronize_session=False)
+    )
+    db.delete(agent)
+    db.commit()
+    return orphaned
+
+
 def status_of(agent: RemoteAgent, *, now: Optional[datetime] = None) -> str:
     """Derived, never stored — a stored status is how a row still reads 'online' three
     weeks after the container died."""

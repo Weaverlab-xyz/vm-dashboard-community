@@ -2810,6 +2810,42 @@
       </template>
 
       <!-- ── XCP-ng / XenServer ── -->
+      <template x-if="panel?.key === 'remote_agents' && !panelLoading">
+        <div class="space-y-4">
+          <p class="text-sm text-gray-500">
+            Containerised agents run <strong>inside a private network</strong> and poll out to
+            this dashboard for work, so on-premises Kubernetes clusters and databases can be
+            discovered without opening any inbound firewall rule. Register and revoke them on the
+            <a href="/agents" class="underline text-blue-600">Agents</a> page.
+          </p>
+
+          <div class="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2">
+            <p class="text-xs text-amber-800">
+              This publishes <code class="font-mono">/api/agent</code> for agents to reach —
+              the only API here that serves callers outside your own network.
+              <strong>Terminate TLS in front of the dashboard first.</strong> Signing gives the
+              agent protocol integrity and replay protection, not confidentiality; see
+              <a href="/docs/remote-agents.md" class="underline">the remote agent docs</a> and
+              <code class="font-mono">docker-compose.agent.yml</code>.
+            </p>
+          </div>
+
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Public base URL</label>
+            <input type="text" x-model="panelCfg.public_base_url"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                   placeholder="https://agents.example.com">
+            <p class="text-[11px] text-gray-400 mt-1">
+              The origin agents reach you on. Leave blank only if nothing sits in front of the
+              dashboard — behind a reverse proxy the signing audience would otherwise be derived
+              from the request scheme, and an audience pinned as
+              <code class="font-mono">http://</code> makes every agent fail authentication in a
+              way that looks exactly like a revoked agent. Also fixes the OAuth callback URIs.
+            </p>
+          </div>
+        </div>
+      </template>
+
       <template x-if="panel?.key === 'xcpng' && !panelLoading">
         <div class="space-y-4">
           <p class="text-sm text-gray-500">
@@ -3574,6 +3610,8 @@ function settingsPage() {
         desc: 'Provision private managed databases (PostgreSQL, MySQL, SQL Server) on AWS, Azure and GCP, or register ones you already run — on-premises or in a cloud. PRA tunnel for the private ones.' },
       { key: 'k8s_management', label: 'Kubernetes',             hasConfig: true,  enabled: false,
         desc: 'Provision (EKS/AKS/GKE), register, and broker Kubernetes clusters — PRA tunnels + Entitle real-identity JIT.' },
+      { key: 'remote_agents', label: 'Remote Agents',           hasConfig: true,  enabled: false,
+        desc: 'Containerised agents inside private networks that poll out to this dashboard to discover on-premises Kubernetes clusters and databases. No inbound firewall rules. Adds an Agents page for registering and revoking them. Terminate TLS in front of the dashboard before enabling — this is the only API that serves callers outside your own network.' },
       { key: 'multi_region', label: 'Multi-region',            hasConfig: true,  enabled: true, configOnly: true,
         desc: 'Per-region resource config sets for AWS, GCP and Azure — subnets, security groups, SSH secrets, networks. Blank fields fall back to the flat defaults.' },
       { key: 'oidc',         label: 'Single sign-on (OIDC)',   hasConfig: true,  enabled: true, configOnly: true,
@@ -3810,7 +3848,7 @@ function settingsPage() {
 
         const features = await API.get('/api/features');
         const map = {
-          chat: features.chat, vmware: features.vmware,
+          vmware: features.vmware,
           beyondtrust: features.beyondtrust, portainer: features.portainer,
           ansible: features.ansible, entitle: features.entitle,
           proxmox: features.proxmox,
@@ -3823,6 +3861,11 @@ function settingsPage() {
           resource_expiry: features.resource_expiry,
           cloud_database: features.cloud_database,
           k8s_management: features.k8s_management,
+          // Miss an entry here and the toggle renders permanently OFF however the flag
+          // is really set — silent, because nothing errors. Notifications was missing
+          // one until now. Pinned by tests/test_settings_integrations.py.
+          notifications: features.notifications,
+          remote_agents: features.remote_agents,
         };
         for (const intg of this.integrations) {
           intg.enabled = !!map[intg.key];

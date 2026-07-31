@@ -520,6 +520,84 @@ def test_the_listing_derives_status_and_never_leaks_key_material():
         assert leaky not in row, f"the listing exposes {leaky}"
 
 
+def test_the_listing_carries_the_signals_needed_to_judge_an_agent():
+    """The console renders these to answer 'did I register this, and where is it?'.
+    They were all returned but unrendered; a field dropped here goes silently blank in
+    the UI rather than erroring."""
+    agent_id, private = _ready()
+    _signed(private, agent_id, "POST", "/api/agent/lease", {})
+    row = next(r for r in CLIENT.get("/api/agent").json()["agents"] if r["id"] == agent_id)
+    for field in ("created_by", "created_at", "enrolled_at", "last_seen_ip",
+                  "policy_hash", "id"):
+        assert field in row, f"the listing no longer returns {field}"
+    assert row["created_by"] == "tester"
+    assert row["policy_hash"] == "a" * 64      # what _enroll reports
+
+
+# ── removing a revoked record ─────────────────────────────────────────────────
+
+def test_a_live_agent_record_cannot_be_removed():
+    """Removal must not be the first action available on a working agent — revoking is
+    what settles its in-flight jobs, and deleting the row first would leave one running
+    with nothing to reconcile it."""
+    agent_id, _private = _ready()
+    resp = CLIENT.delete(f"/api/agent/{agent_id}/record")
+    assert resp.status_code == 409
+    assert "revoke" in resp.json()["detail"].lower()
+
+
+def test_removing_a_revoked_record_frees_the_name():
+    """The reason this endpoint exists. create_agent enforces name uniqueness across
+    ALL rows, so before this a revoked agent squatted its name permanently."""
+    name = f"squatter-{uuid.uuid4().hex[:8]}"
+    agent_id, code = _register(name)
+    _enroll(code)
+
+    # Same name is refused while the row exists, revoked or not.
+    assert CLIENT.delete(f"/api/agent/{agent_id}").status_code == 200
+    assert CLIENT.post("/api/agent", json={"name": name}).status_code == 400
+
+    assert CLIENT.delete(f"/api/agent/{agent_id}/record").status_code == 200
+    assert CLIENT.post("/api/agent", json={"name": name}).status_code == 201, \
+        "the name should be reusable once the record is gone"
+
+
+def test_removing_a_record_keeps_the_job_history():
+    """Deleting the agent must not take its jobs with it — the logs and results are the
+    record of what it did, and that is exactly what you want after removing one you
+    were suspicious of."""
+    agent_id, private = _ready()
+    job_id = _queue_job(agent_id)
+    _signed(private, agent_id, "POST", "/api/agent/lease", {})
+    _signed(private, agent_id, "POST", f"/api/agent/jobs/{job_id}/logs",
+            {"lines": ["something it did"]})
+
+    CLIENT.delete(f"/api/agent/{agent_id}")
+    assert CLIENT.delete(f"/api/agent/{agent_id}/record").status_code == 200
+
+    job = _job(job_id)
+    assert job is not None, "the job row must survive the agent's deletion"
+    assert job.agent_id is None, "and must no longer point at a row that is gone"
+    db = SessionLocal()
+    try:
+        lines = [line for _seq, line in job_service.get_job_logs(db, job_id)]
+    finally:
+        db.close()
+    assert "something it did" in lines
+
+
+def test_the_record_route_is_not_swallowed_by_the_agent_id_route():
+    """`DELETE /{agent_id}` is declared first. A path param matches one segment, so
+    /{id}/record must still reach its own handler — a 404 here would mean the route
+    ordering silently broke."""
+    agent_id, _private = _ready()
+    assert CLIENT.delete(f"/api/agent/{agent_id}/record").status_code == 409  # not 404
+
+
+def test_removing_an_unknown_record_is_a_404():
+    assert CLIENT.delete(f"/api/agent/{uuid.uuid4()}/record").status_code == 404
+
+
 def test_discovery_is_refused_for_an_offline_agent():
     """Queuing work for a dead agent would silently sit there; saying so is kinder."""
     agent_id, _code = _register()

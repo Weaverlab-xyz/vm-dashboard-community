@@ -569,6 +569,10 @@ def _feature_flags() -> dict:
         # "expiring soon" warning. Deletion has its own second gate
         # (resource_expiry_enforce), read server-side only.
         "resource_expiry_enabled": config_service.get_bool("resource_expiry_enabled", settings.resource_expiry_enabled),
+        # Was missing, so Settings → Integrations rendered the Notifications toggle
+        # permanently off: the switch saved fine, but its initial state is read from
+        # /api/features and this key never reached it.
+        "notifications_enabled": config_service.get_bool("notifications_enabled", settings.notifications_enabled),
         # Entitle user-JIT Phase 4 UI affordances — surfaces the
         # "Request access" nav link + portal URL when both are configured.
         "entitle_user_jit_enabled":   config_service.get_bool("entitle_user_jit_enabled", settings.entitle_user_jit_enabled),
@@ -1097,6 +1101,8 @@ async def features():
         "cloud_database": flags["cloud_database_enabled"],
         "k8s_management": flags["k8s_management_enabled"],
         "resource_expiry": flags["resource_expiry_enabled"],
+        "remote_agents": flags["remote_agents_enabled"],
+        "notifications": flags["notifications_enabled"],
     }
 
 

@@ -544,6 +544,22 @@ def import_config(payload: HeadlessImport, request: Request, background_tasks: B
 class VMwareFeatureConfig(BaseModel):
     enabled: bool = False
 
+class RemoteAgentsFeatureConfig(BaseModel):
+    """Remote on-prem agents.
+
+    ``public_base_url`` lives on this panel rather than somewhere more general because
+    it is the single most common way an agent deployment breaks. The signing audience is
+    pinned from it, and an audience pinned as ``http://`` makes every agent 401 in a way
+    that looks exactly like a revoked agent — see docs/remote-agents.md. The operator
+    turning this feature on is the operator who needs to set it.
+
+    Both fields are bool/str on purpose: an unset *int* field reads back as ``""`` from
+    config_service and then fails model validation on save, 422-ing the whole panel.
+    tests/test_setup_feature_roundtrip.py exists because of that.
+    """
+    enabled: bool = False
+    public_base_url: str = ""
+
 class BeyondTrustFeatureConfig(BaseModel):
     enabled: bool = False
     pscli_api_url: str = ""
@@ -1106,6 +1122,10 @@ class NotificationsFeatureConfig(BaseModel):
 
 _FEATURE_MODELS = {
     "vmware":       VMwareFeatureConfig,
+    # Keyed "remote_agents" so _feature_to_cfg_key derives the EXISTING flag name
+    # `remote_agents_enabled` with no special-casing. Renaming this key would silently
+    # start writing a different config key and the toggle would stop doing anything.
+    "remote_agents": RemoteAgentsFeatureConfig,
     "beyondtrust":  BeyondTrustFeatureConfig,
     "portainer":    PortainerFeatureConfig,
     "ansible":      AnsibleFeatureConfig,

@@ -169,7 +169,7 @@ runner stays one-shot; only the thing that launches it moved.
 |---|---|
 | TLS in front of the dashboard | Not optional. Signing gives integrity, not confidentiality. Use `docker-compose.agent.yml`. |
 | A hostname agents can resolve | Pinned as the signing *audience* on first use. Changing it later means re-enrolling. |
-| `remote_agents_enabled` | Setup wizard, or Settings. Off by default. |
+| `remote_agents_enabled` | **Settings → Integrations → Remote Agents**, or the setup wizard. Off by default — the nav link and the whole `/api/agent` router are hidden until you turn it on. |
 | Docker on the agent host | Or any OCI runtime. ~80 MB image, no privileges. |
 | Outbound 443 from the agent | One FQDN. Nothing else. |
 
@@ -253,7 +253,33 @@ file owned by your host user is *not*, and the agent says so and exits rather th
 mysteriously. A single-use secret with a fifteen-minute lifetime in a directory you chose
 is an acceptable trade for that; a long-lived one would not be.
 
-### 4. Discover
+### 4. Keep an eye on who is enrolled
+
+The agents table answers "is this one mine?" without leaving the page:
+
+| Column | What it tells you |
+|---|---|
+| **Registered by** | The admin who created the row. Highlighted amber when it was not you — nothing can appear here that an admin did not deliberately register, so an unfamiliar name means *another operator*, not an intruder. |
+| **Source IP** | Where the container is actually polling from. An address you do not recognise is the clearest signal to look closer. |
+| **Status** | Derived from the last poll, never stored. `enrolling` means a code was issued but never redeemed. |
+
+Expand a row for the agent id, when it was registered and enrolled, and its
+**policy hash** — the sha256 of the `policy.yaml` on the agent host, self-reported on
+every poll. The dashboard cannot change it, so a value that moves means the file was
+edited on the host. That is the only signal you get that a compromised agent rewrote its
+own allow-list.
+
+**Revoke** stops an agent immediately: its key is cleared, its running job is failed and
+its queued ones are cancelled, and no revoked agent can ever come back. The row stays, so
+the history of what it did stays with it.
+
+Once revoked, **Remove** deletes the row. Its only purpose is to free the name —
+registration enforces uniqueness across every row, so a revoked `lab-dc1` would otherwise
+squat that name forever. Job history survives the deletion; those jobs simply stop naming
+an agent, and the audit log records agents by name so it is untouched. Revoked rows are
+hidden by default; untick **Hide revoked** to see them.
+
+### 5. Discover
 
 **Discover** on an online agent, pick what to look for, optionally narrow the networks.
 The job page streams findings as they arrive.
@@ -272,7 +298,7 @@ Discovery is unauthenticated probing, always:
 **No probe ever attempts a login.** Authenticated probing of unknown hosts locks out
 service accounts and reads like credential spraying in a customer's SIEM.
 
-### 5. Register the findings
+### 6. Register the findings
 
 Findings are **never auto-registered**, and that is not a limitation — it is infeasible
 by construction. `register_cluster` needs a full kubeconfig; `register_database` needs
@@ -358,7 +384,9 @@ an objection into a demonstration.
 | `DASHBOARD_URL is http://` and it exits 2 | The agent will not sign over plaintext. Terminate TLS, or `AGENT_INSECURE_TLS=1` for a throwaway lab. |
 | `the dashboard rejected this agent's signature` | Revoked, re-enrolled elsewhere, or the dashboard URL changed (the audience is pinned). Issue a fresh code. |
 | Enrolment returns 400 | The code is single-use and expires in 15 minutes. Issue another. |
-| Enrolment returns 404 | `remote_agents_enabled` is off. |
+| Enrolment returns 404 | `remote_agents_enabled` is off. Settings → Integrations → Remote Agents. |
+| No **Agents** link in the nav | Same flag. It gates the nav entry as well as the router, and the link is admin-only on top of that. |
+| `/agents` says "Remote agents are not enabled" | Same again — the page itself is not gated, so it loads and then tells you which switch to flip. |
 | Enrolment returns 429, and the container exits 2 | Too many *failed* enrolments recently from this address. Nothing is wrong with this agent; the restart policy retries after `Retry-After`. |
 | `the dashboard asked us to slow down` | Over the per-agent cap. Expected during a burst, and it recovers on its own. If an ordinary scan trips it, raise `agent_max_requests_per_minute` — see [Rate limits](#rate-limits). |
 | `AGENT_ENROLLMENT_CODE_FILE … cannot be read` | The container runs as uid 10001; a mode 0600 file owned by your host user is unreadable inside it. Make it world-readable or use the environment variable. |
