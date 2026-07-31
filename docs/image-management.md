@@ -136,7 +136,9 @@ The build form fills its shape list live and drops a default the region
 can't launch, and both the API route and the job runner precheck the
 placement before Packer starts
 (`oci_service.check_launch_placement`) — so cases 1 and 2 now fail
-with a message naming the shape and listing what would work. That
+with a message naming the shape and listing what would work. The two
+OCI *deploy* endpoints run the same check for the same reason — see the
+`shape_not_launchable` entry in [cloud-vms.md](cloud-vms.md). That
 precheck deliberately **fails open**: if the lookup itself can't reach
 OCI, the build proceeds. So a bare 404 that survives all of the above
 is most likely case 3 — check the policies on the compartment holding

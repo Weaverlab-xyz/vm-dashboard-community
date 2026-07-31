@@ -259,17 +259,22 @@ user + API keypair, and (best-effort) a KMS vault SSH-keypair secret.
 > so a **Count** that would exceed the envelope trips it even when each VM is individually
 > free — three free micros is one more than the tier allows. Changing the count clears any
 > acknowledgment you had already ticked. (4) **SDK-only** (no Terraform VM module),
-> Linux-only, no per-region config sets. (5) **The shape list is scoped to the availability
-> domain and the image** — OCI does not offer every shape in every AD of a region, and an
-> image boots only on the shapes it was built for, so changing either refetches the picker
-> (deploy form and Packer build form both). A shape the new scope no longer offers is
-> **cleared**, not substituted, and the form says why; pick one from the narrowed list. It
-> narrows through the same lookup as `oci_service.check_launch_placement`, so the picker never
-> offers a shape that gate would refuse. **But that gate only runs on the Packer build path**
-> (`api/packer.py`, `packer_build_service.py`) — `/api/oci/deploy` and `/api/oci/bulk-deploy`
-> do **not** precheck placement, so on those two the picker is the only guard and an API
-> client bypassing the form still gets the bare `404 NotAuthorizedOrNotFound`. The bulk modal's
-> shape list is not scoped at all (no AD picker; one shared shape across N images).
+> Linux-only, no per-region config sets. (5) **The shape has to exist in your availability
+> domain and the image has to support it** — OCI does not offer every shape in every AD of a
+> region (the free AMD micro `VM.Standard.E2.1.Micro` exists only in the older ones;
+> `us-chicago-1` offers no E2 shape at all), and an image boots only on the shapes it was
+> built for (the other free shape, `A1.Flex`, is Ampere — it needs an `aarch64` image). So
+> the shape list is **scoped to the AD and the image**, and changing either refetches the
+> picker (deploy form and Packer build form both); a shape the new scope no longer offers is
+> **cleared**, not substituted, and the form says why. The picker narrows through the same
+> lookup as `oci_service.check_launch_placement`, and **every entry point gates on that
+> lookup too** — the Packer build route and runner, plus `/api/oci/deploy` and
+> `/api/oci/bulk-deploy` — so an unlaunchable pairing is refused with HTTP 400
+> `shape_not_launchable`, naming the shape and listing what would work, instead of becoming
+> a bare `404 NotAuthorizedOrNotFound` a second into the job. That gate is what covers the
+> paths the picker doesn't: an API client bypassing the form, and the bulk modal, whose list
+> is not scoped at all (no AD picker; one shared shape across N images) — there **every**
+> selected image is checked against the shared shape before anything is created.
 
 ---
 
@@ -354,17 +359,32 @@ in [image-management.md](image-management.md).
 - **OCI deploy rejected (HTTP 400)** — a non-free-tier shape without `acknowledge_charges`;
   tick the acknowledge box or pick a free-tier shape. With a **Count**, the whole batch is
   measured against the envelope, so this can fire on a shape that is free on its own.
+- **OCI deploy rejected (HTTP 400, `shape_not_launchable`)** — the shape can't launch that
+  image in that availability domain: either the AD doesn't offer the shape, or the image
+  doesn't support it (architecture, usually). The message lists the shapes that *do* work
+  for that image there — pick one. `LaunchInstance` reports both cases, and a genuine IAM
+  denial, as the same unattributed `404 NotAuthorizedOrNotFound` about a second into the
+  job, which is why this is checked up front instead. It applies to `POST /api/oci/deploy`
+  (including its `count` fan-out) and to `POST /api/oci/bulk-deploy`, where the shape is
+  shared but **every** selected image is checked — one bad image rejects the whole
+  selection and creates nothing, like a name collision does. A blank `availability_domain`
+  is checked against the AD the deploy would actually use (the first one). Reaching this
+  from the deploy form means the picker fell open (see the empty-picker entry below); from
+  an API client it needs no picker at all. The check deliberately **fails open**: if the
+  lookup can't reach OCI the deploy proceeds, so a bare 404 that survives it is most likely
+  the IAM case — check the policies on the compartment holding the subnet and the image.
 - **OCI Shape reset itself to “— pick a shape —”** — expected: the shape list is scoped to
   the selected availability domain and image, and the one you had isn't offered in the new
   scope. The note under the picker names it. Choose from the narrowed list; the form won't
-  submit until you do.
+  submit until you do. The same happens on load in a region without
+  `VM.Standard.E2.1.Micro`, whose Always-Free default the form drops rather than POST.
 - **OCI shape picker is empty** — OCI returned no shapes for that availability domain at all
   (a failed `ListShapes` looks identical to an empty one). Try another AD, or **Refresh**. The
   *image* narrowing can't cause this: when the image/AD intersection comes back empty, or the
   tenancy's policy blocks `ListImageShapeCompatibilityEntries`, it falls open to the full AD
   list — deliberately matching `check_launch_placement`, so the picker never offers less than
-  the API accepts. In that fallen-open state the advisory architecture warning is your only
-  hint, so mind it.
+  the API accepts. In that fallen-open state the advisory architecture warning and the
+  `shape_not_launchable` gate above are your only hints, so mind them.
 - **Deploy rejected (HTTP 409, `vm_name_collision`)** — the names this deploy would create
   are already taken by VMs the dashboard deployed or is deploying. Pick a different base
   name, or destroy the existing VMs first. The check is deliberately strict: Azure, GCP and
