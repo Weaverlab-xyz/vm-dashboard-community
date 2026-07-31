@@ -11,6 +11,12 @@ Mirrors the AWS / Azure / GCP router patterns:
 Free-tier guardrail: the deploy form defaults to Always-Free compute; a selection
 outside the envelope (services/oci_freetier.py) is rejected with HTTP 400 unless
 the request carries acknowledge_charges=true (warn-and-confirm).
+
+Launch-placement precheck: both deploy endpoints confirm the requested shape can
+actually launch the requested image in the AD the launch will use, before any job
+exists (oci_service.check_launch_placement) — LaunchInstance reports a shape the
+region lacks and an image that doesn't support it as the same bare
+404 NotAuthorizedOrNotFound. Fails open, and runs ahead of the free-tier prompt.
 """
 import logging
 import uuid
@@ -135,6 +141,70 @@ def _existing_freetier_usage(db: Session, exclude_job_id: str = "") -> dict:
             a1_ocpus += float(meta.get("ocpus") or 0)
             a1_mem += float(meta.get("memory_gb") or 0)
     return {"existing_amd_count": amd, "existing_a1_ocpus": a1_ocpus, "existing_a1_memory_gb": a1_mem}
+
+
+# ── Launch-placement precheck ─────────────────────────────────────────────────
+#
+# LaunchInstance answers "the shape isn't offered in this availability domain",
+# "the image doesn't support the shape" and a genuine IAM denial with the same
+# unattributed ``404 NotAuthorizedOrNotFound`` — no field named, about a second
+# into the job. Checking the placement at submit time turns the first two into a
+# sentence naming the shape and listing what would work, exactly as the Packer
+# build route already does (api/packer.py). Advisory by design: every step below
+# fails OPEN, so an OCI that can't be reached is never why a deploy is refused.
+
+async def _resolve_ad(availability_domain: str, compartment: str) -> str:
+    """The AD the launch will actually use, or "" when that can't be determined.
+
+    A blank ``availability_domain`` means "first AD in the compartment" — the deploy
+    runner resolves it to ``ads[0]`` inside ``oci_service._launch_instance_sync``, so
+    prechecking the blank would check nothing (and would ask ``list_shapes`` for an
+    empty AD). Resolved the same way here, against the same compartment.
+    """
+    if availability_domain:
+        return availability_domain
+    try:
+        ads = await oci_service.list_availability_domains(compartment)
+    except Exception as exc:  # noqa: BLE001 — advisory check, never a blocker
+        logger.warning("OCI availability-domain lookup failed; launch-placement "
+                       "precheck skipped: %s", exc)
+        return ""
+    return ads[0] if ads else ""
+
+
+async def _placement_problems(
+    *, availability_domain: str, shape: str, compartment: str,
+    images: list[tuple[str, str]],
+) -> list[str]:
+    """Which of ``images`` ``shape`` cannot launch here, as operator-facing messages.
+
+    ``images`` is ``(image_ocid, label)``: one entry for a single deploy (blank
+    label), one per item for a bulk selection. Bulk needs the loop because the shape
+    is request-level there while every item carries its own image, and half the check
+    — ``list_image_shape_compatibility_entries`` — is a property of the image.
+    Deduplicated by OCID, since each distinct image costs two list calls.
+
+    An empty list means "nothing to report", which is also every fail-open path:
+    ``check_launch_placement`` already swallows a lookup that can't reach OCI.
+    """
+    ad = await _resolve_ad(availability_domain, compartment)
+    if not ad:
+        return []
+    checked: dict[str, str] = {}
+    problems: list[str] = []
+    for image_ocid, label in images:
+        if image_ocid not in checked:
+            checked[image_ocid] = ""
+            try:
+                await oci_service.check_launch_placement(
+                    availability_domain=ad, image_ocid=image_ocid, shape=shape,
+                    compartment_id=compartment, region=_region())
+            except oci_service.OCIError as exc:
+                checked[image_ocid] = str(exc)
+        if checked[image_ocid]:
+            problems.append(f"{label}: {checked[image_ocid]}" if label
+                            else checked[image_ocid])
+    return problems
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -437,6 +507,28 @@ async def bulk_deploy_instances(
         deploy_batch.validate_name(name, "oci")
     deploy_batch.reject_name_collisions(db, "oci_deploy", names)
 
+    # ── Placement precheck (hard gate), per image ────────────────────────────
+    # The shape is request-level but each item brings its own image, and image/shape
+    # compatibility is a property of the pair — so this is checked per image, not
+    # once for the batch. All-or-nothing before the first create_job, matching the
+    # name-collision pre-flight above and for the same reason: a partly-admitted
+    # batch strands `queued` children with no parent to drive them. And ahead of the
+    # free-tier prompt, so an unlaunchable shape isn't waved through an "acknowledge
+    # charges" dialog first.
+    problems = await _placement_problems(
+        availability_domain=req.availability_domain, shape=req.shape,
+        compartment=compartment,
+        images=[(item.image_ocid, item.instance_name) for item in req.items])
+    if problems:
+        message = " ".join(problems)
+        if len(req.items) > 1:
+            message = (f"{len(problems)} of the {len(req.items)} instances in this "
+                       f"selection cannot launch on {req.shape}. " + message)
+        raise HTTPException(status_code=400, detail={
+            "code": "shape_not_launchable",
+            "message": message,
+        })
+
     # ── Free-tier guardrail over the WHOLE selection ──────────────────────────
     # Shape/OCPUs/memory are request-level, so N selected images means N instances of
     # the same shape — exactly what instance_count expresses.
@@ -557,6 +649,23 @@ async def deploy_instance(
     compartment = _compartment()
     workgroup = _validate_workgroup(db, current_user, payload.workgroup)
     payload.workgroup = workgroup
+
+    # ── Placement precheck (hard gate) ────────────────────────────────────────
+    # Before the free-tier prompt on purpose, same as the build route: a shape that
+    # cannot launch at all must not be waved through an "acknowledge charges"
+    # dialog first. This also covers the count > 1 fan-out below — every child
+    # inherits this request's shape, image and AD.
+    problems = await _placement_problems(
+        availability_domain=payload.availability_domain, shape=payload.shape,
+        compartment=compartment, images=[(payload.image_ocid, "")])
+    if problems:
+        # `code` is preserved onto the Error by the frontend API helper (app.js);
+        # the deploy modal surfaces the message. Unlike the free-tier gate there is
+        # nothing to acknowledge — the fix is a different shape.
+        raise HTTPException(status_code=400, detail={
+            "code": "shape_not_launchable",
+            "message": problems[0],
+        })
 
     # ── Free-tier guardrail (warn + confirm) ──────────────────────────────────
     # Evaluated once for the whole request, count included: three Always-Free micros

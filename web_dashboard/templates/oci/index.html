@@ -665,14 +665,22 @@
                narrowing is the real gap: it would need one compatibility lookup per
                selected image, and since an empty intersection falls open anyway (see
                _launchable_shape_rows_sync) a mixed x86 + Ampere selection would gain
-               nothing from it. Note the shape default here is hardcoded and, unlike
-               the build form's, never dropped when the AD can't offer it. -->
+               nothing from it. The default IS dropped, though — defaultShape() blanks
+               it when the first AD has no free micro — and every selected image is
+               checked against the chosen shape by the API before anything is created
+               (400 shape_not_launchable), which is what covers the image axis here. -->
           <select x-model="bulkModal.shape" @change="onBulkShapeChange()"
                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            <option value="">— pick a shape —</option>
             <template x-for="s in networkOpts.shapes" :key="s.shape">
-              <option :value="s.shape" x-text="s.shape"></option>
+              <option :value="s.shape" x-text="s.shape + (s.free_tier ? '  (Always-Free)' : '')"></option>
             </template>
           </select>
+          <p class="text-xs text-gray-400 mt-1" x-show="bulkFreeMicroMissing()" x-cloak>
+            The first availability domain offers no <span class="font-mono">VM.Standard.E2.1.Micro</span>,
+            so the usual default is blank here. Every selected image launches on this one shape —
+            one that can't boot it is rejected by name before anything is created.
+          </p>
         </div>
 
         <div class="grid grid-cols-3 gap-3" x-show="bulkIsFlexShape()" x-cloak>
@@ -793,8 +801,36 @@ function ociDashboard() {
       jump_group: '', jumpoint_name: '',
     },
 
+    // The Always-Free AMD micro, but only where the region actually has it. E2
+    // shapes exist solely in the older OCI regions, and a default the region can't
+    // launch used to POST silently: the <select> has no <option> for it, so Alpine
+    // renders an empty box while the model still holds 'VM.Standard.E2.1.Micro'.
+    // The backend now rejects that by name, but a blank + "— pick a shape —" says
+    // so before the round-trip. The build form got this treatment in its init();
+    // this is the same rule for the bulk modal, which has no AD picker and so never
+    // runs _reconcileShape.
+    defaultShape() {
+      const micro = (this.networkOpts.free_tier || {}).amd_shape || 'VM.Standard.E2.1.Micro';
+      // The baseline list IS the bulk modal's scope: it sends no availability_domain,
+      // and an unscoped /network-options is the "first AD, any image" list — the AD a
+      // blank request resolves to at launch.
+      const offered = (this.networkOpts.shapes || []).map(s => s.shape);
+      // Shape list not fetched yet → keep the old default rather than guess blank.
+      if (!offered.length) return micro;
+      return offered.includes(micro) ? micro : '';
+    },
+
+    // True exactly when defaultShape() came back blank, i.e. the first AD has no
+    // Always-Free micro. Only the bulk modal needs it — the deploy and build forms
+    // annotate their own narrowed lists through *ShapeNotice().
+    bulkFreeMicroMissing() {
+      return !this.defaultShape();
+    },
+
     blankForm() {
       return {
+        // Hardcoded on purpose: openDeployModal() awaits onDeployPlacementChange(),
+        // whose _reconcileShape clears a default the AD+image scope doesn't offer.
         instance_name: '', count: 1, shape: 'VM.Standard.E2.1.Micro',
         ocpus: null, memory_gb: null, availability_domain: '',
         subnet_ocid: '', assign_public_ip: false, ssh_username: 'opc',
@@ -1351,7 +1387,9 @@ function ociDashboard() {
         // Blank, like blankForm() — this page has always made the operator choose,
         // and the submit button stays disabled until they do.
         workgroup: '',
-        shape: 'VM.Standard.E2.1.Micro',
+        // Blank in a region without the free micro — see defaultShape(). The shape
+        // is shared by every image in the selection, so a wrong one fails N deploys.
+        shape: this.defaultShape(),
         ocpus: null, memory_gb: null, boot_volume_gb: 50,
         assign_public_ip: false, acknowledge_charges: false,
         submitting: false, error: '',
@@ -1361,7 +1399,7 @@ function ociDashboard() {
 
     bulkDeployReady() {
       const m = this.bulkModal;
-      if (!m.workgroup || !m.items.length) return false;
+      if (!m.workgroup || !m.items.length || !m.shape) return false;
       if (m.names.some(n => !n || !n.trim())) return false;
       if ((this.bulkFreeTierWarnings().length || m.serverGateTripped)
           && !m.acknowledge_charges) return false;
@@ -1401,6 +1439,9 @@ function ociDashboard() {
           m.serverGateMessage = e.message || 'Selection exceeds the Always-Free tier.';
           m.error = 'Selection exceeds the Always-Free tier — tick the acknowledgment to proceed.';
         } else {
+          // code=shape_not_launchable lands here on purpose: it is a hard gate with
+          // nothing to acknowledge, and its message already names the offending
+          // instances and lists the shapes that would work. Nothing was created.
           m.error = (e && e.message) ? e.message : 'Bulk deploy failed.';
         }
       } finally {
@@ -1472,6 +1513,9 @@ function ociDashboard() {
           this.serverGateMessage = e.message || 'Selection exceeds the Always-Free tier.';
           this.deployError = 'Selection exceeds the Always-Free tier — tick the acknowledgment to proceed.';
         } else {
+          // code=shape_not_launchable lands here on purpose: unlike the free-tier
+          // gate there is nothing to acknowledge — the shape genuinely cannot launch
+          // this image here — and the message already lists the shapes that can.
           this.deployError = (e && e.message) ? e.message : 'Deploy failed.';
         }
       } finally {

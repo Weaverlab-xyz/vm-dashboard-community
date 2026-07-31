@@ -451,7 +451,10 @@ def test_the_no_free_shape_case_points_at_the_ampere_alternative():
 
 def test_both_entry_points_precheck_the_placement():
     """The route gives the operator the error at submit time; the runner covers a
-    re-queued job and the route's fail-open path."""
+    re-queued job and the route's fail-open path.
+
+    The two OCI *deploy* endpoints run the same check for the same reason — that
+    wiring, and the per-image bulk case, is pinned in test_oci_deploy_placement.py."""
     api = _read("web_dashboard", "api", "packer.py")
     assert "check_launch_placement(" in api
     assert '"code": "shape_not_launchable"' in api
