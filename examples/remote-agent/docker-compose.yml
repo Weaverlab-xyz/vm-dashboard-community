@@ -29,7 +29,8 @@ services:
 
     environment:
       # Must be https. The agent refuses to send signed requests over plaintext unless
-      # AGENT_INSECURE_TLS=1, which is for a throwaway lab and warns on every poll.
+      # AGENT_INSECURE_TLS=1, which is for a throwaway lab and warns once at startup.
+      # Case-sensitive — only 1, true or yes count; AGENT_INSECURE_TLS=True is ignored.
       DASHBOARD_URL: ${DASHBOARD_URL:?set DASHBOARD_URL, e.g. https://agents.example.com}
       # Only needed on first start; the identity in the volume is used from then on.
       AGENT_ENROLLMENT_CODE: ${AGENT_ENROLLMENT_CODE:-}

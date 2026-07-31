@@ -926,6 +926,39 @@ def _preflight() -> None:
         log.warning("!! TLS verification is disabled (AGENT_INSECURE_TLS=1)")
     if MODE not in ("normal", "audit"):
         raise AgentFatal(f"AGENT_MODE must be 'normal' or 'audit', not '{MODE}'")
+    _check_state_dir_writable()
+
+
+def _check_state_dir_writable() -> None:
+    """Fail before enrolment if the identity cannot be saved afterwards.
+
+    Enrolment spends the code on the SERVER — a successful ``/enroll`` NULLs
+    ``enroll_code_hash`` — and only then does the agent write ``identity.json``. So a
+    state directory that is not writable does not merely fail: it fails *after* the
+    single-use code has been consumed, with a raw ``PermissionError`` traceback and exit
+    1. Under ``--restart unless-stopped`` that becomes a crash loop in which every
+    restart re-enrols with a dead code, and ten failures inside fifteen minutes trip the
+    dashboard's per-address enrolment throttle, locking the host out for fifteen more.
+
+    Checking here turns all of that into one clear message with the code untouched. The
+    check is a real create-and-delete rather than ``os.access``, because ``access`` tests
+    the *permission bits* and answers wrongly on a read-only filesystem, which is exactly
+    the case ``--read-only`` without a mounted volume produces.
+    """
+    probe = os.path.join(STATE_DIR, ".write-probe")
+    try:
+        os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
+        with open(probe, "w") as fh:
+            fh.write("")
+        os.unlink(probe)
+    except OSError as exc:
+        raise AgentFatal(
+            f"The state directory {STATE_DIR} is not writable ({exc}). The agent stores "
+            f"its identity there after enrolling, and the enrolment code is spent the "
+            f"moment the dashboard accepts it — so starting without a writable volume "
+            f"would burn the code and leave nothing to show for it. Mount one "
+            f"(-v dashboard_agent_state:{STATE_DIR}) and make sure it is writable by "
+            f"uid 10001, then start again. The code you have is still good.")
 
 
 def main() -> int:

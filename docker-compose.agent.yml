@@ -44,6 +44,17 @@ services:
       AGENT_HOSTNAME: ${AGENT_HOSTNAME:?set AGENT_HOSTNAME, e.g. agents.example.com}
       # Let's Encrypt emails expiry warnings here. Optional but wanted.
       ACME_EMAIL: ${ACME_EMAIL:-}
+      # Set AGENT_TLS_INTERNAL=1 when AGENT_HOSTNAME is an internal name that can never
+      # satisfy an ACME challenge — a lab LAN, a split-horizon domain. Caddy then issues
+      # from its own CA instead of retrying Let's Encrypt forever and serving nothing.
+      #
+      # The `:+` form yields the replacement only when the variable is set and non-empty,
+      # so unset leaves this blank and the default public-ACME behaviour stands.
+      # Agents must then trust that CA — export the root and point AGENT_CA_BUNDLE at it:
+      #
+      #   docker compose -f docker-compose.hub.yml -f docker-compose.agent.yml \
+      #     cp agent-gateway:/data/caddy/pki/authorities/local/root.crt ./caddy-root.crt
+      AGENT_TLS_DIRECTIVE: ${AGENT_TLS_INTERNAL:+tls internal}
     volumes:
       - ./examples/remote-agent/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data          # certificates and ACME account — persist or you WILL

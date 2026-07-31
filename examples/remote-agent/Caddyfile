@@ -1,7 +1,31 @@
 # Caddy config for the remote-agent vhost. Used by docker-compose.agent.yml.
 #
-# Automatic HTTPS: Caddy obtains and renews a Let's Encrypt certificate for
-# {$AGENT_HOSTNAME} on its own. There is no renewal cron to forget.
+# TWO CERTIFICATE MODES, and picking the wrong one is the most likely reason a first
+# run never gets off the ground.
+#
+#   PUBLIC HOSTNAME (default) — Caddy obtains and renews a Let's Encrypt certificate
+#   for {$AGENT_HOSTNAME} on its own. Requires the name to resolve publicly and port 80
+#   to be reachable from the internet for the ACME challenge. No renewal cron to forget.
+#
+#   INTERNAL HOSTNAME — set AGENT_TLS_INTERNAL=1. A lab name like agents.lab.internal
+#   can never satisfy an ACME challenge, so Caddy would retry forever and serve nothing,
+#   and the agent (which refuses plain HTTP) could not connect at all. This switches to
+#   Caddy's built-in CA, which issues immediately and offline.
+#
+#   With the internal CA the agent must be told to trust it — it is not in any system
+#   trust store. Export the root once:
+#
+#     docker compose -f docker-compose.hub.yml -f docker-compose.agent.yml \
+#       cp agent-gateway:/data/caddy/pki/authorities/local/root.crt ./caddy-root.crt
+#
+#   then on the agent host mount it and set AGENT_CA_BUNDLE to the mounted path. Prefer
+#   that over AGENT_INSECURE_TLS=1: the insecure switch also skips verification, which
+#   is exactly the part worth exercising, and it hides a misconfigured PUBLIC_BASE_URL
+#   or TRUSTED_PROXY_HOSTS until an agent 401s for reasons that look like revocation.
+#
+#   The root is generated on first start and lives in the caddy_data volume, so it
+#   survives restarts but NOT a `docker compose down -v`. Wipe that volume and every
+#   agent needs the new root.
 
 {
 	email {$ACME_EMAIL}
@@ -11,6 +35,12 @@
 }
 
 {$AGENT_HOSTNAME} {
+	# Expands to `tls internal` when AGENT_TLS_INTERNAL is set, and to nothing
+	# otherwise — Caddy substitutes env vars before parsing, so an empty value leaves a
+	# blank line and the default ACME behaviour stands. See the header for which mode
+	# you want; docker-compose.agent.yml derives this from AGENT_TLS_INTERNAL.
+	{$AGENT_TLS_DIRECTIVE}
+
 	encode gzip
 
 	# The ONLY thing this vhost serves. Everything else — the UI, /api/auth,
