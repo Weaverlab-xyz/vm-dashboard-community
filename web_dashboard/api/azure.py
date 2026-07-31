@@ -157,29 +157,44 @@ async def _validate_ssh_key_override(override) -> None:
 
 # ── Private images (gallery + managed) ───────────────────────────────────────
 
+CACHE_KEY_IMAGES = "azure_images"
+
+
+def images_cache_key() -> str:
+    """Cache key for the private-image list — the one place this key is built."""
+    return cache_service.key_global(CACHE_KEY_IMAGES)
+
+
+async def _fetch_private_images() -> dict:
+    """Shared Image Gallery images + standalone Managed Images for the configured
+    location. Shared by /images, /dashboard-stats and the startup warmer in
+    main.py, so all three agree on the key AND on how the gallery is resolved.
+
+    Gallery defaults resolve through the per-region config sets (PR3). With no
+    region map configured this returns the flat azure_shared_image_gallery /
+    azure_gallery_resource_group / azure_resource_group values verbatim — which is
+    all the warmer used to read, so on a multi-region setup its pass overwrote the
+    correctly-resolved payload with one built from the flat defaults."""
+    from ..services.region_config import resolve_azure_region
+    region = resolve_azure_region(_loc())
+    return await azure_service.list_private_images(
+        region["gallery_name"],
+        region["gallery_resource_group"],
+        region["resource_group"] or "vm-cli-rg",
+    )
+
+
 @router.get("/images")
 async def list_images(
     current_user: User = Depends(require_permission("azure", "read")),
 ):
     """List private images: Shared Image Gallery images + standalone Managed Images. Served from cache (5 min)."""
-    cache_key = cache_service.key_global("azure_images")
-    ttl = cache_service.TTL["azure_images"]
-
-    # Gallery defaults resolve through the per-region config sets (PR3). With no
-    # region map configured this returns the flat azure_shared_image_gallery /
-    # azure_gallery_resource_group / azure_resource_group values verbatim.
-    from ..services.region_config import resolve_azure_region
-    region = resolve_azure_region(_loc())
-
-    async def _fetch():
-        return await azure_service.list_private_images(
-            region["gallery_name"],
-            region["gallery_resource_group"],
-            region["resource_group"] or "vm-cli-rg",
-        )
+    cache_key = images_cache_key()
+    ttl = cache_service.TTL[CACHE_KEY_IMAGES]
 
     try:
-        payload, cached_at = await cache_service.get_or_refresh(cache_key, ttl, _fetch)
+        payload, cached_at = await cache_service.get_or_refresh(
+            cache_key, ttl, _fetch_private_images)
         images = payload.get("images", [])
         warnings = payload.get("warnings", [])
         return {
@@ -222,6 +237,26 @@ async def list_marketplace_images(
 
 # ── Network options for deploy form ──────────────────────────────────────────
 
+# Cache identity for the per-location network options. Exported as a builder so the
+# startup warmer in main.py produces the byte-identical key this route reads — the
+# warmer used to write key_global("azure_network_opts") against this route's
+# key_param(location=...), warming a key nobody read.
+CACHE_KEY_NETWORK_OPTS = "azure_network_opts"
+
+
+def network_opts_cache_key(location: str) -> str:
+    """Cache key for `location`'s network options — the one place this key is built."""
+    return cache_service.key_param(CACHE_KEY_NETWORK_OPTS, location=location)
+
+
+async def _fetch_network_options(location: str) -> dict:
+    """Locations, VM sizes, subnets, NSGs for `location`. Shared by /network-options
+    and the startup warmer so both resolve the resource groups the same way."""
+    return await azure_service.get_network_options(
+        location, _cfg("azure_vnet_resource_group"), _rg()
+    )
+
+
 @router.get("/network-options", response_model=AzureNetworkOptions)
 async def network_options(
     location: Optional[str] = None,
@@ -232,18 +267,14 @@ async def network_options(
     ``location`` (default: the configured ``azure_location``); pass ?location= to
     target another region. Served from a per-region cache (10 min); ?bust=true forces a refresh."""
     loc = _resolve_location(location)
-    cache_key = cache_service.key_param("azure_network_opts", location=loc)
-    ttl = cache_service.TTL["azure_network_opts"]
-
-    async def _fetch():
-        return await azure_service.get_network_options(
-            loc, _cfg("azure_vnet_resource_group"), _rg()
-        )
+    cache_key = network_opts_cache_key(loc)
+    ttl = cache_service.TTL[CACHE_KEY_NETWORK_OPTS]
 
     try:
         if bust:
             await cache_service.invalidate(cache_key)
-        opts, cached_at = await cache_service.get_or_refresh(cache_key, ttl, _fetch)
+        opts, cached_at = await cache_service.get_or_refresh(
+            cache_key, ttl, lambda: _fetch_network_options(loc))
         return AzureNetworkOptions(
             location=opts.get("location", ""),
             locations=opts["locations"],
@@ -552,14 +583,10 @@ async def azure_dashboard_stats(
     except AzureError:
         pass
     try:
-        from ..services.region_config import resolve_azure_region
-        region = resolve_azure_region(_loc())
         payload, _ = await cache_service.get_or_refresh(
-            cache_service.key_global("azure_images"),
-            cache_service.TTL["azure_images"],
-            lambda: azure_service.list_private_images(
-                region["gallery_name"], region["gallery_resource_group"],
-                region["resource_group"] or "vm-cli-rg"))
+            images_cache_key(),
+            cache_service.TTL[CACHE_KEY_IMAGES],
+            _fetch_private_images)
         out["images"] = {"total": len(payload.get("images", []))}
     except AzureError:
         pass
@@ -1191,7 +1218,7 @@ async def delete_image(
         db, current_user.username, "azure_delete_image",
         details={"image_name": image_name},
     )
-    await cache_service.invalidate(cache_service.key_global("azure_images"))
+    await cache_service.invalidate(images_cache_key())
     return {"deleted": True, "image_name": image_name}
 
 

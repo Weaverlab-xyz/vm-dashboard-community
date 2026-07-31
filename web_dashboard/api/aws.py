@@ -138,19 +138,33 @@ async def _resolve_aws_ecs_deploy_key() -> str:
 
 # ── AMI listing ───────────────────────────────────────────────────────────────
 
+CACHE_KEY_AMIS = "aws_amis"
+
+
+def amis_cache_key() -> str:
+    """Cache key for the AMI list — the one place this key is built."""
+    return cache_service.key_global(CACHE_KEY_AMIS)
+
+
+async def _fetch_amis() -> list:
+    """AMIs owned by this account, in the configured region. Shared by /amis,
+    /dashboard-stats and the startup warmer in main.py — the warmer used to resolve
+    the region from `settings.aws_region` (process start) instead of `_aws_region()`
+    (config_service), so after a Setup-wizard region change it kept refilling this
+    key with the OLD region's AMIs."""
+    return await aws_service.list_amis(_aws_region())
+
+
 @router.get("/amis", response_model=AMIListResponse)
 async def list_amis(
     current_user: User = Depends(require_permission("aws", "read")),
 ):
     """List all AMIs owned by this AWS account. Served from cache (5 min TTL)."""
-    cache_key = cache_service.key_global("aws_amis")
-    ttl = cache_service.TTL["aws_amis"]
-
-    async def _fetch():
-        return await aws_service.list_amis(_aws_region())
+    cache_key = amis_cache_key()
+    ttl = cache_service.TTL[CACHE_KEY_AMIS]
 
     try:
-        amis, cached_at = await cache_service.get_or_refresh(cache_key, ttl, _fetch)
+        amis, cached_at = await cache_service.get_or_refresh(cache_key, ttl, _fetch_amis)
         return AMIListResponse(
             amis=[AMIInfo(**a) for a in amis],
             count=len(amis),
@@ -162,6 +176,19 @@ async def list_amis(
 
 # ── Network options for deploy form ──────────────────────────────────────────
 
+# Cache identity for the per-region network options. Exported as a builder so the
+# startup warmer in main.py produces the byte-identical key this route reads: the
+# warmer used to write key_global("aws_network_opts") while the route read
+# key_param(region=...), so it filled a key nobody looked at and the first
+# network-options request of every session still paid a live EC2 round-trip.
+CACHE_KEY_NETWORK_OPTS = "aws_network_opts"
+
+
+def network_opts_cache_key(region: str) -> str:
+    """Cache key for `region`'s network options — the one place this key is built."""
+    return cache_service.key_param(CACHE_KEY_NETWORK_OPTS, region=region)
+
+
 @router.get("/network-options", response_model=NetworkOptions)
 async def network_options(
     region: Optional[str] = None,
@@ -171,8 +198,8 @@ async def network_options(
     cache (10 min TTL). ``?region=`` scopes the lookup to a specific region (defaults to
     the configured ``aws_region``); the cache is keyed per region so regions never collide."""
     _region = _resolve_region(region)
-    cache_key = cache_service.key_param("aws_network_opts", region=_region)
-    ttl = cache_service.TTL["aws_network_opts"]
+    cache_key = network_opts_cache_key(_region)
+    ttl = cache_service.TTL[CACHE_KEY_NETWORK_OPTS]
 
     async def _fetch():
         return await aws_service.get_network_options(_region)
@@ -186,10 +213,26 @@ async def network_options(
 
 # ── EC2 instance listing ──────────────────────────────────────────────────────
 
+# Cache identity for the dashboard-deployed instance list.
+CACHE_KEY_INSTANCES = "aws_instances"
+
+
+def instances_cache_key() -> str:
+    """Cache key for the instance list — the one place this key is built."""
+    return cache_service.key_global(CACHE_KEY_INSTANCES)
+
+
 async def _fetch_instances(db: Session) -> list:
     """Dashboard-deployed EC2 instances (completed, non-destroyed ec2_deploy jobs)
     merged with live state. Shared by /instances and /dashboard-stats so both hit
-    the same cache key. Returns dicts carrying `state` + `workgroup`."""
+    the same cache key. Returns dicts carrying `state` + `workgroup`.
+
+    This is also the startup warmer's fetcher (main.py::_warm_aws_instances) — it
+    must be, because the warmer writes the same key these routes read. A separate
+    copy in main.py omitted `region`/`workgroup`/`key_name`, and /instances drops
+    every row whose `workgroup` is None for a non-admin, so each warmer pass
+    silently emptied the list for every non-admin user and blanked the by-region
+    tile. tests/test_cache_warmer_parity.py pins warmer and reader together."""
     deploy_jobs = (
         db.query(Job)
         .filter(Job.job_type == "ec2_deploy", Job.status == "completed")
@@ -253,8 +296,8 @@ async def aws_dashboard_stats(
     out = {"instances": None, "images": None}
     try:
         raw, _ = await cache_service.get_or_refresh(
-            cache_service.key_global("aws_instances"),
-            cache_service.TTL["aws_instances"],
+            instances_cache_key(),
+            cache_service.TTL[CACHE_KEY_INSTANCES],
             lambda: _fetch_instances(db))
         accessible = _accessible_workgroups(current_user)
         out["instances"] = cloud_stats.summarize_instances(raw, accessible, "state")
@@ -264,9 +307,9 @@ async def aws_dashboard_stats(
         pass
     try:
         amis, _ = await cache_service.get_or_refresh(
-            cache_service.key_global("aws_amis"),
-            cache_service.TTL["aws_amis"],
-            lambda: aws_service.list_amis(_aws_region()))
+            amis_cache_key(),
+            cache_service.TTL[CACHE_KEY_AMIS],
+            _fetch_amis)
         out["images"] = {"total": len(amis)}
     except AWSError:
         pass
@@ -292,8 +335,8 @@ async def list_instances(
         if accessible is not None and canonical not in accessible:
             raise HTTPException(status_code=403, detail=f"No access to workgroup '{canonical}'")
 
-    cache_key = cache_service.key_global("aws_instances")
-    ttl = cache_service.TTL["aws_instances"]
+    cache_key = instances_cache_key()
+    ttl = cache_service.TTL[CACHE_KEY_INSTANCES]
 
     try:
         raw, cached_at = await cache_service.get_or_refresh(
@@ -695,7 +738,7 @@ async def enable_ami_ena(
         db, current_user.username, "enable_ena",
         details={"source_ami_id": ami_id, "new_ami_id": new_ami_id},
     )
-    await cache_service.invalidate(cache_service.key_global("aws_amis"))
+    await cache_service.invalidate(amis_cache_key())
     return {"success": True, "source_ami_id": ami_id, "new_ami_id": new_ami_id}
 
 
@@ -716,7 +759,7 @@ async def deregister_ami(
         details={"ami_id": ami_id, "deleted_snapshots": deleted_snapshots},
     )
     # Invalidate the private AMI list cache
-    await cache_service.invalidate(cache_service.key_global("aws_amis"))
+    await cache_service.invalidate(amis_cache_key())
 
     return {
         "deregistered": True,
@@ -767,7 +810,7 @@ async def reassign_instance_workgroup(
             job.cloud_resource_id = instance_id
         db.commit()
 
-    await cache_service.invalidate(cache_service.key_global("aws_instances"))
+    await cache_service.invalidate(instances_cache_key())
     return {"instance_id": instance_id, "workgroup": canonical, "job_id": job.id if job else None}
 
 

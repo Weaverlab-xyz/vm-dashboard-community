@@ -356,11 +356,34 @@ def _apply_config(payload: SetupPayload) -> None:
 # Data caches whose payload is derived from cloud/config values written via the
 # setup wizard. Invalidated after every wizard save so the next page load
 # rebuilds them against the new config instead of serving stale pre-save data.
+#
+# SPLIT BY KEY SHAPE, and keep it that way — the two need different deletes and
+# picking the wrong one is a silent no-op, not an error:
+#   * key_global("x")        -> "vmcli:x"           -> invalidate(key_global(x))
+#   * key_param("x", k=v)    -> "vmcli:x:k=v"       -> invalidate_prefix(x)
+# invalidate_prefix matches "vmcli:x:" so it never reaches a key_global key, and
+# invalidate(key_global(x)) never reaches a key_param family. Before checking a
+# name in here, grep for how its readers build the key.
 _CONFIG_DEPENDENT_CACHES = (
-    "azure_images", "azure_network_opts", "azure_vms", "azure_marketplace",
-    "aws_amis", "aws_network_opts", "aws_instances", "aws_ssh_key_secrets",
-    "cfgmgmt_instances", "cfgmgmt_s3status",
-    "portainer_endpoints", "portainer_containers", "portainer_stacks",
+    # Azure — api/azure.py
+    "azure_images", "azure_vms",
+    # AWS — api/aws.py
+    "aws_amis", "aws_instances",
+    # GCP — api/gcp.py
+    "gcp_custom_images", "gcp_instances",
+    # OCI is deliberately absent: api/oci.py::_cache_key scopes every OCI cache by
+    # region + compartment, so a wizard change lands on a new key and misses. A
+    # scoped key self-heals and needs no entry here — prefer that to listing.
+)
+
+# key_param() families — one entry per region/location/endpoint, cleared by prefix.
+_CONFIG_DEPENDENT_CACHE_PREFIXES = (
+    "aws_network_opts",       # api/aws.py           key_param(region=...)
+    "azure_network_opts",     # api/azure.py         key_param(location=...)
+    "gcp_network_opts",       # api/gcp.py           key_param(region=...)
+    "portainer_endpoints",    # services/portainer_service.py  key_param() — "vmcli:portainer_endpoints:"
+    "portainer_containers",   # services/portainer_service.py  key_param(endpoint_id=, all=)
+    "portainer_stacks",       # services/portainer_service.py  key_param(endpoint_id=)
 )
 
 
@@ -368,6 +391,8 @@ async def _invalidate_data_caches() -> None:
     from ..services import cache_service
     for name in _CONFIG_DEPENDENT_CACHES:
         await cache_service.invalidate(cache_service.key_global(name))
+    for name in _CONFIG_DEPENDENT_CACHE_PREFIXES:
+        await cache_service.invalidate_prefix(name)
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
