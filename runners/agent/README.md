@@ -54,7 +54,7 @@ reads like credential spraying in a customer's SIEM.
 | `AGENT_MODE` | `normal` | `audit` logs what it would do and executes nothing. |
 | `AGENT_POLL_INTERVAL` | `5` | Seconds, jittered. |
 | `AGENT_CA_BUNDLE` | — | For a TLS-inspecting corporate proxy. |
-| `AGENT_INSECURE_TLS` | — | Lab only. Warns on every poll. |
+| `AGENT_INSECURE_TLS` | — | Lab only. Warns once at startup. Case-sensitive: `1`, `true` or `yes`. |
 | `KUBECONFIG` | `/etc/dashboard-agent/kubeconfig` | Optional. Only the server URL and version are reported. |
 
 `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` are honoured. Set `NO_PROXY` for your private

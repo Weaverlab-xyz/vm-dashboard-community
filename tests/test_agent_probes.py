@@ -360,6 +360,62 @@ def test_handlers_are_a_closed_dict_not_a_dynamic_dispatch():
     assert "getattr(sys.modules" not in src and "eval(" not in src and "exec(" not in src
 
 
+# ── pre-flight ────────────────────────────────────────────────────────────────
+
+def test_a_writable_state_dir_passes_preflight():
+    import tempfile
+    original = agent.STATE_DIR
+    agent.STATE_DIR = tempfile.mkdtemp()
+    try:
+        agent._check_state_dir_writable()
+    finally:
+        agent.STATE_DIR = original
+
+
+def test_an_unwritable_state_dir_fails_before_enrolment():
+    """The enrolment code is spent on the SERVER the moment /enroll returns 200, and the
+    identity is written only after that. So a bad volume used to fail *past* the point of
+    no return: raw PermissionError, exit 1, code burnt, and under a restart policy a
+    crash loop that walks straight into the per-address enrolment throttle.
+
+    This must raise AgentFatal (exit 2, handled) rather than escaping as an OSError, and
+    it must say the code is still usable — otherwise the operator's next move is to
+    re-issue one they did not need to.
+    """
+    import os
+    import tempfile
+    original = agent.STATE_DIR
+    # A path whose parent is a regular file: makedirs fails on every platform, unlike
+    # chmod, which Windows ignores.
+    blocker = os.path.join(tempfile.mkdtemp(), "blocker")
+    open(blocker, "w").close()
+    agent.STATE_DIR = os.path.join(blocker, "state")
+    try:
+        agent._check_state_dir_writable()
+        raise AssertionError("an unwritable state dir must be fatal")
+    except agent.AgentFatal as exc:
+        msg = str(exc)
+        assert "still good" in msg, "must tell the operator the code was not burnt"
+        assert "10001" in msg, "must name the uid the volume has to be writable by"
+    finally:
+        agent.STATE_DIR = original
+
+
+def test_preflight_checks_the_state_dir_before_any_network_call():
+    """Ordering is the whole point. If this moved after enrolment it would be useless —
+    asserted on the source because the failure it prevents cannot be reproduced without
+    a live dashboard to spend a code against."""
+    code = _code_of("_preflight")
+    assert "_check_state_dir_writable" in code, \
+        "_preflight must check the state directory"
+    src = open(_PATH, encoding="utf-8").read()
+    assert src.index("def _preflight(") < src.index("def main("), \
+        "preflight must be defined before main"
+    main_code = _code_of("main")
+    assert main_code.index("_preflight()") < main_code.index("Identity.load()"), \
+        "preflight must run before the identity/enrolment path"
+
+
 def test_the_agent_imports_no_execution_machinery():
     """Structurally incapable of running a playbook or shelling out. If one of these
     ever appears, the security argument in the module docstring stops being true."""

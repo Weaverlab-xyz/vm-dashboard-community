@@ -210,6 +210,38 @@ both matter here:
   merely trusted, and it is the only way the value is right when the operator's browser
   and the agents reach the dashboard on different names.
 
+#### If the hostname is internal
+
+Caddy's automatic HTTPS means ACME, and ACME needs the name to resolve publicly with
+port 80 reachable. A lab name — `agents.lab.internal`, a split-horizon domain — can
+never satisfy that, so Caddy retries forever and serves nothing, and the agent (which
+refuses plain HTTP) cannot connect at all. This is the most likely reason a first run
+never gets started.
+
+Set `AGENT_TLS_INTERNAL=1` and Caddy issues from its own CA instead, immediately and
+offline:
+
+```bash
+AGENT_HOSTNAME=agents.lab.internal AGENT_TLS_INTERNAL=1 \
+  docker compose -f docker-compose.hub.yml -f docker-compose.agent.yml up -d
+```
+
+Then give the agents that CA — it is in no system trust store:
+
+```bash
+docker compose -f docker-compose.hub.yml -f docker-compose.agent.yml \
+  cp agent-gateway:/data/caddy/pki/authorities/local/root.crt ./caddy-root.crt
+```
+
+Copy it to the agent host, mount it, and set `AGENT_CA_BUNDLE` to the mounted path.
+
+Prefer this over `AGENT_INSECURE_TLS=1`. The insecure switch also disables verification,
+which is the part most worth exercising, and it masks a wrong `PUBLIC_BASE_URL` or
+`TRUSTED_PROXY_HOSTS` until an agent starts 401ing for reasons that look like
+revocation. The root is generated on first start and lives in the `caddy_data` volume —
+it survives restarts but not `docker compose down -v`, and wiping it means re-issuing
+the root to every agent.
+
 ### 2. Write the policy
 
 Copy [`examples/remote-agent/policy.example.yaml`](../examples/remote-agent/policy.example.yaml)
@@ -368,8 +400,16 @@ Mount the inspection CA and point `AGENT_CA_BUNDLE` at it —
 [`docker-compose.corp-ca.yml`](../docker-compose.corp-ca.yml) is the same pattern for
 the dashboard. `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` are honoured automatically.
 
-**Set `NO_PROXY` for your private ranges**, or the agent tries to reach your database
-subnet through the corporate proxy and fails in a confusing way.
+They apply to the **dashboard connection only**. The discovery probes are raw sockets
+and ignore proxy variables entirely, so `NO_PROXY` is not needed to keep a scan off the
+corporate proxy — a scan was never going through it. What `NO_PROXY` is for here is the
+narrower case of the dashboard itself being on a network the proxy should not be used
+for.
+
+A bad `AGENT_CA_BUNDLE` path is worth knowing about because it fails badly: `requests`
+raises a bare `OSError("Could not find a suitable TLS CA certificate bundle, invalid
+path: …")`, which is not a `RequestException` and so is not caught — the agent dies with
+a traceback and exit 1 rather than a readable message.
 
 Worth saying plainly: an inspecting proxy sees the full content of every request. That
 is exactly why the agent's credential is a per-request signature rather than a bearer
@@ -390,12 +430,19 @@ an objection into a demonstration.
 | Enrolment returns 429, and the container exits 2 | Too many *failed* enrolments recently from this address. Nothing is wrong with this agent; the restart policy retries after `Retry-After`. |
 | `the dashboard asked us to slow down` | Over the per-agent cap. Expected during a burst, and it recovers on its own. If an ordinary scan trips it, raise `agent_max_requests_per_minute` — see [Rate limits](#rate-limits). |
 | `AGENT_ENROLLMENT_CODE_FILE … cannot be read` | The container runs as uid 10001; a mode 0600 file owned by your host user is unreadable inside it. Make it world-readable or use the environment variable. |
-| Agent polls, gets 503 | Dashboard setup is not complete. The agent backs off; it is deliberately not redirected to the HTML wizard. |
+| Agent polls, gets 503 | Dashboard setup is not complete. On `lease` the agent backs off and keeps trying; it is deliberately not redirected to the HTML wizard. **On enrolment a 503 is fatal** — the agent exits 2 and the container's restart policy is the retry, so finish setup before issuing a code. |
 | `Policy refused N of M host:port combinations` | Working as intended — the request was wider than the policy. The counts tell you which to widen. |
 | Stuck `queued`, agent online | The job type is not in the agent's `job_types`. Check the policy. |
 | Nothing found on a subnet you expect | Confirm the ports are in `targets`, and remember `already_registered` findings still appear. |
 | Clock skew errors | Signatures are valid ±60s. Run NTP on the agent host. |
 | Every agent 401s right after adding a proxy, and the dashboard logs `Ignoring X-Forwarded-*` | The proxy is not in `TRUSTED_PROXY_HOSTS`, so the audience was pinned as `http://…`. Set the variable **and** `PUBLIC_BASE_URL`, then clear the stale `agent_base_url` config key and re-enrol. |
+| `The state directory … is not writable` | No volume mounted, or one not writable by uid 10001. Caught before enrolling, so **the code is still good** — fix the mount and start again. |
+| `AGENT_INSECURE_TLS` appears to be ignored | Case-sensitive: only `1`, `true` or `yes`. `True` and `on` are read as unset. |
+| `dashboard unreachable (404 …)` on an agent that was working | Not a network fault — `remote_agents_enabled` was turned off. The agent reports every non-2xx this way. |
+| `enrolment refused (400) … Invalid enrolment code` repeating | The code is single-use with a 15-minute TTL, and a crash loop re-spends it on every restart. `docker stop` first, fix the cause, then issue **one** code and start **once**. |
+| `the dashboard is throttling enrolment` | Ten failed enrolments from one address in 15 minutes. Stop the container, wait out the `Retry-After`, fix the real cause before retrying — restart loops are what get you here. |
+| Discovery reports `Policy refused N of M` | Expected, not a fault. The scan asks for port 443 and the example policy does not list it, so a /24 yields one refusal per host. Widen `ports:` only if you mean to. |
+| Caddy never serves; logs show ACME retries | The hostname is internal and cannot satisfy an ACME challenge. Set `AGENT_TLS_INTERNAL=1` — see [above](#if-the-hostname-is-internal). |
 
 ## Where this is heading
 
