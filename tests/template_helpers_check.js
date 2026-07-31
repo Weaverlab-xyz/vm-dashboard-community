@@ -326,9 +326,10 @@ ok('ttlWhyNot names the deletion arming deadline',
 // AD-3 and never refetched — there was no @change on the AD select at all. OCI
 // does not offer every shape in every AD of a region, so the picker offered shapes
 // that cannot launch there, on the deploy form and the Packer build form both.
-// Unlike the Azure case above there is NO server-side placement check behind this
-// one, so the picker is the only thing standing between a bad pick and an opaque
-// LaunchInstance failure minutes later.
+// A server-side placement check now backs all of these paths (the Packer build
+// route/runner and both deploy endpoints reject an unlaunchable pairing with 400
+// shape_not_launchable — tests/test_oci_deploy_placement.py), but it fails open by
+// design, so the picker is still what keeps a bad pick from reaching it.
 const OCI = 'oci/index.html';
 const ociComp = (over) => {
   const o = {};
