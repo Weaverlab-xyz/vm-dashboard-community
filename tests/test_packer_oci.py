@@ -363,6 +363,109 @@ def test_a_missing_bucket_skips_the_export_instead_of_failing_the_build():
     assert "storage_oci_bucket" in body
 
 
+# ── the launch placement is checked before a build starts ────────────────────
+#
+# LaunchInstance answers "shape not offered in this region", "image doesn't
+# support this shape" and a real policy denial with the same unattributed
+# 404 NotAuthorizedOrNotFound. The default shape VM.Standard.E2.1.Micro is
+# Always-Free but only exists in the older regions — us-chicago-1 offers no E2
+# shape at all — so the out-of-the-box build dies in one second with an error
+# naming no field. These pin the precheck that turns that into a sentence.
+
+
+def _oci_service():
+    """oci_service does `from . import oci_freetier`, so it needs a package to be
+    relative to. Stub one over services/ — both modules import the oci SDK lazily
+    (inside _require_oci), so this loads without it."""
+    import types
+    pkg_name = "_oci_probe_pkg"
+    if pkg_name not in sys.modules:
+        pkg = types.ModuleType(pkg_name)
+        pkg.__path__ = [os.path.join(_ROOT, "web_dashboard", "services")]
+        sys.modules[pkg_name] = pkg
+    name = pkg_name + ".oci_service"
+    spec = importlib.util.spec_from_file_location(
+        name, os.path.join(_ROOT, "web_dashboard", "services", "oci_service.py"))
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _placement(usable, shape="VM.Standard.E2.1.Micro"):
+    """Run the precheck with a canned launchable-shape list. Returns the error
+    message, or None when the placement was accepted."""
+    mod = _oci_service()
+    if isinstance(usable, Exception):
+        def fake(*a, **k):
+            raise usable
+    else:
+        def fake(*a, **k):
+            return list(usable)
+    mod._launchable_shapes_sync = fake
+    mod._cfg = lambda key: "us-chicago-1" if key == "oci_region" else ""
+    try:
+        mod._check_launch_placement_sync(
+            availability_domain="wYeM:US-CHICAGO-1-AD-1",
+            image_ocid="ocid1.image.oc1.us-chicago-1.aaaa",
+            shape=shape, compartment_id="ocid1.compartment.oc1..aaaa")
+    except mod.OCIError as e:
+        return str(e)
+    return None
+
+
+_CHICAGO_USABLE = ["VM.Standard.E5.Flex", "VM.Standard3.Flex",
+                   "BM.Standard.E5.192", "BM.Standard3.64"]
+
+
+def test_a_shape_the_region_does_not_offer_is_refused_by_name():
+    msg = _placement(_CHICAGO_USABLE)
+    assert msg, "E2.1.Micro in a region with no E2 shape was allowed through"
+    assert "VM.Standard.E2.1.Micro" in msg, "the error must name the rejected shape"
+    assert "wYeM:US-CHICAGO-1-AD-1" in msg, "the error must name the placement"
+    assert "VM.Standard.E5.Flex" in msg, "the error must list what would work"
+
+
+def test_a_launchable_shape_is_accepted():
+    assert _placement(_CHICAGO_USABLE, shape="VM.Standard.E5.Flex") is None
+
+
+def test_the_precheck_fails_open_when_the_lookup_breaks():
+    """A listing call that can't reach OCI is not evidence the placement is
+    wrong, and must never be the reason a build refuses to start."""
+    assert _placement(RuntimeError("connection reset")) is None
+    assert _placement([]) is None, "an empty intersection tells us nothing"
+
+
+def test_the_no_free_shape_case_points_at_the_ampere_alternative():
+    """In a region with no E2, nothing an x86 image can launch on is free — say
+    so, because the free-tier gate upstream just approved E2.1.Micro as free."""
+    msg = _placement(_CHICAGO_USABLE)
+    assert "None of them are Always-Free" in msg
+    assert "A1.Flex" in msg and "aarch64" in msg
+    # ...and stay quiet about it when a free shape *is* among the usable ones.
+    # (A1.Flex still appears there, as the shape to switch to — that's the list,
+    # not the note.)
+    assert "None of them are Always-Free" not in (_placement(["VM.Standard.A1.Flex"]) or "")
+
+
+def test_both_entry_points_precheck_the_placement():
+    """The route gives the operator the error at submit time; the runner covers a
+    re-queued job and the route's fail-open path."""
+    api = _read("web_dashboard", "api", "packer.py")
+    assert "check_launch_placement(" in api
+    assert '"code": "shape_not_launchable"' in api
+    # Before the free-tier prompt: a shape that cannot launch must not be waved
+    # through an "acknowledge charges" dialog first.
+    assert api.index("check_launch_placement(") < api.index("oci_freetier.evaluate("), \
+        "the placement gate must precede the free-tier prompt"
+    svc = _read("web_dashboard", "services", "packer_build_service.py")
+    body = re.search(r"async def _run_oci_build\(.*?\n(.*?)\nasync def ", svc, re.S).group(1)
+    assert "check_launch_placement(" in body
+    # Surfaced as a PackerError, else the job reports it as "Unexpected error".
+    assert "raise PackerError(str(exc))" in body
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0

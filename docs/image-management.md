@@ -113,6 +113,40 @@ shape. Oracle encodes `aarch64` in platform image display names, so
 the form warns when an Arm image is paired with an x86 shape or vice
 versa — advisory, because a custom image may be named anything.
 
+##### The shape has to exist in *your* region
+
+`LaunchInstance` answers three different mistakes with the same
+unattributed `404 NotAuthorizedOrNotFound` — no field named, one second
+into the build:
+
+1. the shape isn't offered in that availability domain,
+2. the base image doesn't support the shape,
+3. a genuine IAM policy denial.
+
+The first is the easy trap, because the default build shape is
+`VM.Standard.E2.1.Micro`, the Always-Free AMD micro — and **E2 shapes
+exist only in the older OCI regions.** A newer region such as
+`us-chicago-1` offers no E2 shape at all, so the out-of-the-box default
+is unlaunchable there. Worse, the free tier has no x86 substitute: the
+other Always-Free shape, `VM.Standard.A1.Flex`, is Ampere, so it pairs
+only with an `aarch64` base image. An x86 Oracle Linux 10 image in
+`us-chicago-1` has exactly four usable shapes, none of them free.
+
+The build form fills its shape list live and drops a default the region
+can't launch, and both the API route and the job runner precheck the
+placement before Packer starts
+(`oci_service.check_launch_placement`) — so cases 1 and 2 now fail
+with a message naming the shape and listing what would work. That
+precheck deliberately **fails open**: if the lookup itself can't reach
+OCI, the build proceeds. So a bare 404 that survives all of the above
+is most likely case 3 — check the policies on the compartment holding
+the subnet and the image.
+
+To build an x86 image in a region without E2, pick a paid shape
+(`VM.Standard.E5.Flex` at 1 OCPU costs cents for a build that lasts
+minutes) and acknowledge the free-tier warning. To stay inside the free
+tier, use an `aarch64` base image with `VM.Standard.A1.Flex`.
+
 Set `storage_oci_bucket` on the Storage page to have builds export to
 VHD and register in the image hub; without it the build still produces
 the custom image and reports `export_skipped`.

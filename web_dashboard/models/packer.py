@@ -135,7 +135,14 @@ class OCIPackerBuildRequest(BaseModel):
     charset here as well as HCL-escaped at generation time."""
     image_name: str
     base_image_ocid: str
-    shape: str = "VM.Standard.E2.1.Micro"   # the Always-Free AMD micro
+    # The Always-Free AMD micro — but only in the OCI regions old enough to have
+    # E2 hardware. Newer regions (us-chicago-1 among them) offer no E2 shape at
+    # all, and LaunchInstance reports an absent shape as a bare 404
+    # NotAuthorizedOrNotFound, so this default cannot be trusted region-blind:
+    # the form replaces it from the live shape list and the API prechecks it
+    # (oci_service.check_launch_placement). Kept as the default because it is
+    # still right for the default region, us-ashburn-1.
+    shape: str = "VM.Standard.E2.1.Micro"
     availability_domain: str
     subnet_ocid: str = ""                   # blank → oci_default_subnet_ocid
     ssh_username: str = "opc"               # Oracle Linux default; "ubuntu" for Ubuntu images

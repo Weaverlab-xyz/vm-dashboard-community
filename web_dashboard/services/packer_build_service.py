@@ -25,9 +25,11 @@ from . import (
     gcp_service,
     image_registry_service,
     job_service,
+    oci_service,
     packer_service,
     storage_service,
 )
+from .oci_service import OCIError
 from .packer_service import PackerError, PackerCancelled
 from .epml_service import EpmlError
 
@@ -586,6 +588,19 @@ async def _run_oci_build(job_id: str, req: OCIPackerBuildRequest, created_by: st
                 "No subnet for the build instance. Pick one on the build form, or set "
                 "oci_default_subnet_ocid in Setup → OCI. It must be a public subnet that "
                 "allows inbound TCP 22 from the dashboard — Packer connects over the internet.")
+
+        # Re-checked here, not just at the API route: a job can be re-queued
+        # directly, and the route's copy of this check fails open when OCI is
+        # briefly unreachable. Cheap (two list calls) against a build that runs
+        # for minutes, and it is the difference between a named cause and
+        # LaunchInstance's unattributed 404 NotAuthorizedOrNotFound.
+        try:
+            await oci_service.check_launch_placement(
+                availability_domain=req.availability_domain,
+                image_ocid=req.base_image_ocid, shape=req.shape,
+                compartment_id=compartment, region=region)
+        except OCIError as exc:
+            raise PackerError(str(exc)) from exc
 
         env = _base_env()
         env["PKR_VAR_tenancy_ocid"] = tenancy
