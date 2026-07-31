@@ -815,10 +815,10 @@ function ociDashboard() {
       setTimeout(() => { this.toast = ''; }, 5000);
     },
 
-    async loadImages() {
+    async loadImages(bust = false) {
       this.imagesLoading = true;
       try {
-        const r = await API.get('/api/oci/images');
+        const r = await API.get('/api/oci/images' + (bust ? '?bust=true' : ''));
         this.images = r?.images || [];
         this.credError = '';
       } catch (e) {
@@ -828,9 +828,9 @@ function ociDashboard() {
       }
     },
 
-    async loadNetworkOpts() {
+    async loadNetworkOpts(bust = false) {
       try {
-        const r = await API.get('/api/oci/network-options');
+        const r = await API.get('/api/oci/network-options' + (bust ? '?bust=true' : ''));
         this.networkOpts = r || this.networkOpts;
         this.region = r?.region || '';
       } catch (e) { /* credError already surfaced by loadImages */ }
@@ -851,7 +851,10 @@ function ociDashboard() {
     switchToInstances() { this.activeTab = 'instances'; if (!this.instances.length) this.loadInstances(); },
 
     async refreshAll() {
-      await Promise.all([this.loadImages(), this.loadNetworkOpts()]);
+      // bust on all three: Refresh exists to escape a stale cache (most often one
+      // holding the previous region's OCIDs after a Setup → OCI change), and a
+      // plain re-GET would just be served the same entry for the rest of the TTL.
+      await Promise.all([this.loadImages(true), this.loadNetworkOpts(true)]);
       if (this.activeTab === 'instances') await this.loadInstances(true);
     },
 
