@@ -141,34 +141,46 @@ async def _resolve_aws_ecs_deploy_key() -> str:
 CACHE_KEY_AMIS = "aws_amis"
 
 
-def amis_cache_key() -> str:
-    """Cache key for the AMI list — the one place this key is built."""
-    return cache_service.key_global(CACHE_KEY_AMIS)
+def amis_cache_key(region: str) -> str:
+    """Cache key for the AMI list, scoped per region — the one place this is built.
+
+    An AMI id only resolves in the region that owns it, and this router is
+    multi-region (``DeployRequest.region``, ``?region=`` below). Under the previous
+    single ``key_global`` key the first region to warm the cache owned it for the
+    whole TTL, so the deploy form offered another region's ids and EC2 rejected the
+    launch with ``InvalidAMIID.NotFound`` — which names no region and reads like a
+    deleted image. Same per-region keying as ``network_opts_cache_key`` below."""
+    return cache_service.key_param(CACHE_KEY_AMIS, region=region)
 
 
-async def _fetch_amis() -> list:
-    """AMIs owned by this account, in the configured region. Shared by /amis,
-    /dashboard-stats and the startup warmer in main.py — the warmer used to resolve
-    the region from `settings.aws_region` (process start) instead of `_aws_region()`
-    (config_service), so after a Setup-wizard region change it kept refilling this
-    key with the OLD region's AMIs."""
-    return await aws_service.list_amis(_aws_region())
+async def _fetch_amis(region: str) -> list:
+    """AMIs owned by this account, in ``region``. Shared by /amis, /dashboard-stats
+    and the startup warmer in main.py, which pairs it with ``amis_cache_key`` through
+    ``_warm_scoped_loop`` so the key can never name a different region than the data
+    stored under it."""
+    return await aws_service.list_amis(region)
 
 
 @router.get("/amis", response_model=AMIListResponse)
 async def list_amis(
+    region: Optional[str] = None,
     current_user: User = Depends(require_permission("aws", "read")),
 ):
-    """List all AMIs owned by this AWS account. Served from cache (5 min TTL)."""
-    cache_key = amis_cache_key()
+    """List all AMIs owned by this AWS account. ``?region=`` scopes the lookup to a
+    specific region (defaults to the configured ``aws_region``); served from a
+    per-region cache (5 min TTL) so regions never collide."""
+    _region = _resolve_region(region)
+    cache_key = amis_cache_key(_region)
     ttl = cache_service.TTL[CACHE_KEY_AMIS]
 
     try:
-        amis, cached_at = await cache_service.get_or_refresh(cache_key, ttl, _fetch_amis)
+        amis, cached_at = await cache_service.get_or_refresh(
+            cache_key, ttl, lambda: _fetch_amis(_region))
         return AMIListResponse(
             amis=[AMIInfo(**a) for a in amis],
             count=len(amis),
             cached_at=cached_at,
+            region=_region,
         )
     except AWSError as e:
         raise HTTPException(status_code=503, detail=str(e))
@@ -306,10 +318,11 @@ async def aws_dashboard_stats(
     except AWSError:
         pass
     try:
+        _region = _aws_region()
         amis, _ = await cache_service.get_or_refresh(
-            amis_cache_key(),
+            amis_cache_key(_region),
             cache_service.TTL[CACHE_KEY_AMIS],
-            _fetch_amis)
+            lambda: _fetch_amis(_region))
         out["images"] = {"total": len(amis)}
     except AWSError:
         pass
@@ -738,7 +751,10 @@ async def enable_ami_ena(
         db, current_user.username, "enable_ena",
         details={"source_ami_id": ami_id, "new_ami_id": new_ami_id},
     )
-    await cache_service.invalidate(amis_cache_key())
+    # By prefix, not by key: the AMI list is cached per region now, so an
+    # exact-key invalidate would silently clear nothing. Over-clearing the
+    # other regions just costs them one refetch.
+    await cache_service.invalidate_prefix(CACHE_KEY_AMIS)
     return {"success": True, "source_ami_id": ami_id, "new_ami_id": new_ami_id}
 
 
@@ -759,7 +775,10 @@ async def deregister_ami(
         details={"ami_id": ami_id, "deleted_snapshots": deleted_snapshots},
     )
     # Invalidate the private AMI list cache
-    await cache_service.invalidate(amis_cache_key())
+    # By prefix, not by key: the AMI list is cached per region now, so an
+    # exact-key invalidate would silently clear nothing. Over-clearing the
+    # other regions just costs them one refetch.
+    await cache_service.invalidate_prefix(CACHE_KEY_AMIS)
 
     return {
         "deregistered": True,

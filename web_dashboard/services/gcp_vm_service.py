@@ -418,7 +418,7 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
                                       project=project_id, zone=result["zone"])
 
         job_service.set_completed(db, job_id, final_meta)
-        await cache_service.invalidate(cache_service.key_global("gcp_instances"))
+        await cache_service.invalidate_prefix("gcp_instances")
 
     except Exception as exc:
         logger.error("GCE deploy failed for job %s: %s", job_id, exc)
@@ -466,7 +466,7 @@ async def _run_capture(
             instance_name=instance_name, image_name=image_name, description=description,
         )
         job_service.set_completed(db, job_id, result)
-        await cache_service.invalidate(cache_service.key_global("gcp_custom_images"))
+        await cache_service.invalidate_prefix("gcp_custom_images")
     except Exception as exc:
         logger.error("GCE image capture failed for job %s: %s", job_id, exc)
         job_service.set_failed(db, job_id, str(exc))
@@ -615,7 +615,7 @@ async def _run_destroy(
                 result["jumpoint_host_teardown_error"] = str(e)
 
         job_service.set_completed(db, job_id, result)
-        await cache_service.invalidate(cache_service.key_global("gcp_instances"))
+        await cache_service.invalidate_prefix("gcp_instances")
     except Exception as exc:
         logger.error("GCE destroy failed for job %s: %s", job_id, exc)
         job_service.set_failed(db, job_id, str(exc))

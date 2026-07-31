@@ -160,15 +160,23 @@ async def _validate_ssh_key_override(override) -> None:
 CACHE_KEY_IMAGES = "azure_images"
 
 
-def images_cache_key() -> str:
-    """Cache key for the private-image list — the one place this key is built."""
-    return cache_service.key_global(CACHE_KEY_IMAGES)
+def images_cache_key(location: str) -> str:
+    """Cache key for the private-image list, scoped per location — the one place this
+    key is built.
+
+    This does not read one fixed gallery: ``_fetch_private_images`` resolves
+    ``gallery_name`` / ``gallery_resource_group`` / ``resource_group`` per region
+    through ``azure_region_configs``. A single ``key_global`` key therefore let
+    whichever region loaded first own the list for the whole TTL, and the Images tab
+    showed another region's gallery. Same per-region keying as
+    ``network_opts_cache_key`` below."""
+    return cache_service.key_param(CACHE_KEY_IMAGES, location=location)
 
 
-async def _fetch_private_images() -> dict:
-    """Shared Image Gallery images + standalone Managed Images for the configured
-    location. Shared by /images, /dashboard-stats and the startup warmer in
-    main.py, so all three agree on the key AND on how the gallery is resolved.
+async def _fetch_private_images(location: str) -> dict:
+    """Shared Image Gallery images + standalone Managed Images for ``location``.
+    Shared by /images, /dashboard-stats and the startup warmer in main.py, so all
+    three agree on the key AND on how the gallery is resolved.
 
     Gallery defaults resolve through the per-region config sets (PR3). With no
     region map configured this returns the flat azure_shared_image_gallery /
@@ -176,7 +184,7 @@ async def _fetch_private_images() -> dict:
     all the warmer used to read, so on a multi-region setup its pass overwrote the
     correctly-resolved payload with one built from the flat defaults."""
     from ..services.region_config import resolve_azure_region
-    region = resolve_azure_region(_loc())
+    region = resolve_azure_region(location)
     return await azure_service.list_private_images(
         region["gallery_name"],
         region["gallery_resource_group"],
@@ -186,15 +194,19 @@ async def _fetch_private_images() -> dict:
 
 @router.get("/images")
 async def list_images(
+    location: Optional[str] = None,
     current_user: User = Depends(require_permission("azure", "read")),
 ):
-    """List private images: Shared Image Gallery images + standalone Managed Images. Served from cache (5 min)."""
-    cache_key = images_cache_key()
+    """List private images: Shared Image Gallery images + standalone Managed Images.
+    ``?location=`` scopes the lookup to a specific region (defaults to the configured
+    ``azure_location``); served from a per-region cache (5 min)."""
+    loc = _resolve_location(location)
+    cache_key = images_cache_key(loc)
     ttl = cache_service.TTL[CACHE_KEY_IMAGES]
 
     try:
         payload, cached_at = await cache_service.get_or_refresh(
-            cache_key, ttl, _fetch_private_images)
+            cache_key, ttl, lambda: _fetch_private_images(loc))
         images = payload.get("images", [])
         warnings = payload.get("warnings", [])
         return {
@@ -202,6 +214,7 @@ async def list_images(
             "count": len(images),
             "cached_at": cached_at,
             "warnings": warnings,
+            "location": loc,
         }
     except AzureError as e:
         raise HTTPException(status_code=503, detail=str(e))
@@ -583,10 +596,11 @@ async def azure_dashboard_stats(
     except AzureError:
         pass
     try:
+        loc = _loc()
         payload, _ = await cache_service.get_or_refresh(
-            images_cache_key(),
+            images_cache_key(loc),
             cache_service.TTL[CACHE_KEY_IMAGES],
-            _fetch_private_images)
+            lambda: _fetch_private_images(loc))
         out["images"] = {"total": len(payload.get("images", []))}
     except AzureError:
         pass
@@ -1218,7 +1232,9 @@ async def delete_image(
         db, current_user.username, "azure_delete_image",
         details={"image_name": image_name},
     )
-    await cache_service.invalidate(images_cache_key())
+    # By prefix, not by key: the image list is cached per location now, so an
+    # exact-key invalidate would silently clear nothing.
+    await cache_service.invalidate_prefix(CACHE_KEY_IMAGES)
     return {"deleted": True, "image_name": image_name}
 
 

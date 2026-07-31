@@ -729,7 +729,7 @@ async def _run_create_image(job_id: str, instance_id: str, req: CreateImageReque
                         "name": req.name,
                     },
                 )
-                await cache_service.invalidate(cache_service.key_global("aws_amis"))
+                await cache_service.invalidate_prefix("aws_amis")
                 return
 
             if state == "failed":
@@ -795,7 +795,7 @@ async def _run_ami_copy(job_id: str, req: CopyAMIRequest):
                         "name": req.name,
                     },
                 )
-                await cache_service.invalidate(cache_service.key_global("aws_amis"))
+                await cache_service.invalidate_prefix("aws_amis")
                 return
 
             if state == "failed":

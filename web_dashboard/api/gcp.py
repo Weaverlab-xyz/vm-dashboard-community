@@ -63,6 +63,37 @@ def _gcp_region() -> str:
     return parts[0] if len(parts) == 2 else zone
 
 
+# Cache identities for the two project-scoped GCP caches. Exported as builders so
+# every reader and writer produces a byte-identical key — same convention as
+# api/aws.py and api/azure.py. GCP has no startup warmer, but the read/write split
+# inside this module is enough to make a drifted key a silent permanent miss.
+CACHE_KEY_INSTANCES = "gcp_instances"
+CACHE_KEY_CUSTOM_IMAGES = "gcp_custom_images"
+
+
+def instances_cache_key(project_id: str) -> str:
+    """Cache key for the dashboard GCE inventory, scoped to the project it was read
+    from. Three call sites share it (`_build_gcp_instances` writes, `list_instances`
+    and `_gcp_instances_unfiltered` read) and a write/read key that disagree is a
+    silent permanent miss, so they resolve it here rather than each spelling it out.
+
+    Project, not region: `_build_gcp_instances` already iterates every zone a deploy
+    job recorded, so the payload spans regions by construction. What it does *not*
+    span is projects — `gcp_project_id` is operator-changeable in Settings, and the
+    cached payload literally embeds the `project_id` it was built for, so after a
+    switch the page kept reporting the old project's instances under its old id."""
+    return cache_service.key_param(CACHE_KEY_INSTANCES, project=project_id)
+
+
+def custom_images_cache_key(project_id: str) -> str:
+    """Cache key for the custom (private) image list, scoped per project.
+
+    A custom image lives in the project that owns it, and the payload echoes the
+    `project_id` back. GCE images are global *within* a project, so project is the
+    only dimension needed here — not region."""
+    return cache_service.key_param(CACHE_KEY_CUSTOM_IMAGES, project=project_id)
+
+
 def _resolve_zone(zone: Optional[str]) -> str:
     """Resolve the effective GCE zone for a request. Format validation is delegated
     to the shared region catalog; a blank/None zone falls back to the configured
@@ -176,7 +207,12 @@ async def list_custom_images(
     if not project_id:
         raise HTTPException(status_code=400, detail="GCP project ID not configured — run the setup wizard.")
 
-    cache_key = cache_service.key_global("gcp_custom_images")
+    # Keyed per project: a custom image lives in the project that owns it, and
+    # `gcp_project_id` is operator-changeable in Settings. Under a single global key
+    # the old project's images (and the `project_id` echoed in this very payload)
+    # were served for the whole TTL after the switch. GCE images are global within a
+    # project, so project is the only dimension needed here — not region.
+    cache_key = custom_images_cache_key(project_id)
     cached = await cache_service.get(cache_key)
     if cached:
         return cached["data"]
@@ -295,14 +331,14 @@ async def _build_gcp_instances(db, project_id: str) -> list:
             instances.append(inst)
 
     full = GCPInstanceListResponse(instances=instances, project_id=project_id, zone=_gcp_zone())
-    await cache_service.set(cache_service.key_global("gcp_instances"), full.model_dump(), ttl=60)
+    await cache_service.set(instances_cache_key(project_id), full.model_dump(), ttl=60)
     return instances
 
 
 async def _gcp_instances_unfiltered(db, project_id: str) -> list:
     """Full dashboard GCE instances, cache-aware (reads the gcp_instances cache,
     builds + caches on miss)."""
-    cached = await cache_service.get(cache_service.key_global("gcp_instances"))
+    cached = await cache_service.get(instances_cache_key(project_id))
     if cached:
         return (cached.get("data") or {}).get("instances") or []
     return await _build_gcp_instances(db, project_id)
@@ -329,7 +365,8 @@ async def gcp_dashboard_stats(
     except gcp_service.GCPError:
         pass
     try:
-        cached = await cache_service.get(cache_service.key_global("gcp_custom_images"))
+        cached = await cache_service.get(
+            custom_images_cache_key(project_id))
         if cached:
             imgs = (cached.get("data") or {}).get("images") or []
         else:
@@ -362,7 +399,7 @@ async def list_instances(
         if accessible is not None and canonical not in accessible:
             raise HTTPException(status_code=403, detail=f"No access to workgroup '{canonical}'")
 
-    cache_key = cache_service.key_global("gcp_instances")
+    cache_key = instances_cache_key(project_id)
     if not bust:
         cached = await cache_service.get(cache_key)
         if cached:
@@ -786,7 +823,7 @@ async def reassign_instance_workgroup(
             job.cloud_resource_id = instance_name
         db.commit()
 
-    await cache_service.invalidate(cache_service.key_global("gcp_instances"))
+    await cache_service.invalidate_prefix(CACHE_KEY_INSTANCES)
     return {"instance_name": instance_name, "workgroup": canonical, "job_id": job.id if job else None}
 
 
@@ -936,5 +973,5 @@ async def delete_image(
     except gcp_service.GCPError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     job_service.log_audit(db, current_user.username, "gce_delete_image", details={"image_name": image_name})
-    await cache_service.invalidate(cache_service.key_global("gcp_custom_images"))
+    await cache_service.invalidate_prefix(CACHE_KEY_CUSTOM_IMAGES)
     return {"ok": True, "image_name": image_name}

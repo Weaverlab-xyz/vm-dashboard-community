@@ -810,7 +810,7 @@ async def _run_create_image(
 
         job_service.update_progress(db, job_id, 90, f"Image '{req.name}' created successfully.")
         job_service.set_completed(db, job_id, result)
-        await cache_service.invalidate(cache_service.key_global("azure_images"))
+        await cache_service.invalidate_prefix("azure_images")
 
     except AzureError as e:
         job_service.set_failed(db, job_id, str(e))

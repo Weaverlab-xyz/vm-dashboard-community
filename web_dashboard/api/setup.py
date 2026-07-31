@@ -366,20 +366,24 @@ def _apply_config(payload: SetupPayload) -> None:
 # name in here, grep for how its readers build the key.
 _CONFIG_DEPENDENT_CACHES = (
     # Azure — api/azure.py
-    "azure_images", "azure_vms",
+    "azure_vms",
     # AWS — api/aws.py
-    "aws_amis", "aws_instances",
-    # GCP — api/gcp.py
-    "gcp_custom_images", "gcp_instances",
+    "aws_instances",
+    # Both are dashboard-wide inventories: their fetchers iterate every region a
+    # deploy job recorded, so the payload spans regions and the key is genuinely flat.
     # OCI is deliberately absent: api/oci.py::_cache_key scopes every OCI cache by
     # region + compartment, so a wizard change lands on a new key and misses. A
     # scoped key self-heals and needs no entry here — prefer that to listing.
 )
 
-# key_param() families — one entry per region/location/endpoint, cleared by prefix.
+# key_param() families — one entry per region/location/project, cleared by prefix.
 _CONFIG_DEPENDENT_CACHE_PREFIXES = (
+    "aws_amis",               # api/aws.py           key_param(region=...)
     "aws_network_opts",       # api/aws.py           key_param(region=...)
+    "azure_images",           # api/azure.py         key_param(location=...)
     "azure_network_opts",     # api/azure.py         key_param(location=...)
+    "gcp_custom_images",      # api/gcp.py           key_param(project=...)
+    "gcp_instances",          # api/gcp.py           key_param(project=...)
     "gcp_network_opts",       # api/gcp.py           key_param(region=...)
     "portainer_endpoints",    # services/portainer_service.py  key_param() — "vmcli:portainer_endpoints:"
     "portainer_containers",   # services/portainer_service.py  key_param(endpoint_id=, all=)

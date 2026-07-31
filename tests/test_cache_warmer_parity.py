@@ -285,6 +285,54 @@ def test_network_opts_warmers_use_the_per_region_reader_key():
     assert az_payload["location"] == "westeurope"
 
 
+def test_amis_and_images_warmers_use_the_per_region_reader_key():
+    """The AMI list and the private-image list are per-scope caches too.
+
+    An AMI id only resolves in its own region, and under ``azure_region_configs`` each
+    region names its own Shared Image Gallery — so both keys carry their scope and both
+    warmers must go through ``_warm_scoped_loop``. Reverting either to the flat
+    ``_warm_loop`` calls ``key_fn()`` with no argument: that raises TypeError, which
+    ``_warm_loop`` swallows and logs, so the warmer silently never writes anything and
+    every first request of a session pays a live cloud round-trip. ``_first_write``
+    fails on exactly that (it asserts a write happened at all).
+    """
+    patch = _Patch()
+
+    async def _run():
+        async def _fake_list_amis(region):
+            return [{"ami_id": f"ami-{region}", "name": f"img-{region}",
+                     "state": "available"}]
+
+        patch.set(aws_api.aws_service, "list_amis", _fake_list_amis)
+        patch.set(aws_api, "_aws_region", lambda: "ap-south-1")
+        aws_key, aws_payload, _ = await _first_write(main._warm_aws_amis, patch)
+
+        async def _fake_private_images(location):
+            return {"images": [{"resource_id": f"/subscriptions/x/{location}",
+                                "name": f"img-{location}"}],
+                    "warnings": []}
+
+        patch.set(azure_api, "_fetch_private_images", _fake_private_images)
+        patch.set(azure_api, "_loc", lambda: "westeurope")
+        az_key, az_payload, _ = await _first_write(main._warm_azure_images, patch)
+        return aws_key, aws_payload, az_key, az_payload
+
+    try:
+        aws_key, aws_payload, az_key, az_payload = asyncio.run(_run())
+    finally:
+        patch.undo()
+
+    # Exactly the key the route reads.
+    assert aws_key == aws_api.amis_cache_key("ap-south-1")
+    assert az_key == azure_api.images_cache_key("westeurope")
+    # The pre-fix keys, which no reader ever looks at.
+    assert aws_key != cache_service.key_global(aws_api.CACHE_KEY_AMIS)
+    assert az_key != cache_service.key_global(azure_api.CACHE_KEY_IMAGES)
+    # The key describes the same scope as the data stored under it.
+    assert aws_payload[0]["name"] == "img-ap-south-1"
+    assert az_payload["images"][0]["name"] == "img-westeurope"
+
+
 def test_warmers_resolve_scope_through_config_service_not_startup_env():
     """A Setup-wizard region change must reach the warmer without a restart.
 
@@ -350,8 +398,16 @@ def test_warmers_delegate_to_the_route_modules():
 
 def test_cache_key_builders_are_the_single_source_of_key_truth():
     # These identities are what make payload drift impossible by construction.
-    assert aws_api.amis_cache_key() == cache_service.key_global(aws_api.CACHE_KEY_AMIS)
-    assert azure_api.images_cache_key() == cache_service.key_global(
+    # amis/images are per-region now (an AMI id and a gallery are both region-local),
+    # so their builders take the scope — same shape as network_opts below.
+    assert aws_api.amis_cache_key("eu-west-1") == cache_service.key_param(
+        aws_api.CACHE_KEY_AMIS, region="eu-west-1")
+    assert azure_api.images_cache_key("westeurope") == cache_service.key_param(
+        azure_api.CACHE_KEY_IMAGES, location="westeurope")
+    # …and never the flat key, which no reader looks at any more.
+    assert aws_api.amis_cache_key("eu-west-1") != cache_service.key_global(
+        aws_api.CACHE_KEY_AMIS)
+    assert azure_api.images_cache_key("westeurope") != cache_service.key_global(
         azure_api.CACHE_KEY_IMAGES)
     assert aws_api.CACHE_KEY_AMIS in cache_service.TTL
     assert aws_api.CACHE_KEY_INSTANCES in cache_service.TTL

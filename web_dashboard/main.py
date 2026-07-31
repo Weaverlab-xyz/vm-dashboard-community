@@ -317,8 +317,11 @@ async def _warm_cost_summary() -> None:
 
 async def _warm_aws_amis() -> None:
     from .api import aws as aws_api
-    await _warm_loop(
+    # Scoped, not flat: an AMI id only resolves in its own region, so this key now
+    # carries the region (aws_api.amis_cache_key) exactly like network-options does.
+    await _warm_scoped_loop(
         "aws_amis",
+        scope_fn=aws_api._aws_region,
         fetcher=aws_api._fetch_amis,
         key_fn=aws_api.amis_cache_key,
         ttl=cache_service.TTL[aws_api.CACHE_KEY_AMIS],
@@ -358,8 +361,11 @@ async def _warm_aws_instances() -> None:
 
 async def _warm_azure_images() -> None:
     from .api import azure as azure_api
-    await _warm_loop(
+    # Scoped, not flat: under azure_region_configs each region resolves its own
+    # gallery, so the key has to name the location the images came from.
+    await _warm_scoped_loop(
         "azure_images",
+        scope_fn=azure_api._loc,
         fetcher=azure_api._fetch_private_images,
         key_fn=azure_api.images_cache_key,
         ttl=cache_service.TTL[azure_api.CACHE_KEY_IMAGES],
