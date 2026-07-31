@@ -209,15 +209,22 @@
         <div class="grid grid-cols-2 gap-4">
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">Build Shape</label>
+            <!-- Scoped to the AD + base image below, not region-wide: OCI does not
+                 offer every shape in every AD, and an image boots only on the
+                 shapes it was built for. -->
             <select x-model="ociPackerForm.shape" @change="onPackerShapeChange()"
                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-red-500 focus:border-red-500">
               <option value="">— pick a shape —</option>
-              <template x-for="s in (networkOpts.shapes || [])" :key="s.shape">
+              <template x-for="s in packerShapes()" :key="s.shape">
                 <option :value="s.shape" x-text="s.shape + (s.free_tier ? '  (always-free)' : '')"></option>
               </template>
             </select>
+            <p x-show="packerShapesBusy()" x-cloak class="text-xs text-gray-400 mt-1">
+              Checking which shapes this availability domain and base image support…</p>
+            <p x-show="!packerShapesBusy() && packerShapeNotice()" x-cloak
+               class="text-xs text-amber-700 mt-1" x-text="packerShapeNotice()"></p>
             <p class="text-xs text-gray-400 mt-1" x-show="packerFreeMicroMissing()" x-cloak>
-              This region offers no <span class="font-mono">VM.Standard.E2.1.Micro</span> — the
+              This availability domain offers no <span class="font-mono">VM.Standard.E2.1.Micro</span> — the
               Always-Free AMD micro only exists in the older regions. The free alternative,
               <span class="font-mono">VM.Standard.A1.Flex</span>, is Arm and needs an aarch64 base image.
             </p>
@@ -250,7 +257,10 @@
         <div class="grid grid-cols-2 gap-4">
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">Availability Domain <span class="text-red-500">*</span></label>
+            <!-- @change refetches Build Shape: the shape list is AD-scoped, so
+                 changing AD without refetching leaves a list from another one. -->
             <select x-model="ociPackerForm.availability_domain"
+                    @change="onPackerPlacementChange()"
                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-red-500 focus:border-red-500">
               <option value="">— pick an availability domain —</option>
               <template x-for="ad in (networkOpts.availability_domains || [])" :key="ad">
@@ -450,12 +460,23 @@
 
         <div>
           <label class="block text-xs font-medium text-gray-600 mb-1">Shape</label>
+          <!-- Scoped to the availability domain below and to this image: OCI does
+               not offer every shape in every AD, and an image boots only on the
+               shapes it was built for. -->
           <select x-model="deployForm.shape" @change="onShapeChange()"
                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
-            <template x-for="s in networkOpts.shapes" :key="s.shape">
+            <!-- A placeholder, like the build form's: without one, a shape the
+                 narrowed list dropped renders as an empty box while the model keeps
+                 the old value and submits it. -->
+            <option value="">— pick a shape —</option>
+            <template x-for="s in deployShapes()" :key="s.shape">
               <option :value="s.shape" x-text="s.shape + (s.free_tier ? '  (Always-Free)' : '')"></option>
             </template>
           </select>
+          <p x-show="deployShapesBusy()" x-cloak class="text-xs text-gray-400 mt-1">
+            Checking which shapes this availability domain and image support…</p>
+          <p x-show="!deployShapesBusy() && deployShapeNotice()" x-cloak
+             class="text-xs text-amber-700 mt-1" x-text="deployShapeNotice()"></p>
         </div>
 
         <!-- Flexible shape sizing (A1.Flex etc.) -->
@@ -475,7 +496,10 @@
         <div class="grid grid-cols-2 gap-3">
           <div>
             <label class="block text-xs font-medium text-gray-600 mb-1">Availability domain</label>
+            <!-- @change refetches Shape above: the shape list is AD-scoped, so
+                 changing AD without refetching leaves a list from another one. -->
             <select x-model="deployForm.availability_domain"
+                    @change="onDeployPlacementChange()"
                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
               <option value="">(first available)</option>
               <template x-for="ad in networkOpts.availability_domains" :key="ad">
@@ -635,6 +659,14 @@
 
         <div>
           <label class="block text-xs font-medium text-gray-600 mb-1">Shape (shared)</label>
+          <!-- Unscoped, unlike the single-deploy and build forms. Defensible on the
+               AD axis: this modal has no availability-domain picker, so it always
+               takes the first AD — which IS the unscoped list's scope. Image
+               narrowing is the real gap: it would need one compatibility lookup per
+               selected image, and since an empty intersection falls open anyway (see
+               _launchable_shape_rows_sync) a mixed x86 + Ampere selection would gain
+               nothing from it. Note the shape default here is hardcoded and, unlike
+               the build form's, never dropped when the AD can't offer it. -->
           <select x-model="bulkModal.shape" @change="onBulkShapeChange()"
                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
             <template x-for="s in networkOpts.shapes" :key="s.shape">
@@ -728,6 +760,16 @@ function ociDashboard() {
     imageFilter: 'all',
     networkOpts: { availability_domains: [], shapes: [], subnets: [], region: '', free_tier: {}, ssh_key_configured: false },
     availableWorkgroups: [],
+    // networkOpts.shapes is AD- AND image-scoped (OCI offers different shapes in
+    // different ADs of one region, and an image boots only on the shapes it was
+    // built for). Three forms share this component, so one mutable shape list
+    // would mean the build tab's AD silently rewrites the deploy modal's picker.
+    // Instead: keep networkOpts.shapes as the unscoped baseline and cache each
+    // scope separately, keyed "<ad>|<image>".
+    shapeScopes: {},         // key → array of shapes (an EMPTY array is a real answer)
+    shapeScopeLoading: {},   // key → true while that scope is in flight
+    packerShapeNote: '',
+    deployShapeNote: '',
 
     deployModal: false,
     selectedImage: null,
@@ -795,6 +837,10 @@ function ociDashboard() {
       }
       if ((this.networkOpts.availability_domains || []).length === 1) {
         this.ociPackerForm.availability_domain = this.networkOpts.availability_domains[0];
+        // Preselecting an AD is a placement change like any other — the shape list
+        // has to follow it rather than stay on the unscoped baseline. Awaited so the
+        // default-shape check below judges against the scoped list.
+        await this.onPackerPlacementChange();
       }
       // The default shape is a guess, and a wrong one used to submit silently: the
       // select has no <option> for a shape this region doesn't offer, so Alpine
@@ -802,8 +848,11 @@ function ociDashboard() {
       // POSTed it. LaunchInstance answers a shape that isn't there with a 404
       // NotAuthorizedOrNotFound naming no field, one second into the build. Drop a
       // default the region can't launch and make the operator pick.
-      const offered = (this.networkOpts.shapes || []).map(s => s.shape);
-      if (offered.length && !offered.includes(this.ociPackerForm.shape)) {
+      // Judged against packerShapes() — the AD/image-scoped list — so a default
+      // that this region has but this AD does not is dropped too.
+      const offered = this.packerShapes().map(s => s.shape);
+      if (this.ociPackerForm.shape && offered.length
+          && !offered.includes(this.ociPackerForm.shape)) {
         this.ociPackerForm.shape = '';
         this.onPackerShapeChange();
       }
@@ -833,7 +882,92 @@ function ociDashboard() {
         const r = await API.get('/api/oci/network-options' + (bust ? '?bust=true' : ''));
         this.networkOpts = r || this.networkOpts;
         this.region = r?.region || '';
+        // Drop cached scopes — a manual refresh has to refetch them, not keep
+        // serving lists built before it.
+        this.shapeScopes = {};
+        // The unscoped response IS the "first AD, any image" scope; seed it so the
+        // common case costs no second round-trip.
+        if (r) this.shapeScopes[this._shapeScopeKey('', '')] = r.shapes || [];
       } catch (e) { /* credError already surfaced by loadImages */ }
+    },
+
+    // ── AD/image-scoped shape lists ─────────────────────────────────────────
+    _shapeScopeKey(ad, imageOcid) { return (ad || '') + '|' + (imageOcid || ''); },
+
+    // Falls back to the unscoped list only while a scope is UNLOADED. A scope
+    // that loaded empty returns empty — "nothing here can launch this" is an
+    // answer, and papering over it with the first AD's list is the bug.
+    shapesFor(ad, imageOcid) {
+      const hit = this.shapeScopes[this._shapeScopeKey(ad, imageOcid)];
+      return Array.isArray(hit) ? hit : (this.networkOpts.shapes || []);
+    },
+
+    shapeScopeBusy(ad, imageOcid) {
+      return !!this.shapeScopeLoading[this._shapeScopeKey(ad, imageOcid)];
+    },
+
+    shapeScopeEmpty(ad, imageOcid) {
+      const hit = this.shapeScopes[this._shapeScopeKey(ad, imageOcid)];
+      return Array.isArray(hit) && hit.length === 0;
+    },
+
+    async loadShapeScope(ad, imageOcid, bust = false) {
+      const k = this._shapeScopeKey(ad, imageOcid);
+      if (this.shapeScopeLoading[k]) return;
+      if (Array.isArray(this.shapeScopes[k]) && !bust) return;
+      this.shapeScopeLoading[k] = true;
+      try {
+        const p = [];
+        if (ad) p.push('availability_domain=' + encodeURIComponent(ad));
+        if (imageOcid) p.push('image_ocid=' + encodeURIComponent(imageOcid));
+        if (bust) p.push('bust=true');
+        const r = await API.get('/api/oci/network-options' + (p.length ? '?' + p.join('&') : ''));
+        this.shapeScopes[k] = r?.shapes || [];
+      } catch (e) {
+        // Leave the scope unset so shapesFor() falls back to the baseline list.
+        // A transient failure must not empty the picker.
+      } finally {
+        delete this.shapeScopeLoading[k];
+      }
+    },
+
+    // is_flexible / free_tier belong to the shape itself, not to the scope it was
+    // listed in, so metadata lookups fall back to the baseline list — a narrowed
+    // scope must not turn a Flex shape into a fixed one mid-form.
+    _shapeMeta(name, shapes) {
+      return (shapes || []).find(s => s.shape === name)
+          || (this.networkOpts.shapes || []).find(s => s.shape === name)
+          || null;
+    },
+
+    // A narrower scope can drop the shape already picked. Leaving it selected is
+    // the worst outcome: Alpine has no <option> to match, so the select renders on
+    // the placeholder while the model still holds the old value and submits it —
+    // the exact silent-bad-shape failure this scoping exists to prevent.
+    //
+    // Clears it rather than picking a replacement, matching what init() does to an
+    // unofferable default. Substituting the first offered shape would be a silent
+    // override of a choice the operator actually made, and on a form whose whole
+    // problem was submitting a shape nobody chose, that is the wrong direction.
+    // The placeholder option and the *Ready() guards keep the cleared form
+    // unsubmittable until they pick.
+    _reconcileShape(form, shapes, ad) {
+      if (!shapes.length || !form.shape) return '';
+      if (shapes.some(s => s.shape === form.shape)) return '';
+      const was = form.shape;
+      form.shape = '';
+      return `${was} is not offered ${ad ? 'in ' + ad : 'for this selection'}`
+             + ' — pick a shape from the narrowed list.';
+    },
+
+    // Reachable only when the AD itself lists no shapes — a bad AD, or a failed
+    // ListShapes. The image narrowing cannot empty the list: it falls open to the
+    // full AD list whenever the intersection comes back empty, matching
+    // oci_service.check_launch_placement (see _launchable_shape_rows_sync).
+    _emptyScopeMessage(ad) {
+      return `OCI lists no shapes ${ad ? 'in ' + ad : 'in this availability domain'}.`
+             + ' Try another availability domain, or Refresh — a failed listing looks'
+             + ' the same as an empty one.';
     },
 
     async loadInstances(bust = false) {
@@ -855,6 +989,11 @@ function ociDashboard() {
       // holding the previous region's OCIDs after a Setup → OCI change), and a
       // plain re-GET would just be served the same entry for the rest of the TTL.
       await Promise.all([this.loadImages(true), this.loadNetworkOpts(true)]);
+      // loadNetworkOpts() dropped the scoped shape caches. Rebuild the scope each
+      // open form is actually on — and bust it too, for the same reason as above:
+      // a scope refetched from a stale server entry has escaped nothing.
+      await this.onPackerPlacementChange(true);
+      if (this.deployModal) await this.onDeployPlacementChange(true);
       if (this.activeTab === 'instances') await this.loadInstances(true);
     },
 
@@ -882,18 +1021,52 @@ function ociDashboard() {
 
     // The Always-Free AMD micro is region-dependent: it exists in the older OCI
     // regions and not in the newer ones (us-chicago-1 offers no E2 shape at all).
+    // Reads the SCOPED list, like the picker it annotates — sourced from the
+    // region-wide list it would contradict the dropdown next to it.
     // Blank until the live shape list has loaded, so the hint can't flash on a
     // page that simply hasn't fetched yet.
     packerFreeMicroMissing() {
-      const shapes = this.networkOpts.shapes || [];
+      const shapes = this.packerShapes();
       if (!shapes.length) return false;
       const micro = (this.networkOpts.free_tier || {}).amd_shape || 'VM.Standard.E2.1.Micro';
       return !shapes.some(s => s.shape === micro);
     },
 
+    // Shapes offered in the build tab's chosen AD that can boot the chosen base
+    // image — not the region-wide list, which is wrong for AD-2 and AD-3.
+    packerShapes() {
+      return this.shapesFor(this.ociPackerForm.availability_domain,
+                            this.ociPackerForm.base_image_ocid);
+    },
+
+    packerShapesBusy() {
+      return this.shapeScopeBusy(this.ociPackerForm.availability_domain,
+                                 this.ociPackerForm.base_image_ocid);
+    },
+
+    packerShapeNotice() {
+      const f = this.ociPackerForm;
+      if (this.shapeScopeEmpty(f.availability_domain, f.base_image_ocid))
+        return this._emptyScopeMessage(f.availability_domain);
+      return this.packerShapeNote;
+    },
+
+    // Availability domain or base image changed — both narrow the shape list, so
+    // both have to refetch it. Without this the picker keeps offering the first
+    // AD's shapes after the operator moves to AD-2.
+    async onPackerPlacementChange(bust = false) {
+      const f = this.ociPackerForm;
+      await this.loadShapeScope(f.availability_domain, f.base_image_ocid, bust);
+      this.packerShapeNote = this._reconcileShape(
+        f, this.packerShapes(), f.availability_domain);
+      if (this.packerShapeNote) {
+        this.onPackerShapeChange();          // flex-ness follows the shape
+        f.acknowledge_charges = false;       // and so does the free-tier envelope
+      }
+    },
+
     packerShapeIsFlex() {
-      const m = (this.networkOpts.shapes || [])
-        .find(s => s.shape === this.ociPackerForm.shape);
+      const m = this._shapeMeta(this.ociPackerForm.shape, this.packerShapes());
       return m ? !!m.is_flexible : (this.ociPackerForm.shape || '').includes('Flex');
     },
 
@@ -917,11 +1090,16 @@ function ociDashboard() {
       this.ociPackerForm.ssh_username =
         os.includes('ubuntu') ? 'ubuntu' :
         os.includes('debian') ? 'debian' : 'opc';
+      // The image also constrains which shapes can boot it.
+      this.onPackerPlacementChange();
     },
 
     // Launching an aarch64 image on an x86 shape (or the reverse) fails inside OCI
     // with an opaque error. The image list carries no architecture field — Oracle
     // encodes it in the display name — so this is a heuristic, hence advisory.
+    // The picker now narrows by real image/shape compatibility, which makes this
+    // mostly redundant; it stays as the backstop for when that narrowing fails
+    // open (compatibility unreadable), where the heuristic is all there is.
     packerArchWarning() {
       const img = this.packerSelectedBaseImage();
       if (!img) return '';
@@ -1041,8 +1219,39 @@ function ociDashboard() {
       }
     },
 
+    // Shapes offered in the deploy form's chosen AD that can boot the image being
+    // deployed. A blank AD is the "(first available)" option, which is the scope
+    // the backend resolves it to as well.
+    deployShapes() {
+      return this.shapesFor(this.deployForm.availability_domain,
+                            this.selectedImage?.ocid || '');
+    },
+
+    deployShapesBusy() {
+      return this.shapeScopeBusy(this.deployForm.availability_domain,
+                                 this.selectedImage?.ocid || '');
+    },
+
+    deployShapeNotice() {
+      const ad = this.deployForm.availability_domain;
+      const img = this.selectedImage?.ocid || '';
+      if (this.shapeScopeEmpty(ad, img)) return this._emptyScopeMessage(ad);
+      return this.deployShapeNote;
+    },
+
+    async onDeployPlacementChange(bust = false) {
+      const ad = this.deployForm.availability_domain;
+      const img = this.selectedImage?.ocid || '';
+      await this.loadShapeScope(ad, img, bust);
+      this.deployShapeNote = this._reconcileShape(this.deployForm, this.deployShapes(), ad);
+      if (this.deployShapeNote) {
+        this.onShapeChange();                          // flex-ness follows the shape
+        this.deployForm.acknowledge_charges = false;   // so does the free-tier envelope
+      }
+    },
+
     selectedShapeMeta() {
-      return (this.networkOpts.shapes || []).find(s => s.shape === this.deployForm.shape) || null;
+      return this._shapeMeta(this.deployForm.shape, this.deployShapes());
     },
     selectedShapeIsFlex() {
       const m = this.selectedShapeMeta();
@@ -1207,6 +1416,10 @@ function ociDashboard() {
 
     deployReady() {
       if (!this.deployForm.instance_name || !this.deployForm.workgroup) return false;
+      // Cleared when the AD/image scope dropped it (_reconcileShape), same as the
+      // build form's required-shape check. Submitting '' would deploy on whatever
+      // the request model defaults to — a shape nobody chose and this AD may lack.
+      if (!this.deployForm.shape) return false;
       const n = this.deployForm.count || 1;
       if (!(n >= 1 && n <= this.countMax)) return false;
       if ((this.freeTierWarnings().length || this.serverGateTripped) && !this.deployForm.acknowledge_charges) return false;
@@ -1230,8 +1443,12 @@ function ociDashboard() {
       this.serverGateTripped = false;
       this.serverGateMessage = '';
       this.deployForm = this.blankForm();
+      this.deployShapeNote = '';
       this.deployModal = true;
       this.loadPraPickers();
+      // Narrow the shape list to what THIS image can boot before the operator
+      // picks — blank AD, matching blankForm()'s "(first available)".
+      this.onDeployPlacementChange();
     },
 
     async deploy() {

@@ -319,4 +319,187 @@ ok('ttlWhyNot names the deletion arming deadline',
    /arms at/i.test(why({ enforce: true, dry_run: false, armed: true,
                          enforce_arms_at: '2026-07-29T14:00:00' })));
 
-process.exit(fail ? 1 : 0);
+// ── OCI: an availability-domain change must refetch the shape list ───────────
+// The bug these pin: /api/oci/network-options listed shapes for the FIRST
+// availability domain only (oci_service._get_network_options_sync passed ads[0]
+// into the AD-scoped ListShapes call) while the form let the operator pick AD-2 or
+// AD-3 and never refetched — there was no @change on the AD select at all. OCI
+// does not offer every shape in every AD of a region, so the picker offered shapes
+// that cannot launch there, on the deploy form and the Packer build form both.
+// Unlike the Azure case above there is NO server-side placement check behind this
+// one, so the picker is the only thing standing between a bad pick and an opaque
+// LaunchInstance failure minutes later.
+const OCI = 'oci/index.html';
+const ociComp = (over) => {
+  const o = {};
+  for (const m of ['_shapeScopeKey', 'shapesFor', 'shapeScopeBusy', 'shapeScopeEmpty',
+                   '_shapeMeta', '_reconcileShape', '_emptyScopeMessage',
+                   'deployShapes', 'deployShapeNotice', 'selectedShapeMeta',
+                   'selectedShapeIsFlex', 'onShapeChange', 'deployReady',
+                   'freeTierWarnings', '_freeTierWarnings',
+                   'packerShapes', 'packerShapeNotice', 'packerShapeIsFlex',
+                   'packerFreeMicroMissing', 'onPackerShapeChange',
+                   'onDeployPlacementChange', 'onPackerPlacementChange'])
+    Object.assign(o, eval('({' + extract(OCI, m) + '})'));
+  return Object.assign(o, {
+    networkOpts: { shapes: [], free_tier: {} },
+    shapeScopes: {}, shapeScopeLoading: {},
+    packerShapeNote: '', deployShapeNote: '',
+    deployForm: { shape: '', availability_domain: '', acknowledge_charges: false },
+    ociPackerForm: { shape: '', availability_domain: '', base_image_ocid: '',
+                     acknowledge_charges: false },
+    selectedImage: null,
+    countMax: 20, serverGateTripped: false,
+    loadShapeScope() {},        // replaced per case
+  }, over);
+};
+
+// free_tier first, matching the order oci_service._list_shapes_sync returns.
+const MICRO = { shape: 'VM.Standard.E2.1.Micro', free_tier: true };
+const FLEXA1 = { shape: 'VM.Standard.A1.Flex', is_flexible: true, free_tier: true };
+const FLEXE4 = { shape: 'VM.Standard.E4.Flex', is_flexible: true };
+
+// One cache entry per (AD, image). A single shared list is exactly how AD-2's
+// picker ends up displaying AD-1's shapes.
+let oc = ociComp();
+ok(OCI + ' scope keys separate the availability domains',
+   oc._shapeScopeKey('AD-1', '') !== oc._shapeScopeKey('AD-2', ''));
+ok(OCI + ' scope keys separate the images',
+   oc._shapeScopeKey('AD-1', 'ocid1.image.a') !== oc._shapeScopeKey('AD-1', 'ocid1.image.b'));
+
+// The distinction the fallback rests on: UNLOADED falls back to the baseline list,
+// LOADED-EMPTY stays empty. Collapsing the two puts the first AD's shapes back in
+// front of the operator — the original bug, restored through the back door.
+oc = ociComp({ networkOpts: { shapes: [MICRO, FLEXA1] } });
+ok(OCI + ' shapesFor falls back to the baseline while a scope is unloaded',
+   oc.shapesFor('AD-2', '').length === 2);
+oc.shapeScopes[oc._shapeScopeKey('AD-2', '')] = [];
+ok(OCI + ' shapesFor keeps a loaded-empty scope empty, never the baseline',
+   oc.shapesFor('AD-2', '').length === 0);
+ok(OCI + ' a loaded-empty scope reports empty', oc.shapeScopeEmpty('AD-2', '') === true);
+ok(OCI + ' an unloaded scope does not report empty', oc.shapeScopeEmpty('AD-3', '') === false);
+
+// A narrower scope can drop the shape already picked. Alpine leaves the stale value
+// in the model while the <select> falls back to the placeholder, so the form would
+// submit a shape the picker no longer offers — the very failure this scoping exists
+// to prevent, and the same one init()'s default-drop was added for.
+oc = ociComp();
+let oform = { shape: 'VM.Standard.A1.Flex' };
+ok(OCI + ' _reconcileShape leaves a still-offered shape alone',
+   oc._reconcileShape(oform, [MICRO, FLEXA1], 'AD-1') === ''
+   && oform.shape === 'VM.Standard.A1.Flex');
+oform = { shape: 'VM.Standard.A1.Flex' };
+const ocmsg = oc._reconcileShape(oform, [MICRO], 'AD-2');
+ok(OCI + ' _reconcileShape clears a shape the new scope dropped', oform.shape === '');
+ok(OCI + ' _reconcileShape names the dropped shape and the AD, and says to re-pick',
+   ocmsg.includes('A1.Flex') && ocmsg.includes('AD-2') && /pick a shape/i.test(ocmsg));
+// Clearing, not substituting. Quietly moving the operator onto shapes[0] would be
+// the same class of bug as the old hardcoded default: a shape nobody chose. The
+// placeholder <option> plus deployReady()/submitOciPackerBuild()'s required-shape
+// checks are what make the cleared state safe.
+oform = { shape: 'VM.Standard.A1.Flex' };
+oc._reconcileShape(oform, [MICRO, FLEXE4], 'AD-2');
+ok(OCI + ' _reconcileShape does not substitute a shape the operator did not pick',
+   oform.shape === '');
+// Nothing loaded is not a reason to clear: an empty scope keeps the operator's pick,
+// and _emptyScopeMessage explains the empty dropdown instead.
+oform = { shape: 'VM.Standard.A1.Flex' };
+ok(OCI + ' _reconcileShape does not clear the pick when the scope is empty',
+   oc._reconcileShape(oform, [], 'AD-2') === '' && oform.shape === 'VM.Standard.A1.Flex');
+
+// is_flexible belongs to the SHAPE, not to the scope it was listed in. Reading a
+// hidden shape's metadata as absent turns a Flex shape into a fixed one: the
+// OCPU/memory inputs disappear and OCI rejects the launch for the missing
+// shape_config.
+oc = ociComp({ networkOpts: { shapes: [MICRO, FLEXA1] } });
+ok(OCI + ' _shapeMeta falls back to the baseline list for shape metadata',
+   oc._shapeMeta('VM.Standard.A1.Flex', []).is_flexible === true);
+ok(OCI + ' _shapeMeta is null for a shape in neither list',
+   oc._shapeMeta('VM.Standard.X9.Nope', []) === null);
+ok(OCI + ' _emptyScopeMessage names the AD and offers a next step',
+   /AD-2/.test(oc._emptyScopeMessage('AD-2'))
+   && /refresh/i.test(oc._emptyScopeMessage('AD-2')));
+
+// The region hint annotates the picker, so it has to read the same list. Sourced
+// from networkOpts.shapes it would claim the free micro is missing while the
+// dropdown right above it offers one, or vice versa.
+oc = ociComp({
+  networkOpts: { shapes: [MICRO, FLEXA1], free_tier: { amd_shape: MICRO.shape } },
+  ociPackerForm: { shape: '', availability_domain: 'AD-3', base_image_ocid: '' },
+});
+oc.shapeScopes[oc._shapeScopeKey('AD-3', '')] = [FLEXA1];   // Ampere-only AD
+ok(OCI + ' packerFreeMicroMissing() reads the scoped list, not the region-wide one',
+   oc.packerFreeMicroMissing() === true);
+oc.shapeScopes[oc._shapeScopeKey('AD-3', '')] = [MICRO, FLEXA1];
+ok(OCI + ' packerFreeMicroMissing() is quiet when the scope does offer the micro',
+   oc.packerFreeMicroMissing() === false);
+
+// The handlers await their refetch, so — unlike the Azure block above, which
+// asserts only what happens before the first await — the exit has to wait for them.
+async function ociPlacementChecks() {
+  // The actual regression: changing the AD refetched NOTHING. Both forms have to
+  // ask for the newly selected AD (and their image), or the list stays AD-1's.
+  for (const [fn, key, seed] of [
+        ['onDeployPlacementChange', 'deployForm', { selectedImage: { ocid: 'ocid1.image.a' } }],
+        ['onPackerPlacementChange', 'ociPackerForm', {}]]) {
+    const asked = [];
+    const c = ociComp(Object.assign({
+      networkOpts: { shapes: [MICRO, FLEXA1], free_tier: {} },
+      loadShapeScope(ad, img) { asked.push([ad, img]); },
+    }, seed));
+    c[key].shape = 'VM.Standard.A1.Flex';
+    c[key].availability_domain = 'Uocm:PHX-AD-2';
+    if (key === 'ociPackerForm') c[key].base_image_ocid = 'ocid1.image.a';
+    await c[fn]();
+    ok(OCI + ' ' + fn + '() refetches shapes for the newly selected AD',
+       eq(asked, [['Uocm:PHX-AD-2', 'ocid1.image.a']]));
+  }
+
+  // A shape swapped out from under the operator changes the free-tier envelope, so
+  // a prior acknowledgment cannot carry — the same rule the Count field and the
+  // bulk modal's shape select already follow.
+  const c = ociComp({
+    networkOpts: { shapes: [MICRO, FLEXA1], free_tier: {} },
+    selectedImage: { ocid: 'ocid1.image.a' },
+    loadShapeScope(ad, img) {
+      this.shapeScopes[this._shapeScopeKey(ad, img)] = [MICRO];   // A1 absent in AD-3
+    },
+  });
+  Object.assign(c.deployForm, { shape: 'VM.Standard.A1.Flex', ocpus: 4, memory_gb: 24,
+                                instance_name: 'web', workgroup: 'weaverlab', count: 1,
+                                availability_domain: 'Uocm:PHX-AD-3',
+                                acknowledge_charges: true });
+  await c.onDeployPlacementChange();
+  ok(OCI + ' onDeployPlacementChange() drops a shape the new AD does not offer',
+     c.deployForm.shape === '');
+  ok(OCI + ' onDeployPlacementChange() re-arms the free-tier acknowledgment',
+     c.deployForm.acknowledge_charges === false);
+  ok(OCI + ' onDeployPlacementChange() says why the shape was cleared',
+     /AD-3/.test(c.deployShapeNotice()));
+  // onShapeChange() ran for the cleared value: OCI rejects a shape_config on a fixed
+  // shape, so the flex sizing left over from A1.Flex has to go.
+  ok(OCI + ' clearing the shape clears the stale flex sizing',
+     c.deployForm.ocpus === null && c.deployForm.memory_gb === null);
+  // The form must not be submittable in the cleared state — otherwise clearing is
+  // strictly worse than the stale value it replaced.
+  ok(OCI + ' deployReady() is false while the shape is cleared', c.deployReady() === false);
+  c.deployForm.shape = MICRO.shape;
+  ok(OCI + ' deployReady() passes once a shape from the narrowed list is picked',
+     c.deployReady() === true);
+
+  // An AD that lists no shapes at all (bad AD, or a failed ListShapes) reports that
+  // rather than silently showing the first AD's list.
+  const e = ociComp({
+    networkOpts: { shapes: [MICRO, FLEXA1], free_tier: {} },
+    selectedImage: { ocid: 'ocid1.image.arm' },
+    loadShapeScope(ad, img) { this.shapeScopes[this._shapeScopeKey(ad, img)] = []; },
+  });
+  e.deployForm.availability_domain = 'Uocm:PHX-AD-2';
+  await e.onDeployPlacementChange();
+  ok(OCI + ' an AD that lists no shapes offers nothing and says so',
+     e.deployShapes().length === 0 && /AD-2/.test(e.deployShapeNotice()));
+}
+
+ociPlacementChecks().then(() => process.exit(fail ? 1 : 0),
+                          (e) => { console.log('FAIL ' + OCI + ' placement checks threw: ' + e);
+                                   process.exit(1); });
