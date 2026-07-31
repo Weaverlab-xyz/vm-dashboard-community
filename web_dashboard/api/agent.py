@@ -558,3 +558,39 @@ async def revoke(agent_id: str, request: Request,
                           ip_address=_client_ip(request),
                           details={"agent": agent.name, "jobs_cleared": affected})
     return {"detail": f"Agent '{agent.name}' revoked.", "jobs_cleared": affected}
+
+
+@router.delete("/{agent_id}/record")
+async def remove_record(agent_id: str, request: Request,
+                        current_user: User = Depends(require_admin),
+                        db: Session = Depends(get_db)):
+    """Permanently delete a **revoked** agent's row.
+
+    Revocation deliberately keeps the row: it is the evidence that the agent existed and
+    what happened to it. But `create_agent` enforces name uniqueness across *all* rows,
+    so a revoked agent squats its name forever — you can never register `lab-dc1` again —
+    and the list grows without bound. This is the tidy-up.
+
+    **Refuses unless the agent is already revoked**, so removal cannot be the first
+    action taken on a live agent. That ordering is the point: revoke is what stops the
+    container working and settles its in-flight jobs, and collapsing the two into one
+    click would let an operator delete the row out from under a running job, leaving it
+    to time out ten minutes later with no indication why.
+
+    History survives. `Job.agent_id` is ``ondelete="SET NULL"``, so the agent's jobs keep
+    their logs and results and simply stop naming an agent; audit entries record the
+    agent by name, not by id, so they are unaffected.
+    """
+    agent = _load(db, agent_id)
+    if agent.is_active:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Revoke '{agent.name}' before removing its record.")
+
+    name = agent.name
+    orphaned = agent_service.delete_agent(db, agent)
+    job_service.log_audit(db, current_user.username, "agent.remove",
+                          ip_address=_client_ip(request),
+                          details={"agent": name, "jobs_orphaned": orphaned})
+    return {"detail": f"Removed the record for '{name}'. The name is free to reuse.",
+            "jobs_orphaned": orphaned}
