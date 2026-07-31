@@ -685,6 +685,15 @@
           <p class="text-xs text-gray-400 mt-1">
             Edit to deploy from any AMI ID your AWS account can access (Marketplace, BYOL, cross-account share, etc.).
           </p>
+          <!-- Region mismatch: an AMI id resolves only in its own region, and EC2
+               reports the mismatch as InvalidAMIID.NotFound, which names no region. -->
+          <p x-show="amisOutOfRegion([deployForm.ami_id]).length" x-cloak
+             class="mt-1.5 text-xs text-amber-700">
+            ⚠ This AMI ID is not among the images
+            <span class="font-mono" x-text="deployForm.region"></span> owns. AMI IDs are
+            per-region — if it isn't shared with your account in that region the launch
+            will fail with <code>InvalidAMIID.NotFound</code>.
+          </p>
         </div>
 
         <!-- ENA warning banner — only meaningful when we know the AMI's ENA flag -->
@@ -1025,6 +1034,18 @@
                 <option :value="r.id" x-text="r.label ? (r.id + ' — ' + r.label) : r.id"></option>
               </template>
             </select>
+            <!-- The batch was picked from the AMIs tab, which lists one region. Moving
+                 the shared region here would fail every child job on
+                 InvalidAMIID.NotFound, after all N rows already exist — so say so
+                 rather than silently emptying the batch. -->
+            <p x-show="amisOutOfRegion(bulkDeployItems.map(i => i.ami_id)).length" x-cloak
+               class="mt-1.5 text-xs text-amber-700">
+              ⚠ <span x-text="amisOutOfRegion(bulkDeployItems.map(i => i.ami_id)).length"></span>
+              of these AMIs are not owned by
+              <span class="font-mono" x-text="deployForm.region"></span>.
+              AMI IDs are per-region — copy them to that region first, or pick the region
+              they were listed in.
+            </p>
           </div>
 
           <!-- Shared: Instance Type -->
@@ -1379,6 +1400,9 @@
       // Private AMIs
       amis: [],
       loadingAmis: false,
+      // Which region `amis` was fetched for. AMI ids are region-local, so comparing
+      // a form's region against this is the only way to know the list applies.
+      amisRegion: '',
 
       // Community images
       communityAmis: [],
@@ -1575,14 +1599,20 @@
         }
       },
 
-      async loadAmis() {
+      // AMIs are per-region — an id only resolves in the region that owns it — so the
+      // list has to be fetched for the region it will be deployed into. Called with no
+      // region for the tab (server uses the configured default) and with the deploy
+      // region when that changes.
+      async loadAmis(region = '') {
         this.loadingAmis = true;
         this.credentialError = '';
         try {
-          const resp = await API.get('/api/aws/amis');
+          const q = region ? '?region=' + encodeURIComponent(region) : '';
+          const resp = await API.get('/api/aws/amis' + q);
           if (resp) {
             this.amis = resp.amis || [];
             this.cachedAtAmis = resp.cached_at || null;
+            this.amisRegion = resp.region || region || '';
           }
         } catch (e) {
           if (e.message.includes('credentials') || e.message.includes('configured')) {
@@ -1677,7 +1707,28 @@
       async onDeployRegionChange() {
         this.deployForm.subnet_id = '';
         this.deployForm.security_group_ids = [];
-        await this.loadNetworkOptsFor(this.deployForm.region, true);
+        // The AMI list is region-scoped for the same reason, so refetch it too —
+        // otherwise the form keeps offering the old region's ids and the launch fails
+        // with InvalidAMIID.NotFound, which names no region and reads like a deleted
+        // image. The ami_id itself is left alone (the field is free text and a valid
+        // shared AMI legitimately won't appear in the owned list); the
+        // amisOutOfRegion warnings below flag it instead.
+        await Promise.all([
+          this.loadNetworkOptsFor(this.deployForm.region, true),
+          this.loadAmis(this.deployForm.region),
+        ]);
+      },
+
+      // AMI ids from `ids` that the currently-loaded region does not own. Returns []
+      // unless the list was actually fetched for the region on the form — comparing
+      // against another region's list would flag everything. An *empty* list for the
+      // right region is not skipped: a region owning no AMIs at all is the likeliest
+      // way to reach InvalidAMIID.NotFound, so it must still warn.
+      amisOutOfRegion(ids) {
+        if (this.loadingAmis) return [];
+        if (!this.amisRegion || this.amisRegion !== this.deployForm.region) return [];
+        const known = new Set(this.amis.map(a => a.ami_id));
+        return [...new Set(ids.filter(id => id && !known.has(id)))];
       },
 
       async loadInstances() {

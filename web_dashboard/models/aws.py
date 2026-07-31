@@ -25,6 +25,9 @@ class AMIListResponse(BaseModel):
     amis: List[AMIInfo]
     count: int
     cached_at: Optional[str] = None
+    # The region these AMI ids belong to. An AMI id is region-local, so the deploy
+    # form has to know which region the list it is offering came from.
+    region: Optional[str] = None
 
 
 class EC2InstanceInfo(BaseModel):

@@ -12,7 +12,7 @@
       <p class="text-sm text-gray-500 mt-1">Manage Azure VMs, images, and containers</p>
     </div>
     <div class="flex items-center gap-3">
-      <select x-model="location" @change="refreshNetworkOpts()"
+      <select x-model="location" @change="onLocationChange()"
               class="text-sm border border-gray-300 rounded-md px-3 py-1.5 focus:ring-blue-500 focus:border-blue-500">
         <template x-for="loc in networkOpts.locations" :key="loc">
           <option :value="loc" x-text="loc"></option>
@@ -1257,8 +1257,16 @@ function azureDashboard() {
       }
     },
 
-    async refreshNetworkOpts() {
-      await this.loadNetworkOpts(true);
+    // Header region picker. The private image list is regional too — under
+    // azure_region_configs each region resolves its own Shared Image Gallery — so
+    // switching the header region has to refetch both, or the Images tab keeps
+    // showing the previous region's gallery. (Replaces refreshNetworkOpts, which only
+    // reloaded half of what the picker governs.)
+    async onLocationChange() {
+      await Promise.all([
+        this.loadNetworkOpts(true),
+        this.loadPrivateImages(),
+      ]);
     },
 
     // Subnets and NSGs are regional: the ones listed for the previous location do not
@@ -1297,10 +1305,17 @@ function azureDashboard() {
       }
     },
 
-    async loadPrivateImages() {
+    // Scoped to one region's gallery. Defaults to the header region rather than to
+    // "whatever the server thinks" — same resolution order as loadNetworkOpts — so the
+    // no-argument callers (initial load, Refresh, post-delete reload) stay on the
+    // region the operator is actually looking at instead of snapping back to the
+    // configured default.
+    async loadPrivateImages(location = '') {
       this.imagesLoading = true;
       try {
-        const data = await API.get('/api/azure/images');
+        const loc = location || this.location || '';
+        const q = loc ? '?location=' + encodeURIComponent(loc) : '';
+        const data = await API.get('/api/azure/images' + q);
         this.privateImages = data.images || [];
         this.privateImagesWarnings = data.warnings || [];
       } catch (e) {
