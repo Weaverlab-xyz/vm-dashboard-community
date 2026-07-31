@@ -91,11 +91,16 @@ def _install_stubs():
                  "display_name": f"img-in-{_CFG['oci_region']}",
                  "source": "custom"}]
 
-    async def _fake_network_options(compartment_id="", vcn_id=""):
+    # availability_domain/image_ocid are the shape-picker scope (the route passes them
+    # positionally); the shape list is AD- and image-scoped, so they are cache-key
+    # dimensions too — see tests/test_oci_shape_scoping.py.
+    async def _fake_network_options(compartment_id="", vcn_id="",
+                                    availability_domain="", image_ocid=""):
         _CALLS.append(("netopts", _CFG["oci_region"], compartment_id))
         return {"availability_domains": [f"AD-1-{_CFG['oci_region']}"],
                 "shapes": [], "subnets": [],
-                "region": _CFG["oci_region"], "compartment_ocid": compartment_id}
+                "region": _CFG["oci_region"], "compartment_ocid": compartment_id,
+                "availability_domain": availability_domain, "image_ocid": image_ocid}
 
     oci.oci_service.list_images = _fake_list_images
     oci.oci_service.get_network_options = _fake_network_options
@@ -139,6 +144,12 @@ def test_cache_key_stays_invalidate_prefix_compatible():
     _reset()
     for name in ("oci_images", "oci_network_opts", "oci_instances"):
         assert oci._cache_key(name).startswith(f"vmcli:{name}:")
+    # Extra scope dimensions (the shape picker's AD + image) must stay under the same
+    # prefix. A scoped key the runners' invalidate_prefix can't reach is a silent
+    # no-op — the exact failure mode this test was written for.
+    scoped = oci._cache_key("oci_network_opts", ad="AD-2", image="ocid1.image..a")
+    assert scoped.startswith("vmcli:oci_network_opts:")
+    assert scoped != oci._cache_key("oci_network_opts")
 
 
 # ── GET /api/oci/images ───────────────────────────────────────────────────────
@@ -212,6 +223,39 @@ def test_network_options_bust_and_region_scope():
     assert r.status_code == 200
     assert r.json()["availability_domains"] == [f"AD-1-{CHICAGO}"]
     assert len(_CALLS) == 3, "region change must re-fetch"
+
+
+def test_network_options_ad_and_image_are_cache_dimensions_too():
+    """The shape list is AD- and image-scoped (OCI offers different shapes in
+    different ADs, and an image boots only on the shapes it supports), so the key has
+    to carry both — served from an AD-blind key, switching the form to AD-2 gets the
+    list built for AD-1, which is the bug the scoping exists to fix.
+
+    These dimensions NARROW the region+compartment key; they must not replace it, so
+    the region check is repeated on a scoped key at the end."""
+    _install_stubs()
+    _reset()
+    r = _client.get("/api/oci/network-options")
+    assert r.status_code == 200, (r.status_code, r.text)
+    assert len(_CALLS) == 1
+
+    # The route must thread the parameter through to the service, not drop it.
+    r = _client.get("/api/oci/network-options?availability_domain=AD-2")
+    assert r.status_code == 200, (r.status_code, r.text)
+    assert r.json()["availability_domain"] == "AD-2"
+    assert len(_CALLS) == 2, "an AD change must re-fetch"
+    assert _client.get("/api/oci/network-options?availability_domain=AD-2").status_code == 200
+    assert len(_CALLS) == 2, "the same AD should hit the cache"
+
+    r = _client.get("/api/oci/network-options"
+                    "?availability_domain=AD-2&image_ocid=ocid1.image..a")
+    assert r.status_code == 200, (r.status_code, r.text)
+    assert r.json()["image_ocid"] == "ocid1.image..a"
+    assert len(_CALLS) == 3, "an image change must re-fetch"
+
+    _CFG["oci_region"] = CHICAGO
+    assert _client.get("/api/oci/network-options?availability_domain=AD-2").status_code == 200
+    assert len(_CALLS) == 4, "region change must re-fetch even on an AD-scoped key"
 
 
 # ── /instances: write key == read key, and the runners still clear it ─────────
