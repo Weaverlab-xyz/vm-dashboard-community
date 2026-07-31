@@ -422,7 +422,15 @@ limiter = Limiter(key_func=get_remote_address, default_limits=[f"{settings.rate_
 app = FastAPI(
     title=settings.api_title,
     version=settings.api_version,
-    description="Web-based dashboard for managing VMware Workstation VMs via browser.",
+    description=(
+        "Self-hosted control plane for multi-cloud and on-prem infrastructure. "
+        "Provision and manage cloud VMs, managed databases, containers and "
+        "Kubernetes clusters across AWS, Azure, GCP and OCI — plus VMware, "
+        "Hyper-V, Proxmox and Nutanix on-prem — with image build-and-promote, "
+        "Ansible configuration management, pluggable secrets and storage "
+        "backends, and layered privileged access through PRA, Password Safe "
+        "and Entitle."
+    ),
     lifespan=lifespan,
     # /docs is the repo documentation browser (api/docs_pages.py), so the API
     # explorer lives at /swagger. Both are served by custom routes below:
