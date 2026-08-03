@@ -46,11 +46,19 @@ services:
     volumes:
       # Holds the Ed25519 private key. Losing it just means re-enrolling.
       - agent_state:/var/lib/dashboard-agent
-      - ./policy.yaml:/etc/dashboard-agent/policy.yaml:ro
+      # `,Z` is the SELinux relabel, and on Fedora/RHEL/CentOS/Rocky/Alma it is what makes
+      # the difference between an agent that runs and one that crash-loops on `Permission
+      # denied` reading its own policy file — a file in your home directory is labelled
+      # user_home_t, which the container may not read whatever its mode bits say. Docker
+      # and Podman ignore z/Z where SELinux is absent, so leave it on either way.
+      - ./policy.yaml:/etc/dashboard-agent/policy.yaml:ro,Z
       # Optional: a kubeconfig for clusters you already have credentials for. Only the
       # API server URL and version are ever reported — the credentials stay in the file.
-      # - ./kubeconfig:/etc/dashboard-agent/kubeconfig:ro
-      # - /usr/local/share/ca-certificates/corp.crt:/etc/dashboard-agent/corp-ca.crt:ro
+      # - ./kubeconfig:/etc/dashboard-agent/kubeconfig:ro,Z
+      # Copy the inspection CA next to this file rather than mounting it from /usr/local:
+      # `,Z` relabels the source, and doing that to a shared system trust store affects
+      # everything else on the host that reads it.
+      # - ./corp-ca.crt:/etc/dashboard-agent/corp-ca.crt:ro,Z
 
     logging:
       driver: json-file

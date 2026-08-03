@@ -339,6 +339,47 @@ def test_the_install_hint_offers_a_code_file_form_and_absolute_bind_paths():
     assert code in alt and "rm ./agent-enroll-code" in alt
 
 
+def _bind_mounts(command: str, target: str) -> list:
+    """The `-v` lines of an emitted command that bind to `target`, flags intact."""
+    return [ln.strip().rstrip(' \\"') for ln in command.splitlines()
+            if ln.strip().startswith("-v ") and target in ln]
+
+
+def test_the_install_command_relabels_its_bind_mounts_for_selinux():
+    """`:ro,Z` on the policy mount, or the agent cannot read its own policy file on any
+    SELinux-enforcing host.
+
+    That is Fedora, RHEL, CentOS, Rocky and Alma — a large share of on-prem Linux, which
+    is precisely where a remote agent is meant to run. A bind mount keeps its host label,
+    and the container may not read the `user_home_t` of a file in the operator's home
+    directory however permissive its mode is, so a mode 644 policy.yaml still fails.
+
+    Pinned rather than left to review because the regression is close to undiagnosable
+    from this side: the agent loads its policy *before* the first network call, so it
+    exits 2 and **no request whatsoever reaches the dashboard** — no 4xx, nothing in the
+    app or ingress logs — leaving a row at `enrolling` with no source IP and no policy
+    hash, which reads exactly like a wrong URL or blocked egress. Docker and Podman ignore
+    `z`/`Z` where SELinux is absent, so there is no host to detect and no case in which
+    dropping the flag is an improvement.
+    """
+    resp = CLIENT.post("/api/agent", json={"name": f"agent-{uuid.uuid4().hex[:8]}"})
+    assert resp.status_code == 201, resp.text
+    install = resp.json()["install"]
+
+    for form in ("docker_run", "docker_run_code_file"):
+        mounts = _bind_mounts(install[form], "/etc/dashboard-agent/policy.yaml")
+        assert len(mounts) == 1, f"{form}: expected one policy mount, got {mounts}"
+        assert mounts[0].endswith(":ro,Z"), \
+            f"{form}: the policy mount must keep the SELinux relabel flag: {mounts[0]}"
+
+    # The enrolment-code file is created in the same directory moments earlier, so it
+    # carries the same label and fails the same way.
+    code_mounts = _bind_mounts(install["docker_run_code_file"],
+                               "/etc/dashboard-agent/enroll-code")
+    assert len(code_mounts) == 1, code_mounts
+    assert code_mounts[0].endswith(":ro,Z"), code_mounts[0]
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(list(globals().items())):

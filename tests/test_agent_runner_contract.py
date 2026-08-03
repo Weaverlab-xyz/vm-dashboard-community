@@ -13,7 +13,9 @@ original, byte for byte, and pin the rest of the wire contract the same way:
   * the canonical form and the header names are identical on both sides;
   * every path the agent calls is a route the dashboard actually declares;
   * the agent's handler table matches ``agent_service.AGENT_JOB_TYPES``;
-  * the agent's dependency list stays small enough to audit.
+  * the agent's dependency list stays small enough to audit;
+  * the shipped examples keep the SELinux relabel flag on the policy mount, without which
+    the agent cannot read its own policy on any RHEL-family host.
 
 Runs under pytest, or standalone:
     python tests/test_agent_runner_contract.py
@@ -22,6 +24,7 @@ import ast
 import importlib.util
 import os
 import re
+import stat
 import sys
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -176,6 +179,67 @@ def test_the_agent_reports_its_policy_hash_at_enrolment():
     """The operator's only signal that the file changed under them."""
     src = _read(_AGENT)
     assert '"policy_hash"' in src and "POLICY.digest" in src
+
+
+def test_an_unreadable_but_world_readable_policy_names_selinux():
+    """The container log is the *only* place this failure is visible.
+
+    The policy is loaded before the first network call, so on an SELinux-enforcing host the
+    agent exits 2 having sent the dashboard nothing at all — no request, no 4xx, no log
+    line — while the mode bits say the file is perfectly readable. Whatever the message
+    says here is the entire diagnosis, so it has to name the label rather than repeat the
+    uid-10001 advice that applies to the other case.
+    """
+    import errno as _errno
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "policy.yaml")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("targets: []\n")
+        os.chmod(path, 0o644)
+
+        msg = agent._policy_unreadable(
+            path, PermissionError(_errno.EACCES, "Permission denied"))
+        assert "SELinux" in msg and ":ro,Z" in msg and "chcon" in msg, msg
+        # The uid/mode explanation is actively misleading here — the mode is fine.
+        assert "chmod" not in msg, msg
+
+        # ENOENT is the ordinary missing-mount case and keeps the plain message.
+        assert "SELinux" not in agent._policy_unreadable(
+            path, FileNotFoundError(_errno.ENOENT, "No such file or directory"))
+
+        # A genuinely owner-only file is the uid-10001 case, not the label one. Windows
+        # ignores chmod's group/other bits, so only assert this where it takes effect.
+        os.chmod(path, 0o600)
+        if not (os.stat(path).st_mode & stat.S_IROTH):
+            owner_only = agent._policy_unreadable(
+                path, PermissionError(_errno.EACCES, "Permission denied"))
+            assert "chmod" in owner_only and "SELinux" not in owner_only, owner_only
+
+
+# ── The shipped examples ──────────────────────────────────────────────────────
+
+def test_the_example_mounts_carry_the_selinux_relabel_flag():
+    """Same bug as the emitted `docker run`, in the files an operator copies instead.
+
+    `tests/test_agent_guard.py` pins the API's install command; these are the other two
+    paths to a running agent, and a `:ro` here fails exactly as confusingly.
+    """
+    for name in ("docker-compose.yml", "policy.example.yaml"):
+        body = _read(os.path.join(_ROOT, "examples", "remote-agent", name))
+        mounts = [ln for ln in body.splitlines()
+                  if "/etc/dashboard-agent/policy.yaml" in ln]
+        assert mounts, f"{name}: no policy mount found"
+        for line in mounts:
+            assert ":ro,Z" in line, (
+                f"{name}: the policy mount needs the SELinux relabel flag: {line.strip()}")
+
+    # `docker run -v` rejects a relative source path outright, so the documented command
+    # has to be absolute or it cannot be pasted at all.
+    policy_example = _read(os.path.join(_ROOT, "examples", "remote-agent",
+                                        "policy.example.yaml"))
+    assert "-v ./policy.yaml" not in policy_example
 
 
 # ── Image hygiene ─────────────────────────────────────────────────────────────
