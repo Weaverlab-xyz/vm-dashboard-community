@@ -160,6 +160,14 @@
         <button @click="showRegister = false" class="text-gray-400 hover:text-gray-600 text-xl">&times;</button>
       </div>
       <div class="px-6 py-5 space-y-4">
+        <div x-show="discoveredApiServer" x-cloak
+             class="bg-blue-50 border border-blue-200 rounded-lg px-3 py-2">
+          <p class="text-xs text-blue-800">
+            From a discovery scan: <span class="font-mono" x-text="discoveredApiServer"></span>.
+            Paste a kubeconfig whose <span class="font-mono">server:</span> matches it —
+            the agent identified the cluster but never authenticated to it.
+          </p>
+        </div>
         <div class="grid grid-cols-2 gap-3">
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">Name *</label>
@@ -767,6 +775,9 @@ function k8sPage() {
     filterRegion: '',
     showRegister: false, saving: false,
     form: { name: '', cloud: 'local', kubeconfig: '', mgmt_kind: '' },
+    // Set when a discovery finding sent us here — shown as a hint so the operator can
+    // confirm the kubeconfig they paste points at the cluster the agent actually found.
+    discoveredApiServer: '',
     showProvision: false, provBusy: false,
     provForm: { name: '', cloud: 'aws', region: '', k8s_version: '', node_instance_type: '', node_count: 2, vpc_cidr: '', authorized_cidrs: '', zone: '', enable_ebs_csi: false },
     provOptions: { cloud: '', region: '', regions: [], node_instance_types: [], k8s_versions: [], subnets: [], configured_subnet_ids: [] },
@@ -785,7 +796,23 @@ function k8sPage() {
     imperForm: { group_id: '' },
     showEntraFed: false, fedBusy: false, fedTarget: null,
 
-    async init() { requireAuth(); this.loadSecretBackends(); await this.refresh(); },
+    async init() {
+      requireAuth();
+      this.loadSecretBackends();
+      await this.refresh();
+      this.openFromQuery();
+    },
+
+    // ?register=1&name=…&api_server=… — where a discovery finding on a job page sends
+    // the operator. Only the non-secret fields travel; the kubeconfig is the whole point
+    // of the form and a scan never had one.
+    openFromQuery() {
+      const q = new URLSearchParams(window.location.search);
+      if (!q.get('register')) return;
+      this.openRegister();
+      this.form.name = q.get('name') || '';
+      this.discoveredApiServer = q.get('api_server') || '';
+    },
 
     async refresh() {
       this.loading = true;
@@ -809,6 +836,7 @@ function k8sPage() {
 
     openRegister() {
       this.form = { name: '', cloud: 'local', kubeconfig: '', mgmt_kind: '' };
+      this.discoveredApiServer = '';
       this.showRegister = true;
     },
 

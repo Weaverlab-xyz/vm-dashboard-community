@@ -88,6 +88,37 @@ def _app() -> TestClient:
 CLIENT = _app()
 
 
+def _operator_app() -> TestClient:
+    """The *reading* half — api/jobs, as an authenticated human sees it.
+
+    Deliberately a second client. What a scan finds is written by the agent through the
+    signed routes above and read back through the jobs API, and for a while nothing on
+    that side of the wire read it at all: a completed scan stored its findings in the job
+    row and the UI had no endpoint to ask. Driving both halves in one file is what makes
+    that shape of gap fail a test instead of shipping as a job that goes green and shows
+    nothing.
+    """
+    from web_dashboard.api import jobs as jobs_api
+    from web_dashboard.api.auth import get_current_user
+
+    app = FastAPI()
+    app.include_router(jobs_api.router)
+
+    def _db():
+        db = SessionLocal()
+        try:
+            yield db
+        finally:
+            db.close()
+
+    app.dependency_overrides[get_db] = _db
+    app.dependency_overrides[get_current_user] = lambda: _Admin()
+    return TestClient(app)
+
+
+OPERATOR = _operator_app()
+
+
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 def _register(name: str = "") -> tuple[str, str]:
@@ -426,6 +457,107 @@ def test_completing_a_job_stores_the_findings():
     assert stored["api_server"] == "https://10.20.0.11:6443"
     # Annotated server-side; the agent is never handed the dashboard's inventory.
     assert stored["already_registered"] is False
+
+
+# ── what the operator can read back ───────────────────────────────────────────
+# The other half of the round trip. A scan that reports perfectly and is then unreadable
+# is, from the only seat that matters, a scan that did nothing.
+
+def _run_scan(result: dict, lines: list = None) -> str:
+    """Drive one discovery job all the way through: lease, log, complete."""
+    agent_id, private = _ready()
+    job_id = _queue_job(agent_id)
+    _signed(private, agent_id, "POST", "/api/agent/lease", {})
+    if lines:
+        _signed(private, agent_id, "POST", f"/api/agent/jobs/{job_id}/logs",
+                {"lines": lines})
+    resp = _signed(private, agent_id, "POST", f"/api/agent/jobs/{job_id}/complete",
+                   {"status": "completed", "result": result})
+    assert resp.status_code == 200, resp.text
+    return job_id
+
+
+def test_a_finished_scan_is_readable_by_the_operator():
+    job_id = _run_scan({
+        "findings": [{"kind": "k8s", "host": "10.20.0.11", "port": 6443,
+                      "api_server": "https://10.20.0.11:6443",
+                      "server_version": "v1.31.3+k3s1", "distro": "k3s",
+                      "suggested_name": "k8s-10-20-0-11"}],
+        "scanned": 384, "hosts": 128, "refused": 12,
+    })
+    resp = OPERATOR.get(f"/api/jobs/{job_id}/findings")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["status"] == "completed"
+    assert body["scanned"] == 384 and body["refused"] == 12
+    assert body["findings"][0]["api_server"] == "https://10.20.0.11:6443"
+    assert body["findings"][0]["already_registered"] is False
+
+
+def test_an_empty_scan_still_reports_why():
+    """The case that reads as a broken feature. A scan whose every target was outside the
+    agent's policy completes successfully with nothing to show, so the counters are the
+    only thing that distinguishes it from a clean network."""
+    job_id = _run_scan({"findings": [], "scanned": 0, "hosts": 128, "refused": 384})
+    body = OPERATOR.get(f"/api/jobs/{job_id}/findings").json()
+    assert body["findings"] == []
+    assert body["hosts"] == 128 and body["refused"] == 384
+
+
+def test_the_findings_endpoint_serves_only_findings():
+    """It is keyed on a job id and nothing else, so it must not become the way to read a
+    job row's metadata — which for other job types holds Terraform variables."""
+    agent_id, private = _ready()
+    db = SessionLocal()
+    try:
+        job = job_service.create_job(
+            db, job_type="agent_discover", created_by="tester",
+            metadata={"scan_kind": "k8s", "tf_variables": {"password": "s3cret"}},
+            agent_id=agent_id)
+        job_id = job.id
+    finally:
+        db.close()
+    _signed(private, agent_id, "POST", "/api/agent/lease", {})
+    _signed(private, agent_id, "POST", f"/api/agent/jobs/{job_id}/complete",
+            {"status": "completed", "result": {"findings": [], "scanned": 1}})
+
+    resp = OPERATOR.get(f"/api/jobs/{job_id}/findings")
+    assert "tf_variables" not in resp.json()
+    assert "s3cret" not in resp.text
+
+
+def test_findings_are_refused_for_a_job_type_that_has_none():
+    """A wrong job type is a 400, not an empty result — an empty result would read as
+    "this scan found nothing" for a job that never scanned anything."""
+    db = SessionLocal()
+    try:
+        job = job_service.create_job(db, job_type="ec2_deploy", created_by="tester",
+                                     metadata={"tf_variables": {"password": "s3cret"}})
+        job_id = job.id
+        # Settled before the assertion, so this row is never a `pending` job the local
+        # worker could claim — test_the_local_worker_cannot_claim_an_agent_job asserts
+        # that nothing claimable exists, and it shares this database.
+        job_service.set_completed(db, job_id, {"instance_id": "i-abc"})
+    finally:
+        db.close()
+    assert OPERATOR.get(f"/api/jobs/{job_id}/findings").status_code == 400
+
+
+def test_agent_output_is_readable_after_the_job_finishes():
+    """Live Output is where a scan explains itself, and it is persisted precisely so it
+    survives the job ending. The WebSocket replays these rows on connect, including for a
+    terminal job — this asserts the rows are there to replay."""
+    job_id = _run_scan(
+        {"findings": [], "scanned": 0, "refused": 6},
+        lines=["Starting agent_discover (policy 0123456789ab…)",
+               "Policy refused 6 of 6 host:port combinations",
+               "Probing 0 endpoint(s) across 2 host(s) with 32 workers"])
+    db = SessionLocal()
+    try:
+        replayed = [line for _seq, line in job_service.get_job_logs(db, job_id)]
+    finally:
+        db.close()
+    assert any("Policy refused 6 of 6" in line for line in replayed), replayed
 
 
 def test_agent_b_cannot_complete_agent_as_job():

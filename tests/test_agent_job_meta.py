@@ -162,6 +162,96 @@ def test_normalize_is_applied_at_enqueue():
     assert meta["max_hosts"] == ajm.MAX_HOSTS_CEILING
 
 
+# ── the result, on its way back out ───────────────────────────────────────────
+# The trip in is guarded so a compromised dashboard cannot run code on the LAN. The trip
+# out is guarded because a finding is what an *unidentified host* said about itself, and
+# it is about to be rendered in an operator's browser.
+
+def _finished(**over):
+    """A job row's metadata after set_completed merged the agent's result into the scan
+    request — which is what discover_findings actually reads."""
+    meta = ajm.discover_meta(_payload(), description="d")
+    meta.update({
+        "findings": [{"kind": "k8s", "host": "10.20.0.5", "port": 6443,
+                      "api_server": "https://10.20.0.5:6443", "server_version": "v1.29.4+k3s1",
+                      "distro": "k3s", "tls_cn": "k3s", "suggested_name": "k8s-10-20-0-5",
+                      "already_registered": False}],
+        "scanned": 384, "hosts": 128, "refused": 12, "truncated": False,
+        "audit_mode": False,
+    })
+    meta.update(over)
+    return meta
+
+
+def test_findings_projection_keeps_the_reportable_fields():
+    out = ajm.discover_findings(_finished())
+    assert out["scanned"] == 384 and out["hosts"] == 128 and out["refused"] == 12
+    finding = out["findings"][0]
+    assert finding["api_server"] == "https://10.20.0.5:6443"
+    assert finding["distro"] == "k3s" and finding["port"] == 6443
+    assert finding["already_registered"] is False
+
+
+def test_findings_projection_never_leaks_the_rest_of_the_job_row():
+    """The reason this is a projection and not `return meta`. A job row's metadata holds
+    Terraform variables, resolved config and log-stream ids for other job types, and the
+    endpoint serving this is keyed on nothing but a job id."""
+    meta = _finished()
+    meta.update({"tf_variables": {"secret": "s3cret"}, "description": "d",
+                 "ecs_log_stream": "stream/abc"})
+    out = ajm.discover_findings(meta)
+    assert set(out) == {"findings"} | set(ajm.COUNTER_KEYS)
+
+
+def test_a_finding_cannot_smuggle_extra_keys():
+    """A field the agent invented — or one an attacker who owns the probed host talked it
+    into reporting — must not reach the browser just because it was in the dict."""
+    meta = _finished(findings=[{"kind": "k8s", "host": "10.0.0.1", "port": 6443,
+                                "kubeconfig": "apiVersion: v1\nusers:\n- token: abc",
+                                "command": "rm -rf /"}])
+    finding = ajm.discover_findings(meta)["findings"][0]
+    assert set(finding) <= set(ajm.FINDING_KEYS)
+    assert "kubeconfig" not in finding and "command" not in finding
+
+
+def test_target_controlled_strings_are_sanitised():
+    """server_version is a pre-auth banner and tls_cn is a certificate CN: both are
+    whatever an unknown host chose to send. ANSI escapes would otherwise be replayed into
+    the operator's browser, and into their terminal the moment they copy a name."""
+    meta = _finished(findings=[{
+        "kind": "database", "host": "10.0.0.9", "port": 3306, "engine": "mysql",
+        "server_version": "8.4.0\x1b[31m\x07evil\x00",
+        "suggested_name": "a" * (ajm.MAX_FINDING_CHARS + 50),
+    }])
+    finding = ajm.discover_findings(meta)["findings"][0]
+    assert finding["server_version"] == "8.4.0[31mevil"
+    assert len(finding["suggested_name"]) == ajm.MAX_FINDING_CHARS
+
+
+def test_counters_survive_a_result_with_no_findings():
+    """The whole point of returning the counters. "Probed 0 of 384, 384 refused by policy"
+    is the only thing that tells an operator why a green scan found nothing — without it a
+    refused sweep and a clean network are the same empty table."""
+    out = ajm.discover_findings(_finished(findings=[], scanned=0, refused=384))
+    assert out["findings"] == []
+    assert out["scanned"] == 0 and out["refused"] == 384
+
+
+def test_a_missing_or_junk_result_degrades_to_empty():
+    """A queued job has no result at all, and a failed one may have a partial row."""
+    for meta in ({}, None, {"findings": "lots"}, {"findings": [None, 7, "x"]},
+                 {"scanned": "many", "refused": None}):
+        out = ajm.discover_findings(meta)
+        assert out["findings"] == []
+        assert all(isinstance(out[k], (int, bool)) for k in ajm.COUNTER_KEYS)
+
+
+def test_findings_are_capped():
+    meta = _finished(findings=[{"kind": "k8s", "host": f"10.0.0.{i % 250}", "port": 6443}
+                               for i in range(ajm.MAX_FINDINGS + 25)])
+    assert len(ajm.discover_findings(meta)["findings"]) == ajm.MAX_FINDINGS
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0

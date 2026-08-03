@@ -501,6 +501,124 @@ async function ociPlacementChecks() {
      e.deployShapes().length === 0 && /AD-2/.test(e.deployShapeNotice()));
 }
 
+// ── jobs/detail.html — a discovery scan's result panel ────────────────────────
+// A scan that finds nothing is the normal outcome of a misconfigured one, and for a
+// while the page said nothing at all about it: green badge, empty log pane, no result.
+// These helpers ARE the explanation, so each branch is worth pinning.
+{
+  const JD = 'jobs/detail.html';
+  // Several of these call each other (streamLabel → isTerminal), so compose the
+  // extracted methods into one object rather than building each in isolation.
+  const jobDetail = (state, ...names) =>
+    Object.assign({}, ...names.map(n => build(JD, n, {})), state);
+
+  const label = (status, wsConnected) =>
+    jobDetail({job: {status}, wsConnected}, 'streamLabel', 'isTerminal').streamLabel();
+  ok(JD + ' streamLabel() says Connected while streaming', label('running', true) === 'Connected');
+  // The screenshot symptom: a finished job's pane read "Disconnected" over output that
+  // had already been replayed in full.
+  ok(JD + ' streamLabel() reports a finished job as complete, not disconnected',
+     label('completed', false) === 'Output complete');
+  ok(JD + ' streamLabel() still says Disconnected on a live job that dropped',
+     label('running', false) === 'Disconnected');
+
+  const reasons = (scan) => jobDetail({scan}, 'emptyReasons').emptyReasons();
+  const joined = (scan) => reasons(scan).join(' | ');
+
+  // The case the user actually hit: policy refused everything, so nothing was probed.
+  ok(JD + ' emptyReasons() names policy when it refused every target',
+     /policy\.yaml refused every host and port/.test(joined({refused: 384, scanned: 0})));
+  ok(JD + ' emptyReasons() says policy cannot be widened from the dashboard',
+     /no dashboard setting can widen it/.test(joined({refused: 384, scanned: 0})));
+  // Probed plenty and found nothing — a different answer, and a different next step.
+  ok(JD + ' emptyReasons() points at ports when probes ran but found nothing',
+     /Check the ports/.test(joined({refused: 0, scanned: 384, hosts: 128})));
+  ok(JD + ' emptyReasons() does not blame policy when policy refused nothing',
+     !/policy\.yaml refused every/.test(joined({refused: 0, scanned: 384, hosts: 128})));
+  // No scope at all: neither a CIDR from the operator nor a range from policy.
+  ok(JD + ' emptyReasons() says so when nothing was in scope',
+     /No hosts were in scope/.test(joined({hosts: 0, scanned: 0, refused: 0})));
+  ok(JD + ' emptyReasons() flags audit mode first — it probes nothing by design',
+     /audit mode/.test(reasons({audit_mode: true, scanned: 0})[0]));
+  // The other half of "use the local kubeconfig", which is on by default and does
+  // nothing at all unless the operator mounted one.
+  ok(JD + ' emptyReasons() always mentions the unmounted kubeconfig',
+     /kubeconfig is actually mounted/.test(joined({scanned: 384, hosts: 128})));
+  ok(JD + ' emptyReasons() survives a result with no counters at all',
+     reasons(undefined).length > 0 && reasons({}).length > 0);
+
+  const summary = (scan) => jobDetail({scan}, 'scanSummary').scanSummary();
+  ok(JD + ' scanSummary() reports both probes and hosts',
+     /probed 384 endpoint\(s\) across 128 host\(s\)/.test(summary({scanned: 384, hosts: 128})));
+  ok(JD + ' scanSummary() surfaces the refused count',
+     /12 refused by the agent's policy/.test(summary({scanned: 4, hosts: 2, refused: 12})));
+  ok(JD + ' scanSummary() stays quiet about zero refusals',
+     !/refused/.test(summary({scanned: 4, hosts: 2, refused: 0})));
+  ok(JD + ' scanSummary() reads as zeros on a missing result',
+     /probed 0 endpoint\(s\) across 0 host\(s\)/.test(summary(undefined)));
+
+  const href = (f) => jobDetail({}, 'registerHref').registerHref(f);
+  const k8sHref = href({kind: 'k8s', suggested_name: 'k8s-10-20-0-5',
+                        api_server: 'https://10.20.0.5:6443'});
+  ok(JD + ' registerHref() sends a k8s finding to the cluster register form',
+     k8sHref.startsWith('/k8s?') && /register=1/.test(k8sHref));
+  ok(JD + ' registerHref() carries the suggested name and api server, encoded',
+     /name=k8s-10-20-0-5/.test(k8sHref) &&
+     /api_server=https%3A%2F%2F10.20.0.5%3A6443/.test(k8sHref));
+  const dbHref = href({kind: 'database', engine: 'mysql', host: '10.20.0.9', port: 3306});
+  ok(JD + ' registerHref() sends a database finding to the database register form',
+     dbHref.startsWith('/databases?') && /engine=mysql/.test(dbHref) &&
+     /host=10.20.0.9/.test(dbHref) && /port=3306/.test(dbHref));
+  ok(JD + ' registerHref() omits fields a probe could not learn',
+     !/port=/.test(href({kind: 'database', engine: 'oracle', host: '10.0.0.2'})));
+}
+
+// ── the register forms' end of that hand-off ──────────────────────────────────
+// A Register link that lands on an empty form is a link that wasted the finding.
+{
+  const withQuery = (search, file, fn, state, ...names) => {
+    global.window = {location: {search}};
+    const c = Object.assign({}, ...names.map(n => build(file, n, {})), state);
+    c[fn]();
+    return c;
+  };
+
+  const k = withQuery('?register=1&name=k8s-10-20-0-5&api_server=https://10.20.0.5:6443',
+                      'k8s/index.html', 'openFromQuery',
+                      {}, 'openFromQuery', 'openRegister');
+  ok('k8s/index.html ?register= opens the form with the finding prefilled',
+     k.showRegister === true && k.form.name === 'k8s-10-20-0-5' &&
+     k.discoveredApiServer === 'https://10.20.0.5:6443');
+  // The one field the hand-off must NOT prefill: the agent never had a kubeconfig,
+  // because a discovery probe never authenticates to anything.
+  ok('k8s/index.html the prefill leaves the kubeconfig empty', k.form.kubeconfig === '');
+
+  const plain = withQuery('', 'k8s/index.html', 'openFromQuery',
+                          {showRegister: false}, 'openFromQuery', 'openRegister');
+  ok('k8s/index.html a normal page load opens nothing', plain.showRegister === false);
+
+  const d = withQuery('?register=1&engine=mariadb&host=10.20.0.9&port=3306',
+                      'databases/index.html', 'openFromQuery',
+                      {loadRegAccounts() { this._lookedUp = true; }},
+                      'openFromQuery', 'openRegister');
+  // mariadb is probed under its own name but has no option in the select; registering
+  // it as mysql is correct, and leaving 'mariadb' selected would be a value the API
+  // rejects on submit.
+  ok('databases/index.html a mariadb finding registers as mysql', d.reg.engine === 'mysql');
+  ok('databases/index.html the host and port arrive prefilled',
+     d.reg.host === '10.20.0.9' && d.reg.port === 3306);
+  ok('databases/index.html prefilling the host looks up its managed accounts',
+     d._lookedUp === true);
+
+  const junk = withQuery('?register=1&engine=notarealengine&port=notanumber',
+                         'databases/index.html', 'openFromQuery',
+                         {loadRegAccounts() {}}, 'openFromQuery', 'openRegister');
+  ok('databases/index.html an unknown engine is ignored, not selected',
+     junk.reg.engine === 'postgres' && junk.reg.port === null);
+
+  delete global.window;
+}
+
 ociPlacementChecks().then(() => process.exit(fail ? 1 : 0),
                           (e) => { console.log('FAIL ' + OCI + ' placement checks threw: ' + e);
                                    process.exit(1); });
