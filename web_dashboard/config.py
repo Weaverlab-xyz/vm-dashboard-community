@@ -879,6 +879,60 @@ class Settings(BaseSettings):
     resource_expiry_allow_never: bool = False      # may an admin clear a timer outright
     resource_expiry_exempt_workgroups: str = ""    # CSV; mirrors the admission_* lists
 
+    # ── Background job worker concurrency ────────────────────────────────────
+    # How many jobs the dedicated worker (web_dashboard.jobs_worker) runs at once. It
+    # used to run exactly ONE, and "run more" meant more docker-compose replicas — a
+    # lever a PaaS host doesn't give you per-worker, and one that costs a whole DB
+    # connection pool per replica. These caps put the concurrency inside one process.
+    # Replicas still MULTIPLY them (the queue claim is atomic), so total = replicas x caps.
+    #
+    # Tiered because the jobs are not alike (jobs_worker.HEAVY/MEDIUM/LIGHT_TYPES):
+    #   heavy  — a long LOCAL subprocess streamed line by line (terraform apply, packer
+    #            build, `docker run`). One JobLog INSERT per output line.
+    #   medium — cloud SDK plus a SHORT local process: a PRA/Entitle/Password-Safe
+    #            terraform in a tempdir, or kubectl/helm at k8s_runner=local (default).
+    #   light  — start a cloud operation, then poll its API. Image exports/promotes/
+    #            copies, gateways, epml_sync, expiry_sweep. Hours of near-pure waiting;
+    #            these are the ones that used to queue behind a Packer build.
+    #
+    # These are the BOOTSTRAP defaults. The normal way to change them is Settings →
+    # Job Worker, which stores them in app_config and takes effect within ~5s with no
+    # restart. Ceilings an operator cannot raise live in worker_policy, not here.
+    worker_heavy_concurrency: int = 2
+    worker_medium_concurrency: int = 1
+    worker_light_concurrency: int = 3
+    # Aggregate ceiling across the tiers, and what the pools are sized from — the tier
+    # caps deliberately sum higher, since they bound COMPOSITION and this bounds TOTAL.
+    # Clamped down at startup if the DB pool can't serve it (jobs_worker._limits).
+    worker_max_concurrency: int = 3
+    worker_executor_threads: int = 0               # 0 = derive from the caps above
+    worker_drain_timeout_s: int = 20               # SIGTERM grace; see the pool note below
+
+    # ── Database connection pool ─────────────────────────────────────────────
+    # ENV-ONLY, and it cannot be otherwise: create_engine runs at import in database.py,
+    # before any connection exists, so the pool that connects to the database can't be
+    # sized from a value stored in that database. This is why the worker caps above are
+    # clamped to the pool at runtime rather than the pool being grown to fit them.
+    #
+    # Budget, per PROCESS: db_pool_size + db_max_overflow. The app runs `gunicorn -w 2`
+    # (2 pools) and the worker 1 per replica, so one deployment holds
+    # 3 x (size + overflow) — 30 at the defaults. Keep it under (max_connections - 20),
+    # the 20 covering the server's own management and superuser-reserved sessions.
+    # Check with `SHOW max_connections;`. Azure Postgres Flexible Server Burstable B1ms
+    # is 50 (so 5+5 is the ceiling there, and the worker clamps concurrency to 3); B2s
+    # and every General Purpose tier are 429+ and can take much more.
+    #
+    # App and worker are separate deployments, so they can carry DIFFERENT values for
+    # these under the same names — giving the worker a bigger pool than the request path
+    # buys concurrency at no extra connection cost.
+    db_pool_size: int = 5
+    db_max_overflow: int = 5
+    db_pool_timeout_s: int = 30                    # checkout wait before QueuePool raises
+    # Under any server-side idle timeout. Azure's load balancer drops idle TCP after
+    # minutes, which without this surfaces as an InterfaceError mid-job on a long
+    # poller's first query after a quiet gap — reachable today at concurrency 1.
+    db_pool_recycle_s: int = 1800
+
     # ── Outbound notifications ───────────────────────────────────────────────
     # Sends dashboard events to webhook endpoints (Slack, Microsoft Teams via a Power
     # Automate Workflows URL, or a signed generic envelope you point at whatever you

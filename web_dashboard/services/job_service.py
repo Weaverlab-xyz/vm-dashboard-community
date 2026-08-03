@@ -124,14 +124,30 @@ def set_cloud_resource_id(db: Session, job_id: str, resource_id: str) -> Optiona
 
 
 def set_running(db: Session, job_id: str) -> Optional[Job]:
-    """Mark a job as running."""
+    """Mark a job as running.
+
+    Deliberately does NOT ``db.refresh(job)`` after the commit, unlike the terminal
+    setters below. This one is called at the START of a long job, on the session the job
+    then holds for its whole duration — and a refresh is a SELECT, which opens a
+    transaction that nothing closes until that session's next commit. For a provision
+    that is after the entire terraform apply, so the row read here pinned a PostgreSQL
+    backend ``idle in transaction`` for 30+ minutes: it blocks autovacuum on `jobs` and
+    `job_logs`, the two highest-churn tables, and if the server ever sets
+    ``idle_in_transaction_session_timeout`` the session is killed and the post-apply
+    commit fails *after a successful apply*.
+
+    Nothing reads the return value (all 56 call sites discard it), and with
+    ``expire_on_commit`` at its default the refresh could not have kept the instance
+    usable anyway — the next attribute access would re-SELECT regardless. The terminal
+    setters keep their refresh because ``set_failed`` genuinely uses the refreshed row
+    (``notify_job_failed``) and because by then the session is about to be closed.
+    """
     job = db.query(Job).filter(Job.id == job_id).first()
     if job:
         job.status = "running"
         job.started_at = datetime.utcnow()
         job.updated_at = datetime.utcnow()
         db.commit()
-        db.refresh(job)
     return job
 
 

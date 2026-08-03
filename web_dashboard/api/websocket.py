@@ -85,13 +85,9 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 
-async def broadcast_progress(job_id: str, pct: int, message: str, log_line: str = None):
-    """
-    Push progress to connected clients AND persist it. The dedicated job runner is a
-    separate process, so its in-memory ``manager.broadcast`` reaches no clients — the
-    DB writes (progress + per-line ``JobLog``) are what the WS endpoint reads on its
-    2s poll. The in-memory broadcast still serves any in-process callers.
-    """
+def _persist_progress(job_id: str, pct: int, message: str, log_line: str = None) -> None:
+    """The synchronous half of :func:`broadcast_progress`. Split out so it can be handed
+    to a thread — see there for why that matters."""
     db: Session = SessionLocal()
     try:
         job_service.update_progress(db, job_id, pct, message)
@@ -99,6 +95,29 @@ async def broadcast_progress(job_id: str, pct: int, message: str, log_line: str 
             job_service.append_job_log(db, job_id, log_line)
     finally:
         db.close()
+
+
+async def broadcast_progress(job_id: str, pct: int, message: str, log_line: str = None):
+    """
+    Push progress to connected clients AND persist it. The dedicated job runner is a
+    separate process, so its in-memory ``manager.broadcast`` reaches no clients — the
+    DB writes (progress + per-line ``JobLog``) are what the WS endpoint reads on its
+    2s poll. The in-memory broadcast still serves any in-process callers.
+
+    The DB half runs in a thread. This is called from ``terraform._stream``'s ``on_line``
+    callback — which is awaited directly on the event loop, once PER OUTPUT LINE of a
+    terraform apply — and each call is a session open, an UPDATE, a ``SELECT max(seq)``,
+    an INSERT and two commits. At one job per worker that was merely wasteful; now that
+    ``jobs_worker`` runs several jobs concurrently it is shared infrastructure, and doing
+    it synchronously would make one job's streamed output delay every other job's progress
+    writes, cancel checks and ``asyncio.sleep`` timers — including the heartbeats whose
+    lateness makes a sibling worker's reconcile fail a live job.
+
+    ``append_job_log``'s ``SELECT max(seq) + 1`` stays safe: ``_stream`` awaits ``on_line``
+    sequentially, so there is still exactly one writer per ``job_id`` and the sequence
+    cannot interleave. (``uq_job_log_seq`` is the backstop, not the mechanism.)
+    """
+    await asyncio.to_thread(_persist_progress, job_id, pct, message, log_line)
 
     payload = {
         "job_id": job_id,
