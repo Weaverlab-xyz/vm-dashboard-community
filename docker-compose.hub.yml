@@ -88,19 +88,22 @@ services:
   # Same published image as `app`; shares the DB + config + state backend. No HTTP
   # port, no bind mount.
   #
-  # Each worker runs ONE job at a time (serially), so the replica count IS the
-  # number of long jobs that can run concurrently — raise WORKER_REPLICAS (in .env)
-  # when quick jobs queue behind long ones. The `jobs` table claim is atomic, so
-  # replicas never double-execute a job.
+  # ONE worker runs SEVERAL jobs at a time, capped by kind (light/medium/heavy — see
+  # jobs_worker's tier tuples). Tune it in Settings → Job Worker, which applies within
+  # seconds with no restart; WORKER_*_CONCURRENCY in .env is only the bootstrap default.
+  # The `jobs` table claim is atomic, so neither concurrent tasks nor replicas ever
+  # double-execute a job.
   worker:
     image: chrweav/infra-dashboard:${INFRA_DASHBOARD_TAG:-latest}
     command: ["python", "-m", "web_dashboard.jobs_worker"]
     restart: unless-stopped
     deploy:
-      # Concurrent workers = concurrent long jobs. `docker compose up` honors this;
-      # override ad-hoc with: docker compose up -d --scale worker=N. Defaults to 3
-      # (drop WORKER_REPLICAS toward 1 on small hosts, raise it if jobs still queue).
-      replicas: ${WORKER_REPLICAS:-3}
+      # Replicas MULTIPLY the per-worker caps, so 1 is the right default now: raise the
+      # caps before adding replicas. N slots in one process share ONE database
+      # connection pool; N replicas need N pools, and the pool is usually what limits
+      # concurrency (see DB_POOL_SIZE in .env.example). Ad-hoc override:
+      # docker compose up -d --scale worker=N
+      replicas: ${WORKER_REPLICAS:-1}
       # Per-worker caps bound aggregate host usage when several heavy jobs run at
       # once (jobs are mostly orchestration + cloud-API waits). Tune to your host.
       resources:

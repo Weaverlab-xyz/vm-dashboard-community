@@ -47,6 +47,48 @@ def _handled_types():
     raise AssertionError("HANDLED_TYPES not found in jobs_worker.py")
 
 
+def fn_source(name, path=None):
+    """The source of one top-level function in jobs_worker.py, by AST line span.
+
+    Used by every test here that asserts something about ONE function's body. It has to
+    be the AST rather than a regex: the obvious `def NAME\\(.*?\\n\\ndef ` pattern does
+    not match `async def`, and most of this module is `async def` — so the slice it
+    captured silently ran to the end of the file and the assertion passed on any code
+    anywhere. Shared with tests/test_worker_tiers.py, which asserts the ABSENCE of things
+    in specific functions, where a too-wide slice fails open in the dangerous direction.
+    """
+    src = open(path or _WORKER, encoding="utf-8").read()
+    lines = src.splitlines()
+    for node in ast.parse(src).body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+            return "\n".join(lines[node.lineno - 1:node.end_lineno])
+    raise AssertionError(f"{name}() not found in {path or _WORKER}")
+
+
+def fn_code(name, path=None):
+    """One function's CODE — docstrings and comments removed, via ast.unparse.
+
+    Needed for any assertion about what a function does NOT contain. A docstring that
+    explains a removed construct ("the previous shape was `await _dispatch(...)`") is
+    exactly the prose you want to keep and exactly what makes a raw-text absence check
+    fail; the reverse — a comment that happens to name a call — makes a presence check
+    pass on a function that doesn't make it. Both are the test lying about the code.
+
+    Note ast.unparse normalizes string literals to single quotes, so callers matching a
+    quoted literal should normalize too (see _norm in test_worker_tiers).
+    """
+    src = open(path or _WORKER, encoding="utf-8").read()
+    for node in ast.parse(src).body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+            body = node.body
+            if (body and isinstance(body[0], ast.Expr)
+                    and isinstance(body[0].value, ast.Constant)
+                    and isinstance(body[0].value.value, str)):
+                body = body[1:]                       # drop the docstring
+            return "\n".join(ast.unparse(stmt) for stmt in body)
+    raise AssertionError(f"{name}() not found in {path or _WORKER}")
+
+
 def _dispatched_types():
     """Every job_type literal the dispatch chain tests, in either shape it uses:
     `job_type == "x"` and `job_type in ("a", "b")`."""
@@ -212,11 +254,14 @@ def test_children_of_a_parent_job_are_created_unclaimable():
 def test_queued_is_outside_the_claim_query():
     """`queued` only protects anything because _claim_one filters on status='pending'
     exactly. A change to `!= 'completed'` or an `in_` would silently re-open it."""
-    src = _src()
-    claim = re.search(r"def _claim_one\(.*?\n(.*?)\n\ndef ", src, re.S).group(1)
+    claim = fn_source("_claim_one")
     assert 'Job.status == "pending"' in claim, (
         "_claim_one no longer filters status == 'pending'; queued children are "
         "unprotected and bulk deploys would double-execute")
+    assert "Job.job_type.in_(allowed)" in claim, (
+        "_claim_one no longer filters on the caller's `allowed` allowlist. It must stay "
+        "IN THE QUERY: post-filtering in Python would re-SELECT the same unclaimable "
+        "row on every attempt (see the tiered supervisor in _run_loop)")
 
 
 def test_the_worker_does_not_import_request_models_either():

@@ -14,19 +14,59 @@ import bcrypt as _bcrypt
 from .config import settings
 
 # Create database engine.
-# For SQLite we use NullPool: connections are just file handles so pooling
-# adds no benefit, and the default QueuePool (5 + 10 overflow = 15 max) is
-# exhausted when several long-running background jobs hold sessions open
-# simultaneously (each job + each broadcast_progress call takes one slot).
-# NullPool creates and closes a fresh connection on every Session open/close,
-# eliminating the timeout entirely.
+#
+# SQLite → NullPool: connections are just file handles so pooling adds no benefit, and
+# a bounded pool is exhausted when several long-running background jobs hold sessions
+# open simultaneously (each job + each broadcast_progress call takes one slot). NullPool
+# creates and closes a fresh connection per Session, eliminating the timeout entirely.
+#
+# Postgres → QueuePool, EXPLICITLY sized. The library defaults (pool_size=5,
+# max_overflow=10 = 15 max) were adequate only while the job worker ran ONE job at a time
+# and the concurrency lived in `replicas`, each replica being its own process with its own
+# pool. jobs_worker now runs several jobs in ONE pool, and a job is not one connection:
+# _dispatch holds a session for the job's whole duration, several services open their own
+# (aws_vm_service, azure_vm_service, gcp_vm_service, oci_vm_service, packer_build_service,
+# ansible_local_run_service, vdesktop_service, image_promote_service), and every heartbeat
+# beat, every job_service.cancel_check and every streamed terraform output line via
+# api.websocket.broadcast_progress opens a transient one.
+#
+# pool_pre_ping / pool_recycle are not about concurrency and are worth having on their own:
+# Azure Postgres Flexible Server and the load balancer in front of it close idle
+# connections after minutes, and a pooled-but-dead connection surfaces as an InterfaceError
+# in the middle of a job rather than at checkout. A two-hour image-export poller is exposed
+# to that at concurrency 1.
+#
+# Budget, per PROCESS: pool_size + max_overflow. The app runs `gunicorn -w 2` → 2 pools;
+# the worker → 1 per replica. So one deployment can hold 3 x (size + overflow) — 30 at the
+# defaults — and that whole figure multiplies by the replica count. Keep it under
+# (max_connections - 20), the 20 covering the server's management sessions plus
+# superuser_reserved_connections. Verify with `SHOW max_connections;`: Azure Burstable
+# B1ms is 50, which is why the defaults are 5 + 5 and jobs_worker._limits clamps
+# concurrency to 3 there; B2s and every General Purpose tier are 429+.
 _is_sqlite = "sqlite" in settings.database_url
+_pool_kwargs = {} if _is_sqlite else {
+    "pool_size":     settings.db_pool_size,
+    "max_overflow":  settings.db_max_overflow,
+    "pool_timeout":  settings.db_pool_timeout_s,
+    "pool_pre_ping": True,
+    "pool_recycle":  settings.db_pool_recycle_s,
+}
 engine = create_engine(
     settings.database_url,
     connect_args={"check_same_thread": False} if _is_sqlite else {},
     poolclass=NullPool if _is_sqlite else QueuePool,
     echo=False,
+    **_pool_kwargs,
 )
+
+
+def pool_capacity() -> int:
+    """Max connections this process's pool can hand out — what jobs_worker._limits clamps
+    concurrency against. 0 for SQLite's NullPool, which is unbounded (a fresh connection
+    per Session), so the caller treats 0 as "don't clamp"."""
+    if _is_sqlite:
+        return 0
+    return settings.db_pool_size + settings.db_max_overflow
 
 # Session factory
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

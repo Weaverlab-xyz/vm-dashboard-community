@@ -174,9 +174,18 @@ def test_the_build_is_registered_at_every_point():
     assert 'require_permission("oci", "write")' in api
 
     worker = _read("web_dashboard", "jobs_worker.py")
-    assert worker.count('"packer_oci_build"') == 2, (
-        "packer_oci_build must be in BOTH HANDLED_TYPES and the dispatch tuple")
-    assert worker.count('"oci_export_image"') == 2
+    # Membership in the two places that matter, rather than a count of mentions: the job
+    # types are now ALSO listed in jobs_worker's concurrency tier tuples, so "appears
+    # exactly twice" stopped meaning "registered in both places". Claimable but
+    # undispatchable is a job that goes `running` and dies to the stale reconciler;
+    # dispatchable but unclaimable is dead code that leaves the job `pending` forever.
+    handled = re.search(r"^HANDLED_TYPES = \((.*?)^\)", worker, re.S | re.M).group(1)
+    dispatch = re.search(r'job_type in \("packer_aws_build".*?\)', worker, re.S).group(0)
+    export = re.search(r'job_type in \("aws_export_image".*?\)', worker, re.S).group(0)
+    assert '"packer_oci_build"' in handled, "packer_oci_build is not claimable"
+    assert '"packer_oci_build"' in dispatch, "packer_oci_build has no dispatch branch"
+    assert '"oci_export_image"' in handled, "oci_export_image is not claimable"
+    assert '"oci_export_image"' in export, "oci_export_image has no dispatch branch"
 
     svc = _read("web_dashboard", "services", "packer_build_service.py")
     # Whitespace-tolerant: these dict entries are column-aligned with their siblings.

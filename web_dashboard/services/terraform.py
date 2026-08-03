@@ -173,7 +173,7 @@ def _init_lock_path() -> str:
 
 
 @contextlib.contextmanager
-def _plugin_cache_lock():
+def plugin_cache_lock():
     """Serialize ``terraform init`` across processes/jobs.
 
     Terraform's shared plugin cache (``TF_PLUGIN_CACHE_DIR``, populated once at
@@ -184,6 +184,13 @@ def _plugin_cache_lock():
     the cache, so those still run in parallel) serializes provider placement
     across gunicorn workers and concurrent jobs. ``flock`` is advisory and
     auto-released if a worker dies. No-op where ``fcntl`` is absent (Windows dev).
+
+    PUBLIC on purpose: this module is not the only thing that runs ``terraform
+    init`` against that one cache. The PRA / Entitle / Password-Safe services each
+    shell out to their own terraform in a tempdir, and every one of those inits
+    lands in the SAME plugin cache — so they take this lock too (see their
+    ``_run_tf``). Anything that adds a new ``terraform init`` call site must hold
+    it; ``tests/test_worker_tiers.py`` fails the build if one doesn't.
     """
     if fcntl is None:
         yield
@@ -215,7 +222,7 @@ def _init_sync(deploy_dir: str, env: Optional[dict] = None,
     # template), so -upgrade=false keeps provider fetch offline; the remote backend
     # init still reaches the state store (that is the point).
     _write_backend_tf(deploy_dir, backend_type)
-    with _plugin_cache_lock():
+    with plugin_cache_lock():
         r = _run(_init_args(backend_type, backend_config), deploy_dir, timeout=300, env=env)
     if r.returncode != 0:
         raise TerraformError(f"terraform init failed:\n{r.stderr}")
@@ -393,7 +400,7 @@ async def apply(deploy_dir: str, variables: dict, template_dir: Optional[str] = 
     # Streaming path: stream the apply (the long, interesting part) line-by-line to
     # on_line (e.g. the job's Live Output). Init runs first via the serialized,
     # non-streamed _init_sync — the shared plugin cache isn't concurrency-safe
-    # (see _plugin_cache_lock) and init output is brief. Outputs are still captured
+    # (see plugin_cache_lock) and init output is brief. Outputs are still captured
     # via the post-apply `output -json` (parsing them out of the live stream is fragile).
     await asyncio.to_thread(_init_sync, deploy_dir, merged_env, backend_type, backend_config)
     rc, out = await _stream(

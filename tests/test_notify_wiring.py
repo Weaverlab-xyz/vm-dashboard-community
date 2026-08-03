@@ -241,9 +241,18 @@ def test_the_drain_loop_is_actually_launched():
     while the UI cheerfully reports them as queued."""
     src = _src(_WORKER)
     assert "drain_loop" in src, "jobs_worker never references the notification drain loop"
-    assert re.search(r"gather\(", src), (
-        "jobs_worker.main no longer gathers the job runner with the drain loop")
-    refs = _names(_fn(_WORKER, "_main"))
+    main_node = _fn(_WORKER, "_main")
+    main_src = ast.unparse(main_node)
+    # Concurrently, by either shape. This was `gather(_run_loop(), drain_loop())` until the
+    # worker gained a SIGTERM drain: gather waits for BOTH, and drain_loop never returns, so
+    # a _run_loop that exits on shutdown would hang the process forever instead of stopping.
+    # It is now create_task + cancel in a finally. What matters is that the drain is started
+    # alongside the job runner and never sequenced after it — assert that, not the API.
+    assert re.search(r"gather\(|create_task\(\s*notification_service\.drain_loop", main_src), (
+        "_main no longer starts the notification drain concurrently with the job runner; "
+        "if it awaits the runner first the drain never starts and every notification sits "
+        "in the outbox while the UI reports it as queued")
+    refs = _names(main_node)
     assert "drain_loop" in refs and "_run_loop" in refs, (
         "_main must run both the job runner and the notification drain")
     assert "_main" in _names(_fn(_WORKER, "main"))
