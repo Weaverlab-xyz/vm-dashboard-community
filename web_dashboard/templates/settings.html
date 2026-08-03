@@ -2843,6 +2843,68 @@
               way that looks exactly like a revoked agent. Also fixes the OAuth callback URIs.
             </p>
           </div>
+
+          <!-- ── Signing audience (read-only) ──────────────────────────────────
+               A separate box from the field above, because they are separate values and
+               conflating them is the bug: Public base URL is what you *state*, the audience
+               is what was *pinned* on the first enrolment code and is write-once. Correcting
+               the field above does not move the pin, which is why this needs to be visible
+               and why Reset exists at all. -->
+          <template x-if="agentAudience">
+            <div class="rounded-lg border border-gray-200 bg-gray-50 p-3">
+              <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">
+                Signing audience <span class="normal-case font-normal text-gray-400">— pinned, read-only</span>
+              </p>
+              <div class="text-[11px] space-y-1">
+                <div x-show="agentAudience.pinned">
+                  <span class="text-gray-500">Pinned to:</span>
+                  <span class="ml-1 font-mono text-gray-800" x-text="agentAudience.pinned"></span>
+                </div>
+                <p class="text-gray-500" x-show="!agentAudience.pinned">
+                  Not pinned yet. The next enrolment code pins it permanently to
+                  <span class="font-mono text-gray-700" x-text="agentAudience.effective"></span>.
+                </p>
+                <div x-show="agentAudience.pinned && agentAudience.public_base_url !== agentAudience.pinned">
+                  <span class="text-gray-500">Public base URL says:</span>
+                  <span class="ml-1 font-mono text-gray-800"
+                        x-text="agentAudience.public_base_url || '(unset — derived per request)'"></span>
+                </div>
+                <div>
+                  <span class="text-gray-500">Enrolled agents signing against it:</span>
+                  <span class="ml-1 font-mono text-gray-800" x-text="agentAudience.agents_enrolled"></span>
+                </div>
+              </div>
+
+              <!-- The refusal. Say it here rather than letting the operator discover it
+                   from the Agents page when Register stops working. -->
+              <div x-show="agentAudience.conflict"
+                   class="mt-2 rounded border border-red-200 bg-red-50 px-2 py-1.5">
+                <p class="text-[11px] text-red-800">
+                  <strong>New enrolment codes are refused</strong> until this is resolved, or
+                  until you confirm the prompt to issue against the pinned value anyway.
+                  <span x-text="agentAudience.conflict"></span>
+                </p>
+              </div>
+
+              <template x-for="w in (agentAudience.warnings || [])" :key="w">
+                <div class="mt-2 rounded border border-amber-200 bg-amber-50 px-2 py-1.5">
+                  <p class="text-[11px] text-amber-800" x-text="w"></p>
+                </div>
+              </template>
+
+              <button @click="resetAgentAudience()" x-show="agentAudience.pinned"
+                      :disabled="agentAudienceResetting"
+                      class="mt-3 text-xs px-3 py-1.5 rounded-lg border border-red-300 text-red-700 hover:bg-red-50 transition disabled:opacity-50">
+                <span x-text="agentAudienceResetting ? 'Resetting…' : 'Reset signing audience'"></span>
+              </button>
+              <p class="text-[11px] text-gray-400 mt-1" x-show="agentAudience.pinned">
+                Clears the pin so the next enrolment code re-pins it from Public base URL.
+                <strong class="text-gray-500">Every enrolled agent stops authenticating</strong>
+                and has to be re-enrolled with a fresh code — each one signs against the
+                audience it was handed at enrolment.
+              </p>
+            </div>
+          </template>
         </div>
       </template>
 
@@ -3628,6 +3690,8 @@ function settingsPage() {
     panelError: '',
     panelCfg: {},
     entitleAgentToken: '',   // read-only display of the auto-minted Entitle agent token name
+    agentAudience: null,     // read-only view of the pinned agent signing audience (Remote Agents panel)
+    agentAudienceResetting: false,
     rancherFirewall: null,   // read-only breakdown of the Rancher node firewall allow-list (k8s panel)
     portainerFirewall: null, // same for the managed Portainer node (Containers panel)
     expirySweep: null,       // last auto-delete sweep summary (Auto-delete Timer panel)
@@ -3938,6 +4002,15 @@ function settingsPage() {
           try {
             this.rancherFirewall = await API.get('/api/containers/rancher/firewall');
           } catch (e) { /* node/GCP not configured yet — panel just omits the box */ }
+        }
+        // Remote agents: the pinned signing audience is write-once and was previously
+        // invisible, so an audience pinned to the wrong hostname looked identical to a
+        // revoked agent. Read-only — the panel never puts it in the save payload.
+        if (intg.key === 'remote_agents') {
+          this.agentAudience = null;
+          try {
+            this.agentAudience = await API.get('/api/agent/audience');
+          } catch (e) { /* the router is feature-gated; off means 404, and this panel is where you turn it on */ }
         }
         // Containers: same read-only breakdown for the managed Portainer node, so the
         // operator can see whether the node is actually reachable and from where.
@@ -4382,6 +4455,28 @@ function settingsPage() {
         this.oidcTest = { running: false, ok: true, error: '', doc };
       } catch (e) {
         this.oidcTest = { running: false, ok: false, error: e.message || String(e), doc: null };
+      }
+    },
+
+    // Reset the pinned agent signing audience. Destructive in a way that is not obvious
+    // from the button — it does not touch any agent row, but every enrolled agent starts
+    // failing authentication — so the count goes in the confirm text.
+    async resetAgentAudience() {
+      const a = this.agentAudience || {};
+      const n = a.agents_enrolled || 0;
+      const affected = n
+        ? `\n\n${n} enrolled agent(s) will stop authenticating and must be re-enrolled with a fresh code.`
+        : '';
+      if (!confirm(`Reset the signing audience?\n\nIt is pinned to ${a.pinned}. The next enrolment code will pin it again — from Public base URL if you have set one, otherwise from the origin your browser is on.${affected}`)) return;
+      this.agentAudienceResetting = true;
+      try {
+        const r = await API.delete('/api/agent/audience');
+        this.agentAudience = r;
+        this.showToast(r.detail || 'Signing audience reset.');
+      } catch (e) {
+        this.showToast('Could not reset the signing audience: ' + e.message, 'error');
+      } finally {
+        this.agentAudienceResetting = false;
       }
     },
 

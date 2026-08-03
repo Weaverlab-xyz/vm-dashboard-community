@@ -12,6 +12,8 @@ Operator half — admin only:
 
   POST   /api/agent                         — register an agent, mint an enrolment code
   GET    /api/agent                         — list, with derived status
+  GET    /api/agent/audience                — the pinned signing audience, read-only
+  DELETE /api/agent/audience                — clear the pin so the next mint re-pins it
   GET    /api/agent/{id}                    — one agent
   POST   /api/agent/{id}/enrollment-code    — re-issue for a reinstall
   POST   /api/agent/{id}/discover           — queue a discovery scan
@@ -83,15 +85,134 @@ def _resolve_audience(request: Request, *, persist: bool = False) -> str:
     When nothing is pinned yet, this still *returns* a derived value so verification has
     something to compare against; it simply does not write it down.
     """
-    pinned = config_service.get(_AUDIENCE_CONFIG)
+    pinned = _pinned_audience()
     if pinned:
-        return pinned.rstrip("/")
+        return pinned
     resolved = public_url.resolve(request)
     if not persist:
         return resolved
     config_service.set(_AUDIENCE_CONFIG, resolved)
     logger.info("agent: pinned the signing audience to %s", resolved)
     return resolved
+
+
+def _pinned_audience() -> str:
+    """The stored audience, or "" when nothing has been pinned yet."""
+    return (config_service.get(_AUDIENCE_CONFIG) or "").rstrip("/")
+
+
+def _audience_state(request: Request) -> dict:
+    """What the audience is, what a mint would make it, and whether that looks wrong.
+
+    One function behind three surfaces — the read-only display in Settings, the warnings
+    on a minted enrolment code, and the refusal that blocks a mint outright — so the panel
+    cannot report one audience while the install command emits another.
+
+    The failure this exists to make visible: on a **split-vhost** deployment (UI on one
+    hostname, ``/api/agent*`` on another) the origin an admin's browser is on is the *UI*
+    hostname. Minting the first enrolment code from there pins the audience to it
+    permanently, the agent dials the UI vhost, and an IP-gated or UI-only vhost answers
+    404. From the console that is indistinguishable from a revoked agent: stuck at
+    ``enrolling``, ``Last seen: never``, no policy hash — and no ``/api/agent/enroll``
+    request in the application log at all, because none ever arrived.
+    """
+    pinned = _pinned_audience()
+    stated = public_url.configured()        # public_base_url, normalised, or ""
+    origin = public_url.derive(request)     # the caller's origin, post-ProxyHeaders
+    # Must agree with _resolve_audience(persist=True): pin wins, else the stated origin,
+    # else the request's. If these ever diverge the warning describes a different URL than
+    # the one the operator is handed.
+    effective = pinned or stated or origin
+
+    conflict = ""
+    warnings: list = []
+
+    if pinned and stated and pinned != stated:
+        conflict = (
+            f"The signing audience is pinned to {pinned}, but Public base URL now says "
+            f"{stated}. Pinning is write-once, so an install command issued now would "
+            f"still tell the new agent to dial {pinned} — silently ignoring the value you "
+            f"corrected. Either set Public base URL back to {pinned}, or reset the signing "
+            f"audience under Settings → Integrations → Remote Agents, which re-pins it "
+            f"from {stated} on the next code and requires re-enrolling every agent.")
+    elif not pinned and not stated:
+        warnings.append(
+            f"Nothing is pinned yet, so this code permanently pins the signing audience to "
+            f"{origin} — the origin your own browser is on. If agents reach this dashboard "
+            f"on a different hostname, set Public base URL first and issue a new code: an "
+            f"agent that dials a hostname not serving /api/agent gets a 404 and sits at "
+            f"'enrolling' with Last seen: never, which looks exactly like a revoked agent.")
+    elif pinned and not stated and pinned == origin:
+        warnings.append(
+            f"The signing audience is pinned to {pinned}, the same origin you are browsing. "
+            f"That is right for a single-hostname install. If the UI and /api/agent are on "
+            f"separate hostnames it means the audience was pinned to the UI one, and no "
+            f"agent will ever enrol against it. Set Public base URL to the hostname that "
+            f"serves /api/agent and reset the audience.")
+
+    if effective.startswith("http://"):
+        warnings.append(
+            f"The audience is {effective}. The agent refuses to sign over plaintext unless "
+            f"AGENT_INSECURE_TLS=1, and a proxy whose headers this dashboard does not trust "
+            f"is the usual reason an https deployment pins an http audience. Terminate TLS "
+            f"in front of the dashboard and set Public base URL.")
+
+    return {
+        "pinned": pinned,
+        "public_base_url": stated,
+        "request_origin": origin,
+        "effective": effective,
+        "conflict": conflict,
+        "warnings": warnings,
+    }
+
+
+def _audience_guard(request: Request, *, acknowledged: bool = False) -> dict:
+    """``_audience_state``, refusing the mint when the pin contradicts ``public_base_url``.
+
+    A 409 rather than a stale URL emitted with a warning beside it, because the operator who
+    has just corrected Public base URL has every reason to believe the command they are
+    copying reflects it. Callers must invoke this **before** they mutate anything: refusing
+    after ``create_agent`` would leave a row squatting its name holding a code nobody saw,
+    and after ``reissue_enroll_code`` would clear a working agent's key and hand back an
+    error instead of a replacement code.
+
+    ``acknowledged`` exists because the mismatch is not always a mistake. ``public_base_url``
+    is one value doing two jobs — the OAuth callback origin *and* the agent audience — and on
+    a split-vhost install those legitimately want different hostnames, so a divergence can be
+    the correct steady state. Without an override this guard would block agent registration
+    on that deployment permanently, with no escape but re-pinning the audience to the wrong
+    value. The refusal is about not emitting a stale URL *silently*; an admin who has read the
+    explanation and asked again is not silence. It is logged and audited as the exception it
+    is, and the resulting install command carries a warning saying which URL it used.
+    """
+    state = _audience_state(request)
+    if state["conflict"] and acknowledged:
+        logger.warning(
+            "agent: minting against the pinned audience %s despite public_base_url=%s "
+            "(acknowledged by an admin)", state["pinned"], state["public_base_url"])
+        state = {**state, "warnings": [
+            f"Issued against the pinned audience {state['pinned']}, NOT the {state['public_base_url']} "
+            f"in Public base URL — you acknowledged the mismatch. The agent must reach this "
+            f"dashboard at {state['pinned']} or it will never enrol.",
+            *state["warnings"]]}
+        return state
+    if state["conflict"]:
+        # A structured detail, like the Entitle user-JIT refusals: the remedy is a paragraph
+        # naming two hostnames and a settings panel, and `code` is what lets the Agents page
+        # render it as something that stays on screen rather than a toast that times out
+        # before it has been read. app.js maps `message` onto Error.message, so the plain
+        # string path still works for any caller that only reads that.
+        raise HTTPException(status_code=409, detail={
+            "code": "agent_audience_conflict",
+            "message": state["conflict"],
+            "pinned": state["pinned"],
+            "public_base_url": state["public_base_url"],
+            # The override, named in the response so the caller does not have to read the
+            # source to discover that the refusal is not a dead end.
+            "override": "acknowledge_audience=true",
+        })
+    return state
 
 
 def _client_ip(request: Request) -> str:
@@ -399,10 +520,14 @@ _RUN_FLAGS = (
 )
 
 
-def _install_hint(request: Request, code: str) -> dict:
+def _install_hint(request: Request, code: str, audience: dict) -> dict:
     """Copy-paste install commands built from this dashboard's own URL, so the operator
     never has to type it and cannot typo the one value that must match the signing
     audience.
+
+    ``audience`` comes from ``_audience_guard`` and must be computed *before* this runs:
+    the pin is written here, so a state read afterwards can no longer tell that this mint
+    is what created it — and "about to pin permanently" is the warning that matters most.
 
     Two forms, because where the enrolment code goes is a real trade-off:
 
@@ -439,17 +564,24 @@ def _install_hint(request: Request, code: str) -> dict:
             + "rm ./agent-enroll-code"
         ),
         "dashboard_url": base,
+        # Rendered beside the command in the enrolment modal. Advisory, not fatal — a
+        # single-hostname install trips the first of these legitimately.
+        "warnings": audience["warnings"],
     }
 
 
 @router.post("", status_code=201)
 async def create_agent(body: CreateAgentRequest, request: Request,
+                       acknowledge_audience: bool = False,
                        current_user: User = Depends(require_admin),
                        db: Session = Depends(get_db)):
     """Register an agent and return its one-time enrolment code.
 
     The code is shown exactly once, like a PAT — only its hash is stored.
     """
+    # First, before the row exists: a refusal after create_agent would leave an agent
+    # squatting its name holding a code the operator never saw.
+    audience = _audience_guard(request, acknowledged=acknowledge_audience)
     try:
         agent, code = agent_service.create_agent(
             db, name=body.name, site=body.site, description=body.description,
@@ -459,9 +591,11 @@ async def create_agent(body: CreateAgentRequest, request: Request,
 
     job_service.log_audit(db, current_user.username, "agent.create",
                           ip_address=_client_ip(request),
-                          details={"agent": agent.name, "site": agent.site or ""})
+                          details={"agent": agent.name, "site": agent.site or "",
+                                   "audience": audience["effective"],
+                                   "audience_mismatch_acknowledged": bool(audience["conflict"])})
     return {**_agent_row(agent), "enrollment_code": code,
-            "install": _install_hint(request, code)}
+            "install": _install_hint(request, code, audience)}
 
 
 @router.get("")
@@ -474,6 +608,83 @@ async def list_agents(current_user: User = Depends(require_admin),
             Job.agent_id.isnot(None), Job.status == "running").all():
         counts[agent_id] = counts.get(agent_id, 0) + 1
     return {"agents": [_agent_row(a, counts.get(a.id, 0)) for a in agents]}
+
+
+# ── The signing audience ──────────────────────────────────────────────────────
+# Declared before the ``/{agent_id}`` routes below. ``audience`` is a single path segment,
+# so FastAPI would otherwise bind ``agent_id="audience"`` and answer 404 — see the module
+# docstring on route order.
+
+def _enrolled_count(db: Session) -> int:
+    """Live agents holding a key — exactly the set a reset would break."""
+    return db.query(RemoteAgent).filter(
+        RemoteAgent.is_active.is_(True),
+        RemoteAgent.public_key.isnot(None),
+        RemoteAgent.public_key != "").count()
+
+
+@router.get("/audience")
+async def read_audience(request: Request, current_user: User = Depends(require_admin),
+                        db: Session = Depends(get_db)):
+    """The pinned signing audience and why it might be wrong. **Read-only.**
+
+    This endpoint exists because the pin had no reader at all: ``agent_base_url`` appeared
+    in exactly one file, nothing displayed it, and its value is invisible in the one
+    deployment shape where it goes wrong. Correcting Public base URL afterwards looks like
+    it worked and changes nothing, because the pin wins — recovering from it meant a shell
+    inside the container calling ``config_service.set`` by hand.
+
+    Read-only is the whole design. Anything that accepted an audience from a caller would
+    be the write-once rule with extra steps; see ``_resolve_audience`` for why that rule is
+    load-bearing. The only mutation offered is a full reset.
+    """
+    return {**_audience_state(request), "agents_enrolled": _enrolled_count(db)}
+
+
+@router.delete("/audience")
+async def reset_audience(request: Request, current_user: User = Depends(require_admin),
+                         db: Session = Depends(get_db)):
+    """Clear the pin so the next minted code pins the audience again.
+
+    The recovery ``docs/remote-agents.md`` has always told operators to perform — "clear
+    the stale ``agent_base_url`` config key and re-enrol" — and never gave them a way to.
+
+    **Deliberately not a way to set the audience.** It takes no value: it deletes the key
+    and leaves the existing write-once path to re-pin from ``public_base_url`` on the next
+    admin mint. That distinction is the security property. Write-once pinning is what stops
+    the first stranger to reach ``/api/agent/lease`` with a forged ``Host`` from choosing an
+    audience they control, which is the one thing that would make a signature captured
+    against a host of theirs replayable here. Guarded by ``require_admin``, the same check
+    that guards minting a code, so the unauthenticated signature path cannot reach it.
+
+    **Invalidates every enrolled agent.** Each one signs against the audience it was handed
+    at enrolment, so all of them start failing authentication — as a 401, which the agent
+    reads as "revoked" and stops on. Every agent needs a fresh enrolment code afterwards.
+    """
+    previous = _pinned_audience()
+    affected = _enrolled_count(db)
+    if previous:
+        config_service.delete(_AUDIENCE_CONFIG)
+        logger.warning(
+            "agent: %s reset the signing audience pin (was %s); %d enrolled agent(s) "
+            "must re-enrol", current_user.username, previous, affected)
+    job_service.log_audit(db, current_user.username, "agent.audience_reset",
+                          ip_address=_client_ip(request),
+                          details={"previous": previous, "agents_affected": affected})
+
+    if not previous:
+        detail = "No signing audience was pinned, so there was nothing to reset."
+    else:
+        detail = (
+            f"Signing audience reset — it was pinned to {previous}. The next enrolment code "
+            f"pins it again, so set Public base URL first if agents reach this dashboard on "
+            f"a different hostname than the one you are browsing.")
+        if affected:
+            detail += (f" {affected} enrolled agent(s) will now fail authentication and "
+                       f"must be re-enrolled with a fresh code.")
+    # State recomputed after the delete, so the panel redraws from what is true now.
+    return {"detail": detail, "previous": previous, "agents_affected": affected,
+            **_audience_state(request), "agents_enrolled": affected}
 
 
 def _load(db: Session, agent_id: str) -> RemoteAgent:
@@ -491,6 +702,7 @@ async def get_agent(agent_id: str, current_user: User = Depends(require_admin),
 
 @router.post("/{agent_id}/enrollment-code")
 async def reissue_code(agent_id: str, request: Request,
+                       acknowledge_audience: bool = False,
                        current_user: User = Depends(require_admin),
                        db: Session = Depends(get_db)):
     """Issue a fresh enrolment code for a reinstall.
@@ -501,11 +713,16 @@ async def reissue_code(agent_id: str, request: Request,
     agent = _load(db, agent_id)
     if not agent.is_active:
         raise HTTPException(status_code=409, detail="This agent has been revoked.")
+    # Before reissue_enroll_code, which clears the public key. Refusing after it would lock
+    # out the container being replaced and hand back an error rather than its new code.
+    audience = _audience_guard(request, acknowledged=acknowledge_audience)
     code = agent_service.reissue_enroll_code(db, agent)
     job_service.log_audit(db, current_user.username, "agent.reissue_code",
-                          ip_address=_client_ip(request), details={"agent": agent.name})
+                          ip_address=_client_ip(request),
+                          details={"agent": agent.name, "audience": audience["effective"],
+                                   "audience_mismatch_acknowledged": bool(audience["conflict"])})
     return {**_agent_row(agent), "enrollment_code": code,
-            "install": _install_hint(request, code)}
+            "install": _install_hint(request, code, audience)}
 
 
 class DiscoverRequest(BaseModel):

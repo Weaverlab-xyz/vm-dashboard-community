@@ -219,6 +219,85 @@ def test_agent_routes_are_declared_before_the_agent_id_routes():
         "an agent-protocol route is declared after a /{agent_id} route")
 
 
+def test_the_audience_routes_precede_the_agent_id_routes():
+    """Same trap, one segment further on. 'audience' is a single path segment, so declared
+    after /{agent_id} it would bind agent_id='audience' and answer 404 — 'Agent not found'
+    for a route that has nothing to do with an agent id."""
+    routes = re.findall(r'@router\.(?:get|post|delete|patch)\("([^"]*)"', _read(_AGENT_API))
+    first_param = next((i for i, p in enumerate(routes) if "{agent_id}" in p), len(routes))
+    audience = [i for i, p in enumerate(routes) if p == "/audience"]
+    assert len(audience) == 2, f"expected GET + DELETE /audience, found {len(audience)}"
+    assert all(i < first_param for i in audience), (
+        "an /audience route is declared after a /{agent_id} route and will 404")
+
+
+# ── the signing audience ──────────────────────────────────────────────────────
+# Pinning the audience is write-once on purpose: the first stranger to reach
+# /api/agent/lease with a forged Host must not be able to pin a value they control, which
+# is the one thing that would make a signature captured against their host replayable
+# here. Making the pin visible and resettable (api/agent.py /audience) must not weaken
+# that, and none of it is observable from a single request — hence static.
+# The behaviour those endpoints actually exhibit is in tests/test_agent_audience.py.
+
+def test_only_the_two_intended_callers_may_pin_the_audience():
+    """``persist=True`` is the write, so its call sites ARE the boundary: an authenticated
+    admin minting a code, and an enrolment redeeming a valid single-use code. A third one
+    on the signature path would hand the pin to an unauthenticated caller."""
+    tree = ast.parse(_read(_AGENT_API))
+    pinning = set()
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for node in ast.walk(fn):
+            if not (isinstance(node, ast.Call)
+                    and getattr(node.func, "id", "") == "_resolve_audience"):
+                continue
+            if any(k.arg == "persist" and isinstance(k.value, ast.Constant)
+                   and k.value.value is True for k in node.keywords):
+                pinning.add(fn.name)
+    assert sorted(pinning) == ["_install_hint", "enroll_agent"], (
+        f"_resolve_audience(persist=True) is called from {sorted(pinning)}. Only the admin "
+        f"mint (_install_hint) and a redeemed enrolment code (enroll_agent) may pin the "
+        f"audience — see _resolve_audience for what a third caller would cost.")
+
+
+def test_the_audience_reset_takes_no_value_from_the_caller():
+    """Reset must clear the key, never set it. An endpoint that accepted an audience would
+    be the write-once rule with extra steps — and a way in for a forged Host."""
+    src = _read(_AGENT_API)
+    tree = ast.parse(src)
+    fn = next((f for f in ast.walk(tree)
+               if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef))
+               and f.name == "reset_audience"), None)
+    assert fn is not None, "reset_audience() not found in api/agent.py"
+    assert not [n for n in ast.walk(fn)
+                if isinstance(n, ast.Call) and getattr(n.func, "attr", "") == "set"], \
+        "reset_audience must not call config_service.set — it may only delete the key"
+    assert any(isinstance(n, ast.Call) and getattr(n.func, "attr", "") == "delete"
+               for n in ast.walk(fn)), "reset_audience must delete the pin"
+    # No request body: a payload argument here would be a value channel into the key.
+    assert set(a.arg for a in fn.args.args) <= {"request", "current_user", "db"}, \
+        f"reset_audience takes {[a.arg for a in fn.args.args]} — it must not accept a payload"
+
+
+def test_the_mint_guard_runs_before_anything_is_mutated():
+    """Refusing a mint after ``create_agent`` leaves a row squatting its name holding a code
+    nobody saw; after ``reissue_enroll_code`` it clears a working agent's key and returns an
+    error instead of a replacement code. The ordering IS the correctness of the guard."""
+    src = _read(_AGENT_API)
+    tree = ast.parse(src)
+    for handler, mutator in (("create_agent", "create_agent"),
+                             ("reissue_code", "reissue_enroll_code")):
+        fn = next(f for f in ast.walk(tree)
+                  if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef))
+                  and f.name == handler)
+        body = ast.get_source_segment(src, fn) or ""
+        assert "_audience_guard(" in body, f"{handler} does not check the audience"
+        assert body.index("_audience_guard(") < body.index(f"agent_service.{mutator}("), (
+            f"{handler} calls agent_service.{mutator} before _audience_guard — a refusal "
+            f"would then leave the mutation behind")
+
+
 # ── signature freshness ───────────────────────────────────────────────────────
 
 def test_the_nonce_is_recorded_only_after_the_signature_verifies():
