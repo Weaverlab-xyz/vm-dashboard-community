@@ -106,9 +106,14 @@ What it actually buys:
 
 Two things to know before you do:
 
-- **On SELinux hosts the read-only mounts need a label suffix** — `:ro,z` — or the
-  container cannot read `policy.yaml`. That fails closed (`Cannot read the policy file`,
-  exit 2), so it is a confusing five minutes rather than a hole.
+- **On SELinux hosts the bind mounts need a label suffix** — `:ro,Z` — or the container
+  cannot read `policy.yaml`. Podman's natural home is RHEL-family hosts, where SELinux is
+  enforcing by default, so this is the common case rather than the exotic one. The emitted
+  command already carries it, and Podman ignores `Z` where SELinux is absent; if you are
+  pasting an older command, add it. That fails closed (`Cannot read the policy file`,
+  exit 2), so it is a confusing five minutes rather than a hole — see
+  [Troubleshooting](#troubleshooting) for how to recognise it, because the dashboard-side
+  symptoms all look like networking.
 - `--restart unless-stopped` does not survive a reboot on its own; rootless Podman needs
   `systemctl --user enable podman-restart` (and `loginctl enable-linger`) because there is
   no daemon to do it for you.
@@ -261,6 +266,12 @@ limits:
 
 Omitting `ports` allows any port in the range. Naming them is the difference between
 "may look for databases here" and "may reach anything here".
+
+Mount it `:ro,Z`, as the emitted command does. The `Z` is the SELinux relabel and it is not
+cosmetic: on Fedora, RHEL, CentOS, Rocky or Alma a bind mount keeps its host label, and the
+container may not read a file in your home directory however permissive its mode is — the
+agent then exits 2 on `Permission denied` against a mode 644 file. Docker and Podman ignore
+`z`/`Z` where SELinux is absent, so it is safe on every host.
 
 ### 3. Register and enrol
 
@@ -420,7 +431,8 @@ an objection into a demonstration.
 
 | Symptom | Cause |
 |---|---|
-| `Cannot read the policy file` and the container exits 2 | No policy mounted. Fail-closed is deliberate. |
+| `Cannot read the policy file … No such file or directory` and the container exits 2 | No policy mounted. Fail-closed is deliberate. |
+| `Cannot read the policy file … Permission denied` on a file `ls -l` already shows world-readable | **SELinux**, on Fedora/RHEL/CentOS/Rocky/Alma. A file in your home directory is labelled `user_home_t`, which the container may not read whatever its mode bits say — 644 is not enough here. Mount it `:ro,Z` (the emitted command does; Docker and Podman ignore `Z` on hosts without SELinux) or relabel by hand: `chcon -t container_file_t policy.yaml`. Verify with `ls -lZ policy.yaml`, and `ausearch -m avc -ts recent` for the denial itself. Worth recognising because the dashboard-side symptoms are all misleading: the agent exits *before* its first network call, so **no request whatsoever reaches the dashboard** — no 4xx, nothing in the app or ingress logs — and the row sits at `enrolling` with `Last seen: never`, no source IP and no policy hash, which reads exactly like a wrong URL or a blocked egress. The enrolment code is **not** spent either, so the same one still works once the mount is fixed. |
 | `DASHBOARD_URL is http://` and it exits 2 | The agent will not sign over plaintext. Terminate TLS, or `AGENT_INSECURE_TLS=1` for a throwaway lab. |
 | `the dashboard rejected this agent's signature` | Revoked, re-enrolled elsewhere, or the dashboard URL changed (the audience is pinned). Issue a fresh code. |
 | Enrolment returns 400 | The code is single-use and expires in 15 minutes. Issue another. |
@@ -429,7 +441,7 @@ an objection into a demonstration.
 | `/agents` says "Remote agents are not enabled" | Same again — the page itself is not gated, so it loads and then tells you which switch to flip. |
 | Enrolment returns 429, and the container exits 2 | Too many *failed* enrolments recently from this address. Nothing is wrong with this agent; the restart policy retries after `Retry-After`. |
 | `the dashboard asked us to slow down` | Over the per-agent cap. Expected during a burst, and it recovers on its own. If an ordinary scan trips it, raise `agent_max_requests_per_minute` — see [Rate limits](#rate-limits). |
-| `AGENT_ENROLLMENT_CODE_FILE … cannot be read` | The container runs as uid 10001; a mode 0600 file owned by your host user is unreadable inside it. Make it world-readable or use the environment variable. |
+| `AGENT_ENROLLMENT_CODE_FILE … cannot be read` | The container runs as uid 10001; a mode 0600 file owned by your host user is unreadable inside it. Make it world-readable or use the environment variable. If it is already world-readable, this is the SELinux label, same as the policy row above — mount it `:ro,Z`. |
 | Agent polls, gets 503 | Dashboard setup is not complete. On `lease` the agent backs off and keeps trying; it is deliberately not redirected to the HTML wizard. **On enrolment a 503 is fatal** — the agent exits 2 and the container's restart policy is the retry, so finish setup before issuing a code. |
 | `Policy refused N of M host:port combinations` | Working as intended — the request was wider than the policy. The counts tell you which to widen. |
 | Stuck `queued`, agent online | The job type is not in the agent's `job_types`. Check the policy. |

@@ -33,6 +33,7 @@ no kubectl, no ansible — this image is structurally incapable of running a pla
 from __future__ import annotations
 
 import base64
+import errno
 import hashlib
 import ipaddress
 import json
@@ -42,6 +43,7 @@ import random
 import re
 import socket
 import ssl
+import stat
 import struct
 import sys
 import threading
@@ -175,6 +177,55 @@ def canonical_request(*, agent_id: str, timestamp: str, nonce: str, audience: st
 
 # ── Policy ────────────────────────────────────────────────────────────────────
 
+def _policy_unreadable(path: str, exc: OSError) -> str:
+    """Explain an unreadable policy file in terms of its most likely actual cause.
+
+    Worth the effort because this is the least diagnosable failure in the whole system.
+    The agent refuses to start without a policy, and it loads it *before* the first
+    network call — so nothing reaches the dashboard at all: no request, no 4xx, nothing in
+    the app or ingress logs, and an agent row that sits at ``enrolling`` with no source IP
+    and no policy hash. Every symptom visible from the dashboard says "DNS or TLS", and
+    the container log is the only place the truth exists.
+
+    The interesting case is ``EACCES`` on a file whose mode is already world-readable. On
+    an SELinux-enforcing host — Fedora, RHEL, CentOS, Rocky, Alma, which is a large share
+    of on-prem Linux and therefore of agent hosts — a bind mount keeps its host label, and
+    ``container_t`` may not read the ``user_home_t`` of a file in the operator's home
+    directory whatever its mode says. Mode bits are only half of "readable" there, so the
+    stock advice about uid 10001 sends the reader down the wrong path. This function is the
+    one place that can see both halves of the evidence, so it says which one is wrong.
+    """
+    base = (f"Cannot read the policy file at {path}: {exc}. The agent refuses all "
+            f"work without one — mount it read-only and restart.")
+    if getattr(exc, "errno", None) != errno.EACCES:
+        return base
+    try:
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+    except OSError:
+        # Even stat was refused, so the file's own mode is not what is being enforced:
+        # either the label, or a parent directory this uid cannot search.
+        return (f"{base} Permission was denied without the file's mode even being "
+                f"readable, which points at the mount rather than at the file: check its "
+                f"SELinux label (`ls -lZ` on the host, and mount it `:ro,Z`) and that "
+                f"every parent directory is searchable.")
+    if mode & stat.S_IROTH:
+        return (
+            f"Cannot read the policy file at {path}: {exc}. Its mode is {mode:04o}, so it "
+            f"is world-readable and the mode is not the problem — on an SELinux-enforcing "
+            f"host (Fedora, RHEL, CentOS, Rocky, Alma) a bind-mounted file keeps its host "
+            f"label, and this container may not read a file labelled user_home_t no matter "
+            f"how permissive its mode is. Add the relabel flag to the mount — "
+            f'-v "$PWD/policy.yaml:{path}:ro,Z" — or relabel the host file in place with '
+            f"`chcon -t container_file_t policy.yaml`; confirm with `ls -lZ policy.yaml` "
+            f"and `ausearch -m avc -ts recent`. The agent refuses all work without a "
+            f"readable policy, but it has not contacted the dashboard yet, so your "
+            f"enrolment code is still unspent — fix the mount and start again.")
+    return (f"Cannot read the policy file at {path}: {exc}. Its mode is {mode:04o} and "
+            f"this container runs as uid {os.getuid()}, so a file readable only by its "
+            f"owner on the host is unreadable here — make it world-readable (`chmod 644`) "
+            f"and restart. The agent refuses all work without a readable policy.")
+
+
 class Policy:
     """The customer's allow-list. Fails closed, always.
 
@@ -196,9 +247,7 @@ class Policy:
             with open(path, "rb") as fh:
                 raw = fh.read()
         except OSError as exc:
-            raise AgentFatal(
-                f"Cannot read the policy file at {path}: {exc}. The agent refuses all "
-                f"work without one — mount it read-only and restart.")
+            raise AgentFatal(_policy_unreadable(path, exc))
         try:
             doc = yaml.safe_load(raw) or {}
         except yaml.YAMLError as exc:

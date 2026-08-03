@@ -14,7 +14,7 @@ there. See [`docs/remote-agents.md`](../../docs/remote-agents.md) for the full s
 | Talks to | one dashboard, over HTTPS, outbound only |
 | Authenticates with | an Ed25519 keypair it generates at enrolment |
 | Executes | nothing the dashboard sends — see below |
-| Needs | a `policy.yaml` you write, mounted read-only |
+| Needs | a `policy.yaml` you write, mounted read-only (`:ro,Z` — see below) |
 | Exits non-zero when | misconfigured, revoked, or the policy is missing/corrupt |
 
 ## Why it cannot be turned into a backdoor
@@ -48,9 +48,9 @@ reads like credential spraying in a customer's SIEM.
 |---|---|---|
 | `DASHBOARD_URL` | — | Required. Must be `https://` unless `AGENT_INSECURE_TLS=1`. |
 | `AGENT_ENROLLMENT_CODE` | — | Required on first start only; the identity persists. Stays readable via `docker inspect` for the container's life — prefer the file below. |
-| `AGENT_ENROLLMENT_CODE_FILE` | — | Path to a mounted file holding the code. Wins over the variable above. Must be readable by uid 10001. |
+| `AGENT_ENROLLMENT_CODE_FILE` | — | Path to a mounted file holding the code. Wins over the variable above. Must be readable by uid 10001, and mounted `:ro,Z`. |
 | `AGENT_STATE_DIR` | `/var/lib/dashboard-agent` | Holds the 0600 private key. Mount a volume. |
-| `AGENT_POLICY_FILE` | `/etc/dashboard-agent/policy.yaml` | Mount read-only. |
+| `AGENT_POLICY_FILE` | `/etc/dashboard-agent/policy.yaml` | Mount read-only, as `:ro,Z`. |
 | `AGENT_MODE` | `normal` | `audit` logs what it would do and executes nothing. |
 | `AGENT_POLL_INTERVAL` | `5` | Seconds, jittered. |
 | `AGENT_CA_BUNDLE` | — | For a TLS-inspecting corporate proxy. |
@@ -59,6 +59,22 @@ reads like credential spraying in a customer's SIEM.
 
 `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` are honoured. Set `NO_PROXY` for your private
 ranges, or probes get routed to the corporate proxy and fail confusingly.
+
+## Bind mounts need `:ro,Z` on SELinux hosts
+
+On Fedora, RHEL, CentOS, Rocky or Alma — most of the hosts an agent actually runs on — a
+bind-mounted file keeps its host SELinux label, and the container may not read the
+`user_home_t` of a file in your home directory however permissive its mode is. Without the
+`Z` suffix the agent exits 2 on `Cannot read the policy file … Permission denied` on a
+mode 644 file, and because that happens *before* the first network call, nothing reaches
+the dashboard: the agent row stays at `enrolling` with no source IP, which reads like a
+DNS or TLS fault. Docker and Podman ignore `z`/`Z` where SELinux is absent, so the flag is
+safe everywhere and no host detection is needed. The install command the Agents page emits
+already includes it; check a hand-written one with `ls -lZ policy.yaml`.
+
+`Z` gives the file a label private to this container, which is what you want for one agent
+per host. Use lowercase `z` instead if the same `policy.yaml` is mounted into more than one
+container, since a private label would leave only the most recent one able to read it.
 
 ## Back-pressure
 

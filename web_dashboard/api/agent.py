@@ -381,12 +381,21 @@ def _agent_row(agent: RemoteAgent, running: int = 0) -> dict:
 # because `docker run -v` requires an absolute source path — a relative one is rejected
 # outright, so the command as previously emitted could not run at all. Quoted so a
 # directory with a space in it survives.
+#
+# `,Z` on the bind mounts is the SELinux relabel, and it is not optional on Fedora, RHEL,
+# CentOS, Rocky or Alma — that is a large share of on-prem Linux, which is exactly where
+# an agent runs. A file in the operator's home directory is labelled `user_home_t`, which
+# `container_t` may not read, so without it the agent dies on its own policy file
+# (`Permission denied` on a mode 644 file) *before* making any network call: the row sits
+# at `enrolling` with no source IP and nothing at all reaches the dashboard, so every
+# visible symptom points at DNS or TLS. Docker and Podman ignore `z`/`Z` on hosts without
+# SELinux, so this is safe everywhere and needs no host detection.
 _RUN_FLAGS = (
     "docker run -d --name dashboard-agent --restart unless-stopped \\\n"
     "  --read-only --cap-drop ALL --security-opt no-new-privileges:true \\\n"
     "  --user 10001:10001 --tmpfs /tmp \\\n"
     "  -v dashboard_agent_state:/var/lib/dashboard-agent \\\n"
-    '  -v "$PWD/policy.yaml:/etc/dashboard-agent/policy.yaml:ro" \\\n'
+    '  -v "$PWD/policy.yaml:/etc/dashboard-agent/policy.yaml:ro,Z" \\\n'
 )
 
 
@@ -408,7 +417,8 @@ def _install_hint(request: Request, code: str) -> dict:
     unreadable inside it. That is an acceptable trade for a single-use 15-minute secret in
     a directory the operator chose, and the trailing ``rm`` closes it. An operator who
     wants the code in neither shell history nor Docker metadata can write that file with
-    an editor and skip the first line entirely.
+    an editor and skip the first line entirely. It carries ``,Z`` for the same reason the
+    policy mount does: mode bits are only half of "readable" on an SELinux host.
     """
     base = _resolve_audience(request, persist=True)
     return {
@@ -421,7 +431,7 @@ def _install_hint(request: Request, code: str) -> dict:
         "docker_run_code_file": (
             f"umask 022 && printf '%s' '{code}' > ./agent-enroll-code\n\n"
             + _RUN_FLAGS
-            + '  -v "$PWD/agent-enroll-code:/etc/dashboard-agent/enroll-code:ro" \\\n'
+            + '  -v "$PWD/agent-enroll-code:/etc/dashboard-agent/enroll-code:ro,Z" \\\n'
             + f"  -e DASHBOARD_URL={base} \\\n"
             + "  -e AGENT_ENROLLMENT_CODE_FILE=/etc/dashboard-agent/enroll-code \\\n"
             + "  chrweav/dashboard-agent:latest\n\n"

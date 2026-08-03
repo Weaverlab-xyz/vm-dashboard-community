@@ -8,7 +8,15 @@
 # refuses every job and exits with a message saying so. There is no permissive default.
 #
 # Mount it read-only:
-#   -v ./policy.yaml:/etc/dashboard-agent/policy.yaml:ro
+#   -v "$PWD/policy.yaml:/etc/dashboard-agent/policy.yaml:ro,Z"
+#
+# Two details in that line are not decoration. `$PWD` because `docker run -v` rejects a
+# relative source path outright. `,Z` because on an SELinux-enforcing host — Fedora, RHEL,
+# CentOS, Rocky, Alma — a file in your home directory is labelled `user_home_t`, which the
+# container is not allowed to read no matter how permissive its mode bits are; without the
+# relabel the agent exits 2 on `Permission denied` reading this file, before it has made a
+# single network call. Docker and Podman ignore `z`/`Z` where SELinux is absent, so the
+# flag is safe on every host. Check with `ls -lZ policy.yaml`.
 
 # ── What may be touched ───────────────────────────────────────────────────────
 # The agent refuses any address:port not matched here. Matching happens on the
