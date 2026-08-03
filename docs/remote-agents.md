@@ -296,6 +296,58 @@ file owned by your host user is *not*, and the agent says so and exits rather th
 mysteriously. A single-use secret with a fifteen-minute lifetime in a directory you chose
 is an acceptable trade for that; a long-lived one would not be.
 
+#### The signing audience is pinned by that first code
+
+The URL in the command you just copied is the **signing audience**: the value every agent
+signature is checked against from then on. The first enrolment code minted on an install
+pins it, permanently, and nothing later overwrites it — see
+[§1](#1-publish-the-agent-endpoint) for which two callers may pin and why an
+unauthenticated poll must not.
+
+Which means the *first* code decides it, and on a split-vhost deployment the default is
+wrong. Settings → Integrations → Remote Agents pre-fills **Public base URL** from the origin
+your own browser is on, and on the layout §1 recommends — UI on the internal address,
+`/api/agent/*` on its own vhost — that is the **UI** hostname. Pin that and the agent dials
+a vhost which does not serve `/api/agent`, gets a 404, and the console shows it `enrolling`
+with *Last seen: never* and no policy hash. Nothing distinguishes it from a revoked agent,
+and there is no `/api/agent/enroll` line in the dashboard log to contradict you, because no
+request ever arrived. Correcting Public base URL afterwards appears to work and changes
+nothing, because the pin wins.
+
+So the panel shows the pinned audience read-only, beside — and clearly distinct from — the
+Public base URL field:
+
+- **Pinned to** — the audience itself, and the number of enrolled agents signing against it.
+- **A warning** when it is the same origin you are browsing (right for a single-hostname
+  install, the failure above for a split vhost), when nothing is pinned yet and the next
+  code is about to decide it, or when it is `http://`.
+- **Reset signing audience** — clears the pin so the next enrolment code pins it again from
+  Public base URL. This is the only mutation offered: there is no way to *set* the audience
+  from an API, because a settable audience is the write-once rule with extra steps. Admin
+  only, the same gate as minting a code.
+
+  It **invalidates every enrolled agent.** Each signs against the audience it was handed at
+  enrolment, so all of them start getting 401s — which an agent reads as "revoked" and stops
+  on. Every one needs a fresh enrolment code afterwards. The confirm dialog names the count.
+
+Registering an agent is **refused with a 409** while the pin contradicts Public base URL,
+rather than handing you a command built from the stale value. Nothing is created by the
+refusal — the check runs before the agent row exists, and before a re-issue clears the
+existing key — so a blocked re-issue leaves the running container working. Resolve it by
+setting Public base URL back to the pinned value, or by resetting the audience.
+
+A divergence is not *always* a mistake, though, which is why the refusal is not a dead end.
+`PUBLIC_BASE_URL` is one value doing two jobs — the OAuth callback origin as well as the
+agent audience — and a split vhost is exactly the case where those want different hostnames.
+Confirming the prompt re-issues with `?acknowledge_audience=true`, which mints against the
+**pinned** audience, labels the command with which URL it used, and logs and audits the
+exception. It does not move the pin: the override is permission to use the pinned audience,
+not to re-pin, because re-pinning would invalidate every enrolled agent as a side effect of
+registering one new one.
+
+The same information is available to a script at `GET /api/agent/audience`, and the reset at
+`DELETE /api/agent/audience`; both are admin-only.
+
 ### 4. Keep an eye on who is enrolled
 
 The agents table answers "is this one mine?" without leaving the page:
@@ -447,7 +499,9 @@ an objection into a demonstration.
 | Stuck `queued`, agent online | The job type is not in the agent's `job_types`. Check the policy. |
 | Nothing found on a subnet you expect | Confirm the ports are in `targets`, and remember `already_registered` findings still appear. |
 | Clock skew errors | Signatures are valid ±60s. Run NTP on the agent host. |
-| Every agent 401s right after adding a proxy, and the dashboard logs `Ignoring X-Forwarded-*` | The proxy is not in `TRUSTED_PROXY_HOSTS`, so the audience was pinned as `http://…`. Set the variable **and** `PUBLIC_BASE_URL`, then clear the stale `agent_base_url` config key and re-enrol. |
+| Every agent 401s right after adding a proxy, and the dashboard logs `Ignoring X-Forwarded-*` | The proxy is not in `TRUSTED_PROXY_HOSTS`, so the audience was pinned as `http://…`. Set the variable **and** `PUBLIC_BASE_URL`, then **Reset signing audience** in Settings → Integrations → Remote Agents and re-enrol every agent. |
+| Agent stuck at `enrolling`, *Last seen: never*, no policy hash — and **no `/api/agent/enroll` line in the dashboard log at all**, while the container log shows it *reaching* a URL and getting 404 | The signing audience is pinned to a hostname that does not serve `/api/agent` — on a split-vhost install, almost always the UI hostname, because that is the origin the admin's browser was on when the first code was minted. Every dashboard-side signal here is identical to the SELinux policy-mount row above, so **read the container log to tell them apart**: SELinux exits 2 on `Cannot read the policy file` before any network call, whereas this one dials out and is refused. Settings → Integrations → Remote Agents now shows the pin; fix `PUBLIC_BASE_URL`, reset the audience, and re-enrol. See [The signing audience](#the-signing-audience-is-pinned-by-that-first-code). |
+| **Register Agent** returns 409 naming two URLs | Deliberate: the pinned audience contradicts Public base URL, so the command would have carried the stale one. Nothing was created. Set Public base URL back to the pinned value, reset the audience, or confirm the prompt to issue against the pin anyway. |
 | `The state directory … is not writable` | No volume mounted, or one not writable by uid 10001. Caught before enrolling, so **the code is still good** — fix the mount and start again. |
 | `AGENT_INSECURE_TLS` appears to be ignored | Case-sensitive: only `1`, `true` or `yes`. `True` and `on` are read as unset. |
 | `dashboard unreachable (404 …)` on an agent that was working | Not a network fault — `remote_agents_enabled` was turned off. The agent reports every non-2xx this way. |

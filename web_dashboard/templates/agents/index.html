@@ -18,6 +18,25 @@
        :class="toastType === 'error' ? 'bg-red-50 border-red-200 text-red-700' : 'bg-green-50 border-green-200 text-green-700'"
        class="mb-6 border rounded-lg px-4 py-3 text-sm" x-text="toast"></div>
 
+  <!-- Blocked mint: the pinned signing audience contradicts Public base URL, so a new
+       enrolment code would emit the stale one. Sticky rather than a toast — the remedy names
+       two hostnames and a settings panel, and it outlives the 4 seconds a toast gets. -->
+  <div x-show="audienceBlock" x-cloak
+       class="mb-6 border border-red-200 bg-red-50 rounded-lg px-4 py-3">
+    <div class="flex items-start justify-between gap-4">
+      <div>
+        <p class="text-sm font-semibold text-red-800 mb-1">Enrolment codes are blocked</p>
+        <p class="text-sm text-red-700" x-text="audienceBlock"></p>
+        <p class="text-xs text-red-600 mt-2">
+          Fix it in
+          <a href="/settings" class="underline">Settings → Integrations → Remote Agents</a>,
+          which shows the pinned audience and offers a reset.
+        </p>
+      </div>
+      <button @click="audienceBlock = ''" class="text-red-400 hover:text-red-600 text-lg leading-none">&times;</button>
+    </div>
+  </div>
+
   <!-- Feature off. The page itself is not gated (matching /k8s and the other feature
        pages), so without this the operator gets a generic red "Failed to load agents:
        404" toast and no idea that a switch exists. -->
@@ -241,6 +260,16 @@
                   class="text-sm px-3 py-1.5 rounded-lg border border-gray-300 hover:bg-gray-50 transition">Copy</button>
         </div>
       </div>
+      <!-- Audience warnings, above the command rather than below it: the whole point is to
+           be read before the command is copied. The dashboard URL baked into it comes from
+           the write-once signing audience, and if that was pinned to a hostname which does
+           not serve /api/agent the agent will never enrol — it sits at 'enrolling' with
+           Last seen: never and no request ever reaches the log. -->
+      <template x-for="w in (enrol.warnings || [])" :key="w">
+        <div class="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2">
+          <p class="text-xs text-amber-800" x-text="w"></p>
+        </div>
+      </template>
       <div>
         <label class="block text-xs font-medium text-gray-600 mb-1">Run this inside the private network</label>
         <pre class="bg-gray-900 text-gray-100 rounded-lg p-3 text-xs overflow-x-auto whitespace-pre" x-text="enrol.docker_run"></pre>
@@ -348,8 +377,9 @@ function agentsPage() {
     createOpen: false,
     enrolOpen: false,
     discoverOpen: false,
+    audienceBlock: '',   // the 409 explaining why a mint was refused; sticky until dismissed
     form: {name: '', site: '', description: ''},
-    enrol: {name: '', code: '', docker_run: ''},
+    enrol: {name: '', code: '', docker_run: '', warnings: []},
     discover: {agentId: '', agentName: '', scan_kind: 'both', cidrs: '', hostnames: '',
                use_local_kubeconfig: true},
     _timer: null,
@@ -420,9 +450,9 @@ function agentsPage() {
       this.createOpen = true;
     },
 
-    async create() {
+    async create(ackAudience) {
       try {
-        const r = await API.post('/api/agent', {
+        const r = await API.post('/api/agent' + (ackAudience ? '?acknowledge_audience=true' : ''), {
           name: this.form.name.trim(),
           site: this.form.site.trim(),
           description: this.form.description.trim(),
@@ -431,24 +461,48 @@ function agentsPage() {
         this.showEnrol(r);
         await this.load();
       } catch (e) {
+        // Refused before the row was created, so retrying is safe — the name is still free.
+        // Only once: the override cannot itself be refused, so a second conflict would mean
+        // something else is wrong and must not spin.
+        if (!ackAudience && this.audienceConflict(e)) { return this.create(true); }
+        if (e.code === 'agent_audience_conflict') { this.createOpen = false; return; }
         this.flash('Register failed: ' + (e.message || e), 'error');
       }
+    },
+
+    // The mint refused because the pinned signing audience contradicts Public base URL.
+    // Nothing was mutated — the guard runs first — so the caller may simply ask again with
+    // the override. Returns true only if the operator wants that retry.
+    //
+    // Not always a mistake: public_base_url is also the OAuth callback origin, so on a
+    // split-vhost install the two values legitimately differ and this is the only way to
+    // register an agent at all. The explanation stays on the page either way.
+    audienceConflict(e) {
+      if (!e || e.code !== 'agent_audience_conflict') return false;
+      this.audienceBlock = e.message;
+      return confirm(`${e.message}\n\nIssue the code anyway, built from the pinned audience?\n\nThe agent will have to reach this dashboard at that URL. Cancel to fix the configuration first.`);
     },
 
     showEnrol(r) {
       const install = r.install || {};
       this.enrol = {name: r.name, code: r.enrollment_code,
                     docker_run: install.docker_run || '',
-                    docker_run_code_file: install.docker_run_code_file || ''};
+                    docker_run_code_file: install.docker_run_code_file || '',
+                    warnings: install.warnings || []};
       this.enrolOpen = true;
     },
 
-    async reissue(a) {
-      if (!confirm(`Issue a new enrolment code for '${a.name}'?\n\nThe currently running container will stop being able to claim work immediately.`)) return;
+    async reissue(a, ackAudience) {
+      if (!ackAudience && !confirm(`Issue a new enrolment code for '${a.name}'?\n\nThe currently running container will stop being able to claim work immediately.`)) return;
       try {
-        this.showEnrol(await API.post(`/api/agent/${encodeURIComponent(a.id)}/enrollment-code`, {}));
+        const q = ackAudience ? '?acknowledge_audience=true' : '';
+        this.showEnrol(await API.post(`/api/agent/${encodeURIComponent(a.id)}/enrollment-code${q}`, {}));
         await this.load();
       } catch (e) {
+        // Refused before reissue_enroll_code ran, so this agent's key is intact and its
+        // container is still working — which is what makes the retry safe.
+        if (!ackAudience && this.audienceConflict(e)) return this.reissue(a, true);
+        if (e.code === 'agent_audience_conflict') return;
         this.flash('Could not re-issue: ' + (e.message || e), 'error');
       }
     },
