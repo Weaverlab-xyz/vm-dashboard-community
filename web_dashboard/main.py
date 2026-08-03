@@ -606,6 +606,7 @@ from .api import gateways as gateways_api  # noqa: E402
 from .api import expiry as expiry_api  # noqa: E402
 from .api import notifications as notifications_api  # noqa: E402
 from .api import agent as agent_api  # noqa: E402
+from .api import worker as worker_api  # noqa: E402
 from .api.mcp_server import get_mcp_asgi_app  # noqa: E402
 
 
@@ -813,6 +814,10 @@ app.include_router(expiry_api.router)
 # able to add and test an endpoint *before* switching the feature on, and every route
 # here is admin-only and harmless while it is off.
 app.include_router(notifications_api.router)
+
+# Job-worker concurrency readout. Read-only and admin-only; not feature-gated because the
+# worker has no off switch — it is the process that runs every queued job.
+app.include_router(worker_api.router)
 
 
 # ── HTML pages ────────────────────────────────────────────────────────────────

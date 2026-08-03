@@ -622,6 +622,128 @@
         </div>
       </template>
 
+      <template x-if="panel?.key === 'worker' && !panelLoading">
+        <div class="space-y-4">
+          <p class="text-sm text-gray-500">
+            Long jobs — provisions, image builds, exports, deploys — run in a separate
+            worker process, not in the web app. These limits say how many run
+            <strong>at the same time</strong>, and are read fresh every couple of seconds,
+            so a change here applies without restarting anything.
+            See <a href="/docs/job-worker" class="text-blue-600 underline">the job worker doc</a>.
+          </p>
+
+          <div class="rounded-lg border border-gray-200 bg-gray-50 p-3 text-[11px] text-gray-600">
+            The limits are split by what a job actually costs, because they aren't alike. A
+            job waiting on a cloud API is nearly free; one streaming a Terraform apply
+            writes a line to the database for every line of output. Raising the wrong one
+            makes everything slower rather than faster — so start with
+            <strong>poll-only</strong>.
+          </div>
+
+          <div class="grid grid-cols-3 gap-3">
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Poll-only jobs</label>
+              <input type="number" min="1" x-model.number="panelCfg.worker_light_concurrency"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              <p class="text-[11px] text-gray-400 mt-1">
+                Image exports, promotes and copies, gateways, auto-delete sweeps. They start
+                something in the cloud and then just wait — an export can poll for two hours.
+                Cheap; raise this first. Max 12.
+              </p>
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Heavy jobs</label>
+              <input type="number" min="1" x-model.number="panelCfg.worker_heavy_concurrency"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              <p class="text-[11px] text-gray-400 mt-1">
+                Cluster and database provisions, Packer builds. Each streams its output to
+                the database line by line, so two is usually enough to saturate a small
+                Postgres. Max 4.
+              </p>
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Mixed jobs</label>
+              <input type="number" min="1" x-model.number="panelCfg.worker_medium_concurrency"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              <p class="text-[11px] text-gray-400 mt-1">
+                VM deploys, tunnels, Kubernetes add-ons. Mostly cloud API calls plus a short
+                <span class="font-mono">terraform</span> or <span class="font-mono">helm</span>.
+                Max 4.
+              </p>
+            </div>
+          </div>
+
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Total at once</label>
+            <input type="number" min="1" x-model.number="panelCfg.worker_max_concurrency"
+                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            <p class="text-[11px] text-gray-400 mt-1">
+              The overall ceiling, and the one that actually binds — the three limits above
+              are allowed to add up to more than this, because they cap the <em>mix</em>
+              while this caps the <em>total</em>. Lower this to shrink the worker's
+              footprint. Max 16, but see the note below: it is also capped by how many
+              database connections the worker has.
+            </p>
+          </div>
+
+          <div class="rounded-lg border border-amber-200 bg-amber-50 p-3 text-[11px] text-amber-800">
+            <strong>The database connection pool is the real limit.</strong> Every running
+            job holds connections, so the worker reduces the total above to what its pool
+            can serve and reports it below. That pool is sized by the
+            <span class="font-mono">DB_POOL_SIZE</span> and
+            <span class="font-mono">DB_MAX_OVERFLOW</span> environment variables, not here —
+            it is built before the app can read any setting out of the database. If the
+            readout below says your total was reduced, raise those and redeploy the worker.
+          </div>
+
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Shutdown grace</label>
+              <input type="number" min="0" x-model.number="panelCfg.worker_drain_timeout_s"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              <p class="text-[11px] text-gray-400 mt-1">
+                Seconds to let running jobs finish when the worker is asked to stop (a
+                redeploy). Keep it under your platform's termination grace period — 30s by
+                default on Azure Container Apps — or the process is killed before it
+                finishes waiting. Jobs longer than this are failed promptly by the next
+                worker instead of looking alive for ten minutes. 0 = don't wait.
+              </p>
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Worker threads</label>
+              <input type="number" min="0" x-model.number="panelCfg.worker_executor_threads"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              <p class="text-[11px] text-gray-400 mt-1">
+                <code>0</code> derives it from the limits above, which is almost always
+                right. Set it only if the log shows jobs stuck at 0% — that means cloud
+                calls are queueing for a thread. Applied at worker start, so this one needs
+                a restart. Max 128.
+              </p>
+            </div>
+          </div>
+
+          <div class="rounded-lg border border-gray-200 bg-gray-50 p-3">
+            <div class="flex items-center justify-between mb-2">
+              <span class="text-sm font-medium text-gray-700">What the worker is using</span>
+              <button type="button" @click="loadWorkerStatus()" :disabled="workerStatusLoading"
+                      class="text-xs px-2 py-1 rounded border border-gray-300 bg-white hover:bg-gray-50 font-medium disabled:opacity-50">
+                <span x-text="workerStatusLoading ? 'Checking…' : 'Refresh'"></span>
+              </button>
+            </div>
+            <p class="text-[11px] text-gray-500 font-mono whitespace-pre-wrap"
+               x-text="workerStatusSummary()"></p>
+          </div>
+
+          <p class="text-[11px] text-gray-400">
+            Running more than one worker multiplies these limits — two workers with a total
+            of 3 each run up to 6 jobs. Jobs are claimed atomically, so no job ever runs
+            twice however many workers there are. Note that each worker needs its own
+            database connections, which is why raising the limits inside one worker is
+            usually cheaper than adding another.
+          </p>
+        </div>
+      </template>
+
       <template x-if="panel?.key === 'notifications' && !panelLoading">
         <div class="space-y-4">
           <p class="text-sm text-gray-500">
@@ -3729,6 +3851,8 @@ function settingsPage() {
         desc: 'Per-region resource config sets for AWS, GCP and Azure — subnets, security groups, SSH secrets, networks. Blank fields fall back to the flat defaults.' },
       { key: 'oidc',         label: 'Single sign-on (OIDC)',   hasConfig: true,  enabled: true, configOnly: true,
         desc: 'Sign in with any OpenID Connect provider — Okta, Auth0, Keycloak, Authentik, Authelia, Google Workspace, JumpCloud, Ping, GitLab. Configured from the issuer URL; endpoints are discovered automatically.' },
+      { key: 'worker',       label: 'Job Worker',              hasConfig: true,  enabled: true, configOnly: true,
+        desc: 'How many background jobs run at once, per kind. Raise the poll-only limit if image exports and copies queue up; raise the heavy limit to provision more clusters or databases in parallel. Takes effect within seconds, no restart.' },
     ],
 
     // OIDC discovery probe result (Test connection in the SSO panel).
@@ -3747,6 +3871,8 @@ function settingsPage() {
     portainerFirewall: null, // same for the managed Portainer node (Containers panel)
     expirySweep: null,       // last auto-delete sweep summary (Auto-delete Timer panel)
     expirySweeping: false,
+    workerStatus: null,      // what the job worker resolved its limits to (Job Worker panel)
+    workerStatusLoading: false,
 
     // ── Notifications panel ──────────────────────────────────────────────
     // Endpoints are rows in their own table, not panel config keys, so they load and
@@ -4079,6 +4205,12 @@ function settingsPage() {
             this.expirySweep = await API.get('/api/expiry/last-sweep');
           } catch (e) { /* never run yet — the summary line says so */ }
         }
+        // Job Worker: the saved limits are clamped before use, so the panel is misleading
+        // without the worker's own readout of what it resolved them to.
+        if (intg.key === 'worker') {
+          this.workerStatus = null;
+          await this.loadWorkerStatus();
+        }
         // Notifications: endpoints and the delivery log live outside the feature-panel
         // config, so they load alongside it.
         if (intg.key === 'notifications') {
@@ -4131,6 +4263,47 @@ function settingsPage() {
       } finally {
         this.expirySweeping = false;
       }
+    },
+
+    // ── Job Worker panel ────────────────────────────────────────────────────
+    // Read-only. The worker publishes what it actually resolved, because the numbers
+    // saved above are clamped twice — to the code ceilings, then to what the worker's DB
+    // pool can serve. Without this an operator who raises a limit and sees no change has
+    // no way to find out why short of reading container logs.
+    async loadWorkerStatus() {
+      this.workerStatusLoading = true;
+      try {
+        this.workerStatus = await API.get('/api/worker/status');
+      } catch (e) {
+        this.workerStatus = { error: e.message };
+      } finally {
+        this.workerStatusLoading = false;
+      }
+    },
+
+    workerStatusSummary() {
+      const s = this.workerStatus;
+      if (!s) return 'Loading…';
+      if (s.error) return 'Could not read the worker status: ' + s.error;
+      if (s.never_run) return 'No worker has reported yet. If jobs are running, the worker '
+        + 'is on an older image; otherwise check that it is deployed and can reach the database.';
+      if (s.corrupted) return 'The stored status could not be read.';
+
+      const eff = s.effective || {};
+      const conf = s.configured || {};
+      const lines = [
+        `heavy ${eff.heavy}   mixed ${eff.medium}   poll-only ${eff.light}   total ${eff.total}`,
+      ];
+      // Only worth showing when they disagree — that gap IS the diagnosis.
+      const diffs = ['heavy', 'medium', 'light', 'total']
+        .filter(k => conf[k] !== undefined && conf[k] !== eff[k])
+        .map(k => `${k} ${conf[k]}→${eff[k]}`);
+      if (diffs.length) lines.push('reduced: ' + diffs.join(', '));
+      if (s.clamp_reason) lines.push('why: ' + s.clamp_reason);
+      lines.push(`${s.in_flight ?? 0} job(s) in flight when reported · ${s.executor_threads} threads`
+        + (s.pool_capacity ? ` · pool of ${s.pool_capacity}` : ''));
+      lines.push(`reported by ${s.hostname} at ${s.published_at}`);
+      return lines.join('\n');
     },
 
     // ── Notifications ────────────────────────────────────────────────────

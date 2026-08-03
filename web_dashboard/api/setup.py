@@ -1103,6 +1103,42 @@ class ResourceExpiryFeatureConfig(BaseModel):
     resource_expiry_exempt_workgroups: str = ""
 
 
+class WorkerFeatureConfig(BaseModel):
+    """Background job-worker concurrency. Config-only (see ``_CONFIG_ONLY_FEATURES``):
+    the worker is always running, so an enable toggle would be a switch with one
+    position. `enabled` is carried only because every panel model has it.
+
+    How many jobs the worker runs at once, tiered because the jobs are not alike —
+    ``jobs_worker.HEAVY/MEDIUM/LIGHT_TYPES`` owns which type is which, since that
+    partition is only reviewable next to the dispatch table. These caps take effect on
+    the worker's next supervisor pass (~5s, bounded by config_service's cache) without a
+    restart, which is the whole reason they are here rather than environment-only.
+
+    Every numeric field is annotated plain `int`, never Optional[int]: _read_feature keys
+    off `info.annotation is int`, so an Optional would read back as "" for an unset key
+    and 422 the whole panel on save — the exact regression
+    tests/test_setup_feature_roundtrip.py exists to pin.
+
+    Hard ceilings (how high each cap may go, and the executor/drain bounds) are module
+    constants in services/worker_policy.py, NOT keys here, so no configuration can reach
+    past them. `worker_runtime_status` is runtime state the worker writes and is
+    deliberately absent for the same reason `resource_expiry_last_sweep` is.
+
+    Deliberately absent for a different reason: `db_pool_size` / `db_max_overflow`.
+    create_engine runs at import in database.py, before any connection exists, so the
+    pool that connects to the database cannot be sized from a value stored in it. They
+    are environment-only, and the worker clamps these caps down to what the pool can
+    actually serve — reporting that in the status readout.
+    """
+    enabled: bool = False
+    worker_heavy_concurrency: int = 2
+    worker_medium_concurrency: int = 1
+    worker_light_concurrency: int = 3
+    worker_max_concurrency: int = 3
+    worker_executor_threads: int = 0
+    worker_drain_timeout_s: int = 20
+
+
 class MultiRegionFeatureConfig(BaseModel):
     """Config-only panel that hosts the per-region config-set editors for AWS, GCP
     and Azure. The region maps themselves live under ``<cloud>_region_configs`` and
@@ -1190,12 +1226,16 @@ _FEATURE_MODELS = {
     "notifications":  NotificationsFeatureConfig,
     "multi_region":   MultiRegionFeatureConfig,
     "oidc":           OidcFeatureConfig,
+    "worker":         WorkerFeatureConfig,
 }
 
 # Features whose panel carries config but NOT an enable toggle — their on/off
 # lives elsewhere (e.g. a preview flag). _read/_write_feature skip the enabled
 # key for these, so saving config can't flip the feature's flag.
-_CONFIG_ONLY_FEATURES = {"vdesktops", "multi_region", "oidc"}
+#
+# "worker" is here because the job worker has no off position at all: it is the process
+# that runs every queued job, so an enable toggle could only ever mislead.
+_CONFIG_ONLY_FEATURES = {"vdesktops", "multi_region", "oidc", "worker"}
 
 _SECRET_FEATURE_KEYS = frozenset({
     "pscli_client_secret", "bt_client_secret", "epml_pat",
