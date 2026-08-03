@@ -51,6 +51,7 @@ _install_config_stub()
 try:
     from web_dashboard.api.setup import (_read_feature, _CONFIG_ONLY_FEATURES,
                                          _FEATURE_MODELS, AnsibleFeatureConfig,
+                                         CostExplorerFeatureConfig,
                                          PortainerFeatureConfig,
                                          ResourceExpiryFeatureConfig)
 except Exception as exc:  # pragma: no cover — skip if fastapi/pydantic/app deps missing
@@ -157,6 +158,40 @@ def test_every_promote_runner_key_has_a_form_field():
         f"no form field for: {sorted(model_keys - bound)}"
     assert not (bound - model_keys), \
         f"bound in settings.html but not on AnsibleFeatureConfig: {sorted(bound - model_keys)}"
+
+
+def test_every_bound_panel_key_exists_on_some_feature_model():
+    """The generalisation of the promote_runner_ test above, which was prefix-scoped and
+    so never looked at any other panel — that blind spot is exactly how the Cost Explorer
+    panel shipped an OCI budget input bound to a key no model declared. A key bound in the
+    template but missing from its feature's model is silently DROPPED on save:
+    patch_feature_config validates through the model first, pydantic ignores unknown extras
+    by default, and the `k in payload` filter then intersects an already-stripped dict. The
+    operator types a value, Save reports success, and nothing is written — while
+    _read_feature (which iterates model_fields) leaves the input blank on every reload.
+
+    Only ONE direction is asserted. bound - fields must be empty; fields - bound must not
+    be, because plenty of model fields are deliberately env/DB-only (the ansible ECS
+    cpu/memory knobs, the entitle agent KMS keys) and a handful more are bound through a
+    different Alpine object than panelCfg (the entitle user-JIT panel's own `userJit`).
+
+    Comparing against the UNION of all models rather than each panel's own model is safe
+    here and needs no panel-block parsing: `enabled` is the only field name shared by more
+    than one model, so no real config key is owned by two panels and the union check is
+    equivalent to a per-panel one. It is also the check that matters — a key on the wrong
+    panel's model still round-trips, a key on no model at all cannot.
+    """
+    html = open(_SETTINGS_HTML, encoding="utf-8").read()
+    # The regex only sees dotted access. That is complete today, but would silently skip
+    # anything written panelCfg["key"] — fail loudly instead of quietly under-checking.
+    assert "panelCfg[" not in html, \
+        "settings.html gained bracket-style panelCfg access; teach this test to read it"
+    bound = set(re.findall(r"panelCfg\.([A-Za-z_][A-Za-z_0-9]*)", html))
+    assert len(bound) > 200, f"only found {len(bound)} bound keys — did the regex break?"
+    fields = {f for model in _FEATURE_MODELS.values() for f in model.model_fields}
+    assert not (bound - fields), (
+        "bound in settings.html but declared on no feature model, so the value is "
+        f"discarded on save: {sorted(bound - fields)}")
 
 
 def test_promote_runner_keys_match_the_storage_api():
@@ -276,6 +311,44 @@ def test_resource_expiry_set_int_is_preserved():
         data = _read_feature("resource_expiry", ResourceExpiryFeatureConfig)
         assert data["resource_expiry_default_hours"] == 72
         ResourceExpiryFeatureConfig(**data)
+    finally:
+        CONF.clear()
+
+
+def test_cost_explorer_budgets_round_trip():
+    """All five budgets — the overall one plus one per cloud — must survive the cycle.
+
+    These are the only ``float`` fields on any panel, and _read_feature coerces bool and
+    int ONLY: a float field falls through to config_service.get, so an unset budget reads
+    back as "" rather than as the model default. That "" is why the _blank_to_zero
+    field_validator exists, and why every budget field has to be listed on it — a float
+    field omitted from that validator reads back "" and then 422s the entire Cost Explorer
+    panel on save, which is strictly worse than the dropped-value bug it replaces. This
+    asserts the read shape and the re-validation together, so neither half can regress
+    alone.
+    """
+    CONF.clear()
+    data = _read_feature("cost_explorer", CostExplorerFeatureConfig)
+    budgets = ("cost_monthly_budget", "cost_budget_aws", "cost_budget_azure",
+               "cost_budget_gcp", "cost_budget_oci")
+    for key in budgets:
+        assert key in data, f"{key} is not on CostExplorerFeatureConfig — a form field " \
+                            "bound to it would be silently dropped on save"
+        assert data[key] == "", f"{key} read back as {data[key]!r}, not the unset \"\""
+    # patch_feature_config does exactly this on save — it must not raise. Only passes
+    # while _blank_to_zero covers every one of the five.
+    assert CostExplorerFeatureConfig(**data).cost_budget_oci == 0.0
+
+
+def test_cost_explorer_set_budget_is_preserved():
+    """A configured per-cloud budget round-trips as that float. cost_service reads
+    cost_budget_<cloud> for the per-cloud over/approaching alert, so a value that doesn't
+    survive the save means the alert can never fire for that cloud."""
+    CONF.clear()
+    CONF["cost_budget_oci"] = "250.50"
+    try:
+        data = _read_feature("cost_explorer", CostExplorerFeatureConfig)
+        assert CostExplorerFeatureConfig(**data).cost_budget_oci == 250.5
     finally:
         CONF.clear()
 

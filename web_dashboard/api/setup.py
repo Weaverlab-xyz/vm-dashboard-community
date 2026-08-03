@@ -1024,16 +1024,25 @@ class VirtualDesktopsFeatureConfig(BaseModel):
 class CostExplorerFeatureConfig(BaseModel):
     """Cloud cost tracking. The toggle owns `cost_explorer_enabled` (the feature
     name maps to it via _feature_to_cfg_key). `cost_monthly_budget` is the monthly
-    spend budget used for the over/approaching alerts (0 = no budget)."""
+    spend budget used for the over/approaching alerts (0 = no budget); each
+    `cost_budget_<cloud>` is that cloud's own budget, checked in addition to it.
+
+    Every budget field must be BOTH declared here and listed on _blank_to_zero below.
+    Miss the field and the value is dropped on save (pydantic ignores unknown extras,
+    so patch_feature_config never sees it) while the form input reads back blank
+    forever; miss the validator and an unset key reads back "" from config_service —
+    _read_feature coerces bool and int only, never float — which then 422s the whole
+    panel on save. tests/test_setup_feature_roundtrip.py pins both halves."""
     enabled: bool = False
     cost_monthly_budget: float = 0.0
     cost_budget_aws: float = 0.0
     cost_budget_azure: float = 0.0
     cost_budget_gcp: float = 0.0
+    cost_budget_oci: float = 0.0
     gcp_billing_export_table: str = ""
 
     @field_validator("cost_monthly_budget", "cost_budget_aws", "cost_budget_azure",
-                     "cost_budget_gcp", mode="before")
+                     "cost_budget_gcp", "cost_budget_oci", mode="before")
     @classmethod
     def _blank_to_zero(cls, v):
         # An empty/blank input (no budget) round-trips as "" / null — treat as 0.
