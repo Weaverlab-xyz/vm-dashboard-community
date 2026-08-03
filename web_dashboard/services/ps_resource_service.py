@@ -258,9 +258,22 @@ output "managed_account_id" {{
 # ── Terraform plumbing ────────────────────────────────────────────────────────
 
 def _run_tf(args: list, work_dir: str, env: dict, timeout: int = 180) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        [_TERRAFORM] + args, cwd=work_dir, capture_output=True, text=True,
-        timeout=timeout, env=env)
+    """Run one terraform subcommand in ``work_dir``.
+
+    ``init`` is serialized on the shared plugin cache via ``terraform.plugin_cache_lock``:
+    the tempdir is per-call but TF_PLUGIN_CACHE_DIR is the single cache baked into the
+    image, and parallel inits race to place the same provider binary (ETXTBSY). Same
+    reasoning as terraform_pra_service._run_tf — see the longer note there."""
+    def _go() -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [_TERRAFORM] + args, cwd=work_dir, capture_output=True, text=True,
+            timeout=timeout, env=env)
+
+    if args and args[0] == "init":
+        from .terraform import plugin_cache_lock
+        with plugin_cache_lock():
+            return _go()
+    return _go()
 
 
 def _scrub_state(tf_state_json: Optional[str]) -> Optional[str]:

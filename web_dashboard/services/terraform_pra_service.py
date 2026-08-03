@@ -143,18 +143,38 @@ output "shell_jump_id" {{
 
 def _run_tf(args: list, work_dir: str, timeout: int = 120,
             extra_env: Optional[dict] = None) -> subprocess.CompletedProcess:
+    """Run one terraform subcommand in ``work_dir``.
+
+    ``init`` is serialized on the shared plugin cache. Every caller here works in
+    its own ``TemporaryDirectory``, but they all point TF_PLUGIN_CACHE_DIR at the
+    ONE cache baked into the image (see ``_tf_env``), which is not concurrency-safe:
+    parallel inits race to place the same provider binary and fail with ETXTBSY
+    ("text file busy"). The lock lives in ``terraform.plugin_cache_lock`` so this
+    module and the main terraform path serialize against EACH OTHER, not just each
+    against itself — the app's two gunicorn workers could already race this, and
+    the job worker now runs several jobs at once. Taken here rather than at the
+    nine call sites so a new one cannot forget it; apply/destroy/output don't touch
+    the cache and stay parallel. Imported lazily to keep this module's import graph
+    flat."""
     env = _tf_env()
     if extra_env:
         env.update(extra_env)
-    result = subprocess.run(
-        [_TERRAFORM] + args,
-        cwd=work_dir,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        env=env,
-    )
-    return result
+
+    def _go() -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [_TERRAFORM] + args,
+            cwd=work_dir,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
+        )
+
+    if args and args[0] == "init":
+        from .terraform import plugin_cache_lock
+        with plugin_cache_lock():
+            return _go()
+    return _go()
 
 
 def _provision_sync(
