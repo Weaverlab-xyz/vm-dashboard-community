@@ -72,7 +72,7 @@ except Exception as exc:  # pragma: no cover — skip if other app deps are miss
 
 def _deploy_dir(tmp: str) -> str:
     """A deploy dir that already holds a module, so destroy skips _materialize."""
-    with open(os.path.join(tmp, "main.tf"), "w") as fh:
+    with open(os.path.join(tmp, "main.tf"), "w", encoding="utf-8") as fh:
         fh.write("# test module\n")
     return tmp
 

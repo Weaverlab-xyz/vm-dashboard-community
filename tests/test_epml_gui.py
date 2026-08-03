@@ -29,7 +29,7 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def _read(*parts):
-    return open(os.path.join(_ROOT, *parts)).read()
+    return open(os.path.join(_ROOT, *parts), encoding="utf-8").read()
 
 
 # ── the sync job: the two bugs, and the wiring ────────────────────────────────

@@ -63,7 +63,7 @@ def _rel(path):
 
 def _plays():
     for path in _PLAYBOOKS:
-        for play in (yaml.safe_load(open(path).read()) or []):
+        for play in (yaml.safe_load(open(path, encoding="utf-8").read()) or []):
             yield path, play
 
 
@@ -126,7 +126,7 @@ def test_uninstall_is_gated_on_confirmation():
     """k3s-uninstall.yml wipes cluster state — on a single-server cluster, all of it."""
     path = os.path.join(_K3S_DIR, "k3s-uninstall.yml")
     assert os.path.exists(path), "k3s-uninstall.yml is missing"
-    play = yaml.safe_load(open(path).read())[0]
+    play = yaml.safe_load(open(path, encoding="utf-8").read())[0]
     assert (play.get("vars") or {}).get("confirm") is False, (
         "k3s-uninstall.yml must default confirm to false")
     found = 0
@@ -143,7 +143,7 @@ def test_uninstall_is_gated_on_confirmation():
 def test_join_installs_with_the_token_hidden():
     """k3s-join.yml passes the node token via the environment — that task must no_log."""
     path = os.path.join(_K3S_DIR, "k3s-join.yml")
-    play = yaml.safe_load(open(path).read())[0]
+    play = yaml.safe_load(open(path, encoding="utf-8").read())[0]
     for task in _tasks(play):
         if "K3S_TOKEN" in yaml.safe_dump(task.get("environment") or {}):
             assert task.get("no_log") is True, (
@@ -162,7 +162,8 @@ def test_kubeconfig_rewrite_produces_a_registerable_document():
         print("SKIP: jinja2 unavailable")
         return
 
-    play = yaml.safe_load(open(os.path.join(_K3S_DIR, "k3s-kubeconfig.yml")).read())[0]
+    play = yaml.safe_load(open(os.path.join(_K3S_DIR, "k3s-kubeconfig.yml"),
+                               encoding="utf-8").read())[0]
     expr = None
     for task in _tasks(play):
         facts = task.get("ansible.builtin.set_fact") or task.get("set_fact") or {}

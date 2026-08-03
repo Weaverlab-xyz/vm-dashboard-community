@@ -42,7 +42,7 @@ def _rel(path):
 
 def _plays():
     for path in _PLAYBOOKS:
-        for play in (yaml.safe_load(open(path).read()) or []):
+        for play in (yaml.safe_load(open(path, encoding="utf-8").read()) or []):
             yield path, play
 
 
@@ -103,7 +103,7 @@ def test_probes_are_marked_unchanged():
 
 def test_no_community_docker_usage():
     for path in _PLAYBOOKS:
-        text = open(path).read()
+        text = open(path, encoding="utf-8").read()
         for bad in _FORBIDDEN:
             assert bad not in text, (
                 f"{_rel(path)} references {bad!r}. The runner image's documented "
@@ -116,7 +116,7 @@ def test_leave_is_gated_on_confirmation():
     to act without an explicit opt-in."""
     path = os.path.join(_SWARM_DIR, "swarm-leave.yml")
     assert os.path.exists(path), "swarm-leave.yml is missing"
-    play = yaml.safe_load(open(path).read())[0]
+    play = yaml.safe_load(open(path, encoding="utf-8").read())[0]
     assert (play.get("vars") or {}).get("confirm") is False, (
         "swarm-leave.yml must default confirm to false")
     # the destructive command must be conditioned on it
@@ -135,7 +135,7 @@ def test_join_token_is_not_echoed():
     """The join token is a cluster credential. swarm-join.yml puts it on a command
     line, so that task must no_log."""
     path = os.path.join(_SWARM_DIR, "swarm-join.yml")
-    play = yaml.safe_load(open(path).read())[0]
+    play = yaml.safe_load(open(path, encoding="utf-8").read())[0]
     for task in _tasks(play):
         cmd = _command_of(task)
         if cmd and "docker swarm join " in cmd:

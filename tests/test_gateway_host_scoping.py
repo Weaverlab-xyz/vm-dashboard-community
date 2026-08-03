@@ -360,7 +360,8 @@ def test_host_lookup_swallows_failures():
 # "Reusing IAM role ecsInstanceRole" and exits 0.
 
 def test_setup_aws_attaches_the_ecs_policy_outside_the_create_branch():
-    src = open(os.path.join(_ROOT, "scripts", "sandbox", "Linux", "setup-aws.sh")).read()
+    src = open(os.path.join(_ROOT, "scripts", "sandbox", "Linux", "setup-aws.sh"),
+               encoding="utf-8").read()
     start = src.index('ECS_INSTANCE_ROLE="ecsInstanceRole"')
     block = src[start:src.index("get-instance-profile", start)]
     assert "AmazonEC2ContainerServiceforEC2Role" in block, (
@@ -377,7 +378,7 @@ def test_aws_gateway_settings_come_from_region_config():
     """'2 in us-east-2' only works if the cluster and subnet are resolved per region;
     the flat bt_ecs_* keys describe one region only."""
     src = open(os.path.join(_ROOT, "web_dashboard", "services",
-                            "jumpoint_host_service.py")).read()
+                            "jumpoint_host_service.py"), encoding="utf-8").read()
     assert "resolve_region(\"aws\", region)" in src or "_aws_region_cfg" in src
     body = src[src.index("def _aws_region_cfg"):src.index("async def _live_gateway_tasks")]
     assert "resolve_region" in body, "AWS gateway settings are not region-resolved"

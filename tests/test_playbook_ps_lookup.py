@@ -41,7 +41,7 @@ def _plays_with_lookup():
     """(path, play) for every play whose raw text references the lookup."""
     out = []
     for path in _PLAYBOOKS:
-        text = open(path).read()
+        text = open(path, encoding="utf-8").read()
         if _LOOKUP not in text:
             continue
         for play in (yaml.safe_load(text) or []):
@@ -112,7 +112,7 @@ def test_api_version_and_decrypt_flags():
     inside the lookup expression, so round-tripped YAML can't be string-matched."""
     seen = 0
     for path in _PLAYBOOKS:
-        text = open(path).read()
+        text = open(path, encoding="utf-8").read()
         if _LOOKUP not in text:
             continue
         seen += 1
@@ -134,7 +134,7 @@ def test_no_playbook_templates_a_secret_without_no_log():
     pat = re.compile(r"\{\{\s*_?[a-z_]*(password|pat|token)\b")
     offenders = []
     for path in _PLAYBOOKS:
-        for play in (yaml.safe_load(open(path).read()) or []):
+        for play in (yaml.safe_load(open(path, encoding="utf-8").read()) or []):
             for task in (play.get("tasks") or []):
                 # only module args matter; `when:`/`assert` referencing a name is fine
                 args = {k: v for k, v in task.items()
@@ -149,7 +149,7 @@ def test_no_playbook_templates_a_secret_without_no_log():
 
 def _all_plays():
     for path in _PLAYBOOKS:
-        for play in (yaml.safe_load(open(path).read()) or []):
+        for play in (yaml.safe_load(open(path, encoding="utf-8").read()) or []):
             yield path, play
 
 
