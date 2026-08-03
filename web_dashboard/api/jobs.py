@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..database import User, get_db
 from ..models.job import JobResponse, JobListResponse
-from ..services import job_service
+from ..services import agent_job_meta, agent_service, job_service
 from .auth import get_current_user, can_audit_jobs
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
@@ -144,6 +144,45 @@ async def get_job_logs(
         return {"lines": lines, "log_group": log_group, "log_stream": log_stream}
     except AnsibleError as e:
         raise HTTPException(status_code=503, detail=str(e))
+
+
+@router.get("/{job_id}/findings")
+async def get_job_findings(
+    job_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """What a discovery scan found — the result half of an ``agent_discover`` job.
+
+    A remote agent reports its findings by completing the job, and ``set_completed``
+    merges them into the job's metadata. Nothing else reads that metadata back out:
+    ``_job_to_response`` deliberately projects a fixed set of scalars, so without this
+    endpoint a scan's entire result is written to the database and never shown to anyone,
+    and a run that found a cluster is indistinguishable from one that found nothing.
+
+    Returns the allowlisted projection from ``agent_job_meta.discover_findings``, never
+    the metadata dict — job metadata carries Terraform variables and resolved config for
+    other job types, and an endpoint keyed only on a job id must not become the way to
+    read them.
+
+    The counters come back for any status, including ``failed``: "scanned 0 of 384
+    because policy refused them" is the answer to the question a fruitless scan raises,
+    and a job that failed part-way still has one.
+    """
+    job = job_service.get_job(db, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    # Same ownership rule as GET /api/jobs/{id} — findings name hosts on a private
+    # network, so they are at least as sensitive as the job row itself.
+    if job.created_by != current_user.username and not can_audit_jobs(current_user):
+        raise HTTPException(status_code=403, detail="Access denied")
+    if job.job_type not in agent_service.AGENT_JOB_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Job type '{job.job_type}' does not produce discovery findings.")
+
+    return {"job_id": job.id, "status": job.status,
+            **agent_job_meta.discover_findings(job.metadata_dict)}
 
 
 @router.delete("/{job_id}")

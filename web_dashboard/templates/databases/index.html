@@ -554,7 +554,34 @@ function databasesPage() {
 
     _pollTimer: null,
 
-    async init() { requireAuth(); this.loadSecretBackends(); await this.refresh(); },
+    async init() {
+      requireAuth();
+      this.loadSecretBackends();
+      await this.refresh();
+      this.openFromQuery();
+    },
+
+    // ?register=1&engine=…&host=…&port=… — where a discovery finding on a job page sends
+    // the operator. Host, port and engine are what an unauthenticated probe can learn;
+    // the managed account is what it cannot, so that field is still theirs to fill in.
+    openFromQuery() {
+      const q = new URLSearchParams(window.location.search);
+      if (!q.get('register')) return;
+      this.openRegister();
+      // mariadb is probed as its own engine but registered as mysql — the tunnel and the
+      // Config Management play are the same, and 'mariadb' is not one of the four values
+      // the select offers. Anything else is ignored rather than assigned, so a stray
+      // query param cannot leave the dropdown showing a value the API would reject.
+      const engine = (q.get('engine') || '').trim().toLowerCase();
+      const mapped = engine === 'mariadb' ? 'mysql' : engine;
+      if (['postgres', 'mysql', 'sqlserver', 'oracle'].includes(mapped)) {
+        this.reg.engine = mapped;
+      }
+      if (q.get('host')) this.reg.host = q.get('host');
+      const port = parseInt(q.get('port'), 10);
+      if (port > 0) this.reg.port = port;
+      if (this.reg.host) this.loadRegAccounts();
+    },
 
     // Region filter for the list — distinct from options.region, which is the
     // provision form's target region.

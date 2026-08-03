@@ -12,7 +12,13 @@ That is the same discipline ``ansible_run_meta`` already applies for a different
 reason — there, to keep credentials out of the database; here, to keep code out of the
 customer's LAN. Both work because the allowlist is the funnel, not a convention.
 
-Pure and stdlib-only, so the round-trip is testable without FastAPI or a database.
+:data:`FINDING_KEYS` is the same idea pointed the other way. A completed scan's result
+is written into the job row by the agent, and the agent reports what an *unknown host on
+someone else's network* told it — a MySQL greeting, a certificate CN. So the trip back
+out to the browser is allowlisted and sanitised too, rather than handing the UI whatever
+the job row happens to hold.
+
+Pure and stdlib-only, so every round-trip is testable without FastAPI or a database.
 """
 import copy
 
@@ -139,3 +145,112 @@ def _clamp(value, default: int, low: int, high: int) -> int:
     except (TypeError, ValueError):
         return default
     return max(low, min(high, number))
+
+
+# ── The result, on its way back out to the browser ────────────────────────────
+
+# What a finding may show. Closed, like DISCOVER_META_KEYS, and for the mirror-image
+# reason: these values did not come from the dashboard or the operator, they came from
+# an unidentified host on a network the dashboard cannot see. `already_registered` is the
+# exception — the dashboard computes that one itself (api/agent._annotate_findings).
+FINDING_KEYS = (
+    "kind",               # "k8s" | "database"
+    "host",               # str — the IP the probe connected to
+    "port",               # int
+    "api_server",         # str — k8s only, "https://host:port"
+    "engine",             # str — database only: postgres/mysql/mariadb/sqlserver/oracle
+    "server_version",     # str — read from a PRE-AUTH banner, so target-controlled
+    "distro",             # str — k8s only: k3s/rke2/eks/gke/aks/kubeadm
+    "tls_cn",             # str — k8s only, the apiserver cert CN; target-controlled
+    "tls",                # bool — postgres only: did it accept SSLRequest
+    "suggested_name",     # str — a name to prefill the Register form with
+    "source",             # str — "kubeconfig" when it came from the mounted file
+    "already_registered",  # bool — computed HERE, not reported by the agent
+)
+
+# What the scan itself did, so "0 findings" can be told apart from "0 probes". These are
+# the numbers that answer "why did this find nothing?", which is the question a scan that
+# was refused by policy — or ran with no kubeconfig mounted — actually raises.
+COUNTER_KEYS = ("scanned", "hosts", "refused", "truncated", "audit_mode")
+
+# One finding per host:port, capped by the agent at _MAX_FINDINGS=200. Bounded again here
+# because the cap that matters for rendering is the one on this side of the wire.
+MAX_FINDINGS = 200
+
+# Long enough for any real version string or CN, short enough that a host answering with
+# a megabyte cannot make the findings panel unusable.
+MAX_FINDING_CHARS = 512
+
+
+def discover_findings(meta: dict) -> dict:
+    """The UI-visible projection of a finished ``agent_discover`` job's result.
+
+    Reads the job's stored metadata — which is the *whole* row's metadata, scan request
+    and result merged by ``job_service.set_completed`` — and returns only
+    :data:`FINDING_KEYS` and :data:`COUNTER_KEYS`. Never the metadata itself: a job row
+    carries internals (Terraform variables, log-stream ids, resolved config) that must
+    not become readable to anyone who knows a job id, and a projection that starts from
+    an allowlist cannot start leaking them when a later job type adds a field.
+
+    Every string is sanitised on the way out for the same reason the agent's log lines
+    are (``agent_service._sanitize_line``): a version banner and a certificate CN are
+    whatever an unknown host chose to send.
+    """
+    meta = meta or {}
+    raw = meta.get("findings")
+    findings = []
+    if isinstance(raw, list):
+        for item in raw[:MAX_FINDINGS]:
+            if isinstance(item, dict):
+                findings.append(_clean_finding(item))
+
+    counters = {}
+    for key in COUNTER_KEYS:
+        value = meta.get(key)
+        if key in ("truncated", "audit_mode"):
+            counters[key] = bool(value)
+        else:
+            counters[key] = _non_negative(value)
+    return {"findings": findings, **counters}
+
+
+def _clean_finding(finding: dict) -> dict:
+    out = {}
+    for key in FINDING_KEYS:
+        if key not in finding:
+            continue
+        value = finding[key]
+        if key == "port":
+            port = _non_negative(value)
+            if port:
+                out[key] = port
+        elif key in ("tls", "already_registered"):
+            out[key] = bool(value)
+        else:
+            text = _clean_text(value)
+            if text:
+                out[key] = text
+    return out
+
+
+def _clean_text(value) -> str:
+    """Strip C0/C1 control characters (except tab) and truncate.
+
+    Mirrors ``agent_service._sanitize_line`` rather than importing it: this module is
+    stdlib-only on purpose so the boundary can be tested without the app, and the rule is
+    four lines. ANSI escapes from a hostile apiserver would otherwise be replayed into an
+    operator's browser — and into their terminal, the moment they copy a suggested name.
+    """
+    text = str(value if value is not None else "")
+    cleaned = "".join(
+        ch for ch in text
+        if ch == "\t" or (ord(ch) >= 32 and not (0x7F <= ord(ch) <= 0x9F))
+    ).strip()
+    return cleaned[:MAX_FINDING_CHARS]
+
+
+def _non_negative(value) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
