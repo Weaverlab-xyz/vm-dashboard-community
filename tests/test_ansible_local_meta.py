@@ -106,7 +106,7 @@ def test_run_kwargs_match_the_run_job_signature():
     from the parameter list is a TypeError at dispatch — in a background worker,
     where nobody is watching."""
     src = open(os.path.join(_ROOT, "web_dashboard", "services",
-                            "ansible_local_run_service.py")).read()
+                            "ansible_local_run_service.py"), encoding="utf-8").read()
     sig = re.search(r"async def _run_job\((.*?)\) -> None:", src, re.S).group(1)
     params = set(re.findall(r"^\s*(\w+)\s*[:=]", sig, re.M)) - {"job_id"}
     assert set(arm.RUN_META_KEYS) == params, (
@@ -175,7 +175,8 @@ def test_ansible_local_is_dispatched_by_the_job_runner():
     package for it. That direction is now asserted repo-wide in
     tests/test_worker_dispatch.py; here we only pin that ansible_local is the service
     the branch reaches for."""
-    src = open(os.path.join(_ROOT, "web_dashboard", "jobs_worker.py")).read()
+    src = open(os.path.join(_ROOT, "web_dashboard", "jobs_worker.py"),
+               encoding="utf-8").read()
     handled = re.search(r"HANDLED_TYPES = \((.*?)\)", src, re.S).group(1)
     assert '"ansible_local"' in handled, "ansible_local is not in HANDLED_TYPES"
     assert 'job_type == "ansible_local"' in src, "no dispatch branch for ansible_local"
@@ -186,7 +187,8 @@ def test_ansible_local_is_dispatched_by_the_job_runner():
 def test_run_execution_is_not_defined_in_the_api_module():
     """_run_job and its helpers belong to the service. Defining them in the request
     module is what forced the worker's backwards import in the first place."""
-    src = open(os.path.join(_ROOT, "web_dashboard", "api", "config_mgmt.py")).read()
+    src = open(os.path.join(_ROOT, "web_dashboard", "api", "config_mgmt.py"),
+               encoding="utf-8").read()
     for name in ("_run_job", "_dispatch_cloud_runner", "_resolve_managed_ref",
                  "_resolve_cloud_ssh_key", "_delete_ephemeral"):
         assert f"def {name}(" not in src, f"{name} is still defined in api/config_mgmt.py"
@@ -195,7 +197,8 @@ def test_run_execution_is_not_defined_in_the_api_module():
 def test_endpoint_no_longer_dispatches_in_process():
     """The BackgroundTask path is what stranded these jobs; if it comes back the
     durability guarantee is gone even with the metadata in place."""
-    src = open(os.path.join(_ROOT, "web_dashboard", "api", "config_mgmt.py")).read()
+    src = open(os.path.join(_ROOT, "web_dashboard", "api", "config_mgmt.py"),
+               encoding="utf-8").read()
     assert "background_tasks.add_task" not in src, (
         "config_mgmt still dispatches a run in-process — it must be queued for the runner")
 

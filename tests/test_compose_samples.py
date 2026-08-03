@@ -21,7 +21,7 @@ _SAMPLES = sorted(glob.glob(os.path.join(_ROOT, "examples", "compose", "*.yml"))
 
 
 def _validate_one(path):
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         spec = compose_service.parse_and_validate(f.read())
     assert spec.services, f"{os.path.basename(path)} parsed to zero services"
     for svc in spec.services:

@@ -20,7 +20,7 @@ _SAMPLES = sorted(glob.glob(os.path.join(_ROOT, "examples", "k8s", "*.yaml")))
 
 def _validate_one(path):
     base = os.path.basename(path)
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         docs = [d for d in yaml.safe_load_all(f) if d is not None]
     assert docs, f"{base} parsed to zero objects"
     for i, doc in enumerate(docs):

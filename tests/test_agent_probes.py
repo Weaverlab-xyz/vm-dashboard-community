@@ -388,7 +388,7 @@ def test_an_unwritable_state_dir_fails_before_enrolment():
     # A path whose parent is a regular file: makedirs fails on every platform, unlike
     # chmod, which Windows ignores.
     blocker = os.path.join(tempfile.mkdtemp(), "blocker")
-    open(blocker, "w").close()
+    open(blocker, "w", encoding="utf-8").close()
     agent.STATE_DIR = os.path.join(blocker, "state")
     try:
         agent._check_state_dir_writable()

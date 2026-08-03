@@ -35,7 +35,7 @@ _PAIRS = [
 
 def _tree(*parts):
     path = os.path.join(_ROOT, *parts)
-    return ast.parse(open(path).read(), path)
+    return ast.parse(open(path, encoding="utf-8").read(), path)
 
 
 def _required_keys_by_job_type(svc_tree):
@@ -171,7 +171,8 @@ def test_the_reference_exemption_is_not_a_loophole():
 
 
 def _handled_types():
-    src = open(os.path.join(_ROOT, "web_dashboard", "jobs_worker.py")).read()
+    src = open(os.path.join(_ROOT, "web_dashboard", "jobs_worker.py"),
+               encoding="utf-8").read()
     for node in ast.walk(ast.parse(src)):
         if isinstance(node, ast.Assign) and any(
             getattr(t, "id", None) == "HANDLED_TYPES" for t in node.targets
