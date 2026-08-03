@@ -1655,6 +1655,11 @@
                     </select>
                   </div>
                 </div>
+                <div class="mt-3 flex items-center gap-2">
+                  <input type="checkbox" id="portainer_ui_verify_certificate" x-model="panelCfg.portainer_ui_verify_certificate"
+                         class="rounded border-gray-300">
+                  <label for="portainer_ui_verify_certificate" class="text-sm text-gray-700">Web Jump verifies the node's certificate <span class="text-gray-400">(separate from Verify SSL above, which covers dashboard → Portainer API calls — leave off for the self-signed cert on :9443)</span></label>
+                </div>
               </div>
 
               <!-- Live firewall breakdown (read-only) -->
@@ -3353,12 +3358,58 @@
             <div class="mt-2 flex items-center gap-2">
               <input type="checkbox" id="rancher_verify_tls" x-model="panelCfg.rancher_verify_tls"
                      class="rounded border-gray-300">
-              <label for="rancher_verify_tls" class="text-sm text-gray-700">Verify TLS certificate <span class="text-gray-400">(leave off for the node's self-signed cert)</span></label>
+              <label for="rancher_verify_tls" class="text-sm text-gray-700">Verify TLS certificate on dashboard → Rancher API calls <span class="text-gray-400">(leave off for the node's self-signed cert)</span></label>
             </div>
-            <div class="mt-2 flex items-center gap-2">
-              <input type="checkbox" id="rancher_ui_web_jump_enabled" x-model="panelCfg.rancher_ui_web_jump_enabled"
-                     class="rounded border-gray-300">
-              <label for="rancher_ui_web_jump_enabled" class="text-sm text-gray-700">PRA Web Jump to the Rancher UI <span class="text-gray-400">(opt-in zero-trust access without opening your IP)</span></label>
+
+            <!-- PRA Web Jump (optional broker for the node's UI) — mirrors the Portainer panel -->
+            <div class="pt-3 mt-3 border-t border-gray-100">
+              <div class="flex items-center gap-2">
+                <input type="checkbox" id="rancher_ui_web_jump_enabled" x-model="panelCfg.rancher_ui_web_jump_enabled"
+                       class="rounded border-gray-300">
+                <label for="rancher_ui_web_jump_enabled" class="text-sm text-gray-700">PRA Web Jump to the Rancher UI <span class="text-gray-400">(opt-in zero-trust access without opening your IP)</span></label>
+              </div>
+              <p class="text-xs text-gray-400 mt-1">
+                Opt-in. Reach the node from the PRA representative console — brokered and recorded —
+                without adding your IP to the CIDR list. The Gateway's egress IP is auto-allowed, and
+                with a Vault account group the admin password is injected instead of shown. Jump Group,
+                Gateway and Vault account group can also be chosen per-deploy on the Containers page —
+                these are the defaults it starts from.
+              </p>
+              <div class="grid grid-cols-2 gap-3 mt-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Jump Group</label>
+                  <input type="text" x-model="panelCfg.rancher_ui_jump_group"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                         placeholder="(bt_jump_group_name)">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Gateway</label>
+                  <input type="text" x-model="panelCfg.rancher_ui_jumpoint_name"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                         placeholder="(bt_jumpoint_name)">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Vault account group id</label>
+                  <input type="text" x-model="panelCfg.rancher_ui_vault_account_group_id"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                         placeholder="(bt_vault_account_group_id)">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Gateway cloud</label>
+                  <select x-model="panelCfg.rancher_ui_jumpoint_cloud"
+                          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                    <option value="gcp">gcp</option>
+                    <option value="aws">aws</option>
+                    <option value="azure">azure</option>
+                  </select>
+                  <p class="text-[11px] text-gray-400 mt-1">Which dashboard-managed Gateway brokers the UI. Azure's host has no public IP — add that one to the CIDRs by hand.</p>
+                </div>
+              </div>
+              <div class="mt-3 flex items-center gap-2">
+                <input type="checkbox" id="rancher_ui_verify_certificate" x-model="panelCfg.rancher_ui_verify_certificate"
+                       class="rounded border-gray-300">
+                <label for="rancher_ui_verify_certificate" class="text-sm text-gray-700">Web Jump verifies the node's certificate <span class="text-gray-400">(separate from the API check above — leave off for the self-signed cert)</span></label>
+              </div>
             </div>
           </div>
         </div>
