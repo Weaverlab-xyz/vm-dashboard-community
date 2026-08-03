@@ -970,10 +970,18 @@ class K8sManagementFeatureConfig(BaseModel):
     gcp_rancher_network_tag: str = "rancher"
     gcp_rancher_allow_open: bool = False      # open 0.0.0.0/0 when allowed_source_cidrs is empty
     # Rancher UI PRA web-broker (opt-in zero-trust access without opening CIDRs).
+    # Bound in the k8s_management panel, mirroring the Portainer panel's
+    # portainer_ui_* group — these are the DEFAULTS the Containers deploy form
+    # starts from (jump group / gateway / vault group are also per-deploy picks).
     rancher_ui_web_jump_enabled: bool = False
-    rancher_ui_verify_certificate: bool = False
+    rancher_ui_verify_certificate: bool = False  # sra_web_jump verify_certificate — distinct from rancher_verify_tls, which is the dashboard's own httpx verify on Rancher API calls
     rancher_ui_jump_group: str = ""
     rancher_ui_jumpoint_name: str = ""
+    # NOT bound in the panel and read by nothing: a Web Jump has no local listen
+    # port (that belongs to protocol-tunnel jumps — see k8s_api_tunnel_local_port).
+    # Left settable by env only so an existing RANCHER_UI_LOCAL_PORT doesn't break;
+    # don't wire an input to it without a consumer. Kept plain `int` regardless, so
+    # the unset read-back is 443 and not "" (see CostExplorerFeatureConfig).
     rancher_ui_local_port: int = 443
     rancher_ui_jumpoint_cloud: str = "gcp"    # which dashboard-managed Jumpoint host brokers the Rancher UI (gcp|aws|azure); its egress IP is auto-whitelisted
     rancher_ui_vault_account_group_id: str = ""  # default PRA Vault account group (numeric id) for the vaulted admin credential; usually chosen per-deploy instead

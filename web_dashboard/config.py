@@ -94,7 +94,7 @@ class Settings(BaseSettings):
     rancher_ui_verify_certificate: bool = False  # sra_web_jump verify_certificate (False for the node's self-signed cert)
     rancher_ui_jump_group: str = ""           # "" = bt_jump_group_name
     rancher_ui_jumpoint_name: str = ""        # "" = bt_jumpoint_name
-    rancher_ui_local_port: int = 443          # local listen port (match Rancher 443 for SNI/cert)
+    rancher_ui_local_port: int = 443          # UNUSED — read by nothing. An sra_web_jump has no local listen port (that's a protocol-tunnel jump; see k8s_api_tunnel_local_port). Kept so an existing RANCHER_UI_LOCAL_PORT env doesn't break; deliberately NOT on the Settings panel
     rancher_ui_web_jump_id: str = ""          # PRA Web Jump id for the central Rancher UI (runtime-set)
     rancher_ui_web_jump_tfstate: str = ""     # terraform state for the Web Jump (for teardown)
     rancher_ui_vault_account_group_id: str = ""  # PRA Vault account group (numeric id) the admin credential is vaulted into for Web-Jump injection; chosen at deploy. "" = no vault (fall back to bt_vault_account_group_id, else surface the password)

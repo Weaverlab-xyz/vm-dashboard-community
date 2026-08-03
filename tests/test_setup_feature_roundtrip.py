@@ -52,6 +52,7 @@ try:
     from web_dashboard.api.setup import (_read_feature, _CONFIG_ONLY_FEATURES,
                                          _FEATURE_MODELS, AnsibleFeatureConfig,
                                          CostExplorerFeatureConfig,
+                                         K8sManagementFeatureConfig,
                                          PortainerFeatureConfig,
                                          ResourceExpiryFeatureConfig)
 except Exception as exc:  # pragma: no cover — skip if fastapi/pydantic/app deps missing
@@ -349,6 +350,113 @@ def test_cost_explorer_set_budget_is_preserved():
     try:
         data = _read_feature("cost_explorer", CostExplorerFeatureConfig)
         assert CostExplorerFeatureConfig(**data).cost_budget_oci == 250.5
+    finally:
+        CONF.clear()
+
+
+# The Rancher and Portainer management planes carry a deliberately parallel
+# ``*_ui_<suffix>`` group for their optional PRA Web Jump. Suffixes that exist on one
+# side and legitimately not the other:
+_UI_SUFFIX_EXCLUSIONS = {
+    # Runtime state written by the provisioner/teardown, never operator input — the
+    # same reason resource_expiry_armed_at isn't a panel field.
+    "web_jump_id", "web_jump_tfstate", "vault_account_id", "jumpoint_egress_ip",
+    # rancher-only, and read by NOTHING: an sra_web_jump has no local listen port
+    # (that concept belongs to protocol-tunnel jumps — k8s_api_tunnel_local_port).
+    # Binding an input would let an operator set a value that changes nothing.
+    "local_port",
+}
+
+
+def test_rancher_and_portainer_ui_panels_are_symmetrical():
+    """The two Web-Jump groups must stay bound in lockstep. rancher_ui_web_jump_enabled
+    was bound while its whole config group wasn't, so an admin could switch the broker ON
+    from Settings and then had no way to say which Jump Group / Gateway / Vault group /
+    Gateway cloud it used — env var or a hand-rolled PATCH only.
+
+    test_every_bound_panel_key_exists_on_some_feature_model cannot catch this: it checks
+    bound-implies-model, and here nothing was bound, so there was nothing for it to look
+    at. Unbound-but-declared needs its own guard, and a whole-template version of it would
+    be wrong — plenty of model fields are deliberately env-only.
+
+    Direction is both ways here, unlike that sweep: the features are mirrors, so a suffix
+    bound for one and missing for the other is a gap in whichever panel lacks it, not a
+    judgement about which came first."""
+    html = open(_SETTINGS_HTML, encoding="utf-8").read()
+    bound = set(re.findall(r"panelCfg\.((?:rancher|portainer)_ui_[a-z_0-9]+)", html))
+    suffixes = lambda prefix: {k[len(prefix):] for k in bound if k.startswith(prefix)}
+    rancher, portainer = suffixes("rancher_ui_"), suffixes("portainer_ui_")
+    assert rancher, "the k8s_management panel lost its rancher_ui_* bindings"
+    assert portainer, "the portainer panel lost its portainer_ui_* bindings"
+    only_portainer = portainer - rancher - _UI_SUFFIX_EXCLUSIONS
+    only_rancher = rancher - portainer - _UI_SUFFIX_EXCLUSIONS
+    assert not only_portainer, (
+        "bound as portainer_ui_* but not rancher_ui_*: "
+        f"{sorted(only_portainer)} — add the input to the k8s_management panel "
+        "or list the suffix in _UI_SUFFIX_EXCLUSIONS with a reason")
+    assert not only_rancher, (
+        "bound as rancher_ui_* but not portainer_ui_*: "
+        f"{sorted(only_rancher)} — add the input to the portainer panel "
+        "or list the suffix in _UI_SUFFIX_EXCLUSIONS with a reason")
+
+
+def test_bound_ui_keys_are_declared_on_the_model_their_prefix_names():
+    """Not a narrower copy of test_every_bound_panel_key_exists_on_some_feature_model:
+    that one compares against the UNION of every model, which is the right call for a
+    whole-template sweep (it needs no panel-block parsing) but accepts a key declared on
+    ANY model. Here the prefix names the owner, so this pins the stronger property — a
+    ``rancher_ui_*`` key must be on K8sManagementFeatureConfig specifically.
+
+    Worth pinning because these two groups differ only by prefix, which makes adding one
+    to the other's model the easy copy-paste slip. The union sweep would pass; the panel
+    binding it would still save nothing, since patch_feature_config validates against the
+    model of the feature in the URL."""
+    html = open(_SETTINGS_HTML, encoding="utf-8").read()
+    for prefix, fields in (("rancher_ui_", set(K8sManagementFeatureConfig.model_fields)),
+                           ("portainer_ui_", set(PortainerFeatureConfig.model_fields))):
+        bound = set(re.findall(rf"panelCfg\.({prefix}[a-z_0-9]+)", html))
+        assert bound and not (bound - fields), \
+            f"bound in settings.html but not on the model: {sorted(bound - fields)}"
+
+
+def test_rancher_ui_web_jump_fields_round_trip():
+    """The newly-bound Rancher group must survive GET->PATCH. ``rancher_ui_local_port``
+    is the int trap (unset must read 443, not ""), ``rancher_ui_verify_certificate`` the
+    bool one — a float/Optional annotation on either 422s the whole k8s panel on save."""
+    CONF.clear()
+    data = _read_feature("k8s_management", K8sManagementFeatureConfig)
+    assert data["rancher_ui_local_port"] == 443
+    assert isinstance(data["rancher_ui_local_port"], int)
+    assert data["rancher_ui_verify_certificate"] is False
+    assert data["rancher_ui_web_jump_enabled"] is False
+    # Strings fall back at resolve time (jump group → bt_jump_group_name etc.), so blank
+    # is the correct unset read — but the key must be PRESENT or the input has nothing
+    # to bind to and saves nothing.
+    for key in ("rancher_ui_jump_group", "rancher_ui_jumpoint_name",
+                "rancher_ui_vault_account_group_id"):
+        assert data[key] == "", f"{key} read back as {data[key]!r}"
+    assert data["rancher_ui_jumpoint_cloud"] == ""
+    # patch_feature_config does exactly this on save — it must not raise.
+    K8sManagementFeatureConfig(**data)
+
+
+def test_rancher_ui_web_jump_values_are_preserved():
+    """What the operator types in the panel comes back as typed — including the two
+    keys that had no other UI surface at all (gateway cloud, verify certificate)."""
+    CONF.clear()
+    CONF.update({"rancher_ui_jump_group": "K8s Admins",
+                 "rancher_ui_jumpoint_name": "bt-gateway-gcp",
+                 "rancher_ui_vault_account_group_id": "42",
+                 "rancher_ui_jumpoint_cloud": "aws",
+                 "rancher_ui_verify_certificate": "1"})
+    try:
+        data = _read_feature("k8s_management", K8sManagementFeatureConfig)
+        assert data["rancher_ui_jump_group"] == "K8s Admins"
+        assert data["rancher_ui_jumpoint_name"] == "bt-gateway-gcp"
+        assert data["rancher_ui_vault_account_group_id"] == "42"
+        assert data["rancher_ui_jumpoint_cloud"] == "aws"
+        assert data["rancher_ui_verify_certificate"] is True
+        K8sManagementFeatureConfig(**data)
     finally:
         CONF.clear()
 
