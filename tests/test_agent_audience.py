@@ -292,14 +292,25 @@ def test_an_enrolled_agent_stops_authenticating_after_a_reset():
 
 def test_minting_is_refused_when_the_pin_contradicts_public_base_url():
     """The live failure. Correcting the Settings field looked like it worked and changed
-    nothing, because the modal built its docker run from the stale pin."""
+    nothing, because the modal built its docker run from the stale pin.
+
+    The two URLs are checked by equality on the structured fields and then looked for in the
+    prose *through those fields*, rather than against literals of their own. That is the
+    stronger assertion — it ties the sentence to the values it was built from, so rewording
+    the prose cannot leave it naming one hostname and reporting another — and it keeps a
+    bare-URL ``in`` check out of the file, which CodeQL flags as incomplete URL
+    sanitization (rightly, for the authorization checks that query is written for).
+    """
     _state(public_base="https://dash.corrected.test", pinned="https://ui.stale.test")
     resp = _register()
     assert resp.status_code == 409, resp.text
     detail = resp.json()["detail"]
     assert detail["code"] == "agent_audience_conflict"
-    assert "https://ui.stale.test" in detail["message"]
-    assert "https://dash.corrected.test" in detail["message"]
+    assert detail["pinned"] == "https://ui.stale.test"
+    assert detail["public_base_url"] == "https://dash.corrected.test"
+    # An operator cannot act on "these disagree" without being told which is which.
+    assert detail["pinned"] in detail["message"]
+    assert detail["public_base_url"] in detail["message"]
     assert "reset" in detail["message"].lower(), "the refusal must name the remedy"
 
 
