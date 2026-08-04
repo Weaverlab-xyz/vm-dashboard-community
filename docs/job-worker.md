@@ -164,7 +164,7 @@ Already wired: the `worker` service in `docker-compose.yml` (and `docker-compose
 `scripts/onboard.sh` brings it up with the app. Replicas default to 1 — raise the caps before
 raising `WORKER_REPLICAS`.
 
-### Azure Container Apps
+### Container Apps
 
 The worker is its **own Container App**, not a sidecar in the app's. That is deliberate: a
 sidecar shares the parent's replica count and scale rules, so scaling the worker would scale
