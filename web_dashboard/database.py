@@ -257,6 +257,44 @@ class LoginAttempt(Base):
     attempted_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
 
 
+class EphemeralState(Base):
+    """One short-lived, single-use, opaque server-side value: a FIDO2/WebAuthn
+    ceremony challenge, or an OAuth/OIDC CSRF ``state`` (with its PKCE verifier).
+
+    In the database for the same reason as :class:`LoginAttempt` above, and it is
+    the same bug that motivated that one. This started life as a module-level dict
+    in ``services/fido2_service`` guarded by a ``threading.Lock`` — which is the
+    correct guard for the wrong hazard. The app runs ``gunicorn -w 2``, so a lock
+    makes the dict safe against the *threads* of one worker while leaving the two
+    worker **processes** with a private copy each.
+
+    Every ceremony this holds state for is split across two requests — begin/complete
+    for FIDO2, login/callback for OAuth — and nothing pins a browser to a worker. So
+    the second leg landed on the process that had never stored the state roughly half
+    the time, and the user got ``/login?error=invalid_state`` or "Invalid or expired
+    FIDO2 challenge" with nothing wrong on either side. More replicas, worse odds.
+
+    **Rows are deleted on read, and the delete is the lock.** These values are
+    single-use by definition: a CSRF state that survives its first presentation is
+    not a CSRF defence. Concurrent consumers race on ``DELETE ... WHERE key = ?``
+    and only the one whose rowcount is 1 gets the value — the same portable
+    atomic-claim the job queue uses, no ``SKIP LOCKED``.
+    """
+    __tablename__ = "ephemeral_state"
+
+    # Opaque and namespaced by the service that owns it (`vmcli:oauth:state:<uuid>`,
+    # `vmcli:fido2:challenge:<uuid>`), so one table serves both ceremonies without
+    # either being able to consume the other's rows.
+    key = Column(String(200), primary_key=True)
+    # Text, not String(n): the OIDC entry packs the redirect URI and the PKCE
+    # verifier together, and a FIDO2 entry is a serialised state dict.
+    value = Column(Text, nullable=False, default="")
+    # Wall clock, not time.monotonic() as the dict used — monotonic is per-process
+    # and meaningless to a reader that did not start the same process.
+    # Indexed because the sweep is a range scan on it.
+    expires_at = Column(DateTime, nullable=False, index=True)
+
+
 class RemoteAgent(Base):
     """A containerised agent running inside a private network that polls this
     dashboard for work — the inverse of every other execution path, which dials out
@@ -1323,6 +1361,9 @@ def init_db():
             # dashboard genuinely does not know yet.
             "ALTER TABLE remote_agents ADD COLUMN reported_job_types TEXT",
             # `hypervisor_connections` needs no entry: create_all makes new tables.
+            # Nor does `ephemeral_state` (FIDO2 challenges + OAuth/OIDC CSRF state),
+            # for the same reason. Nothing backfills that one either — every row it
+            # will ever hold expires within five minutes of being written.
         ]
         for stmt in _migrations:
             if _is_sqlite:

@@ -125,6 +125,34 @@ constructed but inert — `SlowAPIMiddleware` is not added, because a blanket pe
 cap would break the UI, which fires many API calls per page load. Missing rate limits
 elsewhere remain out of scope above.
 
+### SSO and WebAuthn ceremony state
+
+FIDO2/WebAuthn challenges and the OAuth/OIDC CSRF `state` (with its PKCE verifier) are
+held in the `ephemeral_state` table, deleted on read, and expire in 120 and 300 seconds
+respectively.
+
+In the database for the same reason as the login counters above, and it was the same
+mistake: this was a process-local dict guarded by a `threading.Lock`, which is the right
+guard for the wrong hazard. The app runs `gunicorn -w 2`, so the lock made the dict safe
+against one worker's threads while giving the two worker **processes** a private copy
+each. Both ceremonies span two requests — FIDO2 begin/complete, OAuth login/callback —
+and nothing pins a browser to a worker, so the second leg reached a process with no
+record of the state about half the time. That surfaced as `/login?error=invalid_state`
+or "Invalid or expired FIDO2 challenge" on a correct credential, and it got worse with
+each added replica. It was an availability bug rather than a bypass — the closed
+direction, never the open one — but it made SSO and MFA unreliable enough to discourage
+turning them on, which is its own security cost.
+
+**Consumption is a delete, and the delete's rowcount is the lock**, the same portable
+atomic claim the job queue uses. Only the caller whose `DELETE` matched a row may act on
+what it read, so a replayed `state` cannot be accepted twice even by two workers racing
+on it. An expired row is consumed rather than left behind: expiry is a rejection, not a
+retry. Expired rows are also swept on the write path, so an abandoned ceremony — a
+closed SSO tab, a cancelled touch prompt — no longer accumulates, which the dict did for
+the life of the worker.
+
+These rows are opaque, single-use and short-lived; they hold no credential and no token.
+
 ### Reverse proxies, forwarded headers, and the public URL
 
 `TRUSTED_PROXY_HOSTS` decides which peers may set `X-Forwarded-For` and
