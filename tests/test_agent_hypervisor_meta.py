@@ -70,11 +70,48 @@ def test_read_and_write_verbs_are_disjoint_and_complete():
     assert set(ahm.VALID_VERBS) == set(ahm.READ_VERBS) | set(ahm.WRITE_VERBS)
 
 
-def test_the_destructive_verbs_that_need_a_name_are_absent():
-    """snapshot/clone/deploy/delete each need an operator-supplied name, size or
-    network — a payload shape indistinguishable from a config file."""
-    for verb in ("snapshot", "clone", "deploy", "delete", "console", "exec"):
+def test_the_verbs_needing_operator_supplied_input_are_absent():
+    """clone/deploy/delete each need a name, a size or a network — a payload shape
+    indistinguishable from a config file, and a config file is one step from a script."""
+    for verb in ("clone", "deploy", "delete", "console", "exec", "migrate"):
         assert verb not in ahm.VALID_VERBS
+
+
+def test_snapshot_is_allowed_but_carries_no_name_field():
+    """Snapshot was held back precisely because a created thing needs a name, and a
+    name is a free-form string. It is allowed now only because the name is DERIVED —
+    so the absence of the field is the whole safety property, not an oversight.
+    """
+    assert "snapshot" in ahm.VALID_VERBS
+    for banned in ("snapshot_name", "name", "label", "description"):
+        assert banned not in ahm.HYPERVISOR_META_KEYS
+
+
+def test_the_snapshot_name_is_derived_from_the_job_id():
+    name = ahm.snapshot_name("a1b2c3d4-0000-1111-2222-333344445555")
+    assert name.startswith(ahm.SNAPSHOT_NAME_PREFIX)
+    assert "a1b2c3d4" in name
+    # Traceable back to the job row that made it, which an operator-typed name is not.
+    assert ahm.snapshot_name("x") != ahm.snapshot_name("y")
+
+
+def test_the_snapshot_name_cannot_carry_anything_hostile():
+    """The job id is ours, but this is the one string the agent hands to a hypervisor,
+    so it is constrained rather than trusted."""
+    for hostile in ("'; DROP TABLE vms; --", "../../etc/passwd", "a b\nc",
+                    "$(whoami)", "<script>"):
+        name = ahm.snapshot_name(hostile)
+        assert re.fullmatch(r"dash-[A-Za-z0-9-]*", name), name
+    assert len(ahm.snapshot_name("z" * 500)) <= len(ahm.SNAPSHOT_NAME_PREFIX) + 32
+
+
+def test_the_agent_derives_the_snapshot_name_rather_than_reading_it():
+    """The dashboard must not be able to choose it. If the agent ever read a name out
+    of the payload, the field would have to exist — and then operator text reaches a
+    hypervisor after all."""
+    body = ast.unparse(_agent_function("_run_verb"))
+    assert "_snapshot_name(job_id)" in body
+    assert "snapshot_name" not in str(ahm.HYPERVISOR_META_KEYS)
 
 
 def test_power_off_and_reset_are_separate_verbs_not_a_force_flag():
@@ -160,17 +197,42 @@ def _agent_function(name: str):
                 if isinstance(n, ast.FunctionDef) and n.name == name)
 
 
+def _payload_readers():
+    """Every function that could read the job payload, not just the entry point.
+
+    Walking only ``run_hypervisor`` was enough when it did the work itself. It now
+    delegates to ``_run_verb`` and the per-product implementations, so a test anchored
+    on the entry point alone would still pass while a host field was read two frames
+    down. Discovered exactly that way — the refactor silently narrowed this test.
+    """
+    with open(_AGENT, encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
+    wanted = re.compile(r"^(run_hypervisor|_run_verb|_sync_|_power_|_snapshot_)")
+    return [n for n in ast.walk(tree)
+            if isinstance(n, ast.FunctionDef) and wanted.match(n.name)]
+
+
 def test_the_agent_never_reads_a_host_from_the_job_payload():
     """The credential decision, in executable form.
 
-    ``run_hypervisor`` may read only the declared routing keys out of the payload. If
-    it ever subscripted it for a host, a port or a username, the dashboard would be
-    able to point an agent at an arbitrary endpoint — which is a proxy, and a proxy is
-    remote code execution with extra steps.
+    Nothing on the hypervisor path may read a host, a port or a credential out of the
+    payload. If anything did, the dashboard could point an agent at an arbitrary
+    endpoint — which is a proxy, and a proxy is remote code execution with extra steps.
     """
-    node = _agent_function("run_hypervisor")
+    nodes = _payload_readers()
+    assert len(nodes) >= 10, f"the sweep only found {[n.name for n in nodes]}"
     banned = {"host", "hostname", "port", "url", "uri", "endpoint", "server",
               "username", "user", "password", "secret", "token", "command"}
+    read = set()
+    for node in nodes:
+        read |= _payload_keys(node)
+    leaked = read & banned
+    assert not leaked, f"the hypervisor path reads {leaked} from the job payload"
+    assert read <= set(ahm.HYPERVISOR_META_KEYS), (
+        f"undeclared payload keys read: {read - set(ahm.HYPERVISOR_META_KEYS)}")
+
+
+def _payload_keys(node):
     read = set()
     for child in ast.walk(node):
         # payload.get("x")
@@ -185,11 +247,7 @@ def test_the_agent_never_reads_a_host_from_the_job_payload():
                 and child.value.id == "payload"
                 and isinstance(child.slice, ast.Constant)):
             read.add(child.slice.value)
-    leaked = read & banned
-    assert not leaked, f"run_hypervisor reads {leaked} from the job payload"
-    assert read <= set(ahm.HYPERVISOR_META_KEYS), (
-        f"run_hypervisor reads undeclared payload keys: "
-        f"{read - set(ahm.HYPERVISOR_META_KEYS)}")
+    return read
 
 
 def test_the_agent_dispatches_verbs_from_a_closed_dict():

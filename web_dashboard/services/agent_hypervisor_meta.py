@@ -40,21 +40,46 @@ HYPERVISOR_META_KEYS = (
 # Phase 4 ships ONE read-only verb. Shipping the *shape* before granting any *power* is
 # the point of splitting this from the write-verb phase.
 READ_VERBS = ("inventory_sync",)
-WRITE_VERBS = ("power_on", "power_off", "power_reset", "restart")
+WRITE_VERBS = ("power_on", "power_off", "power_reset", "restart", "snapshot")
 VALID_VERBS = READ_VERBS + WRITE_VERBS
 
+# `snapshot` was held back from the first cut because it is a *create* verb and a
+# created thing needs a name — and a name is a free-form string, which is the first
+# crack in the no-free-form-string discipline this module exists to keep.
+#
+# It lands now because the name is GENERATED rather than supplied: `dash-{job_id}`,
+# built server-side from an id the operator does not choose. So there is still no
+# field here through which operator text can reach a hypervisor, and there is still
+# no `snapshot_name` key. The job id also makes the snapshot traceable back to the
+# job row that made it, which an operator-typed name would not be.
+SNAPSHOT_NAME_PREFIX = "dash-"
+
+
+def snapshot_name(job_id: str) -> str:
+    """The name a snapshot verb creates. Derived, never supplied.
+
+    Constrained to the same charset as every other id that crosses this boundary, and
+    truncated: some hypervisors cap snapshot names well below a uuid plus a prefix.
+    """
+    clean = re.sub(r"[^A-Za-z0-9-]", "", str(job_id or ""))[:32]
+    return f"{SNAPSHOT_NAME_PREFIX}{clean}" if clean else f"{SNAPSHOT_NAME_PREFIX}unknown"
+
 # Deliberately absent, and each for its own reason:
-#   snapshot — a *create* verb needing a NAME, and a name is a free-form string: the
-#              first crack in the no-free-form-string discipline. Its failure mode is
-#              also "silently filled the datastore". When it lands the name is
-#              generated (dash-{job_id}), so no operator string ever crosses the wire.
 #   delete / deploy / clone / console — these need names, sizes, networks, cloud-init:
 #              a payload shape indistinguishable from a config file, and a config file
 #              is one step from a script. They stay dashboard-direct.
 # power_off and power_reset are separate verbs rather than one verb with a `force`
 # boolean, because a boolean flag on a destructive verb gets defaulted wrong exactly once.
 
-VALID_KINDS = ("vsphere", "proxmox", "nutanix", "xcpng")
+# `esxi` is a DISTINCT kind from `vsphere` on purpose. Same product, different
+# transport: vCenter serves the Automation REST API the agent speaks directly, while a
+# bare ESXi host serves SOAP only and has to go through the sibling runner. Conflating
+# them is how someone ends up pointing pyVmomi at a vCenter for no reason.
+VALID_KINDS = ("vsphere", "proxmox", "nutanix", "xcpng", "hyperv", "esxi")
+
+# The two with no in-agent transport. Listed here as well as in the agent so the
+# dashboard can say "this needs the sibling runner" before queueing anything.
+SIBLING_KINDS = ("hyperv", "esxi")
 VALID_TARGET_TYPES = ("qemu", "lxc", "vm")
 
 MAX_PAGE_SIZE = 1000
