@@ -145,9 +145,25 @@ Read-only. Safe to run against production at any time:
     --target https://dash.example.com
 ```
 
-You get `ADD` / `CHANGE` / `SAME`, with secret values shown as `‹secret›`. A key
-the *target* has redacted reports as `UNKNOWN` — the comparison is genuinely
-impossible, so the tool says so instead of guessing.
+You get `ADD` / `CHANGE` / `SAME`. A key the *target* has redacted reports as
+`UNKNOWN` — the comparison is genuinely impossible, so the tool says so instead
+of guessing.
+
+**Values are never printed**, only a length and a short fingerprint:
+
+```
+ADD: 2
+    azure_client_id = 36 chars #4a05cc1a
+    bt_client_secret = 12 chars #1f3fa74b
+```
+
+That is deliberate, and it is the opposite of how the migration itself decides.
+Choosing what to *carry* fails open, because a credential that silently doesn't
+cross leaves you with a half-working target. Choosing what to *show* fails
+closed, because any name-based rule for "is this a secret" only has to be wrong
+once to put a live credential on a terminal or in a CI log. The fingerprint
+answers what a diff is actually for — did this change, is it the value I
+expect — and the bundle is where you read values, which is why it is mode 0600.
 
 ### 4. Snapshot the target
 

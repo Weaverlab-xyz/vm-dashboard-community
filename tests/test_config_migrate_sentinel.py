@@ -135,6 +135,41 @@ def test_client_refuses_to_send_bulleted_values():
     assert refused == {"azure_client_secret": classify.MASKED}
 
 
+def test_diff_output_never_contains_a_config_value():
+    """No config value reaches stderr, secret-shaped or not.
+
+    The earlier version printed values and redacted whatever
+    ``classify.is_secret`` recognised, which is the wrong way round: choosing
+    what to *migrate* should fail open, because a credential that silently does
+    not cross breaks the target, while choosing what to *display* must fail
+    closed, because a name heuristic that is wrong once puts a live credential
+    on a terminal or in a CI log. CodeQL flagged exactly this
+    (py/clear-text-logging-sensitive-data) and was right to.
+    """
+    from web_dashboard.scripts.config_migrate.__main__ import _show
+
+    cases = [
+        # A key the heuristic knows is a secret…
+        ("bt_client_secret", "s3cr3t-value-aaaaaaaa"),
+        # …and one it does not. This is the case that used to leak.
+        ("entitle_agent_existing_secret_helm_key", "another-live-credential"),
+        ("some_key_invented_next_month", "hunter2"),
+        # Vault references are only pointers, but they still name a vault and a
+        # secret, so they are not free to print either.
+        ("epml_pat", "azure_kv://primary/epml-pat"),
+        ("azure_location", "eastus2"),
+    ]
+    for key, value in cases:
+        rendered = _show(key, value)
+        assert value not in rendered, f"{key}: value leaked into diff output"
+        assert str(len(value)) in rendered, f"{key}: length should still be reported"
+
+    # Different values must be distinguishable, or the diff cannot be read.
+    assert _show("k", "alpha") != _show("k", "bravo")
+    assert _show("k", "alpha") == _show("k", "alpha")
+    assert _show("k", "") == "(empty)"
+
+
 def test_region_values_reach_the_payload_unfiltered():
     """Region fields bypass the exclusion check, so the second guard is load-bearing.
 

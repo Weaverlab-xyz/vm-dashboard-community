@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import hashlib
 import json
 import os
 import subprocess
@@ -46,8 +47,8 @@ def _unicode_ok() -> bool:
         return False
 
 
-_GLYPHS = ({"ok": "✓", "bad": "✗", "rule": "──", "secret": "‹secret›"} if _unicode_ok()
-           else {"ok": "OK", "bad": "X", "rule": "--", "secret": "<secret>"})
+_GLYPHS = ({"ok": "✓", "bad": "✗", "rule": "──"} if _unicode_ok()
+           else {"ok": "OK", "bad": "X", "rule": "--"})
 
 
 def _c(code: str, text: str) -> str:
@@ -308,12 +309,30 @@ def _preflight_vault_refs(payload: dict) -> list[str]:
     return sorted(ids)
 
 
-def _show(key: str, value: object) -> str:
-    """Render a value for the diff, redacting anything secret-shaped."""
-    if classify.is_secret(key):
-        return _GLYPHS["secret"]
+def _fingerprint(text: str) -> str:
+    """Eight hex characters of SHA-256 — enough to tell two values apart."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:8]
+
+
+def _show(_key: str, value: object) -> str:
+    """Describe a value for the diff **without printing it**.
+
+    An earlier version showed the value and redacted whatever
+    ``classify.is_secret`` recognised. That is the wrong way round. Deciding
+    what to *migrate* should fail open, because a credential that silently
+    does not cross breaks the target; deciding what to *display* must fail
+    closed, because a name heuristic that is wrong once puts a live credential
+    on a terminal, in a CI log, or on a shared screen. The two directions have
+    opposite costs, so they get opposite defaults.
+
+    A length and a fingerprint answer the question a diff actually asks — did
+    this change, and is it the value I expect — and neither is reversible. The
+    bundle is the reviewable artifact and is mode 0600; read values there.
+    """
     text = str(value)
-    return text if len(text) <= 60 else text[:57] + "..."
+    if not text:
+        return "(empty)"
+    return f"{len(text)} chars #{_fingerprint(text)}"
 
 
 def _diff(payload: dict, current: dict) -> dict[str, list]:
@@ -411,7 +430,12 @@ def cmd_diff(args: argparse.Namespace, *, apply: bool = False) -> int:
             resp = client.import_config(payload)
         except ApiError as exc:
             die(f"Import failed: {exc.detail}")
-        ok(f"Wrote {len(payload)} keys. Server said: {json.dumps(resp)[:200]}")
+        # Report the server's own counts rather than echoing its response body:
+        # the body is not ours to vouch for, and a future field on it should not
+        # be able to reach a terminal or a CI log unreviewed.
+        merged = resp.get("regions_merged") or []
+        ok(f"Wrote {resp.get('keys_written', len(payload))} keys"
+           + (f"; merged region sets: {', '.join(str(r) for r in merged)}" if merged else ""))
 
     if endpoints and not args.only:
         _sync_endpoints(client, endpoints)
