@@ -66,7 +66,7 @@ async def register_begin(
     )
 
     # state is a plain str-keyed dict (challenge is base64url string, user_verification is str)
-    challenge_token = store_fido2_challenge({"state": state, "user_id": current_user.id})
+    challenge_token = store_fido2_challenge(db, {"state": state, "user_id": current_user.id})
 
     return Fido2RegisterBeginResponse(
         challenge_token=challenge_token,
@@ -85,7 +85,7 @@ async def register_complete(
     db: Session = Depends(get_db),
 ):
     """Verify attestation and store the new FIDO2 credential."""
-    stored = fetch_fido2_challenge(body.challenge_token)
+    stored = fetch_fido2_challenge(db, body.challenge_token)
     if not stored or stored.get("user_id") != current_user.id:
         raise HTTPException(status_code=400, detail="Invalid or expired challenge token")
 

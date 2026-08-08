@@ -377,7 +377,7 @@ async def login_mfa(
     if not challenge_token:
         raise HTTPException(status_code=400, detail="Missing challenge_token in assertion_response")
 
-    stored = fetch_fido2_challenge(challenge_token)
+    stored = fetch_fido2_challenge(db, challenge_token)
     if not stored or stored.get("user_id") != user_id:
         raise HTTPException(status_code=400, detail="Invalid or expired FIDO2 challenge")
 
@@ -469,7 +469,7 @@ async def webauthn_login_begin(
         user_verification="preferred",
     )
 
-    challenge_token = store_fido2_challenge({"state": state, "user_id": user.id})
+    challenge_token = store_fido2_challenge(db, {"state": state, "user_id": user.id})
 
     return Fido2AuthBeginResponse(
         challenge_token=challenge_token,
@@ -641,7 +641,7 @@ def _build_redirect_uri(request: Request) -> str:
 
 
 @router.get("/oauth/azure/login")
-async def oauth_azure_login(request: Request):
+async def oauth_azure_login(request: Request, db: Session = Depends(get_db)):
     """Redirect the browser to Azure AD for OAuth login."""
     client_id, _, tenant_id = _oauth_cfg()
     if not client_id or not tenant_id:
@@ -652,7 +652,7 @@ async def oauth_azure_login(request: Request):
 
     redirect_uri = _build_redirect_uri(request)
     state = str(uuid.uuid4())
-    store_oauth_state(state, redirect_uri)
+    store_oauth_state(db, state, redirect_uri)
 
     import msal  # noqa: F401 (unused var `app` removed)
     # Build the authorization URL manually so we can include the state parameter
@@ -685,7 +685,7 @@ async def oauth_azure_callback(
             status_code=302,
         )
 
-    stored_redirect_uri = verify_and_consume_oauth_state(state) if state else None
+    stored_redirect_uri = verify_and_consume_oauth_state(db, state) if state else None
     if stored_redirect_uri is None:
         return RedirectResponse(url="/login?error=invalid_state", status_code=302)
 
@@ -751,7 +751,7 @@ def _oidc_redirect_uri(request: Request) -> str:
 
 
 @router.get("/oauth/oidc/login")
-async def oauth_oidc_login(request: Request):
+async def oauth_oidc_login(request: Request, db: Session = Depends(get_db)):
     """Redirect to the configured OIDC provider (authorization code + PKCE)."""
     from ..services import oidc_service
     if not oidc_service.is_configured():
@@ -765,7 +765,7 @@ async def oauth_oidc_login(request: Request):
         hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
     # The state store holds one string, so pack the verifier alongside the URI.
     # It never leaves the server and is consumed atomically on callback.
-    store_oauth_state(state, f"{redirect_uri}|{verifier}")
+    store_oauth_state(db, state, f"{redirect_uri}|{verifier}")
 
     try:
         return RedirectResponse(url=oidc_service.authorization_url(redirect_uri, state, challenge),
@@ -791,7 +791,7 @@ async def oauth_oidc_callback(
             url="/login?" + urlencode({"error": "oauth_error", "detail": error_description or error}),
             status_code=302)
 
-    stored = verify_and_consume_oauth_state(state) if state else None
+    stored = verify_and_consume_oauth_state(db, state) if state else None
     if not stored:
         return RedirectResponse(url="/login?error=invalid_state", status_code=302)
     if not code:
