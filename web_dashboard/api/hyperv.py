@@ -14,6 +14,7 @@ from .auth import get_current_user
 from ..services import job_service, workgroup_override_service
 from ..services import hyperv_service
 from ..services.hyperv_service import HyperVError
+from .hypervisor_deps import conn_in_task, conn_or_error
 
 router = APIRouter(prefix="/api/hyperv", tags=["hyperv"])
 
@@ -29,6 +30,7 @@ def _override_key(vm: dict) -> str:
 
 @router.get("/vms")
 async def get_vms(
+    connection_id: str = "",
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -39,7 +41,7 @@ async def get_vms(
     VMs with no override are admin-only.
     """
     try:
-        vms = await hyperv_service.list_vms()
+        vms = await hyperv_service.list_vms(conn_or_error(db, "hyperv", connection_id))
     except HyperVError as e:
         raise HTTPException(status_code=502, detail=str(e))
 
@@ -65,12 +67,12 @@ class PowerOpRequest(BaseModel):
     name: str = ""
 
 
-async def _run_power_op(job_id: str, vmid: str, name: str, op: str, label: str):
+async def _run_power_op(job_id: str, connection_id: str, vmid: str, name: str, op: str, label: str):
     from ..database import SessionLocal
     db = SessionLocal()
     try:
         job_service.update_progress(db, job_id, 10, f"{op.capitalize()}ing {label}…")
-        result = await hyperv_service.power_op(vmid, name, op)
+        result = await hyperv_service.power_op(conn_in_task(db, "hyperv", connection_id), vmid, name, op)
         job_service.set_completed(db, job_id, result)
     except Exception as e:
         job_service.set_failed(db, job_id, str(e))
@@ -82,10 +84,14 @@ def _power_endpoint(op: str):
     async def _handler(
         payload: PowerOpRequest,
         background_tasks: BackgroundTasks,
+        connection_id: str = "",
         db: Session = Depends(get_db),
         current_user: User = Depends(get_current_user),
     ):
         label = payload.name or payload.vmid
+        # Resolve now so a bad id is a 404 the caller sees, not a job that fails later,
+        # then carry the ID (never the credential) into the background task.
+        conn = conn_or_error(db, "hyperv", connection_id)
         job = job_service.create_job(
             db,
             job_type=f"hyperv_{op}",
@@ -94,7 +100,7 @@ def _power_endpoint(op: str):
             owner_id=current_user.id,
         )
         background_tasks.add_task(
-            _run_power_op, job.id, payload.vmid, payload.name, op, label
+            _run_power_op, job.id, conn.id, payload.vmid, payload.name, op, label
         )
         return {"job_id": job.id, "status": "queued"}
 

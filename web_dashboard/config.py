@@ -165,6 +165,11 @@ class Settings(BaseSettings):
     xcpng_password: str = ""            # encrypted at rest
     xcpng_verify_ssl: bool = False      # set True for a valid TLS cert
 
+    # Agent-brokered hypervisor inventory sync. The connections themselves live in the
+    # `hypervisor_connections` table, not here — these two only set the cadence.
+    hypervisor_sync_interval_minutes: int = 30   # per-connection override: options.sync_interval_minutes
+    hypervisor_sync_poll_seconds: int = 300      # how often the loop checks for due syncs
+
     # Hyper-V connection (WinRM to Windows host running Hyper-V)
     hyperv_host: str = ""               # hostname or IP of the Hyper-V host
     hyperv_port: int = 5985             # 5985 = HTTP (default), 5986 = HTTPS

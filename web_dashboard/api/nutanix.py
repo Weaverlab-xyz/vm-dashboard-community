@@ -14,6 +14,7 @@ from .auth import get_current_user
 from ..services import job_service, workgroup_service, workgroup_override_service
 from ..services import nutanix_service
 from ..services.nutanix_service import NutanixError
+from .hypervisor_deps import conn_in_task, conn_or_error
 
 router = APIRouter(prefix="/api/nutanix", tags=["nutanix"])
 
@@ -46,31 +47,41 @@ async def get_cloud_images(current_user: User = Depends(get_current_user)):
 # ── Cluster / subnet / image listing ─────────────────────────────────────────
 
 @router.get("/clusters")
-async def get_clusters(current_user: User = Depends(get_current_user)):
+async def get_clusters(connection_id: str = "",
+                     db: Session = Depends(get_db),
+                     current_user: User = Depends(get_current_user)):
     try:
-        return await nutanix_service.list_clusters()
+        return await nutanix_service.list_clusters(
+            conn_or_error(db, "nutanix", connection_id))
     except NutanixError as e:
         raise HTTPException(status_code=502, detail=str(e))
 
 
 @router.get("/subnets")
-async def get_subnets(current_user: User = Depends(get_current_user)):
+async def get_subnets(connection_id: str = "",
+                     db: Session = Depends(get_db),
+                     current_user: User = Depends(get_current_user)):
     try:
-        return await nutanix_service.list_subnets()
+        return await nutanix_service.list_subnets(
+            conn_or_error(db, "nutanix", connection_id))
     except NutanixError as e:
         raise HTTPException(status_code=502, detail=str(e))
 
 
 @router.get("/images")
-async def get_images(current_user: User = Depends(get_current_user)):
+async def get_images(connection_id: str = "",
+                     db: Session = Depends(get_db),
+                     current_user: User = Depends(get_current_user)):
     try:
-        return await nutanix_service.list_images()
+        return await nutanix_service.list_images(
+            conn_or_error(db, "nutanix", connection_id))
     except NutanixError as e:
         raise HTTPException(status_code=502, detail=str(e))
 
 
 @router.get("/vms")
 async def get_vms(
+    connection_id: str = "",
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -85,7 +96,7 @@ async def get_vms(
     VMs with no resolved workgroup are admin-only.
     """
     try:
-        vms = await nutanix_service.list_vms()
+        vms = await nutanix_service.list_vms(conn_or_error(db, "nutanix", connection_id))
     except NutanixError as e:
         raise HTTPException(status_code=502, detail=str(e))
 
@@ -130,12 +141,13 @@ class ImportImageRequest(BaseModel):
     source_uri: str
 
 
-async def _run_import(job_id: str, name: str, source_uri: str):
+async def _run_import(job_id: str, connection_id: str, name: str, source_uri: str):
     from ..database import SessionLocal
     db = SessionLocal()
     try:
         job_service.update_progress(db, job_id, 5, f"Importing '{name}' from URL…")
-        result = await nutanix_service.import_image(name, source_uri)
+        result = await nutanix_service.import_image(
+            conn_in_task(db, "nutanix", connection_id), name, source_uri)
         job_service.set_completed(db, job_id, result)
     except Exception as e:
         job_service.set_failed(db, job_id, str(e))
@@ -147,17 +159,20 @@ async def _run_import(job_id: str, name: str, source_uri: str):
 async def import_image(
     payload: ImportImageRequest,
     background_tasks: BackgroundTasks,
+    connection_id: str = "",
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    conn = conn_or_error(db, "nutanix", connection_id)
     job = job_service.create_job(
         db,
         job_type="nutanix_import_image",
         created_by=current_user.username,
         workgroup="nutanix",
-        metadata={"image_name": payload.name, "source_uri": payload.source_uri},
+        metadata={"image_name": payload.name, "source_uri": payload.source_uri,
+                  "connection_id": conn.id},
     )
-    background_tasks.add_task(_run_import, job.id, payload.name, payload.source_uri)
+    background_tasks.add_task(_run_import, job.id, conn.id, payload.name, payload.source_uri)
     return {"job_id": job.id, "status": "queued"}
 
 
@@ -175,12 +190,13 @@ class DeployRequest(BaseModel):
     disk_size_mib: int = 40960
 
 
-async def _run_deploy(job_id: str, req: DeployRequest):
+async def _run_deploy(job_id: str, connection_id: str, req: DeployRequest):
     from ..database import SessionLocal
     db = SessionLocal()
     try:
         job_service.update_progress(db, job_id, 10, f"Creating VM '{req.vm_name}'…")
         result = await nutanix_service.deploy_vm(
+            conn_in_task(db, "nutanix", connection_id),
             vm_name=req.vm_name,
             image_uuid=req.image_uuid,
             cluster_uuid=req.cluster_uuid,
@@ -201,10 +217,12 @@ async def _run_deploy(job_id: str, req: DeployRequest):
 async def deploy(
     payload: DeployRequest,
     background_tasks: BackgroundTasks,
+    connection_id: str = "",
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     canonical = _validate_workgroup(db, current_user, payload.workgroup)
+    conn = conn_or_error(db, "nutanix", connection_id)
     job = job_service.create_job(
         db,
         job_type="nutanix_deploy",
@@ -217,20 +235,24 @@ async def deploy(
             "vm_name": payload.vm_name,
             "image_uuid": payload.image_uuid,
             "cluster_uuid": payload.cluster_uuid,
+            # Pinned at enqueue, never re-chosen at execution: flipping the
+            # default mid-flight must not redirect a queued deploy.
+            "connection_id": conn.id,
         },
     )
-    background_tasks.add_task(_run_deploy, job.id, payload)
+    background_tasks.add_task(_run_deploy, job.id, conn.id, payload)
     return {"job_id": job.id, "status": "queued"}
 
 
 # ── Delete image ──────────────────────────────────────────────────────────────
 
-async def _run_delete_image(job_id: str, uuid: str, name: str):
+async def _run_delete_image(job_id: str, connection_id: str, uuid: str, name: str):
     from ..database import SessionLocal
     db = SessionLocal()
     try:
         job_service.update_progress(db, job_id, 10, f"Deleting image '{name}'…")
-        result = await nutanix_service.delete_image(uuid)
+        result = await nutanix_service.delete_image(
+            conn_in_task(db, "nutanix", connection_id), uuid)
         job_service.set_completed(db, job_id, result)
     except Exception as e:
         job_service.set_failed(db, job_id, str(e))
@@ -242,10 +264,12 @@ async def _run_delete_image(job_id: str, uuid: str, name: str):
 async def delete_image(
     uuid: str,
     name: str = "",
+    connection_id: str = "",
     background_tasks: BackgroundTasks = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    conn = conn_or_error(db, "nutanix", connection_id)
     job = job_service.create_job(
         db,
         job_type="nutanix_delete_image",
@@ -253,18 +277,19 @@ async def delete_image(
         workgroup="nutanix",
         metadata={"image_uuid": uuid, "image_name": name},
     )
-    background_tasks.add_task(_run_delete_image, job.id, uuid, name)
+    background_tasks.add_task(_run_delete_image, job.id, conn.id, uuid, name)
     return {"job_id": job.id, "status": "queued"}
 
 
 # ── Delete VM ─────────────────────────────────────────────────────────────────
 
-async def _run_delete_vm(job_id: str, uuid: str, name: str):
+async def _run_delete_vm(job_id: str, connection_id: str, uuid: str, name: str):
     from ..database import SessionLocal
     db = SessionLocal()
     try:
         job_service.update_progress(db, job_id, 10, f"Deleting VM '{name}'…")
-        result = await nutanix_service.delete_vm(uuid, name)
+        result = await nutanix_service.delete_vm(
+            conn_in_task(db, "nutanix", connection_id), uuid, name)
         job_service.set_completed(db, job_id, result)
     except Exception as e:
         job_service.set_failed(db, job_id, str(e))
@@ -276,18 +301,20 @@ async def _run_delete_vm(job_id: str, uuid: str, name: str):
 async def delete_vm(
     uuid: str,
     name: str = "",
+    connection_id: str = "",
     background_tasks: BackgroundTasks = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    conn = conn_or_error(db, "nutanix", connection_id)
     job = job_service.create_job(
         db,
         job_type="nutanix_delete_vm",
         created_by=current_user.username,
         workgroup="nutanix",
-        metadata={"vm_uuid": uuid, "vm_name": name},
+        metadata={"vm_uuid": uuid, "vm_name": name, "connection_id": conn.id},
     )
-    background_tasks.add_task(_run_delete_vm, job.id, uuid, name)
+    background_tasks.add_task(_run_delete_vm, job.id, conn.id, uuid, name)
     return {"job_id": job.id, "status": "queued"}
 
 
@@ -299,12 +326,13 @@ class PowerOpRequest(BaseModel):
     cluster: str = ""
 
 
-async def _run_power_op(job_id: str, uuid: str, name: str, op: str, label: str):
+async def _run_power_op(job_id: str, connection_id: str, uuid: str, name: str, op: str, label: str):
     from ..database import SessionLocal
     db = SessionLocal()
     try:
         job_service.update_progress(db, job_id, 10, f"{op.capitalize()}ing {label}…")
-        result = await nutanix_service.power_op(uuid, name, op)
+        result = await nutanix_service.power_op(
+            conn_in_task(db, "nutanix", connection_id), uuid, name, op)
         job_service.set_completed(db, job_id, result)
     except Exception as e:
         job_service.set_failed(db, job_id, str(e))
@@ -316,10 +344,12 @@ def _power_endpoint(op: str):
     async def _handler(
         payload: PowerOpRequest,
         background_tasks: BackgroundTasks,
+        connection_id: str = "",
         db: Session = Depends(get_db),
         current_user: User = Depends(get_current_user),
     ):
         label = payload.name or payload.uuid
+        conn = conn_or_error(db, "nutanix", connection_id)
         job = job_service.create_job(
             db,
             job_type=f"nutanix_{op}",
@@ -333,7 +363,7 @@ def _power_endpoint(op: str):
             },
         )
         background_tasks.add_task(
-            _run_power_op, job.id, payload.uuid, payload.name, op, label
+            _run_power_op, job.id, conn.id, payload.uuid, payload.name, op, label
         )
         return {"job_id": job.id, "status": "queued"}
 

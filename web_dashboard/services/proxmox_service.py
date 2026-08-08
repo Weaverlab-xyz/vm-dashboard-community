@@ -75,14 +75,10 @@ class ProxmoxError(Exception):
     pass
 
 
-def _cfg(key: str) -> str:
-    from . import config_service
-    return config_service.get(key) or ""
-
-
-def _cfg_bool(key: str, default: bool = False) -> bool:
-    from . import config_service
-    return config_service.get_bool(key, default)
+# No _cfg here any more. This module used to read the singleton config keys directly,
+# which meant there could only ever be ONE Proxmox cluster. It now takes a resolved
+# `Connection` (services/hypervisor_connection_service) as its first argument, and the
+# router is the only layer that chooses which one.
 
 
 def _require_proxmoxer():
@@ -94,45 +90,36 @@ def _require_proxmoxer():
         )
 
 
-def _client():
-    """Return an authenticated ProxmoxAPI client."""
+def _client(conn):
+    """Authenticated ProxmoxAPI client for ONE connection.
+
+    Takes a resolved Connection rather than reading config: this module no longer knows
+    there is such a thing as *the* Proxmox host. `conn` is threaded from the router,
+    which is the only layer that chooses a connection.
+
+    Token auth when the connection carries a token id (the documented preference,
+    seeded from PROXMOX_TOKEN_ID); password auth otherwise. Either way the secret half
+    is `conn.secret`.
+    """
     _require_proxmoxer()
     from proxmoxer import ProxmoxAPI
 
-    host = _cfg("proxmox_host")
+    host = conn.host
     if not host:
-        raise ProxmoxError("PROXMOX_HOST is not configured")
+        raise ProxmoxError(f"Connection {conn.name!r} has no host configured")
 
-    port = int(_cfg("proxmox_port") or "8006")
-    verify_ssl = _cfg_bool("proxmox_verify_ssl", False)
-    user = _cfg("proxmox_user") or "root@pam"
+    common = dict(port=int(conn.port or 8006), verify_ssl=conn.verify_ssl)
+    user = conn.username or "root@pam"
+    token_id = (conn.options or {}).get("token_id") or ""
 
-    token_id = _cfg("proxmox_token_id")
-    token_secret = _cfg("proxmox_token_secret")
-
-    if token_id and token_secret:
-        return ProxmoxAPI(
-            host,
-            user=user,
-            token_name=token_id,
-            token_value=token_secret,
-            port=port,
-            verify_ssl=verify_ssl,
-        )
-
-    password = _cfg("proxmox_password")
-    if not password:
+    if token_id:
+        return ProxmoxAPI(host, user=user, token_name=token_id,
+                          token_value=conn.secret, **common)
+    if not conn.secret:
         raise ProxmoxError(
-            "Proxmox credentials not configured. "
-            "Set PROXMOX_TOKEN_ID + PROXMOX_TOKEN_SECRET or PROXMOX_PASSWORD."
-        )
-    return ProxmoxAPI(
-        host,
-        user=user,
-        password=password,
-        port=port,
-        verify_ssl=verify_ssl,
-    )
+            f"Connection {conn.name!r} has neither an API token nor a password. "
+            f"Edit it on the Connections page.")
+    return ProxmoxAPI(host, user=user, password=conn.secret, **common)
 
 
 # ── Task polling ──────────────────────────────────────────────────────────────
@@ -154,8 +141,8 @@ def _wait_for_task_sync(pve, node: str, upid: str, timeout: int = 600) -> None:
 
 # ── Node helpers ──────────────────────────────────────────────────────────────
 
-def _list_nodes_sync() -> list[dict]:
-    pve = _client()
+def _list_nodes_sync(conn) -> list[dict]:
+    pve = _client(conn)
     nodes = []
     for n in pve.nodes.get():
         nodes.append({
@@ -171,9 +158,9 @@ def _list_nodes_sync() -> list[dict]:
 
 # ── Resource listing ──────────────────────────────────────────────────────────
 
-def _list_node_resources_sync(node: str) -> list[dict]:
+def _list_node_resources_sync(conn, node: str) -> list[dict]:
     """List QEMU VMs and LXC containers on a single node."""
-    pve = _client()
+    pve = _client(conn)
     resources = []
 
     for vm in pve.nodes(node).qemu.get():
@@ -185,8 +172,8 @@ def _list_node_resources_sync(node: str) -> list[dict]:
     return sorted(resources, key=lambda x: x["vmid"])
 
 
-def _list_all_resources_sync(nodes: Optional[list[str]] = None) -> list[dict]:
-    pve = _client()
+def _list_all_resources_sync(conn, nodes: Optional[list[str]] = None) -> list[dict]:
+    pve = _client(conn)
     if nodes is None:
         nodes = [n["node"] for n in pve.nodes.get()]
 
@@ -222,9 +209,9 @@ def _normalise(raw: dict, node: str, vm_type: str) -> dict:
 
 # ── Storage listing ───────────────────────────────────────────────────────────
 
-def _list_storage_sync(node: str) -> list[dict]:
+def _list_storage_sync(conn, node: str) -> list[dict]:
     """List storage pools on a node that are active and support images/import."""
-    pve = _client()
+    pve = _client(conn)
     stores = pve.nodes(node).storage.get()
     result = []
     for s in stores:
@@ -242,15 +229,16 @@ def _list_storage_sync(node: str) -> list[dict]:
 
 # ── Template listing ──────────────────────────────────────────────────────────
 
-def _list_templates_sync() -> list[dict]:
+def _list_templates_sync(conn) -> list[dict]:
     """Return all QEMU templates across all nodes."""
-    all_resources = _list_all_resources_sync()
+    all_resources = _list_all_resources_sync(conn)
     return [r for r in all_resources if r["template"] and r["type"] == "qemu"]
 
 
 # ── Image import + template creation ─────────────────────────────────────────
 
 def _import_and_create_template_sync(
+    conn,
     node: str,
     storage: str,
     image_url: str,
@@ -266,7 +254,7 @@ def _import_and_create_template_sync(
 
     Requires PVE 7.2+ (download-url API + import-from scsi0 syntax).
     """
-    pve = _client()
+    pve = _client(conn)
 
     # Step 1: Download the cloud image to storage (content=import)
     logger.info("Proxmox: downloading %s to %s:%s", image_filename, node, storage)
@@ -323,6 +311,7 @@ def _import_and_create_template_sync(
 # ── Deploy from template ──────────────────────────────────────────────────────
 
 def _deploy_from_template_sync(
+    conn,
     node: str,
     template_vmid: int,
     vm_name: str,
@@ -331,7 +320,7 @@ def _deploy_from_template_sync(
     full_clone: bool = True,
 ) -> dict:
     """Clone a template and start the resulting VM."""
-    pve = _client()
+    pve = _client(conn)
 
     new_vmid = int(pve.cluster.nextid.get())
     logger.info("Proxmox: cloning template %d → %d (%s)", template_vmid, new_vmid, vm_name)
@@ -367,9 +356,9 @@ def _deploy_from_template_sync(
 
 # ── Delete VM or template ─────────────────────────────────────────────────────
 
-def _delete_vm_sync(node: str, vmid: int, vm_type: str = "qemu") -> dict:
+def _delete_vm_sync(conn, node: str, vmid: int, vm_type: str = "qemu") -> dict:
     """Stop (if running) and delete a QEMU VM or LXC container."""
-    pve = _client()
+    pve = _client(conn)
     endpoint = pve.nodes(node).qemu(vmid) if vm_type == "qemu" else pve.nodes(node).lxc(vmid)
 
     try:
@@ -389,13 +378,13 @@ def _delete_vm_sync(node: str, vmid: int, vm_type: str = "qemu") -> dict:
 
 # ── Power operations ──────────────────────────────────────────────────────────
 
-def _power_op_sync(node: str, vmid: int, vm_type: str, op: str) -> dict:
+def _power_op_sync(conn, node: str, vmid: int, vm_type: str, op: str) -> dict:
     """
     Execute a power operation and wait for the resulting task to complete.
     op must be one of: start, stop, shutdown, reboot, reset, suspend.
     Returns {"task": upid, "status": "OK"} on success.
     """
-    pve = _client()
+    pve = _client(conn)
     endpoint = pve.nodes(node).qemu(vmid) if vm_type == "qemu" else pve.nodes(node).lxc(vmid)
 
     upid = getattr(endpoint.status, op).post()
@@ -406,8 +395,8 @@ def _power_op_sync(node: str, vmid: int, vm_type: str, op: str) -> dict:
 
 # ── VM config / detail ────────────────────────────────────────────────────────
 
-def _get_config_sync(node: str, vmid: int, vm_type: str) -> dict:
-    pve = _client()
+def _get_config_sync(conn, node: str, vmid: int, vm_type: str) -> dict:
+    pve = _client(conn)
     endpoint = pve.nodes(node).qemu(vmid) if vm_type == "qemu" else pve.nodes(node).lxc(vmid)
     try:
         cfg = endpoint.config.get()
@@ -456,36 +445,36 @@ def list_cloud_images() -> list[dict]:
     return _CLOUD_IMAGES
 
 
-async def list_nodes() -> list[dict]:
+async def list_nodes(conn) -> list[dict]:
     try:
-        return await asyncio.to_thread(_list_nodes_sync)
+        return await asyncio.to_thread(_list_nodes_sync, conn)
     except ProxmoxError:
         raise
     except Exception as e:
         raise ProxmoxError(f"Failed to list Proxmox nodes: {e}") from e
 
 
-async def list_resources(nodes: Optional[list[str]] = None) -> list[dict]:
+async def list_resources(conn, nodes: Optional[list[str]] = None) -> list[dict]:
     try:
-        return await asyncio.to_thread(_list_all_resources_sync, nodes)
+        return await asyncio.to_thread(_list_all_resources_sync, conn, nodes)
     except ProxmoxError:
         raise
     except Exception as e:
         raise ProxmoxError(f"Failed to list Proxmox resources: {e}") from e
 
 
-async def list_storage(node: str) -> list[dict]:
+async def list_storage(conn, node: str) -> list[dict]:
     try:
-        return await asyncio.to_thread(_list_storage_sync, node)
+        return await asyncio.to_thread(_list_storage_sync, conn, node)
     except ProxmoxError:
         raise
     except Exception as e:
         raise ProxmoxError(f"Failed to list Proxmox storage: {e}") from e
 
 
-async def list_templates() -> list[dict]:
+async def list_templates(conn) -> list[dict]:
     try:
-        return await asyncio.to_thread(_list_templates_sync)
+        return await asyncio.to_thread(_list_templates_sync, conn)
     except ProxmoxError:
         raise
     except Exception as e:
@@ -493,6 +482,7 @@ async def list_templates() -> list[dict]:
 
 
 async def import_and_create_template(
+    conn,
     node: str,
     storage: str,
     image_url: str,
@@ -506,7 +496,7 @@ async def import_and_create_template(
     try:
         return await asyncio.to_thread(
             _import_and_create_template_sync,
-            node, storage, image_url, image_filename,
+            conn, node, storage, image_url, image_filename,
             template_name, vcpus, memory_mb, disk_size, username,
         )
     except ProxmoxError:
@@ -516,6 +506,7 @@ async def import_and_create_template(
 
 
 async def deploy_from_template(
+    conn,
     node: str,
     template_vmid: int,
     vm_name: str,
@@ -526,7 +517,7 @@ async def deploy_from_template(
     try:
         return await asyncio.to_thread(
             _deploy_from_template_sync,
-            node, template_vmid, vm_name, username, ssh_public_key, full_clone,
+            conn, node, template_vmid, vm_name, username, ssh_public_key, full_clone,
         )
     except ProxmoxError:
         raise
@@ -534,25 +525,25 @@ async def deploy_from_template(
         raise ProxmoxError(f"Deploy from template failed: {e}") from e
 
 
-async def delete_vm(node: str, vmid: int, vm_type: str = "qemu") -> dict:
+async def delete_vm(conn, node: str, vmid: int, vm_type: str = "qemu") -> dict:
     try:
-        return await asyncio.to_thread(_delete_vm_sync, node, vmid, vm_type)
+        return await asyncio.to_thread(_delete_vm_sync, conn, node, vmid, vm_type)
     except ProxmoxError:
         raise
     except Exception as e:
         raise ProxmoxError(f"Delete VM {vmid} on {node} failed: {e}") from e
 
 
-async def get_vm_detail(node: str, vmid: int, vm_type: str) -> dict:
+async def get_vm_detail(conn, node: str, vmid: int, vm_type: str) -> dict:
     try:
-        return await asyncio.to_thread(_get_config_sync, node, vmid, vm_type)
+        return await asyncio.to_thread(_get_config_sync, conn, node, vmid, vm_type)
     except ProxmoxError:
         raise
     except Exception as e:
         raise ProxmoxError(f"Failed to get VM detail: {e}") from e
 
 
-async def power_op(node: str, vmid: int, vm_type: str, op: str) -> dict:
+async def power_op(conn, node: str, vmid: int, vm_type: str, op: str) -> dict:
     """
     Run a power operation: start | stop | shutdown | reboot | reset | suspend.
     'stop' is force-off; prefer 'shutdown' for graceful guest shutdown.
@@ -565,7 +556,7 @@ async def power_op(node: str, vmid: int, vm_type: str, op: str) -> dict:
     if vm_type == "lxc" and op in ("reset", "suspend"):
         raise ProxmoxError(f"Operation '{op}' is not supported for LXC containers.")
     try:
-        return await asyncio.to_thread(_power_op_sync, node, vmid, vm_type, op)
+        return await asyncio.to_thread(_power_op_sync, conn, node, vmid, vm_type, op)
     except ProxmoxError:
         raise
     except Exception as e:

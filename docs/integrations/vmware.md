@@ -152,3 +152,24 @@ mode `0777`; the container entrypoint copies the key to a `0600` path
 automatically. If you see `WARNING: UNPROTECTED PRIVATE KEY FILE`, check that
 `/usr/local/bin/entrypoint.sh` ran and that the key copy succeeded (check
 `docker compose logs app | head -20`).
+
+## Not available over a remote agent
+
+Workstation is a **desktop** hypervisor with no network API: the dashboard drives it
+through `vmrun` and PowerShell against VMX paths on a local filesystem. Two consequences
+follow, and both are decisions rather than gaps:
+
+* **It is not discoverable.** A remote agent's scan looks for hypervisor *management
+  endpoints*; Workstation exposes nothing on the network by default. (Workstation Pro
+  ships a `vmrest` daemon on 8697, but it is off by default, binds `127.0.0.1`, and needs
+  `vmrest -C` run by hand first — it is not a discoverable service.) A probe for it would
+  be code that never returns anything.
+* **It has no Connections row.** The `hypervisor_connections` table holds a host, a port
+  and a credential; Workstation has a script path and, optionally, an SSH target. There
+  is nothing for a row to hold.
+
+Managing Workstation through an agent *co-located on the desktop host* is a plausible
+future — it would replace the existing `POWERSHELL_EXECUTION_MODE=ssh` mode, which does
+the same job today by having the dashboard hold an inbound SSH key to that host. It is a
+new deployment shape rather than one more connection kind, so it is tracked separately;
+see [remote agents](../remote-agents.md#where-this-is-heading).

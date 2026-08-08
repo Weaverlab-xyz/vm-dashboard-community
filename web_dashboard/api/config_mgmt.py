@@ -95,7 +95,8 @@ async def upload_asset(
 # ── Inventory ─────────────────────────────────────────────────────────────────
 
 @router.get("/inventory")
-async def get_inventory(current_user: User = Depends(get_current_user)):
+async def get_inventory(db: Session = Depends(get_db),
+                        current_user: User = Depends(get_current_user)):
     """
     Return the dynamic Ansible inventory.
 
@@ -105,8 +106,8 @@ async def get_inventory(current_user: User = Depends(get_current_user)):
       inventory — full Ansible JSON inventory (groups + hostvars)
     """
     return {
-        "targets":   ansible_local_service.get_configured_targets(),
-        "inventory": ansible_local_service.build_inventory(),
+        "targets":   ansible_local_service.get_configured_targets(db),
+        "inventory": ansible_local_service.build_inventory(db),
     }
 
 
@@ -461,7 +462,7 @@ async def run_playbook(
     if payload.target_kind in ("k8s", "database"):
         return await _run_cloud_localhost(payload, db, current_user)
 
-    targets = ansible_local_service.get_configured_targets()
+    targets = ansible_local_service.get_configured_targets(db)
     valid_keys = {t["key"] for t in targets}
 
     # Bare IP/hostname targets (contain a dot or colon) are allowed ad-hoc.

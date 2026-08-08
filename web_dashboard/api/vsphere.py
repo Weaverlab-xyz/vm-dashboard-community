@@ -14,6 +14,10 @@ from .auth import get_current_user
 from ..services import job_service, workgroup_override_service
 from ..services import vsphere_service
 from ..services.vsphere_service import VSphereError
+from .hypervisor_deps import agent_power_job, conn_in_task, conn_or_error
+
+# Page verb -> the agent's closed verb allowlist (services/agent_hypervisor_meta).
+_AGENT_VERBS = {'start': 'power_on', 'stop': 'power_off', 'shutdown': 'restart', 'reset': 'power_reset', 'reboot': 'restart', 'hard_reboot': 'power_reset'}
 
 router = APIRouter(prefix="/api/vsphere", tags=["vsphere"])
 
@@ -28,19 +32,25 @@ def _override_key(vm: dict) -> str:
 # ── List endpoints ────────────────────────────────────────────────────────────
 
 @router.get("/datacenters")
-async def get_datacenters(current_user: User = Depends(get_current_user)):
+async def get_datacenters(connection_id: str = "",
+                          db: Session = Depends(get_db),
+                          current_user: User = Depends(get_current_user)):
     """List all vSphere datacenters (returns ['ha-datacenter'] for standalone ESXi)."""
     try:
-        return await vsphere_service.list_datacenters()
+        return await vsphere_service.list_datacenters(
+            conn_or_error(db, "vsphere", connection_id))
     except VSphereError as e:
         raise HTTPException(status_code=502, detail=str(e))
 
 
 @router.get("/hosts")
-async def get_hosts(current_user: User = Depends(get_current_user)):
+async def get_hosts(connection_id: str = "",
+                    db: Session = Depends(get_db),
+                    current_user: User = Depends(get_current_user)):
     """List all ESXi hosts with resource summary."""
     try:
-        return await vsphere_service.list_hosts()
+        return await vsphere_service.list_hosts(
+            conn_or_error(db, "vsphere", connection_id))
     except VSphereError as e:
         raise HTTPException(status_code=502, detail=str(e))
 
@@ -48,6 +58,7 @@ async def get_hosts(current_user: User = Depends(get_current_user)):
 @router.get("/vms")
 async def get_vms(
     datacenter: str = "",
+    connection_id: str = "",
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -58,7 +69,8 @@ async def get_vms(
     VMs with no override are admin-only.
     """
     try:
-        vms = await vsphere_service.list_vms(datacenter)
+        vms = await vsphere_service.list_vms(
+            conn_or_error(db, "vsphere", connection_id), datacenter)
     except VSphereError as e:
         raise HTTPException(status_code=502, detail=str(e))
 
@@ -80,11 +92,14 @@ async def get_vms(
 @router.get("/vms/{moref}")
 async def get_vm_detail(
     moref: str,
+    connection_id: str = "",
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """Get full detail for one VM by its managed object reference ID."""
     try:
-        return await vsphere_service.get_vm(moref)
+        return await vsphere_service.get_vm(
+            conn_or_error(db, "vsphere", connection_id), moref)
     except VSphereError as e:
         raise HTTPException(status_code=502, detail=str(e))
 
@@ -97,12 +112,13 @@ class PowerOpRequest(BaseModel):
     host: str = ""
 
 
-async def _run_power_op(job_id: str, moref: str, op: str, label: str):
+async def _run_power_op(job_id: str, connection_id: str, moref: str, op: str, label: str):
     from ..database import SessionLocal
     db = SessionLocal()
     try:
         job_service.update_progress(db, job_id, 10, f"{op.capitalize()}ing {label}…")
-        result = await vsphere_service.power_op(moref, op)
+        result = await vsphere_service.power_op(
+            conn_in_task(db, "vsphere", connection_id), moref, op)
         job_service.set_completed(db, job_id, result)
     except Exception as e:
         job_service.set_failed(db, job_id, str(e))
@@ -114,10 +130,25 @@ def _power_endpoint(op: str):
     async def _handler(
         payload: PowerOpRequest,
         background_tasks: BackgroundTasks,
+        connection_id: str = "",
         db: Session = Depends(get_db),
         current_user: User = Depends(get_current_user),
     ):
         label = payload.name or payload.moref
+        # Resolve now so a bad id is a 404 the caller sees, not a job that fails later,
+        # then carry the ID (never the credential) into the background task.
+        conn = conn_or_error(db, "vsphere", connection_id)
+        # An agent-bound connection is on a network the dashboard cannot dial, so the
+        # button enqueues an agent job instead of calling the service. Verbs the agent
+        # has no implementation for are refused by it, in Live Output, naming why.
+        agent_job = agent_power_job(
+            db, conn, verb=_AGENT_VERBS.get(op, op), target_id=payload.moref,
+            target_scope="", target_type="vm",
+            created_by=current_user.username,
+            description=f"{op} {label} via agent")
+        if agent_job is not None:
+            return {"job_id": agent_job.id, "status": agent_job.status}
+
         job = job_service.create_job(
             db,
             job_type=f"vsphere_{op}",
@@ -125,7 +156,7 @@ def _power_endpoint(op: str):
             workgroup=payload.host or "vsphere",
             owner_id=current_user.id,
         )
-        background_tasks.add_task(_run_power_op, job.id, payload.moref, op, label)
+        background_tasks.add_task(_run_power_op, job.id, conn.id, payload.moref, op, label)
         return {"job_id": job.id, "status": "queued"}
 
     _handler.__name__ = f"vsphere_{op}"

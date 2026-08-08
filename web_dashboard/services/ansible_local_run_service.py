@@ -554,6 +554,9 @@ async def _run_job(
             ssh_key_pem=ssh_key_pem,
             secret_extra_vars=secret_extra_vars or None,
             ps_env=ps_env or None,
+            # The inventory is built from hypervisor_connections now, so the runner
+            # needs a session to see more than the legacy singletons.
+            db=db,
         )
 
         output = _scrub_secrets(output, secret_values)

@@ -14,6 +14,10 @@ from .auth import get_current_user
 from ..services import job_service, workgroup_override_service
 from ..services import xcpng_service
 from ..services.xcpng_service import XcpNgError
+from .hypervisor_deps import agent_power_job, conn_in_task, conn_or_error
+
+# Page verb -> the agent's closed verb allowlist (services/agent_hypervisor_meta).
+_AGENT_VERBS = {'start': 'power_on', 'stop': 'power_off', 'shutdown': 'restart', 'reset': 'power_reset', 'reboot': 'restart', 'hard_reboot': 'power_reset'}
 
 router = APIRouter(prefix="/api/xcpng", tags=["xcpng"])
 
@@ -27,6 +31,7 @@ def _override_key(vm: dict) -> str:
 
 @router.get("/vms")
 async def get_vms(
+    connection_id: str = "",
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -37,7 +42,7 @@ async def get_vms(
     VMs with no override are admin-only.
     """
     try:
-        vms = await xcpng_service.list_vms()
+        vms = await xcpng_service.list_vms(conn_or_error(db, "xcpng", connection_id))
     except XcpNgError as e:
         raise HTTPException(status_code=502, detail=str(e))
 
@@ -61,12 +66,12 @@ class PowerOpRequest(BaseModel):
     name: str = ""
 
 
-async def _run_power_op(job_id: str, uuid: str, name: str, op: str, label: str):
+async def _run_power_op(job_id: str, connection_id: str, uuid: str, name: str, op: str, label: str):
     from ..database import SessionLocal
     db = SessionLocal()
     try:
         job_service.update_progress(db, job_id, 10, f"{op.replace('_', ' ').capitalize()}ing {label}…")
-        result = await xcpng_service.power_op(uuid, name, op)
+        result = await xcpng_service.power_op(conn_in_task(db, "xcpng", connection_id), uuid, name, op)
         job_service.set_completed(db, job_id, result)
     except Exception as e:
         job_service.set_failed(db, job_id, str(e))
@@ -78,10 +83,25 @@ def _power_endpoint(op: str):
     async def _handler(
         payload: PowerOpRequest,
         background_tasks: BackgroundTasks,
+        connection_id: str = "",
         db: Session = Depends(get_db),
         current_user: User = Depends(get_current_user),
     ):
         label = payload.name or payload.uuid
+        # Resolve now so a bad id is a 404 the caller sees, not a job that fails later,
+        # then carry the ID (never the credential) into the background task.
+        conn = conn_or_error(db, "xcpng", connection_id)
+        # An agent-bound connection is on a network the dashboard cannot dial, so the
+        # button enqueues an agent job instead of calling the service. Verbs the agent
+        # has no implementation for are refused by it, in Live Output, naming why.
+        agent_job = agent_power_job(
+            db, conn, verb=_AGENT_VERBS.get(op, op), target_id=payload.uuid,
+            target_scope="", target_type="vm",
+            created_by=current_user.username,
+            description=f"{op} {label} via agent")
+        if agent_job is not None:
+            return {"job_id": agent_job.id, "status": agent_job.status}
+
         job = job_service.create_job(
             db,
             job_type=f"xcpng_{op}",
@@ -90,7 +110,7 @@ def _power_endpoint(op: str):
             owner_id=current_user.id,
         )
         background_tasks.add_task(
-            _run_power_op, job.id, payload.uuid, payload.name, op, label
+            _run_power_op, job.id, conn.id, payload.uuid, payload.name, op, label
         )
         return {"job_id": job.id, "status": "queued"}
 
