@@ -73,7 +73,46 @@ connections:
   #   password_file: /run/secrets/xcpng
   #   verify_ssl: false
 
-  # ── Hyper-V is NOT here ────────────────────────────────────────────────────
-  # WinRM needs a real NTLM/Negotiate stack, which is the one transport the agent's
-  # deliberately minimal dependency set cannot do. Hyper-V stays dashboard-direct;
-  # configure it on the Connections page without an agent.
+  # ── Password Safe, instead of a stored credential ──────────────────────────
+  # The end state: this agent holds NO hypervisor credential at all, only a Password
+  # Safe OAuth client whose single power is to ask. Each job checks a credential out
+  # and checks it back in, so every use is subject to Password Safe's own policy,
+  # approval workflow and session recording.
+  #
+  # `ps_managed_account` wins over `password_file` and `password` if you leave one
+  # below it — an operator who has moved a connection to Password Safe should not
+  # silently keep authenticating with the stale secret.
+  #
+  # Mount the client alongside this file (see passwordsafe.example.yaml):
+  #   -v "$PWD/passwordsafe.yaml:/etc/dashboard-agent/passwordsafe.yaml:ro,Z"
+  #
+  # - name: dc2-vcenter
+  #   kind: vsphere
+  #   host: vcenter2.lab.internal
+  #   username: svc-dashboard@vsphere.local
+  #   ps_managed_account: 4821        # the Password Safe ManagedAccountID
+  #   ps_duration_minutes: 30
+  #   verify_ssl: true
+
+  # ── Hyper-V and BARE ESXi: via the sibling runner ──────────────────────────
+  # These two need a container, because WinRM needs a real NTLM stack and a standalone
+  # ESXi host serves only SOAP. Enable `sibling:` in policy.yaml and apply
+  # docker-compose.sibling.yml — that mounts the Docker socket, which is root on this
+  # host, so read that file before you do.
+  #
+  # `kind: esxi` means a BARE host. A vCenter is `kind: vsphere` and needs none of this.
+  #
+  # - name: hq-hyperv
+  #   kind: hyperv
+  #   host: hv01.corp.internal
+  #   port: 5985
+  #   username: CORP\svc-dashboard
+  #   password_file: /run/secrets/hyperv
+  #   transport: ntlm
+  #
+  # - name: edge-esxi
+  #   kind: esxi
+  #   host: 10.20.0.30
+  #   username: root
+  #   password_file: /run/secrets/esxi
+  #   verify_ssl: false

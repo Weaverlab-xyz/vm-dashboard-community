@@ -1,0 +1,72 @@
+# OPT-IN overlay: lets the agent launch one-shot hypervisor runner containers.
+#
+# Apply it ON TOP of docker-compose.yml, never instead of it:
+#   docker compose -f docker-compose.yml -f docker-compose.sibling.yml up -d
+#
+# ─────────────────────────────────────────────────────────────────────────────
+#  READ THIS BEFORE APPLYING IT
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# This mounts the Docker socket. **The Docker socket is root on the host.** A process
+# that can reach it can start a privileged container, bind-mount /, and take the machine.
+# That is true of anything holding the socket, not just this agent.
+#
+# It is a separate file precisely so the promise in docker-compose.yml stays true:
+# without this overlay the agent has no socket, launches nothing, and cannot be made to.
+# Applying this is a deliberate act, and it is the third of three independent grants —
+# the dashboard must grant the `agent_hypervisor` job type, your policy.yaml must
+# enable the runner and name its image, and the socket must be here. Withhold any one
+# and nothing runs.
+#
+# WHAT IT BUYS: Hyper-V and **bare ESXi**, the two transports the agent cannot carry
+# itself — WinRM needs a real NTLM stack and a standalone ESXi host serves only the SOAP
+# API. vCenter, Proxmox, Nutanix Prism and XCP-ng need none of this; they work over the
+# agent's own three dependencies. If you do not run Hyper-V or standalone ESXi, do not
+# apply this file.
+#
+# WHAT THE AGENT DOES WITH IT: creates a container from the image named in *your*
+# policy.yaml, with no bind mounts, no capabilities, a read-only root filesystem,
+# no-new-privileges and a memory cap — none of which is derived from anything the
+# dashboard sends, because there is no field through which to ask. It waits, reads one
+# JSON line, and deletes the container. Orphans from a crashed agent are swept by label
+# at startup.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+#  PREFER ROOTLESS
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Rootless Docker or the Podman user socket give the same capability without handing out
+# root. Use one of those unless you have a reason not to:
+#
+#   rootless Docker:  /run/user/$(id -u)/docker.sock
+#   Podman:           /run/user/$(id -u)/podman/podman.sock
+#
+# Point AGENT_DOCKER_SOCKET at whichever you mount. The example below uses the rootless
+# path deliberately — if you need the root socket, changing it should be a conscious edit.
+
+services:
+  dashboard-agent:
+    environment:
+      # Must match the container-side path of the mount below.
+      AGENT_DOCKER_SOCKET: /var/run/docker.sock
+    volumes:
+      # Rootless Docker (recommended). Swap the SOURCE for /var/run/docker.sock only if
+      # you accept that the agent then holds root on this host.
+      - ${XDG_RUNTIME_DIR:-/run/user/1000}/docker.sock:/var/run/docker.sock
+
+    # The agent still runs read-only with every capability dropped. Holding the socket
+    # does not require loosening the agent's own hardening, and it should not be
+    # loosened: the socket is the capability, the container flags are not.
+
+# Then, in YOUR policy.yaml:
+#
+#   sibling:
+#     enabled: true
+#     image: chrweav/hypervisor-runner:latest
+#     network: bridge          # the network the runner joins; not host
+#
+# And pull the image once on this host — the agent will not pull it for you, because a
+# pull is a network fetch of executable content and that is a decision for you, not for
+# a job:
+#
+#   docker pull chrweav/hypervisor-runner:latest

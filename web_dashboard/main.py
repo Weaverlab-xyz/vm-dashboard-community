@@ -908,6 +908,31 @@ async def vms_page(request: Request):
     return templates.TemplateResponse("vms/list.html", {"request": request, **_feature_flags()})
 
 
+def _hypervisor_page_host(kind: str) -> dict:
+    """The endpoint a hypervisor page is actually talking to, for its header.
+
+    These pages have no connection picker, so they use the default connection — and
+    they used to display the singleton `*_host` config key instead, which on a
+    multi-connection install is simply the wrong host. Resolve the same connection the
+    API will use, and name it, so the header stops disagreeing with the data below it.
+
+    Best-effort: an unconfigured or unreachable-to-resolve kind renders a blank host
+    rather than 500ing a page whose real content loads over the API anyway.
+    """
+    from .database import SessionLocal
+    from .services import hypervisor_connection_service as hcs
+    try:
+        with SessionLocal() as db:
+            conn = hcs.resolve(db, kind)
+        # An agent-bound connection has no host here by design — the agent holds it —
+        # so show the agent-side name rather than an empty span.
+        return {"host": conn.host or conn.agent_connection_name or "",
+                "connection_name": conn.name,
+                "via_agent": conn.via_agent}
+    except Exception:  # noqa: BLE001
+        return {"host": "", "connection_name": "", "via_agent": False}
+
+
 @app.get("/connections", response_class=HTMLResponse, include_in_schema=False)
 async def connections_page(request: Request):
     """Hypervisor connections. Reachable whenever ANY hypervisor integration is on —
@@ -937,10 +962,12 @@ async def vsphere_page(request: Request):
 async def hyperv_page(request: Request):
     if not config_service.get_bool("hyperv_enabled", settings.hyperv_enabled):
         raise HTTPException(status_code=404, detail="Hyper-V integration is disabled")
-    host = config_service.get("hyperv_host") or settings.hyperv_host
+    conn = _hypervisor_page_host("hyperv")
     return templates.TemplateResponse(
         "hyperv/index.html",
-        {"request": request, "hyperv_host": host, **_feature_flags()},
+        {"request": request, "hyperv_host": conn["host"],
+         "connection_name": conn["connection_name"], "via_agent": conn["via_agent"],
+         **_feature_flags()},
     )
 
 
@@ -948,10 +975,12 @@ async def hyperv_page(request: Request):
 async def nutanix_page(request: Request):
     if not config_service.get_bool("nutanix_enabled", settings.nutanix_enabled):
         raise HTTPException(status_code=404, detail="Nutanix integration is disabled")
-    host = config_service.get("nutanix_host") or settings.nutanix_host
+    conn = _hypervisor_page_host("nutanix")
     return templates.TemplateResponse(
         "nutanix/index.html",
-        {"request": request, "nutanix_host": host, **_feature_flags()},
+        {"request": request, "nutanix_host": conn["host"],
+         "connection_name": conn["connection_name"], "via_agent": conn["via_agent"],
+         **_feature_flags()},
     )
 
 
@@ -959,10 +988,12 @@ async def nutanix_page(request: Request):
 async def xcpng_page(request: Request):
     if not config_service.get_bool("xcpng_enabled", settings.xcpng_enabled):
         raise HTTPException(status_code=404, detail="XCP-ng integration is disabled")
-    host = config_service.get("xcpng_host") or settings.xcpng_host
+    conn = _hypervisor_page_host("xcpng")
     return templates.TemplateResponse(
         "xcpng/index.html",
-        {"request": request, "xcpng_host": host, **_feature_flags()},
+        {"request": request, "xcpng_host": conn["host"],
+         "connection_name": conn["connection_name"], "via_agent": conn["via_agent"],
+         **_feature_flags()},
     )
 
 

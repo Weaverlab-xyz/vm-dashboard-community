@@ -15,6 +15,7 @@ name: Publish images
 #   chrweav/ansible-winrm              (context: runners/ansible-winrm)
 #   chrweav/ansible-cloud              (context: runners/ansible-cloud)
 #   chrweav/dashboard-agent            (context: runners/agent)
+#   chrweav/hypervisor-runner          (context: runners/hypervisor)
 
 on:
   push:
@@ -54,6 +55,14 @@ jobs:
           - image: chrweav/dashboard-agent
             context: runners/agent
             dockerfile: runners/agent/Dockerfile
+          # The agent's one-shot hypervisor runner: Hyper-V (WinRM/NTLM) and bare ESXi
+          # (SOAP), the two transports the agent's three-dependency image deliberately
+          # cannot carry. Pulled by the operator on the agent host, like the agent
+          # itself — the agent never pulls it, because a pull is a network fetch of
+          # executable content and that is the operator's decision, not a job's.
+          - image: chrweav/hypervisor-runner
+            context: runners/hypervisor
+            dockerfile: runners/hypervisor/Dockerfile
     steps:
       - name: Checkout
         uses: actions/checkout@v4
