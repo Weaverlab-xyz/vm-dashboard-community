@@ -374,6 +374,77 @@ def test_the_service_holds_no_process_local_store():
         "a lock here would again be guarding threads against a process-level hazard")
 
 
+def test_the_failure_path_logs_no_secret():
+    """Both helpers swallow their exception and log rather than 500 mid-ceremony, so
+    the log line is on the path a real outage takes. It must carry neither the key
+    nor the value: the key embeds the live CSRF state, and the value the PKCE
+    verifier and the redirect URI.
+
+    CodeQL flagged an earlier version of this (`py/clear-text-logging-sensitive-data`)
+    when the message was derived from the key by `rsplit`. That did strip the token,
+    but a sanitiser that happens to work today is one refactor from not working, so
+    the label is now a caller-supplied constant and this pins it.
+    """
+    import logging
+
+    class _Boom:
+        """A session that fails on first use, to force the except branch."""
+        def query(self, *a, **kw):
+            raise RuntimeError("connection reset")
+
+        def rollback(self):
+            pass
+
+    secret_state = "SUPERSECRET-STATE-a1b2c3"
+    secret_value = "https://example.test/cb|SUPERSECRET-VERIFIER-d4e5f6"
+
+    records = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    handler = _Capture()
+    log = logging.getLogger(w1.__name__)
+    log.addHandler(handler)
+    log.propagate = False
+    try:
+        w1.store_oauth_state(_Boom(), secret_state, secret_value)
+        w1.verify_and_consume_oauth_state(_Boom(), secret_state)
+        token = "SUPERSECRET-TOKEN-99"
+        w1.fetch_fido2_challenge(_Boom(), token)
+    finally:
+        log.removeHandler(handler)
+        log.propagate = True
+
+    assert records, "the failure path must still log something"
+    blob = "\n".join(records)
+    for secret in ("SUPERSECRET-STATE", "SUPERSECRET-VERIFIER", "SUPERSECRET-TOKEN",
+                   "example.test"):
+        assert secret not in blob, f"{secret!r} reached the log: {blob!r}"
+
+
+def test_a_failed_store_does_not_raise():
+    """A 500 here would be indistinguishable from the IdP being down, and would turn
+    a transient database blip into a broken login rather than a retryable one."""
+    class _Boom:
+        def query(self, *a, **kw):
+            raise RuntimeError("connection reset")
+
+        def rollback(self):
+            pass
+
+    import logging
+    log = logging.getLogger(w1.__name__)
+    log.propagate = False           # the expected traceback is not test output
+    try:
+        w1.store_oauth_state(_Boom(), "s", "https://example.test/cb")   # must not raise
+        assert w1.verify_and_consume_oauth_state(_Boom(), "s") is None
+        assert w1.fetch_fido2_challenge(_Boom(), "t") is None
+    finally:
+        log.propagate = True
+
+
 def test_ttls_are_unchanged():
     """Behaviour-preserving move: the ceremony windows are the ones users already
     have, not new ones inherited from the storage change."""

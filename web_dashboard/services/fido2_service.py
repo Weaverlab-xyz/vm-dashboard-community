@@ -48,8 +48,13 @@ _FIDO2_KEY_PREFIX = "vmcli:fido2:challenge:"
 _OAUTH_STATE_PREFIX = "vmcli:oauth:state:"
 
 
-def _store_set(db: Session, key: str, ttl: int, value: str) -> None:
+def _store_set(db: Session, key: str, ttl: int, value: str, label: str) -> None:
     """Write one state row, replacing any existing row with the same key.
+
+    ``label`` is a fixed description of which ceremony this is, for the log line.
+    It is a caller-supplied constant rather than anything derived from ``key`` or
+    ``value``, so no part of a live challenge, CSRF state or PKCE verifier can reach
+    the log even by accident — see the note on _store_getdel.
 
     Never raises: the caller is mid-ceremony and a 500 here would be indistinguishable
     from the provider being down. A failed write surfaces as an invalid state on the
@@ -66,15 +71,14 @@ def _store_set(db: Session, key: str, ttl: int, value: str) -> None:
         db.commit()
         _sweep(db)
     except Exception:  # noqa: BLE001
-        logger.warning("ephemeral state: could not store %s", key.rsplit(":", 1)[0],
-                       exc_info=True)
+        logger.warning("ephemeral state: could not store %s", label, exc_info=True)
         try:
             db.rollback()
         except Exception:  # pragma: no cover — defensive
             pass
 
 
-def _store_getdel(db: Session, key: str) -> Optional[str]:
+def _store_getdel(db: Session, key: str, label: str) -> Optional[str]:
     """Read a state value and delete it in one shot. Returns None if it never
     existed, has expired, or has already been consumed.
 
@@ -83,6 +87,11 @@ def _store_getdel(db: Session, key: str) -> Optional[str]:
     statements — and only the caller whose DELETE matched a row is allowed to act on
     what it read. That is what keeps a replayed OAuth `state` from being accepted
     twice by two workers at once.
+
+    Nothing here logs ``key`` or ``value``, not even a truncated form. The key embeds
+    the live CSRF state and the value the PKCE verifier, and a log line is exactly the
+    wrong place for either — a sanitiser that happens to strip the secret today is one
+    refactor away from not doing so, and is not worth defending in review.
     """
     try:
         row = (
@@ -101,8 +110,7 @@ def _store_getdel(db: Session, key: str) -> Optional[str]:
             return None          # consumed either way — expiry is not a retry
         return row.value
     except Exception:  # noqa: BLE001
-        logger.warning("ephemeral state: could not consume %s", key.rsplit(":", 1)[0],
-                       exc_info=True)
+        logger.warning("ephemeral state: could not consume %s", label, exc_info=True)
         try:
             db.rollback()
         except Exception:  # pragma: no cover — defensive
@@ -138,7 +146,8 @@ def _sweep(db: Session, now: Optional[datetime] = None) -> int:
 def store_fido2_challenge(db: Session, state: dict) -> str:
     """Persist a FIDO2 state dict and return the token (UUID) that identifies it."""
     token = str(uuid.uuid4())
-    _store_set(db, f"{_FIDO2_KEY_PREFIX}{token}", _CHALLENGE_TTL, json.dumps(state))
+    _store_set(db, f"{_FIDO2_KEY_PREFIX}{token}", _CHALLENGE_TTL, json.dumps(state),
+               "a FIDO2 challenge")
     return token
 
 
@@ -147,7 +156,7 @@ def fetch_fido2_challenge(db: Session, token: str) -> Optional[dict]:
     Retrieve and atomically delete the challenge state identified by *token*.
     Returns None if the token has expired or never existed.
     """
-    raw = _store_getdel(db, f"{_FIDO2_KEY_PREFIX}{token}")
+    raw = _store_getdel(db, f"{_FIDO2_KEY_PREFIX}{token}", "a FIDO2 challenge")
     if raw is None:
         return None
     try:
@@ -160,7 +169,8 @@ def fetch_fido2_challenge(db: Session, token: str) -> Optional[dict]:
 
 def store_oauth_state(db: Session, state: str, redirect_uri: str = "") -> None:
     """Store an OAuth CSRF state value alongside its redirect_uri."""
-    _store_set(db, f"{_OAUTH_STATE_PREFIX}{state}", _OAUTH_STATE_TTL, redirect_uri or "1")
+    _store_set(db, f"{_OAUTH_STATE_PREFIX}{state}", _OAUTH_STATE_TTL, redirect_uri or "1",
+               "an OAuth/OIDC state")
 
 
 def verify_and_consume_oauth_state(db: Session, state: str) -> Optional[str]:
@@ -168,7 +178,7 @@ def verify_and_consume_oauth_state(db: Session, state: str) -> Optional[str]:
     Verify the OAuth state exists, atomically delete it, and return the stored
     redirect_uri.  Returns None if the state is invalid or expired.
     """
-    raw = _store_getdel(db, f"{_OAUTH_STATE_PREFIX}{state}")
+    raw = _store_getdel(db, f"{_OAUTH_STATE_PREFIX}{state}", "an OAuth/OIDC state")
     if not raw or raw == "1":
         # "1" is the legacy sentinel — state valid but no URI stored
         return "" if raw == "1" else None
