@@ -104,6 +104,206 @@ async def _sign_out(client: httpx.AsyncClient) -> None:
         pass
 
 
+# ── inventory reads (paged) ───────────────────────────────────────────────────
+#
+# Everything above this line fetches one object, so it opens a client, signs in,
+# does one call and signs out. An inventory read is the opposite shape: several
+# collections, each of them paged, and repeating that dance per collection would
+# be four Token + SignAppIn + Signout round trips for one modal open. So the
+# helpers below take an already-signed-in client and the public entry point owns
+# the session.
+
+_PAGE_SIZE = 500
+# 20 000 rows. A ceiling, not a target — it bounds a tenant that pages forever.
+_MAX_PAGES = 40
+# Inventory reads dwarf the single-object writes _client()'s 30s was sized for.
+_LIST_TIMEOUT_S = 60.0
+
+
+def _list_client() -> httpx.AsyncClient:
+    return httpx.AsyncClient(
+        base_url=f"{_base_url()}/",
+        headers={"Accept": "application/json"},
+        timeout=_LIST_TIMEOUT_S,
+    )
+
+
+def _page_items(resp: httpx.Response) -> list:
+    """Rows out of a list response, accepting both shapes Password Safe returns:
+    a bare JSON array, and the ``{"TotalCount": n, "Data": [...]}`` envelope."""
+    try:
+        body = resp.json()
+    except ValueError:
+        return []
+    if isinstance(body, dict):
+        body = body.get("Data") or body.get("data") or []
+    return body if isinstance(body, list) else []
+
+
+def _row_key(item: dict, id_keys):
+    for key in id_keys:
+        val = item.get(key)
+        if val not in (None, ""):
+            return str(val)
+    return None
+
+
+async def _get_all(client: httpx.AsyncClient, path: str) -> list:
+    """One GET for a collection Password Safe does not page (Platforms, Workgroups)."""
+    resp = await client.get(path)
+    if resp.status_code != 200:
+        raise PSApiError(f"GET {path} failed ({resp.status_code}): {resp.text[:400]}")
+    return _page_items(resp)
+
+
+async def _get_paged(client: httpx.AsyncClient, path: str, *, id_keys,
+                     params: dict = None, max_items: int = 20000) -> list:
+    """Walk a paged collection with ``limit``/``offset``.
+
+    Three stop conditions, and all three are needed:
+
+    1. a short page — the normal end;
+    2. ``max_items`` — the caller's cap;
+    3. **a page that contributes no new id.** Some deployments (and some proxies
+       in front of them) ignore ``offset`` and re-serve page one. Without this the
+       loop runs ``_MAX_PAGES`` times and hands back forty copies of the same rows,
+       which downstream reads as a tenant with forty identical databases. Rows are
+       appended only when their id is new, so even the page that trips this
+       contributes nothing.
+
+    ``_MAX_PAGES`` bounds the walk regardless — including the case where no row
+    carries a recognisable id and condition 3 therefore cannot fire.
+    """
+    out = []
+    seen = set()
+    for page in range(_MAX_PAGES):
+        query = dict(params or {})
+        query.update({"limit": _PAGE_SIZE, "offset": page * _PAGE_SIZE})
+        resp = await client.get(path, params=query)
+        if resp.status_code != 200:
+            raise PSApiError(f"GET {path} failed ({resp.status_code}): {resp.text[:400]}")
+        items = _page_items(resp)
+        if not items:
+            break
+
+        added = keyed = 0
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            key = _row_key(item, id_keys)
+            if key is not None:
+                keyed += 1
+                if key in seen:
+                    continue
+                seen.add(key)
+            out.append(item)
+            added += 1
+            if len(out) >= max_items:
+                return out[:max_items]
+
+        if len(items) < _PAGE_SIZE:
+            break
+        if keyed and not added:
+            logger.warning(
+                "Password Safe %s returned no new rows at offset %d — the tenant "
+                "appears to ignore offset; stopping after %d rows.",
+                path, page * _PAGE_SIZE, len(out))
+            break
+    return out
+
+
+async def _workgroup_id(client: httpx.AsyncClient, name_or_id: str) -> str:
+    """In-session half of :func:`get_workgroup_id`, so a caller that already holds
+    a signed-in client does not need a second session."""
+    val = (name_or_id or "").strip()
+    if not val:
+        raise PSApiError("workgroup is not configured")
+    if val.isdigit():
+        return val
+    for wg in await _get_all(client, "Workgroups"):
+        if str(wg.get("Name") or "").strip().lower() == val.lower():
+            wid = wg.get("ID") or wg.get("Id") or wg.get("OrganizationID")
+            if wid is not None:
+                return str(wid)
+    raise PSApiError(f"workgroup {val!r} not found in Password Safe")
+
+
+async def read_database_inventory(*, workgroup: str = "") -> dict:
+    """Every collection the database import needs, in ONE signed-in pass.
+
+    Returns the rows **raw** — ``{"platforms", "systems", "databases", "accounts",
+    "workgroup_id", "warnings"}``. Shaping, filtering and sanitising belong to
+    ``ps_database_catalog``, which is pure, so the I/O half and the logic half stay
+    testable apart.
+
+    Accounts come from the flat ``ManagedAccounts`` collection rather than
+    per-system ``ManagedSystems/{id}/ManagedAccounts``. That collapses N calls into
+    one paged call, and — the reason that matters — it returns the accounts this
+    API identity can actually *request*. That is the same permission surface the
+    run-time checkout uses, so a missing Requestor role or Smart Rule shows up as a
+    greyed-out row at import time instead of a 4031/403 hours later on the first
+    playbook run.
+
+    ``Databases`` and ``ManagedAccounts`` each degrade to a warning: losing the
+    first costs port/instance enrichment, losing the second makes every row
+    ineligible with an actionable reason. Losing ``ManagedSystems`` is fatal —
+    there is nothing to show.
+    """
+    warnings = []
+    async with _list_client() as client:
+        await _sign_in(client)
+        try:
+            platforms = await _get_all(client, "Platforms")
+
+            params = {}
+            workgroup_id = None
+            if (workgroup or "").strip():
+                workgroup_id = await _workgroup_id(client, workgroup)
+                # Sent as a hint, and applied again below. Whether v3 honours
+                # workgroupID on this collection varies by version, and a filter
+                # that silently does nothing is worse than one that costs
+                # bandwidth — so correctness does not depend on the tenant.
+                params["workgroupID"] = workgroup_id
+
+            systems = await _get_paged(
+                client, "ManagedSystems", params=params,
+                id_keys=("ManagedSystemID", "SystemId", "SystemID"))
+            if workgroup_id is not None:
+                systems = [s for s in systems
+                           if str(s.get("WorkgroupID") or s.get("WorkgroupId") or "")
+                           == str(workgroup_id)]
+
+            try:
+                databases = await _get_paged(
+                    client, "Databases",
+                    id_keys=("DatabaseID", "DatabaseId", "ID"))
+            except PSApiError as exc:
+                logger.warning("Password Safe Databases read failed: %s", exc)
+                databases = []
+                warnings.append(
+                    "Could not read the Databases list from Password Safe — ports "
+                    "and instance names fall back to platform defaults.")
+
+            try:
+                accounts = await _get_paged(
+                    client, "ManagedAccounts",
+                    id_keys=("ManagedAccountID", "AccountId", "AccountID"))
+            except PSApiError as exc:
+                logger.warning("Password Safe ManagedAccounts read failed: %s", exc)
+                accounts = []
+                warnings.append(
+                    "Could not read the requestable accounts from Password Safe, so "
+                    "nothing can be imported. The API identity needs the Requestor "
+                    "role and an access policy granting View on a Smart Rule "
+                    "containing the database accounts.")
+
+            return {"platforms": platforms, "systems": systems,
+                    "databases": databases, "accounts": accounts,
+                    "workgroup_id": workgroup_id, "warnings": warnings}
+        finally:
+            await _sign_out(client)
+
+
 async def _platform_id_by_name(client: httpx.AsyncClient, platform_name: str) -> int:
     """Resolve a platform display name → PlatformID via GET Platforms. Used for
     both the built-in DB engines and the operator-installed custom plugins
@@ -206,15 +406,7 @@ async def get_workgroup_id(name_or_id: str) -> str:
     async with _client() as client:
         await _sign_in(client)
         try:
-            resp = await client.get("Workgroups")
-            if resp.status_code != 200:
-                raise PSApiError(f"GET Workgroups failed ({resp.status_code}): {resp.text[:400]}")
-            for wg in resp.json():
-                if str(wg.get("Name") or "").strip().lower() == val.lower():
-                    wid = wg.get("ID") or wg.get("Id") or wg.get("OrganizationID")
-                    if wid is not None:
-                        return str(wid)
-            raise PSApiError(f"workgroup {val!r} not found in Password Safe")
+            return await _workgroup_id(client, val)
         finally:
             await _sign_out(client)
 

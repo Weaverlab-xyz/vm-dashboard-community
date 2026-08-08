@@ -24,6 +24,10 @@
     <h1 class="text-2xl font-bold text-gray-800">Databases</h1>
     <div class="flex items-center gap-2">
       {% if beyondtrust_enabled %}
+      <button @click="openImport()"
+              class="bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 text-sm font-medium px-3 py-1.5 rounded-lg">
+        Import from Password Safe
+      </button>
       <button @click="openRegister()"
               class="bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 text-sm font-medium px-3 py-1.5 rounded-lg">
         Register existing
@@ -36,8 +40,11 @@
     </div>
   </div>
   <p class="text-sm text-gray-500 mb-6">
-    <strong>Register</strong> a database that already exists — on-premises or in any cloud —
-    so it can be a Configuration Management target. Or <strong>provision</strong> a new one:
+    {% if beyondtrust_enabled %}<strong>Import from Password Safe</strong> to pick from the databases
+    Password Safe already discovered — it knows the platform, port and accounts, so there is nothing
+    to type. <strong>Register</strong> one by hand if it isn't in Password Safe.{% else %}<strong>Register</strong>
+    a database that already exists — on-premises or in any cloud — so it can be a Configuration
+    Management target.{% endif %} Or <strong>provision</strong> a new one:
     managed databases are built <strong>private</strong> (no public endpoint) and reached only
     through a BeyondTrust PRA protocol-tunnel jump. <strong>PostgreSQL, MySQL, and SQL
     Server</strong> across <strong>AWS, Azure, and GCP</strong> are supported, plus Oracle on
@@ -70,8 +77,8 @@
       <div x-show="loading" x-cloak class="p-6 text-center text-sm text-gray-400">Loading…</div>
       <div x-show="!loading && databases.length === 0" x-cloak class="p-10 text-center text-sm text-gray-400">
         No databases yet. Click <strong>Provision database</strong> to create a private managed
-        instance{% if beyondtrust_enabled %}, or <strong>Register existing</strong> to record one you
-        already run — on-premises or in a cloud{% endif %}.
+        instance{% if beyondtrust_enabled %}, <strong>Import from Password Safe</strong> to pick from
+        the ones it already knows about, or <strong>Register existing</strong> to record one by hand{% endif %}.
       </div>
       <table x-show="!loading && databases.length > 0" x-cloak class="min-w-full text-sm">
         <thead>
@@ -233,6 +240,164 @@
           <span x-show="!regSaving">Register</span>
           <span x-show="regSaving" x-cloak>Registering…</span>
         </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Import from Password Safe. Password Safe already discovered these with managed
+       credentials, so every field is read from it; eligibility is decided server-side
+       and arrives as `eligible` + `reason`, so this list never offers a checkbox the
+       import endpoint would refuse. -->
+  <div x-show="showImport" x-cloak
+       class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+       @click.self="showImport = false">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-3xl max-h-[90vh] overflow-y-auto">
+      <div class="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+        <h3 class="text-lg font-semibold">Import from Password Safe</h3>
+        <button @click="showImport = false" class="text-gray-400 hover:text-gray-600 text-xl">&times;</button>
+      </div>
+
+      <div class="px-6 py-5 space-y-4">
+        <p class="text-sm text-gray-500">
+          Databases Password Safe already knows about. Importing records them here so they can be
+          Configuration Management targets — the credential stays in Password Safe and is checked
+          out at run time. Nothing in Password Safe is created or changed.
+        </p>
+
+        <div x-show="impLoading" x-cloak class="text-sm text-gray-400">Reading Password Safe…</div>
+
+        <div x-show="!impEnabled" x-cloak
+             class="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+          BeyondTrust is turned off. Enable it in Settings → Integrations → BeyondTrust.
+        </div>
+        <div x-show="impEnabled && !impConfigured" x-cloak
+             class="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2"
+             x-text="impReason"></div>
+        <div x-show="impError" x-cloak
+             class="text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2"
+             x-text="impError"></div>
+
+        <template x-for="w in impWarnings" :key="w">
+          <div class="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2"
+               x-text="w"></div>
+        </template>
+        <div x-show="impTruncated" x-cloak
+             class="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+          Showing the first <span x-text="impCandidates.length"></span> — set an import workgroup in
+          Settings → Integrations → BeyondTrust to narrow the list rather than raising the cap.
+        </div>
+
+        <div x-show="!impLoading && impConfigured && impEnabled" x-cloak class="space-y-4">
+          <div class="flex items-end gap-3">
+            <div class="w-56">
+              <label class="block text-sm font-medium text-gray-700 mb-1">Location</label>
+              <select x-model="impCloud"
+                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                <option value="local">On-premises</option>
+                <option value="aws">AWS</option>
+                <option value="azure">Azure</option>
+                <option value="gcp">GCP</option>
+                <option value="oci">OCI</option>
+              </select>
+            </div>
+            <p class="text-xs text-gray-400 pb-2">
+              Applies to everything in this batch. Password Safe does not record a cloud, and this
+              decides which runner reaches the database — a wrong value fails the run, not the import.
+            </p>
+          </div>
+
+          <div x-show="impCandidates.length === 0" x-cloak class="p-6 text-center text-sm text-gray-400">
+            Password Safe has no database managed systems to show.
+          </div>
+
+          <div x-show="impCandidates.length > 0" x-cloak
+               class="border border-gray-200 rounded-lg overflow-hidden">
+            <table class="min-w-full text-sm">
+              <thead>
+                <tr class="text-left text-xs uppercase text-gray-500 bg-gray-50 border-b border-gray-200">
+                  <th class="px-3 py-2 w-10">
+                    <input type="checkbox" @change="impToggleAll($event.target.checked)"
+                           :checked="impAllShownSelected()"
+                           :disabled="impSelectableShown().length === 0"
+                           title="Select every importable database"
+                           class="rounded border-gray-300 text-blue-600 focus:ring-blue-500 disabled:opacity-30">
+                  </th>
+                  <th class="px-3 py-2">System</th>
+                  <th class="px-3 py-2">Engine</th>
+                  <th class="px-3 py-2">Endpoint</th>
+                  <th class="px-3 py-2">Account</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-gray-100">
+                <template x-for="c in impCandidates" :key="c.system_id">
+                  <tr :class="impSelectable(c) ? '' : 'opacity-50'">
+                    <td class="px-3 py-2 align-top">
+                      <input type="checkbox" :checked="impIsSelected(c)" @change="impToggle(c)"
+                             :disabled="!impSelectable(c)" :title="impDisabledReason(c)"
+                             class="rounded border-gray-300 text-blue-600 focus:ring-blue-500 disabled:opacity-30 disabled:cursor-not-allowed">
+                    </td>
+                    <td class="px-3 py-2 align-top">
+                      <div class="font-medium text-gray-800" x-text="c.name || ('#' + c.system_id)"></div>
+                      <div class="text-xs text-gray-400" x-text="c.platform"></div>
+                      <div x-show="!impSelectable(c)" x-cloak
+                           class="text-xs text-amber-700 mt-1" x-text="impDisabledReason(c)"></div>
+                    </td>
+                    <td class="px-3 py-2 align-top">
+                      <span x-text="c.engine || '—'"></span>
+                      <div class="text-xs text-gray-400" x-show="c.version" x-text="c.version"></div>
+                    </td>
+                    <td class="px-3 py-2 align-top font-mono text-xs">
+                      <span x-text="(c.host || '—') + (c.port ? ':' + c.port : '')"></span>
+                      <div class="text-gray-400" x-show="c.db_name" x-text="c.db_name"></div>
+                    </td>
+                    <td class="px-3 py-2 align-top">
+                      <select x-show="c.accounts.length > 0" x-model.number="impAccount[c.system_id]"
+                              :disabled="!impSelectable(c)"
+                              class="w-full border border-gray-300 rounded px-2 py-1 text-xs disabled:opacity-50">
+                        <template x-for="a in c.accounts" :key="a.account_id">
+                          <option :value="a.account_id" x-text="a.name"></option>
+                        </template>
+                      </select>
+                      <span x-show="c.accounts.length === 0" x-cloak class="text-xs text-gray-400">none</span>
+                    </td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+
+          <p x-show="impCachedAt" x-cloak class="text-xs text-gray-400"
+             x-text="'Password Safe data as of ' + impCachedAt"></p>
+        </div>
+
+        <!-- Partial success: the modal stays open, because this is the only place the
+             per-row reasons are shown. -->
+        <div x-show="impResult && impResult.failed && impResult.failed.length" x-cloak
+             class="border border-amber-200 bg-amber-50 rounded-lg px-3 py-2 space-y-1">
+          <p class="text-sm font-medium text-amber-900">
+            Imported <span x-text="impResult ? impResult.count : 0"></span>;
+            <span x-text="impResult ? impResult.failed.length : 0"></span> could not be imported:
+          </p>
+          <template x-for="f in (impResult ? impResult.failed : [])" :key="f.system_id">
+            <p class="text-xs text-amber-800">
+              <span class="font-medium" x-text="f.name"></span> — <span x-text="f.error"></span>
+            </p>
+          </template>
+        </div>
+      </div>
+
+      <div class="px-6 py-4 border-t border-gray-100 flex justify-between items-center gap-2">
+        <span class="text-xs text-gray-400"
+              x-text="impSelected.length ? impSelected.length + ' selected' : ''"></span>
+        <div class="flex gap-2">
+          <button @click="showImport = false"
+                  class="px-4 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50">Cancel</button>
+          <button @click="submitImport()" :disabled="impSelected.length === 0 || impSaving"
+                  class="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium disabled:opacity-50">
+            <span x-show="!impSaving" x-text="impSelected.length > 1 ? ('Import ' + impSelected.length + ' databases') : 'Import'"></span>
+            <span x-show="impSaving" x-cloak>Importing…</span>
+          </button>
+        </div>
       </div>
     </div>
   </div>
@@ -543,6 +708,20 @@ function databasesPage() {
     regSystems: [], regAccountsLoading: false, regAccountsError: '',
     reg: { engine: 'postgres', cloud: 'local', host: '', port: null, db_name: '', accountKey: '' },
 
+    // Import-from-Password-Safe. Every key is prefixed `imp` on purpose: this page's
+    // `options` state object is pinned by tests/test_pra_picker_bindings.py, so a
+    // second object by that name here would break the Gateway-picker assertion.
+    // Note there is no colon-packed account key like reg.accountKey — the import
+    // posts {system_id, account_id} as numbers, so a ':' in an account name cannot
+    // break it. Don't "unify" the two.
+    showImport: false, impLoading: false, impSaving: false,
+    impEnabled: true, impConfigured: true, impError: '', impReason: '',
+    impCandidates: [], impWarnings: [], impTruncated: false, impCachedAt: '',
+    impSelected: [],        // system_ids
+    impAccount: {},         // system_id -> account_id
+    impCloud: 'local',
+    impResult: null,
+
     options: { cloud: '', region: '', regions: [], instance_classes: [], db_subnet_groups: [], security_groups: [], vault_account_groups: [], jump_groups: [], gateways: [] },
     loadingOptions: false, optionsError: '',
     form: { engine: 'postgres', cloud: 'aws', region: '', name: '', master_username: 'dbadmin',
@@ -561,9 +740,12 @@ function databasesPage() {
       this.openFromQuery();
     },
 
-    // ?register=1&engine=…&host=…&port=… — where a discovery finding on a job page sends
-    // the operator. Host, port and engine are what an unauthenticated probe can learn;
-    // the managed account is what it cannot, so that field is still theirs to fill in.
+    // ?register=1&engine=…&host=…&port=… prefill for this form.
+    //
+    // Agent discovery no longer produces database findings — Password Safe already
+    // knows these, with the platform and accounts a socket probe never could, so
+    // "Import from Password Safe" replaced that path. See docs/databases.md. This
+    // handler stays because the link still works if someone has one bookmarked.
     openFromQuery() {
       const q = new URLSearchParams(window.location.search);
       if (!q.get('register')) return;
@@ -626,6 +808,106 @@ function databasesPage() {
       this.regError = '';
       this.regAccountsError = '';
       this.showRegister = true;
+    },
+
+    // ── Import from Password Safe ──────────────────────────────────────────────
+
+    openImport() {
+      this.impSelected = [];
+      this.impAccount = {};
+      this.impResult = null;
+      this.impError = '';
+      this.showImport = true;
+      this.loadImportCandidates();
+    },
+
+    async loadImportCandidates() {
+      this.impLoading = true;
+      this.impError = '';
+      try {
+        const data = await API.get('/api/databases/ps-candidates');
+        this.impEnabled = data.enabled !== false;
+        this.impConfigured = data.configured !== false;
+        this.impReason = data.reason || '';
+        this.impError = data.error || '';
+        this.impCandidates = data.systems || [];
+        this.impWarnings = data.warnings || [];
+        this.impTruncated = !!data.truncated;
+        this.impCachedAt = data.cached_at || '';
+        if (data.default_cloud) this.impCloud = data.default_cloud;
+        // Preselect each row's first account so "select all → Import" works without
+        // opening every dropdown. The list is sorted so a plain account name beats a
+        // ';'-suffixed cloud-plugin one.
+        const chosen = {};
+        for (const c of this.impCandidates) {
+          if (c.accounts && c.accounts.length) chosen[c.system_id] = c.accounts[0].account_id;
+        }
+        this.impAccount = chosen;
+        // Drop anything that stopped being importable while the modal was open.
+        this.impSelected = this.impSelected.filter(
+          id => this.impCandidates.some(c => c.system_id === id && this.impSelectable(c)));
+      } catch (e) {
+        this.impError = e.message || 'Failed to read Password Safe.';
+        this.impCandidates = [];
+      } finally {
+        this.impLoading = false;
+      }
+    },
+
+    // Eligibility is the SERVER's answer, never a rule invented here — so the list
+    // cannot offer a checkbox the import endpoint would refuse.
+    impSelectable(c) { return !!c.eligible && !c.already_imported; },
+    impDisabledReason(c) {
+      if (c.already_imported) return 'Already in the dashboard — a database is registered at this host for this engine.';
+      return c.reason || 'Not importable.';
+    },
+    impIsSelected(c) { return this.impSelected.includes(c.system_id); },
+    impToggle(c) {
+      if (!this.impSelectable(c)) return;
+      const i = this.impSelected.indexOf(c.system_id);
+      if (i === -1) this.impSelected.push(c.system_id); else this.impSelected.splice(i, 1);
+    },
+    impSelectableShown() { return this.impCandidates.filter(c => this.impSelectable(c)); },
+    impAllShownSelected() {
+      const shown = this.impSelectableShown();
+      return shown.length > 0 && shown.every(c => this.impIsSelected(c));
+    },
+    impToggleAll(checked) {
+      this.impSelected = checked ? this.impSelectableShown().map(c => c.system_id) : [];
+    },
+    impClearSelection() { this.impSelected = []; },
+
+    async submitImport() {
+      this.impSaving = true;
+      this.impError = '';
+      this.impResult = null;
+      try {
+        // Ids only. The server re-resolves each system from its own Password Safe
+        // read, so there is nothing here that could point an import at another host.
+        const items = this.impSelected.map(id => ({
+          system_id: id,
+          account_id: this.impAccount[id],
+          cloud: this.impCloud,
+        }));
+        const r = await API.post('/api/databases/ps-import', { items });
+        this.impResult = r;
+        await this.refresh();
+        if (!(r.failed || []).length) {
+          this.showImport = false;
+          this.flash(`Imported ${r.count} database${r.count === 1 ? '' : 's'} — they can now be selected in Configuration Management.`);
+        } else {
+          // Partial success is a normal outcome of a bulk action, so the modal stays
+          // open: closing it would hide the only place the per-row reasons appear.
+          this.impSelected = r.failed.map(f => f.system_id);
+          this.flash(`Imported ${r.count}; ${r.failed.length} could not be imported.`,
+                     r.count ? 'success' : 'error');
+          await this.loadImportCandidates();
+        }
+      } catch (e) {
+        this.impError = e.message || 'Import failed.';
+      } finally {
+        this.impSaving = false;
+      }
     },
 
     async loadRegAccounts() {

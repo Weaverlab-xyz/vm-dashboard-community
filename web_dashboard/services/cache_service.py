@@ -48,6 +48,11 @@ TTL = {
     "cost_breakdown_v2": 21600,   # 6 h
     # Deployment inventory (DB aggregation) — short TTL; cheap indexed queries.
     "deployment_inventory": 60,   # 1 min
+    # Password Safe database import candidates (api/cloud_databases.py). Four paged
+    # collections per miss, so worth caching; 5 min because Password Safe discovery
+    # runs on an hourly-plus schedule and nothing here changes faster than that.
+    # Keyed on the workgroup filter — see SCOPED_CACHES in tests/test_cache_key_scoping.py.
+    "ps_db_candidates":    300,   # 5 min
 }
 
 # ── Internal store ────────────────────────────────────────────────────────────

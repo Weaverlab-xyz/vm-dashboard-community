@@ -391,6 +391,17 @@ class Settings(BaseSettings):
     clouddb_ps_platform_sqlserver: str = "mssql SSM Custom Plugin"
     clouddb_ps_pravault_platform: str = "PRA Vault Username Password"
     clouddb_ps_workgroup: str = ""                 # blank → falls back to passwordsafe_workgroup
+    # Import from Password Safe (/databases → "Import from Password Safe"). Reads only —
+    # nothing in Password Safe is created or changed. Password Safe already runs a
+    # discovery scanner with managed credentials, so it knows a database's platform,
+    # port and requestable accounts authoritatively; these four tune what the import
+    # list shows. All optional: the feature is already gated on cloud_database_enabled
+    # + beyondtrust_enabled, so a third on/off switch would only be a third thing to
+    # forget. See docs/databases.md "Importing from Password Safe".
+    clouddb_ps_import_workgroup: str = ""          # blank → everything the API identity can see
+    clouddb_ps_import_default_cloud: str = "local"  # Location preselected in the modal
+    clouddb_ps_import_max_systems: int = 500       # cap on candidates returned
+    clouddb_ps_import_platform_map: str = ""       # JSON {"Percona Server": "mysql"} overrides
     # DB-client container images run on the jump host (override for a mirrored registry).
     clouddb_db_client_image_postgres: str = "postgres:16"
     clouddb_db_client_image_mysql: str = "mysql:8.4"

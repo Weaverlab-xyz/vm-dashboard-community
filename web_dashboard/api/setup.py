@@ -388,6 +388,11 @@ _CONFIG_DEPENDENT_CACHE_PREFIXES = (
     "portainer_endpoints",    # services/portainer_service.py  key_param() — "vmcli:portainer_endpoints:"
     "portainer_containers",   # services/portainer_service.py  key_param(endpoint_id=, all=)
     "portainer_stacks",       # services/portainer_service.py  key_param(endpoint_id=)
+    # The dimension this is keyed on (clouddb_ps_import_workgroup) is edited on the
+    # very panel whose save calls _invalidate_data_caches, so it MUST be here rather
+    # than in the exact-key tuple — an exact-key invalidate of a scoped key is a
+    # silent no-op, which is the whole reason these two tuples are separate.
+    "ps_db_candidates",       # api/cloud_databases.py  key_param(workgroup=...)
 )
 
 
@@ -628,6 +633,14 @@ class BeyondTrustFeatureConfig(BaseModel):
     clouddb_ps_platform_sqlserver: str = "mssql SSM Custom Plugin"
     clouddb_ps_pravault_platform: str = "PRA Vault Username Password"
     clouddb_ps_workgroup: str = ""                 # blank → falls back to passwordsafe_workgroup
+    # Import from Password Safe — see config.py for what each one does.
+    # clouddb_ps_import_max_systems MUST stay annotated `int`: _read_feature's
+    # int-coercion branch only fires on an int annotation, and an unset int otherwise
+    # reads back as "" and 422s the whole panel.
+    clouddb_ps_import_workgroup: str = ""
+    clouddb_ps_import_default_cloud: str = "local"
+    clouddb_ps_import_max_systems: int = 500
+    clouddb_ps_import_platform_map: str = ""
     clouddb_db_client_image_postgres: str = "postgres:16"
     clouddb_db_client_image_mysql: str = "mysql:8.4"
     clouddb_db_client_image_sqlserver: str = "mcr.microsoft.com/mssql-tools18"

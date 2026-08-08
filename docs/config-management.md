@@ -103,7 +103,9 @@ the runner section below.
 ### Kubernetes clusters & databases (localhost plays)
 
 Registered or provisioned **Kubernetes clusters** and **databases**
-appear in the same target dropdown, under their own groups.
+appear in the same target dropdown, under their own groups. A database
+[imported from Password Safe](databases.md#importing-from-password-safe)
+is an ordinary registered row and behaves identically as a target.
 These are *not* SSH targets — Ansible's `kubernetes.core` and
 `community.postgresql`/`mysql`/`general` modules run on the controller
 (`hosts: localhost, connection: local`) and reach *out* to the API

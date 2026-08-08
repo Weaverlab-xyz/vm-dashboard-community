@@ -334,6 +334,31 @@ so it can be a Configuration Management target. That path has no tunnel and no o
 admin login is a Password Safe **managed account**, checked out just-in-time per run and never
 stored, so the database has to be onboarded in Password Safe *before* it can be registered.
 
+### Importing databases from Password Safe
+
+Since Password Safe's own discovery scanner already found and onboarded these databases —
+with managed credentials, so it knows the platform, port, instance and accounts — the
+Databases page can read that inventory directly instead of asking an operator to retype it.
+**Databases** → **Import from Password Safe** lists the candidates and registers the ones you
+tick. It **reads only**; nothing in Password Safe is created or changed.
+
+Two things worth knowing here rather than in the feature doc:
+
+- **This path uses the public REST API, not `ps-cli`.** It reads `Platforms`,
+  `ManagedSystems`, `Databases` and `ManagedAccounts` over HTTPS with the same
+  `pscli_api_url` / `pscli_client_id` / `pscli_client_secret` OAuth client configured in
+  [Part 1](#part-1--password-safe-oauth-application-ps-cli), so it works in an image with no
+  `ps-cli` binary. The run-time credential *checkout* still goes through `ps-cli`.
+- **The account list comes from the accounts the API identity can `request`.** That is the
+  same permission surface the checkout uses, so a missing **Requestor** role or Smart Rule
+  shows up as a greyed-out candidate instead of a `4031, statuscode: 403` in a worker log
+  hours later.
+
+Configuration keys (Settings → Integrations → BeyondTrust → *Database Import*):
+`clouddb_ps_import_workgroup`, `clouddb_ps_import_default_cloud`,
+`clouddb_ps_import_max_systems`, `clouddb_ps_import_platform_map`. All optional and all
+documented in **[Databases → Importing from Password Safe](../databases.md#importing-from-password-safe)**.
+
 ---
 
 ## Preparing images for BT management

@@ -25,7 +25,9 @@ The other path is [registration](#registering-an-existing-database): record a da
 the dashboard did **not** create — on-premises (`cloud = local`) or in a cloud — so it
 can be a [Configuration Management](config-management.md) target. Nothing is built and no
 credential is stored; the admin login is a Password Safe **managed account** checked out
-at run time.
+at run time. The fastest way to register is
+[**Import from Password Safe**](#importing-from-password-safe), which lists what Password
+Safe already discovered instead of asking you to type it.
 
 The layers stack — stop after Provisioning + PRA, or add Password Safe and/or Entitle.
 **They apply to what the dashboard provisions**: a registered database gets none of them,
@@ -97,6 +99,83 @@ because their tunnels terminate/forward TLS themselves.
 
 ---
 
+## Importing from Password Safe
+
+Password Safe already runs a discovery scanner, and it scans **with managed
+credentials** — so it knows a database's platform, port, instance and accounts, not just
+that something is listening. Importing reads that inventory and registers the rows you
+pick. It is the same outcome as registering by hand, with nothing to type.
+
+**It only reads.** Nothing in Password Safe is created, changed or deleted.
+
+**How to import.** **Databases** page → **Import from Password Safe**, or
+`GET /api/databases/ps-candidates` + `POST /api/databases/ps-import`. Both need
+`cloud_database:read`/`write` **and** `secrets:use` — listing every managed system and
+account in the tenant is strictly more than the host-scoped lookup the run form uses, and
+importing pins a managed account for later checkout. The button renders only when
+`beyondtrust_enabled` is on.
+
+**What it reads.** Four collections over the Password Safe **public REST API** — no
+`ps-cli` binary needed, so it works in a container that doesn't ship one:
+
+| Collection | Used for |
+|---|---|
+| `Platforms` | platform name → engine |
+| `ManagedSystems` | the candidate rows: name, host, port, workgroup |
+| `Databases` | port, instance name and version enrichment |
+| `ManagedAccounts` | the accounts this API identity can **request** |
+
+Reading accounts from the *requestable* list is the point: it is the same permission
+surface the run-time checkout uses, so a missing Requestor role shows up as a greyed-out
+row **now** rather than as a failed playbook run later. See the blockquote below.
+
+**Platform → engine.** Matched on substrings of the Password Safe platform name and short
+name, first hit wins: `sqlserver` (`ms sql`, `mssql`, `sql server`), `postgres`
+(`postgresql`, `postgres`, `psql`, `greenplum`), `mysql` (`mysql`, `mariadb` — MariaDB
+registers as mysql), `oracle` (`oracle`, `oradb`). `mysql` is matched before `oracle` so
+"Oracle MySQL" resolves correctly. A platform that maps to nothing is **shown and greyed
+out**, never silently dropped — otherwise "my database isn't in the list" is
+undiagnosable. Add your own with `clouddb_ps_import_platform_map`.
+
+**Why a row is greyed out.** Eligibility is decided server-side and the reason travels
+with the row, so the list never offers something the import would refuse:
+
+| Reason | Fix |
+|---|---|
+| already registered in the dashboard | nothing to do — it's here already |
+| onboarded by this dashboard's own cloud-DB Password Safe integration | nothing to do — it's managed here |
+| the platform isn't a database engine the dashboard supports | add a `clouddb_ps_import_platform_map` entry, if it really is one |
+| no DNS name, host name or IP address | fix the managed system in Password Safe |
+| no requestable Password Safe account | grant the Requestor role — see below |
+
+**Location is yours to choose.** Password Safe records no cloud, so the dialog asks once
+per batch and defaults to `clouddb_ps_import_default_cloud`. It decides which Ansible
+runner reaches the database, so a wrong value fails the *run*, not the import.
+
+**Host spelling matters.** "Already imported" compares host and engine literally. Password
+Safe holding `db01` where an existing row says `db01.corp.internal` reads as a new
+database, and both can be registered. The dashboard cannot resolve your private DNS to
+tell them apart — it is not on that network. Prefer consistent naming; the import shows
+the exact host it will record.
+
+**Settings** → Integrations → BeyondTrust → *Database Import*:
+
+| Key | Default | Purpose |
+|---|---|---|
+| `clouddb_ps_import_workgroup` | *(blank)* | Restrict candidates to one Password Safe workgroup. Blank = everything the API identity can see. |
+| `clouddb_ps_import_default_cloud` | `local` | Location preselected in the dialog. |
+| `clouddb_ps_import_max_systems` | `500` | Cap on candidates. The dialog says so when it truncates — narrow with a workgroup rather than raising this. |
+| `clouddb_ps_import_platform_map` | *(blank)* | JSON platform→engine overrides, e.g. `{"Percona Server": "mysql"}`. Invalid JSON is ignored. |
+
+The candidate list is cached for 5 minutes per workgroup; "already imported" is computed
+fresh on every request, so an import is reflected immediately.
+
+Imported rows are ordinary registered rows — everything under
+[Registering an existing database](#registering-an-existing-database) applies to them
+unchanged, including that no credential is stored.
+
+---
+
 ## Registering an existing database
 
 Registration records a database the dashboard **didn't create**, so it can be a
@@ -113,7 +192,9 @@ the `ansible-cloud` runner image ships no Oracle client, and no Ansible runner r
 for `oci` at all, so an OCI row registers and lists but can't be a run target.
 
 **How to register.** **Databases** page → **Register existing**, or
-`POST /api/databases/register` (permission `cloud_database:write`). The button only
+`POST /api/databases/register` (permission `cloud_database:write`). To register several
+at once from what Password Safe already knows, use
+[Import from Password Safe](#importing-from-password-safe) instead. The button only
 renders when the BeyondTrust integration is on (`beyondtrust_enabled`), because the admin
 login *has* to be a Password Safe managed account. The `cloud_database_enabled` feature
 toggle gates registration and provisioning alike.
@@ -145,6 +226,13 @@ credential from the provisioning job's Terraform variables and the encrypted con
 > not requestable the instant it exists. Check with
 > `ps-cli access-policies test -s-id <system> -a-id <account>`; an empty list means no
 > policy applies yet.
+>
+> **The import catches this early.** Because
+> [Import from Password Safe](#importing-from-password-safe) sources its account list from
+> the *requestable* accounts, a managed system showing **no requestable account** there is
+> this same problem, surfaced before the row is ever created rather than hours later in a
+> worker log. If a database you know is onboarded shows that reason, it is the Requestor
+> role or the Smart Rule — not the onboarding.
 
 **Where the run executes** follows the database's location, exactly as it does for
 clusters — an on-premises database runs in a sibling container on the dashboard host,

@@ -18,6 +18,7 @@ non-admins. The real Terraform apply and the PRA tunnel (Phase 2, via the
 creds) drives the apply as a background task.
 """
 import logging
+import uuid
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -25,8 +26,9 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ..config import settings
-from ..database import User, get_db
-from ..services import aws_service, cache_service, cloud_database_service, config_service, job_service, region_catalog
+from ..database import CloudDatabase, User, get_db
+from ..services import (aws_service, cache_service, cloud_database_service, config_service,
+                        job_service, ps_api_service, ps_database_catalog, region_catalog)
 from ..services.aws_service import AWSError
 from .auth import require_permission
 
@@ -274,6 +276,335 @@ async def database_options(
     return DatabaseOptions(
         **opts, regions=_region_choices("aws", region),
         cached_at=cached_at, **(await _pra_pickers()))
+
+
+# ── Import from Password Safe ─────────────────────────────────────────────────
+#
+# Password Safe already runs a discovery scanner with managed credentials, so it
+# knows a database's platform, port and requestable accounts authoritatively.
+# These two routes read that inventory and register the rows an operator picks —
+# nothing in Password Safe is created or changed.
+#
+# Both are declared ABOVE the /{db_id} routes so a path parameter can never
+# capture them, and both demand `secrets:use` on top of the cloud_database scope
+# (see _require_secrets_use).
+
+# One batch is an operator ticking boxes in a dialog, not a migration tool.
+_MAX_IMPORT_BATCH = 50
+
+# Platform config keys naming the custom plugins THIS dashboard's own cloud-DB
+# onboarding creates. A managed system on one of those is already managed here, and
+# offering it for import would let a provisioned database acquire a registered twin
+# whose host string happens not to match.
+_DASHBOARD_PLATFORM_KEYS = (
+    "clouddb_ps_platform_postgres", "clouddb_ps_platform_mysql",
+    "clouddb_ps_platform_sqlserver", "clouddb_ps_platform_azure_postgres",
+    "clouddb_ps_platform_azure_mysql", "clouddb_ps_platform_azure_sqlserver",
+)
+
+_PS_GENERIC_ERROR = ("Password Safe lookup failed — check the BeyondTrust "
+                     "configuration and server logs.")
+
+
+def _require_secrets_use(user: User) -> None:
+    """Listing Password Safe systems and accounts is the ``secrets:use`` grant.
+
+    It is the same inventory ``GET /api/config-mgmt/managed-accounts`` gates on,
+    and this returns strictly *more* of it — that route needs a ``host``, this one
+    enumerates the tenant. Importing then pins a managed account for later
+    just-in-time checkout, which is ``secrets:use`` in durable form. Without this
+    check a holder of ``cloud_database:read`` alone would have a way around the
+    scope.
+
+    Reuses config_mgmt's predicate rather than restating it, so the two routes
+    cannot drift apart. Imported locally to avoid an import cycle.
+    """
+    from .config_mgmt import _can_use_secrets
+    if not _can_use_secrets(user):
+        raise HTTPException(status_code=403, detail="The 'secrets:use' permission is required.")
+
+
+def _cfg(key: str):
+    val = config_service.get(key)
+    if val not in (None, ""):
+        return val
+    return getattr(settings, key, "")
+
+
+def _import_settings() -> dict:
+    try:
+        max_systems = int(_cfg("clouddb_ps_import_max_systems"))
+    except (TypeError, ValueError):
+        max_systems = settings.clouddb_ps_import_max_systems
+    default_cloud = str(_cfg("clouddb_ps_import_default_cloud") or "local").strip().lower()
+    if default_cloud not in cloud_database_service.VALID_REGISTER_CLOUDS:
+        default_cloud = "local"
+    return {
+        "workgroup": str(_cfg("clouddb_ps_import_workgroup") or "").strip(),
+        "default_cloud": default_cloud,
+        "max_systems": max(1, max_systems),
+        "platform_map": ps_database_catalog.parse_platform_map(
+            _cfg("clouddb_ps_import_platform_map")),
+        "dashboard_platforms": tuple(
+            str(_cfg(k) or "").strip() for k in _DASHBOARD_PLATFORM_KEYS),
+    }
+
+
+def _annotate_imported(db: Session, candidates: list) -> None:
+    """Mark the candidates the dashboard already holds a row for.
+
+    Computed here and never baked into the cached Password Safe payload: the
+    Password Safe half is tenant-wide and cacheable, this half changes the moment
+    anyone imports. Same split as ``api/agent._annotate_findings``, and it means an
+    import needs no cache invalidation at all.
+
+    Two deliberate choices:
+
+    * **Not creator-filtered**, unlike the list endpoint. A row another user
+      imported must still read as already imported, or two operators race and the
+      second gets a per-item failure they cannot explain from the UI.
+    * **No status filter**, because ``register_database``'s duplicate check has
+      none either — a decommissioned row still blocks a re-register, and greying
+      the candidate is how that becomes visible instead of surprising.
+
+    The comparison is case-insensitive while the service's is a plain ``==``, so a
+    host differing only in case greys out a row the service would in fact accept.
+    That direction is the safe one, and it matches _annotate_findings.
+    """
+    known = {((row[0] or "").strip().lower(), (row[1] or "").strip().lower())
+             for row in db.query(CloudDatabase.private_host, CloudDatabase.engine).all()}
+    for candidate in candidates:
+        candidate["already_imported"] = (
+            (candidate.get("host") or "").strip().lower(),
+            (candidate.get("engine") or "").strip().lower()) in known
+
+
+async def _read_candidates(db: Session) -> dict:
+    """Candidate rows plus the counters the modal needs, cache-backed.
+
+    ``get_or_refresh`` re-raises on a cache *miss* but swallows a failed background
+    refresh, so after one success a Password Safe outage looks like unchanging
+    data — hence ``cached_at`` travelling to the UI.
+    """
+    cfg = _import_settings()
+    cache_key = cache_service.key_param("ps_db_candidates",
+                                        workgroup=(cfg["workgroup"] or "*"))
+
+    async def _fetch():
+        return await ps_api_service.read_database_inventory(workgroup=cfg["workgroup"])
+
+    raw, cached_at = await cache_service.get_or_refresh(
+        cache_key, cache_service.TTL["ps_db_candidates"], _fetch)
+
+    systems, truncated = ps_database_catalog.build_candidates(
+        platforms=raw.get("platforms"), systems=raw.get("systems"),
+        databases=raw.get("databases"), accounts=raw.get("accounts"),
+        platform_map=cfg["platform_map"],
+        dashboard_platforms=cfg["dashboard_platforms"],
+        max_candidates=cfg["max_systems"])
+    _annotate_imported(db, systems)
+    return {"systems": systems, "truncated": truncated,
+            "warnings": list(raw.get("warnings") or []),
+            "cached_at": cached_at, "default_cloud": cfg["default_cloud"]}
+
+
+@router.get("/ps-candidates")
+async def ps_candidates(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("cloud_database", "read")),
+):
+    """Databases Password Safe knows about, shaped for the import dialog.
+
+    Never 500s and never returns Password Safe's own error text: a ``PSApiError``
+    carries a slice of the tenant's response body, which must not reach the caller
+    (CodeQL ``py/stack-trace-exposure``). A disabled or unconfigured integration is
+    reported as a *state* rather than an error, matching
+    ``GET /api/config-mgmt/managed-accounts``, so the dialog can say which switch to
+    flip instead of showing a failure.
+    """
+    _require_enabled()
+    _require_secrets_use(current_user)
+
+    if not config_service.get_bool("beyondtrust_enabled", settings.beyondtrust_enabled):
+        return {"enabled": False, "configured": False, "systems": [],
+                "default_cloud": "local", "truncated": False, "warnings": []}
+    if not ps_api_service.configured():
+        return {"enabled": True, "configured": False, "systems": [],
+                "default_cloud": _import_settings()["default_cloud"],
+                "truncated": False, "warnings": [],
+                "reason": "Password Safe is not configured — set the API URL, client "
+                          "id and secret in Settings → Integrations → BeyondTrust."}
+    try:
+        return {"enabled": True, "configured": True, **(await _read_candidates(db))}
+    except ps_api_service.PSApiError as exc:
+        logger.warning("Password Safe database inventory read failed: %s", exc)
+        return {"enabled": True, "configured": True, "systems": [],
+                "default_cloud": _import_settings()["default_cloud"],
+                "truncated": False, "warnings": [], "error": _PS_GENERIC_ERROR}
+    except Exception:  # noqa: BLE001
+        logger.exception("Password Safe database import candidates failed")
+        return {"enabled": True, "configured": True, "systems": [],
+                "default_cloud": "local", "truncated": False, "warnings": [],
+                "error": _PS_GENERIC_ERROR}
+
+
+class PSImportItem(BaseModel):
+    """One database to import, named by its Password Safe ids and nothing else.
+
+    There is deliberately no host, port or account-name field. The server
+    re-resolves every ``system_id`` from its own candidate read, which is the same
+    property ``config_mgmt.run_playbook_bulk`` gets from resolving inventory ids
+    server-side: a caller cannot pair an arbitrary host with an arbitrary managed
+    account and register it, bypassing every eligibility rule. ``engine`` may be
+    sent, but only to be checked against the server's answer — never trusted.
+    """
+    system_id: int
+    account_id: int
+    cloud: str = ""
+    engine: str = ""
+    db_name: Optional[str] = None
+
+
+class PSImportRequest(BaseModel):
+    items: list[PSImportItem] = []
+
+
+@router.post("/ps-import")
+async def ps_import(
+    req: PSImportRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("cloud_database", "write")),
+):
+    """Register the selected Password Safe databases.
+
+    Two tiers of validation, following ``run_playbook_bulk``:
+
+    * **Selection** problems — nothing to do, too many, the same system twice, two
+      systems that would collide on ``(host, engine)``, an invalid location, an
+      engine that disagrees with the server's — refuse the *whole* request with a
+      400 before a single row is written. A partial success there would be
+      arbitrary, and letting item two fail on the uniqueness row item one just
+      created reads as a Password Safe fault.
+    * **Per-target** problems — the system vanished, it is no longer eligible, the
+      account is not on it, the register call refused — fail that item and carry
+      on, returning a partial-success envelope. 400 only if nothing succeeded.
+    """
+    _require_enabled()
+    _require_secrets_use(current_user)
+
+    if not config_service.get_bool("beyondtrust_enabled", settings.beyondtrust_enabled):
+        raise HTTPException(
+            status_code=400,
+            detail="BeyondTrust is disabled, so there is nothing to import from.")
+
+    items = req.items or []
+    if not items:
+        raise HTTPException(status_code=400, detail="Select at least one database to import.")
+    if len(items) > _MAX_IMPORT_BATCH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Import at most {_MAX_IMPORT_BATCH} databases at a time "
+                   f"({len(items)} selected).")
+    system_ids = [i.system_id for i in items]
+    if len(set(system_ids)) != len(system_ids):
+        raise HTTPException(status_code=400,
+                            detail="The same managed system was selected more than once.")
+
+    try:
+        found = await _read_candidates(db)
+    except ps_api_service.PSApiError as exc:
+        logger.warning("Password Safe read failed during import: %s", exc)
+        raise HTTPException(status_code=503, detail=_PS_GENERIC_ERROR) from exc
+
+    default_cloud = found["default_cloud"]
+    by_id = {c["system_id"]: c for c in found["systems"]}
+
+    # ── selection pass: no writes ──
+    seen_targets = {}
+    for item in items:
+        candidate = by_id.get(item.system_id)
+        if candidate is None:
+            continue                      # per-target below; the id may have gone
+        cloud = (item.cloud or default_cloud).strip().lower()
+        if cloud not in cloud_database_service.VALID_REGISTER_CLOUDS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{cloud!r} is not a valid location. Choose one of: "
+                       f"{', '.join(sorted(cloud_database_service.VALID_REGISTER_CLOUDS))}.")
+        if item.engine and item.engine.strip().lower() != candidate["engine"]:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Password Safe reports {candidate['name'] or item.system_id} as "
+                       f"{candidate['engine'] or 'an unsupported engine'}, not "
+                       f"{item.engine!r}.")
+        target = ((candidate.get("host") or "").strip().lower(), candidate["engine"])
+        if target in seen_targets:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Two selected systems point at the same database "
+                       f"({target[0]}, {target[1]}): "
+                       f"{seen_targets[target]} and {candidate['name'] or item.system_id}. "
+                       f"Import one of them.")
+        seen_targets[target] = candidate["name"] or item.system_id
+
+    # ── per-target pass ──
+    batch_id = str(uuid.uuid4())
+    imported, failed = [], []
+    for item in items:
+        candidate = by_id.get(item.system_id)
+        name = (candidate or {}).get("name") or str(item.system_id)
+        if candidate is None:
+            failed.append({"system_id": item.system_id, "name": name,
+                           "error": "no longer present in Password Safe"})
+            continue
+        if candidate.get("already_imported"):
+            failed.append({"system_id": item.system_id, "name": name,
+                           "error": "already registered in the dashboard"})
+            continue
+        if not candidate.get("eligible"):
+            failed.append({"system_id": item.system_id, "name": name,
+                           "error": candidate.get("reason") or "not importable"})
+            continue
+        if not ps_database_catalog.find_account(candidate, item.account_id):
+            failed.append({"system_id": item.system_id, "name": name,
+                           "error": "the selected account is not a requestable account "
+                                    "on that managed system"})
+            continue
+
+        payload = ps_database_catalog.import_request(
+            candidate, cloud=(item.cloud or default_cloud), account_id=item.account_id)
+        if item.db_name is not None:
+            payload["db_name"] = item.db_name.strip()
+        try:
+            # Always through register_database, never around it: that is what keeps
+            # the credential-never-persisted property (and its test) covering
+            # imported rows too.
+            result = cloud_database_service.register_database(
+                db, engine=payload["engine"], cloud=payload["cloud"],
+                host=payload["host"], port=payload["port"], db_name=payload["db_name"],
+                managed_account=payload["managed_account"],
+                created_by=current_user.username,
+                region=payload["region"], instance_id=payload["instance_id"])
+        except cloud_database_service.CloudDatabaseError as exc:
+            # The dashboard's own text — safe to pass through.
+            failed.append({"system_id": item.system_id, "name": name, "error": str(exc)})
+            continue
+        imported.append({"system_id": item.system_id, "name": name,
+                         "db_id": result.get("id"),
+                         "host": payload["host"], "engine": payload["engine"]})
+
+    job_service.log_audit(db, current_user.username, "clouddb_ps_import", details={
+        "batch_id": batch_id, "count": len(imported),
+        "system_ids": [i["system_id"] for i in imported],
+        "failed": [f["system_id"] for f in failed]})
+
+    if not imported:
+        raise HTTPException(
+            status_code=400,
+            detail=f"No databases were imported. First failure: {failed[0]['error']}"
+                   if failed else "No databases were imported.")
+    return {"batch_id": batch_id, "count": len(imported),
+            "imported": imported, "failed": failed}
 
 
 @router.get("/{db_id}/connection")
