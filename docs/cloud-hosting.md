@@ -165,12 +165,21 @@ racing, which is correct but is real wall-clock time.
 
 ### Replicas
 
-**Run one app replica.** The dashboard keeps OIDC/OAuth CSRF state and FIDO2
-challenges in process memory, so the second leg of a login ceremony must land on
-the process that started it. This already makes SSO and security-key logins
-intermittent across the image's two gunicorn workers; more replicas make it
-worse. Password login is unaffected. Cache warmers also run per process, so
-extra replicas multiply billable cloud API calls — Cost Explorer among them.
+**Login no longer constrains this.** OIDC/OAuth CSRF state and FIDO2 challenges
+used to live in process memory, which made SSO and security-key logins fail
+intermittently even across the image's own two gunicorn workers — the second leg
+of a ceremony had to land on the process that started it, and nothing makes it.
+That state is now a short-TTL database table, so it crosses workers and replicas.
+Password login was never affected.
+
+**One app replica is still the default,** but now for a cost reason rather than a
+correctness one: cache warmers run per process, so extra replicas multiply
+billable cloud API calls — Cost Explorer among them.
+
+Live job output is not a constraint here. The job WebSocket is driven entirely by
+the database — it replays persisted log lines on connect and tails new ones by
+polling — so a browser reaches an in-flight job's output from any replica, not
+only the one that started it.
 
 **Run exactly one worker replica** unless you have raised the connection budget
 to match. Sizing and the budget arithmetic are in
