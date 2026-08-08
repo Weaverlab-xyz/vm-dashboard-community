@@ -509,6 +509,13 @@ def import_config(payload: HeadlessImport, request: Request, background_tasks: B
     for key, value in payload.config.items():
         if value is None:
             continue
+        # Skip the redaction sentinel, same as _write_feature. GET /api/setup/config
+        # returns bullets for the keys in config_service._SECRET_KEYS, so anything
+        # that round-trips a read back into a write arrives holding them. Storing
+        # one leaves a key that *looks* configured in the UI and fails at
+        # cloud-call time — worse than leaving it unset.
+        if isinstance(value, str) and value.startswith("••"):
+            continue
         if isinstance(value, bool):
             sval = "1" if value else "0"
         else:
