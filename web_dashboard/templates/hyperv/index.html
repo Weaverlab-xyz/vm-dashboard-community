@@ -10,6 +10,7 @@
       <h1 class="text-2xl font-bold text-gray-900">Hyper-V</h1>
       <p class="text-sm text-gray-500 mt-1">
         <span class="font-mono">{{ hyperv_host }}</span>
+        {% if connection_name %}<span class="ml-1 text-xs text-gray-400">({{ connection_name }}{% if via_agent %}, via agent{% endif %})</span>{% endif %}
         <span x-show="allVms.length > 0" class="ml-2">·
           <span x-text="filteredVms.length + ' VM' + (filteredVms.length !== 1 ? 's' : '')"></span>
           <span x-show="filteredVms.length !== allVms.length"

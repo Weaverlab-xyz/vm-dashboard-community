@@ -10,6 +10,7 @@
       <h1 class="text-2xl font-bold text-gray-900">Nutanix AHV</h1>
       <p class="text-sm text-gray-500 mt-1">
         <span class="font-mono">{{ nutanix_host }}</span>
+        {% if connection_name %}<span class="ml-1 text-xs text-gray-400">({{ connection_name }}{% if via_agent %}, via agent{% endif %})</span>{% endif %}
         <span x-show="lastLoaded" class="ml-2 text-xs text-gray-400"
               x-text="'· Loaded ' + timeAgo(lastLoaded)"></span>
       </p>
