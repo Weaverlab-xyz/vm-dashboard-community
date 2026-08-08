@@ -41,6 +41,7 @@ import logging
 import os
 import random
 import re
+import http.client as http_client
 import socket
 import ssl
 import stat
@@ -51,7 +52,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 import urllib.error as _urlerror
 import urllib.request as _urlrequest
-from urllib.parse import urlparse
+from urllib.parse import quote as _quote, urlparse
 
 import requests
 import yaml
@@ -245,13 +246,20 @@ class Policy:
     """
 
     def __init__(self, allow: list, deny: list, job_types: set, limits: dict,
-                 digest: str, connection_verbs: dict = None):
+                 digest: str, connection_verbs: dict = None, sibling: dict = None):
         self.allow = allow            # [(network, {ports} or None)]
         self.deny = deny              # [network]
         self.job_types = job_types
         self.limits = limits
         self.digest = digest
         self.connection_verbs = connection_verbs or {}   # {connection name: {verb}}
+        # The sibling runner is off unless the customer turns it on AND names an image.
+        # The image comes from here and never from a job, so a compromised dashboard
+        # cannot choose what gets run on the host.
+        sibling = sibling or {}
+        self.sibling_enabled = bool(sibling.get("enabled"))
+        self.sibling_image = str(sibling.get("image") or "")
+        self.sibling_network = str(sibling.get("network") or "bridge")
 
     def check_verb(self, connection_ref: str, verb: str) -> None:
         """Raise :class:`PolicyRefusal` unless policy.yaml grants this verb here.
@@ -324,12 +332,13 @@ class Policy:
         # Per-connection verb grants. The CUSTOMER decides what may be done to each
         # target, not the dashboard: a connection absent from this list, or present
         # without a verb, is refused however the job was signed.
+        sibling = doc.get("sibling") if isinstance(doc.get("sibling"), dict) else {}
         verbs = {}
         for entry in doc.get("connections") or []:
             if isinstance(entry, dict) and entry.get("name"):
                 verbs[str(entry["name"])] = {str(v) for v in (entry.get("verbs") or [])}
         return cls(allow, deny, job_types, limits,
-                   hashlib.sha256(raw).hexdigest(), verbs)
+                   hashlib.sha256(raw).hexdigest(), verbs, sibling)
 
     def check(self, ip: str, port: int) -> None:
         """Raise :class:`PolicyRefusal` unless this exact address:port is allowed."""
@@ -814,7 +823,7 @@ def _expand(payload: dict, policy: Policy, emit) -> list:
     return targets[:max_hosts]
 
 
-def run_discovery(payload: dict, policy: Policy, emit, cancelled) -> dict:
+def run_discovery(payload: dict, policy: Policy, emit, cancelled, job_id: str = "") -> dict:
     """Sweep the requested scope with unauthenticated probes and return findings."""
     scan_kind = payload.get("scan_kind") or "all"
     timeout = float(payload.get("timeout_s") or 3)
@@ -936,9 +945,164 @@ class HypervisorConnections:
         return conn
 
 
-def _secret_for(conn: dict) -> str:
-    """The connection's password. `password_file` wins so a Docker/Podman secret can be
-    mounted instead of putting the value in a YAML file."""
+# ── Password Safe just-in-time checkout ───────────────────────────────────────
+#
+# The end state this design was always heading for. With `ps_managed_account:` in
+# connections.yaml, the agent holds NO hypervisor credential at all — only a Password
+# Safe OAuth client, whose single power is to ask Password Safe for one. Every checkout
+# is then subject to Password Safe's own policy, approval workflow and session
+# recording, and the credential exists on this host for the duration of one job.
+#
+# The OAuth client is mounted by the customer, exactly like the enrolment code and the
+# policy file. The dashboard never issues it and never sees it — if it did, the
+# dashboard would once again be a place from which every hypervisor could be reached,
+# which is the thing all of this exists to prevent.
+
+PS_CLIENT_FILE = os.environ.get("AGENT_PS_CLIENT_FILE",
+                                "/etc/dashboard-agent/passwordsafe.yaml")
+
+
+class PasswordSafe:
+    """Minimal Password Safe REST client — enough to check one credential out and back.
+
+    Mirrors services/ps_api_service's flow (OAuth client-credentials -> SignAppIn ->
+    request -> credential -> check-in) rather than importing it: this runs in the agent
+    image, which has `requests` and nothing else. ps-cli is not available here and
+    neither is httpx.
+    """
+
+    def __init__(self, api_url: str, client_id: str, client_secret: str,
+                 verify: bool = True):
+        self.base = api_url.rstrip("/")
+        if "/beyondtrust/api/public/" not in self.base.lower():
+            self.base = f"{self.base}/BeyondTrust/api/public/v3"
+        self._id = client_id
+        self._secret = client_secret
+        self._verify = verify
+        self._session = requests.Session()
+
+    @classmethod
+    def from_file(cls, path: str = "") -> "PasswordSafe":
+        path = path or PS_CLIENT_FILE
+        try:
+            with open(path, "rb") as fh:
+                doc = yaml.safe_load(fh.read()) or {}
+        except OSError as exc:
+            raise PolicyRefusal(
+                f"a connection asks for a Password Safe checkout but {path} cannot be "
+                f"read: {exc}. Mount it :ro,Z — see docs/remote-agents.md.")
+        except yaml.YAMLError as exc:
+            raise PolicyRefusal(f"{path} is not valid YAML: {exc}")
+        if not isinstance(doc, dict) or not doc.get("api_url"):
+            raise PolicyRefusal(f"{path} needs api_url, client_id and client_secret")
+        secret = doc.get("client_secret") or ""
+        if doc.get("client_secret_file"):
+            try:
+                with open(doc["client_secret_file"], encoding="utf-8") as fh:
+                    secret = fh.read().strip()
+            except OSError as exc:
+                raise PolicyRefusal(f"cannot read client_secret_file: {exc}")
+        return cls(str(doc["api_url"]), str(doc.get("client_id") or ""), str(secret),
+                   verify=bool(doc.get("verify_ssl", True)))
+
+    def _call(self, method: str, path: str, **kw):
+        try:
+            resp = self._session.request(
+                method, f"{self.base}/{path}", timeout=30, verify=self._verify, **kw)
+        except requests.RequestException as exc:
+            raise PolicyRefusal(f"Password Safe unreachable: {exc}")
+        return resp
+
+    def sign_in(self) -> None:
+        resp = self._call("POST", "Auth/Connect/Token", data={
+            "grant_type": "client_credentials",
+            "client_id": self._id, "client_secret": self._secret})
+        if resp.status_code != 200:
+            raise PolicyRefusal(
+                f"Password Safe token request failed ({resp.status_code})")
+        token = (resp.json() or {}).get("access_token") or ""
+        if not token:
+            raise PolicyRefusal("Password Safe returned no access token")
+        self._session.headers["Authorization"] = f"Bearer {token}"
+        sign = self._call("POST", "Auth/SignAppIn")
+        if sign.status_code not in (200, 201):
+            raise PolicyRefusal(f"Password Safe SignAppIn failed ({sign.status_code})")
+
+    def sign_out(self) -> None:
+        try:
+            self._call("POST", "Auth/Signout")
+        except Exception:  # noqa: BLE001 — best effort; the session expires anyway
+            pass
+
+    def checkout(self, account_id: int, duration_min: int = 30) -> tuple:
+        """(request_id, credential). `ConflictOption=reuse` returns an existing active
+        request instead of a 409 — the same reason btapi_service passes `-c-op reuse`,
+        where a 409 body was once mis-parsed as a request id."""
+        resp = self._call("POST", "Requests", json={
+            "AccessType": "View", "SystemID": 0, "AccountID": int(account_id),
+            "DurationMinutes": int(duration_min), "Reason": "vm-dashboard agent",
+            "ConflictOption": "reuse"})
+        if resp.status_code not in (200, 201):
+            raise PolicyRefusal(
+                f"Password Safe refused the credential request ({resp.status_code}). "
+                f"The API identity needs the Requestor role and an access policy "
+                f"granting View on a Smart Rule containing this account.")
+        body = resp.json()
+        request_id = body if isinstance(body, int) else (
+            body.get("RequestID") or body.get("id"))
+        if not request_id:
+            raise PolicyRefusal("Password Safe returned no request id")
+
+        got = self._call("GET", f"Credentials/{int(request_id)}")
+        if got.status_code != 200:
+            raise PolicyRefusal(
+                f"Password Safe would not release the credential ({got.status_code}) — "
+                f"the request may be awaiting approval.")
+        credential = got.json()
+        if isinstance(credential, dict):
+            credential = credential.get("Credentials") or credential.get("Password") or ""
+        return int(request_id), str(credential)
+
+    def checkin(self, request_id: int) -> None:
+        """Best effort, and deliberately so: the credential is already used, the request
+        expires on its own duration, and failing a completed job because the check-in
+        was refused would be the wrong trade."""
+        try:
+            self._call("PUT", f"Requests/{int(request_id)}/Checkin",
+                       json={"Reason": "vm-dashboard agent finished"})
+        except Exception:  # noqa: BLE001
+            log.debug("Password Safe check-in failed for request %s", request_id)
+
+
+def _secret_for(conn: dict, checkins: list = None) -> str:
+    """The connection's password, by whichever of the three means it declares.
+
+    Precedence is deliberate: `ps_managed_account` first, because an operator who has
+    moved a connection to Password Safe should not silently keep using a stale literal
+    left in the file below it. Then `password_file` (so a Docker/Podman secret can be
+    mounted), then an inline `password`.
+
+    When `checkins` is provided, a just-in-time checkout appends its request id so the
+    caller can check the credential back in when the job finishes. Without it the
+    request simply expires on its own duration — which is safe, just untidy.
+    """
+    account = conn.get("ps_managed_account")
+    if account:
+        ps = PasswordSafe.from_file()
+        ps.sign_in()
+        try:
+            request_id, credential = ps.checkout(
+                int(account), int(conn.get("ps_duration_minutes") or 30))
+        finally:
+            ps.sign_out()
+        if checkins is not None:
+            checkins.append(request_id)
+        if not credential:
+            raise PolicyRefusal(
+                f"connection {conn.get('name')!r}: Password Safe released an empty "
+                f"credential for account {account}")
+        return credential
+
     path = conn.get("password_file")
     if path:
         try:
@@ -948,6 +1112,23 @@ def _secret_for(conn: dict) -> str:
             raise PolicyRefusal(
                 f"connection {conn.get('name')!r}: cannot read password_file {path}: {exc}")
     return str(conn.get("password") or "")
+
+
+def _checkin_all(request_ids: list) -> None:
+    """Return every credential this job checked out. Best effort by design."""
+    if not request_ids:
+        return
+    try:
+        ps = PasswordSafe.from_file()
+        ps.sign_in()
+        try:
+            for request_id in request_ids:
+                ps.checkin(request_id)
+        finally:
+            ps.sign_out()
+    except Exception:  # noqa: BLE001 — a failed check-in must not fail a finished job
+        log.warning("could not check %d Password Safe credential(s) back in",
+                    len(request_ids))
 
 
 def _conn_endpoint(conn: dict, default_port: int) -> tuple:
@@ -1015,7 +1196,7 @@ def _check_endpoint(policy: "Policy", host: str, port: int) -> None:
         policy.check(addr, port)
 
 
-def _sync_vsphere(conn: dict, payload: dict, policy: "Policy", emit) -> dict:
+def _sync_vsphere(conn, payload, policy, emit, checkins=None):
     """vCenter inventory via the vSphere Automation REST API (7.0U2+).
 
     vCenter, not bare ESXi: ESXi serves only the SOAP API, so an ESXi connection has to
@@ -1025,7 +1206,7 @@ def _sync_vsphere(conn: dict, payload: dict, policy: "Policy", emit) -> dict:
     _check_endpoint(policy, host, port)
     base = f"https://{host}:{port}"
     user = str(conn.get("username") or "")
-    basic = base64.b64encode(f"{user}:{_secret_for(conn)}".encode()).decode()
+    basic = base64.b64encode(f"{user}:{_secret_for(conn, checkins)}".encode()).decode()
     session = _hv_request(conn, "POST", f"{base}/api/session",
                           headers={"Authorization": f"Basic {basic}"})
     token = session if isinstance(session, str) else str(session.get("value") or session)
@@ -1042,7 +1223,7 @@ def _sync_vsphere(conn: dict, payload: dict, policy: "Policy", emit) -> dict:
     return {"vms": out, "next_cursor": "", "complete": True, "scanned": len(out)}
 
 
-def _sync_proxmox(conn: dict, payload: dict, policy: "Policy", emit) -> dict:
+def _sync_proxmox(conn, payload, policy, emit, checkins=None):
     """Proxmox inventory via /api2/json/cluster/resources.
 
     API-token auth only here. A password login would mean posting credentials to
@@ -1057,7 +1238,7 @@ def _sync_proxmox(conn: dict, payload: dict, policy: "Policy", emit) -> dict:
             f"connection {conn.get('name')!r} needs `token_id` — the agent uses Proxmox "
             f"API-token auth, not a password login.")
     user = str(conn.get("username") or "root@pam")
-    header = {"Authorization": f"PVEAPIToken={user}!{token_id}={_secret_for(conn)}"}
+    header = {"Authorization": f"PVEAPIToken={user}!{token_id}={_secret_for(conn, checkins)}"}
     body = _hv_request(conn, "GET",
                        f"https://{host}:{port}/api2/json/cluster/resources?type=vm",
                        headers=header)
@@ -1071,13 +1252,13 @@ def _sync_proxmox(conn: dict, payload: dict, policy: "Policy", emit) -> dict:
     return {"vms": out, "next_cursor": "", "complete": True, "scanned": len(out)}
 
 
-def _sync_nutanix(conn: dict, payload: dict, policy: "Policy", emit) -> dict:
+def _sync_nutanix(conn, payload, policy, emit, checkins=None):
     """Prism Central v3 inventory. Genuinely paged, so this is where the cursor earns
     its place: the offset rides back to the dashboard and returns on the next job."""
     host, port = _conn_endpoint(conn, 9440)
     _check_endpoint(policy, host, port)
     user = str(conn.get("username") or "admin")
-    basic = base64.b64encode(f"{user}:{_secret_for(conn)}".encode()).decode()
+    basic = base64.b64encode(f"{user}:{_secret_for(conn, checkins)}".encode()).decode()
     page = int(payload.get("page_size") or 250)
     try:
         offset = int(payload.get("cursor") or 0)
@@ -1108,7 +1289,7 @@ def _sync_nutanix(conn: dict, payload: dict, policy: "Policy", emit) -> dict:
             "complete": complete, "scanned": len(out)}
 
 
-def _sync_xcpng(conn: dict, payload: dict, policy: "Policy", emit) -> dict:
+def _sync_xcpng(conn, payload, policy, emit, checkins=None):
     """XCP-ng inventory over XAPI. stdlib xmlrpc.client, same as the dashboard uses."""
     import xmlrpc.client
 
@@ -1123,7 +1304,7 @@ def _sync_xcpng(conn: dict, payload: dict, policy: "Policy", emit) -> dict:
         f"https://{host}:{port}/",
         transport=xmlrpc.client.SafeTransport(context=context))
     result = server.session.login_with_password(
-        str(conn.get("username") or "root"), _secret_for(conn), "2.0", "dashboard-agent")
+        str(conn.get("username") or "root"), _secret_for(conn, checkins), "2.0", "dashboard-agent")
     if result.get("Status") != "Success":
         raise PolicyRefusal(f"XAPI login refused at {host}")
     session = result["Value"]
@@ -1161,7 +1342,7 @@ _POWER = {
 }
 
 
-def _power_proxmox(conn, payload, policy, emit, verb):
+def _power_proxmox(conn, payload, policy, emit, verb, checkins=None):
     host, port = _conn_endpoint(conn, 8006)
     _check_endpoint(policy, host, port)
     node = payload.get("target_scope") or ""
@@ -1171,7 +1352,7 @@ def _power_proxmox(conn, payload, policy, emit, verb):
         raise PolicyRefusal("a Proxmox power verb needs target_scope (node) and target_id")
     user = str(conn.get("username") or "root@pam")
     header = {"Authorization":
-              f"PVEAPIToken={user}!{conn.get('token_id')}={_secret_for(conn)}"}
+              f"PVEAPIToken={user}!{conn.get('token_id')}={_secret_for(conn, checkins)}"}
     action = _POWER[verb]["proxmox"]
     _hv_request(conn, "POST",
                 f"https://{host}:{port}/api2/json/nodes/{node}/{vm_type}/{vmid}"
@@ -1180,13 +1361,13 @@ def _power_proxmox(conn, payload, policy, emit, verb):
     return {"verb": verb, "target_id": vmid, "ok": True}
 
 
-def _power_vsphere(conn, payload, policy, emit, verb):
+def _power_vsphere(conn, payload, policy, emit, verb, checkins=None):
     """vCenter power via the Automation REST API. vCenter only — ESXi serves SOAP."""
     host, port = _conn_endpoint(conn, 443)
     _check_endpoint(policy, host, port)
     base = f"https://{host}:{port}"
     user = str(conn.get("username") or "")
-    basic = base64.b64encode(f"{user}:{_secret_for(conn)}".encode()).decode()
+    basic = base64.b64encode(f"{user}:{_secret_for(conn, checkins)}".encode()).decode()
     session = _hv_request(conn, "POST", f"{base}/api/session",
                           headers={"Authorization": f"Basic {basic}"})
     token = session if isinstance(session, str) else str(session.get("value") or session)
@@ -1201,13 +1382,13 @@ def _power_vsphere(conn, payload, policy, emit, verb):
     return {"verb": verb, "target_id": vm, "ok": True}
 
 
-def _power_nutanix(conn, payload, policy, emit, verb):
+def _power_nutanix(conn, payload, policy, emit, verb, checkins=None):
     raise PolicyRefusal(
         "Nutanix power verbs are not implemented in this agent build — a v3 power "
         "change is a full spec PUT with a metadata version, not a simple action.")
 
 
-def _power_xcpng(conn, payload, policy, emit, verb):
+def _power_xcpng(conn, payload, policy, emit, verb, checkins=None):
     import xmlrpc.client
 
     host, port = _conn_endpoint(conn, 443)
@@ -1221,7 +1402,7 @@ def _power_xcpng(conn, payload, policy, emit, verb):
         f"https://{host}:{port}/",
         transport=xmlrpc.client.SafeTransport(context=context))
     result = server.session.login_with_password(
-        str(conn.get("username") or "root"), _secret_for(conn), "2.0", "dashboard-agent")
+        str(conn.get("username") or "root"), _secret_for(conn, checkins), "2.0", "dashboard-agent")
     if result.get("Status") != "Success":
         raise PolicyRefusal(f"XAPI login refused at {host}")
     session = result["Value"]
@@ -1246,7 +1427,311 @@ _POWER_IMPL = {"proxmox": _power_proxmox, "nutanix": _power_nutanix,
                "xcpng": _power_xcpng, "vsphere": _power_vsphere}
 
 
-def run_hypervisor(payload: dict, policy: Policy, emit, cancelled) -> dict:
+# Mirrors agent_hypervisor_meta.snapshot_name. Derived from the job id the agent
+# already holds, NOT sent in the payload: a snapshot needs a name, and the moment a
+# name travels as a field there is a free-form string in a payload whose whole premise
+# is that there isn't one. The job id also makes the snapshot traceable to the row
+# that created it, which an operator-typed name would not be.
+SNAPSHOT_NAME_PREFIX = "dash-"
+
+
+def _snapshot_name(job_id: str) -> str:
+    clean = re.sub(r"[^A-Za-z0-9-]", "", str(job_id or ""))[:32]
+    return f"{SNAPSHOT_NAME_PREFIX}{clean}" if clean else f"{SNAPSHOT_NAME_PREFIX}unknown"
+
+
+def _snapshot_proxmox(conn, payload, policy, emit, name, checkins=None):
+    host, port = _conn_endpoint(conn, 8006)
+    _check_endpoint(policy, host, port)
+    node = payload.get("target_scope") or ""
+    vm_type = payload.get("target_type") or "qemu"
+    vmid = payload.get("target_id") or ""
+    if not (node and vmid):
+        raise PolicyRefusal("a Proxmox snapshot needs target_scope (node) and target_id")
+    user = str(conn.get("username") or "root@pam")
+    header = {"Authorization":
+              f"PVEAPIToken={user}!{conn.get('token_id')}={_secret_for(conn, checkins)}"}
+    _hv_request(conn, "POST",
+                f"https://{host}:{port}/api2/json/nodes/{node}/{vm_type}/{vmid}/snapshot",
+                headers=header, body={"snapname": name})
+    emit(f"snapshot {name} requested for {vm_type}/{vmid} on {node}")
+    return {"verb": "snapshot", "target_id": vmid, "snapshot": name, "ok": True}
+
+
+def _snapshot_vsphere(conn, payload, policy, emit, name, checkins=None):
+    host, port = _conn_endpoint(conn, 443)
+    _check_endpoint(policy, host, port)
+    base = f"https://{host}:{port}"
+    user = str(conn.get("username") or "")
+    basic = base64.b64encode(f"{user}:{_secret_for(conn, checkins)}".encode()).decode()
+    session = _hv_request(conn, "POST", f"{base}/api/session",
+                          headers={"Authorization": f"Basic {basic}"})
+    token = session if isinstance(session, str) else str(session.get("value") or session)
+    vm = payload.get("target_id") or ""
+    if not vm:
+        raise PolicyRefusal("a vSphere snapshot needs target_id (the VM moref)")
+    _hv_request(conn, "POST", f"{base}/api/vcenter/vm/{vm}/snapshots",
+                headers={"vmware-api-session-id": token},
+                body={"name": name, "description": "created by vm-dashboard",
+                      "memory": False, "quiesce": False})
+    emit(f"snapshot {name} requested for {vm}")
+    return {"verb": "snapshot", "target_id": vm, "snapshot": name, "ok": True}
+
+
+def _snapshot_xcpng(conn, payload, policy, emit, name, checkins=None):
+    import xmlrpc.client
+
+    host, port = _conn_endpoint(conn, 443)
+    _check_endpoint(policy, host, port)
+    context = ssl.create_default_context()
+    if not conn.get("verify_ssl"):
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    server = xmlrpc.client.ServerProxy(
+        f"https://{host}:{port}/",
+        transport=xmlrpc.client.SafeTransport(context=context))
+    result = server.session.login_with_password(
+        str(conn.get("username") or "root"), _secret_for(conn, checkins), "2.0", "dashboard-agent")
+    if result.get("Status") != "Success":
+        raise PolicyRefusal(f"XAPI login refused at {host}")
+    session = result["Value"]
+    try:
+        ref = server.VM.get_by_uuid(session, payload.get("target_id") or "").get("Value")
+        server.VM.snapshot(session, ref, name)
+    finally:
+        try:
+            server.session.logout(session)
+        except Exception:  # noqa: BLE001
+            pass
+    emit(f"snapshot {name} requested for {payload.get('target_id')}")
+    return {"verb": "snapshot", "target_id": payload.get("target_id"),
+            "snapshot": name, "ok": True}
+
+
+def _snapshot_nutanix(conn, payload, policy, emit, name, checkins=None):
+    raise PolicyRefusal(
+        "Nutanix snapshots are not implemented in this agent build — a v3 snapshot is "
+        "a separate resource with its own spec, not an action on the VM.")
+
+
+_SNAPSHOT_IMPL = {"proxmox": _snapshot_proxmox, "vsphere": _snapshot_vsphere,
+                  "xcpng": _snapshot_xcpng, "nutanix": _snapshot_nutanix}
+
+# The two the agent cannot speak to itself. `esxi` is a distinct kind from `vsphere`
+# on purpose: the same product, but a bare host serves SOAP only while vCenter serves
+# the Automation REST API the agent uses directly, and conflating them is how someone
+# ends up pointing pyVmomi at a vCenter for no reason.
+_SIBLING_KINDS = ("hyperv", "esxi")
+
+
+# ── The sibling runner ────────────────────────────────────────────────────────
+#
+# Hyper-V (WinRM/NTLM) and bare ESXi (SOAP) are the two transports this agent cannot
+# carry itself. Rather than fatten the image — the three-dependency rule is the security
+# argument, in executable form, and two tests enforce it — those two run in a one-shot
+# container that exits when the work is done. The supervisor stays inert.
+#
+# THE COST, STATED PLAINLY: launching a container needs the Docker socket, and the
+# socket is root on the host. It is NOT mounted by the default deployment, whose compose
+# file still promises it launches nothing; it lives in a separate opt-in overlay. So the
+# capability needs three independent parties to agree — the dashboard grants the job
+# type, the customer's policy.yaml enables the runner and names its image, and the host
+# operator physically mounts the socket. Withhold any one and nothing happens.
+#
+# The Engine API is spoken with the standard library: http.client over an AF_UNIX
+# socket, about sixty lines. Adding the `docker` SDK would put a package the audit tests
+# ban into the image to do something they already cover.
+
+DOCKER_SOCKET = os.environ.get("AGENT_DOCKER_SOCKET", "/var/run/docker.sock")
+SIBLING_LABEL = "com.weaverlab.dashboard-agent"
+
+
+class _UnixHTTP(http_client.HTTPConnection):
+    """HTTPConnection that dials a unix socket instead of a host:port."""
+
+    def __init__(self, path: str, timeout: float = 60.0):
+        super().__init__("localhost", timeout=timeout)
+        self._path = path
+
+    def connect(self):
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(self.timeout)
+        sock.connect(self._path)
+        self.sock = sock
+
+
+def _engine(method: str, path: str, body=None, timeout: float = 60.0):
+    """One Docker Engine API call. Returns (status, parsed-or-raw-body)."""
+    conn = _UnixHTTP(DOCKER_SOCKET, timeout=timeout)
+    try:
+        payload = json.dumps(body).encode() if body is not None else None
+        headers = {"Content-Type": "application/json"} if payload else {}
+        conn.request(method, path, body=payload, headers=headers)
+        resp = conn.getresponse()
+        raw = resp.read()
+    except OSError as exc:
+        raise PolicyRefusal(
+            f"cannot reach the Docker socket at {DOCKER_SOCKET}: {exc}. The sibling "
+            f"runner needs it mounted — see docker-compose.sibling.yml.")
+    finally:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        return resp.status, json.loads(raw.decode("utf-8", "replace")) if raw else {}
+    except ValueError:
+        return resp.status, raw.decode("utf-8", "replace")
+
+
+def _demux(raw: bytes) -> str:
+    """Strip Docker's 8-byte stream framing from a non-TTY log stream."""
+    out, i = [], 0
+    while i + 8 <= len(raw):
+        size = int.from_bytes(raw[i + 4:i + 8], "big")
+        out.append(raw[i + 8:i + 8 + size])
+        i += 8 + size
+    return b"".join(out).decode("utf-8", "replace") if out else raw.decode("utf-8", "replace")
+
+
+def sweep_orphans() -> int:
+    """Remove sibling containers a previous agent left behind.
+
+    A crash between create and remove leaves one; without this they accumulate on the
+    host forever. Scoped by label, so it can never touch a container this agent did not
+    create. Best effort — a socket that is not mounted simply means there is nothing to
+    sweep.
+    """
+    try:
+        status, body = _engine(
+            "GET", "/containers/json?all=1&filters="
+                   + _quote(json.dumps({"label": [SIBLING_LABEL]})))
+    except PolicyRefusal:
+        return 0
+    if status != 200 or not isinstance(body, list):
+        return 0
+    removed = 0
+    for container in body:
+        try:
+            _engine("DELETE", f"/containers/{container['Id']}?force=1&v=1")
+            removed += 1
+        except Exception:  # noqa: BLE001
+            pass
+    if removed:
+        log.info("swept %d orphaned sibling container(s)", removed)
+    return removed
+
+
+def _run_sibling(policy: "Policy", env: dict, emit, cancelled,
+                 timeout: float = 300.0) -> dict:
+    """Run one hypervisor operation in a throwaway container and return its JSON.
+
+    Note what is NOT derived from the job: the image (policy), and every field of
+    HostConfig. There is deliberately no path by which a payload can ask for a bind
+    mount, a capability, host networking or privileged mode — a fully hostile dashboard
+    cannot get `--privileged` out of this agent because there is no field to ask with.
+    """
+    image = policy.sibling_image
+    if not policy.sibling_enabled or not image:
+        raise PolicyRefusal(
+            "this agent's policy.yaml does not enable the sibling runner. Set "
+            "`sibling: {enabled: true, image: chrweav/hypervisor-runner:latest}` and "
+            "mount the Docker socket — see docs/remote-agents.md#the-sibling-runner.")
+
+    # The credential rides in Env in the create body: not in argv (where it would show
+    # in `ps` on the host) and not in a file (which would need a bind mount).
+    spec = {
+        "Image": image,
+        "Env": [f"{k}={v}" for k, v in env.items()],
+        "Labels": {SIBLING_LABEL: "1"},
+        "HostConfig": {
+            "AutoRemove": False,       # racing the log read; we remove explicitly
+            "Binds": [],
+            "Privileged": False,
+            "CapDrop": ["ALL"],
+            "ReadonlyRootfs": True,
+            "Tmpfs": {"/tmp": "rw,size=16m"},
+            "NetworkMode": policy.sibling_network,
+            "PidsLimit": 128,
+            "Memory": 256 * 1024 * 1024,
+            "SecurityOpt": ["no-new-privileges:true"],
+        },
+    }
+    status, body = _engine("POST", "/containers/create", spec)
+    if status == 404:
+        raise PolicyRefusal(
+            f"the sibling image {image!r} is not present on this host. Pull it first: "
+            f"docker pull {image}")
+    if status not in (200, 201):
+        raise PolicyRefusal(f"could not create the sibling container ({status}): "
+                            f"{str(body)[:200]}")
+    container = body.get("Id")
+    emit(f"running {image} for this operation")
+
+    try:
+        status, _ = _engine("POST", f"/containers/{container}/start")
+        if status not in (204, 304):
+            raise PolicyRefusal(f"the sibling container would not start ({status})")
+
+        if cancelled():
+            _engine("POST", f"/containers/{container}/kill")
+            raise PolicyRefusal("cancelled while the sibling was starting")
+
+        status, _ = _engine("POST", f"/containers/{container}/wait",
+                            timeout=timeout + 15)
+        status, raw = _engine(
+            "GET", f"/containers/{container}/logs?stdout=1&stderr=1")
+        text = _demux(raw.encode() if isinstance(raw, str) else raw)
+    finally:
+        try:
+            _engine("DELETE", f"/containers/{container}?force=1&v=1")
+        except Exception:  # noqa: BLE001
+            log.warning("could not remove sibling container %s", container[:12])
+
+    # The runner prints exactly one JSON object, and prints a refusal the same way, so
+    # a failure is reported rather than inferred from an empty pipe.
+    line = next((ln for ln in reversed(text.splitlines()) if ln.strip().startswith("{")),
+                "")
+    if not line:
+        raise PolicyRefusal(f"the sibling runner produced no result: {text[-300:]}")
+    try:
+        result = json.loads(line)
+    except ValueError:
+        raise PolicyRefusal("the sibling runner produced unparseable output")
+    if not result.get("ok"):
+        raise PolicyRefusal(result.get("error") or "the sibling runner failed")
+    result.pop("ok", None)
+    return result
+
+
+def _sibling_env(conn: dict, kind: str, verb: str, payload: dict, secret: str) -> dict:
+    host, port = _conn_endpoint(conn, 5985 if kind == "hyperv" else 443)
+    opts = conn.get("options") if isinstance(conn.get("options"), dict) else conn
+    env = {
+        "HV_KIND": kind, "HV_VERB": verb,
+        "HV_HOST": host, "HV_PORT": str(port),
+        "HV_USERNAME": str(conn.get("username") or ""),
+        "HV_PASSWORD": secret,
+        "HV_VERIFY_SSL": "1" if conn.get("verify_ssl") else "0",
+        "HV_TARGET_ID": str(payload.get("target_id") or ""),
+    }
+    if kind == "hyperv":
+        env["HV_TRANSPORT"] = str(opts.get("transport") or "ntlm")
+        env["HV_USE_SSL"] = "1" if opts.get("use_ssl") else "0"
+    return env
+
+
+def _via_sibling(conn, payload, policy, emit, verb, kind, checkins=None):
+    host, port = _conn_endpoint(conn, 5985 if kind == "hyperv" else 443)
+    # The policy gate applies exactly as it does to an in-process call: the sibling is
+    # a different process, not a different trust boundary.
+    _check_endpoint(policy, host, port)
+    env = _sibling_env(conn, kind, verb, payload, _secret_for(conn, checkins))
+    return _run_sibling(policy, env, emit, lambda: False)
+
+
+def run_hypervisor(payload: dict, policy: Policy, emit, cancelled, job_id: str = "") -> dict:
     """Execute ONE allow-listed verb against ONE named connection.
 
     Three independent gates, and all three must agree:
@@ -1267,24 +1752,68 @@ def run_hypervisor(payload: dict, policy: Policy, emit, cancelled) -> dict:
     policy.check_verb(ref, verb)
     conn = HypervisorConnections.load().get(ref)
     declared = str(conn.get("kind") or kind)
-    if declared != kind:
+    if not _kind_matches(declared, kind):
         raise PolicyRefusal(
             f"connection {ref!r} is a {declared} connection; the job asked for {kind}")
+    # The AGENT's kind wins from here on. The dashboard has no `esxi` connection kind —
+    # from its side a bare host and a vCenter are both "vsphere" — but the two need
+    # different transports, and only this file knows which one this endpoint is.
+    kind = declared
 
     emit(f"{verb} on {ref} ({kind}) — granted by policy digest {policy.digest[:12]}")
     if cancelled():
         raise PolicyRefusal("cancelled before the connection was opened")
 
+    if conn.get("ps_managed_account"):
+        emit(f"checking a credential out of Password Safe for account "
+             f"{conn['ps_managed_account']} — this agent stores none")
+    checkins: list = []
+    try:
+        return _run_verb(conn, payload, policy, emit, verb, kind, job_id, checkins)
+    finally:
+        _checkin_all(checkins)
+
+
+def _kind_matches(declared: str, asked: str) -> bool:
+    """Does the agent's own kind for this connection satisfy what the job asked for?
+
+    Exact match, plus one deliberate specialisation: a job for ``vsphere`` may be served
+    by a connection this agent knows is ``esxi``. The dashboard cannot tell them apart —
+    it stores no host for an agent-bound connection, let alone a probe of it — and both
+    are vSphere as far as its model goes. The distinction is purely local: vCenter
+    serves the Automation REST API the agent speaks directly, a bare host serves SOAP
+    and has to go through the sibling runner.
+
+    Not symmetric. A job for `esxi` is NOT served by a `vsphere` connection, because
+    that direction would silently send SOAP work to a vCenter.
+    """
+    return declared == asked or (asked == "vsphere" and declared == "esxi")
+
+
+def _run_verb(conn, payload, policy, emit, verb, kind, job_id, checkins):
+    # Hyper-V and bare ESXi have no in-agent transport; they go to the sibling runner.
+    if kind in _SIBLING_KINDS:
+        if verb == "snapshot":
+            raise PolicyRefusal(
+                f"snapshot is not available for {kind!r} through the sibling runner")
+        return _via_sibling(conn, payload, policy, emit, verb, kind, checkins)
+
     if verb == "inventory_sync":
         handler = _SYNC.get(kind)
         if handler is None:
             raise PolicyRefusal(f"no inventory sync for {kind!r} in this agent build")
-        return handler(conn, payload, policy, emit)
+        return handler(conn, payload, policy, emit, checkins)
+
+    if verb == "snapshot":
+        impl = _SNAPSHOT_IMPL.get(kind)
+        if impl is None:
+            raise PolicyRefusal(f"no snapshot support for {kind!r} in this agent build")
+        return impl(conn, payload, policy, emit, _snapshot_name(job_id), checkins)
 
     impl = _POWER_IMPL.get(kind)
     if impl is None or verb not in _POWER:
         raise PolicyRefusal(f"{verb!r} is not available for {kind!r} in this agent build")
-    return impl(conn, payload, policy, emit, verb)
+    return impl(conn, payload, policy, emit, verb, checkins)
 
 
 HANDLERS = {"agent_discover": run_discovery,
@@ -1354,7 +1883,7 @@ def execute(dashboard: Dashboard, policy: Policy, job: dict) -> None:
 
         reporter.emit(f"Starting {job_type} (policy {policy.digest[:12]}…)")
         result = handler(job.get("payload") or {}, policy, reporter.emit,
-                         lambda: reporter.cancelled)
+                         lambda: reporter.cancelled, job_id)
         reporter.stop()
 
         if reporter.cancelled:

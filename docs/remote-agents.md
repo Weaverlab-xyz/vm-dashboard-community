@@ -476,10 +476,15 @@ override per connection with `options.sync_interval_minutes`). `power_on`, `powe
 `power_reset` and `restart` are on-demand, issued by the existing power buttons on the
 hypervisor pages when the resolved connection is agent-bound.
 
-Deliberately absent: **snapshot** (it needs a name, and a name is a free-form string —
-when it lands the name will be generated), and **deploy / clone / delete / console**
-(they need sizes, networks and cloud-init: a payload shape indistinguishable from a
-config file, and a config file is one step from a script). Those stay dashboard-direct.
+**`snapshot`** creates a snapshot named `dash-<job id>`. The name is *generated*, never
+supplied — which is exactly why it was held back at first: a created thing needs a name,
+and a name is a free-form string. There is still no field in the protocol through which
+operator text could reach a hypervisor, and the job id makes the snapshot traceable back to
+the row that made it, which a typed name would not be.
+
+Deliberately absent: **deploy / clone / delete / console** — they need sizes, networks and
+cloud-init, a payload shape indistinguishable from a config file, and a config file is one
+step from a script. Those stay dashboard-direct.
 
 `power_off` and `power_reset` are separate verbs rather than one verb with a `force`
 flag, because a boolean on a destructive verb gets defaulted wrong exactly once.
@@ -492,13 +497,79 @@ flag, because a boolean on a destructive verb gets defaulted wrong exactly once.
 | Proxmox VE | `/api2/json` + API token | yes | yes |
 | XCP-ng | XAPI (stdlib XML-RPC) | yes | yes |
 | Nutanix Prism | Prism v3 REST | yes | no — a v3 power change is a full spec PUT with a metadata version, not an action |
-| **bare ESXi** | — | no | no — ESXi serves only the SOAP API; point it at the dashboard directly |
-| **Hyper-V** | — | no | no — WinRM needs a real NTLM/Negotiate stack |
+| bare ESXi | SOAP, via the [sibling runner](#the-sibling-runner) | yes | yes |
+| Hyper-V | WinRM, via the [sibling runner](#the-sibling-runner) | yes | yes |
 
-Four of five products over REST, and **no new agent dependency for any of them**. That
-is why the agent image still installs only `requests`, `PyYAML` and `cryptography`:
-those two audit tests are the security argument in executable form, and trading them
-for pyVmomi would buy a capability the REST API already provides.
+`esxi` is a distinct connection kind from `vsphere` on the agent's side even though the
+dashboard has only `vsphere`: same product, different transport, and the agent is the only
+side that knows which one a given endpoint is. A job for `vsphere` is served by an `esxi`
+connection; the reverse is refused, because that direction would send SOAP work to a
+vCenter.
+
+Four of six products over REST, and **no new agent dependency for any of them**. That is
+why the agent image still installs only `requests`, `PyYAML` and `cryptography`: those two
+audit tests are the security argument in executable form. The remaining two get their heavy
+dependencies in a container that lives for seconds, which keeps the long-lived supervisor
+inert — the property `test_the_agent_imports_no_execution_machinery` protects.
+
+### Where the credential comes from
+
+Three sources, and the order matters: `ps_managed_account` beats `password_file` beats an
+inline `password`. An operator who has moved a connection to Password Safe should not
+silently keep authenticating with a stale literal left in the file underneath it.
+
+With `ps_managed_account`, **the agent holds no hypervisor credential at all** — only a
+Password Safe OAuth client whose single power is to ask for one. Each job checks a
+credential out and checks it back in, so every use lands in Password Safe's audit trail
+and is subject to its policy and approval workflow. That is the end state this design was
+heading for: an on-prem agent with zero standing target credentials.
+
+Mount the client alongside the other two files — see
+[`passwordsafe.example.yaml`](../examples/remote-agent/passwordsafe.example.yaml). The
+dashboard never issues it and never sees it.
+
+A check-in failure is swallowed deliberately: the credential has already been used and the
+request expires on its own duration, so failing a completed job over it would be the wrong
+trade. An account that requires human approval will not release, and the job fails rather
+than hanging — use auto-approve policies for accounts an unattended agent needs.
+
+### The sibling runner
+
+Hyper-V and **bare ESXi** are the only two the agent cannot talk to itself: WinRM is SOAP
+with NTLM/Negotiate, and a standalone ESXi host serves only the SOAP API. Rather than put
+a real auth stack and pyVmomi into an image whose three-dependency restraint *is* the
+security argument, those two run in a one-shot container the agent creates, reads one line
+of JSON from, and deletes.
+
+**This needs the Docker socket, and the socket is root on the host.** It is not mounted by
+the default deployment — [`docker-compose.yml`](../examples/remote-agent/docker-compose.yml)
+still promises the agent launches nothing, and that stays true. Turning it on is a
+separate, deliberate act:
+
+| Grant | Who | Where |
+|---|---|---|
+| the `agent_hypervisor` job type | dashboard operator | Agents page |
+| `sibling: {enabled, image}` | **you** | `policy.yaml` |
+| the socket itself | **you** | [`docker-compose.sibling.yml`](../examples/remote-agent/docker-compose.sibling.yml) |
+
+Withhold any one and nothing runs. Prefer the rootless Docker or Podman user socket; the
+example overlay uses the rootless path deliberately, so reaching for the root socket has to
+be a conscious edit.
+
+What the agent does with it is deliberately narrow. Every field of the container spec is a
+constant or comes from your policy — the image, the network, and a `HostConfig` with no
+bind mounts, no capabilities, a read-only root filesystem and `no-new-privileges`. **None
+of it is derived from anything the dashboard sends**, because there is no field through
+which to ask; a test asserts that. The credential rides in the environment of the create
+call rather than argv, so it never appears in `ps` on the host. Containers are labelled and
+orphans from a crashed agent are swept at startup.
+
+The agent will not pull the image for you. A pull is a network fetch of executable content,
+and that is your decision rather than a job's:
+
+```
+docker pull chrweav/hypervisor-runner:latest
+```
 
 ### Large inventories
 
@@ -616,6 +687,10 @@ an objection into a demonstration.
 | `unknown connection 'x'` | The name in the dashboard's connection row does not match any `name:` in that agent's `connections.yaml`. The dashboard holds no credential for it; the string is the whole join. |
 | `policy.yaml does not grant 'power_off' on 'x'` | Working as intended — the customer's file is the authority. Add the verb under that connection's `verbs:` list and restart the agent. |
 | One sync produced a dozen job rows | Expected for a large inventory: one row per page, all sharing a `batch_id`. See [Large inventories](#large-inventories). |
+| `policy.yaml does not enable the sibling runner` | Hyper-V and bare ESXi need it. Add the `sibling:` block, and apply `docker-compose.sibling.yml` so the socket is present. Read that file first — it mounts the Docker socket. |
+| `the sibling image … is not present on this host` | `docker pull chrweav/hypervisor-runner:latest`. The agent will not pull it for you, deliberately. |
+| `cannot reach the Docker socket` | The overlay is not applied, or `AGENT_DOCKER_SOCKET` does not match the mount's container-side path. |
+| A Password Safe checkout fails `4031 … 403` | The OAuth client's user needs the **Requestor** role plus a View access policy on a Smart Rule containing that managed account. Membership is recomputed on a schedule, so a new account is not requestable immediately. |
 | A sync never runs, and the connection shows an error | Read it — the enqueuer records why rather than queueing a job that would wait indefinitely. Usually the bound agent is offline or lacks the `agent_hypervisor` grant. |
 | Caddy never serves; logs show ACME retries | The hostname is internal and cannot satisfy an ACME challenge. Set `AGENT_TLS_INTERNAL=1` — see [above](#if-the-hostname-is-internal). |
 
@@ -631,12 +706,9 @@ Hypervisor brokering followed it and is described above. Next:
 - **Password Safe JIT checkout by the agent**, so it holds exactly one credential whose
   only power is to ask Password Safe — subject to its policy, approval workflow and
   session recording. An on-prem agent with zero standing target credentials.
-- **Hyper-V and bare ESXi over an agent.** The two the stdlib cannot reach: WinRM needs
-  a real NTLM/Negotiate stack and ESXi serves only SOAP. Both would come via a one-shot
-  sibling container rather than by fattening the agent, which keeps the supervisor
-  inert — the property `test_the_agent_imports_no_execution_machinery` protects.
-- **Snapshot**, with a generated name (`dash-{job_id}`) so no operator string crosses
-  the wire, and Nutanix power verbs.
+- **Nutanix power verbs and snapshots.** Both are full spec PUTs carrying a metadata
+  version rather than simple actions, so getting one wrong writes to the VM instead of
+  failing. Worth doing carefully rather than quickly.
 - **VMware Workstation over a co-located agent.** Not network-reachable, so this is a
   new *deployment shape* rather than one more connection kind — the agent would have to
   run on the desktop host and speak to `vmrest` on localhost. It would replace the
