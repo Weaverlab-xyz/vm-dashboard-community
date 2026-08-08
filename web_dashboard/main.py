@@ -103,6 +103,9 @@ async def lifespan(app: FastAPI):
     # Auto-delete timer sweeper. Loop always launched; it no-ops while the feature is
     # off, so flipping it on in Settings activates the next pass without an app restart.
     warmers.append(
+        asyncio.create_task(_hypervisor_sync_loop(), name="hypervisor_sync_loop")
+    )
+    warmers.append(
         asyncio.create_task(_expiry_sweeper_loop(), name="expiry_sweeper_loop")
     )
 
@@ -237,6 +240,46 @@ async def _expiry_sweeper_loop() -> None:
             interval = expiry_policy.sweep_interval_seconds()
         except Exception:
             interval = 30 * 60
+        await asyncio.sleep(interval)
+
+
+# ── Hypervisor inventory sync loop ───────────────────────────────────────────
+
+async def _hypervisor_sync_loop() -> None:
+    """Enqueue one inventory_sync per due agent-bound hypervisor connection.
+
+    Same shape and the same reasoning as _expiry_sweeper_loop: this ONLY enqueues.
+    Under ``gunicorn -w 2`` every task here runs twice, and letting
+    ``agent_service.lease_one``'s ``UPDATE ... WHERE status='queued' AND agent_id=:id``
+    rowcount decide the winner is what makes a pass single-flight across both workers.
+    It is emphatically not a jobs_worker handler — ``agent_hypervisor`` must stay
+    disjoint from HANDLED_TYPES or the local worker would race the agent for the row.
+
+    Always launched, and a no-op when remote agents are off or no connection is bound to
+    one, so flipping the flag in Settings activates the next pass with no restart.
+    """
+    from .database import SessionLocal
+    from .services import hypervisor_sync_service
+
+    while True:
+        try:
+            db = SessionLocal()
+            try:
+                queued = await asyncio.to_thread(
+                    hypervisor_sync_service.enqueue_due_syncs, db)
+                if queued:
+                    logger.info("queued %d hypervisor inventory sync(s)", queued)
+            finally:
+                db.close()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("hypervisor sync enqueue failed: %s", exc)
+        try:
+            interval = max(60, int(config_service.get("hypervisor_sync_poll_seconds")
+                                   or 300))
+        except (TypeError, ValueError):
+            interval = 300
         await asyncio.sleep(interval)
 
 
@@ -735,6 +778,15 @@ except ImportError as exc:
     logger.warning("API router 'config_mgmt' not loaded: %s", exc)
 
 
+# Hypervisor connections. NOT behind any single hypervisor's feature gate: the page
+# manages connections for all five kinds, and gating it on one of them would hide the
+# others' connections whenever that one is off.
+try:
+    from .api import connections as connections_api  # noqa: E402
+    app.include_router(connections_api.router)
+except ImportError as exc:
+    logger.warning("API router 'connections' not loaded: %s", exc)
+
 try:
     from .api import proxmox  # noqa: E402
     app.include_router(proxmox.router, dependencies=[_feature_gate("proxmox_enabled")])
@@ -854,6 +906,17 @@ async def vms_page(request: Request):
     if not config_service.get_bool("vmware_enabled", settings.vmware_enabled):
         raise HTTPException(status_code=404, detail="VMware integration is disabled")
     return templates.TemplateResponse("vms/list.html", {"request": request, **_feature_flags()})
+
+
+@app.get("/connections", response_class=HTMLResponse, include_in_schema=False)
+async def connections_page(request: Request):
+    """Hypervisor connections. Reachable whenever ANY hypervisor integration is on —
+    it is the one place their credentials now live."""
+    flags = _feature_flags()
+    if not any(flags.get(f"{k}_enabled") for k in
+               ("proxmox", "vsphere", "hyperv", "nutanix", "xcpng")):
+        raise HTTPException(status_code=404, detail="No hypervisor integration is enabled")
+    return templates.TemplateResponse("connections/index.html", {"request": request, **flags})
 
 
 @app.get("/proxmox", response_class=HTMLResponse, include_in_schema=False)

@@ -1355,6 +1355,54 @@
             </div>
           </div>
 
+          <!-- Database import (reads Password Safe; writes nothing to it) -->
+          <div class="border-t border-gray-100 pt-4">
+            <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Database Import</p>
+            <p class="text-xs text-gray-400 mb-3">
+              Tunes the <span class="font-medium">Import from Password Safe</span> button on the Databases page,
+              which lists the databases Password Safe already knows about and registers the ones you pick.
+              It only <span class="font-medium">reads</span> &mdash; nothing in Password Safe is created or changed.
+              All four are optional. Importing needs both the <code class="bg-gray-100 px-1 rounded">cloud_database:write</code>
+              and <code class="bg-gray-100 px-1 rounded">secrets:use</code> permissions.
+            </p>
+            <div class="grid grid-cols-2 gap-3">
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Import Workgroup <span class="text-gray-400 font-normal">(blank = everything visible)</span></label>
+                <input type="text" x-model="panelCfg.clouddb_ps_import_workgroup"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="Default Workgroup">
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Default Location</label>
+                <select x-model="panelCfg.clouddb_ps_import_default_cloud"
+                        class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                  <option value="local">On-premises</option>
+                  <option value="aws">AWS</option>
+                  <option value="azure">Azure</option>
+                  <option value="gcp">GCP</option>
+                  <option value="oci">OCI</option>
+                </select>
+                <p class="text-xs text-gray-400 mt-1">Preselected in the import dialog. Password Safe does not record a cloud, so this is a starting point, not a lookup.</p>
+              </div>
+            </div>
+            <div class="grid grid-cols-2 gap-3 mt-3">
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Max Candidates</label>
+                <input type="number" min="1" x-model.number="panelCfg.clouddb_ps_import_max_systems"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="500">
+                <p class="text-xs text-gray-400 mt-1">The dialog says so when it truncates &mdash; narrow with a workgroup rather than raising this.</p>
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Platform Overrides <span class="text-gray-400 font-normal">(JSON)</span></label>
+                <input type="text" x-model="panelCfg.clouddb_ps_import_platform_map"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder='{"Percona Server": "mysql"}'>
+                <p class="text-xs text-gray-400 mt-1">Maps a Password Safe platform name to postgres, mysql, sqlserver or oracle. Invalid JSON is ignored.</p>
+              </div>
+            </div>
+          </div>
+
           <!-- Database Password Safe onboarding (provisioned cloud DBs only) -->
           <div class="border-t border-gray-100 pt-4">
             <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Database Onboarding <span class="text-gray-400 font-normal normal-case">(AWS only)</span></p>
@@ -2674,6 +2722,15 @@
       <!-- ── Hyper-V ── -->
       <template x-if="panel?.key === 'hyperv' && !panelLoading">
         <div class="space-y-4">
+        <div class="mb-4 text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+          <span class="font-medium">These fields are the initial values only.</span>
+          Hypervisor credentials now live on the <a href="/connections" class="underline font-medium">Connections</a>
+          page, which supports more than one of each kind. The values here were copied
+          across on first start; editing them afterwards has no effect on what the
+          dashboard connects to. They are kept so rolling back to an older build still
+          works.
+        </div>
+
           <p class="text-sm text-gray-500">
             Connects to a Windows host running Hyper-V via <strong>WinRM</strong> (Windows Remote
             Management). Runs PowerShell Hyper-V cmdlets remotely — no agent required on the host.
@@ -2765,6 +2822,15 @@
       <!-- ── vSphere / ESXi ── -->
       <template x-if="panel?.key === 'vsphere' && !panelLoading">
         <div class="space-y-4">
+        <div class="mb-4 text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+          <span class="font-medium">These fields are the initial values only.</span>
+          Hypervisor credentials now live on the <a href="/connections" class="underline font-medium">Connections</a>
+          page, which supports more than one of each kind. The values here were copied
+          across on first start; editing them afterwards has no effect on what the
+          dashboard connects to. They are kept so rolling back to an older build still
+          works.
+        </div>
+
           <p class="text-sm text-gray-500">
             Connects to a vCenter Server or standalone ESXi host via the vSphere Web Services API.
             Works with vCenter 6.7+ and ESXi 6.7+. Requires <code class="bg-gray-100 px-1 rounded">pyVmomi</code> (installed by default).
@@ -2820,6 +2886,15 @@
       <!-- ── Proxmox VE ── -->
       <template x-if="panel?.key === 'proxmox' && !panelLoading">
         <div class="space-y-4">
+        <div class="mb-4 text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+          <span class="font-medium">These fields are the initial values only.</span>
+          Hypervisor credentials now live on the <a href="/connections" class="underline font-medium">Connections</a>
+          page, which supports more than one of each kind. The values here were copied
+          across on first start; editing them afterwards has no effect on what the
+          dashboard connects to. They are kept so rolling back to an older build still
+          works.
+        </div>
+
           <p class="text-sm text-gray-500">
             Connects to a Proxmox VE node or cluster via the REST API. Supports
             API token auth (recommended) or username/password.
@@ -2883,6 +2958,15 @@
       <!-- ── Nutanix AHV ── -->
       <template x-if="panel?.key === 'nutanix' && !panelLoading">
         <div class="space-y-4">
+        <div class="mb-4 text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+          <span class="font-medium">These fields are the initial values only.</span>
+          Hypervisor credentials now live on the <a href="/connections" class="underline font-medium">Connections</a>
+          page, which supports more than one of each kind. The values here were copied
+          across on first start; editing them afterwards has no effect on what the
+          dashboard connects to. They are kept so rolling back to an older build still
+          works.
+        </div>
+
           <p class="text-sm text-gray-500">
             Connects to <strong>Prism Central</strong> (or Prism Element) via the Nutanix REST API v3.
             Supports start, graceful ACPI shutdown (requires Nutanix Guest Tools), force stop, reboot,
@@ -3037,6 +3121,15 @@
 
       <template x-if="panel?.key === 'xcpng' && !panelLoading">
         <div class="space-y-4">
+        <div class="mb-4 text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+          <span class="font-medium">These fields are the initial values only.</span>
+          Hypervisor credentials now live on the <a href="/connections" class="underline font-medium">Connections</a>
+          page, which supports more than one of each kind. The values here were copied
+          across on first start; editing them afterwards has no effect on what the
+          dashboard connects to. They are kept so rolling back to an older build still
+          works.
+        </div>
+
           <p class="text-sm text-gray-500">
             Connects to an <strong>XCP-ng</strong> or <strong>XenServer</strong> host or pool master
             via the XAPI XML-RPC API (Python stdlib — no external SDK required). Supports start,

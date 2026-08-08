@@ -135,7 +135,7 @@ then the honest position is the blast-radius table above plus fast revocation.
           │                               │                         │
           │ unauthenticated probes        │                    ┌────▼─────┐
           ▼                               │                    │  jobs    │
-  k3s :6443   postgres :5432              │                    │  table   │
+  vCenter :443  Proxmox :8006            │                    │  table   │
 ```
 
 The `jobs` table is the queue in both directions. An agent job is created `queued` with
@@ -255,7 +255,7 @@ and edit the ranges:
 ```yaml
 targets:
   - cidr: 10.20.0.0/24
-    ports: [6443, 5432, 3306, 1433]
+    ports: [443, 8006, 9440, 5985, 5986]
 deny:
   - 169.254.0.0/16
 job_types:
@@ -379,33 +379,136 @@ hidden by default; untick **Hide revoked** to see them.
 **Discover** on an online agent, pick what to look for, optionally narrow the networks.
 The job page streams findings as they arrive.
 
-Discovery is unauthenticated probing, always:
+Discovery looks for **hypervisor management endpoints**, and it is unauthenticated
+probing, always:
 
-| Target | Probe | Yields |
-|---|---|---|
-| Kubernetes | `GET /version` over TLS. 200, 401 or 403 all identify an apiserver. | version, distro (k3s/rke2/kubeadm/eks/gke/aks), cert CN |
-| PostgreSQL | SSLRequest → `S`/`N` | engine, TLS support |
-| MySQL / MariaDB | server greeting (sent first, pre-auth) | engine, version |
-| SQL Server | TDS PRELOGIN | engine, version |
-| Oracle | TNS CONNECT → Accept/Refuse/Resend | engine |
-| Mounted kubeconfig | contexts enumerated, `/version` on each | version; **credentials stay in the file** |
+| Target | Port | Probe | Version? | Confidence |
+|---|---|---|---|---|
+| vCenter / ESXi | 443 | `GET /sdk/vimServiceVersions.xml`, then a constant `RetrieveServiceContent`. `apiType` separates vCenter from a bare ESXi host. | **yes** — full name, API version, build | confirmed |
+| XCP-ng / XenServer | 443 | `GET /` → the `Server: Xapi/…` header | **yes** | confirmed |
+| Proxmox VE | 8006 | `GET /` → `Server: pve-api-daemon` + the page title | no — `/api2/json/version` needs auth | confirmed |
+| Nutanix Prism | 9440 | `GET` on the v3 API → a 401, plus the certificate | no — nothing anonymous reports AOS | confirmed |
+| WinRM | 5985 / 5986 | `GET /wsman` → 401 + `Server: Microsoft-HTTPAPI` | no | **possible only** |
+
+443 is shared by vSphere and XCP-ng, so the agent probes each host:port **once** and
+classifies whichever answered.
+
+**WinRM is the honest limit of the set.** It identifies WinRM on Windows — and nearly
+every domain-joined Windows Server has WinRM enabled, the overwhelming majority of them
+not hypervisors. Those findings are marked *possible only* and rendered differently.
+There is a way to read the OS build, NetBIOS name and DNS domain anonymously (an NTLM
+type-1 negotiate token carries no credential, and the type-2 challenge answers with AV
+pairs) and the agent deliberately does not: it initiates an authentication exchange and
+lands in the Windows Security log as a logon event. A test bans the token by name.
 
 **No probe ever attempts a login.** Authenticated probing of unknown hosts locks out
 service accounts and reads like credential spraying in a customer's SIEM.
 
-### 6. Register the findings
+Not probed, and not by omission: **Proxmox Backup Server** (8007) and **oVirt/RHV**
+answer on ports in this list and are returned as *unidentified* rather than mislabelled.
+**VMware Workstation** is absent because a desktop hypervisor exposes nothing on the
+network — a probe for it would be code that never returns anything.
+
+Databases and Kubernetes clusters are **no longer discovered by an agent**. Password
+Safe already finds databases with managed credentials — it knows the platform, port and
+accounts, which a socket probe never could — so
+[Import from Password Safe](databases.md#importing-from-password-safe) replaced that
+path. Kubernetes clusters are registered from a kubeconfig, which no credential-less
+probe could ever supply.
+
+### 6. Add the connections
 
 Findings are **never auto-registered**, and that is not a limitation — it is infeasible
-by construction. `register_cluster` needs a full kubeconfig; `register_database` needs
-a Password Safe managed account. An agent able to supply either would have to hold
-cluster-admin or a privileged credential, which is the thing this design exists to
-avoid.
+by construction. A connection needs a credential, and a probe by definition has none.
 
-So you review the findings and click **Register**, which posts to the *existing*
-`POST /api/k8s/clusters` and `POST /api/databases/register` under your own credentials
-and permission checks. Findings the dashboard already knows about are marked
-`already_registered` — computed server-side, because an agent should never be handed
-the inventory of everything else the dashboard manages.
+So you review the findings and click **Add connection…**, which prefills the
+[Connections](#hypervisor-connections) form with the host, port and a suggested name and
+runs under your own credentials and permission checks. Findings the dashboard already
+has a connection for are marked `already_registered` — computed server-side, because an
+agent should never be handed the inventory of everything else the dashboard manages.
+
+One limitation worth knowing: a connection configured with an FQDN but discovered by IP
+reads as new, because the dashboard cannot resolve your private DNS — it is not on that
+network, which is the whole reason the agent exists. The prefill uses the IP the probe
+connected to, so a second scan matches.
+
+## Hypervisor connections
+
+Once an agent is enrolled it can also **broker hypervisor operations** — inventory sync
+on a schedule, and power verbs on demand — for vCenter, Proxmox, Nutanix and XCP-ng
+endpoints the dashboard has no route to.
+
+### The credential is the agent's, never the dashboard's
+
+A dashboard connection row bound to an agent stores the agent's **name for it** and
+nothing else: no host, no username, no password. The job says *"run `inventory_sync` on
+`dc1-vcenter`"* and the agent resolves the rest from its own
+[`connections.yaml`](../examples/remote-agent/connections.example.yaml).
+
+That is the difference between this and a proxy. Shipping credentials in the job
+envelope would put a standing vCenter administrator password in the dashboard's
+database, in every job payload, in the agent's memory — and, because **envelopes are
+signed rather than encrypted**, in the logs of any TLS-inspecting proxy in between. The
+[whole feature is sold](#behind-a-tls-inspecting-proxy) on the opposite property.
+
+The cost is two files joined by a string, and a typo in either yields
+`unknown connection 'dc1-vcenter'`. The connection form mitigates that by offering an
+agent picker rather than a free-text uuid.
+
+### Three grants, all required
+
+Nothing runs unless all three agree, and they belong to different people:
+
+| Grant | Who owns it | Where |
+|---|---|---|
+| this agent may run `agent_hypervisor` | the dashboard operator | Agents page |
+| this verb is allowed on this connection | **you** | `policy.yaml` → `connections:` |
+| this connection exists, with a credential | **you** | `connections.yaml` |
+
+Withhold any one and nothing happens. A refusal from the second or third arrives in
+Live Output naming the file and the line to add — the dashboard cannot fix it and does
+not pretend to.
+
+### The verbs
+
+`inventory_sync` is read-only and runs on a schedule (default every 30 minutes;
+override per connection with `options.sync_interval_minutes`). `power_on`, `power_off`,
+`power_reset` and `restart` are on-demand, issued by the existing power buttons on the
+hypervisor pages when the resolved connection is agent-bound.
+
+Deliberately absent: **snapshot** (it needs a name, and a name is a free-form string —
+when it lands the name will be generated), and **deploy / clone / delete / console**
+(they need sizes, networks and cloud-init: a payload shape indistinguishable from a
+config file, and a config file is one step from a script). Those stay dashboard-direct.
+
+`power_off` and `power_reset` are separate verbs rather than one verb with a `force`
+flag, because a boolean on a destructive verb gets defaulted wrong exactly once.
+
+### What the agent can and cannot reach
+
+| Product | Transport | Inventory | Power |
+|---|---|---|---|
+| vCenter | vSphere Automation REST API | yes | yes |
+| Proxmox VE | `/api2/json` + API token | yes | yes |
+| XCP-ng | XAPI (stdlib XML-RPC) | yes | yes |
+| Nutanix Prism | Prism v3 REST | yes | no — a v3 power change is a full spec PUT with a metadata version, not an action |
+| **bare ESXi** | — | no | no — ESXi serves only the SOAP API; point it at the dashboard directly |
+| **Hyper-V** | — | no | no — WinRM needs a real NTLM/Negotiate stack |
+
+Four of five products over REST, and **no new agent dependency for any of them**. That
+is why the agent image still installs only `requests`, `PyYAML` and `cryptography`:
+those two audit tests are the security argument in executable form, and trading them
+for pyVmomi would buy a capability the REST API already provides.
+
+### Large inventories
+
+A sync returns one **page** plus an opaque cursor; the dashboard applies it and enqueues
+the next. The chain is capped at 40 pages (10 000 VMs), which is what stops a
+misbehaving agent making the dashboard enqueue work forever. Every page of one sync
+shares a `batch_id`, so N job rows roll up as one run on `/jobs`.
+
+The cap that forces this is `MAX_RESULT_BYTES` (256 KB), and raising it is not an
+option — it is the only bound on an agent's write path into the database.
 
 ## Best practices
 
@@ -507,13 +610,19 @@ an objection into a demonstration.
 | `dashboard unreachable (404 …)` on an agent that was working | Not a network fault — `remote_agents_enabled` was turned off. The agent reports every non-2xx this way. |
 | `enrolment refused (400) … Invalid enrolment code` repeating | The code is single-use with a 15-minute TTL, and a crash loop re-spends it on every restart. `docker stop` first, fix the cause, then issue **one** code and start **once**. |
 | `the dashboard is throttling enrolment` | Ten failed enrolments from one address in 15 minutes. Stop the container, wait out the `Retry-After`, fix the real cause before retrying — restart loops are what get you here. |
-| Discovery reports `Policy refused N of M` | Expected, not a fault. The scan asks for port 443 and the example policy does not list it, so a /24 yields one refusal per host. Widen `ports:` only if you mean to. |
+| Discovery reports `Policy refused N of M` | Expected, not a fault. The scan asks for a port the policy does not list, so a /24 yields one refusal per host. Widen `ports:` only if you mean to. |
+| `Agent … reports version 1.x` on a 409, and nothing is queued | A 1.x agent scans for Kubernetes and databases. Given a hypervisor scan it would probe nothing, complete **green**, and report zero findings — indistinguishable from a clean network. Pull `chrweav/dashboard-agent:latest` and restart the container; re-enrolment is not needed. |
+| `Agent … does not offer discovery` | The agent is current but its `policy.yaml` omits `agent_discover` from `job_types`. |
+| `unknown connection 'x'` | The name in the dashboard's connection row does not match any `name:` in that agent's `connections.yaml`. The dashboard holds no credential for it; the string is the whole join. |
+| `policy.yaml does not grant 'power_off' on 'x'` | Working as intended — the customer's file is the authority. Add the verb under that connection's `verbs:` list and restart the agent. |
+| One sync produced a dozen job rows | Expected for a large inventory: one row per page, all sharing a `batch_id`. See [Large inventories](#large-inventories). |
+| A sync never runs, and the connection shows an error | Read it — the enqueuer records why rather than queueing a job that would wait indefinitely. Usually the bound agent is offline or lacks the `agent_hypervisor` grant. |
 | Caddy never serves; logs show ACME retries | The hostname is internal and cannot satisfy an ACME challenge. Set `AGENT_TLS_INTERNAL=1` — see [above](#if-the-hostname-is-internal). |
 
 ## Where this is heading
 
-Discovery is the first slice, chosen because no credential crosses the wire at all.
-Next:
+Discovery was the first slice, chosen because no credential crosses the wire at all.
+Hypervisor brokering followed it and is described above. Next:
 
 - **Agent-executed Ansible** against private targets, spawning one-shot
   `chrweav/ansible-cloud` siblings and reusing the existing
@@ -522,8 +631,19 @@ Next:
 - **Password Safe JIT checkout by the agent**, so it holds exactly one credential whose
   only power is to ask Password Safe — subject to its policy, approval workflow and
   session recording. An on-prem agent with zero standing target credentials.
-- **On-prem hypervisors.** Blocked on something upstream: `config.py` holds hypervisor
-  connections as global singletons (one `proxmox_host`, one `vsphere_host`), so N sites
-  × M hypervisors needs a multi-instance config refactor that is larger than the agent
-  itself. When it lands, the shape is scheduled inventory sync plus a closed verb
-  allowlist — not a generic proxy, which is remote code execution with extra steps.
+- **Hyper-V and bare ESXi over an agent.** The two the stdlib cannot reach: WinRM needs
+  a real NTLM/Negotiate stack and ESXi serves only SOAP. Both would come via a one-shot
+  sibling container rather than by fattening the agent, which keeps the supervisor
+  inert — the property `test_the_agent_imports_no_execution_machinery` protects.
+- **Snapshot**, with a generated name (`dash-{job_id}`) so no operator string crosses
+  the wire, and Nutanix power verbs.
+- **VMware Workstation over a co-located agent.** Not network-reachable, so this is a
+  new *deployment shape* rather than one more connection kind — the agent would have to
+  run on the desktop host and speak to `vmrest` on localhost. It would replace the
+  existing `POWERSHELL_EXECUTION_MODE=ssh` dev escape hatch, which does the same job
+  today with an inbound SSH key.
+
+`config.py`'s singleton hypervisor keys (one `proxmox_host`, one `vsphere_host`) were
+the blocker for all of this. They are now a one-time **seed** for the
+`hypervisor_connections` table rather than the source of truth; the old Settings panels
+are read-only and say so.

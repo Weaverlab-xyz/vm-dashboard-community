@@ -8,7 +8,7 @@
   <h1 class="text-2xl font-bold text-gray-800 mb-1">Remote Agents</h1>
   <p class="text-sm text-gray-500 mb-8">
     Containerised agents that run inside a private network and poll <em>out</em> to this
-    dashboard for work — so on-premises Kubernetes clusters and databases can be discovered
+    dashboard for work — so on-premises hypervisors can be discovered and managed
     without opening a single inbound firewall rule. Each agent authenticates with an Ed25519
     key it generates itself; no reusable credential ever crosses the wire.
   </p>
@@ -328,9 +328,12 @@
           <label class="block text-xs font-medium text-gray-600 mb-1">Look for</label>
           <select x-model="discover.scan_kind"
                   class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
-            <option value="both">Kubernetes clusters and databases</option>
-            <option value="k8s">Kubernetes clusters only</option>
-            <option value="database">Databases only</option>
+            <option value="all">Every supported hypervisor</option>
+            <option value="vmware">VMware vCenter / ESXi only (443)</option>
+            <option value="proxmox">Proxmox VE only (8006)</option>
+            <option value="nutanix">Nutanix Prism only (9440)</option>
+            <option value="xcpng">XCP-ng / XenServer only (443)</option>
+            <option value="winrm">WinRM / possible Hyper-V only (5985-6)</option>
           </select>
         </div>
         <div>
@@ -347,10 +350,10 @@
           <input type="text" x-model="discover.hostnames" placeholder="pg01.lab.local"
                  class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-200"/>
         </div>
-        <label class="flex items-center gap-2 text-sm text-gray-700">
-          <input type="checkbox" x-model="discover.use_local_kubeconfig" class="rounded border-gray-300"/>
-          Also read a kubeconfig mounted into the agent
-        </label>
+        <p class="text-xs text-gray-400">
+          Probes never authenticate, so a WinRM answer identifies Windows &mdash; not
+          necessarily a Hyper-V host. Those findings are marked <em>possible only</em>.
+        </p>
       </div>
       <div class="flex justify-end gap-2 mt-6">
         <button @click="discoverOpen = false"
@@ -380,8 +383,7 @@ function agentsPage() {
     audienceBlock: '',   // the 409 explaining why a mint was refused; sticky until dismissed
     form: {name: '', site: '', description: ''},
     enrol: {name: '', code: '', docker_run: '', warnings: []},
-    discover: {agentId: '', agentName: '', scan_kind: 'both', cidrs: '', hostnames: '',
-               use_local_kubeconfig: true},
+    discover: {agentId: '', agentName: '', scan_kind: 'all', cidrs: '', hostnames: ''},
     _timer: null,
 
     get visibleAgents() {
@@ -534,8 +536,8 @@ function agentsPage() {
     },
 
     openDiscover(a) {
-      this.discover = {agentId: a.id, agentName: a.name, scan_kind: 'both',
-                       cidrs: '', hostnames: '', use_local_kubeconfig: true};
+      this.discover = {agentId: a.id, agentName: a.name, scan_kind: 'all',
+                       cidrs: '', hostnames: ''};
       this.discoverOpen = true;
     },
 
@@ -549,7 +551,6 @@ function agentsPage() {
           scan_kind: this.discover.scan_kind,
           cidrs: this._list(this.discover.cidrs),
           hostnames: this._list(this.discover.hostnames),
-          use_local_kubeconfig: this.discover.use_local_kubeconfig,
         });
         this.discoverOpen = false;
         // The job page streams the agent's output through the existing Live Output pane.

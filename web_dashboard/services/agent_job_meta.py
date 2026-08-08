@@ -24,33 +24,43 @@ import copy
 
 # Everything an agent_discover run needs, and nothing else.
 DISCOVER_META_KEYS = (
-    "scan_kind",            # "k8s" | "database" | "both"
+    "scan_kind",            # one of VALID_SCAN_KINDS
     "cidrs",                # list[str] — CIDRs to sweep, intersected with agent policy
     "hostnames",            # list[str] — explicit hosts, checked against agent policy
-    "ports",                # {"k8s": [int], "database": [int]}
-    "use_local_kubeconfig",  # bool — read a kubeconfig MOUNTED INTO the agent
+    "ports",                # {family: [int]} for the families below
     "timeout_s",            # int — per-probe connect timeout
     "max_hosts",            # int — hard cap on hosts expanded from cidrs
     "concurrency",          # int — parallel probes
 )
 
-# The `both` default keeps a payload written by an older build behaving like one that
-# never had the field, matching ansible_run_meta's reason for having defaults at all.
+# Scan families. `scan_kind` keeps an enum rather than collapsing to a single value: a
+# one-value enum is a field that can only ever be wrong, and an operator sweeping a /22
+# who knows they only run Proxmox should not pay 1024 hosts x 5 probes.
+#
+# Note these are VALUES, not keys, so test_no_field_can_carry_executable_content does
+# not scan them — worth knowing before anyone adds a value-scanning assertion, which
+# would flag "vmware" for containing nothing of the sort.
+VALID_SCAN_KINDS = ("vmware", "proxmox", "nutanix", "xcpng", "winrm", "all")
+
 _DEFAULTS = {
-    "scan_kind": "both",
+    "scan_kind": "all",
     "cidrs": [],
     "hostnames": [],
-    # Ports a *service* listens on, not ports we guess at. 6443 kubeadm/k3s/rke2,
-    # 8443 some managed and older distros, 443 clusters fronted by a load balancer.
-    "ports": {"k8s": [6443, 8443, 443],
-              "database": [5432, 3306, 1433, 1521]},
-    "use_local_kubeconfig": True,
+    # Ports a hypervisor MANAGEMENT endpoint listens on, not ports we guess at.
+    # 443 vCenter/ESXi and XCP-ng XAPI (shared — the agent de-duplicates and asks the
+    # one question that tells them apart), 8006 Proxmox VE, 9440 Nutanix Prism,
+    # 5985/5986 WinRM.
+    "ports": {"vmware": [443], "proxmox": [8006], "nutanix": [9440],
+              "xcpng": [443], "winrm": [5985, 5986]},
     "timeout_s": 3,
     "max_hosts": 1024,
     "concurrency": 32,
 }
 
-VALID_SCAN_KINDS = ("k8s", "database", "both")
+# The families `ports` may name. Anything else in a stored payload falls back wholesale,
+# which is what makes a job row written by a 1.x build degrade instead of half-running:
+# its {"k8s": …, "database": …} matches nothing here and the defaults apply.
+_PORT_FAMILIES = tuple(_DEFAULTS["ports"])
 
 # Caps applied server-side at enqueue AND agent-side before scanning. Both, because
 # they defend different things: the server cap stops an operator typo from queueing a
@@ -115,10 +125,9 @@ def normalize(meta: dict) -> dict:
         ports = dict(_DEFAULTS["ports"])
     out["ports"] = {
         family: _valid_ports(ports.get(family), _DEFAULTS["ports"][family])
-        for family in ("k8s", "database")
+        for family in _PORT_FAMILIES
     }
 
-    out["use_local_kubeconfig"] = bool(out.get("use_local_kubeconfig", True))
     out["timeout_s"] = _clamp(out.get("timeout_s"), _DEFAULTS["timeout_s"], 1, MAX_TIMEOUT_S)
     out["max_hosts"] = _clamp(out.get("max_hosts"), _DEFAULTS["max_hosts"], 1, MAX_HOSTS_CEILING)
     out["concurrency"] = _clamp(out.get("concurrency"), _DEFAULTS["concurrency"], 1, MAX_CONCURRENCY)
@@ -154,17 +163,21 @@ def _clamp(value, default: int, low: int, high: int) -> int:
 # an unidentified host on a network the dashboard cannot see. `already_registered` is the
 # exception — the dashboard computes that one itself (api/agent._annotate_findings).
 FINDING_KEYS = (
-    "kind",               # "k8s" | "database"
+    "kind",               # "hypervisor" — one value today; the column stays so the
+                          #   table can grow without a migration of the projection
+    "product",            # vsphere|esxi|proxmox|nutanix|xcpng|winrm — maps to a
+                          #   connection kind via api/agent._PRODUCT_TO_KIND
     "host",               # str — the IP the probe connected to
     "port",               # int
-    "api_server",         # str — k8s only, "https://host:port"
-    "engine",             # str — database only: postgres/mysql/mariadb/sqlserver/oracle
-    "server_version",     # str — read from a PRE-AUTH banner, so target-controlled
-    "distro",             # str — k8s only: k3s/rke2/eks/gke/aks/kubeadm
-    "tls_cn",             # str — k8s only, the apiserver cert CN; target-controlled
-    "tls",                # bool — postgres only: did it accept SSLRequest
-    "suggested_name",     # str — a name to prefill the Register form with
-    "source",             # str — "kubeconfig" when it came from the mounted file
+    "endpoint",           # str — "https://host:port"
+    "server_version",     # str — read from a PRE-AUTH response, so target-controlled
+    "build",              # str — vCenter/ESXi build number; target-controlled
+    "confidence",         # "confirmed" | "possible" — earns its place on WinRM alone,
+                          #   which identifies Windows, not Hyper-V
+    "tls_cn",             # str — cert CN; target-controlled
+    "tls_issuer",         # str — cert issuer; corroborates Nutanix and XenServer
+    "suggested_name",     # str — a name to prefill the connection form with
+    "source",             # str — "probe"
     "already_registered",  # bool — computed HERE, not reported by the agent
 )
 

@@ -299,6 +299,11 @@ class RemoteAgent(Base):
 
     allowed_job_types = Column(Text)               # JSON list; empty/NULL = the default set
     agent_version = Column(String(32))
+    # What the agent said it can run, on its last lease: the intersection of its
+    # HANDLERS table and its own policy.yaml. Distinct from allowed_job_types, which is
+    # what the DASHBOARD permits — one is capability, the other is trust, and the UI
+    # needs both to say "granted, but this agent's policy refuses it".
+    reported_job_types = Column(Text)              # JSON list
     enrolled_at = Column(DateTime, nullable=True)
     last_seen_at = Column(DateTime, nullable=True, index=True)
     last_seen_ip = Column(String(45))              # 45 = max INET6_ADDRSTRLEN
@@ -312,13 +317,22 @@ class RemoteAgent(Base):
 
     @property
     def allowed_job_types_list(self) -> list:
-        if not self.allowed_job_types:
-            return []
-        try:
-            value = json.loads(self.allowed_job_types)
-            return value if isinstance(value, list) else []
-        except Exception:  # noqa: BLE001 — a corrupt list must not break the listing
-            return []
+        return _json_list(self.allowed_job_types)
+
+    @property
+    def reported_job_types_list(self) -> list:
+        return _json_list(self.reported_job_types)
+
+
+def _json_list(raw) -> list:
+    """A JSON list column, read defensively. A corrupt value must not break a listing."""
+    if not raw:
+        return []
+    try:
+        value = json.loads(raw)
+        return value if isinstance(value, list) else []
+    except Exception:  # noqa: BLE001
+        return []
 
 
 class AgentNonce(Base):
@@ -365,6 +379,109 @@ class AgentEnrollAttempt(Base):
     ip = Column(String(45), nullable=False, default="", index=True)
     # Indexed because every query is a range scan on it, in both the check and the sweep.
     attempted_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+
+class HypervisorConnection(Base):
+    """One reachable hypervisor management endpoint.
+
+    Replaces the singleton ``proxmox_host`` / ``vsphere_host`` / … config keys, which
+    made "N sites x M hypervisors" inexpressible — there was exactly one of each, so a
+    second vCenter, or the same product at a second site, had nowhere to live.
+
+    Two rows exist for the same reason a `Job` row does: something has to be the record.
+    Every integration resolves one of these instead of reading ``settings``, and
+    ``agent_id`` is what makes a connection the dashboard *cannot dial* still usable —
+    a remote agent on that network does the talking.
+
+    Credentials: exactly one of ``secret_enc`` (Fernet, via ``config_service``) or
+    ``secret_ref`` (an external backend reference) is set. For an **agent-bound**
+    connection both are NULL and so are ``host``/``username`` — the credential lives in
+    the agent's own connections.yaml, and ``agent_connection_name`` is the whole join.
+    That is deliberate: a dashboard compromise then yields a verb and a name, not a
+    vCenter administrator password.
+    """
+    __tablename__ = "hypervisor_connections"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    kind = Column(String(16), nullable=False, index=True)   # vsphere|proxmox|nutanix|xcpng|hyperv
+    name = Column(String(64), nullable=False)               # operator label
+    host = Column(String(255), nullable=False, default="")
+    port = Column(Integer)
+    username = Column(String(255))
+
+    secret_enc = Column(Text)              # Fernet ciphertext (config_service.encrypt_value)
+    secret_ref = Column(String(256))       # aws_sm:// | azure_kv:// | gcp_sm:// | bt_safe://
+    verify_ssl = Column(Boolean, default=False, nullable=False)
+    # Per-kind NON-SECRET extras, JSON: vsphere datacenter, hyperv transport/use_ssl,
+    # proxmox token_id, sync_interval_minutes. Allowlisted per kind by the service.
+    options = Column(Text)
+
+    # NULL = the dashboard dials this endpoint itself (the behaviour before this table).
+    agent_id = Column(String(36), ForeignKey("remote_agents.id", ondelete="SET NULL"),
+                      index=True, nullable=True)
+    # The name this connection has in that agent's own connections.yaml. The dashboard
+    # never learns the credential; this string is the entire join between the two.
+    agent_connection_name = Column(String(64))
+
+    # Grouping and display only — routing is the agent_id FK. A site join would mean
+    # "any agent here can service this", but only the agent that actually holds the
+    # credential can, so it would lease cleanly and then refuse.
+    site = Column(String(64), index=True)
+
+    is_default = Column(Boolean, default=False, nullable=False)
+    is_active = Column(Boolean, default=True, nullable=False)
+    last_ok_at = Column(DateTime)
+    last_error = Column(Text)
+    last_sync_at = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_by = Column(String(100))
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+    # Unique on (kind, name), NOT on name alone: "dc1" is a reasonable label for both a
+    # vSphere and a Proxmox connection. Deliberately NOT unique on (kind, host, port)
+    # either — two connections to one vCenter under different service accounts (a
+    # read-only sync account and a privileged deploy account) is a legitimate setup.
+    #
+    # `is_default` is a plain boolean with a service-enforced "at most one per kind"
+    # rule rather than a partial unique index: SQLite's partial-index support is not
+    # something to bet the startup path on.
+    __table_args__ = (UniqueConstraint("kind", "name", name="uq_hypervisor_connection_name"),)
+
+    @property
+    def options_dict(self) -> dict:
+        if not self.options:
+            return {}
+        try:
+            value = json.loads(self.options)
+            return value if isinstance(value, dict) else {}
+        except Exception:  # noqa: BLE001
+            return {}
+
+
+class HypervisorVMCache(Base):
+    """VMs an agent reported for one connection.
+
+    Not ``VMStateCache``: that table's identity is a VMX path on the dashboard host,
+    which has no meaning for a VM on a customer's vCenter. Identity here is
+    ``(connection_id, vm_id)`` — the hypervisor's own opaque id.
+
+    A read-through cache, never a source of truth. ``synced_at`` is what makes deletion
+    detectable: the last page of a sync prunes rows older than the pass that started it,
+    the same trick ``populate_db_from_ps`` uses.
+    """
+    __tablename__ = "hypervisor_vm_cache"
+
+    connection_id = Column(String(36), primary_key=True)
+    vm_id = Column(String(128), primary_key=True)
+    name = Column(String(256))
+    power_state = Column(String(32))
+    vcpus = Column(Integer)
+    mem_mib = Column(Integer)
+    ip_addresses = Column(Text)     # JSON list
+    scope = Column(String(128))     # node / cluster / datacenter
+    vm_type = Column(String(16))
+    tags = Column(Text)             # JSON list
+    synced_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
 
 
 class Job(Base):
@@ -1201,6 +1318,11 @@ def init_db():
             # relationship is declared on the model for the ORM's benefit only.
             "ALTER TABLE jobs ADD COLUMN agent_id VARCHAR(36)",
             "CREATE INDEX ix_jobs_agent_id ON jobs(agent_id)",
+            # What the agent reports it can run, refreshed on every lease. Existing rows
+            # read NULL until their agent next polls, which is the correct answer — the
+            # dashboard genuinely does not know yet.
+            "ALTER TABLE remote_agents ADD COLUMN reported_job_types TEXT",
+            # `hypervisor_connections` needs no entry: create_all makes new tables.
         ]
         for stmt in _migrations:
             if _is_sqlite:
@@ -1228,6 +1350,18 @@ def init_db():
     from .services import workgroup_service
     with SessionLocal() as _seed_db:
         workgroup_service.seed_if_empty(_seed_db)
+        # Copy the legacy singleton hypervisor config into hypervisor_connections.
+        # Here and not in the migration block above on purpose: this is a data seed,
+        # not DDL, and it must stay OUTSIDE the advisory-locked transaction — a
+        # session-level lock around it is the QueuePool leak that hung cold
+        # app+worker co-deploys. The unique constraint arbitrates the race instead.
+        try:
+            from .services import hypervisor_connection_service
+            hypervisor_connection_service.seed_from_settings(_seed_db)
+        except Exception:  # noqa: BLE001 — a seed must never stop the app booting
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "hypervisor connection seed skipped", exc_info=True)
 
     # One-time: chain any pre-existing (pre-upgrade) audit rows so the whole
     # history is tamper-evident, not just entries written after this upgrade.

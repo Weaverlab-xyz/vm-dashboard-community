@@ -33,6 +33,7 @@ pre-OIDC users, which is exactly wrong for a machine principal. Agents authorize
 asserts this file never calls ``require_permission`` in an agent route.
 """
 import logging
+import re
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -40,8 +41,9 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ..database import Job, RemoteAgent, User, get_db
-from ..services import (agent_guard, agent_job_meta, agent_service, agent_signing,
-                        config_service, job_service, public_url)
+from ..services import (agent_guard, agent_hypervisor_meta, agent_job_meta,
+                        agent_service, agent_signing, config_service,
+                        hypervisor_sync_service, job_service, public_url)
 from ..services.agent_guard import AgentThrottled
 from ..services.agent_service import AgentError
 from .auth import require_admin
@@ -319,8 +321,34 @@ async def signed_agent(request: Request, db: Session = Depends(get_db)) -> Remot
         raise HTTPException(status_code=401, detail="Authentication failed.")
 
 
+def _envelope_payload(job_type: str, meta: dict) -> dict:
+    """The payload half of a signed lease envelope, per job type.
+
+    Dispatched rather than hardcoded to discovery, and each branch goes through that
+    type's OWN closed allowlist — which is what stops a field added for one job type
+    from silently becoming reachable by another.
+    """
+    if job_type == "agent_hypervisor":
+        return agent_hypervisor_meta.hypervisor_kwargs(meta)
+    return agent_job_meta.discover_kwargs(meta)
+
+
+class LeaseRequest(BaseModel):
+    """What the agent says it currently is.
+
+    Both fields are advisory and unvalidated — a compromised agent can claim anything,
+    and nothing here grants it a capability. They exist so the dashboard can *describe*
+    the fleet honestly: an agent that pulled a new image reports the new version, and
+    an agent whose policy.yaml omits a job type says so. Older agents send ``{}`` and
+    both default, leaving the stored values untouched.
+    """
+    agent_version: str = ""
+    job_types: list = []
+
+
 @router.post("/lease")
-async def lease_job(request: Request, agent: RemoteAgent = Depends(signed_agent),
+async def lease_job(request: Request, body: LeaseRequest = LeaseRequest(),
+                    agent: RemoteAgent = Depends(signed_agent),
                     db: Session = Depends(get_db)):
     """Claim the next queued job for this agent, or report an empty queue.
 
@@ -337,6 +365,14 @@ async def lease_job(request: Request, agent: RemoteAgent = Depends(signed_agent)
     except Exception:  # noqa: BLE001 — housekeeping must never fail a lease
         logger.debug("agent: nonce sweep failed", exc_info=True)
 
+    # Before the claim, so a compatibility gate elsewhere sees a fresh version even for
+    # an agent that never gets given work.
+    try:
+        agent_service.record_self_report(
+            db, agent, agent_version=body.agent_version, job_types=body.job_types)
+    except Exception:  # noqa: BLE001 — bookkeeping must never fail a lease
+        logger.debug("agent: self-report update failed", exc_info=True)
+
     claim = agent_service.lease_one(db, agent)
     if claim is None:
         return {"job": None, "poll_interval_s": agent_service.DEFAULT_POLL_INTERVAL_S}
@@ -346,7 +382,7 @@ async def lease_job(request: Request, agent: RemoteAgent = Depends(signed_agent)
         "job_type": claim["job_type"],
         "agent_id": agent.id,
         "audience": _resolve_audience(request),
-        "payload": agent_job_meta.discover_kwargs(claim["meta"]),
+        "payload": _envelope_payload(claim["job_type"], claim["meta"]),
     }
     agent_service.audit(db, agent, "agent.lease", ip=_client_ip(request),
                         details={"job_id": claim["id"], "job_type": claim["job_type"]})
@@ -416,7 +452,15 @@ async def complete(job_id: str, body: CompleteRequest, request: Request,
         raise HTTPException(status_code=400, detail="status must be 'completed' or 'failed'.")
 
     result = body.result or {}
-    if job.job_type == "agent_discover" and body.status == "completed":
+    if job.job_type == "agent_hypervisor" and body.status == "completed":
+        # Apply the page, and chain the next one if the agent handed back a cursor.
+        # Bounded by MAX_SYNC_PAGES — see hypervisor_sync_service.
+        try:
+            result = hypervisor_sync_service.apply_page(db, job, result)
+        except Exception:  # noqa: BLE001 — a bad page must not wedge the job row
+            logger.exception("could not apply a hypervisor sync page for job %s", job.id)
+            result = agent_hypervisor_meta.sync_page(result)
+    elif job.job_type == "agent_discover" and body.status == "completed":
         # Cross-check findings against the dashboard's own inventory HERE rather than
         # sending the agent the inventory to compare against. An agent should never
         # learn what else the dashboard manages.
@@ -437,35 +481,47 @@ def _owned(db: Session, agent: RemoteAgent, job_id: str, *,
         raise HTTPException(status_code=409, detail=str(exc))
 
 
-def _annotate_findings(db: Session, result: dict) -> dict:
-    """Mark each finding that the dashboard already knows about.
+# A probe reports a PRODUCT; a connection has a KIND. ESXi and vCenter are both
+# vsphere connections, and WinRM is as close as a credential-less probe gets to Hyper-V.
+_PRODUCT_TO_KIND = {"vsphere": "vsphere", "esxi": "vsphere", "proxmox": "proxmox",
+                    "nutanix": "nutanix", "xcpng": "xcpng", "winrm": "hyperv"}
 
-    Registration is never automatic — ``register_cluster`` needs a full kubeconfig and
-    ``register_database`` needs a Password Safe managed account, and an agent able to
-    supply either would have to hold cluster-admin or a privileged credential. So this
-    only annotates; a human clicks Register, and the existing endpoints run under that
-    human's own permissions.
+
+def _annotate_findings(db: Session, result: dict) -> dict:
+    """Mark each finding the dashboard already has a connection for.
+
+    Computed HERE rather than by sending the agent the connection list to compare
+    against: an agent should never learn what else the dashboard manages.
+
+    Registration is never automatic — a connection needs a credential, and a probe by
+    definition has none. So this only annotates; a human clicks "Add connection" and
+    supplies the credential under their own permissions.
+
+    One honest limitation: a connection configured with an FQDN but discovered by IP
+    reads as unregistered, because the dashboard cannot resolve the customer's private
+    DNS — it is not on that network, which is the whole reason the agent exists. The
+    prefill writes the IP the probe used, so a second scan matches.
     """
-    from ..database import CloudDatabase, K8sCluster
+    from ..database import HypervisorConnection
 
     findings = result.get("findings")
     if not isinstance(findings, list):
         return result
 
-    api_servers = {(row[0] or "").strip().rstrip("/")
-                   for row in db.query(K8sCluster.api_server).all()}
-    databases = {((row[0] or "").strip().lower(), (row[1] or "").strip().lower())
-                 for row in db.query(CloudDatabase.private_host, CloudDatabase.engine).all()}
-
+    known = {((row[0] or "").lower(), (row[1] or "").strip().lower(), int(row[2] or 0))
+             for row in db.query(HypervisorConnection.kind, HypervisorConnection.host,
+                                 HypervisorConnection.port)
+             .filter(HypervisorConnection.is_active.is_(True)).all()}
     for finding in findings:
         if not isinstance(finding, dict):
             continue
-        if finding.get("kind") == "k8s":
-            known = (finding.get("api_server") or "").strip().rstrip("/") in api_servers
-        else:
-            known = ((finding.get("host") or "").strip().lower(),
-                     (finding.get("engine") or "").strip().lower()) in databases
-        finding["already_registered"] = known
+        kind = _PRODUCT_TO_KIND.get((finding.get("product") or "").lower(), "")
+        try:
+            port = int(finding.get("port") or 0)
+        except (TypeError, ValueError):
+            port = 0
+        finding["already_registered"] = (
+            kind, (finding.get("host") or "").strip().lower(), port) in known
     return result
 
 
@@ -495,6 +551,11 @@ def _agent_row(agent: RemoteAgent, running: int = 0) -> dict:
         "created_at": agent.created_at,
         "created_by": agent.created_by or "",
         "running_jobs": running,
+        # Three distinct states the UI renders differently: granted and capable,
+        # granted but refused by the agent's own policy.yaml, and not granted.
+        "job_types": list(agent_service.AGENT_JOB_TYPES),
+        "allowed_job_types": list(agent_service.allowed_job_types(agent)),
+        "reported_job_types": agent.reported_job_types_list,
     }
 
 
@@ -517,6 +578,11 @@ _RUN_FLAGS = (
     "  --user 10001:10001 --tmpfs /tmp \\\n"
     "  -v dashboard_agent_state:/var/lib/dashboard-agent \\\n"
     '  -v "$PWD/policy.yaml:/etc/dashboard-agent/policy.yaml:ro,Z" \\\n'
+    # For agent-brokered hypervisors, add:
+    #   -v "$PWD/connections.yaml:/etc/dashboard-agent/connections.yaml:ro,Z"
+    # Deliberately not in the emitted command: an agent that only does discovery has no
+    # reason to have the file, and a bind mount whose source is missing is a hard
+    # `docker run` failure, so including it unconditionally would break the paste.
 )
 
 
@@ -726,11 +792,10 @@ async def reissue_code(agent_id: str, request: Request,
 
 
 class DiscoverRequest(BaseModel):
-    scan_kind: str = "both"
+    scan_kind: str = "all"        # vmware|proxmox|nutanix|xcpng|winrm|all
     cidrs: list = []
     hostnames: list = []
     ports: Optional[dict] = None
-    use_local_kubeconfig: bool = True
     timeout_s: int = 3
     max_hosts: int = 1024
     concurrency: int = 32
@@ -759,6 +824,33 @@ async def queue_discovery(agent_id: str, body: DiscoverRequest, request: Request
             status_code=409,
             detail=f"Agent '{agent.name}' is not online. Start it and try again.")
 
+    # A 1.x agent scans for Kubernetes API servers and database listeners. Hand it a
+    # hypervisor scan and it matches no family, probes NOTHING, completes green and
+    # reports zero findings — which on the findings panel is indistinguishable from a
+    # clean network, and emptyReasons() will confidently blame the ports. So refuse
+    # before anything is queued, and say exactly what to do.
+    #
+    # This is only honest because the lease body reports agent_version on every poll
+    # (agent_service.record_self_report). It used to be written once at enrolment, so
+    # an operator who HAD upgraded would still have been refused.
+    if _major_version(agent.agent_version) < 2:
+        raise HTTPException(
+            status_code=409,
+            detail=(f"Agent '{agent.name}' reports version "
+                    f"{agent.agent_version or 'unknown'}, which scans for Kubernetes "
+                    f"clusters and databases. Hypervisor discovery needs agent 2.0 or "
+                    f"later — pull chrweav/dashboard-agent:latest and restart the "
+                    f"container. Re-enrolment is not needed; the agent keeps its "
+                    f"identity across an image update."))
+    reported = agent.reported_job_types_list
+    if reported and "agent_discover" not in reported:
+        # Covers what a version number cannot: a current agent whose policy.yaml omits
+        # the job type. The job would lease and then be refused on the far side.
+        raise HTTPException(
+            status_code=409,
+            detail=(f"Agent '{agent.name}' does not offer discovery. Add "
+                    f"`agent_discover` to `job_types` in its policy.yaml and restart it."))
+
     # `ports=None` needs no special case: normalize() falls back to the defaults for
     # anything that is not a dict, and clamps whatever is.
     meta = agent_job_meta.discover_meta(
@@ -772,6 +864,51 @@ async def queue_discovery(agent_id: str, body: DiscoverRequest, request: Request
                           details={"agent": agent.name, "job_id": job.id,
                                    "scan_kind": meta.get("scan_kind")})
     return {"job_id": job.id, "status": job.status, "agent": agent.name}
+
+
+def _major_version(raw: str) -> int:
+    """Leading integer of a version string; 0 when unknown or unparseable.
+
+    0 for unknown is deliberate: an agent that has never reported a version has also
+    never leased under a build that reports one, so it is old.
+    """
+    match = re.match(r"\s*(\d+)", str(raw or ""))
+    return int(match.group(1)) if match else 0
+
+
+class AgentUpdateRequest(BaseModel):
+    """Operator-editable fields. `allowed_job_types` is the dashboard's TRUST in this
+    agent; what the agent can actually run is its own policy.yaml, which the dashboard
+    cannot change and must not pretend to."""
+    allowed_job_types: Optional[list] = None
+    site: Optional[str] = None
+    description: Optional[str] = None
+
+
+@router.patch("/{agent_id}")
+async def update_agent(agent_id: str, body: AgentUpdateRequest, request: Request,
+                       current_user: User = Depends(require_admin),
+                       db: Session = Depends(get_db)):
+    """Grant or narrow what this agent may be given.
+
+    An **empty** list means "the default set", not "nothing" — that sentinel predates
+    this writer and changing it would silently re-authorize every existing agent. So
+    "grant nothing" is deliberately not expressible: to stop an agent, revoke it.
+    """
+    agent = _load(db, agent_id)
+    if body.allowed_job_types is not None:
+        agent_service.set_allowed_job_types(db, agent, body.allowed_job_types)
+    if body.site is not None:
+        agent.site = str(body.site).strip()[:64]
+    if body.description is not None:
+        agent.description = str(body.description).strip()[:255]
+    db.commit()
+    db.refresh(agent)
+    job_service.log_audit(db, current_user.username, "agent.update",
+                          ip_address=_client_ip(request),
+                          details={"agent": agent.name,
+                                   "allowed_job_types": agent.allowed_job_types_list})
+    return _agent_row(agent)
 
 
 @router.delete("/{agent_id}")

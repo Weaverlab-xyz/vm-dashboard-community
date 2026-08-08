@@ -46,6 +46,7 @@ SCOPED_CACHES = {
     "oci_images":         "region",
     "oci_network_opts":   "region",
     "oci_instances":      "region",
+    "ps_db_candidates":   "workgroup",
 }
 
 # Names whose key is built by a helper that takes the cache name as a *parameter*, so

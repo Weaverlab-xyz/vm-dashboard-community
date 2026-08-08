@@ -176,7 +176,12 @@ async def get_job_findings(
     # network, so they are at least as sensitive as the job row itself.
     if job.created_by != current_user.username and not can_audit_jobs(current_user):
         raise HTTPException(status_code=403, detail="Access denied")
-    if job.job_type not in agent_service.AGENT_JOB_TYPES:
+    # Named explicitly rather than "any agent job type". Discovery is the only type
+    # whose result IS a findings list; the moment AGENT_JOB_TYPES grew a second member
+    # a membership test started serving discover_findings() for a job with a different
+    # result shape, which renders as "this scan found nothing" for a job that never
+    # scanned. A new type wanting a panel gets its own projection and its own endpoint.
+    if job.job_type != "agent_discover":
         raise HTTPException(
             status_code=400,
             detail=f"Job type '{job.job_type}' does not produce discovery findings.")

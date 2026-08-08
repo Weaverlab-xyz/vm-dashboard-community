@@ -173,3 +173,35 @@ Reassign the token to a role that includes that privilege (e.g. `PVEVMAdmin`).
 **IP addresses not showing** — install and enable the QEMU Guest Agent inside
 the VM and ensure **QEMU Guest Agent** is checked under VM → Options in the
 Proxmox UI.
+
+## Multiple connections
+
+Connection details used to live in Settings as a single set of fields, so there could
+only ever be one Proxmox cluster. They now live in the **Connections** page (`/connections`),
+which holds as many as you like — a second Proxmox cluster at another site, or the same one
+under a read-only and a privileged service account.
+
+* The **default** connection is what every page and API call uses when not told
+  otherwise. The first connection of a kind becomes the default automatically.
+* Pass `?connection_id=<id>` to any `/api/proxmox` endpoint to target a specific one.
+* Job-backed operations (deploys, power verbs) record the connection at **enqueue**, so
+  changing the default while one is queued cannot redirect it.
+
+Your existing Settings values were copied into the first connection on upgrade. The old
+panel is still there, read-only, with a banner pointing here — editing it no longer
+changes what the dashboard connects to. It is kept so that rolling back to a previous
+image still works.
+
+## Over a remote agent
+
+A Proxmox cluster the dashboard has no network route to can be reached through a
+[remote agent](../remote-agents.md#hypervisor-connections) instead. Tick *Reached
+through a remote agent* when adding the connection and give it the name that connection
+has in the agent's own `connections.yaml`.
+
+The dashboard then stores **no host and no credential** for it — only the name. The
+agent uses the `/api2/json` REST API with an API token, which needs no dependency the agent does not already have.
+
+Three separate grants must line up: the dashboard grants the agent the
+`agent_hypervisor` job type, your `policy.yaml` grants the individual verbs on that
+connection, and your `connections.yaml` defines it. Withhold any one and nothing runs.

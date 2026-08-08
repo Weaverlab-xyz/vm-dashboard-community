@@ -803,9 +803,12 @@ function k8sPage() {
       this.openFromQuery();
     },
 
-    // ?register=1&name=…&api_server=… — where a discovery finding on a job page sends
-    // the operator. Only the non-secret fields travel; the kubeconfig is the whole point
-    // of the form and a scan never had one.
+    // ?register=1&name=…&api_server=… prefill for this form.
+    //
+    // Agent discovery no longer produces Kubernetes findings — it scans for hypervisor
+    // management endpoints now, and Password Safe is the source for databases. See
+    // docs/remote-agents.md. This handler stays because the link still works if someone
+    // has one bookmarked or builds it by hand, and it costs ten lines.
     openFromQuery() {
       const q = new URLSearchParams(window.location.search);
       if (!q.get('register')) return;

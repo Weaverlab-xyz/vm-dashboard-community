@@ -74,28 +74,30 @@ class NutanixError(Exception):
     pass
 
 
-def _cfg(key: str) -> str:
-    from . import config_service
-    return config_service.get(key) or ""
+# No _cfg here any more. This module used to read the singleton config keys directly,
+# which meant there could only ever be ONE Prism Central. It now takes a resolved
+# `Connection` (services/hypervisor_connection_service) as its first argument, and the
+# router is the only layer that chooses which one.
 
 
-def _cfg_bool(key: str, default: bool = False) -> bool:
-    from . import config_service
-    return config_service.get_bool(key, default)
+def _client(conn) -> httpx.Client:
+    """Prism Central v3 client for ONE connection.
 
-
-def _client() -> httpx.Client:
-    host = _cfg("nutanix_host")
+    Takes a resolved Connection rather than reading config: this module no longer knows
+    there is such a thing as *the* Prism Central.
+    """
+    host = conn.host
     if not host:
-        raise NutanixError("NUTANIX_HOST is not configured")
+        raise NutanixError(f"Connection {conn.name!r} has no host configured")
 
-    port     = int(_cfg("nutanix_port") or "9440")
-    username = _cfg("nutanix_username") or "admin"
-    password = _cfg("nutanix_password")
+    port     = int(conn.port or 9440)
+    username = conn.username or "admin"
+    password = conn.secret
     if not password:
-        raise NutanixError("NUTANIX_PASSWORD is not configured")
+        raise NutanixError(
+            f"Connection {conn.name!r} has no password. Edit it on the Connections page.")
 
-    verify = _cfg_bool("nutanix_verify_ssl", False)
+    verify = conn.verify_ssl
 
     return httpx.Client(
         base_url=f"https://{host}:{port}/api/nutanix/v3",
@@ -205,32 +207,32 @@ def _list_all(c: httpx.Client, kind: str) -> list[dict]:
 
 # ── List VMs ──────────────────────────────────────────────────────────────────
 
-def _list_vms_sync() -> list[dict]:
-    with _client() as c:
+def _list_vms_sync(conn) -> list[dict]:
+    with _client(conn) as c:
         entities = _list_all(c, "vms")
     return sorted([_normalise_vm(e) for e in entities], key=lambda v: v["name"].lower())
 
 
 # ── List images ───────────────────────────────────────────────────────────────
 
-def _list_images_sync() -> list[dict]:
-    with _client() as c:
+def _list_images_sync(conn) -> list[dict]:
+    with _client(conn) as c:
         entities = _list_all(c, "images")
     return sorted([_normalise_image(e) for e in entities], key=lambda i: i["name"].lower())
 
 
 # ── List clusters ─────────────────────────────────────────────────────────────
 
-def _list_clusters_sync() -> list[dict]:
-    with _client() as c:
+def _list_clusters_sync(conn) -> list[dict]:
+    with _client(conn) as c:
         entities = _list_all(c, "clusters")
     return sorted([_normalise_cluster(e) for e in entities], key=lambda c: c["name"].lower())
 
 
 # ── List subnets ──────────────────────────────────────────────────────────────
 
-def _list_subnets_sync() -> list[dict]:
-    with _client() as c:
+def _list_subnets_sync(conn) -> list[dict]:
+    with _client(conn) as c:
         entities = _list_all(c, "subnets")
     return sorted([_normalise_subnet(e) for e in entities], key=lambda s: s["name"].lower())
 
@@ -261,10 +263,10 @@ def _wait_for_task(c: httpx.Client, task_uuid: str, timeout: int = 600) -> None:
 
 # ── Image import ──────────────────────────────────────────────────────────────
 
-def _import_image_sync(name: str, source_uri: str) -> dict:
+def _import_image_sync(conn, name: str, source_uri: str) -> dict:
     """Import an image from a public URL into the Nutanix Image Service."""
     logger.info("Nutanix: importing image '%s' from %s", name, source_uri)
-    with _client() as c:
+    with _client(conn) as c:
         body = {
             "spec": {
                 "name": name,
@@ -295,6 +297,7 @@ def _import_image_sync(name: str, source_uri: str) -> dict:
 # ── Deploy VM from image ──────────────────────────────────────────────────────
 
 def _deploy_vm_sync(
+    conn,
     vm_name: str,
     image_uuid: str,
     cluster_uuid: str,
@@ -306,7 +309,7 @@ def _deploy_vm_sync(
 ) -> dict:
     """Deploy a VM from an existing Image Service image."""
     logger.info("Nutanix: deploying VM '%s' from image %s", vm_name, image_uuid)
-    with _client() as c:
+    with _client(conn) as c:
         body = {
             "spec": {
                 "name": vm_name,
@@ -363,8 +366,8 @@ def _deploy_vm_sync(
 
 # ── Delete image ──────────────────────────────────────────────────────────────
 
-def _delete_image_sync(uuid: str) -> dict:
-    with _client() as c:
+def _delete_image_sync(conn, uuid: str) -> dict:
+    with _client(conn) as c:
         r = c.delete(f"/images/{uuid}")
         try:
             r.raise_for_status()
@@ -379,8 +382,8 @@ def _delete_image_sync(uuid: str) -> dict:
 
 # ── Delete VM ─────────────────────────────────────────────────────────────────
 
-def _delete_vm_sync(uuid: str, name: str = "") -> dict:
-    with _client() as c:
+def _delete_vm_sync(conn, uuid: str, name: str = "") -> dict:
+    with _client(conn) as c:
         # Force off first if running
         try:
             r = c.post(f"/vms/{uuid}/set_power_state", json={"transition": "OFF"})
@@ -415,14 +418,14 @@ _TRANSITIONS = {
 }
 
 
-def _power_op_sync(uuid: str, name: str, op: str) -> dict:
+def _power_op_sync(conn, uuid: str, name: str, op: str) -> dict:
     if op not in _TRANSITIONS:
         raise NutanixError(f"Unknown operation: {op}")
 
     transition = _TRANSITIONS[op]
     logger.info("Nutanix: %s (%s) on %s (%s)", op, transition, name or uuid, uuid)
 
-    with _client() as c:
+    with _client(conn) as c:
         r = c.post(
             f"/vms/{uuid}/set_power_state",
             json={"transition": transition},
@@ -445,45 +448,45 @@ def list_cloud_images() -> list[dict]:
     return _CLOUD_IMAGES
 
 
-async def list_vms() -> list[dict]:
+async def list_vms(conn) -> list[dict]:
     try:
-        return await asyncio.to_thread(_list_vms_sync)
+        return await asyncio.to_thread(_list_vms_sync, conn)
     except NutanixError:
         raise
     except Exception as e:
         raise NutanixError(f"Failed to list VMs: {e}") from e
 
 
-async def list_images() -> list[dict]:
+async def list_images(conn) -> list[dict]:
     try:
-        return await asyncio.to_thread(_list_images_sync)
+        return await asyncio.to_thread(_list_images_sync, conn)
     except NutanixError:
         raise
     except Exception as e:
         raise NutanixError(f"Failed to list images: {e}") from e
 
 
-async def list_clusters() -> list[dict]:
+async def list_clusters(conn) -> list[dict]:
     try:
-        return await asyncio.to_thread(_list_clusters_sync)
+        return await asyncio.to_thread(_list_clusters_sync, conn)
     except NutanixError:
         raise
     except Exception as e:
         raise NutanixError(f"Failed to list clusters: {e}") from e
 
 
-async def list_subnets() -> list[dict]:
+async def list_subnets(conn) -> list[dict]:
     try:
-        return await asyncio.to_thread(_list_subnets_sync)
+        return await asyncio.to_thread(_list_subnets_sync, conn)
     except NutanixError:
         raise
     except Exception as e:
         raise NutanixError(f"Failed to list subnets: {e}") from e
 
 
-async def import_image(name: str, source_uri: str) -> dict:
+async def import_image(conn, name: str, source_uri: str) -> dict:
     try:
-        return await asyncio.to_thread(_import_image_sync, name, source_uri)
+        return await asyncio.to_thread(_import_image_sync, conn, name, source_uri)
     except NutanixError:
         raise
     except Exception as e:
@@ -491,6 +494,7 @@ async def import_image(name: str, source_uri: str) -> dict:
 
 
 async def deploy_vm(
+    conn,
     vm_name: str,
     image_uuid: str,
     cluster_uuid: str,
@@ -503,7 +507,7 @@ async def deploy_vm(
     try:
         return await asyncio.to_thread(
             _deploy_vm_sync,
-            vm_name, image_uuid, cluster_uuid, subnet_uuid,
+            conn, vm_name, image_uuid, cluster_uuid, subnet_uuid,
             vcpus, num_sockets, memory_mib, disk_size_mib,
         )
     except NutanixError:
@@ -512,31 +516,31 @@ async def deploy_vm(
         raise NutanixError(f"VM deploy failed: {e}") from e
 
 
-async def delete_image(uuid: str) -> dict:
+async def delete_image(conn, uuid: str) -> dict:
     try:
-        return await asyncio.to_thread(_delete_image_sync, uuid)
+        return await asyncio.to_thread(_delete_image_sync, conn, uuid)
     except NutanixError:
         raise
     except Exception as e:
         raise NutanixError(f"Delete image {uuid} failed: {e}") from e
 
 
-async def delete_vm(uuid: str, name: str = "") -> dict:
+async def delete_vm(conn, uuid: str, name: str = "") -> dict:
     try:
-        return await asyncio.to_thread(_delete_vm_sync, uuid, name)
+        return await asyncio.to_thread(_delete_vm_sync, conn, uuid, name)
     except NutanixError:
         raise
     except Exception as e:
         raise NutanixError(f"Delete VM {name or uuid} failed: {e}") from e
 
 
-async def power_op(uuid: str, name: str, op: str) -> dict:
+async def power_op(conn, uuid: str, name: str, op: str) -> dict:
     if op not in _TRANSITIONS:
         raise NutanixError(
             f"Invalid operation '{op}'. Must be one of: {', '.join(sorted(_TRANSITIONS))}"
         )
     try:
-        return await asyncio.to_thread(_power_op_sync, uuid, name, op)
+        return await asyncio.to_thread(_power_op_sync, conn, uuid, name, op)
     except NutanixError:
         raise
     except Exception as e:

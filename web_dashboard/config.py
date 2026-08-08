@@ -165,6 +165,11 @@ class Settings(BaseSettings):
     xcpng_password: str = ""            # encrypted at rest
     xcpng_verify_ssl: bool = False      # set True for a valid TLS cert
 
+    # Agent-brokered hypervisor inventory sync. The connections themselves live in the
+    # `hypervisor_connections` table, not here — these two only set the cadence.
+    hypervisor_sync_interval_minutes: int = 30   # per-connection override: options.sync_interval_minutes
+    hypervisor_sync_poll_seconds: int = 300      # how often the loop checks for due syncs
+
     # Hyper-V connection (WinRM to Windows host running Hyper-V)
     hyperv_host: str = ""               # hostname or IP of the Hyper-V host
     hyperv_port: int = 5985             # 5985 = HTTP (default), 5986 = HTTPS
@@ -391,6 +396,17 @@ class Settings(BaseSettings):
     clouddb_ps_platform_sqlserver: str = "mssql SSM Custom Plugin"
     clouddb_ps_pravault_platform: str = "PRA Vault Username Password"
     clouddb_ps_workgroup: str = ""                 # blank → falls back to passwordsafe_workgroup
+    # Import from Password Safe (/databases → "Import from Password Safe"). Reads only —
+    # nothing in Password Safe is created or changed. Password Safe already runs a
+    # discovery scanner with managed credentials, so it knows a database's platform,
+    # port and requestable accounts authoritatively; these four tune what the import
+    # list shows. All optional: the feature is already gated on cloud_database_enabled
+    # + beyondtrust_enabled, so a third on/off switch would only be a third thing to
+    # forget. See docs/databases.md "Importing from Password Safe".
+    clouddb_ps_import_workgroup: str = ""          # blank → everything the API identity can see
+    clouddb_ps_import_default_cloud: str = "local"  # Location preselected in the modal
+    clouddb_ps_import_max_systems: int = 500       # cap on candidates returned
+    clouddb_ps_import_platform_map: str = ""       # JSON {"Percona Server": "mysql"} overrides
     # DB-client container images run on the jump host (override for a mirrored registry).
     clouddb_db_client_image_postgres: str = "postgres:16"
     clouddb_db_client_image_mysql: str = "mysql:8.4"

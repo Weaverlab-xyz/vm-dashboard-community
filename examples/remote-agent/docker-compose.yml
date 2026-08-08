@@ -52,9 +52,10 @@ services:
       # user_home_t, which the container may not read whatever its mode bits say. Docker
       # and Podman ignore z/Z where SELinux is absent, so leave it on either way.
       - ./policy.yaml:/etc/dashboard-agent/policy.yaml:ro,Z
-      # Optional: a kubeconfig for clusters you already have credentials for. Only the
-      # API server URL and version are ever reported — the credentials stay in the file.
-      # - ./kubeconfig:/etc/dashboard-agent/kubeconfig:ro,Z
+      # Optional: hypervisor credentials, for connections the dashboard cannot dial.
+      # The dashboard stores only the NAME of each entry here — never the credential.
+      # Same `,Z` for the same reason.
+      # - ./connections.yaml:/etc/dashboard-agent/connections.yaml:ro,Z
       # Copy the inspection CA next to this file rather than mounting it from /usr/local:
       # `,Z` relabels the source, and doing that to a shared system trust store affects
       # everything else on the host that reads it.

@@ -225,128 +225,122 @@ def _ssh_hostvars(user: str, password: str) -> dict:
     return hvars
 
 
-def _proxmox_user() -> str:
-    u = _cfg("proxmox_user") or "root@pam"
-    return u.split("@")[0]
+def _split_user(raw: str, default: str) -> str:
+    """The OS login half of a management username: ``root@pam`` -> ``root``."""
+    return (raw or default).split("@")[0]
 
 
-def _vsphere_user() -> str:
-    u = _cfg("vsphere_user") or "root"
-    return u.split("@")[0]
-
-
-def _hyperv_hostvars() -> dict:
-    use_ssl   = _cfg_bool("hyperv_use_ssl", False)
-    verify    = _cfg_bool("hyperv_verify_ssl", False)
-    port      = int(_cfg("hyperv_port") or ("5986" if use_ssl else "5985"))
-    transport = _cfg("hyperv_transport") or "ntlm"
-    username  = _cfg("hyperv_username") or ""
-    password  = _cfg("hyperv_password") or ""
+def _hyperv_hostvars(conn) -> dict:
+    opts      = conn.options or {}
+    use_ssl   = bool(opts.get("use_ssl"))
+    transport = opts.get("transport") or "ntlm"
+    port      = int(conn.port or (5986 if use_ssl else 5985))
 
     hvars: dict = {
         "ansible_connection":                   "winrm",
         "ansible_winrm_scheme":                 "https" if use_ssl else "http",
         "ansible_winrm_port":                   port,
         "ansible_winrm_transport":              transport,
-        "ansible_winrm_server_cert_validation": "validate" if verify else "ignore",
+        "ansible_winrm_server_cert_validation": "validate" if conn.verify_ssl else "ignore",
     }
-    if username:
-        hvars["ansible_user"] = username
-    if password:
-        hvars["ansible_password"] = password
+    if conn.username:
+        hvars["ansible_user"] = conn.username
+    if conn.secret:
+        hvars["ansible_password"] = conn.secret
     return hvars
 
 
 # ── Hypervisor registry ───────────────────────────────────────────────────────
-# Each tuple: (group_key, flag_key, host_key, display_label, hostvars_fn)
+#
+# Keyed by connection kind. Each entry is (flag_key, label, hostvars_fn(conn)).
+# Reads a resolved Connection rather than the singleton config keys, so an install
+# with three Proxmox clusters now gets three inventory hosts instead of silently
+# only ever the first one.
 
-_HYPERVISOR_DEFS = [
-    (
-        "proxmox",
-        "proxmox_enabled",
-        "proxmox_host",
-        "Proxmox VE",
-        lambda: _ssh_hostvars(_proxmox_user(), _cfg("proxmox_password")),
-    ),
-    (
-        "vsphere",
-        "vsphere_enabled",
-        "vsphere_host",
-        "VMware vSphere / ESXi",
-        lambda: _ssh_hostvars(_vsphere_user(), _cfg("vsphere_password")),
-    ),
-    (
-        "hyperv",
-        "hyperv_enabled",
-        "hyperv_host",
-        "Microsoft Hyper-V",
-        _hyperv_hostvars,
-    ),
-    (
-        "nutanix",
-        "nutanix_enabled",
-        "nutanix_host",
-        "Nutanix AHV",
-        lambda: _ssh_hostvars(
-            _cfg("nutanix_username") or "nutanix",
-            _cfg("nutanix_password"),
-        ),
-    ),
-    (
-        "xcpng",
-        "xcpng_enabled",
-        "xcpng_host",
-        "XCP-ng / XenServer",
-        lambda: _ssh_hostvars(
-            _cfg("xcpng_username") or "root",
-            _cfg("xcpng_password"),
-        ),
-    ),
-]
+_HYPERVISOR_DEFS = {
+    "proxmox": ("proxmox_enabled", "Proxmox VE",
+                lambda c: _ssh_hostvars(_split_user(c.username, "root@pam"), c.secret)),
+    "vsphere": ("vsphere_enabled", "VMware vSphere / ESXi",
+                lambda c: _ssh_hostvars(_split_user(c.username, "root"), c.secret)),
+    "hyperv":  ("hyperv_enabled", "Microsoft Hyper-V", _hyperv_hostvars),
+    "nutanix": ("nutanix_enabled", "Nutanix AHV",
+                lambda c: _ssh_hostvars(c.username or "nutanix", c.secret)),
+    "xcpng":   ("xcpng_enabled", "XCP-ng / XenServer",
+                lambda c: _ssh_hostvars(c.username or "root", c.secret)),
+}
+
+
+def _enabled_connections(db) -> list:
+    """Every enabled, dashboard-reachable hypervisor connection.
+
+    Agent-bound connections are deliberately skipped: they have no host and no
+    credential here by design, and this inventory is for plays the dashboard runs
+    itself. Including them would produce an entry nothing could ever connect to.
+
+    ``db`` may be None — callers that have no session (and installs mid-migration)
+    fall back to the legacy singletons through ``resolve``'s COMPAT branch.
+    """
+    from . import hypervisor_connection_service as hcs
+    out = []
+    for kind, (flag_key, label, hvars_fn) in _HYPERVISOR_DEFS.items():
+        if not _cfg_bool(flag_key):
+            continue
+        try:
+            if db is None:
+                conns = [hcs.resolve(db, kind)]
+            else:
+                rows = [r for r in db.query(hcs.HypervisorConnection).filter(
+                    hcs.HypervisorConnection.kind == kind,
+                    hcs.HypervisorConnection.is_active.is_(True)).all()
+                    if not r.agent_id]
+                conns = [hcs.to_connection(r) for r in rows] or [hcs.resolve(db, kind)]
+        except Exception:  # noqa: BLE001 — an unconfigured kind is not an error here
+            continue
+        for conn in conns:
+            if conn.host and not conn.agent_id:
+                out.append((kind, label, conn, hvars_fn))
+    return out
 
 
 # ── Public helpers ────────────────────────────────────────────────────────────
 
-def build_inventory() -> dict:
+def build_inventory(db=None) -> dict:
     """
-    Build an Ansible JSON inventory from enabled+configured on-prem hypervisors.
+    Build an Ansible JSON inventory from enabled, dashboard-reachable hypervisors.
 
-    Only hypervisors with *both* the feature flag enabled *and* a host address
-    configured appear in the inventory.  Hyper-V gets ansible_connection=winrm
-    with its WinRM settings; all others get SSH with ansible_password.
+    One host per *connection*, not per kind: an install with two Proxmox clusters
+    gets both. Hyper-V gets ansible_connection=winrm with its WinRM settings; all
+    others get SSH with ansible_password. Agent-bound connections are excluded —
+    see :func:`_enabled_connections`.
     """
     inventory: dict = {
         "_meta": {"hostvars": {}},
         "on_premises": {"children": []},
     }
 
-    for group, flag_key, host_key, label, hvars_fn in _HYPERVISOR_DEFS:
-        if not _cfg_bool(flag_key):
-            continue
-        host = _cfg(host_key)
-        if not host:
-            continue
-
+    for kind, label, conn, hvars_fn in _enabled_connections(db):
         hostvars = {
-            "ansible_host":     host,
-            "hypervisor_type":  group,
+            "ansible_host":     conn.host,
+            "hypervisor_type":  kind,
             "hypervisor_label": label,
-            **hvars_fn(),
+            **hvars_fn(conn),
         }
-
-        inventory[group] = {"hosts": [host]}
-        inventory["_meta"]["hostvars"][host] = hostvars
-        inventory["on_premises"]["children"].append(group)
+        group = inventory.setdefault(kind, {"hosts": []})
+        if conn.host not in group["hosts"]:
+            group["hosts"].append(conn.host)
+        inventory["_meta"]["hostvars"][conn.host] = hostvars
+        if kind not in inventory["on_premises"]["children"]:
+            inventory["on_premises"]["children"].append(kind)
 
     return inventory
 
 
-def get_configured_targets() -> list[dict]:
-    """Return [{key, label, host}] for each enabled+configured on-prem hypervisor."""
+def get_configured_targets(db=None) -> list[dict]:
+    """[{key, label, host, connection_id, connection_name}] per reachable connection."""
     return [
-        {"key": group, "label": label, "host": _cfg(host_key)}
-        for group, flag_key, host_key, label, _ in _HYPERVISOR_DEFS
-        if _cfg_bool(flag_key) and _cfg(host_key)
+        {"key": kind, "label": label, "host": conn.host,
+         "connection_id": conn.id, "connection_name": conn.name}
+        for kind, label, conn, _ in _enabled_connections(db)
     ]
 
 
@@ -377,6 +371,7 @@ async def run_playbook(
     ssh_key_pem: str | None = None,
     secret_extra_vars: dict | None = None,
     ps_env: dict | None = None,
+    db=None,
 ) -> tuple[str, int]:
     """
     Run an Ansible playbook or provisioning asset in a sibling Docker container.
@@ -398,7 +393,7 @@ async def run_playbook(
     soon as the container exits.
     """
     image = _cfg("ansible_local_image") or "chrweav/ansible-winrm:latest"
-    inventory = build_inventory()
+    inventory = build_inventory(db)
     is_group = target in inventory and target not in ("_meta", "on_premises")
     atype = asset_type(asset_name)
 

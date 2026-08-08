@@ -53,8 +53,9 @@ ENROLL_CODE_PREFIX = "agte_"
 ENROLL_TTL_MINUTES = 15
 
 # Job types a remote agent may execute. MUST stay disjoint from
-# jobs_worker.HANDLED_TYPES; the static test enforces it.
-AGENT_JOB_TYPES = ("agent_discover",)
+# jobs_worker.HANDLED_TYPES; the static test enforces it. These run on a network the
+# local worker cannot reach, so a type in both would be raced between two executors.
+AGENT_JOB_TYPES = ("agent_discover", "agent_hypervisor")
 
 # An agent is "online" if it polled within this many seconds. Three times the default
 # poll interval, so one dropped request does not flap the badge.
@@ -417,6 +418,55 @@ def allowed_job_types(agent: RemoteAgent) -> tuple:
     if not per_agent:
         return AGENT_JOB_TYPES
     return tuple(t for t in AGENT_JOB_TYPES if t in per_agent)
+
+
+def set_allowed_job_types(db: Session, agent: RemoteAgent, types) -> RemoteAgent:
+    """Grant this agent a subset of :data:`AGENT_JOB_TYPES`.
+
+    Intersected at WRITE time as well as at read time. Both, deliberately: the read-time
+    intersection is what keeps a stale row safe after a type is retired from the product,
+    and the write-time one keeps the stored value honest so the UI is not showing a grant
+    that silently does nothing.
+
+    An **empty** list stores NULL, which means "the default set" — not "nothing". That
+    sentinel predates this writer and changing it would silently re-authorize every
+    existing agent, so "grant nothing" is deliberately not expressible here: to stop an
+    agent, revoke it.
+    """
+    wanted = [t for t in AGENT_JOB_TYPES if t in set(types or ())]
+    agent.allowed_job_types = json.dumps(wanted) if wanted else None
+    db.commit()
+    db.refresh(agent)
+    return agent
+
+
+def record_self_report(db: Session, agent: RemoteAgent, *,
+                       agent_version: str = "", job_types=None) -> None:
+    """Store what the agent reported about itself on this lease.
+
+    ``agent_version`` was previously written only at enrolment, so an operator who
+    pulled a new image and restarted the container kept the stale value forever — and
+    an upgrade gate that reads it would then refuse an agent that had in fact upgraded.
+
+    Advisory data, not a capability: nothing here grants the agent anything, so it is
+    stored as reported. Only written when it actually changed, to keep an idle fleet's
+    poll from being a write per agent every five seconds.
+    """
+    changed = False
+    version = (agent_version or "").strip()[:32]
+    if version and version != (agent.agent_version or ""):
+        agent.agent_version = version
+        changed = True
+
+    if job_types is not None:
+        reported = sorted({str(t).strip()[:64] for t in job_types if str(t).strip()})
+        encoded = json.dumps(reported) if reported else None
+        if encoded != agent.reported_job_types:
+            agent.reported_job_types = encoded
+            changed = True
+
+    if changed:
+        db.commit()
 
 
 # A cancelled job is still the agent's until it winds down. Cooperative cancel works
