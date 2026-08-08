@@ -540,10 +540,14 @@ async function ociPlacementChecks() {
      /No hosts were in scope/.test(joined({hosts: 0, scanned: 0, refused: 0})));
   ok(JD + ' emptyReasons() flags audit mode first — it probes nothing by design',
      /audit mode/.test(reasons({audit_mode: true, scanned: 0})[0]));
-  // The other half of "use the local kubeconfig", which is on by default and does
-  // nothing at all unless the operator mounted one.
-  ok(JD + ' emptyReasons() always mentions the unmounted kubeconfig',
-     /kubeconfig is actually mounted/.test(joined({scanned: 384, hosts: 128})));
+  // The kubeconfig bullet is gone with the kubeconfig path itself: discovery looks
+  // for hypervisor management endpoints now, and nothing is mounted into the agent.
+  ok(JD + ' emptyReasons() no longer mentions a kubeconfig',
+     !/kubeconfig/.test(joined({scanned: 384, hosts: 128})));
+  // It names the ports an operator can actually check, per product.
+  ok(JD + ' emptyReasons() names the hypervisor ports when probes found nothing',
+     /8006/.test(joined({refused: 0, scanned: 384, hosts: 128})) &&
+     /9440/.test(joined({refused: 0, scanned: 384, hosts: 128})));
   ok(JD + ' emptyReasons() survives a result with no counters at all',
      reasons(undefined).length > 0 && reasons({}).length > 0);
 
@@ -557,20 +561,26 @@ async function ociPlacementChecks() {
   ok(JD + ' scanSummary() reads as zeros on a missing result',
      /probed 0 endpoint\(s\) across 0 host\(s\)/.test(summary(undefined)));
 
-  const href = (f) => jobDetail({}, 'registerHref').registerHref(f);
-  const k8sHref = href({kind: 'k8s', suggested_name: 'k8s-10-20-0-5',
-                        api_server: 'https://10.20.0.5:6443'});
-  ok(JD + ' registerHref() sends a k8s finding to the cluster register form',
-     k8sHref.startsWith('/k8s?') && /register=1/.test(k8sHref));
-  ok(JD + ' registerHref() carries the suggested name and api server, encoded',
-     /name=k8s-10-20-0-5/.test(k8sHref) &&
-     /api_server=https%3A%2F%2F10.20.0.5%3A6443/.test(k8sHref));
-  const dbHref = href({kind: 'database', engine: 'mysql', host: '10.20.0.9', port: 3306});
-  ok(JD + ' registerHref() sends a database finding to the database register form',
-     dbHref.startsWith('/databases?') && /engine=mysql/.test(dbHref) &&
-     /host=10.20.0.9/.test(dbHref) && /port=3306/.test(dbHref));
-  ok(JD + ' registerHref() omits fields a probe could not learn',
-     !/port=/.test(href({kind: 'database', engine: 'oracle', host: '10.0.0.2'})));
+  // Findings now hand off to the Connections form, not the k8s/database register
+  // forms — a hypervisor needs a credential, which is exactly what a probe lacks.
+  const href = (f) => jobDetail({}, 'connectHref').connectHref(f);
+  const pve = href({product: 'proxmox', host: '10.20.0.5', port: 8006,
+                    suggested_name: 'pve-10-20-0-5'});
+  ok(JD + ' connectHref() sends a finding to the connections form',
+     pve.startsWith('/connections?') && /add=1/.test(pve));
+  ok(JD + ' connectHref() carries the host, port and suggested name',
+     /kind=proxmox/.test(pve) && /host=10.20.0.5/.test(pve) &&
+     /port=8006/.test(pve) && /name=pve-10-20-0-5/.test(pve));
+  // A probe reports a PRODUCT; the form takes a connection KIND. ESXi and vCenter are
+  // both vsphere connections, and WinRM is the Hyper-V case. Passing the product
+  // straight through would leave the dropdown on a value the API refuses, and the
+  // form ignores an unrecognised kind — so the prefill would silently vanish.
+  ok(JD + ' connectHref() maps esxi onto the vsphere connection kind',
+     /kind=vsphere/.test(href({product: 'esxi', host: '10.0.0.6', port: 443})));
+  ok(JD + ' connectHref() maps winrm onto the hyperv connection kind',
+     /kind=hyperv/.test(href({product: 'winrm', host: '10.0.0.7', port: 5985})));
+  ok(JD + ' connectHref() omits fields a probe could not learn',
+     !/name=/.test(href({product: 'nutanix', host: '10.0.0.2', port: 9440})));
 }
 
 // ── the register forms' end of that hand-off ──────────────────────────────────
