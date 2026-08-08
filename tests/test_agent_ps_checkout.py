@@ -212,16 +212,22 @@ def test_a_missing_client_file_says_what_to_mount():
 
 
 def test_the_client_secret_can_come_from_a_mounted_secret_file():
+    """`client_secret_file` is the recommended form, so that the value can be a
+    Docker/Podman secret rather than text in a YAML file."""
+    fake_secret = "not-a-real-secret"
     with tempfile.TemporaryDirectory() as tmp:
-        secret = os.path.join(tmp, "secret")
-        with open(secret, "w", encoding="utf-8") as fh:
-            fh.write("shhh\n")
+        # A PATH, not a secret — naming it `secret` made this read as though the file
+        # write were storing a credential, which is also how CodeQL read it.
+        secret_path = os.path.join(tmp, "client_secret")
+        with open(secret_path, "w", encoding="utf-8") as fh:
+            fh.write(f"{fake_secret}\n")
         conf = os.path.join(tmp, "passwordsafe.yaml")
         with open(conf, "w", encoding="utf-8") as fh:
             fh.write(f"api_url: https://ps.example.com\nclient_id: cid\n"
-                     f"client_secret_file: {secret}\n")
+                     f"client_secret_file: {secret_path}\n")
         ps = agent.PasswordSafe.from_file(conf)
-        assert ps._secret == "shhh"
+        # Trailing newline stripped, so a `printf`-written secret file works.
+        assert ps._secret == fake_secret
 
 
 if __name__ == "__main__":
