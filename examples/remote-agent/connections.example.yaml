@@ -1,0 +1,79 @@
+# Hypervisor connections — YOUR file, not the dashboard's.
+#
+# This is where hypervisor credentials live when a connection is reached through an
+# agent. The dashboard stores the connection's NAME and nothing else: no host, no
+# username, no password. A job says "run inventory_sync on dc1-vcenter" and the agent
+# resolves the rest from here.
+#
+# That is deliberate, and it is the difference between this design and a proxy. If the
+# dashboard shipped credentials in the job envelope, a standing vCenter administrator
+# password would sit in its database, in every job payload, in this agent's memory —
+# and, because envelopes are signed rather than encrypted, in the logs of any
+# TLS-inspecting corporate proxy between the two. The whole feature is sold on the
+# opposite property.
+#
+# Mount it read-only, with the SELinux relabel:
+#   -v "$PWD/connections.yaml:/etc/dashboard-agent/connections.yaml:ro,Z"
+#
+# The `,Z` is not optional on Fedora, RHEL, CentOS, Rocky or Alma — without it the
+# agent cannot read this file whatever its mode bits say. Same reasoning as policy.yaml.
+#
+# Nothing here grants anything on its own. Three separate parties must agree before a
+# verb runs:
+#   1. the dashboard grants this agent the `agent_hypervisor` job type (Agents page);
+#   2. policy.yaml grants that verb on this connection name;
+#   3. this file defines the name, with a credential.
+# Withhold any one and nothing happens.
+
+connections:
+  # ── VMware vCenter ─────────────────────────────────────────────────────────
+  # vCenter, NOT a bare ESXi host: the agent uses the vSphere Automation REST API
+  # (7.0U2+), which ESXi does not serve. Point an ESXi host at the dashboard directly.
+  - name: dc1-vcenter
+    kind: vsphere
+    host: vcenter.lab.internal
+    port: 443
+    username: svc-dashboard@vsphere.local
+    # `password_file` wins over `password`, so a Docker/Podman secret can be mounted
+    # instead of putting the value in a YAML file. Prefer it.
+    password_file: /run/secrets/vcenter
+    verify_ssl: true
+
+  # ── Proxmox VE ─────────────────────────────────────────────────────────────
+  # API-token auth only. A password login would mean posting credentials to
+  # /access/ticket and juggling a CSRF token — more surface, no gain.
+  # Create the token in Proxmox under Datacenter → Permissions → API Tokens.
+  - name: lab-proxmox
+    kind: proxmox
+    host: 10.20.0.5
+    port: 8006
+    username: root@pam
+    token_id: dashboard          # the token NAME; the secret goes in `password`
+    password: "REPLACE-WITH-THE-TOKEN-SECRET"
+    verify_ssl: false
+
+  # ── Nutanix Prism Central ──────────────────────────────────────────────────
+  # Inventory sync only in this build. Power verbs are refused: a v3 power change is a
+  # full spec PUT carrying a metadata version, not a simple action, and getting that
+  # wrong writes to the VM rather than failing.
+  # - name: hq-prism
+  #   kind: nutanix
+  #   host: prism.lab.internal
+  #   port: 9440
+  #   username: svc-dashboard
+  #   password_file: /run/secrets/prism
+  #   verify_ssl: true
+
+  # ── XCP-ng / XenServer ─────────────────────────────────────────────────────
+  # - name: lab-xcpng
+  #   kind: xcpng
+  #   host: 10.20.0.9
+  #   port: 443
+  #   username: root
+  #   password_file: /run/secrets/xcpng
+  #   verify_ssl: false
+
+  # ── Hyper-V is NOT here ────────────────────────────────────────────────────
+  # WinRM needs a real NTLM/Negotiate stack, which is the one transport the agent's
+  # deliberately minimal dependency set cannot do. Hyper-V stays dashboard-direct;
+  # configure it on the Connections page without an agent.

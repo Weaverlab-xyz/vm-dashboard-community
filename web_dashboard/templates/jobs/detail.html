@@ -129,7 +129,7 @@
       <table class="w-full text-sm">
         <thead class="bg-gray-50 text-xs uppercase text-gray-500">
           <tr>
-            <th class="px-4 py-2 text-left font-medium">Kind</th>
+            <th class="px-4 py-2 text-left font-medium">Product</th>
             <th class="px-4 py-2 text-left font-medium">Endpoint</th>
             <th class="px-4 py-2 text-left font-medium">Identified as</th>
             <th class="px-4 py-2 text-left font-medium">Suggested name</th>
@@ -141,36 +141,41 @@
             <tr>
               <td class="px-4 py-3">
                 <span class="inline-flex px-2 py-0.5 rounded text-xs font-semibold"
-                      :class="f.kind === 'k8s' ? 'bg-indigo-100 text-indigo-700' : 'bg-amber-100 text-amber-700'"
-                      x-text="f.kind === 'k8s' ? 'Kubernetes' : 'Database'"></span>
-                <span x-show="f.source === 'kubeconfig'" x-cloak
-                      class="block text-xs text-gray-400 mt-1"
-                      title="Read from the kubeconfig mounted into the agent, not from a network sweep">from kubeconfig</span>
+                      :class="productClass(f.product)" x-text="productLabel(f.product)"></span>
+                <!--
+                  `possible` exists for WinRM alone: nearly every domain-joined Windows
+                  Server answers on 5985 and the overwhelming majority are not
+                  hypervisors. Rendering it identically to a confirmed vCenter would
+                  send operators to add connections to file servers.
+                -->
+                <span x-show="f.confidence === 'possible'" x-cloak
+                      class="block mt-1 text-xs text-amber-700"
+                      title="Something answered, but only credentials can confirm what it is">possible only</span>
               </td>
               <td class="px-4 py-3 font-mono text-xs text-gray-700">
-                <span x-text="f.api_server || (f.host + ':' + f.port)"></span>
+                <span x-text="f.endpoint || (f.host + ':' + f.port)"></span>
                 <span x-show="f.tls_cn" x-cloak class="block text-gray-400 mt-0.5"
                       x-text="'CN=' + f.tls_cn"></span>
               </td>
               <td class="px-4 py-3 text-gray-700">
-                <span x-text="[f.distro || f.engine, f.server_version].filter(Boolean).join(' ') || 'responded, version unknown'"></span>
+                <span x-text="[f.server_version, f.build && ('build ' + f.build)].filter(Boolean).join(' ') || 'responded, version unknown'"></span>
               </td>
               <td class="px-4 py-3 font-mono text-xs text-gray-600" x-text="f.suggested_name || '–'"></td>
               <td class="px-4 py-3 text-right whitespace-nowrap">
                 <span x-show="f.already_registered"
                       class="inline-flex px-2 py-1 rounded text-xs font-medium bg-green-100 text-green-700">
-                  Already registered
+                  Already configured
                 </span>
                 <!--
-                  A link, not a fetch. Registering needs a kubeconfig (or a Password Safe
-                  managed account) that the agent never had and must never be asked for —
-                  it authenticates to nothing during a scan. So this hands the operator to
-                  the existing Register form with the non-secret fields already filled in,
-                  and that form runs under their own permissions.
+                  A link, not a fetch. A connection needs a credential that the agent
+                  never had and must never be asked for — it authenticates to nothing
+                  during a scan. So this hands the operator to the Connections form with
+                  the non-secret fields already filled in, and that form runs under
+                  their own permissions.
                 -->
-                <a x-show="!f.already_registered" x-cloak :href="registerHref(f)"
+                <a x-show="!f.already_registered" x-cloak :href="connectHref(f)"
                    class="inline-flex px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white text-xs font-medium rounded transition">
-                  Register…
+                  Add connection…
                 </a>
               </td>
             </tr>
@@ -178,8 +183,8 @@
         </tbody>
       </table>
       <p class="px-4 py-3 text-xs text-gray-500 border-t border-gray-100">
-        Registering asks for the one thing a scan cannot supply — a kubeconfig, or a
-        Password Safe managed account. Probes never authenticate.
+        Adding a connection asks for the one thing a scan cannot supply — credentials.
+        Probes never authenticate.
       </p>
     </div>
   </div>
@@ -435,30 +440,48 @@
           out.push('No hosts were in scope. Give the scan a CIDR or a hostname, or add ' +
                    "ranges to the agent's policy.yaml — with neither, there is nothing to sweep.");
         } else if (s.scanned && !s.refused) {
-          out.push(`Probed ${s.scanned} endpoint(s) and nothing answered as a Kubernetes ` +
-                   'API server or a database. Check the ports: a cluster behind a load ' +
-                   'balancer may not be on 6443, and only 5432/3306/1433/1521 are probed.');
+          out.push(`Probed ${s.scanned} endpoint(s) and nothing answered as a hypervisor ` +
+                   'management endpoint. Check the ports: 443 for vCenter/ESXi and XCP-ng, ' +
+                   '8006 for Proxmox, 9440 for Nutanix Prism, 5985/5986 for WinRM. A ' +
+                   'management UI behind a reverse proxy may answer as the proxy instead.');
         }
-        out.push('"Use the mounted kubeconfig" only finds a cluster if a kubeconfig is ' +
-                 'actually mounted into the agent container at /etc/dashboard-agent/kubeconfig ' +
-                 '(or KUBECONFIG). Nothing is mounted by the install command.');
+        if ((this.findings || []).length &&
+            (this.findings || []).every(f => f.confidence === 'possible')) {
+          out.push('Everything found came back as `possible` only — WinRM answered, but ' +
+                   'nothing about an anonymous response proves the host runs Hyper-V. ' +
+                   'Only credentials can tell you.');
+        }
         return out;
       },
 
-      // Hands off to the existing Register form with the non-secret fields prefilled.
-      // Deliberately not a one-click register: both flows need a credential the scan
-      // never had, and they run under the operator's own permissions.
-      registerHref(f) {
-        if (f.kind === 'k8s') {
-          const p = new URLSearchParams({register: '1', name: f.suggested_name || ''});
-          if (f.api_server) p.set('api_server', f.api_server);
-          return '/k8s?' + p.toString();
-        }
-        const p = new URLSearchParams({register: '1'});
-        if (f.engine) p.set('engine', f.engine);
+      productLabel(product) {
+        return ({vsphere: 'vCenter', esxi: 'ESXi', proxmox: 'Proxmox VE',
+                 nutanix: 'Nutanix Prism', xcpng: 'XCP-ng',
+                 winrm: 'WinRM (Windows)'})[product] || product || 'unknown';
+      },
+
+      productClass(product) {
+        return ({vsphere: 'bg-sky-100 text-sky-700', esxi: 'bg-sky-100 text-sky-700',
+                 proxmox: 'bg-orange-100 text-orange-700',
+                 nutanix: 'bg-indigo-100 text-indigo-700',
+                 xcpng: 'bg-emerald-100 text-emerald-700',
+                 winrm: 'bg-amber-100 text-amber-700'})[product] || 'bg-gray-100 text-gray-700';
+      },
+
+      // Hands off to the Connections form with the non-secret fields prefilled.
+      // Deliberately not a one-click add: a connection needs a credential the scan
+      // never had, and the form runs under the operator's own permissions.
+      connectHref(f) {
+        // A probe reports a PRODUCT; the form takes a connection KIND. ESXi and vCenter
+        // are both vsphere connections and WinRM is the Hyper-V case, so map rather
+        // than pass through — the form ignores an unrecognised kind, which would
+        // silently drop the prefill.
+        const kind = ({esxi: 'vsphere', winrm: 'hyperv'})[f.product] || f.product || '';
+        const p = new URLSearchParams({add: '1', kind});
         if (f.host) p.set('host', f.host);
         if (f.port) p.set('port', String(f.port));
-        return '/databases?' + p.toString();
+        if (f.suggested_name) p.set('name', f.suggested_name);
+        return '/connections?' + p.toString();
       },
 
       async cancelJob() {

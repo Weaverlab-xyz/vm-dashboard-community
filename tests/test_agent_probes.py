@@ -1,20 +1,23 @@
-"""Invariants for the remote agent's discovery probes and its policy allow-list.
+"""Invariants for the remote agent's hypervisor probes and its policy allow-list.
 
 Two properties matter here and neither is visible from a passing scan.
 
-**The probes never authenticate.** Discovery reads pre-auth protocol banners: a
-Postgres SSLRequest reply, a MySQL greeting, a TDS PRELOGIN response, a TNS refusal.
-If one ever grew a login attempt it would still "work" — and it would also lock out
-service accounts across a customer's estate and read, in their SIEM, exactly like
-credential spraying. So there is a static assertion that no probe sends anything
-credential-shaped.
+**The probes never authenticate.** Discovery reads what a management endpoint says
+before any credential is offered: a VMware service descriptor, an XAPI ``Server``
+header, a Prism 401. If one ever grew a login attempt it would still "work" — and it
+would also lock out service accounts across a customer's estate and read, in their
+SIEM, exactly like credential spraying. So there is a static assertion that no probe
+sends anything credential-shaped, and it explicitly bans the NTLM negotiate token that
+would otherwise be the tempting way to fingerprint a Windows host.
 
 **The policy fails closed.** A missing or corrupt policy file must refuse everything.
 Fail-open is the classic inversion bug in exactly this kind of code, and it is
 invisible until someone reads the file that granted the access.
 
-Runs against real byte fixtures, no network. Needs requests/PyYAML/cryptography (the
-agent's own dependencies). Runs under pytest, or standalone:
+Identification is tested as a pure function over captured response bytes — no sockets,
+no fake TLS — which is what keeps this suite as good as the byte-fixture tests it
+replaced. Needs requests/PyYAML/cryptography (the agent's own dependencies). Runs under
+pytest, or standalone:
     python tests/test_agent_probes.py
 """
 import importlib.util
@@ -40,141 +43,121 @@ except Exception as exc:  # pragma: no cover — agent deps missing
         sys.exit(0)
 
 
-class FakeSock:
-    """A socket that replays a scripted reply and records what was sent."""
-
-    def __init__(self, reply: bytes = b""):
-        self.reply = reply
-        self.sent = b""
-
-    def sendall(self, data):
-        self.sent += data
-
-    def recv(self, _n):
-        out, self.reply = self.reply, b""
-        return out
-
-    def settimeout(self, _t):
-        pass
-
-    def close(self):
-        pass
+def _resp(status: str = "200 OK", headers: dict = None, body: str = "") -> bytes:
+    """An HTTP response as bytes, the way _identify receives it."""
+    lines = [f"HTTP/1.1 {status}"]
+    for key, value in (headers or {}).items():
+        lines.append(f"{key}: {value}")
+    return ("\r\n".join(lines) + "\r\n\r\n" + body).encode()
 
 
-# ── Postgres ──────────────────────────────────────────────────────────────────
+# ── Product identification (pure, against captured-shape responses) ────────────
 
-def test_postgres_ssl_supported_and_not_supported_both_identify():
-    for reply, tls in ((b"S", True), (b"N", False)):
-        sock = FakeSock(reply)
-        found = agent.probe_postgres(sock)
-        assert found["engine"] == "postgres"
-        assert found["tls"] is tls
-        # The SSLRequest is exactly 8 bytes: length 8, magic 80877103.
-        assert sock.sent == struct.pack("!II", 8, 80877103)
-
-
-def test_postgres_ignores_an_unrelated_service():
-    assert agent.probe_postgres(FakeSock(b"HTTP/1.1 200 OK")) is None
-
-
-# ── MySQL / MariaDB ───────────────────────────────────────────────────────────
-
-def _mysql_greeting(version: bytes) -> bytes:
-    payload = b"\x0a" + version + b"\x00" + b"\x00" * 20
-    return len(payload).to_bytes(3, "little") + b"\x00" + payload
+def test_vcenter_is_identified_with_its_version():
+    body = ("<ServiceContent><about><fullName>VMware vCenter Server 8.0.3 "
+            "build-24022515</fullName><apiType>VirtualCenter</apiType>"
+            "<apiVersion>8.0.3.0</apiVersion><build>24022515</build></about>"
+            "</ServiceContent>")
+    found = agent._identify(_resp(body=body), None, "10.0.0.5", 443)
+    assert found["product"] == "vsphere"
+    assert found["confidence"] == "confirmed"
+    assert "8.0.3" in found["server_version"]
+    assert found["build"] == "24022515"
+    assert found["endpoint"] == "https://10.0.0.5:443"
 
 
-def test_mysql_greeting_yields_the_version():
-    found = agent.probe_mysql(FakeSock(_mysql_greeting(b"8.4.0")))
-    assert found == {"engine": "mysql", "server_version": "8.4.0"}
+def test_a_bare_esxi_host_is_told_apart_from_vcenter():
+    """apiType is the discriminator, and it matters for more than labelling: the agent
+    transport needs vCenter's Automation REST API, which ESXi does not serve."""
+    body = ("<about><fullName>VMware ESXi 8.0.2 build-22380479</fullName>"
+            "<apiType>HostAgent</apiType></about>")
+    found = agent._identify(_resp(body=body), None, "10.0.0.6", 443)
+    assert found["product"] == "esxi"
 
 
-def test_mariadb_is_distinguished_from_mysql():
-    found = agent.probe_mysql(FakeSock(_mysql_greeting(b"11.4.2-MariaDB")))
-    assert found["engine"] == "mariadb"
+def test_xcpng_is_identified_from_the_server_header():
+    found = agent._identify(_resp(headers={"Server": "Xapi/25.6.0"}), None, "10.0.0.7", 443)
+    assert found["product"] == "xcpng"
+    assert found["server_version"] == "25.6.0"
+    assert found["confidence"] == "confirmed"
 
 
-def test_mysql_probe_sends_nothing_at_all():
-    """The server speaks first, so a MySQL probe is a pure read — there is no packet
-    that could be mistaken for a handshake attempt."""
-    sock = FakeSock(_mysql_greeting(b"8.4.0"))
-    agent.probe_mysql(sock)
-    assert sock.sent == b""
+def test_proxmox_is_identified_but_reports_no_version():
+    """/api2/json/version is auth-gated, so there is no version to report and we do not
+    invent one."""
+    found = agent._identify(
+        _resp(headers={"Server": "pve-api-daemon/3.0"},
+              body="<title>pve1 - Proxmox Virtual Environment</title>"),
+        None, "10.0.0.8", 8006)
+    assert found["product"] == "proxmox"
+    assert found["server_version"] == ""
+    assert found["confidence"] == "confirmed"
 
 
-def test_mysql_rejects_a_wrong_protocol_version():
-    payload = b"\x09" + b"5.7.0" + b"\x00"
-    frame = len(payload).to_bytes(3, "little") + b"\x00" + payload
-    assert agent.probe_mysql(FakeSock(frame)) is None
+def test_nutanix_prism_is_identified_from_its_refusal():
+    """A 401 is a refusal, not a login attempt — no credential is ever sent."""
+    found = agent._identify(
+        _resp("401 Unauthorized", {"WWW-Authenticate": 'Basic realm="Nutanix"'}),
+        None, "10.0.0.9", 9440)
+    assert found["product"] == "nutanix"
+    assert found["confidence"] == "confirmed"
 
 
-def test_mysql_rejects_a_truncated_greeting():
-    assert agent.probe_mysql(FakeSock(b"\x05\x00")) is None
+def test_winrm_is_reported_as_possible_not_confirmed():
+    """The honest limit of the whole probe set: this identifies WinRM on Windows, and
+    nearly every domain-joined Windows Server has WinRM on. Claiming "Hyper-V" here
+    would send operators to add connections to file servers."""
+    found = agent._identify(
+        _resp("401 Unauthorized", {"Server": "Microsoft-HTTPAPI/2.0",
+                                   "WWW-Authenticate": "Negotiate"}),
+        None, "10.0.0.10", 5985)
+    assert found["product"] == "winrm"
+    assert found["confidence"] == "possible"
 
 
-# ── SQL Server ────────────────────────────────────────────────────────────────
-
-def _tds_prelogin_response(major, minor, build) -> bytes:
-    options = b"\x00\x00\x06\x00\x06\xff"
-    data = bytes([major, minor]) + build.to_bytes(2, "big") + b"\x00\x00"
-    payload = options + data
-    return struct.pack("!BBHHBB", 0x04, 0x01, 8 + len(payload), 0, 0, 0) + payload
-
-
-def test_mssql_prelogin_yields_the_version():
-    found = agent.probe_mssql(FakeSock(_tds_prelogin_response(16, 0, 4135)))
-    assert found == {"engine": "sqlserver", "server_version": "16.0.4135"}
-
-
-def test_mssql_request_is_a_prelogin_not_a_login():
-    """0x12 is PRELOGIN. 0x10 would be LOGIN7 — an authentication attempt."""
-    sock = FakeSock(_tds_prelogin_response(16, 0, 1))
-    agent.probe_mssql(sock)
-    assert sock.sent[0] == 0x12, "the probe must send PRELOGIN (0x12), never LOGIN7"
-    assert struct.unpack("!H", sock.sent[2:4])[0] == len(sock.sent)
+def test_unrelated_services_are_not_mislabelled():
+    """Proxmox Backup Server and oVirt both answer on ports we probe. Returning None
+    for them is better than a finding an operator would act on."""
+    cases = [
+        (_resp(headers={"Server": "nginx/1.24.0"}), "10.0.0.11", 443),
+        (_resp(headers={"Server": "proxmox-backup-api/3.0"}), "10.0.0.12", 8007),
+        (_resp("401 Unauthorized", {"Server": "Apache"},
+               "<html>oVirt Engine</html>"), "10.0.0.13", 443),
+        (_resp(), "10.0.0.14", 443),
+    ]
+    for raw, ip, port in cases:
+        assert agent._identify(raw, None, ip, port) is None, f"{ip}:{port} mislabelled"
 
 
-def test_mssql_ignores_a_non_tds_reply():
-    assert agent.probe_mssql(FakeSock(b"SSH-2.0-OpenSSH_9.6\r\n")) is None
+def test_every_finding_declares_a_confidence():
+    """The UI renders `possible` differently, so a finding without one would silently
+    read as confirmed."""
+    samples = [
+        (_resp(body="<namespaces><name>urn:vim25</name></namespaces>"), 443),
+        (_resp(headers={"Server": "Xapi/25.6.0"}), 443),
+        (_resp(headers={"Server": "pve-api-daemon/3.0"}), 8006),
+        (_resp("401 Unauthorized", {"WWW-Authenticate": 'Basic realm="Nutanix"'}), 9440),
+        (_resp("401 Unauthorized", {"Server": "Microsoft-HTTPAPI/2.0"}), 5985),
+    ]
+    for raw, port in samples:
+        found = agent._identify(raw, None, "10.0.0.20", port)
+        assert found and found["confidence"] in ("confirmed", "possible")
+        assert found["kind"] == "hypervisor"
 
 
-# ── Oracle ────────────────────────────────────────────────────────────────────
-
-def test_tns_connect_packet_is_well_formed():
-    """The connect-data offset field must match the real offset or the listener
-    silently drops the packet and Oracle looks like a closed port."""
-    data = b"(CONNECT_DATA=(COMMAND=ping))"
-    pkt = agent._tns_connect_packet(data)
-    assert struct.unpack("!H", pkt[0:2])[0] == len(pkt), "declared length must match"
-    assert pkt[4] == 1, "packet type must be CONNECT"
-    declared_offset = struct.unpack("!H", pkt[26:28])[0]
-    assert declared_offset == 58
-    assert pkt[declared_offset:] == data, "connect data must start at the declared offset"
+def test_headers_are_matched_case_insensitively():
+    found = agent._identify(_resp(headers={"server": "Xapi/25.6.0"}), None, "10.0.0.21", 443)
+    assert found and found["product"] == "xcpng"
 
 
-def test_oracle_accepts_refuse_and_resend_as_identification():
-    for packet_type in (2, 4, 11):        # Accept, Refuse, Resend
-        reply = b"\x00\x20\x00\x00" + bytes([packet_type]) + b"\x00" * 10
-        assert agent.probe_oracle(FakeSock(reply))["engine"] == "oracle"
-
-
-def test_oracle_ignores_anything_else():
-    assert agent.probe_oracle(FakeSock(b"\x00\x20\x00\x00\x63" + b"\x00" * 10)) is None
-
-
-# ── The no-credentials guarantee ──────────────────────────────────────────────
+# ── The probes never authenticate ─────────────────────────────────────────────
 
 def _code_of(name: str) -> str:
-    """A function's executable code with its docstring and comments removed.
-
-    Scanning raw text would flag the docstrings, which exist precisely to explain that
-    these probes do not authenticate — prose about a rule must not read as a breach of
-    it.
-    """
     import ast
-    tree = ast.parse(open(_PATH, encoding="utf-8").read())
+    with open(_PATH, encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
     node = next(n for n in ast.walk(tree)
-                if isinstance(n, ast.FunctionDef) and n.name == name)
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == name)
     body = node.body
     if (body and isinstance(body[0], ast.Expr)
             and isinstance(body[0].value, ast.Constant)
@@ -185,29 +168,39 @@ def _code_of(name: str) -> str:
 
 def test_no_probe_sends_anything_credential_shaped():
     """Static scan of the probe functions. A probe that grew a username, a password or
-    a login packet would still pass a functional test — this is the assertion that
-    catches it."""
-    banned = re.compile(r"(password|passwd|credential|username|LOGIN7|auth_plugin)", re.I)
-    for name in ("probe_postgres", "probe_mysql", "probe_mssql", "probe_oracle"):
+    an auth token would still pass every functional test above — this is the assertion
+    that catches it.
+
+    ``NTLM``/``Negotiate``/``Basic`` are banned explicitly. There IS a way to read a
+    Windows host's OS build, NetBIOS name and DNS domain anonymously: send an NTLM
+    type-1 negotiate token, which carries no credential, and parse the AV pairs out of
+    the type-2 challenge. It is tempting, because it would turn `possible` into
+    something much better. We do not do it: it initiates an authentication exchange and
+    lands in the Windows Security log as a logon event, and "probes never authenticate,
+    not once" is the sentence this whole feature is sold on.
+    """
+    banned = re.compile(
+        r"(password|passwd|credential|username|LOGIN7|auth_plugin|NTLM|Negotiate|Basic )")
+    for name in ("_https_probe", "probe_hypervisor", "_identify"):
         hits = banned.findall(_code_of(name))
         assert not hits, f"{name} references {hits} — probes must never authenticate"
 
 
-def test_kubernetes_probe_sends_only_an_unauthenticated_get():
-    code = _code_of("probe_kubernetes")
-    assert "GET /version" in code
-    assert "Authorization" not in code, "the k8s probe must not send a credential"
+def test_every_probe_sends_only_an_unauthenticated_get():
+    code = _code_of("_https_probe")
+    assert "GET " in code
+    assert "Authorization" not in code, "the probe must not send a credential"
 
 
-def test_kubernetes_probe_refuses_deprecated_tls_versions():
+def test_the_probe_refuses_deprecated_tls_versions():
     """The probe turns verification off — it is identifying an unknown host whose CA it
     has never seen — and that also relaxes the context's security level enough to
     negotiate TLS 1.0/1.1.
 
     Asserted against the live context rather than the source, because the default
-    minimum depends on the OpenSSL the image was built against: it happens to be
-    TLS 1.2 on some builds and is not guaranteed to be on others. Kubernetes has
-    required TLS 1.2 for years, so pinning the floor costs no discovery reach.
+    minimum depends on the OpenSSL the image was built against. Every management
+    endpoint we probe has required TLS 1.2 for years, so pinning the floor costs no
+    discovery reach.
     """
     import ssl as _ssl
     created = []
@@ -222,26 +215,25 @@ def test_kubernetes_probe_refuses_deprecated_tls_versions():
     try:
         # No listener on this port, so the probe builds its context and then returns
         # None at the connect — which is all we need to inspect it.
-        agent.probe_kubernetes("127.0.0.1", 1, 0.05)
+        agent._https_probe("127.0.0.1", 1, 0.05)
     finally:
         _ssl.create_default_context = original
 
-    assert created, "probe_kubernetes did not build an SSL context"
+    assert created, "_https_probe did not build an SSL context"
     ctx = created[0]
     assert ctx.minimum_version >= _ssl.TLSVersion.TLSv1_2, (
         f"the probe would negotiate {ctx.minimum_version!r}; pin TLSv1_2 or higher")
     # And the verification posture is still deliberately off — if this ever flips, the
-    # probe stops working against every self-signed cluster CA out there.
+    # probe stops working against every self-signed management endpoint out there.
     assert ctx.verify_mode == _ssl.CERT_NONE and ctx.check_hostname is False
 
 
-# ── Version / distro parsing ──────────────────────────────────────────────────
-
-def test_distro_is_derived_from_the_version_string():
-    cases = {"v1.31.3+k3s1": "k3s", "v1.30.5+rke2r1": "rke2", "v1.31.0-eks-a1b2c3": "eks",
-             "v1.31.3": "kubeadm", "": ""}
-    for version, want in cases.items():
-        assert agent._distro_of(version) == want, version
+def test_port_443_asks_the_vmware_question_first():
+    """vSphere and XCP-ng share 443. One probe per host:port that classifies whichever
+    answered, not two connects."""
+    code = _code_of("probe_hypervisor")
+    assert "vimServiceVersions" in code
+    assert code.count("_identify") >= 1
 
 
 # ── Policy ────────────────────────────────────────────────────────────────────
@@ -355,7 +347,7 @@ def test_check_reports_a_reason():
 def test_handlers_are_a_closed_dict_not_a_dynamic_dispatch():
     """A dict lookup cannot be talked into reaching a function the author did not
     list; getattr() on a string from the wire can."""
-    assert set(agent.HANDLERS) == {"agent_discover"}
+    assert set(agent.HANDLERS) == {"agent_discover", "agent_hypervisor"}
     src = open(_PATH, encoding="utf-8").read()
     assert "getattr(sys.modules" not in src and "eval(" not in src and "exec(" not in src
 

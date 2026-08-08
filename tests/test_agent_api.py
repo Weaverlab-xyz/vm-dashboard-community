@@ -135,7 +135,7 @@ def _enroll(code: str) -> tuple[str, str]:
     private, public = agent_signing.generate_keypair()
     resp = CLIENT.post("/api/agent/enroll", json={
         "enrollment_code": code, "public_key": public,
-        "agent_version": "1.0.0", "policy_hash": "a" * 64})
+        "agent_version": "2.0.0", "policy_hash": "a" * 64})
     assert resp.status_code == 200, resp.text
     return resp.json()["agent_id"], private
 
@@ -157,7 +157,7 @@ def _queue_job(agent_id: str, job_type: str = "agent_discover") -> str:
     db = SessionLocal()
     try:
         job = job_service.create_job(db, job_type=job_type, created_by="tester",
-                                     metadata={"scan_kind": "k8s"}, agent_id=agent_id)
+                                     metadata={"scan_kind": "proxmox"}, agent_id=agent_id)
         return job.id
     finally:
         db.close()
@@ -182,7 +182,7 @@ def test_enrolment_binds_the_public_key_and_returns_the_dashboard_key():
     _id, code = _register()
     private, public = agent_signing.generate_keypair()
     resp = CLIENT.post("/api/agent/enroll", json={
-        "enrollment_code": code, "public_key": public, "agent_version": "1.0.0"})
+        "enrollment_code": code, "public_key": public, "agent_version": "2.0.0"})
     assert resp.status_code == 200
     body = resp.json()
     assert body["agent_id"] == _id
@@ -446,7 +446,7 @@ def test_completing_a_job_stores_the_findings():
     _signed(private, agent_id, "POST", "/api/agent/lease", {})
 
     findings = [{"kind": "k8s", "host": "10.20.0.11", "port": 6443,
-                 "api_server": "https://10.20.0.11:6443", "server_version": "v1.31.3+k3s1"}]
+                 "endpoint": "https://10.20.0.11:8006", "product": "proxmox"}]
     resp = _signed(private, agent_id, "POST", f"/api/agent/jobs/{job_id}/complete",
                    {"status": "completed", "result": {"findings": findings, "scanned": 12}})
     assert resp.status_code == 200 and resp.json()["status"] == "completed"
@@ -454,7 +454,7 @@ def test_completing_a_job_stores_the_findings():
     job = _job(job_id)
     assert job.status == "completed"
     stored = job.metadata_dict["findings"][0]
-    assert stored["api_server"] == "https://10.20.0.11:6443"
+    assert stored["endpoint"] == "https://10.20.0.11:8006"
     # Annotated server-side; the agent is never handed the dashboard's inventory.
     assert stored["already_registered"] is False
 
@@ -480,7 +480,7 @@ def _run_scan(result: dict, lines: list = None) -> str:
 def test_a_finished_scan_is_readable_by_the_operator():
     job_id = _run_scan({
         "findings": [{"kind": "k8s", "host": "10.20.0.11", "port": 6443,
-                      "api_server": "https://10.20.0.11:6443",
+                      "endpoint": "https://10.20.0.11:8006",
                       "server_version": "v1.31.3+k3s1", "distro": "k3s",
                       "suggested_name": "k8s-10-20-0-11"}],
         "scanned": 384, "hosts": 128, "refused": 12,
@@ -490,7 +490,7 @@ def test_a_finished_scan_is_readable_by_the_operator():
     body = resp.json()
     assert body["status"] == "completed"
     assert body["scanned"] == 384 and body["refused"] == 12
-    assert body["findings"][0]["api_server"] == "https://10.20.0.11:6443"
+    assert body["findings"][0]["endpoint"] == "https://10.20.0.11:8006"
     assert body["findings"][0]["already_registered"] is False
 
 
@@ -512,7 +512,7 @@ def test_the_findings_endpoint_serves_only_findings():
     try:
         job = job_service.create_job(
             db, job_type="agent_discover", created_by="tester",
-            metadata={"scan_kind": "k8s", "tf_variables": {"password": "s3cret"}},
+            metadata={"scan_kind": "proxmox", "tf_variables": {"password": "s3cret"}},
             agent_id=agent_id)
         job_id = job.id
     finally:
@@ -740,7 +740,7 @@ def test_discovery_is_refused_for_an_offline_agent():
 def test_discovery_queues_a_job_bound_to_the_agent():
     agent_id, private = _ready()
     resp = CLIENT.post(f"/api/agent/{agent_id}/discover",
-                       json={"scan_kind": "both", "cidrs": ["10.20.0.0/24"],
+                       json={"scan_kind": "all", "cidrs": ["10.20.0.0/24"],
                              "max_hosts": 10 ** 7})
     assert resp.status_code == 202
     job = _job(resp.json()["job_id"])
@@ -748,6 +748,65 @@ def test_discovery_queues_a_job_bound_to_the_agent():
     # Clamped at enqueue, so the stored row is already sane.
     from web_dashboard.services import agent_job_meta
     assert job.metadata_dict["max_hosts"] == agent_job_meta.MAX_HOSTS_CEILING
+
+
+def test_a_stale_agent_version_is_refused_before_anything_is_queued():
+    """A 1.x agent scans for Kubernetes and databases. Given a hypervisor scan it
+    matches no family, probes nothing, and completes GREEN with zero findings — which
+    on the findings panel is indistinguishable from a clean network. Refusing at
+    enqueue is the only place this is still diagnosable.
+    """
+    from web_dashboard.database import RemoteAgent, SessionLocal
+    agent_id, _private = _ready()
+    db = SessionLocal()
+    try:
+        row = db.query(RemoteAgent).filter(RemoteAgent.id == agent_id).one()
+        row.agent_version = "1.4.2"
+        db.commit()
+    finally:
+        db.close()
+
+    resp = CLIENT.post(f"/api/agent/{agent_id}/discover", json={"cidrs": ["10.20.0.0/24"]})
+    assert resp.status_code == 409
+    detail = resp.json()["detail"]
+    assert "2.0 or later" in detail and "Re-enrolment is not needed" in detail
+
+
+def test_an_agent_whose_policy_omits_discovery_is_refused_too():
+    """What a version number cannot see: a current agent whose policy.yaml does not
+    list the job type. Without this the job leases and is refused on the far side."""
+    from web_dashboard.database import RemoteAgent, SessionLocal
+    agent_id, _private = _ready()
+    db = SessionLocal()
+    try:
+        row = db.query(RemoteAgent).filter(RemoteAgent.id == agent_id).one()
+        row.reported_job_types = '["agent_hypervisor"]'
+        db.commit()
+    finally:
+        db.close()
+
+    resp = CLIENT.post(f"/api/agent/{agent_id}/discover", json={"cidrs": ["10.20.0.0/24"]})
+    assert resp.status_code == 409
+    assert "policy.yaml" in resp.json()["detail"]
+
+
+def test_a_lease_refreshes_what_the_agent_reports_about_itself():
+    """agent_version used to be written only at enrolment, so an operator who pulled a
+    new image and restarted kept the stale value forever — and every compatibility gate
+    reads it."""
+    from web_dashboard.database import RemoteAgent, SessionLocal
+    agent_id, private = _ready()
+    resp = _signed(private, agent_id, "POST", "/api/agent/lease",
+                   {"agent_version": "2.7.1", "job_types": ["agent_discover"]})
+    assert resp.status_code == 200
+
+    db = SessionLocal()
+    try:
+        row = db.query(RemoteAgent).filter(RemoteAgent.id == agent_id).one()
+        assert row.agent_version == "2.7.1"
+        assert row.reported_job_types_list == ["agent_discover"]
+    finally:
+        db.close()
 
 
 def test_a_queued_agent_job_is_cancellable():

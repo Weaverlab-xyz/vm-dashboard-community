@@ -44,12 +44,13 @@ import re
 import socket
 import ssl
 import stat
-import struct
 import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
+import urllib.error as _urlerror
+import urllib.request as _urlrequest
 from urllib.parse import urlparse
 
 import requests
@@ -59,7 +60,12 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey, Ed25519PublicKey,
 )
 
-AGENT_VERSION = "1.0.0"
+# 2.x scans for HYPERVISORS. 1.x scanned for Kubernetes API servers and database
+# listeners, and handed a 2.x scan request it would probe nothing, complete green and
+# report zero findings — indistinguishable from a clean network. The dashboard refuses
+# to queue for a 1.x agent (api/agent.queue_discovery), which is why the major matters
+# and why the lease body reports it on every poll rather than only at enrolment.
+AGENT_VERSION = "2.0.0"
 
 log = logging.getLogger("agent")
 
@@ -80,7 +86,11 @@ INSECURE_TLS = os.environ.get("AGENT_INSECURE_TLS", "").strip() in ("1", "true",
 # weeks and diff intent against policy before letting it act — in practice this is what
 # gets an agent approved by a security team.
 MODE = (os.environ.get("AGENT_MODE") or "normal").strip().lower()
-KUBECONFIG = os.environ.get("KUBECONFIG", "/etc/dashboard-agent/kubeconfig")
+# Ports a hypervisor MANAGEMENT endpoint listens on. Mirrors agent_job_meta
+# _DEFAULTS["ports"] server-side; both sides clamp, for the two different reasons
+# that module documents.
+_PORT_DEFAULTS = {"vmware": [443], "proxmox": [8006], "nutanix": [9440],
+                  "xcpng": [443], "winrm": [5985, 5986]}
 
 _IDENTITY_FILE = os.path.join(STATE_DIR, "identity.json")
 _HTTP_TIMEOUT = 30
@@ -234,12 +244,31 @@ class Policy:
     resolves inside the allowed range when validated and somewhere else when connected.
     """
 
-    def __init__(self, allow: list, deny: list, job_types: set, limits: dict, digest: str):
+    def __init__(self, allow: list, deny: list, job_types: set, limits: dict,
+                 digest: str, connection_verbs: dict = None):
         self.allow = allow            # [(network, {ports} or None)]
         self.deny = deny              # [network]
         self.job_types = job_types
         self.limits = limits
         self.digest = digest
+        self.connection_verbs = connection_verbs or {}   # {connection name: {verb}}
+
+    def check_verb(self, connection_ref: str, verb: str) -> None:
+        """Raise :class:`PolicyRefusal` unless policy.yaml grants this verb here.
+
+        Names the file and the line to add, because the operator seeing this message
+        is looking at Live Output on a dashboard that cannot fix it for them.
+        """
+        granted = self.connection_verbs.get(connection_ref)
+        if granted is None:
+            raise PolicyRefusal(
+                f"policy.yaml grants no verbs for connection {connection_ref!r}. Add it "
+                f"under `connections:` with a `verbs:` list and restart the agent.")
+        if verb not in granted:
+            raise PolicyRefusal(
+                f"policy.yaml does not grant {verb!r} on {connection_ref!r} "
+                f"(granted: {', '.join(sorted(granted)) or 'none'}). Add it to that "
+                f"connection's `verbs:` list and restart the agent.")
 
     @classmethod
     def load(cls, path: str) -> "Policy":
@@ -292,8 +321,15 @@ class Policy:
 
         job_types = set(doc.get("job_types") or ["agent_discover"])
         limits = doc.get("limits") if isinstance(doc.get("limits"), dict) else {}
+        # Per-connection verb grants. The CUSTOMER decides what may be done to each
+        # target, not the dashboard: a connection absent from this list, or present
+        # without a verb, is refused however the job was signed.
+        verbs = {}
+        for entry in doc.get("connections") or []:
+            if isinstance(entry, dict) and entry.get("name"):
+                verbs[str(entry["name"])] = {str(v) for v in (entry.get("verbs") or [])}
         return cls(allow, deny, job_types, limits,
-                   hashlib.sha256(raw).hexdigest())
+                   hashlib.sha256(raw).hexdigest(), verbs)
 
     def check(self, ip: str, port: int) -> None:
         """Raise :class:`PolicyRefusal` unless this exact address:port is allowed."""
@@ -472,7 +508,20 @@ class Dashboard:
         return identity
 
     def lease(self) -> Optional[dict]:
-        resp = self._request("POST", "/api/agent/lease", {})
+        # The lease body carries what this agent CURRENTLY is, not what it was when it
+        # enrolled. agent_version was written once at enrolment, so an operator who
+        # pulled a new image and restarted the container kept the old value forever —
+        # and every compatibility decision the dashboard makes reads it. job_types is
+        # the honest half: HANDLERS says what this build can run, policy.job_types says
+        # what the customer allows, and only the intersection actually runs. The
+        # dashboard can then say "granted, but this agent's policy refuses it" instead
+        # of pretending a grant it cannot enforce.
+        #
+        # Free on the wire: _request already signs over the serialized body.
+        resp = self._request("POST", "/api/agent/lease", {
+            "agent_version": AGENT_VERSION,
+            "job_types": sorted(set(HANDLERS) & POLICY.job_types),
+        })
         if resp.status_code == 401:
             raise AgentFatal(
                 "the dashboard rejected this agent's signature — it was probably "
@@ -529,142 +578,22 @@ def _connect(ip: str, port: int, timeout: float) -> Optional[socket.socket]:
         return None
 
 
-def probe_postgres(sock: socket.socket) -> Optional[dict]:
-    """PostgreSQL SSLRequest. The server answers a single byte, 'S' or 'N', before any
-    authentication happens — enough to identify the engine and nothing more."""
-    sock.sendall(struct.pack("!II", 8, 80877103))
-    reply = sock.recv(1)
-    if reply in (b"S", b"N"):
-        # The version is only available after a StartupMessage, which is the beginning
-        # of an authentication attempt. Not worth a locked-out service account.
-        return {"engine": "postgres", "server_version": "", "tls": reply == b"S"}
-    return None
+def _https_probe(ip: str, port: int, timeout: float,
+                 path: str = "/") -> Optional[tuple]:
+    """One TLS connect and one plain GET. Returns ``(raw_response, peer_cert_der)``.
 
+    Verification is off and the TLS floor is pinned back to 1.2, for the same two
+    reasons the Kubernetes probe had: the certificate is read as EVIDENCE about an
+    unknown host, never trusted for anything, and dropping verification also drops the
+    context's security level enough to negotiate TLS 1.0/1.1 — a probe should not be
+    the one thing in the estate still willing to speak a deprecated protocol.
 
-def probe_mysql(sock: socket.socket) -> Optional[dict]:
-    """MySQL/MariaDB send their greeting first, and the version string is in the clear
-    ahead of any credential exchange."""
-    data = sock.recv(256)
-    if len(data) < 6:
-        return None
-    payload_len = int.from_bytes(data[0:3], "little")
-    if not (0 < payload_len <= 1024) or data[4] != 10:   # protocol version 10
-        return None
-    end = data.find(b"\x00", 5)
-    if end < 0:
-        return None
-    version = data[5:end].decode("utf-8", "replace")
-    engine = "mariadb" if "mariadb" in version.lower() else "mysql"
-    return {"engine": engine, "server_version": version}
-
-
-def probe_mssql(sock: socket.socket) -> Optional[dict]:
-    """TDS PRELOGIN — the pre-authentication handshake packet. The response carries the
-    server version in its VERSION option."""
-    options = b"\x00\x00\x06\x00\x06\xff"          # VERSION token, then terminator
-    payload = options + b"\x00" * 6
-    header = struct.pack("!BBHHBB", 0x12, 0x01, 8 + len(payload), 0, 0, 0)
-    sock.sendall(header + payload)
-
-    reply = sock.recv(512)
-    if len(reply) < 9 or reply[0] != 0x04:          # 0x04 = tabular result
-        return None
-    body = reply[8:]
-    version = ""
-    idx = 0
-    while idx + 5 <= len(body) and body[idx] != 0xFF:
-        token = body[idx]
-        offset = int.from_bytes(body[idx + 1:idx + 3], "big")
-        length = int.from_bytes(body[idx + 3:idx + 5], "big")
-        if token == 0x00 and length >= 6 and offset + 6 <= len(body):
-            major, minor = body[offset], body[offset + 1]
-            build = int.from_bytes(body[offset + 2:offset + 4], "big")
-            version = f"{major}.{minor}.{build}"
-            break
-        idx += 5
-    return {"engine": "sqlserver", "server_version": version}
-
-
-def _tns_connect_packet(connect_data: bytes) -> bytes:
-    """A TNS CONNECT packet: 8-byte packet header, a 50-byte CONNECT body, then the
-    connect-data string at offset 58. Built field by field because the offsets are
-    load-bearing — ``connect_data_offset`` below must equal the real one or the
-    listener drops the packet without replying."""
-    body = struct.pack(
-        "!HHHHHHHH",
-        0x013A,      # version
-        0x012C,      # minimum compatible version
-        0x0000,      # service options
-        0x0800,      # session data unit
-        0x7FFF,      # transport data unit
-        0x860E,      # NT protocol characteristics
-        0x0000,      # line turnaround
-        0x0001,      # value of 1 in hardware, for byte-order detection
-    )
-    body += struct.pack("!HH", len(connect_data), 58)   # data length, data offset
-    body += struct.pack("!I", 0)                        # max receivable connect data
-    body += struct.pack("!BB", 0, 0)                    # connect flags 0/1
-    body += b"\x00" * 24                                # trace/xactions, pad to offset 58
-    header = struct.pack("!HHBBH", 8 + len(body) + len(connect_data), 0, 1, 0, 0)
-    return header + body + connect_data
-
-
-def probe_oracle(sock: socket.socket) -> Optional[dict]:
-    """Oracle TNS. A listener answers a CONNECT with Accept, Refuse or Resend — all
-    three positively identify it, and none of them is a login attempt."""
-    try:
-        sock.sendall(_tns_connect_packet(b"(CONNECT_DATA=(COMMAND=ping))"))
-        reply = sock.recv(64)
-    except OSError:
-        return None
-    # Byte 4 of the reply header is the TNS packet type: 2=Accept, 4=Refuse, 11=Resend.
-    if len(reply) >= 5 and reply[4] in (2, 4, 11):
-        return {"engine": "oracle", "server_version": ""}
-    return None
-
-
-_DB_PROBES = {5432: probe_postgres, 3306: probe_mysql, 1433: probe_mssql,
-              1521: probe_oracle}
-
-
-def probe_database(ip: str, port: int, timeout: float) -> Optional[dict]:
-    prober = _DB_PROBES.get(port)
-    if prober is None:
-        return None
-    sock = _connect(ip, port, timeout)
-    if sock is None:
-        return None
-    try:
-        sock.settimeout(timeout)
-        found = prober(sock)
-    except (OSError, struct.error, ValueError):
-        return None
-    finally:
-        sock.close()
-    if not found:
-        return None
-    return {"kind": "database", "host": ip, "port": port,
-            "suggested_name": f"{found['engine']}-{ip.replace('.', '-')}", **found}
-
-
-_GITVERSION = re.compile(r'"gitVersion"\s*:\s*"([^"]+)"')
-
-
-def probe_kubernetes(ip: str, port: int, timeout: float) -> Optional[dict]:
-    """A Kubernetes apiserver answers GET /version with a gitVersion, or with 401/403 —
-    and a refusal is itself a positive identification, since almost nothing else on
-    6443 rejects an anonymous request that way."""
+    Everything network-facing lives here, so :func:`_identify` stays pure and the whole
+    identification table can be tested against captured bytes with no socket at all.
+    """
     context = ssl.create_default_context()
-    # Verification off on purpose: we are identifying an unknown host, and its
-    # certificate is almost certainly signed by a cluster CA we have never seen. The
-    # certificate is read as EVIDENCE, not trusted for anything.
     context.check_hostname = False
     context.verify_mode = ssl.CERT_NONE
-    # Dropping verification also relaxes the context's security level, which lets it
-    # negotiate TLS 1.0/1.1. Pin the floor back: Kubernetes has required TLS 1.2 since
-    # 1.x (`--tls-min-version` defaults to VersionTLS12), so nothing we want to find is
-    # excluded, and a probe should not be the one thing in the estate still willing to
-    # speak a deprecated protocol.
     context.minimum_version = ssl.TLSVersion.TLSv1_2
 
     sock = _connect(ip, port, timeout)
@@ -674,8 +603,8 @@ def probe_kubernetes(ip: str, port: int, timeout: float) -> Optional[dict]:
         sock.settimeout(timeout)
         with context.wrap_socket(sock, server_hostname=None) as tls:
             der = tls.getpeercert(binary_form=True)
-            tls.sendall(b"GET /version HTTP/1.1\r\nHost: " + ip.encode() +
-                        b"\r\nAccept: application/json\r\nConnection: close\r\n\r\n")
+            tls.sendall(f"GET {path} HTTP/1.1\r\nHost: ".encode() + ip.encode() +
+                        b"\r\nAccept: */*\r\nConnection: close\r\n\r\n")
             chunks, total = [], 0
             while total < 65536:
                 block = tls.recv(8192)
@@ -683,7 +612,7 @@ def probe_kubernetes(ip: str, port: int, timeout: float) -> Optional[dict]:
                     break
                 chunks.append(block)
                 total += len(block)
-            raw = b"".join(chunks).decode("utf-8", "replace")
+            return b"".join(chunks), der
     except (OSError, ssl.SSLError):
         return None
     finally:
@@ -692,37 +621,153 @@ def probe_kubernetes(ip: str, port: int, timeout: float) -> Optional[dict]:
         except OSError:
             pass
 
-    status = raw.split(" ")[1] if raw.startswith("HTTP/") and " " in raw else ""
-    match = _GITVERSION.search(raw)
-    if not match and status not in ("401", "403"):
+
+def _header(raw: str, name: str) -> str:
+    """One HTTP response header value, case-insensitively, or ""."""
+    needle = f"\n{name.lower()}:"
+    lowered = raw.lower()
+    idx = lowered.find(needle)
+    if idx < 0:
+        return ""
+    line_end = raw.find("\r\n", idx + 1)
+    if line_end < 0:
+        line_end = len(raw)
+    return raw[idx + len(needle):line_end].strip()
+
+
+def _status(raw: str) -> str:
+    return raw.split(" ")[1] if raw.startswith("HTTP/") and " " in raw else ""
+
+
+def _group(pattern, raw: str) -> str:
+    """First capture group, or "". Keeps _identify from searching twice per field."""
+    match = pattern.search(raw)
+    return match.group(1).strip() if match else ""
+
+
+_VMWARE_FULLNAME = re.compile(r"<fullName>([^<]+)</fullName>")
+_VMWARE_APITYPE = re.compile(r"<apiType>([^<]+)</apiType>")
+_VMWARE_APIVERSION = re.compile(r"<apiVersion>([^<]+)</apiVersion>")
+_VMWARE_BUILD = re.compile(r"<build>([^<]+)</build>")
+_XAPI_SERVER = re.compile(r"xapi/?([0-9][0-9.]*)", re.I)
+_PVE_SERVER = re.compile(r"pve-api-daemon/?([0-9][0-9.]*)?", re.I)
+
+
+def _identify(raw_bytes: bytes, der: Optional[bytes], ip: str, port: int) -> Optional[dict]:
+    """What answered, from a response and a certificate. Pure — no sockets.
+
+    Returns None for anything not positively identified. That matters: Proxmox Backup
+    Server (8007) and oVirt/RHV both answer on ports we probe, and mislabelling them
+    would be worse than missing them.
+    """
+    raw = raw_bytes.decode("utf-8", "replace")
+    server = _header(raw, "Server")
+    cn = _cert_cn(der)
+    issuer = _cert_issuer(der)
+    base = {"kind": "hypervisor", "host": ip, "port": port,
+            "endpoint": f"https://{ip}:{port}",
+            "tls_cn": cn, "tls_issuer": issuer, "source": "probe"}
+
+    # ── VMware: vCenter vs standalone ESXi, with a version. The best of the five. ──
+    full = _group(_VMWARE_FULLNAME, raw)
+    api_type = _group(_VMWARE_APITYPE, raw)
+    if "vim25" in raw or "vimServiceVersions" in raw or full or api_type:
+        # apiType separates them: "VirtualCenter" is vCenter, "HostAgent" a bare ESXi.
+        # It matters for more than labelling — the agent transport needs vCenter's
+        # Automation REST API, which ESXi does not serve at all. Fall back to the
+        # product name when apiType is absent (the service-descriptor document has no
+        # apiType, only the SOAP response does).
+        if api_type:
+            product = "esxi" if api_type == "HostAgent" else "vsphere"
+        elif "esx" in full.lower() and "vcenter" not in full.lower():
+            product = "esxi"
+        else:
+            product = "vsphere"
+        return {**base, "product": product,
+                "server_version": full or _group(_VMWARE_APIVERSION, raw),
+                "build": _group(_VMWARE_BUILD, raw), "confidence": "confirmed",
+                "suggested_name": f"{product}-{ip.replace('.', '-')}"}
+
+    # ── XCP-ng / XenServer: the Server header carries the XAPI version. ──
+    match = _XAPI_SERVER.search(server)
+    if match or "xenserver" in cn.lower() or "xcp-ng" in raw.lower():
+        return {**base, "product": "xcpng",
+                "server_version": match.group(1) if match else "",
+                "confidence": "confirmed",
+                "suggested_name": f"xcpng-{ip.replace('.', '-')}"}
+
+    # ── Proxmox VE: product yes, version no — /api2/json/version needs auth. ──
+    if _PVE_SERVER.search(server) or "proxmox virtual environment" in raw.lower():
+        return {**base, "product": "proxmox", "server_version": "",
+                "confidence": "confirmed",
+                "suggested_name": f"pve-{ip.replace('.', '-')}"}
+
+    # ── Nutanix Prism: a 401 from the v3 API, plus the cert. No AOS version is
+    #    available anonymously, so we do not invent one. ──
+    if port == 9440 and (_status(raw) == "401" or "nutanix" in raw.lower()
+                         or "nutanix" in cn.lower() or "nutanix" in issuer.lower()):
+        return {**base, "product": "nutanix", "server_version": "",
+                "confidence": "confirmed",
+                "suggested_name": f"prism-{ip.replace('.', '-')}"}
+
+    # ── WinRM. This identifies WinRM ON WINDOWS, not Hyper-V: nearly every
+    #    domain-joined Windows Server has WinRM enabled and the overwhelming majority
+    #    are not hypervisors. Reported as `possible` and labelled as such in the UI.
+    #
+    #    There IS a way to get the OS build, NetBIOS name and DNS domain anonymously —
+    #    send an NTLM type-1 negotiate token (which carries no credential) and read the
+    #    AV pairs out of the type-2 challenge. We deliberately do NOT: it initiates an
+    #    authentication exchange and lands in the Windows Security log as a logon
+    #    event, and "probes never authenticate, not once" is the sentence this whole
+    #    feature is sold on. test_agent_probes pins that decision. ──
+    if "microsoft-httpapi" in server.lower() and _status(raw) in ("401", "404", "405"):
+        return {**base, "product": "winrm", "server_version": "",
+                "confidence": "possible",
+                "suggested_name": f"hyperv-{ip.replace('.', '-')}"}
+
+    return None
+
+
+def probe_hypervisor(ip: str, port: int, timeout: float) -> Optional[dict]:
+    """Identify a hypervisor management endpoint. Never authenticates.
+
+    Port 443 is shared by vSphere and XCP-ng, so this asks the ONE question that can
+    tell them apart rather than running a probe per product: fetch the VMware service
+    descriptor, and fall back to the root document, classifying whichever answered.
+    """
+    if port == 443:
+        got = _https_probe(ip, port, timeout, "/sdk/vimServiceVersions.xml")
+        if got:
+            found = _identify(got[0], got[1], ip, port)
+            if found:
+                return found
+    path = "/api/nutanix/v3/clusters/list" if port == 9440 else (
+        "/wsman" if port in (5985, 5986) else "/")
+    got = _https_probe(ip, port, timeout, path)
+    if not got:
         return None
-
-    version = match.group(1) if match else ""
-    return {"kind": "k8s", "host": ip, "port": port,
-            "api_server": f"https://{ip}:{port}",
-            "server_version": version,
-            "distro": _distro_of(version),
-            "tls_cn": _cert_cn(der),
-            "suggested_name": f"k8s-{ip.replace('.', '-')}"}
-
-
-def _distro_of(version: str) -> str:
-    lowered = (version or "").lower()
-    for marker, name in (("+k3s", "k3s"), ("+rke2", "rke2"), ("-eks", "eks"),
-                         ("-gke", "gke"), ("+aks", "aks")):
-        if marker in lowered:
-            return name
-    return "kubeadm" if version else ""
+    return _identify(got[0], got[1], ip, port)
 
 
 def _cert_cn(der: Optional[bytes]) -> str:
+    return _cert_name(der, "subject")
+
+
+def _cert_issuer(der: Optional[bytes]) -> str:
+    return _cert_name(der, "issuer")
+
+
+def _cert_name(der: Optional[bytes], which: str) -> str:
     if not der:
         return ""
     try:
         from cryptography import x509
         from cryptography.x509.oid import NameOID
         cert = x509.load_der_x509_certificate(der)
-        attrs = cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
+        source = cert.subject if which == "subject" else cert.issuer
+        attrs = source.get_attributes_for_oid(NameOID.COMMON_NAME)
+        if not attrs:
+            attrs = source.get_attributes_for_oid(NameOID.ORGANIZATION_NAME)
         return attrs[0].value if attrs else ""
     except Exception:  # noqa: BLE001 — a cert we cannot parse is not an error
         return ""
@@ -771,32 +816,32 @@ def _expand(payload: dict, policy: Policy, emit) -> list:
 
 def run_discovery(payload: dict, policy: Policy, emit, cancelled) -> dict:
     """Sweep the requested scope with unauthenticated probes and return findings."""
-    scan_kind = payload.get("scan_kind") or "both"
+    scan_kind = payload.get("scan_kind") or "all"
     timeout = float(payload.get("timeout_s") or 3)
     ports = payload.get("ports") or {}
-    k8s_ports = list(ports.get("k8s") or [6443, 8443, 443])
-    db_ports = [p for p in (ports.get("database") or [5432, 3306, 1433, 1521])
-                if p in _DB_PROBES]
     workers = max(1, min(int(payload.get("concurrency") or 32),
                          policy.limit("max_concurrency", 128)))
 
-    findings = []
-    if payload.get("use_local_kubeconfig") and scan_kind in ("k8s", "both"):
-        findings.extend(_from_kubeconfig(policy, emit))
+    families = [scan_kind] if scan_kind in _PORT_DEFAULTS else list(_PORT_DEFAULTS)
+    wanted = []
+    for family in families:
+        wanted += list(ports.get(family) or _PORT_DEFAULTS[family])
 
     hosts = _expand(payload, policy, emit)
+    # De-duplicate (host, port): vSphere and XCP-ng share 443, and probing it twice
+    # would double the work and produce two findings for one endpoint.
     checks = []
-    refused = 0
+    seen = set()
     for host in hosts:
-        if scan_kind in ("k8s", "both"):
-            checks += [(host, p, "k8s") for p in k8s_ports]
-        if scan_kind in ("database", "both"):
-            checks += [(host, p, "database") for p in db_ports]
+        for port in wanted:
+            if (host, port) not in seen:
+                seen.add((host, port))
+                checks.append((host, port))
 
-    allowed = []
-    for host, port, kind in checks:
+    allowed, refused = [], 0
+    for host, port in checks:
         if policy.allows(host, port):
-            allowed.append((host, port, kind))
+            allowed.append((host, port))
         else:
             refused += 1
     if refused:
@@ -805,15 +850,15 @@ def run_discovery(payload: dict, policy: Policy, emit, cancelled) -> dict:
          f"with {workers} workers")
 
     def _one(item):
-        host, port, kind = item
+        host, port = item
         if cancelled():
             return None
         if MODE == "audit":
-            log.info("AUDIT would probe %s:%s (%s)", host, port, kind)
+            log.info("AUDIT would probe %s:%s", host, port)
             return None
-        return (probe_kubernetes(host, port, timeout) if kind == "k8s"
-                else probe_database(host, port, timeout))
+        return probe_hypervisor(host, port, timeout)
 
+    findings = []
     done = 0
     with ThreadPoolExecutor(max_workers=workers) as pool:
         for found in pool.map(_one, allowed):
@@ -821,9 +866,9 @@ def run_discovery(payload: dict, policy: Policy, emit, cancelled) -> dict:
             if done % 64 == 0:
                 emit(f"…{done}/{len(allowed)} probed")
             if found and len(findings) < _MAX_FINDINGS:
-                emit(f"FOUND {found['kind']} at {found['host']}:{found['port']} "
-                     f"{found.get('engine') or found.get('distro') or ''} "
-                     f"{found.get('server_version') or ''}".rstrip())
+                emit(f"FOUND {found['product']} at {found['host']}:{found['port']} "
+                     f"{found.get('server_version') or ''} "
+                     f"({found.get('confidence')})".replace("  ", " "))
                 findings.append(found)
 
     return {"findings": findings, "scanned": len(allowed),
@@ -831,41 +876,419 @@ def run_discovery(payload: dict, policy: Policy, emit, cancelled) -> dict:
             "truncated": len(findings) >= _MAX_FINDINGS}
 
 
-def _from_kubeconfig(policy: Policy, emit) -> list:
-    """Highest-signal path: a kubeconfig the operator mounted in. Only the API server
-    URL and version are ever reported — the credentials in the file stay in the file."""
-    if not os.path.exists(KUBECONFIG):
-        return []
+# ── Hypervisor connections: the customer's file, not the dashboard's ──────────
+#
+# The dashboard never holds these credentials. A job names a connection by the string
+# it has HERE, and the agent resolves it locally — so a fully compromised dashboard can
+# ask for a granted verb on a name the customer already wrote down, and nothing more.
+#
+# The secret is pluggable on purpose (`password`, `password_file`, and later a Password
+# Safe managed-account id), so agent-side just-in-time checkout becomes a new branch in
+# _secret_for rather than a redesign.
+
+CONNECTIONS_FILE = os.environ.get("AGENT_CONNECTIONS_FILE",
+                                  "/etc/dashboard-agent/connections.yaml")
+
+
+class HypervisorConnections:
+    """Parsed connections.yaml, keyed by name."""
+
+    def __init__(self, by_name: dict):
+        self.by_name = by_name
+
+    @classmethod
+    def load(cls, path: str = "") -> "HypervisorConnections":
+        path = path or CONNECTIONS_FILE
+        if not os.path.exists(path):
+            # Absent is fine — an agent that only does discovery has no reason to have
+            # one. A hypervisor job then fails with "unknown connection", which names
+            # the missing thing rather than the missing file.
+            return cls({})
+        try:
+            with open(path, "rb") as fh:
+                doc = yaml.safe_load(fh.read()) or {}
+        except OSError as exc:
+            raise AgentFatal(
+                f"Cannot read the connections file at {path}: {exc}. Mount it :ro,Z — "
+                f"see docs/remote-agents.md.")
+        except yaml.YAMLError as exc:
+            raise AgentFatal(f"connections.yaml is not valid YAML: {exc}")
+        if not isinstance(doc, dict):
+            raise AgentFatal("connections.yaml must be a mapping at the top level.")
+
+        by_name = {}
+        for entry in doc.get("connections") or []:
+            if isinstance(entry, dict) and entry.get("name"):
+                by_name[str(entry["name"])] = entry
+        return cls(by_name)
+
+    def names(self) -> list:
+        return sorted(self.by_name)
+
+    def get(self, name: str) -> dict:
+        conn = self.by_name.get(name)
+        if conn is None:
+            known = ", ".join(self.names()) or "none"
+            raise PolicyRefusal(
+                f"unknown connection {name!r} — this agent's connections.yaml defines: "
+                f"{known}. The dashboard holds no credential for it; the name is the "
+                f"whole join between the two.")
+        return conn
+
+
+def _secret_for(conn: dict) -> str:
+    """The connection's password. `password_file` wins so a Docker/Podman secret can be
+    mounted instead of putting the value in a YAML file."""
+    path = conn.get("password_file")
+    if path:
+        try:
+            with open(path, encoding="utf-8") as fh:
+                return fh.read().strip()
+        except OSError as exc:
+            raise PolicyRefusal(
+                f"connection {conn.get('name')!r}: cannot read password_file {path}: {exc}")
+    return str(conn.get("password") or "")
+
+
+def _conn_endpoint(conn: dict, default_port: int) -> tuple:
+    host = str(conn.get("host") or "")
+    if not host:
+        raise PolicyRefusal(f"connection {conn.get('name')!r} has no host")
     try:
-        with open(KUBECONFIG) as fh:
-            doc = yaml.safe_load(fh) or {}
-    except (OSError, yaml.YAMLError) as exc:
-        emit(f"Could not read the mounted kubeconfig: {exc}")
-        return []
+        port = int(conn.get("port") or default_port)
+    except (TypeError, ValueError):
+        port = default_port
+    return host, port
 
-    findings = []
-    for cluster in doc.get("clusters") or []:
-        server = ((cluster or {}).get("cluster") or {}).get("server") or ""
-        parsed = urlparse(server)
-        if not parsed.hostname:
+
+def _hv_request(conn: dict, method: str, url: str, *, headers=None, body=None,
+                timeout: float = 60.0):
+    """One HTTPS call to a hypervisor management API, using only the stdlib.
+
+    No new dependency: Prism v3, Proxmox's /api2/json and the vSphere Automation REST
+    API are all plain JSON over HTTPS, and XCP-ng's XAPI is stdlib xmlrpc. Fattening
+    the agent image with pyVmomi/proxmoxer would trade the two image-audit tests — which
+    ARE the security argument, in executable form — for a capability REST already gives.
+
+    Verification follows the connection's own `verify_ssl`, unlike the discovery probe:
+    this one carries a credential, so trusting an unverified certificate is a real
+    interception risk rather than an identification detail.
+    """
+    parsed = urlparse(url)
+    context = ssl.create_default_context()
+    if not conn.get("verify_ssl"):
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+
+    payload = json.dumps(body).encode() if body is not None else None
+    request = _urlrequest.Request(url, data=payload, method=method)
+    request.add_header("Accept", "application/json")
+    if payload is not None:
+        request.add_header("Content-Type", "application/json")
+    for key, value in (headers or {}).items():
+        request.add_header(key, value)
+    try:
+        with _urlrequest.urlopen(request, timeout=timeout, context=context) as resp:
+            raw = resp.read()
+    except _urlerror.HTTPError as exc:
+        raise PolicyRefusal(
+            f"{parsed.hostname} answered {exc.code} for {method} {parsed.path}")
+    except (OSError, ssl.SSLError) as exc:
+        raise PolicyRefusal(f"could not reach {parsed.hostname}: {exc}")
+    try:
+        return json.loads(raw.decode("utf-8", "replace")) if raw else {}
+    except ValueError:
+        return {}
+
+
+def _check_endpoint(policy: "Policy", host: str, port: int) -> None:
+    """The policy gate, on the RESOLVED address — same rule as a discovery probe.
+
+    Matching the resolved IP rather than the name is what stops DNS rebinding: a name
+    that resolves inside the allowed range when checked and elsewhere when connected.
+    """
+    addresses = _resolve_all(host)
+    if not addresses:
+        raise PolicyRefusal(f"{host} does not resolve")
+    for addr in addresses:
+        policy.check(addr, port)
+
+
+def _sync_vsphere(conn: dict, payload: dict, policy: "Policy", emit) -> dict:
+    """vCenter inventory via the vSphere Automation REST API (7.0U2+).
+
+    vCenter, not bare ESXi: ESXi serves only the SOAP API, so an ESXi connection has to
+    stay dashboard-direct. The connection form says so.
+    """
+    host, port = _conn_endpoint(conn, 443)
+    _check_endpoint(policy, host, port)
+    base = f"https://{host}:{port}"
+    user = str(conn.get("username") or "")
+    basic = base64.b64encode(f"{user}:{_secret_for(conn)}".encode()).decode()
+    session = _hv_request(conn, "POST", f"{base}/api/session",
+                          headers={"Authorization": f"Basic {basic}"})
+    token = session if isinstance(session, str) else str(session.get("value") or session)
+    emit(f"authenticated to vCenter at {host}")
+    vms = _hv_request(conn, "GET", f"{base}/api/vcenter/vm",
+                      headers={"vmware-api-session-id": token})
+    rows = vms if isinstance(vms, list) else (vms.get("value") or [])
+    out = []
+    for vm in rows:
+        out.append({"vm_id": vm.get("vm"), "name": vm.get("name"),
+                    "power_state": vm.get("power_state"),
+                    "vcpus": vm.get("cpu_count"), "mem_mib": vm.get("memory_size_MiB"),
+                    "vm_type": "vm"})
+    return {"vms": out, "next_cursor": "", "complete": True, "scanned": len(out)}
+
+
+def _sync_proxmox(conn: dict, payload: dict, policy: "Policy", emit) -> dict:
+    """Proxmox inventory via /api2/json/cluster/resources.
+
+    API-token auth only here. A password login would mean posting credentials to
+    /access/ticket and holding a CSRF token, which is more surface for no gain — the
+    dashboard's own connection form already prefers a token.
+    """
+    host, port = _conn_endpoint(conn, 8006)
+    _check_endpoint(policy, host, port)
+    token_id = str(conn.get("token_id") or "")
+    if not token_id:
+        raise PolicyRefusal(
+            f"connection {conn.get('name')!r} needs `token_id` — the agent uses Proxmox "
+            f"API-token auth, not a password login.")
+    user = str(conn.get("username") or "root@pam")
+    header = {"Authorization": f"PVEAPIToken={user}!{token_id}={_secret_for(conn)}"}
+    body = _hv_request(conn, "GET",
+                       f"https://{host}:{port}/api2/json/cluster/resources?type=vm",
+                       headers=header)
+    out = []
+    for vm in body.get("data") or []:
+        out.append({"vm_id": str(vm.get("vmid")), "name": vm.get("name"),
+                    "power_state": vm.get("status"), "vcpus": vm.get("maxcpu"),
+                    "mem_mib": int((vm.get("maxmem") or 0) / (1024 * 1024)),
+                    "scope": vm.get("node"), "vm_type": vm.get("type")})
+    emit(f"read {len(out)} guest(s) from Proxmox at {host}")
+    return {"vms": out, "next_cursor": "", "complete": True, "scanned": len(out)}
+
+
+def _sync_nutanix(conn: dict, payload: dict, policy: "Policy", emit) -> dict:
+    """Prism Central v3 inventory. Genuinely paged, so this is where the cursor earns
+    its place: the offset rides back to the dashboard and returns on the next job."""
+    host, port = _conn_endpoint(conn, 9440)
+    _check_endpoint(policy, host, port)
+    user = str(conn.get("username") or "admin")
+    basic = base64.b64encode(f"{user}:{_secret_for(conn)}".encode()).decode()
+    page = int(payload.get("page_size") or 250)
+    try:
+        offset = int(payload.get("cursor") or 0)
+    except ValueError:
+        offset = 0
+    body = _hv_request(conn, "POST",
+                       f"https://{host}:{port}/api/nutanix/v3/vms/list",
+                       headers={"Authorization": f"Basic {basic}"},
+                       body={"kind": "vm", "length": page, "offset": offset})
+    entities = body.get("entities") or []
+    total = ((body.get("metadata") or {}).get("total_matches")
+             or (offset + len(entities)))
+    out = []
+    for vm in entities:
+        status = vm.get("status") or {}
+        resources = status.get("resources") or {}
+        out.append({"vm_id": (vm.get("metadata") or {}).get("uuid"),
+                    "name": status.get("name"),
+                    "power_state": resources.get("power_state"),
+                    "vcpus": resources.get("num_sockets"),
+                    "mem_mib": resources.get("memory_size_mib"),
+                    "scope": ((status.get("cluster_reference") or {}).get("uuid")),
+                    "vm_type": "vm"})
+    nxt = offset + len(entities)
+    complete = nxt >= int(total or 0) or not entities
+    emit(f"read {len(out)} VM(s) from Prism at {host} (offset {offset})")
+    return {"vms": out, "next_cursor": "" if complete else str(nxt),
+            "complete": complete, "scanned": len(out)}
+
+
+def _sync_xcpng(conn: dict, payload: dict, policy: "Policy", emit) -> dict:
+    """XCP-ng inventory over XAPI. stdlib xmlrpc.client, same as the dashboard uses."""
+    import xmlrpc.client
+
+    host, port = _conn_endpoint(conn, 443)
+    _check_endpoint(policy, host, port)
+    context = ssl.create_default_context()
+    if not conn.get("verify_ssl"):
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    server = xmlrpc.client.ServerProxy(
+        f"https://{host}:{port}/",
+        transport=xmlrpc.client.SafeTransport(context=context))
+    result = server.session.login_with_password(
+        str(conn.get("username") or "root"), _secret_for(conn), "2.0", "dashboard-agent")
+    if result.get("Status") != "Success":
+        raise PolicyRefusal(f"XAPI login refused at {host}")
+    session = result["Value"]
+    try:
+        records = server.VM.get_all_records(session).get("Value") or {}
+    finally:
+        try:
+            server.session.logout(session)
+        except Exception:  # noqa: BLE001
+            pass
+    out = []
+    for _ref, vm in records.items():
+        if vm.get("is_a_template") or vm.get("is_control_domain"):
             continue
-        port = parsed.port or 443
-        for ip in _resolve_all(parsed.hostname):
-            if not policy.allows(ip, port):
-                emit(f"REFUSED kubeconfig cluster {server}: {ip}:{port} is outside policy")
-                break
-            found = probe_kubernetes(ip, port, 5)
-            if found:
-                found["api_server"] = server.rstrip("/")
-                found["suggested_name"] = cluster.get("name") or found["suggested_name"]
-                found["source"] = "kubeconfig"
-                emit(f"FOUND k8s {server} ({found.get('server_version') or 'version unknown'})")
-                findings.append(found)
-            break
-    return findings
+        out.append({"vm_id": vm.get("uuid"), "name": vm.get("name_label"),
+                    "power_state": vm.get("power_state"),
+                    "vcpus": vm.get("VCPUs_max"),
+                    "mem_mib": int(int(vm.get("memory_static_max") or 0) / (1024 * 1024)),
+                    "vm_type": "vm"})
+    emit(f"read {len(out)} VM(s) from XCP-ng at {host}")
+    return {"vms": out, "next_cursor": "", "complete": True, "scanned": len(out)}
 
 
-HANDLERS = {"agent_discover": run_discovery}
+_SYNC = {"vsphere": _sync_vsphere, "proxmox": _sync_proxmox,
+         "nutanix": _sync_nutanix, "xcpng": _sync_xcpng}
+
+# Verb -> (proxmox path fragment, nutanix power state, XAPI method). Hyper-V is absent
+# on purpose: WinRM needs a real NTLM/Negotiate stack, which is the one transport the
+# stdlib cannot do, so Hyper-V stays dashboard-direct.
+_POWER = {
+    "power_on":    {"proxmox": "start",    "nutanix": "ON",  "xcpng": "VM.start"},
+    "power_off":   {"proxmox": "stop",     "nutanix": "OFF", "xcpng": "VM.hard_shutdown"},
+    "power_reset": {"proxmox": "reset",    "nutanix": "OFF", "xcpng": "VM.hard_reboot"},
+    "restart":     {"proxmox": "shutdown", "nutanix": "OFF", "xcpng": "VM.clean_reboot"},
+}
+
+
+def _power_proxmox(conn, payload, policy, emit, verb):
+    host, port = _conn_endpoint(conn, 8006)
+    _check_endpoint(policy, host, port)
+    node = payload.get("target_scope") or ""
+    vm_type = payload.get("target_type") or "qemu"
+    vmid = payload.get("target_id") or ""
+    if not (node and vmid):
+        raise PolicyRefusal("a Proxmox power verb needs target_scope (node) and target_id")
+    user = str(conn.get("username") or "root@pam")
+    header = {"Authorization":
+              f"PVEAPIToken={user}!{conn.get('token_id')}={_secret_for(conn)}"}
+    action = _POWER[verb]["proxmox"]
+    _hv_request(conn, "POST",
+                f"https://{host}:{port}/api2/json/nodes/{node}/{vm_type}/{vmid}"
+                f"/status/{action}", headers=header)
+    emit(f"{verb} issued for {vm_type}/{vmid} on {node}")
+    return {"verb": verb, "target_id": vmid, "ok": True}
+
+
+def _power_vsphere(conn, payload, policy, emit, verb):
+    """vCenter power via the Automation REST API. vCenter only — ESXi serves SOAP."""
+    host, port = _conn_endpoint(conn, 443)
+    _check_endpoint(policy, host, port)
+    base = f"https://{host}:{port}"
+    user = str(conn.get("username") or "")
+    basic = base64.b64encode(f"{user}:{_secret_for(conn)}".encode()).decode()
+    session = _hv_request(conn, "POST", f"{base}/api/session",
+                          headers={"Authorization": f"Basic {basic}"})
+    token = session if isinstance(session, str) else str(session.get("value") or session)
+    vm = payload.get("target_id") or ""
+    if not vm:
+        raise PolicyRefusal("a vSphere power verb needs target_id (the VM moref)")
+    action = {"power_on": "start", "power_off": "stop",
+              "power_reset": "reset", "restart": "reset"}[verb]
+    _hv_request(conn, "POST", f"{base}/api/vcenter/vm/{vm}/power?action={action}",
+                headers={"vmware-api-session-id": token})
+    emit(f"{verb} issued for {vm}")
+    return {"verb": verb, "target_id": vm, "ok": True}
+
+
+def _power_nutanix(conn, payload, policy, emit, verb):
+    raise PolicyRefusal(
+        "Nutanix power verbs are not implemented in this agent build — a v3 power "
+        "change is a full spec PUT with a metadata version, not a simple action.")
+
+
+def _power_xcpng(conn, payload, policy, emit, verb):
+    import xmlrpc.client
+
+    host, port = _conn_endpoint(conn, 443)
+    _check_endpoint(policy, host, port)
+    context = ssl.create_default_context()
+    if not conn.get("verify_ssl"):
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    server = xmlrpc.client.ServerProxy(
+        f"https://{host}:{port}/",
+        transport=xmlrpc.client.SafeTransport(context=context))
+    result = server.session.login_with_password(
+        str(conn.get("username") or "root"), _secret_for(conn), "2.0", "dashboard-agent")
+    if result.get("Status") != "Success":
+        raise PolicyRefusal(f"XAPI login refused at {host}")
+    session = result["Value"]
+    try:
+        ref = server.VM.get_by_uuid(session, payload.get("target_id") or "").get("Value")
+        method = _POWER[verb]["xcpng"]
+        obj = server
+        for part in method.split("."):
+            obj = getattr(obj, part)
+        args = (session, ref, False, False) if method == "VM.start" else (session, ref)
+        obj(*args)
+    finally:
+        try:
+            server.session.logout(session)
+        except Exception:  # noqa: BLE001
+            pass
+    emit(f"{verb} issued for {payload.get('target_id')}")
+    return {"verb": verb, "target_id": payload.get("target_id"), "ok": True}
+
+
+_POWER_IMPL = {"proxmox": _power_proxmox, "nutanix": _power_nutanix,
+               "xcpng": _power_xcpng, "vsphere": _power_vsphere}
+
+
+def run_hypervisor(payload: dict, policy: Policy, emit, cancelled) -> dict:
+    """Execute ONE allow-listed verb against ONE named connection.
+
+    Three independent gates, and all three must agree:
+
+    1. the dashboard granted this agent the job type (``allowed_job_types``);
+    2. the customer's policy.yaml grants this verb on this connection name;
+    3. the customer's connections.yaml actually defines that name, with a credential
+       the dashboard has never seen.
+
+    Note what this function never reads out of ``payload``: a host, a port, a URL, a
+    username or a password. There is no field for any of them, and a static test
+    asserts it — that is the difference between a verb allowlist and a proxy.
+    """
+    verb = str(payload.get("verb") or "")
+    ref = str(payload.get("connection_ref") or "")
+    kind = str(payload.get("kind") or "")
+
+    policy.check_verb(ref, verb)
+    conn = HypervisorConnections.load().get(ref)
+    declared = str(conn.get("kind") or kind)
+    if declared != kind:
+        raise PolicyRefusal(
+            f"connection {ref!r} is a {declared} connection; the job asked for {kind}")
+
+    emit(f"{verb} on {ref} ({kind}) — granted by policy digest {policy.digest[:12]}")
+    if cancelled():
+        raise PolicyRefusal("cancelled before the connection was opened")
+
+    if verb == "inventory_sync":
+        handler = _SYNC.get(kind)
+        if handler is None:
+            raise PolicyRefusal(f"no inventory sync for {kind!r} in this agent build")
+        return handler(conn, payload, policy, emit)
+
+    impl = _POWER_IMPL.get(kind)
+    if impl is None or verb not in _POWER:
+        raise PolicyRefusal(f"{verb!r} is not available for {kind!r} in this agent build")
+    return impl(conn, payload, policy, emit, verb)
+
+
+HANDLERS = {"agent_discover": run_discovery,
+            "agent_hypervisor": run_hypervisor}
 
 
 # ── Job execution ─────────────────────────────────────────────────────────────

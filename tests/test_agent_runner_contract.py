@@ -226,14 +226,17 @@ def test_the_example_mounts_carry_the_selinux_relabel_flag():
     `tests/test_agent_guard.py` pins the API's install command; these are the other two
     paths to a running agent, and a `:ro` here fails exactly as confusingly.
     """
-    for name in ("docker-compose.yml", "policy.example.yaml"):
+    # Every /etc/dashboard-agent mount, not just policy.yaml: connections.yaml joined
+    # it later and would have shipped with a bare `:ro` had this stayed name-specific.
+    for name in ("docker-compose.yml", "policy.example.yaml",
+                 "connections.example.yaml"):
         body = _read(os.path.join(_ROOT, "examples", "remote-agent", name))
         mounts = [ln for ln in body.splitlines()
-                  if "/etc/dashboard-agent/policy.yaml" in ln]
-        assert mounts, f"{name}: no policy mount found"
+                  if "/etc/dashboard-agent/" in ln and ":ro" in ln]
+        assert mounts, f"{name}: no agent config mount found"
         for line in mounts:
             assert ":ro,Z" in line, (
-                f"{name}: the policy mount needs the SELinux relabel flag: {line.strip()}")
+                f"{name}: this mount needs the SELinux relabel flag: {line.strip()}")
 
     # `docker run -v` rejects a relative source path outright, so the documented command
     # has to be absolute or it cannot be pasted at all.
