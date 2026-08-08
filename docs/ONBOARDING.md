@@ -495,6 +495,13 @@ So, for the community edition:
   a portable image artefact, store it in your storage backend, then
   promote it to AWS / Azure / GCP:
   [`docs/image-management.md`](image-management.md).
+- **Hosting it in a cloud instead of on this host** — Azure Container Apps,
+  Cloud Run or ECS, with a gateway sidecar that keeps the agent endpoint
+  public and the UI private. Note that a cloud-hosted dashboard has no route
+  to on-premises hypervisors and cannot use the local Ansible runner:
+  [`docs/cloud-hosting.md`](cloud-hosting.md).
+- **Moving configuration to a second instance** — every Settings value, without
+  re-typing it: [`docs/config-migration.md`](config-migration.md).
 
 ---
 

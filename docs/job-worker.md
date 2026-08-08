@@ -235,6 +235,10 @@ Caddy is a sidecar *in the app's* Container App rather than its own, because tha
 `TRUSTED_PROXY_HOSTS=127.0.0.1` true. The worker is the opposite case — nothing about it wants
 to share a lifecycle with the request path.
 
+The `dash` half of that table — the environment, the private database, the custom domains and
+the gateway sidecar's own config — is covered in [cloud-hosting.md](cloud-hosting.md), along
+with the Cloud Run and ECS equivalents.
+
 ---
 
 ## Verifying it works
