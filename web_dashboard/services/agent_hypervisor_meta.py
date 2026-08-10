@@ -75,7 +75,8 @@ def snapshot_name(job_id: str) -> str:
 # transport: vCenter serves the Automation REST API the agent speaks directly, while a
 # bare ESXi host serves SOAP only and has to go through the sibling runner. Conflating
 # them is how someone ends up pointing pyVmomi at a vCenter for no reason.
-VALID_KINDS = ("vsphere", "proxmox", "nutanix", "xcpng", "hyperv", "esxi")
+VALID_KINDS = ("vsphere", "proxmox", "nutanix", "xcpng", "hyperv", "esxi",
+               "workstation")
 
 # The two with no in-agent transport. Listed here as well as in the agent so the
 # dashboard can say "this needs the sibling runner" before queueing anything.

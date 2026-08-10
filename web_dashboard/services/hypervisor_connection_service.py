@@ -30,10 +30,18 @@ from . import config_service
 
 logger = logging.getLogger(__name__)
 
-VALID_KINDS = ("proxmox", "vsphere", "nutanix", "xcpng", "hyperv")
+# `workstation` is VMware Workstation Pro via its `vmrest` daemon. Agent-bound only —
+# see the guard in create(). The dashboard's own Workstation support (/vms) is the
+# separate PowerShell/VMX-path model and is not a connection at all.
+VALID_KINDS = ("proxmox", "vsphere", "nutanix", "xcpng", "hyperv", "workstation")
+
+# Kinds with no dashboard-direct transport: the dashboard cannot dial them under any
+# configuration, so a connection of this kind without an agent is unusable by
+# construction rather than merely unconfigured.
+AGENT_ONLY_KINDS = ("workstation",)
 
 DEFAULT_PORTS = {"proxmox": 8006, "vsphere": 443, "nutanix": 9440,
-                 "xcpng": 443, "hyperv": 5985}
+                 "xcpng": 443, "hyperv": 5985, "workstation": 8697}
 
 # Non-secret per-kind extras allowed in `options`. Closed, and pinned by a test: this is
 # a JSON blob on a row that holds credentials, so "anything goes" here would be the
@@ -44,6 +52,7 @@ OPTION_KEYS = {
     "nutanix": ("sync_interval_minutes",),
     "xcpng":   ("sync_interval_minutes",),
     "hyperv":  ("transport", "use_ssl", "sync_interval_minutes"),
+    "workstation": ("sync_interval_minutes",),
 }
 
 _SEED_MARK = "hypervisor_connections_seeded"
@@ -218,7 +227,11 @@ _SINGLETON_SPEC = {
 
 
 def _from_settings(kind: str) -> Optional[Connection]:
-    spec = _SINGLETON_SPEC[kind]
+    # Agent-only kinds never had singleton config keys — there was no dashboard-direct
+    # transport for them to configure — so there is nothing to fall back to.
+    spec = _SINGLETON_SPEC.get(kind)
+    if spec is None:
+        return None
     host = _cfg(spec["host"])
     if not host:
         return None
@@ -368,6 +381,13 @@ def create(db: Session, *, kind: str, name: str, created_by: str,
 
     agent_id = (agent_id or "").strip()
     agent_connection_name = (agent_connection_name or "").strip()
+    if kind in AGENT_ONLY_KINDS and not agent_id:
+        # Refused rather than allowed-and-broken: there is no transport by which the
+        # dashboard could ever reach this, so a row without an agent can only produce a
+        # confusing failure later.
+        raise HypervisorConnectionError(
+            f"a {kind} connection must be reached through a remote agent — the "
+            f"dashboard has no way to dial one directly")
     if agent_id:
         # An agent-bound connection is defined ENTIRELY by the name it has in that
         # agent's own file. Accepting a host here would invite someone to fill it in and

@@ -246,7 +246,8 @@ class Policy:
     """
 
     def __init__(self, allow: list, deny: list, job_types: set, limits: dict,
-                 digest: str, connection_verbs: dict = None, sibling: dict = None):
+                 digest: str, connection_verbs: dict = None, sibling: dict = None,
+                 loopback_connections: set = None):
         self.allow = allow            # [(network, {ports} or None)]
         self.deny = deny              # [network]
         self.job_types = job_types
@@ -260,6 +261,19 @@ class Policy:
         self.sibling_enabled = bool(sibling.get("enabled"))
         self.sibling_image = str(sibling.get("image") or "")
         self.sibling_network = str(sibling.get("network") or "bridge")
+        # Connections allowed to reach a LOOPBACK endpoint. Opt-in, per connection, and
+        # deliberately NOT a way to edit the deny list: `check()` still refuses
+        # 127.0.0.0/8 unconditionally, which is what keeps a discovery sweep from
+        # probing the agent's own container or a cloud metadata service. The exception
+        # applies only on the named-connection path (`_check_endpoint`), where the
+        # operator already wrote the name, the host and the port in their own files.
+        #
+        # It exists for one real case: VMware Workstation's `vmrest` binds 127.0.0.1,
+        # so a genuinely co-located agent cannot reach it any other way.
+        self.loopback_connections = loopback_connections or set()
+
+    def allows_loopback(self, connection_ref: str) -> bool:
+        return bool(connection_ref) and connection_ref in self.loopback_connections
 
     def check_verb(self, connection_ref: str, verb: str) -> None:
         """Raise :class:`PolicyRefusal` unless policy.yaml grants this verb here.
@@ -334,11 +348,15 @@ class Policy:
         # without a verb, is refused however the job was signed.
         sibling = doc.get("sibling") if isinstance(doc.get("sibling"), dict) else {}
         verbs = {}
+        loopback = set()
         for entry in doc.get("connections") or []:
             if isinstance(entry, dict) and entry.get("name"):
-                verbs[str(entry["name"])] = {str(v) for v in (entry.get("verbs") or [])}
+                name = str(entry["name"])
+                verbs[name] = {str(v) for v in (entry.get("verbs") or [])}
+                if entry.get("allow_loopback"):
+                    loopback.add(name)
         return cls(allow, deny, job_types, limits,
-                   hashlib.sha256(raw).hexdigest(), verbs, sibling)
+                   hashlib.sha256(raw).hexdigest(), verbs, sibling, loopback)
 
     def check(self, ip: str, port: int) -> None:
         """Raise :class:`PolicyRefusal` unless this exact address:port is allowed."""
@@ -1183,16 +1201,29 @@ def _hv_request(conn: dict, method: str, url: str, *, headers=None, body=None,
         return {}
 
 
-def _check_endpoint(policy: "Policy", host: str, port: int) -> None:
+def _check_endpoint(policy: "Policy", host: str, port: int,
+                    connection_ref: str = "") -> None:
     """The policy gate, on the RESOLVED address — same rule as a discovery probe.
 
     Matching the resolved IP rather than the name is what stops DNS rebinding: a name
     that resolves inside the allowed range when checked and elsewhere when connected.
+
+    One exception, and only here: a connection whose policy entry sets `allow_loopback`
+    may reach a loopback address. `Policy.check` — which every discovery probe goes
+    through — is untouched and still refuses loopback unconditionally. The port needs no
+    separate allow-listing because it comes from the operator's own connections.yaml,
+    not from anything the dashboard sent.
     """
     addresses = _resolve_all(host)
     if not addresses:
         raise PolicyRefusal(f"{host} does not resolve")
+    loopback_ok = policy.allows_loopback(connection_ref)
     for addr in addresses:
+        try:
+            if loopback_ok and ipaddress.ip_address(addr).is_loopback:
+                continue
+        except ValueError:
+            pass
         policy.check(addr, port)
 
 
@@ -1328,8 +1359,151 @@ def _sync_xcpng(conn, payload, policy, emit, checkins=None):
     return {"vms": out, "next_cursor": "", "complete": True, "scanned": len(out)}
 
 
+# ── VMware Workstation Pro, via vmrest ────────────────────────────────────────
+#
+# Workstation was written off twice as unreachable, on the grounds that it is driven by
+# `vmrun` against local VMX paths. That was true of vmrun and wrong overall: Workstation
+# Pro ships `vmrest`, a REST daemon that is plain JSON over HTTP. So this needs no new
+# dependency and no sibling container — it is an ordinary connection that happens to be
+# on the same host as the agent.
+#
+# Three quirks will otherwise cost a debugging round:
+#   * vmrest REJECTS `application/json`. Accept and Content-Type must both be its own
+#     vendor type.
+#   * the power endpoint takes a BARE STRING body ("on"), not a JSON object.
+#   * GET /api/vms returns only `id` and `path` — no name. The display name is a
+#     separate per-VM call.
+#
+# vmrest binds 127.0.0.1 by default, which the agent's mandatory deny would refuse, so a
+# co-located connection needs `allow_loopback: true` in policy.yaml. See _check_endpoint.
+
+_VMREST_MEDIA = "application/vnd.vmware.vmw.rest-v1+json"
+
+# vmrest's power actions. `restart`/`power_reset`/`snapshot` are deliberately absent:
+# vmrest has no reset, no reboot and no snapshot API, and mapping `restart` onto
+# `shutdown` would quietly do something other than what the operator asked for.
+_VMREST_POWER = {"power_on": "on", "power_off": "off"}
+
+
+def _vmrest(conn: dict, method: str, path: str, *, body=None, checkins=None,
+            timeout: float = 30.0):
+    """One vmrest call. Returns the decoded JSON, or None when the call failed."""
+    host, port = _conn_endpoint(conn, 8697)
+    scheme = "https" if conn.get("verify_ssl") or conn.get("use_https") else "http"
+    url = f"{scheme}://{host}:{port}/api{path}"
+    user = str(conn.get("username") or "")
+    basic = base64.b64encode(f"{user}:{_secret_for(conn, checkins)}".encode()).decode()
+    headers = {"Authorization": f"Basic {basic}",
+               "Accept": _VMREST_MEDIA, "Content-Type": _VMREST_MEDIA}
+
+    # A bare string body, not JSON — vmrest's power endpoint wants `on`, not `"on"`.
+    payload = body.encode() if isinstance(body, str) else (
+        json.dumps(body).encode() if body is not None else None)
+    request = _urlrequest.Request(url, data=payload, method=method)
+    for key, value in headers.items():
+        request.add_header(key, value)
+    context = None
+    if scheme == "https":
+        context = ssl.create_default_context()
+        if not conn.get("verify_ssl"):
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+    try:
+        with _urlrequest.urlopen(request, timeout=timeout, context=context) as resp:
+            raw = resp.read()
+    except _urlerror.HTTPError as exc:
+        if exc.code in (401, 403):
+            raise PolicyRefusal(
+                f"vmrest rejected the credential for {conn.get('name')!r} ({exc.code}). "
+                f"Set it with `vmrest -C` and check the username in connections.yaml.")
+        return None
+    except (OSError, ssl.SSLError) as exc:
+        raise PolicyRefusal(
+            f"could not reach vmrest at {host}:{port}: {exc}. Is `vmrest` running, and "
+            f"does policy.yaml allow this connection to reach it?")
+    try:
+        return json.loads(raw.decode("utf-8", "replace")) if raw else {}
+    except ValueError:
+        return None
+
+
+def _vmrest_name(conn, vm_id, path, checkins):
+    """displayName, falling back to the VMX filename.
+
+    /api/vms gives only an id and a path, so a name costs one more call per VM. When
+    that call fails the basename is a perfectly good name — far better than a blank
+    cell, and it is what the file is actually called on disk.
+    """
+    got = _vmrest(conn, "GET", f"/vms/{vm_id}/params/displayName", checkins=checkins)
+    name = (got or {}).get("value") if isinstance(got, dict) else ""
+    if name:
+        return str(name)
+    base = str(path or "").replace("\\", "/").rsplit("/", 1)[-1]
+    return base[:-4] if base.lower().endswith(".vmx") else base
+
+
+def _sync_workstation(conn, payload, policy, emit, checkins=None):
+    host, port = _conn_endpoint(conn, 8697)
+    _check_endpoint(policy, host, port, str(payload.get("connection_ref") or ""))
+
+    listing = _vmrest(conn, "GET", "/vms", checkins=checkins)
+    if not isinstance(listing, list):
+        raise PolicyRefusal(
+            "vmrest did not return a VM list — check that `vmrest` is running and that "
+            "its credentials were set with `vmrest -C`.")
+
+    limit = max(1, int(payload.get("page_size") or 250))
+    out = []
+    for entry in listing[:limit]:
+        vm_id = str(entry.get("id") or "")
+        if not vm_id:
+            continue
+        settings_doc = _vmrest(conn, "GET", f"/vms/{vm_id}", checkins=checkins) or {}
+        power = _vmrest(conn, "GET", f"/vms/{vm_id}/power", checkins=checkins) or {}
+        state = str(power.get("power_state") or "")
+        row = {
+            "vm_id": vm_id,
+            "name": _vmrest_name(conn, vm_id, entry.get("path"), checkins),
+            "power_state": state,
+            "vcpus": (settings_doc.get("cpu") or {}).get("processors"),
+            "mem_mib": settings_doc.get("memory"),
+            # The VMX path rides in `scope`, which is the generic cache's per-kind
+            # column. It is display-only: identity is vmrest's opaque id.
+            "scope": str(entry.get("path") or ""),
+            "vm_type": "vm",
+        }
+        # Only a powered-on VM has an address, and only with tools installed. Asking a
+        # stopped VM costs a call per VM to learn nothing.
+        if state.lower() in ("poweredon", "powered_on", "on"):
+            ip = _vmrest(conn, "GET", f"/vms/{vm_id}/ip", checkins=checkins) or {}
+            if ip.get("ip"):
+                row["ip_addresses"] = [str(ip["ip"])]
+        out.append(row)
+
+    emit(f"read {len(out)} VM(s) from Workstation at {host}")
+    # One page: a desktop hypervisor does not have 10 000 VMs, and vmrest has no cursor.
+    return {"vms": out, "next_cursor": "", "complete": True, "scanned": len(out)}
+
+
+def _power_workstation(conn, payload, policy, emit, verb, checkins=None):
+    action = _VMREST_POWER.get(verb)
+    if action is None:
+        raise PolicyRefusal(
+            f"vmrest has no {verb!r} operation — Workstation supports power_on and "
+            f"power_off only (its API offers on/off/shutdown/suspend/pause/unpause, "
+            f"with no reset, reboot or snapshot).")
+    vm_id = str(payload.get("target_id") or "")
+    if not vm_id:
+        raise PolicyRefusal("a Workstation power verb needs target_id (the vmrest VM id)")
+    host, port = _conn_endpoint(conn, 8697)
+    _check_endpoint(policy, host, port, str(payload.get("connection_ref") or ""))
+    _vmrest(conn, "PUT", f"/vms/{vm_id}/power", body=action, checkins=checkins)
+    emit(f"{verb} issued for {vm_id}")
+    return {"verb": verb, "target_id": vm_id, "ok": True}
+
 _SYNC = {"vsphere": _sync_vsphere, "proxmox": _sync_proxmox,
-         "nutanix": _sync_nutanix, "xcpng": _sync_xcpng}
+         "nutanix": _sync_nutanix, "xcpng": _sync_xcpng,
+         "workstation": _sync_workstation}
 
 # Verb -> (proxmox path fragment, nutanix power state, XAPI method). Hyper-V is absent
 # on purpose: WinRM needs a real NTLM/Negotiate stack, which is the one transport the
@@ -1424,7 +1598,8 @@ def _power_xcpng(conn, payload, policy, emit, verb, checkins=None):
 
 
 _POWER_IMPL = {"proxmox": _power_proxmox, "nutanix": _power_nutanix,
-               "xcpng": _power_xcpng, "vsphere": _power_vsphere}
+               "xcpng": _power_xcpng, "vsphere": _power_vsphere,
+               "workstation": _power_workstation}
 
 
 # Mirrors agent_hypervisor_meta.snapshot_name. Derived from the job id the agent
@@ -1517,6 +1692,7 @@ def _snapshot_nutanix(conn, payload, policy, emit, name, checkins=None):
 
 _SNAPSHOT_IMPL = {"proxmox": _snapshot_proxmox, "vsphere": _snapshot_vsphere,
                   "xcpng": _snapshot_xcpng, "nutanix": _snapshot_nutanix}
+
 
 # The two the agent cannot speak to itself. `esxi` is a distinct kind from `vsphere`
 # on purpose: the same product, but a bare host serves SOAP only while vCenter serves
@@ -1811,7 +1987,7 @@ def _run_verb(conn, payload, policy, emit, verb, kind, job_id, checkins):
         return impl(conn, payload, policy, emit, _snapshot_name(job_id), checkins)
 
     impl = _POWER_IMPL.get(kind)
-    if impl is None or verb not in _POWER:
+    if impl is None or (verb not in _POWER and kind != "workstation"):
         raise PolicyRefusal(f"{verb!r} is not available for {kind!r} in this agent build")
     return impl(conn, payload, policy, emit, verb, checkins)
 

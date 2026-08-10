@@ -497,6 +497,7 @@ flag, because a boolean on a destructive verb gets defaulted wrong exactly once.
 | Proxmox VE | `/api2/json` + API token | yes | yes |
 | XCP-ng | XAPI (stdlib XML-RPC) | yes | yes |
 | Nutanix Prism | Prism v3 REST | yes | no — a v3 power change is a full spec PUT with a metadata version, not an action |
+| VMware Workstation Pro | `vmrest`, on the same host | yes | on/off only — vmrest has no reset, reboot or snapshot |
 | bare ESXi | SOAP, via the [sibling runner](#the-sibling-runner) | yes | yes |
 | Hyper-V | WinRM, via the [sibling runner](#the-sibling-runner) | yes | yes |
 
@@ -570,6 +571,51 @@ and that is your decision rather than a job's:
 ```
 docker pull chrweav/hypervisor-runner:latest
 ```
+
+### VMware Workstation Pro
+
+Workstation is the one hypervisor here that runs on somebody's desktop, and it was twice
+written off as unreachable because the dashboard drives it with `vmrun` against local VMX
+paths. That was true of `vmrun` and wrong overall: Workstation **Pro** ships `vmrest`, a
+REST daemon that is plain JSON over HTTP. An agent on that host reaches it with no extra
+dependency and no container.
+
+On the Workstation host:
+
+```
+vmrest -C     # set the API credentials, once
+vmrest        # run the daemon — 127.0.0.1:8697
+```
+
+Then add a `workstation` connection bound to that host's agent. It is **agent-bound
+only**: the dashboard has no transport for Workstation, so a connection without an agent
+is refused rather than created and left broken.
+
+**It needs `allow_loopback`.** vmrest binds `127.0.0.1`, and the agent denies loopback
+unconditionally — that deny is what stops a discovery sweep probing the agent's own
+container or a cloud metadata endpoint, and it is re-added even if an operator deletes
+it. So a co-located connection opts in explicitly, in `policy.yaml`, next to its verbs:
+
+```yaml
+connections:
+  - name: my-workstation
+    verbs: [inventory_sync, power_on, power_off]
+    allow_loopback: true
+```
+
+That exempts **that connection**, on the port its `connections.yaml` entry names, and
+nothing else. Discovery still refuses loopback however this is set. If you can make
+vmrest listen on a routable address instead, do that and skip the exception entirely.
+
+**Inventory plus power on and off — and nothing more.** vmrest's API is
+`on/off/shutdown/suspend/pause/unpause` with **no reset, no reboot and no snapshot**, so
+`restart`, `power_reset` and `snapshot` are refused with a message saying so. Mapping
+`restart` onto `shutdown` would quietly do something other than what was asked.
+
+Synced VMs appear on the **Workstation** page alongside the ones this host scans locally,
+badged with the agent's name. They are tagged into workgroups the same way Proxmox and
+Nutanix VMs are, and an untagged VM is admin-only — which is what stops an agent widening
+what a non-admin can see.
 
 ### Large inventories
 
@@ -691,6 +737,9 @@ an objection into a demonstration.
 | `the sibling image … is not present on this host` | `docker pull chrweav/hypervisor-runner:latest`. The agent will not pull it for you, deliberately. |
 | `cannot reach the Docker socket` | The overlay is not applied, or `AGENT_DOCKER_SOCKET` does not match the mount's container-side path. |
 | A Password Safe checkout fails `4031 … 403` | The OAuth client's user needs the **Requestor** role plus a View access policy on a Smart Rule containing that managed account. Membership is recomputed on a schedule, so a new account is not requestable immediately. |
+| `could not reach vmrest at 127.0.0.1:8697` | Either `vmrest` is not running, or the connection lacks `allow_loopback: true` in policy.yaml. The agent denies loopback by default. |
+| `vmrest rejected the credential` | Set them with `vmrest -C`, and check the username matches connections.yaml. |
+| `vmrest has no 'restart' operation` | Working as intended — its API has no reset, reboot or snapshot. Use power_off then power_on. |
 | A sync never runs, and the connection shows an error | Read it — the enqueuer records why rather than queueing a job that would wait indefinitely. Usually the bound agent is offline or lacks the `agent_hypervisor` grant. |
 | Caddy never serves; logs show ACME retries | The hostname is internal and cannot satisfy an ACME challenge. Set `AGENT_TLS_INTERNAL=1` — see [above](#if-the-hostname-is-internal). |
 
@@ -709,7 +758,12 @@ Hypervisor brokering followed it and is described above. Next:
 - **Nutanix power verbs and snapshots.** Both are full spec PUTs carrying a metadata
   version rather than simple actions, so getting one wrong writes to the VM instead of
   failing. Worth doing carefully rather than quickly.
-- **VMware Workstation over a co-located agent.** Not network-reachable, so this is a
+- **Retiring `POWERSHELL_EXECUTION_MODE=ssh`,** now that a co-located agent does the
+  same job by polling outward instead of the dashboard holding an inbound SSH key to a
+  Windows desktop.
+- ~~VMware Workstation over a co-located agent~~ — shipped; see
+  [VMware Workstation Pro](#vmware-workstation-pro).
+- **The rest of what was deferred.** Not network-reachable, so this is a
   new *deployment shape* rather than one more connection kind — the agent would have to
   run on the desktop host and speak to `vmrest` on localhost. It would replace the
   existing `POWERSHELL_EXECUTION_MODE=ssh` dev escape hatch, which does the same job

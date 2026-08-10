@@ -215,7 +215,16 @@
               </div>
             </td>
             <!-- VM Name -->
-            <td class="px-4 py-3 font-medium text-gray-800" x-text="vm.vm_name"></td>
+            <td class="px-4 py-3 font-medium text-gray-800">
+              <span x-text="vm.vm_name"></span>
+              <!-- A row synced by a co-located agent, rather than scanned on this host.
+                   Worth labelling: the two look identical otherwise, and only the local
+                   ones respond to the PowerShell-backed actions below. -->
+              <span x-show="vm.source && vm.source !== 'local'" x-cloak
+                    class="ml-2 text-[10px] uppercase bg-purple-50 text-purple-700 px-1.5 py-0.5 rounded"
+                    :title="'Synced by remote agent ' + vm.source"
+                    x-text="vm.source"></span>
+            </td>
             <!-- OS -->
             <td class="px-4 py-3 text-xs text-gray-500" x-text="vm.os_type || '–'"></td>
             <!-- IP Address (DB-backed, shown for all VMs with a known IP) -->

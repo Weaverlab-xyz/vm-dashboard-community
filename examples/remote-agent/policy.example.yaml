@@ -70,9 +70,29 @@ job_types:
 #   - name: lab-proxmox
 #     verbs: [inventory_sync, power_on, power_off, restart, snapshot]
 #
+#   # VMware Workstation on THIS host. `allow_loopback` is what lets the agent reach
+#   # vmrest on 127.0.0.1 — see below.
+#   - name: my-workstation
+#     verbs: [inventory_sync, power_on, power_off]
+#     allow_loopback: true
+#
 # `snapshot` creates a snapshot named dash-<job id>. The name is GENERATED, never
 # supplied — there is no field anywhere in the protocol through which an operator
 # string could reach a hypervisor. Grant it only where you want snapshots piling up.
+
+# ── allow_loopback ────────────────────────────────────────────────────────────
+# Loopback and cloud-metadata addresses are denied unconditionally, and that deny is
+# re-added even if you delete it from the list above — an operator who writes a wide
+# CIDR has not decided to expose their own container.
+#
+# One case genuinely needs an exception: VMware Workstation's `vmrest` binds 127.0.0.1,
+# so a co-located agent cannot reach it any other way. Setting `allow_loopback: true` on
+# a connection exempts THAT connection, for the port its connections.yaml entry names,
+# and nothing else. A discovery scan still refuses loopback however this is set — the
+# exception applies only where you have already written down the name, host and port.
+#
+# If you can make vmrest listen on a routable address instead, do that and leave this
+# alone. It is not needed for anything but a same-host connection.
 
 # ── The sibling runner (OFF, and it needs the Docker socket) ──────────────────
 # Hyper-V and BARE ESXi are the only two the agent cannot talk to itself: WinRM needs a
