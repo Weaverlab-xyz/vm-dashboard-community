@@ -1175,6 +1175,13 @@ class K8sCluster(Base):
     jumpoint_name = Column(String(128), nullable=True)     # PRA Jumpoint name override (else bt_jumpoint_name) — the "separate jumpoint"
     pra_credential_ref = Column(String(256), nullable=True)  # secret ref → bt_client_secret override (else config)
     secrets_delivery_kind = Column(String(20), nullable=True)  # eso | secrets_agent (Phase 4)
+    # Password-Safe-managed ServiceAccount token rotation. ps_token_account_id being
+    # SET is the discriminator that stops the dashboard minting a second token: the
+    # rotation plugin sweeps only Secrets carrying ITS labels, so a dashboard-minted
+    # Secret alongside a managed one is a cluster-admin credential nothing ever rotates.
+    ps_token_account_id = Column(String(64), nullable=True)      # PS ManagedAccount id of <ns>/<sa>
+    ps_pra_vault_account_id = Column(String(64), nullable=True)  # PS ManagedAccount id of the "PRA Vault Token" mirror
+    pra_vault_account_id = Column(String(64), nullable=True)     # sra_vault_token_account id the rotation is mirrored into
 
     created_by = Column(String(100), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
@@ -1364,6 +1371,20 @@ def init_db():
             # Nor does `ephemeral_state` (FIDO2 challenges + OAuth/OIDC CSRF state),
             # for the same reason. Nothing backfills that one either — every row it
             # will ever hold expires within five minutes of being written.
+            #
+            # Password-Safe-managed k8s ServiceAccount token rotation. Two Password Safe
+            # managed-account ids (the token account, and the "PRA Vault Token" mirror the
+            # rotation is pushed through), plus the PRA Vault account id — which the tunnel
+            # registration already computed and threw away, so only pra_tunnel_state held it.
+            # Columns rather than config keys because ps_token_account_id is a WHERE clause:
+            # the sync sweep selects the registered clusters, and the mint path checks it on
+            # every tunnel register. NULL backfills to "not Password Safe managed", which is
+            # the right answer — enabling the feature cannot capture a cluster nobody bound.
+            "ALTER TABLE k8s_clusters ADD COLUMN ps_token_account_id VARCHAR(64)",
+            "ALTER TABLE k8s_clusters ADD COLUMN ps_pra_vault_account_id VARCHAR(64)",
+            "ALTER TABLE k8s_clusters ADD COLUMN pra_vault_account_id VARCHAR(64)",
+            "CREATE INDEX ix_k8s_clusters_ps_token_account_id "
+            "ON k8s_clusters(ps_token_account_id)",
         ]
         for stmt in _migrations:
             if _is_sqlite:

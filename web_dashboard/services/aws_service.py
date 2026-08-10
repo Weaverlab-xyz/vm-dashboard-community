@@ -77,6 +77,34 @@ def _get_eks(region: str):
     return boto3.client("eks", **_aws_kwargs(region))
 
 
+def create_eks_access_entry(cluster_name: str, region: str, *, principal_arn: str,
+                            username: str) -> dict:
+    """Map an IAM principal into the cluster as ``username`` via an EKS access entry.
+
+    The modern replacement for editing the ``aws-auth`` ConfigMap — which this function
+    deliberately never touches, because a bad edit there can lock every principal out of
+    the cluster. Used by the Password Safe token-rotation onboarding: the rotator
+    ClusterRoleBinding's ``User`` subject is this username, and without the access entry
+    the binding matches nothing and the API server 401s — a failure whose cause is
+    invisible from inside the cluster.
+
+    Idempotent: an entry that already exists (``ResourceInUseException``) is success.
+    Requires the cluster's authenticationMode to be API or API_AND_CONFIG_MAP; the
+    error from a CONFIG_MAP-only cluster is surfaced as-is."""
+    _require_boto3()
+    eks = _get_eks(region)
+    try:
+        eks.create_access_entry(
+            clusterName=cluster_name, principalArn=principal_arn,
+            type="STANDARD", username=username)
+        return {"created": True, "already": False}
+    except Exception as exc:  # noqa: BLE001 — botocore error classes are dynamic
+        if "ResourceInUseException" in exc.__class__.__name__ or \
+                "already exists" in str(exc).lower():
+            return {"created": False, "already": True}
+        raise
+
+
 # ── EKS OIDC identity-provider federation (Entra ID) ─────────────────────────────
 #
 # Associate a shared Entra app registration as an EKS cluster's OIDC identity

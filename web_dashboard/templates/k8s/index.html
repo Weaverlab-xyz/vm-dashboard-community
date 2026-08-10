@@ -113,6 +113,14 @@
                       title="Direct kubectl-to-API TCP tunnel + downloadable cloud-login (token-free) kubeconfig; supports kubectl --as impersonation for Entitle grants"
                       class="text-xs px-2 py-1 bg-cyan-600 hover:bg-cyan-700 text-white rounded font-medium"
                       x-text="c.api_tunnel_jump ? 'API tunnel ✓' : 'API tunnel'"></button>
+              {% if beyondtrust_enabled %}
+              <button x-show="c.status === 'registered' || c.status === 'managed'" @click="openPsToken(c)"
+                      title="Manage the PRA-injected ServiceAccount token in Password Safe so it ROTATES on schedule — and keep the PRA Vault copy in sync through Password Safe"
+                      :class="c.token_sync_state === 'error' || c.token_sync_state === 'unregistered'
+                                ? 'text-xs px-2 py-1 bg-red-600 hover:bg-red-700 text-white rounded font-medium'
+                                : 'text-xs px-2 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded font-medium'"
+                      x-text="c.ps_token_managed ? 'Token rotation ✓' : 'Token rotation'"></button>
+              {% endif %}
               <button x-show="c.status === 'registered' || c.status === 'managed'" @click="openEntraGroup(c)"
                       title="Bind an Entra (AAD) group to a ClusterRole — members get real-identity JIT access when Entitle's Entra-ID integration grants them membership (no impersonation)"
                       class="text-xs px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded font-medium"
@@ -327,6 +335,16 @@
             <span class="block text-[11px] text-gray-400">Leave off for federation/JIT demos (no storage). Tick it only for stateful workloads (e.g. a Rancher management plane) — it adds a slower, occasionally flaky addon step.</span>
           </label>
         </div>
+        {% if beyondtrust_enabled %}
+        <!-- Password Safe token-rotation opt-in (chained after the provision completes) -->
+        <div class="flex items-start gap-2">
+          <input type="checkbox" id="ps_token_reg" x-model="provForm.register_token_in_passwordsafe" class="mt-0.5">
+          <label for="ps_token_reg" class="text-sm text-gray-700">
+            Register the ServiceAccount token in Password Safe <span class="text-gray-400">(rotatable)</span>
+            <span class="block text-[11px] text-gray-400">Onboards <code>pra-access/pra-access</code> as a managed account on the Kubernetes Service Account Token plugin and applies the in-cluster rotator RBAC. The Password Safe functional account must already exist.</span>
+          </label>
+        </div>
+        {% endif %}
         <p class="text-[11px] text-gray-400">
           Provisioning takes ~5–15 min; the row shows <span class="font-mono">provisioning → registered</span>.
           AKS/GKE nodes get internet egress (managed outbound / Cloud NAT) so an installed Entitle agent can reach its SaaS.
@@ -763,6 +781,100 @@ gcloud auth login --login-config=login.json</pre>
       </div>
     </div>
   </div>
+
+  {% if beyondtrust_enabled %}
+  <!-- Password Safe token rotation modal -->
+  <div x-show="showPsToken" x-cloak class="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
+       @click.self="showPsToken = false">
+    <div class="bg-white rounded-xl shadow-xl w-full max-w-lg">
+      <div class="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+        <h3 class="font-semibold text-gray-800">Password Safe token rotation<span x-show="psTokenTarget" class="text-gray-400 font-normal"> — <span x-text="psTokenTarget && psTokenTarget.name"></span></span></h3>
+        <button @click="showPsToken = false" class="text-gray-400 hover:text-gray-600 text-xl">&times;</button>
+      </div>
+      <div class="px-6 py-4 space-y-4">
+        <p class="text-xs text-gray-500">
+          Onboards the PRA-injected ServiceAccount token (<span class="font-mono">pra-access/pra-access</span>) as a
+          Password Safe managed account on the <span class="font-mono">Kubernetes Service Account Token</span> plugin
+          and applies the in-cluster rotator RBAC. Rotations are mirrored into the PRA Vault copy through the
+          <span class="font-mono">PRA Vault Token</span> plugin, so the k8s tunnel keeps working. The functional
+          account must already exist in Password Safe.
+        </p>
+        <template x-if="psTokenTarget && psTokenTarget.ps_token_managed">
+          <div class="text-xs space-y-1 bg-gray-50 rounded-lg p-3">
+            <p><span class="text-gray-500">Managed account id:</span> <span class="font-mono" x-text="psTokenTarget.ps_token_account_id"></span>
+               <span class="text-gray-500 ml-2">PRA mirror id:</span> <span class="font-mono" x-text="psTokenTarget.ps_pra_vault_account_id || 'none'"></span></p>
+            <p><span class="text-gray-500">Sync:</span> <span class="font-mono" x-text="psTokenTarget.token_sync_state || 'never'"></span>
+               <span class="text-gray-500 ml-2">last</span> <span class="font-mono" x-text="psTokenTarget.token_sync_at || '—'"></span>
+               <span class="text-gray-500 ml-2">PRA verified</span> <span class="font-mono" x-text="psTokenTarget.token_sync_verified || '—'"></span></p>
+            <p x-show="psTokenTarget.token_sync_error" class="text-red-600" x-text="psTokenTarget.token_sync_error"></p>
+          </div>
+        </template>
+        <template x-if="!(psTokenTarget && psTokenTarget.ps_token_managed)">
+          <div class="space-y-3">
+            <div class="grid grid-cols-2 gap-3">
+              <div>
+                <label class="block text-xs font-medium text-gray-600 mb-1">Token mode</label>
+                <select x-model="psTokenForm.mode" class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
+                  <option value="">(configured default)</option>
+                  <option value="longlived">LongLived — rotation revokes</option>
+                  <option value="bound">Bound — no revoke, TTL expiry</option>
+                </select>
+              </div>
+              <div x-show="psTokenForm.mode === 'bound'">
+                <label class="block text-xs font-medium text-gray-600 mb-1">Bound TTL (seconds)</label>
+                <input type="number" x-model="psTokenForm.ttl_seconds" min="600" placeholder="3600"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm font-mono">
+              </div>
+            </div>
+            <div class="grid grid-cols-2 gap-3" x-show="psTokenTarget && psTokenTarget.source === 'registered'">
+              <div>
+                <label class="block text-xs font-medium text-gray-600 mb-1">Cloud cluster name <span class="text-gray-400">(registered rows only)</span></label>
+                <input type="text" x-model="psTokenForm.cluster_name" placeholder="(defaults to the row name)"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm font-mono">
+              </div>
+              <div x-show="psTokenTarget && psTokenTarget.cloud === 'azure'">
+                <label class="block text-xs font-medium text-gray-600 mb-1">Resource group <span class="text-gray-400">(AKS)</span></label>
+                <input type="text" x-model="psTokenForm.resource_group" placeholder="rg-aks-prod"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm font-mono">
+              </div>
+            </div>
+            <p class="text-[11px] text-gray-400">
+              Registration seeds Password Safe with the live token, rotates once to prove the path, mirrors the new
+              token into PRA, then deletes the dashboard-minted Secret (the plugin's sweep never touches it).
+            </p>
+          </div>
+        </template>
+      </div>
+      <div class="px-6 py-4 border-t border-gray-100 flex justify-between gap-3">
+        <div class="flex gap-2">
+          <template x-if="psTokenTarget && psTokenTarget.ps_token_managed">
+            <button @click="rotatePsToken()" :disabled="psTokenBusy"
+                    class="px-3 py-2 text-sm border border-amber-300 text-amber-700 rounded-lg hover:bg-amber-50 disabled:opacity-50">Rotate now</button>
+          </template>
+          <template x-if="psTokenTarget && psTokenTarget.ps_token_managed">
+            <button @click="syncPsToken()" :disabled="psTokenBusy"
+                    class="px-3 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 disabled:opacity-50">Sync now</button>
+          </template>
+        </div>
+        <div class="flex gap-3">
+          <button @click="showPsToken = false" class="px-4 py-2 text-sm border border-gray-300 rounded-lg">Cancel</button>
+          <template x-if="psTokenTarget && psTokenTarget.ps_token_managed">
+            <button @click="removePsToken()" :disabled="psTokenBusy"
+                    class="px-4 py-2 bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white text-sm font-medium rounded-lg">
+              <span x-show="!psTokenBusy">Remove</span><span x-show="psTokenBusy" x-cloak>Working…</span>
+            </button>
+          </template>
+          <template x-if="!(psTokenTarget && psTokenTarget.ps_token_managed)">
+            <button @click="submitPsToken()" :disabled="psTokenBusy"
+                    class="px-4 py-2 bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white text-sm font-medium rounded-lg">
+              <span x-show="!psTokenBusy">Register</span><span x-show="psTokenBusy" x-cloak>Working…</span>
+            </button>
+          </template>
+        </div>
+      </div>
+    </div>
+  </div>
+  {% endif %}
 </div>
 {% endblock %}
 
@@ -779,12 +891,14 @@ function k8sPage() {
     // confirm the kubeconfig they paste points at the cluster the agent actually found.
     discoveredApiServer: '',
     showProvision: false, provBusy: false,
-    provForm: { name: '', cloud: 'aws', region: '', k8s_version: '', node_instance_type: '', node_count: 2, vpc_cidr: '', authorized_cidrs: '', zone: '', enable_ebs_csi: false },
+    provForm: { name: '', cloud: 'aws', region: '', k8s_version: '', node_instance_type: '', node_count: 2, vpc_cidr: '', authorized_cidrs: '', zone: '', enable_ebs_csi: false, register_token_in_passwordsafe: false },
     provOptions: { cloud: '', region: '', regions: [], node_instance_types: [], k8s_versions: [], subnets: [], configured_subnet_ids: [] },
     loadingProvOpts: false, provOptsError: '',
     showBroker: false, brokering: false, brokerTarget: null,
     brokerForm: { jump_group: '', jumpoint_name: '', praCredBackend: '', pra_credential_ref: '', vault_inject: false, vault_account_group_id: null },
     showSecrets: false, secretsBusy: false, secretsTarget: null, secretsKind: 'eso',
+    showPsToken: false, psTokenBusy: false, psTokenTarget: null,
+    psTokenForm: { mode: '', ttl_seconds: '', cluster_name: '', resource_group: '' },
     showTunnel: false, tunneling: false, tunnelTarget: null,
     tunnelForm: { jump_group: '', jumpoint_name: '', tunnelCredBackend: '', pra_credential_ref: '', vault_inject: false, vault_account_group_id: null },
     tunnelOpts: { configured: true, jump_groups: [], gateways: [], vault_account_groups: [] },
@@ -922,6 +1036,7 @@ function k8sPage() {
         }
         if (f.cloud === 'gcp' && f.zone && f.zone.trim()) body.zone = f.zone.trim();
         if (f.cloud === 'aws' && f.enable_ebs_csi) body.enable_ebs_csi = true;
+        if (f.register_token_in_passwordsafe) body.register_token_in_passwordsafe = true;
         const r = await API.post('/api/k8s/clusters/provision', body);
         this.showProvision = false;
         this.flash('Provisioning cluster… (takes ~10–15 min; watch the status)');
@@ -1354,6 +1469,74 @@ function k8sPage() {
         this.flash(e.message || 'Secret-delivery setup failed.', 'error');
       } finally {
         this.secretsBusy = false;
+      }
+    },
+
+    openPsToken(c) {
+      this.psTokenTarget = c;
+      this.psTokenForm = { mode: '', ttl_seconds: '', cluster_name: '', resource_group: '' };
+      this.showPsToken = true;
+    },
+
+    async submitPsToken() {
+      this.psTokenBusy = true;
+      try {
+        const f = this.psTokenForm;
+        const body = {};
+        if (f.mode) body.mode = f.mode;
+        if (f.mode === 'bound' && f.ttl_seconds) body.ttl_seconds = Number(f.ttl_seconds);
+        if (f.cluster_name && f.cluster_name.trim()) body.cluster_name = f.cluster_name.trim();
+        if (f.resource_group && f.resource_group.trim()) body.resource_group = f.resource_group.trim();
+        const r = await API.post(`/api/k8s/clusters/${this.psTokenTarget.id}/ps-token`, body);
+        if (r && r.job_id) { window.location.href = '/jobs/' + r.job_id; return; }
+        this.showPsToken = false;
+        await this.refresh();
+      } catch (e) {
+        this.flash(e.message || 'Password Safe registration failed.', 'error');
+      } finally {
+        this.psTokenBusy = false;
+      }
+    },
+
+    async removePsToken() {
+      if (!confirm(`Remove the Password Safe registration for "${this.psTokenTarget.name}"? ` +
+                   'This off-boards both managed systems — the current token stays valid but stops rotating.')) return;
+      this.psTokenBusy = true;
+      try {
+        const r = await API.del(`/api/k8s/clusters/${this.psTokenTarget.id}/ps-token`);
+        if (r && r.job_id) { window.location.href = '/jobs/' + r.job_id; return; }
+        this.showPsToken = false;
+        await this.refresh();
+      } catch (e) {
+        this.flash(e.message || 'Password Safe removal failed.', 'error');
+      } finally {
+        this.psTokenBusy = false;
+      }
+    },
+
+    async rotatePsToken() {
+      if (!confirm('Rotate the ServiceAccount token in Password Safe now? In LongLived mode the old ' +
+                   'token is revoked once the rotation completes; PRA is re-synced in the same job.')) return;
+      this.psTokenBusy = true;
+      try {
+        const r = await API.post(`/api/k8s/clusters/${this.psTokenTarget.id}/ps-token/rotate`, {});
+        if (r && r.job_id) { window.location.href = '/jobs/' + r.job_id; return; }
+      } catch (e) {
+        this.flash(e.message || 'Rotation failed.', 'error');
+      } finally {
+        this.psTokenBusy = false;
+      }
+    },
+
+    async syncPsToken() {
+      this.psTokenBusy = true;
+      try {
+        const r = await API.post(`/api/k8s/clusters/${this.psTokenTarget.id}/token-sync`, {});
+        if (r && r.job_id) { window.location.href = '/jobs/' + r.job_id; return; }
+      } catch (e) {
+        this.flash(e.message || 'Sync failed.', 'error');
+      } finally {
+        this.psTokenBusy = false;
       }
     },
 

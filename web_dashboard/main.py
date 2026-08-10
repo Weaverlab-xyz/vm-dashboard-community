@@ -108,6 +108,11 @@ async def lifespan(app: FastAPI):
     warmers.append(
         asyncio.create_task(_expiry_sweeper_loop(), name="expiry_sweeper_loop")
     )
+    # k8s ServiceAccount token → PRA Vault sync. Same shape: always launched, no-ops
+    # while the feature is off or no cluster is bound.
+    warmers.append(
+        asyncio.create_task(_k8s_token_sync_loop(), name="k8s_token_sync_loop")
+    )
 
     # Cost-summary warmer — always launched; no-ops (no billable calls) while the
     # cost feature is off, so flipping the flag in Settings warms the next pass.
@@ -240,6 +245,43 @@ async def _expiry_sweeper_loop() -> None:
             interval = expiry_policy.sweep_interval_seconds()
         except Exception:
             interval = 30 * 60
+        await asyncio.sleep(interval)
+
+
+# ── k8s ServiceAccount token → PRA Vault sync loop ───────────────────────────
+
+async def _k8s_token_sync_loop() -> None:
+    """Enqueue one k8s-token → PRA-Vault sync pass per interval.
+
+    ONLY enqueues, for the same reasons as ``_expiry_sweeper_loop``: under
+    ``gunicorn -w 2`` every task started here runs twice, and letting
+    ``jobs_worker._claim_one``'s ``UPDATE ... WHERE status='pending'`` rowcount pick the
+    winner is what makes a pass single-flight across both app workers AND the worker
+    replicas, on SQLite as well as PostgreSQL. It also keeps the credential checkout and
+    write in the worker process, where every other privileged operation runs, and gives
+    each pass a job row on /jobs with Live Output and cancel.
+
+    Cadence is read live each iteration so a Settings change takes effect on the next
+    pass without an app restart (same contract as _expiry_sweeper_loop).
+    """
+    from .database import SessionLocal
+    from .services import k8s_token_sync
+
+    while True:
+        try:
+            db = SessionLocal()
+            try:
+                await asyncio.to_thread(k8s_token_sync.enqueue_sweep_if_due, db)
+            finally:
+                db.close()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("k8s token sync enqueue failed: %s", exc)
+        try:
+            interval = k8s_token_sync.sweep_interval_seconds()
+        except Exception:
+            interval = 15 * 60
         await asyncio.sleep(interval)
 
 
