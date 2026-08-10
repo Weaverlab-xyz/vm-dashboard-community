@@ -14,6 +14,7 @@ from .auth import get_current_user
 from ..services import job_service, workgroup_service, workgroup_override_service
 from ..services import proxmox_service
 from ..services.proxmox_service import ProxmoxError
+from ..services import hypervisor_view_service
 from .hypervisor_deps import agent_power_job, conn_in_task, conn_or_error
 
 # Page verb -> the agent's closed verb allowlist (services/agent_hypervisor_meta).
@@ -97,8 +98,15 @@ async def get_resources(
     """
     try:
         nodes = [node] if node else None
-        resources = await proxmox_service.list_resources(
-            conn_or_error(db, "proxmox", connection_id), nodes)
+        conn = conn_or_error(db, "proxmox", connection_id)
+        # An agent-bound connection is on a network the dashboard has no route
+        # to — that is why it is bound to an agent. Calling the live API here
+        # returned a 502 and made the page unusable; serve what the agent last
+        # synced instead. The banner says so.
+        if conn.via_agent:
+            resources = hypervisor_view_service.synced_rows(db, conn)
+        else:
+            resources = await proxmox_service.list_resources(conn, nodes)
     except ProxmoxError as e:
         raise HTTPException(status_code=502, detail=str(e))
 

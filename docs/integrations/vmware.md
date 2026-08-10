@@ -153,23 +153,55 @@ automatically. If you see `WARNING: UNPROTECTED PRIVATE KEY FILE`, check that
 `/usr/local/bin/entrypoint.sh` ran and that the key copy succeeded (check
 `docker compose logs app | head -20`).
 
-## Not available over a remote agent
+## Over a co-located remote agent
 
-Workstation is a **desktop** hypervisor with no network API: the dashboard drives it
-through `vmrun` and PowerShell against VMX paths on a local filesystem. Two consequences
-follow, and both are decisions rather than gaps:
+**This section previously said Workstation could not be managed by an agent. That was
+wrong, and it is worth saying why:** the reasoning was about `vmrun`, which is a local
+binary driving VMX paths on disk — correct as far as it went. Workstation **Pro** also
+ships **`vmrest`**, a REST daemon that is plain JSON over HTTP, and that changes the
+answer entirely. An agent on the Workstation host reaches it with no extra dependency and
+no container.
 
-* **It is not discoverable.** A remote agent's scan looks for hypervisor *management
-  endpoints*; Workstation exposes nothing on the network by default. (Workstation Pro
-  ships a `vmrest` daemon on 8697, but it is off by default, binds `127.0.0.1`, and needs
-  `vmrest -C` run by hand first — it is not a discoverable service.) A probe for it would
-  be code that never returns anything.
-* **It has no Connections row.** The `hypervisor_connections` table holds a host, a port
-  and a credential; Workstation has a script path and, optionally, an SSH target. There
-  is nothing for a row to hold.
+This replaces `POWERSHELL_EXECUTION_MODE=ssh`, which does the same job today by having
+the dashboard hold an inbound SSH key to a Windows desktop. The agent polls outward
+instead, so nothing has to be opened toward that machine.
 
-Managing Workstation through an agent *co-located on the desktop host* is a plausible
-future — it would replace the existing `POWERSHELL_EXECUTION_MODE=ssh` mode, which does
-the same job today by having the dashboard hold an inbound SSH key to that host. It is a
-new deployment shape rather than one more connection kind, so it is tracked separately;
-see [remote agents](../remote-agents.md#where-this-is-heading).
+### Setting it up
+
+On the Workstation host, once:
+
+```
+vmrest -C     # sets the API credentials
+vmrest        # runs the daemon on 127.0.0.1:8697
+```
+
+Confirm it works before involving the agent — this separates vmrest setup from agent
+configuration, which is where the time otherwise goes:
+
+```
+curl -u USER:PASS -H "Accept: application/vnd.vmware.vmw.rest-v1+json"      http://127.0.0.1:8697/api/vms
+```
+
+Then run an agent on that host and add a **workstation** connection bound to it. See
+[remote agents](../remote-agents.md#vmware-workstation-pro) for the connection and policy
+entries — including `allow_loopback: true`, which the agent needs because vmrest binds
+loopback and the agent denies loopback by default.
+
+### What it can do
+
+| | |
+|---|---|
+| Inventory sync | yes — name, power state, vCPU, memory, IP for running VMs |
+| Power on / off | yes |
+| Reset, reboot, snapshot | **no** — vmrest's API has none of them, and the agent refuses rather than substituting `shutdown` |
+
+Synced VMs appear on this page alongside the ones the dashboard scans locally, badged
+with the agent's name. They are tagged into workgroups exactly as Proxmox and Nutanix VMs
+are, and an untagged VM is admin-only.
+
+### Still local-only
+
+The **discovery** scan does not find Workstation, and that has not changed: a desktop
+hypervisor exposes nothing on the network by default. vmrest binds `127.0.0.1` and is off
+until someone runs it, so there is nothing for a subnet sweep to find. Add the connection
+by hand.

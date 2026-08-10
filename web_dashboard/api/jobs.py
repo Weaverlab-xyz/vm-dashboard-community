@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..database import User, get_db
 from ..models.job import JobResponse, JobListResponse
-from ..services import agent_job_meta, agent_service, job_service
+from ..services import agent_job_meta, job_service
 from .auth import get_current_user, can_audit_jobs
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])

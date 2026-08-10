@@ -94,6 +94,29 @@ connections:
   #   ps_duration_minutes: 30
   #   verify_ssl: true
 
+  # ── VMware Workstation Pro (co-located) ────────────────────────────────────
+  # The agent runs ON the Workstation host and talks to `vmrest`, Workstation Pro's
+  # REST daemon. No container and no extra dependency — it is plain JSON over HTTP.
+  #
+  # Set it up once on that host:
+  #   vmrest -C          # sets the API credentials; use them below
+  #   vmrest             # runs the daemon on 127.0.0.1:8697
+  #
+  # vmrest binds LOOPBACK, which the agent refuses by default — so this connection also
+  # needs `allow_loopback: true` in policy.yaml. That deny exists to stop a discovery
+  # sweep probing the agent's own container, and it stays in force everywhere else.
+  #
+  # Inventory plus power on/off. vmrest has no reset, reboot or snapshot API, and the
+  # agent refuses those rather than quietly substituting `shutdown`.
+  #
+  # - name: my-workstation
+  #   kind: workstation
+  #   host: 127.0.0.1
+  #   port: 8697
+  #   username: dashboard          # the user you set with `vmrest -C`
+  #   password_file: /run/secrets/vmrest
+  #   verify_ssl: false            # vmrest is plain HTTP unless you ran `vmrest -c`
+
   # ── Hyper-V and BARE ESXi: via the sibling runner ──────────────────────────
   # These two need a container, because WinRM needs a real NTLM stack and a standalone
   # ESXi host serves only SOAP. Enable `sibling:` in policy.yaml and apply

@@ -275,3 +275,14 @@ here can go through an agent; see
 A remote agent's discovery scan *will* report WinRM on 5985/5986, but marked **possible
 only**: nearly every domain-joined Windows Server answers there and the overwhelming
 majority are not hypervisors. Only credentials can tell you which is which.
+
+### When the connection is reached through an agent
+
+The dashboard has no route to an agent-bound connection — that is the point of binding it
+to an agent — so this page cannot query it live. It shows the **last synced inventory**
+instead, with a banner saying so and how old it is. Live-only figures (CPU usage, uptime,
+disk) are blank there rather than zero: they were never measured, and a fabricated 0 is
+worse than an empty cell.
+
+Power actions still work: they are dispatched to the agent as jobs and appear on `/jobs`
+with Live Output, exactly like a discovery scan.
