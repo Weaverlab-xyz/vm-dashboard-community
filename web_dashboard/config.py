@@ -1209,6 +1209,54 @@ class Settings(BaseSettings):
     gcp_workforce_provider_id: str = ""              # OIDC provider id in the pool (e.g. bt-entra-oidc); for the end-user login config
     gcp_workforce_location: str = "global"           # workforce pool location (always "global" today)
     bt_vault_account_group_id: str = ""              # OPTIONAL — PRA Vault account group id for injected k8s/DB credentials
+    # ── Password-Safe-managed k8s ServiceAccount token rotation ──────────────
+    # The PRA-injected SA token above becomes a Password Safe managed account on the
+    # "Kubernetes Service Account Token" custom plugin, rotated on the tenant's
+    # schedule; a second managed account on the "PRA Vault Token" plugin mirrors each
+    # rotation into the PRA Vault copy. Operator prerequisites (manual): import both
+    # .psplugins, create the platforms, create the per-cloud functional accounts, and
+    # grant the pscli identity Requestor + an auto-release access policy on the new
+    # managed accounts. See docs/design/k8s-sa-token-rotation.md.
+    k8s_ps_token_rotation_enabled: bool = False      # master gate: row action, provision checkbox, sync loop
+    k8s_ps_token_platform: str = "Kubernetes Service Account Token"  # plugin platform (name or id)
+    k8s_ps_pravault_token_platform: str = "PRA Vault Token"          # mirror plugin platform (name or id)
+    k8s_ps_functional_account_aws: str = ""          # per-cloud functional account (name or id); _local is the
+    k8s_ps_functional_account_azure: str = ""        # generic/on-prem (and OKE) fallback
+    k8s_ps_functional_account_gcp: str = ""
+    k8s_ps_functional_account_local: str = ""
+    k8s_ps_pravault_functional_account: str = ""     # FA for the mirror (PRA Config API OAuth client)
+    k8s_ps_workgroup: str = ""                       # blank → passwordsafe_workgroup
+    k8s_ps_token_mode: str = "longlived"             # longlived (rotation revokes) | bound (TokenRequest, no revoke)
+    k8s_ps_token_ttl_seconds: int = 3600             # bound mode requested TTL; API-server floor is 600
+    k8s_ps_token_change_on_register: bool = True     # rotate once on register — proves the whole path immediately
+    k8s_ps_token_delete_legacy_secret: bool = True   # retire the dashboard-minted Secret the plugin's sweep never touches
+    k8s_ps_token_register_on_provision: bool = False  # provision-form checkbox default
+    k8s_ps_pravault_mirror_enabled: bool = True      # register the "PRA Vault Token" mirror when a PRA vault account exists
+    k8s_ps_token_checkout_duration_min: int = 15     # Password Safe request duration for token reads
+    k8s_ps_token_address_options: str = ""           # extra ;key=value appended to every address (serverName=, dnsEndpoint=true, …)
+    # In-cluster rotator RBAC (the plugin's scripts/rbac.yaml). The binding subject
+    # differs per cloud and mostly CANNOT be derived: AKS needs the SP's OBJECT id (not
+    # the client id in the FA username); EKS needs the access-entry username + the IAM
+    # principal ARN behind the FA's access key. GKE's subject IS the FA's account name
+    # (the SA email), so it is derived when the override is blank.
+    k8s_ps_rotator_apply_rbac: bool = True
+    k8s_ps_rotator_gke_sa_email: str = ""            # blank → derived from the GCP functional account's name
+    k8s_ps_rotator_aks_sp_object_id: str = ""        # the oid claim — the plugin logs it on every run
+    k8s_ps_rotator_eks_username: str = "passwordsafe-rotator"   # access-entry username = RBAC User subject
+    k8s_ps_rotator_eks_principal_arn: str = ""       # IAM role/user behind the FA's access key (not derivable)
+    k8s_ps_rotator_eks_create_access_entry: bool = True  # create the access entry when the ARN is set (never touches aws-auth)
+    k8s_ps_rotator_bootstrap_namespace: str = "beyondtrust"     # generic path bootstrap SA namespace
+    k8s_ps_rotator_bootstrap_sa: str = "password-safe-rotator"  # generic path bootstrap SA name
+    # PS → PRA sync sweep (services/k8s_token_sync). LongLived rotation revokes the old
+    # token, so PRA holds a dead credential until the next pass — mean interval/2, worst
+    # interval + pass. Shorten the interval, or use ;bound on clusters whose tunnel must
+    # not break (bound never revokes; the old token stays valid until its TTL).
+    k8s_token_sync_enabled: bool = True              # the sweep no-ops while nothing is registered
+    k8s_token_sync_interval_minutes: int = 15        # floor 5 (enforced in code)
+    k8s_token_sync_request_duration_min: int = 15    # checkout duration for the sync's read
+    k8s_token_sync_max_per_pass: int = 5             # checkout/push cap per pass; the rest defer, oldest drift first
+    k8s_token_sync_max_failures: int = 5             # consecutive failures before a cluster parks until a manual sync
+    k8s_token_sync_max_per_hour: int = 4             # circuit breaker for the rotate-on-release loop
     entitle_allowed_durations: str = "3600,43200,86400"  # JIT durations (seconds) offered on created integrations
     entitle_ssh_sudo_user: str = ""                 # OPTIONAL override — each VM deploy passes its image's cloud-default login user (ubuntu/ec2-user/azureuser/gcp-user) automatically; set this only to force a different sudo user for ALL registrations
     entitle_ssh_private_key_ref: str = ""           # OPTIONAL fallback/override only — the SSH private key is normally sourced from the VM's own per-cloud keypair (the key cloud-init injected). See docs/design/entitle-resource-registration.md

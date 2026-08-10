@@ -81,6 +81,16 @@ def _parse_api_server(kubeconfig: str) -> str:
 
 def _serialize(r: K8sCluster) -> dict:
     from . import config_service
+    # Token-sync bookkeeping lives in one JSON blob per cluster (churning state, so a
+    # column per field would be a migration per field). Never the token, and never even
+    # its full digest: this dict is served by the clusters API.
+    sync = {}
+    try:
+        import json
+        raw = config_service.get(f"k8s_token_sync_{r.id}")
+        sync = json.loads(raw) if raw else {}
+    except Exception:  # noqa: BLE001 — a corrupt blob must not blank the whole page
+        sync = {}
     return {
         "id":                    r.id,
         "cloud":                 r.cloud,
@@ -104,6 +114,16 @@ def _serialize(r: K8sCluster) -> dict:
         # once the "Entra federation" action runs (tracked in config).
         "entra_federation_enabled": (r.cloud == "azure")
                                     or bool(config_service.get(f"k8s_entra_fed_{r.id}")),
+        # Password Safe token rotation. The ids are not secrets — they are exactly what
+        # an operator pastes into the plugin's configuration.
+        "ps_token_managed":      bool(r.ps_token_account_id),
+        "ps_token_account_id":   r.ps_token_account_id or "",
+        "ps_pra_vault_account_id": r.ps_pra_vault_account_id or "",
+        "pra_vault_account_id":  r.pra_vault_account_id or "",
+        "token_sync_state":      sync.get("state") or ("" if not r.ps_token_account_id else "never"),
+        "token_sync_at":         sync.get("synced_at") or "",
+        "token_sync_error":      sync.get("error") or "",
+        "token_sync_verified":   sync.get("pra_verified") or "",
         "created_by":            r.created_by,
         "created_at":            r.created_at.isoformat() if r.created_at else "",
     }
@@ -268,10 +288,16 @@ def create_cluster(db: Session, *, cloud: str, name: str, region: str,
         cloud=cloud, cluster_id=cluster_id, name=name, region=region, opts=opts, db=db)
 
     from . import job_service
+    meta = {"cluster_id": cluster_id, "cloud": cloud, "name": name,
+            "region": region, "tf_variables": tf_variables}
+    # The Password Safe token-registration opt-in rides the job metadata (not
+    # tf_variables — it is a post-provision step, not a module input). None means
+    # "use the configured default", resolved at chain time so a Settings change
+    # between enqueue and apply is honored.
+    if opts.get("register_token_in_passwordsafe") is not None:
+        meta["register_token_in_passwordsafe"] = bool(opts["register_token_in_passwordsafe"])
     job = job_service.create_job(
-        db, job_type="k8s_provision", created_by=created_by,
-        metadata={"cluster_id": cluster_id, "cloud": cloud, "name": name,
-                  "region": region, "tf_variables": tf_variables},
+        db, job_type="k8s_provision", created_by=created_by, metadata=meta,
     )
     row.deploy_job_id = job.id
     db.commit()
@@ -976,6 +1002,34 @@ def _explain_apply_failure(cloud: str, tf_variables: dict, text: str) -> str:
             f"different machine type.\n\n{text}")
 
 
+def _chain_ps_token_registration(db: Session, *, provision_job_id: str,
+                                 cluster_id: str, created_by: str) -> None:
+    """Enqueue the Password Safe token registration a provision opted into.
+
+    The opt-in rides the provision job's metadata; absent means "the settings
+    default" (``k8s_ps_token_register_on_provision``), resolved here — at chain time —
+    so a Settings change made while the cluster was building is honored. Created
+    ``pending`` deliberately: the worker must claim it like any other job (it is not a
+    parent-driven child), and its failure is its own, never the provision's."""
+    from . import job_service, ps_k8s_token_service
+    provision = db.query(Job).filter(Job.id == provision_job_id).first()
+    meta = (provision.metadata_dict or {}) if provision else {}
+    opted = meta.get("register_token_in_passwordsafe")
+    if opted is None:
+        opted = ps_k8s_token_service._cfg_bool("k8s_ps_token_register_on_provision", False)
+    if not opted:
+        return
+    if not ps_k8s_token_service.enabled():
+        logger.info("k8s provision: PS token registration requested for %s but the "
+                    "feature is disabled — skipping", cluster_id)
+        return
+    job = job_service.create_job(
+        db, job_type="k8s_ps_token", created_by=created_by or "system",
+        metadata={"cluster_id": cluster_id, "action": "register"})
+    logger.info("k8s provision: chained PS token registration for %s (job %s)",
+                cluster_id, job.id)
+
+
 async def run_provision_apply(db: Session, *, cluster_id: str, job_id: str,
                               cloud: str, tf_variables: dict) -> None:
     """**§1.1a** background task: ``terraform apply`` the cluster module, assemble a
@@ -1054,6 +1108,16 @@ async def run_provision_apply(db: Session, *, cluster_id: str, job_id: str,
             await rancher_node_service.refresh_rancher_firewall(db)
         except Exception as exc:
             logger.warning("k8s provision: rancher firewall refresh failed (non-fatal): %s", exc)
+        # Chain the Password Safe token registration when the deploy opted in (else the
+        # settings default). A separate claimable job, not inline: it talks to Password
+        # Safe and the cluster and can fail on its own terms — never the provision's.
+        try:
+            _chain_ps_token_registration(db, provision_job_id=job_id,
+                                         cluster_id=cluster_id,
+                                         created_by=row.created_by or "system")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("k8s provision: PS token registration chain failed "
+                           "(non-fatal): %s", exc)
     except Exception as exc:
         # Tear down whatever the apply managed to create BEFORE the row goes failed,
         # so a failed provision doesn't leave a half-built cluster billing (and, on
@@ -1131,8 +1195,12 @@ async def run_decommission(db: Session, *, cluster_id: str, job_id: str) -> None
     #    most on GKE — its gateway IAM grant + fleet state are project-level and would
     #    otherwise outlive the destroyed cluster (EKS's OIDC config dies with it).
     job_service.update_progress(db, job_id, 15, "Removing PRA tunnels…")
-    for _dereg in (deregister_pra_tunnel, deregister_api_tunnel, unbind_entra_group,
-                   disable_entra_federation):
+    # The Password Safe token registration goes FIRST: it clears ps_token_account_id,
+    # so deregister_pra_tunnel below then takes its normal ServiceAccount-revoke path
+    # instead of the skip-because-managed branch.
+    from . import ps_k8s_token_service
+    for _dereg in (ps_k8s_token_service.deregister, deregister_pra_tunnel,
+                   deregister_api_tunnel, unbind_entra_group, disable_entra_federation):
         try:
             await _dereg(db, cluster_id)
         except Exception as exc:
@@ -2392,7 +2460,7 @@ async def _mint_pra_sa_token(kubeconfig: str, target_cloud: str = "") -> str:
     One command on purpose: on a Cloud Run runner each kubectl call is a fresh ~2-min
     container, so the old apply-then-poll-``.data.token``-6× loop was ~7 containers
     (~14 min) and still timed out on GKE, which never populated the Secret."""
-    ns = _cfg("pra_k8s_namespace", "kube-system")
+    ns = _cfg("pra_k8s_namespace", "pra-access")
     sa = _cfg("pra_k8s_sa_name", "pra-access")
     secret = f"{sa}-token"
     manifest = _entitle_k8s_rbac_manifest(ns, sa, secret)
@@ -2428,6 +2496,185 @@ async def _mint_pra_sa_token(kubeconfig: str, target_cloud: str = "") -> str:
                      len(out or ""), (out or "")[-1200:])
         raise K8sError("could not mint the PRA ServiceAccount token — see the job logs")
     return token
+
+
+# ── Password-Safe-managed ServiceAccount token ────────────────────────────────
+#
+# The token _mint_pra_sa_token creates can instead be a Password Safe managed
+# account, rotated by the "Kubernetes Service Account Token" plugin. Once it is,
+# the dashboard must stop minting: the plugin sweeps only the token Secrets
+# carrying ITS OWN labels (beyondtrust.com/managed-by=password-safe), so the
+# Secret this module creates — which has an annotation and no labels — would never
+# be swept and would stay valid forever. That is not a broken PRA copy; it is
+# worse and quieter: a permanent, unrotatable, unaudited cluster-admin bearer
+# token, defeating the only reason to choose the revoking token mode.
+#
+# See services/ps_k8s_token_service.py and docs/design/k8s-sa-token-rotation.md.
+
+# ClusterRole names + rules from the plugin's own scripts/rbac.yaml.
+_PS_ROTATOR_ROLE = "password-safe-token-rotator"
+_PS_ROTATOR_ROLE_BOUND = "password-safe-token-rotator-bound"
+
+
+def _ps_rotator_rbac_manifest(*, mode: str, subject_kind: str, subject_name: str,
+                              subject_namespace: str = "") -> str:
+    """ClusterRole + ClusterRoleBinding for the rotation plugin's functional account.
+
+    LongLived needs ``serviceaccounts`` get/list plus ``secrets``
+    create/get/list/delete, because it rotates by creating a new token Secret and
+    deleting the old ones. Bound needs ``serviceaccounts/token`` create and **no
+    access to Secrets at all** — strictly less privilege, which is the reason to
+    prefer it where a brief stale window is acceptable.
+
+    Deliberately NOT folded into _entitle_k8s_rbac_manifest: that manifest renders a
+    cluster-admin binding for a different subject, is shared with the Entitle
+    External-Access path, and is re-rendered and ``kubectl delete``d by
+    deregister_pra_tunnel — so anything added to it would be destroyed when the PRA
+    tunnel is removed, and this RBAC has to outlive the tunnel."""
+    bound = (mode or "").strip().lower() == "bound"
+    role = _PS_ROTATOR_ROLE_BOUND if bound else _PS_ROTATOR_ROLE
+    if bound:
+        rules = (
+            '  - apiGroups: [""]\n'
+            '    resources: ["serviceaccounts"]\n'
+            '    verbs: ["get", "list"]\n'
+            '  - apiGroups: [""]\n'
+            '    resources: ["serviceaccounts/token"]\n'
+            '    verbs: ["create"]\n'
+        )
+    else:
+        rules = (
+            '  - apiGroups: [""]\n'
+            '    resources: ["serviceaccounts"]\n'
+            '    verbs: ["get", "list"]\n'
+            '  - apiGroups: [""]\n'
+            '    resources: ["secrets"]\n'
+            '    verbs: ["create", "get", "list", "delete"]\n'
+        )
+    manifest = (
+        "apiVersion: rbac.authorization.k8s.io/v1\nkind: ClusterRole\nmetadata:\n"
+        f"  name: {role}\nrules:\n{rules}"
+    )
+    if not subject_name:
+        # No subject configured: apply the role only. Harmless and idempotent, and
+        # Password Safe's own Verify Functional Account names what is still missing.
+        return manifest
+
+    subject = f"- kind: {subject_kind}\n  name: {subject_name}\n"
+    if subject_kind == "ServiceAccount":
+        subject += f"  namespace: {subject_namespace}\n"
+    else:
+        # A User/Group subject needs the RBAC API group; a ServiceAccount must NOT
+        # have it. Getting this wrong is silently accepted and matches nothing.
+        subject += "  apiGroup: rbac.authorization.k8s.io\n"
+    return (
+        manifest + "---\n"
+        "apiVersion: rbac.authorization.k8s.io/v1\nkind: ClusterRoleBinding\nmetadata:\n"
+        f"  name: {role}-binding\n"
+        "roleRef:\n  apiGroup: rbac.authorization.k8s.io\n  kind: ClusterRole\n"
+        f"  name: {role}\nsubjects:\n{subject}"
+    )
+
+
+def _ps_rotator_subject(cloud: str) -> tuple:
+    """``(kind, name, namespace)`` for the rotator ClusterRoleBinding, from config.
+
+    The subject differs per cloud and a wrong one fails as an opaque 401/403 at the
+    first rotation rather than at bind time, so each cloud names its own config key
+    and a missing one is reported by name.
+
+    These come from config rather than being derived because the dashboard only knows
+    the functional account's NAME — its cloud identity lives in Password Safe. AKS
+    needs the service principal's object id, which is a different GUID from the client
+    id in the functional account's username and would require a Graph lookup; and an
+    AWS access key id cannot be mapped to a principal ARN at all without the secret.
+    GKE is the exception: there the functional account's own name IS the subject, so
+    the caller passes it in when config is blank."""
+    c = (cloud or "").strip().lower()
+    if c == "gcp":
+        return ("User", _cfg("k8s_ps_rotator_gke_sa_email"), "")
+    if c == "azure":
+        return ("User", _cfg("k8s_ps_rotator_aks_sp_object_id"), "")
+    if c == "aws":
+        return ("User", _cfg("k8s_ps_rotator_eks_username", "passwordsafe-rotator"), "")
+    return ("ServiceAccount",
+            _cfg("k8s_ps_rotator_bootstrap_sa", "password-safe-rotator"),
+            _cfg("k8s_ps_rotator_bootstrap_namespace", "beyondtrust"))
+
+
+async def apply_ps_rotator_rbac(db: Session, cluster_id: str, *, mode: str,
+                                subject_name: str = "") -> str:
+    """Apply the rotator ClusterRole (+ binding when a subject is known). Returns a
+    human-readable note for the job result."""
+    row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
+    if row is None:
+        raise K8sError(f"cluster {cluster_id} not found")
+    kind, name, namespace = _ps_rotator_subject(row.cloud)
+    name = subject_name or name
+    manifest = _ps_rotator_rbac_manifest(
+        mode=mode, subject_kind=kind, subject_name=name, subject_namespace=namespace)
+    if kind == "ServiceAccount" and name:
+        # The generic path's bootstrap ServiceAccount has to exist before it can be
+        # bound; on the cloud paths the subject is a cloud identity we never create.
+        manifest = (
+            "apiVersion: v1\nkind: Namespace\nmetadata:\n"
+            f"  name: {namespace}\n---\n"
+            "apiVersion: v1\nkind: ServiceAccount\nmetadata:\n"
+            f"  name: {name}\n  namespace: {namespace}\n---\n" + manifest
+        )
+    await _apply_manifest_via_runner(
+        resolve_kubeconfig(db, cluster_id), manifest, target_cloud=row.cloud)
+    if not name:
+        return ("rotator ClusterRole applied; no binding subject is configured for "
+                f"{row.cloud or 'this cloud'} — run Verify Functional Account in Password "
+                "Safe, which names the missing verbs and prints the ClusterRole to apply")
+    return f"rotator RBAC applied ({kind} {name})"
+
+
+async def remove_ps_rotator_rbac(db: Session, cluster_id: str, *, mode: str) -> None:
+    """Best-effort teardown of the rotator ClusterRole + binding."""
+    row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
+    if row is None:
+        return
+    kind, name, namespace = _ps_rotator_subject(row.cloud)
+    manifest = _ps_rotator_rbac_manifest(
+        mode=mode, subject_kind=kind, subject_name=name, subject_namespace=namespace)
+    await _delete_manifest_via_runner(
+        resolve_kubeconfig(db, cluster_id), manifest, target_cloud=row.cloud)
+
+
+async def delete_legacy_pra_token_secret(db: Session, cluster_id: str) -> None:
+    """Delete the dashboard-minted ``<sa>-token`` Secret.
+
+    Called ONLY after the PRA Vault account carries a Password-Safe-issued token —
+    delete it any earlier and the brokered session loses the credential it is
+    currently using. Deleting the Secret, not the manifest: the manifest also carries
+    the Namespace, ServiceAccount and ClusterRoleBinding, all of which must survive
+    (the plugin binds every token it issues to the ServiceAccount's uid, so recreating
+    the SA would invalidate every token Password Safe has issued)."""
+    row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
+    if row is None:
+        return
+    ns = _cfg("pra_k8s_namespace", "pra-access")
+    sa = _cfg("pra_k8s_sa_name", "pra-access")
+    command = (f"kubectl -n {shlex.quote(ns)} delete secret {shlex.quote(f'{sa}-token')} "
+               f"--ignore-not-found")
+    await _run_cluster_command(
+        resolve_kubeconfig(db, cluster_id), command, target_cloud=row.cloud)
+
+
+async def _resolve_pra_sa_token(db: Session, row: K8sCluster, kubeconfig: str) -> tuple:
+    """``(token, source)`` for PRA Vault injection.
+
+    ``source`` is ``"password_safe"`` when this cluster's ServiceAccount token is a
+    Password Safe managed account: the CURRENT value is checked out of Password Safe
+    and nothing is minted. Minting here would leave an unlabelled token Secret the
+    rotation plugin never sweeps — a cluster-admin credential nothing rotates (see
+    the section comment above). Otherwise ``"minted"``, and the legacy mint runs."""
+    if row.ps_token_account_id:
+        from . import ps_k8s_token_service
+        return await ps_k8s_token_service.current_token(db, row.id), "password_safe"
+    return await _mint_pra_sa_token(kubeconfig, target_cloud=row.cloud), "minted"
 
 
 async def register_pra_tunnel(db: Session, cluster_id: str, *, jump_group: str = None,
@@ -2493,9 +2740,10 @@ async def register_pra_tunnel(db: Session, cluster_id: str, *, jump_group: str =
     # hand it to the Vault token account associated with the jump.
     vault_account_name = ""
     sa_token = ""
+    token_source = ""
     group_id = vault_account_group_id
     if vault_inject:
-        sa_token = await _mint_pra_sa_token(kubeconfig, target_cloud=row.cloud)
+        sa_token, token_source = await _resolve_pra_sa_token(db, row, kubeconfig)
         vault_account_name = f"k8s-{row.name}-sa"
         if group_id is None:
             cfg_group = _cfg("bt_vault_account_group_id")
@@ -2515,11 +2763,18 @@ async def register_pra_tunnel(db: Session, cluster_id: str, *, jump_group: str =
     )
     row.pra_jump_id = str(result.get("tunnel_jump_id") or "")
     row.pra_tunnel_state = result.get("tf_state_json")
+    # Persist the Vault account id: the token sync needs a durable handle on it, and
+    # until now this was computed and thrown away — only the (token-redacted) tunnel
+    # state held it. Same precedent as rancher_ui_vault_account_id.
+    if result.get("vault_account_id"):
+        row.pra_vault_account_id = str(result["vault_account_id"])
     db.commit()
-    logger.info("Registered k8s PRA tunnel for cluster %s (jump id %s, vault account %s)",
-                row.name, row.pra_jump_id, result.get("vault_account_id") or "none")
+    logger.info("Registered k8s PRA tunnel for cluster %s (jump id %s, vault account %s, "
+                "token from %s)", row.name, row.pra_jump_id,
+                row.pra_vault_account_id or "none", token_source or "n/a")
     return {"pra_jump_id": row.pra_jump_id, "jump_group_name": result.get("jump_group_name"),
-            "vault_account_id": result.get("vault_account_id")}
+            "vault_account_id": result.get("vault_account_id"),
+            "token_source": token_source}
 
 
 async def deregister_pra_tunnel(db: Session, cluster_id: str) -> dict:
@@ -2539,18 +2794,41 @@ async def deregister_pra_tunnel(db: Session, cluster_id: str) -> dict:
     # long-lived and would otherwise stay valid in the cluster after the Vault
     # account is gone). Deleting the dedicated namespace removes the SA + token
     # Secret; the ClusterRoleBinding is deleted by name. Best-effort, idempotent.
-    try:
-        ns = _cfg("pra_k8s_namespace", "pra-access")
-        sa = _cfg("pra_k8s_sa_name", "pra-access")
-        await _delete_manifest_via_runner(
-            resolve_kubeconfig(db, cluster_id), _entitle_k8s_rbac_manifest(ns, sa, f"{sa}-token"), target_cloud=row.cloud)
-    except Exception as exc:
-        logger.warning("k8s tunnel: PRA ServiceAccount revoke for %s failed (non-fatal): %s",
-                       cluster_id, exc)
+    #
+    # NOT when the token is Password Safe-managed: the rotation plugin binds every
+    # token it issues to the ServiceAccount's uid, so deleting and recreating the SA
+    # invalidates all of them and leaves the managed account pointing at an object
+    # that no longer exists. Removing the Password Safe registration (which revokes
+    # properly) is the way to retire that ServiceAccount.
+    if row.ps_token_account_id:
+        logger.warning(
+            "k8s tunnel: cluster %s ServiceAccount token is Password Safe-managed "
+            "(account %s) — skipping the in-cluster ServiceAccount revoke; remove the "
+            "Password Safe registration to retire it.", cluster_id, row.ps_token_account_id)
+    else:
+        try:
+            ns = _cfg("pra_k8s_namespace", "pra-access")
+            sa = _cfg("pra_k8s_sa_name", "pra-access")
+            await _delete_manifest_via_runner(
+                resolve_kubeconfig(db, cluster_id), _entitle_k8s_rbac_manifest(ns, sa, f"{sa}-token"), target_cloud=row.cloud)
+        except Exception as exc:
+            logger.warning("k8s tunnel: PRA ServiceAccount revoke for %s failed (non-fatal): %s",
+                           cluster_id, exc)
 
     row.pra_jump_id = None
     row.pra_tunnel_state = None
+    row.pra_vault_account_id = None
     db.commit()
+    # Drop the sync watermark with the Vault account it refers to. Left behind, it
+    # would suppress the first sync after the tunnel is re-provisioned — PRA would
+    # hold the new provision-time token, Password Safe a different one, and nothing
+    # would ever reconcile them.
+    try:
+        from . import config_service
+        config_service.delete(f"k8s_token_sync_{cluster_id}")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("k8s tunnel: clearing the token-sync state for %s failed: %s",
+                       cluster_id, exc)
 
     # The cluster no longer needs the shared Jumpoint — tear it down if nothing
     # else (VM / DB / another tunneled cluster) is using it. Best-effort.

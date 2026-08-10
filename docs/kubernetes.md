@@ -9,8 +9,8 @@ privileged access on top — the same **provisioning + stacked layers** model as
 - **Management plane** — import the cluster into central **Rancher**; optionally install
   **External Secrets Operator** for secret delivery.
 - **Access & identity** — the PAM story for clusters: **PRA tunnels** *(Layer 1 — reach it)*,
-  **ESO / PRA vault token** *(Layer 2 — secrets)*, and **Entitle k8s JIT + Entra→RBAC
-  federation** *(Layer 3 — time-boxed access)*.
+  **ESO / PRA vault token, with Password Safe owning the token's rotation** *(Layer 2 —
+  secrets)*, and **Entitle k8s JIT + Entra→RBAC federation** *(Layer 3 — time-boxed access)*.
 - **Config Management** — run localhost Ansible plays against the cluster API.
 
 The whole feature is gated by the **`k8s_management_enabled`** toggle (surfaces the `/k8s`
@@ -259,9 +259,26 @@ secrets)**, and **Entitle + Entra federation (Layer 3 — time-boxed access)**.
 - **PRA k8s tunnel** — `POST /clusters/{id}/tunnel` creates an `sra_protocol_tunnel_jump` with
   `tunnel_type=k8s` through the shared gateway host. Optional `vault_inject` mints a
   cluster-admin ServiceAccount bearer token in-cluster and stores it as a **PRA Vault token
-  account** for injection at session launch (PRA-only access, no Entitle). **Caveat:** this
+  account** for injection at session launch (PRA-only access, no Entitle). Once the token is
+  Password Safe-managed (below) the dashboard **reads it from Password Safe instead of
+  minting**, and removing the tunnel no longer deletes the ServiceAccount — every issued
+  token is bound to its uid. **Caveat:** this
   proxy **strips `Impersonate-*` headers**, so `kubectl --as` does not work through it — use
   the API tunnel for impersonation. See [sra-provider-k8s-tunnel-bug](notes/sra-provider-k8s-tunnel-bug.md).
+- **Password Safe token rotation** — `POST /clusters/{id}/ps-token` onboards the injected
+  ServiceAccount token (`<pra_k8s_namespace>/<pra_k8s_sa_name>`, default
+  `pra-access/pra-access`) as a Password Safe **managed account** on the *Kubernetes Service
+  Account Token* plugin, applies the in-cluster rotator RBAC, and registers a *PRA Vault
+  Token* managed account so each rotation is mirrored into the PRA Vault copy — closing the
+  gap where the vaulted token was minted once and never rotated. `…/ps-token/rotate` rotates
+  on demand; `…/token-sync` re-syncs one cluster; `DELETE …/ps-token` off-boards both managed
+  systems. A background pass (`k8s_token_sync`, every
+  `k8s_token_sync_interval_minutes`) polls each account's change date and pushes when it
+  moves. **In the default LongLived mode rotation revokes the old token, so PRA holds a dead
+  credential for up to one interval** — append `;bound` (Settings → token mode) on clusters
+  whose tunnel must not break, since Bound never revokes. Full detail and the operator
+  prerequisites: [Password Safe k8s token rotation](integrations/beyondtrust.md#kubernetes-serviceaccount-token-rotation)
+  and the [design note](design/k8s-sa-token-rotation.md).
 - **PRA API (TCP) tunnel** — `POST /clusters/{id}/api-tunnel` creates a `tunnel_type=tcp` jump
   straight to the API server on a pinned local port (`k8s_api_tunnel_local_port`, `6443`).
   Raw TCP, so kubectl authenticates end-to-end with the downloadable kubeconfig

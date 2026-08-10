@@ -15,6 +15,7 @@ Password Safe API access plus account-management (functional accounts)
 permission — without it these calls return 401/403 and callers log a warning
 (everything here is best-effort from the caller's perspective).
 """
+import hashlib
 import logging
 
 import httpx
@@ -360,7 +361,8 @@ async def _platform_name(client: httpx.AsyncClient, platform_id: int) -> str:
 
 
 async def get_functional_account(name: str) -> dict:
-    """Resolve an EXISTING functional account by name → ``{id, platform_id, platform_name}``.
+    """Resolve an EXISTING functional account by name →
+    ``{id, platform_id, platform_name, account_name}``.
 
     The VM Password-Safe registration onboards a managed system against an
     operator-configured functional account (per cloud); the provider has no
@@ -368,7 +370,12 @@ async def get_functional_account(name: str) -> dict:
     account's ``PlatformID`` also drives the managed system's ``platform_id``
     (and thus the management method); ``platform_name`` lets callers sanity-check it
     (e.g. SSM onboarding requires an "AWS Systems Manager" platform — guarding against
-    a functional account from a different platform being configured by mistake)."""
+    a functional account from a different platform being configured by mistake).
+
+    ``account_name`` is the account's own name in Password Safe, which for the GKE
+    functional account IS the service-account email — i.e. the exact subject the
+    Kubernetes rotator ClusterRoleBinding needs. Returning it here avoids a config key
+    whose only job would be to repeat the functional account's name."""
     target = (name or "").strip()
     if not target:
         raise PSApiError("functional account name is empty")
@@ -388,7 +395,8 @@ async def get_functional_account(name: str) -> dict:
                     if fa_id is None or pid is None:
                         break
                     return {"id": int(fa_id), "platform_id": int(pid),
-                            "platform_name": await _platform_name(client, int(pid))}
+                            "platform_name": await _platform_name(client, int(pid)),
+                            "account_name": acct}
             raise PSApiError(f"functional account {target!r} not found in Password Safe")
         finally:
             await _sign_out(client)
@@ -437,6 +445,311 @@ async def change_managed_account_password(account_id: int) -> None:
                     f"({resp.status_code}): {resp.text[:400]}")
         finally:
             await _sign_out(client)
+
+
+# ── credential read + write (the k8s token → PRA Vault sync) ──────────────────
+#
+# change_managed_account_password above asks Password Safe to MINT a credential.
+# The pair below is the other direction: read one account's change state without
+# touching the credential, and set an account's credential to a value we already
+# hold. Together they move a Kubernetes ServiceAccount token Password Safe just
+# rotated into the PRA Vault account a brokered session injects, so the vaulted
+# copy survives rotation. See services/k8s_token_sync.py.
+#
+# The plaintext credential exists only inside rotate_pra_vault_token's frame. It
+# is deliberately never returned, logged, or put in a job result: job metadata is
+# served by the jobs API and the MCP job tool, so a value that escapes this module
+# escapes to a lot of places.
+
+# Which by-id read shape this tenant supports, remembered after the first probe.
+# A per-process cache under `gunicorn -w 2` is fine here — it is a hint, not state:
+# each process discovers the same answer independently and a wrong guess self-corrects.
+_ACCOUNT_READ_SHAPE = ""  # "" unknown | "by_id" | "scan"
+
+
+def _redact(text: str, secret: str) -> str:
+    """``text`` with ``secret`` blanked, for an error body we want to keep.
+
+    Password Safe's validation errors normally quote field names, not values — but
+    "normally" is not a guarantee worth betting a bearer token on, and dropping the
+    body entirely would throw away the only diagnostic the operator gets."""
+    if not secret or not text:
+        return text or ""
+    return text.replace(secret, "***")
+
+
+def _account_state(item: dict) -> dict:
+    """One ManagedAccounts row → the fields the sync needs, key-shape tolerant.
+
+    ``last_change_date`` is kept as the VERBATIM string. Callers compare it as an
+    opaque value and must not parse it: tenants return both ``…123Z`` and
+    ``…+00:00``, and a parse that fails either never fires (nothing ever syncs) or
+    fires every pass (a checkout and a PRA write every interval, forever)."""
+    return {
+        "account_id": _row_key(item, ("ManagedAccountID", "ManagedAccountId",
+                                      "AccountId", "AccountID", "ID")),
+        "account_name": str(item.get("AccountName") or "").strip(),
+        "system_id": _row_key(item, ("ManagedSystemID", "ManagedSystemId",
+                                     "SystemId", "SystemID")),
+        "platform_id": _row_key(item, ("PlatformID", "PlatformId")),
+        "last_change_date": str(item.get("LastChangeDate")
+                                or item.get("lastChangeDate") or ""),
+        "next_change_date": str(item.get("NextChangeDate")
+                                or item.get("nextChangeDate") or ""),
+    }
+
+
+async def _managed_account(client: httpx.AsyncClient, account_id: int) -> dict:
+    """One managed account's state, or ``{}`` when the account does not exist.
+
+    Two read shapes exist across versions: ``GET ManagedAccounts/{id}`` on some
+    builds, only the collection on others (where ManagedAccounts is request-scoped).
+    Probe by id, fall back to filtering the paged collection — the read this repo has
+    already proven against a live tenant — and remember which worked.
+
+    ``{}`` means genuinely absent: by-id said no AND the account is not in the
+    collection. A caller must not treat that as a transport failure, and must not
+    treat a transport failure as absence."""
+    global _ACCOUNT_READ_SHAPE
+    aid = int(account_id)
+
+    if _ACCOUNT_READ_SHAPE != "scan":
+        resp = await client.get(f"ManagedAccounts/{aid}")
+        if resp.status_code == 200:
+            _ACCOUNT_READ_SHAPE = "by_id"
+            body = resp.json()
+            return _account_state(body) if isinstance(body, dict) else {}
+        if resp.status_code not in (400, 404, 405):
+            raise PSApiError(
+                f"GET ManagedAccounts/{aid} failed ({resp.status_code}): {resp.text[:400]}")
+        # 400/404/405 is either "no such account" or "no such route" — the scan below
+        # distinguishes them, and only a scan miss is real absence.
+        _ACCOUNT_READ_SHAPE = "scan"
+
+    rows = await _get_paged(
+        client, "ManagedAccounts",
+        id_keys=("ManagedAccountID", "ManagedAccountId", "AccountId", "AccountID"))
+    for item in rows:
+        state = _account_state(item)
+        if state["account_id"] and int(state["account_id"]) == aid:
+            return state
+    return {}
+
+
+async def _checkout(client: httpx.AsyncClient, account_id: int, *,
+                    duration_min: int, reason: str) -> tuple:
+    """``(request_id, credential)`` for one managed account.
+
+    ``ConflictOption=reuse`` returns an existing active request instead of a 409 —
+    the same reason btapi_service passes ``-c-op reuse``, where a 409 body was once
+    mis-parsed as a request id. It is also what keeps two passes racing the same
+    cluster from failing each other.
+
+    The refusal message names the tenant-side grant verbatim because this is THE
+    live blocker on every Password Safe consumption path here, and a paraphrase
+    turns a two-minute fix into an afternoon."""
+    resp = await client.post("Requests", json={
+        "AccessType": "View", "SystemID": 0, "AccountID": int(account_id),
+        "DurationMinutes": int(duration_min), "Reason": reason,
+        "ConflictOption": "reuse"})
+    if resp.status_code not in (200, 201):
+        raise PSApiError(
+            f"Password Safe refused the credential request ({resp.status_code}). The API "
+            f"identity needs the Requestor role and an access policy granting View on a "
+            f"Smart Rule containing this account. There is no Smart Rule API — this is an "
+            f"out-of-band Password Safe prerequisite (docs/integrations/beyondtrust.md).")
+    body = resp.json()
+    request_id = body if isinstance(body, int) else (
+        body.get("RequestID") or body.get("RequestId") or body.get("id"))
+    if not request_id:
+        raise PSApiError("Password Safe returned no request id for the credential request")
+
+    got = await client.get(f"Credentials/{int(request_id)}")
+    if got.status_code != 200:
+        raise PSApiError(
+            f"Password Safe would not release the credential ({got.status_code}) — the "
+            f"request may be awaiting approval, or the access policy may not auto-release.")
+    credential = got.json()
+    if isinstance(credential, dict):
+        credential = credential.get("Credentials") or credential.get("Password") or ""
+    return int(request_id), str(credential)
+
+
+async def _checkin(client: httpx.AsyncClient, request_id: int) -> None:
+    """Release the request. Best-effort — it expires on its own duration anyway.
+
+    Plain ``Checkin`` ONLY — never the rotate-on-release variant that
+    btapi_service.rotate_ps_request_on_checkin flags. Asking Password Safe to rotate on
+    release would rotate the ServiceAccount token again the instant we finished
+    mirroring the previous one, revoking the value we just wrote into PRA and starting
+    an endless rotate → sync → rotate loop with a dead-credential window every pass.
+    A static test asserts that endpoint is named nowhere in this module."""
+    try:
+        await client.put(f"Requests/{int(request_id)}/Checkin",
+                         json={"Reason": "k8s token sync complete"})
+    except Exception:  # noqa: BLE001 — never log the request id (CodeQL taints it)
+        logger.debug("Password Safe credential check-in was refused")
+
+
+async def _set_credential(client: httpx.AsyncClient, account_id: int, credential: str) -> None:
+    """``PUT ManagedAccounts/{id}/Credentials`` — set a SPECIFIC value.
+
+    ``UpdateSystemPassword=true`` is what makes the account's platform plugin run.
+    Without it Password Safe records the value and stops, the PRA Vault copy is never
+    written, and the call silently accomplishes nothing — which is the entire point of
+    making it. Only ``Password`` is sent: an empty PrivateKey/Passphrase on a
+    password-managed account is at best ignored and at worst a 400.
+
+    Verify the exact shape against the tenant's API version during live testing (the
+    same caveat as change_managed_account_password)."""
+    resp = await client.put(
+        f"ManagedAccounts/{int(account_id)}/Credentials",
+        json={"Password": credential, "UpdateSystemPassword": True},
+    )
+    if resp.status_code not in (200, 201, 202, 204):
+        raise PSApiError(
+            f"PUT ManagedAccounts/{account_id}/Credentials failed "
+            f"({resp.status_code}): {_redact(resp.text[:400], credential)}")
+
+
+def _platform_matches(actual: str, expected: str) -> bool:
+    """Every word of the configured platform name appears in the tenant's.
+
+    Same tolerance as ps_vm_hook._platform_name_ok and for the same reason — a
+    Password Safe admin can rename an imported plugin platform, and "Azure VM SSH
+    Rotation" once became "Azure Waagent VM SSH Rotation" overnight and silently
+    switched onboarding off. Duplicated rather than imported because ps_vm_hook
+    imports this module."""
+    have = (actual or "").strip().lower()
+    want = [w for w in (expected or "").strip().lower().split() if w]
+    return bool(have) and bool(want) and all(w in have for w in want)
+
+
+def _looks_like_sa_token(value: str) -> bool:
+    """A Kubernetes ServiceAccount token is a JWT in both LongLived and Bound mode:
+    three dot-separated segments, no whitespace.
+
+    This guards the one failure that would write a secret-shaped non-secret into
+    PRA's vault: Password Safe can return a soft-failure STRING in the credential
+    position ("It was not possible to get a credential for Request ID: 5" — the case
+    btapi_service already learned to catch), and mirroring that into PRA breaks the
+    tunnel while reporting success."""
+    return (bool(value) and len(value) >= 40 and value.count(".") == 2
+            and not any(c.isspace() for c in value))
+
+
+async def get_managed_account_states(account_ids: list) -> dict:
+    """``{account_id: state}`` for several accounts in ONE signed-in session.
+
+    This is the sync loop's cheap path: it reads LastChangeDate to decide whether
+    anything rotated, with no credential request and no checkout, so it is affordable
+    every interval for every registered cluster. Per-account helpers each own a
+    session (Token + SignAppIn + Signout), which for a liveness poll over N clusters
+    would be 3N round trips — hence the inventory-read shape instead.
+
+    An account that does not exist maps to ``{}``; the whole call raises on a
+    transport or auth failure, because "Password Safe is down" must not look like
+    "every account was deleted"."""
+    wanted = [int(a) for a in account_ids if str(a or "").strip()]
+    if not wanted:
+        return {}
+    out: dict = {}
+    async with _list_client() as client:
+        await _sign_in(client)
+        try:
+            for aid in wanted:
+                out[str(aid)] = await _managed_account(client, aid)
+        finally:
+            await _sign_out(client)
+    return out
+
+
+async def checkout_credential(account_id: int, *, duration_min: int = 15,
+                              reason: str = "") -> str:
+    """Check one managed account's credential out and RETURN it.
+
+    The deliberate exception to this section's containment rule, and the only one: the
+    PRA Vault token account is provisioned by Terraform, so the tunnel registration has
+    to hold the value long enough to pass it as a sensitive ``TF_VAR``. Nothing else
+    should call this — the recurring sync uses rotate_pra_vault_token, which never
+    hands the value out.
+
+    Callers must not log it, must not put it in a job result, and must not let it reach
+    Terraform state unscrubbed (terraform_pra_service._scrub_tf_state redacts ``token``
+    fail-closed, which is what makes the tunnel path safe)."""
+    async with _client() as client:
+        await _sign_in(client)
+        try:
+            request_id, credential = await _checkout(
+                client, int(account_id), duration_min=duration_min,
+                reason=reason or "k8s ServiceAccount token read for PRA Vault")
+            try:
+                if not _looks_like_sa_token(credential):
+                    raise PSApiError(
+                        f"Password Safe returned a value that is not a ServiceAccount token "
+                        f"({len(credential)} chars) — check that account {account_id} is "
+                        f"managed by the 'Kubernetes Service Account Token' plugin.")
+                return credential
+            finally:
+                await _checkin(client, request_id)
+        finally:
+            await _sign_out(client)
+
+
+async def rotate_pra_vault_token(*, source_account_id: int, target_account_id: int,
+                                 duration_min: int = 15, reason: str = "",
+                                 expect_target_platform: str = "") -> dict:
+    """Copy ``source``'s credential onto ``target``, pushing it to target's system.
+
+    Source is the Kubernetes ServiceAccount token account (rotated by the "Kubernetes
+    Service Account Token" plugin); target is the "PRA Vault Token" account, whose
+    plugin PATCHes the value into PRA Vault. One checkout, one set, one check-in,
+    inside a single Password Safe session.
+
+    Returns ``{"sha256": "<12 hex>", "pushed": bool, "skipped": str}`` and NEVER the
+    credential — keeping the plaintext to this one frame is what stops it reaching a
+    traceback local, a JobLog row or the jobs API.
+
+    ``expect_target_platform`` fails the call CLOSED when the target account is not on
+    that platform. Writing a Kubernetes bearer token into an account managed by some
+    other plugin is the one failure here that puts a secret somewhere it does not
+    belong, so an ambiguous target is refused rather than guessed at."""
+    src = int(source_account_id)
+    tgt = int(target_account_id)
+    reason = reason or "k8s ServiceAccount token → PRA Vault sync"
+
+    async with _client() as client:
+        await _sign_in(client)
+        try:
+            if expect_target_platform:
+                target = await _managed_account(client, tgt)
+                if not target:
+                    raise PSApiError(
+                        f"Password Safe managed account {tgt} (the PRA Vault Token account) "
+                        f"does not exist — re-register the cluster or clear the binding.")
+                pname = await _platform_name(client, int(target["platform_id"] or 0))
+                if not _platform_matches(pname, expect_target_platform):
+                    raise PSApiError(
+                        f"managed account {tgt} is on platform {pname or '(unknown)'!r}, not a "
+                        f"{expect_target_platform!r} platform — refusing to write a Kubernetes "
+                        f"ServiceAccount token to it.")
+
+            request_id, credential = await _checkout(
+                client, src, duration_min=duration_min, reason=reason)
+            try:
+                if not _looks_like_sa_token(credential):
+                    raise PSApiError(
+                        f"Password Safe returned a value that is not a ServiceAccount token "
+                        f"({len(credential)} chars) — check that account {src} is managed by "
+                        f"the 'Kubernetes Service Account Token' plugin and has rotated once.")
+                digest = hashlib.sha256(credential.encode("utf-8")).hexdigest()[:12]
+                await _set_credential(client, tgt, credential)
+            finally:
+                del credential
+                await _checkin(client, request_id)
+        finally:
+            await _sign_out(client)
+    return {"sha256": digest, "pushed": True, "skipped": ""}
 
 
 async def create_functional_account(

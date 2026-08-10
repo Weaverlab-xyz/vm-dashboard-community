@@ -320,6 +320,169 @@ recorded on the job (`ps_error`) but never fail the deploy.
 
 ---
 
+## Kubernetes ServiceAccount token rotation
+
+A cluster's PRA k8s tunnel can inject a ServiceAccount bearer token at session launch
+([Kubernetes → Access & identity](../kubernetes.md#access--identity)). The dashboard used to
+mint that token once and never touch it again. This makes it a Password Safe **managed
+account** so it rotates on the tenant's schedule, and keeps the PRA Vault copy current.
+
+Two custom plugins, both imported by hand:
+
+| Plugin | Platform (default name) | Role |
+|---|---|---|
+| Kubernetes Service Account Token | `Kubernetes Service Account Token` | Rotates the token in the cluster |
+| PRA Vault Token | `PRA Vault Token` | Writes the rotated value into the PRA Vault `opaque_token` account |
+
+Enable **Kubernetes Token Rotation** in Settings → BeyondTrust, then use the per-cluster
+**Token rotation** button on `/k8s` (or tick the box on the provision form). Registration
+applies the rotator RBAC, creates the managed system + account seeded with the token the
+cluster is using, registers the PRA Vault mirror, rotates once to prove the path, pushes the
+new token into PRA, and finally deletes the dashboard-minted `<sa>-token` Secret.
+
+**Why that last step matters.** The plugin's rotation sweep selects Secrets by *its own*
+labels, so the dashboard-minted Secret is never swept — leaving it in place would mean
+rotation revokes nothing and a permanent cluster-admin bearer token stays valid forever. The
+ordering is deliberate too: it is deleted only after PRA carries a Password-Safe-issued
+token, because until then it is the credential live sessions are using.
+
+### Managed system address
+
+The address is the plugin's only per-cluster configuration surface (a `.psplugin` is
+checksum-sealed, so its packaged settings cannot be edited), capped at 249 characters:
+
+```
+eks;<region>;<clusterName>[;option…]
+aks;<subscriptionId>;<resourceGroup>;<clusterName>[;option…]
+gke;<projectId>;<location>;<clusterName>[;option…]
+k8s;<apiServerUrl>[;option…]
+```
+
+The dashboard builds it from the cluster row plus its deploy job's Terraform variables. For
+a **registered** cluster those are unknown, so the modal accepts a cloud cluster name and
+(for AKS) a resource group. **OKE and on-prem clusters use the generic `k8s;` form** — the
+plugin has no OCI provider. For GKE the `location` must be the **zone** for a zonal cluster
+and the **region** for a regional one; mixing them is the documented cause of a 404.
+
+Options appended automatically: `;longlived` or `;bound` (+ `ttl=`), `;ns=<namespace>`, and
+anything in `k8s_ps_token_address_options` (e.g. `dnsEndpoint=true`, `serverName=`,
+`allowHostnameMismatch=true`, `ca=` on generic addresses only).
+
+### Functional accounts
+
+One per cloud, created by the operator — the dashboard references them by name and never
+holds a cloud secret. The managed system inherits the functional account's platform, so a
+functional account on the wrong platform is refused with the platform named.
+
+| Cloud | Username | Password |
+|---|---|---|
+| GKE | service account email (or `impersonate:<target>`) | **base64 of the whole JSON key file** |
+| EKS | AWS access key id (or `InstanceProfile` / `WebIdentity`) | `<secret>` or `<secret>:<sessionToken>` |
+| AKS | `SP:<tenantId>:<clientId>` — tenant **first** | Entra client secret (`-` for managed identity) |
+| Generic / OKE | `token`, `cert` or `kubeconfig` | bearer token, PEM/PKCS#12, or `b64kubeconfig:<base64>` |
+| PRA Vault mirror | PRA OAuth **Client ID** | PRA OAuth **Client Secret** |
+
+### In-cluster rotator RBAC
+
+Applied automatically (`k8s_ps_rotator_apply_rbac`). LongLived needs `serviceaccounts`
+get/list + `secrets` create/get/list/delete; Bound needs `serviceaccounts/token` create and
+**no** access to Secrets at all. The ClusterRole always applies; the binding only when a
+subject is configured, because **the subject differs per cloud and is the single most common
+onboarding mistake**:
+
+| Cloud | Binding subject | Config key |
+|---|---|---|
+| GKE | the service account's **email** | `k8s_ps_rotator_gke_sa_email` (blank → derived from the functional account) |
+| AKS | the service principal's **object id** (`oid`), *not* the client id | `k8s_ps_rotator_aks_sp_object_id` |
+| EKS | the username the access entry maps the principal to | `k8s_ps_rotator_eks_username` |
+| Generic / OKE | a bootstrap ServiceAccount | `k8s_ps_rotator_bootstrap_sa` / `_namespace` |
+
+On EKS the access entry is created too when `k8s_ps_rotator_eks_principal_arn` is set —
+without it the binding's `User` subject matches nothing and the API server returns 401,
+which is invisible from inside the cluster. The dashboard never edits `aws-auth`; a bad edit
+there can lock every principal out. If the ARN is unset the job result prints the command:
+
+```
+aws eks create-access-entry --cluster-name <cluster> \
+  --principal-arn <arn> --type STANDARD --username passwordsafe-rotator
+```
+
+Run **Verify Functional Account** in Password Safe after registering: it names every missing
+verb, prints the ClusterRole to apply, and logs the correct AKS object id on every run.
+
+### Keeping the PRA Vault copy in sync
+
+A background pass polls each token account's `LastChangeDate` (cheap — no checkout) and, when
+it moves, checks the new token out and sets it as the PRA Vault Token account's credential
+with `UpdateSystemPassword`, so Password Safe drives the plugin's PATCH into PRA. Both
+accounts stay Password Safe-managed and audited; the plaintext never leaves the API client.
+
+**The LongLived break window.** Rotation revokes the old token immediately, so PRA holds a
+dead credential until the next pass — roughly half the interval on average, one interval plus
+the pass in the worst case. Shorten `k8s_token_sync_interval_minutes`, or set the cluster's
+token mode to **Bound**, which never revokes (the old token stays valid until its TTL, so the
+window is zero as long as the interval is well under it). The dashboard can shrink this
+window but cannot remove it.
+
+Verification is free: Password Safe's change date on the *mirror* account is the receipt that
+the PATCH ran, so the next pass reads it and flips the cluster to `ok` or reports that the PRA
+write did not complete.
+
+### Operator prerequisites
+
+1. Import both `.psplugin` packages and confirm the platform names.
+2. Create the functional accounts above.
+3. Grant the API identity **Requestor** plus an access policy granting **View** on a Smart
+   Rule containing both managed accounts. There is no Smart Rule API, so this is out-of-band —
+   and it is the failure every Password Safe consumption path here hits first (`POST /Requests`
+   → `4031` / 403).
+4. **Leave "Change Password After Release" OFF** on the token account. With it on, every sync
+   triggers another rotation — an endless loop with a dead-credential window each pass. A
+   circuit breaker (`k8s_token_sync_max_per_hour`) trips and names it, but the fix is the
+   access policy.
+5. Give the Password Safe host or Resource Broker network reachability to the cluster's API
+   server. For private clusters this is a real constraint — Password Safe does not route
+   through the PRA Gateway.
+
+### Configuration keys
+
+| Key | Default | Notes |
+|---|---|---|
+| `k8s_ps_token_rotation_enabled` | `false` | Master gate (row action, provision checkbox, sync loop) |
+| `k8s_ps_token_platform` | `Kubernetes Service Account Token` | Plugin platform (name or id) |
+| `k8s_ps_pravault_token_platform` | `PRA Vault Token` | Mirror plugin platform |
+| `k8s_ps_functional_account_aws` / `_azure` / `_gcp` / `_local` | — | Per cloud; `_local` also covers OKE and on-prem |
+| `k8s_ps_pravault_functional_account` | — | PRA Config-API OAuth client for the mirror |
+| `k8s_ps_workgroup` | — | Blank → `passwordsafe_workgroup` |
+| `k8s_ps_token_mode` | `longlived` | `longlived` (revokes) or `bound` (TTL expiry, no revoke) |
+| `k8s_ps_token_ttl_seconds` | `3600` | Bound mode; clamped up to the API server's 600s floor |
+| `k8s_ps_token_change_on_register` | `true` | Rotate once on register — proves the whole path immediately |
+| `k8s_ps_token_delete_legacy_secret` | `true` | Retire the dashboard-minted Secret the plugin's sweep never touches |
+| `k8s_ps_token_register_on_provision` | `false` | Pre-tick the provision-form checkbox |
+| `k8s_ps_pravault_mirror_enabled` | `true` | Register the PRA Vault Token mirror when a PRA vault account exists |
+| `k8s_ps_token_checkout_duration_min` | `15` | Password Safe request duration for token reads |
+| `k8s_ps_token_address_options` | — | Extra `;key=value` appended to every address |
+| `k8s_ps_rotator_apply_rbac` | `true` | Apply the rotator ClusterRole + binding on register |
+| `k8s_ps_rotator_gke_sa_email` | — | Blank → derived from the GCP functional account's name |
+| `k8s_ps_rotator_aks_sp_object_id` | — | The `oid` claim; the plugin logs it on every run |
+| `k8s_ps_rotator_eks_username` | `passwordsafe-rotator` | Access-entry username = the RBAC `User` subject |
+| `k8s_ps_rotator_eks_principal_arn` | — | IAM principal behind the functional account's key |
+| `k8s_ps_rotator_eks_create_access_entry` | `true` | Create the access entry when the ARN is set |
+| `k8s_ps_rotator_bootstrap_namespace` / `_sa` | `beyondtrust` / `password-safe-rotator` | Generic-path bootstrap ServiceAccount |
+| `k8s_token_sync_enabled` | `true` | The PS → PRA sync pass (no-ops while nothing is registered) |
+| `k8s_token_sync_interval_minutes` | `15` | Floored at 5 |
+| `k8s_token_sync_request_duration_min` | `15` | Checkout duration for the sync's read |
+| `k8s_token_sync_max_per_pass` | `5` | Push cap per pass; the rest defer, oldest drift first |
+| `k8s_token_sync_max_failures` | `5` | Consecutive failures before a cluster parks until a manual sync |
+| `k8s_token_sync_max_per_hour` | `4` | Circuit breaker for the rotate-on-release loop |
+| `pra_k8s_namespace` / `pra_k8s_sa_name` | `pra-access` | The managed account name is `<namespace>/<sa>` |
+
+Off-boarding removes both managed systems and the rotator RBAC; it runs automatically when the
+cluster is decommissioned or deregistered. Design rationale, including why each of these
+choices is what it is: [k8s-sa-token-rotation](../design/k8s-sa-token-rotation.md).
+
+---
+
 ## Databases
 
 The dashboard also provisions **managed cloud databases** (AWS / Azure / GCP / OCI), reaches

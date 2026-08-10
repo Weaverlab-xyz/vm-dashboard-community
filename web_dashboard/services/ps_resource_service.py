@@ -80,9 +80,35 @@ _REDACTED = "**REDACTED-BY-DASHBOARD**"
 # ``dbazure`` (cloud-DB via the "{engine} Azure Run Command Plugin") and ``pravault``
 # (the "PRA Vault Username Password" plugin) are PASSWORD-managed, so their account
 # emits dss_auto_management_flag = false.
-_PLUGIN_METHODS = frozenset({"ssm", "azurevm", "gcpvm", "dbssm", "dbazure", "pravault"})
+# ``k8ssa`` (the "Kubernetes Service Account Token" plugin) is password-managed too —
+# there the "password" IS the ServiceAccount bearer token.
+_PLUGIN_METHODS = frozenset({"ssm", "azurevm", "gcpvm", "dbssm", "dbazure", "pravault",
+                             "k8ssa"})
 # Methods whose managed account is password-managed (no SSH DSS key auto-management).
-_PASSWORD_MANAGED_METHODS = frozenset({"dbssm", "dbazure", "pravault"})
+_PASSWORD_MANAGED_METHODS = frozenset({"dbssm", "dbazure", "pravault", "k8ssa"})
+
+# ── Kubernetes Service Account Token address grammar ──────────────────────────
+#
+# Transcribed from the plugin's Factories/ParameterFactory.cs so a bad address is
+# rejected here, at registration, instead of at the first scheduled rotation. The
+# plugin rejects an unrecognised option rather than ignoring it (a silently dropped
+# option inside a checksum-sealed package is neither diagnosable nor fixable), so
+# this validator has to be exact rather than permissive.
+#
+# Password Safe truncates the address field at 255 characters; the plugin refuses at
+# 249 so a truncated address never reaches the cluster lookup.
+_K8SSA_MAX_ADDRESS = 249
+# Semicolon-separated fields that precede the options, per prefix.
+_K8SSA_POSITIONAL = {"eks": 3, "aks": 4, "gke": 4, "k8s": 2}
+# Option keys, lowercased exactly as the plugin's ApplyOption switch compares them.
+_K8SSA_OPTION_KEYS = frozenset({
+    "mode", "ttl", "ns", "dnsendpoint", "allowhostnamemismatch", "servername",
+    "rolearn", "aadappid", "ca",
+})
+# Options the plugin accepts only on one prefix; anywhere else it raises.
+_K8SSA_OPTION_PROVIDER = {"rolearn": "eks", "aadappid": "aks", "ca": "k8s"}
+_K8SSA_MODES = frozenset({"bound", "longlived"})
+_RFC1123_LABEL = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
 
 
 class PSResourceError(Exception):
@@ -109,6 +135,78 @@ def _line(key: str, val) -> str:
     """One aligned HCL attribute line (``  key = val``), padding the key so the
     ``=`` lines up across the block — matches the hand-aligned style the tests assert."""
     return f"  {key:<24} = {val}"
+
+
+def _validate_k8ssa_dns_name(dns_name: str) -> None:
+    """Raise PSResourceError unless ``dns_name`` is an address the plugin will parse.
+
+    Mirrors ParameterFactory.ParseAddress: length cap, a known prefix, at least that
+    prefix's positional field count, then every trailing field is either the bare mode
+    shorthand or ``key=value`` with a recognised, provider-appropriate key. Blank
+    trailing fields are skipped, as the plugin skips them, so a trailing ';' is fine."""
+    addr = (dns_name or "").strip()
+    if not addr:
+        raise PSResourceError(
+            "Kubernetes ServiceAccount Token onboarding requires a dns_name of the form "
+            "'eks;<region>;<cluster>', 'aks;<subscriptionId>;<resourceGroup>;<cluster>', "
+            "'gke;<projectId>;<location>;<cluster>' or 'k8s;<apiServerUrl>'")
+    if len(addr) > _K8SSA_MAX_ADDRESS:
+        raise PSResourceError(
+            f"managed system address is {len(addr)} characters, "
+            f"{len(addr) - _K8SSA_MAX_ADDRESS} over the {_K8SSA_MAX_ADDRESS} character "
+            f"limit the plugin enforces (Password Safe truncates the field at 255)")
+
+    fields = [f.strip() for f in addr.split(";")]
+    prefix = fields[0].lower()
+    positional = _K8SSA_POSITIONAL.get(prefix)
+    if positional is None:
+        raise PSResourceError(
+            f"managed system address prefix {fields[0]!r} is not recognised — use one of "
+            f"eks; aks; gke; k8s;")
+    if len(fields) < positional:
+        raise PSResourceError(
+            f"managed system address {addr!r} has {len(fields)} field(s), expected at "
+            f"least {positional} for a {prefix!r} address")
+    if any(not f for f in fields[1:positional]):
+        raise PSResourceError(
+            f"managed system address {addr!r} has an empty positional field — every one of "
+            f"the first {positional} fields must be set for a {prefix!r} address")
+
+    for field in fields[positional:]:
+        if not field:
+            continue
+        if field.lower() in _K8SSA_MODES:
+            continue
+        key, sep, value = field.partition("=")
+        if not sep or not key:
+            raise PSResourceError(
+                f"{field!r} in managed system address {addr!r} is not a recognised option — "
+                f"options are 'bound', 'longlived', or key=value with one of: "
+                f"{', '.join(sorted(_K8SSA_OPTION_KEYS))}")
+        key = key.strip().lower()
+        if key not in _K8SSA_OPTION_KEYS:
+            raise PSResourceError(
+                f"{key!r} in managed system address {addr!r} is not a recognised option key — "
+                f"valid keys: {', '.join(sorted(_K8SSA_OPTION_KEYS))}")
+        required = _K8SSA_OPTION_PROVIDER.get(key)
+        if required and required != prefix:
+            raise PSResourceError(
+                f"the {key!r} option applies only to {required!r} addresses, but {addr!r} is "
+                f"a {prefix!r} address")
+        if key == "mode" and value.strip().lower() not in _K8SSA_MODES:
+            raise PSResourceError(
+                f"token mode {value!r} is not valid — use 'mode=longlived' or 'mode=bound' "
+                f"(or the bare shorthand ';bound')")
+        # The plugin only requires ttl > 0 here; the API server's own 600s floor is
+        # applied by whoever builds the address, not by the parser.
+        if key == "ttl" and (not value.strip().isdigit() or int(value.strip()) <= 0):
+            raise PSResourceError(
+                f"bound token TTL {value!r} is not a positive whole number of seconds "
+                f"(example: ttl=43200)")
+        if key == "ns" and not _RFC1123_LABEL.match(value.strip()):
+            raise PSResourceError(
+                f"default namespace {value!r} is not a valid Kubernetes name — lowercase "
+                f"letters, digits and hyphens, starting and ending alphanumeric")
 
 
 def _ssm_account_name(name: str, suffix: str) -> str:
@@ -353,7 +451,8 @@ async def register_managed_system(*, name: str, host_name: str, private_key: str
                                    entity_type_id: int = 1, managed_account_name: str = "adminuser",
                                    ssh_key_enforcement_mode: int = 2,
                                    application_host_id: int = 0, method: str = "ssh",
-                                   dns_name: str = "", account_suffix: str = "") -> dict:
+                                   dns_name: str = "", account_suffix: str = "",
+                                   initial_password: str = "") -> dict:
     """Onboard a VM as a Password Safe managed system + managed account.
     Returns ``{managed_system_id, managed_account_id, tf_state_json}``.
 
@@ -387,12 +486,26 @@ async def register_managed_system(*, name: str, host_name: str, private_key: str
     the PRA appliance URL and ``managed_account_name`` the exact PRA Vault account name; the
     account is password-managed.
 
+    ``method="k8ssa"`` uses the "Kubernetes Service Account Token" plugin: ``dns_name`` must
+    be a cluster address (``eks;<region>;<cluster>``, ``aks;<subscriptionId>;<resourceGroup>;
+    <cluster>``, ``gke;<projectId>;<location>;<cluster>`` or ``k8s;<apiServerUrl>``) plus
+    optional trailing ``;key=value`` options, at most 249 characters;
+    ``managed_account_name`` is ``<namespace>/<serviceaccount>``. The account is
+    password-managed — the credential IS the bearer token — so pass the cluster's current
+    token as ``initial_password``.
+
     ``method="ssh"`` (default) keeps the traditional key-managed flow and requires
-    ``private_key``."""
+    ``private_key``.
+
+    ``initial_password`` seeds the managed account with a credential the caller already
+    holds, instead of the throwaway placeholder. Only meaningful for a password-managed
+    method: it is what lets a k8s registration start out holding the token the cluster
+    (and the PRA Vault copy) is actually using, rather than a value Password Safe would
+    have to rotate before anything works."""
     method = (method or "ssh").lower()
     # The provider requires a password even for a key-managed account; supply a strong
     # placeholder it never uses (the real credential is the SSH key, managed by Password Safe).
-    tf_vars = {"ps_account_password": secrets.token_urlsafe(24)}
+    tf_vars = {"ps_account_password": initial_password or secrets.token_urlsafe(24)}
     if method == "ssm":
         if not dns_name or ":" not in dns_name:
             raise PSResourceError(
@@ -486,6 +599,26 @@ async def register_managed_system(*, name: str, host_name: str, private_key: str
             ssh_key_enforcement_mode=ssh_key_enforcement_mode,
             application_host_id=application_host_id,
             method="pravault", dns_name="", emit_private_key=False,
+            dss_auto_management=False)
+    elif method == "k8ssa":
+        # "Kubernetes Service Account Token" plugin: dns_name carries the cluster
+        # address plus trailing ;key=value options, and the managed account name is
+        # "<namespace>/<serviceaccount>". host_name stays a human label and ip_address
+        # the 127.0.0.1 placeholder — the plugin iterates every host Password Safe
+        # supplies and skips the ones that do not parse as a cluster address, so the
+        # two non-addresses cost nothing. Port is irrelevant (the API server port is
+        # part of the endpoint URL). Password-managed: the credential is the bearer
+        # token itself, so no private key and no DSS auto-management.
+        _validate_k8ssa_dns_name(dns_name)
+        hcl = _generate_managed_system_hcl(
+            name=name, host_name=host_name, ip_address=ip_address or "127.0.0.1",
+            port=port or 443,
+            functional_account_id=functional_account_id, platform_id=platform_id,
+            entity_type_id=entity_type_id, workgroup_id=workgroup_id,
+            managed_account_name=managed_account_name,
+            ssh_key_enforcement_mode=ssh_key_enforcement_mode,
+            application_host_id=application_host_id,
+            method="k8ssa", dns_name=dns_name, emit_private_key=False,
             dss_auto_management=False)
     else:
         if not private_key:

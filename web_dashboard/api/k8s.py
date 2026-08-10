@@ -29,6 +29,7 @@ from ..models.k8s import (
     ImpersonatorRequest,
     K8sProvisionOptions,
     ManagementRequest,
+    PSTokenRegisterRequest,
     SecretDeliveryRequest,
 )
 from ..services import k8s_service, job_service, cache_service, pra_api_service
@@ -108,6 +109,7 @@ async def provision_cluster(
         "authorized_cidrs": payload.authorized_cidrs,
         "zone": payload.zone,
         "enable_ebs_csi": payload.enable_ebs_csi,
+        "register_token_in_passwordsafe": payload.register_token_in_passwordsafe,
     }.items() if v is not None}
 
     # Pre-action policy gate (inert unless enabled + this action is gated).
@@ -216,8 +218,13 @@ async def delete_cluster(
         result = k8s_service.start_decommission(db, cluster_id, created_by=current_user.username)
         return {"status": "decommissioning", **result}
 
-    for _dereg in (k8s_service.deregister_pra_tunnel, k8s_service.deregister_api_tunnel,
-                   k8s_service.unbind_entra_group):
+    # Password Safe registration first, for the same reason as run_decommission: it
+    # clears ps_token_account_id so the tunnel deregister takes its normal
+    # ServiceAccount-revoke path. Without it the two managed systems would be orphaned
+    # in Password Safe, still trying to rotate a cluster the dashboard has forgotten.
+    from ..services import ps_k8s_token_service
+    for _dereg in (ps_k8s_token_service.deregister, k8s_service.deregister_pra_tunnel,
+                   k8s_service.deregister_api_tunnel, k8s_service.unbind_entra_group):
         try:
             await _dereg(db, cluster_id)
         except Exception as e:
@@ -616,6 +623,128 @@ async def setup_secret_delivery(
     )
     return {"ok": True, "status": "installing", "cluster_id": cluster_id,
             "kind": payload.kind, "job_id": job.id}
+
+
+@router.post("/clusters/{cluster_id}/ps-token", status_code=202)
+async def register_ps_token(
+    cluster_id: str,
+    payload: PSTokenRegisterRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("k8s", "write")),
+):
+    """Register the cluster's PRA ServiceAccount token as a Password Safe managed
+    account (the "Kubernetes Service Account Token" plugin), so it rotates on the
+    tenant's schedule; optionally registers the "PRA Vault Token" mirror so each
+    rotation is pushed into the PRA Vault copy. Async — enqueues a ``k8s_ps_token``
+    job. Idempotent: an already-registered cluster re-applies the RBAC and completes.
+
+    Pre-checks the gates rather than enqueuing a job that will certainly fail —
+    the same courtesy the Rancher Entitle route extends."""
+    from ..services import ps_k8s_token_service
+    if not ps_k8s_token_service.enabled():
+        raise HTTPException(
+            status_code=400,
+            detail="Password Safe token rotation is disabled — enable it in Settings "
+                   "(k8s_ps_token_rotation_enabled)")
+    from ..services import ps_api_service
+    if not ps_api_service.configured():
+        raise HTTPException(
+            status_code=400,
+            detail="Password Safe is not configured — set the pscli_* connection keys")
+    if payload.mode and payload.mode not in ps_k8s_token_service.VALID_PS_TOKEN_MODES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown mode {payload.mode!r} (expected one of "
+                   f"{', '.join(ps_k8s_token_service.VALID_PS_TOKEN_MODES)})")
+    try:
+        k8s_service.get_cluster(db, cluster_id)   # 404 if unknown
+    except K8sError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    meta = {"cluster_id": cluster_id, "action": "register"}
+    meta.update({k: v for k, v in payload.model_dump().items() if v is not None})
+    job = job_service.create_job(
+        db, job_type="k8s_ps_token", created_by=current_user.username, metadata=meta)
+    return {"ok": True, "status": "registering", "cluster_id": cluster_id,
+            "job_id": job.id}
+
+
+@router.delete("/clusters/{cluster_id}/ps-token", status_code=202)
+async def remove_ps_token(
+    cluster_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("k8s", "delete")),
+):
+    """Off-board both Password Safe managed systems and drop the rotator RBAC.
+    Async — enqueues a ``k8s_ps_token`` job with ``action=deregister``."""
+    try:
+        k8s_service.get_cluster(db, cluster_id)
+    except K8sError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    job = job_service.create_job(
+        db, job_type="k8s_ps_token", created_by=current_user.username,
+        metadata={"cluster_id": cluster_id, "action": "deregister"})
+    return {"ok": True, "status": "removing", "cluster_id": cluster_id,
+            "job_id": job.id}
+
+
+@router.post("/clusters/{cluster_id}/ps-token/rotate", status_code=202)
+async def rotate_ps_token(
+    cluster_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("k8s", "write")),
+):
+    """Rotate the token in Password Safe now, then sync the result into PRA in the
+    same job — an operator-initiated rotation should not leave PRA holding a dead
+    token until the next sweep."""
+    try:
+        k8s_service.get_cluster(db, cluster_id)
+    except K8sError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    job = job_service.create_job(
+        db, job_type="k8s_ps_token", created_by=current_user.username,
+        metadata={"cluster_id": cluster_id, "action": "rotate"})
+    return {"ok": True, "status": "rotating", "cluster_id": cluster_id,
+            "job_id": job.id}
+
+
+@router.post("/clusters/{cluster_id}/token-sync", status_code=202)
+async def sync_ps_token(
+    cluster_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("k8s", "write")),
+):
+    """Sync this cluster's PRA Vault copy from Password Safe now. ``force`` bypasses
+    the change-date short-circuit AND the failure backoff — a human who just pressed
+    the button means now, which is also why this enqueues its own pass rather than
+    reporting that a periodic one is due soon."""
+    try:
+        k8s_service.get_cluster(db, cluster_id)
+    except K8sError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    job = job_service.create_job(
+        db, job_type="k8s_token_sync", created_by=current_user.username,
+        metadata={"cluster_id": cluster_id, "force": True})
+    return {"ok": True, "status": "syncing", "cluster_id": cluster_id,
+            "job_id": job.id}
+
+
+@router.post("/token-sync/sweep", status_code=202)
+async def force_token_sync_sweep(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("k8s", "write")),
+):
+    """Run a full token-sync pass now, skipping the recency guard (``min_gap_seconds=0``)
+    — mirroring the auto-delete force-sweep. The active-pass check still applies, so a
+    pass already running is reported rather than doubled."""
+    from ..services import k8s_token_sync
+    if not k8s_token_sync.enabled():
+        raise HTTPException(
+            status_code=400,
+            detail="token sync is disabled — enable k8s_token_sync_enabled in Settings")
+    job_id = k8s_token_sync.enqueue_sweep_if_due(db, min_gap_seconds=0)
+    if not job_id:
+        return {"ok": True, "status": "already_running", "job_id": None}
+    return {"ok": True, "status": "sweeping", "job_id": job_id}
 
 
 @router.post("/clusters/{cluster_id}/entitle-agent", status_code=202)

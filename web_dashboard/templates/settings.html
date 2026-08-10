@@ -1610,6 +1610,235 @@
             </div>
           </div>
 
+          <!-- Kubernetes ServiceAccount token rotation (Password Safe) -->
+          <div class="border-t border-gray-100 pt-4">
+            <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Kubernetes Token Rotation</p>
+            <p class="text-xs text-gray-400 mb-3">
+              Makes a cluster's PRA-injected ServiceAccount token a Password Safe managed account on the
+              <code class="bg-gray-100 px-1 rounded">Kubernetes Service Account Token</code> plugin so it rotates on schedule,
+              and mirrors each rotation into the PRA Vault copy through the
+              <code class="bg-gray-100 px-1 rounded">PRA Vault Token</code> plugin. Importing the two plugins, creating the
+              functional accounts, and granting the API identity Requestor + an auto-release access policy on the new
+              managed accounts are one-time manual setup — see the BeyondTrust integration docs.
+              <span class="text-amber-600">The token account's access policy must NOT enable "Change Password After
+              Release"</span> — every sync would then trigger another rotation.
+            </p>
+            <label class="flex items-center gap-2 mb-3 text-sm text-gray-700">
+              <input type="checkbox" x-model="panelCfg.k8s_ps_token_rotation_enabled"
+                     class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+              Enable Password Safe rotation for k8s ServiceAccount tokens
+            </label>
+            <div x-show="panelCfg.k8s_ps_token_rotation_enabled" class="space-y-3">
+              <div class="grid grid-cols-2 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Token Platform</label>
+                  <input type="text" x-model="panelCfg.k8s_ps_token_platform"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="Kubernetes Service Account Token">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">PRA Vault Token Platform</label>
+                  <input type="text" x-model="panelCfg.k8s_ps_pravault_token_platform"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="PRA Vault Token">
+                </div>
+              </div>
+              <p class="text-xs text-gray-400">Functional accounts (name or id). Per cloud: an AWS access key, an Entra service principal (<code class="bg-gray-100 px-1 rounded">SP:&lt;tenantId&gt;:&lt;clientId&gt;</code>), a GCP service-account key, or a bootstrap ServiceAccount credential for on-prem/OKE. The PRA Vault mirror's is a PRA Config-API OAuth client.</p>
+              <div class="grid grid-cols-2 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">AWS Functional Account</label>
+                  <input type="text" x-model="panelCfg.k8s_ps_functional_account_aws"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="ps-k8s-rotator-aws">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Azure Functional Account</label>
+                  <input type="text" x-model="panelCfg.k8s_ps_functional_account_azure"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="ps-k8s-rotator-azure">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">GCP Functional Account</label>
+                  <input type="text" x-model="panelCfg.k8s_ps_functional_account_gcp"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="psafe-rotator@project.iam.gserviceaccount.com">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Generic / On-prem Functional Account</label>
+                  <input type="text" x-model="panelCfg.k8s_ps_functional_account_local"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="ps-k8s-rotator-generic">
+                </div>
+              </div>
+              <div class="grid grid-cols-2 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">PRA Vault Mirror Functional Account</label>
+                  <input type="text" x-model="panelCfg.k8s_ps_pravault_functional_account"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="pra-config-api">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Workgroup <span class="text-gray-400 font-normal">(blank = reuse VM workgroup)</span></label>
+                  <input type="text" x-model="panelCfg.k8s_ps_workgroup"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="Default Workgroup">
+                </div>
+              </div>
+              <div class="grid grid-cols-3 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Token Mode</label>
+                  <select x-model="panelCfg.k8s_ps_token_mode"
+                          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    <option value="longlived">LongLived — rotation revokes the old token</option>
+                    <option value="bound">Bound — no revoke; old token valid until TTL</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Bound TTL (seconds)</label>
+                  <input type="number" x-model="panelCfg.k8s_ps_token_ttl_seconds" min="600"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="3600">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Extra Address Options</label>
+                  <input type="text" x-model="panelCfg.k8s_ps_token_address_options"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="dnsEndpoint=true;serverName=…">
+                </div>
+              </div>
+              <div class="grid grid-cols-3 gap-3">
+                <label class="flex items-center gap-2 text-sm text-gray-700">
+                  <input type="checkbox" x-model="panelCfg.k8s_ps_token_change_on_register"
+                         class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+                  Rotate once on register
+                </label>
+                <label class="flex items-center gap-2 text-sm text-gray-700">
+                  <input type="checkbox" x-model="panelCfg.k8s_ps_token_delete_legacy_secret"
+                         class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+                  Delete the dashboard-minted token Secret
+                </label>
+                <label class="flex items-center gap-2 text-sm text-gray-700">
+                  <input type="checkbox" x-model="panelCfg.k8s_ps_token_register_on_provision"
+                         class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+                  Pre-tick on the provision form
+                </label>
+              </div>
+              <p class="text-xs text-gray-400">In-cluster rotator RBAC. The binding subject differs per cloud: AKS needs the service principal's <em>object id</em> (the plugin logs it on every run — not the client id), EKS the access-entry username + the IAM principal ARN behind the functional account's key. GKE derives the subject from the functional account's name when blank.</p>
+              <div class="grid grid-cols-3 gap-3">
+                <label class="flex items-center gap-2 text-sm text-gray-700 col-span-3">
+                  <input type="checkbox" x-model="panelCfg.k8s_ps_rotator_apply_rbac"
+                         class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+                  Apply the rotator ClusterRole + binding on register
+                </label>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">GKE SA Email <span class="text-gray-400 font-normal">(blank = derive)</span></label>
+                  <input type="text" x-model="panelCfg.k8s_ps_rotator_gke_sa_email"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="psafe-rotator@project.iam.gserviceaccount.com">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">AKS SP Object ID</label>
+                  <input type="text" x-model="panelCfg.k8s_ps_rotator_aks_sp_object_id"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="00000000-1111-2222-3333-444444444444">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">EKS Access-Entry Username</label>
+                  <input type="text" x-model="panelCfg.k8s_ps_rotator_eks_username"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="passwordsafe-rotator">
+                </div>
+              </div>
+              <div class="grid grid-cols-2 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">EKS Principal ARN <span class="text-gray-400 font-normal">(behind the FA's access key)</span></label>
+                  <input type="text" x-model="panelCfg.k8s_ps_rotator_eks_principal_arn"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="arn:aws:iam::123456789012:role/PasswordSafeRotator">
+                </div>
+                <label class="flex items-center gap-2 text-sm text-gray-700 mt-6">
+                  <input type="checkbox" x-model="panelCfg.k8s_ps_rotator_eks_create_access_entry"
+                         class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+                  Create the EKS access entry when the ARN is set
+                </label>
+              </div>
+              <div class="grid grid-cols-2 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Bootstrap SA Namespace <span class="text-gray-400 font-normal">(generic/on-prem)</span></label>
+                  <input type="text" x-model="panelCfg.k8s_ps_rotator_bootstrap_namespace"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="beyondtrust">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Bootstrap SA Name</label>
+                  <input type="text" x-model="panelCfg.k8s_ps_rotator_bootstrap_sa"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="password-safe-rotator">
+                </div>
+              </div>
+              <p class="text-xs text-gray-400">PS → PRA sync. In LongLived mode the old token is revoked at rotation, so PRA holds a dead credential until the next pass — mean half the interval. Shorten the interval, or use Bound mode on clusters whose tunnel must not break.</p>
+              <div class="grid grid-cols-3 gap-3">
+                <label class="flex items-center gap-2 text-sm text-gray-700">
+                  <input type="checkbox" x-model="panelCfg.k8s_token_sync_enabled"
+                         class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+                  Sync rotations into PRA
+                </label>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Sync Interval (minutes)</label>
+                  <input type="number" x-model="panelCfg.k8s_token_sync_interval_minutes" min="5"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="15">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Checkout Duration (minutes)</label>
+                  <input type="number" x-model="panelCfg.k8s_token_sync_request_duration_min" min="1"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="15">
+                </div>
+              </div>
+              <div class="grid grid-cols-3 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Max Pushes / Pass</label>
+                  <input type="number" x-model="panelCfg.k8s_token_sync_max_per_pass" min="1"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="5">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Max Failures Before Parking</label>
+                  <input type="number" x-model="panelCfg.k8s_token_sync_max_failures" min="1"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="5">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Max Pushes / Hour / Cluster</label>
+                  <input type="number" x-model="panelCfg.k8s_token_sync_max_per_hour" min="1"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="4">
+                </div>
+              </div>
+              <div class="grid grid-cols-3 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">PRA SA Namespace</label>
+                  <input type="text" x-model="panelCfg.pra_k8s_namespace"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="pra-access">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">PRA SA Name</label>
+                  <input type="text" x-model="panelCfg.pra_k8s_sa_name"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="pra-access">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">PRA Vault Account Group ID <span class="text-gray-400 font-normal">(optional)</span></label>
+                  <input type="text" x-model="panelCfg.bt_vault_account_group_id"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="(numeric id)">
+                </div>
+              </div>
+            </div>
+          </div>
+
           <!-- EPM for Linux -->
           <div class="border-t border-gray-100 pt-4">
             <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">EPM for Linux (EPM-L)</p>

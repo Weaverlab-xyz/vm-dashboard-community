@@ -39,7 +39,7 @@ ACTIVE_STATUSES = ("queued", "pending", "running")
 # disagree.
 #
 # Display and retention only — nothing authorizes off this tuple.
-ROUTINE_JOB_TYPES = ("expiry_sweep",)
+ROUTINE_JOB_TYPES = ("expiry_sweep", "k8s_token_sync")
 
 
 def create_job(

@@ -688,6 +688,46 @@ class BeyondTrustFeatureConfig(BaseModel):
     # EPM for Linux (EPM-L) — Pathfinder public API gateway at api.beyondtrust.io
     epml_site_id: str = ""          # Pathfinder site UUID; PATs are bound to the site active at creation
     epml_pat: str = ""              # encrypted at rest; Bearer token for EPML API
+    # k8s ServiceAccount token rotation (Password Safe) — see config.py for the key
+    # semantics. Every numeric key below MUST stay annotated `int`: _read_feature's
+    # int-coercion branch only fires on an int annotation, and an unset int otherwise
+    # reads back as "" and 422s the whole panel (same note as clouddb_ps_import_max_systems).
+    k8s_ps_token_rotation_enabled: bool = False
+    k8s_ps_token_platform: str = "Kubernetes Service Account Token"
+    k8s_ps_pravault_token_platform: str = "PRA Vault Token"
+    k8s_ps_functional_account_aws: str = ""
+    k8s_ps_functional_account_azure: str = ""
+    k8s_ps_functional_account_gcp: str = ""
+    k8s_ps_functional_account_local: str = ""
+    k8s_ps_pravault_functional_account: str = ""
+    k8s_ps_workgroup: str = ""
+    k8s_ps_token_mode: str = "longlived"
+    k8s_ps_token_ttl_seconds: int = 3600
+    k8s_ps_token_change_on_register: bool = True
+    k8s_ps_token_delete_legacy_secret: bool = True
+    k8s_ps_token_register_on_provision: bool = False
+    k8s_ps_pravault_mirror_enabled: bool = True
+    k8s_ps_token_checkout_duration_min: int = 15
+    k8s_ps_token_address_options: str = ""
+    k8s_ps_rotator_apply_rbac: bool = True
+    k8s_ps_rotator_gke_sa_email: str = ""
+    k8s_ps_rotator_aks_sp_object_id: str = ""
+    k8s_ps_rotator_eks_username: str = "passwordsafe-rotator"
+    k8s_ps_rotator_eks_principal_arn: str = ""
+    k8s_ps_rotator_eks_create_access_entry: bool = True
+    k8s_ps_rotator_bootstrap_namespace: str = "beyondtrust"
+    k8s_ps_rotator_bootstrap_sa: str = "password-safe-rotator"
+    k8s_token_sync_enabled: bool = True
+    k8s_token_sync_interval_minutes: int = 15
+    k8s_token_sync_request_duration_min: int = 15
+    k8s_token_sync_max_per_pass: int = 5
+    k8s_token_sync_max_failures: int = 5
+    k8s_token_sync_max_per_hour: int = 4
+    # Previously env-only, promoted alongside the rotation feature that makes them
+    # operationally load-bearing (the managed account name is <namespace>/<sa>).
+    pra_k8s_namespace: str = "pra-access"
+    pra_k8s_sa_name: str = "pra-access"
+    bt_vault_account_group_id: str = ""
 
 class PortainerFeatureConfig(BaseModel):
     """Portainer CE — both the connection to a server and the knobs for deploying a
