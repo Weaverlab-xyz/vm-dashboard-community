@@ -14,6 +14,7 @@ from .auth import get_current_user
 from ..services import job_service, workgroup_override_service
 from ..services import hyperv_service
 from ..services.hyperv_service import HyperVError
+from ..services import hypervisor_view_service
 from .hypervisor_deps import conn_in_task, conn_or_error
 
 router = APIRouter(prefix="/api/hyperv", tags=["hyperv"])
@@ -41,7 +42,9 @@ async def get_vms(
     VMs with no override are admin-only.
     """
     try:
-        vms = await hyperv_service.list_vms(conn_or_error(db, "hyperv", connection_id))
+        conn = conn_or_error(db, "hyperv", connection_id)
+        vms = (hypervisor_view_service.synced_rows(db, conn) if conn.via_agent
+               else await hyperv_service.list_vms(conn))
     except HyperVError as e:
         raise HTTPException(status_code=502, detail=str(e))
 

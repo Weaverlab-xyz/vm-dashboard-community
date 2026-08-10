@@ -14,6 +14,7 @@ from .auth import get_current_user
 from ..services import job_service, workgroup_service, workgroup_override_service
 from ..services import nutanix_service
 from ..services.nutanix_service import NutanixError
+from ..services import hypervisor_view_service
 from .hypervisor_deps import conn_in_task, conn_or_error
 
 router = APIRouter(prefix="/api/nutanix", tags=["nutanix"])
@@ -96,7 +97,9 @@ async def get_vms(
     VMs with no resolved workgroup are admin-only.
     """
     try:
-        vms = await nutanix_service.list_vms(conn_or_error(db, "nutanix", connection_id))
+        conn = conn_or_error(db, "nutanix", connection_id)
+        vms = (hypervisor_view_service.synced_rows(db, conn) if conn.via_agent
+               else await nutanix_service.list_vms(conn))
     except NutanixError as e:
         raise HTTPException(status_code=502, detail=str(e))
 

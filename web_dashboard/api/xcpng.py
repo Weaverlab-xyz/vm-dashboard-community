@@ -14,6 +14,7 @@ from .auth import get_current_user
 from ..services import job_service, workgroup_override_service
 from ..services import xcpng_service
 from ..services.xcpng_service import XcpNgError
+from ..services import hypervisor_view_service
 from .hypervisor_deps import agent_power_job, conn_in_task, conn_or_error
 
 # Page verb -> the agent's closed verb allowlist (services/agent_hypervisor_meta).
@@ -42,7 +43,9 @@ async def get_vms(
     VMs with no override are admin-only.
     """
     try:
-        vms = await xcpng_service.list_vms(conn_or_error(db, "xcpng", connection_id))
+        conn = conn_or_error(db, "xcpng", connection_id)
+        vms = (hypervisor_view_service.synced_rows(db, conn) if conn.via_agent
+               else await xcpng_service.list_vms(conn))
     except XcpNgError as e:
         raise HTTPException(status_code=502, detail=str(e))
 

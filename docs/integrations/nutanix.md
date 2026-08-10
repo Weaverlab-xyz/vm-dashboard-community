@@ -131,3 +131,14 @@ connection, and your `connections.yaml` defines it. Withhold any one and nothing
 Inventory sync only. Power verbs are refused by the agent: a v3 power
 change is a full spec PUT carrying a metadata version rather than a simple
 action, and getting that wrong writes to the VM instead of failing.
+
+### When the connection is reached through an agent
+
+The dashboard has no route to an agent-bound connection — that is the point of binding it
+to an agent — so this page cannot query it live. It shows the **last synced inventory**
+instead, with a banner saying so and how old it is. Live-only figures (CPU usage, uptime,
+disk) are blank there rather than zero: they were never measured, and a fabricated 0 is
+worse than an empty cell.
+
+Power actions still work: they are dispatched to the agent as jobs and appear on `/jobs`
+with Live Output, exactly like a discovery scan.

@@ -4,6 +4,19 @@
 {% block content %}
 <div x-data="nutanixDashboard()" x-init="init()" class="pb-12">
 
+  {% if via_agent %}
+  {#- An agent-bound connection is on a network the dashboard has no route to, so this
+      page shows what the agent last synced rather than a live query. Saying so is the
+      point: a stale panel that looks live is worse than one labelled stale. -#}
+  <div class="mb-4 text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+    <span class="font-medium">Showing the last synced inventory.</span>
+    This connection{% if connection_name %} (<span class="font-mono">{{ connection_name }}</span>){% endif %}
+    is reached through a remote agent, so the dashboard cannot query it live.
+    {% if synced_at %}<span x-text="'Synced ' + timeAgo('{{ synced_at }}') + '.'"></span>{% endif %}
+    Live-only figures such as CPU usage and uptime are blank here.
+  </div>
+  {% endif %}
+
   <!-- Header -->
   <div class="flex items-center justify-between mb-4">
     <div>

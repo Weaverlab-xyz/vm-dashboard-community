@@ -919,18 +919,25 @@ def _hypervisor_page_host(kind: str) -> dict:
     Best-effort: an unconfigured or unreachable-to-resolve kind renders a blank host
     rather than 500ing a page whose real content loads over the API anyway.
     """
-    from .database import SessionLocal
+    from .database import HypervisorConnection, SessionLocal
     from .services import hypervisor_connection_service as hcs
     try:
         with SessionLocal() as db:
             conn = hcs.resolve(db, kind)
         # An agent-bound connection has no host here by design — the agent holds it —
         # so show the agent-side name rather than an empty span.
+        # last_sync_at drives the "showing the last synced inventory" banner. It lives
+        # on the connection rather than in the VM response so the list endpoints keep a
+        # single shape — see hypervisor_view_service.synced_rows.
+        row = db.query(HypervisorConnection).filter(
+            HypervisorConnection.id == conn.id).first() if conn.id else None
+        synced_at = row.last_sync_at.isoformat() if (row and row.last_sync_at) else ""
         return {"host": conn.host or conn.agent_connection_name or "",
                 "connection_name": conn.name,
-                "via_agent": conn.via_agent}
+                "via_agent": conn.via_agent,
+                "synced_at": synced_at}
     except Exception:  # noqa: BLE001
-        return {"host": "", "connection_name": "", "via_agent": False}
+        return {"host": "", "connection_name": "", "via_agent": False, "synced_at": ""}
 
 
 @app.get("/connections", response_class=HTMLResponse, include_in_schema=False)
@@ -948,14 +955,24 @@ async def connections_page(request: Request):
 async def proxmox_page(request: Request):
     if not config_service.get_bool("proxmox_enabled", settings.proxmox_enabled):
         raise HTTPException(status_code=404, detail="Proxmox integration is disabled")
-    return templates.TemplateResponse("proxmox/index.html", {"request": request, **_feature_flags()})
+    conn = _hypervisor_page_host("proxmox")
+    return templates.TemplateResponse(
+        "proxmox/index.html",
+        {"request": request, "connection_name": conn["connection_name"],
+         "via_agent": conn["via_agent"], "synced_at": conn["synced_at"],
+         **_feature_flags()})
 
 
 @app.get("/vsphere", response_class=HTMLResponse, include_in_schema=False)
 async def vsphere_page(request: Request):
     if not config_service.get_bool("vsphere_enabled", settings.vsphere_enabled):
         raise HTTPException(status_code=404, detail="vSphere integration is disabled")
-    return templates.TemplateResponse("vsphere/index.html", {"request": request, **_feature_flags()})
+    conn = _hypervisor_page_host("vsphere")
+    return templates.TemplateResponse(
+        "vsphere/index.html",
+        {"request": request, "connection_name": conn["connection_name"],
+         "via_agent": conn["via_agent"], "synced_at": conn["synced_at"],
+         **_feature_flags()})
 
 
 @app.get("/hyperv", response_class=HTMLResponse, include_in_schema=False)
@@ -967,6 +984,7 @@ async def hyperv_page(request: Request):
         "hyperv/index.html",
         {"request": request, "hyperv_host": conn["host"],
          "connection_name": conn["connection_name"], "via_agent": conn["via_agent"],
+         "synced_at": conn["synced_at"],
          **_feature_flags()},
     )
 
@@ -980,6 +998,7 @@ async def nutanix_page(request: Request):
         "nutanix/index.html",
         {"request": request, "nutanix_host": conn["host"],
          "connection_name": conn["connection_name"], "via_agent": conn["via_agent"],
+         "synced_at": conn["synced_at"],
          **_feature_flags()},
     )
 
@@ -993,6 +1012,7 @@ async def xcpng_page(request: Request):
         "xcpng/index.html",
         {"request": request, "xcpng_host": conn["host"],
          "connection_name": conn["connection_name"], "via_agent": conn["via_agent"],
+         "synced_at": conn["synced_at"],
          **_feature_flags()},
     )
 

@@ -217,3 +217,14 @@ connection, and your `connections.yaml` defines it. Withhold any one and nothing
 
 **vCenter only.** A bare ESXi host serves the SOAP API and not the
 Automation REST API, so an ESXi connection has to stay dashboard-direct.
+
+### When the connection is reached through an agent
+
+The dashboard has no route to an agent-bound connection — that is the point of binding it
+to an agent — so this page cannot query it live. It shows the **last synced inventory**
+instead, with a banner saying so and how old it is. Live-only figures (CPU usage, uptime,
+disk) are blank there rather than zero: they were never measured, and a fabricated 0 is
+worse than an empty cell.
+
+Power actions still work: they are dispatched to the agent as jobs and appear on `/jobs`
+with Live Output, exactly like a discovery scan.
