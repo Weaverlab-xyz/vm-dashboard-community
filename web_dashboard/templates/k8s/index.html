@@ -797,7 +797,9 @@ gcloud auth login --login-config=login.json</pre>
           Password Safe managed account on the <span class="font-mono">Kubernetes Service Account Token</span> plugin
           and applies the in-cluster rotator RBAC. Rotations are mirrored into the PRA Vault copy through the
           <span class="font-mono">PRA Vault Token</span> plugin, so the k8s tunnel keeps working. The functional
-          account must already exist in Password Safe.
+          account must already exist in Password Safe — see the
+          <a href="/docs/integrations/beyondtrust#kubernetes-serviceaccount-token-rotation" class="underline" target="_blank">token rotation guide</a>
+          for the plugin import, functional accounts and access policy.
         </p>
         <template x-if="psTokenTarget && psTokenTarget.ps_token_managed">
           <div class="text-xs space-y-1 bg-gray-50 rounded-lg p-3">

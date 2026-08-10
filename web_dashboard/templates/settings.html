@@ -1411,7 +1411,7 @@
               Password Safe managed system + managed account (via the <code class="bg-gray-100 px-1 rounded">{engine} SSM Custom Plugin</code>),
               and onboards the PRA Vault credential (via the <code class="bg-gray-100 px-1 rounded">PRA Vault Username Password</code> plugin)
               so Password Safe propagates rotations into the tunnel-injected credential. The custom plugins + jump-host RSA
-              key prep are one-time manual setup — see the BeyondTrust integration docs.
+              key prep are one-time manual setup — see the <a href="/docs/databases#layer-2--password-safe-aws--azure" class="underline" target="_blank">database onboarding guide</a>.
             </p>
             <label class="flex items-center gap-2 mb-3 text-sm text-gray-700">
               <input type="checkbox" x-model="panelCfg.clouddb_ps_onboarding_enabled"
@@ -1619,7 +1619,7 @@
               and mirrors each rotation into the PRA Vault copy through the
               <code class="bg-gray-100 px-1 rounded">PRA Vault Token</code> plugin. Importing the two plugins, creating the
               functional accounts, and granting the API identity Requestor + an auto-release access policy on the new
-              managed accounts are one-time manual setup — see the BeyondTrust integration docs.
+              managed accounts are one-time manual setup — see the <a href="/docs/integrations/beyondtrust#kubernetes-serviceaccount-token-rotation" class="underline" target="_blank">token rotation guide</a>.
               <span class="text-amber-600">The token account's access policy must NOT enable "Change Password After
               Release"</span> — every sync would then trigger another rotation.
             </p>
@@ -3265,7 +3265,7 @@
               the only API here that serves callers outside your own network.
               <strong>Terminate TLS in front of the dashboard first.</strong> Signing gives the
               agent protocol integrity and replay protection, not confidentiality; see
-              <a href="/docs/remote-agents.md" class="underline">the remote agent docs</a> and
+              <a href="/docs/remote-agents" class="underline">the remote agent docs</a> and
               <code class="font-mono">docker-compose.agent.yml</code>.
             </p>
           </div>
