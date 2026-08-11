@@ -820,7 +820,9 @@ gcloud auth login --login-config=login.json</pre>
                 <p x-show="psTokenStatus.registered && psTokenStatus.pravault_account_id && !psTokenStatus.linked && !psTokenStatus.error"
                    class="text-red-600">
                   The PRA Vault account is not synced to the token account, so rotations will NOT reach PRA.
-                  Re-register the token, or re-create the sync in Password Safe.
+                  Use <span class="font-medium">Repair sync</span> below — it re-creates the link and touches
+                  nothing in the cluster. If it fails with a permission error, grant the API identity
+                  Password Safe Account Management (Full control) and try again.
                 </p>
               </div>
             </template>
@@ -868,6 +870,18 @@ gcloud auth login --login-config=login.json</pre>
           <template x-if="psTokenTarget && psTokenTarget.ps_token_managed">
             <button @click="rotatePsToken()" :disabled="psTokenBusy"
                     class="px-3 py-2 text-sm border border-amber-300 text-amber-700 rounded-lg hover:bg-amber-50 disabled:opacity-50">Rotate now</button>
+          </template>
+          <!-- Only offered when Password Safe says the pair is unlinked. Registration
+               commits the token account two steps before it links the pair, so a failure
+               at the link (a 403 on the sync grant, most likely) leaves a row that reads
+               as registered next to a pair that syncs nothing — and the register form
+               above is hidden from then on. This re-runs the register, which reconciles
+               the missing link and touches nothing in the cluster. -->
+          <template x-if="psTokenTarget && psTokenTarget.ps_token_managed && psTokenStatus
+                          && psTokenStatus.registered && psTokenStatus.pravault_account_id
+                          && !psTokenStatus.linked && !psTokenStatus.error">
+            <button @click="repairPsTokenSync()" :disabled="psTokenBusy"
+                    class="px-3 py-2 text-sm border border-red-300 text-red-700 rounded-lg hover:bg-red-50 disabled:opacity-50">Repair sync</button>
           </template>
         </div>
         <div class="flex gap-3">
@@ -1524,6 +1538,23 @@ function k8sPage() {
         await this.refresh();
       } catch (e) {
         this.flash(e.message || 'Password Safe registration failed.', 'error');
+      } finally {
+        this.psTokenBusy = false;
+      }
+    },
+
+    // Re-runs the register on an already-registered cluster. That path re-applies the
+    // rotator RBAC and re-creates the SyncedAccounts link if it is missing; it creates no
+    // managed systems, checks out nothing and does not rotate, so the cluster's current
+    // token keeps working either way.
+    async repairPsTokenSync() {
+      this.psTokenBusy = true;
+      try {
+        const r = await API.post(`/api/k8s/clusters/${this.psTokenTarget.id}/ps-token`, {});
+        if (r && r.job_id) { window.location.href = '/jobs/' + r.job_id; return; }
+        await this.loadPsTokenStatus(this.psTokenTarget.id);
+      } catch (e) {
+        this.flash(e.message || 'Repairing the Password Safe sync failed.', 'error');
       } finally {
         this.psTokenBusy = false;
       }

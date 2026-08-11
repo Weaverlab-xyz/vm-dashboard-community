@@ -636,7 +636,10 @@ async def register_ps_token(
     account (the "Kubernetes Service Account Token" plugin), so it rotates on the
     tenant's schedule; optionally registers the "PRA Vault Token" mirror so each
     rotation is pushed into the PRA Vault copy. Async — enqueues a ``k8s_ps_token``
-    job. Idempotent: an already-registered cluster re-applies the RBAC and completes.
+    job. Idempotent, and doubles as the repair path: an already-registered cluster
+    re-applies the RBAC and re-creates the synced-account link if it is missing, which
+    is the state a cluster is left in when the (fatal) link failed after the managed
+    system was already committed.
 
     Pre-checks the gates rather than enqueuing a job that will certainly fail —
     the same courtesy the Rancher Entitle route extends."""
