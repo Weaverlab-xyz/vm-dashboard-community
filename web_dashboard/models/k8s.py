@@ -157,15 +157,13 @@ class ClusterInfo(BaseModel):
     entra_group_bound: bool = False           # true when an Entra group is bound to a ClusterRole (config-tracked)
     entra_federation_enabled: bool = False    # true when the cluster trusts Entra as an OIDC IdP (AKS native; EKS via action)
     # Password Safe token rotation. Ids are not secrets — they are what an operator
-    # pastes into the plugin configuration. The sync fields mirror k8s_token_sync's
-    # per-cluster state blob (never the token, never even its full digest).
+    # pastes into the plugin configuration. There is no sync state here: Password Safe
+    # keeps the PRA Vault account in step via SyncedAccounts, and whether that link is
+    # still in place is read live from Password Safe (GET .../ps-token/status), not
+    # cached on the row where it could only ever be a claim about registration time.
     ps_token_managed: bool = False            # true when the SA token is a Password Safe managed account
     ps_token_account_id: Optional[str] = None
     ps_pra_vault_account_id: Optional[str] = None
     pra_vault_account_id: Optional[str] = None
-    token_sync_state: Optional[str] = None    # "" | never | ok | error | unregistered
-    token_sync_at: Optional[str] = None
-    token_sync_error: Optional[str] = None
-    token_sync_verified: Optional[str] = None  # "" | pending | yes | no
     created_by: Optional[str] = None
     created_at: str

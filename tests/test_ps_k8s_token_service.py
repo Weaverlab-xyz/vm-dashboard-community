@@ -3,14 +3,17 @@ and the address builder.
 
 The register ORDER is the correctness argument, so it is what these tests pin:
 
-    RBAC → read current token → managed system (seeded) → mirror → rotate →
-    PRA push (FATAL) → delete the legacy Secret (only after the push)
+    RBAC → read current token → managed system (seeded) → PRA Vault account (seeded) →
+    LINK (FATAL) → rotate → delete the legacy Secret (only if linked)
+
+The link is what hands the sync to Password Safe, and it comes before the rotation on
+purpose: a failure there has changed nothing in the cluster, whereas rotating first and
+failing to link would leave PRA holding a value nothing will refresh. Completing with an
+unlinked pair is the exact hole this feature closes, so an unconfirmed link fails the job.
 
 Deleting the legacy ``<sa>-token`` Secret any earlier would destroy the credential the
 PRA-brokered session is currently using; never deleting it leaves a cluster-admin token
-the rotation plugin's label-scoped sweep will never touch. And a rotation whose PRA push
-failed must FAIL the job — completing there ships a managed-but-not-mirrored token,
-which is exactly the hole the feature exists to close.
+the rotation plugin's label-scoped sweep will never touch.
 
 Every collaborator module is a stub injected into sys.modules (function-level imports
 resolve at call time), so this runs with no app, DB or Password Safe.
@@ -118,7 +121,8 @@ def _row(**kw):
     return types.SimpleNamespace(**base)
 
 
-def _install_stubs(rec, *, cfg=None, push_fails=False, checkout_value="tok"):
+def _install_stubs(rec, *, cfg=None, link_fails=False, link_confirmed=True,
+                   linked_now=True, checkout_value="tok"):
     """Inject stub collaborator modules and return (config_store, modules)."""
     store = {
         "k8s_ps_token_rotation_enabled": "1",
@@ -178,12 +182,27 @@ def _install_stubs(rec, *, cfg=None, push_fails=False, checkout_value="tok"):
         rec.hit("rotate")
     m_ps.change_managed_account_password = _change
 
-    async def _push(**kw):
-        rec.hit("pra_push")
-        if push_fails:
-            raise RuntimeError("PUT ManagedAccounts/9/Credentials failed (422)")
-        return {"sha256": "abc123def456", "pushed": True, "skipped": ""}
-    m_ps.rotate_pra_vault_token = _push
+    async def _link(*, parent_account_id, synced_account_id,
+                    expect_subscriber_platform=""):
+        rec.hit("link")
+        rec.events.append(("linked", parent_account_id, synced_account_id))
+        if link_fails:
+            raise RuntimeError("POST ManagedAccounts/201/SyncedAccounts/202 failed (403)")
+        return {"linked": True, "confirmed": link_confirmed}
+    m_ps.link_synced_account = _link
+
+    async def _unlink(*, parent_account_id, synced_account_id):
+        rec.hit("unlink")
+        return True
+    m_ps.unlink_synced_account = _unlink
+
+    async def _sync_status(*, parent_account_id, synced_account_id):
+        rec.hit("sync_status")
+        return {"linked": linked_now, "parent_exists": True,
+                "parent_last_change": "2026-08-11T08:00:00Z",
+                "subscriber_last_change": "2026-08-11T09:00:00Z",
+                "subscriber_count": 1 if linked_now else 0}
+    m_ps.synced_account_status = _sync_status
 
     async def _checkout(account_id, *, duration_min=15, reason=""):
         rec.hit("checkout")
@@ -321,13 +340,27 @@ def test_register_runs_the_steps_in_the_safe_order():
 
     assert rec.index("rbac") < rec.index("read_current_token")
     assert rec.index("read_current_token") < rec.index("register_managed_system")
-    assert rec.index("rotate") < rec.index("pra_push")
-    assert rec.index("pra_push") < rec.index("delete_legacy_secret"), (
-        "the legacy Secret is the credential PRA is USING until the push lands — "
-        "deleting it earlier breaks every brokered session on a failed push")
-    assert out["rotated"] and out["pra_mirrored"] and out["legacy_secret_deleted"]
+    assert rec.index("link") < rec.index("rotate"), (
+        "linking after the rotation would leave PRA holding a value nothing refreshes "
+        "if the link then failed — and in LongLived mode that value was just revoked")
+    assert rec.index("rotate") < rec.index("delete_legacy_secret"), (
+        "the legacy Secret is the credential PRA is USING — deleting it before the "
+        "rotation has produced a Password-Safe-issued token breaks brokered sessions")
+    assert out["rotated"] and out["pra_synced"] and out["legacy_secret_deleted"]
     assert row.ps_token_account_id == "201"
     assert row.ps_pra_vault_account_id == "202"
+
+
+def test_register_makes_the_token_account_the_parent_of_the_pair():
+    """Direction. Swapping the two ids links successfully and syncs BACKWARDS — the PRA
+    Vault account's value would be pushed onto the cluster's token account."""
+    rec = Recorder()
+    _install_stubs(rec)
+    _run_register(rec, _row())
+    linked = [e for e in rec.events if isinstance(e, tuple) and e[0] == "linked"]
+    assert linked == [("linked", 201, 202)], (
+        f"expected parent=201 (the ServiceAccount token), subscriber=202 (the PRA Vault "
+        f"copy); got {linked}")
 
 
 def test_register_seeds_password_safe_with_the_live_token():
@@ -341,27 +374,45 @@ def test_register_seeds_password_safe_with_the_live_token():
         "hold the real token — nothing works until the first rotation")
 
 
-def test_a_failed_pra_push_fails_register_and_keeps_the_legacy_secret():
+def test_a_failed_link_fails_register_before_anything_rotates():
     rec = Recorder()
-    _install_stubs(rec, push_fails=True)
+    _install_stubs(rec, link_fails=True)
     try:
         _run_register(rec, _row())
     except RuntimeError:
         pass
     else:
         raise AssertionError(
-            "a managed-but-not-mirrored token is the exact hole this feature closes — "
+            "a managed-but-unsynced token is the exact hole this feature closes — "
             "the register must fail loudly")
+    assert "rotate" not in rec.events, (
+        "the link comes first precisely so a failure leaves the cluster's token alone")
     assert "delete_legacy_secret" not in rec.events
 
 
-def test_no_pra_vault_account_means_no_mirror_and_the_secret_stays():
+def test_an_unconfirmed_link_fails_register():
+    """Password Safe returned 200 but the subscriber is not in the parent's list. That
+    is indistinguishable from success at the call site, which is why it is re-read."""
+    rec = Recorder()
+    _install_stubs(rec, link_confirmed=False)
+    try:
+        _run_register(rec, _row())
+    except svc.PSK8sTokenError as exc:
+        assert "synced list" in str(exc)
+    else:
+        raise AssertionError("an unconfirmed link must fail the register")
+    assert "rotate" not in rec.events and "delete_legacy_secret" not in rec.events
+
+
+def test_no_pra_vault_account_means_no_link_and_the_secret_stays():
     rec = Recorder()
     _install_stubs(rec)
     row = _row(pra_vault_account_id=None)
     out, _db = _run_register(rec, row)
-    assert "delete_legacy_secret" not in rec.events
-    assert out["pra_mirrored"] is False
+    assert "link" not in rec.events
+    assert "delete_legacy_secret" not in rec.events, (
+        "with nothing syncing to PRA the legacy Secret is what keeps the tunnel alive")
+    assert out["pra_synced"] is False
     assert any("PRA Vault account" in w for w in out["warnings"])
 
 
@@ -402,7 +453,7 @@ def test_current_token_requires_a_registration():
 
 # ── deregister ───────────────────────────────────────────────────────────────────
 
-def test_deregister_destroys_the_mirror_before_the_token_system():
+def test_deregister_unlinks_then_destroys_in_reverse_registration_order():
     rec = Recorder()
     store = _install_stubs(rec)
     row = _row(ps_token_account_id="201", ps_pra_vault_account_id="202")
@@ -414,15 +465,46 @@ def test_deregister_destroys_the_mirror_before_the_token_system():
 
     out = asyncio.run(svc.deregister(db, "c-1"))
     assert out["removed"] is True and not out["errors"]
+    assert rec.index("unlink") < rec.index(("deregistered", 2)), (
+        "destroying a subscriber while the link is live can leave Password Safe syncing "
+        "into an account that no longer exists")
     dereg = [e for e in rec.events if isinstance(e, tuple) and e[0] == "deregistered"]
     assert dereg == [("deregistered", 2), ("deregistered", 1)], (
-        "the mirror references the functional account — destroy in reverse "
+        "the PRA Vault account references the functional account — destroy in reverse "
         "registration order, the same rule the cloud-DB teardown follows")
     assert row.ps_token_account_id is None and row.ps_pra_vault_account_id is None
     assert "ps_k8s_token_c-1" not in store, "the registration state must be dropped"
     assert "k8s_token_sync_c-1" not in store, (
-        "a stale watermark would suppress the first sync of a re-registered cluster")
+        "orphan rows from the v26.7.7 poll-and-push sync must still be cleaned up")
     assert "rbac_removed" in rec.events
+
+
+# ── rotate_now ───────────────────────────────────────────────────────────────────
+
+def test_rotate_now_does_not_push_anything_itself():
+    """One call to Password Safe. The synced link means PRA is updated by the same
+    change, so there is no second half for the dashboard to drive."""
+    rec = Recorder()
+    _install_stubs(rec)
+    db = FakeDB({"K8sCluster": _row(ps_token_account_id="201",
+                                    ps_pra_vault_account_id="202")})
+    out = asyncio.run(svc.rotate_now(db, "c-1"))
+    assert out["rotated"] is True and out["pra_synced"] is True
+    assert "rotate" in rec.events
+    assert "checkout" not in rec.events, "rotate_now must never handle the credential"
+
+
+def test_rotate_now_warns_when_the_pair_is_no_longer_synced():
+    """An admin can unlink in the Password Safe console. The rotation still succeeds and
+    still revokes the old token — it just never reaches PRA, which is worth saying in
+    the job result rather than leaving to a broken tunnel to reveal."""
+    rec = Recorder()
+    _install_stubs(rec, linked_now=False)
+    db = FakeDB({"K8sCluster": _row(ps_token_account_id="201",
+                                    ps_pra_vault_account_id="202")})
+    out = asyncio.run(svc.rotate_now(db, "c-1"))
+    assert out["rotated"] is True and out["pra_synced"] is False
+    assert "NOT synced" in out["note"]
 
 
 def test_deregister_without_a_registration_is_a_noop():
@@ -437,7 +519,7 @@ def test_deregister_without_a_registration_is_a_noop():
 
 def test_run_fails_the_job_instead_of_raising():
     rec = Recorder()
-    _install_stubs(rec, push_fails=True)
+    _install_stubs(rec, link_fails=True)
     db = FakeDB({"K8sCluster": _row(),
                  "Job": _fake_job({"tf_variables": {"project": "p", "region": "r",
                                                     "cluster_name": "c"}})})

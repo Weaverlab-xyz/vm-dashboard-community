@@ -81,16 +81,6 @@ def _parse_api_server(kubeconfig: str) -> str:
 
 def _serialize(r: K8sCluster) -> dict:
     from . import config_service
-    # Token-sync bookkeeping lives in one JSON blob per cluster (churning state, so a
-    # column per field would be a migration per field). Never the token, and never even
-    # its full digest: this dict is served by the clusters API.
-    sync = {}
-    try:
-        import json
-        raw = config_service.get(f"k8s_token_sync_{r.id}")
-        sync = json.loads(raw) if raw else {}
-    except Exception:  # noqa: BLE001 — a corrupt blob must not blank the whole page
-        sync = {}
     return {
         "id":                    r.id,
         "cloud":                 r.cloud,
@@ -115,15 +105,13 @@ def _serialize(r: K8sCluster) -> dict:
         "entra_federation_enabled": (r.cloud == "azure")
                                     or bool(config_service.get(f"k8s_entra_fed_{r.id}")),
         # Password Safe token rotation. The ids are not secrets — they are exactly what
-        # an operator pastes into the plugin's configuration.
+        # an operator pastes into the plugin's configuration. Whether the two accounts
+        # are still SYNCED is deliberately not here: that lives in Password Safe, and is
+        # read live by the ps-token/status endpoint rather than cached per row.
         "ps_token_managed":      bool(r.ps_token_account_id),
         "ps_token_account_id":   r.ps_token_account_id or "",
         "ps_pra_vault_account_id": r.ps_pra_vault_account_id or "",
         "pra_vault_account_id":  r.pra_vault_account_id or "",
-        "token_sync_state":      sync.get("state") or ("" if not r.ps_token_account_id else "never"),
-        "token_sync_at":         sync.get("synced_at") or "",
-        "token_sync_error":      sync.get("error") or "",
-        "token_sync_verified":   sync.get("pra_verified") or "",
         "created_by":            r.created_by,
         "created_at":            r.created_at.isoformat() if r.created_at else "",
     }
@@ -2819,16 +2807,13 @@ async def deregister_pra_tunnel(db: Session, cluster_id: str) -> dict:
     row.pra_tunnel_state = None
     row.pra_vault_account_id = None
     db.commit()
-    # Drop the sync watermark with the Vault account it refers to. Left behind, it
-    # would suppress the first sync after the tunnel is re-provisioned — PRA would
-    # hold the new provision-time token, Password Safe a different one, and nothing
-    # would ever reconcile them.
-    try:
-        from . import config_service
-        config_service.delete(f"k8s_token_sync_{cluster_id}")
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("k8s tunnel: clearing the token-sync state for %s failed: %s",
-                       cluster_id, exc)
+    # Nothing to clear on the Password Safe side, and deliberately so. The synced-account
+    # link between the token account and the "PRA Vault Token" account is left in place:
+    # that plugin resolves its PRA Vault account by NAME (a stable `k8s-<cluster>-sa`), so
+    # re-provisioning the tunnel re-creates the account the link already points at and the
+    # pair resumes on its own. Unlinking here would trade that self-healing for a manual
+    # re-registration. The cost is that a rotation landing while no tunnel exists fails the
+    # PRA half — visibly, in Password Safe's change log, which is the right place for it.
 
     # The cluster no longer needs the shared Jumpoint — tear it down if nothing
     # else (VM / DB / another tunneled cluster) is using it. Best-effort.

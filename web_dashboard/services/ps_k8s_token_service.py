@@ -1,13 +1,21 @@
 """Password Safe registration for a cluster's PRA ServiceAccount token.
 
-Today the token `k8s_service._mint_pra_sa_token` creates is vaulted in PRA and lives
-forever. This module makes it a Password Safe **managed account** on the "Kubernetes
-Service Account Token" custom plugin, so Password Safe rotates it on a schedule — and
-registers a second managed account on the "PRA Vault Token" plugin so each rotation can
-be mirrored into the PRA Vault copy a brokered session injects
-(``services/k8s_token_sync.py`` drives that).
+Left alone, the token `k8s_service._mint_pra_sa_token` creates is vaulted in PRA and
+lives forever. This module makes it a Password Safe **managed account** on the
+"Kubernetes Service Account Token" custom plugin, so Password Safe rotates it on a
+schedule — and registers a second managed account on the "PRA Vault Token" plugin,
+whose plugin writes a value into the PRA Vault account a brokered session injects.
 
-Two things about the plugin shape the whole design, and both are easy to get wrong:
+**Password Safe keeps those two in step, not the dashboard.** Registration links them
+with ``SyncedAccounts``: the PRA Vault account becomes a *subscriber* of the token
+account, and a managed account and its subscribers always share an identical
+credential, so every rotation reaches PRA with nothing running here on a schedule. An
+earlier version of this feature polled ``LastChangeDate`` every 15 minutes and pushed
+the value across itself; that was a reimplementation of a product primitive, and all of
+its machinery — watermarks, backoff, parking, a rotation-loop circuit breaker — existed
+only to manage failure modes the poll introduced.
+
+Two things about the plugin shape the rest of the design, and both are easy to get wrong:
 
 * **The rotation sweep is label-scoped.** It deletes only Secrets carrying
   ``beyondtrust.com/managed-by=password-safe``. The dashboard's ``<sa>-token`` Secret
@@ -292,16 +300,20 @@ async def register(db: Session, cluster_id: str, *, job_id: str = "",
       2. create the managed system + account, seeded with the token the cluster is
          using right now — so Password Safe starts out holding a working credential
          instead of a placeholder it would have to rotate before anything works;
-      3. create the "PRA Vault Token" mirror, also seeded, when there is a PRA Vault
-         account to keep in sync. Before the rotation, because it is where the rotated
-         value gets pushed;
-      4. rotate once, which proves the whole path (functional-account credentials →
+      3. create the "PRA Vault Token" subscriber, also seeded, when there is a PRA Vault
+         account to keep in step;
+      4. **link** the two with ``SyncedAccounts`` — fatal, and deliberately BEFORE the
+         rotation. From here on Password Safe owns the sync; a failure at this point has
+         changed nothing in the cluster, whereas rotating first and failing to link would
+         leave PRA holding a value nothing will ever refresh;
+      5. rotate once, which proves the whole path (functional-account credentials →
          cloud control plane → API server → RBAC → Secret create) at registration time
-         rather than at 3am on the first scheduled rotation;
-      5. mirror the new token into PRA — **fatal**, because stopping here leaves the
-         token managed but not mirrored;
+         rather than at 3am on the first scheduled rotation — and, because the link is
+         already in place, proves propagation with it;
       6. delete the dashboard's ``<sa>-token`` Secret, which the plugin's label-scoped
-         sweep would never remove.
+         sweep would never remove. Gated on the link, not on observing the propagation:
+         Password Safe queues change operations, so there is nothing synchronous to
+         observe, and the link is the guarantee that it converges.
 
     Idempotent: an already-registered cluster re-applies the RBAC and returns."""
     if not enabled():
@@ -370,49 +382,61 @@ async def register(db: Session, cluster_id: str, *, job_id: str = "",
                 account_name=account_name)
     db.commit()
 
-    # 3. The PRA Vault mirror — only meaningful when there IS a PRA Vault copy.
+    # 3. The PRA Vault subscriber — only meaningful when there IS a PRA Vault copy.
     mirror = (_cfg_bool("k8s_ps_pravault_mirror_enabled", True)
               if mirror_to_pra is None else bool(mirror_to_pra))
     vault_name = f"k8s-{row.name}-sa"
-    mirrored = False
+    pravault_registered = False
     if mirror and row.pra_vault_account_id:
         if job_id:
-            await broadcast_progress(job_id, 60, "Registering the PRA Vault Token mirror…")
+            await broadcast_progress(job_id, 55, "Registering the PRA Vault Token account…")
         try:
-            mirrored = await _register_pravault_mirror(
+            pravault_registered = await _register_pravault_mirror(
                 db, row, vault_account_name=vault_name, initial_password=current)
         except Exception as exc:  # noqa: BLE001
             # Non-fatal on its own: the k8s account is still rotatable, PRA just stops
             # tracking. Mirrors provision_k8s_tunnel's best-effort vault half.
-            warnings.append(f"PRA Vault Token mirror registration failed: {exc}")
+            warnings.append(f"PRA Vault Token account registration failed: {exc}")
             logger.warning("PS token: PRA mirror for %s failed: %s", cluster_id, exc)
     elif mirror and not row.pra_vault_account_id:
         warnings.append(
             "no PRA Vault account exists for this cluster (register the PRA k8s tunnel "
-            "with credential injection first), so rotations will not be mirrored into PRA")
+            "with credential injection first), so rotations will not reach PRA")
     del current
 
-    # 4/5/6. Rotate, mirror the result, then retire the unsweepable Secret.
+    # 4. Hand the sync to Password Safe. FATAL, and before the rotation on purpose:
+    #    a failure here has changed nothing in the cluster, and reporting success with
+    #    the token managed but unlinked is exactly the hole this feature exists to close.
+    linked = False
+    if pravault_registered:
+        if job_id:
+            await broadcast_progress(job_id, 70, "Syncing the PRA Vault account to the token…")
+        link = await ps_api_service.link_synced_account(
+            parent_account_id=int(row.ps_token_account_id),
+            synced_account_id=int(row.ps_pra_vault_account_id),
+            expect_subscriber_platform=_cfg("k8s_ps_pravault_token_platform",
+                                            "PRA Vault Token"))
+        if not link.get("confirmed"):
+            raise PSK8sTokenError(
+                f"Password Safe accepted the sync of account {row.ps_pra_vault_account_id} to "
+                f"{row.ps_token_account_id} but the account is not in the parent's synced list "
+                f"— refusing to continue, because rotations would not reach PRA.")
+        linked = True
+        _save_state(cluster_id, synced_to_parent=True)
+
+    # 5. Rotate once. The link is already in place, so Password Safe propagates.
     rotated = False
     change = (_cfg_bool("k8s_ps_token_change_on_register", True)
               if change_on_register is None else bool(change_on_register))
     if change:
         if job_id:
-            await broadcast_progress(job_id, 75, "Rotating the token once to prove the path…")
+            await broadcast_progress(job_id, 80, "Rotating the token once to prove the path…")
         await ps_api_service.change_managed_account_password(int(row.ps_token_account_id))
         rotated = True
 
+    # 6. Retire the Secret the plugin's label-scoped sweep would never remove.
     legacy_deleted = False
-    if rotated and mirrored:
-        if job_id:
-            await broadcast_progress(job_id, 85, "Mirroring the new token into PRA Vault…")
-        # FATAL on failure: the alternative is reporting success with the token managed
-        # but not mirrored, which is exactly the hole this feature exists to close.
-        await ps_api_service.rotate_pra_vault_token(
-            source_account_id=int(row.ps_token_account_id),
-            target_account_id=int(row.ps_pra_vault_account_id),
-            duration_min=_cfg_int("k8s_ps_token_checkout_duration_min", 15),
-            expect_target_platform=_cfg("k8s_ps_pravault_token_platform", "PRA Vault Token"))
+    if rotated and linked:
         if _cfg_bool("k8s_ps_token_delete_legacy_secret", True):
             if job_id:
                 await broadcast_progress(job_id, 92, "Removing the unmanaged token Secret…")
@@ -426,21 +450,22 @@ async def register(db: Session, cluster_id: str, *, job_id: str = "",
                     f"could not delete the dashboard-minted {sa}-token Secret ({exc}) — it is "
                     f"NOT swept by the rotation plugin (which selects on its own labels), so "
                     f"it remains a cluster-admin token nothing rotates. Delete it by hand.")
-    elif rotated and not mirrored:
+    elif rotated and not linked:
         warnings.append(
-            f"rotated, but with no PRA Vault mirror the {sa}-token Secret was left in place "
-            f"so PRA keeps working — rotation will not revoke anything until the mirror exists")
+            f"rotated, but with no synced PRA Vault account the {sa}-token Secret was left in "
+            f"place so PRA keeps working — rotation will not revoke anything until the sync "
+            f"exists")
 
     _save_state(cluster_id, rotated=rotated, legacy_secret_deleted=legacy_deleted,
                 rbac=rbac_note)
-    logger.info("PS token registration for cluster %s: account=%s mirror=%s rotated=%s "
-                "legacy_deleted=%s", row.name, row.ps_token_account_id, mirrored, rotated,
+    logger.info("PS token registration for cluster %s: account=%s linked=%s rotated=%s "
+                "legacy_deleted=%s", row.name, row.ps_token_account_id, linked, rotated,
                 legacy_deleted)
     return {"managed_system_id": get_state(cluster_id).get("system_id"),
             "managed_account_id": row.ps_token_account_id,
             "pravault_account_id": row.ps_pra_vault_account_id or "",
             "address": address, "token_mode": mode, "rbac": rbac_note,
-            "rotated": rotated, "pra_mirrored": mirrored,
+            "rotated": rotated, "pra_synced": linked,
             "legacy_secret_deleted": legacy_deleted, "warnings": warnings}
 
 
@@ -513,7 +538,11 @@ async def _register_pravault_mirror(db: Session, row: K8sCluster, *,
                                     vault_account_name: str,
                                     initial_password: str) -> bool:
     """Register the PRA Vault account as a managed account on the "PRA Vault Token"
-    plugin, so a rotation can be pushed into PRA through Password Safe.
+    plugin, so Password Safe can drive the write into PRA itself.
+
+    This only creates the account. What makes rotations reach PRA is the
+    ``SyncedAccounts`` link the caller adds next — on its own, this account is just a
+    second managed account that happens to hold the same value.
 
     Reuses ``method="pravault"`` — the HCL shape is identical to the cloud-DB mirror
     (host_name = the PRA appliance URL, no dns_name, password-managed) and the plugin
@@ -565,21 +594,33 @@ async def current_token(db: Session, cluster_id: str) -> str:
 # ── rotate on demand ──────────────────────────────────────────────────────────
 
 async def rotate_now(db: Session, cluster_id: str, *, job_id: str = "") -> dict:
-    """Ask Password Safe to rotate the token, then mirror the result into PRA in the
-    same job — an operator-initiated rotation should not leave PRA stale until the next
-    sweep."""
+    """Ask Password Safe to rotate the token now.
+
+    One call, because the synced-account link means PRA is updated by Password Safe as
+    part of the same change — there is no second half for the dashboard to drive. The
+    link is re-read rather than assumed: an admin can unlink in the Password Safe
+    console, and a rotation on an unlinked pair silently leaves PRA holding the old
+    value, which is worth saying in the job result rather than discovering later."""
     row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
     if row is None or not row.ps_token_account_id:
         raise PSK8sTokenError(
             f"cluster {cluster_id} has no Password Safe-managed ServiceAccount token")
     from . import ps_api_service
+
+    linked = False
+    note = "no PRA Vault Token account is registered, so PRA will not be updated"
+    if row.ps_pra_vault_account_id:
+        st = await ps_api_service.synced_account_status(
+            parent_account_id=int(row.ps_token_account_id),
+            synced_account_id=int(row.ps_pra_vault_account_id))
+        linked = bool(st.get("linked"))
+        note = "" if linked else (
+            f"managed account {row.ps_pra_vault_account_id} is NOT synced to "
+            f"{row.ps_token_account_id} in Password Safe — this rotation will not reach PRA. "
+            f"Re-register the cluster's token, or re-create the sync in Password Safe.")
+
     await ps_api_service.change_managed_account_password(int(row.ps_token_account_id))
-    if not row.ps_pra_vault_account_id:
-        return {"rotated": True, "pra_synced": False,
-                "note": "no PRA Vault Token mirror is registered, so PRA was not updated"}
-    from . import k8s_token_sync
-    synced = await k8s_token_sync.sync_cluster(db, cluster_id, force=True)
-    return {"rotated": True, "pra_synced": bool(synced.get("pushed")), **synced}
+    return {"rotated": True, "pra_synced": linked, "note": note}
 
 
 # ── deregister ────────────────────────────────────────────────────────────────
@@ -590,17 +631,28 @@ async def deregister(db: Session, cluster_id: str, *, job_id: str = "") -> dict:
     Positional ``cluster_id`` so this can join ``k8s_service.run_decommission``'s
     deregister tuple, which calls each entry as ``(db, cluster_id)``.
 
-    The mirror goes first: a managed system that references a functional account blocks
-    that account's deletion, and destroying in registration order keeps the same
-    ordering rule the cloud-DB teardown follows."""
+    Teardown runs in reverse of registration: unlink the synced pair, then the PRA Vault
+    account, then the token account. The unlink is first because a subscriber
+    relationship is a reference between the two accounts — and because deleting a
+    subscriber out from under a live link is the one ordering that could leave Password
+    Safe rotating into an account that no longer exists."""
     row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
     if row is None or not (row.ps_token_account_id or row.ps_pra_vault_account_id):
         return {"ok": True, "removed": False}
-    from . import k8s_service, ps_resource_service
+    from . import k8s_service, ps_api_service, ps_resource_service
     state = get_state(cluster_id)
     errors: list = []
 
-    for label, key in (("PRA Vault Token mirror", "pravault_tf_state"),
+    if row.ps_token_account_id and row.ps_pra_vault_account_id:
+        try:
+            await ps_api_service.unlink_synced_account(
+                parent_account_id=int(row.ps_token_account_id),
+                synced_account_id=int(row.ps_pra_vault_account_id))
+        except Exception as exc:  # noqa: BLE001 — best-effort, like every other step here
+            errors.append(f"unsyncing the PRA Vault account: {exc}")
+            logger.warning("PS token deregister (unlink) for %s failed: %s", cluster_id, exc)
+
+    for label, key in (("PRA Vault Token account", "pravault_tf_state"),
                        ("Kubernetes token managed system", "tf_state")):
         tf_state = state.get(key)
         if not tf_state:
@@ -623,11 +675,47 @@ async def deregister(db: Session, cluster_id: str, *, job_id: str = "") -> dict:
     db.commit()
     _clear_state(cluster_id)
     try:
+        # Orphan cleanup, kept deliberately after the module that wrote it was deleted:
+        # the poll-and-push sync shipped in v26.7.7, so a deployed instance can still
+        # hold a `k8s_token_sync_<cluster_id>` row that nothing will ever read again.
+        # Safe to drop once no instance predates the synced-accounts change.
         from . import config_service
         config_service.delete(f"k8s_token_sync_{cluster_id}")
     except Exception:  # noqa: BLE001
         pass
     return {"ok": True, "removed": True, "errors": errors}
+
+
+# ── status ────────────────────────────────────────────────────────────────────
+
+async def sync_status(db: Session, cluster_id: str) -> dict:
+    """Password Safe's live view of the pair, for the operator-facing modal.
+
+    Deliberately not cached. The dashboard no longer participates in the sync, so the
+    only thing it could cache is a claim about what was true at registration — and an
+    admin unlinking the pair in the Password Safe console is precisely the case an
+    operator opens this to diagnose."""
+    row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
+    if row is None:
+        raise PSK8sTokenError(f"cluster {cluster_id} not found")
+    if not row.ps_token_account_id:
+        return {"registered": False, "linked": False}
+    out = {"registered": True,
+           "managed_account_id": row.ps_token_account_id,
+           "pravault_account_id": row.ps_pra_vault_account_id or "",
+           "linked": False}
+    if not row.ps_pra_vault_account_id:
+        out["note"] = ("no PRA Vault Token account is registered, so rotations do not "
+                       "reach PRA")
+        return out
+    from . import ps_api_service
+    try:
+        out.update(await ps_api_service.synced_account_status(
+            parent_account_id=int(row.ps_token_account_id),
+            synced_account_id=int(row.ps_pra_vault_account_id)))
+    except Exception as exc:  # noqa: BLE001 — a status read must not 500 the modal
+        out["error"] = str(exc)[:400]
+    return out
 
 
 # ── worker entry ──────────────────────────────────────────────────────────────

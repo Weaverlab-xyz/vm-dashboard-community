@@ -20,9 +20,11 @@ Two Password Safe custom plugins close the gap:
 | **Kubernetes Service Account Token** | Verifies and rotates k8s SA tokens on EKS, AKS, GKE and generic/on-prem clusters |
 | **PRA Vault Token** | Writes whatever value Password Safe supplies into a PRA Vault `opaque_token` account (`PATCH /api/config/v1/vault/account/{id}`) |
 
-So: the token becomes a managed account Password Safe rotates, and a second managed
-account mirrors each rotation into the PRA Vault copy. `services/ps_k8s_token_service.py`
-owns registration; `services/k8s_token_sync.py` owns the mirroring.
+So: the token becomes a managed account Password Safe rotates, and a second managed account
+carries the value into PRA. Keeping the two in step is **Password Safe's job, not the
+dashboard's** — registration syncs them and stops there (§4).
+`services/ps_k8s_token_service.py` owns the whole feature; there is no second module and
+nothing runs on a timer.
 
 ## 1. The rotation sweep is label-scoped — which inverts the obvious risk
 
@@ -86,65 +88,86 @@ Registration therefore does both:
    Secret create — at registration time instead of at 3am on the first scheduled rotation.
    Same reasoning as `passwordsafe_azure_change_password_on_register`.
 
-Mirroring the rotated token into PRA is the one **fatal** step. Completing the job there
-would ship a token that is managed but not mirrored — precisely the hole the feature
-exists to close.
+Creating the **sync link is the one fatal step**, and it happens *before* the rotation.
+Completing the job with an unlinked pair would ship a token that is managed but never
+delivered — precisely the hole the feature exists to close. Ordering it first also means a
+failure there has changed nothing in the cluster, whereas rotating first and then failing
+to link would leave PRA holding a value that was just revoked and that nothing will refresh.
 
-## 4. The sync is a watermark reconciler, not an event pipeline
+## 4. Password Safe owns the sync — the dashboard was rebuilding a primitive it already has
 
-Password Safe owns the schedule and offers no webhook, so the dashboard polls
-`LastChangeDate` (cheap — no credential request, no checkout) and pushes when it moves.
-Making the persisted state a description of *what PRA is known to hold* rather than a log
-of what happened is what makes missed rotations, lost state, double rotations and a
-rotation landing mid-sync all fall out correctly with no queue.
+`POST ManagedAccounts/{id}/SyncedAccounts/{syncedAccountID}` makes one managed account a
+**subscriber** of another, and a managed account and its subscribers always share an
+identical credential. Registration calls it once, with the ServiceAccount token account as
+`{id}` and the PRA Vault Token account as `{syncedAccountID}`. Every rotation from then on
+is applied to the subscriber too, which runs the PRA Vault plugin's PATCH into PRA.
 
-**Two details are load-bearing:**
+**This replaced a watermark reconciler, and the replacement is worth recording because the
+original was a reasonable-looking mistake.** The first implementation polled
+`LastChangeDate` every 15 minutes, checked the token out and wrote it onto the target
+account itself. It worked, and everything it contained was there for a real reason — but
+every one of those reasons was created by the decision to poll:
 
-- **The date is compared as an opaque string.** Tenants emit both `…123Z` and `…+00:00`; a
-  parse that fails either never fires (nothing ever syncs) or fires every pass (a checkout
-  and a credential write every interval, forever).
-- **The recorded watermark is the date read *before* the checkout.** If Password Safe
-  rotates between the read and the push, we push token *A* while recording date *A* — the
-  next pass sees the newer date, re-pushes, and self-corrects at the cost of one wasted
-  checkout. Recording a post-checkout re-read would store date *B* having pushed token
-  *A*: a silent, permanent desync, because every later pass then agrees nothing changed.
+| The reconciler needed | Because |
+|---|---|
+| a per-cluster watermark, recorded pre-checkout | a rotation landing mid-pass would otherwise desync permanently |
+| opaque-string date comparison | tenants emit both `…123Z` and `…+00:00` |
+| exponential backoff + parking after N failures | a 403 from a missing Smart Rule never fixes itself |
+| a `pending`/`yes`/`no` verification state machine | Password Safe queues change operations, so a push is not a write |
+| an hourly circuit breaker | "Change Password After Release" turned every sync into a rotation |
+| a singleton job type + an advisory lock + a recency guard | two passes are two checkouts and two writes of possibly different values |
+| six tuning settings and a Settings panel | none of the above has a safe universal default |
 
-Verification is free. Password Safe is the only party that knows whether the plugin's
-PATCH ran, and its change date on the *target* account is the receipt — so the next pass's
-read of that account verifies the previous push with no extra call. A fresh push records
-`pending` (Password Safe queues change operations, so "accepted, not yet reflected" is
-normal); a target date that has not moved by the next pass becomes `no` and charges
-backoff.
+All of it is gone. Not simplified — *deleted*, because the failure modes it managed only
+existed while the dashboard was in the data path. The lesson generalises: before building a
+reconciler against a product API, check whether the product models the relationship
+directly.
 
-A failure never advances the watermark. That is the difference between "retries next pass"
-and "silently stale forever".
+Two things survive from that design, both cheap:
+
+- **The link is confirmed by re-reading the subscriber list.** A 200 on a POST that did not
+  take is indistinguishable from success at the call site, and the read costs one GET with
+  read-only permission.
+- **The status shown to operators is read live, never cached.** The dashboard is no longer
+  a party to the sync, so anything it stored would describe registration time — and "an
+  admin unlinked it in the Password Safe console" is exactly what that panel exists to
+  surface.
+
+**What this design does not prove.** The shared-credential behaviour is documented for
+ordinary password accounts. Here *both* accounts are custom plugins — one that mints its
+value and reports it back, one that writes whatever it is handed — and that combination is
+not covered by the documentation. Verify it against the tenant with
+`ps-cli synced-accounts create -ma-id <parent> -sa-id <subscriber>` before relying on it.
 
 ## 5. The rotate-on-release loop
 
-If the token account's access policy enables **Change Password After Release** — or if
-anything ever calls Password Safe's rotate-on-check-in endpoint — every sync triggers
-another rotation: an endless rotate → sync → rotate loop with a real cluster rotation and
-a dead-credential window every pass. Three defences, all present:
+If either account's access policy enables **Change Password After Release** — or if anything
+ever calls Password Safe's rotate-on-check-in endpoint — the pair rotates every time it is
+released, with a real cluster rotation and a dead-credential window each time.
+
+Synced accounts make this *worse*, and the reason is worth stating plainly: a credential
+change on **either** member of a synced pair re-rotates both. So a release-triggered change
+on the PRA Vault copy — an account that has nothing to do with the cluster — rotates the
+real ServiceAccount token. Two defences:
 
 1. `_checkin` issues plain `Checkin` only, and a static test asserts the rotate-on-release
    endpoint is named nowhere in the feature;
-2. a per-cluster circuit breaker (`k8s_token_sync_max_per_hour`, default 4) trips and names
-   the access policy as the likely cause;
-3. it is documented as an operator prerequisite.
+2. it is documented as an operator prerequisite, now for both accounts rather than one.
+
+The circuit breaker that used to be the third defence went with the reconciler. It was
+counting the dashboard's own pushes, and the dashboard no longer pushes.
 
 ## 6. The break window is real and cannot be closed here
 
 In LongLived mode Password Safe revokes the old token as part of the rotation, before
-anything can observe it. So PRA holds a dead credential for up to one sync interval:
+anything can observe it. Password Safe applies the new value to the subscriber as part of
+the same change, but change operations are queued, so there is still a window — now bounded
+by Password Safe's own queue rather than by a poll interval the dashboard chose.
 
-- expected ≈ `interval / 2` (≈ 7.5 min at the default 15)
-- worst ≈ `interval + pass duration` (≈ 16 min)
-
-The dashboard can shorten that window, not remove it. **`;bound` is the only lever that
-changes the kind of failure rather than its duration** — Bound mode never revokes, so the
-previous token stays valid until its TTL and the window is zero as long as the interval is
-well under the TTL. Recommend it for any cluster whose tunnel is used interactively; keep
-LongLived where a brief outage is acceptable or rotation is scheduled off-hours.
+**Bound mode is the only lever that changes the kind of failure rather than its duration.**
+Bound never revokes, so the previous token stays valid until its TTL and the window is zero.
+Recommend it for any cluster whose tunnel is used interactively; keep LongLived where a
+brief outage is acceptable or rotation is scheduled off-hours.
 
 ## 7. Why the rotator RBAC subject comes from config
 
@@ -173,27 +196,32 @@ nothing and the API server 401s — invisible from inside the cluster. It never 
 
 ## 8. Smaller decisions worth recording
 
-- **The credential is checked out over REST (`ps_api_service`), not `ps-cli`.** The poll
-  needs one signed-in session for every cluster; `btapi_service` spawns a subprocess with
-  its own OAuth handshake per call. It also keeps the feature working in an image with no
-  `ps-cli` binary, and is why the sync pass qualifies for the LIGHT worker tier.
-- **The plaintext stays inside one function.** `rotate_pra_vault_token` checks out, pushes
-  and checks in in a single frame and returns a 12-hex digest — never the value. Job
-  metadata is served by the jobs API and the MCP job tool, so a credential that escapes
-  the module escapes to a lot of places. `checkout_credential` is the one documented
-  exception: the PRA Vault account is Terraform-provisioned, so the tunnel path must hold
-  the value long enough to pass it as a sensitive `TF_VAR`.
-- **A checked-out value is shape-guarded before any write.** Password Safe can return a
-  soft-failure *string* in the credential position; mirroring that into PRA's vault would
-  break the tunnel while reporting success. A ServiceAccount token is a JWT in both modes,
-  so three dot-separated segments is a sufficient and cheap check.
-- **The PRA target is bound by numeric `ManagedAccountID`, never by name**, and a resolved
-  account on the wrong platform fails closed. PRA does not enforce unique vault account
-  names, and writing a Kubernetes bearer token into some other plugin's account is the one
-  failure here that puts a secret somewhere it does not belong.
-- **The sync must never go through Terraform.** `terraform_pra_service._scrub_tf_state`
-  redacts `token` fail-closed, so an apply over the stored tunnel state would push the
-  redaction sentinel into PRA.
+- **Password Safe is driven over REST (`ps_api_service`), not `ps-cli`.** `ps-cli` does
+  expose `synced-accounts`, but `btapi_service` spawns a subprocess with its own OAuth
+  handshake per call, and this feature already holds a signed-in REST session for the
+  reads around it. REST also keeps the feature working in an image with no `ps-cli` binary.
+- **The direction of the link is the likeliest defect in the whole feature.** Both path
+  segments are plain managed-account ids, so a swapped pair links successfully and then
+  syncs *backwards* — pushing the PRA Vault account's value onto the cluster's token
+  account, with nothing downstream to notice. Two tests pin it: one on the URL
+  `ps_api_service` builds, one on the arguments `register` passes.
+- **The dashboard holds a plaintext token in exactly one place.** `checkout_credential`
+  returns the value because the PRA Vault account is Terraform-provisioned and the tunnel
+  path must pass it as a sensitive `TF_VAR`. Nothing else needs it — keeping the pair in
+  step needs no checkout at all, which is the security dividend of §4.
+- **A checked-out value is shape-guarded before use.** Password Safe can return a
+  soft-failure *string* in the credential position; provisioning the tunnel with that would
+  break it while reporting success. A ServiceAccount token is a JWT in both modes, so three
+  dot-separated segments is a sufficient and cheap check.
+- **The subscriber is bound by numeric `ManagedAccountID`, never by name**, and an account
+  on the wrong platform fails closed before the link is created. PRA does not enforce
+  unique vault account names, and syncing a Kubernetes bearer token to some other plugin's
+  account is the one failure here that puts a secret somewhere it does not belong.
+- **Removing the PRA tunnel deliberately leaves the link in place.** The plugin resolves
+  its PRA Vault account by *name* (`k8s-<cluster>-sa`), so re-provisioning re-creates the
+  account the link already points at and syncing resumes with no operator action. The cost
+  is that a rotation landing while no tunnel exists fails the PRA half — visibly, in
+  Password Safe's change log, which is the right place for it.
 - **OKE and on-prem share the generic `k8s;` path.** The plugin has no OCI provider, so a
   fourth cloud branch would buy nothing.
 
@@ -206,7 +234,12 @@ nothing and the API server 401s — invisible from inside the cluster. It never 
   Rule containing both managed accounts. There is no Smart Rule API — in this repo or in
   Password Safe's public API — so this is out-of-band, and it is the failure every
   Password Safe consumption path here has hit first.
-- Leave **Change Password After Release** off on the token account (see §5).
+- Grant the API identity whatever the tenant enforces for the sync link. The REST reference
+  says **Password Safe Account Management (Full control)**; `ps-cli synced-accounts -h` says
+  **BeyondInsight/Password Safe Role Management (Read/Write)**. The documentation disagrees
+  with itself, so check both when the link 403s.
+- Leave **Change Password After Release** off on **both** accounts (see §5) — under synced
+  accounts a change on either one rotates the pair.
 - Give the Password Safe host or Resource Broker network reachability to the cluster's API
   server. For private EKS/AKS/GKE clusters that is a real problem, and the PRA Gateway
   cannot help — Password Safe does not route through it.

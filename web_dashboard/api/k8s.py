@@ -693,9 +693,12 @@ async def rotate_ps_token(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("k8s", "write")),
 ):
-    """Rotate the token in Password Safe now, then sync the result into PRA in the
-    same job — an operator-initiated rotation should not leave PRA holding a dead
-    token until the next sweep."""
+    """Rotate the token in Password Safe now.
+
+    Password Safe pushes the new value into the synced PRA Vault account as part of the
+    same change, so there is no second step — but the job result says whether the pair
+    is actually still synced, because an unlinked rotation succeeds while silently
+    leaving PRA on the old value."""
     try:
         k8s_service.get_cluster(db, cluster_id)
     except K8sError as e:
@@ -707,44 +710,27 @@ async def rotate_ps_token(
             "job_id": job.id}
 
 
-@router.post("/clusters/{cluster_id}/token-sync", status_code=202)
-async def sync_ps_token(
+@router.get("/clusters/{cluster_id}/ps-token/status")
+async def ps_token_status(
     cluster_id: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_permission("k8s", "write")),
+    current_user: User = Depends(require_permission("k8s", "read")),
 ):
-    """Sync this cluster's PRA Vault copy from Password Safe now. ``force`` bypasses
-    the change-date short-circuit AND the failure backoff — a human who just pressed
-    the button means now, which is also why this enqueues its own pass rather than
-    reporting that a periodic one is due soon."""
+    """Password Safe's live view of the token account and its synced PRA Vault account.
+
+    Read live on every open rather than served from the cluster row: the dashboard is
+    not a party to the sync any more, so the only thing it could cache is what was true
+    at registration — and "an admin unlinked it in the Password Safe console" is exactly
+    what an operator opens this to find out."""
+    from ..services import ps_k8s_token_service
     try:
         k8s_service.get_cluster(db, cluster_id)
     except K8sError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    job = job_service.create_job(
-        db, job_type="k8s_token_sync", created_by=current_user.username,
-        metadata={"cluster_id": cluster_id, "force": True})
-    return {"ok": True, "status": "syncing", "cluster_id": cluster_id,
-            "job_id": job.id}
-
-
-@router.post("/token-sync/sweep", status_code=202)
-async def force_token_sync_sweep(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_permission("k8s", "write")),
-):
-    """Run a full token-sync pass now, skipping the recency guard (``min_gap_seconds=0``)
-    — mirroring the auto-delete force-sweep. The active-pass check still applies, so a
-    pass already running is reported rather than doubled."""
-    from ..services import k8s_token_sync
-    if not k8s_token_sync.enabled():
-        raise HTTPException(
-            status_code=400,
-            detail="token sync is disabled — enable k8s_token_sync_enabled in Settings")
-    job_id = k8s_token_sync.enqueue_sweep_if_due(db, min_gap_seconds=0)
-    if not job_id:
-        return {"ok": True, "status": "already_running", "job_id": None}
-    return {"ok": True, "status": "sweeping", "job_id": job_id}
+    try:
+        return {"ok": True, **await ps_k8s_token_service.sync_status(db, cluster_id)}
+    except Exception as e:  # noqa: BLE001 — a status read must not 500 the modal
+        return {"ok": False, "registered": False, "linked": False, "error": str(e)[:400]}
 
 
 @router.post("/clusters/{cluster_id}/entitle-agent", status_code=202)
