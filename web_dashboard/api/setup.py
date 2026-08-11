@@ -200,7 +200,9 @@ class OCISetup(BaseModel):
 
 class FeaturesSetup(BaseModel):
     vmware_enabled: bool = False
-    beyondtrust_enabled: bool = False
+    password_safe_enabled: bool = False
+    pra_enabled: bool = False
+    epml_enabled: bool = False
     portainer_enabled: bool = False
     ansible_enabled: bool = False
     entitle_enabled: bool = False
@@ -325,7 +327,9 @@ def _apply_config(payload: SetupPayload) -> None:
     # Feature flags — always store (explicit true/false is meaningful)
     pairs.update({
         "vmware_enabled":       "1" if payload.features.vmware_enabled else "0",
-        "beyondtrust_enabled":  "1" if payload.features.beyondtrust_enabled else "0",
+        "password_safe_enabled": "1" if payload.features.password_safe_enabled else "0",
+        "pra_enabled":          "1" if payload.features.pra_enabled else "0",
+        "epml_enabled":         "1" if payload.features.epml_enabled else "0",
         "portainer_enabled":    "1" if payload.features.portainer_enabled else "0",
         "ansible_enabled":      "1" if payload.features.ansible_enabled else "0",
         "entitle_enabled":      "1" if payload.features.entitle_enabled else "0",
@@ -601,7 +605,23 @@ class RemoteAgentsFeatureConfig(BaseModel):
     enabled: bool = False
     public_base_url: str = ""
 
-class BeyondTrustFeatureConfig(BaseModel):
+class PasswordSafeFeatureConfig(BaseModel):
+    """Password Safe / Secrets Safe — secret and managed-account checkout, plus
+    onboarding of everything the dashboard builds (VMs, cloud databases, Kubernetes
+    ServiceAccount tokens) as managed systems + accounts. Driven by ``ps-cli``.
+
+    One of the three products that used to share a single ``BeyondTrustFeatureConfig``
+    and a single ``beyondtrust_enabled`` flag; see PRAFeatureConfig and
+    EPMLFeatureConfig for the other two. The split is strict — every key lives on
+    exactly one model, because patch_feature_config resolves the model from the URL
+    path segment, so a key bound inside another panel's drawer would be silently
+    dropped on save and read back blank.
+
+    Several keys here name PRA objects (``k8s_ps_pravault_*``,
+    ``clouddb_ps_pravault_platform``) and belong on THIS model regardless: they are
+    Password Safe platform and functional-account names used by the rotation path, so
+    turning PRA off must not blank them.
+    """
     enabled: bool = False
     pscli_api_url: str = ""
     pscli_client_id: str = ""
@@ -625,13 +645,6 @@ class BeyondTrustFeatureConfig(BaseModel):
     # GCP VM SSH Rotation (cloud-native) onboarding — GCP counterpart (writes the key into GCE ssh-keys metadata).
     passwordsafe_gcp_registration_method: str = "gcpvm"   # "gcpvm" (GCP VM SSH Rotation plugin) | "ssh"
     passwordsafe_gcp_change_password_on_register: bool = True  # mint first key on onboard (adminuser has none baked in)
-    # PRA API credentials (used by the SRA Terraform provider for Shell Jump provisioning)
-    bt_api_host: str = ""
-    bt_client_id: str = ""
-    bt_client_secret: str = ""      # encrypted at rest
-    # Shell Jump provisioning — Jump Group and Jumpoint must pre-exist in PRA
-    bt_jump_group_name: str = ""
-    bt_jumpoint_name: str = ""
     # Optional cloud-DATABASE Password Safe onboarding (AWS-only) — see config.py.
     # The two custom plugins + jump-host RSA prep are one-time MANUAL setup.
     clouddb_ps_onboarding_enabled: bool = False
@@ -656,8 +669,6 @@ class BeyondTrustFeatureConfig(BaseModel):
     clouddb_ps_ssm_secret_access_key: str = ""      # encrypted at rest
     clouddb_ps_ssm_account_suffix: str = "local"    # "local" or a cross-account AssumeRole ARN
     clouddb_ps_ssm_public_key_path: str = ""         # public key path on the PS node/broker
-    pra_config_api_client_id: str = ""              # blank → reuse bt_client_id
-    pra_config_api_client_secret: str = ""          # encrypted at rest; blank → reuse bt_client_secret
     # Azure cloud-DATABASE Password Safe onboarding (Run Command plugins) — see config.py.
     # The three custom plugins + the RSA keypair are one-time MANUAL setup.
     passwordsafe_azure_db_registration_method: str = "runcommand"  # "runcommand" (Azure Run Command plugins) | "off"
@@ -671,23 +682,6 @@ class BeyondTrustFeatureConfig(BaseModel):
     clouddb_ps_azure_sp_client_secret: str = ""     # encrypted at rest; blank → reuse azure_client_secret
     clouddb_ps_azure_plugin_private_key: str = ""   # PEM, encrypted at rest; dropped on the jump VM
     clouddb_ps_azure_plugin_passphrase: str = ""    # encrypted at rest
-    # Azure-specific overrides (leave blank to fall back to the AWS values above)
-    azure_bt_jump_group_name: str = ""
-    azure_jumpoint_name: str = ""
-    # "shared" (default) | "aci" — whether a SINGLE Azure VM deploy borrows the
-    # ref-counted clouddb-jumpoint VM or starts its own ACI container group. Editable
-    # here so the choice is reversible without a redeploy. Batches always share one ACI.
-    azure_vm_jumpoint_mode: str = "shared"
-    # GCP-specific overrides (leave blank to fall back to the AWS values above)
-    gcp_bt_jump_group_name: str = ""
-    gcp_jumpoint_name: str = ""
-    # "shared" (default) | "paired" — whether a SINGLE GCP VM deploy borrows the
-    # ref-counted Jumpoint host or starts its own bt-jumpoint-<vm>. Editable here so
-    # the choice is reversible without a redeploy. Batches always share.
-    gcp_vm_jumpoint_mode: str = "shared"
-    # EPM for Linux (EPM-L) — Pathfinder public API gateway at api.beyondtrust.io
-    epml_site_id: str = ""          # Pathfinder site UUID; PATs are bound to the site active at creation
-    epml_pat: str = ""              # encrypted at rest; Bearer token for EPML API
     # k8s ServiceAccount token rotation (Password Safe) — see config.py for the key
     # semantics. Every numeric key below MUST stay annotated `int`: _read_feature's
     # int-coercion branch only fires on an int annotation, and an unset int otherwise
@@ -723,11 +717,67 @@ class BeyondTrustFeatureConfig(BaseModel):
     k8s_token_sync_max_per_pass: int = 5
     k8s_token_sync_max_failures: int = 5
     k8s_token_sync_max_per_hour: int = 4
-    # Previously env-only, promoted alongside the rotation feature that makes them
-    # operationally load-bearing (the managed account name is <namespace>/<sa>).
+
+class PRAFeatureConfig(BaseModel):
+    """Privileged Remote Access (PRA/SRA) — brokered access to everything the dashboard
+    builds. Provisions Shell Jump, Web Jump, Remote RDP and Protocol Tunnel jump items
+    plus PRA Vault accounts, and runs the Gateway hosts those jumps are brokered
+    through. Driven by the ``sra`` Terraform provider plus a small REST client.
+
+    The Jump Group and Gateway named here must already exist in PRA — the dashboard
+    looks them up by name, it does not create them.
+
+    ``pra_k8s_namespace`` / ``pra_k8s_sa_name`` / ``bt_vault_account_group_id`` live
+    here rather than on PasswordSafeFeatureConfig even though the Password Safe token
+    rotator also reads them: they name the ServiceAccount PRA injects and the vault
+    group PRA drops credentials into, and PRA tunnel provisioning needs them with
+    Password Safe rotation off entirely.
+    """
+    enabled: bool = False
+    # PRA API credentials (used by the SRA Terraform provider for Shell Jump provisioning)
+    bt_api_host: str = ""
+    bt_client_id: str = ""
+    bt_client_secret: str = ""      # encrypted at rest
+    # Shell Jump provisioning — Jump Group and Jumpoint must pre-exist in PRA
+    bt_jump_group_name: str = ""
+    bt_jumpoint_name: str = ""
+    # PRA Configuration API account — the few calls the SRA provider can't make
+    # (PRA Vault accounts for cloud-DB onboarding). Blank reuses the credentials above.
+    pra_config_api_client_id: str = ""              # blank → reuse bt_client_id
+    pra_config_api_client_secret: str = ""          # encrypted at rest; blank → reuse bt_client_secret
+    # Azure-specific overrides (leave blank to fall back to the AWS values above)
+    azure_bt_jump_group_name: str = ""
+    azure_jumpoint_name: str = ""
+    # "shared" (default) | "aci" — whether a SINGLE Azure VM deploy borrows the
+    # ref-counted clouddb-jumpoint VM or starts its own ACI container group. Editable
+    # here so the choice is reversible without a redeploy. Batches always share one ACI.
+    azure_vm_jumpoint_mode: str = "shared"
+    # GCP-specific overrides (leave blank to fall back to the AWS values above)
+    gcp_bt_jump_group_name: str = ""
+    gcp_jumpoint_name: str = ""
+    # "shared" (default) | "paired" — whether a SINGLE GCP VM deploy borrows the
+    # ref-counted Jumpoint host or starts its own bt-jumpoint-<vm>. Editable here so
+    # the choice is reversible without a redeploy. Batches always share.
+    gcp_vm_jumpoint_mode: str = "shared"
+    # The identity PRA injects into a managed cluster. Previously env-only, promoted
+    # alongside the Password Safe rotation feature that makes them operationally
+    # load-bearing (the managed account name is <namespace>/<sa>).
     pra_k8s_namespace: str = "pra-access"
     pra_k8s_sa_name: str = "pra-access"
     bt_vault_account_group_id: str = ""
+
+class EPMLFeatureConfig(BaseModel):
+    """Endpoint Privilege Management for Linux (EPM-L) — agent package builds, sync to
+    asset storage, and installation tokens, via the BeyondTrust Pathfinder public API.
+
+    The site id comes from ``app.beyondtrust.io/api/platform/currentSite``, but the API
+    this talks to is ``api.beyondtrust.io`` — a common mix-up. The PAT must be created
+    while that site is the active one; PATs are bound to the site, not the user.
+    """
+    enabled: bool = False
+    # EPM for Linux (EPM-L) — Pathfinder public API gateway at api.beyondtrust.io
+    epml_site_id: str = ""          # Pathfinder site UUID; PATs are bound to the site active at creation
+    epml_pat: str = ""              # encrypted at rest; Bearer token for EPML API
 
 class PortainerFeatureConfig(BaseModel):
     """Portainer CE — both the connection to a server and the knobs for deploying a
@@ -1268,7 +1318,13 @@ _FEATURE_MODELS = {
     # `remote_agents_enabled` with no special-casing. Renaming this key would silently
     # start writing a different config key and the toggle would stop doing anything.
     "remote_agents": RemoteAgentsFeatureConfig,
-    "beyondtrust":  BeyondTrustFeatureConfig,
+    # The three BeyondTrust products, split out of a single "beyondtrust" panel.
+    # These keys must stay exactly as-is: _feature_to_cfg_key suffixes "_enabled" to
+    # derive the config key, so renaming one silently repoints its toggle at a key
+    # nothing reads.
+    "password_safe": PasswordSafeFeatureConfig,
+    "pra":          PRAFeatureConfig,
+    "epml":         EPMLFeatureConfig,
     "portainer":    PortainerFeatureConfig,
     "ansible":      AnsibleFeatureConfig,
     "entitle":      EntitleFeatureConfig,

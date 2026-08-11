@@ -11,9 +11,9 @@ Three things are pinned here:
   * **every #hash a dashboard tile points at /containers with is a tab that page
     honours.** Stated generally, not just for gateways, so the next tile added this
     way fails here rather than in someone's browser.
-  * **the gateways hash is Jinja-gated on `beyondtrust_enabled`.** Unlike the Portainer
+  * **the gateways hash is Jinja-gated on `pra_enabled`.** Unlike the Portainer
     panel — which renders either way, so `#portainer` is always safe — the gateways
-    panel is wrapped in `{% if beyondtrust_enabled %}` in its entirety. Honouring the
+    panel is wrapped in `{% if pra_enabled %}` in its entirety. Honouring the
     hash with the feature off would select a tab that isn't in the DOM: a blank page.
   * **landing via the hash loads the list.** The tab *button* calls `loadGateways()` on
     click; arriving from the dashboard skips that click, so init has to do it or the
@@ -79,7 +79,7 @@ def test_the_gateways_tile_exists_in_the_containers_section():
         "the tile must deep-link to the Gateways tab, not the Containers page default")
     # Same flag as the tab and the API routes, so the tile can't offer a surface the
     # rest of the app has switched off.
-    assert _field(tile, "flag") == "beyondtrust", (
+    assert _field(tile, "flag") == "pra", (
         "the tile must gate on the same flag as the tab and /api/gateways")
 
 
@@ -116,13 +116,13 @@ def test_the_gateways_hash_is_gated_on_the_feature_flag():
     allowlist = _containers_tab_allowlist()
     assert "'gateways'" in allowlist, (
         "the Containers page ignores #gateways, so the dashboard tile lands on Cloud")
-    assert "{% if beyondtrust_enabled %}" in allowlist, (
+    assert "{% if pra_enabled %}" in allowlist, (
         "#gateways must be accepted only when the panel is rendered, or the tab "
         "selects nothing and the page comes up blank")
 
     # The premise of that gate: the panel really is Jinja-gated, unlike Portainer's.
     panel = CONTAINERS.index("activeTab === 'gateways'\" x-cloak")
-    assert "{% if beyondtrust_enabled %}" in CONTAINERS[:panel][-400:], (
+    assert "{% if pra_enabled %}" in CONTAINERS[:panel][-400:], (
         "the gateways panel is no longer Jinja-gated — if it now renders "
         "unconditionally, the gate on the hash is no longer needed")
 

@@ -153,7 +153,7 @@ def test_partial_failure_keeps_the_modal_open():
 # ── gating ─────────────────────────────────────────────────────────────────────
 
 def test_the_button_and_modal_sit_inside_the_beyondtrust_gate():
-    gates = [m.start() for m in re.finditer(r"\{% if beyondtrust_enabled %\}", HTML)]
+    gates = [m.start() for m in re.finditer(r"\{% if password_safe_enabled %\}", HTML)]
     ends = [m.start() for m in re.finditer(r"\{% endif %\}", HTML)]
     button = HTML.index('@click="openImport()"')
     modal = HTML.index('x-show="showImport"')
@@ -161,7 +161,7 @@ def test_the_button_and_modal_sit_inside_the_beyondtrust_gate():
         opened = [g for g in gates if g < pos]
         closed = [e for e in ends if e < pos]
         assert opened and len(opened) > len(closed), \
-            f"{what} is not inside a beyondtrust_enabled block"
+            f"{what} is not inside a password_safe_enabled block"
 
 
 def test_the_page_still_defines_the_helpers_other_tests_pin():

@@ -432,7 +432,7 @@ async def _run_deploy(job_id: str, req: AzureDeployRequest, rg: str, loc: str, *
         # Step 1: BeyondTrust Gateway — the shared ref-counted VM host by default, or a
         # dedicated ACI container group when the operator asked for one (or supplied a
         # per-deploy key). See _aci_requested for why shared is the default.
-        if settings.beyondtrust_enabled:
+        if settings.pra_enabled:
             if aci is None:
                 aci = (await _acquire_aci(db, job_id, req, loc) if _aci_requested(req)
                        else await _acquire_shared_host(db, job_id, loc))
@@ -502,13 +502,13 @@ async def _run_deploy(job_id: str, req: AzureDeployRequest, rg: str, loc: str, *
         )
 
         # Step 3: BeyondTrust PRA — Shell Jump (optional; SSH, so Linux only)
-        if settings.beyondtrust_enabled and is_windows:
+        if settings.pra_enabled and is_windows:
             job_service.update_progress(
                 db, job_id, 90,
                 "Windows VM deployed — Shell Jump (SSH) skipped; broker access with an "
                 "RDP jump item on the Gateway. Password: Azure → VMs → Password."
             )
-        elif settings.beyondtrust_enabled:
+        elif settings.pra_enabled:
             from ..services import terraform_pra_service
             # Resolve from config_service (wizard/DB) first, then env-var defaults.
             # Azure-specific keys override the shared bt_* keys.
@@ -616,7 +616,7 @@ async def _run_bulk_deploy(job_items: list, req: AzureBulkDeployRequest, rg: str
         # mode="shared": one VM failing must not stop the container the rest still need.
         aci = (await _acquire_aci(db, first_job_id, req, loc,
                                   count=len(job_items), mode="shared")
-               if settings.beyondtrust_enabled else _AciRef("none"))
+               if settings.pra_enabled else _AciRef("none"))
 
         # One Key Vault round trip for the batch, not one per VM.
         batch_ssh_public_key = await _effective_ssh_public_key(req)

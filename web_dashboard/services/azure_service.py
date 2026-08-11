@@ -105,7 +105,7 @@ async def _ensure_creds() -> tuple:
 
         if client_id and client_secret and tenant_id and sub_id:
             source = "config store / env vars"
-        elif settings.beyondtrust_enabled:
+        elif settings.password_safe_enabled:
             from . import btapi_service
             try:
                 client_id     = await btapi_service.get_ps_secret(settings.azure_client_id_secret_title)

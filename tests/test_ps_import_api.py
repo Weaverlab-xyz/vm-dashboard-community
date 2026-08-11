@@ -95,7 +95,7 @@ class Harness:
         def _get_bool(key, default=False):
             if key == "cloud_database_enabled":
                 return True
-            if key == "beyondtrust_enabled":
+            if key == "password_safe_enabled":
                 return harness.beyondtrust
             return default
 

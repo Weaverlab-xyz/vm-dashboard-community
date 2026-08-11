@@ -634,7 +634,7 @@ function storagePage() {
     async loadFeatureFlags() {
       try {
         const f = await API.get('/api/features') || {};
-        this.epml.enabled = !!f.beyondtrust;
+        this.epml.enabled = !!f.epml;
       } catch (e) {
         this.epml.enabled = false;   // hide rather than show a section that can't work
       }

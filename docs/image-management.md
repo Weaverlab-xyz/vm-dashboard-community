@@ -219,7 +219,7 @@ so a name can't break out of the `environment_vars` array.
 > [`bt-ready-*` scripts](../provisioners/beyondtrust/README.md). It
 > sets `BT_ADMIN_USER` / `BT_ENTITLE_PUBKEY` and, for EPM-L, resolves a
 > fresh BeyondTrust presigned package URL into `BT_EPML_URL` via the
-> [EPM-L integration](./integrations/beyondtrust.md) at build-launch
+> [EPM-L integration](./integrations/epml.md) at build-launch
 > (those links expire ~30 min). On Azure the panel shows only for
 > Linux builds — the Windows path uses a PowerShell provisioner, not
 > the shell `environment_vars` mechanism.

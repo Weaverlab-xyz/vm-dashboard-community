@@ -68,7 +68,7 @@ def runner_env() -> dict:
     """
     from . import config_service as cs
     return build_runner_env(
-        enabled=cs.get_bool("beyondtrust_enabled", True),
+        enabled=cs.get_bool("password_safe_enabled", True),
         api_url_raw=cs.get("pscli_api_url"),
         client_id=cs.get("pscli_client_id"),
         client_secret=cs.get("pscli_client_secret"),

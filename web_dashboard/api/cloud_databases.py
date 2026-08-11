@@ -425,7 +425,7 @@ async def ps_candidates(
     _require_enabled()
     _require_secrets_use(current_user)
 
-    if not config_service.get_bool("beyondtrust_enabled", settings.beyondtrust_enabled):
+    if not config_service.get_bool("password_safe_enabled", settings.password_safe_enabled):
         return {"enabled": False, "configured": False, "systems": [],
                 "default_cloud": "local", "truncated": False, "warnings": []}
     if not ps_api_service.configured():
@@ -492,7 +492,7 @@ async def ps_import(
     _require_enabled()
     _require_secrets_use(current_user)
 
-    if not config_service.get_bool("beyondtrust_enabled", settings.beyondtrust_enabled):
+    if not config_service.get_bool("password_safe_enabled", settings.password_safe_enabled):
         raise HTTPException(
             status_code=400,
             detail="BeyondTrust is disabled, so there is nothing to import from.")

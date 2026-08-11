@@ -146,7 +146,8 @@ after first login — only if you have the backing infrastructure:
   runner is one-shot — see [docs/config-management.md](docs/config-management.md)
   for the security argument. Integration setup in
   [docs/integrations/ansible.md](docs/integrations/ansible.md).
-- **BeyondTrust Password Safe and/or PRA** — secret retrieval and session recording
+- **BeyondTrust Password Safe** — on-demand checkout of SSH keys and passwords, plus onboarding of the VMs, databases and Kubernetes tokens the dashboard builds as managed systems + accounts. See [docs/integrations/password-safe.md](docs/integrations/password-safe.md).
+- **BeyondTrust Privileged Remote Access** — Shell Jump, Web Jump, Remote RDP and protocol-tunnel jump items plus PRA Vault accounts, and the Gateway hosts they broker through. See [docs/integrations/privileged-remote-access.md](docs/integrations/privileged-remote-access.md).
 - **BeyondTrust EPM for Linux (EPM-L)** — list and build agent packages, one-click sync of `.rpm`/`.deb` packages to your Ansible asset bucket, installation-token issuance for new endpoint registration. See [docs/integrations/epml.md](docs/integrations/epml.md).
 - **Portainer CE** — on-prem Docker host management
 - **Entitle** — approval-workflow integration

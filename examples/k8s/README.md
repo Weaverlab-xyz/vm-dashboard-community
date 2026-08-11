@@ -4,7 +4,7 @@ Ready-to-adapt manifests for the **EKS / AKS / GKE clusters the dashboard
 manages** — provision or register a cluster, import it into the Rancher
 management plane, and broker access via BeyondTrust PRA
 (see [docs/integrations/rancher.md](../../docs/integrations/rancher.md) and
-[docs/integrations/beyondtrust.md](../../docs/integrations/beyondtrust.md)).
+[docs/integrations/privileged-remote-access.md](../../docs/integrations/privileged-remote-access.md)).
 
 They are the Kubernetes counterpart to [`examples/compose/`](../compose/) and
 [`examples/playbooks/`](../playbooks/): the community-edition answer to an

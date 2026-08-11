@@ -557,7 +557,7 @@ async def _checkout(client: httpx.AsyncClient, account_id: int, *,
             f"Password Safe refused the credential request ({resp.status_code}). The API "
             f"identity needs the Requestor role and an access policy granting View on a "
             f"Smart Rule containing this account. There is no Smart Rule API — this is an "
-            f"out-of-band Password Safe prerequisite (docs/integrations/beyondtrust.md).")
+            f"out-of-band Password Safe prerequisite (docs/integrations/password-safe.md).")
     body = resp.json()
     request_id = body if isinstance(body, int) else (
         body.get("RequestID") or body.get("RequestId") or body.get("id"))

@@ -1,530 +1,89 @@
-# BeyondTrust Integration
+# BeyondTrust Integrations
 
 ## What is it?
 
-The dashboard integrates with four BeyondTrust products. **This page covers the first
-two**; the others have their own pages and are listed here so the whole surface is
-discoverable from one place.
+The dashboard integrates with four BeyondTrust products. Each has its own page and its
+own feature flag; this page is the map, plus the parts that belong to no single product.
 
 - **Password Safe / Secrets Safe** — on-demand checkout of SSH keys and passwords.
   Target credentials (AWS keys, Azure service principal secrets, SSH private keys) are
   fetched at the moment the dashboard needs them and discarded after use, rather than
   stored in the dashboard's encrypted database. It also **onboards** resources the
-  dashboard builds — VMs, cloud databases — as managed systems + accounts. Driven by
-  `ps-cli`.
+  dashboard builds — VMs, cloud databases, Kubernetes ServiceAccount tokens — as managed
+  systems + accounts. Driven by `ps-cli`. `password_safe_enabled`. See
+  [Password Safe](password-safe.md).
 - **Privileged Remote Access (PRA/SRA)** — brokered access to everything the dashboard
   builds. The dashboard creates and tears down **Shell Jump**, **Web Jump**, **Remote
   RDP** and **Protocol Tunnel** jump items, plus PRA Vault accounts, so operators reach
   VMs, container UIs, databases and Kubernetes API servers through PRA rather than
   direct network exposure. Driven by the `sra` Terraform provider plus a small REST
   client for the few calls the provider can't make. It also runs the **Gateway hosts**
-  those jumps are brokered through — one auto-managed per cloud, plus any you deploy to
-  carry session load. See [Gateway hosts](gateways.md).
+  those jumps are brokered through. `pra_enabled`. See
+  [Privileged Remote Access](privileged-remote-access.md) and
+  [Gateway hosts](gateways.md).
 - **Endpoint Privilege Management for Linux (EPM-L)** — agent package builds, sync to
-  asset storage, and installation tokens. Gated by the **same** `beyondtrust_enabled`
-  flag as the two above. See [EPM-L](epml.md).
-- **Entitle** — just-in-time cloud identity and access requests. A **separate**
-  `entitle_enabled` flag, so it can be turned on and off independently. See
+  asset storage, and installation tokens, through the BeyondTrust Pathfinder API.
+  `epml_enabled`. See [EPM-L](epml.md).
+- **Entitle** — just-in-time cloud identity and access requests. `entitle_enabled`. See
   [Entitle](entitle.md).
 
-Password Safe and PRA are controlled by the single `beyondtrust_enabled` flag. You can
-configure only Password Safe and leave the PRA fields blank if you do not have a PRA
-deployment.
+---
+
+## Three products, three feature flags
+
+| Product | Flag | Settings panel | Page |
+|---|---|---|---|
+| Password Safe / Secrets Safe | `password_safe_enabled` | Settings → Integrations → **Password Safe** | [password-safe.md](password-safe.md) |
+| Privileged Remote Access | `pra_enabled` | Settings → Integrations → **Privileged Remote Access** | [privileged-remote-access.md](privileged-remote-access.md) |
+| EPM for Linux | `epml_enabled` | Settings → Integrations → **EPM for Linux** | [epml.md](epml.md) |
+| Entitle | `entitle_enabled` | Settings → Integrations → **Entitle** | [entitle.md](entitle.md) |
+
+Password Safe, PRA and EPM-L used to share a single `beyondtrust_enabled` flag and a
+single Settings panel. They are now independent, because customers routinely license one
+or two of the three: a Password Safe deployment with no PRA no longer renders Gateway
+tabs and jump-item options it cannot use, and a PRA deployment needs no Secrets Safe
+licence to provision jump items.
+
+Upgrading an existing install carries your old setting forward — the first boot after the
+upgrade copies whatever `beyondtrust_enabled` said into all three new flags, so nothing
+turns on or off by surprise. The legacy key is left in place, not deleted, so rolling
+back to a previous image is a no-op.
+
+These are all **Settings keys**, not environment variables. The dashboard's config store
+reads from the database only; exporting an equivalently-named env var has no effect.
+
+> **Independently *gated* is not independently *behaved*.** Some paths genuinely need two
+> products live, and enabling only one leaves them inert rather than broken:
+> [Kubernetes token rotation](password-safe.md#kubernetes-serviceaccount-token-rotation)
+> rotates a token whose ServiceAccount PRA injects; a database tunnel is PRA, while the
+> credential it carries can be Password Safe-managed; and
+> `bt_ps_deploy_key_title` stores a PRA Gateway's Docker deploy key in Password Safe.
+> Each page says so where it applies.
 
 ---
 
-## Use cases
+## Which page do I want?
 
-- **Vault-backed cloud credentials** — instead of entering AWS access keys,
-  Azure service principal secrets, or SSH private keys into the dashboard
-  (where they would be stored encrypted in the application database), the
-  dashboard fetches them from Password Safe at runtime. Rotate credentials in
-  one place; the dashboard always gets the current value.
-- **Audit trail** — every secret checkout creates a Password Safe audit record.
-  You know who (the dashboard service account) requested what credential and
-  when.
-- **SSH key checkout for cloud VMs** — the Ansible config-management runner and
-  BeyondTrust Gateway container retrieve SSH keys from Password Safe managed
-  accounts, so the private key never touches the host filesystem.
-- **In-playbook secret lookup (Ansible)** — a config-management playbook can fetch
-  its own secrets/managed-account passwords from Password Safe at runtime via the
-  `beyondtrust.secrets_safe` Galaxy collection. The dashboard reuses this same OAuth
-  client (`pscli_*`) — auto-injecting it into the runner as `PASSWORD_SAFE_*` — so no
-  separate credential is needed. See
-  [integrations/ansible.md](ansible.md#in-playbook-password-safe-lookup-beyondtrustsecrets_safe)
-  and [examples/playbooks/password-safe/](../../examples/playbooks/password-safe/).
-
----
-
-## Prerequisites
-
-| Requirement | Notes |
+| I want to… | Page |
 |---|---|
-| BeyondTrust Password Safe | Secrets Safe licence; hosted or on-prem |
-| `ps-cli` | Ships as the `beyondtrust-bips-cli` **pip dependency** (`web_dashboard/requirements.txt`), so it is present in any image built from this repo — there is no separate binary install step |
-| BeyondTrust PRA (optional) | Required for jump items, protocol tunnels and PRA Vault accounts |
-| Terraform + the `sra` provider | How PRA jump items are created and destroyed; fetched by the dashboard's Terraform flow. No CLI to install |
-
----
-
-## Setup
-
-### Part 1 — Password Safe OAuth application (ps-cli)
-
-ps-cli authenticates to Password Safe with an OAuth 2.0 client-credentials
-grant.
-
-1. In **Password Safe** → **Configuration** → **API Registration** →
-   **Add API Registration**:
-   - Authentication type: **Client Credentials**
-   - Copy the **Client ID** and **Client Secret** displayed after creation.
-
-2. Assign the registration the following permissions (minimum):
-   - **Secrets** → Read
-   - **Requests** → Create
-   - **Credentials** → Read
-
-   Add Managed System / Managed Account scope for any accounts the dashboard
-   will check out SSH keys from.
-
-### Part 2 — PRA Config API credentials (optional)
-
-The `sra` Terraform provider and the REST client both authenticate to the BeyondTrust
-PRA Configuration API with an OAuth 2.0 client-credentials pair.
-
-1. In **BeyondTrust PRA** → **Configuration** → **API Configuration** →
-   **Add API Account**. Copy the **Client ID** and **Client Secret**.
-2. The API host is the hostname of your PRA appliance, e.g.
-   `https://pra.company.com`.
-
-Grant the account permission to manage **Jump Items** and **Jump Groups**, and — if you
-use the cloud-database or Kubernetes tunnels — read access to **Vault Accounts** (the
-dashboard enumerates account groups to populate the provision form).
-
-> If your PRA appliance and Password Safe are the same host, the credentials
-> from Part 1 and Part 2 may be identical.
-
-**Optional second credential.** Onboarding a database's PRA Vault account into Password
-Safe creates a functional account whose username/password *is* a PRA Config API client
-pair. Set `pra_config_api_client_id` / `pra_config_api_client_secret` to use a separate,
-narrower client for that; left blank, the dashboard falls back to the main
-`bt_client_id` / `bt_client_secret`.
-
-### Part 3 — Enable and configure in the dashboard
-
-**Option A — Setup wizard (first run)**
-
-The wizard Step 5 lists optional integrations. Toggle **BeyondTrust** on and
-fill in the fields.
-
-**Option B — Settings → Integrations (after first run)**
-
-1. Open **Settings** → **Integrations** → **BeyondTrust** → toggle on.
-2. Fill in the **Password Safe** section:
-
-   | Field | Example |
-   |---|---|
-   | Password Safe URL | `https://ps.company.com` |
-   | OAuth Client ID | (from API Registration) |
-   | OAuth Client Secret | (from API Registration) |
-
-3. Fill in the **Privileged Remote Access** section (leave blank if not using PRA):
-
-   | Field | Example |
-   |---|---|
-   | API Host | `https://pra.company.com` |
-   | Client ID | (from API Account) |
-   | Client Secret | (from API Account) |
-
-4. Click **Save**. No container restart is required.
-
----
-
-## What it enables in the dashboard
-
-| Feature | Description |
-|---|---|
-| **Vault-backed cloud credentials** | AWS, Azure, and SSH credentials resolved from Password Safe at runtime rather than stored in the application database |
-| **SSH key checkout** | Ansible and BT Gateway tasks retrieve SSH private keys from Managed Accounts on demand |
-| **Managed-account checkout for playbook runs** | A Config-Management run can use a Password Safe managed account as its login identity — the operator picks an account from a live list and the credential is checked out **just-in-time** at run time, never shown and scrubbed from job output. See [below](#managed-account-checkout-for-config-management-runs) |
-| **Resource onboarding** | VMs and cloud databases the dashboard builds are onboarded as Password Safe managed systems + accounts, and removed again on destroy |
-| **PRA jump items** | Shell Jump (VMs), Web Jump (Portainer / Rancher UIs), Remote RDP (virtual desktops) and Protocol Tunnel (databases, Kubernetes API) — created and torn down with the resource |
-| **Gateway hosts** | The hosts those jumps broker *through*. One per cloud is auto-ensured and reference-counted; **Containers → Gateways** inventories them and deploys more to carry session load. See [Gateway hosts](gateways.md) |
-| **PRA Vault accounts** | Tunnel credentials are minted as PRA Vault accounts, which can themselves be onboarded into Password Safe for rotation |
-| **EPM-L agent lifecycle** | Package builds, sync to asset storage, and installation tokens — same feature flag ([EPM-L](epml.md)) |
-| **Secret audit log** | Every checkout creates an immutable record in Password Safe |
-
-### Managed-account checkout for Config-Management runs
-
-Instead of referencing a *stored* secret, an operator running a playbook can pick a
-Password Safe **managed account** and have its credential checked out just-in-time. Two
-details are worth knowing because they are not obvious:
-
-- **Across many hosts, the account is matched by name.** A managed account reference
-  pins a system id *and* an account id, both specific to one managed system — reusing
-  one across a fleet would check out a single machine's credential and connect to every
-  host with it. A [bulk run](../config-management.md#bulk-runs-from-the-inventory)
-  therefore sends the account **name**, and each job resolves it against the host it is
-  configuring, so every host checks out its own credential.
-- **On the ECS / Cloud Run runners it needs an opt-in.** Those runners *reference* a
-  store secret rather than taking a value inline, which a just-in-time credential has
-  no place in — so they are rejected unless **Ephemeral cloud secrets** is enabled, at
-  which point the credential is briefly written to that cloud's store as a short-lived,
-  RBAC-locked secret and force-deleted after the run.
-
-Full walkthrough in
-[Ansible → Managed-account checkout](ansible.md#managed-account-checkout-beyondtrust-password-safe).
-
----
-
-## Password Safe VM onboarding (managed systems)
-
-When enabled, each freshly built **Linux** VM can be onboarded into Password Safe as a
-**managed system + managed account** via a per-deploy **"Onboard into Password Safe"**
-checkbox on the AWS / Azure / GCP deploy forms. Turn the capability on under **Settings →
-Integrations → BeyondTrust → Resource registration (VMs)** (`passwordsafe_registration_enabled`).
-The functional account + workgroup must already exist in Password Safe; the dashboard
-resolves them over the public API and creates the managed system/account with Terraform.
-
-> This section is the authoritative reference for **VM** onboarding methods. For the full
-> cloud-VM deploy story (provisioning, PRA Shell Jump, Entitle) see [Cloud VMs](../cloud-vms.md).
-
-Three onboarding methods, chosen per cloud:
-
-### AWS — AWS Systems Manager custom plugin (cloud-native, default)
-
-The recommended path. Password Safe manages the Linux EC2 instance over **AWS SSM
-`SendCommand`** instead of SSH, so you need **no per-VPC Resource Broker and no SSH
-line-of-sight** — one Password Safe node (or a single Cloud Resource Broker on EC2) can
-manage Linux instances across many accounts/VPCs.
-
-The dashboard creates the managed system with **DNS name `{instance-id}:{region}`** (e.g.
-`i-0eaa6a10886717ed:us-east-1`, the field the plugin parses) on the custom-plugin platform,
-and a managed account named **`{managed_account_name};{suffix}`**. The account's credential
-is an SSH private key that **Password Safe mints over SSM on a credential change** — it is
-not set at creation. Auto-management rotates it on schedule; optionally the dashboard can
-trigger an immediate **Change Password** right after onboarding
-(`passwordsafe_ssm_change_password_on_register`, off by default).
-
-**Prerequisites (one-time, admin):**
-
-- Upload the **AWS Systems Manager** `.PSPLUGIN` in BeyondInsight → **Configuration →
-  Privileged Access Management → Platform Plugins**.
-- Create a **functional account on the *AWS Systems Manager Custom Plugin* platform** and
-  point the dashboard's **Functional account — AWS** at it. Its platform is what binds the
-  managed system to the plugin.
-  - **IAM-user mode** (suffix `local`): the functional account password is
-    `{AccessKeyID}:{AccessKeySecret}` for an IAM user with `ssm:SendCommand`,
-    `ssm:ListCommandInvocations`, `ssm:GetCommandInvocation`.
-  - **EC2 mode** (cross-account Resource Broker on EC2): set **SSM account suffix** to the
-    remote-account **AssumeRole ARN** (`{name};arn:aws:iam::…:role/…`); auth is the broker
-    EC2 instance's IAM role, so the functional account holds only placeholder credentials.
-- The instance must already be **SSM-managed** — the deploy attaches
-  `ec2_ssm_instance_profile`, which must grant `AmazonSSMManagedInstanceCore`. Confirm the
-  instance appears in **Fleet Manager** before onboarding.
-
-### Azure — Azure VM SSH Rotation custom plugin (cloud-native, default)
-
-The recommended path for Azure. Password Safe writes the key onto the VM over **Azure VM
-Run Command** (through the Azure control plane) instead of SSH, so you need **no Resource
-Broker and no SSH line-of-sight** — one Password Safe node can manage Linux VMs across many
-resource groups and regions. This is the Azure counterpart of the AWS Systems Manager path;
-plugin internals are documented in **`Beekeeper-AzureVmSshRotation.docx`**.
-
-The dashboard creates the managed system with **address
-`tenantId/subscriptionId/resourceGroup/vmName`** (tenant + subscription from the dashboard's
-Azure config, resource group + VM name from the deploy — the field the plugin parses) on the
-custom-plugin platform, and a managed account named after the baked-in **`adminuser`** Linux
-user (no `;suffix`). The account's credential is an SSH key the plugin **generates and writes
-onto `adminuser`'s `~/.ssh/authorized_keys` via Run Command** on a credential change. Because
-`adminuser` has no key baked in, the dashboard triggers an initial **Change Password** right
-after onboarding by default (`passwordsafe_azure_change_password_on_register`, on) so the
-account is immediately usable.
-
-**Prerequisites (one-time, admin):**
-
-- Upload the **Azure VM SSH Rotation** `.PSPLUGIN` in BeyondInsight → **Configuration →
-  Privileged Access Management → Platform Plugins**.
-- Create a **functional account on the *Azure VM SSH Rotation Custom Plugin* platform** and
-  point the dashboard's **Functional account — Azure** at it. Its platform is what binds the
-  managed system to the plugin. The credentials are the Azure service principal:
-  **Username = Application (client) ID**, **Password = client secret**.
-- Grant that service principal **Virtual Machine Contributor** on the target resource group
-  (covers `Microsoft.Compute/virtualMachines/read` + `runCommand/action`). You may reuse the
-  service principal the dashboard already uses to deploy Azure VMs — it qualifies.
-- The image must be built with the **bt-ready** provisioner so the `adminuser` account exists
-  on the VM (the plugin `chown`s the key to it; it does not create the account).
-
-### GCP — GCP VM SSH Rotation custom plugin (cloud-native, default)
-
-The recommended path for GCP. Password Safe writes the public key into the GCE instance's
-**`ssh-keys` metadata** (through the Compute Engine API); the in-guest Google guest agent then
-propagates it to the user's `~/.ssh/authorized_keys`, so you need **no Resource Broker and no
-SSH line-of-sight** — one Password Safe node can manage instances across many projects and
-zones. This is the GCP counterpart of the AWS Systems Manager / Azure paths; plugin internals
-are documented in **`Beekeeper-GcpVmSshRotation.docx`**.
-
-The dashboard creates the managed system with **DNS name `projectId/zone/instanceName`**
-(project from the dashboard's GCP config, zone + instance name from the deploy — the field the
-plugin parses) on the custom-plugin platform, and a managed account named after the baked-in
-**`adminuser`** Linux user (no `;suffix`). The account's credential is an SSH key the plugin
-**generates and writes into the instance's `ssh-keys` metadata** on a credential change. Because
-`adminuser` has no key baked in, the dashboard triggers an initial **Change Password** right
-after onboarding by default (`passwordsafe_gcp_change_password_on_register`, on) so the account
-is immediately usable.
-
-**Prerequisites (one-time, admin):**
-
-- Upload the **GCP VM SSH Rotation** `.PSPLUGIN` in BeyondInsight → **Configuration →
-  Privileged Access Management → Platform Plugins**.
-- Create a **functional account on the *GCP VM SSH Rotation Custom Plugin* platform** and point
-  the dashboard's **Functional account — GCP** at it. Its platform is what binds the managed
-  system to the plugin. The credentials are a Google **service account**:
-  **Username = service-account email**, **Password = the full service-account JSON key**.
-- Grant that service account **`roles/compute.instanceAdmin.v1`** on the target project (covers
-  `compute.instances.get` / `setMetadata` / `list` and `compute.zoneOperations.get`).
-- **OS Login must be disabled** on the target instances/project — GCE ignores instance
-  `ssh-keys` metadata when OS Login is enabled, so the plugin's updates would have no effect.
-  (Dashboard-built VMs have OS Login off by default.)
-- The image must be built with the **bt-ready** provisioner so the `adminuser` account exists
-  on the VM (the guest agent syncs metadata to that existing user; it does not create it).
-
-### AWS / Azure / GCP when set to SSH — traditional managed system
-
-A managed system keyed by hostname/IP on an SSH platform; the dashboard pushes the VM's own
-SSH private key into the managed account and `passwordsafe_ssh_key_enforcement_mode` enforces
-key-only auth. This requires SSH line-of-sight from a Resource Broker / Gateway. Select it per
-cloud via the `*_registration_method` key (set to `ssh`).
-
-### Configuration keys
-
-| Key | Default | Notes |
-|---|---|---|
-| `passwordsafe_registration_enabled` | `false` | Global capability flag (also per-deploy opt-in) |
-| `passwordsafe_workgroup` | — | Workgroup name or id the managed system lands in |
-| `passwordsafe_vm_functional_account_aws` / `_azure` / `_gcp` | — | Functional account per cloud (for AWS+SSM, the custom-plugin account) |
-| `passwordsafe_managed_account_name` | `adminuser` | The onboarded account (the `{name}` part for SSM) |
-| `passwordsafe_aws_registration_method` | `ssm` | AWS method: `ssm` (AWS Systems Manager plugin) or `ssh` |
-| `passwordsafe_ssm_account_suffix` | `local` | SSM account-name suffix; an AssumeRole ARN for EC2 cross-account mode |
-| `passwordsafe_ssm_change_password_on_register` | `false` | Trigger an initial Change Password after onboarding (mints the key now) |
-| `passwordsafe_azure_registration_method` | `azurevm` | Azure method: `azurevm` (Azure VM SSH Rotation plugin) or `ssh` |
-| `passwordsafe_azure_change_password_on_register` | `true` | Mint `adminuser`'s first key over Run Command right after onboarding |
-| `passwordsafe_gcp_registration_method` | `gcpvm` | GCP method: `gcpvm` (GCP VM SSH Rotation plugin) or `ssh` |
-| `passwordsafe_gcp_change_password_on_register` | `true` | Mint `adminuser`'s first key into GCE `ssh-keys` metadata right after onboarding |
-| `passwordsafe_ssh_key_enforcement_mode` | `2` | SSH method only — 0 none / 1 auto / 2 strict |
-| `passwordsafe_application_host_id` | `0` | SSH method only — >0 routes via a broker/application host |
-
-Off-boarding is automatic: destroying the VM removes the managed system + account
-(Terraform destroy from the stored state). Onboarding failures are **non-fatal** — they are
-recorded on the job (`ps_error`) but never fail the deploy.
-
----
-
-## Kubernetes ServiceAccount token rotation
-
-A cluster's PRA k8s tunnel can inject a ServiceAccount bearer token at session launch
-([Kubernetes → Access & identity](../kubernetes.md#access--identity)). The dashboard used to
-mint that token once and never touch it again. This makes it a Password Safe **managed
-account** so it rotates on the tenant's schedule, and keeps the PRA Vault copy current.
-
-Two custom plugins, both imported by hand:
-
-| Plugin | Platform (default name) | Role |
-|---|---|---|
-| Kubernetes Service Account Token | `Kubernetes Service Account Token` | Rotates the token in the cluster |
-| PRA Vault Token | `PRA Vault Token` | Writes the rotated value into the PRA Vault `opaque_token` account |
-
-Enable **Kubernetes Token Rotation** in Settings → BeyondTrust, then use the per-cluster
-**Token rotation** button on `/k8s` (or tick the box on the provision form). Registration
-applies the rotator RBAC, creates the managed system + account seeded with the token the
-cluster is using, registers the PRA Vault mirror, rotates once to prove the path, pushes the
-new token into PRA, and finally deletes the dashboard-minted `<sa>-token` Secret.
-
-**Why that last step matters.** The plugin's rotation sweep selects Secrets by *its own*
-labels, so the dashboard-minted Secret is never swept — leaving it in place would mean
-rotation revokes nothing and a permanent cluster-admin bearer token stays valid forever. The
-ordering is deliberate too: it is deleted only after PRA carries a Password-Safe-issued
-token, because until then it is the credential live sessions are using.
-
-### Managed system address
-
-The address is the plugin's only per-cluster configuration surface (a `.psplugin` is
-checksum-sealed, so its packaged settings cannot be edited), capped at 249 characters:
-
-```
-eks;<region>;<clusterName>[;option…]
-aks;<subscriptionId>;<resourceGroup>;<clusterName>[;option…]
-gke;<projectId>;<location>;<clusterName>[;option…]
-k8s;<apiServerUrl>[;option…]
-```
-
-The dashboard builds it from the cluster row plus its deploy job's Terraform variables. For
-a **registered** cluster those are unknown, so the modal accepts a cloud cluster name and
-(for AKS) a resource group. **OKE and on-prem clusters use the generic `k8s;` form** — the
-plugin has no OCI provider. For GKE the `location` must be the **zone** for a zonal cluster
-and the **region** for a regional one; mixing them is the documented cause of a 404.
-
-Options appended automatically: `;longlived` or `;bound` (+ `ttl=`), `;ns=<namespace>`, and
-anything in `k8s_ps_token_address_options` (e.g. `dnsEndpoint=true`, `serverName=`,
-`allowHostnameMismatch=true`, `ca=` on generic addresses only).
-
-### Functional accounts
-
-One per cloud, created by the operator — the dashboard references them by name and never
-holds a cloud secret. The managed system inherits the functional account's platform, so a
-functional account on the wrong platform is refused with the platform named.
-
-| Cloud | Username | Password |
-|---|---|---|
-| GKE | service account email (or `impersonate:<target>`) | **base64 of the whole JSON key file** |
-| EKS | AWS access key id (or `InstanceProfile` / `WebIdentity`) | `<secret>` or `<secret>:<sessionToken>` |
-| AKS | `SP:<tenantId>:<clientId>` — tenant **first** | Entra client secret (`-` for managed identity) |
-| Generic / OKE | `token`, `cert` or `kubeconfig` | bearer token, PEM/PKCS#12, or `b64kubeconfig:<base64>` |
-| PRA Vault mirror | PRA OAuth **Client ID** | PRA OAuth **Client Secret** |
-
-### In-cluster rotator RBAC
-
-Applied automatically (`k8s_ps_rotator_apply_rbac`). LongLived needs `serviceaccounts`
-get/list + `secrets` create/get/list/delete; Bound needs `serviceaccounts/token` create and
-**no** access to Secrets at all. The ClusterRole always applies; the binding only when a
-subject is configured, because **the subject differs per cloud and is the single most common
-onboarding mistake**:
-
-| Cloud | Binding subject | Config key |
-|---|---|---|
-| GKE | the service account's **email** | `k8s_ps_rotator_gke_sa_email` (blank → derived from the functional account) |
-| AKS | the service principal's **object id** (`oid`), *not* the client id | `k8s_ps_rotator_aks_sp_object_id` |
-| EKS | the username the access entry maps the principal to | `k8s_ps_rotator_eks_username` |
-| Generic / OKE | a bootstrap ServiceAccount | `k8s_ps_rotator_bootstrap_sa` / `_namespace` |
-
-On EKS the access entry is created too when `k8s_ps_rotator_eks_principal_arn` is set —
-without it the binding's `User` subject matches nothing and the API server returns 401,
-which is invisible from inside the cluster. The dashboard never edits `aws-auth`; a bad edit
-there can lock every principal out. If the ARN is unset the job result prints the command:
-
-```
-aws eks create-access-entry --cluster-name <cluster> \
-  --principal-arn <arn> --type STANDARD --username passwordsafe-rotator
-```
-
-Run **Verify Functional Account** in Password Safe after registering: it names every missing
-verb, prints the ClusterRole to apply, and logs the correct AKS object id on every run.
-
-### Keeping the PRA Vault copy in sync
-
-A background pass polls each token account's `LastChangeDate` (cheap — no checkout) and, when
-it moves, checks the new token out and sets it as the PRA Vault Token account's credential
-with `UpdateSystemPassword`, so Password Safe drives the plugin's PATCH into PRA. Both
-accounts stay Password Safe-managed and audited; the plaintext never leaves the API client.
-
-**The LongLived break window.** Rotation revokes the old token immediately, so PRA holds a
-dead credential until the next pass — roughly half the interval on average, one interval plus
-the pass in the worst case. Shorten `k8s_token_sync_interval_minutes`, or set the cluster's
-token mode to **Bound**, which never revokes (the old token stays valid until its TTL, so the
-window is zero as long as the interval is well under it). The dashboard can shrink this
-window but cannot remove it.
-
-Verification is free: Password Safe's change date on the *mirror* account is the receipt that
-the PATCH ran, so the next pass reads it and flips the cluster to `ok` or reports that the PRA
-write did not complete.
-
-### Operator prerequisites
-
-1. Import both `.psplugin` packages and confirm the platform names.
-2. Create the functional accounts above.
-3. Grant the API identity **Requestor** plus an access policy granting **View** on a Smart
-   Rule containing both managed accounts. There is no Smart Rule API, so this is out-of-band —
-   and it is the failure every Password Safe consumption path here hits first (`POST /Requests`
-   → `4031` / 403).
-4. **Leave "Change Password After Release" OFF** on the token account. With it on, every sync
-   triggers another rotation — an endless loop with a dead-credential window each pass. A
-   circuit breaker (`k8s_token_sync_max_per_hour`) trips and names it, but the fix is the
-   access policy.
-5. Give the Password Safe host or Resource Broker network reachability to the cluster's API
-   server. For private clusters this is a real constraint — Password Safe does not route
-   through the PRA Gateway.
-
-### Configuration keys
-
-| Key | Default | Notes |
-|---|---|---|
-| `k8s_ps_token_rotation_enabled` | `false` | Master gate (row action, provision checkbox, sync loop) |
-| `k8s_ps_token_platform` | `Kubernetes Service Account Token` | Plugin platform (name or id) |
-| `k8s_ps_pravault_token_platform` | `PRA Vault Token` | Mirror plugin platform |
-| `k8s_ps_functional_account_aws` / `_azure` / `_gcp` / `_local` | — | Per cloud; `_local` also covers OKE and on-prem |
-| `k8s_ps_pravault_functional_account` | — | PRA Config-API OAuth client for the mirror |
-| `k8s_ps_workgroup` | — | Blank → `passwordsafe_workgroup` |
-| `k8s_ps_token_mode` | `longlived` | `longlived` (revokes) or `bound` (TTL expiry, no revoke) |
-| `k8s_ps_token_ttl_seconds` | `3600` | Bound mode; clamped up to the API server's 600s floor |
-| `k8s_ps_token_change_on_register` | `true` | Rotate once on register — proves the whole path immediately |
-| `k8s_ps_token_delete_legacy_secret` | `true` | Retire the dashboard-minted Secret the plugin's sweep never touches |
-| `k8s_ps_token_register_on_provision` | `false` | Pre-tick the provision-form checkbox |
-| `k8s_ps_pravault_mirror_enabled` | `true` | Register the PRA Vault Token mirror when a PRA vault account exists |
-| `k8s_ps_token_checkout_duration_min` | `15` | Password Safe request duration for token reads |
-| `k8s_ps_token_address_options` | — | Extra `;key=value` appended to every address |
-| `k8s_ps_rotator_apply_rbac` | `true` | Apply the rotator ClusterRole + binding on register |
-| `k8s_ps_rotator_gke_sa_email` | — | Blank → derived from the GCP functional account's name |
-| `k8s_ps_rotator_aks_sp_object_id` | — | The `oid` claim; the plugin logs it on every run |
-| `k8s_ps_rotator_eks_username` | `passwordsafe-rotator` | Access-entry username = the RBAC `User` subject |
-| `k8s_ps_rotator_eks_principal_arn` | — | IAM principal behind the functional account's key |
-| `k8s_ps_rotator_eks_create_access_entry` | `true` | Create the access entry when the ARN is set |
-| `k8s_ps_rotator_bootstrap_namespace` / `_sa` | `beyondtrust` / `password-safe-rotator` | Generic-path bootstrap ServiceAccount |
-| `k8s_token_sync_enabled` | `true` | The PS → PRA sync pass (no-ops while nothing is registered) |
-| `k8s_token_sync_interval_minutes` | `15` | Floored at 5 |
-| `k8s_token_sync_request_duration_min` | `15` | Checkout duration for the sync's read |
-| `k8s_token_sync_max_per_pass` | `5` | Push cap per pass; the rest defer, oldest drift first |
-| `k8s_token_sync_max_failures` | `5` | Consecutive failures before a cluster parks until a manual sync |
-| `k8s_token_sync_max_per_hour` | `4` | Circuit breaker for the rotate-on-release loop |
-| `pra_k8s_namespace` / `pra_k8s_sa_name` | `pra-access` | The managed account name is `<namespace>/<sa>` |
-
-Off-boarding removes both managed systems and the rotator RBAC; it runs automatically when the
-cluster is decommissioned or deregistered. Design rationale, including why each of these
-choices is what it is: [k8s-sa-token-rotation](../design/k8s-sa-token-rotation.md).
-
----
-
-## Databases
-
-The dashboard also provisions **managed cloud databases** (AWS / Azure / GCP / OCI), reaches
-them through a PRA protocol tunnel, and can optionally **onboard AWS and Azure databases into
-Password Safe** for credential rotation (via the `{engine} SSM Custom Plugin` /
-`{engine} Azure Run Command Plugin` and the shared `PRA Vault Username Password` plugin). That
-whole feature — base provisioning, per-cloud prerequisites, and the Password Safe onboarding —
-is documented separately in **[Databases](../databases.md)**.
-
-The dashboard can also **register** a database it did not create — on-premises or in a cloud —
-so it can be a Configuration Management target. That path has no tunnel and no onboarding: its
-admin login is a Password Safe **managed account**, checked out just-in-time per run and never
-stored, so the database has to be onboarded in Password Safe *before* it can be registered.
-
-### Importing databases from Password Safe
-
-Since Password Safe's own discovery scanner already found and onboarded these databases —
-with managed credentials, so it knows the platform, port, instance and accounts — the
-Databases page can read that inventory directly instead of asking an operator to retype it.
-**Databases** → **Import from Password Safe** lists the candidates and registers the ones you
-tick. It **reads only**; nothing in Password Safe is created or changed.
-
-Two things worth knowing here rather than in the feature doc:
-
-- **This path uses the public REST API, not `ps-cli`.** It reads `Platforms`,
-  `ManagedSystems`, `Databases` and `ManagedAccounts` over HTTPS with the same
-  `pscli_api_url` / `pscli_client_id` / `pscli_client_secret` OAuth client configured in
-  [Part 1](#part-1--password-safe-oauth-application-ps-cli), so it works in an image with no
-  `ps-cli` binary. The run-time credential *checkout* still goes through `ps-cli`.
-- **The account list comes from the accounts the API identity can `request`.** That is the
-  same permission surface the checkout uses, so a missing **Requestor** role or Smart Rule
-  shows up as a greyed-out candidate instead of a `4031, statuscode: 403` in a worker log
-  hours later.
-
-Configuration keys (Settings → Integrations → BeyondTrust → *Database Import*):
-`clouddb_ps_import_workgroup`, `clouddb_ps_import_default_cloud`,
-`clouddb_ps_import_max_systems`, `clouddb_ps_import_platform_map`. All optional and all
-documented in **[Databases → Importing from Password Safe](../databases.md#importing-from-password-safe)**.
+| Check out a secret or managed-account credential at runtime | [Password Safe](password-safe.md) |
+| Onboard a VM or cloud database as a managed system | [Password Safe](password-safe.md#password-safe-vm-onboarding-managed-systems) |
+| Rotate a Kubernetes ServiceAccount token | [Password Safe](password-safe.md#kubernetes-serviceaccount-token-rotation) |
+| Create Shell Jump / Web Jump / RDP / tunnel jump items | [Privileged Remote Access](privileged-remote-access.md) |
+| Mint PRA Vault accounts for tunnel credentials | [Privileged Remote Access](privileged-remote-access.md) |
+| Deploy or inventory more Gateway hosts | [Gateway hosts](gateways.md) |
+| Build EPM-L agent packages or mint installation tokens | [EPM-L](epml.md) |
+| Request just-in-time cloud access | [Entitle](entitle.md) |
+| Pre-condition an image for any of the above | [below](#preparing-images-for-bt-management) |
 
 ---
 
 ## Preparing images for BT management
+
+This section stays on the hub because it is keyed to an **artifact, not a product**: one
+run of `bt-ready-debian.sh` hardens sshd for PRA Shell Jump, creates the Password Safe
+bootstrap account, and installs the EPM-L package — and its env vars all go into the same
+Packer build form.
 
 Images built by the dashboard's Packer flow (`/images/aws`, `/images/azure`, `/images/gcp`) can be pre-conditioned for BeyondTrust pickup using the provisioner scripts under [`provisioners/beyondtrust/`](../../provisioners/beyondtrust/):
 
@@ -538,7 +97,7 @@ Images built by the dashboard's Packer flow (`/images/aws`, `/images/azure`, `/i
 ### What the Linux scripts prepare
 
 - **PRA Shell Jump connectivity** — sshd hardened (key-only, no root password, sensible client-alive), passwordless sudo wired to the cloud-default user via a `/etc/sudoers.d/90-bt-ready` drop-in, host clock synced. The sshd drop-in is written as `00-bt-ready.conf` so it loads lex-first and wins against any later compliance drop-ins (sshd is first-occurrence-wins). On OpenSSH &lt; 8.2 — no `Include` for `sshd_config.d` — the directives are written into `/etc/ssh/sshd_config` directly instead.
-- **A Password Safe / Entitle SSH bootstrap account** — `adminuser` by default (`BT_ADMIN_USER`). This is the account the Azure and GCP onboarding paths above expect to exist: their plugins write a key *to* it, they don't create it.
+- **A Password Safe / Entitle SSH bootstrap account** — `adminuser` by default (`BT_ADMIN_USER`). This is the account the Azure and GCP [Password Safe onboarding paths](password-safe.md#password-safe-vm-onboarding-managed-systems) expect to exist: their plugins write a key *to* it, they don't create it.
 - **Optional EPM-L package install** — set `BT_EPML_URL` to a presigned URL for the `.deb` / `.rpm`.
 - **Optional PRA SSH certificate login** — see below.
 - **Conservative baseline hygiene** — security updates applied, persistent journald, opt-in unattended security updates (`BT_AUTOPATCH=1`), image cleaned for re-launch (host keys + machine-id + cloud-init state stripped).
@@ -561,7 +120,7 @@ accounts NOPASSWD sudo (default: none).
 
 - **No Password Safe onboarding.** They *create* `adminuser`; registering it as a Managed
   Account (Smart Rule / rotation) is out-of-band — or done by the dashboard's own
-  [VM onboarding](#password-safe-vm-onboarding-managed-systems).
+  [VM onboarding](password-safe.md#password-safe-vm-onboarding-managed-systems).
 - **No EPM-L activation.** Package install only. `pbactivate` runs post-deploy with a
   short-lived token from the EPM-L integration, because registration tokens expire 8h
   after issue and can't be baked into an image. See [EPM-L](epml.md).
@@ -577,7 +136,7 @@ Set these as Packer build env on the build page. Full detail and a smoke-test re
 |---|---|
 | `BT_TARGET_USER` | Force the sudoers-target user; default autodetects the cloud-default (`ubuntu`/`debian`/`admin`, `ec2-user`/`rocky`/`centos`/`almalinux`/`cloud-user`) |
 | `BT_ADMIN_USER` | The Password-Safe-managed bootstrap account (default `adminuser`) |
-| `BT_SEED_ADMIN_KEY=1` | Seed `adminuser`'s `authorized_keys` with a throwaway key **so the AWS Systems Manager plugin has one to rotate** — the private half is discarded. Relevant to the [AWS SSM path](#aws--aws-systems-manager-custom-plugin-cloud-native-default), where the credential is minted on first change |
+| `BT_SEED_ADMIN_KEY=1` | Seed `adminuser`'s `authorized_keys` with a throwaway key **so the AWS Systems Manager plugin has one to rotate** — the private half is discarded. Relevant to the [AWS SSM path](password-safe.md#aws--aws-systems-manager-custom-plugin-cloud-native-default), where the credential is minted on first change |
 | `BT_ADMIN_NOPASSWD_ALL=1` | Full `NOPASSWD: ALL` sudo for `adminuser` instead of the scoped set — **required for Ansible Config-Management `become`**, which runs sudo's `/bin/sh` |
 | `BT_PRA_CA_PUBKEY` | PRA Vault SSH CA public key (enables certificate login) |
 | `BT_PRA_USERS` | Accounts to create for certificate login; names must match the PRA vault accounts |
@@ -604,59 +163,14 @@ Set these as Packer build env on the build page. Full detail and a smoke-test re
 
 ---
 
-## Advanced configuration
+## Where else BeyondTrust shows up
 
-These are **Settings keys**, not environment variables — set them under **Settings →
-Integrations → BeyondTrust**. The dashboard's config store reads from the database
-only; exporting an equivalently-named env var has no effect.
-
-| Key | Notes |
+| Doc | What it covers |
 |---|---|
-| `bt_api_host` | PRA appliance hostname, e.g. `tenant.beyondtrustcloud.com` |
-| `bt_client_id` / `bt_client_secret` | PRA Config API OAuth client-credentials pair |
-| `pra_config_api_client_id` / `pra_config_api_client_secret` | Optional narrower client used only for the PRA Vault functional account; falls back to `bt_client_id` / `bt_client_secret` |
-| `bt_jump_group_name` | Jump group new jump items land in |
-| `bt_jumpoint_name` | The Gateway to route through, **by name** — the pickers in Settings enumerate both from the PRA Config API |
-| `azure_bt_jump_group_name` | Azure-specific jump-group override; blank falls back to `bt_jump_group_name` |
-| `bt_vault_account_group_id` | Vault account group new tunnel credentials are created in |
-| `bt_ps_deploy_key_title` | Title of the Password Safe secret holding the Docker deploy key — the dashboard looks secrets up by title |
-| `bt_shell_jump_id` | Recorded per-VM so the jump item can be torn down with the VM; not operator-set |
-
-**Self-hosted Gateway (AWS).** A separate `bt_ecs_*` block provisions a Gateway host
-as an ECS task or EC2 instance (`bt_ecs_launch_type`, `bt_ecs_cluster`,
-`bt_ecs_jumpoint_subnet_id`, `bt_ecs_image`, and the CPU/memory/role keys). Configure it
-in the same Settings panel; it exists so a cloud VPC can have a Gateway with
-line-of-sight to private instances without one being run by hand.
-
-Those keys describe the **auto-managed** AWS host — the one the dashboard ensures on
-demand and reclaims when idle. It is not the only one you can have: **Containers →
-Gateways** lists every gateway host in every cloud and deploys additional ones, which
-join the same PRA Gateway as extra cluster nodes (so `bt_jumpoint_name` never changes).
-Full detail — the managed-vs-requested lifecycle, placement, naming, and the node-firewall
-consequences — is in **[Gateway hosts](gateways.md)**.
-
----
-
-## Troubleshooting
-
-**"ps-cli not found"** — `ps-cli` comes from the `beyondtrust-bips-cli` pip package in
-`web_dashboard/requirements.txt`, so this means the image was built without installing
-requirements, or something is shadowing `PATH`. Confirm with
-`docker compose exec app ps-cli --version`; rebuild the image if it is genuinely absent.
-
-**"Authentication failed" from ps-cli** — verify the Client ID and Client Secret
-in **Settings → Integrations → BeyondTrust** match the API Registration in
-Password Safe and that the registration has not expired.
-
-**PRA jump item wasn't created** — the jump item is created by Terraform with the `sra`
-provider as part of the resource's own job, so the failure is in that job's log, not a
-separate one. Check that `bt_api_host` is reachable from the container
-(`docker compose exec app curl -Is "https://<bt_api_host>"`), that the PRA Config API
-account may manage Jump Items, and that `bt_jump_group_name` / `bt_jumpoint_name` match
-entries that exist in PRA — they are matched by **name**, so a rename in PRA breaks
-them silently. A self-signed appliance certificate may need adding to the container's
-CA store.
-
-**Secrets retrieved are empty** — check that the API Registration has **Secrets →
-Read** and **Credentials → Read** permissions, and that the specific secret is
-in scope for the registration.
+| [Gateway hosts](gateways.md) | The managed-vs-requested Gateway lifecycle, placement, naming and node firewalls |
+| [Databases](../databases.md) | Cloud-DB provisioning, PRA tunnels, and Password Safe database onboarding |
+| [Kubernetes](../kubernetes.md) | Cluster provisioning, PRA k8s tunnels, and access identity |
+| [Cloud VMs](../cloud-vms.md) | The full VM deploy story — provisioning, Shell Jump, onboarding, Entitle |
+| [Config management](../config-management.md) | Ansible runs, including managed-account checkout as the login identity |
+| [Secrets management](../secrets-management.md) | Where Password Safe sits among the dashboard's secret backends |
+| [`provisioners/beyondtrust/README.md`](../../provisioners/beyondtrust/README.md) | The image-prep scripts in depth, with a smoke-test recipe |

@@ -119,6 +119,57 @@ def test_the_api_supplies_every_field_the_map_reads():
         f"does not return them — those toggles render permanently off")
 
 
+# ── the BeyondTrust family ────────────────────────────────────────────────────
+
+def test_the_beyondtrust_family_is_three_independent_toggles():
+    """Password Safe, PRA and EPM-L were one panel under one `beyondtrust_enabled` flag.
+    Each now needs all three wirings above in its own right, and the combined panel must
+    be gone from every one of them — a leftover `beyondtrust` entry in integrations[]
+    renders a card whose toggle PATCHes a feature `_FEATURE_MODELS` no longer knows, so
+    it 404s on click.
+    """
+    keys, models, mapped = _integration_keys(), _feature_model_keys(), _load_map_keys()
+    for key in ("password_safe", "pra", "epml"):
+        assert key in keys, f"no {key} toggle in Settings → Integrations"
+        assert key in models, f"{key} is not in _FEATURE_MODELS — its panel 404s"
+        assert key in mapped, f"{key} is not in the flag map — its toggle renders OFF"
+    for structure, name in ((keys, "integrations[]"), (models, "_FEATURE_MODELS"),
+                            (mapped, "the flag map")):
+        assert "beyondtrust" not in structure, \
+            f"the retired combined beyondtrust panel is still in {name}"
+
+
+def test_the_wizard_and_the_settings_page_agree_on_labels():
+    """The wizard's Step 5 list and Settings → Integrations are two hand-maintained copies
+    of the same integration names. Splitting a panel in one and forgetting the other is
+    the obvious failure: the wizard would keep offering a `beyondtrust_enabled` toggle
+    nothing reads, and a first-run operator would never see the three real ones.
+
+    Labels only. The `desc` strings for vmware and remote_agents already diverge between
+    the two files, so asserting those would fail on arrival for reasons unrelated to this.
+    """
+    settings_html = _read(_SETTINGS)
+    start = settings_html.index("integrations: [")
+    end = settings_html.index("\n    ],", start)
+    settings_labels = dict(re.findall(r"key:\s*'([a-z_0-9]+)',\s*label:\s*'([^']*)'",
+                                      settings_html[start:end]))
+
+    wizard = _read(os.path.join(_ROOT, "web_dashboard", "templates", "setup.html"))
+    wblock = wizard[wizard.index("featureFlags: ["):]
+    wizard_labels = dict(re.findall(r"key:\s*'([a-z_0-9]+)_enabled',\s*\n\s*label:\s*'([^']*)'",
+                                    wblock))
+    assert wizard_labels, "could not parse setup.html's featureFlags — teach this test its shape"
+
+    for key, label in wizard_labels.items():
+        if key not in settings_labels:
+            raise AssertionError(
+                f"the wizard offers a '{key}_enabled' toggle with no matching "
+                f"integrations[] entry in settings.html — the two lists have drifted")
+        assert settings_labels[key] == label, (
+            f"'{key}' is labelled {label!r} in the wizard but {settings_labels[key]!r} in "
+            f"Settings; the same integration must not have two names")
+
+
 # ── remote agents specifically ────────────────────────────────────────────────
 
 def test_remote_agents_is_reachable_from_settings():

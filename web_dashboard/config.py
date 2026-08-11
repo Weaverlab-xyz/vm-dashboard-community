@@ -21,7 +21,14 @@ class Settings(BaseSettings):
     # explicit opt-in. The community edition's .env.example ships all of
     # these set to false; users turn on what they have infra for.
     vmware_enabled: bool = True         # VMs router + /vms page + VM cache warmers + VMware inventory scans
-    beyondtrust_enabled: bool = True    # Password Safe secret lookups (btapi_service)
+    # The three BeyondTrust products the dashboard drives are gated independently —
+    # customers routinely license one or two, not all three. They replaced a single
+    # `beyondtrust_enabled` flag; feature_flag_migration.seed_beyondtrust_split copies
+    # an existing install's stored value into all three on first boot after the upgrade,
+    # which is why these default True (matching the old flag's default).
+    password_safe_enabled: bool = True  # Secret + managed-account checkout, VM/DB/K8s onboarding, rotation
+    pra_enabled: bool = True            # Shell Jump / tunnel / Web Jump provisioning + Gateway hosts
+    epml_enabled: bool = True           # EPM for Linux package builds + activation tokens
     portainer_enabled: bool = True      # Containers router + /containers page + portainer warmer
     ansible_enabled: bool = True        # Config-mgmt router + /config-mgmt page
     entitle_enabled: bool = True        # Entitle integration: Settings panel + user-JIT nav link
@@ -401,7 +408,7 @@ class Settings(BaseSettings):
     # discovery scanner with managed credentials, so it knows a database's platform,
     # port and requestable accounts authoritatively; these four tune what the import
     # list shows. All optional: the feature is already gated on cloud_database_enabled
-    # + beyondtrust_enabled, so a third on/off switch would only be a third thing to
+    # + password_safe_enabled, so a third on/off switch would only be a third thing to
     # forget. See docs/databases.md "Importing from Password Safe".
     clouddb_ps_import_workgroup: str = ""          # blank → everything the API identity can see
     clouddb_ps_import_default_cloud: str = "local"  # Location preselected in the modal

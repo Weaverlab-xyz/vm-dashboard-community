@@ -187,7 +187,7 @@ async def _acquire_batch_resources(db, progress_job_id: str, region: str,
     res = _BatchResources(ssh_secret_name)
     scope = f" for {count}-instance batch" if count > 1 else ""
 
-    if _cfg_svc.get_bool("beyondtrust_enabled"):
+    if _cfg_svc.get_bool("pra_enabled"):
         job_service.update_progress(
             db, progress_job_id, 15,
             f"Ensuring the shared BeyondTrust Gateway host{scope}…")
@@ -442,7 +442,7 @@ async def _run_deploy(
         )
 
         # ── Step 3: BeyondTrust PRA — Shell Jump (optional) ───────────────────
-        if _cfg_svc.get_bool("beyondtrust_enabled"):
+        if _cfg_svc.get_bool("pra_enabled"):
             from ..services import terraform_pra_service
             try:
                 _client_secret = _cfg_svc.resolve_reference(pra_credential_ref.strip()) if pra_credential_ref else ""
@@ -604,7 +604,7 @@ async def _run_destroy(destroy_job_id: str, deploy_job_id: str, instance_id: str
             meta = deploy_job.metadata_dict
 
             # Remove BeyondTrust Shell Jump if this deploy provisioned one.
-            # Check bt_shell_jump_id — not settings.beyondtrust_enabled — so
+            # Check bt_shell_jump_id — not settings.pra_enabled — so
             # the cleanup still runs even if the feature flag was toggled off
             # after deployment (the jump exists in PRA regardless of the flag).
             bt_shell_jump_id = meta.get("bt_shell_jump_id")

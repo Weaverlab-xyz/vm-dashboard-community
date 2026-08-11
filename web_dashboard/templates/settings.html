@@ -317,7 +317,6 @@
            class="bg-red-50 border border-red-200 rounded-lg px-4 py-3 text-red-700 text-sm"
            x-text="panelError"></div>
 
-      <!-- ── BeyondTrust ── -->
       <!-- ── Cloud Costs ── -->
       <template x-if="panel?.key === 'cost_explorer' && !panelLoading">
         <div class="space-y-4">
@@ -1039,17 +1038,22 @@
         </div>
       </template>
 
-      <template x-if="panel?.key === 'beyondtrust' && !panelLoading">
+      <template x-if="panel?.key === 'password_safe' && !panelLoading">
         <div class="space-y-4">
           <p class="text-sm text-gray-500">
-            BeyondTrust PRA (Password Safe) integration for secret retrieval and Shell Jump provisioning.
-            Shell Jumps are managed via the <strong>BeyondTrust SRA Terraform provider</strong> (ARM64-native, no binary dependency).
-            The Jump Group and Gateway referenced below must already exist in PRA — the dashboard does not create them.
+            BeyondTrust Password Safe / Secrets Safe — on-demand checkout of secrets and
+            managed-account credentials via the <code class="bg-gray-100 px-1 rounded">ps-cli</code>
+            binary, plus onboarding of the VMs, cloud databases and Kubernetes ServiceAccount
+            tokens this dashboard builds as managed systems and accounts.
           </p>
-
+          <p class="text-sm text-gray-500">
+            Shell Jump, Gateway and PRA Vault configuration lives on the
+            <button type="button" @click="openPanelByKey('pra')" class="underline text-blue-600">Privileged
+            Remote Access</button> panel.
+          </p>
           <!-- Password Safe -->
           <div>
-            <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Password Safe</p>
+            <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">API connection</p>
             <p class="text-xs text-gray-400 mb-3">
               Secret retrieval and managed-account credential checkout via the
               <code class="bg-gray-100 px-1 rounded">ps-cli</code> binary.
@@ -1083,7 +1087,6 @@
               </div>
             </div>
           </div>
-
           <!-- Password Safe resource registration (optional, per-VM-deploy) -->
           <div class="border-t border-gray-100 pt-4">
             <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Resource registration (VMs)</p>
@@ -1238,123 +1241,6 @@
               </p>
             </div>
           </div>
-
-          <!-- Privileged Remote Access — Terraform provider -->
-          <div class="border-t border-gray-100 pt-4">
-            <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Privileged Remote Access (PRA)</p>
-            <p class="text-xs text-gray-400 mb-3">
-              Shell Jump provisioning via the BeyondTrust SRA Terraform provider.
-              Runs natively on ARM64 — no binary dependency.
-            </p>
-            <div class="space-y-3">
-              <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">PRA API Host</label>
-                <input type="text" x-model="panelCfg.bt_api_host"
-                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                       placeholder="pra.company.com">
-              </div>
-              <div class="grid grid-cols-2 gap-3">
-                <div>
-                  <label class="block text-sm font-medium text-gray-700 mb-1">OAuth Client ID</label>
-                  <input type="text" x-model="panelCfg.bt_client_id"
-                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500">
-                </div>
-                <div>
-                  <label class="block text-sm font-medium text-gray-700 mb-1">OAuth Client Secret</label>
-                  <input type="password" x-model="panelCfg.bt_client_secret"
-                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                         placeholder="••••••••">
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <!-- Shell Jump provisioning -->
-          <div class="border-t border-gray-100 pt-4">
-            <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Shell Jump provisioning</p>
-            <p class="text-xs text-gray-400 mb-3">
-              The Jump Group and Gateway must already exist in PRA — the dashboard looks them up by name and creates Shell Jumps inside them.
-            </p>
-            <div class="grid grid-cols-2 gap-3 mb-3">
-              <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">Jump Group Name <span class="text-gray-400 font-normal">(AWS)</span></label>
-                <input type="text" x-model="panelCfg.bt_jump_group_name"
-                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                       placeholder="us-east-2">
-              </div>
-              <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">Gateway Name <span class="text-gray-400 font-normal">(AWS)</span></label>
-                <input type="text" x-model="panelCfg.bt_jumpoint_name"
-                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                       placeholder="AWS ECS">
-              </div>
-            </div>
-            <p class="text-xs text-gray-400 mb-2">Azure overrides — leave blank to reuse the AWS values above.</p>
-            <div class="grid grid-cols-2 gap-3 mb-3">
-              <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">Jump Group Name <span class="text-gray-400 font-normal">(Azure)</span></label>
-                <input type="text" x-model="panelCfg.azure_bt_jump_group_name"
-                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                       placeholder="same as AWS">
-              </div>
-              <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">Gateway Name <span class="text-gray-400 font-normal">(Azure)</span></label>
-                <input type="text" x-model="panelCfg.azure_jumpoint_name"
-                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                       placeholder="ACI">
-              </div>
-            </div>
-            <div class="mb-3">
-              <label class="block text-sm font-medium text-gray-700 mb-1">VM Gateway mode <span class="text-gray-400 font-normal">(Azure)</span></label>
-              <!-- x-init default is load-bearing: an unset string config key reads back
-                   as "" from /api/setup/feature, not as the model default. -->
-              <select x-model="panelCfg.azure_vm_jumpoint_mode"
-                      x-init="panelCfg.azure_vm_jumpoint_mode = panelCfg.azure_vm_jumpoint_mode || 'shared'"
-                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
-                <option value="shared">Shared host (default) — one Gateway VM for all VMs, databases and clusters</option>
-                <option value="aci">ACI — a dedicated container group per VM</option>
-              </select>
-              <p class="text-xs text-gray-400 mt-1">
-                Applies to single deploys; a batch always shares one ACI group. ACI is
-                Shell-Jump only — it cannot do protocol tunnels — and every group mounts
-                the same <span class="font-mono">/jpt</span> share, so they contend over one
-                Gateway identity. A deploy that supplies its own Gateway deploy key always
-                gets ACI, since the shared host uses the configured key.
-              </p>
-            </div>
-            <p class="text-xs text-gray-400 mb-2">GCP overrides — leave blank to reuse the AWS values above.</p>
-            <div class="grid grid-cols-2 gap-3">
-              <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">Jump Group Name <span class="text-gray-400 font-normal">(GCP)</span></label>
-                <input type="text" x-model="panelCfg.gcp_bt_jump_group_name"
-                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                       placeholder="same as AWS">
-              </div>
-              <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">Gateway Name <span class="text-gray-400 font-normal">(GCP)</span></label>
-                <input type="text" x-model="panelCfg.gcp_jumpoint_name"
-                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                       placeholder="same as AWS">
-              </div>
-            </div>
-            <div class="mt-3">
-              <label class="block text-sm font-medium text-gray-700 mb-1">VM Gateway mode <span class="text-gray-400 font-normal">(GCP)</span></label>
-              <!-- x-init default is load-bearing: an unset string config key reads back
-                   as "" from /api/setup/feature, not as the model default. -->
-              <select x-model="panelCfg.gcp_vm_jumpoint_mode"
-                      x-init="panelCfg.gcp_vm_jumpoint_mode = panelCfg.gcp_vm_jumpoint_mode || 'shared'"
-                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
-                <option value="shared">Shared host (default) — one Gateway for all VMs, databases and clusters</option>
-                <option value="paired">Paired — a dedicated bt-jumpoint-&lt;vm&gt; per VM</option>
-              </select>
-              <p class="text-xs text-gray-400 mt-1">
-                Applies to single deploys; a batch always shares one Gateway. Paired
-                costs an extra e2-micro per VM. A deploy that supplies its own Gateway
-                deploy key is always paired, since the shared host uses the configured key.
-              </p>
-            </div>
-          </div>
-
           <!-- Database import (reads Password Safe; writes nothing to it) -->
           <div class="border-t border-gray-100 pt-4">
             <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Database Import</p>
@@ -1402,7 +1288,6 @@
               </div>
             </div>
           </div>
-
           <!-- Database Password Safe onboarding (provisioned cloud DBs only) -->
           <div class="border-t border-gray-100 pt-4">
             <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Database Onboarding <span class="text-gray-400 font-normal normal-case">(AWS only)</span></p>
@@ -1488,21 +1373,11 @@
                          placeholder="C:\Utils\public_ssm.pem">
                 </div>
               </div>
-              <p class="text-xs text-gray-400">PRA Configuration-API OAuth account for the PRA Vault plugin — leave blank to reuse the PRA credentials above.</p>
-              <div class="grid grid-cols-2 gap-3">
-                <div>
-                  <label class="block text-sm font-medium text-gray-700 mb-1">PRA Config API Client ID</label>
-                  <input type="text" x-model="panelCfg.pra_config_api_client_id"
-                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                         placeholder="(blank = reuse PRA client id)">
-                </div>
-                <div>
-                  <label class="block text-sm font-medium text-gray-700 mb-1">PRA Config API Client Secret</label>
-                  <input type="password" x-model="panelCfg.pra_config_api_client_secret"
-                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                         placeholder="••••••••">
-                </div>
-              </div>
+              <p class="text-xs text-gray-400">
+                The PRA Vault plugin authenticates with the PRA Configuration API account on the
+                <button type="button" @click="openPanelByKey('pra')" class="underline text-blue-600">Privileged
+                Remote Access</button> panel. Unsaved edits here are discarded when the panel switches.
+              </p>
               <div class="grid grid-cols-3 gap-3">
                 <div>
                   <label class="block text-sm font-medium text-gray-700 mb-1">psql Client Image</label>
@@ -1609,7 +1484,6 @@
               </div>
             </div>
           </div>
-
           <!-- Kubernetes ServiceAccount token rotation (Password Safe) -->
           <div class="border-t border-gray-100 pt-4">
             <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Kubernetes Token Rotation</p>
@@ -1619,7 +1493,7 @@
               and mirrors each rotation into the PRA Vault copy through the
               <code class="bg-gray-100 px-1 rounded">PRA Vault Token</code> plugin. Importing the two plugins, creating the
               functional accounts, and granting the API identity Requestor + an auto-release access policy on the new
-              managed accounts are one-time manual setup — see the <a href="/docs/integrations/beyondtrust#kubernetes-serviceaccount-token-rotation" class="underline" target="_blank">token rotation guide</a>.
+              managed accounts are one-time manual setup — see the <a href="/docs/integrations/password-safe#kubernetes-serviceaccount-token-rotation" class="underline" target="_blank">token rotation guide</a>.
               <span class="text-amber-600">The token account's access policy must NOT enable "Change Password After
               Release"</span> — every sync would then trigger another rotation.
             </p>
@@ -1816,6 +1690,177 @@
                          placeholder="4">
                 </div>
               </div>
+              <p class="text-xs text-gray-400">
+                The managed account name is <code class="bg-gray-100 px-1 rounded">&lt;namespace&gt;/&lt;serviceaccount&gt;</code>,
+                taken from the Kubernetes tunnel identity on the
+                <button type="button" @click="openPanelByKey('pra')" class="underline text-blue-600">Privileged
+                Remote Access</button> panel. Unsaved edits here are discarded when the panel switches.
+              </p>
+            </div>
+          </div>
+        </div>
+      </template>
+
+      <template x-if="panel?.key === 'pra' && !panelLoading">
+        <div class="space-y-4">
+          <p class="text-sm text-gray-500">
+            BeyondTrust Privileged Remote Access brokers access to everything the dashboard
+            builds — Shell Jump, Web Jump, Remote RDP and Protocol Tunnel jump items, plus PRA
+            Vault accounts. Provisioned via the <strong>BeyondTrust SRA Terraform provider</strong>
+            (ARM64-native, no binary dependency).
+          </p>
+          <p class="text-sm text-gray-500">
+            The Jump Group and Gateway named below must already exist in PRA — the dashboard
+            looks them up by name, it does not create them. Gateway <em>hosts</em> are deployed
+            from the Containers page.
+          </p>
+          <!-- Privileged Remote Access — Terraform provider -->
+          <div class="border-t border-gray-100 pt-4">
+            <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">API connection</p>
+            <p class="text-xs text-gray-400 mb-3">
+              Shell Jump provisioning via the BeyondTrust SRA Terraform provider.
+              Runs natively on ARM64 — no binary dependency.
+            </p>
+            <div class="space-y-3">
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">PRA API Host</label>
+                <input type="text" x-model="panelCfg.bt_api_host"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="pra.company.com">
+              </div>
+              <div class="grid grid-cols-2 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">OAuth Client ID</label>
+                  <input type="text" x-model="panelCfg.bt_client_id"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">OAuth Client Secret</label>
+                  <input type="password" x-model="panelCfg.bt_client_secret"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="••••••••">
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="border-t border-gray-100 pt-4">
+            <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Configuration API account</p>
+            <p class="text-xs text-gray-400 mb-3">
+              For the few calls the SRA Terraform provider cannot make — the PRA Vault accounts used by
+              cloud-database onboarding. Optional: leave blank to reuse the credentials above.
+            </p>
+            <div class="space-y-3">
+              <div class="grid grid-cols-2 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">PRA Config API Client ID</label>
+                  <input type="text" x-model="panelCfg.pra_config_api_client_id"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="(blank = reuse PRA client id)">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">PRA Config API Client Secret</label>
+                  <input type="password" x-model="panelCfg.pra_config_api_client_secret"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="••••••••">
+                </div>
+              </div>
+            </div>
+          </div>
+          <!-- Shell Jump provisioning -->
+          <div class="border-t border-gray-100 pt-4">
+            <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Shell Jump provisioning</p>
+            <p class="text-xs text-gray-400 mb-3">
+              The Jump Group and Gateway must already exist in PRA — the dashboard looks them up by name and creates Shell Jumps inside them.
+            </p>
+            <div class="grid grid-cols-2 gap-3 mb-3">
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Jump Group Name <span class="text-gray-400 font-normal">(AWS)</span></label>
+                <input type="text" x-model="panelCfg.bt_jump_group_name"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="us-east-2">
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Gateway Name <span class="text-gray-400 font-normal">(AWS)</span></label>
+                <input type="text" x-model="panelCfg.bt_jumpoint_name"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="AWS ECS">
+              </div>
+            </div>
+            <p class="text-xs text-gray-400 mb-2">Azure overrides — leave blank to reuse the AWS values above.</p>
+            <div class="grid grid-cols-2 gap-3 mb-3">
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Jump Group Name <span class="text-gray-400 font-normal">(Azure)</span></label>
+                <input type="text" x-model="panelCfg.azure_bt_jump_group_name"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="same as AWS">
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Gateway Name <span class="text-gray-400 font-normal">(Azure)</span></label>
+                <input type="text" x-model="panelCfg.azure_jumpoint_name"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="ACI">
+              </div>
+            </div>
+            <div class="mb-3">
+              <label class="block text-sm font-medium text-gray-700 mb-1">VM Gateway mode <span class="text-gray-400 font-normal">(Azure)</span></label>
+              <!-- x-init default is load-bearing: an unset string config key reads back
+                   as "" from /api/setup/feature, not as the model default. -->
+              <select x-model="panelCfg.azure_vm_jumpoint_mode"
+                      x-init="panelCfg.azure_vm_jumpoint_mode = panelCfg.azure_vm_jumpoint_mode || 'shared'"
+                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                <option value="shared">Shared host (default) — one Gateway VM for all VMs, databases and clusters</option>
+                <option value="aci">ACI — a dedicated container group per VM</option>
+              </select>
+              <p class="text-xs text-gray-400 mt-1">
+                Applies to single deploys; a batch always shares one ACI group. ACI is
+                Shell-Jump only — it cannot do protocol tunnels — and every group mounts
+                the same <span class="font-mono">/jpt</span> share, so they contend over one
+                Gateway identity. A deploy that supplies its own Gateway deploy key always
+                gets ACI, since the shared host uses the configured key.
+              </p>
+            </div>
+            <p class="text-xs text-gray-400 mb-2">GCP overrides — leave blank to reuse the AWS values above.</p>
+            <div class="grid grid-cols-2 gap-3">
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Jump Group Name <span class="text-gray-400 font-normal">(GCP)</span></label>
+                <input type="text" x-model="panelCfg.gcp_bt_jump_group_name"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="same as AWS">
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Gateway Name <span class="text-gray-400 font-normal">(GCP)</span></label>
+                <input type="text" x-model="panelCfg.gcp_jumpoint_name"
+                       class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="same as AWS">
+              </div>
+            </div>
+            <div class="mt-3">
+              <label class="block text-sm font-medium text-gray-700 mb-1">VM Gateway mode <span class="text-gray-400 font-normal">(GCP)</span></label>
+              <!-- x-init default is load-bearing: an unset string config key reads back
+                   as "" from /api/setup/feature, not as the model default. -->
+              <select x-model="panelCfg.gcp_vm_jumpoint_mode"
+                      x-init="panelCfg.gcp_vm_jumpoint_mode = panelCfg.gcp_vm_jumpoint_mode || 'shared'"
+                      class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                <option value="shared">Shared host (default) — one Gateway for all VMs, databases and clusters</option>
+                <option value="paired">Paired — a dedicated bt-jumpoint-&lt;vm&gt; per VM</option>
+              </select>
+              <p class="text-xs text-gray-400 mt-1">
+                Applies to single deploys; a batch always shares one Gateway. Paired
+                costs an extra e2-micro per VM. A deploy that supplies its own Gateway
+                deploy key is always paired, since the shared host uses the configured key.
+              </p>
+            </div>
+          </div>
+          <div class="border-t border-gray-100 pt-4">
+            <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Kubernetes tunnel identity</p>
+            <p class="text-xs text-gray-400 mb-3">
+              The ServiceAccount PRA injects into a managed cluster for API-server tunnels, and the PRA
+              Vault account group injected Kubernetes, database and Web Jump credentials land in. Password
+              Safe can rotate this token on a schedule — see the
+              <button type="button" @click="openPanelByKey('password_safe')" class="underline text-blue-600">Password
+              Safe</button> panel.
+            </p>
+            <div class="space-y-3">
               <div class="grid grid-cols-3 gap-3">
                 <div>
                   <label class="block text-sm font-medium text-gray-700 mb-1">PRA SA Namespace</label>
@@ -1838,19 +1883,25 @@
               </div>
             </div>
           </div>
+        </div>
+      </template>
 
-          <!-- EPM for Linux -->
-          <div class="border-t border-gray-100 pt-4">
-            <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">EPM for Linux (EPM-L)</p>
-            <p class="text-xs text-gray-400 mb-3">
-              Site ID + Personal Access Token for the BeyondTrust Pathfinder API at
-              <code class="bg-gray-100 px-1 rounded">api.beyondtrust.io</code>.
-              Used to download EPML client packages and generate activation tokens.
-              Find your Site ID by opening
-              <code class="bg-gray-100 px-1 rounded">app.beyondtrust.io/api/platform/currentSite</code>
-              while signed in and copying the <code class="bg-gray-100 px-1 rounded">site_id</code> field.
-              The PAT must be created while that site is active.
-            </p>
+      <template x-if="panel?.key === 'epml' && !panelLoading">
+        <div class="space-y-4">
+          <p class="text-sm text-gray-500">
+            Site ID + Personal Access Token for the BeyondTrust Endpoint Privilege Management
+            for Linux API, on the Pathfinder gateway at
+            <code class="bg-gray-100 px-1 rounded">api.beyondtrust.io</code>. Used to build and
+            download EPM-L client packages, sync them to asset storage, and mint activation tokens.
+          </p>
+          <p class="text-sm text-gray-500">
+            Find your Site ID by opening
+            <code class="bg-gray-100 px-1 rounded">app.beyondtrust.io/api/platform/currentSite</code>
+            while signed in and copying the <code class="bg-gray-100 px-1 rounded">site_id</code>
+            field. The PAT must be created while that site is the active one — PATs are bound to
+            the site, not the user.
+          </p>
+          <div class="space-y-3">
             <div class="space-y-3">
               <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">EPM-L Site ID</label>
@@ -4137,8 +4188,16 @@ function settingsPage() {
     integrations: [
       { key: 'vmware',       label: 'VMware Workstation',      hasConfig: false, enabled: false,
         desc: 'VM management on a Windows host. Toggle to enable.' },
-      { key: 'beyondtrust',  label: 'BeyondTrust',             hasConfig: true,  enabled: false,
-        desc: 'Password Safe secret retrieval and PRA session recording.' },
+      // The three BeyondTrust products gate independently — customers routinely license
+      // one or two, not all three. Each key derives its own config flag via
+      // _feature_to_cfg_key (password_safe -> password_safe_enabled), so renaming one
+      // silently repoints its toggle at a key nothing reads.
+      { key: 'password_safe', label: 'Password Safe',          hasConfig: true,  enabled: false,
+        desc: 'Secret and managed-account checkout, VM / database / Kubernetes onboarding, and scheduled credential rotation.' },
+      { key: 'pra',          label: 'Privileged Remote Access', hasConfig: true,  enabled: false,
+        desc: 'Shell Jump, protocol-tunnel and Web Jump provisioning through PRA, plus the Gateway hosts that carry them.' },
+      { key: 'epml',         label: 'EPM for Linux',           hasConfig: true,  enabled: false,
+        desc: 'Build and download EPM for Linux client packages and mint activation tokens via the BeyondTrust Pathfinder API.' },
       { key: 'portainer',    label: 'Containers',              hasConfig: true,  enabled: false,
         desc: 'Manage and view containers across all configured cloud providers (AWS ECS, Azure ACI, GCP Cloud Run), plus optional on-prem Portainer management.' },
       { key: 'ansible',      label: 'Remote Worker',           hasConfig: true,  enabled: false,
@@ -4412,7 +4471,8 @@ function settingsPage() {
         const features = await API.get('/api/features');
         const map = {
           vmware: features.vmware,
-          beyondtrust: features.beyondtrust, portainer: features.portainer,
+          password_safe: features.password_safe, pra: features.pra, epml: features.epml,
+          portainer: features.portainer,
           ansible: features.ansible, entitle: features.entitle,
           proxmox: features.proxmox,
           vsphere: features.vsphere,

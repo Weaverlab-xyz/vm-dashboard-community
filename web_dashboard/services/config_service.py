@@ -274,6 +274,26 @@ def get_raw(key: str, default: str = "", workgroup: str | None = None) -> str:
     return raw or ""
 
 
+def get_opt(key: str, workgroup: str | None = None) -> str | None:
+    """Return the stored value for key, or None when no row exists at all.
+
+    get() cannot express this: its `default` argument folds "no row" and "a row
+    holding an empty string" into the same answer, and get_bool() folds them
+    further into the settings/env fallback. A migration that has to tell "the
+    operator never touched this flag" (fall through to the config.py default)
+    from "the operator deliberately set it to 0" (carry the 0 forward) needs the
+    difference. See feature_flag_migration.seed_beyondtrust_split.
+
+    Deliberately does NOT resolve external references, unlike get(): a feature
+    flag is never a vault ref, and resolving one here would turn a boot-time
+    seed into a network call."""
+    _ensure_loaded()
+    with _cache_lock:
+        if workgroup is not None and (key, workgroup) in _cache:
+            return _cache[(key, workgroup)]
+        return _cache.get((key, None))
+
+
 def is_reference(raw: str) -> bool:
     """True if raw is an external secret-backend reference (aws_sm://, azure_kv://,
     gcp_sm://, …) rather than a literal value."""

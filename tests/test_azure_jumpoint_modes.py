@@ -52,7 +52,7 @@ def _install_stubs():
     sa_orm = mod("sqlalchemy.orm", Session=type("Session", (), {}))
     mod("sqlalchemy", orm=sa_orm)
     mod("web_dashboard.config", settings=types.SimpleNamespace(
-        beyondtrust_enabled=False, azure_vm_jumpoint_mode="shared",
+        pra_enabled=False, azure_vm_jumpoint_mode="shared",
         azure_aci_subnet_id="", azure_aci_cpu=1.0, azure_aci_memory=2.0,
         azure_aci_storage_account="", azure_aci_storage_account_rg="",
         azure_aci_file_share="jpt"))

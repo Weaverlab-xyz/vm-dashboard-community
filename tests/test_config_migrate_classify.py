@@ -141,7 +141,8 @@ def test_on_prem_flag_travels_with_its_connection_details():
         assert classify.exclusion_reason(flag, "1", include_on_prem=True) is None, flag
     # Cloud-side feature flags have no such coupling and always migrate.
     for flag in ("cloud_database_enabled", "k8s_management_enabled",
-                 "entitle_enabled", "beyondtrust_enabled", "remote_agents_enabled"):
+                 "entitle_enabled", "password_safe_enabled", "pra_enabled",
+                 "epml_enabled", "remote_agents_enabled"):
         assert classify.exclusion_reason(flag, "1") is None, flag
 
 

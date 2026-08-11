@@ -53,7 +53,7 @@
         Kubernetes (Rancher)
       </button>
       {% endif %}
-      {% if beyondtrust_enabled %}
+      {% if pra_enabled %}
       <button @click="activeTab = 'gateways'; loadGateways()"
               :class="activeTab === 'gateways'
                 ? 'border-b-2 border-blue-600 text-blue-600 font-semibold'
@@ -65,7 +65,7 @@
     </nav>
   </div>
 
-  {% if beyondtrust_enabled %}
+  {% if pra_enabled %}
   <!-- ── BeyondTrust Gateways ────────────────────────────────────────────── -->
   <div x-show="activeTab === 'gateways'" x-cloak>
     <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6 mb-6">
@@ -1635,7 +1635,7 @@ function containersDashboard() {
       // 'gateways' is Jinja-gated below, panel and all — unlike #portainer, whose panel
       // renders either way — so honouring it with the feature off would show a blank
       // page. The dashboard's Gateways tile links here.
-      const tabs = ['portainer', 'cloud', 'rancher'{% if beyondtrust_enabled %}, 'gateways'{% endif %}];
+      const tabs = ['portainer', 'cloud', 'rancher'{% if pra_enabled %}, 'gateways'{% endif %}];
       if (tabs.includes(tab)) {
         this.activeTab = tab;
       }
@@ -1653,7 +1653,7 @@ function containersDashboard() {
       {% if k8s_management_enabled %}
       tasks.push(this.loadRancher());
       {% endif %}
-      {% if beyondtrust_enabled %}
+      {% if pra_enabled %}
       // Stays lazy — the tab button loads on click. Landing here from the dashboard
       // tile skips that click, so fetch it now or the table renders empty.
       if (this.activeTab === 'gateways') tasks.push(this.loadGateways());

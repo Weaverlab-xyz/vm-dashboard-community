@@ -30,7 +30,7 @@ Desktop required).
 - [Appendix E — Nutanix AHV integration](#appendix-e--nutanix-ahv-integration)
 - [Appendix F — XCP-ng / XenServer integration](#appendix-f--xcp-ng--xenserver-integration)
 - [Appendix G — Sign in with Microsoft (Entra OAuth)](#appendix-g--sign-in-with-microsoft-entra-oauth)
-- [Appendix H — BeyondTrust integration](#appendix-h--beyondtrust-integration)
+- [Appendix H — BeyondTrust integrations](#appendix-h--beyondtrust-integrations)
 - [Appendix I — Entitle resource registration](#appendix-i--entitle-resource-registration)
 - [Appendix J — MCP server (AI client integration)](#appendix-j--mcp-server-ai-client-integration)
 - [Appendix K — Portainer CE integration](#appendix-k--portainer-ce-integration)
@@ -929,33 +929,34 @@ assigned workgroups on first OAuth login.
 
 ---
 
-## Appendix H — BeyondTrust integration
+## Appendix H — BeyondTrust integrations
 
-Optional. Enables two things when both are configured:
+All optional, and **each is enabled independently** — you only need the ones you license.
 
-> **Full guide:** [docs/integrations/beyondtrust.md](integrations/beyondtrust.md)
+> **Full guide:** [docs/integrations/beyondtrust.md](integrations/beyondtrust.md), which
+> maps the whole surface. Per-product detail:
+> [Password Safe](integrations/password-safe.md),
+> [Privileged Remote Access](integrations/privileged-remote-access.md),
+> [EPM-L](integrations/epml.md).
 
-- **Secret retrieval (pscli / ps-cli)** — the dashboard checks out SSH
-  keys and passwords from BeyondTrust Password Safe on demand, so
-  credentials never need to be stored locally.
-- **Session context (btapi)** — used to pass session metadata back to
-  BeyondTrust PRA during remote access operations.
-
-Both tools are separate binaries that must be present inside the container.
-The dashboard feature flag controls both; configure the credentials that
-apply to your deployment.
+- **Password Safe** (`password_safe_enabled`) — the dashboard checks out SSH keys and
+  passwords on demand, so credentials never need to be stored locally, and onboards the
+  VMs, databases and Kubernetes tokens it builds as managed systems + accounts.
+- **Privileged Remote Access** (`pra_enabled`) — Shell Jump, Web Jump, Remote RDP and
+  protocol-tunnel jump items, plus the Gateway hosts they broker through.
+- **EPM for Linux** (`epml_enabled`) — agent package builds and installation tokens.
 
 ### Prerequisites
 
-- A **BeyondTrust Password Safe** (Secrets Safe) tenant
-- The **ps-cli** binary (`pscli`) accessible inside the container at the
-  path set in `PSCLI_EXECUTABLE` (default: the system PATH)
-- Optionally the **btapi** binary if your PRA tenant is separate from
-  Password Safe
+- For Password Safe: a **Password Safe / Secrets Safe** tenant. `ps-cli` ships as the
+  `beyondtrust-bips-cli` pip dependency, so it is already in any image built from this
+  repo — there is no separate binary to install.
+- For PRA: a **PRA** appliance or cloud tenant, plus a Jump Group and Gateway that
+  already exist in it (the dashboard looks them up by name).
 
-### Part 1 — Password Safe OAuth application (pscli)
+### Part 1 — Password Safe OAuth application (ps-cli)
 
-pscli authenticates to Password Safe with an OAuth 2.0 client credentials
+ps-cli authenticates to Password Safe with an OAuth 2.0 client credentials
 grant. Create the application in Password Safe:
 
 1. **Password Safe** → **Configuration** → **API Registration** →
@@ -966,10 +967,10 @@ grant. Create the application in Password Safe:
    dashboard needs. At minimum: **Secrets > Read**, **Requests > Create**,
    **Credentials > Read**.
 
-### Part 2 — btapi credentials (if using PRA session recording)
+### Part 2 — PRA Config API credentials (if using PRA)
 
-btapi authenticates to the BeyondTrust PRA API with its own client
-credentials. Obtain them from:
+The `sra` Terraform provider authenticates to the BeyondTrust PRA Configuration API with
+its own client credentials. Obtain them from:
 
 **BeyondTrust PRA** → **Configuration** → **API Configuration** →
 **Add API Account**. Copy the **Client ID** and **Client Secret**.
@@ -980,26 +981,31 @@ same appliance, the host and credentials may be the same as Part 1.
 
 ### Enable and configure
 
-1. **Settings → Integrations** → toggle **BeyondTrust PRA** on.
-   The configuration panel opens automatically.
+1. **Settings → Integrations** → toggle **Password Safe** on. The configuration
+   panel opens automatically.
 
-2. Fill in the **Password Safe** section:
+2. Fill in its **API connection** section:
 
    | Field | Value |
    |-------|-------|
    | Password Safe URL | Base URL of your Password Safe instance, e.g. `https://ps.company.com` |
    | OAuth Client ID | From the API Registration you created in Part 1 |
    | OAuth Client Secret | From the API Registration |
+   | API run-as account | The BeyondInsight user the OAuth client runs as (needed for VM onboarding) |
 
-3. Fill in the **btapi** section (leave blank if not using PRA session recording):
+3. If you use PRA, toggle **Privileged Remote Access** on and fill in its
+   **API connection** section:
 
    | Field | Value |
    |-------|-------|
-   | API Host | Your PRA appliance URL, e.g. `https://pra.company.com` |
-   | Client ID | From the PRA API Account |
-   | Client Secret | From the PRA API Account |
+   | PRA API Host | Your PRA appliance URL, e.g. `https://pra.company.com` |
+   | OAuth Client ID | From the PRA API Account |
+   | OAuth Client Secret | From the PRA API Account |
 
-4. Click **Save**. No restart required.
+   Then set the Jump Group and Gateway under **Shell Jump provisioning** — the pickers
+   enumerate both from the PRA Config API.
+
+4. Click **Save** on each panel. No restart required.
 
 > **Secret note:** Client secrets are encrypted with AES-256 in the
 > application database. Leaving a secret field blank on a subsequent save
