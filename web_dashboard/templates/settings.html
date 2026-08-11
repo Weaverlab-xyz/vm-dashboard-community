@@ -1597,6 +1597,19 @@
                   Pre-tick on the provision form
                 </label>
               </div>
+              <div class="grid grid-cols-2 gap-3">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Token Checkout Duration (minutes) <span class="text-gray-400 font-normal">(Password Safe request)</span></label>
+                  <input type="number" x-model="panelCfg.k8s_ps_token_checkout_duration_min" min="1"
+                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                         placeholder="15">
+                </div>
+                <label class="flex items-center gap-2 text-sm text-gray-700 mt-6">
+                  <input type="checkbox" x-model="panelCfg.k8s_ps_pravault_mirror_enabled"
+                         class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+                  Register the PRA Vault Token mirror
+                </label>
+              </div>
               <p class="text-xs text-gray-400">In-cluster rotator RBAC. The binding subject differs per cloud: AKS needs the service principal's <em>object id</em> (the plugin logs it on every run — not the client id), EKS the access-entry username + the IAM principal ARN behind the functional account's key. GKE derives the subject from the functional account's name when blank.</p>
               <div class="grid grid-cols-3 gap-3">
                 <label class="flex items-center gap-2 text-sm text-gray-700 col-span-3">
