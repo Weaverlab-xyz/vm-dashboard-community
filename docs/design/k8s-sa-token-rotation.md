@@ -133,11 +133,25 @@ Two things survive from that design, both cheap:
   admin unlinked it in the Password Safe console" is exactly what that panel exists to
   surface.
 
-**What this design does not prove.** The shared-credential behaviour is documented for
-ordinary password accounts. Here *both* accounts are custom plugins — one that mints its
-value and reports it back, one that writes whatever it is handed — and that combination is
-not covered by the documentation. Verify it against the tenant with
-`ps-cli synced-accounts create -ma-id <parent> -sa-id <subscriber>` before relying on it.
+**Why this works with two custom plugins, which the documentation does not spell out.**
+The published behaviour is written for ordinary password accounts, where Password Safe
+generates a policy-conformant password and pushes it outward. Here the parent *mints* a
+JWT rather than accepting a generated password, so the obvious worry is that the sync
+would carry a policy-generated string to the subscriber and write that into PRA — a
+failure that would report success at every step while leaving PRA holding garbage.
+
+It does not, and the reason is the mechanism rather than luck: **the sync copies whatever
+is stored as the parent's password**, and the parent's plugin is what decides what gets
+stored. The "Kubernetes Service Account Token" plugin ignores the password policy — it is
+not minting a password — and reports the JWT it obtained from the cluster, so the JWT
+*is* the stored credential and the JWT is what the subscriber receives. Confirmed by the
+plugin author; recorded here because it is the single assumption the whole design rests
+on, and it is not derivable from the API reference.
+
+Worth keeping in mind for anything built on top of this: **nothing in this design detects
+a wrong value, only a missing one.** The subscriber's change date moves whether or not the
+value written was correct. That was equally true of the reconciler this replaced, whose
+verification step confirmed the plugin's PATCH *ran* and never what it wrote.
 
 ## 5. The rotate-on-release loop
 
@@ -234,10 +248,11 @@ nothing and the API server 401s — invisible from inside the cluster. It never 
   Rule containing both managed accounts. There is no Smart Rule API — in this repo or in
   Password Safe's public API — so this is out-of-band, and it is the failure every
   Password Safe consumption path here has hit first.
-- Grant the API identity whatever the tenant enforces for the sync link. The REST reference
-  says **Password Safe Account Management (Full control)**; `ps-cli synced-accounts -h` says
-  **BeyondInsight/Password Safe Role Management (Read/Write)**. The documentation disagrees
-  with itself, so check both when the link 403s.
+- Grant the API identity **Password Safe Account Management (Full control)** for the sync
+  link, per the REST reference. `ps-cli synced-accounts -h` claims *Role Management
+  (Read/Write)*, which reads like an error in the CLI help — the operation acts on managed
+  accounts, not roles — but it is worth trying if the link 403s with Account Management
+  already in place.
 - Leave **Change Password After Release** off on **both** accounts (see §5) — under synced
   accounts a change on either one rotates the pair.
 - Give the Password Safe host or Resource Broker network reachability to the cluster's API

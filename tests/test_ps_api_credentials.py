@@ -282,9 +282,12 @@ def test_an_accepted_post_that_did_not_take_is_reported_unconfirmed():
         "an unconfirmed link must be reported so registration can refuse to continue")
 
 
-def test_a_refused_link_names_both_documented_grants():
-    # The REST reference says Account Management (Full control); ps-cli says Role
-    # Management (Read/Write). An operator chasing a 403 needs to be told both.
+def test_a_refused_link_names_the_grant_it_needs_and_the_fallback():
+    # Account Management (Full control) per the REST reference — the operation acts on
+    # managed accounts, so that is almost certainly right. ps-cli's help says Role
+    # Management (Read/Write); that reads like a CLI documentation error but has not been
+    # ruled out, so a 403 names it second rather than dropping it. A PS permission gap
+    # surfaces here as an opaque 4031/403, which is why the message carries the answer.
     _install(FakeClient(status={"ManagedAccounts/1/SyncedAccounts/7": 403}))
     try:
         _run(ps.link_synced_account(parent_account_id=1, synced_account_id=7))

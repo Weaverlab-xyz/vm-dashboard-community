@@ -721,9 +721,8 @@ async def sync_status(db: Session, cluster_id: str) -> dict:
         logger.warning("PS token status read for cluster %s failed: %s", cluster_id, exc)
         out["error"] = (
             "could not read the sync state from Password Safe — check the server logs. "
-            "The usual cause is the API identity lacking the grant the sync link needs: "
-            "Account Management (Full control), or Role Management (Read/Write) — the two "
-            "references disagree, so check both.")
+            "The usual cause is the API identity lacking Password Safe Account Management "
+            "(Full control), which the synced-account calls need.")
     return out
 
 

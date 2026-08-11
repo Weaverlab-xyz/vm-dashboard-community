@@ -406,11 +406,13 @@ queued, so there is a short window where PRA still holds the revoked token. Set 
 token mode to **Bound** on tunnels that must not break: Bound never revokes, and the old token
 stays valid until its TTL.
 
-**One caveat worth confirming against your tenant.** The shared-credential behaviour is
-documented for ordinary password accounts. Here both accounts are custom plugins — one that
-*mints* its value and reports it back, one that *writes* whatever it is handed. That
-combination is not covered by the documentation, so verify with `ps-cli synced-accounts` on a
-throwaway pair before relying on it in anger.
+**Why this works when the parent mints a JWT rather than accepting a password.** Password
+Safe's published shared-credential behaviour describes ordinary password accounts, where it
+generates a password from the policy and pushes it outward. The sync actually copies whatever
+is *stored* as the parent's password, and the parent's plugin decides what that is: the
+"Kubernetes Service Account Token" plugin ignores the password policy — it is minting a JWT,
+not a password — and reports the token it got from the cluster, so the token is the stored
+credential and the token is what the subscriber receives.
 
 ### Operator prerequisites
 
@@ -420,10 +422,11 @@ throwaway pair before relying on it in anger.
    Rule containing both managed accounts. There is no Smart Rule API, so this is out-of-band —
    and it is the failure every Password Safe consumption path here hits first (`POST /Requests`
    → `4031` / 403).
-4. Grant the API identity the permission the sync link needs. The REST reference says
-   **Password Safe Account Management (Full control)**; `ps-cli synced-accounts -h` says
-   **BeyondInsight/Password Safe Role Management (Read/Write)**. Those are different grants and
-   the documentation disagrees, so if the link 403s, check both.
+4. Grant the API identity **Password Safe Account Management (Full control)** — what the
+   sync link needs, per the REST reference. (`ps-cli synced-accounts -h` claims *Role
+   Management (Read/Write)* instead; that looks like an error in the CLI help, since the
+   operation acts on managed accounts rather than roles. If the link 403s with Account
+   Management already granted, try Role Management before assuming a different cause.)
 5. **Leave "Change Password After Release" OFF** on *both* accounts. A credential change on
    either member of a synced pair re-rotates the pair, so with it on, every release of the PRA
    copy would rotate the real cluster token — an endless loop with a dead-credential window

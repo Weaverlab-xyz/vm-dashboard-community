@@ -666,9 +666,9 @@ async def checkout_credential(account_id: int, *, duration_min: int = 15,
 
 
 _SYNC_GRANT_HINT = (
-    "The API identity needs Password Safe Account Management (Full control) — note that "
-    "`ps-cli synced-accounts` documents this as Role Management (Read/Write) instead, so "
-    "check both if the tenant refuses.")
+    "The API identity needs Password Safe Account Management (Full control). If it already "
+    "has that, try Role Management (Read/Write) — `ps-cli synced-accounts` documents the "
+    "grant that way, which looks like an error in its help but has not been ruled out.")
 
 
 async def _synced_accounts(client: httpx.AsyncClient, parent_id: int) -> list:
