@@ -86,11 +86,17 @@ k8s_ps_token_address_options k8s_ps_rotator_apply_rbac k8s_ps_rotator_gke_sa_ema
 k8s_ps_rotator_aks_sp_object_id k8s_ps_rotator_eks_username
 k8s_ps_rotator_eks_principal_arn k8s_ps_rotator_eks_create_access_entry
 k8s_ps_rotator_bootstrap_namespace k8s_ps_rotator_bootstrap_sa
-k8s_token_sync_enabled k8s_token_sync_interval_minutes
-k8s_token_sync_request_duration_min k8s_token_sync_max_per_pass
-k8s_token_sync_max_failures k8s_token_sync_max_per_hour
 pra_k8s_namespace pra_k8s_sa_name bt_vault_account_group_id
 """.split())
+
+# RETIRED, deliberately absent from LEGACY_KEYS above: the six `k8s_token_sync_*` keys
+# (enabled / interval_minutes / request_duration_min / max_per_pass / max_failures /
+# max_per_hour). They tuned a dashboard-side poll that copied the rotated ServiceAccount
+# token into the PRA Vault account. Password Safe does that itself now — registration
+# links the two managed accounts with SyncedAccounts — so there is no interval, no push
+# cap and no circuit breaker left to tune. This is the one case where a key vanishing
+# from all three models is correct rather than a lossy split, which is why it is written
+# down here instead of just deleted.
 
 
 def _read(path):

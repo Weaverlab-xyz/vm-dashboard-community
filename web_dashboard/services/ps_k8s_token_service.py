@@ -714,7 +714,16 @@ async def sync_status(db: Session, cluster_id: str) -> dict:
             parent_account_id=int(row.ps_token_account_id),
             synced_account_id=int(row.ps_pra_vault_account_id)))
     except Exception as exc:  # noqa: BLE001 — a status read must not 500 the modal
-        out["error"] = str(exc)[:400]
+        # The detail goes to the log, never into the returned dict: this is served
+        # straight to the browser by the ps-token/status endpoint, and a Password Safe
+        # error carries its response body (CodeQL py/stack-trace-exposure). The
+        # replacement still names the one cause worth naming, from our own text.
+        logger.warning("PS token status read for cluster %s failed: %s", cluster_id, exc)
+        out["error"] = (
+            "could not read the sync state from Password Safe — check the server logs. "
+            "The usual cause is the API identity lacking the grant the sync link needs: "
+            "Account Management (Full control), or Role Management (Read/Write) — the two "
+            "references disagree, so check both.")
     return out
 
 

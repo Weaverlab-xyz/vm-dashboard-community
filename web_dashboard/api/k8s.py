@@ -729,8 +729,14 @@ async def ps_token_status(
         raise HTTPException(status_code=404, detail=str(e))
     try:
         return {"ok": True, **await ps_k8s_token_service.sync_status(db, cluster_id)}
-    except Exception as e:  # noqa: BLE001 — a status read must not 500 the modal
-        return {"ok": False, "registered": False, "linked": False, "error": str(e)[:400]}
+    except Exception as exc:  # noqa: BLE001 — a status read must not 500 the modal
+        # Log the real error server-side; return a generic reason. A Password Safe error
+        # carries response bodies and tenant detail, and this endpoint is reachable by
+        # any k8s reader — CodeQL py/stack-trace-exposure. Same rule as
+        # api/config_mgmt's managed-account lookup.
+        logger.warning("PS token status for cluster %s failed: %s", cluster_id, exc)
+        return {"ok": False, "registered": False, "linked": False,
+                "error": "Password Safe status read failed — check the server logs."}
 
 
 @router.post("/clusters/{cluster_id}/entitle-agent", status_code=202)
