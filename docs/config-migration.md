@@ -39,7 +39,7 @@ Everything reachable from the **Settings** panel:
 | | |
 |---|---|
 | Cloud credentials | AWS, Azure, GCP, OCI — from the setup wizard |
-| Integration panels | all 21: BeyondTrust, Entitle, Portainer, Ansible, Kubernetes, Databases, Cost Explorer, Guardrails, Auto-delete, Notifications, SSO, Worker, … |
+| Integration panels | all 23: Password Safe, PRA, EPM-L, Entitle, Portainer, Ansible, Kubernetes, Databases, Cost Explorer, Guardrails, Auto-delete, Notifications, SSO, Worker, … |
 | Feature flags | including the preview flags |
 | Per-region resource sets | `<cloud>_region_configs`, merged rather than replaced |
 | Storage and Secrets backends | `storage_*` and `secrets_*` keys |

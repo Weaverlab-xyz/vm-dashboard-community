@@ -512,7 +512,7 @@ async def run_playbook(
     # A managed-account checkout needs BeyondTrust Password Safe enabled.
     if has_managed:
         from ..services import config_service as cs
-        if not cs.get_bool("beyondtrust_enabled"):
+        if not cs.get_bool("password_safe_enabled"):
             raise HTTPException(
                 status_code=400,
                 detail="Managed-account checkout requires BeyondTrust Password Safe to be enabled in Settings.")
@@ -755,7 +755,7 @@ async def list_managed_accounts(
     # ephemeral_enabled tells the UI that managed accounts can run on ECS/GCP (via
     # the ephemeral store copy) and to nudge on change-after-release for those.
     ephemeral_enabled = cs.get_bool("ansible_cloud_ephemeral_secrets_enabled")
-    if not cs.get_bool("beyondtrust_enabled"):
+    if not cs.get_bool("password_safe_enabled"):
         return {"enabled": False, "ephemeral_enabled": ephemeral_enabled, "systems": []}
 
     host = (host or "").strip()

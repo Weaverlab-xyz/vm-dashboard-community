@@ -23,7 +23,7 @@
   <div class="flex items-center justify-between mb-1">
     <h1 class="text-2xl font-bold text-gray-800">Databases</h1>
     <div class="flex items-center gap-2">
-      {% if beyondtrust_enabled %}
+      {% if password_safe_enabled %}
       <button @click="openImport()"
               class="bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 text-sm font-medium px-3 py-1.5 rounded-lg">
         Import from Password Safe
@@ -40,7 +40,7 @@
     </div>
   </div>
   <p class="text-sm text-gray-500 mb-6">
-    {% if beyondtrust_enabled %}<strong>Import from Password Safe</strong> to pick from the databases
+    {% if password_safe_enabled %}<strong>Import from Password Safe</strong> to pick from the databases
     Password Safe already discovered — it knows the platform, port and accounts, so there is nothing
     to type. <strong>Register</strong> one by hand if it isn't in Password Safe.{% else %}<strong>Register</strong>
     a database that already exists — on-premises or in any cloud — so it can be a Configuration
@@ -77,7 +77,7 @@
       <div x-show="loading" x-cloak class="p-6 text-center text-sm text-gray-400">Loading…</div>
       <div x-show="!loading && databases.length === 0" x-cloak class="p-10 text-center text-sm text-gray-400">
         No databases yet. Click <strong>Provision database</strong> to create a private managed
-        instance{% if beyondtrust_enabled %}, <strong>Import from Password Safe</strong> to pick from
+        instance{% if password_safe_enabled %}, <strong>Import from Password Safe</strong> to pick from
         the ones it already knows about, or <strong>Register existing</strong> to record one by hand{% endif %}.
       </div>
       <table x-show="!loading && databases.length > 0" x-cloak class="min-w-full text-sm">
@@ -137,7 +137,7 @@
     </div>
   </div>
 
-  {% if beyondtrust_enabled %}
+  {% if password_safe_enabled %}
   <!-- Register-existing modal — records a database the dashboard did not create -->
   <div x-show="showRegister" x-cloak
        class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"

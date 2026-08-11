@@ -113,7 +113,7 @@
                       title="Direct kubectl-to-API TCP tunnel + downloadable cloud-login (token-free) kubeconfig; supports kubectl --as impersonation for Entitle grants"
                       class="text-xs px-2 py-1 bg-cyan-600 hover:bg-cyan-700 text-white rounded font-medium"
                       x-text="c.api_tunnel_jump ? 'API tunnel ✓' : 'API tunnel'"></button>
-              {% if beyondtrust_enabled %}
+              {% if password_safe_enabled %}
               <button x-show="c.status === 'registered' || c.status === 'managed'" @click="openPsToken(c)"
                       title="Manage the PRA-injected ServiceAccount token in Password Safe so it ROTATES on schedule — and keep the PRA Vault copy in sync through Password Safe"
                       :class="c.token_sync_state === 'error' || c.token_sync_state === 'unregistered'
@@ -335,7 +335,7 @@
             <span class="block text-[11px] text-gray-400">Leave off for federation/JIT demos (no storage). Tick it only for stateful workloads (e.g. a Rancher management plane) — it adds a slower, occasionally flaky addon step.</span>
           </label>
         </div>
-        {% if beyondtrust_enabled %}
+        {% if password_safe_enabled %}
         <!-- Password Safe token-rotation opt-in (chained after the provision completes) -->
         <div class="flex items-start gap-2">
           <input type="checkbox" id="ps_token_reg" x-model="provForm.register_token_in_passwordsafe" class="mt-0.5">
@@ -782,7 +782,7 @@ gcloud auth login --login-config=login.json</pre>
     </div>
   </div>
 
-  {% if beyondtrust_enabled %}
+  {% if password_safe_enabled %}
   <!-- Password Safe token rotation modal -->
   <div x-show="showPsToken" x-cloak class="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
        @click.self="showPsToken = false">
@@ -798,7 +798,7 @@ gcloud auth login --login-config=login.json</pre>
           and applies the in-cluster rotator RBAC. Rotations are mirrored into the PRA Vault copy through the
           <span class="font-mono">PRA Vault Token</span> plugin, so the k8s tunnel keeps working. The functional
           account must already exist in Password Safe — see the
-          <a href="/docs/integrations/beyondtrust#kubernetes-serviceaccount-token-rotation" class="underline" target="_blank">token rotation guide</a>
+          <a href="/docs/integrations/password-safe#kubernetes-serviceaccount-token-rotation" class="underline" target="_blank">token rotation guide</a>
           for the plugin import, functional accounts and access policy.
         </p>
         <template x-if="psTokenTarget && psTokenTarget.ps_token_managed">

@@ -53,7 +53,7 @@ asserts no `_run_bulk_deploy` calls its cloud's launch function directly.
 Ordered steps (each Layer-1/2/3 step is **non-fatal** — a failure logs a warning and the
 deploy still succeeds):
 
-1. **Ensure the gateway host** (only when `beyondtrust_enabled`) — AWS uses a shared
+1. **Ensure the gateway host** (only when `pra_enabled`) — AWS uses a shared
    ref-counted ECS host, Azure the shared `clouddb-jumpoint` VM (see
    `azure_vm_jumpoint_mode`), GCP the shared COS host (see `gcp_vm_jumpoint_mode`);
    **OCI does nothing here** (bring your own). In a batch this happens once for the
@@ -171,7 +171,7 @@ and a service principal with **Contributor** on the RG.
 
 Azure single deploys borrow the **shared, ref-counted gateway VM** that cloud databases,
 k8s tunnels and VDI seats already use, following `azure_vm_jumpoint_mode` (editable under
-**Settings → BeyondTrust → Azure overrides**, so the choice is reversible without a
+**Settings → Integrations → Privileged Remote Access → Shell Jump provisioning**, so the choice is reversible without a
 redeploy). Batches still share one ACI container group. Two things override the mode: a
 deploy supplying its own **Gateway deploy key** always gets ACI (the shared host resolves
 its key from config, so there is nowhere to honour a per-deploy override), and `aci` mode
@@ -220,7 +220,7 @@ GCP deploys borrow the **shared, ref-counted gateway host** that cloud databases
 tunnels and VDI seats already use — one host, rather than an `e2-micro` per VM. Batches
 always share. Single deploys follow `gcp_vm_jumpoint_mode` (`shared` by default,
 `paired` for the pre-2026-07 behaviour of a dedicated `bt-jumpoint-<vmname>`), editable
-under **Settings → BeyondTrust → GCP overrides** so the choice is reversible without a
+under **Settings → Integrations → Privileged Remote Access → Shell Jump provisioning** so the choice is reversible without a
 redeploy.
 
 Two things override the mode. A deploy that supplies its own **Gateway deploy key** is
@@ -280,7 +280,7 @@ user + API keypair, and (best-effort) a KMS vault SSH-keypair secret.
 
 ## Layer 1 — PRA (Shell Jump)
 
-When `beyondtrust_enabled` and PRA is configured (`bt_api_host`, `bt_client_id`,
+When `pra_enabled` and PRA is configured (`bt_api_host`, `bt_client_id`,
 `bt_client_secret`, `bt_jump_group_name`, `bt_jumpoint_name`), every Linux deploy brokers a
 PRA **Shell Jump** via `terraform_pra_service.provision_jump(tag=<cloud>)` (the `beyondtrust/sra`
 provider), routed through the cloud's gateway host. The jump is removed on destroy from its
@@ -293,7 +293,7 @@ the `bt_*` defaults. AWS + Azure also accept a per-deploy `pra_credential_ref` (
 `bt_client_secret`). **Windows Azure VMs** skip the SSH jump — use an RDP jump.
 
 The shared gateway host, deploy keys, and PRA OAuth setup are described in the
-[BeyondTrust integration](integrations/beyondtrust.md) doc.
+[Privileged Remote Access](integrations/privileged-remote-access.md) doc.
 
 ---
 
@@ -309,7 +309,7 @@ method only** (no cloud-native plugin) and therefore needs SSH line-of-sight fro
 Broker / Gateway.
 
 This is documented in full — plugin uploads, per-cloud methods, the `adminuser` account, and
-the config-key table — in the [BeyondTrust integration](integrations/beyondtrust.md) doc's
+the config-key table — in the [Password Safe](integrations/password-safe.md) doc's
 **"Password Safe VM onboarding"** section. Off-boarding is automatic on VM destroy.
 
 ---

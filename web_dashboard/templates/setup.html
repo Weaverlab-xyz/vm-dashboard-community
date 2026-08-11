@@ -781,7 +781,8 @@ function wizard() {
                   oci_region: 'us-ashburn-1', oci_compartment_ocid: '',
                   oci_vcn_ocid: '', oci_default_subnet_ocid: '',
                   oci_ssh_key_secret: '', oci_vault_ocid: '' },
-      features: { vmware_enabled: false, beyondtrust_enabled: false,
+      features: { vmware_enabled: false,
+                  password_safe_enabled: false, pra_enabled: false, epml_enabled: false,
                   portainer_enabled: false, ansible_enabled: false, entitle_enabled: false },
     },
 
@@ -853,10 +854,22 @@ function wizard() {
         note:  'Windows host only — requires VMware Workstation + SSH from the container.',
       },
       {
-        key:   'beyondtrust_enabled',
-        label: 'BeyondTrust',
-        desc:  'Password Safe secret retrieval and PRA session recording.',
-        note:  'Requires a BeyondTrust tenant; uses the ps-cli and/or btapi binaries.',
+        key:   'password_safe_enabled',
+        label: 'Password Safe',
+        desc:  'Secret and managed-account checkout, VM / database / Kubernetes onboarding, and scheduled credential rotation.',
+        note:  'Requires a Password Safe tenant and an API OAuth client; uses the ps-cli binary.',
+      },
+      {
+        key:   'pra_enabled',
+        label: 'Privileged Remote Access',
+        desc:  'Shell Jump, protocol-tunnel and Web Jump provisioning through PRA, plus the Gateway hosts that carry them.',
+        note:  'Requires a PRA appliance or tenant, an API account, and a pre-existing Jump Group + Gateway.',
+      },
+      {
+        key:   'epml_enabled',
+        label: 'EPM for Linux',
+        desc:  'Build and download EPM for Linux client packages and mint activation tokens via the BeyondTrust Pathfinder API.',
+        note:  'Requires a BeyondTrust Pathfinder site ID and a Personal Access Token.',
       },
       {
         key:   'portainer_enabled',

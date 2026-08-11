@@ -463,7 +463,7 @@
           </p>
         </div>
         {% endif %}
-        {% if beyondtrust_enabled %}
+        {% if password_safe_enabled %}
         <!-- Password Safe registration opt-in (Linux only — managed system + account) -->
         <div x-show="deployModal.osType !== 'Windows'">
           <label class="flex items-center gap-2 text-sm text-gray-700">
@@ -684,7 +684,7 @@
           Register each Linux VM in Entitle for just-in-time SSH access
         </label>
         {% endif %}
-        {% if beyondtrust_enabled %}
+        {% if password_safe_enabled %}
         <label class="flex items-center gap-2 text-sm text-gray-700">
           <input type="checkbox" x-model="bulkModal.register_in_passwordsafe"
                  class="rounded border-gray-300 text-green-600 focus:ring-green-500">

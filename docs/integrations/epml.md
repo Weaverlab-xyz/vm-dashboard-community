@@ -13,9 +13,10 @@ integrates with the EPM-L public API on the BeyondTrust Pathfinder gateway to:
 - **Issue installation tokens** — generate short-lived tokens used to
   register new endpoints with EPM-L (passed as an Ansible extra var)
 
-The EPM-L routes (`/api/epml/*`) are gated behind the **BeyondTrust**
-feature flag — enable it in Settings → Integrations → BeyondTrust to
-activate them.
+The EPM-L routes (`/api/epml/*`) are gated behind `epml_enabled` — enable
+**EPM for Linux** under Settings → Integrations to activate them. This is one of three
+independently-gated BeyondTrust products, so EPM-L can be on with Password Safe and PRA
+off, or the other way round; see [BeyondTrust Integrations](beyondtrust.md).
 
 ### How the API is addressed
 
@@ -72,7 +73,7 @@ https://app.beyondtrust.io/api/platform/currentSite
 
 ## Step 3 — Configure the dashboard
 
-**Settings → Integrations → BeyondTrust → EPM for Linux (EPM-L)**
+**Settings → Integrations → EPM for Linux**
 
 Paste the **Site ID** and the **Personal Access Token** and save. The PAT is
 encrypted with AES-256 and stored in the database — it never touches disk in
@@ -94,7 +95,7 @@ EPML_BASE_URL=https://api.beyondtrust.io
 **In the GUI:** open **Storage** → **BeyondTrust EPM-L packages**. *Check BeyondTrust*
 lists what's built (with a *Build packages* button when there's nothing yet), and
 *Sync to storage* queues the download-and-upload as a job you're taken straight to.
-The section only appears when the BeyondTrust integration is enabled.
+The section only appears when the EPM-L integration is enabled (`epml_enabled`).
 
 The packages land as ordinary assets in the active backend — `.rpm` and `.deb` are
 already accepted asset types — so they show up in the asset list beside your playbooks.

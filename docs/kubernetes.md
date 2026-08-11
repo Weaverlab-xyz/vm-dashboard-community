@@ -277,7 +277,7 @@ secrets)**, and **Entitle + Entra federation (Layer 3 — time-boxed access)**.
   moves. **In the default LongLived mode rotation revokes the old token, so PRA holds a dead
   credential for up to one interval** — append `;bound` (Settings → token mode) on clusters
   whose tunnel must not break, since Bound never revokes. Full detail and the operator
-  prerequisites: [Password Safe k8s token rotation](integrations/beyondtrust.md#kubernetes-serviceaccount-token-rotation)
+  prerequisites: [Password Safe k8s token rotation](integrations/password-safe.md#kubernetes-serviceaccount-token-rotation)
   and the [design note](design/k8s-sa-token-rotation.md).
 - **PRA API (TCP) tunnel** — `POST /clusters/{id}/api-tunnel` creates a `tunnel_type=tcp` jump
   straight to the API server on a pinned local port (`k8s_api_tunnel_local_port`, `6443`).

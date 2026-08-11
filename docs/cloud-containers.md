@@ -107,7 +107,7 @@ session load. Two lifecycle rules follow from that, and both are enforced for yo
   the idle teardown can't reclaim the host that brokers it. Without that, the last cloud
   DB or cluster going away took the management UIs offline with it.
 
-The tab is gated on `beyondtrust_enabled`, and the **Gateways** tile in the dashboard's
+The tab is gated on `pra_enabled`, and the **Gateways** tile in the dashboard's
 Containers section deep-links straight to it (`/containers#gateways`). For the full story —
 why the managed gateway can't be deleted, why the region picker offers only configured
 regions, and the naming rules that keep the two kinds of host apart in the cloud — see

@@ -113,7 +113,7 @@ pick. It is the same outcome as registering by hand, with nothing to type.
 `cloud_database:read`/`write` **and** `secrets:use` — listing every managed system and
 account in the tenant is strictly more than the host-scoped lookup the run form uses, and
 importing pins a managed account for later checkout. The button renders only when
-`beyondtrust_enabled` is on.
+`password_safe_enabled` is on.
 
 **What it reads.** Four collections over the Password Safe **public REST API** — no
 `ps-cli` binary needed, so it works in a container that doesn't ship one:
@@ -158,7 +158,7 @@ database, and both can be registered. The dashboard cannot resolve your private 
 tell them apart — it is not on that network. Prefer consistent naming; the import shows
 the exact host it will record.
 
-**Settings** → Integrations → BeyondTrust → *Database Import*:
+**Settings** → Integrations → Password Safe → *Database Import*:
 
 | Key | Default | Purpose |
 |---|---|---|
@@ -195,7 +195,7 @@ for `oci` at all, so an OCI row registers and lists but can't be a run target.
 `POST /api/databases/register` (permission `cloud_database:write`). To register several
 at once from what Password Safe already knows, use
 [Import from Password Safe](#importing-from-password-safe) instead. The button only
-renders when the BeyondTrust integration is on (`beyondtrust_enabled`), because the admin
+renders when the Password Safe integration is on (`password_safe_enabled`), because the admin
 login *has* to be a Password Safe managed account. The `cloud_database_enabled` feature
 toggle gates registration and provisioning alike.
 
@@ -267,7 +267,7 @@ The reverse is refused too: a provisioned database is decommissioned, never dere
 ## Layer 1 — PRA access (shared prerequisites, all clouds)
 
 Before any **provisioned** database will get a working tunnel, configure PRA once under
-**Settings → Integrations → BeyondTrust**:
+**Settings → Integrations → Privileged Remote Access**:
 
 - **PRA appliance + OAuth API account** → `bt_api_host`, `bt_client_id`,
   `bt_client_secret` (used by the SRA Terraform provider to create the tunnel).
@@ -635,7 +635,7 @@ on-demand **socat forwarder** in the sandbox VPC and points Entitle at it — en
   to the legacy admin-credential staging — check the job log for the warning.
 - **Registering: "no Password Safe managed accounts found for this host."** The lookup is by
   the host string you typed and needs an already-onboarded managed system in Password Safe.
-  Onboard the database there first, and check `beyondtrust_enabled` plus the `pscli_*` OAuth
+  Onboard the database there first, and check `password_safe_enabled` plus the `pscli_*` OAuth
   client — the dashboard deliberately has no "type a database password" path.
 - **A registered on-prem database run fails with `docker: command not found`.** A
   `cloud = local` database runs in a sibling container on the dashboard host, because
@@ -645,5 +645,5 @@ on-demand **socat forwarder** in the sandbox VPC and points Entitle at it — en
   no Ansible runner resolves for `oci`. Registration still gives you the inventory row.
 
 For the base BeyondTrust/PRA setup (OAuth accounts, Jump Group/Jumpoint, deploy keys), see
-the [BeyondTrust integration](integrations/beyondtrust.md) doc. For the sandbox network
+the [Privileged Remote Access](integrations/privileged-remote-access.md) doc. For the sandbox network
 topology, see [Cloud Sandbox](CLOUD_SANDBOX.md).

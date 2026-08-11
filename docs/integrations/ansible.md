@@ -459,7 +459,7 @@ secret always rides the existing `SSH_KEY_B64` channel and needs no migration.
 
 ### Managed-account checkout (BeyondTrust Password Safe)
 
-When **BeyondTrust is enabled** (`beyondtrust_enabled`), a run can also use a
+When **Password Safe is enabled** (`password_safe_enabled`), a run can also use a
 Password Safe **managed account** as the login identity — instead of referencing a
 *stored* secret, the operator picks an account from a **live list** and the
 dashboard checks out its credential **just-in-time** at run time. The operator
@@ -560,7 +560,7 @@ Two implementation notes that matter if you adapt the pattern:
 
 **Auto-injected credentials.** The lookup runs on the Ansible controller (the runner
 container) and reads `PASSWORD_SAFE_API_URL` / `PASSWORD_SAFE_CLIENT_ID` /
-`PASSWORD_SAFE_CLIENT_SECRET`. When **BeyondTrust is enabled** (`beyondtrust_enabled`)
+`PASSWORD_SAFE_CLIENT_SECRET`. When **Password Safe is enabled** (`password_safe_enabled`)
 and the ps-cli OAuth client is configured, the dashboard **auto-injects** those three env
 vars into **every** runner (Local, ECS, ACI, Cloud Run) — reusing the same
 `pscli_api_url` / `pscli_client_id` / `pscli_client_secret` config as the checkout path,

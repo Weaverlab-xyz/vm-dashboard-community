@@ -18,7 +18,7 @@ checkout (see [../../docs/integrations/ansible.md](../../docs/integrations/ansib
 ## Credentials — auto-injected
 
 The lookup runs on the Ansible **controller** (the runner container) and reads three env
-vars. When **BeyondTrust is enabled** (`beyondtrust_enabled`) and the ps-cli OAuth client is
+vars. When **Password Safe is enabled** (`password_safe_enabled`) and the ps-cli OAuth client is
 configured (`pscli_api_url` / `pscli_client_id` / `pscli_client_secret`), the dashboard
 **auto-injects** them into every runner — you supply nothing:
 

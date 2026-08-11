@@ -1424,6 +1424,17 @@ def init_db():
             import logging as _logging
             _logging.getLogger(__name__).warning(
                 "hypervisor connection seed skipped", exc_info=True)
+        # Translate the retired `beyondtrust_enabled` flag into the three product flags
+        # that replaced it. Writes app_config only, so it takes no db session — it lives
+        # here because this is the block that runs after the schema is ready and outside
+        # the advisory lock.
+        try:
+            from .services import feature_flag_migration
+            feature_flag_migration.seed_beyondtrust_split()
+        except Exception:  # noqa: BLE001 — a seed must never stop the app booting
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "BeyondTrust flag split seed skipped", exc_info=True)
 
     # One-time: chain any pre-existing (pre-upgrade) audit rows so the whole
     # history is tamper-evident, not just entries written after this upgrade.

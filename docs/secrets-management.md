@@ -270,7 +270,7 @@ file against the dashboard.
 
 With the BeyondTrust integration enabled, the dashboard can retrieve AWS, Azure,
 and SSH credentials directly from Password Safe at runtime rather than from the
-application database. See [docs/integrations/beyondtrust.md](integrations/beyondtrust.md)
+application database. See [docs/integrations/password-safe.md](integrations/password-safe.md)
 for setup instructions.
 
 **How it differs from Tier 2:**

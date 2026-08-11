@@ -15,7 +15,7 @@ have once sessions start queueing behind a single host.
 
 **Containers → Gateways** answers it. The tab is one inventory of every gateway host the
 dashboard put in a cloud, plus a form to add more. It appears when **BeyondTrust** is
-enabled (`beyondtrust_enabled`), alongside the [Cloud](../cloud-containers.md),
+enabled (`pra_enabled`), alongside the [Cloud](../cloud-containers.md),
 [Portainer](portainer.md) and [Kubernetes (Rancher)](rancher.md) tabs.
 
 The **Gateways** tile in the dashboard's *Containers* section links straight there
@@ -25,7 +25,7 @@ page. The tile is gated on the same `beyondtrust` flag as the tab.
 
 > **This page is about the gateway *hosts*.** Which PRA Gateway a jump item routes
 > through — by name, from the `bt_jumpoint_name` setting or a deploy form's picker — is
-> covered in [BeyondTrust integration](beyondtrust.md). The two are related but not the
+> covered in [Privileged Remote Access](privileged-remote-access.md). The two are related but not the
 > same thing, and the next section is the reason why.
 
 ---
@@ -127,7 +127,7 @@ tab, badged `Gateway` — see [Cloud Containers](../cloud-containers.md#monitori
 
 | Requirement | Notes |
 |---|---|
-| **BeyondTrust enabled** | `beyondtrust_enabled`, under **Settings → Integrations → BeyondTrust**. Gates the tab entirely. |
+| **PRA enabled** | `pra_enabled`, under **Settings → Integrations → Privileged Remote Access**. Gates the tab entirely. |
 | **A Gateway deploy key for that cloud** | The key above. Without it the ensure has nothing to launch and the job fails with the specific missing value in its log. |
 | **A gateway subnet for that cloud** | `bt_ecs_jumpoint_subnet_id` (AWS), the region's `jumpoint_subnet_id` / `azure_aci_subnet_id` (Azure), the zone's derived subnetwork (GCP). |
 | **AWS only: an ECS-capable instance profile** | The host's profile (`bt_ecs_host_instance_profile`, default `ecsInstanceRole`) must carry the AWS-managed **`AmazonEC2ContainerServiceforEC2Role`** policy. Without `ecs:RegisterContainerInstance` the host's ECS agent is denied, treats it as terminal and exits — see [below](#the-aws-host-never-joins-the-cluster). |
@@ -285,7 +285,7 @@ Both mutating endpoints are **enqueue-only** and write an audit record
 
 ## Configuration reference
 
-Gateway hosts are configured under **Settings → Integrations → BeyondTrust** (and
+Gateway hosts are configured under **Settings → Integrations → Privileged Remote Access** (and
 **Settings → Multi-region** for per-region overrides). Nothing here is specific to the
 requested gateways — they reuse the managed host's configuration, which is why a new one
 needs no setup of its own.
@@ -306,12 +306,12 @@ needs no setup of its own.
 
 ## Troubleshooting
 
-**The Gateways tab isn't there** — it is gated on `beyondtrust_enabled`. Toggle
+**The Gateways tab isn't there** — it is gated on `pra_enabled`. Toggle
 **BeyondTrust** on under **Settings → Integrations**; it applies immediately, no restart.
 
 **"The `<cloud>` gateway could not be started"** — the ensure path returned nothing because
 a prerequisite is missing: the deploy key, the project, or the gateway subnet. The job log
-names the specific one. Check **Settings → Integrations → BeyondTrust**.
+names the specific one. Check **Settings → Integrations → Privileged Remote Access**.
 
 **The region I want isn't in the picker** — it has no per-region config set. Add one under
 **Settings → Multi-region**. The picker is deliberately not the full region catalog; a

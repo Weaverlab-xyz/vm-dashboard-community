@@ -641,7 +641,11 @@ def _feature_flags() -> dict:
         "portainer_enabled":    config_service.get_bool("portainer_enabled",     settings.portainer_enabled),
         "ansible_enabled":      config_service.get_bool("ansible_enabled",       settings.ansible_enabled),
         "entitle_enabled":      config_service.get_bool("entitle_enabled",       settings.entitle_enabled),
-        "beyondtrust_enabled":  config_service.get_bool("beyondtrust_enabled",   settings.beyondtrust_enabled),
+        # The three BeyondTrust products gate independently — a Password Safe-only
+        # deployment should not render Gateway tabs or EPM-L sections it cannot use.
+        "password_safe_enabled": config_service.get_bool("password_safe_enabled", settings.password_safe_enabled),
+        "pra_enabled":          config_service.get_bool("pra_enabled",           settings.pra_enabled),
+        "epml_enabled":         config_service.get_bool("epml_enabled",          settings.epml_enabled),
         "proxmox_enabled":      config_service.get_bool("proxmox_enabled",       settings.proxmox_enabled),
         "vsphere_enabled":      config_service.get_bool("vsphere_enabled",       settings.vsphere_enabled),
         "hyperv_enabled":       config_service.get_bool("hyperv_enabled",        settings.hyperv_enabled),
@@ -861,15 +865,16 @@ except ImportError as exc:
 
 try:
     from .api import epml  # noqa: E402
-    app.include_router(epml.router, dependencies=[_feature_gate("beyondtrust_enabled")])
+    app.include_router(epml.router, dependencies=[_feature_gate("epml_enabled")])
 except ImportError as exc:
     logger.warning("API router 'epml' not loaded: %s", exc)
 
-# Gateway hosts are a BeyondTrust PRA concept, so the routes follow the same flag as
-# the rest of the integration — with it off there is nothing for a gateway to register
-# with and the Gateways tab stays hidden.
+# Gateway hosts are a BeyondTrust PRA concept, so the routes follow the PRA flag — with
+# it off there is nothing for a gateway to register with and the Gateways tab stays
+# hidden. Deliberately NOT password_safe_enabled: a PRA-only deployment still needs
+# gateways, and a Password Safe-only one has no use for them.
 app.include_router(gateways_api.router,
-                   dependencies=[_feature_gate("beyondtrust_enabled")])
+                   dependencies=[_feature_gate("pra_enabled")])
 
 try:
     # Virtual desktop management (Azure pools + PRA brokering). Gated on vdesktops_enabled.
@@ -1245,7 +1250,13 @@ async def features():
     )
     return {
         "vmware":       flags["vmware_enabled"],
-        "beyondtrust":  flags["beyondtrust_enabled"],
+        # Named to match the Settings panel keys, so settings.html's flag map needs no
+        # translation layer. There is deliberately no combined "beyondtrust" key: an
+        # OR would tell a caller the integration is on when only one of three products
+        # is, and every consumer wants a specific product.
+        "password_safe": flags["password_safe_enabled"],
+        "pra":          flags["pra_enabled"],
+        "epml":         flags["epml_enabled"],
         "portainer":    flags["portainer_enabled"],
         # Distinct from the enabled toggle: the dashboard tile hides unless
         # Portainer is both enabled AND has a URL configured.

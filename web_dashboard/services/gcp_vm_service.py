@@ -270,7 +270,7 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
     # `default` VPC, where the peered/co-located Entitle agent has no route to it
     # (the "Failed to fetch resources / SSH timeout" trap). Explicit form value wins.
     subnet = payload.subnetwork or _rc["subnetwork"]
-    bt_enabled = _cfg_svc.get_bool("beyondtrust_enabled")
+    bt_enabled = _cfg_svc.get_bool("pra_enabled")
     jp: Optional[_JumpointRef] = None
     try:
         job_service.set_running(db, job_id)
@@ -356,7 +356,7 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
             jp.record(final_meta)
 
         # ── BeyondTrust PRA — Shell Jump (optional) ───────────────────────────
-        if _cfg_svc.get_bool("beyondtrust_enabled"):
+        if _cfg_svc.get_bool("pra_enabled"):
             from ..services import terraform_pra_service
             jump_group = ((payload.jump_group or "").strip() or _cfg_svc.get("gcp_bt_jump_group_name")
                           or _cfg_svc.get("bt_jump_group_name") or settings.bt_jump_group_name)
@@ -443,7 +443,7 @@ async def _run_bulk_deploy(job_items: list, project_id: str, zone: str) -> None:
     failure fails that row alone and the batch carries on."""
     from ..services import config_service as _cfg_svc
     jumpoint = None
-    if _cfg_svc.get_bool("beyondtrust_enabled"):
+    if _cfg_svc.get_bool("pra_enabled"):
         jumpoint = await _acquire_shared_jumpoint(_region_from_zone(zone))
     for job_id, payload in job_items:
         await _run_deploy(job_id, payload, project_id, zone, jumpoint=jumpoint)

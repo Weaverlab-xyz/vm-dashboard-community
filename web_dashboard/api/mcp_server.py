@@ -106,7 +106,12 @@ async def dashboard_summary() -> dict:
         "total_jobs": total,
         "features": {
             "vmware": config_service.get_bool("vmware_enabled", False),
-            "beyondtrust": config_service.get_bool("beyondtrust_enabled", False),
+            # Three keys, never an OR of them: an agent told "beyondtrust: true"
+            # because only EPM-L is on would go on to attempt a Password Safe
+            # checkout and get a 400 back.
+            "password_safe": config_service.get_bool("password_safe_enabled", False),
+            "pra": config_service.get_bool("pra_enabled", False),
+            "epml": config_service.get_bool("epml_enabled", False),
             "portainer": config_service.get_bool("portainer_enabled", False),
             "ansible": config_service.get_bool("ansible_enabled", False),
             "aws": bool(config_service.get("aws_access_key_id") or config_service.get("aws_region")),

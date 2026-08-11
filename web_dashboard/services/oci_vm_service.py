@@ -133,7 +133,7 @@ async def _run_deploy(job_id: str, payload: OCIDeployRequest, compartment: str,
         }
 
         # ── BeyondTrust PRA — Shell Jump (optional) ───────────────────────────
-        if _cfg_svc.get_bool("beyondtrust_enabled"):
+        if _cfg_svc.get_bool("pra_enabled"):
             from ..services import terraform_pra_service
             jump_group = (payload.jump_group or _cfg_svc.get("oci_bt_jump_group_name")
                           or _cfg_svc.get("bt_jump_group_name") or settings.bt_jump_group_name)
