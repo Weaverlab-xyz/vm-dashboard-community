@@ -94,6 +94,26 @@ delivered — precisely the hole the feature exists to close. Ordering it first 
 failure there has changed nothing in the cluster, whereas rotating first and then failing
 to link would leave PRA holding a value that was just revoked and that nothing will refresh.
 
+**The cost of that ordering is a recoverable half-state, and recovering it is the register's
+job.** `ps_token_account_id` is committed at step 2, when the managed system is created —
+two steps before the link. So a fatal failure at the link leaves the column set, both
+managed accounts created, and nothing syncing: a row that reads as registered beside a pair
+that delivers nothing. Re-running the register therefore **reconciles the link** rather than
+returning early on the column (`_reconcile_synced_link`): it reads `SyncedAccounts` and
+re-POSTs the link only when the pair is genuinely unlinked. Read-then-link, because the read
+needs only *Read* and a POST against a live link is not documented as idempotent; the
+direction and the confirm re-read are the same as step 4's, since a swapped pair links
+happily and syncs backwards. Returning early instead would re-apply the RBAC and report
+success on a registration that still never reaches PRA, leaving deregister-then-register —
+two managed systems destroyed and rebuilt — as the way to restore one missing reference.
+
+This matters because the likeliest cause of that failure is a **403 on the link**, and the
+grant is genuinely unsettled (see the prerequisites below): the operator fixes it
+tenant-side and then wants a retry. The cluster is untouched throughout, so the retry is
+cheap and safe. The k8s panel surfaces it as **Repair sync**, shown only while Password
+Safe reports the pair unlinked — the register form itself is hidden once the row looks
+registered, which is what made the half-state unreachable from the UI.
+
 ## 4. Password Safe owns the sync — the dashboard was rebuilding a primitive it already has
 
 `POST ManagedAccounts/{id}/SyncedAccounts/{syncedAccountID}` makes one managed account a

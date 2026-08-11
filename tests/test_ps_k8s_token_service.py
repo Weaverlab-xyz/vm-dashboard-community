@@ -15,6 +15,11 @@ Deleting the legacy ``<sa>-token`` Secret any earlier would destroy the credenti
 PRA-brokered session is currently using; never deleting it leaves a cluster-admin token
 the rotation plugin's label-scoped sweep will never touch.
 
+The other half of that order is its recovery: the managed system is committed at step 2,
+so a fatal failure at step 4 leaves a row that looks registered beside a pair that does
+not sync. Re-running the register reconciles that link instead of returning early —
+otherwise the RBAC re-apply reports success on a still-broken registration.
+
 Every collaborator module is a stub injected into sys.modules (function-level imports
 resolve at call time), so this runs with no app, DB or Password Safe.
 Runs under pytest or standalone:  python tests/test_ps_k8s_token_service.py
@@ -423,6 +428,99 @@ def test_register_is_idempotent_for_an_already_registered_cluster():
     assert out["already_registered"] is True
     assert "register_managed_system" not in rec.events
     assert "rbac" in rec.events, "re-applying the (idempotent) RBAC is the useful half"
+
+
+# ── register: the already-registered path reconciles a missing link ──────────────
+#
+# ps_token_account_id is committed at step 2 and the link is step 4, so a failure at the
+# (fatal) link leaves a row that LOOKS registered next to a pair that does not sync.
+
+def test_register_relinks_an_already_registered_pair_that_is_unlinked():
+    """The recovery path for a link that failed after the column was committed — most
+    likely a 403, whose fix is tenant-side and then wants a retry. Returning early here
+    would re-apply the RBAC and report success on a pair that still never reaches PRA,
+    leaving deregister-then-register (two managed systems destroyed and rebuilt) as the
+    only way to re-create one missing reference."""
+    rec = Recorder()
+    _install_stubs(rec, linked_now=False)
+    row = _row(ps_token_account_id="201", ps_pra_vault_account_id="202")
+    out, _db = _run_register(rec, row)
+
+    assert out["already_registered"] is True
+    assert rec.index("sync_status") < rec.index("link"), (
+        "read before linking — the read needs only Read permission, and a POST against a "
+        "link that is already live is not documented as idempotent")
+    assert out["relinked"] is True and out["pra_synced"] is True
+    linked = [e for e in rec.events if isinstance(e, tuple) and e[0] == "linked"]
+    assert linked == [("linked", 201, 202)], (
+        f"the repair must keep the direction of the original link: parent=201 (the "
+        f"ServiceAccount token), subscriber=202 (the PRA Vault copy). A swapped pair links "
+        f"successfully and syncs BACKWARDS; got {linked}")
+    assert "register_managed_system" not in rec.events, (
+        "both managed accounts already exist — the repair creates nothing")
+    assert "rotate" not in rec.events, (
+        "the repair restores the missing reference and stops; rotating would revoke the "
+        "token PRA is currently using for no reason")
+
+
+def test_register_does_not_relink_a_pair_that_is_already_linked():
+    """The healthy re-register. Password Safe already owns the sync, so the only work is
+    the RBAC — one status read and no write."""
+    rec = Recorder()
+    _install_stubs(rec)                       # linked_now=True
+    row = _row(ps_token_account_id="201", ps_pra_vault_account_id="202")
+    out, _db = _run_register(rec, row)
+
+    assert "sync_status" in rec.events
+    assert "link" not in rec.events, "re-POSTing a live link is a write nothing needs"
+    assert out["pra_synced"] is True and out["relinked"] is False
+    assert "rbac" in rec.events
+
+
+def test_an_unconfirmed_relink_fails_the_register():
+    """Same rule as the first link: Password Safe can 200 a POST that did not take, so the
+    subscriber list is re-read — and a repair that cannot be confirmed must not be
+    reported as one."""
+    rec = Recorder()
+    _install_stubs(rec, linked_now=False, link_confirmed=False)
+    row = _row(ps_token_account_id="201", ps_pra_vault_account_id="202")
+    try:
+        _run_register(rec, row)
+    except svc.PSK8sTokenError as exc:
+        assert "synced list" in str(exc)
+    else:
+        raise AssertionError("an unconfirmed relink must fail the job")
+
+
+def test_an_already_registered_cluster_with_no_pra_vault_account_says_so():
+    """Nothing to link to, and a re-register cannot create one — the PRA Vault account is
+    only registered on a first registration. Say that rather than implying the re-run
+    repaired something."""
+    rec = Recorder()
+    _install_stubs(rec, linked_now=False)
+    out, _db = _run_register(rec, _row(ps_token_account_id="201",
+                                       ps_pra_vault_account_id=None))
+    assert "sync_status" not in rec.events and "link" not in rec.events
+    assert out["pra_synced"] is False and out["relinked"] is False
+    assert any("Remove the Password Safe registration" in w for w in out["warnings"])
+
+
+def test_a_failed_sync_status_read_leaves_the_link_alone():
+    """A transient read failure must not fail an otherwise fine re-register, and must not
+    be answered by blind-POSTing a link onto a pair that may already be live."""
+    rec = Recorder()
+    _install_stubs(rec, linked_now=False)
+
+    async def _boom(*, parent_account_id, synced_account_id):
+        rec.hit("sync_status")
+        raise RuntimeError("GET ManagedAccounts/201/SyncedAccounts failed (500)")
+    sys.modules["web_dashboard.services.ps_api_service"].synced_account_status = _boom
+
+    out, _db = _run_register(rec, _row(ps_token_account_id="201",
+                                       ps_pra_vault_account_id="202"))
+    assert "link" not in rec.events
+    assert out["already_registered"] is True and out["relinked"] is False
+    assert any("could not read the synced-account state" in w for w in out["warnings"])
 
 
 def test_register_respects_the_master_gate():

@@ -315,7 +315,10 @@ async def register(db: Session, cluster_id: str, *, job_id: str = "",
          Password Safe queues change operations, so there is nothing synchronous to
          observe, and the link is the guarantee that it converges.
 
-    Idempotent: an already-registered cluster re-applies the RBAC and returns."""
+    Idempotent: an already-registered cluster re-applies the RBAC and reconciles a
+    missing sync link (see ``_reconcile_synced_link``) rather than returning early —
+    step 2 commits ``ps_token_account_id`` before the fatal step 4, so a failed link
+    leaves a row that looks registered and a pair that does not sync."""
     if not enabled():
         raise PSK8sTokenError(
             "Password Safe token rotation is disabled — enable k8s_ps_token_rotation_enabled")
@@ -341,8 +344,11 @@ async def register(db: Session, cluster_id: str, *, job_id: str = "",
 
     if row.ps_token_account_id:
         note = await _apply_rbac(db, cluster_id, mode=mode, warnings=warnings)
+        sync = await _reconcile_synced_link(row, job_id=job_id, warnings=warnings)
         return {"already_registered": True, "managed_account_id": row.ps_token_account_id,
-                "rbac": note, "warnings": warnings}
+                "pravault_account_id": row.ps_pra_vault_account_id or "",
+                "rbac": note, "pra_synced": sync["linked"], "relinked": sync["relinked"],
+                "warnings": warnings}
 
     address = _address_for(db, row, mode=mode, ttl_seconds=ttl, namespace=ns,
                            cluster_name=cluster_name, resource_group=resource_group,
@@ -467,6 +473,80 @@ async def register(db: Session, cluster_id: str, *, job_id: str = "",
             "address": address, "token_mode": mode, "rbac": rbac_note,
             "rotated": rotated, "pra_synced": linked,
             "legacy_secret_deleted": legacy_deleted, "warnings": warnings}
+
+
+async def _reconcile_synced_link(row: K8sCluster, *, job_id: str = "",
+                                 warnings: list) -> dict:
+    """Re-create the ``SyncedAccounts`` link when an already-registered pair is unlinked.
+
+    ``register`` commits ``ps_token_account_id`` at step 2, when it creates the managed
+    system — two steps before the (deliberately fatal) link. So a failure at the link
+    leaves the column set, both managed accounts created, and nothing syncing rotations
+    into PRA. Without reconciling here, re-running the register would see the column,
+    re-apply the RBAC and report success on a pair that still does not sync; the only
+    recovery was to deregister and register again, which off-boards and re-creates two
+    managed systems to fix one missing reference.
+
+    The likeliest cause of that failure is a **403 on the link**, and the grant it needs
+    is not settled: the REST reference says Password Safe *Account Management (Full
+    control)*, ``ps-cli synced-accounts -h`` says *Role Management (Read/Write)*. Either
+    way it is fixed tenant-side and then wants a retry — the one shape of failure most
+    worth making retryable.
+
+    Read first, then link: ``synced_account_status`` needs only *Read*, an already-linked
+    pair must not be POSTed at on every idempotent re-register, and a POST against a live
+    link is not documented as idempotent. A relink that is attempted and does not confirm
+    is fatal, for the same reason step 4 is — reporting success on an unsynced pair is the
+    hole this feature exists to close."""
+    if not row.ps_pra_vault_account_id:
+        # Nothing to link to. A re-register cannot repair this either: the PRA Vault
+        # account is only created on a first registration, so say so plainly instead of
+        # implying the re-run fixed something.
+        warnings.append(
+            "no PRA Vault Token account is registered for this cluster, so rotations do "
+            "not reach PRA — re-registering cannot create one. Remove the Password Safe "
+            "registration and register again (with a PRA k8s tunnel in place).")
+        return {"linked": False, "relinked": False}
+
+    from . import ps_api_service
+    try:
+        st = await ps_api_service.synced_account_status(
+            parent_account_id=int(row.ps_token_account_id),
+            synced_account_id=int(row.ps_pra_vault_account_id))
+    except Exception as exc:  # noqa: BLE001
+        # Don't guess in either direction: a transient read failure must not fail a
+        # re-register that is otherwise fine, and blind-POSTing the link is not safe on a
+        # pair that may already be live. The status panel reads this the same way, live.
+        warnings.append(
+            "could not read the synced-account state from Password Safe, so the PRA sync "
+            "was left as it is — check the token rotation panel (details are in the "
+            "server log)")
+        logger.warning("PS token relink check for cluster %s failed: %s", row.id, exc)
+        return {"linked": False, "relinked": False}
+    if st.get("linked"):
+        return {"linked": True, "relinked": False}
+
+    if job_id:
+        from ..api.websocket import broadcast_progress
+        await broadcast_progress(job_id, 60, "Re-syncing the PRA Vault account…")
+    # Same direction as step 4, and for the same reason: both path segments are plain
+    # managed-account ids, so a swapped pair links happily and syncs BACKWARDS — pushing
+    # the PRA Vault account's value onto the cluster's real token account.
+    link = await ps_api_service.link_synced_account(
+        parent_account_id=int(row.ps_token_account_id),
+        synced_account_id=int(row.ps_pra_vault_account_id),
+        expect_subscriber_platform=_cfg("k8s_ps_pravault_token_platform",
+                                        "PRA Vault Token"))
+    if not link.get("confirmed"):
+        raise PSK8sTokenError(
+            f"Password Safe accepted re-syncing account {row.ps_pra_vault_account_id} to "
+            f"{row.ps_token_account_id} but the account is not in the parent's synced list "
+            f"— refusing to report this repaired, because rotations still would not reach "
+            f"PRA.")
+    _save_state(row.id, synced_to_parent=True)
+    logger.info("PS token: re-synced PRA Vault account %s to token account %s for "
+                "cluster %s", row.ps_pra_vault_account_id, row.ps_token_account_id, row.id)
+    return {"linked": True, "relinked": True}
 
 
 async def _apply_rbac(db: Session, cluster_id: str, *, mode: str, warnings: list) -> str:
