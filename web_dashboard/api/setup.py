@@ -711,12 +711,6 @@ class PasswordSafeFeatureConfig(BaseModel):
     k8s_ps_rotator_eks_create_access_entry: bool = True
     k8s_ps_rotator_bootstrap_namespace: str = "beyondtrust"
     k8s_ps_rotator_bootstrap_sa: str = "password-safe-rotator"
-    k8s_token_sync_enabled: bool = True
-    k8s_token_sync_interval_minutes: int = 15
-    k8s_token_sync_request_duration_min: int = 15
-    k8s_token_sync_max_per_pass: int = 5
-    k8s_token_sync_max_failures: int = 5
-    k8s_token_sync_max_per_hour: int = 4
 
 class PRAFeatureConfig(BaseModel):
     """Privileged Remote Access (PRA/SRA) — brokered access to everything the dashboard

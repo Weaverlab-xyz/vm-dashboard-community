@@ -15,7 +15,6 @@ Password Safe API access plus account-management (functional accounts)
 permission — without it these calls return 401/403 and callers log a warning
 (everything here is best-effort from the caller's perspective).
 """
-import hashlib
 import logging
 
 import httpx
@@ -447,19 +446,23 @@ async def change_managed_account_password(account_id: int) -> None:
             await _sign_out(client)
 
 
-# ── credential read + write (the k8s token → PRA Vault sync) ──────────────────
+# ── managed-account reads + synced accounts ───────────────────────────────────
 #
 # change_managed_account_password above asks Password Safe to MINT a credential.
-# The pair below is the other direction: read one account's change state without
-# touching the credential, and set an account's credential to a value we already
-# hold. Together they move a Kubernetes ServiceAccount token Password Safe just
-# rotated into the PRA Vault account a brokered session injects, so the vaulted
-# copy survives rotation. See services/k8s_token_sync.py.
+# What follows reads an account's change state without touching the credential,
+# and links one account to another so Password Safe keeps their credentials
+# identical for us.
 #
-# The plaintext credential exists only inside rotate_pra_vault_token's frame. It
-# is deliberately never returned, logged, or put in a job result: job metadata is
-# served by the jobs API and the MCP job tool, so a value that escapes this module
-# escapes to a lot of places.
+# The dashboard does NOT copy the Kubernetes ServiceAccount token into the PRA
+# Vault account. Password Safe does, natively: SyncedAccounts makes the PRA Vault
+# account a subscriber of the token account, and "the managed account and all of
+# its subscribers always share an identical password". An earlier version of this
+# feature polled LastChangeDate and pushed the value itself; that was rebuilding a
+# primitive the product already has. See services/ps_k8s_token_service.py.
+#
+# One consequence worth keeping in mind: because a change to EITHER account
+# re-rotates the pair, nothing here may ask Password Safe to rotate on release.
+# _checkin below is the enforcement point.
 
 # Which by-id read shape this tenant supports, remembered after the first probe.
 # A per-process cache under `gunicorn -w 2` is fine here — it is a hint, not state:
@@ -467,19 +470,8 @@ async def change_managed_account_password(account_id: int) -> None:
 _ACCOUNT_READ_SHAPE = ""  # "" unknown | "by_id" | "scan"
 
 
-def _redact(text: str, secret: str) -> str:
-    """``text`` with ``secret`` blanked, for an error body we want to keep.
-
-    Password Safe's validation errors normally quote field names, not values — but
-    "normally" is not a guarantee worth betting a bearer token on, and dropping the
-    body entirely would throw away the only diagnostic the operator gets."""
-    if not secret or not text:
-        return text or ""
-    return text.replace(secret, "***")
-
-
 def _account_state(item: dict) -> dict:
-    """One ManagedAccounts row → the fields the sync needs, key-shape tolerant.
+    """One ManagedAccounts row → the fields callers need, key-shape tolerant.
 
     ``last_change_date`` is kept as the VERBATIM string. Callers compare it as an
     opaque value and must not parse it: tenants return both ``…123Z`` and
@@ -579,37 +571,16 @@ async def _checkin(client: httpx.AsyncClient, request_id: int) -> None:
     """Release the request. Best-effort — it expires on its own duration anyway.
 
     Plain ``Checkin`` ONLY — never the rotate-on-release variant that
-    btapi_service.rotate_ps_request_on_checkin flags. Asking Password Safe to rotate on
-    release would rotate the ServiceAccount token again the instant we finished
-    mirroring the previous one, revoking the value we just wrote into PRA and starting
-    an endless rotate → sync → rotate loop with a dead-credential window every pass.
-    A static test asserts that endpoint is named nowhere in this module."""
+    btapi_service.rotate_ps_request_on_checkin flags. Under synced accounts this matters
+    more than it used to, not less: a credential change on EITHER member of a synced pair
+    re-rotates both, so rotate-on-release here would rotate the real cluster token every
+    time the tunnel reads it, with a dead-credential window each time. A static test
+    asserts that endpoint is named nowhere in this module."""
     try:
         await client.put(f"Requests/{int(request_id)}/Checkin",
-                         json={"Reason": "k8s token sync complete"})
+                         json={"Reason": "k8s ServiceAccount token read complete"})
     except Exception:  # noqa: BLE001 — never log the request id (CodeQL taints it)
         logger.debug("Password Safe credential check-in was refused")
-
-
-async def _set_credential(client: httpx.AsyncClient, account_id: int, credential: str) -> None:
-    """``PUT ManagedAccounts/{id}/Credentials`` — set a SPECIFIC value.
-
-    ``UpdateSystemPassword=true`` is what makes the account's platform plugin run.
-    Without it Password Safe records the value and stops, the PRA Vault copy is never
-    written, and the call silently accomplishes nothing — which is the entire point of
-    making it. Only ``Password`` is sent: an empty PrivateKey/Passphrase on a
-    password-managed account is at best ignored and at worst a 400.
-
-    Verify the exact shape against the tenant's API version during live testing (the
-    same caveat as change_managed_account_password)."""
-    resp = await client.put(
-        f"ManagedAccounts/{int(account_id)}/Credentials",
-        json={"Password": credential, "UpdateSystemPassword": True},
-    )
-    if resp.status_code not in (200, 201, 202, 204):
-        raise PSApiError(
-            f"PUT ManagedAccounts/{account_id}/Credentials failed "
-            f"({resp.status_code}): {_redact(resp.text[:400], credential)}")
 
 
 def _platform_matches(actual: str, expected: str) -> bool:
@@ -629,11 +600,11 @@ def _looks_like_sa_token(value: str) -> bool:
     """A Kubernetes ServiceAccount token is a JWT in both LongLived and Bound mode:
     three dot-separated segments, no whitespace.
 
-    This guards the one failure that would write a secret-shaped non-secret into
-    PRA's vault: Password Safe can return a soft-failure STRING in the credential
-    position ("It was not possible to get a credential for Request ID: 5" — the case
-    btapi_service already learned to catch), and mirroring that into PRA breaks the
-    tunnel while reporting success."""
+    This guards the one failure that would put a secret-shaped non-secret into PRA's
+    vault: Password Safe can return a soft-failure STRING in the credential position
+    ("It was not possible to get a credential for Request ID: 5" — the case
+    btapi_service already learned to catch), and provisioning the tunnel with that
+    breaks the tunnel while reporting success."""
     return (bool(value) and len(value) >= 40 and value.count(".") == 2
             and not any(c.isspace() for c in value))
 
@@ -641,11 +612,9 @@ def _looks_like_sa_token(value: str) -> bool:
 async def get_managed_account_states(account_ids: list) -> dict:
     """``{account_id: state}`` for several accounts in ONE signed-in session.
 
-    This is the sync loop's cheap path: it reads LastChangeDate to decide whether
-    anything rotated, with no credential request and no checkout, so it is affordable
-    every interval for every registered cluster. Per-account helpers each own a
-    session (Token + SignAppIn + Signout), which for a liveness poll over N clusters
-    would be 3N round trips — hence the inventory-read shape instead.
+    A credential-free read: it reports LastChangeDate and existence without a request or
+    a checkout. Per-account helpers each own a session (Token + SignAppIn + Signout),
+    which over N accounts would be 3N round trips — hence the inventory-read shape.
 
     An account that does not exist maps to ``{}``; the whole call raises on a
     transport or auth failure, because "Password Safe is down" must not look like
@@ -668,11 +637,11 @@ async def checkout_credential(account_id: int, *, duration_min: int = 15,
                               reason: str = "") -> str:
     """Check one managed account's credential out and RETURN it.
 
-    The deliberate exception to this section's containment rule, and the only one: the
-    PRA Vault token account is provisioned by Terraform, so the tunnel registration has
-    to hold the value long enough to pass it as a sensitive ``TF_VAR``. Nothing else
-    should call this — the recurring sync uses rotate_pra_vault_token, which never
-    hands the value out.
+    The only function here that hands a plaintext credential back, and it exists for one
+    reason: the PRA Vault token account is provisioned by Terraform, so the tunnel
+    registration has to hold the value long enough to pass it as a sensitive ``TF_VAR``.
+    Nothing else should call it. Keeping the pair in step afterwards needs no checkout at
+    all — that is Password Safe's job now (``link_synced_account``).
 
     Callers must not log it, must not put it in a job result, and must not let it reach
     Terraform state unscrubbed (terraform_pra_service._scrub_tf_state redacts ``token``
@@ -696,60 +665,142 @@ async def checkout_credential(account_id: int, *, duration_min: int = 15,
             await _sign_out(client)
 
 
-async def rotate_pra_vault_token(*, source_account_id: int, target_account_id: int,
-                                 duration_min: int = 15, reason: str = "",
-                                 expect_target_platform: str = "") -> dict:
-    """Copy ``source``'s credential onto ``target``, pushing it to target's system.
+_SYNC_GRANT_HINT = (
+    "The API identity needs Password Safe Account Management (Full control). If it already "
+    "has that, try Role Management (Read/Write) — `ps-cli synced-accounts` documents the "
+    "grant that way, which looks like an error in its help but has not been ruled out.")
 
-    Source is the Kubernetes ServiceAccount token account (rotated by the "Kubernetes
-    Service Account Token" plugin); target is the "PRA Vault Token" account, whose
-    plugin PATCHes the value into PRA Vault. One checkout, one set, one check-in,
-    inside a single Password Safe session.
 
-    Returns ``{"sha256": "<12 hex>", "pushed": bool, "skipped": str}`` and NEVER the
-    credential — keeping the plaintext to this one frame is what stops it reaching a
-    traceback local, a JobLog row or the jobs API.
+async def _synced_accounts(client: httpx.AsyncClient, parent_id: int) -> list:
+    """``GET ManagedAccounts/{id}/SyncedAccounts`` → the subscriber rows.
 
-    ``expect_target_platform`` fails the call CLOSED when the target account is not on
-    that platform. Writing a Kubernetes bearer token into an account managed by some
-    other plugin is the one failure here that puts a secret somewhere it does not
-    belong, so an ambiguous target is refused rather than guessed at."""
-    src = int(source_account_id)
-    tgt = int(target_account_id)
-    reason = reason or "k8s ServiceAccount token → PRA Vault sync"
+    Read-only (needs only *Read*), so this is the cheap way to confirm a link without
+    touching a credential."""
+    resp = await client.get(f"ManagedAccounts/{int(parent_id)}/SyncedAccounts")
+    if resp.status_code == 404:
+        return []
+    if resp.status_code != 200:
+        raise PSApiError(
+            f"GET ManagedAccounts/{parent_id}/SyncedAccounts failed "
+            f"({resp.status_code}): {resp.text[:400]}")
+    body = resp.json()
+    return [_account_state(item) for item in body if isinstance(item, dict)] \
+        if isinstance(body, list) else []
+
+
+async def link_synced_account(*, parent_account_id: int, synced_account_id: int,
+                              expect_subscriber_platform: str = "") -> dict:
+    """Make ``synced`` a subscriber of ``parent``, so Password Safe keeps them identical.
+
+    ``POST ManagedAccounts/{id}/SyncedAccounts/{syncedAccountID}``. From then on Password
+    Safe owns the sync — a credential change on the parent propagates to every
+    subscriber — which is what replaces the LastChangeDate poll-and-push this module used
+    to do.
+
+    **Direction is the one thing to get right, and the API will not catch it.** Both path
+    segments are plain managed-account ids, so a swapped pair links happily and then syncs
+    backwards, pushing the PRA Vault account's value onto the cluster's token account.
+    ``{id}`` is the PARENT ("cannot be a Synced Account"); ``{syncedAccountID}`` is the
+    subordinate ("cannot be a parent Managed Account"). ps-cli names the same two
+    ``-ma-id`` and ``-sa-id``.
+
+    ``expect_subscriber_platform`` fails the call CLOSED when the subordinate is not on
+    that platform — linking a Kubernetes bearer token to an account managed by some other
+    plugin is the one failure here that puts a secret somewhere it does not belong, so an
+    ambiguous target is refused rather than guessed at.
+
+    Returns ``{"linked": True, "confirmed": bool}``. The confirm is a re-read of the
+    subscriber list in the same session: a 200 on a POST that did not actually take is
+    the one silent failure worth one extra round trip."""
+    parent = int(parent_account_id)
+    sub = int(synced_account_id)
+    if parent == sub:
+        raise PSApiError(
+            f"refusing to sync managed account {parent} to itself — the parent and the "
+            f"subscriber must be different accounts")
 
     async with _client() as client:
         await _sign_in(client)
         try:
-            if expect_target_platform:
-                target = await _managed_account(client, tgt)
+            if expect_subscriber_platform:
+                target = await _managed_account(client, sub)
                 if not target:
                     raise PSApiError(
-                        f"Password Safe managed account {tgt} (the PRA Vault Token account) "
+                        f"Password Safe managed account {sub} (the PRA Vault Token account) "
                         f"does not exist — re-register the cluster or clear the binding.")
                 pname = await _platform_name(client, int(target["platform_id"] or 0))
-                if not _platform_matches(pname, expect_target_platform):
+                if not _platform_matches(pname, expect_subscriber_platform):
                     raise PSApiError(
-                        f"managed account {tgt} is on platform {pname or '(unknown)'!r}, not a "
-                        f"{expect_target_platform!r} platform — refusing to write a Kubernetes "
-                        f"ServiceAccount token to it.")
+                        f"managed account {sub} is on platform {pname or '(unknown)'!r}, not a "
+                        f"{expect_subscriber_platform!r} platform — refusing to sync a "
+                        f"Kubernetes ServiceAccount token to it.")
 
-            request_id, credential = await _checkout(
-                client, src, duration_min=duration_min, reason=reason)
-            try:
-                if not _looks_like_sa_token(credential):
-                    raise PSApiError(
-                        f"Password Safe returned a value that is not a ServiceAccount token "
-                        f"({len(credential)} chars) — check that account {src} is managed by "
-                        f"the 'Kubernetes Service Account Token' plugin and has rotated once.")
-                digest = hashlib.sha256(credential.encode("utf-8")).hexdigest()[:12]
-                await _set_credential(client, tgt, credential)
-            finally:
-                del credential
-                await _checkin(client, request_id)
+            resp = await client.post(
+                f"ManagedAccounts/{parent}/SyncedAccounts/{sub}")
+            if resp.status_code not in (200, 201, 204):
+                raise PSApiError(
+                    f"POST ManagedAccounts/{parent}/SyncedAccounts/{sub} failed "
+                    f"({resp.status_code}): {resp.text[:400]}. {_SYNC_GRANT_HINT}")
+
+            confirmed = any(
+                str(row.get("account_id") or "") == str(sub)
+                for row in await _synced_accounts(client, parent))
         finally:
             await _sign_out(client)
-    return {"sha256": digest, "pushed": True, "skipped": ""}
+    return {"linked": True, "confirmed": confirmed}
+
+
+async def unlink_synced_account(*, parent_account_id: int, synced_account_id: int) -> bool:
+    """``DELETE ManagedAccounts/{id}/SyncedAccounts/{syncedAccountID}``.
+
+    Tolerant of 404: deregistration runs this before off-boarding either account, and a
+    link that is already gone is the desired end state, not an error."""
+    parent = int(parent_account_id)
+    sub = int(synced_account_id)
+    async with _client() as client:
+        await _sign_in(client)
+        try:
+            resp = await client.delete(
+                f"ManagedAccounts/{parent}/SyncedAccounts/{sub}")
+            if resp.status_code == 404:
+                return False
+            if resp.status_code not in (200, 201, 204):
+                raise PSApiError(
+                    f"DELETE ManagedAccounts/{parent}/SyncedAccounts/{sub} failed "
+                    f"({resp.status_code}): {resp.text[:400]}. {_SYNC_GRANT_HINT}")
+            return True
+        finally:
+            await _sign_out(client)
+
+
+async def synced_account_status(*, parent_account_id: int,
+                                synced_account_id: int) -> dict:
+    """Whether the pair is still linked, plus both change dates — one signed-in session.
+
+    This is what the operator-facing status reads, deliberately live rather than cached:
+    an admin can unlink in the Password Safe console at any time, and a dashboard that
+    kept asserting "linked" from its own registration record would be reporting a claim
+    about the past. Change dates are returned VERBATIM (see ``_account_state``) and are
+    for display only — nothing branches on them any more."""
+    parent = int(parent_account_id)
+    sub = int(synced_account_id)
+    async with _client() as client:
+        await _sign_in(client)
+        try:
+            src = await _managed_account(client, parent)
+            rows = await _synced_accounts(client, parent)
+            match = next((r for r in rows
+                          if str(r.get("account_id") or "") == str(sub)), {})
+            return {
+                "linked": bool(match),
+                "parent_exists": bool(src),
+                "parent_last_change": src.get("last_change_date") or "",
+                "parent_next_change": src.get("next_change_date") or "",
+                "subscriber_last_change": match.get("last_change_date") or "",
+                "subscriber_count": len(rows),
+            }
+        finally:
+            await _sign_out(client)
 
 
 async def create_functional_account(

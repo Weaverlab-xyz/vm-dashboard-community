@@ -1254,16 +1254,10 @@ class Settings(BaseSettings):
     k8s_ps_rotator_eks_create_access_entry: bool = True  # create the access entry when the ARN is set (never touches aws-auth)
     k8s_ps_rotator_bootstrap_namespace: str = "beyondtrust"     # generic path bootstrap SA namespace
     k8s_ps_rotator_bootstrap_sa: str = "password-safe-rotator"  # generic path bootstrap SA name
-    # PS → PRA sync sweep (services/k8s_token_sync). LongLived rotation revokes the old
-    # token, so PRA holds a dead credential until the next pass — mean interval/2, worst
-    # interval + pass. Shorten the interval, or use ;bound on clusters whose tunnel must
-    # not break (bound never revokes; the old token stays valid until its TTL).
-    k8s_token_sync_enabled: bool = True              # the sweep no-ops while nothing is registered
-    k8s_token_sync_interval_minutes: int = 15        # floor 5 (enforced in code)
-    k8s_token_sync_request_duration_min: int = 15    # checkout duration for the sync's read
-    k8s_token_sync_max_per_pass: int = 5             # checkout/push cap per pass; the rest defer, oldest drift first
-    k8s_token_sync_max_failures: int = 5             # consecutive failures before a cluster parks until a manual sync
-    k8s_token_sync_max_per_hour: int = 4             # circuit breaker for the rotate-on-release loop
+    # No PS → PRA sync settings: Password Safe owns that. Registration links the PRA
+    # Vault account to the token account with SyncedAccounts, and a managed account and
+    # its subscribers always share a credential, so every rotation reaches PRA with
+    # nothing here on a timer and no interval to tune.
     entitle_allowed_durations: str = "3600,43200,86400"  # JIT durations (seconds) offered on created integrations
     entitle_ssh_sudo_user: str = ""                 # OPTIONAL override — each VM deploy passes its image's cloud-default login user (ubuntu/ec2-user/azureuser/gcp-user) automatically; set this only to force a different sudo user for ALL registrations
     entitle_ssh_private_key_ref: str = ""           # OPTIONAL fallback/override only — the SSH private key is normally sourced from the VM's own per-cloud keypair (the key cloud-init injected). See docs/design/entitle-resource-registration.md

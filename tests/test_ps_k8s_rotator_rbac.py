@@ -186,9 +186,14 @@ def test_deregister_pra_tunnel_skips_the_revoke_when_ps_managed():
     src = inspect.getsource(k.deregister_pra_tunnel)
     assert "ps_token_account_id" in src
     assert src.index("ps_token_account_id") < src.index("_delete_manifest_via_runner")
-    # And the sync watermark must be dropped with the vault account it refers to.
-    assert "k8s_token_sync_" in src
     assert "pra_vault_account_id" in src
+    # And it must NOT unlink the synced pair. The "PRA Vault Token" plugin resolves its
+    # account by NAME (a stable k8s-<cluster>-sa), so re-provisioning the tunnel
+    # re-creates the account the existing link already points at and the pair resumes on
+    # its own. Unlinking here would trade that for a manual re-registration.
+    assert "unlink_synced_account" not in src, (
+        "removing the tunnel must not unlink the Password Safe pair — the link is what "
+        "makes a re-provisioned tunnel resume syncing without operator action")
 
 
 if __name__ == "__main__":

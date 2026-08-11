@@ -297,8 +297,16 @@ Two custom plugins, both imported by hand:
 Enable **Kubernetes Token Rotation** in Settings → Integrations → Password Safe, then use the
 per-cluster **Token rotation** button on `/k8s` (or tick the box on the provision form).
 Registration applies the rotator RBAC, creates the managed system + account seeded with the
-token the cluster is using, registers the PRA Vault mirror, rotates once to prove the path,
-pushes the new token into PRA, and finally deletes the dashboard-minted `<sa>-token` Secret.
+token the cluster is using, registers the PRA Vault Token account, **syncs** it to the token
+account, rotates once to prove the path, and finally deletes the dashboard-minted
+`<sa>-token` Secret.
+
+The sync is the step that matters, and it is a Password Safe feature rather than anything the
+dashboard runs: the PRA Vault account becomes a *subscriber* of the token account, and a
+managed account and its subscribers always share an identical credential. The link is created
+before the registration rotation on purpose — a failure there has changed nothing in the
+cluster, whereas rotating first and failing to link would leave PRA holding a value that was
+just revoked and that nothing would refresh.
 
 **Why that last step matters.** The plugin's rotation sweep selects Secrets by *its own*
 labels, so the dashboard-minted Secret is never swept — leaving it in place would mean
@@ -340,7 +348,7 @@ functional account on the wrong platform is refused with the platform named.
 | EKS | AWS access key id (or `InstanceProfile` / `WebIdentity`) | `<secret>` or `<secret>:<sessionToken>` |
 | AKS | `SP:<tenantId>:<clientId>` — tenant **first** | Entra client secret (`-` for managed identity) |
 | Generic / OKE | `token`, `cert` or `kubeconfig` | bearer token, PEM/PKCS#12, or `b64kubeconfig:<base64>` |
-| PRA Vault mirror | PRA OAuth **Client ID** | PRA OAuth **Client Secret** |
+| PRA Vault Token | PRA OAuth **Client ID** | PRA OAuth **Client Secret** |
 
 ### In-cluster rotator RBAC
 
@@ -372,21 +380,39 @@ verb, prints the ClusterRole to apply, and logs the correct AKS object id on eve
 
 ### Keeping the PRA Vault copy in sync
 
-A background pass polls each token account's `LastChangeDate` (cheap — no checkout) and, when
-it moves, checks the new token out and sets it as the PRA Vault Token account's credential
-with `UpdateSystemPassword`, so Password Safe drives the plugin's PATCH into PRA. Both
-accounts stay Password Safe-managed and audited; the plaintext never leaves the API client.
+Password Safe does it. Registration calls
+`POST ManagedAccounts/{id}/SyncedAccounts/{syncedAccountID}` — `{id}` is the **parent** (the
+Kubernetes Service Account Token account), `{syncedAccountID}` the **subscriber** (the PRA
+Vault Token account). `ps-cli synced-accounts create -ma-id <parent> -sa-id <subscriber>` is
+the same operation and is the quickest way to check it by hand. From then on every rotation of
+the token account is applied to the subscriber too, which runs the PRA Vault Token plugin's
+PATCH into PRA. Both accounts stay Password Safe-managed and audited, and no credential passes
+through the dashboard at all.
 
-**The LongLived break window.** Rotation revokes the old token immediately, so PRA holds a
-dead credential until the next pass — roughly half the interval on average, one interval plus
-the pass in the worst case. Shorten `k8s_token_sync_interval_minutes`, or set the cluster's
-token mode to **Bound**, which never revokes (the old token stays valid until its TTL, so the
-window is zero as long as the interval is well under it). The dashboard can shrink this
-window but cannot remove it.
+`GET …/ps-token/status` re-reads the link from Password Safe on every open rather than caching
+it, because an admin unlinking in the Password Safe console is exactly the condition an
+operator opens that panel to diagnose. `DELETE …/ps-token` unlinks before off-boarding either
+account.
 
-Verification is free: Password Safe's change date on the *mirror* account is the receipt that
-the PATCH ran, so the next pass reads it and flips the cluster to `ok` or reports that the PRA
-write did not complete.
+> **Removing the PRA tunnel does not unlink the pair.** The plugin resolves its PRA Vault
+> account by *name* (`k8s-<cluster>-sa`), so re-provisioning the tunnel re-creates the account
+> the link already points at and syncing resumes with no operator action. The cost is that a
+> rotation landing while no tunnel exists fails the PRA half — visibly, in Password Safe's
+> change log.
+
+**The LongLived break window.** Rotation revokes the old token immediately. Password Safe
+applies the new value to the subscriber as part of the same change, but change operations are
+queued, so there is a short window where PRA still holds the revoked token. Set the cluster's
+token mode to **Bound** on tunnels that must not break: Bound never revokes, and the old token
+stays valid until its TTL.
+
+**Why this works when the parent mints a JWT rather than accepting a password.** Password
+Safe's published shared-credential behaviour describes ordinary password accounts, where it
+generates a password from the policy and pushes it outward. The sync actually copies whatever
+is *stored* as the parent's password, and the parent's plugin decides what that is: the
+"Kubernetes Service Account Token" plugin ignores the password policy — it is minting a JWT,
+not a password — and reports the token it got from the cluster, so the token is the stored
+credential and the token is what the subscriber receives.
 
 ### Operator prerequisites
 
@@ -396,11 +422,16 @@ write did not complete.
    Rule containing both managed accounts. There is no Smart Rule API, so this is out-of-band —
    and it is the failure every Password Safe consumption path here hits first (`POST /Requests`
    → `4031` / 403).
-4. **Leave "Change Password After Release" OFF** on the token account. With it on, every sync
-   triggers another rotation — an endless loop with a dead-credential window each pass. A
-   circuit breaker (`k8s_token_sync_max_per_hour`) trips and names it, but the fix is the
-   access policy.
-5. Give the Password Safe host or Resource Broker network reachability to the cluster's API
+4. Grant the API identity **Password Safe Account Management (Full control)** — what the
+   sync link needs, per the REST reference. (`ps-cli synced-accounts -h` claims *Role
+   Management (Read/Write)* instead; that looks like an error in the CLI help, since the
+   operation acts on managed accounts rather than roles. If the link 403s with Account
+   Management already granted, try Role Management before assuming a different cause.)
+5. **Leave "Change Password After Release" OFF** on *both* accounts. A credential change on
+   either member of a synced pair re-rotates the pair, so with it on, every release of the PRA
+   copy would rotate the real cluster token — an endless loop with a dead-credential window
+   each time. There is no circuit breaker for this any more; the access policy is the fix.
+6. Give the Password Safe host or Resource Broker network reachability to the cluster's API
    server. For private clusters this is a real constraint — Password Safe does not route
    through the PRA Gateway.
 
@@ -408,18 +439,18 @@ write did not complete.
 
 | Key | Default | Notes |
 |---|---|---|
-| `k8s_ps_token_rotation_enabled` | `false` | Master gate (row action, provision checkbox, sync loop) |
+| `k8s_ps_token_rotation_enabled` | `false` | Master gate (row action, provision checkbox) |
 | `k8s_ps_token_platform` | `Kubernetes Service Account Token` | Plugin platform (name or id) |
-| `k8s_ps_pravault_token_platform` | `PRA Vault Token` | Mirror plugin platform |
+| `k8s_ps_pravault_token_platform` | `PRA Vault Token` | Subscriber plugin platform |
 | `k8s_ps_functional_account_aws` / `_azure` / `_gcp` / `_local` | — | Per cloud; `_local` also covers OKE and on-prem |
-| `k8s_ps_pravault_functional_account` | — | PRA Config-API OAuth client for the mirror |
+| `k8s_ps_pravault_functional_account` | — | PRA Config-API OAuth client for the PRA Vault account |
 | `k8s_ps_workgroup` | — | Blank → `passwordsafe_workgroup` |
 | `k8s_ps_token_mode` | `longlived` | `longlived` (revokes) or `bound` (TTL expiry, no revoke) |
 | `k8s_ps_token_ttl_seconds` | `3600` | Bound mode; clamped up to the API server's 600s floor |
 | `k8s_ps_token_change_on_register` | `true` | Rotate once on register — proves the whole path immediately |
 | `k8s_ps_token_delete_legacy_secret` | `true` | Retire the dashboard-minted Secret the plugin's sweep never touches |
 | `k8s_ps_token_register_on_provision` | `false` | Pre-tick the provision-form checkbox |
-| `k8s_ps_pravault_mirror_enabled` | `true` | Register the PRA Vault Token mirror when a PRA vault account exists |
+| `k8s_ps_pravault_mirror_enabled` | `true` | Register and sync the PRA Vault Token account when a PRA vault account exists |
 | `k8s_ps_token_checkout_duration_min` | `15` | Password Safe request duration for token reads |
 | `k8s_ps_token_address_options` | — | Extra `;key=value` appended to every address |
 | `k8s_ps_rotator_apply_rbac` | `true` | Apply the rotator ClusterRole + binding on register |
@@ -429,12 +460,6 @@ write did not complete.
 | `k8s_ps_rotator_eks_principal_arn` | — | IAM principal behind the functional account's key |
 | `k8s_ps_rotator_eks_create_access_entry` | `true` | Create the access entry when the ARN is set |
 | `k8s_ps_rotator_bootstrap_namespace` / `_sa` | `beyondtrust` / `password-safe-rotator` | Generic-path bootstrap ServiceAccount |
-| `k8s_token_sync_enabled` | `true` | The PS → PRA sync pass (no-ops while nothing is registered) |
-| `k8s_token_sync_interval_minutes` | `15` | Floored at 5 |
-| `k8s_token_sync_request_duration_min` | `15` | Checkout duration for the sync's read |
-| `k8s_token_sync_max_per_pass` | `5` | Push cap per pass; the rest defer, oldest drift first |
-| `k8s_token_sync_max_failures` | `5` | Consecutive failures before a cluster parks until a manual sync |
-| `k8s_token_sync_max_per_hour` | `4` | Circuit breaker for the rotate-on-release loop |
 
 The managed account name is `<namespace>/<serviceaccount>`, taken from `pra_k8s_namespace` /
 `pra_k8s_sa_name` on the

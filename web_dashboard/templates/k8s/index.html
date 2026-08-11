@@ -115,10 +115,8 @@
                       x-text="c.api_tunnel_jump ? 'API tunnel ✓' : 'API tunnel'"></button>
               {% if password_safe_enabled %}
               <button x-show="c.status === 'registered' || c.status === 'managed'" @click="openPsToken(c)"
-                      title="Manage the PRA-injected ServiceAccount token in Password Safe so it ROTATES on schedule — and keep the PRA Vault copy in sync through Password Safe"
-                      :class="c.token_sync_state === 'error' || c.token_sync_state === 'unregistered'
-                                ? 'text-xs px-2 py-1 bg-red-600 hover:bg-red-700 text-white rounded font-medium'
-                                : 'text-xs px-2 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded font-medium'"
+                      title="Manage the PRA-injected ServiceAccount token in Password Safe so it ROTATES on schedule — Password Safe keeps the PRA Vault copy in step"
+                      class="text-xs px-2 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded font-medium"
                       x-text="c.ps_token_managed ? 'Token rotation ✓' : 'Token rotation'"></button>
               {% endif %}
               <button x-show="c.status === 'registered' || c.status === 'managed'" @click="openEntraGroup(c)"
@@ -795,8 +793,9 @@ gcloud auth login --login-config=login.json</pre>
         <p class="text-xs text-gray-500">
           Onboards the PRA-injected ServiceAccount token (<span class="font-mono">pra-access/pra-access</span>) as a
           Password Safe managed account on the <span class="font-mono">Kubernetes Service Account Token</span> plugin
-          and applies the in-cluster rotator RBAC. Rotations are mirrored into the PRA Vault copy through the
-          <span class="font-mono">PRA Vault Token</span> plugin, so the k8s tunnel keeps working. The functional
+          and applies the in-cluster rotator RBAC. The PRA Vault copy is registered on the
+          <span class="font-mono">PRA Vault Token</span> plugin and <em>synced</em> to it in Password Safe, so every
+          rotation reaches PRA and the k8s tunnel keeps working. The functional
           account must already exist in Password Safe — see the
           <a href="/docs/integrations/password-safe#kubernetes-serviceaccount-token-rotation" class="underline" target="_blank">token rotation guide</a>
           for the plugin import, functional accounts and access policy.
@@ -804,11 +803,27 @@ gcloud auth login --login-config=login.json</pre>
         <template x-if="psTokenTarget && psTokenTarget.ps_token_managed">
           <div class="text-xs space-y-1 bg-gray-50 rounded-lg p-3">
             <p><span class="text-gray-500">Managed account id:</span> <span class="font-mono" x-text="psTokenTarget.ps_token_account_id"></span>
-               <span class="text-gray-500 ml-2">PRA mirror id:</span> <span class="font-mono" x-text="psTokenTarget.ps_pra_vault_account_id || 'none'"></span></p>
-            <p><span class="text-gray-500">Sync:</span> <span class="font-mono" x-text="psTokenTarget.token_sync_state || 'never'"></span>
-               <span class="text-gray-500 ml-2">last</span> <span class="font-mono" x-text="psTokenTarget.token_sync_at || '—'"></span>
-               <span class="text-gray-500 ml-2">PRA verified</span> <span class="font-mono" x-text="psTokenTarget.token_sync_verified || '—'"></span></p>
-            <p x-show="psTokenTarget.token_sync_error" class="text-red-600" x-text="psTokenTarget.token_sync_error"></p>
+               <span class="text-gray-500 ml-2">PRA Vault account id:</span> <span class="font-mono" x-text="psTokenTarget.ps_pra_vault_account_id || 'none'"></span></p>
+            <p x-show="psTokenStatus === null" class="text-gray-400">Reading the sync state from Password Safe…</p>
+            <template x-if="psTokenStatus">
+              <div class="space-y-1">
+                <p><span class="text-gray-500">Synced in Password Safe:</span>
+                   <span :class="psTokenStatus.linked ? 'font-mono text-green-700' : 'font-mono text-red-600'"
+                         x-text="psTokenStatus.linked ? 'yes' : 'no'"></span>
+                   <span class="text-gray-400" x-show="psTokenStatus.linked"> — Password Safe pushes every rotation into PRA</span></p>
+                <p><span class="text-gray-500">Token last changed:</span> <span class="font-mono" x-text="psTokenStatus.parent_last_change || '—'"></span>
+                   <span class="text-gray-500 ml-2">next</span> <span class="font-mono" x-text="psTokenStatus.parent_next_change || '—'"></span></p>
+                <p x-show="psTokenStatus.linked"><span class="text-gray-500">PRA copy last changed:</span>
+                   <span class="font-mono" x-text="psTokenStatus.subscriber_last_change || '—'"></span></p>
+                <p x-show="psTokenStatus.note" class="text-amber-600" x-text="psTokenStatus.note"></p>
+                <p x-show="psTokenStatus.error" class="text-red-600" x-text="psTokenStatus.error"></p>
+                <p x-show="psTokenStatus.registered && psTokenStatus.pravault_account_id && !psTokenStatus.linked && !psTokenStatus.error"
+                   class="text-red-600">
+                  The PRA Vault account is not synced to the token account, so rotations will NOT reach PRA.
+                  Re-register the token, or re-create the sync in Password Safe.
+                </p>
+              </div>
+            </template>
           </div>
         </template>
         <template x-if="!(psTokenTarget && psTokenTarget.ps_token_managed)">
@@ -841,8 +856,9 @@ gcloud auth login --login-config=login.json</pre>
               </div>
             </div>
             <p class="text-[11px] text-gray-400">
-              Registration seeds Password Safe with the live token, rotates once to prove the path, mirrors the new
-              token into PRA, then deletes the dashboard-minted Secret (the plugin's sweep never touches it).
+              Registration seeds Password Safe with the live token, syncs the PRA Vault account to it, rotates once to
+              prove the path, then deletes the dashboard-minted Secret (the plugin's sweep never touches it).
+              From then on Password Safe delivers every rotation to PRA on its own.
             </p>
           </div>
         </template>
@@ -852,10 +868,6 @@ gcloud auth login --login-config=login.json</pre>
           <template x-if="psTokenTarget && psTokenTarget.ps_token_managed">
             <button @click="rotatePsToken()" :disabled="psTokenBusy"
                     class="px-3 py-2 text-sm border border-amber-300 text-amber-700 rounded-lg hover:bg-amber-50 disabled:opacity-50">Rotate now</button>
-          </template>
-          <template x-if="psTokenTarget && psTokenTarget.ps_token_managed">
-            <button @click="syncPsToken()" :disabled="psTokenBusy"
-                    class="px-3 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 disabled:opacity-50">Sync now</button>
           </template>
         </div>
         <div class="flex gap-3">
@@ -900,6 +912,9 @@ function k8sPage() {
     brokerForm: { jump_group: '', jumpoint_name: '', praCredBackend: '', pra_credential_ref: '', vault_inject: false, vault_account_group_id: null },
     showSecrets: false, secretsBusy: false, secretsTarget: null, secretsKind: 'eso',
     showPsToken: false, psTokenBusy: false, psTokenTarget: null,
+    // null = the Password Safe read is still in flight (the modal says so); an object
+    // once it resolves, including on failure, where it carries `error`.
+    psTokenStatus: null,
     psTokenForm: { mode: '', ttl_seconds: '', cluster_name: '', resource_group: '' },
     showTunnel: false, tunneling: false, tunnelTarget: null,
     tunnelForm: { jump_group: '', jumpoint_name: '', tunnelCredBackend: '', pra_credential_ref: '', vault_inject: false, vault_account_group_id: null },
@@ -1477,7 +1492,21 @@ function k8sPage() {
     openPsToken(c) {
       this.psTokenTarget = c;
       this.psTokenForm = { mode: '', ttl_seconds: '', cluster_name: '', resource_group: '' };
+      this.psTokenStatus = null;
       this.showPsToken = true;
+      // Read the sync state from Password Safe rather than from the cluster row: the
+      // dashboard is not a party to the sync, so a cached answer could only describe
+      // registration time — and "someone unlinked it in the PS console" is the case
+      // this panel exists to surface. Never blocks opening the modal.
+      if (c.ps_token_managed) this.loadPsTokenStatus(c.id);
+    },
+
+    async loadPsTokenStatus(clusterId) {
+      try {
+        this.psTokenStatus = await API.get(`/api/k8s/clusters/${clusterId}/ps-token/status`);
+      } catch (e) {
+        this.psTokenStatus = { linked: false, error: (e && e.message) || 'status read failed' };
+      }
     },
 
     async submitPsToken() {
@@ -1518,25 +1547,14 @@ function k8sPage() {
 
     async rotatePsToken() {
       if (!confirm('Rotate the ServiceAccount token in Password Safe now? In LongLived mode the old ' +
-                   'token is revoked once the rotation completes; PRA is re-synced in the same job.')) return;
+                   'token is revoked once the rotation completes; Password Safe delivers the new one ' +
+                   'to PRA as part of the same change.')) return;
       this.psTokenBusy = true;
       try {
         const r = await API.post(`/api/k8s/clusters/${this.psTokenTarget.id}/ps-token/rotate`, {});
         if (r && r.job_id) { window.location.href = '/jobs/' + r.job_id; return; }
       } catch (e) {
         this.flash(e.message || 'Rotation failed.', 'error');
-      } finally {
-        this.psTokenBusy = false;
-      }
-    },
-
-    async syncPsToken() {
-      this.psTokenBusy = true;
-      try {
-        const r = await API.post(`/api/k8s/clusters/${this.psTokenTarget.id}/token-sync`, {});
-        if (r && r.job_id) { window.location.href = '/jobs/' + r.job_id; return; }
-      } catch (e) {
-        this.flash(e.message || 'Sync failed.', 'error');
       } finally {
         this.psTokenBusy = false;
       }

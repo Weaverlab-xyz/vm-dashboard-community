@@ -269,13 +269,14 @@ secrets)**, and **Entitle + Entra federation (Layer 3 — time-boxed access)**.
   ServiceAccount token (`<pra_k8s_namespace>/<pra_k8s_sa_name>`, default
   `pra-access/pra-access`) as a Password Safe **managed account** on the *Kubernetes Service
   Account Token* plugin, applies the in-cluster rotator RBAC, and registers a *PRA Vault
-  Token* managed account so each rotation is mirrored into the PRA Vault copy — closing the
-  gap where the vaulted token was minted once and never rotated. `…/ps-token/rotate` rotates
-  on demand; `…/token-sync` re-syncs one cluster; `DELETE …/ps-token` off-boards both managed
-  systems. A background pass (`k8s_token_sync`, every
-  `k8s_token_sync_interval_minutes`) polls each account's change date and pushes when it
-  moves. **In the default LongLived mode rotation revokes the old token, so PRA holds a dead
-  credential for up to one interval** — append `;bound` (Settings → token mode) on clusters
+  Token* managed account — closing the gap where the vaulted token was minted once and never
+  rotated. Registration then **syncs** the PRA Vault account to the token account
+  (`POST ManagedAccounts/{id}/SyncedAccounts/{syncedAccountID}`); a managed account and its
+  subscribers always share a credential, so Password Safe delivers every rotation to PRA
+  itself and the dashboard runs nothing on a schedule. `…/ps-token/rotate` rotates on demand;
+  `GET …/ps-token/status` reads the live link state out of Password Safe; `DELETE …/ps-token`
+  unlinks the pair and off-boards both managed systems. **In the default LongLived mode
+  rotation revokes the old token**, so use Bound mode (Settings → token mode) on clusters
   whose tunnel must not break, since Bound never revokes. Full detail and the operator
   prerequisites: [Password Safe k8s token rotation](integrations/password-safe.md#kubernetes-serviceaccount-token-rotation)
   and the [design note](design/k8s-sa-token-rotation.md).

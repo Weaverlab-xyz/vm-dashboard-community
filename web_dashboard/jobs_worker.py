@@ -72,9 +72,6 @@ HANDLED_TYPES = (
     # and three worker replicas. Running it here also gives each pass a job row, Live
     # Output and cancel — see services/expiry_reaper.
     "expiry_sweep",
-    # k8s ServiceAccount token → PRA Vault sync pass. Same enqueue-only shape and the
-    # same reasoning — see services/k8s_token_sync.
-    "k8s_token_sync",
 )
 
 # ── Concurrency tiers ─────────────────────────────────────────────────────────
@@ -143,10 +140,6 @@ LIGHT_TYPES = (
     "gateway_deploy", "gateway_teardown",              # pure cloud SDK (jumpoint_host_service)
     "epml_sync",                                       # HTTP download + storage upload
     "expiry_sweep",                                    # pure DB, sub-second
-    # Password Safe REST only — no ps-cli subprocess, which is precisely why the checkout
-    # was built on ps_api_service rather than btapi_service. A local process would put
-    # this in MEDIUM by that tier's own definition.
-    "k8s_token_sync",
 )
 
 # At most ONE in flight per type, whatever the tier allows. These write DEPLOYMENT-global
@@ -162,17 +155,10 @@ LIGHT_TYPES = (
 # One at a time bounds the worker's peak at a single package instead of multiplying it by
 # the light cap, which matters on a container with a hard memory limit: an OOM there kills
 # the container, and with it every OTHER job in flight.
-#
-# k8s_token_sync is here because two concurrent passes are two credential checkouts and
-# two credential WRITES to the same Password Safe account, possibly with different values.
-# Note this cap is per worker PROCESS (see _allowed_types, which reads the local `running`
-# dict), so with several replicas it is a narrowing, not a guarantee — the real
-# single-flight is the enqueue-side advisory lock in k8s_token_sync.enqueue_sweep_if_due.
 SINGLETON_TYPES = frozenset((
     "rancher_node_deploy", "rancher_node_teardown",
     "portainer_node_deploy", "portainer_node_teardown",
     "expiry_sweep",
-    "k8s_token_sync",
     "epml_sync",
 ))
 
@@ -331,12 +317,6 @@ async def _dispatch(job_id: str, job_type: str, meta: dict) -> None:
                             "cluster_name", "resource_group", "location",
                             "functional_account", "change_on_register", "mirror_to_pra")
                    and v is not None})
-        elif job_type == "k8s_token_sync":
-            # One k8s token → PRA Vault sync pass. The app's loop only ENQUEUES these;
-            # winning the claim above is what makes a pass single-flight across app
-            # workers and worker replicas.
-            from .services import k8s_token_sync
-            await k8s_token_sync.run(db, job_id=job_id, meta=meta)
         elif job_type == "rancher_node_deploy":
             from .services import rancher_node_service
             await rancher_node_service.run_deploy(db, job_id=job_id, meta=meta)

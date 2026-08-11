@@ -1490,12 +1490,15 @@
             <p class="text-xs text-gray-400 mb-3">
               Makes a cluster's PRA-injected ServiceAccount token a Password Safe managed account on the
               <code class="bg-gray-100 px-1 rounded">Kubernetes Service Account Token</code> plugin so it rotates on schedule,
-              and mirrors each rotation into the PRA Vault copy through the
-              <code class="bg-gray-100 px-1 rounded">PRA Vault Token</code> plugin. Importing the two plugins, creating the
-              functional accounts, and granting the API identity Requestor + an auto-release access policy on the new
-              managed accounts are one-time manual setup — see the <a href="/docs/integrations/password-safe#kubernetes-serviceaccount-token-rotation" class="underline" target="_blank">token rotation guide</a>.
-              <span class="text-amber-600">The token account's access policy must NOT enable "Change Password After
-              Release"</span> — every sync would then trigger another rotation.
+              and registers the PRA Vault copy as a second managed account on the
+              <code class="bg-gray-100 px-1 rounded">PRA Vault Token</code> plugin. Registration then <em>syncs</em> the two in
+              Password Safe, so every rotation reaches PRA with nothing running on the dashboard's side.
+              Importing the two plugins, creating the functional accounts, and granting the API identity Requestor + an
+              auto-release access policy on the new managed accounts are one-time manual setup — see the
+              <a href="/docs/integrations/password-safe#kubernetes-serviceaccount-token-rotation" class="underline" target="_blank">token rotation guide</a>.
+              <span class="text-amber-600">Neither account's access policy may enable "Change Password After
+              Release"</span> — a credential change on <em>either</em> member of a synced pair re-rotates both, so a
+              release-triggered change on the PRA copy would rotate the real cluster token.
             </p>
             <label class="flex items-center gap-2 mb-3 text-sm text-gray-700">
               <input type="checkbox" x-model="panelCfg.k8s_ps_token_rotation_enabled"
@@ -1663,46 +1666,13 @@
                          placeholder="password-safe-rotator">
                 </div>
               </div>
-              <p class="text-xs text-gray-400">PS → PRA sync. In LongLived mode the old token is revoked at rotation, so PRA holds a dead credential until the next pass — mean half the interval. Shorten the interval, or use Bound mode on clusters whose tunnel must not break.</p>
-              <div class="grid grid-cols-3 gap-3">
-                <label class="flex items-center gap-2 text-sm text-gray-700">
-                  <input type="checkbox" x-model="panelCfg.k8s_token_sync_enabled"
-                         class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
-                  Sync rotations into PRA
-                </label>
-                <div>
-                  <label class="block text-sm font-medium text-gray-700 mb-1">Sync Interval (minutes)</label>
-                  <input type="number" x-model="panelCfg.k8s_token_sync_interval_minutes" min="5"
-                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                         placeholder="15">
-                </div>
-                <div>
-                  <label class="block text-sm font-medium text-gray-700 mb-1">Checkout Duration (minutes)</label>
-                  <input type="number" x-model="panelCfg.k8s_token_sync_request_duration_min" min="1"
-                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                         placeholder="15">
-                </div>
-              </div>
-              <div class="grid grid-cols-3 gap-3">
-                <div>
-                  <label class="block text-sm font-medium text-gray-700 mb-1">Max Pushes / Pass</label>
-                  <input type="number" x-model="panelCfg.k8s_token_sync_max_per_pass" min="1"
-                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                         placeholder="5">
-                </div>
-                <div>
-                  <label class="block text-sm font-medium text-gray-700 mb-1">Max Failures Before Parking</label>
-                  <input type="number" x-model="panelCfg.k8s_token_sync_max_failures" min="1"
-                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                         placeholder="5">
-                </div>
-                <div>
-                  <label class="block text-sm font-medium text-gray-700 mb-1">Max Pushes / Hour / Cluster</label>
-                  <input type="number" x-model="panelCfg.k8s_token_sync_max_per_hour" min="1"
-                         class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                         placeholder="4">
-                </div>
-              </div>
+              <p class="text-xs text-gray-400">
+                There is nothing to tune for PS&nbsp;&rarr;&nbsp;PRA delivery: registration syncs the PRA Vault account to the
+                token account in Password Safe, and a managed account and its subscribers always share a credential, so
+                rotations reach PRA as part of the change itself. In LongLived mode the old token is revoked at rotation,
+                so use Bound mode on clusters whose tunnel must not break — Bound never revokes, and the old token stays
+                valid until its TTL.
+              </p>
               <p class="text-xs text-gray-400">
                 The managed account name is <code class="bg-gray-100 px-1 rounded">&lt;namespace&gt;/&lt;serviceaccount&gt;</code>,
                 taken from the Kubernetes tunnel identity on the
