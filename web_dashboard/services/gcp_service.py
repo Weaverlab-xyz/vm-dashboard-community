@@ -775,6 +775,125 @@ def _qualify_network(network: str) -> str:
     return f"global/networks/{network}"
 
 
+# Markers of a GCE *server-side* blip on instances.insert — the API returning
+# "503 … Internal error. Please try again or contact Google Support. (Code: …)",
+# a 500/backendError, or the connection dropping mid-request. These clear on
+# their own, so the same zone is worth another try.
+#
+# Capacity is deliberately NOT in here even though a stockout also surfaces as a
+# 503: re-inserting into a zone that just told us it has no room does not help —
+# that one needs a *different* zone (see _is_zone_capacity_error and the sibling
+# ladders in _run_gce_rancher_sync / _export_custom_image_to_vhd_sync).
+_TRANSIENT_INSERT_STATUS = (500, 502, 503, 504)
+
+_TRANSIENT_INSERT_MARKERS = (
+    "internal error",
+    "internal server error",
+    "internalerror",
+    "backenderror",
+    "service unavailable",
+    "serviceunavailable",
+    "deadline exceeded",
+    "connection reset",
+    "connection aborted",
+    "remote end closed",
+)
+
+
+def _is_transient_insert_error(e) -> bool:
+    """True when a GCE insert failed for a reason that a plain retry can fix.
+
+    Order matters: a zone stockout is reported as ``503 SERVICE UNAVAILABLE
+    ZONE_RESOURCE_POOL_EXHAUSTED``, so it would match a 5xx test too — check
+    capacity first and hand those to the zone-rotation logic instead of burning
+    retries in a zone that has no room."""
+    if _is_zone_capacity_error(e):
+        return False
+    # google.api_core exceptions carry the HTTP status on `.code`. Preferred over
+    # a substring hunt for "503", which also matches the digits landing in a URL,
+    # an instance name or a quota limit.
+    if getattr(e, "code", None) in _TRANSIENT_INSERT_STATUS:
+        return True
+    msg = str(e).lower()
+    return any(m in msg for m in _TRANSIENT_INSERT_MARKERS)
+
+
+# A GCE instance that exists and is on its way up. Anything else (TERMINATED,
+# SUSPENDED) is a create that landed badly — not something to adopt silently.
+_INSERT_LIVE_STATES = ("PROVISIONING", "STAGING", "RUNNING", "REPAIRING")
+
+
+def _insert_instance_with_retry(client, project_id: str, zone: str, instance_name: str,
+                                instance, attempts: int = 3, delay: int = 15,
+                                op_timeout: int = 600) -> None:
+    """``instances.insert`` + wait, retried on a transient GCE-side failure.
+
+    Without this a single "503 Internal error. Please try again" — Google's own
+    advice — failed the whole deploy job and left the operator to re-submit the
+    form by hand (observed 2026-08-12 in us-east1-b).
+
+    Before each retry the instance is looked up: a 503 on the POST usually means
+    the insert never happened, but the write can land with the response lost, and
+    re-inserting that name would 409 instead of returning the VM the user asked
+    for. A found instance in a live state is adopted and waited out; a found
+    instance in any other state re-raises, so a genuinely broken create still
+    fails loudly rather than being reported as a success."""
+    from google.api_core.exceptions import NotFound
+
+    for attempt in range(1, attempts + 1):
+        try:
+            op = client.insert(project=project_id, zone=zone, instance_resource=instance)
+            op.result(timeout=op_timeout)
+            return
+        except TimeoutError as e:
+            # op.result() ran out of patience — the operation is very likely still
+            # going, so re-inserting would 409. Raise, but with the context the bare
+            # TimeoutError (empty message) would otherwise cost the job row.
+            raise GCPError(
+                f"GCE insert for '{instance_name}' in {zone} did not complete within "
+                f"{op_timeout}s — check the instance in the console before retrying") from e
+        except Exception as e:
+            if attempt >= attempts or not _is_transient_insert_error(e):
+                raise
+            try:
+                existing = client.get(project=project_id, zone=zone, instance=instance_name)
+            except NotFound:
+                existing = None
+            except Exception as get_err:  # noqa: BLE001 — probe only; fall through to the retry
+                logger.warning("GCP deploy %s: could not check whether the instance "
+                               "already exists (%s); retrying the insert", instance_name, get_err)
+                existing = None
+            if existing is not None:
+                if existing.status not in _INSERT_LIVE_STATES:
+                    raise
+                logger.warning("GCP deploy %s: insert reported %s but the instance exists "
+                               "(status=%s) — adopting it instead of re-inserting",
+                               instance_name, e, existing.status)
+                _wait_for_instance_running(client, project_id, zone, instance_name)
+                return
+            logger.warning("GCP deploy %s: transient GCE error on attempt %d/%d, retrying "
+                           "in %ds: %s", instance_name, attempt, attempts, delay, e)
+            time.sleep(delay)
+
+
+def _wait_for_instance_running(client, project_id: str, zone: str, instance_name: str,
+                               timeout: int = 300, interval: int = 5) -> None:
+    """Poll an adopted instance until it leaves PROVISIONING/STAGING.
+
+    Only used on the adopt path — normally ``op.result()`` has already waited, and
+    the caller reads the instance's IPs straight after, which a still-provisioning
+    VM does not have yet. Best-effort: a timeout logs and returns rather than
+    failing a deploy whose VM is simply slow to boot."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        info = client.get(project=project_id, zone=zone, instance=instance_name)
+        if info.status not in ("PROVISIONING", "STAGING"):
+            return
+        time.sleep(interval)
+    logger.warning("GCP deploy %s: adopted instance still provisioning after %ds — "
+                   "continuing; IPs may be incomplete", instance_name, timeout)
+
+
 def _launch_instance_sync(
     project_id: str,
     zone: str,
@@ -848,8 +967,7 @@ def _launch_instance_sync(
     if network_tags:
         instance.tags = compute_v1.Tags(items=network_tags)
 
-    op = client.insert(project=project_id, zone=zone, instance_resource=instance)
-    op.result()
+    _insert_instance_with_retry(client, project_id, zone, instance_name, instance)
 
     # Fetch live IP addresses after boot
     info = client.get(project=project_id, zone=zone, instance=instance_name)
@@ -1167,9 +1285,9 @@ def _run_gce_jumpoint_sync(
             launch_zone, reused = cand, True
             break
         except Exception as e:
-            if _is_zone_capacity_error(e) and cand != candidate_zones[-1]:
-                logger.warning("Gateway zone %s is out of capacity (%s) — trying the next "
-                               "zone in %s", cand, e, region)
+            if _should_try_next_zone(e) and cand != candidate_zones[-1]:
+                logger.warning("Gateway zone %s could not take the instance (%s) — trying "
+                               "the next zone in %s", cand, e, region)
                 last_err = e
                 continue
             raise
@@ -2165,12 +2283,26 @@ def _internal_ip_of(info) -> str:
 
 def _is_zone_capacity_error(e) -> bool:
     """True when a GCE insert failed because the *zone* is out of capacity —
-    ``ZONE_RESOURCE_POOL_EXHAUSTED`` / "does not have enough resources". These are
-    the only errors worth retrying in a sibling zone; anything else (quota, bad
-    subnet, permission) would fail identically elsewhere, so we re-raise those."""
+    ``ZONE_RESOURCE_POOL_EXHAUSTED`` / "does not have enough resources". Anything
+    else (quota, bad subnet, permission) would fail identically elsewhere."""
     msg = str(e).upper()
     return ("ZONE_RESOURCE_POOL_EXHAUSTED" in msg
             or "DOES NOT HAVE ENOUGH RESOURCES" in msg)
+
+
+def _should_try_next_zone(e) -> bool:
+    """True when a failed instance insert is worth re-attempting in a SIBLING zone.
+
+    Two things qualify, and the next zone answers both: it is a different capacity
+    pool *and* a different set of servers. Capacity was the original case; the 503
+    "Internal error. Please try again" that failed a live deploy on 2026-08-12 is
+    the other, and gating only on capacity meant one GCE-side blip took out the
+    shared gateway — and with it every tunnel and Web Jump that needs a broker —
+    while a perfectly good sibling zone sat unused.
+
+    Everything else (quota, a bad subnet, a missing permission) fails identically
+    wherever it runs, so those still raise on the first attempt."""
+    return _is_zone_capacity_error(e) or _is_transient_insert_error(e)
 
 
 def _rancher_candidate_zones(project_id: str, region: str, preferred_zone: str,
@@ -2336,9 +2468,9 @@ def _run_gce_rancher_sync(
             launch_zone = cand
             break
         except Exception as e:
-            if _is_zone_capacity_error(e) and cand != candidate_zones[-1]:
-                logger.warning("Rancher zone %s is out of capacity (%s) — trying the "
-                               "next zone in %s", cand, e, region)
+            if _should_try_next_zone(e) and cand != candidate_zones[-1]:
+                logger.warning("Rancher zone %s could not take the instance (%s) — trying "
+                               "the next zone in %s", cand, e, region)
                 last_err = e
                 continue
             raise
@@ -2726,9 +2858,9 @@ def _run_gce_portainer_sync(
             launch_zone = cand
             break
         except Exception as e:
-            if _is_zone_capacity_error(e) and cand != candidate_zones[-1]:
-                logger.warning("Portainer zone %s is out of capacity (%s) — trying the "
-                               "next zone in %s", cand, e, region)
+            if _should_try_next_zone(e) and cand != candidate_zones[-1]:
+                logger.warning("Portainer zone %s could not take the instance (%s) — trying "
+                               "the next zone in %s", cand, e, region)
                 last_err = e
                 continue
             raise
