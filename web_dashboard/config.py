@@ -1064,6 +1064,19 @@ class Settings(BaseSettings):
     # egress-deny rule on the sandbox VM subnet keys off this tag). Set to
     # `dashboard-sandbox-vm` when paired with scripts/sandbox/setup-gcp.sh.
     gcp_default_network_tag: str = ""
+    # On-demand outbound internet for sandbox VMs (the GCP analog of
+    # aws_nat_instance_enabled). The sandbox leaves the vm-subnet off Cloud NAT AND
+    # adds a priority-1000 egress deny on the tag above, so a VM has no internet —
+    # `dnf update` / config-mgmt playbooks time out. When enabled, the dashboard adds a
+    # SECOND Cloud NAT gateway on the sandbox's existing Cloud Router (scoped to the
+    # vm-subnet) plus a higher-priority egress ALLOW on the first VM deploy, and removes
+    # both when the last VM in that region is destroyed — so VMs get egress with zero
+    # standing cost and the sandbox's own NAT + deny rule are never modified. No-ops
+    # when the region has no Cloud Router. See services/gcp_nat_service.py.
+    gcp_vm_nat_enabled: bool = True
+    gcp_vm_nat_name: str = "dashboard-sandbox-vm-nat"
+    gcp_vm_egress_rule_name: str = "dashboard-sandbox-vm-egress-ondemand"
+    gcp_vm_egress_rule_priority: int = 900  # must beat the sandbox deny at 1000
     gcp_bt_jump_group_name: str = ""     # BT jump group for GCP Shell Jumps (falls back to bt_jump_group_name)
     gcp_jumpoint_name: str = ""          # Jumpoint name for GCP Shell Jumps (falls back to bt_jumpoint_name)
     # On-demand Entitle DB forwarder (GCP-only). A private Cloud SQL PSA IP is

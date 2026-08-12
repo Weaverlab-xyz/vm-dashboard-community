@@ -1544,6 +1544,132 @@ async def delete_firewall_rule(project: str, name: str) -> None:
         raise GCPError(f"Failed to delete firewall rule '{name}': {e}") from e
 
 
+# ── On-demand VM egress primitives (Cloud NAT + egress ALLOW; see gcp_nat_service) ──
+#
+# The sandbox deliberately leaves the vm-subnet OFF Cloud NAT and adds a priority-1000
+# EGRESS DENY on the VM network tag (setup-gcp.sh) — two independent gates, so a VM
+# has no outbound internet. These primitives open BOTH on demand and close them again
+# when the last VM goes, so there is no standing egress (or standing cost) for VMs that
+# don't exist. Neither one touches the sandbox's permanent posture: the NAT is a SECOND
+# gateway on the same Cloud Router, and the ALLOW is a separate higher-priority rule.
+
+def nats_excluding(nats, nat_name: str) -> list:
+    """Every Cloud NAT gateway on a router EXCEPT ``nat_name``.
+
+    The one piece of logic both halves depend on, kept pure so it can be tested without
+    the SDK. ``routers.patch`` REPLACES the repeated ``nats`` field wholesale, so the
+    NAT gateways we are not touching (the sandbox's jumpoint-subnet + k8s ones) have to be
+    read back and re-sent verbatim or they are silently dropped — which would cut the PRA
+    Gateway's own egress, i.e. the SSH path to every VM in the sandbox."""
+    return [n for n in nats if getattr(n, "name", None) != nat_name]
+
+
+def _ensure_vm_egress_nat_sync(project: str, region: str, router: str, nat_name: str,
+                               subnetwork: str) -> bool:
+    """Idempotently add a Cloud NAT gateway scoped to ``subnetwork``'s primary range.
+    Returns True if it created one, False if it was already there."""
+    _require_compute()
+    from google.cloud import compute_v1
+
+    client = compute_v1.RoutersClient(credentials=_gcp_creds())
+    current = client.get(project=project, region=region, router=router)
+    others = nats_excluding(current.nats, nat_name)
+    if len(others) != len(list(current.nats)):
+        return False  # already present — leave it alone
+
+    sub = subnetwork if "/" in subnetwork else (
+        f"projects/{project}/regions/{region}/subnetworks/{subnetwork}")
+    desired = others + [compute_v1.RouterNat(
+        name=nat_name,
+        nat_ip_allocate_option="AUTO_ONLY",
+        source_subnetwork_ip_ranges_to_nat="LIST_OF_SUBNETWORKS",
+        subnetworks=[compute_v1.RouterNatSubnetworkToNat(
+            name=sub, source_ip_ranges_to_nat=["PRIMARY_IP_RANGE"])],
+    )]
+    client.patch(project=project, region=region, router=router,
+                 router_resource=compute_v1.Router(nats=desired)).result(timeout=300)
+    return True
+
+
+async def ensure_vm_egress_nat(*, project: str, region: str, router: str, nat_name: str,
+                               subnetwork: str) -> bool:
+    """Async wrapper: ensure the on-demand VM Cloud NAT gateway exists."""
+    try:
+        return await asyncio.to_thread(_ensure_vm_egress_nat_sync, project, region,
+                                       router, nat_name, subnetwork)
+    except Exception as e:
+        raise GCPError(f"Failed to ensure Cloud NAT '{nat_name}' on router "
+                       f"'{router}' ({region}): {e}") from e
+
+
+def _delete_vm_egress_nat_sync(project: str, region: str, router: str, nat_name: str) -> bool:
+    """Remove ONLY ``nat_name`` from the router, preserving every other gateway."""
+    _require_compute()
+    from google.cloud import compute_v1
+    from google.api_core.exceptions import NotFound
+
+    client = compute_v1.RoutersClient(credentials=_gcp_creds())
+    try:
+        current = client.get(project=project, region=region, router=router)
+    except NotFound:
+        return False  # no router → nothing to reclaim
+    kept = nats_excluding(current.nats, nat_name)
+    if len(kept) == len(list(current.nats)):
+        return False  # already gone
+    client.patch(project=project, region=region, router=router,
+                 router_resource=compute_v1.Router(nats=kept)).result(timeout=300)
+    return True
+
+
+async def delete_vm_egress_nat(*, project: str, region: str, router: str,
+                               nat_name: str) -> bool:
+    """Async wrapper: drop the on-demand VM Cloud NAT gateway. Quiet if absent."""
+    try:
+        return await asyncio.to_thread(_delete_vm_egress_nat_sync, project, region,
+                                       router, nat_name)
+    except Exception as e:
+        raise GCPError(f"Failed to delete Cloud NAT '{nat_name}' on router "
+                       f"'{router}' ({region}): {e}") from e
+
+
+def _ensure_egress_allow_rule_sync(project: str, name: str, network: str,
+                                   target_tags: list, priority: int,
+                                   destination_ranges: list) -> None:
+    """Idempotently create an EGRESS ALLOW rule that outranks the sandbox's
+    priority-1000 ``*-deny-vm-egress``. Lower number = higher precedence in GCP."""
+    _require_compute()
+    from google.cloud import compute_v1
+    from google.api_core.exceptions import NotFound
+
+    client = compute_v1.FirewallsClient(credentials=_gcp_creds())
+    try:
+        client.get(project=project, firewall=name)
+        return  # already present — assume correct
+    except NotFound:
+        pass
+    net = network if "/" in network else f"projects/{project}/global/networks/{network}"
+    rule = compute_v1.Firewall(
+        name=name, network=net, direction="EGRESS", priority=priority,
+        target_tags=list(target_tags), destination_ranges=list(destination_ranges),
+        allowed=[compute_v1.Allowed(I_p_protocol="all")],
+        description="dashboard: on-demand VM internet egress (paired with the "
+                    "on-demand Cloud NAT; removed when the last VM is destroyed)",
+    )
+    client.insert(project=project, firewall_resource=rule).result(timeout=180)
+
+
+async def ensure_egress_allow_rule(*, project: str, name: str, network: str,
+                                   target_tags: list, priority: int = 900,
+                                   destination_ranges: Optional[list] = None) -> None:
+    """Async wrapper: idempotently ensure the on-demand EGRESS ALLOW rule."""
+    try:
+        await asyncio.to_thread(_ensure_egress_allow_rule_sync, project, name, network,
+                                target_tags, priority,
+                                destination_ranges or ["0.0.0.0/0"])
+    except Exception as e:
+        raise GCPError(f"Failed to ensure egress allow rule '{name}': {e}") from e
+
+
 def _container_image_from_metadata(info) -> str:
     """Best-effort: pull the container image out of the gce-container-declaration
     metadata COS boots from. Returns "" on any parse failure."""

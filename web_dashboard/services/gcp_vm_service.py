@@ -315,6 +315,24 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
             except Exception as exc:
                 logger.warning("Could not fetch SSH key from Secret Manager: %s", exc)
 
+        # On-demand Cloud NAT + egress allow (independent of BeyondTrust) so the VM's
+        # subnet gets outbound internet. Opened BEFORE the launch so the instance has
+        # egress from first boot — package installs during cloud-init would otherwise
+        # hang. Removed again when the last VM in the region is destroyed.
+        nat_name = None
+        if _cfg_svc.get_bool("gcp_vm_nat_enabled"):
+            try:
+                from ..services import gcp_nat_service
+                nat_name = await gcp_nat_service.ensure_vm_nat(_region_from_zone(zone))
+                if nat_name:
+                    job_service.update_progress(db, job_id, 19,
+                                                "Cloud NAT ready (VM egress enabled)…")
+            except Exception as e:
+                logger.warning("GCE on-demand NAT ensure failed (non-fatal): %s", e)
+                job_service.update_progress(
+                    db, job_id, 19,
+                    f"NAT ensure failed (non-fatal): {e} — VM may lack outbound internet…")
+
         job_service.update_progress(db, job_id, 20, "Launching Compute Engine instance…")
 
         # Merge config-driven default network tags (used by sandbox firewall
@@ -352,6 +370,8 @@ async def _run_deploy(job_id: str, payload: GCPDeployRequest, project_id: str, z
             "image_self_link": payload.image_self_link,
             "image_name":    payload.image_name,
         }
+        if nat_name:
+            final_meta["nat_name"] = nat_name
         if jp:
             jp.record(final_meta)
 
@@ -613,6 +633,20 @@ async def _run_destroy(
             except Exception as e:
                 logger.warning("Shared Gateway host release failed (non-fatal): %s", e)
                 result["jumpoint_host_teardown_error"] = str(e)
+
+        # Release the on-demand egress (Cloud NAT + allow rule) once this region holds
+        # no live VM. Runs for every jumpoint mode — and for pra_enabled=False, where
+        # neither branch above executes — because egress has nothing to do with the
+        # Gateway. Safe after the "destroyed" write above: the count would otherwise
+        # include the VM being torn down and never reach zero.
+        from ..services import config_service as _cfg_svc
+        if _cfg_svc.get_bool("gcp_vm_nat_enabled"):
+            try:
+                from ..services import gcp_nat_service
+                await gcp_nat_service.reclaim_vm_nat(db, _region_from_zone(zone))
+            except Exception as e:
+                logger.warning("On-demand NAT release failed (non-fatal): %s", e)
+                result["nat_teardown_error"] = str(e)
 
         job_service.set_completed(db, job_id, result)
         await cache_service.invalidate_prefix("gcp_instances")
