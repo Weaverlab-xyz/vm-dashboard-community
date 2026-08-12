@@ -209,6 +209,9 @@ Six things to know before you start:
   that can drift. It costs nothing; ignore it. The corollary matters more: **every `chcon`
   and `ls -lZ` instruction in this document is Linux-only.** If a mount is unreadable on
   Windows it is file sharing, not labelling — check *Settings → Resources → File sharing*.
+  The agent applies that same qualification to its own error text: it recognises Docker
+  Desktop's kernel and names file sharing instead of the SELinux label, so you should not
+  see `chcon` advice on this host at all.
 - **File permissions work out in your favour.** Docker Desktop presents bind mounts with
   permissive ownership because NTFS ACLs do not map onto POSIX mode bits, so uid 10001 can
   read `policy.yaml` with no `umask` and no `chmod`. The emitted PowerShell command has no
@@ -382,12 +385,13 @@ Online. To keep the code out of your shell history as well, create that file wit
 and paste only the `docker run` that follows it — on Windows that is the *only* way, because
 PowerShell writes its history to disk as you type.
 
-If you do write it by hand, save it as plain ASCII or UTF-8 **without** a byte-order mark.
-The agent reads that file as text: a UTF-16 file (what PowerShell 5.1's `>` and `Out-File`
-produce, and what Notepad calls "Unicode") fails to decode, and a UTF-8 BOM is worse still
-because it survives the whitespace trim and the code is rejected as invalid with nothing
-pointing at why. The emitted PowerShell command uses `Set-Content -Encoding ascii` for
-exactly this reason.
+If you do write it by hand, save it as plain ASCII or UTF-8. The emitted PowerShell command
+uses `Set-Content -Encoding ascii -NoNewline` for that reason, and the agent is
+belt-and-braces about it from its side: a **UTF-8 BOM is stripped** rather than sent as part
+of the code, and a **UTF-16 file** — what PowerShell 5.1's `>` and `Out-File` produce, and
+what Notepad calls "Unicode" — is refused with a message naming the encoding and the
+`Set-Content` flags that fix it, rather than the raw decode traceback it used to be. Either
+way the code is not spent, so the same one still works once the file is rewritten.
 
 Because the container runs as uid 10001, that file has to be readable by it — a mode 0600
 file owned by your host user is *not*, and the agent says so and exits rather than failing
@@ -618,6 +622,11 @@ Three sources, and the order matters: `ps_managed_account` beats `password_file`
 inline `password`. An operator who has moved a connection to Password Safe should not
 silently keep authenticating with a stale literal left in the file underneath it.
 
+`password_file` — and `client_secret_file` in `passwordsafe.yaml` — are read with the same
+encoding rules as the enrolment code file: a UTF-8 BOM is stripped, and a UTF-16 file is
+refused with a message naming the encoding rather than a decode traceback out of a job.
+Write them with `Set-Content -Encoding ascii -NoNewline` on Windows.
+
 With `ps_managed_account`, **the agent holds no hypervisor credential at all** — only a
 Password Safe OAuth client whose single power is to ask for one. Each job checks a
 credential out and checks it back in, so every use lands in Password Safe's audit trail
@@ -832,8 +841,8 @@ an objection into a demonstration.
 | `Cannot read the policy file … No such file or directory` and the container exits 2 | No policy mounted. Fail-closed is deliberate. |
 | `Cannot read the policy file … Permission denied` on a file `ls -l` already shows world-readable | **SELinux**, on Fedora/RHEL/CentOS/Rocky/Alma — a **Linux-host-only** cause; on Windows see the row below instead. A file in your home directory is labelled `user_home_t`, which the container may not read whatever its mode bits say — 644 is not enough here. Mount it `:ro,Z` (the emitted command does; Docker and Podman ignore `Z` on hosts without SELinux) or relabel by hand: `chcon -t container_file_t policy.yaml`. Verify with `ls -lZ policy.yaml`, and `ausearch -m avc -ts recent` for the denial itself. Worth recognising because the dashboard-side symptoms are all misleading: the agent exits *before* its first network call, so **no request whatsoever reaches the dashboard** — no 4xx, nothing in the app or ingress logs — and the row sits at `enrolling` with `Last seen: never`, no source IP and no policy hash, which reads exactly like a wrong URL or a blocked egress. The enrolment code is **not** spent either, so the same one still works once the mount is fixed. |
 | `no matching manifest for windows/amd64`, or `image operating system "linux" cannot be used on this platform` | Docker Desktop is in **Windows containers** mode. The agent image is Linux, as is almost everything else you would run; right-click the tray whale → *Switch to Linux containers*. Neither message names the mode, which is why this is worth recognising rather than debugging. |
-| **On Windows**, `Cannot read the policy file`, on a path that plainly exists | Docker Desktop file sharing, **not** SELinux — ignore the `chcon` advice above, it cannot apply. Either the working directory is a UNC path or a mapped network drive (neither can be bind-mounted), or the drive is not shared: *Settings → Resources → File sharing*. Note that on the Hyper-V backend a bind source Docker Desktop cannot reach is materialised as an empty **directory** inside the container rather than failing outright, so the message you get talks about mount flags and points nowhere near the real cause. Keep `policy.yaml` under your user profile and it does not arise. |
-| **On Windows**, the code-file form ends in a Python traceback rather than a message | The file is UTF-16 — PowerShell 5.1's `>` and `Out-File` write that by default, and Notepad's "Unicode" option does too. The agent reads the file as text and cannot decode it. Write it with `Set-Content -Encoding ascii -NoNewline`, as the emitted PowerShell command does, or save it from an editor as ASCII/UTF-8 with no byte-order mark. A UTF-8 BOM is the quieter version of the same fault: it survives the whitespace trim, so the code is simply rejected as invalid. |
+| **On Windows**, `Cannot read the policy file`, on a path that plainly exists | Docker Desktop file sharing, **not** SELinux — ignore the `chcon` advice above, it cannot apply. Either the working directory is a UNC path or a mapped network drive (neither can be bind-mounted), or the drive is not shared: *Settings → Resources → File sharing*. Note that on the Hyper-V backend a bind source Docker Desktop cannot reach is materialised as an empty **directory** inside the container rather than failing outright, so the message you get talks about mount flags and points nowhere near the real cause. Keep `policy.yaml` under your user profile and it does not arise. The agent detects this host from its own kernel (`-microsoft-standard-WSL2` or `-linuxkit` in `/proc/version`) and says all of the above itself rather than repeating the SELinux advice, so the container log should already be pointing you here. |
+| **On Windows**, `AGENT_ENROLLMENT_CODE_FILE … contents are not text this agent can decode` | The file is UTF-16 — PowerShell 5.1's `>` and `Out-File` write that by default, and Notepad's "Unicode" option does too. Write it with `Set-Content -Encoding ascii -NoNewline`, as the emitted PowerShell command does, or save it from an editor as ASCII/UTF-8. Nothing reached the dashboard, so the code is unspent and the same one works once the file is rewritten. A UTF-8 BOM used to be the quieter version of this — it survives the whitespace trim, so the code was simply rejected as invalid — and is now stripped on read instead. Before either was handled the symptom was a raw Python traceback, so an older agent image on this fault looks like a crash rather than a message. |
 | **On Windows**, every agent goes offline when you log off | Docker Desktop runs inside a logged-in user session, so `--restart unless-stopped` cannot help — there is no engine left to restart anything. Enable *Start Docker Desktop when you log in* and stay logged in, or move the agent to Windows Server with the WSL2 engine or a Linux VM. See [Running on Windows](#running-on-windows). |
 | `DASHBOARD_URL is http://` and it exits 2 | The agent will not sign over plaintext. Terminate TLS, or `AGENT_INSECURE_TLS=1` for a throwaway lab. |
 | `the dashboard rejected this agent's signature` | Revoked, re-enrolled elsewhere, or the dashboard URL changed (the audience is pinned). Issue a fresh code. |
