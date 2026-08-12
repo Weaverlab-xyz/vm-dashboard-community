@@ -45,7 +45,7 @@ ANSIBLE_DB_ENGINES = ("postgres", "mysql", "sqlserver")
 _CLOUD_NATIVE_RUNNER = {"aws": "ecs", "azure": "aci", "gcp": "gcp"}
 
 # Which resources may be a Config-Management target, by cloud. Single source of truth
-# for both the picker listing (/managed-targets) and the run gate — they sat as two
+# for both the picker listing (/localhost-targets) and the run gate — they sat as two
 # separate literal tuples and silently disagreeing would half-wire the feature.
 #
 # "local" is an on-prem resource the dashboard did not provision but has a reference to:

@@ -9,13 +9,13 @@
   <div class="flex items-center justify-between">
     <div>
       <h1 class="text-2xl font-bold text-gray-800">Configuration</h1>
-      <p class="text-sm text-gray-500 mt-1">Run Ansible playbooks and provisioning assets against hypervisors and cloud VMs.</p>
+      <p class="text-sm text-gray-500 mt-1">Run Ansible playbooks and provisioning assets against hypervisors, cloud VMs, Kubernetes clusters, and databases.</p>
     </div>
     <a href="/jobs" class="text-sm text-blue-600 hover:underline">View all jobs →</a>
   </div>
 
   <!-- No targets configured -->
-  <template x-if="!loading && targets.length === 0 && !hasCloudTargets">
+  <template x-if="!loading && !hasAnyTarget">
     <div class="bg-amber-50 border border-amber-200 rounded-xl p-6 text-center">
       <svg class="h-10 w-10 text-amber-400 mx-auto mb-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
@@ -26,6 +26,15 @@
         Enable at least one on-premises integration in
         <a href="/settings" class="underline font-medium">Settings → Integrations</a>,
         or deploy cloud VMs via the AWS / Azure / GCP tabs so they appear here.
+        {#- Databases and clusters are runnable targets too, but each page is
+            nav-gated on its own feature flag; pointing at a disabled one 404s. -#}
+        {% if cloud_database_enabled or k8s_management_enabled %}
+        A provisioned or registered
+        {% if cloud_database_enabled %}<a href="/databases" class="underline font-medium">database</a>{% endif %}
+        {% if cloud_database_enabled and k8s_management_enabled %}or{% endif %}
+        {% if k8s_management_enabled %}<a href="/k8s" class="underline font-medium">Kubernetes cluster</a>{% endif %}
+        counts as a target as well — it runs a localhost play, so no SSH host is needed.
+        {% endif %}
       </p>
     </div>
   </template>
@@ -36,7 +45,7 @@
   </template>
 
   <!-- Run panel -->
-  <template x-if="!loading && (targets.length > 0 || hasCloudTargets)">
+  <template x-if="!loading && hasAnyTarget">
     <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
 
       <!-- Left: run form -->
@@ -463,9 +472,42 @@
             </div>
           </template>
 
+          <!-- Localhost-play targets. Listed with their cloud rather than an address:
+               the run never connects to one over SSH, so there is no host to show. -->
+          <template x-if="k8sClusters.length > 0">
+            <div class="mb-3">
+              <p class="text-xs text-gray-500 uppercase tracking-wide mb-1">Kubernetes Clusters</p>
+              <ul class="space-y-1.5">
+                <template x-for="c in k8sClusters" :key="c.id">
+                  <li class="flex items-center gap-2 text-sm">
+                    <span class="w-2 h-2 rounded-full bg-indigo-400 flex-shrink-0"></span>
+                    <span class="font-medium text-gray-700 truncate" x-text="c.name"></span>
+                    <span class="text-gray-400 text-xs" x-text="c.cloud"></span>
+                  </li>
+                </template>
+              </ul>
+            </div>
+          </template>
+
+          <template x-if="cloudDatabases.length > 0">
+            <div class="mb-3">
+              <p class="text-xs text-gray-500 uppercase tracking-wide mb-1">Databases</p>
+              <ul class="space-y-1.5">
+                <template x-for="d in cloudDatabases" :key="d.id">
+                  <li class="flex items-center gap-2 text-sm">
+                    <span class="w-2 h-2 rounded-full bg-teal-400 flex-shrink-0"></span>
+                    <span class="font-medium text-gray-700 truncate" x-text="d.engine"></span>
+                    <span class="text-gray-400 text-xs" x-text="d.cloud"></span>
+                  </li>
+                </template>
+              </ul>
+            </div>
+          </template>
+
           <p class="text-xs text-gray-400 mt-2">
             Add on-prem targets in <a href="/settings" class="underline">Settings → Integrations</a>.
-            Cloud VMs appear automatically once deployed.
+            Cloud VMs, Kubernetes clusters, and databases appear automatically once
+            deployed or registered.
           </p>
         </div>
       </div>
@@ -592,6 +634,25 @@ function configMgmt() {
       return this.cloudTargets.aws.length > 0
           || this.cloudTargets.azure.length > 0
           || this.cloudTargets.gcp.length > 0;
+    },
+
+    // Kubernetes clusters + databases from /localhost-targets. Not SSH hosts — they
+    // run localhost plays — but they ARE runnable targets, so they count.
+    get hasLocalhostTargets() {
+      return this.k8sClusters.length > 0 || this.cloudDatabases.length > 0;
+    },
+
+    // Whether the run panel has anything to offer. Single source of truth for the
+    // empty state and the panel itself: the two conditions were spelled out
+    // separately and both counted VMs only, so a deployment whose only resource was
+    // a database or a cluster hid the very picker that supports it — and a bulk
+    // hand-off from /inventory hid its own selection. Bulk mode needs no picker
+    // target at all; the selection replaces the picker.
+    get hasAnyTarget() {
+      return !!this.bulk
+          || this.targets.length > 0
+          || this.hasCloudTargets
+          || this.hasLocalhostTargets;
     },
 
     // Detect cloud prefix on the selected target so the SSH-user field can
