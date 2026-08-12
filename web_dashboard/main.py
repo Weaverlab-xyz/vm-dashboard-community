@@ -4,6 +4,7 @@ FastAPI application entry point for the VM CLI Web Dashboard.
 import asyncio
 import logging
 import os
+import random
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
@@ -332,29 +333,33 @@ async def _warm_scoped_loop(name: str, scope_fn, fetcher, key_fn, ttl: int) -> N
 
 async def _warm_cost_summary() -> None:
     """Pre-populate the cost tile + /costs page (account summary and the
-    dashboard-managed breakdown). Skips the (billable) cloud calls while
-    cost_explorer_enabled is off, so a runtime flag flip activates it on the next
-    pass — and the endpoints self-populate on first load regardless."""
-    from .services import cost_service
-    ttl = cache_service.TTL["cost_summary"]
-    interval = int(ttl * 0.8)
+    dashboard-managed breakdown). Skips the (billable, rate-limited) cloud calls while
+    cost_explorer_enabled is off, so a runtime flag flip activates it on the next pass —
+    and the endpoints self-populate on first load regardless.
+
+    Calls exactly what /api/costs/{summary,breakdown} call. There is no cache key here
+    and no second fetch path, so there is nothing for a warmer to drift onto — the
+    failure mode the comment block above exists to prevent, closed structurally rather
+    than by sharing a constant.
+
+    Still runs in every gunicorn worker, as every warmer does, and that is now harmless:
+    the first process to claim a cloud queries it and the others read its result out of
+    the table. Before the durable cache this loop was 2 workers x 2 views = 4 Cost
+    Management POSTs against one subscription at every container start."""
+    from .services import cost_cache
+    # De-burst the first pass. Both workers start within milliseconds of each other, and
+    # while the claim lock makes a simultaneous start correct, it makes three of the four
+    # callers wait out the cold-start poll for no reason.
+    await asyncio.sleep(random.uniform(0, 10))
     while True:
         try:
             if config_service.get_bool("cost_explorer_enabled", settings.cost_explorer_enabled):
-                summary = await cost_service.get_cost_summary()
-                await cache_service.set(cache_service.key_global("cost_summary"), summary, ttl)
-                breakdown = await cost_service.get_cost_breakdown()
-                # Key comes from cost_service so the warmer and /api/costs/breakdown
-                # can't drift onto different keys — if they did, the warmer would fill a
-                # key nobody reads and every page load would pay a live 4-cloud fetch.
-                await cache_service.set(
-                    cache_service.key_global(cost_service.CACHE_KEY_BREAKDOWN), breakdown,
-                    cache_service.TTL[cost_service.CACHE_KEY_BREAKDOWN])
+                await cost_cache.warm()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             logger.warning("cache warmer cost_summary failed: %s", exc)
-        await asyncio.sleep(interval)
+        await asyncio.sleep(cost_cache.warm_interval_seconds())
 
 
 async def _warm_aws_amis() -> None:
@@ -1241,12 +1246,27 @@ async def features():
 
 @app.get("/api/cache/status", tags=["health"])
 async def cache_status():
-    """Return metadata for all cached keys (debug / admin)."""
+    """Return metadata for all cached keys (debug / admin).
+
+    Two stores, deliberately: the in-memory one below is per-process and dies with the
+    container, while `cost_cache` rows are shared across every worker and survive a
+    rebuild. Comparing `fetched_at` across replicas is how you confirm the cost cache is
+    actually shared rather than silently per-worker."""
     entries = await cache_service.all_entries()
+    from .services import cost_cache
+    db = SessionLocal()
+    try:
+        cost_rows = cost_cache.snapshot(db)
+    except Exception as exc:  # noqa: BLE001 — a health endpoint must not 500 on a detail
+        logger.warning("cache status: cost cache snapshot failed: %s", exc)
+        cost_rows = []
+    finally:
+        db.close()
     return {
         "cache_type": "in-memory",
         "entry_count": len(entries),
         "entries": entries,
+        "cost_cache": cost_rows,
     }
 
 

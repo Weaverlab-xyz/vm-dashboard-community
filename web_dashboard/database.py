@@ -999,6 +999,63 @@ class ContainerStateCache(Base):
     last_updated = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
 
 
+class CloudCostCache(Base):
+    """Last-known-good month-to-date cost for one (cloud, view), plus the throttle
+    state that decides whether we are allowed to ask that cloud again.
+
+    In the database rather than in ``services/cache_service`` for three reasons, each
+    sufficient on its own. The app runs ``gunicorn -w 2``, so a process-local dict gives
+    each worker its own throttle budget and its own 429 — the same hazard that put
+    :class:`EphemeralState` and :class:`LoginAttempt` here. ``jobs_worker`` is a third
+    process that warms nothing, so the budget-alert scan could only ever read an empty
+    dict there. And Azure Cost Management rate-limits per SUBSCRIPTION, which is a
+    property of the account, not of a process — so "we were just throttled" has to
+    outlive a redeploy, or every image rebuild re-earns the 429.
+
+    ``payload`` is written ONLY when a cloud returned ``status="ok"``. A failure writes
+    the error and cooldown columns and leaves ``payload``/``fetched_at`` untouched. That
+    asymmetry is the whole reason this table exists: a 429 must never be able to replace
+    a working number. The row is therefore not a cache entry with a TTL — it is a
+    last-known-good value plus an expiry *opinion*.
+    """
+    __tablename__ = "cloud_cost_cache"
+
+    # PK is (cloud, view) and deliberately EXCLUDES the month: throttle state is a
+    # property of the API, not of the calendar, so it has to survive a rollover.
+    # `period` guards the payload instead — see cost_cache._is_usable.
+    cloud = Column(String(16), primary_key=True)   # aws | azure | gcp | oci
+    view = Column(String(16), primary_key=True)    # summary | breakdown
+
+    # ── last-known-good (written only on status="ok") ────────────────────────
+    payload = Column(Text, nullable=True)                      # JSON: one cloud's entry
+    payload_version = Column(Integer, nullable=False, default=0)
+    period = Column(String(7), nullable=True)                  # "2026-08"; MTD is month-scoped
+    fetched_at = Column(DateTime, nullable=True, index=True)
+    # Set by a Setup save. Read as "not fresh" while the payload is still SERVED, so
+    # fixing a credential re-queries without blanking the page in the meantime.
+    stale = Column(Boolean, nullable=False, default=False)
+
+    # ── failure / throttle (written only on a failed attempt) ────────────────
+    last_attempt_at = Column(DateTime, nullable=True)
+    last_error = Column(Text, nullable=True)
+    consecutive_failures = Column(Integer, nullable=False, default=0)
+    # Hard gate: while this is in the future NOTHING queries this cloud, including an
+    # explicit ?refresh=true. Set from the provider's Retry-After when it gave one.
+    cooldown_until = Column(DateTime, nullable=True, index=True)
+
+    # ── single-flight ────────────────────────────────────────────────────────
+    # A liveness bound, not a mutex: a process that dies mid-fetch releases its claim by
+    # expiry. The advisory lock only makes the claim's read-modify-write atomic; it is
+    # never held across the network call.
+    lease_until = Column(DateTime, nullable=True)
+    lease_owner = Column(String(64), nullable=True)   # "host:pid" — diagnostics only
+    # Per-CLOUD pacing, written to every row of the cloud: Cost Management throttles per
+    # subscription, so this cloud's summary and breakdown queries must not overlap.
+    next_query_allowed_at = Column(DateTime, nullable=True)
+
+    updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 class RegisteredImage(Base):
     """Operator-registered image artefacts. The dashboard's source-of-truth
     record for "this image exists, here's where the artefact lives, here's
@@ -1385,6 +1442,9 @@ def init_db():
             "ALTER TABLE k8s_clusters ADD COLUMN pra_vault_account_id VARCHAR(64)",
             "CREATE INDEX ix_k8s_clusters_ps_token_account_id "
             "ON k8s_clusters(ps_token_account_id)",
+            # `cloud_cost_cache` needs no entry: create_all makes new tables. Nothing
+            # backfills it either — an empty table is exactly "no cloud has reported a
+            # cost yet", which is what the first warmer pass fixes.
         ]
         for stmt in _migrations:
             if _is_sqlite:

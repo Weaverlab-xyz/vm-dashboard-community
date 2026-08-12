@@ -192,8 +192,13 @@ def test_deregister_unlinks_before_offboarding():
 
 def test_no_two_modules_take_the_same_advisory_lock_id():
     """20260101 init_db's DDL lock, 20260102 the audit chain, 20260103 the expiry
-    enqueue. 20260104 belonged to the deleted token-sync enqueue and is now free —
-    reusing an id would make one pass block schema init or every audit append."""
+    enqueue, 20260104 the cost cache's per-cloud claim (it was freed when the token-sync
+    enqueue was deleted, and reclaimed by services/cost_cache.py). Reusing an id would
+    make one pass block schema init or every audit append.
+
+    Note the scan matches `_LOCK_ID = <n>` as well as the call, so a module that names its
+    id in a constant — as cost_cache does with pg_try_advisory_xact_lock, which the call
+    regex deliberately does not match — is still covered."""
     owners = {}
     for dirpath, dirnames, filenames in os.walk(os.path.join(_ROOT, "web_dashboard")):
         dirnames[:] = [d for d in dirnames if d != "__pycache__"]

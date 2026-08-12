@@ -17,6 +17,20 @@
     </button>
   </div>
 
+  <!-- ── Stale-figure banner ───────────────────────────────────────────────────
+       A throttled or unreachable cloud keeps its last known figure rather than
+       blanking, so the page has to say which numbers are old and when it will try
+       again — otherwise a stale figure is indistinguishable from a fresh one. -->
+  <div x-show="staleClouds().length"
+       class="bg-amber-50 border border-amber-200 rounded-xl p-4 mb-6">
+    <p class="text-sm font-medium text-amber-800">Showing last known figures</p>
+    <ul class="mt-1 space-y-0.5">
+      <template x-for="c in staleClouds()" :key="'stale-' + c.cloud">
+        <li class="text-xs text-amber-700" x-text="c.note"></li>
+      </template>
+    </ul>
+  </div>
+
   <!-- ── Monthly budget ────────────────────────────────────────────────────── -->
   <div x-show="summary.budget" class="bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-8">
     <div class="flex items-baseline justify-between mb-2">
@@ -49,7 +63,15 @@
           <p class="text-xs font-semibold text-gray-500 uppercase" x-text="c.cloud"></p>
           <p class="text-lg font-bold mt-0.5"
              x-text="c.status === 'ok' ? money(c.amount, c.currency) : 'unavailable'"
-             :class="c.status === 'ok' ? 'text-gray-900' : 'text-gray-400'"></p>
+             :class="c.status !== 'ok' ? 'text-gray-400' : (c.stale ? 'text-amber-700' : 'text-gray-900')"></p>
+          <!-- Three states, not two: fresh, stale-but-known, and never-known.
+               `unavailable` now means the narrow thing it says — this cloud has never
+               returned a figure — so `detail` is worth showing when it appears. -->
+          <p class="text-[11px] text-gray-400 mt-1"
+             x-show="c.status === 'ok' && !c.stale && c.as_of"
+             x-text="'as of ' + asOf(c.as_of)"></p>
+          <p class="text-[11px] text-amber-600 mt-1" x-show="c.status === 'ok' && c.stale"
+             :title="c.note" x-text="'last known · ' + asOf(c.as_of)"></p>
           <p class="text-xs text-gray-400 mt-1" x-show="c.status !== 'ok'" x-text="c.detail"></p>
           <p class="mt-1" x-show="c.budget">
             <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-medium"
@@ -83,10 +105,16 @@
       <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
         <div class="flex items-baseline justify-between px-4 py-3 bg-gray-50 border-b border-gray-200">
           <span class="text-xs font-semibold text-gray-600 uppercase" x-text="c.cloud"></span>
-          <span class="text-sm font-bold text-gray-900"
+          <span class="text-sm font-bold" :class="c.stale ? 'text-amber-700' : 'text-gray-900'"
                 x-show="c.status === 'ok'" x-text="money(c.total, c.currency)"></span>
         </div>
-        <!-- unavailable -->
+        <!-- stale: real figures, just not current ones -->
+        <div x-show="c.status === 'ok' && c.stale"
+             class="px-4 py-1.5 bg-amber-50 border-b border-amber-100">
+          <p class="text-[11px] text-amber-700" x-text="'last known · ' + asOf(c.as_of)"></p>
+          <p class="text-[11px] text-amber-600" x-show="c.note" x-text="c.note"></p>
+        </div>
+        <!-- unavailable: this cloud has never returned a figure -->
         <div x-show="c.status !== 'ok'" class="px-4 py-6 text-center">
           <p class="text-sm text-gray-400">unavailable</p>
           <p class="text-xs text-gray-400 mt-1" x-text="c.detail"></p>
@@ -165,23 +193,48 @@
 
       async load(force = false) {
         this.loading = true;
-        // The Refresh button forces a cache-busting requery (?refresh=true); the
-        // initial page load (force=false) reads the shared cache so navigation
-        // stays cheap and doesn't re-run the billable Cost Explorer queries.
+        // The Refresh button forces a live requery (?refresh=true) — non-destructively,
+        // and a cloud in throttle cooldown is skipped server-side. The initial page load
+        // (force=false) reads the shared cache so navigation stays cheap and doesn't
+        // re-run the billable Cost Explorer queries.
         const q = force ? '?refresh=true' : '';
+        const before = this.asOfSignature();
         try {
-          const [s, b] = await Promise.all([
-            API.get('/api/costs/summary' + q).catch(() => ({})),
-            API.get('/api/costs/breakdown' + q).catch(() => ({})),
-          ]);
-          this.summary = s || {};
-          this.breakdown = b || {};
+          // SEQUENTIAL, not Promise.all. These are two separate HTTP requests, so
+          // Promise.all opens two connections and gunicorn -w 2 can accept them in
+          // DIFFERENT workers — two simultaneous Cost Management queries against the same
+          // Azure subscription, which is what Cost Management rate-limits on. The server
+          // paces per-cloud queries anyway; asking in order means the common case never
+          // has to wait out that pacer.
+          this.summary = (await API.get('/api/costs/summary' + q).catch(() => ({}))) || {};
+          this.breakdown = (await API.get('/api/costs/breakdown' + q).catch(() => ({}))) || {};
+          if (force && this.asOfSignature() === before) {
+            toast('Costs were refreshed recently — showing cached figures.', 'info');
+          }
         } catch (e) {
           toast('Failed to load costs: ' + e.message, 'error');
         } finally {
           this.loading = false;
         }
       },
+
+      // Every cloud's as_of, joined. Unchanged after a forced refresh means the server
+      // declined every requery (min interval or cooldown) — worth saying out loud, or the
+      // button looks broken.
+      asOfSignature() {
+        return (this.summary.clouds || []).map(c => c.cloud + '=' + (c.as_of || '')).join(',');
+      },
+
+      // Local short time for an "as of" label. The value is UTC ISO from the server.
+      asOf(iso) {
+        if (!iso) return '';
+        const d = new Date(iso);
+        return isNaN(d) ? '' : d.toLocaleString([], { month: 'short', day: 'numeric',
+                                                     hour: '2-digit', minute: '2-digit' });
+      },
+
+      // Clouds serving a last-known-good figure rather than a fresh one.
+      staleClouds() { return (this.summary.clouds || []).filter(c => c.stale && c.note); },
 
       budgetBadge(s) {
         return ({ over: 'bg-red-100 text-red-700', approaching: 'bg-yellow-100 text-yellow-700',

@@ -52,6 +52,14 @@ class Settings(BaseSettings):
     cost_budget_gcp: float = 0.0
     cost_budget_oci: float = 0.0
     gcp_billing_export_table: str = ""    # BigQuery billing-export table for GCP cost (project.dataset.table); blank = GCP cost off
+    # Durable cost cache (services/cost_cache.py). Env/config.py only — deliberately not
+    # on the Setup panel: they are throttle-safety knobs, not features, and a panel field
+    # that isn't bound both ways is discarded on save without an error.
+    cost_cache_ttl_seconds: int = 21600           # 6 h — how old a good figure may get
+    cost_refresh_min_interval_seconds: int = 300  # floor between two forced requeries
+    cost_query_lease_seconds: int = 120           # single-flight claim expiry
+    cost_query_gap_seconds: int = 2               # min spacing between queries to ONE cloud
+    cost_cold_wait_seconds: int = 5               # cold-miss wait for the claim winner
     # Action-level policy guardrails (pre-action admission control via OPA). Master
     # flag; when off, admission_service.enforce() is a no-op. Which actions are gated
     # is the list `admission_gated_actions` (default none). The caps below are injected
