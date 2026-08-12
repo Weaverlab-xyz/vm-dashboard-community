@@ -35,7 +35,7 @@
 <a href="/xcpng" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
    {% if request.url.path == '/xcpng' %}{{ nav_active }}{% endif %}">XCP-ng</a>
 {% endif %}
-{% if proxmox_enabled or vsphere_enabled or hyperv_enabled or nutanix_enabled or xcpng_enabled %}
+{% if proxmox_enabled or vsphere_enabled or hyperv_enabled or nutanix_enabled or xcpng_enabled or vmware_enabled %}
 <a href="/connections" class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
    {% if request.url.path == '/connections' %}{{ nav_active }}{% endif %}">Connections</a>
 {% endif %}

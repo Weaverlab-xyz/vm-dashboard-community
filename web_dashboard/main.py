@@ -950,7 +950,7 @@ async def connections_page(request: Request):
     it is the one place their credentials now live."""
     flags = _feature_flags()
     if not any(flags.get(f"{k}_enabled") for k in
-               ("proxmox", "vsphere", "hyperv", "nutanix", "xcpng")):
+               ("proxmox", "vsphere", "hyperv", "nutanix", "xcpng", "vmware")):
         raise HTTPException(status_code=404, detail="No hypervisor integration is enabled")
     return templates.TemplateResponse("connections/index.html", {"request": request, **flags})
 
