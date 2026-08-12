@@ -1,14 +1,16 @@
 """
 AWS service wrapper using boto3.
-All blocking calls are run in a thread pool via asyncio.to_thread() to keep
-the FastAPI event loop free (same pattern as services/powershell.py).
+All blocking calls are run via _to_thread() — AWS's OWN bounded pool, not the event
+loop's shared default executor — to keep the FastAPI event loop free AND stop a slow
+AWS starving the other providers. See services/cloud_executor.py.
 """
-import asyncio
 import base64
 import json
 import logging
 from typing import Optional
 from datetime import datetime, timezone
+
+from . import cloud_executor
 
 try:
     import boto3
@@ -22,6 +24,19 @@ logger = logging.getLogger(__name__)
 
 class AWSError(Exception):
     """Raised when an AWS operation fails."""
+
+
+async def _to_thread(fn, /, *args, **kwargs):
+    """Run a blocking boto3 call on AWS's own thread pool.
+
+    Translates the executor's refusals into AWSError so every existing ``except
+    AWSError`` — which is what turns a failure into a 503 or an unavailable tile —
+    keeps working unchanged. Anything boto3 itself raises propagates untouched.
+    """
+    try:
+        return await cloud_executor.run("aws", fn, *args, **kwargs)
+    except cloud_executor.CloudCallError as exc:
+        raise AWSError(str(exc)) from exc
 
 
 def _require_boto3():
@@ -199,7 +214,7 @@ def _get_secret_sync(secret_name: str, region: str) -> str:
 
 async def get_secret(secret_name: str, region: str) -> str:
     """Retrieve a plaintext secret string from AWS Secrets Manager."""
-    return await asyncio.to_thread(_get_secret_sync, secret_name, region)
+    return await _to_thread(_get_secret_sync, secret_name, region)
 
 
 async def get_keypair_private_key(region: str, key_name: str) -> str:
@@ -210,7 +225,7 @@ async def get_keypair_private_key(region: str, key_name: str) -> str:
     """
     secret_name = f"ec2/keypairs/{key_name}"
     try:
-        return await asyncio.to_thread(_get_secret_sync, secret_name, region)
+        return await _to_thread(_get_secret_sync, secret_name, region)
     except Exception as e:
         raise AWSError(
             f"Private key not found in Secrets Manager. "
@@ -244,7 +259,7 @@ def _list_ssh_key_secrets_sync(region: str, prefix: str) -> list:
 async def get_ssh_key_secrets(region: str, prefix: str) -> list:
     """Return all Secrets Manager secrets whose names start with *prefix*."""
     try:
-        return await asyncio.to_thread(_list_ssh_key_secrets_sync, region, prefix)
+        return await _to_thread(_list_ssh_key_secrets_sync, region, prefix)
     except (ClientError, BotoCoreError) as e:
         raise AWSError(f"Failed to list SSH key secrets: {e}") from e
     except NoCredentialsError:
@@ -270,7 +285,7 @@ async def list_secret_names(region: str) -> list:
     """Return every Secrets Manager secret name — the candidate set for the
     per-launch SSH-key-secret override picker."""
     try:
-        return await asyncio.to_thread(_list_secret_names_sync, region)
+        return await _to_thread(_list_secret_names_sync, region)
     except (ClientError, BotoCoreError) as e:
         raise AWSError(f"Failed to list secrets: {e}") from e
     except NoCredentialsError:
@@ -298,7 +313,7 @@ def _get_ssh_public_key_from_secret_sync(region: str, secret_name: str) -> dict:
 async def get_ssh_public_key_from_secret(region: str, secret_name: str) -> dict:
     """Fetch and return the SSH public key from a Secrets Manager secret."""
     try:
-        return await asyncio.to_thread(_get_ssh_public_key_from_secret_sync, region, secret_name)
+        return await _to_thread(_get_ssh_public_key_from_secret_sync, region, secret_name)
     except AWSError:
         raise
     except (ClientError, BotoCoreError) as e:
@@ -359,7 +374,7 @@ def _format_ami(img: dict) -> dict:
 async def list_amis(region: str) -> list:
     """Return all AMIs owned by the account."""
     try:
-        return await asyncio.to_thread(_list_amis_sync, region)
+        return await _to_thread(_list_amis_sync, region)
     except (ClientError, BotoCoreError) as e:
         raise AWSError(f"Failed to list AMIs: {e}") from e
     except NoCredentialsError:
@@ -400,7 +415,7 @@ def _format_instance(inst: dict) -> dict:
 async def describe_instances(region: str, instance_ids: list) -> list:
     """Return live state for a list of instance IDs."""
     try:
-        return await asyncio.to_thread(_describe_instances_sync, region, instance_ids)
+        return await _to_thread(_describe_instances_sync, region, instance_ids)
     except ClientError as e:
         if e.response["Error"]["Code"] == "InvalidInstanceID.NotFound":
             return []
@@ -566,7 +581,7 @@ async def launch_instance(
     (cloud-identity JIT Phase 2).
     """
     try:
-        return await asyncio.to_thread(
+        return await _to_thread(
             _launch_instance_sync,
             region, ami_id, instance_name, instance_type,
             public_key, subnet_id, security_group_ids,
@@ -599,7 +614,7 @@ async def launch_instance(
 async def terminate_instance(region: str, instance_id: str) -> dict:
     """Terminate an EC2 instance."""
     try:
-        return await asyncio.to_thread(_terminate_instance_sync, region, instance_id)
+        return await _to_thread(_terminate_instance_sync, region, instance_id)
     except (ClientError, BotoCoreError) as e:
         raise AWSError(f"Failed to terminate instance {instance_id}: {e}") from e
     except NoCredentialsError:
@@ -617,7 +632,7 @@ def _get_ssm_parameter_sync(region: str, name: str) -> str:
 async def get_ssm_parameter(region: str, name: str) -> str:
     """Read an SSM parameter value (used to resolve the ECS-optimized AMI id)."""
     try:
-        return await asyncio.to_thread(_get_ssm_parameter_sync, region, name)
+        return await _to_thread(_get_ssm_parameter_sync, region, name)
     except (ClientError, BotoCoreError) as e:
         raise AWSError(f"Failed to read SSM parameter {name}: {e}") from e
     except NoCredentialsError:
@@ -679,7 +694,7 @@ async def ssm_send_command(region: str, instance_id: str, commands: list, *,
     on a failed command, only on an AWS/transport error, so callers decide whether a
     SQL failure is fatal."""
     try:
-        return await asyncio.to_thread(
+        return await _to_thread(
             _run_ssm_command_sync, region, instance_id, commands, timeout, poll_interval)
     except (ClientError, BotoCoreError) as e:
         raise AWSError(f"SSM SendCommand to {instance_id} failed: {e}") from e
@@ -727,7 +742,7 @@ async def run_container_instance(
 ) -> dict:
     """Launch an ECS container instance (the EC2 capacity for the Jumpoint)."""
     try:
-        return await asyncio.to_thread(
+        return await _to_thread(
             _run_container_instance_sync, region, ami_id, instance_type, subnet_id,
             security_group_ids, instance_profile, user_data, name_tag,
         )
@@ -756,7 +771,7 @@ async def find_instances_by_tag(region: str, *, name_tag: str, states: list) -> 
     the given states. Used to find-or-create the shared Jumpoint host (public_ip is
     the host's ephemeral egress IP — used to whitelist it in the Rancher firewall)."""
     try:
-        return await asyncio.to_thread(_find_instances_by_tag_sync, region, name_tag, states)
+        return await _to_thread(_find_instances_by_tag_sync, region, name_tag, states)
     except (ClientError, BotoCoreError) as e:
         raise AWSError(f"Failed to list instances by tag: {e}") from e
     except NoCredentialsError:
@@ -785,7 +800,7 @@ async def find_nat_ami(region: str, arch: str = "arm64") -> str:
     """Newest Amazon Linux 2023 AMI id for ``arch`` via DescribeImages — mirrors
     the EKS module's data.aws_ami.nat and avoids needing an ssm:GetParameter grant."""
     try:
-        return await asyncio.to_thread(_find_nat_ami_sync, region, arch)
+        return await _to_thread(_find_nat_ami_sync, region, arch)
     except (ClientError, BotoCoreError) as e:
         raise AWSError(f"Failed to resolve NAT AMI: {e}") from e
     except NoCredentialsError:
@@ -832,7 +847,7 @@ async def run_nat_instance(
 ) -> dict:
     """Launch the shared NAT instance (auto public IP, no instance profile, no EIP)."""
     try:
-        return await asyncio.to_thread(
+        return await _to_thread(
             _run_nat_instance_sync, region, ami_id, instance_type, subnet_id,
             security_group_ids, user_data, name_tag,
         )
@@ -850,7 +865,7 @@ def _set_source_dest_check_sync(region: str, instance_id: str, value: bool) -> N
 async def set_source_dest_check(region: str, instance_id: str, value: bool) -> None:
     """Toggle an instance's source/dest check (must be False to route/NAT)."""
     try:
-        await asyncio.to_thread(_set_source_dest_check_sync, region, instance_id, value)
+        await _to_thread(_set_source_dest_check_sync, region, instance_id, value)
     except (ClientError, BotoCoreError) as e:
         raise AWSError(f"Failed to set source/dest check on {instance_id}: {e}") from e
     except NoCredentialsError:
@@ -884,7 +899,7 @@ def _get_instance_primary_eni_sync(region: str, instance_id: str) -> str:
 async def get_instance_primary_eni(region: str, instance_id: str) -> str:
     """Return the DeviceIndex-0 ENI id of an instance — the NAT route target."""
     try:
-        return await asyncio.to_thread(_get_instance_primary_eni_sync, region, instance_id)
+        return await _to_thread(_get_instance_primary_eni_sync, region, instance_id)
     except (ClientError, BotoCoreError) as e:
         raise AWSError(f"Failed to get primary ENI for {instance_id}: {e}") from e
     except NoCredentialsError:
@@ -919,7 +934,7 @@ def _upsert_default_route_via_eni_sync(region: str, rt_id: str, eni_id: str) -> 
 async def upsert_default_route_via_eni(region: str, rt_id: str, eni_id: str) -> None:
     """Ensure ``rt_id`` has ``0.0.0.0/0 -> eni_id`` (create / replace-if-stale / no-op)."""
     try:
-        await asyncio.to_thread(_upsert_default_route_via_eni_sync, region, rt_id, eni_id)
+        await _to_thread(_upsert_default_route_via_eni_sync, region, rt_id, eni_id)
     except (ClientError, BotoCoreError) as e:
         raise AWSError(f"Failed to set default route on {rt_id}: {e}") from e
     except NoCredentialsError:
@@ -938,7 +953,7 @@ def _delete_default_route_sync(region: str, rt_id: str) -> None:
 async def delete_default_route(region: str, rt_id: str) -> None:
     """Delete the ``0.0.0.0/0`` route from ``rt_id`` (no-op if already absent)."""
     try:
-        await asyncio.to_thread(_delete_default_route_sync, region, rt_id)
+        await _to_thread(_delete_default_route_sync, region, rt_id)
     except (ClientError, BotoCoreError) as e:
         raise AWSError(f"Failed to delete default route on {rt_id}: {e}") from e
     except NoCredentialsError:
@@ -977,7 +992,7 @@ async def ensure_nat_security_group(region: str, *, vpc_id: str, vpc_cidr: str, 
     """Find-or-create the NAT SG (ingress all from ``vpc_cidr``, egress all).
     Fallback for sandboxes that predate the script pre-creating it."""
     try:
-        return await asyncio.to_thread(_ensure_nat_security_group_sync, region, vpc_id, vpc_cidr, name)
+        return await _to_thread(_ensure_nat_security_group_sync, region, vpc_id, vpc_cidr, name)
     except (ClientError, BotoCoreError) as e:
         raise AWSError(f"Failed to ensure NAT security group: {e}") from e
     except NoCredentialsError:
@@ -1026,7 +1041,7 @@ def _ensure_ssm_vpce_security_group_sync(region: str, vpc_id: str, vpc_cidr: str
 async def ensure_ssm_vpce_security_group(region: str, *, vpc_id: str, vpc_cidr: str, name: str) -> str:
     """Find-or-create the SSM-endpoint SG (443 ingress from ``vpc_cidr``)."""
     try:
-        return await asyncio.to_thread(_ensure_ssm_vpce_security_group_sync, region, vpc_id, vpc_cidr, name)
+        return await _to_thread(_ensure_ssm_vpce_security_group_sync, region, vpc_id, vpc_cidr, name)
     except (ClientError, BotoCoreError) as e:
         raise AWSError(f"Failed to ensure SSM endpoint security group: {e}") from e
     except NoCredentialsError:
@@ -1046,7 +1061,7 @@ def _find_security_group_id_sync(region: str, vpc_id: str, name: str) -> Optiona
 async def find_security_group_id(region: str, *, vpc_id: str, name: str) -> Optional[str]:
     """Return the id of the SG named ``name`` in ``vpc_id`` (or None)."""
     try:
-        return await asyncio.to_thread(_find_security_group_id_sync, region, vpc_id, name)
+        return await _to_thread(_find_security_group_id_sync, region, vpc_id, name)
     except (ClientError, BotoCoreError) as e:
         raise AWSError(f"Failed to look up security group {name}: {e}") from e
     except NoCredentialsError:
@@ -1068,7 +1083,7 @@ def _find_ssm_endpoints_sync(region: str, vpc_id: str, service_names: list) -> d
 async def find_ssm_endpoints(region: str, *, vpc_id: str, service_names: list) -> dict:
     """Return {service_name: {endpoint_id, state}} for the given VPC + service names."""
     try:
-        return await asyncio.to_thread(_find_ssm_endpoints_sync, region, vpc_id, service_names)
+        return await _to_thread(_find_ssm_endpoints_sync, region, vpc_id, service_names)
     except (ClientError, BotoCoreError) as e:
         raise AWSError(f"Failed to list VPC endpoints: {e}") from e
     except NoCredentialsError:
@@ -1103,7 +1118,7 @@ async def create_ssm_endpoint(region: str, *, vpc_id: str, service_name: str, su
     """Create one Interface VPC endpoint (private DNS enabled) — mirrors the sandbox
     script's ``aws ec2 create-vpc-endpoint``."""
     try:
-        return await asyncio.to_thread(
+        return await _to_thread(
             _create_ssm_endpoint_sync, region, vpc_id, service_name, subnet_id,
             security_group_ids, name_tag)
     except (ClientError, BotoCoreError) as e:
@@ -1133,7 +1148,7 @@ def _delete_ssm_endpoints_sync(region: str, endpoint_ids: list) -> None:
 async def delete_ssm_endpoints(region: str, endpoint_ids: list) -> None:
     """Delete VPC endpoints and wait for their ENIs to clear."""
     try:
-        await asyncio.to_thread(_delete_ssm_endpoints_sync, region, endpoint_ids)
+        await _to_thread(_delete_ssm_endpoints_sync, region, endpoint_ids)
     except (ClientError, BotoCoreError) as e:
         raise AWSError(f"Failed to delete VPC endpoints: {e}") from e
     except NoCredentialsError:
@@ -1164,7 +1179,7 @@ async def delete_security_group(region: str, sg_id: str) -> None:
     """Delete a security group (no-op if already gone; retries past a transient
     DependencyViolation while endpoint ENIs finish detaching)."""
     try:
-        await asyncio.to_thread(_delete_security_group_sync, region, sg_id)
+        await _to_thread(_delete_security_group_sync, region, sg_id)
     except (ClientError, BotoCoreError) as e:
         raise AWSError(f"Failed to delete security group {sg_id}: {e}") from e
     except NoCredentialsError:
@@ -1187,7 +1202,7 @@ async def set_workgroup_tag(region: str, instance_id: str, workgroup: str) -> No
     so this works whether or not the tag exists.
     """
     try:
-        await asyncio.to_thread(_set_workgroup_tag_sync, region, instance_id, workgroup)
+        await _to_thread(_set_workgroup_tag_sync, region, instance_id, workgroup)
     except (ClientError, BotoCoreError) as e:
         raise AWSError(f"Failed to set Workgroup tag on {instance_id}: {e}") from e
     except NoCredentialsError:
@@ -1252,7 +1267,7 @@ def _get_network_options_sync(region: str) -> dict:
 async def get_network_options(region: str) -> dict:
     """Return dropdowns for the deploy form: subnets, security groups, instance types."""
     try:
-        return await asyncio.to_thread(_get_network_options_sync, region)
+        return await _to_thread(_get_network_options_sync, region)
     except (ClientError, BotoCoreError) as e:
         raise AWSError(f"Failed to fetch network options: {e}") from e
     except NoCredentialsError:
@@ -1333,7 +1348,7 @@ async def get_db_options(region: str) -> dict:
     """Pickers for the database provision form: instance classes, DB subnet
     groups, and security groups in the given region."""
     try:
-        return await asyncio.to_thread(_get_db_options_sync, region)
+        return await _to_thread(_get_db_options_sync, region)
     except (ClientError, BotoCoreError) as e:
         raise AWSError(f"Failed to fetch database options: {e}") from e
     except NoCredentialsError:
@@ -1406,7 +1421,7 @@ def _search_community_amis_sync(region: str, os_filter: Optional[str]) -> list:
 async def search_community_amis(region: str, os_filter: Optional[str] = None) -> list:
     """Return free-tier-compatible community AMIs (Amazon Linux, Ubuntu, Debian)."""
     try:
-        return await asyncio.to_thread(_search_community_amis_sync, region, os_filter)
+        return await _to_thread(_search_community_amis_sync, region, os_filter)
     except (ClientError, BotoCoreError) as e:
         raise AWSError(f"Failed to search community AMIs: {e}") from e
     except NoCredentialsError:
@@ -1448,7 +1463,7 @@ async def copy_ami(
 ) -> str:
     """Copy a community AMI into the account. Returns the new AMI ID."""
     try:
-        return await asyncio.to_thread(_copy_ami_sync, region, source_ami_id, name, description)
+        return await _to_thread(_copy_ami_sync, region, source_ami_id, name, description)
     except (ClientError, BotoCoreError) as e:
         raise AWSError(f"Failed to copy AMI {source_ami_id}: {e}") from e
     except NoCredentialsError:
@@ -1473,7 +1488,7 @@ def _get_ami_status_sync(region: str, ami_id: str) -> dict:
 async def get_ami_status(region: str, ami_id: str) -> dict:
     """Poll the state of an AMI (used during copy to check for 'available')."""
     try:
-        return await asyncio.to_thread(_get_ami_status_sync, region, ami_id)
+        return await _to_thread(_get_ami_status_sync, region, ami_id)
     except (ClientError, BotoCoreError) as e:
         raise AWSError(f"Failed to get AMI status for {ami_id}: {e}") from e
     except NoCredentialsError:
@@ -1672,7 +1687,7 @@ async def run_ecs_jumpoint_task(
     ``host_instance_id`` pins the task to one container instance — see
     :func:`_run_ecs_task_sync`."""
     try:
-        return await asyncio.to_thread(
+        return await _to_thread(
             _run_ecs_task_sync,
             region, cluster, task_family, subnet_id, security_group_ids,
             deploy_key, cpu, memory, execution_role_arn, image, launch_type,
@@ -1687,7 +1702,7 @@ async def run_ecs_jumpoint_task(
 async def stop_ecs_jumpoint_task(region: str, cluster: str, task_arn: str) -> None:
     """Stop a running ECS Jumpoint task."""
     try:
-        await asyncio.to_thread(_stop_ecs_task_sync, region, cluster, task_arn)
+        await _to_thread(_stop_ecs_task_sync, region, cluster, task_arn)
     except (ClientError, BotoCoreError) as e:
         raise AWSError(f"Failed to stop ECS task {task_arn}: {e}") from e
     except NoCredentialsError:
@@ -1709,7 +1724,7 @@ async def list_container_instances(region: str, cluster: str) -> list:
     """Return registered ECS container instances (the EC2 capacity) with status —
     used to poll for the Jumpoint host coming online before running the task."""
     try:
-        return await asyncio.to_thread(_list_container_instances_sync, region, cluster)
+        return await _to_thread(_list_container_instances_sync, region, cluster)
     except (ClientError, BotoCoreError) as e:
         raise AWSError(f"Failed to list container instances: {e}") from e
     except NoCredentialsError:
@@ -1738,7 +1753,7 @@ def _list_ecs_tasks_sync(region: str, cluster: str, include_stopped: bool) -> li
 async def list_ecs_tasks(region: str, cluster: str, include_stopped: bool = False) -> list[dict]:
     """List ECS tasks in the given cluster."""
     try:
-        return await asyncio.to_thread(_list_ecs_tasks_sync, region, cluster, include_stopped)
+        return await _to_thread(_list_ecs_tasks_sync, region, cluster, include_stopped)
     except (ClientError, BotoCoreError) as e:
         raise AWSError(f"Failed to list ECS tasks: {e}") from e
     except NoCredentialsError:
@@ -1922,7 +1937,7 @@ async def run_ecs_ansible_task(
 ) -> tuple:
     """Run an Ansible playbook via ECS Fargate. Returns (exit_code, output)."""
     try:
-        return await asyncio.to_thread(
+        return await _to_thread(
             _run_ecs_ansible_sync,
             region, cluster, task_family, image, cpu, memory,
             subnet_id, security_group_ids, execution_role_arn,
@@ -2091,7 +2106,7 @@ async def run_ecs_k8s_task(
     """Run a kubectl/helm command against a cluster's API via ECS Fargate.
     Returns (exit_code, output)."""
     try:
-        return await asyncio.to_thread(
+        return await _to_thread(
             _run_ecs_k8s_sync,
             region, cluster, task_family, image, cpu, memory,
             subnet_id, security_group_ids, execution_role_arn,
@@ -2261,7 +2276,7 @@ async def run_ecs_ansible_local_task(
     """Run a localhost Ansible play (k8s/DB target) via ECS Fargate.
     Returns (exit_code, output)."""
     try:
-        return await asyncio.to_thread(
+        return await _to_thread(
             _run_ecs_ansible_local_sync,
             region, cluster, task_family, image, cpu, memory,
             subnet_id, security_group_ids, execution_role_arn,
@@ -2292,7 +2307,7 @@ def _describe_ami_sync(region: str, ami_id: str) -> dict:
 async def describe_ami(region: str, ami_id: str) -> dict:
     """Return name and description for a single AMI."""
     try:
-        return await asyncio.to_thread(_describe_ami_sync, region, ami_id)
+        return await _to_thread(_describe_ami_sync, region, ami_id)
     except (ClientError, BotoCoreError) as e:
         return {"name": ami_id, "description": ""}
     except NoCredentialsError:
@@ -2316,7 +2331,7 @@ def _describe_instance_detail_sync(region: str, instance_id: str) -> dict:
 async def describe_instance_detail(region: str, instance_id: str) -> dict:
     """Return subnet_id and security_group_ids for a running instance."""
     try:
-        return await asyncio.to_thread(_describe_instance_detail_sync, region, instance_id)
+        return await _to_thread(_describe_instance_detail_sync, region, instance_id)
     except (ClientError, BotoCoreError) as e:
         raise AWSError(f"Failed to describe instance {instance_id}: {e}") from e
     except NoCredentialsError:
@@ -2355,7 +2370,7 @@ def _deregister_ami_sync(region: str, ami_id: str) -> list[str]:
 async def deregister_ami(region: str, ami_id: str) -> list[str]:
     """Deregister an AMI and delete its backing EBS snapshots."""
     try:
-        return await asyncio.to_thread(_deregister_ami_sync, region, ami_id)
+        return await _to_thread(_deregister_ami_sync, region, ami_id)
     except AWSError:
         raise
     except (ClientError, BotoCoreError) as e:
@@ -2437,7 +2452,7 @@ async def enable_ena_support(region: str, ami_id: str) -> str:
     """Re-register an AMI with EnaSupport=True (same backing snapshot, new AMI ID).
     Returns the new AMI ID. The original AMI is left intact."""
     try:
-        return await asyncio.to_thread(_register_with_ena_sync, region, ami_id)
+        return await _to_thread(_register_with_ena_sync, region, ami_id)
     except AWSError:
         raise
     except (ClientError, BotoCoreError) as e:
@@ -2485,7 +2500,7 @@ async def create_image_from_instance(
 ) -> str:
     """Create an AMI from a running EC2 instance. Returns the new AMI ID."""
     try:
-        return await asyncio.to_thread(
+        return await _to_thread(
             _create_image_sync, region, instance_id, name, description, no_reboot
         )
     except (ClientError, BotoCoreError) as e:
@@ -2579,7 +2594,7 @@ async def export_image_to_vhd(
     streaming status into a Job log.
     """
     try:
-        return await asyncio.to_thread(
+        return await _to_thread(
             _export_image_to_vhd_sync,
             region, ami_id, s3_bucket, s3_prefix, role_name,
             description, poll_interval, timeout, progress_cb,
@@ -2768,7 +2783,7 @@ async def import_image_from_vhd(
     (ImportImage auto-names it import-ami-…, and the Name is immutable) and the
     temporary one is removed; `image_id` is then the renamed AMI."""
     try:
-        return await asyncio.to_thread(
+        return await _to_thread(
             _import_image_from_vhd_sync,
             region, s3_bucket, s3_key, role_name, description, name,
             disk_format, poll_interval, timeout, progress_cb,
@@ -2927,7 +2942,7 @@ async def run_promote_runner_ecs(
 ) -> tuple:
     """Async wrapper around the ECS launch+poll. Returns (exit_code, log_output)."""
     try:
-        return await asyncio.to_thread(
+        return await _to_thread(
             _run_promote_runner_ecs_sync,
             region, cluster, task_family, image, cpu, memory,
             subnet_id, security_group_ids, execution_role_arn,
@@ -3055,7 +3070,7 @@ async def deploy_compose_ecs(
 ) -> dict:
     """Deploy a parsed compose spec to a new ECS Fargate task."""
     try:
-        return await asyncio.to_thread(
+        return await _to_thread(
             _deploy_compose_ecs_sync,
             region, cluster, family, services, cpu, memory,
             subnet_id, security_group_ids, execution_role_arn, assign_public_ip,

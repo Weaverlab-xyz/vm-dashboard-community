@@ -964,6 +964,26 @@ class Settings(BaseSettings):
     # poller's first query after a quiet gap — reachable today at concurrency 1.
     db_pool_recycle_s: int = 1800
 
+    # ── Blocking cloud SDK calls (services/cloud_executor.py) ────────────────
+    # Threads PER PROVIDER, and the deadline on one blocking call. Every cloud SDK call
+    # used to share the event loop's default executor — min(32, os.cpu_count() + 4),
+    # which in a container is computed from the HOST's CPU count and came out at 8. The
+    # home page fans out ~8 per-cloud reads, so one slow provider parked every thread in
+    # the process and the whole dashboard hung until it was restarted (2026-08-12).
+    #
+    # A pool per provider is what bounds that: a wedged provider exhausts its own threads
+    # and AWS, Azure and the pure-DB routes keep serving. Sizing is read once per
+    # provider at first use — a live pool cannot be resized safely — so a change here
+    # needs a restart, unlike the worker_* knobs.
+    cloud_pool_size: int = 8
+    # Request path. Far above a healthy read (~1s) and far below the 240s the ingress
+    # allowed while the site was wedged.
+    cloud_call_timeout_s: int = 60
+    # Job path, applied only in jobs_worker (cloud_executor.use_worker_defaults). Above
+    # the longest poller — a GCP image export runs to 7200s inside ONE to_thread call —
+    # so this bounds runaway work without capping legitimate work.
+    cloud_worker_call_timeout_s: int = 14400
+
     # ── Outbound notifications ───────────────────────────────────────────────
     # Sends dashboard events to webhook endpoints (Slack, Microsoft Teams via a Power
     # Automate Workflows URL, or a signed generic envelope you point at whatever you
