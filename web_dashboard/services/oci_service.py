@@ -6,24 +6,37 @@ encrypted) via the ``_cfg`` helper: tenancy OCID + user OCID + key fingerprint +
 private-key PEM (+ optional passphrase) + region. Every resource lives in a
 compartment (``oci_compartment_ocid``; blank → the tenancy root).
 
-All blocking oci-SDK calls run in ``asyncio.to_thread()`` so the FastAPI event
-loop is never blocked — the same discipline as aws_service / gcp_service. The SDK
+All blocking oci-SDK calls run in ``_to_thread()`` — OCI's OWN bounded pool, not the
+event loop's shared default executor — so the FastAPI event loop is never blocked AND a
+slow OCI cannot starve the other providers (see services/cloud_executor.py). The SDK
 itself is imported lazily inside ``_require_oci`` so the app boots cleanly when
 OCI isn't configured (community-edition invariant).
 """
-import asyncio
 import base64
 import json
 import logging
 from typing import List, Optional
 
-from . import oci_freetier
+from . import cloud_executor, oci_freetier
 
 logger = logging.getLogger(__name__)
 
 
 class OCIError(Exception):
     pass
+
+
+async def _to_thread(fn, /, *args, **kwargs):
+    """Run a blocking oci-SDK call on OCI's own thread pool.
+
+    Translates the executor's refusals into OCIError so every existing ``except
+    OCIError`` — which is what turns a failure into a 503 or an unavailable tile —
+    keeps working unchanged. Anything the SDK itself raises propagates untouched.
+    """
+    try:
+        return await cloud_executor.run("oci", fn, *args, **kwargs)
+    except cloud_executor.CloudCallError as exc:
+        raise OCIError(str(exc)) from exc
 
 
 # ── Credential helpers ────────────────────────────────────────────────────────
@@ -118,7 +131,7 @@ def _list_images_sync(compartment_id: str) -> list[dict]:
 
 
 async def list_images(compartment_id: str = "") -> list[dict]:
-    return await asyncio.to_thread(_list_images_sync, compartment_id or _compartment())
+    return await _to_thread(_list_images_sync, compartment_id or _compartment())
 
 
 # ── Shapes / availability domains / subnets ───────────────────────────────────
@@ -230,7 +243,7 @@ async def check_launch_placement(
     *, availability_domain: str, image_ocid: str, shape: str,
     compartment_id: str = "", region: str = "",
 ) -> None:
-    await asyncio.to_thread(
+    await _to_thread(
         lambda: _check_launch_placement_sync(
             availability_domain=availability_domain, image_ocid=image_ocid,
             shape=shape, compartment_id=compartment_id, region=region))
@@ -336,17 +349,17 @@ def _get_network_options_sync(compartment_id: str, vcn_id: str,
 async def get_network_options(compartment_id: str = "", vcn_id: str = "",
                               availability_domain: str = "",
                               image_ocid: str = "") -> dict:
-    return await asyncio.to_thread(
+    return await _to_thread(
         _get_network_options_sync, compartment_id or _compartment(), vcn_id or _cfg("oci_vcn_ocid"),
         availability_domain, image_ocid)
 
 
 async def list_availability_domains(compartment_id: str = "") -> list[str]:
-    return await asyncio.to_thread(_list_availability_domains_sync, compartment_id or _compartment())
+    return await _to_thread(_list_availability_domains_sync, compartment_id or _compartment())
 
 
 async def list_subnets(compartment_id: str = "", vcn_id: str = "") -> list[dict]:
-    return await asyncio.to_thread(
+    return await _to_thread(
         _list_subnets_sync, compartment_id or _compartment(), vcn_id or _cfg("oci_vcn_ocid"))
 
 
@@ -371,7 +384,7 @@ def _get_secret_content_sync(secret_ref: str) -> str:
 
 
 async def get_secret(secret_ref: str) -> str:
-    return await asyncio.to_thread(_get_secret_content_sync, secret_ref)
+    return await _to_thread(_get_secret_content_sync, secret_ref)
 
 
 def _clean_public_key(value: str) -> str:
@@ -533,7 +546,7 @@ async def launch_instance(
     workgroup: str = "",
 ) -> dict:
     try:
-        return await asyncio.to_thread(
+        return await _to_thread(
             _launch_instance_sync, compartment_id, availability_domain, instance_name,
             shape, image_ocid, subnet_ocid, assign_public_ip, ssh_public_key,
             ocpus, memory_gb, boot_volume_gb, workgroup,
@@ -565,7 +578,7 @@ def _describe_instances_sync(compartment_id: str, instance_ocids: list[str]) -> 
 async def describe_instances(compartment_id: str, instance_ocids: list[str]) -> list[dict]:
     if not instance_ocids:
         return []
-    return await asyncio.to_thread(
+    return await _to_thread(
         _describe_instances_sync, compartment_id or _compartment(), instance_ocids)
 
 
@@ -577,7 +590,7 @@ def _terminate_instance_sync(instance_id: str, preserve_boot_volume: bool = Fals
 
 async def terminate_instance(instance_id: str, preserve_boot_volume: bool = False) -> None:
     try:
-        await asyncio.to_thread(_terminate_instance_sync, instance_id, preserve_boot_volume)
+        await _to_thread(_terminate_instance_sync, instance_id, preserve_boot_volume)
     except OCIError:
         raise
     except Exception as exc:  # noqa: BLE001
@@ -618,7 +631,7 @@ async def oke_cluster_versions(region: str = "") -> list[str]:
     into a 400 "Invalid kubernetesVersion" mid-apply. Blank ``region`` → the
     configured ``oci_region`` (where every OKE cluster lands)."""
     try:
-        return await asyncio.to_thread(_oke_cluster_versions_sync, region)
+        return await _to_thread(_oke_cluster_versions_sync, region)
     except OCIError:
         raise
     except Exception as exc:  # noqa: BLE001
@@ -659,7 +672,7 @@ async def oke_node_pool_shapes(region: str = "") -> list[str]:
     This is discovery for the picker, not a gate — nothing validates a submitted
     shape against it (see ``k8s_service.provision_options``)."""
     try:
-        return await asyncio.to_thread(_oke_node_pool_shapes_sync, region)
+        return await _to_thread(_oke_node_pool_shapes_sync, region)
     except OCIError:
         raise
     except Exception as exc:  # noqa: BLE001
@@ -722,7 +735,7 @@ def _object_storage_namespace_sync() -> str:
 async def object_storage_namespace() -> str:
     """The tenancy's Object Storage namespace (needed to address buckets/objects
     and to build the image-import source tuple)."""
-    return await asyncio.to_thread(_object_storage_namespace_sync)
+    return await _to_thread(_object_storage_namespace_sync)
 
 
 def _delete_object_sync(namespace: str, bucket: str, object_name: str) -> None:
@@ -733,7 +746,7 @@ def _delete_object_sync(namespace: str, bucket: str, object_name: str) -> None:
 
 async def delete_object_storage_object(namespace: str, bucket: str, object_name: str) -> None:
     """Delete a staged Object Storage object (promote-staging cleanup). Best-effort."""
-    await asyncio.to_thread(_delete_object_sync, namespace, bucket, object_name)
+    await _to_thread(_delete_object_sync, namespace, bucket, object_name)
 
 
 def _run_ci_promote_runner_sync(
@@ -808,7 +821,7 @@ async def run_container_instance_promote_runner_task(
     gcp_service.run_cloud_run_promote_runner_task."""
     display_name = f"promote-runner-{(job_id or 'job')[:24]}"
     try:
-        return await asyncio.to_thread(
+        return await _to_thread(
             _run_ci_promote_runner_sync,
             compartment_id=compartment_id, availability_domain=availability_domain,
             subnet_ocid=subnet_ocid, image=image, runner_args=runner_args, env=env,
@@ -859,7 +872,7 @@ async def create_image_from_object_storage(
     Object Storage — the OCI leg of cross-cloud image promotion. Waits for the
     image to reach AVAILABLE. Returns {image_ocid, display_name, lifecycle_state}."""
     try:
-        return await asyncio.to_thread(
+        return await _to_thread(
             _create_image_from_object_storage_sync,
             compartment_id=compartment_id or _compartment(), display_name=display_name,
             namespace=namespace, bucket=bucket, object_name=object_name,
@@ -937,7 +950,7 @@ async def export_image_to_object_storage(
     {namespace, bucket, object_name, export_format, size_bytes}."""
     ns = namespace or await object_storage_namespace()
     try:
-        return await asyncio.to_thread(
+        return await _to_thread(
             _export_image_sync,
             image_ocid=image_ocid, namespace=ns, bucket=bucket,
             object_name=object_name, export_format=export_format,

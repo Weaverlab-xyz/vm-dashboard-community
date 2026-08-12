@@ -803,7 +803,7 @@ async def _main() -> None:
     multiply those caps (the claim is atomic), so replica-based scale-out is unchanged;
     the caps exist because replicas are not a free, or even an available, knob everywhere.
     """
-    from .services import notification_service
+    from .services import cloud_executor, notification_service
 
     loop = asyncio.get_running_loop()
     threads = _executor_size(_limits())
@@ -812,6 +812,10 @@ async def _main() -> None:
     logger.info("job runner: default executor sized to %d threads "
                 "(the stdlib default here would be %d)",
                 threads, min(32, (os.cpu_count() or 1) + 4))
+    # Blocking cloud SDK calls have their own per-provider pools and their own deadline.
+    # This process must say so BEFORE any job runs: the request-path default is 60s, which
+    # is right for a dashboard tile and would kill a two-hour image export.
+    cloud_executor.use_worker_defaults()
     # Owned here, not at module level: an asyncio.Event binds to the loop that first
     # awaits it (see _run_loop).
     shutdown = asyncio.Event()

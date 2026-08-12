@@ -5,10 +5,10 @@ Credential priority (highest to lowest):
   1. config_service DB (wizard-stored service account JSON)
   2. Application Default Credentials (gcloud auth / Workload Identity)
 
-All blocking SDK calls run in asyncio.to_thread() so the FastAPI event loop
-is never blocked.
+All blocking SDK calls run in _to_thread() — GCP's OWN bounded pool, not the event
+loop's shared default executor — so the FastAPI event loop is never blocked AND a slow
+GCP cannot starve the other providers. See services/cloud_executor.py.
 """
-import asyncio
 import hashlib
 import json
 import logging
@@ -16,11 +16,26 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+from . import cloud_executor
+
 logger = logging.getLogger(__name__)
 
 
 class GCPError(Exception):
     pass
+
+
+async def _to_thread(fn, /, *args, **kwargs):
+    """Run a blocking Compute/Storage/Secret-Manager call on GCP's own thread pool.
+
+    Translates the executor's refusals into GCPError so every existing ``except
+    GCPError`` — which is what turns a failure into a 503 or an unavailable tile —
+    keeps working unchanged. Anything the SDK itself raises propagates untouched.
+    """
+    try:
+        return await cloud_executor.run("gcp", fn, *args, **kwargs)
+    except cloud_executor.CloudCallError as exc:
+        raise GCPError(str(exc)) from exc
 
 
 # ── Public image catalog ──────────────────────────────────────────────────────
@@ -119,7 +134,7 @@ def gke_get_token() -> str:
 # workforce group's principalSet the gkehub.gateway* roles. Kubernetes RBAC (the
 # principalSet ClusterRoleBinding) is applied separately by k8s_service. All REST via
 # an AuthorizedSession (google-auth only — gkehub/resourcemanager have no client lib
-# wired here). Synchronous; callers wrap in asyncio.to_thread.
+# wired here). Synchronous; callers wrap in _to_thread.
 
 _GATEWAY_ROLES = ("roles/gkehub.gatewayEditor", "roles/gkehub.viewer")
 
@@ -400,7 +415,7 @@ def _list_custom_images_sync(project_id: str) -> list[dict]:
 
 
 async def list_custom_images(project_id: str) -> list[dict]:
-    return await asyncio.to_thread(_list_custom_images_sync, project_id)
+    return await _to_thread(_list_custom_images_sync, project_id)
 
 
 def _list_public_images_sync(os_filter: str = "all") -> list[dict]:
@@ -443,7 +458,7 @@ def _list_public_images_sync(os_filter: str = "all") -> list[dict]:
 
 
 async def list_public_images(os_filter: str = "all") -> list[dict]:
-    return await asyncio.to_thread(_list_public_images_sync, os_filter)
+    return await _to_thread(_list_public_images_sync, os_filter)
 
 
 def _delete_image_sync(project_id: str, image_name: str) -> None:
@@ -457,7 +472,7 @@ def _delete_image_sync(project_id: str, image_name: str) -> None:
 
 
 async def delete_image(project_id: str, image_name: str) -> None:
-    await asyncio.to_thread(_delete_image_sync, project_id, image_name)
+    await _to_thread(_delete_image_sync, project_id, image_name)
 
 
 def _create_image_from_instance_sync(
@@ -506,7 +521,7 @@ async def create_image_from_instance(
     image_name: str,
     description: str = "",
 ) -> dict:
-    return await asyncio.to_thread(
+    return await _to_thread(
         _create_image_from_instance_sync,
         project_id, zone, instance_name, image_name, description,
     )
@@ -572,7 +587,7 @@ def _get_network_options_sync(project_id: str, region: str, zone: str,
 
 async def get_network_options(project_id: str, region: str, zone: str,
                               zone_regions: Optional[list] = None) -> dict:
-    return await asyncio.to_thread(_get_network_options_sync, project_id, region, zone, zone_regions)
+    return await _to_thread(_get_network_options_sync, project_id, region, zone, zone_regions)
 
 
 def reserved_cidrs(project_id: str = "") -> set:
@@ -649,7 +664,7 @@ def _get_secret_sync(project_id: str, secret_name: str) -> str:
 
 
 async def get_secret(project_id: str, secret_name: str) -> str:
-    return await asyncio.to_thread(_get_secret_sync, project_id, secret_name)
+    return await _to_thread(_get_secret_sync, project_id, secret_name)
 
 
 def _list_secret_names_sync(project_id: str) -> list:
@@ -664,7 +679,7 @@ def _list_secret_names_sync(project_id: str) -> list:
 async def list_secret_names(project_id: str) -> list:
     """Return every Secret Manager secret id — candidate set for the per-launch
     SSH-key-secret override picker."""
-    return await asyncio.to_thread(_list_secret_names_sync, project_id)
+    return await _to_thread(_list_secret_names_sync, project_id)
 
 
 def _clean_public_key(value: str) -> str:
@@ -1004,7 +1019,7 @@ async def launch_instance(
     network_tags: Optional[list[str]] = None,
     labels: Optional[dict] = None,
 ) -> dict:
-    return await asyncio.to_thread(
+    return await _to_thread(
         _launch_instance_sync,
         project_id, zone, instance_name, machine_type, image_self_link,
         subnetwork, create_external_ip, ssh_username, ssh_public_key,
@@ -1053,7 +1068,7 @@ def _describe_instances_sync(project_id: str, zone: str, instance_names: list[st
 
 
 async def describe_instances(project_id: str, zone: str, instance_names: list[str]) -> list[dict]:
-    return await asyncio.to_thread(_describe_instances_sync, project_id, zone, instance_names)
+    return await _to_thread(_describe_instances_sync, project_id, zone, instance_names)
 
 
 def _set_workgroup_label_sync(project_id: str, zone: str, instance_name: str, workgroup: str) -> None:
@@ -1087,7 +1102,7 @@ def _set_workgroup_label_sync(project_id: str, zone: str, instance_name: str, wo
 async def set_workgroup_label(project_id: str, zone: str, instance_name: str, workgroup: str) -> None:
     """Rewrite the `workgroup` label on a GCE instance (preserves other labels).
     Used by the admin reassign endpoint."""
-    await asyncio.to_thread(_set_workgroup_label_sync, project_id, zone, instance_name, workgroup)
+    await _to_thread(_set_workgroup_label_sync, project_id, zone, instance_name, workgroup)
 
 
 def _terminate_instance_sync(project_id: str, zone: str, instance_name: str) -> None:
@@ -1101,7 +1116,7 @@ def _terminate_instance_sync(project_id: str, zone: str, instance_name: str) -> 
 
 
 async def terminate_instance(project_id: str, zone: str, instance_name: str) -> None:
-    await asyncio.to_thread(_terminate_instance_sync, project_id, zone, instance_name)
+    await _to_thread(_terminate_instance_sync, project_id, zone, instance_name)
 
 
 # ── BeyondTrust SRA Jumpoint on COS-on-GCE ────────────────────────────────────
@@ -1320,7 +1335,7 @@ async def run_gce_jumpoint(
 ) -> dict:
     """Async wrapper for _run_gce_jumpoint_sync."""
     try:
-        return await asyncio.to_thread(
+        return await _to_thread(
             _run_gce_jumpoint_sync,
             project_id, zone, name, container_image, deploy_key,
             network, subnetwork, machine_type, "cos-stable", create_external_ip,
@@ -1335,7 +1350,7 @@ async def run_gce_jumpoint(
 async def stop_gce_jumpoint(project_id: str, zone: str, name: str) -> None:
     """Delete the GCE Jumpoint instance. Quiet no-op if it doesn't exist."""
     try:
-        await asyncio.to_thread(_terminate_instance_sync, project_id, zone, name)
+        await _to_thread(_terminate_instance_sync, project_id, zone, name)
     except Exception as e:
         # NotFound is benign; log everything else
         msg = str(e)
@@ -1468,7 +1483,7 @@ async def run_gce_db_forwarder(
 ) -> dict:
     """Async wrapper for :func:`_run_gce_db_forwarder_sync`."""
     try:
-        return await asyncio.to_thread(
+        return await _to_thread(
             _run_gce_db_forwarder_sync, project_id, zone, name,
             listen_port, target_host, target_port, image,
             network, subnetwork, machine_type, "cos-stable", create_external_ip)
@@ -1481,7 +1496,7 @@ async def run_gce_db_forwarder(
 async def stop_gce_db_forwarder(project_id: str, zone: str, name: str) -> None:
     """Delete the forwarder instance. Quiet no-op if it doesn't exist."""
     try:
-        await asyncio.to_thread(_terminate_instance_sync, project_id, zone, name)
+        await _to_thread(_terminate_instance_sync, project_id, zone, name)
     except Exception as e:
         msg = str(e)
         if "404" in msg or "not found" in msg.lower():
@@ -1520,7 +1535,7 @@ async def ensure_firewall_rule(*, project: str, name: str, network: str,
                                protocol: str = "tcp", ports: Optional[list] = None) -> None:
     """Async wrapper: idempotently ensure an INGRESS allow firewall rule."""
     try:
-        await asyncio.to_thread(_ensure_firewall_rule_sync, project, name, network,
+        await _to_thread(_ensure_firewall_rule_sync, project, name, network,
                                 source_ranges, target_tags, protocol, ports or [])
     except GCPError:
         raise
@@ -1536,7 +1551,7 @@ async def delete_firewall_rule(project: str, name: str) -> None:
         client = compute_v1.FirewallsClient(credentials=_gcp_creds())
         client.delete(project=project, firewall=name).result()
     try:
-        await asyncio.to_thread(_sync)
+        await _to_thread(_sync)
     except Exception as e:
         msg = str(e)
         if "404" in msg or "not found" in msg.lower():
@@ -1595,8 +1610,8 @@ async def ensure_vm_egress_nat(*, project: str, region: str, router: str, nat_na
                                subnetwork: str) -> bool:
     """Async wrapper: ensure the on-demand VM Cloud NAT gateway exists."""
     try:
-        return await asyncio.to_thread(_ensure_vm_egress_nat_sync, project, region,
-                                       router, nat_name, subnetwork)
+        return await _to_thread(_ensure_vm_egress_nat_sync, project, region,
+                                router, nat_name, subnetwork)
     except Exception as e:
         raise GCPError(f"Failed to ensure Cloud NAT '{nat_name}' on router "
                        f"'{router}' ({region}): {e}") from e
@@ -1625,8 +1640,8 @@ async def delete_vm_egress_nat(*, project: str, region: str, router: str,
                                nat_name: str) -> bool:
     """Async wrapper: drop the on-demand VM Cloud NAT gateway. Quiet if absent."""
     try:
-        return await asyncio.to_thread(_delete_vm_egress_nat_sync, project, region,
-                                       router, nat_name)
+        return await _to_thread(_delete_vm_egress_nat_sync, project, region,
+                                router, nat_name)
     except Exception as e:
         raise GCPError(f"Failed to delete Cloud NAT '{nat_name}' on router "
                        f"'{router}' ({region}): {e}") from e
@@ -1663,9 +1678,9 @@ async def ensure_egress_allow_rule(*, project: str, name: str, network: str,
                                    destination_ranges: Optional[list] = None) -> None:
     """Async wrapper: idempotently ensure the on-demand EGRESS ALLOW rule."""
     try:
-        await asyncio.to_thread(_ensure_egress_allow_rule_sync, project, name, network,
-                                target_tags, priority,
-                                destination_ranges or ["0.0.0.0/0"])
+        await _to_thread(_ensure_egress_allow_rule_sync, project, name, network,
+                         target_tags, priority,
+                         destination_ranges or ["0.0.0.0/0"])
     except Exception as e:
         raise GCPError(f"Failed to ensure egress allow rule '{name}': {e}") from e
 
@@ -1726,7 +1741,7 @@ def _list_gce_jumpoints_sync(project_id: str) -> list[dict]:
 async def list_gce_jumpoints(project_id: str) -> list[dict]:
     """List the BT Jumpoint container instances (COS on GCE) in the project."""
     try:
-        return await asyncio.to_thread(_list_gce_jumpoints_sync, project_id)
+        return await _to_thread(_list_gce_jumpoints_sync, project_id)
     except GCPError:
         raise
     except Exception as e:
@@ -1857,7 +1872,7 @@ async def deploy_compose_gce(
 ) -> dict:
     """Deploy a parsed compose spec to a new COS GCE instance."""
     try:
-        return await asyncio.to_thread(
+        return await _to_thread(
             _deploy_compose_gce_sync,
             project_id, zone, name, services, machine_type,
             network, subnetwork, create_external_ip, "cos-stable",
@@ -1908,7 +1923,7 @@ def _list_gce_compose_sync(project_id: str) -> list[dict]:
 async def list_gce_compose(project_id: str) -> list[dict]:
     """List the compose container instances (COS on GCE) in the project."""
     try:
-        return await asyncio.to_thread(_list_gce_compose_sync, project_id)
+        return await _to_thread(_list_gce_compose_sync, project_id)
     except GCPError:
         raise
     except Exception as e:
@@ -2185,7 +2200,7 @@ def _list_cloud_run_jobs_sync(project_id: str, limit: int = 20) -> list[dict]:
 async def list_cloud_run_jobs(project_id: str, limit: int = 20) -> list[dict]:
     """List the dashboard-managed Cloud Run runner jobs currently in flight."""
     try:
-        return await asyncio.to_thread(_list_cloud_run_jobs_sync, project_id, limit)
+        return await _to_thread(_list_cloud_run_jobs_sync, project_id, limit)
     except GCPError:
         raise
     except Exception as e:
@@ -2247,7 +2262,7 @@ async def reap_stranded_cloud_run_jobs(project_id: str) -> dict:
     """Delete dashboard-managed Cloud Run runner jobs left behind by a run whose
     self-delete never landed. Never touches a job that is pending or running."""
     try:
-        return await asyncio.to_thread(_reap_stranded_cloud_run_jobs_sync, project_id)
+        return await _to_thread(_reap_stranded_cloud_run_jobs_sync, project_id)
     except GCPError:
         raise
     except Exception as e:
@@ -2629,7 +2644,7 @@ async def run_gce_rancher(
 ) -> dict:
     """Async wrapper for _run_gce_rancher_sync."""
     try:
-        return await asyncio.to_thread(
+        return await _to_thread(
             _run_gce_rancher_sync,
             project_id, zone, name, container_image, bootstrap_password,
             network, subnetwork, machine_type, boot_disk_gb, network_tag,
@@ -2645,7 +2660,7 @@ async def ensure_rancher_firewall(project_id: str, network: str, tag: str,
                                   source_cidrs: list[str], name: str) -> dict:
     """Async wrapper for _ensure_rancher_firewall_sync."""
     try:
-        return await asyncio.to_thread(
+        return await _to_thread(
             _ensure_rancher_firewall_sync, project_id, network, tag, source_cidrs, name)
     except GCPError:
         raise
@@ -2658,14 +2673,14 @@ async def stop_gce_rancher(project_id: str, zone: str, name: str, *,
     """Delete the Rancher node VM (quiet no-op if absent). Optionally delete its
     ingress firewall rule too."""
     try:
-        await asyncio.to_thread(_terminate_instance_sync, project_id, zone, name)
+        await _to_thread(_terminate_instance_sync, project_id, zone, name)
     except Exception as e:
         msg = str(e)
         if not ("404" in msg or "not found" in msg.lower()):
             raise GCPError(f"Failed to stop GCE Rancher node '{name}': {e}") from e
     if delete_firewall and firewall_name:
         try:
-            await asyncio.to_thread(_delete_rancher_firewall_sync, project_id, firewall_name)
+            await _to_thread(_delete_rancher_firewall_sync, project_id, firewall_name)
         except Exception as e:
             logger.warning("Rancher firewall '%s' delete failed (continuing): %s", firewall_name, e)
 
@@ -2711,7 +2726,7 @@ def _list_gce_rancher_sync(project_id: str) -> list[dict]:
 async def list_gce_rancher(project_id: str) -> list[dict]:
     """List the Rancher management-node container instances (COS on GCE)."""
     try:
-        return await asyncio.to_thread(_list_gce_rancher_sync, project_id)
+        return await _to_thread(_list_gce_rancher_sync, project_id)
     except GCPError:
         raise
     except Exception as e:
@@ -3019,7 +3034,7 @@ async def run_gce_portainer(
 ) -> dict:
     """Async wrapper for _run_gce_portainer_sync."""
     try:
-        return await asyncio.to_thread(
+        return await _to_thread(
             _run_gce_portainer_sync,
             project_id, zone, name, container_image,
             network, subnetwork, machine_type, boot_disk_gb, network_tag,
@@ -3035,7 +3050,7 @@ async def ensure_portainer_firewall(project_id: str, network: str, tag: str,
                                     source_cidrs: list[str], name: str) -> dict:
     """Async wrapper for _ensure_portainer_firewall_sync."""
     try:
-        return await asyncio.to_thread(
+        return await _to_thread(
             _ensure_portainer_firewall_sync, project_id, network, tag, source_cidrs, name)
     except GCPError:
         raise
@@ -3048,14 +3063,14 @@ async def stop_gce_portainer(project_id: str, zone: str, name: str, *,
     """Delete the Portainer node VM (quiet no-op if absent). Optionally delete its
     ingress firewall rule too."""
     try:
-        await asyncio.to_thread(_terminate_instance_sync, project_id, zone, name)
+        await _to_thread(_terminate_instance_sync, project_id, zone, name)
     except Exception as e:
         msg = str(e)
         if not ("404" in msg or "not found" in msg.lower()):
             raise GCPError(f"Failed to stop GCE Portainer node '{name}': {e}") from e
     if delete_firewall and firewall_name:
         try:
-            await asyncio.to_thread(_delete_portainer_firewall_sync, project_id, firewall_name)
+            await _to_thread(_delete_portainer_firewall_sync, project_id, firewall_name)
         except Exception as e:
             logger.warning("Portainer firewall '%s' delete failed (continuing): %s",
                            firewall_name, e)
@@ -3102,7 +3117,7 @@ def _list_gce_portainer_sync(project_id: str) -> list[dict]:
 async def list_gce_portainer(project_id: str) -> list[dict]:
     """List the managed Portainer server container instances (COS on GCE)."""
     try:
-        return await asyncio.to_thread(_list_gce_portainer_sync, project_id)
+        return await _to_thread(_list_gce_portainer_sync, project_id)
     except GCPError:
         raise
     except Exception as e:
@@ -3349,7 +3364,7 @@ async def run_cloud_run_ansible_task(
     direct VPC egress (preferred over the ``vpc_connector`` annotation).
     """
     try:
-        return await asyncio.to_thread(
+        return await _to_thread(
             _run_cloud_run_ansible_sync,
             project_id, region, image,
             target_ip, ansible_user,
@@ -3529,7 +3544,7 @@ async def run_cloud_run_k8s_task(
     direct VPC egress (preferred over the ``vpc_connector`` annotation).
     """
     try:
-        return await asyncio.to_thread(
+        return await _to_thread(
             _run_cloud_run_k8s_sync,
             project_id, region, image,
             command, kubeconfig_b64, stdin_b64, job_id,
@@ -3667,7 +3682,7 @@ async def run_cloud_run_ansible_local_task(
     """Run a localhost Ansible play (k8s/DB target) via a GCP Cloud Run Job.
     Returns (exit_code, output_log)."""
     try:
-        return await asyncio.to_thread(
+        return await _to_thread(
             _run_cloud_run_ansible_local_sync,
             project_id, region, image,
             playbook_b64, conn_vars_b64, kubeconfig_b64, job_id,
@@ -3962,7 +3977,7 @@ async def export_custom_image_to_vhd(
     except ImportError:
         raise GCPError("google-cloud-build is not installed — run: pip install google-cloud-build")
     try:
-        return await asyncio.to_thread(
+        return await _to_thread(
             _export_custom_image_to_vhd_sync,
             project_id, image_name, dest_bucket, dest_object,
             network, subnet, timeout, progress_cb, zone,
@@ -4055,7 +4070,7 @@ async def create_image_from_gcs(
     {name, self_link, status}. Caller is expected to have already staged
     the tar.gz at `gcs_url` (the promote runner does this)."""
     try:
-        return await asyncio.to_thread(
+        return await _to_thread(
             _create_image_from_gcs_sync,
             project_id, image_name, gcs_url, description, family, progress_cb,
         )
@@ -4216,7 +4231,7 @@ async def run_cloud_run_promote_runner_task(
     """Run the promote-runner image as a Cloud Run Job. Returns
     (exit_code, log_output)."""
     try:
-        return await asyncio.to_thread(
+        return await _to_thread(
             _run_cloud_run_promote_runner_sync,
             project_id, region, image, runner_args, job_id,
             cpu, memory, timeout_seconds, vpc_connector, service_account_email,
@@ -4243,7 +4258,7 @@ async def delete_gcs_object(bucket: str, object_name: str) -> None:
     """Best-effort cleanup of a staged GCS object. Targets an explicit bucket
     so it works even when the staging lives outside `storage_gcs_bucket`."""
     try:
-        await asyncio.to_thread(_delete_gcs_object_sync, bucket, object_name)
+        await _to_thread(_delete_gcs_object_sync, bucket, object_name)
     except Exception as e:
         raise GCPError(f"Failed to delete gs://{bucket}/{object_name}: {e}") from e
 
@@ -4276,7 +4291,7 @@ def _sweep_orphan_sql_instance_sync(
     a clean destroy), ``"skipped-unlabeled"`` (an instance by this name exists but
     isn't ours), or ``"deleted"``. Raises :class:`GCPError` on a real delete failure
     so the caller can surface the orphan rather than hide it. Synchronous; callers
-    wrap in ``asyncio.to_thread``."""
+    wrap in ``_to_thread``."""
     s = _authed_session()
     inst_url = f"{_SQLADMIN_BASE}/projects/{project}/instances/{name}"
 
@@ -4332,7 +4347,7 @@ def _sweep_orphan_sql_instance_sync(
 
 async def sweep_orphan_sql_instance(project: str, name: str, clouddb_id: str) -> str:
     """Async wrapper for :func:`_sweep_orphan_sql_instance_sync`."""
-    return await asyncio.to_thread(
+    return await _to_thread(
         _sweep_orphan_sql_instance_sync, project, name, clouddb_id)
 
 
@@ -4350,7 +4365,7 @@ def _wait_sql_instance_runnable_sync(
     create. The provisioner uses this to detect that the instance came up anyway so
     it can ``terraform import`` it back rather than orphan it. The label guard means
     we never adopt an instance we didn't create. Synchronous; callers wrap in
-    ``asyncio.to_thread``."""
+    ``_to_thread``."""
     s = _authed_session()
     inst_url = f"{_SQLADMIN_BASE}/projects/{project}/instances/{name}"
     deadline = time.monotonic() + ready_timeout_s
@@ -4383,5 +4398,5 @@ def _wait_sql_instance_runnable_sync(
 
 async def wait_sql_instance_runnable(project: str, name: str, clouddb_id: str) -> Optional[dict]:
     """Async wrapper for :func:`_wait_sql_instance_runnable_sync`."""
-    return await asyncio.to_thread(
+    return await _to_thread(
         _wait_sql_instance_runnable_sync, project, name, clouddb_id)
