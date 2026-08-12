@@ -271,30 +271,68 @@
         </div>
       </template>
       <div>
-        <label class="block text-xs font-medium text-gray-600 mb-1">Run this inside the private network</label>
-        <pre class="bg-gray-900 text-gray-100 rounded-lg p-3 text-xs overflow-x-auto whitespace-pre" x-text="enrol.docker_run"></pre>
-        <button @click="copy(enrol.docker_run)"
+        <div class="flex items-center justify-between mb-1">
+          <label class="block text-xs font-medium text-gray-600">Run this inside the private network</label>
+          <!-- Same container either way; this picks the shell you are pasting into. Hidden
+               against an API that predates the PowerShell forms, so a stale build shows
+               exactly the UI it can actually back. -->
+          <div class="flex gap-1 bg-gray-100 p-1 rounded-lg w-fit" x-show="enrol.docker_run_powershell">
+            <button @click="shell = 'bash'"
+                    :class="shell === 'bash'
+                      ? 'bg-white shadow text-gray-900 font-semibold'
+                      : 'text-gray-500 hover:text-gray-700'"
+                    class="px-2.5 py-1 rounded-md text-xs transition">
+              Linux / macOS
+            </button>
+            <button @click="shell = 'powershell'"
+                    :class="shell === 'powershell'
+                      ? 'bg-white shadow text-gray-900 font-semibold'
+                      : 'text-gray-500 hover:text-gray-700'"
+                    class="px-2.5 py-1 rounded-md text-xs transition">
+              Windows (PowerShell)
+            </button>
+          </div>
+        </div>
+        <pre class="bg-gray-900 text-gray-100 rounded-lg p-3 text-xs overflow-x-auto whitespace-pre" x-text="runCmd()"></pre>
+        <button @click="copy(runCmd())"
                 class="mt-2 text-xs px-3 py-1.5 rounded-lg border border-gray-300 hover:bg-gray-50 transition">
           Copy command
         </button>
+        <p x-show="isPowershell()" class="text-xs text-gray-500 mt-2">
+          The agent image is Linux; on Windows it runs in Docker Desktop's Linux VM, so keep
+          Docker Desktop in <strong>Linux containers</strong> mode. See
+          <a href="/docs/remote-agents#running-on-windows" class="text-blue-600 hover:underline">Running on Windows</a>.
+        </p>
       </div>
 
       <!-- The env-var form above puts the code in the container's config, where
            `docker inspect` keeps it long after the code has been spent. Offered as an
            alternative rather than the default because it costs an extra file and a
            cleanup step, and the code is single-use with a 15-minute TTL. -->
-      <details class="mt-4" x-show="enrol.docker_run_code_file">
+      <details class="mt-4" x-show="codeFileCmd()">
         <summary class="text-xs font-medium text-gray-600 cursor-pointer hover:text-gray-800">
           Alternative: keep the code out of <code class="font-mono">docker inspect</code>
         </summary>
         <p class="text-xs text-gray-500 mt-2">
           Mounts the code as a file instead of an environment variable, so nothing durable in
-          Docker's metadata holds it. To keep it out of your shell history too, write
-          <code class="font-mono">agent-enroll-code</code> with an editor and skip the first line.
+          Docker's metadata holds it. Follows the toggle above. To keep the code out of your
+          shell history too, create <code class="font-mono">agent-enroll-code</code> with an
+          editor — just the code, on one line — and paste only the
+          <code class="font-mono">docker run</code> that follows.
+        </p>
+        <!-- The editor route bypasses the `-Encoding ascii` that makes the emitted line safe,
+             so on Windows it has to carry that constraint itself. A UTF-16 file fails to
+             decode; a UTF-8 BOM is worse, because it survives the agent's .strip() and the
+             code is simply rejected as wrong with nothing pointing at why. -->
+        <p x-show="isPowershell()" class="text-xs text-gray-500 mt-2">
+          Save it as plain ASCII or UTF-8 <em>without</em> a byte-order mark — Notepad's
+          "Unicode" and "UTF-8 with BOM" options both produce a file the agent cannot read.
+          PowerShell also writes its history to disk as you type, so an editor is the only way
+          to keep the code out of it.
         </p>
         <pre class="bg-gray-900 text-gray-100 rounded-lg p-3 text-xs overflow-x-auto whitespace-pre mt-2"
-             x-text="enrol.docker_run_code_file"></pre>
-        <button @click="copy(enrol.docker_run_code_file)"
+             x-text="codeFileCmd()"></pre>
+        <button @click="copy(codeFileCmd())"
                 class="mt-2 text-xs px-3 py-1.5 rounded-lg border border-gray-300 hover:bg-gray-50 transition">
           Copy command
         </button>
@@ -368,6 +406,28 @@
 </div>
 
 <script>
+// Which command flavour to show first. Only a default — the toggle is always there, and a
+// wrong guess costs one click.
+//
+// `navigator.platform` is deprecated but is still the only thing every browser implements;
+// `userAgentData` is Chromium-only. Try the modern one, fall back to platform, then to the
+// UA string, and treat anything unreadable as bash: that is the historical behaviour and
+// the larger population of agent hosts. Wrapped because a hardened browser can make any of
+// these accessors throw.
+//
+// Takes the navigator as an argument so a test can pass a fake — in Node `navigator` is a
+// getter-only global, so assigning to it silently does nothing.
+function detectShell(nav) {
+  try {
+    const n = nav || (typeof navigator === 'undefined' ? {} : navigator);
+    const hint = n.userAgentData && n.userAgentData.platform;
+    const p = hint || n.platform || n.userAgent || '';
+    return /win/i.test(p) ? 'powershell' : 'bash';
+  } catch (e) {
+    return 'bash';
+  }
+}
+
 function agentsPage() {
   return {
     agents: [],
@@ -382,8 +442,15 @@ function agentsPage() {
     discoverOpen: false,
     audienceBlock: '',   // the 409 explaining why a mint was refused; sticky until dismissed
     form: {name: '', site: '', description: ''},
-    enrol: {name: '', code: '', docker_run: '', warnings: []},
+    enrol: {name: '', code: '', docker_run: '', docker_run_code_file: '',
+            docker_run_powershell: '', docker_run_code_file_powershell: '', warnings: []},
     discover: {agentId: '', agentName: '', scan_kind: 'all', cidrs: '', hostnames: ''},
+    // Which shell the copy-paste command is written for. The image is Linux either way —
+    // it runs under Docker Desktop's Linux VM on Windows — so this picks a *shell*, not a
+    // platform. Pre-selected from the browser because an operator on Windows pasting the
+    // POSIX form gets no useful error: a trailing `\` is not a line continuation there, so
+    // each line runs as its own command and the first one fails on its own.
+    shell: detectShell(),
     _timer: null,
 
     get visibleAgents() {
@@ -394,6 +461,35 @@ function agentsPage() {
 
     get revokedCount() {
       return this.agents.filter(a => a.status === 'revoked').length;
+    },
+
+    // One accessor per command rather than two copies of the markup, so Copy cannot get
+    // out of step with what is on screen.
+    //
+    // Both fall back to the POSIX form when the PowerShell one is absent, which is what an
+    // API older than this page returns. Without that a Windows browser — where the toggle
+    // defaults to PowerShell — would render an empty command block and give the operator
+    // nothing to paste, a worse failure than showing the form they have to adapt.
+    // "PowerShell is selected *and* this API can produce it" — the condition every piece of
+    // Windows-specific copy keys off, so prose can never contradict the command shown.
+    //
+    // Methods rather than getters, which is not a style choice: `extract()` in
+    // tests/template_helpers_check.js anchors on a method-shaped definition and cannot see
+    // past a `get ` prefix, which is exactly why `visibleAgents` and `revokedCount` above
+    // have no coverage. The invariant here — Copy copies what is on screen — is worth
+    // testing, so it is written in the shape the harness can reach.
+    isPowershell() {
+      return this.shell === 'powershell' && !!this.enrol.docker_run_powershell;
+    },
+
+    runCmd() {
+      return this.isPowershell() ? this.enrol.docker_run_powershell : this.enrol.docker_run;
+    },
+
+    codeFileCmd() {
+      return this.isPowershell()
+        ? this.enrol.docker_run_code_file_powershell
+        : this.enrol.docker_run_code_file;
     },
 
     async init() {
@@ -490,6 +586,8 @@ function agentsPage() {
       this.enrol = {name: r.name, code: r.enrollment_code,
                     docker_run: install.docker_run || '',
                     docker_run_code_file: install.docker_run_code_file || '',
+                    docker_run_powershell: install.docker_run_powershell || '',
+                    docker_run_code_file_powershell: install.docker_run_code_file_powershell || '',
                     warnings: install.warnings || []};
       this.enrolOpen = true;
     },

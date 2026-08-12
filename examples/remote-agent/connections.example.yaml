@@ -13,10 +13,13 @@
 # opposite property.
 #
 # Mount it read-only, with the SELinux relabel:
-#   -v "$PWD/connections.yaml:/etc/dashboard-agent/connections.yaml:ro,Z"
+#   -v "$PWD/connections.yaml:/etc/dashboard-agent/connections.yaml:ro,Z"      # bash
+#   -v "${PWD}/connections.yaml:/etc/dashboard-agent/connections.yaml:ro,Z"    # PowerShell
 #
 # The `,Z` is not optional on Fedora, RHEL, CentOS, Rocky or Alma — without it the
 # agent cannot read this file whatever its mode bits say. Same reasoning as policy.yaml.
+# On a Windows host it is inert and harmless; see docs/remote-agents.md, "Running on
+# Windows".
 #
 # Nothing here grants anything on its own. Three separate parties must agree before a
 # verb runs:
@@ -84,7 +87,8 @@ connections:
   # silently keep authenticating with the stale secret.
   #
   # Mount the client alongside this file (see passwordsafe.example.yaml):
-  #   -v "$PWD/passwordsafe.yaml:/etc/dashboard-agent/passwordsafe.yaml:ro,Z"
+  #   -v "$PWD/passwordsafe.yaml:/etc/dashboard-agent/passwordsafe.yaml:ro,Z"      # bash
+  #   -v "${PWD}/passwordsafe.yaml:/etc/dashboard-agent/passwordsafe.yaml:ro,Z"    # PowerShell
   #
   # - name: dc2-vcenter
   #   kind: vsphere

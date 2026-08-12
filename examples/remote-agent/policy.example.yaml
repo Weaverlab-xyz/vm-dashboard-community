@@ -8,15 +8,22 @@
 # refuses every job and exits with a message saying so. There is no permissive default.
 #
 # Mount it read-only:
-#   -v "$PWD/policy.yaml:/etc/dashboard-agent/policy.yaml:ro,Z"
+#   -v "$PWD/policy.yaml:/etc/dashboard-agent/policy.yaml:ro,Z"        # bash
+#   -v "${PWD}/policy.yaml:/etc/dashboard-agent/policy.yaml:ro,Z"      # PowerShell
 #
 # Two details in that line are not decoration. `$PWD` because `docker run -v` rejects a
-# relative source path outright. `,Z` because on an SELinux-enforcing host — Fedora, RHEL,
+# relative source path outright — PowerShell spells it `${PWD}`, and continues lines with a
+# backtick rather than a `\`. `,Z` because on an SELinux-enforcing host — Fedora, RHEL,
 # CentOS, Rocky, Alma — a file in your home directory is labelled `user_home_t`, which the
 # container is not allowed to read no matter how permissive its mode bits are; without the
 # relabel the agent exits 2 on `Permission denied` reading this file, before it has made a
 # single network call. Docker and Podman ignore `z`/`Z` where SELinux is absent, so the
 # flag is safe on every host. Check with `ls -lZ policy.yaml`.
+#
+# On a Windows host none of the SELinux half applies — the flag is inert and bind mounts
+# arrive with permissive ownership, so an unreadable file means Docker Desktop file sharing
+# rather than a label. The Agents page emits both flavours; pick the shell with the toggle.
+# See docs/remote-agents.md, "Running on Windows".
 
 # ── What may be touched ───────────────────────────────────────────────────────
 # The agent refuses any address:port not matched here. Matching happens on the

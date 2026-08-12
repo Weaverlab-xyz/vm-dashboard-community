@@ -34,7 +34,7 @@ asserts this file never calls ``require_permission`` in an agent route.
 """
 import logging
 import re
-from typing import Optional
+from typing import NamedTuple, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
@@ -571,19 +571,93 @@ def _agent_row(agent: RemoteAgent, running: int = 0) -> dict:
 # (`Permission denied` on a mode 644 file) *before* making any network call: the row sits
 # at `enrolling` with no source IP and nothing at all reaches the dashboard, so every
 # visible symptom points at DNS or TLS. Docker and Podman ignore `z`/`Z` on hosts without
-# SELinux, so this is safe everywhere and needs no host detection.
-_RUN_FLAGS = (
-    "docker run -d --name dashboard-agent --restart unless-stopped \\\n"
-    "  --read-only --cap-drop ALL --security-opt no-new-privileges:true \\\n"
-    "  --user 10001:10001 --tmpfs /tmp \\\n"
-    "  -v dashboard_agent_state:/var/lib/dashboard-agent \\\n"
-    '  -v "$PWD/policy.yaml:/etc/dashboard-agent/policy.yaml:ro,Z" \\\n'
-    # For agent-brokered hypervisors, add:
-    #   -v "$PWD/connections.yaml:/etc/dashboard-agent/connections.yaml:ro,Z"
-    # Deliberately not in the emitted command: an agent that only does discovery has no
-    # reason to have the file, and a bind mount whose source is missing is a hard
-    # `docker run` failure, so including it unconditionally would break the paste.
+# SELinux, so this is safe everywhere and needs no host detection — including on Windows,
+# which is why the PowerShell form keeps it rather than diverging.
+class _Shell(NamedTuple):
+    """The four things that differ between a POSIX shell and PowerShell here.
+
+    The image is Linux-only, but it runs perfectly well on a Windows host under Docker
+    Desktop's Linux VM — so what a Windows operator needs is a different *shell*, not a
+    different container. Every hardening flag below is identical in both.
+
+    ``cont`` matters most: a trailing ``\\`` is not a line continuation in PowerShell, so
+    pasting the POSIX command there runs each line as its own command and fails on the
+    first one. PowerShell continues with a backtick, which must be the last character on
+    the line — no trailing whitespace.
+
+    ``write_code``/``remove_code`` replace ``umask``/``printf``/``rm``. Two notes on the
+    PowerShell pair: ``-Encoding ascii`` is load-bearing rather than tidy, because
+    PowerShell 5.1's ``>`` and ``Out-File`` write UTF-16LE and the agent reads that file as
+    text — a UTF-16 code file fails to decode. And there is no ``umask`` equivalent because
+    none is needed: Docker Desktop presents bind mounts with permissive ownership, so uid
+    10001 can read the file without one.
+    """
+    cont: str
+    pwd: str
+    write_code: str
+    remove_code: str
+
+
+_BASH = _Shell(
+    cont="\\",
+    pwd="$PWD",
+    write_code="umask 022 && printf '%s' '{code}' > ./agent-enroll-code",
+    remove_code="rm ./agent-enroll-code",
 )
+_POWERSHELL = _Shell(
+    cont="`",
+    pwd="${PWD}",
+    write_code=("Set-Content -Path .\\agent-enroll-code -Value '{code}' "
+                "-NoNewline -Encoding ascii"),
+    remove_code="Remove-Item .\\agent-enroll-code",
+)
+
+
+def _run_flags(sh: _Shell) -> str:
+    """The shared flag block, rendered for one shell.
+
+    Built rather than kept as two literals so the flavours cannot drift: a hardening flag
+    added to one and forgotten in the other would ship a materially weaker container to
+    whichever operator happened to pick that toggle.
+    """
+    return (
+        f"docker run -d --name dashboard-agent --restart unless-stopped {sh.cont}\n"
+        f"  --read-only --cap-drop ALL --security-opt no-new-privileges:true {sh.cont}\n"
+        f"  --user 10001:10001 --tmpfs /tmp {sh.cont}\n"
+        f"  -v dashboard_agent_state:/var/lib/dashboard-agent {sh.cont}\n"
+        f'  -v "{sh.pwd}/policy.yaml:/etc/dashboard-agent/policy.yaml:ro,Z" {sh.cont}\n'
+        # For agent-brokered hypervisors, add:
+        #   -v "$PWD/connections.yaml:/etc/dashboard-agent/connections.yaml:ro,Z"
+        # Deliberately not in the emitted command: an agent that only does discovery has no
+        # reason to have the file, and a bind mount whose source is missing is a hard
+        # `docker run` failure, so including it unconditionally would break the paste.
+    )
+
+
+def _install_forms(sh: _Shell, base: str, code: str) -> tuple:
+    """``(env_var_form, code_file_form)`` for one shell. See ``_install_hint`` for why
+    there are two forms at all."""
+    flags = _run_flags(sh)
+    env_form = (
+        flags
+        + f"  -e DASHBOARD_URL={base} {sh.cont}\n"
+        + f"  -e AGENT_ENROLLMENT_CODE={code} {sh.cont}\n"
+        + "  chrweav/dashboard-agent:latest"
+    )
+    code_file_form = (
+        # `.replace`, not `.format`: a PowerShell template is the natural place for someone
+        # to add `${PWD}`, which `.format` would read as a field name and raise KeyError on.
+        sh.write_code.replace("{code}", code) + "\n\n"
+        + flags
+        + f'  -v "{sh.pwd}/agent-enroll-code:/etc/dashboard-agent/enroll-code:ro,Z" {sh.cont}\n'
+        + f"  -e DASHBOARD_URL={base} {sh.cont}\n"
+        + f"  -e AGENT_ENROLLMENT_CODE_FILE=/etc/dashboard-agent/enroll-code {sh.cont}\n"
+        + "  chrweav/dashboard-agent:latest\n\n"
+        # `#` starts a comment in both shells.
+        + "# Once the Agents page shows this agent Online, the code is spent:\n"
+        + sh.remove_code
+    )
+    return env_form, code_file_form
 
 
 def _install_hint(request: Request, code: str, audience: dict) -> dict:
@@ -606,29 +680,25 @@ def _install_hint(request: Request, code: str, audience: dict) -> dict:
     metadata holds the value. The file itself is world-readable on purpose: the container
     runs as uid 10001 and a bind-mounted 0600 file owned by the host user would simply be
     unreadable inside it. That is an acceptable trade for a single-use 15-minute secret in
-    a directory the operator chose, and the trailing ``rm`` closes it. An operator who
+    a directory the operator chose, and the trailing delete closes it. An operator who
     wants the code in neither shell history nor Docker metadata can write that file with
-    an editor and skip the first line entirely. It carries ``,Z`` for the same reason the
+    an editor and skip the line that writes it. It carries ``,Z`` for the same reason the
     policy mount does: mode bits are only half of "readable" on an SELinux host.
+
+    Each form is emitted twice, once per shell — see :class:`_Shell`. Both flavours are
+    built here, from this one call, on purpose: ``_resolve_audience(persist=True)`` writes
+    the write-once signing pin, and ``tests/test_agent_lease_invariants.py`` pins the set
+    of callers allowed to do that. A second call to get a second flavour would be a second
+    pin.
     """
     base = _resolve_audience(request, persist=True)
+    bash_run, bash_code_file = _install_forms(_BASH, base, code)
+    ps_run, ps_code_file = _install_forms(_POWERSHELL, base, code)
     return {
-        "docker_run": (
-            _RUN_FLAGS
-            + f"  -e DASHBOARD_URL={base} \\\n"
-            + f"  -e AGENT_ENROLLMENT_CODE={code} \\\n"
-            + "  chrweav/dashboard-agent:latest"
-        ),
-        "docker_run_code_file": (
-            f"umask 022 && printf '%s' '{code}' > ./agent-enroll-code\n\n"
-            + _RUN_FLAGS
-            + '  -v "$PWD/agent-enroll-code:/etc/dashboard-agent/enroll-code:ro,Z" \\\n'
-            + f"  -e DASHBOARD_URL={base} \\\n"
-            + "  -e AGENT_ENROLLMENT_CODE_FILE=/etc/dashboard-agent/enroll-code \\\n"
-            + "  chrweav/dashboard-agent:latest\n\n"
-            + "# Once the Agents page shows this agent Online, the code is spent:\n"
-            + "rm ./agent-enroll-code"
-        ),
+        "docker_run": bash_run,
+        "docker_run_code_file": bash_code_file,
+        "docker_run_powershell": ps_run,
+        "docker_run_code_file_powershell": ps_code_file,
         "dashboard_url": base,
         # Rendered beside the command in the enrolment modal. Advisory, not fatal — a
         # single-hostname install trips the first of these legitimately.

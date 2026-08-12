@@ -339,10 +339,24 @@ def test_the_install_hint_offers_a_code_file_form_and_absolute_bind_paths():
     assert code in alt and "rm ./agent-enroll-code" in alt
 
 
+# Trailing continuation noise in both dialects. A Bourne line ends ` \`, a PowerShell one
+# ends in a backtick, and the mount spec's own closing quote sits inside both. Without the
+# backtick here every PowerShell mount assertion fails for the wrong reason: `rstrip` finds
+# a character it does not recognise, stops immediately, and `.endswith(":ro,Z")` is False on
+# a line that does in fact carry the flag.
+_CONTINUATIONS = " \\\"`"
+
+
 def _bind_mounts(command: str, target: str) -> list:
     """The `-v` lines of an emitted command that bind to `target`, flags intact."""
-    return [ln.strip().rstrip(' \\"') for ln in command.splitlines()
+    return [ln.strip().rstrip(_CONTINUATIONS) for ln in command.splitlines()
             if ln.strip().startswith("-v ") and target in ln]
+
+
+# Every install form the API emits, so a new one cannot be added without the mount and
+# hardening assertions below covering it.
+_ALL_FORMS = ("docker_run", "docker_run_code_file",
+              "docker_run_powershell", "docker_run_code_file_powershell")
 
 
 def test_the_install_command_relabels_its_bind_mounts_for_selinux():
@@ -366,7 +380,7 @@ def test_the_install_command_relabels_its_bind_mounts_for_selinux():
     assert resp.status_code == 201, resp.text
     install = resp.json()["install"]
 
-    for form in ("docker_run", "docker_run_code_file"):
+    for form in _ALL_FORMS:
         mounts = _bind_mounts(install[form], "/etc/dashboard-agent/policy.yaml")
         assert len(mounts) == 1, f"{form}: expected one policy mount, got {mounts}"
         assert mounts[0].endswith(":ro,Z"), \
@@ -374,10 +388,126 @@ def test_the_install_command_relabels_its_bind_mounts_for_selinux():
 
     # The enrolment-code file is created in the same directory moments earlier, so it
     # carries the same label and fails the same way.
-    code_mounts = _bind_mounts(install["docker_run_code_file"],
-                               "/etc/dashboard-agent/enroll-code")
-    assert len(code_mounts) == 1, code_mounts
-    assert code_mounts[0].endswith(":ro,Z"), code_mounts[0]
+    for form in ("docker_run_code_file", "docker_run_code_file_powershell"):
+        code_mounts = _bind_mounts(install[form], "/etc/dashboard-agent/enroll-code")
+        assert len(code_mounts) == 1, f"{form}: {code_mounts}"
+        assert code_mounts[0].endswith(":ro,Z"), f"{form}: {code_mounts[0]}"
+
+
+def _docker_statement(command: str, cont: str) -> str:
+    """The `docker run` statement of an emitted command, continuations normalised away.
+
+    Stops at the first line that does not end in a continuation, so the shell-specific
+    preamble and cleanup around the code-file form are excluded.
+    """
+    lines = command.splitlines()
+    start = next(i for i, ln in enumerate(lines) if ln.startswith("docker run"))
+    out = []
+    for line in lines[start:]:
+        body = line.rstrip()
+        continued = body.endswith(cont)
+        out.append(body[:-len(cont)].rstrip() if continued else body)
+        if not continued:
+            break
+    return "\n".join(out)
+
+
+def test_the_powershell_form_is_the_same_container_in_another_shell():
+    """The two flavours must differ ONLY in what the shell forces: the line-continuation
+    character and how it spells the working directory.
+
+    Pinned because drift here is invisible from the Linux side. A hardening flag added to
+    the shared block and forgotten in a PowerShell twin would leave every other test in
+    this file green while Windows operators quietly ran a weaker container — and
+    `connections.yaml` shows this block does get edited after the fact. The emitter builds
+    both from one template so that cannot happen; this is the assertion that keeps it so.
+    """
+    resp = CLIENT.post("/api/agent", json={"name": f"agent-{uuid.uuid4().hex[:8]}"})
+    assert resp.status_code == 201, resp.text
+    install = resp.json()["install"]
+
+    for posix, powershell in (("docker_run", "docker_run_powershell"),
+                              ("docker_run_code_file", "docker_run_code_file_powershell")):
+        normalised = _docker_statement(install[powershell], "`").replace("${PWD}", "$PWD")
+        assert normalised == _docker_statement(install[posix], "\\"), \
+            f"{powershell} is not {posix} in another shell"
+
+
+def test_the_powershell_forms_carry_no_bourne_continuations():
+    """A trailing `\\` is not a syntax error in PowerShell — it is a literal argument.
+
+    So `docker run` takes it as the image name and every following line executes as its own
+    statement: the operator gets `invalid reference format`, then "The term '-e' is not
+    recognized", and nothing anywhere points at the paste having been mis-joined. Three
+    unrelated errors from one wrong character is the worst failure this feature can produce,
+    and it is one forgotten line away.
+    """
+    resp = CLIENT.post("/api/agent", json={"name": f"agent-{uuid.uuid4().hex[:8]}"})
+    assert resp.status_code == 201, resp.text
+    install = resp.json()["install"]
+
+    for form in ("docker_run_powershell", "docker_run_code_file_powershell"):
+        command = install[form]
+        assert " \\\n" not in command, f"{form}: a Bourne line continuation survived"
+        assert "${PWD}/policy.yaml" in command, f"{form}: PowerShell needs the braced form"
+
+    for form in ("docker_run", "docker_run_code_file"):
+        assert "`" not in install[form], f"{form}: a PowerShell continuation leaked in"
+
+    # Nothing may follow a continuation character on its own line, in either dialect: a
+    # backtick followed by a space escapes the space rather than the newline, and the
+    # statement ends there. Same for `\` in Bourne.
+    for form in _ALL_FORMS:
+        for line in install[form].splitlines():
+            assert line == line.rstrip(), \
+                f"{form}: trailing whitespace breaks the line continuation: {line!r}"
+
+
+def test_the_powershell_code_file_can_never_be_written_as_utf16():
+    """`>` and `Out-File` write UTF-16LE on PowerShell 5.1, so the emitted command must use
+    `Set-Content -Encoding ascii` instead.
+
+    The agent reads this file as text and a UTF-16 one fails to decode, killing the
+    container. A UTF-8 BOM is worse still: `\\ufeff` is not whitespace, so it survives the
+    agent's `.strip()` and the code is simply rejected as invalid with nothing pointing at
+    why. `ascii` is also the only encoding name meaning "no BOM" on both 5.1 and 7.
+
+    The assertions are about the *absence* of the hazard as much as the presence of the
+    flag, because the regression being pinned is somebody simplifying this back to a
+    redirect.
+    """
+    resp = CLIENT.post("/api/agent", json={"name": f"agent-{uuid.uuid4().hex[:8]}"})
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    alt, code = body["install"]["docker_run_code_file_powershell"], body["enrollment_code"]
+
+    assert "Set-Content" in alt and "-Encoding ascii" in alt and "-NoNewline" in alt
+    assert "Out-File" not in alt and "> ./agent-enroll-code" not in alt
+    assert "Remove-Item" in alt and "rm ./agent-enroll-code" not in alt
+    assert "umask" not in alt and "printf" not in alt
+    assert code in alt
+    assert "AGENT_ENROLLMENT_CODE_FILE=" in alt
+    assert "AGENT_ENROLLMENT_CODE=" not in alt, \
+        "the file form must not also pass the code as an environment variable"
+    # `-Encoding ascii` substitutes `?` for anything outside it, silently corrupting the
+    # code. Safe today because the alphabet is `agte_` plus hex; asserted so a future
+    # change to the code format cannot break the Windows path alone.
+    assert code.isascii(), \
+        "the enrolment code alphabet must stay ASCII while -Encoding ascii is used"
+
+
+def test_every_install_form_names_the_same_dashboard_url():
+    """One audience, four commands. Guards against the flavours being built from different
+    bases — an agent enrolling against the wrong hostname 401s the whole fleet's worth of
+    confusing symptoms, and the two forms are resolved in one place precisely so they
+    cannot disagree."""
+    resp = CLIENT.post("/api/agent", json={"name": f"agent-{uuid.uuid4().hex[:8]}"})
+    assert resp.status_code == 201, resp.text
+    install = resp.json()["install"]
+
+    expected = f"-e DASHBOARD_URL={install['dashboard_url']} "
+    for form in _ALL_FORMS:
+        assert expected in install[form], f"{form}: does not name the resolved audience"
 
 
 if __name__ == "__main__":

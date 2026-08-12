@@ -175,15 +175,85 @@ runner stays one-shot; only the thing that launches it moved.
 | TLS in front of the dashboard | Not optional. Signing gives integrity, not confidentiality. Use `docker-compose.agent.yml`. |
 | A hostname agents can resolve | Pinned as the signing *audience* on first use. Changing it later means re-enrolling. |
 | `remote_agents_enabled` | **Settings → Integrations → Remote Agents**, or the setup wizard. Off by default — the nav link and the whole `/api/agent` router are hidden until you turn it on. |
-| Docker on the agent host | Or any OCI runtime. ~80 MB image, no privileges. |
+| Docker on the agent host | Or any OCI runtime — Docker Engine, Docker Desktop or Podman. The image is Linux (`linux/amd64`, `linux/arm64`); on a Windows host it runs in Docker Desktop's Linux VM, which is supported and ordinary — see [Running on Windows](#running-on-windows). ~80 MB image, no privileges. |
 | Outbound 443 from the agent | One FQDN. Nothing else. |
+
+## Running on Windows
+
+A Windows desktop or server is a perfectly good agent host, and for some hypervisors it is
+the *only* sensible one — Hyper-V and VMware Workstation both live on Windows. There is no
+Windows-container build of the agent and you do not need one: Docker Desktop runs the Linux
+image in its Linux VM, the same way it runs everything else.
+
+**Almost nothing about the container changes.** Every hardening flag is identical —
+`--read-only`, `--cap-drop ALL`, `--security-opt no-new-privileges`, `--user 10001:10001`,
+`--tmpfs`. What changes is the *shell* you paste into. Set the toggle on the Agents page to
+**Windows (PowerShell)** and the emitted command is already adapted:
+
+- backtick line continuations instead of `\`. This is the one that bites: a trailing `\` is
+  not a syntax error in PowerShell, it is a literal argument, so `docker run` takes it as the
+  image name and every following line executes as its own command. You get `invalid
+  reference format`, then `The term '-e' is not recognized`, and nothing at all pointing at
+  the paste having come apart.
+- `${PWD}` instead of `$PWD`, and `Set-Content` / `Remove-Item` instead of `printf` / `rm`.
+
+Six things to know before you start:
+
+- **Docker Desktop must be in Linux-containers mode.** In Windows-containers mode the pull
+  fails with `no matching manifest for windows/amd64`, or — if the image is already
+  local — `image operating system "linux" cannot be used on this platform`. Neither says
+  "you are in the wrong mode". Right-click the tray whale → *Switch to Linux containers*.
+- **`:ro,Z` is inert here, and kept on purpose.** It is the SELinux relabel, and Docker
+  ignores `z`/`Z` on any host without SELinux — which includes Docker Desktop's VM, exactly
+  as it does on Ubuntu or Debian. Keeping it means there is one mount string rather than two
+  that can drift. It costs nothing; ignore it. The corollary matters more: **every `chcon`
+  and `ls -lZ` instruction in this document is Linux-only.** If a mount is unreadable on
+  Windows it is file sharing, not labelling — check *Settings → Resources → File sharing*.
+- **File permissions work out in your favour.** Docker Desktop presents bind mounts with
+  permissive ownership because NTFS ACLs do not map onto POSIX mode bits, so uid 10001 can
+  read `policy.yaml` with no `umask` and no `chmod`. The emitted PowerShell command has no
+  `umask` equivalent for that reason, not by omission.
+- **Keep `policy.yaml` under your user profile.** A UNC path (`\\server\share`) or a mapped
+  network drive cannot be bind-mounted, and if Docker Desktop cannot reach a bind source on
+  the Hyper-V backend it materialises an *empty directory* in the container instead of
+  failing — so the agent reports it cannot read its policy file and the advice you get points
+  at mount flags rather than at file sharing. Notepad is a fine editor for the file; CRLF
+  parses.
+- **`--restart unless-stopped` only holds while the engine is running.** Docker Desktop lives
+  inside a logged-in user session, so enable *Start Docker Desktop when you log in* and know
+  that logging out stops the agent. This is the Windows counterpart of the rootless-Podman
+  caveat above. For an agent that must stay up unattended, use Windows Server with the WSL2
+  engine, or run it in a Linux VM on the same host.
+- **The source IP the dashboard records is Docker's NAT gateway,** not the Windows host's LAN
+  address. The **Source IP** column and the audit rows will show that. It is not a fault, and
+  it does mean the column cannot identify *which* Windows host an agent is on.
+
+**What discovery can reach from a NAT'd container.** Probes are ordinary unprivileged
+unicast TCP connects — no ICMP, no ARP, no broadcast or multicast — so NAT costs you nothing:
+anything routable from the Windows host is routable from the container, and being off the
+LAN's layer-2 segment does not matter. Every target is an address the agent computed
+arithmetically from a CIDR you wrote down.
+
+The exception is **the host the agent is running on**. Inside the container `127.0.0.1` is
+the container, so `allow_loopback` cannot reach a service listening on the Windows machine's
+own loopback — see [VMware Workstation Pro](#vmware-workstation-pro), where that is the
+whole question. Docker Desktop's `host.docker.internal` resolves to the host and is a
+legitimate `fqdn:` target, but it only helps if the service is listening on an address other
+than `127.0.0.1`.
 
 ## Workflow
 
 ### 1. Publish the agent endpoint
 
 ```bash
+# Bash (WSL / Linux / macOS)
 AGENT_HOSTNAME=agents.example.com docker compose -f docker-compose.hub.yml -f docker-compose.agent.yml up -d
+```
+
+```powershell
+# PowerShell (Windows) — the inline VAR=value prefix is a parse error here
+$env:AGENT_HOSTNAME = 'agents.example.com'
+docker compose -f docker-compose.hub.yml -f docker-compose.agent.yml up -d
 ```
 
 This adds Caddy on a **separate vhost that proxies only `/api/agent/*`**. The UI, the
@@ -227,14 +297,29 @@ Set `AGENT_TLS_INTERNAL=1` and Caddy issues from its own CA instead, immediately
 offline:
 
 ```bash
+# Bash (WSL / Linux / macOS)
 AGENT_HOSTNAME=agents.lab.internal AGENT_TLS_INTERNAL=1 \
   docker compose -f docker-compose.hub.yml -f docker-compose.agent.yml up -d
+```
+
+```powershell
+# PowerShell (Windows)
+$env:AGENT_HOSTNAME = 'agents.lab.internal'
+$env:AGENT_TLS_INTERNAL = '1'
+docker compose -f docker-compose.hub.yml -f docker-compose.agent.yml up -d
 ```
 
 Then give the agents that CA — it is in no system trust store:
 
 ```bash
+# Bash (WSL / Linux / macOS)
 docker compose -f docker-compose.hub.yml -f docker-compose.agent.yml \
+  cp agent-gateway:/data/caddy/pki/authorities/local/root.crt ./caddy-root.crt
+```
+
+```powershell
+# PowerShell (Windows)
+docker compose -f docker-compose.hub.yml -f docker-compose.agent.yml `
   cp agent-gateway:/data/caddy/pki/authorities/local/root.crt ./caddy-root.crt
 ```
 
@@ -280,6 +365,11 @@ copy-paste `docker run` built from the dashboard's own URL. On first start the a
 generates an Ed25519 keypair, redeems the code, pins the dashboard's public key, and
 writes its identity to the state volume. The code is never needed again.
 
+The command comes in two shell flavours, picked with the **Linux / macOS** and **Windows
+(PowerShell)** toggle above it; the container is identical either way, and on a Windows
+browser the PowerShell form is pre-selected. See
+[Running on Windows](#running-on-windows) for what differs on that host.
+
 The private key never leaves the agent host. The dashboard only ever stores the public
 half, so a dashboard database dump does not let anyone impersonate an agent.
 
@@ -288,13 +378,22 @@ has one drawback worth knowing: an environment variable is baked into the contai
 config, so `docker inspect` still shows the code long after it has been spent. The modal
 offers a second form that mounts it as a file and sets `AGENT_ENROLLMENT_CODE_FILE`
 instead, leaving nothing durable in Docker's metadata; delete the file once the agent shows
-Online. To keep the code out of your shell history as well, write that file with an editor
-rather than pasting the `printf` line.
+Online. To keep the code out of your shell history as well, create that file with an editor
+and paste only the `docker run` that follows it — on Windows that is the *only* way, because
+PowerShell writes its history to disk as you type.
+
+If you do write it by hand, save it as plain ASCII or UTF-8 **without** a byte-order mark.
+The agent reads that file as text: a UTF-16 file (what PowerShell 5.1's `>` and `Out-File`
+produce, and what Notepad calls "Unicode") fails to decode, and a UTF-8 BOM is worse still
+because it survives the whitespace trim and the code is rejected as invalid with nothing
+pointing at why. The emitted PowerShell command uses `Set-Content -Encoding ascii` for
+exactly this reason.
 
 Because the container runs as uid 10001, that file has to be readable by it — a mode 0600
 file owned by your host user is *not*, and the agent says so and exits rather than failing
 mysteriously. A single-use secret with a fifteen-minute lifetime in a directory you chose
-is an acceptable trade for that; a long-lived one would not be.
+is an acceptable trade for that; a long-lived one would not be. (On Windows this cannot
+arise: Docker Desktop presents bind mounts with permissive ownership.)
 
 #### The signing audience is pinned by that first code
 
@@ -574,9 +673,10 @@ docker pull chrweav/hypervisor-runner:latest
 
 ### VMware Workstation Pro
 
-Workstation is the one hypervisor here that runs on somebody's desktop, and it was twice
-written off as unreachable because the dashboard drives it with `vmrun` against local VMX
-paths. That was true of `vmrun` and wrong overall: Workstation **Pro** ships `vmrest`, a
+Workstation is the one hypervisor here that runs on somebody's desktop — nearly always a
+**Windows** desktop, so read [Running on Windows](#running-on-windows) alongside this. It was
+twice written off as unreachable because the dashboard drives it with `vmrun` against local
+VMX paths. That was true of `vmrun` and wrong overall: Workstation **Pro** ships `vmrest`, a
 REST daemon that is plain JSON over HTTP. An agent on that host reaches it with no extra
 dependency and no container.
 
@@ -591,21 +691,47 @@ Then add a `workstation` connection bound to that host's agent. It is **agent-bo
 only**: the dashboard has no transport for Workstation, so a connection without an agent
 is refused rather than created and left broken.
 
-**It needs `allow_loopback`.** vmrest binds `127.0.0.1`, and the agent denies loopback
-unconditionally — that deny is what stops a discovery sweep probing the agent's own
-container or a cloud metadata endpoint, and it is re-added even if an operator deletes
-it. So a co-located connection opts in explicitly, in `policy.yaml`, next to its verbs:
+**`vmrest` binds `127.0.0.1`, and that address means something different inside a
+container.** The agent denies loopback unconditionally — that deny is what stops a discovery
+sweep probing the agent's own container or a cloud metadata endpoint, and it is re-added even
+if an operator deletes it. But lifting the deny is only half the problem: inside the
+container `127.0.0.1` *is the container*, so the address has to be one that actually reaches
+the host as well as one the policy permits. Which of the two you need depends on how the
+agent is attached to the network:
 
-```yaml
-connections:
-  - name: my-workstation
-    verbs: [inventory_sync, power_on, power_off]
-    allow_loopback: true
-```
+- **Docker Desktop on Windows or macOS** — point the connection at
+  `host.docker.internal:8697` and add it as a target. Docker Desktop routes that name into
+  the host's own network namespace, which is what makes a loopback-bound `vmrest` reachable
+  at all. It is not a loopback address from the agent's side, so `allow_loopback` is *not*
+  needed:
 
-That exempts **that connection**, on the port its `connections.yaml` entry names, and
-nothing else. Discovery still refuses loopback however this is set. If you can make
-vmrest listen on a routable address instead, do that and skip the exception entirely.
+  ```yaml
+  targets:
+    - fqdn: host.docker.internal
+      ports: [8697]
+  ```
+
+  The name is resolved once when the policy loads and pinned to the address it returned, so
+  the allow-list is in IPs by the time a connection is checked.
+
+- **An agent sharing the host's network namespace** (Linux, `--network host`) — here
+  `127.0.0.1` really is the host's loopback, and the connection opts out of the deny
+  explicitly in `policy.yaml`, next to its verbs:
+
+  ```yaml
+  connections:
+    - name: my-workstation
+      verbs: [inventory_sync, power_on, power_off]
+      allow_loopback: true
+  ```
+
+  That exempts **that connection**, on the port its `connections.yaml` entry names, and
+  nothing else. Discovery still refuses loopback however this is set.
+
+If you can make `vmrest` listen on a routable address instead, do that and skip both
+exceptions — it is the only one of the three that needs nothing special from the container
+runtime. Note that `vmrest` documents a `-p` port option but no bind-address option, so on a
+stock install this usually is not available to you.
 
 **Inventory plus power on and off — and nothing more.** vmrest's API is
 `on/off/shutdown/suspend/pause/unpause` with **no reset, no reboot and no snapshot**, so
@@ -704,7 +830,11 @@ an objection into a demonstration.
 | Symptom | Cause |
 |---|---|
 | `Cannot read the policy file … No such file or directory` and the container exits 2 | No policy mounted. Fail-closed is deliberate. |
-| `Cannot read the policy file … Permission denied` on a file `ls -l` already shows world-readable | **SELinux**, on Fedora/RHEL/CentOS/Rocky/Alma. A file in your home directory is labelled `user_home_t`, which the container may not read whatever its mode bits say — 644 is not enough here. Mount it `:ro,Z` (the emitted command does; Docker and Podman ignore `Z` on hosts without SELinux) or relabel by hand: `chcon -t container_file_t policy.yaml`. Verify with `ls -lZ policy.yaml`, and `ausearch -m avc -ts recent` for the denial itself. Worth recognising because the dashboard-side symptoms are all misleading: the agent exits *before* its first network call, so **no request whatsoever reaches the dashboard** — no 4xx, nothing in the app or ingress logs — and the row sits at `enrolling` with `Last seen: never`, no source IP and no policy hash, which reads exactly like a wrong URL or a blocked egress. The enrolment code is **not** spent either, so the same one still works once the mount is fixed. |
+| `Cannot read the policy file … Permission denied` on a file `ls -l` already shows world-readable | **SELinux**, on Fedora/RHEL/CentOS/Rocky/Alma — a **Linux-host-only** cause; on Windows see the row below instead. A file in your home directory is labelled `user_home_t`, which the container may not read whatever its mode bits say — 644 is not enough here. Mount it `:ro,Z` (the emitted command does; Docker and Podman ignore `Z` on hosts without SELinux) or relabel by hand: `chcon -t container_file_t policy.yaml`. Verify with `ls -lZ policy.yaml`, and `ausearch -m avc -ts recent` for the denial itself. Worth recognising because the dashboard-side symptoms are all misleading: the agent exits *before* its first network call, so **no request whatsoever reaches the dashboard** — no 4xx, nothing in the app or ingress logs — and the row sits at `enrolling` with `Last seen: never`, no source IP and no policy hash, which reads exactly like a wrong URL or a blocked egress. The enrolment code is **not** spent either, so the same one still works once the mount is fixed. |
+| `no matching manifest for windows/amd64`, or `image operating system "linux" cannot be used on this platform` | Docker Desktop is in **Windows containers** mode. The agent image is Linux, as is almost everything else you would run; right-click the tray whale → *Switch to Linux containers*. Neither message names the mode, which is why this is worth recognising rather than debugging. |
+| **On Windows**, `Cannot read the policy file`, on a path that plainly exists | Docker Desktop file sharing, **not** SELinux — ignore the `chcon` advice above, it cannot apply. Either the working directory is a UNC path or a mapped network drive (neither can be bind-mounted), or the drive is not shared: *Settings → Resources → File sharing*. Note that on the Hyper-V backend a bind source Docker Desktop cannot reach is materialised as an empty **directory** inside the container rather than failing outright, so the message you get talks about mount flags and points nowhere near the real cause. Keep `policy.yaml` under your user profile and it does not arise. |
+| **On Windows**, the code-file form ends in a Python traceback rather than a message | The file is UTF-16 — PowerShell 5.1's `>` and `Out-File` write that by default, and Notepad's "Unicode" option does too. The agent reads the file as text and cannot decode it. Write it with `Set-Content -Encoding ascii -NoNewline`, as the emitted PowerShell command does, or save it from an editor as ASCII/UTF-8 with no byte-order mark. A UTF-8 BOM is the quieter version of the same fault: it survives the whitespace trim, so the code is simply rejected as invalid. |
+| **On Windows**, every agent goes offline when you log off | Docker Desktop runs inside a logged-in user session, so `--restart unless-stopped` cannot help — there is no engine left to restart anything. Enable *Start Docker Desktop when you log in* and stay logged in, or move the agent to Windows Server with the WSL2 engine or a Linux VM. See [Running on Windows](#running-on-windows). |
 | `DASHBOARD_URL is http://` and it exits 2 | The agent will not sign over plaintext. Terminate TLS, or `AGENT_INSECURE_TLS=1` for a throwaway lab. |
 | `the dashboard rejected this agent's signature` | Revoked, re-enrolled elsewhere, or the dashboard URL changed (the audience is pinned). Issue a fresh code. |
 | Enrolment returns 400 | The code is single-use and expires in 15 minutes. Issue another. |
@@ -713,7 +843,7 @@ an objection into a demonstration.
 | `/agents` says "Remote agents are not enabled" | Same again — the page itself is not gated, so it loads and then tells you which switch to flip. |
 | Enrolment returns 429, and the container exits 2 | Too many *failed* enrolments recently from this address. Nothing is wrong with this agent; the restart policy retries after `Retry-After`. |
 | `the dashboard asked us to slow down` | Over the per-agent cap. Expected during a burst, and it recovers on its own. If an ordinary scan trips it, raise `agent_max_requests_per_minute` — see [Rate limits](#rate-limits). |
-| `AGENT_ENROLLMENT_CODE_FILE … cannot be read` | The container runs as uid 10001; a mode 0600 file owned by your host user is unreadable inside it. Make it world-readable or use the environment variable. If it is already world-readable, this is the SELinux label, same as the policy row above — mount it `:ro,Z`. |
+| `AGENT_ENROLLMENT_CODE_FILE … cannot be read` | **On a Linux host:** the container runs as uid 10001, and a mode 0600 file owned by your host user is unreadable inside it. Make it world-readable or use the environment variable. If it is already world-readable, this is the SELinux label, same as the policy row above — mount it `:ro,Z`. **On Windows** neither applies: Docker Desktop presents bind mounts with permissive ownership, so this is file sharing or encoding — see the two Windows rows above. |
 | Agent polls, gets 503 | Dashboard setup is not complete. On `lease` the agent backs off and keeps trying; it is deliberately not redirected to the HTML wizard. **On enrolment a 503 is fatal** — the agent exits 2 and the container's restart policy is the retry, so finish setup before issuing a code. |
 | `Policy refused N of M host:port combinations` | Working as intended — the request was wider than the policy. The counts tell you which to widen. |
 | Stuck `queued`, agent online | The job type is not in the agent's `job_types`. Check the policy. |
@@ -737,7 +867,7 @@ an objection into a demonstration.
 | `the sibling image … is not present on this host` | `docker pull chrweav/hypervisor-runner:latest`. The agent will not pull it for you, deliberately. |
 | `cannot reach the Docker socket` | The overlay is not applied, or `AGENT_DOCKER_SOCKET` does not match the mount's container-side path. Settle which with `docker compose -f docker-compose.yml -f docker-compose.sibling.yml config`: the output must show **one** service, `agent`, carrying both the bind mount and the variable. Two services means an overlay whose service key does not match the base file's — Compose merges by service key, not by `container_name`. |
 | A Password Safe checkout fails `4031 … 403` | The OAuth client's user needs the **Requestor** role plus a View access policy on a Smart Rule containing that managed account. Membership is recomputed on a schedule, so a new account is not requestable immediately. |
-| `could not reach vmrest at 127.0.0.1:8697` | Either `vmrest` is not running, or the connection lacks `allow_loopback: true` in policy.yaml. The agent denies loopback by default. |
+| `could not reach vmrest at 127.0.0.1:8697` | Either `vmrest` is not running, or the connection lacks `allow_loopback: true` in policy.yaml — the agent denies loopback by default. **On Docker Desktop `allow_loopback` cannot fix this**, because `127.0.0.1` inside the container is the container: point the connection at `host.docker.internal` and add it as a target instead. See [VMware Workstation Pro](#vmware-workstation-pro). |
 | `vmrest rejected the credential` | Set them with `vmrest -C`, and check the username matches connections.yaml. |
 | `vmrest has no 'restart' operation` | Working as intended — its API has no reset, reboot or snapshot. Use power_off then power_on. |
 | A sync never runs, and the connection shows an error | Read it — the enqueuer records why rather than queueing a job that would wait indefinitely. Usually the bound agent is offline or lacks the `agent_hypervisor` grant. |
