@@ -45,7 +45,10 @@
 # path deliberately — if you need the root socket, changing it should be a conscious edit.
 
 services:
-  dashboard-agent:
+  # Must match the service key in docker-compose.yml — Compose merges by service key,
+  # not by container_name. Keyed on `dashboard-agent` (the container name) this would
+  # declare a second, imageless service instead of mounting the socket on the agent.
+  agent:
     environment:
       # Must match the container-side path of the mount below.
       AGENT_DOCKER_SOCKET: /var/run/docker.sock
