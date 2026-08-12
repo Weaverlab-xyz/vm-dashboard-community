@@ -15,7 +15,9 @@ original, byte for byte, and pin the rest of the wire contract the same way:
   * the agent's handler table matches ``agent_service.AGENT_JOB_TYPES``;
   * the agent's dependency list stays small enough to audit;
   * the shipped examples keep the SELinux relabel flag on the policy mount, without which
-    the agent cannot read its own policy on any RHEL-family host.
+    the agent cannot read its own policy on any RHEL-family host;
+  * the opt-in sibling overlay keys its override on the same service as the base compose
+    file, without which the documented merge command cannot apply the Docker socket.
 
 Runs under pytest, or standalone:
     python tests/test_agent_runner_contract.py
@@ -27,7 +29,10 @@ import re
 import stat
 import sys
 
+import yaml
+
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_EXAMPLES = os.path.join(_ROOT, "examples", "remote-agent")
 _AGENT = os.path.join(_ROOT, "runners", "agent", "agent.py")
 _SIGNING = os.path.join(_ROOT, "web_dashboard", "services", "agent_signing.py")
 _SERVICE = os.path.join(_ROOT, "web_dashboard", "services", "agent_service.py")
@@ -230,7 +235,7 @@ def test_the_example_mounts_carry_the_selinux_relabel_flag():
     # it later and would have shipped with a bare `:ro` had this stayed name-specific.
     for name in ("docker-compose.yml", "policy.example.yaml",
                  "connections.example.yaml"):
-        body = _read(os.path.join(_ROOT, "examples", "remote-agent", name))
+        body = _read(os.path.join(_EXAMPLES, name))
         mounts = [ln for ln in body.splitlines()
                   if "/etc/dashboard-agent/" in ln and ":ro" in ln]
         assert mounts, f"{name}: no agent config mount found"
@@ -240,9 +245,44 @@ def test_the_example_mounts_carry_the_selinux_relabel_flag():
 
     # `docker run -v` rejects a relative source path outright, so the documented command
     # has to be absolute or it cannot be pasted at all.
-    policy_example = _read(os.path.join(_ROOT, "examples", "remote-agent",
-                                        "policy.example.yaml"))
+    policy_example = _read(os.path.join(_EXAMPLES, "policy.example.yaml"))
     assert "-v ./policy.yaml" not in policy_example
+
+
+def test_the_sibling_overlay_targets_the_base_files_service_key():
+    """Compose merges by service key, not by `container_name`.
+
+    The base file declares the service `agent:` and merely *names* the container
+    `dashboard-agent`. An overlay keyed on the container name does not add the socket to
+    the agent — it declares a second service with no image, and the documented
+    `-f docker-compose.yml -f docker-compose.sibling.yml` fails validation outright.
+    Shipped that way, so the whole opt-in path was unreachable.
+    """
+    base = yaml.safe_load(_read(os.path.join(_EXAMPLES, "docker-compose.yml")))
+    overlay = yaml.safe_load(_read(os.path.join(_EXAMPLES,
+                                               "docker-compose.sibling.yml")))
+    extra = set(overlay["services"]) - set(base["services"])
+    assert not extra, (
+        f"the overlay declares service(s) {sorted(extra)} that the base file does not "
+        f"define; Compose merges by service key, so this adds a new imageless service "
+        f"instead of mounting the socket on the agent")
+
+    # The socket has to land on the service, and the variable has to name that mount's
+    # container-side path — the overlay's own comment promises exactly this.
+    for name, svc in overlay["services"].items():
+        target = svc["environment"]["AGENT_DOCKER_SOCKET"]
+        assert any(v.endswith(f":{target}") for v in svc["volumes"]), (
+            f"{name}: AGENT_DOCKER_SOCKET={target} matches no mount target")
+
+
+def test_the_base_example_mounts_no_container_socket():
+    """The promise that makes the overlay a separate file: without it the agent holds no
+    socket, launches nothing, and cannot be made to."""
+    base = yaml.safe_load(_read(os.path.join(_EXAMPLES, "docker-compose.yml")))
+    for name, svc in base["services"].items():
+        for vol in svc.get("volumes") or []:
+            assert "docker.sock" not in vol and "podman.sock" not in vol, (
+                f"{name}: the base file must not mount a container socket: {vol}")
 
 
 # ── Image hygiene ─────────────────────────────────────────────────────────────

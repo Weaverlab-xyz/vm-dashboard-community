@@ -735,7 +735,7 @@ an objection into a demonstration.
 | One sync produced a dozen job rows | Expected for a large inventory: one row per page, all sharing a `batch_id`. See [Large inventories](#large-inventories). |
 | `policy.yaml does not enable the sibling runner` | Hyper-V and bare ESXi need it. Add the `sibling:` block, and apply `docker-compose.sibling.yml` so the socket is present. Read that file first — it mounts the Docker socket. |
 | `the sibling image … is not present on this host` | `docker pull chrweav/hypervisor-runner:latest`. The agent will not pull it for you, deliberately. |
-| `cannot reach the Docker socket` | The overlay is not applied, or `AGENT_DOCKER_SOCKET` does not match the mount's container-side path. |
+| `cannot reach the Docker socket` | The overlay is not applied, or `AGENT_DOCKER_SOCKET` does not match the mount's container-side path. Settle which with `docker compose -f docker-compose.yml -f docker-compose.sibling.yml config`: the output must show **one** service, `agent`, carrying both the bind mount and the variable. Two services means an overlay whose service key does not match the base file's — Compose merges by service key, not by `container_name`. |
 | A Password Safe checkout fails `4031 … 403` | The OAuth client's user needs the **Requestor** role plus a View access policy on a Smart Rule containing that managed account. Membership is recomputed on a schedule, so a new account is not requestable immediately. |
 | `could not reach vmrest at 127.0.0.1:8697` | Either `vmrest` is not running, or the connection lacks `allow_loopback: true` in policy.yaml. The agent denies loopback by default. |
 | `vmrest rejected the credential` | Set them with `vmrest -C`, and check the username matches connections.yaml. |
