@@ -58,8 +58,10 @@ deploy still succeeds):
    `azure_vm_jumpoint_mode`), GCP the shared COS host (see `gcp_vm_jumpoint_mode`);
    **OCI does nothing here** (bring your own). In a batch this happens once for the
    whole run.
-2. **AWS only** — ensure the shared on-demand **NAT instance** (`aws_nat_instance_enabled`)
-   and **SSM interface endpoints** (`aws_ssm_endpoints_enabled`).
+2. **Ensure on-demand egress** — AWS: the shared **NAT instance** (`aws_nat_instance_enabled`)
+   plus **SSM interface endpoints** (`aws_ssm_endpoints_enabled`). GCP: a **Cloud NAT**
+   gateway for the VM subnet plus the egress allow rule (`gcp_vm_nat_enabled`). Both are
+   ref-counted and reclaimed when the last VM goes; Azure and OCI do nothing here.
 3. **Fetch the SSH public key** from the cloud's secret store and inject it (Linux via
    cloud-init / `admin_ssh_key` / `ssh-keys` metadata; Windows skips key injection).
 4. **Launch the instance** (SDK).
@@ -202,10 +204,11 @@ SSH Shell Jump.
 ### GCP (GCE)
 
 Sandbox: [`scripts/sandbox/Linux/setup-gcp.sh`](../scripts/sandbox/Linux/setup-gcp.sh).
-Creates a **vm-subnet** (`10.99.2.0/24`, **no** Cloud NAT → no internet egress) and a
-**jumpoint-subnet** (Cloud NAT), a firewall `…-allow-ssh-from-jumpoint`, a Secret Manager
+Creates a **vm-subnet** (`10.99.2.0/24`, **no** Cloud NAT → no internet egress by default)
+and a **jumpoint-subnet** (Cloud NAT), a firewall `…-allow-ssh-from-jumpoint`, a Secret Manager
 SSH keypair, and a service account. The dashboard **auto-attaches** `gcp_default_network_tag`
-(`dashboard-sandbox-vm`) to every VM so the firewall applies.
+(`dashboard-sandbox-vm`) to every VM so the firewall applies — and, when `gcp_vm_nat_enabled`
+is on, opens on-demand egress for the vm-subnet at deploy time (see below).
 
 | Key | Default | Notes |
 |---|---|---|
@@ -215,6 +218,30 @@ SSH keypair, and a service account. The dashboard **auto-attaches** `gcp_default
 | `gcp_ssh_username` | `gcp-user` | default Linux login |
 | `gcp_jumpoint_subnetwork` / `gcp_cloud_run_docker_deploy_key` | — | COS gateway subnet + deploy key (Layer 1) |
 | `gcp_vm_jumpoint_mode` | `shared` | `shared` (one ref-counted host) or `paired` (an `e2-micro` per VM) |
+| `gcp_vm_nat_enabled` | `true` | on-demand ref-counted Cloud NAT + egress rule for VM internet |
+| `gcp_vm_nat_name` / `gcp_vm_egress_rule_name` | `dashboard-sandbox-vm-nat` / `dashboard-sandbox-vm-egress-ondemand` | names of the two on-demand resources |
+| `gcp_vm_egress_rule_priority` | `900` | must beat the sandbox's priority-1000 egress deny (lower wins) |
+
+#### On-demand VM egress
+
+The sandbox denies VM internet through **two independent gates**: the vm-subnet is left off
+the shared Cloud NAT, *and* `…-deny-vm-egress` denies all egress at priority 1000 on the VM
+network tag (a priority-999 rule allows the sandbox supernet back, which is why SSH still
+works). Opening one gate alone changes nothing.
+
+Rather than making the sandbox permanently open — which bills for egress infrastructure
+serving VMs that don't exist — the dashboard opens both **by reference count**, the GCP
+analog of `aws_nat_instance_enabled`. On the first VM deploy it adds a **second** Cloud NAT
+gateway to the sandbox's existing Cloud Router (scoped to the vm-subnet's primary range) plus
+a priority-900 egress ALLOW; when the last VM **in that region** is destroyed it removes both.
+The count is region-scoped because each sandbox region has its own Cloud Router, so a VM in
+one region never pins another region's gateway.
+
+The sandbox's own NAT and deny rule are never modified — both halves are separately named,
+additive resources. That matters more than it looks: `routers.patch` replaces the `nats` list
+wholesale, so the existing gateways are read back and re-sent verbatim; dropping them would
+cut the PRA Gateway's own egress, which is the SSH path to every VM. No-ops quietly when the
+region has no Cloud Router, so non-sandbox projects are untouched.
 
 GCP deploys borrow the **shared, ref-counted gateway host** that cloud databases, k8s
 tunnels and VDI seats already use — one host, rather than an `e2-micro` per VM. Batches
@@ -347,10 +374,16 @@ in [image-management.md](image-management.md).
 
 - **Destroy** (`DELETE /api/{cloud}/instances|vms/{id}`) removes the instance, deregisters
   the PRA Shell Jump (from stored state), and off-boards Password Safe / Entitle if they were
-  wired. AWS reclaims the shared NAT instance + SSM endpoints when the last VM is gone.
+  wired. AWS reclaims the shared NAT instance + SSM endpoints when the last VM is gone; GCP
+  reclaims the on-demand Cloud NAT + egress rule when the last VM **in that region** is gone.
 - **VM can't reach the internet** — by design (private subnet). On AWS enable
-  `aws_nat_instance_enabled`; on OCI the vm-subnet already has a NAT Gateway; on GCP the VM
-  subnet has no NAT (only the gateway subnet does).
+  `aws_nat_instance_enabled`; on OCI the vm-subnet already has a NAT Gateway; on GCP enable
+  `gcp_vm_nat_enabled` (default on). Note GCP denies egress through **two** independent gates —
+  the vm-subnet is left off the sandbox Cloud NAT *and* a priority-1000 rule denies egress on
+  the VM network tag — so opening only one changes nothing. DNS still resolves either way
+  (the metadata server is always reachable), so the symptom is a **connection timeout**, not a
+  name-resolution failure. Egress is ensured at **deploy** time: a VM created before the
+  feature was enabled needs a redeploy, or the gateway + rule created by hand.
 - **Shell Jump shows Unavailable** — the gateway host didn't start; set the cloud's deploy
   key (`aws_ecs_docker_deploy_key` / `azure_aci_docker_deploy_key` /
   `gcp_cloud_run_docker_deploy_key`). On **OCI** you must supply your own gateway.
