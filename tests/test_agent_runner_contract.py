@@ -14,6 +14,9 @@ original, byte for byte, and pin the rest of the wire contract the same way:
   * every path the agent calls is a route the dashboard actually declares;
   * the agent's handler table matches ``agent_service.AGENT_JOB_TYPES``;
   * the agent's dependency list stays small enough to audit;
+  * a hand-written enrolment-code file survives whatever encoding the operator's editor
+    chose — UTF-16 is explained rather than raising, a BOM is stripped rather than sent;
+  * the SELinux advice is withheld where it cannot possibly apply;
   * the shipped examples keep the SELinux relabel flag on the policy mount, without which
     the agent cannot read its own policy on any RHEL-family host;
   * the opt-in sibling overlay keys its override on the same service as the base compose
@@ -23,6 +26,7 @@ Runs under pytest, or standalone:
     python tests/test_agent_runner_contract.py
 """
 import ast
+import contextlib
 import importlib.util
 import os
 import re
@@ -186,6 +190,23 @@ def test_the_agent_reports_its_policy_hash_at_enrolment():
     assert '"policy_hash"' in src and "POLICY.digest" in src
 
 
+@contextlib.contextmanager
+def _pretend_host(*, docker_desktop: bool):
+    """Pin `_in_docker_desktop_vm`, which otherwise reads the machine running the tests.
+
+    Without this the SELinux assertions below pass on CI's bare Ubuntu runner and fail on a
+    developer's box, because the container these tests usually run in *is* Docker Desktop's
+    Linux VM on Windows and macOS — the probe would be answering correctly about the wrong
+    host. Both messages need asserting on regardless of where pytest happens to be.
+    """
+    original = agent._in_docker_desktop_vm
+    agent._in_docker_desktop_vm = lambda: docker_desktop
+    try:
+        yield
+    finally:
+        agent._in_docker_desktop_vm = original
+
+
 def test_an_unreadable_but_world_readable_policy_names_selinux():
     """The container log is the *only* place this failure is visible.
 
@@ -198,7 +219,7 @@ def test_an_unreadable_but_world_readable_policy_names_selinux():
     import errno as _errno
     import tempfile
 
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory() as tmp, _pretend_host(docker_desktop=False):
         path = os.path.join(tmp, "policy.yaml")
         with open(path, "w", encoding="utf-8") as fh:
             fh.write("targets: []\n")
@@ -221,6 +242,195 @@ def test_an_unreadable_but_world_readable_policy_names_selinux():
             owner_only = agent._policy_unreadable(
                 path, PermissionError(_errno.EACCES, "Permission denied"))
             assert "chmod" in owner_only and "SELinux" not in owner_only, owner_only
+
+
+def test_the_selinux_advice_is_withheld_inside_a_docker_desktop_vm():
+    """`chcon` is not merely unhelpful on a Windows or macOS host — it is unfollowable.
+
+    The image is Linux-only and runs on those hosts in Docker Desktop's Linux VM, which has
+    no SELinux to relabel anything in. An unreadable bind mount there is file sharing: an
+    unshared drive, a UNC path, or the Hyper-V backend materialising an unreachable bind
+    source as an empty *directory* inside the container. Emitting the label message anyway
+    sends the operator after `chcon` for an afternoon, and `docs/remote-agents.md` marks the
+    same troubleshooting rows Linux-only for exactly this reason.
+    """
+    import errno as _errno
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "policy.yaml")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("targets: []\n")
+        os.chmod(path, 0o644)
+        denied = PermissionError(_errno.EACCES, "Permission denied")
+
+        with _pretend_host(docker_desktop=True):
+            msg = agent._policy_unreadable(path, denied)
+            # Not one runnable label remedy survives. SELinux may still be *named* — ruling
+            # it out is the useful part for anyone who already found that advice — but no
+            # command an operator could copy out of the log and try.
+            for absent in ("chcon", "ls -lZ", "ausearch", "user_home_t", ":ro,Z"):
+                assert absent not in msg, f"{absent!r} cannot apply in this VM: {msg}"
+            assert "File sharing" in msg and "Docker Desktop" in msg, msg
+            # Still says the code is unspent — the reason an operator can retry at all.
+            assert "unspent" in msg, msg
+
+            # Even the stat-was-refused branch stops naming a label it cannot have. Restore
+            # the mode before asserting, or TemporaryDirectory's cleanup masks the failure.
+            os.chmod(tmp, 0o000)
+            try:
+                blind = (agent._policy_unreadable(path, denied)
+                         if not os.access(path, os.R_OK) else "")
+            finally:
+                os.chmod(tmp, 0o700)
+            if blind:  # skipped for root, and on Windows where chmod does not bite
+                assert "SELinux" not in blind and "File sharing" in blind, blind
+
+        # And off, the Linux message comes back — qualified as Linux, not unqualified.
+        with _pretend_host(docker_desktop=False):
+            linux = agent._policy_unreadable(path, denied)
+            assert "SELinux" in linux and "chcon" in linux, linux
+
+
+def test_the_docker_desktop_probe_fails_closed():
+    """It reads /proc/version, which is absent on Windows and may be anything at all.
+
+    False has to be the answer to every surprise, because False selects the message that
+    names *both* causes; True selects one that flatly denies SELinux is involved. Being
+    wrong in that direction on a Fedora host would be the original bug with a new coat.
+    """
+    assert agent._in_docker_desktop_vm() in (True, False)  # never raises
+
+    lowered = [m.lower() for m in agent._DESKTOP_KERNEL_MARKERS]
+    assert "microsoft" in lowered and "linuxkit" in lowered, agent._DESKTOP_KERNEL_MARKERS
+    # Matching is done on a lowercased read, so an uppercase marker could never fire.
+    assert all(m == m.lower() for m in agent._DESKTOP_KERNEL_MARKERS)
+
+
+# ── The enrolment code file ───────────────────────────────────────────────────
+# An operator writes this one by hand — that is the whole point of the file form, since it
+# keeps the code out of `docker inspect` and out of shell history. So its encoding is
+# whatever their editor chose, and on Windows that is very often not UTF-8.
+
+
+def _code_file(tmp: str, data: bytes) -> str:
+    path = os.path.join(tmp, "code.txt")
+    with open(path, "wb") as fh:
+        fh.write(data)
+    return path
+
+
+def _read_code(path: str) -> str:
+    """Call `enrollment_code()` with the module globals it reads pointed at `path`."""
+    saved = (agent.ENROLLMENT_CODE_FILE, agent.ENROLLMENT_CODE)
+    try:
+        agent.ENROLLMENT_CODE_FILE, agent.ENROLLMENT_CODE = path, "from-the-env"
+        return agent.enrollment_code()
+    finally:
+        agent.ENROLLMENT_CODE_FILE, agent.ENROLLMENT_CODE = saved
+
+
+_CODE = "agte_" + "a" * 64
+
+
+def test_a_utf16_code_file_is_explained_rather_than_a_traceback():
+    """PowerShell 5.1's `>` and `Out-File` write UTF-16LE, and Notepad calls it "Unicode".
+
+    `UnicodeDecodeError` is a `ValueError`, not an `OSError`, so it used to sail past the
+    handler and kill the container with a raw traceback — discarding the only diagnosis the
+    operator was ever going to get, because this file is read before the first network call
+    and nothing about the failure reaches the dashboard.
+    """
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        for label, raw in (
+            ("utf-16-le with BOM", _CODE.encode("utf-16")),        # PowerShell 5.1 `>`
+            ("utf-16-be with BOM", b"\xfe\xff" + _CODE.encode("utf-16-be")),
+            # No BOM: this one *decodes* as UTF-8, because the high bytes are NUL and NUL
+            # is legal UTF-8. It is the quiet half of the fault and needs its own check.
+            ("utf-16-le without BOM", _CODE.encode("utf-16-le")),
+        ):
+            path = _code_file(tmp, raw)
+            try:
+                got = _read_code(path)
+            except agent.AgentFatal as exc:
+                msg = str(exc)
+                assert "UTF-16" in msg, f"{label}: does not name the cause: {msg}"
+                assert "Set-Content -Encoding ascii" in msg, (
+                    f"{label}: does not name the remedy: {msg}")
+                assert "AGENT_ENROLLMENT_CODE" in msg, msg
+            else:
+                raise AssertionError(f"{label}: returned {got!r} instead of explaining")
+
+
+def test_a_utf8_bom_is_stripped_rather_than_sent_as_part_of_the_code():
+    """The quietest form of the same fault: a BOM is not whitespace.
+
+    It survives `.strip()`, so the dashboard is handed "\\ufeffagte_…" and refuses a code
+    that looks correct in every editor — and the codes are single-use, so each attempt
+    burns one.
+    """
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        assert _read_code(_code_file(tmp, _CODE.encode("utf-8-sig"))) == _CODE
+        # The ordinary cases have to keep working byte for byte.
+        assert _read_code(_code_file(tmp, _CODE.encode("ascii"))) == _CODE
+        assert _read_code(_code_file(tmp, (_CODE + "\r\n").encode("utf-8"))) == _CODE
+
+
+def test_an_unreadable_code_file_still_names_uid_10001():
+    """The pre-existing OSError message is the other half and must not have been traded
+    away for the encoding one — a mode 0600 file is still the commonest failure here."""
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            _read_code(os.path.join(tmp, "absent.txt"))
+        except agent.AgentFatal as exc:
+            assert "10001" in str(exc) and "UTF-16" not in str(exc), exc
+        else:
+            raise AssertionError("a missing code file must be fatal")
+
+
+def test_the_other_hand_written_secret_files_decode_the_same_way():
+    """`password_file` and `client_secret_file` are written by the same operator, in the
+    same shell, on the same host — so they carry the same fault and get the same message.
+
+    These raise `PolicyRefusal` rather than `AgentFatal` because they are read during a
+    job rather than at startup, but an undecodable one still has to say *why* instead of
+    surfacing a decode traceback out of a job handler.
+    """
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        utf16 = _code_file(tmp, "s3cret".encode("utf-16"))
+        try:
+            agent._secret_for({"name": "wk1", "password_file": utf16})
+        except agent.PolicyRefusal as exc:
+            assert "UTF-16" in str(exc) and "wk1" in str(exc), exc
+        else:
+            raise AssertionError("an undecodable password_file must be refused")
+
+        # And a BOM'd one yields the secret itself, not the secret with a mark on the front.
+        bom = os.path.join(tmp, "pw-bom.txt")
+        with open(bom, "wb") as fh:
+            fh.write("s3cret".encode("utf-8-sig"))
+        assert agent._secret_for({"name": "wk1", "password_file": bom}) == "s3cret"
+
+        # safe_dump rather than an f-string: the path is a Windows one under test here, and
+        # its backslashes have to reach the agent as written.
+        ps_client = os.path.join(tmp, "passwordsafe.yaml")
+        with open(ps_client, "w", encoding="utf-8") as fh:
+            yaml.safe_dump({"api_url": "https://ps.example.com", "client_id": "cid",
+                            "client_secret_file": utf16}, fh)
+        try:
+            agent.PasswordSafe.from_file(ps_client)
+        except agent.PolicyRefusal as exc:
+            assert "UTF-16" in str(exc), exc
+        else:
+            raise AssertionError("an undecodable client_secret_file must be refused")
 
 
 # ── The shipped examples ──────────────────────────────────────────────────────

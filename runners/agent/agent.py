@@ -122,6 +122,57 @@ class Throttled(Exception):
         super().__init__(f"throttled for {self.retry_after:.0f}s")
 
 
+def _read_secret_file(path: str) -> str:
+    """Read one small operator-written secret — a code, a password — as text.
+
+    ``utf-8-sig`` rather than plain ``utf-8`` for one reason: **a byte-order mark is not
+    whitespace.** A UTF-8 BOM survives ``.strip()``, so the reads this replaced handed back
+    ``"\\ufeffagte_…"`` and the only symptom was the dashboard rejecting a code that looks
+    correct in every editor. ``utf-8-sig`` decodes ASCII and BOM-less UTF-8 byte for byte
+    identically, so it costs nothing in the ordinary case.
+
+    Raises ``ValueError`` — of which ``UnicodeDecodeError`` is a subclass — for a file
+    that is not UTF-8 at all. In practice that means UTF-16, which is what PowerShell
+    5.1's ``>`` and ``Out-File`` write by default and what Notepad's "Unicode" option
+    saves. The two forms fail differently and both are handled here: a BOM'd UTF-16 file
+    fails to decode on the ``\\xff\\xfe`` itself, while a BOM-less UTF-16LE one *decodes
+    cleanly* — its high bytes are NUL, which is legal UTF-8 — and would otherwise be
+    returned as an interleaved-NUL string that is rejected as invalid with nothing
+    pointing at why. Callers turn either into :func:`_secret_file_undecodable`.
+    """
+    with open(path, encoding="utf-8-sig") as fh:
+        text = fh.read()
+    if "\x00" in text:
+        raise ValueError("embedded NUL: decoded as UTF-8 but is not UTF-8 text")
+    return text.strip()
+
+
+def _secret_file_undecodable(what: str, path: str) -> str:
+    """Explain a secret file whose *encoding* is wrong, in terms of what wrote it.
+
+    Worth its own message because both halves of this failure mislead, in opposite
+    directions. ``UnicodeDecodeError`` is not an ``OSError``, so before this existed a
+    UTF-16 file escaped the handler below and killed the container with a raw traceback —
+    throwing away the one explanation the operator was ever going to get, since the agent
+    reads this file before its first network call and nothing about it reaches the
+    dashboard. The BOM case is the quiet opposite: it reads fine, enrolment is refused as
+    a bad code, and the file looks perfect in every editor that hides the mark.
+
+    Almost always Windows, and almost always PowerShell 5.1. The dashboard's emitted
+    PowerShell command writes the file with ``Set-Content -Encoding ascii -NoNewline``
+    precisely to avoid this, so a file in this state was written by hand — which is why
+    the remedy names the encoding flags rather than telling the operator to re-copy the
+    command.
+    """
+    return (
+        f"{what} is set to {path}, and the file exists and is readable, but its contents "
+        f"are not text this agent can decode. This is an encoding problem, not a "
+        f"permissions one: it looks like UTF-16, which is what PowerShell 5.1's `>` and "
+        f"`Out-File` write by default and what Notepad's \"Unicode\" option saves. Write "
+        f"it as ASCII or UTF-8 with no byte-order mark — in PowerShell that is "
+        f"`Set-Content -Encoding ascii -NoNewline -Path <file> -Value '<value>'`.")
+
+
 def enrollment_code() -> str:
     """The one-time enrolment code, from a mounted file when one is configured.
 
@@ -133,8 +184,13 @@ def enrollment_code() -> str:
     """
     if ENROLLMENT_CODE_FILE:
         try:
-            with open(ENROLLMENT_CODE_FILE) as fh:
-                return fh.read().strip()
+            return _read_secret_file(ENROLLMENT_CODE_FILE)
+        except ValueError:
+            raise AgentFatal(
+                _secret_file_undecodable(
+                    "AGENT_ENROLLMENT_CODE_FILE", ENROLLMENT_CODE_FILE)
+                + " Or pass the code as AGENT_ENROLLMENT_CODE instead. Nothing has "
+                  "reached the dashboard yet, so the code itself is still unspent.")
         except OSError as exc:
             raise AgentFatal(
                 f"AGENT_ENROLLMENT_CODE_FILE is set to {ENROLLMENT_CODE_FILE} but it "
@@ -188,6 +244,31 @@ def canonical_request(*, agent_id: str, timestamp: str, nonce: str, audience: st
 
 # ── Policy ────────────────────────────────────────────────────────────────────
 
+_DESKTOP_KERNEL_MARKERS = ("microsoft", "wsl", "linuxkit")
+
+
+def _in_docker_desktop_vm() -> bool:
+    """Whether this container's kernel is a Docker Desktop / WSL2 Linux VM.
+
+    ``/proc/version`` names the kernel the container shares with whatever is running it,
+    which is about the only thing a container can learn about its host without asking.
+    Docker Desktop brands both of its backends: ``-microsoft-standard-WSL2`` on the WSL2
+    one and ``-linuxkit`` on the Hyper-V one (and on macOS). Neither VM has SELinux and
+    neither can, so where this is true every ``chcon`` instruction is not merely unhelpful
+    but impossible — and the real cause of an unreadable bind mount is file sharing.
+
+    ``False`` is the safe answer, which is why every failure path returns it: it produces
+    the message that names both causes rather than the one that names the wrong cause, so
+    a mis-detection costs a longer message and never a misleading one.
+    """
+    try:
+        with open("/proc/version", encoding="utf-8", errors="replace") as fh:
+            version = fh.read().lower()
+    except OSError:
+        return False
+    return any(marker in version for marker in _DESKTOP_KERNEL_MARKERS)
+
+
 def _policy_unreadable(path: str, exc: OSError) -> str:
     """Explain an unreadable policy file in terms of its most likely actual cause.
 
@@ -205,6 +286,14 @@ def _policy_unreadable(path: str, exc: OSError) -> str:
     directory whatever its mode says. Mode bits are only half of "readable" there, so the
     stock advice about uid 10001 sends the reader down the wrong path. This function is the
     one place that can see both halves of the evidence, so it says which one is wrong.
+
+    That label advice is **Linux-only**, and unqualified it is worse than saying nothing at
+    all: a Windows or macOS agent host runs this image in a Docker Desktop VM that has no
+    SELinux to relabel in, so ``chcon`` and ``ls -lZ`` cannot be followed even in
+    principle, while the real cause — Docker Desktop file sharing — goes unmentioned.
+    :func:`_in_docker_desktop_vm` is what lets the message pick, and it is the runtime
+    counterpart of the Linux-only qualification on the same rows in
+    ``docs/remote-agents.md``.
     """
     base = (f"Cannot read the policy file at {path}: {exc}. The agent refuses all "
             f"work without one — mount it read-only and restart.")
@@ -215,11 +304,34 @@ def _policy_unreadable(path: str, exc: OSError) -> str:
     except OSError:
         # Even stat was refused, so the file's own mode is not what is being enforced:
         # either the label, or a parent directory this uid cannot search.
+        where = ("check that every parent directory is searchable, and that Docker "
+                 "Desktop shares this drive (Settings → Resources → File sharing)"
+                 if _in_docker_desktop_vm() else
+                 "on a Linux host check its SELinux label (`ls -lZ` on the host, and "
+                 "mount it `:ro,Z`), and check that every parent directory is searchable")
         return (f"{base} Permission was denied without the file's mode even being "
-                f"readable, which points at the mount rather than at the file: check its "
-                f"SELinux label (`ls -lZ` on the host, and mount it `:ro,Z`) and that "
-                f"every parent directory is searchable.")
+                f"readable, which points at the mount rather than at the file: {where}.")
     if mode & stat.S_IROTH:
+        if _in_docker_desktop_vm():
+            # The SELinux message below is the single most misleading thing this process can
+            # say on a Windows or macOS host. The label advice there is not merely wrong, it
+            # is unfollowable — there is no SELinux in the VM to relabel anything in — and an
+            # operator who trusts it spends the afternoon on `chcon`.
+            return (
+                f"Cannot read the policy file at {path}: {exc}. Its mode is {mode:04o}, so "
+                f"it is world-readable and the mode is not the problem. This container is "
+                f"running in a Docker Desktop / WSL2 Linux VM, which has no SELinux — so "
+                f"the relabelling advice written for a RHEL-family host cannot be what is "
+                f"wrong here, whatever you may have read, and there is nothing on this host "
+                f"to relabel. The cause is file sharing: check that Settings → Resources → "
+                f"File sharing covers the drive, and note that a UNC path (\\\\server\\share) "
+                f"or a mapped network drive cannot be bind-mounted at all. On the Hyper-V "
+                f"backend a bind source Docker Desktop cannot reach is materialised as an "
+                f"empty directory inside the container rather than failing outright, so the "
+                f"path can look perfectly present from the host — keep policy.yaml under "
+                f"your user profile and this does not arise. The agent refuses all work "
+                f"without a readable policy, but it has not contacted the dashboard yet, "
+                f"so your enrolment code is still unspent.")
         return (
             f"Cannot read the policy file at {path}: {exc}. Its mode is {mode:04o}, so it "
             f"is world-readable and the mode is not the problem — on an SELinux-enforcing "
@@ -1016,8 +1128,10 @@ class PasswordSafe:
         secret = doc.get("client_secret") or ""
         if doc.get("client_secret_file"):
             try:
-                with open(doc["client_secret_file"], encoding="utf-8") as fh:
-                    secret = fh.read().strip()
+                secret = _read_secret_file(doc["client_secret_file"])
+            except ValueError:
+                raise PolicyRefusal(_secret_file_undecodable(
+                    "client_secret_file", str(doc["client_secret_file"])))
             except OSError as exc:
                 raise PolicyRefusal(f"cannot read client_secret_file: {exc}")
         return cls(str(doc["api_url"]), str(doc.get("client_id") or ""), str(secret),
@@ -1124,8 +1238,11 @@ def _secret_for(conn: dict, checkins: list = None) -> str:
     path = conn.get("password_file")
     if path:
         try:
-            with open(path, encoding="utf-8") as fh:
-                return fh.read().strip()
+            return _read_secret_file(path)
+        except ValueError:
+            raise PolicyRefusal(
+                f"connection {conn.get('name')!r}: "
+                + _secret_file_undecodable("password_file", str(path)))
         except OSError as exc:
             raise PolicyRefusal(
                 f"connection {conn.get('name')!r}: cannot read password_file {path}: {exc}")
