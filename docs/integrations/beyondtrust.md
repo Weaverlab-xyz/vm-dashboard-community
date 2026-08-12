@@ -29,7 +29,7 @@ own feature flag; this page is the map, plus the parts that belong to no single 
 
 ---
 
-## Three products, three feature flags
+## Four products, four feature flags
 
 | Product | Flag | Settings panel | Page |
 |---|---|---|---|
