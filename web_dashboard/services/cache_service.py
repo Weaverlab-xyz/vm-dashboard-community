@@ -39,13 +39,10 @@ TTL = {
     "portainer_endpoints": 300,   # 5 min
     "portainer_containers": 60,   # 1 min
     "portainer_stacks":    120,   # 2 min
-    # Cost (cross-cloud MTD spend) — long TTL: cost data updates slowly and AWS
-    # Cost Explorer bills ~$0.01/request, so cache hard.
-    "cost_summary":      21600,   # 6 h
-    # Versioned key (cost_service.CACHE_KEY_BREAKDOWN) — bumped when the payload gained
-    # dashboard/sandbox scopes, so a pre-upgrade cache entry can't be served to the new
-    # template. Keep the TTL long: these CE/CM queries are billable/rate-limited.
-    "cost_breakdown_v2": 21600,   # 6 h
+    # Cost (cross-cloud MTD spend) does NOT live here. It moved to services/cost_cache.py
+    # and a `cloud_cost_cache` table, because this store cannot express what that data
+    # needs: a failure must not overwrite a success, the throttle state must be shared
+    # across workers, and both must survive a restart. Don't add a cost key back.
     # Deployment inventory (DB aggregation) — short TTL; cheap indexed queries.
     "deployment_inventory": 60,   # 1 min
     # Password Safe database import candidates (api/cloud_databases.py). Four paged

@@ -526,10 +526,28 @@ def test_oci_needs_no_invalidation_entry_because_its_keys_are_scoped():
     assert first != cache_service.key_global("oci_images")
 
 
+def test_the_cost_warmer_calls_the_route_entrypoint():
+    """The cost warmer must go through services/cost_cache, the same entrypoint
+    /api/costs/{summary,breakdown} use.
+
+    Stronger than the delegation check above rather than weaker: there is no cache key to
+    share and no second fetch path, so there is nothing left to drift onto. The
+    cache_service assertion is the real regression guard — cost data moved to a table
+    precisely because that store caches a 429 exactly like a real figure, holds a private
+    copy per gunicorn worker, and loses everything on a rebuild."""
+    names = _referenced_names(main._warm_cost_summary)
+    assert "cost_cache" in names, "the cost warmer no longer delegates to cost_cache"
+    assert "warm" in names
+    assert "cache_service" not in names, "cost data must not go back into cache_service"
+    assert "cost_service" not in names, "warm what the reader reads, not the layer below it"
+
+
 def test_no_dead_cache_names_remain():
     """These had a TTL entry and/or an invalidation call but no reader or writer."""
     dead = ("cfgmgmt_instances", "cfgmgmt_s3status", "aws_ssh_key_secrets",
-            "azure_marketplace")
+            "azure_marketplace",
+            # Moved to the cloud_cost_cache table — see cost_cache.py's docstring.
+            "cost_summary", "cost_breakdown_v2")
     listed = set(setup_api._CONFIG_DEPENDENT_CACHES) | set(
         setup_api._CONFIG_DEPENDENT_CACHE_PREFIXES)
     for name in dead:

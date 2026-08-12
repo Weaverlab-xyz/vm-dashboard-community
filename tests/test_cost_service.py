@@ -513,19 +513,152 @@ def test_unmeasured_scope_is_none_not_zero():
     assert res["dashboard_total"] is None
 
 
-def test_breakdown_cache_key_is_versioned_and_has_a_ttl():
-    """The payload shape changed, so the key must not collide with pre-upgrade entries —
-    and it needs a TTL entry, or get_or_refresh KeyErrors on every request.
+def test_cost_no_longer_lives_in_the_generic_cache():
+    """Cost data must not be served by cache_service again.
 
-    Read cache_service as TEXT rather than importing it: sibling test modules stub
+    That store cannot express what this data needs: it caches a degraded per-cloud entry
+    exactly like a real one (cost_service never raises), it is process-local under
+    gunicorn -w 2, and it dies on every rebuild. Versioning moved to
+    cost_cache.PAYLOAD_VERSION and the payload to the cloud_cost_cache table.
+
+    Read both files as TEXT rather than importing them: sibling test modules stub
     web_dashboard.services.cache_service in sys.modules, which would make an import here
     assert against a fake TTL dict."""
-    assert svc.CACHE_KEY_BREAKDOWN != "cost_breakdown"
-    path = os.path.join(_ROOT, "web_dashboard", "services", "cache_service.py")
-    with open(path, encoding="utf-8") as fh:
-        src = fh.read()
-    assert f'"{svc.CACHE_KEY_BREAKDOWN}"' in src, (
-        f"{svc.CACHE_KEY_BREAKDOWN} has no TTL entry in cache_service.TTL")
+    with open(os.path.join(_ROOT, "web_dashboard", "services", "cache_service.py"),
+              encoding="utf-8") as fh:
+        cache_src = fh.read()
+    for dead in ('"cost_summary"', '"cost_breakdown_v2"'):
+        assert dead not in cache_src, f"{dead} is back in cache_service.TTL"
+    assert not hasattr(svc, "CACHE_KEY_BREAKDOWN")
+
+    with open(os.path.join(_ROOT, "web_dashboard", "api", "costs.py"), encoding="utf-8") as fh:
+        api_src = fh.read()
+    # The regression this whole change exists to prevent: invalidating before a fetch
+    # threw the last good figure away before finding out there was nothing to replace it.
+    # Matched on the CALL, not the word — the docstring explains why it isn't there.
+    assert "invalidate(" not in api_src, "?refresh=true must not bust the cache first"
+    assert "cache_service" not in api_src
+    assert "cost_cache" in api_src
+
+
+def test_a_long_retry_after_cools_down_instead_of_sleeping():
+    """A Retry-After longer than the inline cap must NOT be slept through: the retry
+    would fire while still inside the throttle window, spending a second call to earn a
+    second 429 — and it stalls a request handler to do it. One POST, tagged error."""
+    _restore()
+    import httpx as _httpx
+
+    class _Resp429:
+        status_code = 429
+        headers = {"Retry-After": "300"}
+        def raise_for_status(self): raise _httpx.HTTPError("429")
+        def json(self): return {}
+
+    calls = {"n": 0}
+
+    class _Client:
+        def __init__(self, *a, **k): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, *a, **k):
+            calls["n"] += 1
+            return _Resp429()
+
+    orig_client, orig_sleep = _httpx.AsyncClient, asyncio.sleep
+    slept = []
+    async def _fast_sleep(s): slept.append(s)
+    _httpx.AsyncClient, asyncio.sleep = _Client, _fast_sleep
+    try:
+        err = None
+        try:
+            _run(svc.get_azure_mtd_cost())
+        except svc.azure_service.AzureError as e:
+            err = e
+    finally:
+        _httpx.AsyncClient, asyncio.sleep = orig_client, orig_sleep
+
+    assert err is not None
+    assert calls["n"] == 1, "must not retry into a 300s throttle window"
+    assert slept == [], "must not stall the request handler"
+    assert getattr(err, "throttled", False) is True
+    assert err.retry_after == 300
+    # The label prefix is the endpoint's user-facing string; it must survive.
+    assert "Azure Cost Management query failed" in str(err)
+
+
+def test_retry_after_is_uncapped_by_default_and_capped_on_request():
+    """Capping is right for an inline sleep and wrong for a cooldown."""
+    assert svc._retry_after_seconds("300", default=10) == 300
+    assert svc._retry_after_seconds("300", default=10, cap=30) == 30
+    assert svc._retry_after_seconds(None, default=10) == 10
+    assert svc._retry_after_seconds("junk", default=10) == 10
+    assert svc._retry_after_seconds("0", default=10) == 1
+
+
+def test_looks_throttled_recognises_each_provider():
+    """AWS/GCP/OCI give no Retry-After, so the signal is in the message. A miss only
+    costs a shorter cooldown, never a wrong number — but these four are the common ones."""
+    assert svc._looks_throttled(Exception("ThrottlingException: Rate exceeded"))
+    assert svc._looks_throttled(Exception("rateLimitExceeded on BigQuery"))
+    assert svc._looks_throttled(Exception("TooManyRequests"))
+    assert svc._looks_throttled(Exception("Client error '429 Too Many Requests'"))
+    assert not svc._looks_throttled(Exception("NotAuthorizedOrNotFound"))
+    tagged = svc._throttled(Exception, "label", 42)
+    assert svc._looks_throttled(tagged) and tagged.retry_after == 42
+
+
+def test_unavailable_entries_carry_the_throttle_signal():
+    """cost_cache reads throttled/retry_after off the degraded entry to size the cooldown,
+    so both shapes must expose them — and only on the failure, never on a success."""
+    _restore()
+    err = svc._throttled(svc.azure_service.AzureError, "Azure Cost Management query failed", 300)
+
+    async def _boom():
+        raise err
+
+    entry = _run(svc._cloud_entry("azure", _boom))
+    assert entry["status"] == "unavailable"
+    assert entry["throttled"] is True and entry["retry_after"] == 300
+
+    bd = _run(svc._breakdown_entry("azure", _boom))
+    assert bd["status"] == "unavailable"
+    assert bd["throttled"] is True and bd["retry_after"] == 300
+    # Still exposes every key the template reads — see test_unavailable_entry_exposes_...
+    assert bd["scopes"] and "services" in bd
+
+    ok = _run(svc._cloud_entry("aws", lambda: _ok_amount(1.0)))
+    assert ok["status"] == "ok" and "throttled" not in ok
+
+
+async def _ok_amount(v):
+    return v, "USD"
+
+
+def test_assemblers_match_the_live_orchestrators():
+    """The cached per-cloud path and the live whole-payload path assemble through the same
+    two functions, so they cannot drift into different shapes."""
+    _restore()
+    live = _run(svc.get_cost_summary())
+    assert svc.assemble_summary(live["clouds"]) == live
+    live_bd = _run(svc.get_cost_breakdown())
+    assert svc.assemble_breakdown(live_bd["clouds"]) == live_bd
+
+
+def test_per_cloud_entrypoints_resolve_fetchers_at_call_time():
+    """cost_cache calls one cloud at a time through these. They must resolve the fetcher
+    by NAME on each call — a dict of function objects captured at import would freeze the
+    originals and silently ignore every monkeypatched stub, including these tests'."""
+    _restore()
+
+    async def _fake():
+        return 99.0, "USD"
+
+    svc.get_aws_mtd_cost = _fake
+    try:
+        entry = _run(svc.cloud_summary_entry("aws"))
+    finally:
+        _restore()
+    assert entry["cloud"] == "aws" and entry["amount"] == 99.0 and entry["status"] == "ok"
 
 
 # ── managed breakdown: parsing ───────────────────────────────────────────────

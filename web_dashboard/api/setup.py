@@ -401,11 +401,29 @@ _CONFIG_DEPENDENT_CACHE_PREFIXES = (
 
 
 async def _invalidate_data_caches() -> None:
-    from ..services import cache_service
+    from ..database import SessionLocal
+    from ..services import cache_service, cost_cache
     for name in _CONFIG_DEPENDENT_CACHES:
         await cache_service.invalidate(cache_service.key_global(name))
     for name in _CONFIG_DEPENDENT_CACHE_PREFIXES:
         await cache_service.invalidate_prefix(name)
+
+    # The cost cache is a table, not a cache_service key, so it belongs in NEITHER tuple
+    # above — see the comment there about a name living in exactly one of them.
+    #
+    # Two distinct actions, and the payload survives both. `mark_stale` makes the next
+    # read re-query; `clear_cooldowns` drops the throttle/backoff gates, because the
+    # operator just changed a credential or a billing export and whatever we were backing
+    # off from may be exactly what they fixed. Deleting the payload instead would blank
+    # the page from the moment of the save until the requery lands.
+    db = SessionLocal()
+    try:
+        cost_cache.mark_stale(db)
+        cost_cache.clear_cooldowns(db)
+    except Exception as exc:  # noqa: BLE001 — a wizard save must not fail on a cache detail
+        logger.warning("setup: cost cache invalidation failed: %s", exc)
+    finally:
+        db.close()
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────

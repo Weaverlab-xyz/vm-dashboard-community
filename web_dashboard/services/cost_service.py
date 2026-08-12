@@ -15,6 +15,12 @@ otherwise it reports ``unavailable`` with a configure hint).
 Per-cloud failures are caught and reported as ``status="unavailable"`` so one
 misconfigured cloud never sinks the result — same resilience contract as the
 containers page.
+
+This module only *queries*. Persistence, throttle cooldowns and single-flight live in
+``services/cost_cache.py``, which is what the endpoints and the warmer call. Keep it that
+way: the reason a 429 used to blank the tile for six hours is that a degraded entry from
+here is a perfectly well-formed return value, and the old caching layer could not tell
+one from a real answer.
 """
 import asyncio
 import calendar
@@ -58,12 +64,6 @@ _SCOPE_BY_TAG_VALUE = {
     _SANDBOX_TAG_VALUE: SCOPE_SANDBOX,
     _SANDBOX_TAG_VALUE.replace("-", "_"): SCOPE_SANDBOX,
 }
-
-# Cache key for the breakdown payload. BUMP THIS whenever the shape changes — the 6h
-# TTL would otherwise serve an old shape to a template expecting the new one. Both
-# api/costs.py and main.py's warmer read it from here so the two can't drift.
-CACHE_KEY_BREAKDOWN = "cost_breakdown_v2"
-
 
 def _scope_of(tag_value) -> str:
     """Map a ``managed-by`` tag/label value to a scope. Anything unrecognised (or
@@ -173,26 +173,77 @@ async def get_aws_mtd_cost() -> tuple:
     return await asyncio.to_thread(_query)
 
 
-def _retry_after_seconds(header_val, *, default: int, cap: int = 30) -> int:
+def _retry_after_seconds(header_val, *, default: int, cap: int = None) -> int:
     """Parse a Cost Management ``Retry-After`` header (seconds; HTTP-date form is
-    not used by the API). Falls back to ``default``, capped so a retry never
-    stretches a request past a reasonable ceiling."""
+    not used by the API). Falls back to ``default``.
+
+    ``cap=None`` — the default now — parses the header in full. Capping is right for an
+    INLINE retry, which stalls a request handler, and wrong for a cooldown, which does
+    not: truncating a ``Retry-After: 300`` to 30 is precisely how the old code
+    guaranteed its retry fired while still inside the throttle window, spending a second
+    call to earn a second 429. Callers that sleep on the result pass a cap; callers that
+    record a cooldown from it must not."""
     if not header_val:
         return default
     try:
-        return max(1, min(int(header_val), cap))
+        val = max(1, int(header_val))
     except (TypeError, ValueError):
         return default
+    return min(val, cap) if cap is not None else val
+
+
+# The longest we will sleep INSIDE a request handler to retry a 429. Equal to
+# _retry_after_seconds' `default` on purpose: a 429 carrying no Retry-After still earns
+# exactly one real retry, which is the behaviour the tile has always had. An explicit
+# header asking for longer is not a sleep — it is a cooldown, and the caller records it
+# and returns immediately so the page can serve its last known figure instead.
+_INLINE_RETRY_MAX_WAIT = 10
+
+
+def _throttled(exc_cls, label: str, retry_after=None):
+    """Build the provider's OWN error type, tagged so ``cost_cache`` can set a cooldown.
+
+    Attributes rather than a dedicated exception class, deliberately: ``_cloud_entry``
+    and ``_breakdown_entry`` catch AWSError/AzureError/GCPError/OCIError by type, and the
+    message keeps the ``label`` prefix that the endpoints' user-facing string — and
+    tests/test_cost_service.py — depend on. A new class would have to be threaded through
+    every one of those to say the same thing."""
+    suffix = f"; retry after {retry_after}s" if retry_after else ""
+    err = exc_cls(f"{label}: 429 Too Many Requests (rate limited by the provider){suffix}")
+    err.throttled = True
+    err.retry_after = retry_after
+    return err
+
+
+# Azure is the only one of the four that returns a usable Retry-After. For the rest the
+# signal is in the error text, so detection is a substring match and can miss wording we
+# have not seen. A miss only costs a SHORTER cooldown — the generic exponential backoff
+# still applies — and can never produce a wrong number, so erring loose is safe here.
+_THROTTLE_MARKERS = (
+    "throttlingexception", "limitexceededexception",      # AWS Cost Explorer
+    "ratelimitexceeded", "quotaexceeded",                 # GCP BigQuery
+    "toomanyrequests", "too many requests", "429",        # OCI + generic
+)
+
+
+def _looks_throttled(exc) -> bool:
+    """True when an error is a rate limit rather than a misconfiguration. Explicit
+    ``.throttled`` (set by :func:`_throttled`) wins; otherwise sniff the message."""
+    if getattr(exc, "throttled", False):
+        return True
+    return any(m in str(exc).lower() for m in _THROTTLE_MARKERS)
 
 
 async def _azure_cost_query(sub_id: str, token: str, body: dict, *, label: str) -> dict:
     """POST an Azure Cost Management query and return the parsed JSON body.
 
     Cost Management is aggressively rate-limited per subscription (429 with a
-    ``Retry-After`` header) — retry once honoring the header so a single throttled
-    response doesn't poison the tile for the whole 6 h cache TTL. On a repeat
-    429 (or any other HTTP error) surface an ``AzureError`` with a message that
-    starts with ``label`` so the caller's user-facing string is preserved."""
+    ``Retry-After`` header). Retry once, honoring the header, but ONLY when it asks for
+    less than ``_INLINE_RETRY_MAX_WAIT`` — a longer wait means the retry would fire while
+    still throttled, so we raise a tagged error immediately and let ``cost_cache`` record
+    a cooldown and serve the last known figure. On a repeat 429 (or any other HTTP error)
+    surface an ``AzureError`` whose message starts with ``label`` so the caller's
+    user-facing string is preserved."""
     url = (f"{_AZURE_MGMT}/subscriptions/{sub_id}/providers/"
            "Microsoft.CostManagement/query?api-version=2023-03-01")
     headers = {"Authorization": f"Bearer {token}"}
@@ -200,15 +251,20 @@ async def _azure_cost_query(sub_id: str, token: str, body: dict, *, label: str) 
         async with httpx.AsyncClient(timeout=30) as client:
             for attempt in (0, 1):
                 resp = await client.post(url, json=body, headers=headers)
-                if getattr(resp, "status_code", None) == 429 and attempt == 0:
+                if getattr(resp, "status_code", None) == 429:
                     wait = _retry_after_seconds(
                         resp.headers.get("Retry-After") if hasattr(resp, "headers") else None,
                         default=10)
-                    logger.warning(
-                        "azure cost 429 for %s; retrying in %ss (Retry-After honored)",
-                        label, wait)
-                    await asyncio.sleep(wait)
-                    continue
+                    if attempt == 0 and wait <= _INLINE_RETRY_MAX_WAIT:
+                        logger.warning(
+                            "azure cost 429 for %s; retrying in %ss (Retry-After honored)",
+                            label, wait)
+                        await asyncio.sleep(wait)
+                        continue
+                    # AzureError is not an httpx.HTTPError, so this propagates past the
+                    # handler below with its .throttled/.retry_after tags intact.
+                    logger.warning("azure cost 429 for %s; cooling down for %ss", label, wait)
+                    raise _throttled(azure_service.AzureError, label, wait)
                 resp.raise_for_status()
                 return resp.json() or {}
     except httpx.HTTPError as e:
@@ -680,10 +736,16 @@ async def get_oci_managed_breakdown() -> dict:
         raise oci_service.OCIError(f"OCI Usage API breakdown query failed: {e}") from e
 
 
-def _unavailable_breakdown(cloud: str, detail: str) -> dict:
+def _unavailable_breakdown(cloud: str, detail: str, *, exc=None) -> dict:
     """A degraded entry that still exposes every key the template reads, so an
-    unavailable cloud renders "unavailable" instead of `undefined`."""
+    unavailable cloud renders "unavailable" instead of `undefined`.
+
+    ``throttled``/``retry_after`` are carried on the UNAVAILABLE entry only — they tell
+    ``cost_cache`` how long to leave this cloud alone, and a successful entry has nothing
+    to say about that."""
     return {"cloud": cloud, "status": "unavailable", "detail": detail,
+            "throttled": _looks_throttled(exc) if exc is not None else False,
+            "retry_after": getattr(exc, "retry_after", None),
             "total": None, "dashboard_total": None, "sandbox_total": None,
             "unattributed_total": None, "currency": None, "services": [],
             "scopes": _empty_scopes(), "scope_basis": {}, "notes": []}
@@ -695,10 +757,10 @@ async def _breakdown_entry(cloud: str, fetch) -> dict:
         res = await fetch()
         return {"cloud": cloud, "status": "ok", "detail": "", **res}
     except (aws_service.AWSError, azure_service.AzureError, gcp_service.GCPError, oci_service.OCIError) as e:
-        return _unavailable_breakdown(cloud, str(e))
+        return _unavailable_breakdown(cloud, str(e), exc=e)
     except Exception as e:  # noqa: BLE001 — defensive: unknown errors are still per-cloud
         logger.warning("cost: %s breakdown failed unexpectedly: %s", cloud, e)
-        return _unavailable_breakdown(cloud, str(e))
+        return _unavailable_breakdown(cloud, str(e), exc=e)
 
 
 def _sum_scope(entries: list, key: str):
@@ -708,21 +770,10 @@ def _sum_scope(entries: list, key: str):
     return round(sum(vals), 2) if vals else None
 
 
-async def get_cost_breakdown() -> dict:
-    """Per-cloud, per-service MTD spend split into **dashboard** (``managed-by=
-    vm-dashboard``) and **sandbox** (``managed-by=dashboard-sandbox``) scope, plus each
-    cloud's unattributed remainder where it can measure one.
-
-    ``grand_total`` covers only clouds that returned ``ok``, and only their attributed
-    (dashboard + sandbox) spend — unattributed is reported separately so it never
-    double-counts against the account-total card."""
-    aws_entry, azure_entry, gcp_entry, oci_entry = await asyncio.gather(
-        _breakdown_entry("aws", get_aws_managed_breakdown),
-        _breakdown_entry("azure", get_azure_managed_breakdown),
-        _breakdown_entry("gcp", get_gcp_managed_breakdown),
-        _breakdown_entry("oci", get_oci_managed_breakdown),
-    )
-    clouds = [aws_entry, azure_entry, gcp_entry, oci_entry]
+def assemble_breakdown(clouds: list) -> dict:
+    """Roll per-cloud breakdown entries into the payload the endpoint returns. Shared by
+    the cached path and :func:`get_cost_breakdown` for the reason in
+    :func:`assemble_summary`."""
     oks = [c for c in clouds if c["status"] == "ok"]
     currency = oks[0]["currency"] if oks else "USD"
     return {"clouds": clouds,
@@ -734,6 +785,34 @@ async def get_cost_breakdown() -> dict:
             "currency": currency}
 
 
+async def get_cost_breakdown() -> dict:
+    """Per-cloud, per-service MTD spend split into **dashboard** (``managed-by=
+    vm-dashboard``) and **sandbox** (``managed-by=dashboard-sandbox``) scope, plus each
+    cloud's unattributed remainder where it can measure one.
+
+    ``grand_total`` covers only clouds that returned ``ok``, and only their attributed
+    (dashboard + sandbox) spend — unattributed is reported separately so it never
+    double-counts against the account-total card.
+
+    Uncached and unthrottled, like :func:`get_cost_summary`."""
+    clouds = list(await asyncio.gather(
+        _breakdown_entry("aws", get_aws_managed_breakdown),
+        _breakdown_entry("azure", get_azure_managed_breakdown),
+        _breakdown_entry("gcp", get_gcp_managed_breakdown),
+        _breakdown_entry("oci", get_oci_managed_breakdown),
+    ))
+    return assemble_breakdown(clouds)
+
+
+def _unavailable_summary(cloud: str, detail: str, *, exc=None) -> dict:
+    """The degraded summary entry. Mirror of :func:`_unavailable_breakdown` — see there
+    for why the throttle tags ride on the failure and not on the success."""
+    return {"cloud": cloud, "amount": None, "currency": None,
+            "status": "unavailable", "detail": detail,
+            "throttled": _looks_throttled(exc) if exc is not None else False,
+            "retry_after": getattr(exc, "retry_after", None)}
+
+
 async def _cloud_entry(cloud: str, fetch) -> dict:
     """Run one cloud's MTD query, degrading any failure to status=unavailable so
     a single misconfigured cloud never sinks the whole summary."""
@@ -742,26 +821,58 @@ async def _cloud_entry(cloud: str, fetch) -> dict:
         return {"cloud": cloud, "amount": round(amount, 2),
                 "currency": currency, "status": "ok", "detail": ""}
     except (aws_service.AWSError, azure_service.AzureError, gcp_service.GCPError, oci_service.OCIError) as e:
-        return {"cloud": cloud, "amount": None, "currency": None,
-                "status": "unavailable", "detail": str(e)}
+        return _unavailable_summary(cloud, str(e), exc=e)
     except Exception as e:  # noqa: BLE001 — defensive: unknown errors are still per-cloud
         logger.warning("cost: %s query failed unexpectedly: %s", cloud, e)
-        return {"cloud": cloud, "amount": None, "currency": None,
-                "status": "unavailable", "detail": str(e)}
+        return _unavailable_summary(cloud, str(e), exc=e)
+
+
+# Per-cloud fetchers, resolved BY NAME at call time rather than bound here. Tests
+# monkeypatch svc.get_aws_mtd_cost & friends, and a dict of function objects captured at
+# import would freeze the originals and quietly ignore every stub.
+SUMMARY_FETCHERS = {"aws": "get_aws_mtd_cost", "azure": "get_azure_mtd_cost",
+                    "gcp": "get_gcp_mtd_cost", "oci": "get_oci_mtd_cost"}
+BREAKDOWN_FETCHERS = {"aws": "get_aws_managed_breakdown",
+                      "azure": "get_azure_managed_breakdown",
+                      "gcp": "get_gcp_managed_breakdown",
+                      "oci": "get_oci_managed_breakdown"}
+
+
+async def cloud_summary_entry(cloud: str) -> dict:
+    """One cloud's summary entry. The single per-cloud entrypoint ``cost_cache`` calls,
+    so the cached path and ``get_cost_summary`` below cannot drift apart."""
+    return await _cloud_entry(cloud, globals()[SUMMARY_FETCHERS[cloud]])
+
+
+async def cloud_breakdown_entry(cloud: str) -> dict:
+    """One cloud's breakdown entry — the breakdown twin of :func:`cloud_summary_entry`."""
+    return await _breakdown_entry(cloud, globals()[BREAKDOWN_FETCHERS[cloud]])
+
+
+def assemble_summary(clouds: list) -> dict:
+    """Roll per-cloud summary entries into the payload the endpoint returns.
+
+    Split out so the cached per-cloud path and the live whole-payload path below produce
+    byte-identical shapes — assembling in two places is how a template ends up reading a
+    key that only one of them sets."""
+    oks = [c for c in clouds if c["status"] == "ok"]
+    total = round(sum(c["amount"] for c in oks), 2) if oks else None
+    currency = oks[0]["currency"] if oks else "USD"
+    return {"total_mtd": total, "currency": currency, "clouds": clouds}
 
 
 async def get_cost_summary() -> dict:
     """Per-cloud account/subscription MTD spend. AWS + Azure are queried live; GCP
     is queried via the BigQuery billing export when configured. ``total_mtd`` sums
-    only the clouds that returned ``ok``."""
-    aws_entry, azure_entry, gcp_entry, oci_entry = await asyncio.gather(
+    only the clouds that returned ``ok``.
+
+    Uncached and unthrottled — every cloud, right now. ``cost_cache.get_summary`` is what
+    the endpoints and the warmer call; this stays as the direct path for tests and for
+    anything that genuinely wants a live read."""
+    clouds = list(await asyncio.gather(
         _cloud_entry("aws", get_aws_mtd_cost),
         _cloud_entry("azure", get_azure_mtd_cost),
         _cloud_entry("gcp", get_gcp_mtd_cost),
         _cloud_entry("oci", get_oci_mtd_cost),
-    )
-    clouds = [aws_entry, azure_entry, gcp_entry, oci_entry]
-    oks = [c for c in clouds if c["status"] == "ok"]
-    total = round(sum(c["amount"] for c in oks), 2) if oks else None
-    currency = oks[0]["currency"] if oks else "USD"
-    return {"total_mtd": total, "currency": currency, "clouds": clouds}
+    ))
+    return assemble_summary(clouds)

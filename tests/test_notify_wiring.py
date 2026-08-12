@@ -297,10 +297,29 @@ def test_an_integrity_error_on_the_dedupe_key_is_absorbed():
     assert "rollback" in src
 
 
+def test_the_budget_scan_reads_the_durable_cost_cache():
+    """This scan runs in jobs_worker, which warms nothing, so it read a process-local dict
+    that was always empty — and when it wasn't, it handed cache_service.get()'s
+    {"data": ...} ENVELOPE to apply_budget_alerts, which reads .clouds/.total_mtd. Between
+    the two, cost.budget_exceeded had never fired. It now reads the shared table, and
+    read-only: an alert is not worth paying for a billable cloud query."""
+    fn = _fn(_SCANNER, "_scan_cost")
+    # Drop the docstring before unparsing: it NAMES the old cache_service call in order to
+    # explain why it isn't there any more, which a plain substring scan would flag.
+    body = fn.body
+    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+        body = body[1:]
+    src = "\n".join(ast.unparse(node) for node in body)
+    assert "cost_cache" in src, "_scan_cost no longer reads the durable cost cache"
+    assert "allow_fetch=False" in src, "the budget scan must never trigger a cloud query"
+    assert "cache_service" not in src, "cache_service is process-local; this is jobs_worker"
+
+
 def test_no_new_advisory_lock_id_is_taken():
-    """20260101/2/3 are init_db, the audit chain and the expiry enqueue. The notify path
-    has no cross-process read-modify-write to serialise, so taking one would add a
-    deadlock surface for nothing."""
+    """20260101/2/3 are init_db, the audit chain and the expiry enqueue, and 20260104 is
+    the cost cache's per-cloud claim. The notify path has no cross-process
+    read-modify-write to serialise, so taking one would add a deadlock surface for
+    nothing."""
     for path in (_NOTIFY, _POLICY, _SCANNER, _TRANSPORTS):
         ids = set(re.findall(r"pg_advisory_xact_lock\((\d+)\)", _src(path)))
         ids |= set(re.findall(r"_LOCK_ID\s*=\s*(\d+)", _src(path)))

@@ -84,20 +84,28 @@ def _emit(db, event_type: str, *, title: str, body: str, bucket: str,
 async def _scan_cost(db, bucket: str) -> int:
     """Notify once a day per budget whose month-to-date spend is already over.
 
-    Reads the **cached** cost summary and does nothing when the cache is cold: those
-    are billable API calls, and a notification is not worth paying for a fresh one.
-    ``main._warm_cost_summary`` repopulates the cache on its own schedule.
+    Reads the **cached** cost summary and does nothing when nothing has been cached yet:
+    those are billable API calls, and a notification is not worth paying for a fresh one —
+    hence ``allow_fetch=False``. ``main._warm_cost_summary`` populates it on its own
+    schedule.
+
+    This scan runs inside ``jobs_worker``, which is why it reads the durable cache and not
+    ``cache_service``: that store is process-local and this process warms nothing, so the
+    read was always cold and the check never ran. It also passed ``cache_service.get()``'s
+    ``{"data": ..., "cached_at": ...}`` ENVELOPE straight to ``apply_budget_alerts``, which
+    reads ``.clouds``/``.total_mtd`` — so even on the one process that had the entry, the
+    budget evaluated to None. Between the two, ``cost.budget_exceeded`` had never fired.
 
     The cached payload deliberately has no ``budget`` on it — ``apply_budget_alerts``
     is date- and config-dependent, so the cost router applies it per request and so do
     we. Only ``status == "over"`` notifies; ``"approaching"`` is a softer signal and
     would need its own event type rather than being folded into this one.
     """
-    from . import cache_service, config_service, cost_service
+    from . import config_service, cost_cache, cost_service
 
     if not config_service.get_bool("cost_explorer_enabled", False):
         return 0
-    cached = await cache_service.get(cache_service.key_global("cost_summary"))
+    cached = await cost_cache.get_summary(allow_fetch=False)
     if not cached:
         logger.debug("notification scan: cost cache is cold, skipping the budget check")
         return 0
