@@ -629,6 +629,47 @@ async function ociPlacementChecks() {
   delete global.window;
 }
 
+// --- agents/index.html: the install-command shell toggle ---
+// The agent image is Linux only, but it runs fine on a Windows host under Docker Desktop,
+// so the enrolment modal emits the same container for two shells and a toggle picks one.
+// The invariant worth pinning is that Copy copies what the operator is looking at: two
+// <pre> blocks behind x-show with their own copy() calls is how that silently comes apart.
+const AG = 'agents/index.html';
+const mkEnrol = (shell, over) => {
+  const o = {};
+  for (const m of ['isPowershell', 'runCmd', 'codeFileCmd'])
+    Object.assign(o, eval('({' + extract(AG, m) + '})'));
+  o.shell = shell;
+  o.enrol = Object.assign({docker_run: 'SH', docker_run_code_file: 'SHFILE',
+                           docker_run_powershell: 'PS',
+                           docker_run_code_file_powershell: 'PSFILE'}, over || {});
+  return o;
+};
+
+ok(AG + ' the toggle selects the PowerShell command', mkEnrol('powershell').runCmd() === 'PS');
+ok(AG + ' the toggle selects the POSIX command', mkEnrol('bash').runCmd() === 'SH');
+ok(AG + ' the code-file block follows the same toggle',
+   mkEnrol('powershell').codeFileCmd() === 'PSFILE' &&
+   mkEnrol('bash').codeFileCmd() === 'SHFILE');
+// An API older than this page sends no PowerShell keys. Falling back to the POSIX form
+// beats rendering an empty black box: a command for the wrong shell is at least visibly a
+// command, and the toggle defaults to PowerShell on a Windows browser.
+ok(AG + ' falls back to the POSIX form when the API sent no PowerShell command',
+   mkEnrol('powershell', {docker_run_powershell: ''}).runCmd() === 'SH');
+ok(AG + ' the Windows-only prose is hidden when there is no PowerShell command',
+   mkEnrol('powershell', {docker_run_powershell: ''}).isPowershell() === false);
+
+const shellFor = extractFn(AG, 'detectShell');
+ok(AG + ' userAgentData Windows opens on PowerShell',
+   shellFor({userAgentData: {platform: 'Windows'}}) === 'powershell');
+ok(AG + ' userAgentData macOS opens on the POSIX form',
+   shellFor({userAgentData: {platform: 'macOS'}}) === 'bash');
+ok(AG + ' falls back to navigator.platform where userAgentData is absent',
+   shellFor({platform: 'Win32'}) === 'powershell');
+ok(AG + ' falls back to the user agent string last',
+   shellFor({userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}) === 'powershell');
+ok(AG + ' an unreadable navigator opens on the POSIX form', shellFor({}) === 'bash');
+
 ociPlacementChecks().then(() => process.exit(fail ? 1 : 0),
                           (e) => { console.log('FAIL ' + OCI + ' placement checks threw: ' + e);
                                    process.exit(1); });

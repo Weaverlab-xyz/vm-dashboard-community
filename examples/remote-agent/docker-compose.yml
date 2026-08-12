@@ -4,6 +4,14 @@
 #   2. Copy policy.example.yaml to policy.yaml and edit the target ranges.
 #   3. AGENT_ENROLLMENT_CODE=agte_... docker compose up -d
 #
+# On Windows, step 3 in PowerShell — the inline VAR=value prefix is a parse error there:
+#   $env:AGENT_ENROLLMENT_CODE = 'agte_...'
+#   docker compose up -d
+#
+# This is a Linux image and it runs on a Windows host under Docker Desktop's Linux VM;
+# keep Docker Desktop in Linux-containers mode. See docs/remote-agents.md, "Running on
+# Windows", for the handful of things that do differ there.
+#
 # The code is single-use and expires in 15 minutes. On first start the agent generates
 # an Ed25519 keypair, redeems the code, and stores its identity in the named volume —
 # so the code is only needed once and can be dropped from the environment afterwards.

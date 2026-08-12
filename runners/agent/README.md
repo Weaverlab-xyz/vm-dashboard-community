@@ -48,7 +48,7 @@ reads like credential spraying in a customer's SIEM.
 |---|---|---|
 | `DASHBOARD_URL` | — | Required. Must be `https://` unless `AGENT_INSECURE_TLS=1`. |
 | `AGENT_ENROLLMENT_CODE` | — | Required on first start only; the identity persists. Stays readable via `docker inspect` for the container's life — prefer the file below. |
-| `AGENT_ENROLLMENT_CODE_FILE` | — | Path to a mounted file holding the code. Wins over the variable above. Must be readable by uid 10001, and mounted `:ro,Z`. |
+| `AGENT_ENROLLMENT_CODE_FILE` | — | Path to a mounted file holding the code. Wins over the variable above. Must be readable by uid 10001, and mounted `:ro,Z`. Read as text, so it must be ASCII or UTF-8 with no BOM — see [Running on a Windows host](#running-on-a-windows-host). |
 | `AGENT_STATE_DIR` | `/var/lib/dashboard-agent` | Holds the 0600 private key. Mount a volume. |
 | `AGENT_POLICY_FILE` | `/etc/dashboard-agent/policy.yaml` | Mount read-only, as `:ro,Z`. |
 | `AGENT_MODE` | `normal` | `audit` logs what it would do and executes nothing. |
@@ -62,19 +62,45 @@ ranges, or probes get routed to the corporate proxy and fail confusingly.
 
 ## Bind mounts need `:ro,Z` on SELinux hosts
 
-On Fedora, RHEL, CentOS, Rocky or Alma — most of the hosts an agent actually runs on — a
-bind-mounted file keeps its host SELinux label, and the container may not read the
-`user_home_t` of a file in your home directory however permissive its mode is. Without the
-`Z` suffix the agent exits 2 on `Cannot read the policy file … Permission denied` on a
-mode 644 file, and because that happens *before* the first network call, nothing reaches
-the dashboard: the agent row stays at `enrolling` with no source IP, which reads like a
-DNS or TLS fault. Docker and Podman ignore `z`/`Z` where SELinux is absent, so the flag is
-safe everywhere and no host detection is needed. The install command the Agents page emits
-already includes it; check a hand-written one with `ls -lZ policy.yaml`.
+On Fedora, RHEL, CentOS, Rocky or Alma — a large share of on-prem Linux — a bind-mounted
+file keeps its host SELinux label, and the container may not read the `user_home_t` of a
+file in your home directory however permissive its mode is. Without the `Z` suffix the
+agent exits 2 on `Cannot read the policy file … Permission denied` on a mode 644 file, and
+because that happens *before* the first network call, nothing reaches the dashboard: the
+agent row stays at `enrolling` with no source IP, which reads like a DNS or TLS fault.
+Docker and Podman ignore `z`/`Z` where SELinux is absent, so the flag is safe everywhere
+and no host detection is needed. The install command the Agents page emits already includes
+it; check a hand-written one with `ls -lZ policy.yaml`.
 
 `Z` gives the file a label private to this container, which is what you want for one agent
 per host. Use lowercase `z` instead if the same `policy.yaml` is mounted into more than one
 container, since a private label would leave only the most recent one able to read it.
+
+## Running on a Windows host
+
+This is a Linux image (`linux/amd64`, `linux/arm64`) and there is no Windows-container
+build. It runs on a Windows desktop or server under Docker Desktop's Linux VM, which is an
+ordinary supported arrangement — keep Docker Desktop in **Linux containers** mode, or the
+pull fails with `no matching manifest for windows/amd64`.
+
+What changes is the shell, not the container: PowerShell continues lines with a backtick
+rather than a `\`, spells the working directory `${PWD}`, and writes files with
+`Set-Content` rather than `printf`. The Agents page emits both flavours behind a toggle, so
+there is nothing to translate by hand.
+
+Two things behave differently here rather than merely looking different:
+
+- **`:ro,Z` is inert**, since there is no SELinux. Harmless, and kept so there is one mount
+  string rather than two. An unreadable mount on Windows is Docker Desktop file sharing, not
+  a label — so the `chcon` and `ls -lZ` advice above cannot apply. Bind mounts also arrive
+  with permissive ownership, so the uid-10001 readability problem does not arise at all.
+- **`AGENT_ENROLLMENT_CODE_FILE` is encoding-sensitive.** The file is read as text, so a
+  UTF-16 one — what PowerShell 5.1's `>` and `Out-File` produce — fails to decode, and a
+  UTF-8 BOM survives the whitespace trim and makes the code invalid. Write it with
+  `Set-Content -Encoding ascii -NoNewline`.
+
+See [`docs/remote-agents.md`](../../docs/remote-agents.md#running-on-windows) for the host
+setup, including why `--restart unless-stopped` does not survive a logoff.
 
 ## Back-pressure
 
