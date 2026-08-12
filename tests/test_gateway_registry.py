@@ -307,7 +307,7 @@ def test_the_gateway_launcher_falls_back_to_a_sibling_zone():
     is best-effort, so the 503 was only logged."""
     src = _read("web_dashboard", "services", "gcp_service.py")
     block = src[src.index("def _run_gce_jumpoint_sync("):src.index("async def run_gce_jumpoint(")]
-    assert "_is_zone_capacity_error" in block, (
+    assert "_should_try_next_zone" in block, (
         "the gateway launcher has no zone fallback, unlike the Portainer/Rancher ones")
     assert "_find_instance_zone_in_region" in block, (
         "with zone fallback, a zone-scoped reuse check would create a duplicate gateway "
