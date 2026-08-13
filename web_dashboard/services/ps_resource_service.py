@@ -523,13 +523,14 @@ async def register_managed_system(*, name: str, host_name: str, private_key: str
     # a 400 that fails the whole apply, so sending it would cost the managed system too.
     seeded = bool(initial_password) and len(initial_password) <= _MAX_SEED_PASSWORD_LEN
     if initial_password and not seeded:
-        # Logs the overage, never the length. A credential's length is derived from the
-        # credential and narrows a guess at it, so it does not belong in a log line — and
-        # "longer than the cap" is the entire actionable content anyway.
+        # Logs the overage, never the length: a length is derived from the credential and
+        # narrows a guess at it, and "over the cap" is the whole actionable content. The
+        # cap itself is not interpolated either — passing a value whose IDENTIFIER matches
+        # /password/ into a log sink trips CodeQL's name-based sensitive-data heuristic,
+        # and the number is already in the constant, the docstring and the design note.
         logger.info(
             "PS: not seeding the %s managed account for %r — the credential is longer than "
-            "the %d characters the create API accepts; the first rotation will populate it",
-            method, name, _MAX_SEED_PASSWORD_LEN)
+            "the create API's maximum; the first rotation will populate it", method, name)
     tf_vars = {"ps_account_password":
                initial_password if seeded else secrets.token_urlsafe(24)}
     if method == "ssm":
