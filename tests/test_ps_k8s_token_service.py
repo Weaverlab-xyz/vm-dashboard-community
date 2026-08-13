@@ -3,8 +3,14 @@ and the address builder.
 
 The register ORDER is the correctness argument, so it is what these tests pin:
 
-    RBAC → read current token → managed system (seeded) → PRA Vault account (seeded) →
+    RBAC → read current token → managed system → PRA Vault account →
     LINK (FATAL) → rotate → delete the legacy Secret (only if linked)
+
+Both accounts are OFFERED the live token as their initial password, but the create API caps
+Password at 128 characters and a bearer token is 800-1,200, so the seed is dropped and the
+rotation is what actually populates the vault. That makes the rotation mandatory rather
+than a nicety — `change_on_register=false` is overridden, with a warning, when the seed did
+not take.
 
 The link is what hands the sync to Password Safe, and it comes before the rotation on
 purpose: a failure there has changed nothing in the cluster, whereas rotating first and
@@ -117,6 +123,19 @@ class Recorder:
         return self.events.index(name)
 
 
+# A realistic ServiceAccount bearer token: a JWT of ~900 characters. This fixture used to
+# be a 43-character stub, and that is precisely why the suite passed while registration
+# failed live — the create API refuses a Password over 128 characters, and no real token is
+# ever short enough to notice.
+_LONG_TOKEN = ("eyJhbGciOiJSUzI1NiIsImtpZCI6InN2Yy1hY2N0LXNpZ25pbmcta2V5In0."
+               + "eyJhdWQiOlsiaHR0cHM6Ly9rdWJlcm5ldGVzLmRlZmF1bHQuc3ZjIl0s" * 12
+               + ".c2lnbmF0dXJlLWJ5dGVz" * 8)
+
+# What the real ps_resource_service enforces (_MAX_SEED_PASSWORD_LEN). Duplicated because
+# that module is stubbed out entirely here; the stub mirrors its contract, cap included.
+_MAX_SEED = 128
+
+
 def _row(**kw):
     base = dict(id="c-1", cloud="gcp", name="gke-demo", region="us-central1",
                 api_server="https://1.2.3.4", deploy_job_id="job-1",
@@ -151,7 +170,7 @@ def _install_stubs(rec, *, cfg=None, link_fails=False, link_confirmed=True,
 
     async def _resolve(db, row, kubeconfig):
         rec.hit("read_current_token")
-        return "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJzYSJ9.c2ln", "minted"
+        return _LONG_TOKEN, "minted"
     m_k8s._resolve_pra_sa_token = _resolve
 
     async def _rbac(db, cid, *, mode, subject_name=""):
@@ -222,9 +241,13 @@ def _install_stubs(rec, *, cfg=None, link_fails=False, link_confirmed=True,
         rec.hit("register_managed_system")
         rec.events.append(("registered", kw))
         _n["count"] += 1
+        seed = kw.get("initial_password") or ""
         return {"managed_system_id": str(100 + _n["count"]),
                 "managed_account_id": str(200 + _n["count"]),
-                "tf_state_json": json.dumps({"n": _n["count"]})}
+                "tf_state_json": json.dumps({"n": _n["count"]}),
+                # The real service drops an over-long seed for a placeholder and says so,
+                # because sending it would 400 the apply. False for any real token.
+                "initial_password_seeded": bool(seed) and len(seed) <= _MAX_SEED}
     m_res.register_managed_system = _register
 
     async def _deregister(tf_state_json):
@@ -261,6 +284,18 @@ def _install_stubs(rec, *, cfg=None, link_fails=False, link_confirmed=True,
     for name, mod in mods.items():
         sys.modules[name] = mod
     return store
+
+
+def _prior_state(*, rotated=None, seeded=False):
+    """The per-cluster state key a previous registration left behind, as a cfg override.
+
+    ``rotated`` omitted is the half-state that matters: step 2 committed the account id and
+    the run died before step 5, so nothing ever replaced the create-time placeholder."""
+    st = {"system_id": "101", "address": "gke;proj-1;us-central1;k8s-gke-demo",
+          "seeded": seeded}
+    if rotated is not None:
+        st["rotated"] = rotated
+    return {"ps_k8s_token_c-1": json.dumps(st)}
 
 
 def _fake_job(meta):
@@ -368,15 +403,51 @@ def test_register_makes_the_token_account_the_parent_of_the_pair():
         f"copy); got {linked}")
 
 
-def test_register_seeds_password_safe_with_the_live_token():
+def test_register_offers_the_live_token_as_the_seed_to_both_accounts():
+    """Offering it still matters — it is free, and it is what makes the account correct on
+    any path whose limit is higher. What must NOT happen is the caller assuming it took."""
     rec = Recorder()
     _install_stubs(rec)
-    out, _db = _run_register(rec, _row())
-    seeded = [kw for e, kw in [ev for ev in rec.events if isinstance(ev, tuple)
-                               and ev[0] == "registered"]]
-    assert seeded and all(kw["initial_password"].startswith("eyJ") for kw in seeded), (
-        "without seeding, Password Safe holds a placeholder while the cluster and PRA "
-        "hold the real token — nothing works until the first rotation")
+    _run_register(rec, _row())
+    seeded = [kw for _e, kw in [ev for ev in rec.events if isinstance(ev, tuple)
+                                and ev[0] == "registered"]]
+    assert len(seeded) == 2, "the token account and the PRA Vault subscriber"
+    assert all(kw["initial_password"] == _LONG_TOKEN for kw in seeded)
+
+
+def test_register_rotates_even_when_change_on_register_is_off_if_the_seed_was_dropped():
+    """The seed cannot be taken for a bearer token (the create API caps Password at 128),
+    so the rotation is the only thing that puts a real credential in the vault. Honouring
+    change_on_register=false would leave a registration that reads as complete while
+    current_token serves the placeholder to the PRA tunnel."""
+    rec = Recorder()
+    _install_stubs(rec)
+    out, _db = _run_register(rec, _row(), change_on_register=False)
+
+    assert out["rotated"], "a dropped seed makes the rotation mandatory, not optional"
+    assert "rotate" in rec.events
+    assert any("could not be seeded" in w for w in out["warnings"]), (
+        f"overriding the caller's change_on_register must be reported; got {out['warnings']}")
+
+
+def test_register_honours_change_on_register_off_when_the_seed_did_take():
+    """The override is scoped to the reason for it. A credential Password Safe actually
+    holds must not be rotated behind the caller's back — for LongLived mode that would mint
+    and revoke Secrets in the cluster nobody asked it to touch."""
+    rec = Recorder()
+    _install_stubs(rec)
+    # A seedable credential: short enough for the create API to accept.
+    mods = sys.modules["web_dashboard.services.k8s_service"]
+
+    async def _short(db, row, kubeconfig):
+        rec.hit("read_current_token")
+        return "short-enough-to-seed", "minted"
+    mods._resolve_pra_sa_token = _short
+
+    out, _db = _run_register(rec, _row(), change_on_register=False)
+    assert not out["rotated"], "nothing forced a rotation here"
+    assert "rotate" not in rec.events
+    assert not any("could not be seeded" in w for w in out["warnings"])
 
 
 def test_a_failed_link_fails_register_before_anything_rotates():
@@ -423,11 +494,14 @@ def test_no_pra_vault_account_means_no_link_and_the_secret_stays():
 
 def test_register_is_idempotent_for_an_already_registered_cluster():
     rec = Recorder()
-    _install_stubs(rec)
+    _install_stubs(rec, cfg=_prior_state(rotated=True))
     out, _db = _run_register(rec, _row(ps_token_account_id="201"))
     assert out["already_registered"] is True
     assert "register_managed_system" not in rec.events
     assert "rbac" in rec.events, "re-applying the (idempotent) RBAC is the useful half"
+    assert "rotate" not in rec.events, (
+        "the previous run rotated, so the vault holds a real credential — re-registering "
+        "must not mint and revoke Secrets in the cluster to re-prove that")
 
 
 # ── register: the already-registered path reconciles a missing link ──────────────
@@ -458,6 +532,36 @@ def test_register_relinks_an_already_registered_pair_that_is_unlinked():
         f"successfully and syncs BACKWARDS; got {linked}")
     assert "register_managed_system" not in rec.events, (
         "both managed accounts already exist — the repair creates nothing")
+
+
+def test_re_register_replaces_the_placeholder_a_dead_run_left_in_the_vault():
+    """The other half of that same half-state. Because the seed is always dropped, a run
+    that died at the (fatal) link left the account holding its create-time placeholder —
+    and current_token serves whatever is in the vault to the PRA tunnel. Reconciling only
+    the link would repair the plumbing around a credential that authenticates to nothing."""
+    rec = Recorder()
+    _install_stubs(rec, cfg=_prior_state())        # no "rotated" — the run never got there
+    row = _row(ps_token_account_id="201", ps_pra_vault_account_id="202")
+    out, _db = _run_register(rec, row)
+
+    assert out["already_registered"] is True
+    assert out["rotated"] is True and "rotate" in rec.events, (
+        "nothing has ever put a real credential in this account — neither a seed nor a "
+        "completed rotation — so the re-register has to fill it")
+    assert any("placeholder" in w for w in out["warnings"]), (
+        f"a silently-repaired credential is indistinguishable from one that was fine all "
+        f"along; got {out['warnings']}")
+
+
+def test_re_register_does_not_rotate_when_the_first_run_seeded_a_real_credential():
+    # The signal is "does the vault hold a real credential", which is seeded OR rotated —
+    # not rotated alone. A short credential that WAS seeded and deliberately not rotated
+    # (change_on_register=false) must survive a re-register untouched.
+    rec = Recorder()
+    _install_stubs(rec, cfg=_prior_state(seeded=True, rotated=False))
+    row = _row(ps_token_account_id="201", ps_pra_vault_account_id="202")
+    out, _db = _run_register(rec, row)
+    assert out["rotated"] is False and "rotate" not in rec.events
     assert "rotate" not in rec.events, (
         "the repair restores the missing reference and stops; rotating would revoke the "
         "token PRA is currently using for no reason")
@@ -467,12 +571,13 @@ def test_register_does_not_relink_a_pair_that_is_already_linked():
     """The healthy re-register. Password Safe already owns the sync, so the only work is
     the RBAC — one status read and no write."""
     rec = Recorder()
-    _install_stubs(rec)                       # linked_now=True
+    _install_stubs(rec, cfg=_prior_state(rotated=True))   # linked_now=True
     row = _row(ps_token_account_id="201", ps_pra_vault_account_id="202")
     out, _db = _run_register(rec, row)
 
     assert "sync_status" in rec.events
     assert "link" not in rec.events, "re-POSTing a live link is a write nothing needs"
+    assert "rotate" not in rec.events, "nor is re-rotating a credential already in the vault"
     assert out["pra_synced"] is True and out["relinked"] is False
     assert "rbac" in rec.events
 

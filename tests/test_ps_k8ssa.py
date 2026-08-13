@@ -32,7 +32,8 @@ _SUB = "11111111-2222-3333-4444-555555555555"
 
 # The k8ssa shape: dns_name = the cluster address, placeholder ip, port 443 (unused —
 # the API server port belongs to the endpoint URL), account name "<ns>/<sa>", and the
-# bearer token seeded as the account password.
+# account password-managed (the credential IS the bearer token — see the seeding tests
+# for why that token cannot be supplied at create time).
 _K8SSA = dict(name="k8s-gke", host_name="k8s-gke", ip_address="127.0.0.1", port=443,
               functional_account_id=88, platform_id=1008, entity_type_id=1,
               workgroup_id="55", managed_account_name="pra-access/pra-access",
@@ -213,11 +214,17 @@ def test_the_token_rides_a_tf_var_and_never_the_hcl():
 
 
 # ── the seeded credential ───────────────────────────────────────────────────────
+#
+# A realistic ServiceAccount bearer token: a JWT of ~900 characters. Fixtures here used to
+# be a 43-character stub, which is why nothing caught that the create API refuses anything
+# over 128 — no real token is ever that short.
+_LONG_TOKEN = ("eyJhbGciOiJSUzI1NiIsImtpZCI6InN2Yy1hY2N0LXNpZ25pbmcta2V5In0."
+               + "eyJhdWQiOlsiaHR0cHM6Ly9rdWJlcm5ldGVzLmRlZmF1bHQuc3ZjIl0s" * 12
+               + ".c2lnbmF0dXJlLWJ5dGVz" * 8)
 
-def test_initial_password_seeds_the_account_with_the_live_token():
-    # Seeding matters: without it the provider's placeholder means Password Safe holds a
-    # random string while the cluster and PRA hold the real token, so nothing works until
-    # the first rotation.
+
+def _capture_register(**kw):
+    """Run register_managed_system against a faked apply; return (out, captured)."""
     import asyncio
     captured = {}
 
@@ -229,38 +236,59 @@ def test_initial_password_seeds_the_account_with_the_live_token():
     orig = ps._apply_hcl_sync
     ps._apply_hcl_sync = _fake_apply
     try:
-        token = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJzYSJ9.c2ln"
-        asyncio.run(ps.register_managed_system(
-            name="k8s-gke", host_name="k8s-gke", functional_account_id=88,
-            platform_id=1008, workgroup_id="55",
-            managed_account_name="pra-access/pra-access", method="k8ssa",
-            dns_name="gke;p;us-central1;c1", initial_password=token))
+        base = dict(name="k8s-gke", host_name="k8s-gke", functional_account_id=88,
+                    platform_id=1008, workgroup_id="55",
+                    managed_account_name="pra-access/pra-access", method="k8ssa",
+                    dns_name="gke;p;us-central1;c1")
+        base.update(kw)
+        return asyncio.run(ps.register_managed_system(**base)), captured
     finally:
         ps._apply_hcl_sync = orig
 
-    assert captured["tf_vars"]["ps_account_password"] == token
-    assert token not in captured["hcl"], "the token must ride a TF_VAR, never the HCL"
+
+def test_a_bearer_token_is_too_long_to_seed_and_is_dropped():
+    """The whole reason registration cannot seed this credential. The public REST
+    create-managed-account path caps Password at 128 characters and a bearer token is
+    800-1,200, so passing it through does not truncate — it fails the apply with
+    400 "Password cannot exceed 128 characters." and takes the managed system with it."""
+    assert len(_LONG_TOKEN) > ps._MAX_SEED_PASSWORD_LEN
+    out, captured = _capture_register(initial_password=_LONG_TOKEN)
+
+    sent = captured["tf_vars"]["ps_account_password"]
+    assert sent != _LONG_TOKEN, "an over-long seed must be dropped, not sent"
+    assert len(sent) <= ps._MAX_SEED_PASSWORD_LEN
+    assert len(sent) >= 16, "the replacement is still a strong placeholder"
+    assert _LONG_TOKEN not in captured["hcl"]
+    assert out["initial_password_seeded"] is False, (
+        "the caller has to be told the vault holds a placeholder — a credential that is "
+        "wrong rather than missing is the one this feature cannot detect")
+
+
+def test_a_seedable_credential_still_rides_through():
+    # The parameter is not dead: a short password-managed credential (a DB user, a PRA
+    # Vault account) is still seeded, and must still travel by TF_VAR rather than in HCL.
+    pw = "S3cret-placeholder-value"
+    out, captured = _capture_register(initial_password=pw)
+    assert captured["tf_vars"]["ps_account_password"] == pw
+    assert pw not in captured["hcl"], "the credential must ride a TF_VAR, never the HCL"
+    assert out["initial_password_seeded"] is True
+
+
+def test_a_seed_of_exactly_the_limit_is_accepted():
+    # Boundary: 128 is the documented maximum, not the first rejected length.
+    pw = "x" * ps._MAX_SEED_PASSWORD_LEN
+    out, captured = _capture_register(initial_password=pw)
+    assert captured["tf_vars"]["ps_account_password"] == pw
+    assert out["initial_password_seeded"] is True
+
+    out, captured = _capture_register(initial_password="x" * (ps._MAX_SEED_PASSWORD_LEN + 1))
+    assert out["initial_password_seeded"] is False
 
 
 def test_without_initial_password_a_throwaway_placeholder_is_used():
-    import asyncio
-    captured = {}
-
-    def _fake_apply(hcl, tf_vars):
-        captured["tf_vars"] = tf_vars
-        return {"managed_system_id": "1", "managed_account_id": "2", "tf_state_json": "{}"}
-
-    orig = ps._apply_hcl_sync
-    ps._apply_hcl_sync = _fake_apply
-    try:
-        asyncio.run(ps.register_managed_system(
-            name="k8s-gke", host_name="k8s-gke", functional_account_id=88,
-            platform_id=1008, workgroup_id="55",
-            managed_account_name="pra-access/pra-access", method="k8ssa",
-            dns_name="gke;p;us-central1;c1"))
-    finally:
-        ps._apply_hcl_sync = orig
+    out, captured = _capture_register()
     assert len(captured["tf_vars"]["ps_account_password"]) >= 16
+    assert out["initial_password_seeded"] is False
 
 
 def test_register_refuses_a_malformed_address_before_touching_terraform():
@@ -289,14 +317,17 @@ def test_register_refuses_a_malformed_address_before_touching_terraform():
     assert called["n"] == 0, "validation must happen before terraform runs"
 
 
-# ── the token must not survive into stashed state ───────────────────────────────
+# ── the credential must not survive into stashed state ──────────────────────────
 
-def test_scrub_state_redacts_the_seeded_token():
-    token = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJzYSJ9.c2ln"
+def test_scrub_state_redacts_the_account_password():
+    # The stashed state drives deregister, so it outlives the apply. Whatever ends up in
+    # the password field has to be scrubbed — including the create-time placeholder, which
+    # IS the account's live credential in Password Safe until the first rotation.
+    secret = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJzYSJ9.c2ln"
     state = ('{"resources":[{"instances":[{"attributes":'
-             '{"account_name":"pra-access/pra-access","password":"%s"}}]}]}' % token)
+             '{"account_name":"pra-access/pra-access","password":"%s"}}]}]}' % secret)
     out = ps._scrub_state(state)
-    assert token not in out
+    assert secret not in out
     assert ps._REDACTED in out
 
 
