@@ -542,7 +542,7 @@ class Identity:
         # Create with 0600 from the start rather than chmod-ing after: a private key
         # must never exist world-readable, not even for an instant.
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w") as fh:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump({"agent_id": self.agent_id, "private_key": self.private_b64,
                        "dashboard_public_key": self.dashboard_public,
                        "audience": self.audience}, fh)
@@ -551,7 +551,7 @@ class Identity:
     @staticmethod
     def load() -> Optional["Identity"]:
         try:
-            with open(_IDENTITY_FILE) as fh:
+            with open(_IDENTITY_FILE, encoding="utf-8") as fh:
                 data = json.load(fh)
         except (OSError, ValueError):
             return None
@@ -2242,7 +2242,7 @@ def _check_state_dir_writable() -> None:
     probe = os.path.join(STATE_DIR, ".write-probe")
     try:
         os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
-        with open(probe, "w") as fh:
+        with open(probe, "w", encoding="utf-8") as fh:
             fh.write("")
         os.unlink(probe)
     except OSError as exc:
