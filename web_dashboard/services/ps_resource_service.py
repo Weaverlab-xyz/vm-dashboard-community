@@ -523,10 +523,13 @@ async def register_managed_system(*, name: str, host_name: str, private_key: str
     # a 400 that fails the whole apply, so sending it would cost the managed system too.
     seeded = bool(initial_password) and len(initial_password) <= _MAX_SEED_PASSWORD_LEN
     if initial_password and not seeded:
+        # Logs the overage, never the length. A credential's length is derived from the
+        # credential and narrows a guess at it, so it does not belong in a log line — and
+        # "longer than the cap" is the entire actionable content anyway.
         logger.info(
-            "PS: not seeding the %s managed account for %r — the credential is %d characters "
-            "and the create API caps Password at %d; the first rotation will populate it",
-            method, name, len(initial_password), _MAX_SEED_PASSWORD_LEN)
+            "PS: not seeding the %s managed account for %r — the credential is longer than "
+            "the %d characters the create API accepts; the first rotation will populate it",
+            method, name, _MAX_SEED_PASSWORD_LEN)
     tf_vars = {"ps_account_password":
                initial_password if seeded else secrets.token_urlsafe(24)}
     if method == "ssm":
