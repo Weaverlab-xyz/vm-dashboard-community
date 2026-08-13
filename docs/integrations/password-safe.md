@@ -296,10 +296,19 @@ Two custom plugins, both imported by hand:
 
 Enable **Kubernetes Token Rotation** in Settings → Integrations → Password Safe, then use the
 per-cluster **Token rotation** button on `/k8s` (or tick the box on the provision form).
-Registration applies the rotator RBAC, creates the managed system + account seeded with the
-token the cluster is using, registers the PRA Vault Token account, **syncs** it to the token
-account, rotates once to prove the path, and finally deletes the dashboard-minted
-`<sa>-token` Secret.
+Registration applies the rotator RBAC, creates the managed system + account, registers the
+PRA Vault Token account, **syncs** it to the token account, rotates once to prove the path,
+and finally deletes the dashboard-minted `<sa>-token` Secret.
+
+**The registration rotation is not optional here.** A managed account cannot be *created*
+holding a bearer token: the REST path that sets a password on create caps it at 128
+characters and a ServiceAccount JWT is 800–1,200, so the account starts out holding a
+throwaway placeholder. (The cap is specific to that path — a plugin's rotation write-back
+carries multi-KB values, which is how the SSH-key plugins store 3.2 KB private keys.) The
+first rotation is therefore what puts a real credential in the vault, and turning
+`k8s_ps_token_change_on_register` off does not skip it — registration overrides the setting
+and warns, because a vault serving a placeholder to the PRA tunnel looks exactly like a
+working registration.
 
 The sync is the step that matters, and it is a Password Safe feature rather than anything the
 dashboard runs: the PRA Vault account becomes a *subscriber* of the token account, and a

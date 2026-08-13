@@ -297,11 +297,12 @@ async def register(db: Session, cluster_id: str, *, job_id: str = "",
     Ordered, and the order is the correctness argument:
 
       1. apply the rotator RBAC, so the functional account can actually rotate;
-      2. create the managed system + account, seeded with the token the cluster is
-         using right now — so Password Safe starts out holding a working credential
-         instead of a placeholder it would have to rotate before anything works;
-      3. create the "PRA Vault Token" subscriber, also seeded, when there is a PRA Vault
-         account to keep in step;
+      2. create the managed system + account. The token the cluster is using right now is
+         offered as the seed, but a bearer token is far longer than the 128 characters the
+         create API accepts, so in practice it is dropped and the account starts out
+         holding a placeholder — which is why step 5 is not optional (see below);
+      3. create the "PRA Vault Token" subscriber, offered the same seed, when there is a
+         PRA Vault account to keep in step;
       4. **link** the two with ``SyncedAccounts`` — fatal, and deliberately BEFORE the
          rotation. From here on Password Safe owns the sync; a failure at this point has
          changed nothing in the cluster, whereas rotating first and failing to link would
@@ -309,7 +310,9 @@ async def register(db: Session, cluster_id: str, *, job_id: str = "",
       5. rotate once, which proves the whole path (functional-account credentials →
          cloud control plane → API server → RBAC → Secret create) at registration time
          rather than at 3am on the first scheduled rotation — and, because the link is
-         already in place, proves propagation with it;
+         already in place, proves propagation with it. When the seed at step 2 was dropped
+         this is also the only thing that puts a real credential in the vault, so it runs
+         even if ``change_on_register`` said not to;
       6. delete the dashboard's ``<sa>-token`` Secret, which the plugin's label-scoped
          sweep would never remove. Gated on the link, not on observing the propagation:
          Password Safe queues change operations, so there is nothing synchronous to
@@ -318,7 +321,11 @@ async def register(db: Session, cluster_id: str, *, job_id: str = "",
     Idempotent: an already-registered cluster re-applies the RBAC and reconciles a
     missing sync link (see ``_reconcile_synced_link``) rather than returning early —
     step 2 commits ``ps_token_account_id`` before the fatal step 4, so a failed link
-    leaves a row that looks registered and a pair that does not sync."""
+    leaves a row that looks registered and a pair that does not sync. That same failure
+    also leaves the account holding the placeholder step 2 created it with, so the
+    re-register rotates when the stored state shows neither a seed nor a completed
+    rotation. Reconciling only the link would repair the plumbing around a credential
+    that authenticates to nothing."""
     if not enabled():
         raise PSK8sTokenError(
             "Password Safe token rotation is disabled — enable k8s_ps_token_rotation_enabled")
@@ -345,10 +352,30 @@ async def register(db: Session, cluster_id: str, *, job_id: str = "",
     if row.ps_token_account_id:
         note = await _apply_rbac(db, cluster_id, mode=mode, warnings=warnings)
         sync = await _reconcile_synced_link(row, job_id=job_id, warnings=warnings)
+        # The other half of the recoverable half-state, and the reason this path cannot
+        # just reconcile the link: step 2 commits the account id, but the seed is dropped
+        # (a bearer token exceeds the create API's 128-character cap), so a run that died
+        # before step 5 left the account holding its create-time placeholder — and
+        # ``current_token`` would serve THAT to the PRA tunnel. Neither a seed nor a
+        # completed rotation means nothing has ever put a real credential in the vault.
+        st = get_state(cluster_id)
+        refilled = False
+        if not st.get("seeded") and not st.get("rotated"):
+            if job_id:
+                await broadcast_progress(
+                    job_id, 80, "Rotating to replace the create-time placeholder…")
+            await ps_api_service.change_managed_account_password(
+                int(row.ps_token_account_id))
+            refilled = True
+            _save_state(cluster_id, rotated=True)
+            warnings.append(
+                "the managed account was still holding the placeholder it was created with "
+                "(a ServiceAccount token is too long to seed, and no rotation had "
+                "completed) — rotated so the vault holds a real credential")
         return {"already_registered": True, "managed_account_id": row.ps_token_account_id,
                 "pravault_account_id": row.ps_pra_vault_account_id or "",
                 "rbac": note, "pra_synced": sync["linked"], "relinked": sync["relinked"],
-                "warnings": warnings}
+                "rotated": refilled, "warnings": warnings}
 
     address = _address_for(db, row, mode=mode, ttl_seconds=ttl, namespace=ns,
                            cluster_name=cluster_name, resource_group=resource_group,
@@ -382,10 +409,14 @@ async def register(db: Session, cluster_id: str, *, job_id: str = "",
         workgroup_id=workgroup_id, ip_address="127.0.0.1", port=443,
         managed_account_name=account_name, method="k8ssa", dns_name=address,
         initial_password=current)
+    # A bearer token is 800-1,200 characters and the create API caps Password at 128, so
+    # this is False in practice — the vault holds a placeholder until step 5 rotates. Read
+    # it rather than assuming either way: it is what makes that rotation mandatory.
+    seeded = bool(reg.get("initial_password_seeded"))
     row.ps_token_account_id = str(reg.get("managed_account_id") or "")
     _save_state(cluster_id, system_id=str(reg.get("managed_system_id") or ""),
                 tf_state=reg.get("tf_state_json"), token_mode=mode, address=address,
-                account_name=account_name)
+                account_name=account_name, seeded=seeded)
     db.commit()
 
     # 3. The PRA Vault subscriber — only meaningful when there IS a PRA Vault copy.
@@ -434,6 +465,16 @@ async def register(db: Session, cluster_id: str, *, job_id: str = "",
     rotated = False
     change = (_cfg_bool("k8s_ps_token_change_on_register", True)
               if change_on_register is None else bool(change_on_register))
+    if not change and not seeded:
+        # Not a preference we can honour: the seed was dropped, so Password Safe holds a
+        # placeholder that authenticates to nothing, and ``current_token`` hands whatever
+        # is in the vault to the PRA tunnel. Skipping the rotation would leave a
+        # registration that reads as complete while serving a dead credential.
+        change = True
+        warnings.append(
+            "rotated despite change_on_register=false: the ServiceAccount token is longer "
+            "than the 128 characters the managed-account create API accepts, so it could "
+            "not be seeded and only a rotation puts a real credential in the vault")
     if change:
         if job_id:
             await broadcast_progress(job_id, 80, "Rotating the token once to prove the path…")

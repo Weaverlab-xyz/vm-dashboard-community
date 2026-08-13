@@ -87,6 +87,16 @@ _PLUGIN_METHODS = frozenset({"ssm", "azurevm", "gcpvm", "dbssm", "dbazure", "pra
 # Methods whose managed account is password-managed (no SSH DSS key auto-management).
 _PASSWORD_MANAGED_METHODS = frozenset({"dbssm", "dbazure", "pravault", "k8ssa"})
 
+# The public REST create/update-managed-account path the Terraform provider uses caps
+# ``Password`` at 128 characters (400 "Password cannot exceed 128 characters."). This is a
+# limit of THAT path only — a plugin's rotation write-back
+# (``ManagedAccount_CredentialsNew_Password``) carries multi-KB values, which is how the
+# SSH-key plugins store 3.2 KB PEMs. So a credential too long to SEED here is still
+# perfectly storable once the plugin rotates it; a k8s ServiceAccount bearer token
+# (800–1,200 characters) is exactly that case. Seeding one anyway fails the apply outright,
+# so ``register_managed_system`` drops an over-long seed for a placeholder and reports it.
+_MAX_SEED_PASSWORD_LEN = 128
+
 # ── Kubernetes Service Account Token address grammar ──────────────────────────
 #
 # Transcribed from the plugin's Factories/ParameterFactory.cs so a bad address is
@@ -454,7 +464,8 @@ async def register_managed_system(*, name: str, host_name: str, private_key: str
                                    dns_name: str = "", account_suffix: str = "",
                                    initial_password: str = "") -> dict:
     """Onboard a VM as a Password Safe managed system + managed account.
-    Returns ``{managed_system_id, managed_account_id, tf_state_json}``.
+    Returns ``{managed_system_id, managed_account_id, tf_state_json,
+    initial_password_seeded}``.
 
     ``method="ssm"`` uses the AWS Systems Manager custom plugin: ``dns_name`` must be
     ``{instance-id}:{region}``, the account name becomes ``{managed_account_name};{suffix}``
@@ -491,21 +502,33 @@ async def register_managed_system(*, name: str, host_name: str, private_key: str
     <cluster>``, ``gke;<projectId>;<location>;<cluster>`` or ``k8s;<apiServerUrl>``) plus
     optional trailing ``;key=value`` options, at most 249 characters;
     ``managed_account_name`` is ``<namespace>/<serviceaccount>``. The account is
-    password-managed — the credential IS the bearer token — so pass the cluster's current
-    token as ``initial_password``.
+    password-managed — the credential IS the bearer token — but a bearer token cannot be
+    seeded (see ``initial_password``), so the first rotation is what populates it.
 
     ``method="ssh"`` (default) keeps the traditional key-managed flow and requires
     ``private_key``.
 
     ``initial_password`` seeds the managed account with a credential the caller already
     holds, instead of the throwaway placeholder. Only meaningful for a password-managed
-    method: it is what lets a k8s registration start out holding the token the cluster
-    (and the PRA Vault copy) is actually using, rather than a value Password Safe would
-    have to rotate before anything works."""
+    method, and only up to ``_MAX_SEED_PASSWORD_LEN`` — the create API rejects anything
+    longer with a 400 that fails the whole apply, so an over-long value is DROPPED for a
+    placeholder rather than passed through. The returned ``initial_password_seeded`` says
+    which happened: on False, Password Safe holds a placeholder that authenticates to
+    nothing until the account is rotated, and it is the caller's job to make that rotation
+    happen. A k8s ServiceAccount token is always over the cap."""
     method = (method or "ssh").lower()
     # The provider requires a password even for a key-managed account; supply a strong
     # placeholder it never uses (the real credential is the SSH key, managed by Password Safe).
-    tf_vars = {"ps_account_password": initial_password or secrets.token_urlsafe(24)}
+    # An over-long seed is dropped rather than passed through: the create API rejects it with
+    # a 400 that fails the whole apply, so sending it would cost the managed system too.
+    seeded = bool(initial_password) and len(initial_password) <= _MAX_SEED_PASSWORD_LEN
+    if initial_password and not seeded:
+        logger.info(
+            "PS: not seeding the %s managed account for %r — the credential is %d characters "
+            "and the create API caps Password at %d; the first rotation will populate it",
+            method, name, len(initial_password), _MAX_SEED_PASSWORD_LEN)
+    tf_vars = {"ps_account_password":
+               initial_password if seeded else secrets.token_urlsafe(24)}
     if method == "ssm":
         if not dns_name or ":" not in dns_name:
             raise PSResourceError(
@@ -633,7 +656,9 @@ async def register_managed_system(*, name: str, host_name: str, private_key: str
             ssh_key_enforcement_mode=ssh_key_enforcement_mode,
             application_host_id=application_host_id, method="ssh", emit_private_key=True)
         tf_vars["ps_account_private_key"] = private_key
-    return await asyncio.to_thread(_apply_hcl_sync, hcl, tf_vars)
+    out = await asyncio.to_thread(_apply_hcl_sync, hcl, tf_vars)
+    out["initial_password_seeded"] = seeded
+    return out
 
 
 async def deregister(tf_state_json: str) -> None:

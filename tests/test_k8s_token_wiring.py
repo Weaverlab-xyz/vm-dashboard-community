@@ -141,13 +141,30 @@ def test_no_sync_endpoints_remain():
 
 # ── registration hands the sync to Password Safe, in the right order ─────────────
 
+_FRESH_PATH_MARKER = "address = _address_for("
+
+
+def _fresh_registration_path(code):
+    """The part of register() that onboards a NEW cluster, i.e. everything after the
+    already-registered early return (which begins at the address build).
+
+    The early-return branch has a rotation of its own, for an unrelated reason: the seed
+    is dropped (a bearer token exceeds the create API's 128-character cap), so a run that
+    died before the rotation left the account holding its create-time placeholder, and the
+    re-register refills it. That call sits textually BEFORE the link, so a naive
+    first-occurrence scan of the whole function reads the order backwards."""
+    head, _sep, tail = code.partition(_FRESH_PATH_MARKER)
+    assert _sep, f"register() no longer contains {_FRESH_PATH_MARKER!r} — re-anchor this scan"
+    return tail
+
+
 def test_registration_links_before_it_rotates():
     """The link must be established BEFORE the one registration-time rotation.
 
     Rotating first and failing to link leaves Password Safe holding a token PRA will
     never receive — and in LongLived mode the value PRA still has was just revoked.
     Linking first means a failure at that point has changed nothing in the cluster."""
-    code = _fn_code(_TOKENSVC, "register")
+    code = _fresh_registration_path(_fn_code(_TOKENSVC, "register"))
     link = code.find("link_synced_account")
     rotate = code.find("change_managed_account_password")
     assert link != -1, "register() never links the two managed accounts"
@@ -155,6 +172,23 @@ def test_registration_links_before_it_rotates():
     assert link < rotate, (
         "register() rotates before it links — a failed link then leaves PRA holding a "
         "revoked token with nothing to refresh it")
+
+
+def test_a_re_register_refills_an_account_still_holding_its_placeholder():
+    """The counterpart the scan above has to skip. A bearer token cannot be seeded (the
+    create API caps Password at 128 characters), so the account is created holding a
+    placeholder and only the rotation replaces it. A run that died at the fatal link
+    therefore leaves a credential that authenticates to nothing, which ``current_token``
+    would hand to the PRA tunnel — so the already-registered path rotates when neither a
+    seed nor a completed rotation is recorded."""
+    head = _fn_code(_TOKENSVC, "register").partition(_FRESH_PATH_MARKER)[0]
+    compact = "".join(head.split())
+    assert 'notst.get("seeded")andnotst.get("rotated")' in compact, (
+        "the re-register must fill the vault when NOTHING ever put a real credential in "
+        "it — the test is seeded OR rotated, not rotated alone (a short credential that "
+        "was genuinely seeded and deliberately left unrotated must survive untouched)")
+    assert "change_managed_account_password" in head, \
+        "the already-registered path detects the placeholder but never replaces it"
 
 
 def test_registration_passes_the_token_account_as_the_parent():

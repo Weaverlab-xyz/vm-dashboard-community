@@ -71,22 +71,43 @@ The same function also clears the sync watermark. Without that, re-provisioning 
 mints a fresh token and a fresh PRA Vault account while the stale watermark suppresses the
 first sync — PRA holding one token, Password Safe another, and nothing reconciling them.
 
-## 3. Seed *and* rotate at registration
+## 3. The rotation at registration is mandatory, because the seed cannot be taken
 
 The Terraform provider requires a password on a managed account, and
 `ps_resource_service` supplies `secrets.token_urlsafe(24)` — a placeholder. For an SSH-key
 account that is harmless; here the "password" *is* the credential, so a placeholder means
 Password Safe holds a value that authenticates to nothing.
 
-Registration therefore does both:
+The obvious fix is to **seed** the account with the token the cluster is using right now
+(`initial_password`), so Password Safe, the cluster and PRA agree from the first moment.
+**That is not possible for this credential.** The public REST create-managed-account path
+the provider uses caps `Password` at **128 characters**, and a ServiceAccount bearer token
+is a JWT of 800–1,200. Seeding one does not truncate — it fails the whole apply with
+`400 "Password cannot exceed 128 characters."`, taking the managed system with it.
 
-1. **seed** the account with the token the cluster is using right now
-   (`initial_password`), so Password Safe, the cluster and PRA agree from the first
-   moment; and
-2. **rotate once** (`k8s_ps_token_change_on_register`, default on), which exercises the
-   whole path — functional-account credentials → cloud control plane → API server → RBAC →
-   Secret create — at registration time instead of at 3am on the first scheduled rotation.
-   Same reasoning as `passwordsafe_azure_change_password_on_register`.
+The cap belongs to that path alone. A plugin's rotation write-back
+(`ManagedAccount_CredentialsNew_Password`) carries multi-KB values — it is how the SSH-key
+plugins store 3.2 KB PEMs — so the token is perfectly *storable*, just not *seedable*.
+Two different code paths into the same field, and the limits are inconsistent between
+them and between client and server (`ps-cli` caps functional-account passwords at 1,000
+while the API accepts 3,216). Do not infer a limit on one path from a limit on another.
+
+So `register_managed_system` still *offers* the seed, drops it when it exceeds
+`_MAX_SEED_PASSWORD_LEN`, and reports which happened as `initial_password_seeded`. For a
+k8s token that is always False, which makes **rotate once** the step that puts a real
+credential in the vault rather than a nicety:
+
+- it exercises the whole path — functional-account credentials → cloud control plane →
+  API server → RBAC → Secret create — at registration time instead of at 3am on the first
+  scheduled rotation (same reasoning as `passwordsafe_azure_change_password_on_register`);
+- and because the seed was dropped, it is *load-bearing*. `k8s_ps_token_change_on_register`
+  (default on) is therefore overridden when `initial_password_seeded` is False, with a
+  warning on the job. Honouring it would leave a registration that reads as complete while
+  `current_token` serves the placeholder to the PRA tunnel — a credential that is wrong
+  rather than missing, which is the failure mode this feature is least able to detect.
+
+The PRA Vault subscriber is offered the same seed and drops it the same way; the
+`SyncedAccounts` link is created *before* the rotation, so that one rotation populates both.
 
 Creating the **sync link is the one fatal step**, and it happens *before* the rotation.
 Completing the job with an unlinked pair would ship a token that is managed but never
@@ -106,6 +127,16 @@ direction and the confirm re-read are the same as step 4's, since a swapped pair
 happily and syncs backwards. Returning early instead would re-apply the RBAC and report
 success on a registration that still never reaches PRA, leaving deregister-then-register —
 two managed systems destroyed and rebuilt — as the way to restore one missing reference.
+
+**The link is not the only thing that half-state leaves broken.** Because the seed is always
+dropped (§3), a run that died at the link also left the account holding the placeholder it
+was *created* with, and `current_token` hands whatever is in the vault to the PRA tunnel. So
+the re-register also rotates when the stored state shows neither a seed nor a completed
+rotation (`seeded` / `rotated` in `ps_k8s_token_<id>`) — the test is "does the vault hold a
+real credential", which is `seeded OR rotated`, not `rotated` alone: a short credential that
+was genuinely seeded and deliberately left unrotated must survive a re-register untouched.
+Repairing only the link would fix the plumbing around a credential that authenticates to
+nothing, and the resulting registration would read as healthy.
 
 This matters because the likeliest cause of that failure is a **403 on the link**, and the
 grant is genuinely unsettled (see the prerequisites below): the operator fixes it
