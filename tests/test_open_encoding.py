@@ -20,20 +20,42 @@ All 27 sites across 12 files in ``tests/`` were fixed; this is the part that sto
 28th. There is no linter in CI, so — as with ``tests/test_no_undefined_names.py`` and
 ``tests/test_no_redefined_names.py`` — the sweep test IS the guard.
 
+For a while that guard swept ``tests/`` and ``web_dashboard/`` and not ``runners/``, and
+that gap cost the real thing rather than a flaky test. ``runners/agent/agent.py`` read its
+one-time enrolment code with a bare ``open(ENROLLMENT_CODE_FILE)``, so on a Windows agent
+host both failure modes above landed at once: a file written by PowerShell 5.1 — UTF-16,
+which is what ``>`` and ``Out-File`` produce by default — killed the container outright on
+a byte it could not decode, and a UTF-8-BOM one did the quieter thing, decoding fine while
+the mark survived ``.strip()`` so the dashboard refused a code that looked correct in every
+editor. Both are fixed; the third sweep below is what stops the next one.
+
 **Why AST and not grep.** A line-based grep for ``open(`` without ``encoding`` reports
 false positives here, because several call sites wrap and put the keyword on a
 continuation line — see ``tests/test_database_registration.py`` and
 ``tests/test_portainer_node_service.py``. Only a parse sees the whole call.
 
-Two exclusions, without which the check is wrong rather than merely noisy:
+Three exclusions, without which the check is wrong rather than merely noisy:
 
   * **Binary modes.** ``open(p, "rb")`` / ``mode="wb"`` must NOT be asked for an
     encoding; passing one is a ``ValueError``. A mode that is not a literal constant is
     treated as text, deliberately — it cannot be proven binary, so it has to say so.
   * **``os.open``.** A raw file descriptor, which takes no ``encoding`` at any mode.
     Matching ``ast.Attribute`` with ``attr == "open"`` sweeps it up as a false positive;
-    there is a real one at ``runners/agent/agent.py:369``. Other attribute opens are in
-    scope on purpose: ``Path.open`` takes ``encoding`` and needs it just as much.
+    there is a real one in ``Identity.save()`` in ``runners/agent/agent.py``, opening the
+    identity file 0600 from the start. Other attribute opens are in scope on purpose:
+    ``Path.open`` takes ``encoding`` and needs it just as much.
+  * **``tarfile.open``.** This one *does* take an ``encoding``, which is why it cannot be
+    left to the reader: the argument is the codec for member *names* in the archive
+    header, not for content, and there is no text mode here to get wrong. It needs an
+    exclusion rather than falling out of the binary test because its compressed modes
+    contain no ``"b"`` — ``"w:gz"`` reads as text to ``_is_binary``. The site is
+    ``runners/promote/entrypoint.py``, writing the single-``disk.raw`` tarball that GCP's
+    image importer demands.
+
+One known blind spot, worth recording because it sits directly beside one of the fixes:
+``os.fdopen`` is not matched at all, since the attribute is ``fdopen`` and not ``open``. The
+text-mode ``os.fdopen(fd, "w", encoding="utf-8")`` that ``Identity.save()`` wraps its 0600
+descriptor in was therefore corrected by hand, and nothing here holds it that way.
 
 **Deliberately out of scope** — these are pre-existing and are NOT failures:
 
@@ -50,6 +72,20 @@ The boundary is drawn here, in the test, rather than by editing service code to 
 a test — changing how the app writes Terraform to keep a linter quiet would be the tail
 wagging the dog.
 
+**Why ``runners/`` is swept for writes when ``web_dashboard/`` is not.** The obvious move
+is to copy the app's read-only scope, and it is the wrong one, because the reason for that
+scope does not carry over. Nothing under ``runners/`` emits one-way generated artefacts the
+way the services above do: the hypervisor runner writes no files whatsoever and hands its
+inventory back as JSON on stdout, so "inventory" there is a REST fetch and not a file. What
+the agent writes is its own state, and it is the only reader of it — ``Identity.save()``
+writes ``identity.json`` and ``Identity.load()`` parses it back — so an undeclared encoding
+on either half is one half of a round-trip bug. That is the argument that puts writes in
+scope for ``tests/``, and it bites harder here: a runner is the only thing in this repo that
+executes on a host the operator owns, where the platform default really can be ``cp1252``.
+The round trip is latent today — the payload is base64, byte-identical under either codec —
+but that is a property to declare, not to rest on, and declaring it costs two keywords
+rather than an argument with service code.
+
 Runs under pytest, or standalone:  python tests/test_open_encoding.py
 """
 import ast
@@ -59,12 +95,18 @@ import sys
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _TESTS = os.path.join(_ROOT, "tests")
 _APP = os.path.join(_ROOT, "web_dashboard")
+_RUNNERS = os.path.join(_ROOT, "runners")
 
 _SKIP_DIRS = {"__pycache__", ".venv", "node_modules", ".git"}
 
-# Attribute-style openers that are not the text-mode builtin. `os.open` returns a raw
-# fd and accepts no `encoding` in any mode, so requiring one of it is simply incorrect.
-_NON_TEXT_OPENERS = {"os"}
+# Attribute-style openers that are not the text-mode builtin, keyed by the owner name.
+#   os      — `os.open` returns a raw fd and accepts no `encoding` in any mode, so
+#             requiring one of it is simply incorrect.
+#   tarfile — `tarfile.open` does take an `encoding`, but it is the codec for member
+#             *names* in the archive header, not for content; there is no text mode here
+#             to get wrong. It needs naming because `"w:gz"` is not caught by the
+#             `"b" in mode` binary test either.
+_NON_TEXT_OPENERS = {"os", "tarfile"}
 
 # Reads of files this repo does not own, where utf-8 is not ours to assert.
 _APP_READ_EXEMPT = {"web_dashboard/config.py"}  # :195, the JWT secret file
@@ -200,6 +242,23 @@ def test_every_repo_file_read_in_the_app_declares_an_encoding():
         + "\n  ".join(offenders))
 
 
+def test_every_open_in_the_runners_declares_an_encoding():
+    """The runners half, over reads *and* writes — see the module docstring for why.
+
+    This is the sweep the enrolment-code bug got through, and the tree where the hazard is
+    least theoretical: the agent is the only code in this repo that runs on a host the
+    operator owns, so it is the only place the platform default is genuinely likely to be
+    ``cp1252`` rather than the ``UTF-8`` of every container we ship.
+    """
+    checked, offenders = _sweep(_RUNNERS, only_reads=False)
+    assert checked >= 3, (
+        f"expected several in-scope text open() calls under runners/, saw {checked} — the "
+        "walk or the tarfile exclusion may have over-matched rather than started passing")
+    assert not offenders, (
+        f"{len(offenders)} text-mode open() call(s) with no encoding=:\n  "
+        + "\n  ".join(offenders))
+
+
 def test_the_repo_really_does_hold_utf8_only_files():
     """Guard the premise. If nothing in the tree were cp1252-hostile, the sweep above
     would be busywork — so assert the hazard it exists for is real, and platform
@@ -269,6 +328,13 @@ def test_the_guard_catches_the_shape_it_was_written_for():
     assert offenders_in("fd = os.open(t, os.O_WRONLY | os.O_CREAT, 0o600)") == []
     assert offenders_in("p.open(encoding='utf-8')") == []
     assert offenders_in("p.open()") == [("p.open", None)]
+
+    # tarfile.open needs the opener exclusion rather than the binary one: its compressed
+    # modes contain no "b", so _is_binary does not cover them and a writes-inclusive
+    # sweep would demand a content encoding of an archive that has no text mode.
+    assert offenders_in("tarfile.open(p, 'w:gz', format=tarfile.GNU_FORMAT)") == []
+    assert offenders_in("tarfile.open(p, 'r:gz')") == []
+    assert not _is_binary("w:gz"), "the 'b' test cannot be what excludes tarfile"
 
     # A non-constant mode cannot be proven binary, so it must still declare one.
     assert offenders_in("open(p, mode)") == [("open", None)]
