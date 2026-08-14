@@ -547,6 +547,14 @@ Password Safe and that the registration has not expired.
 Read** and **Credentials → Read** permissions, and that the specific secret is
 in scope for the registration.
 
-**A checkout returns `4031` / 403** — the API identity is missing the **Requestor** role or
-an access policy granting View on a Smart Rule containing the account. There is no Smart Rule
-API, so this is out-of-band; see [Operator prerequisites](#operator-prerequisites).
+**A checkout returns `4031` / 403** — usually the API identity is missing the **Requestor**
+role or an access policy granting View on a Smart Rule containing the account. There is no
+Smart Rule API, so this is out-of-band; see [Operator prerequisites](#operator-prerequisites).
+
+Password Safe returns the same 4031 when the account is not **API-enabled**, and when the
+`SystemID` on the request does not own the `AccountID` — `POST Requests` authorises the
+*pair*. So a 4031 that survives a correctly granted Requestor role is not the grant. The
+dashboard sends the account's real managed system (read from the account when the caller
+does not already hold it) and quotes Password Safe's response body in the job error, which
+is where the numeric code that separates these lives: `4034` is a request awaiting approval
+and `4035` the account's concurrent-request cap — both also 403.

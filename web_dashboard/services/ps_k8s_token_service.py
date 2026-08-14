@@ -700,15 +700,22 @@ async def current_token(db: Session, cluster_id: str) -> str:
 
     Called by ``k8s_service._resolve_pra_sa_token`` when a registration exists, so the
     PRA tunnel vaults the value Password Safe holds instead of minting a second token
-    the rotation plugin would never sweep."""
+    the rotation plugin would never sweep.
+
+    The managed system id goes with the account id: ``POST Requests`` authorises the
+    pair, not the account alone. Step 2 of ``register`` recorded it, so the common path
+    spends no round trip re-reading what it already knows — and a state that predates
+    the column falls back to the lookup in ``ps_api_service._checkout``."""
     row = db.query(K8sCluster).filter(K8sCluster.id == cluster_id).first()
     if row is None or not row.ps_token_account_id:
         raise PSK8sTokenError(
             f"cluster {cluster_id} has no Password Safe-managed ServiceAccount token")
     from . import ps_api_service
+    system_id = str(get_state(cluster_id).get("system_id") or "").strip()
     return await ps_api_service.checkout_credential(
         int(row.ps_token_account_id),
         duration_min=_cfg_int("k8s_ps_token_checkout_duration_min", 15),
+        system_id=int(system_id) if system_id.isdigit() else 0,
         reason=f"PRA Vault injection for cluster {row.name}")
 
 
