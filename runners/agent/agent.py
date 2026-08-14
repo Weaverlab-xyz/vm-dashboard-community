@@ -1166,19 +1166,58 @@ class PasswordSafe:
         except Exception:  # noqa: BLE001 — best effort; the session expires anyway
             pass
 
+    def _system_id(self, account_id: int) -> int:
+        """The managed system that owns the account, or 0 when it cannot be read.
+
+        Best-effort: this only fills in a request field, so a failed read must not turn
+        a checkout that would have worked into a refusal."""
+        try:
+            resp = self._call("GET", f"ManagedAccounts/{int(account_id)}")
+            body = resp.json() if resp.status_code == 200 else None
+            if not isinstance(body, dict):
+                # Some builds serve only the request-scoped collection, which is also
+                # the one that lists what this identity may actually request.
+                resp = self._call("GET", "ManagedAccounts")
+                rows = resp.json() if resp.status_code == 200 else []
+                rows = rows.get("Data") if isinstance(rows, dict) else rows
+                body = next(
+                    (r for r in (rows or []) if isinstance(r, dict) and str(
+                        r.get("ManagedAccountID") or r.get("AccountId")
+                        or r.get("AccountID") or "") == str(int(account_id))), None)
+            if isinstance(body, dict):
+                return int(body.get("ManagedSystemID") or body.get("SystemId")
+                           or body.get("SystemID") or 0)
+        except Exception:  # noqa: BLE001
+            log.debug("could not resolve the managed system for a Password Safe account")
+        return 0
+
     def checkout(self, account_id: int, duration_min: int = 30) -> tuple:
-        """(request_id, credential). `ConflictOption=reuse` returns an existing active
-        request instead of a 409 — the same reason btapi_service passes `-c-op reuse`,
-        where a 409 body was once mis-parsed as a request id."""
+        """(request_id, credential).
+
+        `SystemID` is a REQUIRED field and Password Safe authorises the *pair* — the
+        account has to be requestable on that system. Sending a hard-coded 0, which no
+        managed system owns, 403s with 4031: the same code an ungranted Requestor role
+        returns, so the grant looks like the cause and re-granting it changes nothing.
+        Kept in step with `services/ps_api_service._checkout`.
+
+        `ConflictOption=reuse` returns an existing active request instead of a 409 — the
+        same reason btapi_service passes `-c-op reuse`, where a 409 body was once
+        mis-parsed as a request id."""
+        system_id = self._system_id(account_id)
         resp = self._call("POST", "Requests", json={
-            "AccessType": "View", "SystemID": 0, "AccountID": int(account_id),
+            "AccessType": "View", "SystemID": system_id, "AccountID": int(account_id),
             "DurationMinutes": int(duration_min), "Reason": "vm-dashboard agent",
             "ConflictOption": "reuse"})
         if resp.status_code not in (200, 201):
             raise PolicyRefusal(
-                f"Password Safe refused the credential request ({resp.status_code}). "
-                f"The API identity needs the Requestor role and an access policy "
-                f"granting View on a Smart Rule containing this account.")
+                f"Password Safe refused the credential request for account "
+                f"{int(account_id)} on managed system "
+                f"{system_id or 'UNRESOLVED (the account could not be read)'} "
+                f"({resp.status_code}): {resp.text[:200]} — the code in that body says "
+                f"which cause it is. 4031: the API identity needs the Requestor role and "
+                f"an access policy granting View on a Smart Rule containing this account, "
+                f"OR the account is not API-enabled, OR it is not requestable on that "
+                f"system. 4034: awaiting approval. 4035: the concurrent-request cap.")
         body = resp.json()
         request_id = body if isinstance(body, int) else (
             body.get("RequestID") or body.get("id"))

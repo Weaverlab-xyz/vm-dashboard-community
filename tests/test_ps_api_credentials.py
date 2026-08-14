@@ -455,12 +455,33 @@ def test_platform_matching_tolerates_a_rename_but_not_a_different_plugin():
 # ── the refusal message is the deliverable ──────────────────────────────────────
 
 def test_a_denied_request_names_the_tenant_side_grant():
-    _install(FakeClient(status={"Requests": 403}))
+    _install(FakeClient(objects={"ManagedAccounts/1": _acct(1)},
+                        status={"Requests": 403}))
     try:
         _run(ps.checkout_credential(1))
     except ps.PSApiError as exc:
         msg = str(exc)
         assert "Requestor" in msg and "Smart Rule" in msg and "View" in msg
+    else:
+        raise AssertionError("a 403 on POST Requests must raise")
+
+
+def test_a_denied_request_carries_password_safes_own_error_body():
+    """The reason the grant hint alone is not enough. 4031 (no Requestor role / not
+    requestable on that system / not API-enabled), 4034 (awaiting approval) and 4035
+    (concurrent-request cap) are all 403, and only the body tells them apart — so an
+    operator who HAS granted Requestor could re-grant it forever without learning that
+    the tenant was refusing for some other reason."""
+    _install(FakeClient(objects={"ManagedAccounts/1": _acct(1)},
+                        status={"Requests": 403}))
+    try:
+        _run(ps.checkout_credential(1))
+    except ps.PSApiError as exc:
+        msg = str(exc)
+        assert "denied" in msg, f"the response body must survive into the message: {msg}"
+        assert "4034" in msg and "4035" in msg, (
+            "the other two 403 causes have to be named, or the message is the same "
+            "unconditional guess in longer form")
     else:
         raise AssertionError("a 403 on POST Requests must raise")
 
@@ -476,14 +497,61 @@ def test_a_withheld_credential_says_the_request_may_await_approval():
 
 
 def test_the_tunnel_checkout_is_reuse_and_view_and_checks_back_in():
-    client = _install(FakeClient())
+    client = _install(FakeClient(objects={"ManagedAccounts/1": _acct(1)}))
     assert _run(ps.checkout_credential(1)) == TOKEN
     body = next(b for p, b in client.posts if p == "Requests")
     assert body["ConflictOption"] == "reuse", (
         "without reuse a second attempt 409s, and a 409 body was once mis-parsed as a "
         "request id")
-    assert body["AccessType"] == "View" and body["SystemID"] == 0
+    assert body["AccessType"] == "View"
     assert any(p == "Requests/41/Checkin" for _, p in client.calls)
+
+
+# ── the request names the system that owns the account ──────────────────────────
+#
+# THE bug in this area, and it was pinned by a test asserting SystemID == 0. Password
+# Safe authorises the (system, account) PAIR, and 0 owns no account, so every checkout
+# came back 4031/403 — indistinguishable from the missing Requestor role the message
+# named, which is how a tenant with the grant correctly in place stayed broken.
+
+def test_the_checkout_requests_the_system_that_owns_the_account():
+    client = _install(FakeClient(objects={"ManagedAccounts/1": _acct(1)}))
+    _run(ps.checkout_credential(1))
+    body = next(b for p, b in client.posts if p == "Requests")
+    assert body["SystemID"] == 77, (
+        "SystemID is required and must own AccountID — a hard-coded 0 is a permanent "
+        "4031 no tenant-side grant can fix")
+    assert body["AccountID"] == 1
+
+
+def test_a_caller_supplied_system_id_costs_no_lookup():
+    # The k8s registration stores the id at step 2, so the tunnel path already knows it.
+    client = _install(FakeClient(objects={"ManagedAccounts/1": _acct(1)}))
+    _run(ps.checkout_credential(1, system_id=502))
+    body = next(b for p, b in client.posts if p == "Requests")
+    assert body["SystemID"] == 502
+    assert not any(p == "ManagedAccounts/1" for _, p in client.calls)
+
+
+def test_an_unreadable_account_still_attempts_the_checkout():
+    """Best-effort by design: the lookup only fills in a field, so a tenant that refuses
+    the read must not lose a checkout that would otherwise have worked."""
+    client = _install(FakeClient(status={"ManagedAccounts/1": 500}))
+    _run(ps.checkout_credential(1))
+    body = next(b for p, b in client.posts if p == "Requests")
+    assert body["SystemID"] == 0
+
+
+def test_an_unresolved_system_is_named_in_the_refusal():
+    _install(FakeClient(status={"ManagedAccounts/1": 500, "Requests": 403}))
+    try:
+        _run(ps.checkout_credential(1))
+    except ps.PSApiError as exc:
+        assert "UNRESOLVED" in str(exc), (
+            "an unresolved system id is itself enough to cause the 403 — saying so "
+            "beats sending the operator back to the Smart Rule that was never the cause")
+    else:
+        raise AssertionError("a 403 on POST Requests must raise")
 
 
 # ── the functional account exposes its own name ─────────────────────────────────

@@ -528,28 +528,65 @@ async def _managed_account(client: httpx.AsyncClient, account_id: int) -> dict:
     return {}
 
 
+async def _system_id_for(client: httpx.AsyncClient, account_id: int) -> int:
+    """The managed SYSTEM that owns this account, or 0 when it cannot be read.
+
+    Best-effort on purpose: this only fills in a field, so a read that fails must not
+    turn a checkout that would have worked into an error. A 0 reaches the request body
+    and the refusal below says the id was unresolved."""
+    try:
+        return int((await _managed_account(client, int(account_id))).get("system_id") or 0)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("could not resolve the managed system for an account: %s", exc)
+        return 0
+
+
 async def _checkout(client: httpx.AsyncClient, account_id: int, *,
-                    duration_min: int, reason: str) -> tuple:
+                    duration_min: int, reason: str, system_id: int = 0) -> tuple:
     """``(request_id, credential)`` for one managed account.
+
+    ``SystemID`` is a REQUIRED field on ``POST Requests`` and Password Safe authorises
+    the *pair*: the account has to be requestable **on that system**. This used to send
+    a hard-coded 0, which no managed system owns, so every call 403'd with 4031 — the
+    same code an ungranted Requestor role returns, which is why the tenant-side grant
+    looked like the cause and fixing it changed nothing. ``btapi_service`` never had the
+    bug: the ps-cli path passes ``-s-id``.
+
+    Callers that already hold the id (the k8s registration stores it) pass it in;
+    otherwise it is read from the account, which costs one round trip on a path that
+    runs once per tunnel provision.
 
     ``ConflictOption=reuse`` returns an existing active request instead of a 409 —
     the same reason btapi_service passes ``-c-op reuse``, where a 409 body was once
     mis-parsed as a request id. It is also what keeps two passes racing the same
     cluster from failing each other.
 
-    The refusal message names the tenant-side grant verbatim because this is THE
-    live blocker on every Password Safe consumption path here, and a paraphrase
-    turns a two-minute fix into an afternoon."""
+    The refusal carries Password Safe's own body because the numeric code in it is the
+    only thing that separates the causes: 4031 is the tenant-side grant (or a
+    system/account pair that does not match), 4034 an unapproved request, 4035 the
+    concurrent-request cap. Naming one of them unconditionally, as this did, turns a
+    two-minute fix into an afternoon spent re-granting a role that was never missing."""
+    try:
+        sid = int(system_id or 0)
+    except (TypeError, ValueError):
+        sid = 0
+    if not sid:
+        sid = await _system_id_for(client, account_id)
     resp = await client.post("Requests", json={
-        "AccessType": "View", "SystemID": 0, "AccountID": int(account_id),
+        "AccessType": "View", "SystemID": sid, "AccountID": int(account_id),
         "DurationMinutes": int(duration_min), "Reason": reason,
         "ConflictOption": "reuse"})
     if resp.status_code not in (200, 201):
         raise PSApiError(
-            f"Password Safe refused the credential request ({resp.status_code}). The API "
-            f"identity needs the Requestor role and an access policy granting View on a "
-            f"Smart Rule containing this account. There is no Smart Rule API — this is an "
-            f"out-of-band Password Safe prerequisite (docs/integrations/password-safe.md).")
+            f"Password Safe refused the credential request for account {int(account_id)} on "
+            f"managed system {sid or 'UNRESOLVED (the account could not be read)'} "
+            f"({resp.status_code}): {resp.text[:400]} — the code in that body says which "
+            f"cause it is. 4031: the API identity needs the Requestor role and an access "
+            f"policy granting View on a Smart Rule containing this account (there is no "
+            f"Smart Rule API — an out-of-band prerequisite, see "
+            f"docs/integrations/password-safe.md), OR the account is not API-enabled, OR it "
+            f"is not requestable on that system. 4034: awaiting approval. 4035: the "
+            f"account's concurrent-request cap.")
     body = resp.json()
     request_id = body if isinstance(body, int) else (
         body.get("RequestID") or body.get("RequestId") or body.get("id"))
@@ -634,7 +671,7 @@ async def get_managed_account_states(account_ids: list) -> dict:
 
 
 async def checkout_credential(account_id: int, *, duration_min: int = 15,
-                              reason: str = "") -> str:
+                              reason: str = "", system_id: int = 0) -> str:
     """Check one managed account's credential out and RETURN it.
 
     The only function here that hands a plaintext credential back, and it exists for one
@@ -643,6 +680,10 @@ async def checkout_credential(account_id: int, *, duration_min: int = 15,
     Nothing else should call it. Keeping the pair in step afterwards needs no checkout at
     all — that is Password Safe's job now (``link_synced_account``).
 
+    ``system_id`` is the managed system that owns the account — required by the request
+    API (see ``_checkout``). Pass it when the caller already knows it; it is read from
+    the account when omitted.
+
     Callers must not log it, must not put it in a job result, and must not let it reach
     Terraform state unscrubbed (terraform_pra_service._scrub_tf_state redacts ``token``
     fail-closed, which is what makes the tunnel path safe)."""
@@ -650,7 +691,7 @@ async def checkout_credential(account_id: int, *, duration_min: int = 15,
         await _sign_in(client)
         try:
             request_id, credential = await _checkout(
-                client, int(account_id), duration_min=duration_min,
+                client, int(account_id), duration_min=duration_min, system_id=system_id,
                 reason=reason or "k8s ServiceAccount token read for PRA Vault")
             try:
                 if not _looks_like_sa_token(credential):

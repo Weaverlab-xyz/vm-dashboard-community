@@ -228,8 +228,9 @@ def _install_stubs(rec, *, cfg=None, link_fails=False, link_confirmed=True,
                 "subscriber_count": 1 if linked_now else 0}
     m_ps.synced_account_status = _sync_status
 
-    async def _checkout(account_id, *, duration_min=15, reason=""):
+    async def _checkout(account_id, *, duration_min=15, reason="", system_id=0):
         rec.hit("checkout")
+        rec.events.append(("checked_out", account_id, system_id))
         return checkout_value
     m_ps.checkout_credential = _checkout
 
@@ -652,6 +653,29 @@ def test_current_token_requires_a_registration():
     db = FakeDB({"K8sCluster": _row(ps_token_account_id="201")})
     tok = asyncio.run(svc.current_token(db, "c-1"))
     assert tok == "tok" and "checkout" in rec.events
+
+
+def test_current_token_checks_out_against_the_registered_managed_system():
+    """``POST Requests`` authorises the (system, account) PAIR, and step 2 stored the
+    system id — so it goes with the account id rather than being re-read, or worse left
+    at the 0 that made every checkout 4031/403 whatever the tenant granted."""
+    rec = Recorder()
+    _install_stubs(rec, cfg=_prior_state(rotated=True))
+    db = FakeDB({"K8sCluster": _row(ps_token_account_id="201")})
+    asyncio.run(svc.current_token(db, "c-1"))
+    assert ("checked_out", 201, 101) in rec.events, (
+        f"expected the stored system id 101 to travel with account 201; got "
+        f"{[e for e in rec.events if isinstance(e, tuple) and e[0] == 'checked_out']}")
+
+
+def test_current_token_falls_back_when_the_state_has_no_system_id():
+    # A registration whose state predates the column: the service-side lookup covers it,
+    # so 0 here means "read it from the account", not "send 0".
+    rec = Recorder()
+    _install_stubs(rec)
+    db = FakeDB({"K8sCluster": _row(ps_token_account_id="201")})
+    asyncio.run(svc.current_token(db, "c-1"))
+    assert ("checked_out", 201, 0) in rec.events
 
 
 # ── deregister ───────────────────────────────────────────────────────────────────

@@ -38,6 +38,7 @@ class FakeResponse:
     def __init__(self, status_code, body):
         self.status_code = status_code
         self._body = body
+        self.text = body if isinstance(body, str) else str(body)
 
     def json(self):
         return self._body
@@ -46,22 +47,34 @@ class FakeResponse:
 class FakeSession:
     """Stands in for requests.Session, recording every call."""
 
-    def __init__(self, *, checkout_status=200, credential="s3cret", checkin_status=200):
+    def __init__(self, *, checkout_status=200, credential="s3cret", checkin_status=200,
+                 account_status=200, system_id=77):
         self.headers = {}
         self.calls = []
+        self.bodies = []          # (path, json) for the asserts on the request shape
         self._checkout_status = checkout_status
         self._credential = credential
         self._checkin_status = checkin_status
+        self._account_status = account_status
+        self._system_id = system_id
 
     def request(self, method, url, **kw):
         self.calls.append((method, url.rsplit("/public/v3/", 1)[-1]))
         path = url.rsplit("/public/v3/", 1)[-1]
+        self.bodies.append((path, kw.get("json")))
         if path == "Auth/Connect/Token":
             return FakeResponse(200, {"access_token": "tok"})
         if path == "Auth/SignAppIn":
             return FakeResponse(200, {})
         if path == "Auth/Signout":
             return FakeResponse(200, {})
+        if path.startswith("ManagedAccounts/"):
+            return FakeResponse(self._account_status,
+                                {"ManagedAccountID": 99,
+                                 "ManagedSystemID": self._system_id})
+        if path == "ManagedAccounts":
+            return FakeResponse(200, [{"ManagedAccountID": 99,
+                                       "ManagedSystemID": self._system_id}])
         if path == "Requests":
             return FakeResponse(self._checkout_status, 4242)
         if path.startswith("Credentials/"):
@@ -106,16 +119,42 @@ def test_checkout_returns_the_request_id_and_the_credential():
     assert "Requests" in _paths(ps) and "Credentials/4242" in _paths(ps)
 
 
-def test_a_refused_request_names_the_requestor_role():
+def test_the_request_names_the_system_that_owns_the_account():
+    """SystemID is required and Password Safe authorises the (system, account) PAIR.
+    This sent a hard-coded 0, which owns no account, so every checkout came back
+    4031/403 — the same code a missing Requestor role returns, which is exactly what
+    the refusal below blamed it on. Kept in step with ps_api_service._checkout."""
+    ps = _client()
+    ps.sign_in()
+    ps.checkout(99)
+    body = next(b for p, b in ps._session.bodies if p == "Requests")
+    assert body["SystemID"] == 77 and body["AccountID"] == 99
+
+
+def test_an_unreadable_account_still_attempts_the_checkout():
+    # Best-effort: the lookup only fills in a field, so a tenant that refuses the read
+    # must not lose a checkout that would otherwise have worked.
+    ps = _client(account_status=500)
+    ps.sign_in()
+    ps.checkout(99)
+    body = next(b for p, b in ps._session.bodies if p == "Requests")
+    assert body["SystemID"] == 77, "the request-scoped collection is the fallback read"
+
+
+def test_a_refused_request_names_the_requestor_role_and_the_other_causes():
     """The 4031/403 that this whole integration keeps running into. The message has to
     say what to grant, because the operator reading it is looking at Live Output on a
-    dashboard that cannot fix it for them."""
+    dashboard that cannot fix it for them — and it has to carry Password Safe's own code,
+    because 4034 (awaiting approval) and 4035 (concurrent-request cap) are the same 403
+    and an operator who already granted Requestor learns nothing from being told to."""
     ps = _client(checkout_status=403)
     ps.sign_in()
     try:
         ps.checkout(99)
     except agent.PolicyRefusal as exc:
-        assert "Requestor" in str(exc) and "Smart Rule" in str(exc)
+        msg = str(exc)
+        assert "Requestor" in msg and "Smart Rule" in msg
+        assert "4034" in msg and "4035" in msg
     else:
         raise AssertionError("expected a refusal")
 
