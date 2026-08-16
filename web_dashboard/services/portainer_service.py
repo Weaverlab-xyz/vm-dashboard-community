@@ -470,6 +470,203 @@ async def deploy_stack(
     return resp.json()
 
 
+# ── Access management: users, teams, memberships ─────────────────────────────
+#
+# The building blocks for just-in-time Portainer access (Cloud Functions Phase 2,
+# integration #3): grant someone membership of a team that already has access to an
+# environment, then take it away again. Everything above this line manages
+# WORKLOADS; this section manages WHO CAN REACH THEM, which is a different concern
+# and a much more sensitive one.
+#
+# Access itself is NOT granted per-user here, deliberately. In Portainer an access
+# policy attaches to an environment or an environment group and names teams; an
+# operator sets that up once, and a grant is then just a team membership. That keeps
+# the reversible, per-request operation (add/remove one membership row) separate
+# from the standing configuration, so a revoke can never leave a half-dismantled
+# access policy behind.
+#
+# ⚠️  ROLE IDS ARE NUMERIC AND EASY TO INVERT. Portainer uses 1 = administrator and
+#     2 = standard for USERS, and 1 = team LEADER, 2 = team member for MEMBERSHIPS.
+#     Both are "1 is the powerful one", and both are silently accepted if swapped —
+#     a JIT grant that hands out administrator is not an error the API reports. The
+#     constants below exist so no call site writes a bare integer.
+
+USER_ROLE_ADMIN = 1
+USER_ROLE_STANDARD = 2
+TEAM_ROLE_LEADER = 1
+TEAM_ROLE_MEMBER = 2
+
+
+async def _api(method: str, path: str, *, json_body: dict = None,
+               ok: tuple = (200, 201, 204), context: str = ""):
+    """One request against the CONFIGURED Portainer, over whichever transport this
+    deployment uses.
+
+    The methods above predate this and each carry their own automation/local branch;
+    this collapses the pair for the access-management calls rather than doubling
+    eight more methods. Returns the decoded body, or ``None`` for an empty response.
+    """
+    context = context or f"{method} {path}"
+    if _EXECUTION_MODE == "automation":
+        url, headers = await _portainer_url_and_headers()
+        # The proxy takes the body as an already-serialized STRING (it is base64'd
+        # into a runbook parameter), not as an object — passing a dict here would
+        # be silently dropped and read at the far end as a Portainer validation
+        # error rather than a missing payload.
+        result = await _proxy_request(
+            method, f"{url}{path}", headers,
+            body=json.dumps(json_body) if json_body is not None else "")
+        status = result.get("status_code", 0)
+        if status not in ok:
+            raise PortainerError(f"{context}: unexpected status {status}")
+        return result.get("body")
+
+    async with await _client() as client:
+        resp = await client.request(method, path, json=json_body)
+        if resp.status_code not in ok and not resp.is_success:
+            _raise(resp, context)
+        if resp.status_code == 204 or not resp.content:
+            return None
+        try:
+            return resp.json()
+        except ValueError:
+            return None
+
+
+@_wrap_transport_errors
+async def list_users() -> list:
+    """Every Portainer user (GET /api/users)."""
+    data = await _api("GET", "/api/users", ok=(200,), context="list_users")
+    return data if isinstance(data, list) else []
+
+
+async def find_user(username: str) -> dict:
+    """The user with this username, or ``{}``.
+
+    Case-insensitive: Portainer stores the name as given but treats logins
+    case-insensitively, so a case-sensitive lookup here would happily create a
+    second "Alice" alongside "alice" and grant access to the wrong one.
+    """
+    target = (username or "").strip().lower()
+    if not target:
+        return {}
+    for user in await list_users():
+        if str(user.get("Username", "")).strip().lower() == target:
+            return user
+    return {}
+
+
+@_wrap_transport_errors
+async def create_user(username: str, password: str,
+                      role: int = USER_ROLE_STANDARD) -> dict:
+    """Create a user (POST /api/users). Defaults to STANDARD, never administrator."""
+    if role not in (USER_ROLE_ADMIN, USER_ROLE_STANDARD):
+        raise PortainerError(f"invalid Portainer user role {role!r} "
+                             f"(expected {USER_ROLE_STANDARD} standard "
+                             f"or {USER_ROLE_ADMIN} administrator)")
+    body = await _api("POST", "/api/users", context=f"create_user({username})",
+                      json_body={"Username": username, "Password": password,
+                                 "Role": role})
+    logger.info("Portainer user '%s' created (role %s)", username, role)
+    return body or {}
+
+
+@_wrap_transport_errors
+async def delete_user(user_id: int) -> None:
+    """Delete a user (DELETE /api/users/{id}). A missing user is success, not 404:
+    a revoke that errors on an already-removed account would leave the caller
+    retrying forever and the access looking un-revoked."""
+    await _api("DELETE", f"/api/users/{int(user_id)}",
+               ok=(200, 204, 404), context=f"delete_user({user_id})")
+    logger.info("Portainer user id %s deleted", user_id)
+
+
+@_wrap_transport_errors
+async def list_teams() -> list:
+    """Every team (GET /api/teams)."""
+    data = await _api("GET", "/api/teams", ok=(200,), context="list_teams")
+    return data if isinstance(data, list) else []
+
+
+async def find_team(name: str) -> dict:
+    """The team with this name, or ``{}`` (case-insensitive, as for users)."""
+    target = (name or "").strip().lower()
+    if not target:
+        return {}
+    for team in await list_teams():
+        if str(team.get("Name", "")).strip().lower() == target:
+            return team
+    return {}
+
+
+@_wrap_transport_errors
+async def create_team(name: str) -> dict:
+    """Create a team (POST /api/teams)."""
+    body = await _api("POST", "/api/teams", context=f"create_team({name})",
+                      json_body={"Name": name})
+    logger.info("Portainer team '%s' created", name)
+    return body or {}
+
+
+@_wrap_transport_errors
+async def list_team_memberships() -> list:
+    """Every membership (GET /api/team_memberships). Portainer has no filtered
+    variant, so callers filter client-side."""
+    data = await _api("GET", "/api/team_memberships", ok=(200,),
+                      context="list_team_memberships")
+    return data if isinstance(data, list) else []
+
+
+async def find_membership(user_id: int, team_id: int) -> dict:
+    """The membership joining this user to this team, or ``{}``."""
+    for row in await list_team_memberships():
+        if int(row.get("UserID", 0)) == int(user_id) \
+                and int(row.get("TeamID", 0)) == int(team_id):
+            return row
+    return {}
+
+
+@_wrap_transport_errors
+async def add_team_member(user_id: int, team_id: int,
+                          role: int = TEAM_ROLE_MEMBER) -> dict:
+    """Add a user to a team (POST /api/team_memberships).
+
+    Idempotent: an existing membership is returned rather than duplicated, because
+    Portainer will happily create a second row and then the FIRST revoke looks
+    successful while access remains.
+    """
+    if role not in (TEAM_ROLE_LEADER, TEAM_ROLE_MEMBER):
+        raise PortainerError(f"invalid Portainer team role {role!r} "
+                             f"(expected {TEAM_ROLE_MEMBER} member "
+                             f"or {TEAM_ROLE_LEADER} leader)")
+    existing = await find_membership(user_id, team_id)
+    if existing:
+        return existing
+    body = await _api("POST", "/api/team_memberships",
+                      context=f"add_team_member({user_id}→{team_id})",
+                      json_body={"UserID": int(user_id), "TeamID": int(team_id),
+                                 "Role": role})
+    logger.info("Portainer user %s added to team %s (role %s)", user_id, team_id, role)
+    return body or {}
+
+
+@_wrap_transport_errors
+async def remove_team_member(user_id: int, team_id: int) -> bool:
+    """Remove a user from a team. ``True`` if a membership was removed, ``False`` if
+    there was nothing to remove — both are success, for the same reason
+    :func:`delete_user` treats 404 as success."""
+    membership = await find_membership(user_id, team_id)
+    if not membership:
+        logger.info("Portainer user %s was not a member of team %s", user_id, team_id)
+        return False
+    membership_id = int(membership.get("Id", 0))
+    await _api("DELETE", f"/api/team_memberships/{membership_id}",
+               ok=(200, 204, 404),
+               context=f"remove_team_member({user_id}→{team_id})")
+    logger.info("Portainer user %s removed from team %s", user_id, team_id)
+    return True
+
+
 # ── First-run bootstrap for a dashboard-DEPLOYED node ────────────────────────
 # These helpers target a specific base_url and do NOT go through _client() /
 # _resolve_connection(): a freshly launched node has no PAT yet — minting one is

@@ -18,11 +18,14 @@ Two practical implications:
    should be opened as PRs against this repo. They flow downstream
    automatically on the next sync.
 2. **Enterprise-only code doesn't belong here.** If a change requires a
-   BeyondTrust Password Safe or PRA API call, a Portainer client, an
-   Ansible playbook invocation against shared infra, or an Entitle
-   approval check, it lives in the private repo. *(Exception: BeyondTrust
-   EPM for Linux — `api/epml.py` and `services/epml_service.py` — is
-   community-edition code gated by `BEYONDTRUST_ENABLED`.)* Keep
+   BeyondTrust Password Safe or PRA API call, an Ansible playbook
+   invocation against shared infra, or an Entitle approval check, it
+   lives in the private repo. *(Exceptions: BeyondTrust EPM for Linux —
+   `api/epml.py` and `services/epml_service.py` — and the Portainer CE
+   client — `services/portainer_service.py`, `portainer_node_service.py`
+   and `portainer_runner.py`, which became a dashboard-managed offering —
+   are community-edition code gated by `BEYONDTRUST_ENABLED` and
+   `PORTAINER_ENABLED` respectively.)* Keep
    integrations behind the existing feature flags
    (`BEYONDTRUST_ENABLED`, `PORTAINER_ENABLED`, `ANSIBLE_ENABLED`,
    `ENTITLE_ENABLED`) — community code paths must function with all of
