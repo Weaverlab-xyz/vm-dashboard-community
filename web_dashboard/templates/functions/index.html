@@ -1,0 +1,320 @@
+{% extends "base.html" %}
+{% block title %}Functions – Infrastructure Management{% endblock %}
+
+{# Cloud Functions page (PREVIEW, gated by cloud_functions_enabled).
+   Deploys a dashboard-authored handler from web_dashboard/functions/fnworkloads/
+   as an AWS Lambda / Azure Linux Function App / GCP Cloud Run function, optionally
+   attached to a VPC/VNet. Backed by /api/functions. #}
+
+{% block content %}
+<div class="max-w-6xl mx-auto py-8 px-4" x-data="functionsPage()" x-init="init()">
+
+  <div class="flex items-center justify-between mb-1">
+    <div class="flex items-center gap-2">
+      <h1 class="text-2xl font-bold text-gray-800">Cloud Functions</h1>
+      <span class="text-xs font-medium px-2 py-0.5 rounded-full bg-amber-100 text-amber-800">Preview</span>
+    </div>
+    <button @click="openDeploy()"
+            class="bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-3 py-1.5 rounded-lg">
+      Deploy function
+    </button>
+  </div>
+  <p class="text-sm text-gray-500 mb-6">
+    One handler, three clouds. The same dashboard-authored workload runs as an
+    <strong>AWS Lambda</strong>, an <strong>Azure Function App</strong>, or a
+    <strong>GCP Cloud Run function</strong> — optionally attached to a VPC/VNet so it can
+    reach private resources. Each gets a stable HTTPS endpoint protected by a shared
+    bearer secret. <a href="/docs/integrations/cloud-functions" target="_blank"
+    class="text-blue-600 hover:underline">Integration guide</a>.
+  </p>
+
+  <!-- Toast -->
+  <div x-show="toast" x-cloak x-transition
+       :class="toastType === 'error' ? 'bg-red-50 border-red-200 text-red-700' : 'bg-green-50 border-green-200 text-green-700'"
+       class="mb-6 border rounded-lg px-4 py-3 text-sm" x-text="toast"></div>
+
+  <!-- Function list -->
+  <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+    <div x-show="loading" class="px-4 py-8 text-center text-sm text-gray-400">Loading…</div>
+
+    <div x-show="!loading && functions.length === 0" x-cloak
+         class="px-4 py-10 text-center">
+      <p class="text-sm text-gray-500">No functions deployed yet.</p>
+      <p class="text-xs text-gray-400 mt-1">
+        Start with <code class="bg-gray-100 px-1 rounded">echo_diag</code> — it reports what
+        the function can actually reach from where it landed.
+      </p>
+    </div>
+
+    <table x-show="!loading && functions.length" x-cloak class="min-w-full text-sm">
+      <thead class="bg-gray-50 text-xs uppercase text-gray-500">
+        <tr>
+          <th class="text-left px-4 py-2">Name</th>
+          <th class="text-left px-4 py-2">Workload</th>
+          <th class="text-left px-4 py-2">Cloud</th>
+          <th class="text-left px-4 py-2">Network</th>
+          <th class="text-left px-4 py-2">Status</th>
+          <th class="text-right px-4 py-2">Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        <template x-for="fn in functions" :key="fn.id">
+          <tr class="border-t border-gray-100">
+            <td class="px-4 py-2">
+              <div class="font-medium text-gray-800" x-text="fn.name"></div>
+              <a x-show="fn.invoke_url" :href="fn.invoke_url" target="_blank"
+                 class="text-xs text-gray-400 hover:text-blue-600 break-all"
+                 x-text="fn.invoke_url"></a>
+            </td>
+            <td class="px-4 py-2 text-gray-600" x-text="fn.workload"></td>
+            <td class="px-4 py-2 text-gray-600">
+              <span x-text="fn.cloud"></span>
+              <span class="text-gray-400 text-xs" x-text="fn.region"></span>
+            </td>
+            <td class="px-4 py-2">
+              <span class="text-xs px-2 py-0.5 rounded-full"
+                    :class="fn.network_mode === 'public' ? 'bg-gray-100 text-gray-600' : 'bg-indigo-100 text-indigo-700'"
+                    x-text="fn.network_mode"></span>
+            </td>
+            <td class="px-4 py-2">
+              <span class="text-xs px-2 py-0.5 rounded-full"
+                    :class="{
+                      'bg-green-100 text-green-700': fn.status === 'available',
+                      'bg-blue-100 text-blue-700': fn.status === 'deploying',
+                      'bg-amber-100 text-amber-700': fn.status === 'deleting',
+                      'bg-red-100 text-red-700': fn.status === 'failed'
+                    }" x-text="fn.status"></span>
+            </td>
+            <td class="px-4 py-2 text-right whitespace-nowrap">
+              <button @click="openInvoke(fn)" :disabled="fn.status !== 'available'"
+                      class="text-blue-600 hover:underline disabled:text-gray-300 disabled:no-underline text-xs mr-3">
+                Test invoke
+              </button>
+              <button x-show="$store.auth.isAdmin" @click="showCreds(fn)"
+                      :disabled="fn.status !== 'available'"
+                      class="text-gray-600 hover:underline disabled:text-gray-300 disabled:no-underline text-xs mr-3">
+                Endpoint
+              </button>
+              <button @click="destroy(fn)" :disabled="fn.status === 'deleting'"
+                      class="text-red-600 hover:underline disabled:text-gray-300 disabled:no-underline text-xs">
+                Destroy
+              </button>
+            </td>
+          </tr>
+        </template>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Deploy modal -->
+  <div x-show="deployOpen" x-cloak class="fixed inset-0 bg-black/40 flex items-center justify-center z-40 p-4">
+    <div class="bg-white rounded-xl shadow-lg w-full max-w-lg p-6 max-h-[90vh] overflow-y-auto">
+      <h2 class="text-lg font-semibold mb-4">Deploy a function</h2>
+
+      <label class="block text-xs font-medium text-gray-600 mb-1">Workload</label>
+      <select x-model="form.workload" class="w-full border border-gray-300 rounded px-2 py-1.5 text-sm mb-1">
+        <template x-for="w in workloads" :key="w.name">
+          <option :value="w.name" x-text="w.name"></option>
+        </template>
+      </select>
+      <p class="text-xs text-gray-500 mb-3" x-text="workloadDescription()"></p>
+
+      <label class="block text-xs font-medium text-gray-600 mb-1">Cloud</label>
+      <select x-model="form.cloud" class="w-full border border-gray-300 rounded px-2 py-1.5 text-sm mb-1">
+        <template x-for="c in availableClouds()" :key="c.cloud">
+          <option :value="c.cloud" x-text="c.cloud"></option>
+        </template>
+      </select>
+      <p x-show="cloudBlocked()" x-cloak class="text-xs text-red-600 mb-3" x-text="cloudBlocked()"></p>
+
+      <label class="block text-xs font-medium text-gray-600 mb-1 mt-3">Region</label>
+      <input x-model="form.region" class="w-full border border-gray-300 rounded px-2 py-1.5 text-sm mb-3"
+             placeholder="e.g. us-east-1">
+
+      <label class="block text-xs font-medium text-gray-600 mb-1">Name</label>
+      <input x-model="form.name" class="w-full border border-gray-300 rounded px-2 py-1.5 text-sm mb-1"
+             placeholder="my-grant-broker">
+      <p class="text-xs text-gray-400 mb-3">
+        Lowercase letters, digits and hyphens — normalised to what all three clouds accept.
+      </p>
+
+      <label class="block text-xs font-medium text-gray-600 mb-1">Network</label>
+      <select x-model="form.network_mode" class="w-full border border-gray-300 rounded px-2 py-1.5 text-sm mb-1">
+        <option value="public">Public — internet-reachable only</option>
+        <option value="vpc">VPC / VNet attached — can reach private resources</option>
+      </select>
+      <p class="text-xs text-gray-400 mb-4">
+        VPC mode uses the subnet/connector configured in Settings → Cloud Functions.
+        On AWS it also removes the function's internet access unless the subnets route
+        through NAT.
+      </p>
+
+      <div class="flex justify-end gap-2">
+        <button @click="deployOpen = false" class="px-3 py-1.5 text-sm text-gray-600">Cancel</button>
+        <button @click="submitDeploy()" :disabled="deploying || !!cloudBlocked()"
+                class="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300 text-white text-sm px-3 py-1.5 rounded-lg"
+                x-text="deploying ? 'Deploying…' : 'Deploy'"></button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Invoke modal -->
+  <div x-show="invokeOpen" x-cloak class="fixed inset-0 bg-black/40 flex items-center justify-center z-40 p-4">
+    <div class="bg-white rounded-xl shadow-lg w-full max-w-2xl p-6 max-h-[90vh] overflow-y-auto">
+      <h2 class="text-lg font-semibold mb-1">Test invoke</h2>
+      <p class="text-xs text-gray-500 mb-4">
+        Sends this JSON with the shared secret attached — the fastest way to tell a broken
+        function from a wrong curl.
+      </p>
+      <textarea x-model="invokeBody" rows="6"
+                class="w-full border border-gray-300 rounded px-2 py-1.5 text-xs font-mono mb-3"></textarea>
+      <div x-show="invokeResult" x-cloak class="mb-3">
+        <div class="text-xs font-medium text-gray-600 mb-1">
+          Response <span x-text="'(HTTP ' + invokeResult.status + ')'"></span>
+        </div>
+        <pre class="bg-gray-900 text-gray-100 text-xs rounded p-3 overflow-x-auto max-h-72"
+             x-text="JSON.stringify(invokeResult.body, null, 2)"></pre>
+      </div>
+      <div class="flex justify-end gap-2">
+        <button @click="invokeOpen = false" class="px-3 py-1.5 text-sm text-gray-600">Close</button>
+        <button @click="runInvoke()" :disabled="invoking"
+                class="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300 text-white text-sm px-3 py-1.5 rounded-lg"
+                x-text="invoking ? 'Invoking…' : 'Invoke'"></button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Endpoint / credentials modal (admin) -->
+  <div x-show="credsOpen" x-cloak class="fixed inset-0 bg-black/40 flex items-center justify-center z-40 p-4">
+    <div class="bg-white rounded-xl shadow-lg w-full max-w-xl p-6">
+      <h2 class="text-lg font-semibold mb-1">Endpoint</h2>
+      <p class="text-xs text-gray-500 mb-4">
+        What to paste into an Entitle REST integration. Treat the secret like a password.
+      </p>
+      <template x-if="creds">
+        <div class="space-y-3 text-sm">
+          <div>
+            <div class="text-xs font-medium text-gray-600">URL</div>
+            <code class="block bg-gray-50 border rounded px-2 py-1 text-xs break-all" x-text="creds.invoke_url"></code>
+          </div>
+          <div>
+            <div class="text-xs font-medium text-gray-600">Header</div>
+            <code class="block bg-gray-50 border rounded px-2 py-1 text-xs break-all"
+                  x-text="creds.header + ': ' + creds.scheme + ' ' + creds.shared_secret"></code>
+          </div>
+          <div x-show="creds.invoke_key">
+            <div class="text-xs font-medium text-gray-600">Azure host key</div>
+            <code class="block bg-gray-50 border rounded px-2 py-1 text-xs break-all"
+                  x-text="'x-functions-key: ' + creds.invoke_key"></code>
+          </div>
+        </div>
+      </template>
+      <div class="flex justify-end mt-5">
+        <button @click="credsOpen = false" class="px-3 py-1.5 text-sm text-gray-600">Close</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+function functionsPage() {
+  return {
+    functions: [], workloads: [], clouds: [],
+    loading: true, deploying: false, invoking: false,
+    deployOpen: false, invokeOpen: false, credsOpen: false,
+    toast: '', toastType: 'success',
+    creds: null, invokeTarget: null, invokeResult: null,
+    invokeBody: '{\n  "probe": [{"host": "example.com", "port": 443}]\n}',
+    form: { workload: 'echo_diag', cloud: 'aws', region: '', name: '', network_mode: 'public' },
+
+    async init() {
+      await Promise.all([this.load(), this.loadMeta()]);
+      // Deploys are background jobs; poll while any function is mid-flight.
+      setInterval(() => { if (this.functions.some(f => ['deploying','deleting'].includes(f.status))) this.load(); }, 5000);
+    },
+
+    async load() {
+      try {
+        this.functions = (await API.get('/api/functions')).functions || [];
+      } catch (e) { this.notify(e.message, 'error'); }
+      finally { this.loading = false; }
+    },
+
+    async loadMeta() {
+      try {
+        const [w, o] = await Promise.all([
+          API.get('/api/functions/workloads'),
+          API.get('/api/functions/options'),
+        ]);
+        this.workloads = w.workloads || [];
+        this.clouds = o.clouds || [];
+        const ready = this.clouds.find(c => c.package_store_ready);
+        if (ready) { this.form.cloud = ready.cloud; this.form.region = ready.default_region || ''; }
+      } catch (e) { this.notify(e.message, 'error'); }
+    },
+
+    workloadDescription() {
+      return (this.workloads.find(w => w.name === this.form.workload) || {}).description || '';
+    },
+
+    availableClouds() {
+      const w = this.workloads.find(w => w.name === this.form.workload);
+      return this.clouds.filter(c => !w || (w.clouds || []).includes(c.cloud));
+    },
+
+    cloudBlocked() {
+      const c = this.clouds.find(c => c.cloud === this.form.cloud);
+      return c && !c.package_store_ready ? c.reason : '';
+    },
+
+    openDeploy() { this.deployOpen = true; },
+
+    async submitDeploy() {
+      this.deploying = true;
+      try {
+        await API.post('/api/functions', this.form);
+        this.deployOpen = false;
+        this.notify('Deploying — follow progress in Jobs.');
+        this.load();
+      } catch (e) { this.notify(e.message, 'error'); }
+      finally { this.deploying = false; }
+    },
+
+    openInvoke(fn) { this.invokeTarget = fn; this.invokeResult = null; this.invokeOpen = true; },
+
+    async runInvoke() {
+      this.invoking = true;
+      try {
+        let payload = {};
+        try { payload = JSON.parse(this.invokeBody || '{}'); }
+        catch { throw new Error('the request body is not valid JSON'); }
+        this.invokeResult = await API.post(
+          `/api/functions/${this.invokeTarget.id}/invoke`, { payload });
+      } catch (e) { this.notify(e.message, 'error'); }
+      finally { this.invoking = false; }
+    },
+
+    async showCreds(fn) {
+      try {
+        this.creds = await API.get(`/api/functions/${fn.id}/invoke-info`);
+        this.credsOpen = true;
+      } catch (e) { this.notify(e.message, 'error'); }
+    },
+
+    async destroy(fn) {
+      if (!confirm(`Destroy ${fn.name}? This removes the cloud resource.`)) return;
+      try {
+        await API.del(`/api/functions/${fn.id}`);
+        this.notify('Destroying — follow progress in Jobs.');
+        this.load();
+      } catch (e) { this.notify(e.message, 'error'); }
+    },
+
+    notify(msg, type = 'success') {
+      this.toast = msg; this.toastType = type;
+      setTimeout(() => { this.toast = ''; }, 6000);
+    },
+  };
+}
+</script>
+{% endblock %}

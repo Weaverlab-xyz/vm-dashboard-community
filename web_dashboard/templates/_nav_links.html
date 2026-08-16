@@ -67,6 +67,11 @@
    class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
    {% if request.url.path.startswith('/databases') %}{{ nav_active }}{% endif %}">Databases</a>
 {% endif %}
+{% if cloud_functions_enabled %}
+<a href="/functions"
+   class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}
+   {% if request.url.path.startswith('/functions') %}{{ nav_active }}{% endif %}">Functions</a>
+{% endif %}
 {% if k8s_management_enabled %}
 <a href="/k8s"
    class="px-2 py-2 rounded-md text-sm font-medium {{ nav_hover }}

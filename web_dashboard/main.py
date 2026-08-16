@@ -455,6 +455,7 @@ def _feature_flags() -> dict:
         "cloud_database_enabled": config_service.get_bool("cloud_database_enabled", settings.cloud_database_enabled),
         "entitle_registration_enabled": config_service.get_bool("entitle_registration_enabled", settings.entitle_registration_enabled),
         "k8s_management_enabled": config_service.get_bool("k8s_management_enabled", settings.k8s_management_enabled),
+        "cloud_functions_enabled": config_service.get_bool("cloud_functions_enabled", settings.cloud_functions_enabled),
         "cost_explorer_enabled": config_service.get_bool("cost_explorer_enabled", settings.cost_explorer_enabled),
         "admission_control_enabled": config_service.get_bool("admission_control_enabled", settings.admission_control_enabled),
         # Entitle user-JIT Phase 4 UI affordances — surfaces the
@@ -476,6 +477,7 @@ def _feature_flags() -> dict:
 from fastapi import Depends  # noqa: E402
 from .api import auth, jobs, websocket, aws, azure, gcp, oci, packer, mfa, tokens, users, groups, setup, secrets, storage, images, regions as regions_api  # noqa: E402
 from .api import cloud_databases  # noqa: E402
+from .api import cloud_functions as cloud_functions_api  # noqa: E402
 from .api import audit as audit_api  # noqa: E402
 from .api import docs_pages  # noqa: E402
 from .api import workgroups as workgroups_api  # noqa: E402
@@ -574,6 +576,11 @@ async def swagger_ui(request: Request):
 app.include_router(websocket.router)
 app.include_router(aws.router)
 app.include_router(cloud_databases.router)
+# Preview feature: the flag is owned by the Settings → Preview features card, and
+# the router 404s entirely while it is off (the handlers also self-gate with 403,
+# so a stale route can't leak either).
+app.include_router(cloud_functions_api.router,
+                   dependencies=[_feature_gate("cloud_functions_enabled")])
 app.include_router(azure.router)
 app.include_router(gcp.router)
 app.include_router(oci.router)
@@ -850,6 +857,13 @@ async def databases_page(request: Request):
     return templates.TemplateResponse("databases/index.html", {"request": request, **_feature_flags()})
 
 
+@app.get("/functions", response_class=HTMLResponse, include_in_schema=False)
+async def functions_page(request: Request):
+    """Cloud Functions page (preview). Nav-gated on cloud_functions_enabled; the
+    /api/functions router is feature-gated."""
+    return templates.TemplateResponse("functions/index.html", {"request": request, **_feature_flags()})
+
+
 @app.get("/k8s", response_class=HTMLResponse, include_in_schema=False)
 async def k8s_page(request: Request):
     """Kubernetes management page — Phase 3a. Nav-gated on k8s_management_enabled;
@@ -951,6 +965,7 @@ async def features():
         "admission":    flags["admission_control_enabled"],
         "cloud_database": flags["cloud_database_enabled"],
         "k8s_management": flags["k8s_management_enabled"],
+        "cloud_functions": flags["cloud_functions_enabled"],
     }
 
 

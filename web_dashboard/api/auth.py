@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..database import User, Fido2Credential, PersonalAccessToken, OAuthGroupMapping, get_db, verify_password
+from ..services import config_service
 from ..models.user import (
     TokenResponse,
     TokenData,
@@ -151,7 +152,7 @@ def require_admin(current_user: User = Depends(get_current_user)) -> User:
 
 # ── Permission constants ───────────────────────────────────────────────────────
 
-PERMISSION_SCOPES = ["vms", "aws", "azure", "gcp", "oci", "images", "containers", "config_mgmt", "jobs", "workgroups", "secrets", "cloud_database", "k8s"]
+PERMISSION_SCOPES = ["vms", "aws", "azure", "gcp", "oci", "images", "containers", "config_mgmt", "jobs", "workgroups", "secrets", "cloud_database", "k8s", "cloud_function"]
 # "use" grants using a Secrets-Management secret inside an Ansible run without ever
 # seeing its value (scope "secrets"); read/write/delete are unused for that scope.
 PERMISSION_LEVELS = ["read", "write", "delete", "use"]
@@ -192,6 +193,11 @@ def require_permission(scope: str, level: str):
             try:
                 deep_link = _build_request_access_link(scope, level)
             except Exception:
+                # The link is a nicety; never let it turn a 403 into a 500. Logged
+                # because a silent swallow here is exactly what hid a NameError
+                # (config_service was only imported inside _oauth_cfg) long enough
+                # for the link to never render at all.
+                logger.debug("request-access deep link unavailable", exc_info=True)
                 deep_link = None
             if deep_link:
                 detail = {
@@ -543,7 +549,6 @@ def _complete_oauth_login(db, *, subject, email, display_name, groups, provider)
 
 def _oauth_cfg() -> tuple:
     """Return (client_id, client_secret, tenant_id) from DB config, falling back to env."""
-    from ..services import config_service
     return (
         config_service.get("azure_oauth_client_id") or settings.azure_oauth_client_id,
         config_service.get("azure_oauth_client_secret") or settings.azure_oauth_client_secret,

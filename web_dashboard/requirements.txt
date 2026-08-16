@@ -75,8 +75,18 @@ google-cloud-build>=3.20.0
 google-cloud-bigquery>=3.0.0
 google-auth>=2.20.0
 
-# Azure Blob Storage (Packer template archive)
+# Azure Blob Storage (Packer template archive; also the Cloud Functions package
+# blob that WEBSITE_RUN_FROM_PACKAGE points at)
 azure-storage-blob>=12.19.0,<13
+
+# Azure Functions Python worker library — Cloud Functions preview. The dashboard
+# never imports this at runtime; it is VENDORED INTO the deployed zip by
+# services/cloud_function_package.py, because run-from-package mounts the archive
+# read-only and never runs pip install. It is a pure-Python py3-none-any wheel, so
+# vendoring it is safe on this image's multi-arch build (a wheel with a compiled
+# extension would not be — see _BINARY_SUFFIXES in the packager). Capped below 2.x
+# because the v2 programming model's decorators live in this major version.
+azure-functions>=1.21,<2
 
 # Oracle Cloud Infrastructure SDK (fourth cloud provider). Compute VM CRUD +
 # Vault secret + Usage API access in services/oci_service.py; the DB/OKE

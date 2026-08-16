@@ -110,6 +110,7 @@ COPY terraform/db_gcp_mysql/ ./terraform/db_gcp_mysql/
 COPY terraform/db_sqlserver/ ./terraform/db_sqlserver/
 COPY terraform/db_gcp_sqlserver/ ./terraform/db_gcp_sqlserver/
 COPY terraform/db_azure_sqlserver/ ./terraform/db_azure_sqlserver/
+COPY terraform/db_oci_autonomous/ ./terraform/db_oci_autonomous/
 # Managed-Kubernetes provisioning modules (driven by k8s_service, §1.1a): EKS
 # (hashicorp/aws), AKS (hashicorp/azurerm ~> 3.0), GKE (hashicorp/google ~> 5.0) —
 # all three providers are already in the pre-cache init below. Without the AKS/GKE
@@ -118,6 +119,11 @@ COPY terraform/db_azure_sqlserver/ ./terraform/db_azure_sqlserver/
 COPY terraform/k8s_cluster/aws_eks/ ./terraform/k8s_cluster/aws_eks/
 COPY terraform/k8s_cluster/azure_aks/ ./terraform/k8s_cluster/azure_aks/
 COPY terraform/k8s_cluster/gcp_gke/ ./terraform/k8s_cluster/gcp_gke/
+COPY terraform/k8s_cluster/oci_oke/ ./terraform/k8s_cluster/oci_oke/
+# Cloud Functions modules (driven by cloud_function_service) — Lambda / Linux
+# Function App / Cloud Run function. Same rule as above: a missing COPY here is a
+# _materialize failure at deploy time, in the published image only.
+COPY terraform/cloud_function/ ./terraform/cloud_function/
 # Action-level admission-control policies (Rego), evaluated by admission_service
 # via the bundled OPA binary (installed below). Ship the tree so operators can
 # add/edit rules; admission_service reads terraform/policy/admission/ pre-action.

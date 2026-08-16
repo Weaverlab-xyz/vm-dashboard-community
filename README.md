@@ -33,6 +33,7 @@ works:
 | [Secrets Management](docs/secrets-management.md) | Tier 1 (encrypted DB) → Tier 2 (external vault) → Tier 3 (vault-backed runtime checkout); migration UI; why the JWT root key can't move. | You're deciding where to store cloud credentials and how to evolve that over time. |
 | [Storage Management](docs/storage-management.md) | Four backends (S3, Azure Blob, GCS, Local/UNC); migration; why backends are a deployment-level concern, not a per-feature one. | You're about to enable the Ansible feature flag — storage is a prerequisite. |
 | [Cloud Compose](docs/integrations/cloud-compose.md) | Deploy a stored Docker Compose file to ECS / ACI / GCE; the supported subset; ready-to-adapt app starters in [`examples/compose/`](examples/compose/). | You want to run a containerized app (Guacamole, Trivy, OPA, …) on a cloud runtime without Portainer. |
+| [Cloud Functions](docs/integrations/cloud-functions.md) *(preview)* | One Python handler deployed unchanged as an AWS Lambda / Azure Function App / GCP Cloud Run function, optionally VPC-attached; layered auth; workload templates in [`examples/functions/`](examples/functions/). | You need a stable HTTPS endpoint that external systems can call to act *inside* your network — the case a one-shot container can't serve. |
 
 Together they're the philosophy of the tool: **declarative,
 version-controlled, idempotent, ephemeral where it should be and

@@ -40,6 +40,7 @@ HANDLED_TYPES = (
     "k8s_tunnel", "k8s_api_tunnel", "k8s_group_binding", "k8s_entra_federation",
     "rancher_node_deploy", "rancher_node_teardown", "rancher_entitle_register",
     "clouddb_provision", "clouddb_decommission", "clouddb_entitle_register",
+    "cloudfn_deploy", "cloudfn_decommission",
     "vdesktop_pool_provision", "vdesktop_pool_teardown",
     "packer_aws_build", "packer_azure_build", "packer_gcp_build",
     "aws_export_image", "gcp_export_image", "azure_export_image",
@@ -163,6 +164,15 @@ async def _dispatch(job_id: str, job_type: str, meta: dict) -> None:
             await cloud_database_service.run_entitle_register(
                 db, db_id=meta["db_id"], job_id=job_id,
                 action=meta.get("action", "register"))
+        elif job_type == "cloudfn_deploy":
+            from .services import cloud_function_service
+            await cloud_function_service.run_deploy_apply(
+                db, fn_id=meta["fn_id"], job_id=job_id,
+                tf_variables=meta["tf_variables"])
+        elif job_type == "cloudfn_decommission":
+            from .services import cloud_function_service
+            await cloud_function_service.run_decommission(
+                db, fn_id=meta["fn_id"], job_id=job_id)
         elif job_type == "vdesktop_pool_provision":
             # provision_seats / teardown_seats own their own SessionLocal + the
             # job lifecycle (set_running/set_completed) when given a job_id, so they

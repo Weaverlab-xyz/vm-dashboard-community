@@ -1,0 +1,269 @@
+# Cloud Functions (preview) — design
+
+Status: **preview** (`cloud_functions_enabled`). Phase 1 = the modular function
+lifecycle + a catalog of standalone workloads. Phase 2 = using those functions as
+Entitle REST integrations (see §7).
+
+## 1. Why
+
+The dashboard already reaches private, non-internet-facing resources on all three
+clouds: it runs **one-shot containers inside the target cloud** (ECS task on AWS,
+ACI on Azure, Cloud Run job on GCP — selected per-cloud by
+`ansible_runner_{aws,azure,gcp}`). Database provisioning *and* configuration
+management both work everywhere. **Reach is not the problem.**
+
+Two things are missing:
+
+1. **No always-on endpoint.** Every existing execution path is dashboard-initiated
+   and outbound. Entitle's REST integration runs the other way — Entitle POSTs
+   *Give Access* / *Revoke Access* **inbound** and expects a synchronous response
+   (see `cloud-identity-jit.md` Appendix D). A one-shot container has no stable URL
+   and tens of seconds of cold start, so it cannot serve that call.
+
+2. **Entitle's native connectors don't cover the cases we care about.** MySQL gets
+   persistent roles only (`entitle_registration_service._generate_db_hcl`,
+   `allow_creating_accounts = engine != "mysql"`); the MSSQL connector does
+   ephemeral accounts but not against the managed SQL flavors the dashboard deploys
+   (`azurerm_mssql_database`, `google_sql_database_instance`, `aws_db_instance`);
+   Azure machine identity has no native model at all; Portainer and the dashboard's
+   own local/OIDC users have no connector.
+
+A cloud function closes both with one primitive: a stable HTTPS endpoint,
+millisecond response, optionally attached to the VPC/VNet beside the private
+resource, running identical dashboard-authored logic on all three clouds.
+
+Phase 1 must be useful with Entitle switched off — it is a serverless ops toolkit
+on its own (§6).
+
+## 2. The portable handler contract
+
+Source lives in `web_dashboard/functions/`. It ships in the image for free —
+`Dockerfile` already does `COPY web_dashboard/`. Deployable handler source
+deliberately does **not** live in `examples/`, which is not copied into the image.
+
+```
+web_dashboard/functions/
+  runtime/     contract.py  adapters.py  auth.py  logs.py  dispatch.py
+  entry/       aws_entry.py  gcp_entry.py  azure_entry.py  host.json
+  workloads/   echo_diag.py  entitle_webhook_echo.py  ...
+```
+
+### 2.1 The zero-dependency rule
+
+**`runtime/` imports stdlib only.** This is the constraint the whole design rests
+on. It means:
+
+- AWS needs no Lambda layer and no vendored packages (the Lambda Python image
+  already ships `boto3`).
+- Azure's vendor set — required because run-from-package never runs `pip install` —
+  is exactly one pure-Python wheel, `azure-functions`.
+- GCP's `requirements.txt` is trivial.
+
+Any workload that breaks the rule (see `db_grant`, §7) must use **pure-Python**
+libraries. Vendoring a wheel with a compiled `.so` is unsafe: the dashboard image
+is multi-arch, so an arm64 build would ship an arm64 binary into an x86_64 Lambda.
+`tests/test_function_package.py` asserts the vendor tree contains no `.so`/`.pyd`.
+
+### 2.2 Normalized types
+
+`runtime/contract.py` defines `Request`, `Response`, `Context`. A workload author
+writes exactly one function and nothing else — no decorators, no `azure.functions`,
+no `event`/`context`, no Flask:
+
+```python
+NAME = "echo_diag"
+DESCRIPTION = "..."
+
+def handle(req: Request, ctx: Context) -> Response:
+    return Response(200, {"ok": True})
+```
+
+`Request.headers` keys are **always lower-cased by the adapter**, and
+`Request.body` is already base64-decoded. The workload module is passed *into* `dispatch.handle_request` by the entry shim
+rather than imported by it, so dispatch stays pure and testable with fakes; the
+packager copies exactly one workload module into the zip root as `workload.py`.
+
+**The catalog is the filesystem.** `fnworkloads/*.py` is the source of truth —
+dropping in a module makes it deployable, which is the point of the feature being
+modular. `cloud_function_service._CLOUD_RESTRICTED` records only the *exceptions*:
+workloads needing a cloud SDK that just one runtime ships (today only
+`local_account_broker`, which needs boto3). Everything stdlib-only is universal by
+default and needs no table edit.
+
+### 2.3 Adapters
+
+`from_aws` handles four event shapes; missing any of them is a crash, not a
+degradation:
+
+| Shape | Discriminator |
+|---|---|
+| Lambda Function URL / API GW HTTP v2 | `event.get("version") == "2.0"` (one branch; the stage may prefix `rawPath`) |
+| API GW REST v1 / ALB | `"httpMethod" in event` — mixed-case headers, `queryStringParameters` may be `None` |
+| Direct invoke (EventBridge, `aws lambda invoke`) | neither of the above — synthesized as `POST /` with the whole event as the body |
+
+The direct-invoke shape is what makes scheduled workloads (`cred_expiry_watch`)
+possible; without it a scheduled invoke dies on `event["requestContext"]`.
+
+`to_aws` **always** emits the explicit `{"statusCode","headers","body",
+"isBase64Encoded"}` envelope. Returning a bare dict from a Function URL makes
+Lambda wrap it as a 200 — which would silently swallow a 401.
+
+Per repo convention the cloud SDK imports are lazy: `from_azure` imports
+`azure.functions` inside the function body, and `from_gcp` never imports Flask at
+all — it duck-types `.method/.path/.headers/.args/.get_data()`. So `adapters.py`
+imports cleanly on all three runtimes and is unit-testable with plain fixtures.
+
+### 2.4 Auth — layered, fail-closed
+
+Two independent gates. Getting past one does not get you past the other.
+
+1. **Cloud-native front door**, where it is free: Lambda Function URL `AWS_IAM`,
+   the Azure function host key, Cloud Run `roles/run.invoker`.
+2. **A shared-secret bearer header**, verified in `runtime/auth.py` on every
+   request regardless of cloud.
+
+`auth.verify` fails **closed**: a missing `FN_SHARED_SECRET` returns 500, never
+200. It compares with `hmac.compare_digest`, and returns a byte-identical 401 body
+for "missing" and "wrong" so it leaks nothing. Direct invokes bypass the HTTP
+front door, so the secret may also arrive as a `secret` field in the synthesized
+body — which is why `secret` is a redacted key (§2.5).
+
+### 2.5 Logging
+
+One line of JSON per request to stdout — CloudWatch, App Insights, and Cloud
+Logging all capture it. `logs.redact` is a pure function and the single best
+unit-test target in the runtime. Headers **always** pass through it before being
+logged, so `authorization` is unconditionally `"***"`. The raw body is never
+logged; only `redact(req.json())`, and only when `FN_LOG_BODY=1`.
+
+## 3. Packaging
+
+> Build one deterministic zip in memory, upload it to an object store **in the same
+> cloud as the function**, and have Terraform reference it by bucket + key + hash.
+
+GCP forces this: `google_cloudfunctions2_function.build_config.source` accepts only
+`storage_source` or `repo_source` — there is no inline option. Since GCS is
+mandatory anyway, matching it on S3 and Blob removes all divergence from the
+transport, leaving divergence only in the zip layout. All three upload SDKs are
+already dependencies (`boto3`, `google-cloud-storage`, `azure-storage-blob`).
+
+`cloud_function_package.build()` is deterministic — fixed timestamps, sorted
+insertion order, fixed attrs, no `__pycache__`. This matters more than it looks:
+if mtimes leak in, the content hash changes on every apply and **every function
+redeploys forever**, which on GCP is a 60–120 s Cloud Build each time.
+
+| | AWS | GCP | Azure |
+|---|---|---|---|
+| entry file at zip root | `aws_entry.py` | `main.py` *(name fixed by the buildpack)* | `function_app.py` *(name fixed by the v2 model)* |
+| declared in Terraform | `handler` | `entry_point` | discovered |
+| dependencies | none | `requirements.txt` | vendored `azure-functions` |
+| deploy latency | ~5 s | 60–120 s (Cloud Build) | ~20 s (restart) |
+| update trigger | `source_code_hash` | `storage_source.object` | app-setting URL change |
+| residue after destroy | none | Artifact Registry images | none |
+
+## 4. Per-cloud choices
+
+**AWS — S3-sourced, not inline `archive_file`.** `archive_file` needs the source
+tree present in the deploy dir at *destroy* time as well as apply, and it zips with
+real mtimes, which are not stable across the app container and the jobs-worker
+container. When `subnet_ids` is set the module must **also** attach
+`AWSLambdaVPCAccessExecutionRole` — without it the function creates fine and every
+invoke fails with an ENI error.
+
+**Azure — `azurerm_linux_function_app` on a `B1` App Service plan, code via
+`WEBSITE_RUN_FROM_PACKAGE`.** The forks, and why:
+
+- *Flex Consumption — rejected.* Its code path is the Kudu `/api/publish` endpoint,
+  which Terraform cannot drive. It would mean a hand-rolled Kudu REST client plus
+  Oryx remote build (pip-installing from PyPI at deploy time) — a second,
+  non-Terraform deployment channel that AWS and GCP don't have, re-introducing
+  exactly the runtime-download flakiness the Dockerfile's provider pre-cache went
+  out of its way to eliminate.
+- *Linux Consumption (Y1) — rejected as the default.* It **cannot do regional VNet
+  integration**, so Phase 2 is impossible on it. Allowed as an opt-in `sku_name`
+  for public-only demos; the module has a `precondition` that fails at plan time if
+  Y1 is paired with a subnet.
+- *Elastic Premium (EP1)* — works, ~10× the cost of B1 for a preview feature.
+- **B1** — supports VNet integration *and* run-from-package, fully declarative, no
+  cold-start surprises, and one variable moves an operator up to `EP1`/`P0v3`.
+
+Two Azure traps encoded in the module: the blob name **must** contain the content
+hash (`WEBSITE_RUN_FROM_PACKAGE` is a plain app-setting string, so overwriting a
+fixed-name blob leaves Terraform seeing no diff while the app serves stale code);
+and `AzureWebJobsFeatureFlags = "EnableWorkerIndexing"` + `FUNCTIONS_EXTENSION_VERSION
+= "~4"` are set preemptively, against the classic v2-model failure where the app
+boots, serves the default landing page, and registers zero functions.
+
+Azure host keys have **no azurerm data source** — they are fetched post-apply over
+the ARM REST API and stored as `cloudfn/{fn_id}/invoke-key`. Strictly non-fatal:
+if it fails the bearer secret still protects the function.
+
+**GCP — `google_cloudfunctions2_function`.** Two things operators must know up
+front, because they are the top two failure modes: every deploy runs Cloud Build
+and pushes to Artifact Registry (and `terraform destroy` leaves those images
+behind); and the IAM surface is much larger than the DB modules needed —
+`cloudfunctions.developer`, `run.admin`, `cloudbuild.builds.builder`,
+`artifactregistry.writer`, `storage.objectAdmin`, plus `iam.serviceAccountUser` on
+the runtime SA. A missing role surfaces as a 403 ~90 s into the build, *after* a
+successful plan.
+
+## 5. Networking
+
+`network_mode = "public" | "vpc"`. Each module validates its own cloud's ids with a
+`precondition`, so a missing id fails at plan rather than minutes into an apply.
+
+| Cloud | Mechanism | The gotcha |
+|---|---|---|
+| AWS | `vpc_config { subnet_ids, security_group_ids }` | A VPC-attached Lambda has **no public internet** unless its subnets route through NAT. Callback-using workloads hang until timeout. |
+| Azure | `virtual_network_subnet_id` + `vnet_route_all_enabled` | Needs a subnet delegated to `Microsoft.Web/serverFarms` — a *different* subnet from `azure_db_subnet_id` (delegated to `…/flexibleServers`). And **`WEBSITE_DNS_SERVER = 168.63.129.16`**, or the `privatelink.*` zone won't resolve: `vnet_route_all_enabled` fixes routing, not DNS. |
+| GCP | `vpc_connector` + `PRIVATE_RANGES_ONLY` | Serverless VPC Access, **not** Direct VPC egress — `cloudfunctions2.service_config` only exposes `vpc_connector`. A connector runs ≥2 `e2-micro` instances (~$26/mo) whether invoked or not, so reference an **existing** connector rather than creating one per function. |
+
+## 6. Workload catalog
+
+Standalone-useful first; Phase-2-enabling second.
+
+| Workload | What it does | Phase 2 role |
+|---|---|---|
+| `echo_diag` | Echoes the normalized request (redacted) + cloud/region/network placement; TCP/DNS probes each caller-supplied `{host,port}` | Pre-flight check **and this feature's own end-to-end verifier** |
+| `entitle_webhook_echo` | Validates the Entitle Give/Revoke payload shape and returns the success envelope; failure injection via `?fail=` | The contract test every real workload implements |
+| `cred_expiry_watch` | TLS handshake sweep → issuer/`not_after`/days remaining; on-demand or scheduled | Scheduled-invoke plumbing + the function→dashboard callback direction |
+| `db_grant` | Ephemeral DB account create/drop against the private DB | **The Phase 2 pilot** |
+| `local_account_broker` *(AWS)* | SSM-driven ephemeral OS account + authorized key | SSH ephemeral-accounts executor for hosts Entitle's agent can't reach |
+| `inventory_reporter` | Reports what it can see from inside the network, POSTing back to the dashboard | Reverse callback channel for revocation reconciliation |
+
+## 7. Phase 2 — Entitle REST integrations
+
+Entitle POSTs Give/Revoke to the function URL with the shared secret as a header.
+The function performs the grant against the target and returns the success
+envelope. Four integrations are planned:
+
+1. **Ephemeral MySQL / MSSQL DB accounts** — the pilot. Reuses
+   `cloud_db_sql_service`'s existing pure per-engine SQL builders. Needs pure-Python
+   drivers (`pg8000`, `pymysql`, `python-tds`) and a **flavor-aware** SQL Server
+   variant: `CREATE LOGIN` is right for RDS, but Azure SQL Database is a contained
+   -database model needing a login in `master` *plus* a contained user in the target
+   database. That flavor gap is precisely why Entitle's native MSSQL ephemeral
+   accounts don't work here.
+2. **Azure machine identity** — Entitle calls a function that performs the ARM
+   `roleAssignments/write` against the service principal with an `endDateTime`.
+   Note the token-cache invalidation requirement after a grant
+   (`cloud-identity-jit.md` §5.2); `azure_service.invalidate_credentials()` exists.
+3. **Portainer** — needs `/api/users`, `/api/teams`, `/api/team_memberships` added
+   to `portainer_service.py` first.
+4. **Dashboard user identity** — the one exception: the dashboard **is** the target
+   system, so Entitle calls `/api/entitle/rest/*` on the dashboard directly, with no
+   function hop. Replaces the Entra-group indirection with direct grants on
+   `User.session_permissions_dict`, working for local and OIDC users alike.
+
+## 8. Security notes
+
+- `_SECRET_TF_KEYS = ("shared_secret", "package_sas_url", "storage_account_access_key")`
+  are stripped before job metadata is persisted and re-injected in **both**
+  `run_deploy_apply` and `run_decommission`. `package_sas_url` is the easy one to
+  miss — it is a credential embedded in a URL, and unstripped it lands in
+  `jobs.extra_data` *and* streams into the job's Live Output.
+- The modules never use a `data` source on the package object. If the blob has been
+  garbage-collected, a `data "google_storage_bucket_object"` would make `destroy`
+  unrecoverable.
+- Terraform variables holding secrets are marked `sensitive = true`.
+- Auth fails closed; see §2.4.

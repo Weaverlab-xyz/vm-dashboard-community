@@ -1,0 +1,8 @@
+# GCP Cloud Run functions — packaged into the zip root as requirements.txt.
+#
+# fnruntime is stdlib-only, so this pins exactly one thing: the framework the
+# Python buildpack uses to serve the entry point. GCP injects it implicitly when
+# it is absent, but naming it keeps the deployed surface explicit and stops a
+# major-version bump from silently changing the request object the adapter
+# duck-types (fnruntime.adapters.from_gcp).
+functions-framework>=3.0,<4
