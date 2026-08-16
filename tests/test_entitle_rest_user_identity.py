@@ -96,7 +96,8 @@ def test_the_endpoint_is_closed_when_no_secret_is_configured():
     client, _ = _client([_user()], secret="")
     resp = client.get("/api/entitle/rest/get_assets", headers=_hdr())
     assert resp.status_code == 503, resp.text
-    assert "not configured" in json.dumps(resp.json())
+    body = json.dumps(resp.json())
+    assert "entitle_rest_not_configured" in body, body
 
 
 def test_missing_and_wrong_secrets_are_indistinguishable():
