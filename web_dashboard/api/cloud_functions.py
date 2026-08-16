@@ -227,6 +227,39 @@ async def invoke_function(fn_id: str, payload: InvokeRequest,
                     "message": f"could not reach the function ({type(exc).__name__})"}) from exc
 
 
+@router.post("/{fn_id}/entitle-register")
+def entitle_register(fn_id: str, background: BackgroundTasks,
+                     action: str = "register",
+                     db: Session = Depends(get_db),
+                     user: User = Depends(require_permission("cloud_function", "write"))):
+    """Register (or deregister) this function as an Entitle REST integration.
+
+    Only meaningful for a workload that implements the Remote Adapter contract —
+    `db_grant` and `entitle_webhook_echo` do. Entitle then calls the function
+    directly for grant/revoke, which is why the function's endpoint is public even
+    when the resource behind it is not.
+    """
+    _require_enabled()
+    try:
+        result = cloud_function_service.start_entitle_register(
+            db, fn_id, action=action, created_by=user.username)
+    except CloudFunctionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    background.add_task(_run_entitle_register, fn_id=fn_id,
+                        job_id=result["job_id"], action=action)
+    return result
+
+
+async def _run_entitle_register(*, fn_id: str, job_id: str, action: str) -> None:
+    from ..database import SessionLocal
+    db = SessionLocal()
+    try:
+        await cloud_function_service.run_entitle_register(
+            db, fn_id=fn_id, job_id=job_id, action=action)
+    finally:
+        db.close()
+
+
 @router.delete("/{fn_id}")
 def decommission_function(fn_id: str, background: BackgroundTasks,
                           db: Session = Depends(get_db),

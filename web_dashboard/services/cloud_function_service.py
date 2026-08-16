@@ -794,6 +794,87 @@ async def run_decommission(db: Session, *, fn_id: str, job_id: str) -> None:
 
 # ── Test invoke ───────────────────────────────────────────────────────────────
 
+async def run_entitle_register(db: Session, *, fn_id: str, job_id: str,
+                               action: str = "register") -> None:
+    """Worker entry for a ``cloudfn_entitle_register`` job.
+
+    Registers the function as an Entitle REST integration — the adapter contract it
+    already serves — or removes that registration. Mirrors
+    ``cloud_database_service.run_entitle_register``: failures are fatal here,
+    because a post-hoc request should surface them rather than log and continue.
+    """
+    from . import entitle_registration_service as entitle
+
+    row = get_function(db, fn_id)
+    if not row:
+        job_service.set_failed(db, job_id, f"function {fn_id} not found")
+        return
+    job_service.set_running(db, job_id)
+    try:
+        if action == "deregister":
+            job_service.update_progress(db, job_id, 30, "Removing Entitle integration…")
+            state = config_service.get(f"cloudfn/{row.id}/entitle-tfstate") or ""
+            if state:
+                await entitle.deregister(state)
+            config_service.delete(f"cloudfn/{row.id}/entitle-tfstate")
+            row.entitle_integration_id = None
+        else:
+            if not config_service.get_bool(
+                    "entitle_registration_enabled",
+                    getattr(settings, "entitle_registration_enabled", False)):
+                raise CloudFunctionError(
+                    "Entitle registration is disabled (set entitle_registration_enabled)")
+            if not row.invoke_url:
+                raise CloudFunctionError(
+                    "function has no endpoint yet — wait for the deploy to finish")
+            secret = config_service.get(f"cloudfn/{row.id}/bearer") or ""
+            if not secret:
+                raise CloudFunctionError(
+                    "function has no shared secret; redeploy it before registering")
+            job_service.update_progress(db, job_id, 30, "Registering adapter in Entitle…")
+            result = await entitle.register_rest(
+                name=f"{row.name} ({row.workload})",
+                base_url=row.invoke_url,
+                shared_secret=secret,
+                # The FUNCTION is VPC-attached; the ENDPOINT is public, which is the
+                # whole point — so no agent, regardless of network_mode.
+                private=False,
+                ephemeral=True,
+            )
+            row.entitle_integration_id = str(result.get("integration_id") or "")
+            if not row.entitle_integration_id:
+                raise CloudFunctionError("Entitle registration returned no integration id")
+            # The tfstate is what deregister needs later; it is not a secret, but it
+            # is bulky and per-function, so it lives beside the bearer rather than
+            # on the row.
+            config_service.set(f"cloudfn/{row.id}/entitle-tfstate",
+                               str(result.get("tf_state_json") or ""))
+        row.updated_at = datetime.utcnow()
+        db.commit()
+        job_service.set_completed(db, job_id, {
+            "fn_id": fn_id, "action": action,
+            "entitle_integration_id": row.entitle_integration_id,
+        })
+        logger.info("cloudfn entitle %s complete fn_id=%s integration_id=%s",
+                    action, fn_id, row.entitle_integration_id)
+    except Exception as exc:
+        logger.error("cloudfn entitle %s failed fn_id=%s: %s", action, fn_id, exc)
+        job_service.set_failed(db, job_id, str(exc))
+
+
+def start_entitle_register(db: Session, fn_id: str, *, action: str = "register",
+                           created_by: str = "") -> dict:
+    row = get_function(db, fn_id)
+    if not row:
+        raise CloudFunctionError(f"unknown function {fn_id!r}")
+    if action not in ("register", "deregister"):
+        raise CloudFunctionError(f"unknown action {action!r}")
+    job = job_service.create_job(
+        db, job_type="cloudfn_entitle_register", created_by=created_by,
+        metadata={"fn_id": row.id, "action": action, "name": row.name})
+    return {"ok": True, "fn_id": row.id, "job_id": job.id, "action": action}
+
+
 async def invoke(db: Session, *, fn_id: str, payload: Optional[dict] = None) -> dict:
     """Call the function from the dashboard with the right credentials attached.
 
