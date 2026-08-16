@@ -1,40 +1,53 @@
-# Entitle user identity (REST)
+# Entitle dashboard permissions
 
-Just-in-time **dashboard permissions**, granted by Entitle over REST. This is the
-one Entitle integration the dashboard hosts itself — every other one is a Cloud
-Function, because Entitle needs an endpoint and the target is elsewhere. Here the
-dashboard **is** the target system, so a function hop would add a network round
-trip, a second credential and a second thing to deploy, and buy nothing.
+How Entitle grants **permissions inside this dashboard** — time-boxed access to a
+scope (`aws`, `k8s`, …) or to administrator, without standing privilege.
 
-> Gated by `entitle_user_jit_enabled`, and additionally closed whenever
-> `entitle_rest_secret` is unset. Design notes:
-> [docs/design/cloud-functions.md](../design/cloud-functions.md).
+> This is about access **to the dashboard itself**. Entitle granting access to the
+> *infrastructure the dashboard builds* — SSH to a VM, a database account, a
+> Kubernetes cluster — is a different track entirely; see
+> [entitle.md](entitle.md).
 
-## What it replaces
+## Two mechanisms — which one am I using?
 
-Previously Entitle granted dashboard access **through Entra groups**: it added the
-user to `dashboard-<scope>-<level>`, the group arrived in the OIDC `groups` claim,
-and the login path mapped it to permissions. That works, and it stays supported —
-but it has two costs:
+There are two, and they are easy to confuse because they grant the same thing. **The
+REST mechanism is the current one.** The Entra-group mechanism still works and is
+still supported, so nothing breaks if you are already on it.
 
-- **It only works for Entra.** Local users and any other OIDC provider could be
-  granted nothing, which undercuts the point of the generic-OIDC support.
-- **Grants and revokes both take effect at the user's next login.** So "just in
-  time" was, in practice, "some time after you next sign in".
+| | **REST** (current) | **Entra groups** (legacy) |
+|---|---|---|
+| How Entitle grants | calls this dashboard directly | adds the user to `dashboard-<scope>-<level>` in Entra |
+| Works for | **any user** — local, Entra, any OIDC provider | Entra users only |
+| Takes effect | **immediately** | at the user's next login |
+| Revoke takes effect | **immediately** | at the user's next login |
+| Needs | `entitle_rest_secret`, dashboard reachable from Entitle | Entra tenant, group provisioning, OIDC `groups` claim |
+| Config flag | `entitle_user_jit_enabled` + `entitle_rest_secret` | `entitle_user_jit_enabled` |
+| Detail | this document | [design](../design/entitle-user-jit.md) + [runbooks](../runbooks/entitle-user-jit-phase-1-bootstrap-entra.md) |
 
-The REST integration grants directly and immediately, for any user the dashboard
-knows about — local or OIDC, any provider.
+**Both can run at once.** They write different columns and are unioned into a user's
+effective permissions, so moving from groups to REST is a gradual change rather than
+a cutover: point new scopes at REST, leave the existing groups alone, retire them
+when you are ready.
 
-**Both mechanisms can run at once.** They write different columns, so migrating off
-Entra groups is a gradual change rather than a cutover: point new scopes at REST,
-leave the existing groups in place, and retire them when you are ready.
+> **This endpoint is hosted by the dashboard — there is no Cloud Function to
+> deploy.** It uses the same *Remote Adapter contract* the Cloud Functions adapters
+> serve (`db_grant`, `portainer_access`, `azure_role_grant`), which is why the
+> Entitle-side setup looks identical. But those exist because Entitle needs an
+> endpoint and the target is somewhere else; here the dashboard **is** the target, so
+> a function hop would add a round trip, a second credential and a second thing to
+> deploy, and buy nothing. See [cloud-functions.md](cloud-functions.md) for the
+> adapters that *are* functions.
+
+---
+
+# The REST mechanism (current)
 
 ## Prerequisites
 
 | | |
 |---|---|
 | Entitle tenant | able to create a REST integration |
-| Dashboard reachable from Entitle | this endpoint is inbound, unlike the rest of the dashboard's Entitle usage |
+| Dashboard reachable from Entitle | this endpoint is **inbound**, unlike the rest of the dashboard's Entitle usage |
 | `entitle_user_jit_enabled` | Settings → Integrations → Entitle |
 | `entitle_rest_secret` | a strong random string; **unset means the endpoint is closed, not open** |
 
@@ -92,7 +105,7 @@ A user's permissions come from three independent sources:
 | Source | Set by | Rewritten when |
 |---|---|---|
 | `permissions` | an admin, in the dashboard | never automatically |
-| `session_permissions` | OIDC/Entra group mapping | **every login** |
+| `session_permissions` | OIDC/Entra group mapping (the legacy mechanism) | **every login** |
 | `jit_permissions` | this integration | only by this integration |
 
 They are unioned into the user's effective permissions. This endpoint writes only
@@ -105,6 +118,9 @@ the third, which means:
   wholesale
 - `get_all_permissions` reports **only Entitle's own grants**, so Entitle cannot
   reconcile away access it never gave
+
+That third column is also what lets both mechanisms run side by side without
+fighting each other.
 
 ## Authentication
 
@@ -144,3 +160,41 @@ not listed there, Entitle did not grant it and cannot remove it.
 **A user cannot be found.** Actors resolve by username or email. A user created by
 OIDC auto-provisioning has a username derived from the email local-part, which may
 not be the identifier Entitle sends — map the actor to the email instead.
+
+---
+
+# The Entra-group mechanism (legacy)
+
+Still supported; not deprecated. Prefer REST for anything new, because it works for
+non-Entra users and takes effect immediately.
+
+Entitle adds the user to an Entra group named `dashboard-<scope>-<level>` with a
+TTL. At the user's next login the group arrives in the OIDC `groups` claim, and the
+login path maps it through `OAuthGroupMapping` rows into `session_permissions`.
+When the TTL expires and Entitle removes the group, the *next* login recomputes the
+union without it.
+
+That "next login" step is the mechanism's defining limitation, in both directions: a
+granted permission is not usable until the user signs in again, and a revoked one
+remains usable until they do.
+
+Setup lives in its own documents, which remain accurate:
+
+- [Design](../design/entitle-user-jit.md) — the full model and its phases
+- [Runbook: bootstrap Entra groups](../runbooks/entitle-user-jit-phase-1-bootstrap-entra.md)
+- [Runbook: bootstrap Entitle](../runbooks/entitle-user-jit-phase-2-bootstrap-entitle.md)
+- [Runbook: the permission resolver](../runbooks/entitle-user-jit-phase-0-resolver.md)
+
+## Migrating to REST
+
+No cutover needed, because the two write different columns:
+
+1. Configure the REST mechanism alongside the existing groups.
+2. Move scopes across one at a time — create the REST-backed Entitle resource, and
+   remove the corresponding `dashboard-<scope>-<level>` group from Entitle's
+   workflow when you are satisfied.
+3. Leave the `OAuthGroupMapping` rows in place until no group grants anything, then
+   delete them.
+
+At no point does a user lose access mid-migration: `effective_permissions_dict` is
+the union of all three sources, so a permission granted by either mechanism counts.
