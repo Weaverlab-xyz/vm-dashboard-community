@@ -955,6 +955,10 @@ class EntitleFeatureConfig(BaseModel):
     entitle_owner_id: str = ""          # REQUIRED for registration: Entitle user UUID owning created integrations
     entitle_workflow_id: str = ""       # REQUIRED for registration: default approval workflow UUID
     entitle_endpoint: str = ""          # optional provider endpoint override; blank → derived from the API URL host
+    # Inbound: the secret Entitle presents to /api/entitle/rest/* for user-identity
+    # grants. Unset → that endpoint is closed, not open.
+    entitle_rest_secret: str = ""       # encrypted at rest
+    entitle_rest_app_slug: str = ""     # catalog slug for REST integrations; blank → "rest api"
     entitle_agent_token_name: str = ""  # read-only display only; auto-set by ensure_agent_token (not edited here)
     # Agent KMS backend (where the agent vaults integration creds). Per-cloud override;
     # blank → entitle_agent_kms_type. AKS needs azure_secret_manager (the azure_aks
@@ -1391,7 +1395,7 @@ _SECRET_FEATURE_KEYS = frozenset({
     "clouddb_ps_azure_sp_client_secret", "clouddb_ps_azure_plugin_private_key",
     "clouddb_ps_azure_plugin_passphrase",
     "portainer_pat", "portainer_admin_password",
-    "entitle_api_token", "entitle_api_key",
+    "entitle_api_token", "entitle_api_key", "entitle_rest_secret",
     "proxmox_token_secret", "proxmox_password",
     "vsphere_password",
     "hyperv_password",
