@@ -73,7 +73,14 @@ def _client(users, secret=SECRET):
     app.include_router(entitle_rest.router)
     session = _FakeSession(users)
     app.dependency_overrides[get_db] = lambda: session
-    config_service.set("entitle_rest_secret", secret)
+    if secret:
+        config_service.set("entitle_rest_secret", secret)
+    else:
+        # DELETE, not set(""): config_service persists to the encrypted app_config
+        # table, and writing an empty value does not necessarily clear a previous
+        # one — so the "unconfigured" test would otherwise see whatever an earlier
+        # test left behind and never exercise the closed path at all.
+        config_service.delete("entitle_rest_secret")
     return TestClient(app), session
 
 
