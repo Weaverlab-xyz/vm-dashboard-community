@@ -237,13 +237,7 @@ Entitle POSTs Give/Revoke to the function URL with the shared secret as a header
 The function performs the grant against the target and returns the success
 envelope. Four integrations are planned:
 
-1. **Ephemeral MySQL / MSSQL DB accounts** — the pilot. Reuses
-   `cloud_db_sql_service`'s existing pure per-engine SQL builders. Needs pure-Python
-   drivers (`pg8000`, `pymysql`, `python-tds`) and a **flavor-aware** SQL Server
-   variant: `CREATE LOGIN` is right for RDS, but Azure SQL Database is a contained
-   -database model needing a login in `master` *plus* a contained user in the target
-   database. That flavor gap is precisely why Entitle's native MSSQL ephemeral
-   accounts don't work here.
+1. **Ephemeral MySQL / MSSQL DB accounts** — the pilot. **Built** (see §9).
 2. **Azure machine identity** — Entitle calls a function that performs the ARM
    `roleAssignments/write` against the service principal with an `endDateTime`.
    Note the token-cache invalidation requirement after a grant
@@ -254,6 +248,82 @@ envelope. Four integrations are planned:
    system, so Entitle calls `/api/entitle/rest/*` on the dashboard directly, with no
    function hop. Replaces the Entra-group indirection with direct grants on
    `User.session_permissions_dict`, working for local and OIDC users alike.
+
+## 9. db_grant — ephemeral database accounts
+
+Give Access mints a short-lived account on a private database; Revoke Access drops
+it. `cloud_db_sql_service.grant_plan` / `revoke_plan` build the SQL and the
+`db_grant` workload executes it.
+
+### The plan shape, and why it is not a statement list
+
+Both builders return `[(database, [statements…]), …]` — a **plan**, because Azure
+SQL Database genuinely needs two connections: the login lives in `master` on the
+logical server, the user lives in the target database, and there is no `USE` to
+bridge them. Encoding that in the return value keeps the flavor difference in data
+the tests assert on, rather than buried in a branch inside the executor.
+
+| Flavor | Shape |
+|---|---|
+| `rds`, `cloudsql` | one connection to `master`, `USE [db]` to switch |
+| `azure_sql` | **two** connections — `master` for the login, the target database for the contained user |
+
+MySQL needs no flavor branching at all: `CREATE USER` is identical on RDS, Flexible
+Server and Cloud SQL. Revokes are existence-guarded and, on Azure SQL, drop the
+user *before* the login — the login cannot be dropped while a principal maps to it.
+Entitle retries, and a revoke that errors leaves standing access behind, which is
+the one outcome this feature exists to prevent.
+
+### Dry run is the default
+
+With `FN_DB_DRY_RUN` unset the workload returns the exact statements it would run
+and opens no connection. That is how the Entitle path gets validated end to end
+before anything touches a real database — and dry run never returns a password,
+because nothing was created and a credential with no account behind it is just a
+loose secret.
+
+### The one break in the zero-dependency rule
+
+`db_grant` opens real connections, so it ships drivers. PyMySQL is pure Python and
+does TLS through the stdlib `ssl` module. SQL Server is the problem: `python-tds`
+is pure Python but does TLS through **pyOpenSSL → cryptography**, which is
+compiled, and Azure SQL *requires* encryption, so there is no way around it.
+
+Vendoring a compiled wheel out of site-packages is unsafe on this multi-arch image.
+So the Dockerfile fetches the wheels **for the function's platform** at build time
+(`pip install --platform manylinux2014_x86_64`) into `FN_VENDOR_DIR`, and the
+packager takes binaries from there and nowhere else. The "no compiled artifacts"
+assertion narrows to "none from site-packages" rather than disappearing, so the
+wrong-architecture hazard stays closed. This pins functions to x86_64 — the default
+on all three clouds.
+
+`cloud_db_sql_service.py` itself is copied into the zip as `sqlplan.py` — the file,
+not a reimplementation — so the SQL that runs in the cloud is byte-identical to the
+SQL under test. It is safe to ship because it is stdlib-only and opens no
+connection; `tests/test_db_grant_workload.py` pins both properties.
+
+### Credentials
+
+The admin password is never a request field. Each cloud resolves a **reference**,
+so the value never enters Terraform state:
+
+| Cloud | Mechanism |
+|---|---|
+| GCP | `secret_environment_variables` → `FN_DB_ADMIN_PASSWORD` |
+| Azure | `@Microsoft.KeyVault(SecretUri=…)` app setting, resolved by the platform using the app's system-assigned identity (which is why the module now declares one) |
+| AWS | no platform equivalent for Lambda — the function reads Secrets Manager itself with the boto3 the runtime already ships, scoped to named ARNs |
+
+The target (engine, host, port, database, flavor) also comes from the function's
+own configuration, never the request — otherwise every caller of this endpoint
+would be a lateral-movement primitive.
+
+### Still to do
+
+`register_rest()` in `entitle_registration_service`, relaxing
+`allow_creating_accounts` for REST-backed registrations, and the provision-path
+wiring all wait on the Entitle REST application slug and Give/Revoke schema being
+confirmed against a live tenant. `entitle_webhook_echo` exists to produce exactly
+that: point a real integration at it and read `received.matched_keys`.
 
 ## 8. Security notes
 

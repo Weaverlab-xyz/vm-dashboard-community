@@ -44,10 +44,43 @@ _COMPRESS_LEVEL = 9
 _SKIP_DIRS = {"__pycache__", ".pytest_cache", ".mypy_cache"}
 _SKIP_SUFFIXES = (".pyc", ".pyo", ".DS_Store")
 
-# Compiled extensions must never be vendored: the dashboard image is multi-arch, so
-# a wheel built on the arm64 image would ship an arm64 binary into an x86_64 Lambda
-# and fail at import time, in the cloud, with a confusing message.
+# Compiled extensions must never be vendored OUT OF SITE-PACKAGES: this image is
+# built multi-arch, so a wheel installed for the build host would ship an arm64
+# binary into an x86_64 function and fail at import time, in the cloud, with a
+# confusing message.
+#
+# The exception is _VENDOR_DIR, which the Dockerfile populates with wheels fetched
+# for the FUNCTION's platform (`pip install --platform manylinux2014_x86_64`). Those
+# are correct by construction, so binaries from there are allowed and binaries from
+# anywhere else still are not — the hazard the rule exists for stays closed.
 _BINARY_SUFFIXES = (".so", ".pyd", ".dll", ".dylib")
+
+# Where the Dockerfile stages the function-platform wheels. Overridable so a dev
+# box (or a future arm64 target) can point elsewhere.
+_VENDOR_DIR = os.environ.get("FN_VENDOR_DIR", "/opt/fn-vendor/linux-x86_64")
+
+# Distributions a workload needs inside the zip, beyond the stdlib. Only db_grant
+# has any — everything else is stdlib-only by contract, which is what keeps a
+# package ~30 KB and needs no build step.
+#
+# The SQL Server chain is the whole reason _VENDOR_DIR exists: python-tds is pure
+# Python, but it does TLS through pyOpenSSL → cryptography, which is compiled. Azure
+# SQL Database REQUIRES encryption, so there is no "skip TLS" escape.
+_WORKLOAD_VENDOR = {
+    "db_grant": ("pymysql", "pytds", "OpenSSL", "cryptography", "cffi", "_cffi_backend"),
+}
+
+# Extra dashboard modules copied into the zip for a workload, as
+# (path relative to web_dashboard/, destination name at the zip root).
+#
+# db_grant gets the REAL cloud_db_sql_service, not a reimplementation of it, so the
+# SQL executed in the cloud is byte-identical to the SQL tests/test_db_grant_sql.py
+# proves — the alternative is two copies of security-critical SQL drifting apart.
+# It is safe to ship because that module is stdlib-only (re, secrets, string) and
+# opens no connection; tests/test_db_grant_workload.py pins both properties.
+_WORKLOAD_MODULES = {
+    "db_grant": (("services/cloud_db_sql_service.py", "sqlplan.py"),),
+}
 
 # Per-cloud zip layout. Each entry:
 #   entry   (source path under functions/, destination name at the zip root)
@@ -164,6 +197,53 @@ def _vendor_azure_functions() -> list:
     return entries
 
 
+def _vendor_workload_packages(workload: str, arc_prefix: str) -> list:
+    """Distributions this workload needs, taken from the build-time vendor dir.
+
+    Returns ``[]`` for a workload with no dependencies, which is all of them but
+    ``db_grant``. Raises if the vendor dir is missing or incomplete rather than
+    shipping a package that imports fine locally and dies on first invocation.
+    """
+    wanted = _WORKLOAD_VENDOR.get(workload)
+    if not wanted:
+        return []
+    if not os.path.isdir(_VENDOR_DIR):
+        raise CloudFunctionPackageError(
+            f"the {workload!r} workload needs vendored database drivers, but "
+            f"{_VENDOR_DIR} does not exist. It is populated at image build time "
+            "(see the FN_VENDOR_DIR step in the Dockerfile); set FN_VENDOR_DIR if "
+            "you staged the wheels elsewhere.")
+
+    def _arc(name: str) -> str:
+        return f"{arc_prefix}/{name}" if arc_prefix else name
+
+    entries = []
+    missing = []
+    for name in wanted:
+        pkg_dir = os.path.join(_VENDOR_DIR, name)
+        module_py = os.path.join(_VENDOR_DIR, name + ".py")
+        if os.path.isdir(pkg_dir):
+            entries.extend(_walk_tree(pkg_dir, _arc(name)))
+        elif os.path.isfile(module_py):
+            entries.append((_arc(name + ".py"), _read(module_py)))
+        else:
+            # A compiled top-level module (_cffi_backend) lands as a bare .so whose
+            # filename carries the ABI tag, so match on the prefix.
+            hits = [f for f in os.listdir(_VENDOR_DIR)
+                    if f.startswith(name + ".") and f.endswith(_BINARY_SUFFIXES)]
+            if hits:
+                for filename in hits:
+                    entries.append((_arc(filename),
+                                    _read(os.path.join(_VENDOR_DIR, filename))))
+            else:
+                missing.append(name)
+    if missing:
+        raise CloudFunctionPackageError(
+            f"vendored driver(s) {', '.join(missing)} not found in {_VENDOR_DIR} — "
+            "the image's vendor step and _WORKLOAD_VENDOR have drifted apart")
+    return entries
+
+
 def collect_entries(*, cloud: str, workload: str, source_root: str = "") -> list:
     """Every ``(arcname, bytes)`` that goes into the zip, unsorted."""
     if cloud not in _LAYOUT:
@@ -187,6 +267,17 @@ def collect_entries(*, cloud: str, workload: str, source_root: str = "") -> list
 
     if cloud == "azure":
         entries.extend(_vendor_azure_functions())
+
+    # Dashboard modules this workload reuses verbatim. Always at the zip root —
+    # they are imported by the workload, not by the platform's dependency loader.
+    web_root = os.path.dirname(root)
+    for module_src, module_dst in _WORKLOAD_MODULES.get(workload, ()):
+        entries.append((module_dst, _read(os.path.join(web_root, module_src))))
+
+    # Workload dependencies. AWS and GCP put the zip root on sys.path, so packages
+    # go at the root; Azure's run-from-package only searches .python_packages.
+    entries.extend(_vendor_workload_packages(
+        workload, _AZURE_VENDOR_ROOT if cloud == "azure" else ""))
     return entries
 
 

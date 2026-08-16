@@ -261,6 +261,10 @@ def _build_tf_variables(*, cloud: str, region: str, name: str, workload: str,
             "package_sha256_b64": package["sha256_b64"],
             "subnet_ids": network.get("subnet_ids", []),
             "security_group_ids": network.get("security_group_ids", []),
+            # AWS is the only cloud with no platform-resolved env-var secret for
+            # functions, so a credential-using workload reads it itself and needs
+            # the grant. Named ARNs only — never a wildcard.
+            "readable_secret_arns": _csv(opts.get("readable_secret_arns")),
         }
 
     if cloud == "gcp":
@@ -274,6 +278,9 @@ def _build_tf_variables(*, cloud: str, region: str, name: str, workload: str,
             "package_object": package["key"],
             "service_account_email": opts.get("service_account_email", ""),
             "vpc_connector": network.get("vpc_connector", ""),
+            # Injected as FN_DB_ADMIN_PASSWORD by the platform, so the value never
+            # reaches Terraform state or the function's describe output.
+            "db_admin_secret": opts.get("db_admin_secret", ""),
         }
 
     # Azure: no bucket/key vars — run-from-package takes a single SAS URL, and the

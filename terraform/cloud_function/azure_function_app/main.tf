@@ -149,6 +149,17 @@ resource "azurerm_linux_function_app" "this" {
 
   https_only = true
 
+  # Required for Key Vault references in app_settings. A workload needing a
+  # database credential gets it as @Microsoft.KeyVault(SecretUri=...) in
+  # `environment`: the PLATFORM resolves it before the worker starts, so the
+  # handler needs no SDK and the secret never enters Terraform state. That
+  # resolution is performed as this identity, so without it the setting silently
+  # stays the literal @Microsoft.KeyVault(...) string and the workload sees
+  # nonsense rather than a password. Grant it `get` on the vault's secrets.
+  identity {
+    type = "SystemAssigned"
+  }
+
   virtual_network_subnet_id = local.vnet_attached ? var.subnet_id : null
 
   site_config {
@@ -197,4 +208,9 @@ output "default_hostname" {
 output "network_mode" {
   value       = local.vnet_attached ? "vnet" : "public"
   description = "Whether the app was integrated with a VNet"
+}
+
+output "principal_id" {
+  value       = azurerm_linux_function_app.this.identity[0].principal_id
+  description = "System-assigned identity — grant it `get` on a Key Vault's secrets for @Microsoft.KeyVault(...) app settings to resolve"
 }

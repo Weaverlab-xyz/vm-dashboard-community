@@ -89,6 +89,37 @@ ENV PIP_CERT=/etc/ssl/certs/ca-certificates.crt \
 COPY web_dashboard/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Cloud Functions: database drivers vendored into the deployed function zip.
+#
+# The fnruntime contract is stdlib-only precisely so packages need no vendoring,
+# and the db_grant workload is the one deliberate exception: it opens a real
+# database connection. PyMySQL is pure Python and would be safe to vendor from
+# site-packages, but SQL Server is not — python-tds needs pyOpenSSL for TLS,
+# pyOpenSSL needs cryptography, and cryptography ships a COMPILED extension.
+#
+# Vendoring a compiled wheel out of site-packages is unsafe here: this image is
+# built multi-arch, so an arm64 build would place an arm64 .so into a zip that
+# runs on x86_64 and fail at import time, in the cloud, with a confusing error.
+# So fetch the wheels for the FUNCTION's platform explicitly, at build time, into
+# a directory the packager reads instead of site-packages — the same "resolve it
+# at build, never at runtime" discipline as the Terraform provider cache above.
+#
+# --platform/--only-binary is also what makes this correct on an arm64 builder:
+# pip resolves for the TARGET, not the host. All three clouds default to x86_64
+# for Python functions; an operator deploying arm64 Lambdas needs a second dir
+# here and a matching architecture in the aws_lambda module.
+ARG FN_VENDOR_PLATFORM=manylinux2014_x86_64
+ENV FN_VENDOR_DIR=/opt/fn-vendor/linux-x86_64
+RUN pip install --no-cache-dir --no-deps --upgrade \
+        --platform "${FN_VENDOR_PLATFORM}" \
+        --python-version 3.12 \
+        --only-binary=:all: \
+        --target "${FN_VENDOR_DIR}" \
+        PyMySQL==1.1.1 python-tds==1.16.0 pyOpenSSL==24.2.1 cryptography==43.0.1 \
+        cffi==1.17.1 pycparser==2.22 \
+    && find "${FN_VENDOR_DIR}" -name '__pycache__' -type d -prune -exec rm -rf {} + \
+    && find "${FN_VENDOR_DIR}" -name '*.dist-info' -type d -prune -exec rm -rf {} +
+
 # Copy the application.
 COPY web_dashboard/ ./web_dashboard/
 

@@ -106,6 +106,16 @@ variable "ingress_settings" {
   description = "ALLOW_ALL (reachable by Entitle) or ALLOW_INTERNAL_AND_GCLB"
 }
 
+# An EXISTING Secret Manager secret injected as FN_DB_ADMIN_PASSWORD, for workloads
+# that need a database credential (db_grant). Platform-resolved: the value never
+# passes through Terraform state or the function's describe output, and the handler
+# needs no SDK to read it. Empty = not injected.
+variable "db_admin_secret" {
+  type        = string
+  default     = ""
+  description = "Secret Manager secret ID (not a version) holding the DB admin password"
+}
+
 # ── Networking (optional) ─────────────────────────────────────────────────────
 #
 # A Serverless VPC Access connector, NOT Direct VPC egress: cloudfunctions2's
@@ -169,6 +179,16 @@ resource "google_cloudfunctions2_function" "this" {
       project_id = var.project
       secret     = google_secret_manager_secret.shared_secret.secret_id
       version    = "latest"
+    }
+
+    dynamic "secret_environment_variables" {
+      for_each = var.db_admin_secret != "" ? [1] : []
+      content {
+        key        = "FN_DB_ADMIN_PASSWORD"
+        project_id = var.project
+        secret     = var.db_admin_secret
+        version    = "latest"
+      }
     }
   }
 
