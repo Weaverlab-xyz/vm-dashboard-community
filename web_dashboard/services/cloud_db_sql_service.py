@@ -259,40 +259,52 @@ def _check_flavor(engine: str, flavor: str) -> str:
     return flavor
 
 
-def _mysql_grant(*, user: str, password: str, database: str, role: str) -> list:
+# Entitle's Remote Adapter models an ephemeral account as FOUR operations, not two
+# (docs.beyondtrust.com/entitle/docs/open-api-definition):
+#
+#   create_actor   mint the account, with no privileges
+#   give_access    grant it a role on an asset
+#   revoke_access  take the role away
+#   delete_actor   drop the account
+#
+# Splitting them here rather than in the adapter is what makes the SQL Server case
+# fall out cleanly: the login/user split and the role-membership change are already
+# separate statements against different databases, so the four operations map onto
+# statement groups that already existed. ``grant_plan``/``revoke_plan`` remain as
+# the composed pair, for the standalone (non-Entitle) path.
+
+def _mysql_create(*, user: str, password: str) -> list:
     # '%' host: the function reaches the server from a VPC/VNet address that is not
     # predictable per invocation, so pinning the host would break on the next cold
     # start in a different subnet.
-    privileges = "SELECT" if role == "read" else "SELECT, INSERT, UPDATE, DELETE"
-    return [
-        f"CREATE USER '{user}'@'%' IDENTIFIED BY '{password}';",
-        f"GRANT {privileges} ON `{database}`.* TO '{user}'@'%';",
-    ]
+    return [f"CREATE USER '{user}'@'%' IDENTIFIED BY '{password}';"]
 
 
-def _mysql_revoke(*, user: str, database: str) -> list:
+def _mysql_delete(*, user: str) -> list:
     # Dropping the user removes its grants; no explicit REVOKE needed.
     return [f"DROP USER IF EXISTS '{user}'@'%';"]
 
 
-def _pg_grant(*, user: str, password: str, database: str, role: str) -> list:
-    statements = [
-        f"CREATE ROLE \"{user}\" WITH LOGIN PASSWORD '{password}';",
-        f'GRANT CONNECT ON DATABASE "{database}" TO "{user}";',
-        f'GRANT USAGE ON SCHEMA public TO "{user}";',
-    ]
-    if role == "read":
-        statements.append(f'GRANT SELECT ON ALL TABLES IN SCHEMA public TO "{user}";')
-    else:
-        statements.append(
-            f'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO "{user}";')
-    return statements
+def _mysql_privileges(role: str) -> str:
+    return "SELECT" if role == "read" else "SELECT, INSERT, UPDATE, DELETE"
 
 
-def _pg_revoke(*, user: str, database: str) -> list:
+def _mysql_give(*, user: str, database: str, role: str) -> list:
+    return [f"GRANT {_mysql_privileges(role)} ON `{database}`.* TO '{user}'@'%';"]
+
+
+def _mysql_take(*, user: str, database: str, role: str) -> list:
+    return [f"REVOKE {_mysql_privileges(role)} ON `{database}`.* FROM '{user}'@'%';"]
+
+
+def _pg_create(*, user: str, password: str) -> list:
+    return [f"CREATE ROLE \"{user}\" WITH LOGIN PASSWORD '{password}';"]
+
+
+def _pg_delete(*, user: str) -> list:
     # Postgres refuses to drop a role that still owns or is granted anything, so
-    # reassign/drop what it holds first. Without this the revoke fails on any
-    # account that was actually used, which is every account worth revoking.
+    # reassign/drop what it holds first. Without this the delete fails on any
+    # account that was actually used, which is every account worth deleting.
     return [
         f'REASSIGN OWNED BY "{user}" TO CURRENT_USER;',
         f'DROP OWNED BY "{user}";',
@@ -300,15 +312,40 @@ def _pg_revoke(*, user: str, database: str) -> list:
     ]
 
 
+def _pg_dml(role: str) -> str:
+    return "SELECT" if role == "read" else "SELECT, INSERT, UPDATE, DELETE"
+
+
+def _pg_give(*, user: str, database: str, role: str) -> list:
+    return [
+        f'GRANT CONNECT ON DATABASE "{database}" TO "{user}";',
+        f'GRANT USAGE ON SCHEMA public TO "{user}";',
+        f'GRANT {_pg_dml(role)} ON ALL TABLES IN SCHEMA public TO "{user}";',
+    ]
+
+
+def _pg_take(*, user: str, database: str, role: str) -> list:
+    return [
+        f'REVOKE {_pg_dml(role)} ON ALL TABLES IN SCHEMA public FROM "{user}";',
+        f'REVOKE USAGE ON SCHEMA public FROM "{user}";',
+        f'REVOKE CONNECT ON DATABASE "{database}" FROM "{user}";',
+    ]
+
+
 def _mssql_login(*, user: str, password: str) -> list:
     return [f"CREATE LOGIN [{user}] WITH PASSWORD = '{password}';"]
 
 
-def _mssql_user(*, user: str, role: str) -> list:
-    return [
-        f"CREATE USER [{user}] FOR LOGIN [{user}];",
-        f"ALTER ROLE {_MSSQL_ROLE[role]} ADD MEMBER [{user}];",
-    ]
+def _mssql_user(*, user: str) -> list:
+    return [f"CREATE USER [{user}] FOR LOGIN [{user}];"]
+
+
+def _mssql_add_role(*, user: str, role: str) -> list:
+    return [f"ALTER ROLE {_MSSQL_ROLE[role]} ADD MEMBER [{user}];"]
+
+
+def _mssql_drop_role(*, user: str, role: str) -> list:
+    return [f"ALTER ROLE {_MSSQL_ROLE[role]} DROP MEMBER [{user}];"]
 
 
 def _mssql_drop_login(*, user: str) -> list:
@@ -325,76 +362,77 @@ def _mssql_drop_user(*, user: str) -> list:
     ]
 
 
-def grant_plan(engine: str, *, username: str, password: str, database: str,
-               role: str = "read", flavor: str = "") -> list:
-    """``[(database_to_connect_to, [statements…]), …]`` creating an ephemeral account.
+def _merge(plan: list) -> list:
+    """Coalesce adjacent entries for the same database into one connection.
 
-    A **plan**, not a flat statement list, because Azure SQL Database genuinely
-    needs two connections — the login in ``master``, the user in the target
-    database, with no ``USE`` to bridge them. Encoding that in the return value
-    keeps the flavor difference visible in data the tests can assert on, instead of
-    buried in a branch inside the executor.
-
-    Raises on any unsafe identifier or value, so nothing unvalidated reaches SQL.
+    Composition produces runs like ``[(master, …), (appdb, …), (appdb, …)]``; each
+    entry costs a real connection, and on Azure SQL that is a full TLS handshake to
+    a separate endpoint. Merging is purely an efficiency and clarity win — the
+    statement ORDER within a database is never changed.
     """
+    merged: list = []
+    for database, statements in plan:
+        if merged and merged[-1][0] == database:
+            merged[-1] = (database, merged[-1][1] + list(statements))
+        else:
+            merged.append((database, list(statements)))
+    return merged
+
+
+def _prepare(engine: str, *, username: str, database: str, flavor: str,
+             role: str = "", password: str = "") -> tuple:
+    """Validate every input once and return the normalised pieces."""
     _check_engine(engine)
     user = _ident(username)
-    pwd = _value(password)
-    role = _check_role(role)
-    flavor = _check_flavor(engine, flavor)
-    db_name = _ident(database) if database else ""
+    pwd = _value(password) if password else ""
+    checked_role = _check_role(role) if role else ""
+    checked_flavor = _check_flavor(engine, flavor)
+    if not database:
+        raise CloudDbSqlError(f"{engine} plans need a database name")
+    return user, _ident(database), checked_role, checked_flavor, pwd
 
+
+def create_actor_plan(engine: str, *, username: str, password: str,
+                      database: str, flavor: str = "") -> list:
+    """``[(database, [statements…])]`` creating the account with NO privileges.
+
+    Entitle's ``create_actor``. An account with no grants is useless and harmless,
+    which is exactly the point: if the subsequent ``give_access`` never arrives,
+    what is left behind can reach nothing.
+    """
+    # Explicit, because _prepare only validates a password it was actually given —
+    # and a login created with an empty one is a far worse hole than a rejected
+    # request. The other three operations legitimately pass no password.
+    if not password:
+        raise CloudDbSqlError("creating an account requires a password")
+    user, db_name, _role, flavor, pwd = _prepare(
+        engine, username=username, database=database, flavor=flavor, password=password)
     if engine == "mysql":
-        if not db_name:
-            raise CloudDbSqlError("mysql grants need a database name")
-        return [(db_name, _mysql_grant(user=user, password=pwd,
-                                       database=db_name, role=role))]
-
+        return [(db_name, _mysql_create(user=user, password=pwd))]
     if engine == "postgres":
-        if not db_name:
-            raise CloudDbSqlError("postgres grants need a database name")
-        # One connection: the role is cluster-wide, and the object grants apply to
-        # whichever database the connection is against.
-        return [(db_name, _pg_grant(user=user, password=pwd,
-                                    database=db_name, role=role))]
-
-    # SQL Server.
-    if not db_name:
-        raise CloudDbSqlError("sqlserver grants need a database name")
-    login = _mssql_login(user=user, password=pwd)
-    db_user = _mssql_user(user=user, role=role)
+        return [(db_name, _pg_create(user=user, password=pwd))]
+    login, db_user = _mssql_login(user=user, password=pwd), _mssql_user(user=user)
     if flavor in _SPLIT_LOGIN_FLAVORS:
         # Azure SQL: two connections, and the order matters — the user cannot be
         # created until the login exists on the logical server.
         return [("master", login), (db_name, db_user)]
-    # RDS / Cloud SQL: one connection to master, USE to switch.
     return [("master", login + [f"USE [{db_name}];"] + db_user)]
 
 
-def revoke_plan(engine: str, *, username: str, database: str,
-                flavor: str = "") -> list:
-    """``[(database, [statements…]), …]`` removing an ephemeral account.
+def delete_actor_plan(engine: str, *, username: str, database: str,
+                      flavor: str = "") -> list:
+    """``[(database, [statements…])]`` dropping the account.
 
-    Idempotent wherever the engine allows it: a revoke that arrives twice, or for
-    an account a failed grant never finished creating, must still succeed — Entitle
-    retries, and a revoke that errors leaves standing access behind, which is the
-    one outcome this whole feature exists to prevent.
+    Entitle's ``delete_actor``. Idempotent wherever the engine allows it: Entitle
+    retries, and a delete that errors for an account a failed create never finished
+    making would leave the caller retrying forever while access looks un-revoked.
     """
-    _check_engine(engine)
-    user = _ident(username)
-    flavor = _check_flavor(engine, flavor)
-    db_name = _ident(database) if database else ""
-
+    user, db_name, _role, flavor, _pwd = _prepare(
+        engine, username=username, database=database, flavor=flavor)
     if engine == "mysql":
-        return [(db_name or "", _mysql_revoke(user=user, database=db_name))]
-
+        return [(db_name, _mysql_delete(user=user))]
     if engine == "postgres":
-        if not db_name:
-            raise CloudDbSqlError("postgres revokes need a database name")
-        return [(db_name, _pg_revoke(user=user, database=db_name))]
-
-    if not db_name:
-        raise CloudDbSqlError("sqlserver revokes need a database name")
+        return [(db_name, _pg_delete(user=user))]
     if flavor in _SPLIT_LOGIN_FLAVORS:
         # Drop the contained user first: on Azure SQL the login cannot be dropped
         # while a database principal is still mapped to it.
@@ -402,6 +440,71 @@ def revoke_plan(engine: str, *, username: str, database: str,
                 ("master", _mssql_drop_login(user=user))]
     return [("master", [f"USE [{db_name}];"] + _mssql_drop_user(user=user)
              + ["USE [master];"] + _mssql_drop_login(user=user))]
+
+
+def give_access_plan(engine: str, *, username: str, database: str,
+                     role: str = "read", flavor: str = "") -> list:
+    """``[(database, [statements…])]`` granting ``role`` to an EXISTING account.
+
+    Entitle's ``give_access``. Assumes ``create_actor`` already ran — which is the
+    order Entitle calls them in for an ephemeral integration.
+    """
+    user, db_name, role, flavor, _pwd = _prepare(
+        engine, username=username, database=database, flavor=flavor, role=role)
+    if engine == "mysql":
+        return [(db_name, _mysql_give(user=user, database=db_name, role=role))]
+    if engine == "postgres":
+        return [(db_name, _pg_give(user=user, database=db_name, role=role))]
+    add = _mssql_add_role(user=user, role=role)
+    if flavor in _SPLIT_LOGIN_FLAVORS:
+        return [(db_name, add)]
+    return [("master", [f"USE [{db_name}];"] + add)]
+
+
+def revoke_access_plan(engine: str, *, username: str, database: str,
+                       role: str = "read", flavor: str = "") -> list:
+    """``[(database, [statements…])]`` removing ``role`` but LEAVING the account.
+
+    Entitle's ``revoke_access``. The account itself goes away on ``delete_actor``;
+    keeping the two separate is what lets Entitle revoke one role on one asset
+    without disturbing any other access the same actor holds.
+    """
+    user, db_name, role, flavor, _pwd = _prepare(
+        engine, username=username, database=database, flavor=flavor, role=role)
+    if engine == "mysql":
+        return [(db_name, _mysql_take(user=user, database=db_name, role=role))]
+    if engine == "postgres":
+        return [(db_name, _pg_take(user=user, database=db_name, role=role))]
+    drop = _mssql_drop_role(user=user, role=role)
+    if flavor in _SPLIT_LOGIN_FLAVORS:
+        return [(db_name, drop)]
+    return [("master", [f"USE [{db_name}];"] + drop)]
+
+
+def grant_plan(engine: str, *, username: str, password: str, database: str,
+               role: str = "read", flavor: str = "") -> list:
+    """create_actor + give_access, as one plan.
+
+    The standalone (non-Entitle) path: one call that mints a usable account. Entitle
+    drives the two halves separately, so this is a composition of them rather than a
+    third implementation — there is only ever one copy of each statement.
+    """
+    return _merge(
+        create_actor_plan(engine, username=username, password=password,
+                          database=database, flavor=flavor)
+        + give_access_plan(engine, username=username, database=database,
+                           role=role, flavor=flavor))
+
+
+def revoke_plan(engine: str, *, username: str, database: str,
+                flavor: str = "") -> list:
+    """Drop the account outright, which takes its grants with it.
+
+    The standalone counterpart of :func:`grant_plan`. Entitle's revoke_access is a
+    narrower operation — see :func:`revoke_access_plan`.
+    """
+    return _merge(delete_actor_plan(engine, username=username,
+                                    database=database, flavor=flavor))
 
 
 def ephemeral_username(prefix: str, token: str) -> str:

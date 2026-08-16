@@ -1,8 +1,9 @@
 {
-  "action": "Give Access",
-  "userEmail": "alice@example.com",
-  "resource": "prod-mysql",
-  "role": "readonly",
-  "durationSeconds": 3600,
-  "requestId": "11111111-2222-3333-4444-555555555555"
+  "asset": {
+    "identifier": "demo:asset:1",
+    "name": "Demo asset",
+    "type": "demo"
+  },
+  "actor_identifier": "demo-actor",
+  "role_code": "read"
 }

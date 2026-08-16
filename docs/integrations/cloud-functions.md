@@ -83,8 +83,33 @@ catalog** — adding a module makes it deployable, no registry to edit.
 | Workload | What it does |
 |---|---|
 | `echo_diag` | Echoes the request as the function saw it (redacted), reports where it landed, and DNS/TCP-probes any `{host, port}` you pass |
-| `entitle_webhook_echo` | Validates an Entitle Give/Revoke payload and reports what it understood, without granting anything. Supports `?fail=401\|403\|404\|500\|slow\|timeout` |
-| `db_grant` | Mints and drops ephemeral just-in-time database accounts on MySQL and SQL Server. **Dry run by default.** See below. |
+| `entitle_webhook_echo` | A **no-op Entitle Remote Adapter** — serves every route with valid empty responses and reports what arrived, without granting anything. Supports `?fail=401\|403\|404\|500\|slow\|timeout` |
+| `db_grant` | **Entitle Remote Adapter** for ephemeral just-in-time database accounts on MySQL and SQL Server. **Dry run by default.** See below. |
+
+### Wiring an Entitle REST integration
+
+Both adapters implement the [Remote Adapter contract](https://docs.beyondtrust.com/entitle/docs/open-api-definition).
+**The verb is the path**, and Entitle lets you configure each path separately, so
+point them at the routes below (or leave the defaults, which match):
+
+```
+get_assets_path            /get_assets
+get_actors_path            /get_actors
+get_all_permissions_path   /get_all_permissions
+create_actor_path          /create_actor      (required for ephemeral accounts)
+delete_actor_path          /delete_actor      (required for ephemeral accounts)
+give_access_path           /give_access
+revoke_access_path         /revoke_access
+```
+
+Authenticate with the function's shared secret as a custom header — Entitle's
+`headers` config takes `"Authorization": "Bearer <TOKEN>"` verbatim, which is
+exactly what the handler verifies. Get the value from **Functions → Endpoint**.
+
+Start with `entitle_webhook_echo`: it answers every route correctly and grants
+nothing, so you can confirm the network path, the front door, the shared secret and
+every `*_path` mapping before a real database is involved. A 404 from it lists the
+routes it actually serves, which is almost always the fix.
 
 ### db_grant
 
@@ -119,6 +144,11 @@ it — grant that identity `get` on the vault), or `FN_DB_ADMIN_SECRET_ID` plus
 Start in dry run. The response contains the exact SQL the function would execute,
 per connection, which is how you validate the whole Entitle path before anything
 touches a real database.
+
+`db_grant` implements the four-operation ephemeral lifecycle: `create_actor` mints
+the account with **no privileges**, `give_access` grants a role, `revoke_access`
+removes the role but leaves the account, and `delete_actor` drops it. Entitle owns
+the expiry — no request carries a TTL, and the adapter schedules nothing.
 
 ### Writing your own
 

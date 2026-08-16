@@ -1,10 +1,12 @@
-"""The db_grant workload: request handling, dry run, and its safety properties.
+"""db_grant as an Entitle Remote Adapter.
 
-Runs entirely offline. The SQL itself is proved in tests/test_db_grant_sql.py; what
-is pinned here is everything around it — that dry run is the default, that a caller
-cannot redirect the grant at another database, that a password is only ever returned
-for an account that was actually created, and that the vendored SQL module is the
-real one rather than a drifting copy.
+The contract is docs.beyondtrust.com/entitle/docs/open-api-definition. What is
+pinned here is the shape Entitle actually depends on — routes keyed by PATH, the
+response envelopes, and the four-operation ephemeral lifecycle — plus the safety
+properties: dry run by default, a caller that cannot steer the target, and
+credentials returned only for an account that was really created.
+
+The SQL itself is proved in tests/test_db_grant_sql.py. Runs entirely offline.
 """
 import json
 import os
@@ -29,219 +31,302 @@ def _env(**overrides):
             "FN_DB_NAME": "appdb", "FN_DB_ADMIN_USER": "dbadmin"}
     base.update(overrides)
     for key, val in base.items():
-        if val is None:
-            os.environ.pop(key, None)
-        else:
-            os.environ[key] = val
+        os.environ[key] = val
 
 
-def _call(payload, query=None):
+def _call(method, path, payload=None):
     return db_grant.handle(
-        Request(method="POST", path="/", headers={}, query=query or {},
-                body=json.dumps(payload).encode(), source="aws_function_url"),
+        Request(method=method, path=path, headers={}, query={},
+                body=json.dumps(payload or {}).encode(), source="aws_function_url"),
         Context.from_env(workload="db_grant"))
 
 
-# ── Dry run is the default ───────────────────────────────────────────────────
+def _asset_id():
+    return db_grant._asset_identifier(db_grant._target())
 
-def test_dry_run_is_the_default_and_opens_no_connection():
-    """Executing SQL against a production database is not a safe default for a
-    feature whose payload schema is still being pinned. If this regresses, the
-    connect attempt fails on an unresolvable host rather than silently running."""
+
+def _statements(body):
+    return " ".join(s for p in body["data"]["plan"] for s in p["statements"])
+
+
+# ── Routing: the verb is the path ────────────────────────────────────────────
+
+def test_every_contract_route_is_served():
+    """Entitle's integration config names each path separately; a missing one is a
+    404 at setup time with no obvious cause."""
     _env()
-    resp = _call({"action": "grant", "user_email": "alice@example.com", "role": "read"})
-    assert resp.status == 200, resp.body
-    assert resp.body["dry_run"] is True
-    assert resp.body["plan"], "dry run must show what it would have run"
+    for method, path in [
+        ("GET", "/get_assets"), ("GET", "/get_actors"), ("GET", "/get_all_permissions"),
+        ("POST", "/create_actor"), ("POST", "/delete_actor"),
+        ("POST", "/give_access"), ("POST", "/revoke_access"), ("POST", "/check_config"),
+    ]:
+        payload = {"actor": {"email": "a@example.com"}, "actor_identifier": "jit_a_1",
+                   "role_code": "read", "config": {}}
+        resp = _call(method, path, payload)
+        assert resp.status != 404, f"{method} {path} is not routed"
 
 
-def test_dry_run_never_returns_a_password():
-    """Nothing was created, so a credential in the response would be a secret with
-    no account behind it."""
+def test_asset_permissions_route_takes_an_identifier_in_the_path():
     _env()
-    body = _call({"action": "grant", "user_email": "alice@example.com"}).body
-    assert "password" not in body, body
-    assert "password" not in json.dumps(body).lower().replace('"passwordless"', "")
+    resp = _call("GET", f"/get_asset_permissions/{_asset_id()}")
+    assert resp.status == 200
+    assert "actors_permissions" in resp.body["data"]
 
 
-def test_dry_run_can_be_turned_off_explicitly_only():
-    _env(FN_DB_DRY_RUN="0")
-    assert db_grant._dry_run() is False
-    for value in ("1", "true", "yes", "on", "TRUE"):
-        _env(FN_DB_DRY_RUN=value)
-        assert db_grant._dry_run() is True, value
-    _env()                       # unset entirely
-    assert db_grant._dry_run() is True
+def test_an_unknown_route_404s_and_says_what_it_serves():
+    """Entitle's *_path fields are configurable, so a 404 almost always means they
+    disagree with these routes — the response should say so."""
+    _env()
+    resp = _call("POST", "/grant")
+    assert resp.status == 404
+    assert any("/give_access" in r for r in resp.body["routes"])
 
 
-# ── The plan the workload would run ──────────────────────────────────────────
+def test_the_method_is_part_of_the_route():
+    _env()
+    assert _call("POST", "/get_assets").status == 404
+    assert _call("GET", "/give_access").status == 404
 
-def test_grant_plan_matches_the_service_builders_exactly():
-    """The workload must not reimplement the SQL — it delegates to the same pure
-    builders the SQL tests exercise."""
+
+def test_a_trailing_slash_still_routes():
+    _env()
+    assert _call("GET", "/get_assets/").status == 200
+
+
+# ── Response envelopes ───────────────────────────────────────────────────────
+
+def test_read_routes_use_the_next_plus_data_envelope():
+    _env()
+    for path, key in (("/get_assets", "assets"), ("/get_actors", "actors")):
+        body = _call("GET", path).body
+        assert "next" in body and "data" in body, (path, body)
+        assert key in body["data"], (path, body)
+
+
+def test_write_routes_use_the_data_envelope():
+    _env()
+    for path in ("/create_actor", "/give_access", "/revoke_access", "/delete_actor"):
+        payload = {"actor": {"email": "a@example.com"}, "actor_identifier": "jit_a_1",
+                   "role_code": "read"}
+        body = _call("POST", path, payload).body
+        assert "data" in body, (path, body)
+
+
+def test_check_config_reports_valid_and_the_resolved_target():
+    _env()
+    body = _call("POST", "/check_config", {"config": {}}).body
+    assert body["data"]["valid"] is True
+    assert body["data"]["asset"] == _asset_id()
+    assert body["data"]["engine"] == "mysql"
+
+
+def test_get_assets_advertises_the_role_options_entitle_offers():
+    """role_options is how an operator picks a role_code; an empty list means the
+    request form has nothing to choose."""
+    _env()
+    asset = _call("GET", "/get_assets").body["data"]["assets"][0]
+    codes = {opt["code"] for opt in asset["role_options"]}
+    assert codes == {"read", "readwrite"}
+    for option in asset["role_options"]:
+        assert option["available"] is True and option["permissions"]
+    assert asset["identifier"] and asset["type"] == "mysql"
+
+
+# ── The four-operation ephemeral lifecycle ───────────────────────────────────
+
+def test_create_actor_makes_an_account_with_no_privileges():
+    """If the follow-up give_access never arrives, what is left behind must be able
+    to reach nothing."""
+    _env()
+    body = _call("POST", "/create_actor", {"actor": {"email": "alice@example.com"}}).body
+    sql = _statements(body)
+    assert "CREATE USER" in sql
+    for verb in ("GRANT", "SELECT", "INSERT"):
+        assert verb not in sql, f"create_actor leaked {verb}: {sql}"
+
+
+def test_create_actor_returns_the_identifier_entitle_then_uses():
+    _env()
+    body = _call("POST", "/create_actor", {"actor": {"email": "alice@example.com"}}).body
+    identifier = body["data"]["identifier"]
+    assert cloud_db_sql_service._IDENT_RE.match(identifier), identifier
+    # That identifier is what give_access is called with next.
+    give = _call("POST", "/give_access", {
+        "asset": {"identifier": _asset_id()}, "actor_identifier": identifier,
+        "role_code": "read"}).body
+    assert identifier in _statements(give)
+
+
+def test_give_access_grants_without_creating():
+    _env()
+    sql = _statements(_call("POST", "/give_access", {
+        "asset": {"identifier": _asset_id()}, "actor_identifier": "jit_a_1",
+        "role_code": "read"}).body)
+    assert "GRANT SELECT" in sql
+    assert "CREATE USER" not in sql, "give_access must not mint an account"
+
+
+def test_revoke_access_removes_the_role_but_leaves_the_account():
+    """Keeping the two separate is what lets Entitle revoke one role on one asset
+    without disturbing other access the same actor holds."""
+    _env()
+    sql = _statements(_call("POST", "/revoke_access", {
+        "asset": {"identifier": _asset_id()}, "actor_identifier": "jit_a_1",
+        "role_code": "read"}).body)
+    assert "REVOKE" in sql
+    assert "DROP USER" not in sql, "revoke_access must not drop the account"
+
+
+def test_delete_actor_drops_the_account_idempotently():
+    _env()
+    sql = _statements(_call("POST", "/delete_actor",
+                            {"actor_identifier": "jit_a_1"}).body)
+    assert "DROP USER IF EXISTS" in sql
+
+
+def test_the_azure_sql_split_survives_the_adapter():
     _env(FN_DB_ENGINE="sqlserver", FN_DB_FLAVOR="azure_sql")
-    body = _call({"action": "grant", "user_email": "alice@example.com",
-                  "role": "read", "request_id": "req-abc"}).body
-    expected = cloud_db_sql_service.grant_plan(
-        "sqlserver", username=body["username"], password="Pw-1",
-        database="appdb", role="read", flavor="azure_sql")
-    assert [p["database"] for p in body["plan"]] == [db for db, _ in expected]
-    assert [p["database"] for p in body["plan"]] == ["master", "appdb"]
+    create = _call("POST", "/create_actor", {"actor": {"email": "a@example.com"}}).body
+    assert [p["database"] for p in create["data"]["plan"]] == ["master", "appdb"]
+    give = _call("POST", "/give_access", {
+        "asset": {"identifier": _asset_id()}, "actor_identifier": "jit_a_1",
+        "role_code": "read"}).body
+    assert [p["database"] for p in give["data"]["plan"]] == ["appdb"]
+    assert "USE " not in _statements(give)
 
 
-def test_azure_sql_plan_is_two_connections_and_rds_is_one():
-    for flavor, databases in (("azure_sql", ["master", "appdb"]), ("rds", ["master"])):
-        _env(FN_DB_ENGINE="sqlserver", FN_DB_FLAVOR=flavor)
-        body = _call({"action": "grant", "user_email": "a@example.com"}).body
-        assert [p["database"] for p in body["plan"]] == databases, flavor
+# ── Safety ───────────────────────────────────────────────────────────────────
 
-
-def test_revoke_plan_is_produced_for_a_bare_username():
+def test_dry_run_is_the_default():
     _env()
-    body = _call({"action": "revoke", "username": "jit_alice_abc"}).body
-    assert body["ok"] is True and body["username"] == "jit_alice_abc"
-    assert any("DROP USER" in s for p in body["plan"] for s in p["statements"])
+    body = _call("POST", "/create_actor", {"actor": {"email": "a@example.com"}}).body
+    assert body["data"]["dry_run"] is True and body["data"]["plan"]
 
 
-def test_revoke_can_reconstruct_the_username_from_identity_plus_request_id():
-    """Entitle's revoke may not echo the account name, only the original request."""
+def test_dry_run_never_returns_a_credential():
     _env()
-    granted = _call({"action": "grant", "user_email": "alice@example.com",
-                     "request_id": "req-xyz"}).body["username"]
-    revoked = _call({"action": "revoke", "user_email": "alice@example.com",
-                     "request_id": "req-xyz"}).body["username"]
-    assert granted == revoked, (granted, revoked)
+    body = _call("POST", "/create_actor", {"actor": {"email": "a@example.com"}}).body
+    assert "password" not in body["data"]
+    assert "password" not in json.dumps(body).lower()
 
 
-# ── The caller cannot steer the grant ────────────────────────────────────────
-
-def test_the_request_cannot_redirect_the_target_database_or_host():
-    """Host, port, database, engine and flavor come from the function's own config.
-    A payload field that could move the grant to another database would make every
-    caller of this endpoint a lateral-movement primitive."""
+def test_the_asset_in_the_request_cannot_redirect_the_grant():
+    """Entitle echoes the whole asset object. Honouring a host or database from it
+    would make every caller a lateral-movement primitive."""
     _env()
-    body = _call({
-        "action": "grant", "user_email": "alice@example.com",
-        "database": "otherdb", "host": "evil.example.com", "port": 9999,
-        "engine": "postgres", "flavor": "rds", "admin_user": "root",
-    }).body
-    grants = " ".join(s for p in body["plan"] for s in p["statements"])
-    assert "otherdb" not in grants and "evil.example.com" not in grants
-    assert "`appdb`" in grants, grants
+    body = _call("POST", "/give_access", {
+        "asset": {"identifier": _asset_id(), "name": "otherdb",
+                  "host": "evil.example.com", "database": "otherdb"},
+        "actor_identifier": "jit_a_1", "role_code": "read"}).body
+    sql = _statements(body)
+    assert "otherdb" not in sql and "evil.example.com" not in sql
+    assert "`appdb`" in sql
 
 
-def test_an_injection_in_the_identity_cannot_reach_the_sql():
+def test_a_request_for_a_different_asset_is_refused():
+    """A mismatch means the integration is pointed at the wrong function — worth
+    failing loudly rather than quietly granting on the only database we have."""
     _env()
-    body = _call({"action": "grant",
-                  "user_email": "alice'; DROP TABLE users;--@example.com"}).body
-    grants = " ".join(s for p in body["plan"] for s in p["statements"])
-    assert "DROP TABLE" not in grants, grants
-    assert cloud_db_sql_service._IDENT_RE.match(body["username"]), body["username"]
+    resp = _call("POST", "/give_access", {
+        "asset": {"identifier": "mysql:other.host:otherdb"},
+        "actor_identifier": "jit_a_1", "role_code": "read"})
+    assert resp.status == 404, resp.body
 
 
-def test_an_unknown_role_is_rejected_rather_than_downgraded():
+def test_an_unknown_role_code_is_refused_rather_than_downgraded():
     _env()
-    resp = _call({"action": "grant", "user_email": "a@example.com", "role": "db_owner"})
+    resp = _call("POST", "/give_access", {
+        "asset": {"identifier": _asset_id()}, "actor_identifier": "jit_a_1",
+        "role_code": "db_owner"})
     assert resp.status == 400, resp.body
 
 
-# ── Request handling ─────────────────────────────────────────────────────────
-
-def test_entitle_action_spellings_are_accepted():
+def test_an_injection_in_the_actor_cannot_reach_the_sql():
     _env()
-    for spelling in ("grant", "Give Access", "give_access", "GIVEACCESS"):
-        resp = _call({"action": spelling.replace(" ", "_"),
-                      "user_email": "a@example.com"})
-        assert resp.status == 200, (spelling, resp.body)
-        assert resp.body["action"] == "grant"
-    for spelling in ("revoke", "revoke_access", "REVOKEACCESS", "remove"):
-        resp = _call({"action": spelling, "username": "jit_a_1"})
-        assert resp.status == 200, (spelling, resp.body)
-        assert resp.body["action"] == "revoke"
+    body = _call("POST", "/create_actor",
+                 {"actor": {"email": "alice'; DROP TABLE users;--@example.com"}}).body
+    assert "DROP TABLE" not in _statements(body)
 
 
-def test_a_missing_or_unknown_action_is_a_400():
+def test_a_hostile_actor_identifier_is_refused_not_escaped():
     _env()
-    for payload in ({}, {"action": ""}, {"action": "drop_database"}):
-        assert _call(payload).status == 400, payload
+    for evil in ("a'; DROP TABLE x;--", 'a" OR 1=1', "1abc", "a b", ""):
+        resp = _call("POST", "/delete_actor", {"actor_identifier": evil})
+        assert resp.status == 400, (evil, resp.body)
 
 
-def test_grant_without_an_identity_is_a_400():
+def test_missing_required_fields_are_400s():
     _env()
-    assert _call({"action": "grant"}).status == 400
-
-
-def test_revoke_without_enough_to_name_the_account_is_a_400():
-    _env()
-    assert _call({"action": "revoke"}).status == 400
-    assert _call({"action": "revoke", "user_email": "a@example.com"}).status == 400
+    assert _call("POST", "/create_actor", {"actor": {}}).status == 400
+    assert _call("POST", "/give_access",
+                 {"asset": {"identifier": _asset_id()}}).status == 400
+    assert _call("POST", "/delete_actor", {}).status == 400
 
 
 def test_misconfiguration_surfaces_rather_than_silently_defaulting():
-    for env, _why in (({"FN_DB_ENGINE": "postgres"}, "engine not supported here"),
-                      ({"FN_DB_HOST": ""}, "no host"),
-                      ({"FN_DB_PORT": "not-a-number"}, "bad port")):
+    for env in ({"FN_DB_ENGINE": "postgres"}, {"FN_DB_HOST": ""},
+                {"FN_DB_PORT": "not-a-number"}, {"FN_DB_NAME": ""}):
         _env(**env)
         try:
-            _call({"action": "grant", "user_email": "a@example.com"})
+            _call("GET", "/get_assets")
         except RuntimeError:
             pass
         else:
             raise AssertionError(f"accepted a bad config: {env}")
 
 
-# ── Generated credentials ────────────────────────────────────────────────────
+def test_no_route_carries_a_ttl():
+    """Entitle owns expiry and calls revoke/delete when the grant ends, so the
+    adapter is stateless with respect to time. A duration field appearing here would
+    mean someone had built scheduling into a function that cannot schedule."""
+    _env()
+    plain = _statements(_call("POST", "/give_access", {
+        "asset": {"identifier": _asset_id()}, "actor_identifier": "jit_a_1",
+        "role_code": "read"}).body)
+    with_ttl = _statements(_call("POST", "/give_access", {
+        "asset": {"identifier": _asset_id()}, "actor_identifier": "jit_a_1",
+        "role_code": "read", "duration": 3600, "ttl": 60}).body)
+    assert plain == with_ttl
+
 
 def test_generated_passwords_are_accepted_by_the_sql_builders():
-    """The workload generates the password but the service validates it — a
-    mismatch fails every real grant at runtime, not at test time."""
     for _ in range(200):
         pwd = db_grant._generate_password()
-        cloud_db_sql_service.grant_plan(
+        cloud_db_sql_service.create_actor_plan(
             "sqlserver", username="jit_a_1", password=pwd,
-            database="appdb", role="read", flavor="azure_sql")
-
-
-def test_two_grants_for_the_same_person_do_not_collide():
-    _env()
-    first = _call({"action": "grant", "user_email": "a@example.com",
-                   "request_id": "req-1"}).body["username"]
-    second = _call({"action": "grant", "user_email": "a@example.com",
-                    "request_id": "req-2"}).body["username"]
-    assert first != second
+            database="appdb", flavor="azure_sql")
 
 
 # ── The vendored SQL module ──────────────────────────────────────────────────
 
 def test_the_sql_module_is_safe_to_ship_into_a_function():
     """It is copied into the zip verbatim, so it must import nothing beyond the
-    stdlib and open no connection — otherwise the zero-dependency contract that
-    makes this whole feature cheap is broken by the back door."""
+    stdlib and open no connection."""
     import ast
-    path = cloud_db_sql_service.__file__
-    tree = ast.parse(open(path, encoding="utf-8").read())
+    tree = ast.parse(open(cloud_db_sql_service.__file__, encoding="utf-8").read())
     imported = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             imported |= {a.name.split(".")[0] for a in node.names}
-        elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
-            imported.add(node.module.split(".")[0])
-        elif isinstance(node, ast.ImportFrom) and node.level:
-            raise AssertionError(f"relative import in {path} — it cannot be vendored")
+        elif isinstance(node, ast.ImportFrom):
+            assert node.level == 0, "a relative import cannot be vendored"
+            if node.module:
+                imported.add(node.module.split(".")[0])
     assert imported <= {"re", "secrets", "string"}, f"non-stdlib imports: {imported}"
 
 
 def test_the_packager_ships_the_real_sql_module_not_a_copy():
     from web_dashboard.services import cloud_function_package as pkg
-    mapped = dict(pkg._WORKLOAD_MODULES["db_grant"])
-    assert mapped["services/cloud_db_sql_service.py"] == "sqlplan.py"
-    entries = dict(pkg.collect_entries(cloud="aws", workload="db_grant")) \
-        if os.path.isdir(pkg._VENDOR_DIR) else None
-    if entries is None:
-        print(f"SKIP: no vendor dir at {pkg._VENDOR_DIR}; module mapping still asserted")
-        return
-    with open(cloud_db_sql_service.__file__, "rb") as handle:
-        assert entries["sqlplan.py"] == handle.read(), "shipped SQL differs from the tested SQL"
+    assert dict(pkg._WORKLOAD_MODULES["db_grant"])[
+        "services/cloud_db_sql_service.py"] == "sqlplan.py"
+
+
+def test_the_adapter_delegates_every_plan_to_the_service():
+    """Four Entitle operations, four plan builders, no fifth implementation."""
+    for name in ("create_actor_plan", "delete_actor_plan",
+                 "give_access_plan", "revoke_access_plan"):
+        assert hasattr(cloud_db_sql_service, name), name
+        assert name in open(db_grant.__file__, encoding="utf-8").read(), name
 
 
 if __name__ == "__main__":

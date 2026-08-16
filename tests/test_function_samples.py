@@ -17,6 +17,14 @@ from web_dashboard import functions  # noqa: E402,F401  (puts fnruntime on sys.p
 from web_dashboard.services import cloud_function_package as pkg  # noqa: E402
 
 
+# Which route each sample payload exercises. Adapters route on the path, so a
+# sample without one would only ever prove the 404 branch works.
+_SAMPLE_ROUTE = {
+    "db_grant": ("POST", "/give_access"),
+    "entitle_webhook_echo": ("POST", "/give_access"),
+}
+
+
 def _sample_files() -> list:
     return sorted(f for f in os.listdir(_EXAMPLES) if f.endswith(".request.json"))
 
@@ -71,7 +79,11 @@ def test_samples_actually_run_through_their_workload():
             os.environ.update({"FN_DB_ENGINE": "mysql", "FN_DB_HOST": "db.invalid",
                                "FN_DB_NAME": "appdb"})
             os.environ.pop("FN_DB_DRY_RUN", None)
-        request = Request(method="POST", path="/", headers={}, query={},
+        # For an Entitle Remote Adapter THE VERB IS THE PATH, so a sample payload is
+        # only meaningful paired with the route it belongs to. echo_diag has no
+        # routing and accepts anything.
+        method, path = _SAMPLE_ROUTE.get(workload_name, ("POST", "/"))
+        request = Request(method=method, path=path, headers={}, query={},
                           body=json.dumps(payload).encode(), source="aws_function_url")
         response = module.handle(request, Context.from_env(workload=workload_name))
         assert isinstance(response, Response), f"{name}: handler returned {type(response)}"

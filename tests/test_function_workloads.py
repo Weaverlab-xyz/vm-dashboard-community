@@ -86,54 +86,72 @@ def test_echo_diag_ignores_a_garbage_timeout():
 
 # ── entitle_webhook_echo ──────────────────────────────────────────────────────
 
-def test_entitle_echo_normalizes_a_give_access_payload():
-    resp = entitle_webhook_echo.handle(_req({
-        "action": "Give Access", "userEmail": "alice@example.com",
-        "resource": "prod-mysql", "role": "readonly",
-        "durationSeconds": 3600, "requestId": "req-1",
-    }), _ctx())
-    got = resp.body["received"]
-    assert got["action"] == "grant"
-    assert got["user_email"] == "alice@example.com"
-    assert got["duration_seconds"] == 3600
-    assert resp.body["ok"] is True and resp.body["problems"] == []
+def test_entitle_echo_serves_every_contract_route():
+    """The point of this workload: prove each *_path in the integration config maps
+    to a route that exists, before any target system is involved."""
+    for method, route in entitle_webhook_echo._ROUTES:
+        path = route.replace("{asset_identifier}", "demo:asset:1")
+        resp = entitle_webhook_echo.handle(
+            Request(method=method, path=path, headers={}, query={},
+                    body=b"{}", source="aws_function_url"), _ctx())
+        assert resp.status == 200, (method, path, resp.body)
 
 
-def test_entitle_echo_normalizes_revoke_and_snake_case_spellings():
-    resp = entitle_webhook_echo.handle(_req({
-        "operation": "revoke_access", "user_email": "bob@example.com",
-        "resource_name": "prod-mssql", "ttl_seconds": "900",
-    }), _ctx())
-    got = resp.body["received"]
-    assert got["action"] == "revoke"
-    assert got["user_email"] == "bob@example.com"
-    assert got["duration_seconds"] == 900
-    assert got["matched_keys"]["action"] == "operation"
+def test_entitle_echo_returns_the_contract_envelopes():
+    """Entitle rejects a malformed body, so the empty responses still have to be
+    the right SHAPE or the integration cannot even be saved."""
+    def _get(path):
+        return entitle_webhook_echo.handle(
+            Request(method="GET", path=path, headers={}, query={}, body=b"{}",
+                    source="aws_function_url"), _ctx()).body
+
+    assets = _get("/get_assets")
+    assert "next" in assets and "assets" in assets["data"]
+    assert assets["data"]["assets"][0]["role_options"], "no role for Entitle to offer"
+    perms = _get("/get_all_permissions")
+    assert "actors_permissions" in perms["data"] and "assets_permissions" in perms["data"]
 
 
-def test_entitle_echo_falls_back_to_the_path_for_the_verb():
-    req = Request(method="POST", path="/revoke-access", headers={}, query={},
-                  body=json.dumps({"email": "c@example.com", "target": "db"}).encode(),
-                  source="aws_function_url")
-    resp = entitle_webhook_echo.handle(req, _ctx())
-    assert resp.body["received"]["action"] == "revoke"
-    assert resp.body["received"]["matched_keys"]["action"] == "<path>"
+def test_entitle_echo_reports_which_contract_fields_arrived():
+    """The diagnostic: what Entitle actually sent, against what the contract says."""
+    resp = entitle_webhook_echo.handle(
+        Request(method="POST", path="/give_access", headers={}, query={},
+                body=json.dumps({"asset": {"identifier": "x"},
+                                 "actor_identifier": "jit_a_1",
+                                 "role_code": "read"}).encode(),
+                source="aws_function_url"), _ctx())
+    observed = resp.body["observed"]
+    assert observed["missing_keys"] == []
+    assert observed["received_keys"] == ["actor_identifier", "asset", "role_code"]
 
 
-def test_entitle_echo_flattens_a_nested_user_object():
-    resp = entitle_webhook_echo.handle(_req({
-        "action": "grant", "user": {"email": "d@example.com"}, "resource": "r"}), _ctx())
-    assert resp.body["received"]["user_email"] == "d@example.com"
-
-
-def test_entitle_echo_reports_problems_but_still_returns_200():
-    """A 4xx would make Entitle retry and hide the diagnostic — which is the only
-    thing this workload exists to produce."""
-    resp = entitle_webhook_echo.handle(_req({"nothing": "useful"}), _ctx())
+def test_entitle_echo_flags_a_payload_that_misses_contract_fields():
+    resp = entitle_webhook_echo.handle(
+        Request(method="POST", path="/give_access", headers={}, query={},
+                body=json.dumps({"nothing": "useful"}).encode(),
+                source="aws_function_url"), _ctx())
+    # Still 200: a 4xx would make Entitle retry and hide the diagnostic, which is
+    # the only thing this workload exists to produce.
     assert resp.status == 200
-    assert resp.body["ok"] is False
-    assert len(resp.body["problems"]) == 3
-    assert resp.body["raw_keys"] == ["nothing"]
+    assert set(resp.body["observed"]["missing_keys"]) == {
+        "asset", "actor_identifier", "role_code"}
+
+
+def test_entitle_echo_never_grants_anything():
+    for path in ("/give_access", "/create_actor", "/revoke_access", "/delete_actor"):
+        resp = entitle_webhook_echo.handle(
+            Request(method="POST", path=path, headers={}, query={}, body=b"{}",
+                    source="aws_function_url"), _ctx())
+        assert resp.body["data"]["granted"] is False, path
+
+
+def test_entitle_echo_404s_an_unknown_route_and_lists_the_real_ones():
+    """Entitle's paths are configurable, so this is the most likely setup mistake."""
+    resp = entitle_webhook_echo.handle(
+        Request(method="POST", path="/grant", headers={}, query={}, body=b"{}",
+                source="aws_function_url"), _ctx())
+    assert resp.status == 404
+    assert any("/give_access" in route for route in resp.body["routes"])
 
 
 def test_entitle_echo_failure_injection():

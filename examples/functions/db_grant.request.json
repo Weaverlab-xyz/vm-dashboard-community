@@ -1,6 +1,9 @@
 {
-  "action": "grant",
-  "user_email": "alice@example.com",
-  "role": "read",
-  "request_id": "11111111-2222-3333-4444-555555555555"
+  "asset": {
+    "identifier": "mysql:appdb.private.example:appdb",
+    "name": "appdb (appdb.private.example)",
+    "type": "mysql"
+  },
+  "actor_identifier": "jit_alice_example_com_a1b2c3",
+  "role_code": "read"
 }
