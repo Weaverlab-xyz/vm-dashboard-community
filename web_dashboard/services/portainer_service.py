@@ -491,10 +491,14 @@ async def deploy_stack(
 #     a JIT grant that hands out administrator is not an error the API reports. The
 #     constants below exist so no call site writes a bare integer.
 
-USER_ROLE_ADMIN = 1
-USER_ROLE_STANDARD = 2
-TEAM_ROLE_LEADER = 1
-TEAM_ROLE_MEMBER = 2
+# Re-exported from portainer_access_rules, which is the single copy the Cloud
+# Functions adapter also uses (it is vendored into the function's zip). Keeping the
+# names here means no call site changed.
+from . import portainer_access_rules as _rules  # noqa: E402
+from .portainer_access_rules import (  # noqa: E402
+    USER_ROLE_ADMIN, USER_ROLE_STANDARD, TEAM_ROLE_LEADER, TEAM_ROLE_MEMBER,
+    PortainerRuleError,
+)
 
 
 async def _api(method: str, path: str, *, json_body: dict = None,
@@ -547,23 +551,17 @@ async def find_user(username: str) -> dict:
     case-insensitively, so a case-sensitive lookup here would happily create a
     second "Alice" alongside "alice" and grant access to the wrong one.
     """
-    target = (username or "").strip().lower()
-    if not target:
-        return {}
-    for user in await list_users():
-        if str(user.get("Username", "")).strip().lower() == target:
-            return user
-    return {}
+    return _rules.match_user(await list_users(), username)
 
 
 @_wrap_transport_errors
 async def create_user(username: str, password: str,
                       role: int = USER_ROLE_STANDARD) -> dict:
     """Create a user (POST /api/users). Defaults to STANDARD, never administrator."""
-    if role not in (USER_ROLE_ADMIN, USER_ROLE_STANDARD):
-        raise PortainerError(f"invalid Portainer user role {role!r} "
-                             f"(expected {USER_ROLE_STANDARD} standard "
-                             f"or {USER_ROLE_ADMIN} administrator)")
+    try:
+        role = _rules.validate_user_role(role)
+    except PortainerRuleError as exc:
+        raise PortainerError(str(exc)) from exc
     body = await _api("POST", "/api/users", context=f"create_user({username})",
                       json_body={"Username": username, "Password": password,
                                  "Role": role})
@@ -590,13 +588,7 @@ async def list_teams() -> list:
 
 async def find_team(name: str) -> dict:
     """The team with this name, or ``{}`` (case-insensitive, as for users)."""
-    target = (name or "").strip().lower()
-    if not target:
-        return {}
-    for team in await list_teams():
-        if str(team.get("Name", "")).strip().lower() == target:
-            return team
-    return {}
+    return _rules.match_team(await list_teams(), name)
 
 
 @_wrap_transport_errors
@@ -619,11 +611,7 @@ async def list_team_memberships() -> list:
 
 async def find_membership(user_id: int, team_id: int) -> dict:
     """The membership joining this user to this team, or ``{}``."""
-    for row in await list_team_memberships():
-        if int(row.get("UserID", 0)) == int(user_id) \
-                and int(row.get("TeamID", 0)) == int(team_id):
-            return row
-    return {}
+    return _rules.match_membership(await list_team_memberships(), user_id, team_id)
 
 
 @_wrap_transport_errors
@@ -635,10 +623,10 @@ async def add_team_member(user_id: int, team_id: int,
     Portainer will happily create a second row and then the FIRST revoke looks
     successful while access remains.
     """
-    if role not in (TEAM_ROLE_LEADER, TEAM_ROLE_MEMBER):
-        raise PortainerError(f"invalid Portainer team role {role!r} "
-                             f"(expected {TEAM_ROLE_MEMBER} member "
-                             f"or {TEAM_ROLE_LEADER} leader)")
+    try:
+        role = _rules.validate_team_role(role)
+    except PortainerRuleError as exc:
+        raise PortainerError(str(exc)) from exc
     existing = await find_membership(user_id, team_id)
     if existing:
         return existing

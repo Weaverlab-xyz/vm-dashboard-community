@@ -307,7 +307,7 @@ function functionsPage() {
 
     // Only workloads implementing the Entitle Remote Adapter contract can be
     // registered; offering it on echo_diag would just produce a broken integration.
-    isAdapter(fn) { return ['db_grant', 'entitle_webhook_echo'].includes(fn.workload); },
+    isAdapter(fn) { return ['db_grant', 'portainer_access', 'entitle_webhook_echo'].includes(fn.workload); },
 
     async toggleEntitle(fn) {
       const action = fn.entitle_integration_id ? 'deregister' : 'register';
