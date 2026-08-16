@@ -147,7 +147,8 @@ Two things worth knowing:
 
 The fourth integration is not a function at all: granting **dashboard permissions**
 happens on a dashboard-hosted endpoint, because there the dashboard *is* the target
-system. See [entitle-user-identity.md](entitle-user-identity.md).
+system and there is no function to deploy. See
+[entitle-dashboard-permissions.md](entitle-dashboard-permissions.md).
 
 ### db_grant
 

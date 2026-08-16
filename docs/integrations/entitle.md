@@ -7,7 +7,7 @@ tenant + API token. You can enable any combination:
 |---|---|---|
 | **Resource registration** (this doc) | As the dashboard builds Linux VMs and cloud databases, it registers each as an Entitle integration so users request **just-in-time access** in Entitle. | Off |
 | **Machine-identity JIT** | Short-TTL, auto-approved cloud-credential elevations for the dashboard's own privileged cloud calls. | Off |
-| **User-JIT** | Entra-group-backed dashboard permissions granted just-in-time through Entitle. | Off |
+| **Dashboard permissions** | Time-boxed permissions **inside the dashboard**, granted by Entitle. Two mechanisms: **REST** (current — any user, takes effect immediately) and **Entra groups** (legacy — Entra only, takes effect at next login). See [entitle-dashboard-permissions.md](entitle-dashboard-permissions.md). | Off |
 
 > The previous **approval-gate** track (which blocked dashboard actions behind an
 > Entitle approval + webhook) has been **removed**. Secret read/update/delete are
