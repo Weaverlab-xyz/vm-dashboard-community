@@ -35,6 +35,7 @@ Desktop required).
 - [Appendix J — MCP server (AI client integration)](#appendix-j--mcp-server-ai-client-integration)
 - [Appendix K — Portainer CE integration](#appendix-k--portainer-ce-integration)
 - [Appendix L — Remote Worker (Ansible + Kubernetes runners)](#appendix-l--remote-worker-ansible--kubernetes-runners)
+- [Appendix M — Cloud Functions (preview)](#appendix-m--cloud-functions-preview)
 
 ---
 
@@ -1146,3 +1147,46 @@ task (AWS ECS Fargate / Azure ACI / GCP Cloud Run).
 2. Configure the runner backends (`ansible_runner`, `k8s_runner`) and any
    shared cloud infrastructure in the **Remote Worker** configuration panel.
 3. Click **Save**. No restart required.
+
+---
+
+## Appendix M — Cloud Functions (preview)
+
+> **Full guide:** [docs/integrations/cloud-functions.md](integrations/cloud-functions.md)
+
+Optional, and **preview**. Deploys a dashboard-authored Python handler as an
+**AWS Lambda**, an **Azure Linux Function App**, or a **GCP Cloud Run
+function** — the same handler, unchanged, on all three. Each gets a stable
+HTTPS endpoint protected by a shared bearer secret, and can optionally be
+attached to a VPC/VNet so it can reach private resources.
+
+This is the one thing the dashboard could not do before: an **always-on
+endpoint an external system can call** to act inside your network. The
+existing one-shot runners (ECS / ACI / Cloud Run jobs) already reach private
+resources, but they are dashboard-initiated and slow to start, so they cannot
+serve a synchronous inbound call.
+
+### Enable the integration
+
+1. **Settings → Preview features** → toggle **Cloud Functions** on. The nav
+   entry and `/api/functions` appear immediately; no restart.
+2. **Settings → Integrations → Cloud Functions** → set a package store for each
+   cloud you want to deploy to (an S3 bucket, a GCS bucket, and/or a blob
+   container on the dashboard's existing storage account). A cloud without one
+   is shown in the deploy form but blocked, with the reason.
+3. *(Optional)* Fill in the **VPC / VNet attachment** fields if you need
+   functions that reach private resources.
+4. **Functions → Deploy function** → pick `echo_diag` and deploy, then use
+   **Test invoke**. It reports what the function can actually reach, separating
+   DNS failures from routing/security-group failures.
+
+### Good to know
+
+- Packages are built **deterministically** and named by content hash, so an
+  unchanged function is a Terraform no-op.
+- The handler **fails closed**: with no shared secret in its environment it
+  returns 500, never an unauthenticated 200.
+- GCP deploys run Cloud Build (60–120 s) and leave Artifact Registry images
+  behind after `terraform destroy`.
+- Azure needs a plan that supports VNet integration — `B1` (the default) does,
+  `Y1` (Consumption) does not.

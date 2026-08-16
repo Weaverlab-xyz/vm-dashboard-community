@@ -1283,6 +1283,25 @@ class OidcFeatureConfig(BaseModel):
     oidc_groups_claim: str = ""
 
 
+class CloudFunctionsFeatureConfig(BaseModel):
+    """Config-only panel (no `enabled`) for the Cloud Functions PREVIEW feature.
+    The preview toggle owns `cloud_functions_enabled`; this panel holds the package
+    stores and the optional VPC/VNet attachment ids. See _CONFIG_ONLY_FEATURES.
+
+    Azure has no bucket field on purpose: run-from-package needs a blob + SAS on the
+    dashboard's own storage account (`storage_azure_account`), so only the container
+    name is configurable here."""
+    function_package_s3_bucket: str = ""
+    function_package_gcs_bucket: str = ""
+    function_package_azure_container: str = "function-packages"
+    # B1 supports VNet integration AND run-from-package. Y1 (Consumption) does not
+    # do VNet integration — the module rejects Y1 + a subnet at plan time.
+    azure_functions_plan_sku: str = "B1"
+    # Blank → the function deploys public-only (no VPC/VNet attachment).
+    aws_functions_subnet_ids: str = ""
+    aws_functions_security_group_ids: str = ""
+    azure_functions_subnet_id: str = ""
+    gcp_functions_vpc_connector: str = ""
 class NotificationsFeatureConfig(BaseModel):
     """Outbound notifications. Two brakes, both deliberate.
 
@@ -1354,6 +1373,7 @@ _FEATURE_MODELS = {
     "notifications":  NotificationsFeatureConfig,
     "multi_region":   MultiRegionFeatureConfig,
     "oidc":           OidcFeatureConfig,
+    "cloud_functions": CloudFunctionsFeatureConfig,
     "worker":         WorkerFeatureConfig,
 }
 
@@ -1363,7 +1383,7 @@ _FEATURE_MODELS = {
 #
 # "worker" is here because the job worker has no off position at all: it is the process
 # that runs every queued job, so an enable toggle could only ever mislead.
-_CONFIG_ONLY_FEATURES = {"vdesktops", "multi_region", "oidc", "worker"}
+_CONFIG_ONLY_FEATURES = {"vdesktops", "multi_region", "oidc", "worker", "cloud_functions"}
 
 _SECRET_FEATURE_KEYS = frozenset({
     "pscli_client_secret", "bt_client_secret", "epml_pat",
@@ -1616,6 +1636,10 @@ def put_azure_regions(payload: RegionConfigsPayload, request: Request):
 _PREVIEW_FLAGS = {
     "vdesktops_enabled": (
         "Virtual Desktops", "Desktop pools brokered as PRA sessions (Phase 1: Azure)."),
+    "cloud_functions_enabled": (
+        "Cloud Functions",
+        "Deploy dashboard-authored handlers as AWS Lambda / Azure Function Apps / "
+        "GCP Cloud Run functions, optionally attached to a VPC/VNet."),
 }
 
 # Preview flags that ALSO have a config panel — maps the flag key to the
@@ -1623,6 +1647,7 @@ _PREVIEW_FLAGS = {
 # the panel is config-only (see _CONFIG_ONLY_FEATURES).
 _PREVIEW_FLAG_CONFIG = {
     "vdesktops_enabled": "vdesktops",
+    "cloud_functions_enabled": "cloud_functions",
 }
 
 

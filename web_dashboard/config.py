@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     vdesktops_enabled: bool = False     # Virtual desktops router + /desktops page (Azure pools + PRA brokering)
     cloud_database_enabled: bool = False  # /api/databases router — private managed DBs brokered via a PRA tunnel
     k8s_management_enabled: bool = False  # /api/k8s router — provision/register/manage Kubernetes clusters
+    cloud_functions_enabled: bool = False  # /api/functions router — Lambda / Function App / Cloud Run function lifecycle
     # /api/agent router + /agents page — containerised agents inside private networks
     # that poll OUT to this dashboard for work. Off by default and deliberately so:
     # it is the only router that serves callers outside the dashboard's trust domain,
@@ -438,6 +439,31 @@ class Settings(BaseSettings):
     pra_config_api_client_id: str = ""
     pra_config_api_client_secret: str = ""          # encrypted at rest
 
+    # ── Cloud Functions (PREVIEW) ─────────────────────────────────────────────
+    # Lambda / Function App / Cloud Run function lifecycle. The deployable handler
+    # source lives in web_dashboard/functions/; the dashboard builds a deterministic
+    # zip, uploads it to an object store IN THE SAME CLOUD as the function, and
+    # terraform references it by bucket + key + content hash. GCP forces that shape
+    # (cloudfunctions2 accepts only storage_source), so AWS/Azure match it to keep
+    # one transport. The on/off is the `cloud_functions_enabled` PREVIEW flag; these
+    # are the connection knobs its config-only panel writes.
+    function_package_s3_bucket: str = ""    # AWS: S3 bucket for lambda zips (required for cloud=aws)
+    function_package_gcs_bucket: str = ""   # GCP: GCS bucket for function sources (required for cloud=gcp)
+    # Azure reuses the dashboard's storage account (storage_azure_account) with a
+    # dedicated container; run-from-package needs a blob + SAS, not a separate store.
+    function_package_azure_container: str = "function-packages"
+    # Azure App Service plan SKU for the Function App. B1 (Basic) is the default
+    # because it supports BOTH regional VNet integration and WEBSITE_RUN_FROM_PACKAGE.
+    # Y1 (Linux Consumption) is cheaper but CANNOT do VNet integration — the module
+    # fails at plan time if Y1 is paired with a subnet.
+    azure_functions_plan_sku: str = "B1"
+    # VPC/VNet attachment for functions that must reach private resources. Blank →
+    # the function deploys public-only. Per-region overrides resolve through
+    # region_config; these are the flat fallbacks.
+    aws_functions_subnet_ids: str = ""              # CSV; blank → falls back to the DB subnets
+    aws_functions_security_group_ids: str = ""      # CSV; blank → falls back to aws_db_security_group_id
+    azure_functions_subnet_id: str = ""             # MUST be delegated to Microsoft.Web/serverFarms
+    gcp_functions_vpc_connector: str = ""           # existing Serverless VPC Access connector name/self_link
     # ── Azure cloud-DATABASE Password Safe onboarding (Run Command plugins) ───
     # The Azure counterpart of the SSM path above: when enabled, provisioning an
     # AZURE DB onboards it onto the "{engine} Azure Run Command Plugin", whose

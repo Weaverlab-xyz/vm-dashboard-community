@@ -31,6 +31,8 @@ terraform/*
 !terraform/db_azure_sqlserver
 !terraform/db_oci_autonomous
 !terraform/k8s_cluster
+# Cloud Functions modules — driven by cloud_function_service.
+!terraform/cloud_function
 # Admission-control Rego policies — read at runtime by admission_service (the
 # pre-action guardrails). COPYed by the Dockerfile, so must be in the context.
 !terraform/policy

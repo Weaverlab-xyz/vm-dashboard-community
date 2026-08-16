@@ -3953,6 +3953,113 @@
         </div>
       </template>
 
+      <!-- Cloud Functions (preview): package stores + optional VPC/VNet attachment -->
+      <template x-if="panel?.key === 'cloud_functions' && !panelLoading">
+        <div class="space-y-4">
+          <p class="text-sm text-gray-500">
+            The dashboard builds a deterministic zip from
+            <code>web_dashboard/functions/</code>, uploads it to an object store
+            <strong>in the same cloud as the function</strong>, and Terraform references it by
+            content hash. Configure the store for each cloud you want to deploy to — a cloud
+            without one is offered but blocked in the deploy form. Enable/disable the feature
+            with the Preview toggle.
+            <a href="/docs/integrations/cloud-functions" target="_blank"
+               class="text-blue-600 hover:text-blue-800 underline">Integration guide</a>.
+          </p>
+
+          <div>
+            <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-1">Package stores</p>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">AWS — S3 bucket</label>
+              <input type="text" x-model="panelCfg.function_package_s3_bucket"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     placeholder="my-function-packages">
+            </div>
+            <div class="mt-3">
+              <label class="block text-sm font-medium text-gray-700 mb-1">GCP — GCS bucket</label>
+              <input type="text" x-model="panelCfg.function_package_gcs_bucket"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     placeholder="my-function-packages">
+              <p class="text-[11px] text-gray-400 mt-1">
+                Every GCP deploy runs Cloud Build and pushes an image to Artifact Registry
+                (60–120&nbsp;s). <code>terraform destroy</code> removes the function but leaves
+                those images behind.
+              </p>
+            </div>
+            <div class="mt-3">
+              <label class="block text-sm font-medium text-gray-700 mb-1">Azure — blob container</label>
+              <input type="text" x-model="panelCfg.function_package_azure_container"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     placeholder="function-packages">
+              <p class="text-[11px] text-gray-400 mt-1">
+                Uses the dashboard's existing storage account (<code>storage_azure_account</code>);
+                the key is resolved over ARM at deploy time, never stored.
+              </p>
+            </div>
+            <div class="mt-3">
+              <label class="block text-sm font-medium text-gray-700 mb-1">Azure — App Service plan SKU</label>
+              <input type="text" x-model="panelCfg.azure_functions_plan_sku"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     placeholder="B1">
+              <p class="text-[11px] text-gray-400 mt-1">
+                <code>B1</code> is the cheapest SKU that supports <strong>both</strong> VNet
+                integration and run-from-package. <code>Y1</code> (Consumption) is cheaper but
+                <strong>cannot</strong> do VNet integration — pairing it with a subnet fails at plan time.
+              </p>
+            </div>
+          </div>
+
+          <div class="border-t border-gray-100 pt-4">
+            <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-1">
+              VPC / VNet attachment <span class="normal-case text-gray-400">(optional)</span>
+            </p>
+            <p class="text-[11px] text-gray-400 mb-3">
+              Only needed for functions that must reach private resources. Leave blank to deploy
+              public-only functions.
+            </p>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">AWS — subnet IDs</label>
+              <input type="text" x-model="panelCfg.aws_functions_subnet_ids"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     placeholder="subnet-aaa,subnet-bbb">
+              <p class="text-[11px] text-gray-400 mt-1">
+                Comma-separated. A VPC-attached Lambda has <strong>no internet access</strong>
+                unless these subnets route through NAT.
+              </p>
+            </div>
+            <div class="mt-3">
+              <label class="block text-sm font-medium text-gray-700 mb-1">AWS — security group IDs</label>
+              <input type="text" x-model="panelCfg.aws_functions_security_group_ids"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     placeholder="sg-aaa">
+              <p class="text-[11px] text-gray-400 mt-1">Typically one already allowed into the database's security group.</p>
+            </div>
+            <div class="mt-3">
+              <label class="block text-sm font-medium text-gray-700 mb-1">Azure — functions subnet ID</label>
+              <input type="text" x-model="panelCfg.azure_functions_subnet_id"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     placeholder="/subscriptions/…/subnets/functions-subnet">
+              <p class="text-[11px] text-gray-400 mt-1">
+                Must be delegated to <code>Microsoft.Web/serverFarms</code> — a
+                <strong>different</strong> subnet from the database one (delegated to the DB
+                service). The module also sets <code>WEBSITE_DNS_SERVER</code>, without which
+                <code>privatelink.*</code> zones never resolve even when routing is correct.
+              </p>
+            </div>
+            <div class="mt-3">
+              <label class="block text-sm font-medium text-gray-700 mb-1">GCP — Serverless VPC Access connector</label>
+              <input type="text" x-model="panelCfg.gcp_functions_vpc_connector"
+                     class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"
+                     placeholder="projects/…/locations/…/connectors/…">
+              <p class="text-[11px] text-gray-400 mt-1">
+                Reference an <strong>existing</strong> connector: one runs a minimum of two
+                <code>e2-micro</code> instances (~$26/mo) whether or not the function is invoked.
+              </p>
+            </div>
+          </div>
+        </div>
+      </template>
+
       <!-- Single sign-on (OIDC): generic OpenID Connect, discovery-driven -->
       <template x-if="panel?.key === 'oidc' && !panelLoading">
         <div class="space-y-5">

@@ -1,0 +1,8 @@
+{
+  "probe": [
+    { "host": "mydb.abc123.us-east-1.rds.amazonaws.com", "port": 5432 },
+    { "host": "10.0.4.17", "port": 3306 }
+  ],
+  "timeout": 3,
+  "egress": true
+}

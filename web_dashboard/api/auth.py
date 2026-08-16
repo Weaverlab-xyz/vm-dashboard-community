@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..database import User, Fido2Credential, PersonalAccessToken, OAuthGroupMapping, get_db, verify_password
+from ..services import config_service
 from ..models.user import (
     TokenResponse,
     TokenData,
@@ -152,7 +153,7 @@ def require_admin(current_user: User = Depends(get_current_user)) -> User:
 
 # ── Permission constants ───────────────────────────────────────────────────────
 
-PERMISSION_SCOPES = ["vms", "aws", "azure", "gcp", "oci", "images", "containers", "config_mgmt", "jobs", "workgroups", "secrets", "cloud_database", "k8s"]
+PERMISSION_SCOPES = ["vms", "aws", "azure", "gcp", "oci", "images", "containers", "config_mgmt", "jobs", "workgroups", "secrets", "cloud_database", "k8s", "cloud_function"]
 # "use" grants using a Secrets-Management secret inside an Ansible run without ever
 # seeing its value (scope "secrets"); read/write/delete are unused for that scope.
 PERMISSION_LEVELS = ["read", "write", "delete", "use"]
@@ -613,7 +614,6 @@ def _complete_oauth_login(db, *, subject, email, display_name, groups, provider)
 
 def _oauth_cfg() -> tuple:
     """Return (client_id, client_secret, tenant_id) from DB config, falling back to env."""
-    from ..services import config_service
     return (
         config_service.get("azure_oauth_client_id") or settings.azure_oauth_client_id,
         config_service.get("azure_oauth_client_secret") or settings.azure_oauth_client_secret,
