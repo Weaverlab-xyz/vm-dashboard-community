@@ -1,29 +1,23 @@
-"""Entitle REST-integration contract simulator.
+"""A no-op Entitle Remote Adapter, for proving the path before wiring a real target.
 
-Entitle's REST integration is **outbound from Entitle to the target system**: it
-POSTs Give Access / Revoke Access and expects a synchronous response. This workload
-implements that contract and does nothing else — so the whole path (network, front
-door, shared secret, timeouts, retries, error handling) can be wired up and proven
-BEFORE any real grant logic exists, and re-run afterwards as a regression check.
+Implements every route of the Remote Adapter contract
+(docs.beyondtrust.com/entitle/docs/open-api-definition) with valid, empty-but-
+well-formed responses, and reports what it received. Point a real Entitle
+integration at this and you can confirm — before any target system is involved —
+that:
 
-Every real Phase 2 workload implements this same shape; this is the reference.
+  * the network path and front door work
+  * the shared secret is configured correctly on both sides
+  * each ``*_path`` in the integration config maps to a route that exists
+  * the payloads arrive in the shape the contract says
 
-⚠️  SCHEMA NOT YET CONFIRMED against a live tenant. Entitle's exact field names for
-    the Give/Revoke payload are an open item (see docs/design/cloud-functions.md
-    §7), so ``_normalize`` accepts every plausible spelling and reports which key it
-    actually matched under ``matched_keys``. Point a real integration at this
-    workload, read ``received`` out of the response, and THEN pin the schema. This
-    mirrors the ⚠️ discipline in entitle_registration_service for unconfirmed
-    vendor schema.
+Every real adapter (``db_grant``, and the Portainer and machine-identity ones to
+come) implements this same set of routes, so this is the reference and the
+smoke test for all of them.
 
-Failure injection, for testing Entitle's retry/alerting behaviour:
+Failure injection, for testing Entitle's retry and alerting behaviour:
 
-    ?fail=401     unauthorized
-    ?fail=403     forbidden
-    ?fail=404     resource not found
-    ?fail=500     server error
-    ?fail=slow    respond after ~5s (inside most timeouts)
-    ?fail=timeout sleep past any sane timeout (~25s)
+    ?fail=401 | 403 | 404 | 500 | slow | timeout
 
 Stdlib only.
 """
@@ -32,84 +26,45 @@ import time
 from fnruntime.contract import Context, Request, Response
 
 NAME = "entitle_webhook_echo"
-DESCRIPTION = "Validates the Entitle Give/Revoke REST contract without granting anything."
+DESCRIPTION = "No-op Entitle Remote Adapter — proves the path without granting anything."
 
-# Candidate spellings, most-likely first. Whichever is present wins.
-_ACTION_KEYS = ("action", "operation", "type", "eventType", "event_type", "method")
-_USER_KEYS = ("userEmail", "user_email", "email", "user", "principal",
-              "targetUser", "target_user", "actor")
-_RESOURCE_KEYS = ("resource", "resourceName", "resource_name", "target",
-                  "integration", "resourceId", "resource_id")
-_ROLE_KEYS = ("role", "roleName", "role_name", "permission", "entitlement", "bundle")
-_DURATION_KEYS = ("duration", "durationSeconds", "duration_seconds", "ttl",
-                  "ttlSeconds", "ttl_seconds", "expiresIn", "expires_in")
-_REQUEST_KEYS = ("requestId", "request_id", "accessRequestId", "id")
+# The documented contract. Kept as data so `handle` can both route on it and report
+# it in a 404, which is what turns a path-config mistake into a self-explaining
+# error rather than a silent one.
+_ROUTES = (
+    ("GET", "/get_assets"),
+    ("GET", "/get_actors"),
+    ("GET", "/get_all_permissions"),
+    ("GET", "/get_asset_permissions/{asset_identifier}"),
+    ("POST", "/create_actor"),
+    ("POST", "/delete_actor"),
+    ("POST", "/give_access"),
+    ("POST", "/revoke_access"),
+    ("POST", "/check_config"),
+)
 
-# Values that mean grant vs revoke, lower-cased.
-_GRANT_WORDS = ("give", "grant", "giveaccess", "give_access", "add", "create", "provision")
-_REVOKE_WORDS = ("revoke", "remove", "revokeaccess", "revoke_access", "delete", "deprovision")
+# Fields the contract defines per write route. Reported as present/absent rather
+# than enforced — the point is to show an operator what actually arrived.
+_EXPECTED = {
+    "/give_access": ("asset", "actor_identifier", "role_code"),
+    "/revoke_access": ("asset", "actor_identifier", "role_code"),
+    "/create_actor": ("actor",),
+    "/delete_actor": ("actor_identifier",),
+    "/check_config": ("config",),
+}
 
-
-def _first(payload: dict, keys) -> tuple:
-    """``(value, matched_key)`` for the first present, non-empty key."""
-    for key in keys:
-        if key in payload and payload[key] not in (None, ""):
-            return payload[key], key
-    return None, ""
-
-
-def _classify(raw_action) -> str:
-    text = str(raw_action or "").strip().lower().replace("-", "").replace(" ", "")
-    if any(word in text for word in _REVOKE_WORDS):
-        return "revoke"
-    if any(word in text for word in _GRANT_WORDS):
-        return "grant"
-    return "unknown"
-
-
-def _normalize(payload: dict, path: str) -> dict:
-    """Best-effort mapping onto the shape every real workload consumes."""
-    raw_action, action_key = _first(payload, _ACTION_KEYS)
-    action = _classify(raw_action)
-    # Entitle may express the verb in the PATH rather than the body
-    # (…/give-access vs …/revoke-access), so fall back to that.
-    if action == "unknown":
-        action = _classify(path)
-        if action != "unknown":
-            action_key = "<path>"
-
-    user, user_key = _first(payload, _USER_KEYS)
-    resource, resource_key = _first(payload, _RESOURCE_KEYS)
-    role, role_key = _first(payload, _ROLE_KEYS)
-    duration, duration_key = _first(payload, _DURATION_KEYS)
-    request_id, request_id_key = _first(payload, _REQUEST_KEYS)
-
-    try:
-        duration_seconds = int(duration) if duration is not None else None
-    except (TypeError, ValueError):
-        duration_seconds = None
-
-    # A nested user object ({"user": {"email": ...}}) is common; flatten it.
-    if isinstance(user, dict):
-        user = user.get("email") or user.get("id") or user.get("name") or ""
-
-    return {
-        "action": action,
-        "user_email": str(user) if user is not None else "",
-        "resource": str(resource) if resource is not None else "",
-        "role": str(role) if role is not None else "",
-        "duration_seconds": duration_seconds,
-        "entitle_request_id": str(request_id) if request_id is not None else "",
-        "matched_keys": {k: v for k, v in {
-            "action": action_key, "user_email": user_key, "resource": resource_key,
-            "role": role_key, "duration_seconds": duration_key,
-            "entitle_request_id": request_id_key,
-        }.items() if v},
-    }
+_SAMPLE_ASSET = {
+    "identifier": "demo:asset:1",
+    "name": "Demo asset",
+    "type": "demo",
+    "role_options": [
+        {"code": "read", "display_name": "Read only", "available": True,
+         "permissions": ["read"]},
+    ],
+}
 
 
 def _injected_failure(req: Request):
-    """The ``?fail=`` response, or None."""
     mode = str(req.query.get("fail") or "").strip().lower()
     if not mode:
         return None
@@ -119,15 +74,26 @@ def _injected_failure(req: Request):
     if mode == "timeout":
         time.sleep(25)
         return None
-    if mode in ("401", "unauthorized"):
-        return Response(401, {"error": "unauthorized", "injected": True})
-    if mode in ("403", "forbidden"):
-        return Response(403, {"error": "forbidden", "injected": True})
-    if mode in ("404", "notfound", "not_found"):
-        return Response(404, {"error": "resource not found", "injected": True})
-    if mode in ("500", "error"):
-        return Response(500, {"error": "internal error", "injected": True})
+    codes = {"401": 401, "unauthorized": 401, "403": 403, "forbidden": 403,
+             "404": 404, "notfound": 404, "500": 500, "error": 500}
+    if mode in codes:
+        return Response(codes[mode], {"error": mode, "injected": True})
     return Response(400, {"error": f"unknown fail mode: {mode}", "injected": True})
+
+
+def _observed(req: Request, path: str) -> dict:
+    """What arrived, and whether it matches the contract for this route."""
+    payload = req.json()
+    expected = _EXPECTED.get(path, ())
+    return {
+        "method": req.method,
+        "path": path,
+        "source": req.source,
+        "received_keys": sorted(payload.keys()),
+        "expected_keys": list(expected),
+        "missing_keys": [key for key in expected if key not in payload],
+        "unexpected_keys": [key for key in sorted(payload) if expected and key not in expected],
+    }
 
 
 def handle(req: Request, ctx: Context) -> Response:
@@ -135,29 +101,37 @@ def handle(req: Request, ctx: Context) -> Response:
     if injected is not None:
         return injected
 
-    payload = req.json()
-    normalized = _normalize(payload, req.path)
+    path = (req.path or "/").rstrip("/") or "/"
+    known = {route for _method, route in _ROUTES}
+    is_asset_permissions = path.startswith("/get_asset_permissions/")
 
-    problems = []
-    if normalized["action"] == "unknown":
-        problems.append(
-            "could not determine grant vs revoke — no recognised action key "
-            f"(looked for: {', '.join(_ACTION_KEYS)}) and the path did not say")
-    if not normalized["user_email"]:
-        problems.append(
-            f"no user identified (looked for: {', '.join(_USER_KEYS)})")
-    if not normalized["resource"]:
-        problems.append(
-            f"no resource identified (looked for: {', '.join(_RESOURCE_KEYS)})")
+    if path not in known and not is_asset_permissions:
+        # Entitle's *_path fields are configurable per operation, so this is the
+        # single most likely setup mistake — say exactly what is served.
+        return Response(404, {
+            "error": f"no route for {req.method} {path}",
+            "routes": [f"{method} {route}" for method, route in _ROUTES],
+            "request_id": ctx.request_id,
+        })
 
-    # 200 even when fields are missing: this workload's job is to REPORT what the
-    # payload looked like, and a 4xx would make Entitle retry and hide the answer.
-    return Response(200, {
-        "ok": not problems,
-        "workload": NAME,
-        "request_id": ctx.request_id,
-        "received": normalized,
-        "problems": problems,
-        "raw_keys": sorted(payload.keys()),
-        "duration_ms": ctx.elapsed_ms(),
-    })
+    observed = _observed(req, path)
+    observed["request_id"] = ctx.request_id
+
+    # Valid, empty-but-well-formed responses in the contract's own envelopes, so
+    # Entitle accepts them and the integration can be saved and exercised.
+    if path == "/get_assets":
+        return Response(200, {"next": "", "data": {"assets": [_SAMPLE_ASSET]},
+                              "observed": observed})
+    if path == "/get_actors":
+        return Response(200, {"next": "", "data": {"actors": []}, "observed": observed})
+    if path == "/get_all_permissions" or is_asset_permissions:
+        return Response(200, {"next": "", "data": {"actors_permissions": [],
+                                                   "assets_permissions": []},
+                              "observed": observed})
+    if path == "/check_config":
+        return Response(200, {"data": {"valid": True}, "observed": observed})
+
+    # create_actor / delete_actor / give_access / revoke_access — acknowledged,
+    # nothing granted.
+    return Response(200, {"data": {"ok": True, "granted": False},
+                          "observed": observed})

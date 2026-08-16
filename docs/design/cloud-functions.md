@@ -317,13 +317,51 @@ The target (engine, host, port, database, flavor) also comes from the function's
 own configuration, never the request — otherwise every caller of this endpoint
 would be a lateral-movement primitive.
 
+### The Entitle contract (confirmed)
+
+Source: [Remote Adapter OpenAPI definition](https://docs.beyondtrust.com/entitle/docs/open-api-definition)
+and [REST integration setup](https://docs.beyondtrust.com/entitle/docs/entitle-integration-rest).
+
+**The verb is the PATH, not a body field**, and each path is configurable per
+operation in the integration config (`give_access_path`, `revoke_access_path`,
+`create_actor_path`, …), so a 404 almost always means those fields disagree with
+the adapter's routes — which is why the 404 body lists them.
+
+| Route | Body |
+|---|---|
+| `GET /get_assets` | — (paginated via `page`, returns `{next, data:{assets}}`) |
+| `GET /get_actors` | — |
+| `GET /get_all_permissions` | — |
+| `GET /get_asset_permissions/{asset_identifier}` | — |
+| `POST /create_actor` | `{actor}` |
+| `POST /give_access` | `{asset, actor_identifier, role_code}` |
+| `POST /revoke_access` | `{asset, actor_identifier, role_code}` |
+| `POST /delete_actor` | `{actor_identifier}` |
+| `POST /check_config` | `{config}` → `{data:{valid}}` |
+
+Three things worth stating explicitly, because each shaped the implementation:
+
+- **There is no TTL in any request.** Entitle owns expiry and calls revoke/delete
+  when a grant ends, so an adapter is stateless with respect to time — it never
+  schedules anything and never needs to be told a duration.
+- **Ephemeral accounts require `create_actor` / `delete_actor`.** They are a
+  separate lifecycle from `give_access` / `revoke_access`, which is why
+  `cloud_db_sql_service` exposes four plan builders rather than two. That split
+  maps almost exactly onto the SQL Server login-vs-role-membership split that
+  already existed.
+- **Auth is a custom header or OAuth2 client credentials.** The layered
+  bearer-header model this feature already used slots straight in — Entitle's
+  `headers` config takes `"Authorization": "Bearer <TOKEN>"` verbatim.
+
+The read routes are not optional in practice: `get_assets` is how Entitle populates
+the request UI, and `get_all_permissions` is how it reconciles.
+
 ### Still to do
 
-`register_rest()` in `entitle_registration_service`, relaxing
-`allow_creating_accounts` for REST-backed registrations, and the provision-path
-wiring all wait on the Entitle REST application slug and Give/Revoke schema being
-confirmed against a live tenant. `entitle_webhook_echo` exists to produce exactly
-that: point a real integration at it and read `received.matched_keys`.
+`register_rest()` in `entitle_registration_service` (the Terraform side that
+creates the integration), and the provision-path wiring that pairs a database with
+its adapter function. Both are now unblocked — the contract above is the input they
+were waiting on.
 
 ## 8. Security notes
 

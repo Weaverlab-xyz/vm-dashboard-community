@@ -279,6 +279,100 @@ def test_every_plan_entry_is_a_database_and_a_nonempty_statement_list():
                 assert all(s.rstrip().endswith(";") for s in stmts), (engine, stmts)
 
 
+# ── The four Entitle operations ──────────────────────────────────────────────
+
+def test_create_actor_grants_nothing():
+    """Entitle calls create_actor before give_access. If the second call never
+    arrives, what is left behind must be able to reach nothing."""
+    for engine, flavor in (("mysql", ""), ("postgres", ""),
+                           ("sqlserver", "rds"), ("sqlserver", "azure_sql")):
+        body = _flat(sql.create_actor_plan(engine, username="jit_a_1", password="Pw-1",
+                                           database="appdb", flavor=flavor))
+        assert "CREATE" in body, (engine, flavor)
+        for verb in ("GRANT ", "ALTER ROLE", "db_datareader"):
+            assert verb not in body, f"{engine}/{flavor} create leaked {verb}: {body}"
+
+
+def test_create_actor_refuses_an_empty_password():
+    """A login created with no password is a far worse hole than a rejected
+    request — and the other three operations legitimately pass none."""
+    for engine, flavor in (("mysql", ""), ("sqlserver", "azure_sql")):
+        try:
+            sql.create_actor_plan(engine, username="jit_a_1", password="",
+                                  database="appdb", flavor=flavor)
+        except sql.CloudDbSqlError:
+            pass
+        else:
+            raise AssertionError(f"{engine} accepted an empty password")
+
+
+def test_give_access_does_not_create_and_revoke_access_does_not_drop():
+    """The account lifecycle belongs to create_actor/delete_actor. Mixing them
+    would make Entitle unable to revoke one role without destroying the actor."""
+    for engine, flavor in (("mysql", ""), ("postgres", ""),
+                           ("sqlserver", "rds"), ("sqlserver", "azure_sql")):
+        give = _flat(sql.give_access_plan(engine, username="jit_a_1",
+                                          database="appdb", role="read", flavor=flavor))
+        assert "CREATE USER" not in give and "CREATE LOGIN" not in give, (engine, give)
+        take = _flat(sql.revoke_access_plan(engine, username="jit_a_1",
+                                            database="appdb", role="read", flavor=flavor))
+        assert "DROP USER" not in take and "DROP LOGIN" not in take, (engine, take)
+        assert "DROP ROLE IF EXISTS" not in take, (engine, take)
+
+
+def test_revoke_access_mirrors_give_access():
+    """Whatever a grant hands out, the revoke must take back — a privilege granted
+    and not listed in the revoke is a permanent leak."""
+    for engine, flavor in (("mysql", ""), ("postgres", ""), ("sqlserver", "azure_sql")):
+        for role in ("read", "readwrite"):
+            give = _flat(sql.give_access_plan(engine, username="jit_a_1",
+                                              database="appdb", role=role, flavor=flavor))
+            take = _flat(sql.revoke_access_plan(engine, username="jit_a_1",
+                                                database="appdb", role=role, flavor=flavor))
+            for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE",
+                              "CONNECT", "USAGE", "db_datareader", "db_datawriter"):
+                if privilege in give:
+                    assert privilege in take, \
+                        f"{engine}/{flavor}/{role} grants {privilege} but never revokes it"
+
+
+def test_delete_actor_matches_the_old_revoke_plan():
+    """revoke_plan is now a composition; it must not have changed behaviour."""
+    for engine, flavor in (("mysql", ""), ("postgres", ""),
+                           ("sqlserver", "rds"), ("sqlserver", "azure_sql")):
+        assert sql.revoke_plan(engine, username="jit_a_1", database="appdb",
+                               flavor=flavor) == \
+            sql.delete_actor_plan(engine, username="jit_a_1", database="appdb",
+                                  flavor=flavor)
+
+
+def test_grant_plan_is_exactly_create_plus_give():
+    """The standalone path must be a composition, not a third implementation —
+    otherwise the two copies of the SQL drift."""
+    for engine, flavor in (("mysql", ""), ("postgres", ""),
+                           ("sqlserver", "rds"), ("sqlserver", "azure_sql")):
+        composed = _flat(
+            sql.create_actor_plan(engine, username="jit_a_1", password="Pw-1",
+                                  database="appdb", flavor=flavor)
+            + sql.give_access_plan(engine, username="jit_a_1", database="appdb",
+                                   role="read", flavor=flavor))
+        assert _flat(sql.grant_plan(engine, username="jit_a_1", password="Pw-1",
+                                    database="appdb", role="read",
+                                    flavor=flavor)) == composed, (engine, flavor)
+
+
+def test_composition_merges_adjacent_connections():
+    """Each plan entry costs a real connection, and on Azure SQL that is a full TLS
+    handshake. Composition must not turn two connections into three."""
+    plan = sql.grant_plan("sqlserver", username="jit_a_1", password="Pw-1",
+                          database="appdb", role="read", flavor="azure_sql")
+    assert _databases(plan) == ["master", "appdb"], _databases(plan)
+    # …and the statement order within a database is preserved.
+    appdb = plan[1][1]
+    assert appdb.index(next(s for s in appdb if "CREATE USER" in s)) < \
+        appdb.index(next(s for s in appdb if "ALTER ROLE" in s))
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failures = 0
