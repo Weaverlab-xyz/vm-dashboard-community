@@ -26,13 +26,19 @@ def _stub(name, **attrs):
     sys.modules[name] = module
 
 
+# config_service is stubbed UNCONDITIONALLY, not just when its dependencies are
+# missing: the module under test reads owner/workflow ids through it, and the real
+# one reads the encrypted app_config table — which is empty on a CI runner, so every
+# test would fail with "entitle_owner_id is not configured". Gating this on whether
+# pydantic happens to be installed made the suite pass locally and fail in CI.
+_stub("web_dashboard.services.config_service",
+      get=lambda key, default="": CONF.get(key, default),
+      get_bool=lambda key, default=False: bool(CONF.get(key, default)))
+
 try:
     import pydantic  # noqa: F401
 except ImportError:
     _stub("web_dashboard.config", settings=types.SimpleNamespace())
-    _stub("web_dashboard.services.config_service",
-          get=lambda key, default="": CONF.get(key, default),
-          get_bool=lambda key, default=False: bool(CONF.get(key, default)))
 
 from web_dashboard.services import entitle_registration_service as ers
 
