@@ -58,6 +58,7 @@ HANDLED_TYPES = (
     "portainer_node_deploy", "portainer_node_teardown",
     "clouddb_provision", "clouddb_decommission", "clouddb_entitle_register",
     "cloudfn_deploy", "cloudfn_decommission", "cloudfn_entitle_register",
+    "clouddb_adapter_pair",
     "ansible_cloud_run", "ansible_local", "epml_sync",
     "vdesktop_pool_provision", "vdesktop_pool_teardown",
     "packer_aws_build", "packer_azure_build", "packer_gcp_build", "packer_oci_build",
@@ -93,6 +94,7 @@ HEAVY_TYPES = (
     "k8s_provision", "k8s_decommission",              # k8s_service, terraform apply/destroy
     "clouddb_provision", "clouddb_decommission",      # cloud_database_service, same
     "cloudfn_deploy", "cloudfn_decommission",         # cloud_function_service, same
+    "clouddb_adapter_pair",                           # drives cloudfn_deploy's apply inline
     "packer_aws_build", "packer_azure_build",         # packer_service._stream_command
     "packer_gcp_build", "packer_oci_build",
     "ansible_local",                                  # ansible_local_service, `docker run`
@@ -359,6 +361,13 @@ async def _dispatch(job_id: str, job_type: str, meta: dict) -> None:
             await cloud_function_service.run_entitle_register(
                 db, fn_id=meta["fn_id"], job_id=job_id,
                 action=meta.get("action", "register"))
+        elif job_type == "clouddb_adapter_pair":
+            # Stages a credential, deploys the adapter function and registers it —
+            # one job because the three stages are useless individually.
+            from .services import cloud_db_adapter_service
+            await cloud_db_adapter_service.run_pairing(
+                db, db_id=meta["db_id"], job_id=job_id,
+                dry_run=meta.get("dry_run", True))
         elif job_type == "ansible_cloud_run":
             # Config-Management localhost Ansible run against a Kubernetes cluster or
             # cloud database — always executes on a transient in-cloud runner.
