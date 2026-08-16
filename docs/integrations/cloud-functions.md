@@ -85,6 +85,7 @@ catalog** — adding a module makes it deployable, no registry to edit.
 | `echo_diag` | Echoes the request as the function saw it (redacted), reports where it landed, and DNS/TCP-probes any `{host, port}` you pass |
 | `entitle_webhook_echo` | A **no-op Entitle Remote Adapter** — serves every route with valid empty responses and reports what arrived, without granting anything. Supports `?fail=401\|403\|404\|500\|slow\|timeout` |
 | `db_grant` | **Entitle Remote Adapter** for ephemeral just-in-time database accounts on MySQL and SQL Server. **Dry run by default.** See below. |
+| `portainer_access` | **Entitle Remote Adapter** for just-in-time Portainer access, granted through team membership. **Dry run by default.** See below. |
 
 ### Wiring an Entitle REST integration
 
@@ -149,6 +150,39 @@ touches a real database.
 the account with **no privileges**, `give_access` grants a role, `revoke_access`
 removes the role but leaves the account, and `delete_actor` drops it. Entitle owns
 the expiry — no request carries a TTL, and the adapter schedules nothing.
+
+### portainer_access
+
+Just-in-time Portainer access. Portainer has no Entitle connector at all, so this
+adapter is the only route to it.
+
+| Setting | Notes |
+|---|---|
+| `FN_PORTAINER_URL` | base URL of the Portainer instance |
+| `FN_PORTAINER_API_KEY` | an access token; supply it by reference (GCP secret env var / Azure Key Vault reference / AWS Secrets Manager) |
+| `FN_PORTAINER_VERIFY_SSL` | `0` only for a self-signed lab instance |
+| `FN_PORTAINER_DRY_RUN` | unset or truthy = dry run. **Default is dry run.** |
+
+**Access is granted through team membership, not per-user.** In Portainer an access
+policy attaches to an environment or environment group and names *teams*. Configure
+that once; a grant is then a single membership row, and a revoke removes it. That
+keeps the reversible per-request operation separate from the standing
+configuration, so a revoke can never leave a half-dismantled access policy behind.
+
+Entitle sees each **team** as an asset, with the team name as the `role_code` — so
+an operator reading a request sees the team they configured access on.
+
+Two guards worth knowing about, because they bound the blast radius:
+
+- `create_actor` makes a **standard** user in **no team**. An actor whose
+  `give_access` never arrives can reach nothing.
+- `get_actors` and `delete_actor` only ever see accounts this adapter minted (the
+  `jit-` prefix). Your real Portainer users are never listed to Entitle, and a
+  request to delete one is refused with a 403 — a grant integration must not be able
+  to remove an operator's account.
+
+If Portainer is reachable only from inside your network, deploy the adapter in
+`vpc` mode; otherwise `public` is fine.
 
 ### Writing your own
 

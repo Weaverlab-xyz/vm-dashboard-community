@@ -21,6 +21,7 @@ from web_dashboard.services import cloud_function_package as pkg  # noqa: E402
 # sample without one would only ever prove the 404 branch works.
 _SAMPLE_ROUTE = {
     "db_grant": ("POST", "/give_access"),
+    "portainer_access": ("POST", "/give_access"),
     "entitle_webhook_echo": ("POST", "/give_access"),
 }
 
@@ -79,6 +80,10 @@ def test_samples_actually_run_through_their_workload():
             os.environ.update({"FN_DB_ENGINE": "mysql", "FN_DB_HOST": "db.invalid",
                                "FN_DB_NAME": "appdb"})
             os.environ.pop("FN_DB_DRY_RUN", None)
+        if workload_name == "portainer_access":
+            os.environ["FN_PORTAINER_URL"] = "https://portainer.invalid"
+            os.environ.pop("FN_PORTAINER_API_KEY", None)
+            os.environ.pop("FN_PORTAINER_DRY_RUN", None)   # dry run is the default
         # For an Entitle Remote Adapter THE VERB IS THE PATH, so a sample payload is
         # only meaningful paired with the route it belongs to. echo_diag has no
         # routing and accepts anything.

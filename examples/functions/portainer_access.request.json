@@ -1,0 +1,9 @@
+{
+  "asset": {
+    "identifier": "portainer:team:7",
+    "name": "Platform",
+    "type": "portainer_team"
+  },
+  "actor_identifier": "jit-alice-example-com-a1b2c3",
+  "role_code": "Platform"
+}

@@ -80,6 +80,10 @@ _WORKLOAD_VENDOR = {
 # opens no connection; tests/test_db_grant_workload.py pins both properties.
 _WORKLOAD_MODULES = {
     "db_grant": (("services/cloud_db_sql_service.py", "sqlplan.py"),),
+    # Same arrangement: the dashboard's Portainer client and this adapter must not
+    # disagree about which user a name refers to or whether a membership exists, so
+    # they share one tested copy of the rules. Stdlib-only and I/O-free.
+    "portainer_access": (("services/portainer_access_rules.py", "portainerrules.py"),),
 }
 
 # Per-cloud zip layout. Each entry:
